@@ -1,14 +1,17 @@
 import { ArrowRight01Icon, Search01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
+import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import type {
 	StoreSearchGroup,
 	StoreSearchItem,
@@ -26,11 +29,13 @@ export default function StoreSearchResults({
 	groups,
 	loading,
 	isEmpty,
+	onClearSearch,
 	onOpenRealm,
 }: {
 	groups: StoreSearchGroup[];
 	loading: boolean;
 	isEmpty: boolean;
+	onClearSearch: () => void;
 	/** Open a realm's tab, carrying the current query across as its initial search. */
 	onOpenRealm: (realm: StoreSearchRealm) => void;
 }) {
@@ -54,6 +59,11 @@ export default function StoreSearchResults({
 						different search.
 					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onClearSearch} size="sm" variant="ghost">
+						Clear search
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
@@ -84,7 +94,7 @@ function ResultSection({
 					{group.label}
 				</span>
 				<span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] tabular-nums">
-					{group.items.length}
+					{formatCount(group.items.length) ?? "—"}
 				</span>
 				<HugeiconsIcon className="size-3.5" icon={ArrowRight01Icon} />
 			</button>

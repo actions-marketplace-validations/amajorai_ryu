@@ -1,4 +1,4 @@
-//! Voice engine data path — speech-to-text transcription.
+//! Voice engine data path — Voice Recognition transcription and Audio synthesis.
 //!
 //! `POST /api/voice/transcribe` accepts a multipart upload with a `file` field
 //! (the audio) and proxies it to the running whisper.cpp voice sidecar's
@@ -8,8 +8,8 @@
 //!
 //! Per the Core-vs-Gateway rule this is **Core** (it decides *what runs* — which
 //! voice engine handles the audio). Both legs can also route to the cloud:
-//! `?engine=gateway` on transcribe goes through the Gateway's STT slot
-//! (`crates/core/stt`), and `engine: "gateway"` on speak goes through its TTS
+//! `?engine=gateway` on transcribe goes through the Gateway's Voice Recognition slot
+//! (`crates/core/stt`), and `engine: "gateway"` on speak goes through its Audio
 //! slot ([`synth_via_gateway`] below).
 
 use axum::{
@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 
 use super::ServerState;
 
-// The STT primitive — result types (`Transcription`/`TranscriptSegment`),
+// The Voice Recognition primitive — result types (`Transcription`/`TranscriptSegment`),
 // `verbose_json` parsing, the engine dispatch, and the in-process parakeet ONNX
 // engine — now lives in the extracted `ryu-stt` crate. Re-export the result types
 // + the cross-surface default resolver + the Core-wired data-path entrypoints
@@ -37,21 +37,21 @@ pub use crate::stt_host::{transcribe_wav, transcribe_wav_detailed};
 #[derive(Debug, Deserialize)]
 pub struct TranscribeQuery {
     /// `"parakeet"` (default), `"whisper"` (local whisper.cpp), or `"gateway"`
-    /// (Gateway-routed Whisper — the swappable cloud STT slot, default Groq).
+    /// (Gateway-routed Whisper — the swappable cloud Voice Recognition slot, default Groq).
     /// When omitted, the cross-surface default from [`default_stt_engine`] is used.
     #[serde(default)]
     pub engine: Option<String>,
 }
 
-/// Request body for text-to-speech synthesis.
+/// Request body for Audio synthesis.
 #[derive(Debug, Deserialize)]
 pub struct SpeakRequest {
     /// The text to speak.
     pub text: String,
     /// Engine selector. Omitted or `"outetts"` → the built-in OuteTTS engine
-    /// (backward compatible). `"gateway"` routes to the Gateway's TTS modality
+    /// (backward compatible). `"gateway"` routes to the Gateway's Audio modality
     /// slot (the swappable cloud provider). Any other id (e.g. `"kitten"`,
-    /// `"pocket"`) is served by the universal Ryu TTS sidecar
+    /// `"pocket"`) is served by the universal Ryu Audio sidecar
     /// (`apps-store/voice/sidecar`).
     #[serde(default)]
     pub engine: Option<String>,
@@ -69,16 +69,16 @@ pub struct SpeakRequest {
     pub reference_audio: Option<String>,
 }
 
-/// `POST /api/voice/speak` — synthesize speech from text, returning a `audio/wav`
+/// `POST /api/voice/speak` — synthesize Audio from text, returning a `audio/wav`
 /// body. Engine selection mirrors `/api/voice/transcribe`'s `?engine=` pattern:
 /// omitted (or `"outetts"`) runs the built-in OuteTTS `llama-tts` path; any other
-/// engine id is proxied to the universal Ryu TTS sidecar's `/generate`. Nothing
+/// engine id is proxied to the universal Ryu Audio sidecar's `/generate`. Nothing
 /// is hardcoded — the available engines are whatever the sidecar registry serves.
 #[utoipa::path(
     post,
     path = "/api/voice/speak",
     tag = "Voice",
-    summary = "synthesize speech from text, returning a `audio/wav",
+    summary = "synthesize Audio from text, returning a `audio/wav",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -108,13 +108,13 @@ pub async fn speak(
             Ok(wav) => (StatusCode::OK, [(header::CONTENT_TYPE, "audio/wav")], wav).into_response(),
             Err(e) => (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": format!("text-to-speech failed: {e:#}") })),
+                Json(json!({ "error": format!("audio generation failed: {e:#}") })),
             )
                 .into_response(),
         };
     }
 
-    // The cloud slot: route to the Gateway's TTS modality provider. Same
+    // The cloud slot: route to the Gateway's Audio modality provider. Same
     // graceful degrade as the sidecar path below — a cloud outage must not
     // silence the island — but the content type comes from the provider, since
     // it may hand back mp3 rather than wav.
@@ -129,7 +129,7 @@ pub async fn speak(
                     .into_response();
             }
             Err(gateway_err) => {
-                tracing::warn!("gateway TTS failed ({gateway_err}); falling back to OuteTTS");
+                tracing::warn!("gateway Audio failed ({gateway_err}); falling back to OuteTTS");
                 return match crate::sidecar::providers::outetts::synthesize(text).await {
                     Ok(wav) => {
                         (StatusCode::OK, [(header::CONTENT_TYPE, "audio/wav")], wav).into_response()
@@ -138,7 +138,7 @@ pub async fn speak(
                         StatusCode::BAD_GATEWAY,
                         Json(json!({
                             "error": format!(
-                                "gateway TTS failed ({gateway_err}) and the OuteTTS \
+                                "gateway Audio failed ({gateway_err}) and the OuteTTS \
                                  fallback also failed ({fallback_err:#})."
                             )
                         })),
@@ -149,7 +149,7 @@ pub async fn speak(
         }
     }
 
-    // Everything else (incl. the Kokoro default): proxy to the Ryu TTS sidecar's
+    // Everything else (incl. the Kokoro default): proxy to the Ryu Audio sidecar's
     // normalized /generate. If the sidecar is down or the engine can't render (e.g.
     // the sidecar runtime isn't provisioned yet on this node), degrade gracefully to
     // the always-available OuteTTS fallback so spoken output never hard-fails.
@@ -158,7 +158,7 @@ pub async fn speak(
         Err(sidecar_err) => {
             tracing::warn!(
                 engine = %engine,
-                "TTS sidecar synthesis failed ({sidecar_err}); falling back to OuteTTS"
+                "Audio sidecar synthesis failed ({sidecar_err}); falling back to OuteTTS"
             );
             match crate::sidecar::providers::outetts::synthesize(text).await {
                 Ok(wav) => {
@@ -168,7 +168,7 @@ pub async fn speak(
                     StatusCode::BAD_GATEWAY,
                     Json(json!({
                         "error": format!(
-                            "TTS engine '{engine}' failed ({sidecar_err}) and the OuteTTS \
+                            "Audio engine '{engine}' failed ({sidecar_err}) and the OuteTTS \
                              fallback also failed ({fallback_err:#})."
                         )
                     })),
@@ -179,7 +179,7 @@ pub async fn speak(
     }
 }
 
-/// Proxy one synthesis request to the Ryu TTS sidecar's `/generate`, returning the
+/// Proxy one synthesis request to the Ryu Audio sidecar's `/generate`, returning the
 /// `audio/wav` bytes or a human-readable error. Factored out so [`speak`] can wrap it
 /// in an OuteTTS fallback (and so the low-latency voice-session path can reuse it).
 async fn synth_via_sidecar(
@@ -213,20 +213,20 @@ async fn synth_via_sidecar(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Ryu TTS sidecar not reachable at {url}: {e}"))?;
+        .map_err(|e| format!("Ryu Audio sidecar not reachable at {url}: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let detail = resp.text().await.unwrap_or_default();
         return Err(format!(
-            "ryu-tts engine '{engine}' returned {status}: {detail}"
+            "Audio engine '{engine}' returned {status}: {detail}"
         ));
     }
 
     resp.bytes()
         .await
         .map(|b| b.to_vec())
-        .map_err(|e| format!("reading ryu-tts audio failed: {e}"))
+        .map_err(|e| format!("reading Audio output failed: {e}"))
 }
 
 /// The voice sent to the Gateway when the caller supplies none. OpenAI's
@@ -241,11 +241,11 @@ pub(crate) const DEFAULT_GATEWAY_TTS_VOICE: &str = "alloy";
 /// overwrites `model` with whatever the route resolved to.
 pub(crate) const DEFAULT_GATEWAY_TTS_MODEL: &str = "tts-1";
 
-/// The operator's explicit TTS slot pins, if any.
+/// The operator's explicit Audio slot pins, if any.
 ///
 /// Empty means "do not send the slot headers at all" — and that is the point.
 /// The Gateway resolves slot override → `modality_map` → model routing, so a
-/// header sent unconditionally would win over the TTS provider the user chose
+/// header sent unconditionally would win over the Audio provider the user chose
 /// in Settings → Providers and make that setting permanently inert.
 fn gateway_tts_slot_overrides() -> (Option<String>, Option<String>) {
     let read = |key: &str| {
@@ -301,15 +301,15 @@ fn build_gateway_tts_request(
     request.json(payload)
 }
 
-/// The synthetic `gateway` row in the TTS engine list — the one thing that makes
+/// The synthetic `gateway` row in the Audio engine list — the one thing that makes
 /// the cloud engine selectable from every picker without a client-side list edit.
 fn gateway_tts_engine_row() -> Value {
     json!({
         "id": "gateway",
         "display_name": "Cloud (via gateway)",
-        "description": "Routed to this node's TTS provider · no local model",
+        "description": "Routed to this node's audio provider · no local model",
         // OpenAI's voices, because model-based routing resolves `tts-1` to
-        // openai when the node has pinned no TTS provider. They are not
+        // openai when the node has pinned no Audio provider. They are not
         // meaningful if `modality_map[Tts]` points elsewhere; the voice is
         // forwarded as-is and the provider judges it.
         "voices": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
@@ -319,25 +319,25 @@ fn gateway_tts_engine_row() -> Value {
         "languages": ["en"],
         "size_mb": 0,
         // Deliberate: a cloud engine installs nothing locally. Same reasoning as
-        // the STT `gateway` row.
+        // the Voice Recognition `gateway` row.
         "installed": true,
         "loaded": false,
     })
 }
 
 /// Synthesize one utterance through the Gateway's `/v1/audio/speech` — the
-/// swappable cloud TTS slot. Returns the audio bytes and the content type to
-/// serve them under. Mirrors `transcribe_via_gateway` (the STT leg) in
+/// swappable cloud Audio slot. Returns the audio bytes and the content type to
+/// serve them under. Mirrors `transcribe_via_gateway` (the Voice Recognition leg) in
 /// `crates/core/stt`, with two deliberate differences:
 ///
 /// * The per-attribute slot headers (`x-ryu-slot-tts-*`) are sent **only** when
 ///   the operator set `RYU_TTS_GATEWAY_PROVIDER` / `RYU_TTS_GATEWAY_MODEL`.
 ///   The Gateway resolves slot override → `modality_map` → model routing, so
 ///   always sending them would pin every read-aloud to openai/tts-1 and make
-///   the node's configured TTS provider (Settings → Providers, "Serves POST
+///   the node's configured Audio provider (Settings → Providers, "Serves POST
 ///   /v1/audio/speech") permanently inert.
 /// * The prompt goes under the key `input`, not `text`: the Gateway's inbound
-///   firewall scans `body["input"]` for Tts, so `text` would route fine and
+///   firewall scans `body["input"]` for Audio, so `text` would route fine and
 ///   silently skip the scan.
 ///
 /// Takes a bare `reqwest::Client` rather than the `ServerState` so the realtime
@@ -361,7 +361,7 @@ pub(crate) async fn synth_via_gateway(
     let base = base.trim_end_matches('/');
     let url = format!("{base}/v1/audio/speech");
     let bearer = crate::sidecar::gateway::gateway_bearer()
-        .map_err(|e| format!("no gateway credential for TTS: {e:#}"))?;
+        .map_err(|e| format!("no gateway credential for audio: {e:#}"))?;
 
     let payload = gateway_tts_payload(&model, voice, speed, text);
     let resp = build_gateway_tts_request(
@@ -374,24 +374,24 @@ pub(crate) async fn synth_via_gateway(
     )
     .send()
     .await
-    .map_err(|e| format!("gateway TTS unreachable at {url}: {e}"))?;
+    .map_err(|e| format!("gateway audio unreachable at {url}: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let detail = resp.text().await.unwrap_or_default();
-        return Err(format!("gateway TTS returned {status}: {detail}"));
+        return Err(format!("gateway audio returned {status}: {detail}"));
     }
 
     let value: Value = resp
         .json()
         .await
-        .map_err(|e| format!("could not parse gateway TTS response: {e}"))?;
+        .map_err(|e| format!("could not parse gateway audio response: {e}"))?;
 
     // Inline bytes (openai and any provider that answers with audio).
     if let Some(b64) = value["data"][0]["b64_json"].as_str() {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(b64.trim())
-            .map_err(|e| format!("gateway TTS audio is not valid base64: {e}"))?;
+            .map_err(|e| format!("gateway audio is not valid base64: {e}"))?;
         let content_type = value["data"][0]["content_type"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -407,9 +407,9 @@ pub(crate) async fn synth_via_gateway(
             .get(link)
             .send()
             .await
-            .map_err(|e| format!("gateway TTS audio URL unreachable: {e}"))?;
+            .map_err(|e| format!("gateway audio URL unreachable: {e}"))?;
         if !media.status().is_success() {
-            return Err(format!("gateway TTS audio URL returned {}", media.status()));
+            return Err(format!("gateway audio URL returned {}", media.status()));
         }
         let content_type = media
             .headers()
@@ -421,12 +421,12 @@ pub(crate) async fn synth_via_gateway(
         let bytes = media
             .bytes()
             .await
-            .map_err(|e| format!("reading gateway TTS audio failed: {e}"))?;
+            .map_err(|e| format!("reading gateway audio failed: {e}"))?;
         return Ok((bytes.to_vec(), content_type));
     }
 
     Err(format!(
-        "gateway TTS response carried no audio (expected data[0].b64_json or data[0].url), got keys: {}",
+        "gateway audio response carried no audio (expected data[0].b64_json or data[0].url), got keys: {}",
         value
             .as_object()
             .map(|o| o.keys().cloned().collect::<Vec<_>>().join(", "))
@@ -434,7 +434,7 @@ pub(crate) async fn synth_via_gateway(
     ))
 }
 
-/// `GET /api/voice/tts-engines` — list available TTS engines for the desktop
+/// `GET /api/voice/tts-engines` — list available Audio engines for the desktop
 /// picker. Always includes the built-in `outetts`, then mirrors the Ryu TTS
 /// sidecar's `/engines` catalog when it is reachable (so the set is whatever the
 /// sidecar registry serves — nothing hardcoded). When the sidecar is down, only
@@ -443,7 +443,7 @@ pub(crate) async fn synth_via_gateway(
     get,
     path = "/api/voice/tts-engines",
     tag = "Voice",
-    summary = "list available TTS engines for the desktop",
+    summary = "list available Audio engines for the desktop",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 pub async fn tts_engines(State(state): State<ServerState>) -> impl IntoResponse {
@@ -477,7 +477,7 @@ pub async fn tts_engines(State(state): State<ServerState>) -> impl IntoResponse 
         .into_response()
 }
 
-/// `GET /api/voice/tts-models` — the curated, installable TTS model catalog (the
+/// `GET /api/voice/tts-models` — the curated, installable Audio model catalog (the
 /// voicebox-style known-good set, each model bound to its engine + cache state).
 /// Distinct from the raw HF `pipeline_tag=text-to-speech` browse in the Models
 /// tab: these are the models Core can actually install + run. Empty when the Ryu
@@ -486,7 +486,7 @@ pub async fn tts_engines(State(state): State<ServerState>) -> impl IntoResponse 
     get,
     path = "/api/voice/tts-models",
     tag = "Voice",
-    summary = "the curated, installable TTS model catalog (the",
+    summary = "the curated, installable Audio model catalog",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 pub async fn tts_models(State(state): State<ServerState>) -> impl IntoResponse {
@@ -501,7 +501,7 @@ pub async fn tts_models(State(state): State<ServerState>) -> impl IntoResponse {
         .into_response()
 }
 
-/// Request body for installing a curated TTS model.
+/// Request body for installing a curated Audio model.
 #[derive(Debug, Deserialize)]
 pub struct InstallTtsModelRequest {
     /// Engine id the model belongs to (from `/api/voice/tts-models`).
@@ -530,7 +530,7 @@ pub async fn tts_models_install(
     let engine = req.engine.clone();
     let model_name = req.model_name.clone();
     let client = state.client.clone();
-    let label = format!("TTS model: {model_name}");
+    let label = format!("Audio model: {model_name}");
 
     let result = state
         .downloads
@@ -550,7 +550,7 @@ pub async fn tts_models_install(
         Ok(body) => (StatusCode::OK, Json(body)).into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": format!("installing TTS model failed: {e:#}") })),
+            Json(json!({ "error": format!("installing Audio model failed: {e:#}") })),
         )
             .into_response(),
     }

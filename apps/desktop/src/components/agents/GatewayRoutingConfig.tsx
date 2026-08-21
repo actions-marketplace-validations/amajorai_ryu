@@ -6,15 +6,15 @@
 //   * MODEL EGRESS — `agent-gateway-routing`. Core injects OPENAI_BASE_URL +
 //     OPENAI_API_KEY into the agent's spawn command, so an agent whose client
 //     honours the OpenAI base URL sends its model calls through the gateway.
-//     Default OFF, because turning it on changes which endpoint a credential is
-//     presented to and where the spend is counted.
+//     Default ON for newly created/installed ACP agents; turning it off is the
+//     explicit opt-out to keep model egress direct.
 //   * RYU TOOLS — `agent-tool-bridge`. Core injects its own in-process MCP server
 //     into the ACP session, so the agent can call the tools its allowlist already
 //     permits. Default ON, because it grants nothing the user has not configured.
 //
 // ── Why this file changed ────────────────────────────────────────────────────
 // These used to be ONE preference. An agent whose owner declined the credential
-// swap — the correct, default choice — ALSO silently lost every Ryu tool, which
+// swap ALSO silently lost every Ryu tool, which
 // is why a freshly added ACP agent could not do anything. `agent_routing` split
 // them; this editor previously showed only the egress half, so after the split
 // the tool gate had no per-agent control in the agent editor at all.
@@ -61,7 +61,7 @@ import {
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
 export function GatewayRoutingConfig({ agentId }: { agentId: string }) {
-	const [enabled, setEnabled] = useState(false);
+	const [enabled, setEnabled] = useState(true);
 	const [loaded, setLoaded] = useState(false);
 	const [tools, setTools] = useState<AgentToolBridge | null>(null);
 	// The value THIS component last persisted for the tools switch, so the control

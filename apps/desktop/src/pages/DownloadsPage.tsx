@@ -17,19 +17,19 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
-import { IconSwap } from "@ryu/ui/components/icon-swap";
 import { PullToRefresh } from "@ryu/ui/components/pull-to-refresh";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { AvailableUpdates } from "@/src/components/downloads/AvailableUpdates.tsx";
 import { DownloadRow } from "@/src/components/downloads/DownloadRow.tsx";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAvailableUpdates } from "@/src/hooks/useAvailableUpdates.ts";
 import {
@@ -70,6 +70,7 @@ function mergeHistory(
 export default function DownloadsPage() {
 	const tasks = useDownloadsStore(useShallow(selectOrderedTasks));
 	const [friendly] = useFriendlyMode();
+	const { openTab } = useTabsContext();
 	const { updates, loading, refresh } = useAvailableUpdates();
 	const node = useActiveNode();
 
@@ -160,18 +161,14 @@ export default function DownloadsPage() {
 					    content. The state is driven by the queries' own in-flight flags
 					    plus a floor, so it is never a lie about work that already ended. */}
 						<Button
-							disabled={refreshing}
+							loading={refreshing}
 							onClick={() => {
 								onRefresh();
 							}}
 							size="sm"
 							variant="ghost"
 						>
-							<IconSwap
-								a={<HugeiconsIcon icon={Refresh01Icon} />}
-								b={<Spinner size="sm" speed="fast" />}
-								state={refreshing ? "b" : "a"}
-							/>
+							<HugeiconsIcon icon={Refresh01Icon} />
 							{refreshing ? "Refreshing…" : "Refresh"}
 						</Button>
 					</div>
@@ -189,6 +186,14 @@ export default function DownloadsPage() {
 								is up to date.
 							</EmptyDescription>
 						</EmptyHeader>
+						<EmptyContent>
+							<Button
+								onClick={() => openTab("/store", { title: "Store" })}
+								size="sm"
+							>
+								Browse the Store
+							</Button>
+						</EmptyContent>
 					</Empty>
 				) : (
 					<>

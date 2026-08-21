@@ -12,13 +12,17 @@ import {
 	normalizeThemePrefs,
 	THEME_PREFS_VERSION,
 } from "./prefs.ts";
-import { DEFAULT_DARK_ID, DEFAULT_LIGHT_ID } from "./presets.ts";
+import {
+	DEFAULT_DARK_ID,
+	DEFAULT_LIGHT_ID,
+	type ThemeVariant,
+} from "./presets.ts";
 
 describe("defaultThemePrefs", () => {
-	test("returns the documented light-first defaults", () => {
+	test("returns the documented system-following defaults", () => {
 		const p = defaultThemePrefs();
 		expect(p.version).toBe(THEME_PREFS_VERSION);
-		expect(p.mode).toBe("light");
+		expect(p.mode).toBe("system");
 		expect(p.lightPreset).toBe(DEFAULT_LIGHT_ID);
 		expect(p.darkPreset).toBe(DEFAULT_DARK_ID);
 		expect(p.contrast).toBe(DEFAULT_CONTRAST);
@@ -58,8 +62,8 @@ describe("normalizeThemePrefs", () => {
 	});
 
 	test("an invalid mode falls back to the default mode", () => {
-		expect(normalizeThemePrefs({ mode: "neon" }).mode).toBe("light");
-		expect(normalizeThemePrefs({ mode: 7 }).mode).toBe("light");
+		expect(normalizeThemePrefs({ mode: "neon" }).mode).toBe("system");
+		expect(normalizeThemePrefs({ mode: 7 }).mode).toBe("system");
 	});
 
 	test("string preset ids pass through; non-strings fall back", () => {
@@ -90,7 +94,7 @@ describe("normalizeThemePrefs", () => {
 		expect(
 			normalizeThemePrefs({ customThemes: { id: "x" } }).customThemes
 		).toEqual([]);
-		const arr = [{ id: "z" }];
+		const arr = [{ id: "z" }] as unknown as ThemeVariant[];
 		expect(normalizeThemePrefs({ customThemes: arr }).customThemes).toBe(arr);
 	});
 

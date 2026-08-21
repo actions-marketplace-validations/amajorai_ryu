@@ -1,4 +1,10 @@
 {
+  "tags": ["context","date","time","hooks"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/hook-session-context",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/hook-session-context",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/session-context",
   "name": "Session Context",
   "version": "0.1.14",

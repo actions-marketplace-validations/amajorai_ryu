@@ -52,7 +52,7 @@ export function GettingStartedTracker({ className }: { className?: string }) {
 				inert={collapsed}
 			>
 				<div className="overflow-hidden">
-					<div className="scroll-fade-effect-y max-h-[40vh] overflow-y-auto pt-0.5">
+					<div className="scroll-fade max-h-[40vh] overflow-y-auto pt-0.5">
 						<GettingStartedChecklist onRun={run} quests={quests} />
 					</div>
 				</div>

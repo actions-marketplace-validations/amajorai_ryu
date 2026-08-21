@@ -1,51 +1,24 @@
 //! Discord channel adapter.
 //!
-//! A Discord bot normally receives messages over the Gateway WebSocket. To stay
-//! consistent with the dependency-light, long-poll transport used by the
-//! [`telegram`](super::telegram) adapter, this adapter polls each watched
-//! channel's REST message history with an `after` cursor — the same
-//! advance-the-offset trick Telegram's `getUpdates` uses, so nothing is ever
-//! re-delivered. Everything after "a message arrived" is the shared path:
+//! A Discord bot receives messages over the Gateway WebSocket. The adapter keeps
+//! that identified session alive, handles Gateway reconnects and heartbeats, and
+//! uses REST only for verbs the socket cannot perform. Everything after "a
+//! message arrived" is the shared path:
 //! [`handle_turn`] gates it, folds in media, runs it through Core's session seam
-//! (or the legacy gateway pipeline) and delivers the reply, so this file owns only
-//! the poll transport plus Discord's own verbs.
-//!
-//! # What the REST-poll transport cannot do
-//!
-//! Two Discord features are deliberately absent because they are unreachable from
-//! a poller, and a half-working version of either is worse than none:
-//!
-//! - **Slash commands.** Registering application commands is a plain REST call, but
-//!   *invoking* one delivers an INTERACTION — over an interactions webhook on a
-//!   public HTTPS endpoint, or over an identified Gateway WebSocket. This adapter
-//!   has neither, so a registered menu would show entries that fail with "the
-//!   application did not respond" when clicked. [`Channel::publish_commands`] is
-//!   therefore left as the kernel's no-op and [`ChannelCaps::command_menu`] is
-//!   false. Commands still work when *typed*: `/goal ship it` is ordinary message
-//!   content that reaches Core intact and is dispatched there like any other
-//!   surface's. Lifting this needs either a public interactions URL (and Ed25519
-//!   request verification) or a Gateway WebSocket connection.
-//! - **Presence (the green dot).** A bot's online status is a property of an
-//!   identified Gateway WebSocket session; there is no REST endpoint that sets it,
-//!   so a REST-poll bot always renders offline in the member list. Ryu's own
-//!   liveness signal ([`StatusReporter`], heartbeated from the poll loop
-//!   below) already answers "is this bot running", which is the question an
-//!   operator actually has.
-//!
-//! Related: only the configured `channel_ids` are polled. A thread this adapter
-//! opens is a *separate* channel, so the reply lands in the thread and Core keeps
-//! that thread's own history, but a user's follow-up typed **inside** the thread is
-//! not picked up — answering there needs the poll set to grow at runtime (a shared
-//! mutable channel set written from the spawned turn tasks), which is a larger
-//! change than it looks and is left for the Gateway-WebSocket transport.
+//! (or the legacy gateway pipeline) and delivers the reply, so this file owns the
+//! Gateway transport plus Discord's own verbs. Slash commands and presence travel
+//! through the same identified session; REST history backfill is optional and only
+//! fills a cursor after a reconnect.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, warn};
 
 use crate::media::{self, Attachment, AttachmentKind, VoiceDelivery};
@@ -53,18 +26,11 @@ use crate::pairing::PairingStore;
 use crate::status::StatusReporter;
 use crate::{
     handle_turn, pack_thread, unpack_thread, BotProfile, Channel, ChannelCaps, ChannelHost,
-    ChannelRuntime, DiscordChannelConfig, GroupReplyMode, InboundMessage,
+    ChannelRuntime, DiscordChannelConfig, DiscordChannelOptions, GroupReplyMode, InboundMessage,
 };
-
-/// Minimum spacing between `online` heartbeats. The poll loop runs every 2s, so
-/// this throttles the report to roughly one every 20s while healthy.
-const HEARTBEAT_MIN_SPACING: Duration = Duration::from_secs(20);
 
 /// Discord REST API base. Pinned to v10 (the current stable version).
 const API_BASE: &str = "https://discord.com/api/v10";
-
-/// Interval between message-history polls per watched channel.
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Cooldown before retrying after a transport error, so a flaky network or a
 /// transient Discord outage doesn't become a tight failure loop.
@@ -76,6 +42,11 @@ const FETCH_LIMIT: u8 = 50;
 /// Timeout for one REST call. Generous enough for a slow round trip, short enough
 /// that a hung request cannot stall the poll loop for a watched channel.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// GUILDS + GUILD_MESSAGES + GUILD_MESSAGE_REACTIONS + DIRECT_MESSAGES +
+/// MESSAGE_CONTENT. Message Content is privileged and must also be enabled in
+/// the Discord developer portal.
+const DISCORD_GATEWAY_INTENTS: u64 = 1 | 512 | 1024 | 4096 | 32768;
 
 /// Discord's per-message content ceiling. An agent reply routinely exceeds it, and
 /// the API rejects the whole message rather than truncating, so replies are split
@@ -110,6 +81,8 @@ pub struct DiscordChannel {
     /// [`Channel::caps`]: Discord *can* thread regardless, this is the operator's
     /// choice about whether it should.
     thread_replies: bool,
+    options: DiscordChannelOptions,
+    application_id: OnceLock<String>,
 }
 
 impl DiscordChannel {
@@ -133,10 +106,6 @@ impl DiscordChannel {
         if cfg.token.trim().is_empty() {
             anyhow::bail!("discord channel token is empty");
         }
-        if cfg.channel_ids.is_empty() {
-            anyhow::bail!("discord channel requires at least one channel_id");
-        }
-
         // Every watched channel is a guild (multi-user) channel, so the shared gate
         // decides it as a GROUP — and the default group policy is an allowlist that
         // starts empty, which would deny every message the operator explicitly
@@ -154,12 +123,24 @@ impl DiscordChannel {
                 common.access.group_allowlist.push(channel_id.clone());
             }
         }
+        for channel_id in &cfg.options.allowed_channels {
+            if !common
+                .access
+                .group_allowlist
+                .iter()
+                .any(|id| id == channel_id)
+            {
+                common.access.group_allowlist.push(channel_id.clone());
+            }
+        }
 
         Ok(Self {
             runtime: ChannelRuntime::new(http, common, pairing, status),
             token: cfg.token,
             channel_ids: cfg.channel_ids,
             thread_replies: cfg.thread_replies,
+            options: cfg.options,
+            application_id: OnceLock::new(),
         })
     }
 
@@ -300,6 +281,311 @@ impl DiscordChannel {
     }
 }
 
+impl DiscordChannel {
+    /// Register Core's command registry as Discord application commands. The
+    /// Gateway delivers the resulting `INTERACTION_CREATE` events to the same
+    /// connection as messages, so the menu is real rather than decorative.
+    async fn publish_commands(
+        &self,
+        cmds: &[crate::commands::ChannelCommand],
+    ) -> anyhow::Result<()> {
+        let Some(application_id) = self.application_id.get() else {
+            anyhow::bail!("discord application id is not known yet")
+        };
+        if cmds.is_empty() {
+            return Ok(());
+        }
+        let commands: Vec<Value> = cmds
+            .iter()
+            .take(100)
+            .map(|command| {
+                json!({
+                    "name": command.name,
+                    "description": command.description,
+                    "type": 1,
+                })
+            })
+            .collect();
+        self.http()
+            .put(format!("{API_BASE}/applications/{application_id}/commands"))
+            .header("Authorization", self.auth_header())
+            .json(&commands)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    async fn gateway_url(&self) -> anyhow::Result<String> {
+        let body: GatewayUrlResponse = self
+            .http()
+            .get(format!("{API_BASE}/gateway/bot"))
+            .header("Authorization", self.auth_header())
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        body.url
+            .filter(|url| !url.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("discord Gateway response contained no url"))
+    }
+
+    async fn parent_channel_id(&self, channel_id: &str) -> Option<String> {
+        let response = self
+            .http()
+            .get(format!("{API_BASE}/channels/{channel_id}"))
+            .header("Authorization", self.auth_header())
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        response.json::<DiscordChannelRef>().await.ok()?.parent_id
+    }
+
+    async fn dispatch_gateway_message(
+        self: &Arc<Self>,
+        host: Arc<dyn ChannelHost>,
+        value: Value,
+        me_id: &str,
+        thread_parents: &mut HashMap<String, String>,
+        last_seen: &mut HashMap<String, String>,
+    ) {
+        let Ok(message) = serde_json::from_value::<DiscordMessage>(value) else {
+            return;
+        };
+        if message.channel_id.is_empty() || message.id.is_empty() {
+            return;
+        }
+        last_seen.insert(message.channel_id.clone(), message.id.clone());
+        if message.author.id == me_id {
+            return;
+        }
+        if message.author.bot.unwrap_or(false) && !self.options.allow_bots {
+            return;
+        }
+        let is_group = message.guild_id.is_some();
+        let parent = if is_group {
+            if let Some(parent) = thread_parents.get(&message.channel_id) {
+                Some(parent.clone())
+            } else if self.channel_ids.iter().any(|id| id == &message.channel_id) {
+                None
+            } else {
+                let parent = self.parent_channel_id(&message.channel_id).await;
+                if let Some(parent) = &parent {
+                    thread_parents.insert(message.channel_id.clone(), parent.clone());
+                }
+                parent
+            }
+        } else {
+            None
+        };
+        let scope_channel = parent.as_deref().unwrap_or(&message.channel_id);
+        if !self.channel_ids.is_empty()
+            && is_group
+            && !self.channel_ids.iter().any(|id| id == scope_channel)
+        {
+            return;
+        }
+        if self
+            .options
+            .ignored_channels
+            .iter()
+            .any(|id| id == scope_channel || id == &message.channel_id)
+        {
+            return;
+        }
+        if is_group
+            && !self.options.allowed_channels.is_empty()
+            && !self
+                .options
+                .allowed_channels
+                .iter()
+                .any(|id| id == scope_channel || id == &message.channel_id)
+        {
+            return;
+        }
+        let in_thread = parent.is_some();
+        let Some(routed_text) = decide_reply_with_options(
+            &message,
+            me_id,
+            self.runtime.cfg.group_reply_mode,
+            in_thread,
+            &self.options,
+        ) else {
+            return;
+        };
+        let chat_id = inbound_chat_id(&message.channel_id, parent.as_deref());
+        let inbound = InboundMessage {
+            chat_id,
+            access_chat_id: parent.or_else(|| is_group.then(|| message.channel_id.clone())),
+            text: routed_text,
+            author_name: Some(message.author.username.clone())
+                .filter(|name| !name.trim().is_empty()),
+            sender_id: Some(message.author.id.clone()).filter(|id| !id.is_empty()),
+            message_id: Some(message.id.clone()),
+            is_group,
+            attachments: parse_attachments(&message),
+        };
+        let channel = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut inbound = inbound;
+            let downloaded = channel.download_speech(&inbound).await;
+            if !downloaded.is_empty() {
+                channel.runtime.ingest_media(&mut inbound, downloaded).await;
+            }
+            handle_turn(channel, host, inbound).await;
+        });
+    }
+
+    async fn backfill(
+        self: &Arc<Self>,
+        host: &Arc<dyn ChannelHost>,
+        me_id: &str,
+        last_seen: &mut HashMap<String, String>,
+        thread_parents: &mut HashMap<String, String>,
+    ) {
+        for channel_id in &self.channel_ids {
+            let Some(after) = last_seen.get(channel_id) else {
+                continue;
+            };
+            match self.fetch_messages(channel_id, Some(after)).await {
+                Ok(mut messages) => {
+                    messages.reverse();
+                    for message in messages {
+                        let Ok(value) = serde_json::to_value(message) else {
+                            continue;
+                        };
+                        self.dispatch_gateway_message(
+                            Arc::clone(host),
+                            value,
+                            me_id,
+                            thread_parents,
+                            last_seen,
+                        )
+                        .await;
+                    }
+                }
+                Err(err) => warn!(%err, channel_id, "discord history backfill failed"),
+            }
+        }
+    }
+
+    async fn handle_interaction(
+        self: &Arc<Self>,
+        value: Value,
+        host: Arc<dyn ChannelHost>,
+        _me_id: &str,
+    ) {
+        if value["type"].as_u64() != Some(2) {
+            return;
+        }
+        let Some(interaction_id) = value["id"].as_str() else {
+            return;
+        };
+        let Some(token) = value["token"].as_str() else {
+            return;
+        };
+        let Some(name) = value["data"]["name"].as_str() else {
+            return;
+        };
+        let mut text = format!("/{name}");
+        if let Some(options) = value["data"]["options"].as_array() {
+            for option in options {
+                if let Some(option_value) = option["value"].as_str() {
+                    text.push(' ');
+                    text.push_str(option_value);
+                }
+            }
+        }
+        let callback = format!("{API_BASE}/interactions/{interaction_id}/{token}/callback");
+        if self
+            .http()
+            .post(callback)
+            .json(&json!({ "type": 5 }))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let channel_id = value["channel_id"].as_str().unwrap_or_default().to_string();
+        if channel_id.is_empty() {
+            return;
+        }
+        let sender_id = value["member"]["user"]["id"]
+            .as_str()
+            .or_else(|| value["user"]["id"].as_str())
+            .map(str::to_string);
+        let author_name = value["member"]["user"]["username"]
+            .as_str()
+            .or_else(|| value["user"]["username"].as_str())
+            .map(str::to_string);
+        let is_group = value["guild_id"].as_str().is_some();
+        if is_group
+            && !self.options.allowed_roles.is_empty()
+            && !value["member"]["roles"].as_array().is_some_and(|roles| {
+                roles.iter().any(|role| {
+                    role.as_str().is_some_and(|role| {
+                        self.options
+                            .allowed_roles
+                            .iter()
+                            .any(|allowed| allowed == role)
+                    })
+                })
+            })
+        {
+            return;
+        }
+        let scope_channel = if is_group {
+            self.parent_channel_id(&channel_id)
+                .await
+                .unwrap_or_else(|| channel_id.clone())
+        } else {
+            channel_id.clone()
+        };
+        if self
+            .options
+            .ignored_channels
+            .iter()
+            .any(|id| id == &channel_id || id == &scope_channel)
+        {
+            return;
+        }
+        if is_group
+            && (!self.channel_ids.is_empty()
+                && !self
+                    .channel_ids
+                    .iter()
+                    .any(|id| id == &channel_id || id == &scope_channel)
+                || !self.options.allowed_channels.is_empty()
+                    && !self
+                        .options
+                        .allowed_channels
+                        .iter()
+                        .any(|id| id == &channel_id || id == &scope_channel))
+        {
+            return;
+        }
+        let inbound = InboundMessage {
+            chat_id: channel_id.clone(),
+            access_chat_id: is_group.then_some(scope_channel),
+            text,
+            author_name,
+            sender_id,
+            message_id: None,
+            is_group,
+            attachments: Vec::new(),
+        };
+        handle_turn(Arc::clone(self), host, inbound).await;
+    }
+}
+
 #[async_trait]
 impl Channel for DiscordChannel {
     fn name(&self) -> &'static str {
@@ -316,15 +602,15 @@ impl Channel for DiscordChannel {
     /// `rich_text` is deliberately FALSE: Discord message content already renders
     /// the markdown our replies are written in, so plain `content` *is* the rich
     /// surface. Claiming otherwise would send replies through [`Channel::send_rich`]
-    /// for no behavioural difference. `command_menu` and `streaming` are false for
-    /// the transport reasons in the module doc.
+    /// for no behavioural difference. Streaming drafts are false because Discord
+    /// has no draft surface; command menus are registered through interactions.
     fn caps(&self) -> ChannelCaps {
         ChannelCaps {
             typing: true,
             rich_text: false,
             streaming: false,
             threads: true,
-            command_menu: false,
+            command_menu: true,
             voice: true,
             attachments: true,
             reactions: true,
@@ -457,6 +743,14 @@ impl Channel for DiscordChannel {
             return chat_id.to_string();
         }
         let (channel_id, existing) = unpack_thread(chat_id);
+        if self
+            .options
+            .no_thread_channels
+            .iter()
+            .any(|id| id == channel_id)
+        {
+            return chat_id.to_string();
+        }
         if existing.is_some() {
             // Already inside a thread — nest no further.
             return chat_id.to_string();
@@ -479,127 +773,169 @@ impl Channel for DiscordChannel {
     }
 
     async fn run(self: Arc<Self>, host: Arc<dyn ChannelHost>) -> anyhow::Result<()> {
-        debug!("discord channel poll loop started");
+        debug!("discord channel Gateway loop started");
         if let Some(reporter) = &self.runtime.status {
             reporter.connecting().await;
         }
-
-        // Profile first: it is a one-shot REST call and an operator who set a name
-        // expects to see it before the first message, not after. Best-effort —
-        // Discord rate-limits username changes hard (2 per hour).
         let profile = self.runtime.cfg.profile.clipped();
         if !profile.is_empty() {
             if let Err(err) = self.publish_profile(&profile).await {
                 warn!(%err, "discord profile publish failed");
             }
         }
-
-        // Resolve the bot's own user id once so mention detection recognises
-        // `<@id>`. Non-fatal on failure: in Mentions mode nothing matches (the
-        // bot stays quiet) until restart; All mode is unaffected.
         let me_id = match self.get_me_id().await {
             Ok(id) => id,
             Err(err) => {
-                warn!(
-                    error = %err,
-                    "discord get_me failed; mention detection disabled until restart"
-                );
+                warn!(error = %err, "discord get_me failed; mention detection disabled");
                 String::new()
             }
         };
-        // Per-channel cursor: the snowflake id of the last message we processed.
-        // Discord ids are monotonically increasing, so `after` cleanly excludes
-        // anything we've already handled.
-        let mut cursors: HashMap<String, String> = HashMap::new();
-        // Throttle `online` heartbeats — the poll loop is far faster than we need
-        // to report liveness.
-        let mut last_online: Option<Instant> = None;
+        let _ = self.application_id.set(me_id.clone());
+        if self.runtime.cfg.publish_commands {
+            let commands = self.runtime.refresh_commands().await;
+            if let Err(err) = self.publish_commands(&commands).await {
+                warn!(%err, "discord application commands not published");
+            }
+        }
 
+        let mut reconnect_attempt = 0u32;
+        let mut last_seen: HashMap<String, String> = HashMap::new();
         loop {
-            for channel_id in &self.channel_ids {
-                let after = cursors.get(channel_id).cloned();
-                let is_seed_poll = after.is_none();
-                match self.fetch_messages(channel_id, after.as_deref()).await {
-                    Ok(mut messages) => {
-                        // A successful fetch means the bot is live — heartbeat
-                        // online, throttled so we don't spam the control plane.
-                        if let Some(reporter) = &self.runtime.status {
-                            let due =
-                                last_online.map_or(true, |t| t.elapsed() >= HEARTBEAT_MIN_SPACING);
-                            if due {
-                                reporter.online().await;
-                                last_online = Some(Instant::now());
+            let gateway = match self.gateway_url().await {
+                Ok(url) => url,
+                Err(err) => {
+                    reconnect_attempt = reconnect_attempt.saturating_add(1);
+                    warn!(%err, "discord Gateway URL lookup failed");
+                    if let Some(reporter) = &self.runtime.status {
+                        reporter.error(&err.to_string()).await;
+                    }
+                    tokio::time::sleep(ERROR_BACKOFF).await;
+                    continue;
+                }
+            };
+            let url = format!("{gateway}?v=10&encoding=json");
+            let (mut ws, _) = match tokio_tungstenite::connect_async(&url).await {
+                Ok(pair) => pair,
+                Err(err) => {
+                    reconnect_attempt = reconnect_attempt.saturating_add(1);
+                    warn!(%err, "discord Gateway connection failed");
+                    if let Some(reporter) = &self.runtime.status {
+                        reporter.error(&err.to_string()).await;
+                    }
+                    tokio::time::sleep(ERROR_BACKOFF).await;
+                    continue;
+                }
+            };
+            reconnect_attempt = 0;
+
+            let hello = match ws.next().await {
+                Some(Ok(WsMessage::Text(text))) => serde_json::from_str::<GatewayEnvelope>(&text)
+                    .ok()
+                    .filter(|envelope| envelope.op == 10),
+                _ => None,
+            };
+            let Some(hello) = hello else {
+                warn!("discord Gateway did not send HELLO");
+                tokio::time::sleep(ERROR_BACKOFF).await;
+                continue;
+            };
+            let heartbeat_ms = hello
+                .d
+                .as_ref()
+                .and_then(|value| value["heartbeat_interval"].as_u64())
+                .unwrap_or(41_250);
+            ws.send(WsMessage::Text(
+                json!({
+                    "op": 2,
+                    "d": {
+                        "token": self.token,
+                        "intents": DISCORD_GATEWAY_INTENTS,
+                            "properties": {
+                                "os": "ryu",
+                                "browser": "ryu",
+                                "device": "ryu",
+                            },
+                            "presence": {
+                                "since": 0,
+                                "activities": [{"name": "Ryu", "type": 0}],
+                                "status": "online",
+                                "afk": false
                             }
-                        }
-                        // Discord returns newest-first; process oldest-first so
-                        // the cursor advances correctly and replies stay ordered.
-                        messages.reverse();
-                        for message in messages {
-                            cursors.insert(channel_id.clone(), message.id.clone());
+                    }
+                })
+                .to_string(),
+            ))
+            .await?;
 
-                            // First poll only seeds the cursor; don't replay
-                            // history that predates the bot starting up.
-                            if is_seed_poll {
-                                continue;
-                            }
-
-                            // Decide whether to reply: skips bot/empty messages,
-                            // and in Mentions mode skips anything that doesn't
-                            // @mention the bot. Returns the mention-stripped text
-                            // to route, or None to ignore.
-                            let Some(routed_text) =
-                                decide_reply(&message, &me_id, self.runtime.cfg.group_reply_mode)
-                            else {
-                                continue;
-                            };
-
-                            let mut inbound = InboundMessage {
-                                chat_id: channel_id.clone(),
-                                text: routed_text,
-                                // Attribution is a first-class field now, so the
-                                // speaker is recorded on the turn rather than
-                                // smuggled into the prompt text.
-                                author_name: Some(message.author.username.clone())
-                                    .filter(|n| !n.trim().is_empty()),
-                                sender_id: Some(message.author.id.clone())
-                                    .filter(|id| !id.is_empty()),
-                                message_id: Some(message.id.clone()),
-                                // A watched channel is a guild channel, i.e. always
-                                // multi-user, so the group rules apply to all of it.
-                                is_group: true,
-                                attachments: parse_attachments(&message),
-                            };
-
-                            let channel = Arc::clone(&self);
-                            let host = Arc::clone(&host);
-                            tokio::spawn(async move {
-                                let downloaded = channel.download_speech(&inbound).await;
-                                if !downloaded.is_empty() {
-                                    channel.runtime.ingest_media(&mut inbound, downloaded).await;
-                                }
-                                handle_turn(channel, host, inbound).await;
-                            });
+            let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_ms));
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut thread_parents = HashMap::new();
+            loop {
+                tokio::select! {
+                    _ = heartbeat.tick() => {
+                        if ws.send(WsMessage::Text(json!({"op": 1, "d": Value::Null}).to_string())).await.is_err() {
+                            break;
                         }
                     }
-                    Err(err) => {
-                        warn!(
-                            channel_id = %channel_id,
-                            error = %err,
-                            "discord message fetch failed, backing off"
-                        );
-                        if let Some(reporter) = &self.runtime.status {
-                            reporter.error(&err.to_string()).await;
+                    frame = ws.next() => {
+                        let Some(frame) = frame else { break; };
+                        let payload = match frame {
+                            Ok(WsMessage::Text(text)) => text,
+                            Ok(WsMessage::Ping(data)) => { let _ = ws.send(WsMessage::Pong(data)).await; continue; }
+                            Ok(WsMessage::Close(_)) => break,
+                            Ok(_) => continue,
+                            Err(err) => { warn!(%err, "discord Gateway frame failed"); break; }
+                        };
+                        let Ok(envelope) = serde_json::from_str::<GatewayEnvelope>(&payload) else { continue; };
+                        if envelope.op == 7 || envelope.op == 9 {
+                            break;
                         }
-                        tokio::time::sleep(ERROR_BACKOFF).await;
+                        if envelope.op == 0 {
+                            match envelope.event_name.as_deref() {
+                                Some("READY") | Some("RESUMED") => {
+                                    if let Some(reporter) = &self.runtime.status { reporter.online().await; }
+                                    if self.options.history_backfill {
+                                        self.backfill(&host, &me_id, &mut last_seen, &mut thread_parents).await;
+                                    }
+                                }
+                                Some("MESSAGE_CREATE") => {
+                                    if let Some(data) = envelope.d {
+                                        self.dispatch_gateway_message(Arc::clone(&host), data, &me_id, &mut thread_parents, &mut last_seen).await;
+                                    }
+                                }
+                                Some("INTERACTION_CREATE") => {
+                                    if let Some(data) = envelope.d {
+                                        self.handle_interaction(data, Arc::clone(&host), &me_id).await;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            if let Some(reporter) = &self.runtime.status {
+                reporter.connecting().await;
+            }
+            tokio::time::sleep(reconnect_delay(reconnect_attempt)).await;
         }
     }
 }
 
 // ─── Pure helpers ───────────────────────────────────────────────────────────
+
+/// Build the Core conversation key for a Discord inbound message.
+///
+/// Discord exposes a thread as its own channel id, while the shared packed key
+/// is always `parent_channel:thread_channel`. Keeping the parent first means
+/// outbound routing resolves the actual thread instead of posting back to the
+/// parent channel.
+fn inbound_chat_id(channel_id: &str, parent_channel_id: Option<&str>) -> String {
+    match parent_channel_id {
+        Some(parent_channel_id) => pack_thread(parent_channel_id, Some(channel_id)),
+        None => pack_thread(channel_id, None),
+    }
+}
 
 /// The channel a conversation key addresses: the thread when the key carries one,
 /// otherwise the room itself.
@@ -738,9 +1074,26 @@ fn parse_attachments(message: &DiscordMessage) -> Vec<Attachment> {
 /// the transcript or the attachment note becomes the prompt downstream — or `None`
 /// to ignore the message (bot author, nothing at all, or unaddressed in Mentions
 /// mode).
+#[cfg(test)]
 fn decide_reply(message: &DiscordMessage, me_id: &str, mode: GroupReplyMode) -> Option<String> {
+    decide_reply_with_options(
+        message,
+        me_id,
+        mode,
+        false,
+        &DiscordChannelOptions::default(),
+    )
+}
+
+fn decide_reply_with_options(
+    message: &DiscordMessage,
+    me_id: &str,
+    mode: GroupReplyMode,
+    in_thread: bool,
+    options: &DiscordChannelOptions,
+) -> Option<String> {
     // Ignore bot messages (including our own replies) to avoid self-talk.
-    if message.author.bot.unwrap_or(false) {
+    if message.author.bot.unwrap_or(false) && !options.allow_bots {
         return None;
     }
     let content = message.content.trim();
@@ -750,12 +1103,39 @@ fn decide_reply(message: &DiscordMessage, me_id: &str, mode: GroupReplyMode) -> 
         return None;
     }
 
+    let is_group = message.guild_id.is_some();
+    if is_group
+        && !options.allowed_roles.is_empty()
+        && !message.member.as_ref().is_some_and(|member| {
+            member
+                .roles
+                .iter()
+                .any(|role| options.allowed_roles.iter().any(|allowed| allowed == role))
+        })
+    {
+        return None;
+    }
+
     let mentioned = !me_id.is_empty()
         && (message.mentions.iter().any(|user| user.id == me_id)
             || content.contains(&format!("<@{me_id}>"))
             || content.contains(&format!("<@!{me_id}>")));
 
-    if mode == GroupReplyMode::Mentions && !mentioned {
+    let pattern_match = options.mention_patterns.iter().any(|pattern| {
+        let pattern = pattern.trim().to_ascii_lowercase();
+        !pattern.is_empty() && content.to_ascii_lowercase().contains(&pattern)
+    });
+    let addressed = mentioned || pattern_match;
+    let thread_is_allowed = in_thread && !options.thread_require_mention;
+    if is_group
+        && mode == GroupReplyMode::Mentions
+        && !addressed
+        && !thread_is_allowed
+        && !options
+            .free_response_channels
+            .iter()
+            .any(|channel| channel == &message.channel_id)
+    {
         return None;
     }
 
@@ -776,9 +1156,13 @@ fn decide_reply(message: &DiscordMessage, me_id: &str, mode: GroupReplyMode) -> 
 
 // ─── Discord REST API response types (only the fields we use) ──────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct DiscordMessage {
     id: String,
+    #[serde(default)]
+    channel_id: String,
+    #[serde(default)]
+    guild_id: Option<String>,
     #[serde(default)]
     content: String,
     author: DiscordUser,
@@ -786,11 +1170,20 @@ struct DiscordMessage {
     /// detecting whether the bot was addressed.
     #[serde(default)]
     mentions: Vec<DiscordUser>,
+    /// Guild member roles used by the optional role allowlist.
+    #[serde(default)]
+    member: Option<DiscordMember>,
     #[serde(default)]
     attachments: Vec<DiscordAttachment>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+struct DiscordMember {
+    #[serde(default)]
+    roles: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct DiscordUser {
     #[serde(default)]
     id: String,
@@ -800,7 +1193,7 @@ struct DiscordUser {
     bot: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct DiscordAttachment {
     #[serde(default)]
     url: String,
@@ -821,6 +1214,28 @@ struct DiscordAttachment {
 struct DiscordChannelRef {
     #[serde(default)]
     id: String,
+    #[serde(default)]
+    parent_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GatewayUrlResponse {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GatewayEnvelope {
+    op: u8,
+    #[serde(default)]
+    d: Option<Value>,
+    #[serde(rename = "t", default)]
+    event_name: Option<String>,
+}
+
+fn reconnect_delay(attempt: u32) -> Duration {
+    let power = attempt.min(5);
+    Duration::from_secs(ERROR_BACKOFF.as_secs().saturating_mul(1u64 << power))
 }
 
 #[cfg(test)]
@@ -834,6 +1249,7 @@ mod tests {
             token: token.to_string(),
             channel_ids,
             thread_replies: false,
+            options: DiscordChannelOptions::default(),
             common: CommonChannelConfig {
                 model: "gpt-4o".to_string(),
                 ..Default::default()
@@ -848,6 +1264,8 @@ mod tests {
     fn msg(content: &str, mentions: Vec<&str>) -> DiscordMessage {
         DiscordMessage {
             id: "1".to_string(),
+            channel_id: "chan".to_string(),
+            guild_id: Some("guild".to_string()),
             content: content.to_string(),
             author: DiscordUser {
                 id: "user-1".to_string(),
@@ -862,6 +1280,7 @@ mod tests {
                     bot: None,
                 })
                 .collect(),
+            member: None,
             attachments: Vec::new(),
         }
     }
@@ -906,6 +1325,30 @@ mod tests {
     }
 
     #[test]
+    fn role_allowlist_filters_guild_messages() {
+        let mut message = msg("role gated", vec![]);
+        message.member = Some(DiscordMember {
+            roles: vec!["role-allowed".to_string()],
+        });
+        let options = DiscordChannelOptions {
+            allowed_roles: vec!["role-allowed".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            decide_reply_with_options(&message, BOT_ID, GroupReplyMode::All, false, &options)
+                .as_deref(),
+            Some("role gated")
+        );
+        message.member = Some(DiscordMember {
+            roles: vec!["role-other".to_string()],
+        });
+        assert!(
+            decide_reply_with_options(&message, BOT_ID, GroupReplyMode::All, false, &options)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn empty_bot_id_disables_mention_detection() {
         let message = msg("<@999> hi", vec!["999"]);
         assert!(decide_reply(&message, "", GroupReplyMode::Mentions).is_none());
@@ -944,7 +1387,7 @@ mod tests {
 
     #[test]
     fn new_rejects_missing_channels() {
-        assert!(build(make_cfg("abc", vec![])).is_err());
+        assert!(build(make_cfg("abc", vec![])).is_ok());
     }
 
     #[test]
@@ -989,7 +1432,7 @@ mod tests {
         // surface to claim.
         assert!(!caps.rich_text);
         // Slash commands need an interactions endpoint or a Gateway socket.
-        assert!(!caps.command_menu);
+        assert!(caps.command_menu);
         assert!(!caps.streaming);
         // The indicator lasts 10s, so it must be re-asserted under that.
         assert!(channel.typing_interval() < Duration::from_secs(10));
@@ -1005,6 +1448,14 @@ mod tests {
         assert_eq!(target_channel(&packed), "222");
         // An unthreaded key addresses the channel itself.
         assert_eq!(target_channel("111"), "111");
+    }
+
+    #[test]
+    fn existing_thread_inbound_key_keeps_parent_before_thread() {
+        let packed = inbound_chat_id("thread-222", Some("channel-111"));
+        assert_eq!(packed, "channel-111:thread-222");
+        assert_eq!(target_channel(&packed), "thread-222");
+        assert_eq!(inbound_chat_id("channel-111", None), "channel-111");
     }
 
     #[test]

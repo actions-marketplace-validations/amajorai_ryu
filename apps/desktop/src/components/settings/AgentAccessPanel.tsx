@@ -3,7 +3,7 @@
 // Inline "what this agent can reach" editor for settings pages that pick an
 // agent (Dictation agent-ask, and reusable elsewhere). Cross-app access is the
 // chosen agent's allowlists — Spaces for retrieval, MCP tools grouped by the
-// owning app/plugin (ghost__, spaces__, browser__, …). Editing here is the same
+// owning app/plugin (ghost., spaces__, browser., …). Editing here is the same
 // data as Agent edit → Tools / Memory & Spaces; this panel is the compact surface
 // for feature settings that need cross-allow without leaving the page.
 
@@ -13,6 +13,11 @@ import { toast } from "@ryu/ui/components/sileo";
 import { Switch } from "@ryu/ui/components/switch";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
+import {
+	ALL_MCP_TOOLS,
+	encodeToolAllowlist,
+	NO_AGENT_CAPABILITIES,
+} from "@/src/lib/agent-capabilities.ts";
 import {
 	type Agent,
 	type AgentInput,
@@ -54,12 +59,12 @@ export interface AgentAccessPanelProps {
 	target: ApiTarget;
 }
 
-/** Group key for an MCP tool: server name, else prefix before `__`, else "other". */
+/** Group key for an MCP tool: server name, else prefix before `.`, else "other". */
 function toolGroupKey(tool: McpTool): string {
 	if (tool.server.trim().length > 0) {
 		return tool.server.trim().toLowerCase();
 	}
-	const sep = tool.id.indexOf("__");
+	const sep = tool.id.indexOf(".");
 	if (sep > 0) {
 		return tool.id.slice(0, sep).toLowerCase();
 	}
@@ -148,10 +153,18 @@ export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
 		return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
 	}, [tools]);
 
-	const selectedTools = useMemo(
-		() => new Set(agent?.tools ?? []),
-		[agent?.tools]
-	);
+	const selectedTools = useMemo(() => {
+		if (!agent) {
+			return new Set<string>();
+		}
+		if (agent.tools.includes(ALL_MCP_TOOLS) || agent.tools.length === 0) {
+			return new Set(tools.map((tool) => tool.id));
+		}
+		if (agent.tools.includes(NO_AGENT_CAPABILITIES)) {
+			return new Set<string>();
+		}
+		return new Set(agent.tools);
+	}, [agent, tools]);
 	/**
 	 * The levels to show as checked. An empty stored list means Core's default —
 	 * the three personal levels — so render that rather than an all-unchecked row
@@ -277,7 +290,12 @@ export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
 				next.delete(tool.id);
 			}
 		}
-		void persist({ tools: [...next] });
+		void persist({
+			tools: encodeToolAllowlist(
+				tools.map((tool) => tool.id),
+				next
+			),
+		});
 	};
 
 	if (loading) {
@@ -301,10 +319,10 @@ export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
 		<SettingsSection
 			caption={
 				<>
-					Cross-app reach for <strong>{agent.name}</strong>. Spaces feed
-					retrieval; app tool groups unlock that app&apos;s MCP tools (Ghost,
-					Spaces pages, Browser, …). Same allowlists as Agent edit. Changes
-					apply everywhere this agent runs, including agent-ask.
+					Cross-app reach for <strong>{agent.name}</strong>. New agents start
+					with registered app tools; Spaces feed retrieval and these groups
+					narrow that reach. Same allowlists as Agent edit. Changes apply
+					everywhere this agent runs, including agent-ask.
 				</>
 			}
 			title="Agent access"

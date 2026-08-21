@@ -398,7 +398,10 @@ function useTableResizeController({
 	);
 
 	const applyResize = useCallback(
-		(event: PointerEvent, finished: boolean) => {
+		(
+			event: Pick<globalThis.PointerEvent, "clientX" | "clientY">,
+			finished: boolean
+		) => {
 			const dragState = dragStateRef.current;
 
 			if (!dragState) {
@@ -462,7 +465,7 @@ function useTableResizeController({
 				dragState.initialSize;
 			const nextInitial = effectiveColSizesRef.current[dragState.colIndex + 1];
 			const complement = (width: number) =>
-				currentInitial + nextInitial - width;
+				currentInitial + (nextInitial ?? 0) - width;
 			const currentWidth = roundCellSizeToStep(
 				resizeLengthClampStatic(currentInitial + delta, {
 					max: nextInitial ? complement(minColumnWidth) : undefined,
@@ -573,11 +576,11 @@ function useTableResizeController({
 				freezeRowHeights();
 			}
 
-			const handlePointerMove = (pointerEvent: PointerEvent) => {
+			const handlePointerMove = (pointerEvent: globalThis.PointerEvent) => {
 				applyResize(pointerEvent, false);
 			};
 
-			const handlePointerEnd = (pointerEvent: PointerEvent) => {
+			const handlePointerEnd = (pointerEvent: globalThis.PointerEvent) => {
 				applyResize(pointerEvent, true);
 				stopResize();
 			};
@@ -1303,7 +1306,7 @@ function RowDropLine() {
 	return (
 		<div
 			className={cn(
-				"absolute inset-x-0 left-2 z-50 h-0.5 bg-brand/50",
+				"reorder-drop-indicator absolute inset-x-0 left-2 z-50 h-0.5 bg-brand/50",
 				dropLine === "top" ? "-top-px" : "-bottom-px"
 			)}
 		/>

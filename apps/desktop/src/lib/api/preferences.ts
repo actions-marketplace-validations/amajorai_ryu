@@ -19,6 +19,21 @@ interface PreferenceWire {
 	value: string;
 }
 
+/** Notifications for in-process consumers that need a saved preference to take
+ * effect immediately (for example, a plugin-owned audio controller). */
+export type PreferenceChangeListener = (key: string, value: string) => void;
+
+const preferenceChangeListeners = new Set<PreferenceChangeListener>();
+
+export function subscribePreferenceChanges(
+	listener: PreferenceChangeListener
+): () => void {
+	preferenceChangeListeners.add(listener);
+	return () => {
+		preferenceChangeListeners.delete(listener);
+	};
+}
+
 /** Read a raw preference value (JSON string) by key, or null if unset/unreachable. */
 export async function getPreference(
 	target: ApiTarget,
@@ -46,6 +61,14 @@ export async function setPreference(
 			method: "PUT",
 			body: { value },
 		});
+		for (const listener of preferenceChangeListeners) {
+			try {
+				listener(key, value);
+			} catch {
+				// A preference observer must not turn a successful save into a
+				// reported failure for the control that initiated it.
+			}
+		}
 		return true;
 	} catch {
 		return false;
@@ -273,6 +296,47 @@ export function serializeAgentSelection(selection: AgentSelection): string {
  */
 export const DEFAULT_AGENT_SELECTION_PREF_KEY = "default-agent-selection";
 
+/** The node-scoped defaults for the local and normal-chat lanes. */
+export const DEFAULT_LOCAL_AGENT_SELECTION_PREF_KEY =
+	"default-local-agent-selection";
+export const DEFAULT_CLOUD_AGENT_SELECTION_PREF_KEY =
+	"default-cloud-agent-selection";
+
+export type AgentLane = "local" | "cloud";
+
+/** Core's installed local Gemma used by a fresh Ryu lane. */
+export const DEFAULT_LOCAL_RYU_MODEL_ID = "gemma-4-E2B-it-Q4_K_M";
+/** Persisted logical provider id for paid managed Ryu inference. */
+export const MANAGED_RYU_PROVIDER_ID = "managed-openrouter";
+/** Managed Ryu's provider-side automatic model route. */
+export const MANAGED_RYU_MODEL_ID = "openrouter/auto";
+
+export function defaultLocalAgentSelection(): AgentSelection {
+	return {
+		...EMPTY_AGENT_SELECTION,
+		agent_id: "ryu",
+		provider: "local",
+		model: DEFAULT_LOCAL_RYU_MODEL_ID,
+	};
+}
+
+export function defaultCloudAgentSelection(paid: boolean): AgentSelection {
+	return paid
+		? {
+				...EMPTY_AGENT_SELECTION,
+				agent_id: "ryu",
+				provider: MANAGED_RYU_PROVIDER_ID,
+				model: MANAGED_RYU_MODEL_ID,
+			}
+		: { ...EMPTY_AGENT_SELECTION };
+}
+
+export function agentLanePreferenceKey(lane: AgentLane): string {
+	return lane === "local"
+		? DEFAULT_LOCAL_AGENT_SELECTION_PREF_KEY
+		: DEFAULT_CLOUD_AGENT_SELECTION_PREF_KEY;
+}
+
 /** Read any selection-valued preference (legacy bare model ids included). */
 export async function getAgentSelection(
 	target: ApiTarget,
@@ -291,6 +355,32 @@ export function setAgentSelection(
 		? ""
 		: serializeAgentSelection(selection);
 	return setPreference(target, key, value);
+}
+
+/**
+ * Read a lane default. The former one-default preference is a local-only
+ * migration fallback; it must never silently become a cloud target.
+ */
+export async function getLaneAgentSelection(
+	target: ApiTarget,
+	lane: AgentLane
+): Promise<AgentSelection> {
+	const current = await getPreference(target, agentLanePreferenceKey(lane));
+	if (current !== null) {
+		return parseAgentSelection(current);
+	}
+	if (lane === "local") {
+		return getAgentSelection(target, DEFAULT_AGENT_SELECTION_PREF_KEY);
+	}
+	return EMPTY_AGENT_SELECTION;
+}
+
+export function setLaneAgentSelection(
+	target: ApiTarget,
+	lane: AgentLane,
+	selection: AgentSelection
+): Promise<boolean> {
+	return setAgentSelection(target, agentLanePreferenceKey(lane), selection);
 }
 
 // --- Island appearance ----------------------------------------------------
@@ -1568,7 +1658,7 @@ export function setPromptCacheTtl(
 
 // --- Skills disclosure mode (progressive vs full) ---------------------------
 // Progressive (default): only a skill's name+description is injected up front and
-// the model loads full instructions on demand via the `skills__load` tool — saves
+// the model loads full instructions on demand via the `skills.load` tool — saves
 // context on low-context models. Full: every enabled skill body is injected each
 // turn (the original behavior). Stored as "progressive" | "full" in Core under the
 // `skills-disclosure` pref. Only the tool-loop (ACP) plane honors progressive; the
@@ -1803,6 +1893,30 @@ export function setChatRenameEnabled(
 	enabled: boolean
 ): Promise<boolean> {
 	return setPreference(target, AUTO_TITLE_ENABLED_PREF_KEY, String(enabled));
+}
+
+// --- Chat source indexing ---------------------------------------------------
+// Chat-message search is an opt-in Memory app contribution. The preference is
+// kept separate from long-term memory and auto-recall: turning it on permits
+// Core to index past chat messages, while turning it off stops new indexing and
+// keeps the existing encrypted transcript intact.
+
+export const CHAT_MEMORY_ENABLED_PREF_KEY = "chat-memory-enabled";
+
+/** Read whether chat messages may be embedded for Memory search. Defaults OFF. */
+export async function getChatMemoryEnabled(
+	target: ApiTarget
+): Promise<boolean> {
+	const raw = await getPreference(target, CHAT_MEMORY_ENABLED_PREF_KEY);
+	return parsePrefBool(raw, false);
+}
+
+/** Persist the chat-source search opt-in as a bare boolean string. */
+export function setChatMemoryEnabled(
+	target: ApiTarget,
+	enabled: boolean
+): Promise<boolean> {
+	return setPreference(target, CHAT_MEMORY_ENABLED_PREF_KEY, String(enabled));
 }
 
 // --- Conversation context window --------------------------------------------
@@ -2211,20 +2325,23 @@ export function setFalApiKey(target: ApiTarget, key: string): Promise<boolean> {
 }
 
 // --- Claude Code gateway routing --------------------------------------------
-// Opt-in: route Claude Code's egress through the Ryu gateway's transparent
+/** Shared governed-by-default posture for new and auto-installed routable agents. */
+export const DEFAULT_GATEWAY_ROUTING = true;
+
+// Gateway-governed by default: route Claude Code's egress through the Ryu gateway's transparent
 // passthrough proxy (firewall/DLP/audit) while forwarding the user's OWN Pro/Max
 // subscription auth upstream unchanged. Core injects `ANTHROPIC_BASE_URL` at
 // spawn only when this is on; it never sets an API key (that would flip Claude
 // Code off the subscription). Stored raw (a bare boolean string) under a key Core
-// reads on startup and on change (`claude-gateway-routing`). Off by default since
-// it changes how the subscription credential flows.
+// reads on startup and on change (`claude-gateway-routing`). New ACP agents start
+// governed by default; the switch is an explicit direct-egress opt-out.
 
 export const CLAUDE_GATEWAY_ROUTING_PREF_KEY = "claude-gateway-routing";
 
-/** Default: off, so Claude Code keeps its native (ungoverned) egress until opt-in. */
-export const DEFAULT_CLAUDE_GATEWAY_ROUTING = false;
+/** Default: on, so a new Claude agent is Gateway-governed. */
+export const DEFAULT_CLAUDE_GATEWAY_ROUTING = DEFAULT_GATEWAY_ROUTING;
 
-/** Read the Claude Code gateway-routing toggle, defaulting to off. */
+/** Read the Claude Code gateway-routing toggle, defaulting to Gateway governance. */
 export async function getClaudeGatewayRouting(
 	target: ApiTarget
 ): Promise<boolean> {
@@ -2299,21 +2416,22 @@ export function setExecApprovalEnabled(
 }
 
 // --- Codex gateway routing ---------------------------------------------------
-// Opt-in: route Codex's ChatGPT-login (subscription) Responses egress through the
+// Gateway-governed by default: route Codex's ChatGPT-login (subscription) Responses egress through the
 // Ryu gateway's transparent passthrough proxy (firewall/DLP/audit) while
 // forwarding the user's OWN OAuth bearer + ChatGPT-Account-ID upstream unchanged.
 // Core points Codex at an isolated CODEX_HOME whose config routes the
 // subscription traffic at the gateway; it never injects an API key (that would
 // flip Codex onto API-key billing). Stored raw (a bare boolean string) under a
-// key Core reads on startup and on change (`codex-gateway-routing`). Off by
-// default since it changes how the subscription credential flows.
+// key Core reads on startup and on change (`codex-gateway-routing`). New ACP
+// agents start governed by default; the switch is an explicit direct-egress
+// opt-out because it changes how the subscription credential flows.
 
 export const CODEX_GATEWAY_ROUTING_PREF_KEY = "codex-gateway-routing";
 
-/** Default: off, so Codex keeps its native subscription egress until opt-in. */
-export const DEFAULT_CODEX_GATEWAY_ROUTING = false;
+/** Default: on, so a new Codex agent is Gateway-governed. */
+export const DEFAULT_CODEX_GATEWAY_ROUTING = DEFAULT_GATEWAY_ROUTING;
 
-/** Read the Codex gateway-routing toggle, defaulting to off. */
+/** Read the Codex gateway-routing toggle, defaulting to Gateway governance. */
 export async function getCodexGatewayRouting(
 	target: ApiTarget
 ): Promise<boolean> {
@@ -2353,8 +2471,8 @@ export function setCodexGatewayRouting(
 
 export const AGENT_GATEWAY_ROUTING_PREF_KEY = "agent-gateway-routing";
 
-/** Default: off, so a BYO agent keeps its native (ungoverned) egress until opt-in. */
-export const DEFAULT_AGENT_GATEWAY_ROUTING = false;
+/** Default: on, so a new routable ACP agent is Gateway-governed. */
+export const DEFAULT_AGENT_GATEWAY_ROUTING = DEFAULT_GATEWAY_ROUTING;
 
 function parseAgentGatewayMap(raw: string | null): Record<string, boolean> {
 	if (!raw || raw.trim() === "") {
@@ -2367,13 +2485,28 @@ function parseAgentGatewayMap(raw: string | null): Record<string, boolean> {
 			for (const [id, value] of Object.entries(
 				parsed as Record<string, unknown>
 			)) {
-				out[id] = value === true || value === "true" || value === 1;
+				if (typeof value === "boolean") {
+					out[id] = value;
+					continue;
+				}
+				if (typeof value === "number" && Number.isFinite(value)) {
+					out[id] = value !== 0;
+					continue;
+				}
+				if (typeof value === "string") {
+					const normalized = value.trim().toLowerCase();
+					if (["true", "1", "on", "yes"].includes(normalized)) {
+						out[id] = true;
+					} else if (["false", "0", "off", "no"].includes(normalized)) {
+						out[id] = false;
+					}
+				}
 			}
 			return out;
 		}
 	} catch {
-		// Unparseable → treat as empty (everything off), never throw on the
-		// settings path.
+		// Unparseable → treat as empty (missing entries use the governed default), never
+		// throw on the settings path.
 	}
 	return {};
 }
@@ -2386,7 +2519,7 @@ export async function getAgentGatewayRoutingMap(
 	return parseAgentGatewayMap(raw);
 }
 
-/** Read the gateway-routing toggle for a single agent id, defaulting to off. */
+/** Read the gateway-routing toggle for a single agent id, defaulting to governance. */
 export async function getAgentGatewayRouting(
 	target: ApiTarget,
 	agentId: string
@@ -2476,8 +2609,9 @@ export function setAgentGatewayRoutingMany(
 // `agent-gateway-routing` (above) decides whether Core injects OPENAI_BASE_URL +
 // OPENAI_API_KEY into an agent's spawn command — that is MODEL EGRESS. Turning it
 // on changes which endpoint a subscription credential is presented to and which
-// ledger the spend lands on, which is exactly why it defaults OFF and why a bulk
-// action must never flip it for you.
+// ledger the spend lands on. New ACP agents start governed; a direct path is an
+// explicit opt-out, and a bulk action still must never silently flip existing
+// agents' explicit choices for you.
 //
 // This key gates something with no credential implication at all: whether Core
 // injects its own in-process MCP server (`build_ryu_mcp_server`) into the agent's
@@ -2485,7 +2619,8 @@ export function setAgentGatewayRoutingMany(
 // `call_tool` path. Nothing leaves the machine that would not otherwise; the
 // allowlist and the interactive permission prompt still gate every call. An agent
 // without it is not "safer", it is just unable to do anything Ryu offers — which
-// is why the default here is ON while the default above stays OFF.
+// is why the default here is ON as well; the two maps remain separate because
+// they control independent runtime planes and preserve independent opt-outs.
 //
 // ── CROSS-TRACK CONTRACT, verified against Core rather than assumed ───────────
 // Every clause below was read out of `apps/core/src/agent_routing/mod.rs` and its
@@ -2494,11 +2629,12 @@ export function setAgentGatewayRoutingMany(
 //   key    : "agent-tool-bridge" — `agent_routing::AGENT_TOOL_BRIDGE_PREF_KEY`
 //   value  : a JSON object of agent id → boolean, the same shape and the same
 //            truthy coercions as `agent-gateway-routing`
-//   default: ON. `agent_routing::is_tool_bridge_enabled` returns `unwrap_or(true)`,
-//            and an unreadable entry ALSO falls back to `true` (its parse arm
-//            comments "must not be taken as an opt-out"). Only an explicit
-//            `false` withholds the bridge. This is the one place the two keys
-//            deliberately disagree, and it is the whole point: an installed ACP
+//   default: ON. `agent_routing::is_tool_bridge_enabled` returns
+//            `unwrap_or(DEFAULT_AGENT_TOOL_BRIDGE)`, and an unreadable entry ALSO
+//            falls back to that shared default (its parse arm comments "must not
+//            be taken as an opt-out"). Only an explicit `false` withholds the
+//            bridge. The keys remain separate even though they share the broad ON
+//            default: an installed ACP
 //            agent has Ryu's tools out of the box.
 //   seeded : `apps/core/src/main.rs` at startup, and `server/mod.rs`'s preference
 //            PUT handler on change — so a write here takes effect on this node
@@ -2527,10 +2663,10 @@ export const AGENT_TOOL_BRIDGE_PREF_KEY = "agent-tool-bridge";
 
 /**
  * The value the bulk action writes and the value Core must assume for an agent
- * with no entry. ON, unlike {@link DEFAULT_AGENT_GATEWAY_ROUTING} — see the
- * section comment for why the two defaults are opposite on purpose.
+ * with no entry. Both ACP gates share the same broad ON default; they remain
+ * separate keys because their opt-outs control different runtime planes.
  */
-export const DEFAULT_AGENT_TOOL_BRIDGE = true;
+export const DEFAULT_AGENT_TOOL_BRIDGE = DEFAULT_GATEWAY_ROUTING;
 
 /**
  * Read the full per-agent tool-bridge map. Deliberately returns the RAW map
@@ -2751,9 +2887,9 @@ export async function setAgentSmartRoute(
 // kebab keys below so every surface (and every later phase) reads ONE source of
 // truth. Defaults follow the §6 table: closed-UI product analytics + crash
 // reports are opt-out (ON by default), while the data-plane OTLP export and the
-// local support-access channel are opt-in (OFF). NO collector/SDK is wired in
-// this unit — these are the controls only, so collection can never precede
-// consent. Core mirrors each to an env var (RYU_PRODUCT_ANALYTICS_ENABLED,
+// local support-access channel are opt-in (OFF). The desktop runtime gates read
+// these same values before analytics/crash initialization, and Core mirrors
+// each to an env var (RYU_PRODUCT_ANALYTICS_ENABLED,
 // OTEL_EXPORTER_OTLP_ENDPOINT, ...) for headless operation.
 
 export const PRODUCT_ANALYTICS_ENABLED_PREF_KEY = "product-analytics-enabled";
@@ -2957,6 +3093,7 @@ export function setSupportAccessLocalExpiry(
 // Default-ON in Core when unset (headless / OSS Core / still-entitled desktop).
 
 export const ENTITLEMENT_ACTIVE_PREF_KEY = "entitlement-active";
+export const MANAGED_INFERENCE_ENTITLED_PREF_KEY = "managed-inference-entitled";
 
 /** Push whether the node is entitled to run autonomous automations. */
 export function setEntitlementActive(
@@ -2964,6 +3101,18 @@ export function setEntitlementActive(
 	active: boolean
 ): Promise<boolean> {
 	return setPreference(target, ENTITLEMENT_ACTIVE_PREF_KEY, String(active));
+}
+
+/** Push the control-plane's paid managed-inference capability to Core. */
+export function setManagedInferenceEntitled(
+	target: ApiTarget,
+	active: boolean
+): Promise<boolean> {
+	return setPreference(
+		target,
+		MANAGED_INFERENCE_ENTITLED_PREF_KEY,
+		String(active)
+	);
 }
 
 // --- Default sandbox run budget ---------------------------------------------

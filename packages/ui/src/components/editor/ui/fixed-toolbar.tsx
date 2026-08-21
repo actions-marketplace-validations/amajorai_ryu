@@ -1,17 +1,20 @@
 "use client";
 
-import { cn } from "@ryu/ui/lib/utils.ts";
+import type { ReactNode } from "react";
 
 import { Toolbar } from "./toolbar.tsx";
 
-export function FixedToolbar(props: React.ComponentProps<typeof Toolbar>) {
+/**
+ * Compatibility wrapper for the fixed-toolbar plugin slot.
+ *
+ * The toolbar itself now owns its fixed positioning through the shared nested
+ * overflow primitive, so this slot must not reserve a second sticky row above the
+ * editor.
+ */
+export function FixedToolbar({ children }: { children: ReactNode }) {
 	return (
-		<Toolbar
-			{...props}
-			className={cn(
-				"scrollbar-hide sticky top-0 left-0 z-50 w-full justify-between overflow-x-auto rounded-t-lg border-b border-b-border bg-background/95 p-1 backdrop-blur-sm supports-backdrop-blur:bg-background/60",
-				props.className
-			)}
-		/>
+		<Toolbar className="w-full" role="presentation">
+			{children}
+		</Toolbar>
 	);
 }

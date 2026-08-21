@@ -1,7 +1,3 @@
-import {
-	BouncyAccordion,
-	type BouncyAccordionItem,
-} from "@ryu/ui/components/bouncy-accordion";
 import { Button, buttonVariants } from "@ryu/ui/components/button";
 import {
 	Card,
@@ -10,16 +6,34 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@ryu/ui/components/card";
+import PageHeader from "@ryu/ui/components/page-header";
 import { cn } from "@ryu/ui/lib/utils";
-import { Download, Globe, RefreshCw, Sparkles, WifiOff } from "lucide-react";
+import {
+	ArrowUpRight,
+	BookOpen,
+	Cloud,
+	Download,
+	FlaskConical,
+	Globe,
+	History,
+	Moon,
+	RefreshCw,
+	Sparkles,
+	WifiOff,
+} from "lucide-react";
 import type { SVGProps } from "react";
+import { DOCS_URL } from "./data/resources.tsx";
 import {
 	archLabel,
 	type DownloadArch,
 	type DownloadOS,
 	type DownloadState,
+	findChannelRelease,
 	findReleaseWithAsset,
+	GITHUB_REPO,
 	osName,
+	PRERELEASE_CHANNELS,
+	type PrereleaseChannel,
 	RELEASES_PAGE,
 	type Release,
 	resolveDownloadState,
@@ -205,17 +219,6 @@ export function buildDownloadUrl(
 	return null;
 }
 
-function formatDate(value: string) {
-	const date = new Date(value);
-	return Number.isNaN(date.getTime())
-		? value
-		: date.toLocaleDateString(undefined, {
-				year: "numeric",
-				month: "long",
-				day: "numeric",
-			});
-}
-
 /** The sub-label under an arch name, explaining what that row can offer. */
 function archHintFor(state: DownloadState, arch: DownloadArch): string {
 	if (state.kind === "building") {
@@ -235,92 +238,78 @@ function archHintFor(state: DownloadState, arch: DownloadArch): string {
 		: processors;
 }
 
-function ArchButtons({
-	releases,
-	platformId,
+function DownloadSettingRow({
+	ariaLabel,
+	downloadName,
+	href,
+	icon,
+	label,
+	meta,
+	openInNewTab = false,
+	status,
 }: {
-	releases: Release[];
-	platformId: string;
+	ariaLabel?: string;
+	downloadName?: string;
+	href?: string;
+	icon: React.ReactNode;
+	label: string;
+	meta?: string;
+	openInNewTab?: boolean;
+	status?: "building" | "disabled" | "ready" | "unavailable";
 }) {
-	return (
-		<div className="flex w-full flex-col gap-2">
-			{(["arm", "intel"] as const).map((arch) => {
-				const state = resolveDownloadState(releases, platformId, arch);
-				const body = (
-					<>
-						<span className="flex flex-col items-start text-left">
-							<span className="font-medium text-sm">
-								{archLabel(platformId, arch)}
-							</span>
-							<span className="text-muted-foreground text-xs">
-								{archHintFor(state, arch)}
-							</span>
-						</span>
-						<Download className="size-4 text-muted-foreground" />
-					</>
-				);
-				// Disable ONLY when we know there is nothing to hand over. A release
-				// list we could not read is not knowledge — that case still links to
-				// GitHub, or the download page would be empty on a transient blip.
-				if (state.kind === "unavailable" || state.kind === "building") {
-					return (
-						<Button
-							className="w-full justify-between"
-							disabled
-							key={arch}
-							variant="outline"
-						>
-							{body}
-						</Button>
-					);
-				}
-				const href =
-					state.kind === "ready"
-						? state.asset.browser_download_url
-						: state.href;
-				return (
-					<Button
-						className="w-full justify-between"
-						key={arch}
-						nativeButton={false}
-						render={
-							<a
-								href={href}
-								rel="noopener noreferrer"
-								{...(state.kind === "ready"
-									? { download: state.asset.name }
-									: { target: "_blank" })}
-							/>
-						}
-						variant="outline"
-					>
-						{body}
-					</Button>
-				);
-			})}
-		</div>
+	const disabled =
+		status === "building" ||
+		status === "disabled" ||
+		status === "unavailable" ||
+		!href;
+	const content = (
+		<span className="flex w-full items-center gap-3 px-4 py-3.5 text-left">
+			<span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-muted text-foreground">
+				{icon}
+			</span>
+			<span className="min-w-0 flex-1">
+				<span className="block truncate font-medium text-sm">{label}</span>
+				{meta ? (
+					<span className="mt-0.5 block truncate text-muted-foreground text-xs">
+						{meta}
+					</span>
+				) : null}
+			</span>
+			{disabled ? (
+				<span className="shrink-0 text-muted-foreground text-xs">
+					{status === "building" ? "Building" : "Not available"}
+				</span>
+			) : openInNewTab ? (
+				<ArrowUpRight className="size-4 shrink-0 text-muted-foreground" />
+			) : (
+				<Download className="size-4 shrink-0 text-muted-foreground" />
+			)}
+		</span>
 	);
-}
 
-/**
- * The line under the hero CTA. It states the version being handed over — during
- * a release window that is the last one with binaries, not the just-tagged one
- * still building — or why there is nothing to hand over yet.
- */
-function heroStatusNote(state: DownloadState): string {
-	if (state.kind === "building") {
-		return `${state.version} is building now · check back shortly`;
+	if (disabled) {
+		return (
+			<div
+				aria-disabled="true"
+				className="mx-2 border-border/60 border-b last:border-b-0"
+			>
+				{content}
+			</div>
+		);
 	}
-	if (state.kind === "unavailable") {
-		return "No build for this machine yet · Free and open to use locally";
-	}
-	if (state.kind === "unknown") {
-		return "Couldn't reach GitHub · grab a build from the releases page";
-	}
-	if (state.supersededByBuilding) {
-		return `${state.servedVersion} · a newer release is still building`;
-	}
-	return `${state.servedVersion} · Free and open to use locally`;
+
+	return (
+		<a
+			aria-label={ariaLabel}
+			className="mx-2 block border-border/60 border-b outline-none transition-colors last:border-b-0 hover:bg-muted/45 focus-visible:bg-muted/45 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-inset"
+			download={downloadName}
+			href={href}
+			rel={openInNewTab ? "noopener noreferrer" : undefined}
+			target={openInNewTab ? "_blank" : undefined}
+		>
+			{content}
+		</a>
+	);
 }
 
 function PlatformCard({
@@ -331,28 +320,108 @@ function PlatformCard({
 	releases: Release[];
 }) {
 	return (
-		<div className="flex h-full flex-col gap-5 rounded-2xl border border-border bg-muted/40 p-6 backdrop-blur-sm transition-colors hover:bg-muted/60">
-			<div className="flex items-center gap-4">
-				<span className="inline-flex size-12 items-center justify-center rounded-2xl bg-foreground/10">
-					{platform.icon}
-				</span>
-				<div>
-					<h3 className="font-semibold text-foreground text-lg">
-						{platform.name}
-					</h3>
-					<p className="text-muted-foreground text-sm">
-						{platform.description}
-					</p>
+		<Card className="h-full bg-card shadow-none">
+			<CardHeader>
+				<div className="flex items-center gap-3">
+					<span className="inline-flex size-10 items-center justify-center rounded-xl bg-muted">
+						{platform.icon}
+					</span>
+					<div className="min-w-0">
+						<CardTitle>{platform.name}</CardTitle>
+						<CardDescription>{platform.description}</CardDescription>
+					</div>
 				</div>
-			</div>
-			<div className="mt-auto">
-				<ArchButtons platformId={platform.id} releases={releases} />
-			</div>
-		</div>
+			</CardHeader>
+			<CardContent className="p-0">
+				{(["arm", "intel"] as const).map((arch) => {
+					const state = resolveDownloadState(releases, platform.id, arch);
+					const href =
+						state.kind === "ready" || state.kind === "unknown"
+							? state.kind === "ready"
+								? state.asset.browser_download_url
+								: state.href
+							: undefined;
+					return (
+						<DownloadSettingRow
+							downloadName={
+								state.kind === "ready" ? state.asset.name : undefined
+							}
+							href={href}
+							icon={<Download className="size-4" />}
+							key={arch}
+							label={archLabel(platform.id, arch)}
+							meta={archHintFor(state, arch)}
+							openInNewTab={state.kind === "unknown"}
+							status={
+								state.kind === "ready" || state.kind === "unknown"
+									? "ready"
+									: state.kind
+							}
+						/>
+					);
+				})}
+			</CardContent>
+		</Card>
+	);
+}
+
+function SettingsSection({
+	children,
+	title,
+}: {
+	children: React.ReactNode;
+	title: string;
+}) {
+	return (
+		<section className="space-y-4">
+			<PageHeader as="h2" title={title} />
+			{children}
+		</section>
+	);
+}
+
+function PrereleaseSettingRows({
+	channel,
+	releases,
+}: {
+	channel: PrereleaseChannel;
+	releases: Release[];
+}) {
+	const release = findChannelRelease(releases, channel);
+	const scopedReleases = release ? [release] : [];
+
+	return PLATFORMS.flatMap((platform) =>
+		(["arm", "intel"] as const).map((arch) => {
+			const state = resolveDownloadState(scopedReleases, platform.id, arch);
+			const href =
+				state.kind === "ready" || state.kind === "unknown"
+					? state.kind === "ready"
+						? state.asset.browser_download_url
+						: state.href
+					: undefined;
+			return (
+				<DownloadSettingRow
+					downloadName={state.kind === "ready" ? state.asset.name : undefined}
+					href={href}
+					icon={platform.icon}
+					key={`${channel}-${platform.id}-${arch}`}
+					label={platform.name}
+					meta={archLabel(platform.id, arch)}
+					openInNewTab={state.kind === "unknown"}
+					status={
+						state.kind === "ready" || state.kind === "unknown"
+							? "ready"
+							: state.kind
+					}
+				/>
+			);
+		})
 	);
 }
 
 export interface DownloadProps {
+	/** All fetched releases, including rolling prerelease channels. */
+	allReleases?: Release[];
 	/** Detected architecture preference; the live page derives it from the user agent. */
 	arch?: DownloadArch;
 	/** Mobile gate; the live page derives it from the viewport. */
@@ -385,6 +454,7 @@ export interface DownloadProps {
  */
 export default function DownloadBlock({
 	releases = [],
+	allReleases = releases,
 	arch = "intel",
 	os = "macos",
 	isMobile = false,
@@ -393,7 +463,6 @@ export default function DownloadBlock({
 	// Nothing to say yet — not "GitHub is down". Hold the CTA back until we know,
 	// exactly as an unresolved fetch used to.
 	const pendingReleases = !releasesLoaded && releases.length === 0;
-	const previousReleases = releases.slice(1);
 	// The newest release that actually HAS this platform's binary. A freshly
 	// tagged release has no assets until its build finishes, so pointing the CTA
 	// at `releases[0]` hands the user a dead link during every release window.
@@ -403,24 +472,16 @@ export default function DownloadBlock({
 	// this is the page whose entire job is handing over the app.
 	const heroHref =
 		hero.kind === "ready" ? hero.asset.browser_download_url : RELEASES_PAGE;
-	const heroNote = heroStatusNote(hero);
 
 	return (
 		<div className="pb-8">
-			<section className="container mx-auto px-4 pt-20 pb-12 text-center md:pt-28">
-				<div className="mx-auto max-w-3xl space-y-6">
-					<span className="inline-flex items-center gap-2 rounded-full bg-muted/60 px-3 py-1 font-medium text-muted-foreground text-xs">
-						<Download className="size-3.5" strokeWidth={1.5} />
-						Download
-					</span>
-					<h1 className="text-balance font-medium text-4xl text-foreground leading-[1.1] tracking-tight md:text-6xl">
-						Agents, as easy as installing an app.
-					</h1>
-					<p className="mx-auto max-w-xl text-balance text-muted-foreground md:text-lg">
-						Run local models on your own machine, no terminal or API keys
-						required. Available for macOS, Windows, and Linux, and free while
-						we're in beta.
-					</p>
+			<section className="container mx-auto px-4 pt-20 pb-12 md:pt-28">
+				<PageHeader
+					className="mx-auto max-w-3xl text-center"
+					title="Your agents are ready"
+					titleClassName="text-balance font-medium text-4xl leading-[1.1] tracking-tight md:text-6xl"
+				/>
+				<div className="mx-auto mt-7 max-w-xl">
 					{!(isMobile || pendingReleases) && (
 						<div className="flex flex-col items-center gap-3">
 							<div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
@@ -450,103 +511,139 @@ export default function DownloadBlock({
 									All releases
 								</a>
 							</div>
-							<p className="text-muted-foreground/60 text-xs">{heroNote}</p>
 						</div>
 					)}
 				</div>
 			</section>
 
-			{isMobile ? (
-				<section className="container mx-auto px-4 pb-12">
-					<div className="mx-auto w-full max-w-md text-center">
-						<Card>
+			<section className="container mx-auto px-4 py-12">
+				<div className="mx-auto max-w-6xl space-y-12">
+					{isMobile ? (
+						<Card className="bg-card shadow-none">
 							<CardHeader>
 								<CardTitle>Desktop only, for now</CardTitle>
 								<CardDescription>Mobile is coming soon.</CardDescription>
 							</CardHeader>
 							<CardContent>
 								<p className="text-muted-foreground text-sm">
-									Open this page on your computer to download Ryu, or grab a
-									build straight from GitHub.
+									Open this page on your computer to install Ryu, or browse the
+									release options below.
 								</p>
-								<Button
-									className="mt-4"
-									nativeButton={false}
-									render={
-										<a
-											href={RELEASES_PAGE}
-											rel="noopener noreferrer"
-											target="_blank"
-										/>
-									}
-									variant="outline"
-								>
-									View releases on GitHub
-								</Button>
 							</CardContent>
 						</Card>
-					</div>
-				</section>
-			) : (
-				<section className="container mx-auto px-4 py-12">
-					<div className="mx-auto max-w-6xl">
+					) : null}
+					<SettingsSection title="Desktop app">
 						<div className="grid grid-cols-1 gap-4 md:grid-cols-3">
 							{/* The whole list, not just the newest release: a platform whose
-							    build is still uploading falls back to the last release that
-							    really has it instead of showing a dead row. */}
+								    build is still uploading falls back to the last release that
+								    really has it instead of showing a dead row. */}
 							{PLATFORMS.map((platform, i) => (
 								<Reveal delay={i * 0.06} key={platform.id}>
 									<PlatformCard platform={platform} releases={releases} />
 								</Reveal>
 							))}
 						</div>
+					</SettingsSection>
 
-						{previousReleases.length > 0 && (
-							<div className="mt-16">
-								<h2 className="mb-6 text-center font-medium text-foreground text-xl">
-									Previous releases
-								</h2>
-								<BouncyAccordion
-									classNames={{
-										item: "border border-border bg-muted/30",
-										trigger: "px-4 py-3",
-										description: "text-foreground",
-									}}
-									items={previousReleases.map(
-										(release): BouncyAccordionItem => ({
-											id: release.id.toString(),
-											title: (
-												<span className="flex flex-col items-start text-left">
-													<span className="font-semibold">
-														{release.tag_name}
-													</span>
-													<span className="text-muted-foreground text-xs">
-														{formatDate(release.published_at)}
-													</span>
-												</span>
-											),
-											description: (
-												<div className="grid grid-cols-1 gap-4 pt-1 md:grid-cols-3">
-													{/* Scoped to this one release — an archived version
-													    must not silently serve a different version's
-													    binary just because its own build lacked one. */}
-													{PLATFORMS.map((platform) => (
-														<PlatformCard
-															key={platform.id}
-															platform={platform}
-															releases={[release]}
-														/>
-													))}
-												</div>
-											),
-										})
-									)}
+					<SettingsSection title="Open in browser">
+						<Card className="bg-card shadow-none">
+							<CardContent className="p-0">
+								<DownloadSettingRow
+									href={WEBAPP_URL}
+									icon={<Globe className="size-4" />}
+									label="Open Web App"
+									meta={WEBAPP_URL}
+									openInNewTab
+									status="ready"
 								/>
+							</CardContent>
+						</Card>
+					</SettingsSection>
+
+					<SettingsSection title="Other versions">
+						<Card className="bg-card shadow-none">
+							<CardContent className="p-0">
+								<DownloadSettingRow
+									href={RELEASES_PAGE}
+									icon={<History className="size-4" />}
+									label="All versions"
+									meta="Stable releases on GitHub"
+									openInNewTab
+									status="ready"
+								/>
+							</CardContent>
+						</Card>
+					</SettingsSection>
+
+					<SettingsSection title="Developers">
+						<div className="grid gap-4 lg:grid-cols-2">
+							<Card className="bg-card shadow-none">
+								<CardContent className="p-0">
+									<DownloadSettingRow
+										href={GITHUB_REPO}
+										icon={<Globe className="size-4" />}
+										label="Self-host"
+										meta="Ryu on your own infrastructure"
+										openInNewTab
+										status="ready"
+									/>
+									<DownloadSettingRow
+										href={DOCS_URL}
+										icon={<BookOpen className="size-4" />}
+										label="Documentation"
+										meta={DOCS_URL}
+										openInNewTab
+										status="ready"
+									/>
+								</CardContent>
+							</Card>
+							<div className="space-y-4">
+								{PRERELEASE_CHANNELS.map(({ id, label }) => (
+									<Card className="bg-card shadow-none" key={id}>
+										<CardHeader>
+											<div className="flex items-center gap-3">
+												<span className="flex size-9 items-center justify-center rounded-xl bg-muted">
+													{id === "nightly" ? (
+														<Moon className="size-4" />
+													) : (
+														<FlaskConical className="size-4" />
+													)}
+												</span>
+												<div>
+													<CardTitle>{label}</CardTitle>
+													<CardDescription>
+														Rolling desktop builds
+													</CardDescription>
+												</div>
+											</div>
+										</CardHeader>
+										<CardContent className="p-0">
+											<PrereleaseSettingRows
+												channel={id}
+												releases={allReleases}
+											/>
+										</CardContent>
+									</Card>
+								))}
 							</div>
-						)}
-					</div>
-				</section>
-			)}
+						</div>
+					</SettingsSection>
+
+					<SettingsSection title="Cloud">
+						<Card className="bg-card shadow-none">
+							<CardContent className="p-0">
+								<DownloadSettingRow
+									href="/login?view=signup"
+									icon={<Cloud className="size-4" />}
+									label="Join waitlist"
+									meta="Hosted agents and sync"
+									status="ready"
+								/>
+							</CardContent>
+						</Card>
+					</SettingsSection>
+				</div>
+			</section>
 
 			<div className="py-12">
 				<Highlights items={DOWNLOAD_HIGHLIGHTS} />

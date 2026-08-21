@@ -14,7 +14,17 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
+import { BeforeAfterSummary } from "@ryu/ui/components/before-after-summary.tsx";
 import { Button } from "@ryu/ui/components/button";
+import {
+	Dialog,
+	DialogClose,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@ryu/ui/components/dialog.tsx";
 import {
 	Empty,
 	EmptyContent,
@@ -27,16 +37,13 @@ import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import { Separator } from "@ryu/ui/components/separator";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { formatMicroUsd as formatSharedMicroUsd } from "@ryu/ui/lib/number-format.ts";
+import { useState } from "react";
 
 /** Pure micro-USD → currency formatter, copied from `@/src/lib/api/credits`
  *  so the block stays free of app imports. */
 export function formatMicroUsd(microUsd: number, currency = "usd"): string {
-	return (microUsd / 1_000_000).toLocaleString(undefined, {
-		style: "currency",
-		currency: currency.toUpperCase(),
-		minimumFractionDigits: 2,
-		maximumFractionDigits: 4,
-	});
+	return formatSharedMicroUsd(microUsd, currency);
 }
 
 export interface CreditWalletView {
@@ -84,6 +91,22 @@ export interface CreditLedgerRow {
 	reasonLabel: string;
 }
 
+type PendingTopup = number | "custom";
+
+function pendingTopupDollars(
+	pendingTopup: PendingTopup | null,
+	customAmount: string
+): number | null {
+	if (pendingTopup === null) {
+		return null;
+	}
+	if (pendingTopup === "custom") {
+		const parsed = Number.parseFloat(customAmount);
+		return Number.isFinite(parsed) ? parsed : null;
+	}
+	return pendingTopup;
+}
+
 export interface CreditsViewProps {
 	authed?: boolean;
 	billingUnavailable?: boolean;
@@ -111,6 +134,7 @@ export interface CreditsViewProps {
 	onNextPage?: () => void;
 	onPrevPage?: () => void;
 	onRefresh?: () => void;
+	onSignIn?: () => void;
 	onTopupCustom?: () => void;
 	onTopupPack?: (pack: number) => void;
 	packs?: number[];
@@ -164,8 +188,43 @@ export function CreditsView({
 	onCustomAmountChange,
 	onPrevPage,
 	onNextPage,
+	onSignIn,
 }: CreditsViewProps) {
 	const currency = wallet?.currency ?? "usd";
+	const [pendingTopup, setPendingTopup] = useState<PendingTopup | null>(null);
+	const pendingDollars = pendingTopupDollars(pendingTopup, customAmount);
+	const pendingMicroUsd =
+		pendingDollars === null ? null : Math.round(pendingDollars * 1_000_000);
+	const pendingAmountLabel =
+		pendingDollars === null ? "—" : `$${pendingDollars.toFixed(2)}`;
+	const currentBalance = wallet
+		? formatMicroUsd(wallet.balanceMicroUsd, currency)
+		: "—";
+	const balanceAfterTopup =
+		wallet && pendingMicroUsd !== null
+			? formatMicroUsd(wallet.balanceMicroUsd + pendingMicroUsd, currency)
+			: pendingMicroUsd === null
+				? "—"
+				: "Pending";
+
+	const openTopupReview = (value: PendingTopup) => {
+		if (pendingTopupDollars(value, customAmount) === null) {
+			return;
+		}
+		setPendingTopup(value);
+	};
+
+	const confirmTopup = () => {
+		if (pendingTopup === null) {
+			return;
+		}
+		setPendingTopup(null);
+		if (pendingTopup === "custom") {
+			onTopupCustom?.();
+			return;
+		}
+		onTopupPack?.(pendingTopup);
+	};
 
 	if (!authed) {
 		return (
@@ -180,6 +239,13 @@ export function CreditsView({
 						see your balance and top up.
 					</EmptyDescription>
 				</EmptyHeader>
+				{onSignIn ? (
+					<EmptyContent>
+						<Button onClick={onSignIn} size="sm">
+							Sign in
+						</Button>
+					</EmptyContent>
+				) : null}
 			</Empty>
 		);
 	}
@@ -234,13 +300,11 @@ export function CreditsView({
 						</p>
 						<Button
 							className="mt-2"
-							disabled={busyPack !== null}
-							onClick={() => onTopupPack?.(packs[0])}
+							loading={busyPack === packs[0]}
+							onClick={() => openTopupReview(packs[0])}
 							size="sm"
 						>
-							{busyPack === packs[0] ? (
-								<Spinner className="mr-2 size-3.5" />
-							) : (
+							{busyPack !== packs[0] && (
 								<HugeiconsIcon className="mr-2 size-3.5" icon={Add01Icon} />
 							)}
 							Add <span className="font-heading">${packs[0]}</span> credits
@@ -364,14 +428,12 @@ export function CreditsView({
 						<div className="flex flex-wrap gap-2">
 							{packs.map((pack) => (
 								<Button
-									disabled={busyPack !== null}
 									key={pack}
-									onClick={() => onTopupPack?.(pack)}
+									loading={busyPack === pack}
+									onClick={() => openTopupReview(pack)}
 									variant="outline"
 								>
-									{busyPack === pack ? (
-										<Spinner className="mr-2 size-3.5" />
-									) : (
+									{busyPack !== pack && (
 										<HugeiconsIcon className="mr-2 size-3.5" icon={Add01Icon} />
 									)}
 									<span className="font-heading">${pack}</span>
@@ -396,12 +458,13 @@ export function CreditsView({
 									value={customAmount}
 								/>
 								<Button
-									disabled={busyPack !== null || !customAmount.trim()}
-									onClick={onTopupCustom}
+									disabled={
+										!customAmount.trim() ||
+										(busyPack !== null && busyPack !== "custom")
+									}
+									loading={busyPack === "custom"}
+									onClick={() => openTopupReview("custom")}
 								>
-									{busyPack === "custom" ? (
-										<Spinner className="mr-2 size-3.5" />
-									) : null}
 									Top up
 								</Button>
 							</div>
@@ -491,6 +554,51 @@ export function CreditsView({
 					</p>
 				) : null}
 			</section>
+
+			<Dialog
+				onOpenChange={(open) => {
+					if (!open) {
+						setPendingTopup(null);
+					}
+				}}
+				open={pendingTopup !== null}
+			>
+				<DialogContent className="sm:max-w-lg">
+					<DialogHeader>
+						<DialogTitle>Review credit top-up</DialogTitle>
+						<DialogDescription>
+							See how your organization balance changes before you leave Ryu for
+							payment.
+						</DialogDescription>
+					</DialogHeader>
+					<BeforeAfterSummary
+						current={{
+							amount: currentBalance,
+							detail: "Available before checkout",
+							eyebrow: "Current",
+							label: "Wallet balance",
+						}}
+						footer={{
+							detail:
+								"A deposit fee is added at checkout; the full face value is credited.",
+							label: "Credits added",
+							value: pendingAmountLabel,
+						}}
+						next={{
+							amount: balanceAfterTopup,
+							detail: `${pendingAmountLabel} of prepaid usage credit`,
+							eyebrow: "After top-up",
+							label: "Wallet balance",
+						}}
+					/>
+					<DialogFooter>
+						<DialogClose render={<Button variant="ghost" />}>
+							Cancel
+						</DialogClose>
+						<Button onClick={confirmTopup}>Continue to checkout</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }

@@ -98,6 +98,8 @@ export interface MarketplaceReviewsPage {
 export interface MarketplaceReviewsService {
 	/** Whether a review write can even be attempted (a signed-in session exists). */
 	canWrite: () => boolean;
+	/** Optional surface-owned sign-in action for the empty review state. */
+	onSignIn?: () => Promise<void> | void;
 	/** A page of reviews for one item. */
 	list: (input: {
 		cursor?: string | null;
@@ -125,6 +127,12 @@ export interface MarketplaceHost {
 	likes?: MarketplaceLikesService;
 	/** Open an external URL (Tauri shell on desktop, navigation on web). */
 	openExternal: (url: string) => Promise<void> | void;
+	/** Open the surface's sign-in flow from an auth-gated empty state. */
+	openSignIn?: () => Promise<void> | void;
+	/** Return to the marketplace catalog from an account empty state. */
+	openMarketplace?: () => Promise<void> | void;
+	/** Open organization selection from an org-gated empty state. */
+	openOrganization?: () => Promise<void> | void;
 	/** Ratings + user-submitted reviews. Optional: a surface without it renders no
 	 *  Reviews tab at all, rather than an empty one that can never be filled. */
 	reviews?: MarketplaceReviewsService;

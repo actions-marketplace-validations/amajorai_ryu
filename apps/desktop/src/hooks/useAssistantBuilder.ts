@@ -1,7 +1,7 @@
 // Hand the global "Ask Ryu" panel over to a page's builder while that page is
 // the focused tab. A builder page (agent edit, workflows) calls this with the
 // target it's building + the wiring to resolve/refresh it; the panel then acts
-// as that builder (preamble, `*_builder__*` tools, live refresh) docked as a
+// as that builder (preamble, `*_builder.*` tools, live refresh) docked as a
 // sidebar. Mirrors `useAssistantPageContext`: only the ACTIVE tab registers, so
 // a background builder tab can't steal the panel (every tab stays mounted — see
 // Layout), and the takeover is cleared when the page unmounts or loses focus.

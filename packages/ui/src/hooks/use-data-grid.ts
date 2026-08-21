@@ -3359,7 +3359,7 @@ function useDataGrid<TData>({
 	}, [store]);
 
 	useEffect(() => {
-		function onOutsideClick(event: MouseEvent) {
+		function onOutsideClick(event: globalThis.MouseEvent) {
 			if (event.button === 2) {
 				return;
 			}
@@ -3628,7 +3628,7 @@ function useDataGrid<TData>({
 			rafId = requestAnimationFrame(tick);
 		}
 
-		function onMove(event: MouseEvent) {
+		function onMove(event: globalThis.MouseEvent) {
 			mouseX = event.clientX;
 			mouseY = event.clientY;
 			mouseReady = true;

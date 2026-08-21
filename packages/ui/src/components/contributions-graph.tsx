@@ -1,5 +1,6 @@
 "use client";
 
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
@@ -364,7 +365,7 @@ export function ContributionsGraph({
 						<span className="font-semibold text-sm">{title ?? "Activity"}</span>
 					</div>
 					<span className="text-muted-foreground text-sm">
-						{total.toLocaleString("en-US")} contributions in the last year
+						{formatCount(total)} contributions in the last year
 					</span>
 				</div>
 			) : null}
@@ -410,15 +411,29 @@ export function ContributionsGraph({
 }
 
 export interface StatCardProps {
+	chart?: ReactNode;
+	className?: string;
 	icon?: ReactNode;
 	sub?: ReactNode;
 	title: string;
 	value: ReactNode;
 }
 
-export function StatCard({ title, value, sub, icon }: StatCardProps) {
+export function StatCard({
+	chart,
+	className,
+	title,
+	value,
+	sub,
+	icon,
+}: StatCardProps) {
 	return (
-		<div className="flex flex-col gap-1 rounded-4xl bg-card p-4 text-card-foreground shadow-sm">
+		<div
+			className={cn(
+				"flex flex-col gap-1 rounded-4xl bg-card p-4 text-card-foreground shadow-sm",
+				className
+			)}
+		>
 			<div className="flex items-center justify-between gap-2">
 				<span className="font-medium text-muted-foreground text-xs">
 					{title}
@@ -438,6 +453,7 @@ export function StatCard({ title, value, sub, icon }: StatCardProps) {
 			{sub ? (
 				<span className="text-muted-foreground text-xs">{sub}</span>
 			) : null}
+			{chart ? <div className="mt-auto pt-2">{chart}</div> : null}
 		</div>
 	);
 }

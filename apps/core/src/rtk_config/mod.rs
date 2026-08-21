@@ -1,6 +1,6 @@
 //! RTK per-agent auto-wrap (Phase 2 of the `rtk` plugin).
 //!
-//! Phase 1 exposes RTK as an explicit `rtk__run` tool — now a fully declarative
+//! Phase 1 exposes RTK as an explicit `rtk.run` tool — now a fully declarative
 //! `command`-backend plugin (`plugins-store/rtk`, mirrored as the built-in
 //! manifest `plugins-store/rtk/manifest.json`, which Core includes directly); its native provider
 //! (`sidecar/mcp/rtk.rs`) was deleted. Phase 2, below, is NOT a tool and cannot be
@@ -49,7 +49,7 @@ static WRAP_CLAUDE: AtomicBool = AtomicBool::new(false);
 ///
 /// Relocated verbatim from the deleted `sidecar/mcp/rtk.rs` provider: Phase-2
 /// auto-wrap (this module) is its only remaining consumer. The declarative
-/// `rtk__run` tool does NOT use this — the generic `command` backend resolves its
+/// `rtk.run` tool does NOT use this — the generic `command` backend resolves its
 /// bin through the Core command-tool allowlist (`RYU_COMMAND_TOOL_ALLOWLIST`).
 ///
 /// **Never feed this into the command-tool allowlist.** The PATH walk below is
@@ -287,7 +287,7 @@ pub async fn seed_and_apply(preferences: &crate::server::preferences::Preference
         }
     }
     // Push the exclude list into rtk's config so both the auto-wrap hooks and the
-    // `rtk__run` tool honour it. No-op when rtk is absent or the pref is unset.
+    // `rtk.run` tool honour it. No-op when rtk is absent or the pref is unset.
     if let Ok(Some(raw)) = preferences.get(EXCLUDE_COMMANDS_PREF_KEY).await {
         if let Err(e) = set_exclude_commands(&raw) {
             tracing::warn!(error = %e, "rtk auto-wrap: writing exclude_commands failed");

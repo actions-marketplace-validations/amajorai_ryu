@@ -1,4 +1,10 @@
 {
+  "tags": ["automation","continuation","agent","loop","productivity"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/auto-continue",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/auto-continue",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/auto-continue",
   "name": "Auto Continue",
   "version": "0.1.14",

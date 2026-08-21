@@ -3,18 +3,16 @@
 // Typed client for the org-scoped Teams billing surface (epic #496, Unit D1).
 // Like credits.ts (and unlike the Core-node clients), this targets the
 // identity/control-plane server (:3000, BACKEND_URL), authenticated with the
-// Better-Auth session bearer token. Billing/seats/wallet are "what is allowed /
-// shared / paid for" concerns and live in the control plane (packages/api).
+// Better-Auth session bearer token. Member seats, the shared wallet, and
+// organization billing all live in the control plane (packages/api).
 //
-// RBAC is enforced SERVER-SIDE by the billing/credits routers: the seat
-// mutation + the Teams checkout require an org owner/admin; the wallet + seat
-// reads are member-visible. This client never decides who may mutate; it only
-// hides controls as a courtesy and surfaces the server's 403/422.
+// RBAC is enforced SERVER-SIDE by the billing/credits routers: seat checkout,
+// seat changes, and portal access require an org owner/admin; wallet reads are
+// member-visible. This client never decides who may mutate; it only hides
+// controls as a courtesy and surfaces the server's 403/422.
 //
 //   GET  /api/billing/subscription-status -> org plan + entitlement (pool)
-//   GET  /api/billing/seats               -> seat status (member-readable)
-//   POST /api/billing/seats               -> set billed seats (owner/admin)
-//   POST /api/billing/checkout/teams      -> a Polar Teams checkout URL
+//   POST /api/billing/checkout/teams      -> native seat checkout URL
 //   GET  /api/billing/portal              -> the Polar billing portal URL
 //   GET  /api/credits/wallet              -> the pooled org wallet balance
 
@@ -142,7 +140,6 @@ export interface Entitlement {
 	managedInference: boolean;
 	monthlyCreditPoolMicroUsd: number;
 	plan: string | null;
-	seats: number;
 }
 
 export interface SubscriptionStatus {
@@ -161,42 +158,79 @@ export interface SubscriptionStatus {
 	 * in step by hand.
 	 */
 	features: Record<string, boolean>;
+	hostedAgents: HostedAgentEntitlement | null;
 	organizationId: string | null;
 	plan: string | null;
 	scope: "org" | "user";
-	seats: number;
 }
 
 export function fetchSubscriptionStatus(): Promise<SubscriptionStatus> {
 	return get<SubscriptionStatus>("/billing/subscription-status");
 }
 
-/** Seat status for the active org (member-readable). */
-export interface SeatStatus {
+/** Member-seat state for the active organization. Polar owns billedSeats. */
+export interface TeamsSeatStatus {
 	billedSeats: number | null;
+	bonusExpiresAt: string | null;
+	bonusSeats: number;
+	includedCreditPoolMicroUsd: number | null;
+	includedSeats: number | null;
 	memberCount: number;
 	minRequired: number;
 	minSeats: number;
 	organizationId: string;
 	overAllocated: boolean;
+	pendingSeatReservations: number;
 	plan: string | null;
 }
 
-export function fetchSeatStatus(): Promise<SeatStatus> {
-	return get<SeatStatus>("/billing/seats");
+export function fetchTeamsSeatStatus(): Promise<TeamsSeatStatus> {
+	return get<TeamsSeatStatus>("/billing/seats");
+}
+
+/** Start the native Polar seat-based Teams checkout. */
+export function checkoutTeams(
+	interval: "monthly" | "yearly",
+	seats: number,
+	organizationId?: string | null
+): Promise<{ seats: number; url: string }> {
+	return post("/billing/checkout/teams", {
+		interval,
+		organizationId,
+		seats,
+	});
+}
+
+/** Update the billed seat quantity; server-side RBAC and floors still apply. */
+export function updateTeamsSeats(seats: number): Promise<{
+	memberCount: number;
+	pendingSeatCount: number;
+	seats: number;
+}> {
+	return post("/billing/seats", { seats });
+}
+
+export type HostedAgentPlanId = "max" | "pro" | "teams";
+
+export interface HostedAgentEntitlement {
+	bonusAgents: number;
+	contractedAgents: number;
+	effectiveAgents: number;
+	includedCreditPoolMicroUsd: number;
+	monthlyPriceMicroUsd: number;
+	nodeProfile: string;
+	planId: HostedAgentPlanId;
 }
 
 /**
  * A live billing-status snapshot pushed by `GET /api/billing/status/stream`
- * (SSE `event: "billing-status"`): the caller's active-org subscription status
- * combined with its seat status. Mirrors the {@link SubscriptionStatus} and
- * {@link SeatStatus} REST reads (`scope`/`organizationId` ride along on
- * `subscription`). Emitted on connect (snapshot) and whenever a Polar/Stripe
- * webhook changes the plan or seat count. `seats` is null for a user-scope
- * caller with no org (matching the server's `SeatStatusPayload | null`).
+ * (SSE `event: "billing-status"`). The subscription payload includes the
+ * hosted-agent entitlement, and is emitted on connect and whenever a
+ * Polar/Stripe webhook changes organization billing.
  */
 export interface BillingStatusUpdate {
-	seats: SeatStatus | null;
+	organizationId: string | null;
+	scope: "org" | "user";
 	subscription: SubscriptionStatus;
 }
 
@@ -216,20 +250,17 @@ export function openBillingStatusStream(
 	});
 }
 
-/** Set the billed seat count (owner/admin only; validated server-side). */
-export function setSeats(seats: number): Promise<{
-	seats: number;
-	memberCount: number;
-}> {
-	return post("/billing/seats", { seats });
-}
-
-/** Start a Teams subscription checkout for `seats` (owner/admin only). */
-export function checkoutTeams(seats: number): Promise<{
+/** Legacy Pro/Max process-agent checkout; Teams uses {@link checkoutTeams}. */
+export function checkoutHostedAgents(
+	planId: HostedAgentPlanId,
+	agentCount: number
+): Promise<{
+	agentCount: number;
+	monthlyPriceUsd: number;
+	planId: HostedAgentPlanId;
 	url: string;
-	seats: number;
 }> {
-	return post("/billing/checkout/teams", { seats });
+	return post("/billing/checkout/agents", { agentCount, planId });
 }
 
 /** Open the Polar billing portal (owner/admin only) to change/cancel a plan. */

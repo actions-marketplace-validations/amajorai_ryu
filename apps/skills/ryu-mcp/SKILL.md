@@ -58,7 +58,7 @@ Agents and teams:
 Models and engines:
 
 - `ryu_search_models` - search the catalog (HF GGUF by default). Args - `query`, optional `limit`.
-- `ryu_get_active_model` - read which installed model the local chat engine serves. No args.
+- `ryu_get_active_model` - read which installed model local Chat serves. No args.
 - `ryu_set_active_model` - switch the served model. Args - `modelId` (local stem or HF repo id, must already be installed), optional `engine` to override the format-derived engine.
 - `ryu_list_engines` - list runnable inference engines. No args. More in [[ryu-local-model]].
 
@@ -76,7 +76,7 @@ Workflows:
 MCP bridge:
 
 - `ryu_list_mcp_servers` - list MCP servers Ryu has registered. No args.
-- `ryu_call_mcp_tool` - invoke a tool on any MCP server Ryu has registered. Args - `tool` (fully-qualified `server__tool`, or a bare name plus `server`), `agentId` (required - Core ties the per-agent tool allowlist to a registered agent, so an empty or unknown agent is denied), optional `args` object. This is how you reach Ghost, Shadow, Spider, and other registered tools through one node.
+- `ryu_call_mcp_tool` - invoke a tool on any MCP server Ryu has registered. Args - `tool` (fully-qualified `server.tool`, or a bare name plus `server`), `agentId` (required - Core ties the per-agent tool allowlist to a registered agent, so an empty or unknown agent is denied), optional `args` object. This is how you reach Ghost, Shadow, Spider, and other registered tools through one node.
 
 Spaces and retrieval (RAG):
 

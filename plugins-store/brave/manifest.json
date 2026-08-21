@@ -1,9 +1,15 @@
 {
+  "tags": ["search","web"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/brave",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/brave",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/brave",
   "name": "Brave Search",
   "version": "0.1.14",
   "stability": "experimental",
-  "description": "Independent web search via the Brave Search API (https://brave.com/search/api/), exposed as one declarative HTTP tool. Provides the swappable `web.search` layer, so selecting it in the layer picker re-points the stable `web__search` tool at Brave's own crawled index without changing what agents call. Brave is search-only: it deliberately declares neither `web.extract` nor `web.crawl`. Requires a BYOK Brave Search API key.",
+  "description": "Independent web search via the Brave Search API (https://brave.com/search/api/), exposed as one declarative HTTP tool. Provides the swappable `web.search` layer, so selecting it in the layer picker re-points the stable `web.search` tool at Brave's own crawled index without changing what agents call. Brave is search-only: it deliberately declares neither `web.extract` nor `web.crawl`. Requires a BYOK Brave Search API key.",
   "icon": "svgl:brave",
   "iconPadding": "md",
   "iconDither": { "from": 300, "to": "transparent", "direction": "down" },
@@ -29,7 +35,7 @@
       "name": "Brave Web Search",
       "kind": "tool",
       "config": {
-        "slug": "brave__search",
+        "slug": "brave.search",
         "backend": "http",
         "method": "GET",
         "url": "https://api.search.brave.com/res/v1/web/search",
@@ -88,8 +94,8 @@
       "title": "Search",
       "selectable": true,
       "tools": {
-        "web__search": {
-          "tool": "brave__search",
+        "web.search": {
+          "tool": "brave.search",
           "args": {
             "query": "q",
             "limit": "count"

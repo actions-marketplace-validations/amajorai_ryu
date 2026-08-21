@@ -1,4 +1,10 @@
 {
+  "tags": ["writing","editing","quality","style","turn"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/no-ai-slop",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/no-ai-slop",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/no-ai-slop",
   "name": "No AI Slop",
   "version": "0.1.14",

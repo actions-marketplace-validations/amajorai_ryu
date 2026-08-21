@@ -8,12 +8,14 @@ import {
 	type DitherColor,
 	isDitherColor,
 } from "@ryu/ui/components/dither-kit/palette.ts";
+import type { ExpressiveAnimationSelection } from "@ryu/ui/components/expressive-animation.ts";
 import {
 	dicebearUrl,
 	type GlyphDitherValue,
 	type GlyphValue,
 } from "@ryu/ui/components/glyph.ts";
 import { Icon } from "@ryu/ui/components/icon.tsx";
+import { Logo } from "@ryu/ui/components/logo";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 
@@ -46,7 +48,7 @@ function DitherBackdrop({ dither }: { dither: GlyphDitherValue }) {
 /**
  * Render any {@link GlyphValue}. Hosts pass a `fallback` for the null / empty
  * case (engine logo, folder icon, etc.). Icons and emojis may include an
- * optional dither background; DiceBear and uploads never do.
+ * optional dither background; DiceBear, expressive ghosts, and uploads never do.
  */
 export function GlyphDisplay({
 	value,
@@ -54,13 +56,22 @@ export function GlyphDisplay({
 	size = 16,
 	className,
 	alt = "",
+	animated = true,
+	animation,
+	thinking = false,
 }: {
 	/** Accessible alt for image-like glyphs; decorative when empty. */
 	alt?: string;
+	/** Override the animation for an expressive glyph at render time. */
+	animation?: ExpressiveAnimationSelection;
+	/** Disable expression cycling and gaze/blink motion for dense picker previews. */
+	animated?: boolean;
 	className?: string;
 	fallback?: ReactNode;
 	/** Square footprint in px (font-size for emoji, Icon size, img box). */
 	size?: number;
+	/** Runtime working state; expressive ghosts use the orbit animation to think. */
+	thinking?: boolean;
 	value: GlyphValue;
 }) {
 	if (value?.kind === "avatar") {
@@ -124,6 +135,24 @@ export function GlyphDisplay({
 				src={dicebearUrl(value.style, value.seed, { size })}
 				style={{ width: size, height: size }}
 			/>
+		);
+	}
+	if (value?.kind === "expressive") {
+		return (
+			<span
+				aria-hidden={alt ? undefined : true}
+				aria-label={alt || undefined}
+				className={cn("inline-flex shrink-0", className)}
+				role={alt ? "img" : undefined}
+			>
+				<Logo
+					animated={animated}
+					animation={thinking ? "orbit" : (animation ?? value.animation)}
+					expression={value.expression}
+					size={`${size}px`}
+					variant="expressive"
+				/>
+			</span>
 		);
 	}
 	if (value?.kind === "dither") {

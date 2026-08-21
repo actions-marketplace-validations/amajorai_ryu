@@ -6,9 +6,10 @@
 // Placed in the Safety filters section, directly under the command-approval
 // card, because the firewall/DLP rules configured above it only ever see an
 // agent whose model egress traverses the gateway. Without this list the rest of
-// that section reads as node-wide policy when it is in fact per-agent opt-in for
-// three of the four agent families (see `lib/api/agent-egress.ts` for the
-// defaults and the mechanism each family uses).
+// that section reads as node-wide policy when it is in fact per-agent routing for
+// the ACP families (new/routable subscription and generic agents are direct by
+// default; see
+// `lib/api/agent-egress.ts` for the mechanism each family uses).
 //
 // ── Why every row is two rows ────────────────────────────────────────────────
 // Until `agent_routing`'s split, ONE preference decided both whether Core swapped
@@ -139,7 +140,7 @@ function ConcernRow({
 				<p className="font-medium text-foreground text-xs">{label}</p>
 				<p className="text-muted-foreground text-xs leading-snug">
 					{detail}
-					{/* The credential note answers "why is this off by default?", so it
+					{/* The credential note answers "what changes when routing is on?", so it
 					    sits on the row itself rather than behind a docs link. */}
 					{notes ? ` ${notes}` : null}
 				</p>

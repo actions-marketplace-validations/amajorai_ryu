@@ -1,6 +1,11 @@
 import type { ChatStatus, UIMessage } from "ai";
 import type React from "react";
+import type { AnswerNowControl } from "./answer-now.ts";
 import type { SuggestionItem } from "./input/suggestions.tsx";
+import type {
+	ComposerMenuGroup,
+	ComposerMenuItem,
+} from "./input/composer-menu.tsx";
 import type { LinkPreviewResolvers } from "./link-preview.tsx";
 import type { MessageReactionBucket } from "./message-reactions.tsx";
 import type {
@@ -19,10 +24,19 @@ export type InputSuggestions =
 export type AgentUiSubmit = (value: unknown) => void | Promise<void>;
 
 export interface MentionItem {
+	/** Accent used for the inline token when the mention belongs to an app. */
+	accentColor?: string;
 	icon?: React.ReactNode;
 	id?: string;
 	kind: string;
 	label: string;
+	/** Optional host destination for a contributed/app-owned mention. */
+	target?: {
+		options?: { conversationId?: string };
+		path: string;
+	};
+	/** App-owned artwork, kept as a node so hosts can reuse their canonical icon. */
+	visualIcon?: React.ReactNode;
 }
 
 export interface ChatTheme {
@@ -192,8 +206,15 @@ export interface ChatSlots {
 		actions?: React.ReactNode;
 		message: UIMessage;
 		className?: string;
+		messageActionState?: MessageActionRuntimeState;
+		messageActions?: ContributedMessageAction[];
+		onContributedMessageAction?: (
+			action: ContributedMessageAction,
+			context: MessageActionContext
+		) => void;
 		onOpenFile?: (path: string) => void;
 		onOpenLink?: (url: string) => void;
+		onOpenMention?: (item: MentionItem) => void;
 		previewResolvers?: LinkPreviewResolvers;
 	}>;
 	/** Renders a live app widget for `data-tool-widget-available` parts. Supplied
@@ -213,11 +234,13 @@ export interface ModelOption {
  *  (`contributes.message_actions`), resolved by the shell and passed in
  *  presentationally. Blocks never fetches the contributions feed. */
 export interface ContributedMessageAction {
+	args?: Record<string, unknown>;
 	capability?: string;
 	icon?: string;
 	id: string;
 	kind: string;
 	label: string;
+	order?: number;
 	plugin: string;
 	states?: {
 		active_icon?: string;
@@ -228,9 +251,22 @@ export interface ContributedMessageAction {
 	target: string;
 }
 
+/** The message identity and optional value a contributed action receives. */
+export interface MessageActionContext {
+	messageId: string;
+	value?: string;
+}
+
+/** Runtime state supplied by the host to a contributed message-action renderer. */
+export interface MessageActionRuntimeState {
+	reactionBuckets?: readonly MessageReactionBucket[];
+}
+
 export interface AgentChatProps {
 	/** Agent identities used when an agent-comms tool becomes a transcript activity. */
 	agentMessageContext?: AgentMessageContext;
+	/** Native-provider action shown below the active thinking row. */
+	answerNow?: AnswerNowControl;
 	/** Avatar node shown beside each assistant turn — the active agent's logo, or
 	 * a fanned stack of member logos for a team. When omitted, no avatar shows. */
 	assistantAvatar?: React.ReactNode;
@@ -239,6 +275,8 @@ export interface AgentChatProps {
 	/** Marks for the agents working on the live turn, drawn side by side in the
 	 * status row. Defaults to `assistantAvatar` alone. */
 	assistantPlanningAvatars?: React.ReactNode[];
+	/** Optional role/title badge shown beside the assistant name. */
+	assistantTitle?: string;
 	attachments?: {
 		onAttach?: () => void;
 		images?: {
@@ -256,8 +294,16 @@ export interface AgentChatProps {
 	};
 
 	className?: string;
-
 	classNames?: Partial<ChatClassNames>;
+	/** An active human-input card that temporarily replaces this chat's composer. */
+	composerPrompt?: {
+		content: React.ReactNode;
+		id: string;
+	};
+	/** Searchable directory rows shared by the composer `+` menu and `@` tokens. */
+	composerMenuGroups?: ComposerMenuGroup[];
+	/** Density override for narrow hosts such as the island and side-chat rail. */
+	density?: "comfortable" | "compact";
 	/**
 	 * The active model's context window in tokens. Drives the per-message
 	 * context-usage ring in each completed assistant turn's stats footer.
@@ -274,9 +320,13 @@ export interface AgentChatProps {
 	};
 	/** Project-scoped saved drafts exposed by the host composer. */
 	draftControls?: import("./input-bar.tsx").ComposerDraftControls;
+	/** Disable the shared composer while its host surface is unavailable. */
+	composerDisabled?: boolean;
 	/** Rendered below the composer in the centered empty state (e.g. a recent
 	 * chats list, Codex-style). Ignored once the thread has messages. */
 	emptyStateFooter?: React.ReactNode;
+	/** Small host-owned action strip rendered below the shared composer. */
+	composerFooter?: React.ReactNode;
 	/** Rendered above the composer in the centered empty state (e.g. a greeting
 	 * heading on the home view). Ignored once the thread has messages. */
 	emptyStateHeader?: React.ReactNode;
@@ -296,6 +346,8 @@ export interface AgentChatProps {
 		items: SuggestionItem[];
 		onSelect: (item: SuggestionItem) => void;
 	};
+	/** True when a page older than the visible transcript is available. */
+	hasOlderMessages?: boolean;
 	/** This thread's persisted history could not be fetched — the node was
 	 * unreachable or answered an error. A THIRD state, distinct from both "empty"
 	 * and "has messages": the transcript area says so (with an optional retry)
@@ -323,8 +375,12 @@ export interface AgentChatProps {
 		}[];
 	};
 	initialScrollBehavior?: "bottom" | "top";
+	/** True while the transcript is fetching the page above the current one. */
+	loadingOlderMessages?: boolean;
 	/** Resolved @ mentions used by the composer and transcript renderer. */
 	mentionItems?: MentionItem[];
+	/** Runtime state keyed by message id for contributed message-action renderers. */
+	messageActionStates?: ReadonlyMap<string, MessageActionRuntimeState>;
 	/** Contributed per-message toolbar actions (resolved by the shell from
 	 *  `contributes.message_actions`, filtered to the message's `target`), rendered
 	 *  after the built-in toolbar buttons. Dispatches through
@@ -338,12 +394,11 @@ export interface AgentChatProps {
 	onBranch?: (messageId: string) => void;
 	/** Clear the pending composer quote (dismiss button). */
 	onClearQuote?: () => void;
-	/** Fire a contributed message action: receives the action and, for a
-	 *  `toggle-group` kind, the selected state's `value`. The shell dispatches it
-	 *  through the owning plugin's granted host seam. */
+	/** Fire a contributed message action with the message identity and optional
+	 *  selected value. The shell dispatches it through the owning plugin seam. */
 	onContributedMessageAction?: (
 		action: ContributedMessageAction,
-		value?: string
+		context: MessageActionContext
 	) => void;
 	/** Notified whenever the composer's text changes, including when a send clears
 	 * it (called with `""`). Deliberately generic: the surface decides what an
@@ -365,6 +420,8 @@ export interface AgentChatProps {
 		rating: "up" | "down" | null,
 		isLatest: boolean
 	) => void;
+	/** Request the next older message page when the viewport reaches the top. */
+	onLoadOlderMessages?: () => Promise<void>;
 
 	/**
 	 * Open the full context-window breakdown (the workspace Context tab). When
@@ -377,6 +434,12 @@ export interface AgentChatProps {
 	onOpenFile?: (path: string) => void;
 	/** Open an external website link through the host's preferred browser surface. */
 	onOpenLink?: (url: string) => void;
+	/** Open a resolved @ mention through the host's navigation surface. */
+	onOpenMention?: (item: MentionItem) => void;
+	/** Apply a selection made from the shared composer directory. */
+	onComposerMenuSelect?: (item: ComposerMenuItem) => void;
+	/** Report the shared composer's measured height to a compact host surface. */
+	onComposerResize?: (height: number) => void;
 	/** Quote a text selection in a message. When provided, selecting message text
 	 * surfaces a floating "Quote" button; clicking it calls this with the selected
 	 * plain text (the surface stashes it as the pending `quote`). */
@@ -403,9 +466,6 @@ export interface AgentChatProps {
 	 * with the turn's combined text. When omitted, no speak button is shown. */
 	onSpeak?: (text: string) => void;
 	onStop: () => void;
-	/** Toggle an emoji reaction on a message. Omit to hide the feature entirely —
-	 * which is what a surface with no realtime room (island, storyboard) wants. */
-	onToggleReaction?: (messageId: string, emoji: string) => void;
 	/** Resume a workflow suspended at a human-input gate. The host owns the
 	 *  Core-backed API; blocks only renders and forwards the response payload. */
 	onWorkflowResume?: (runId: string, payload: string) => Promise<unknown>;
@@ -425,12 +485,12 @@ export interface AgentChatProps {
 	/** Pending quote shown inside the composer, above the textarea. The surface
 	 * prepends it to the outgoing message on send. */
 	quote?: string | null;
-	/** Reaction buckets keyed by message id, in Core's first-reaction order. */
-	reactionsByMessage?: ReadonlyMap<string, readonly MessageReactionBucket[]>;
 	/** Pre-fills the composer once when it transitions to a non-empty value (e.g.
 	 * a `ryu://chat/new?prompt=…` deep link). Never sends — the user reviews and
 	 * submits. Subsequent user edits are not clobbered. */
 	seedDraft?: string;
+	/** Called after a seed has been applied so a host can clear its one-shot value. */
+	onSeedDraftConsumed?: () => void;
 
 	showCopyToolbar?: boolean;
 	slots?: Partial<ChatSlots>;

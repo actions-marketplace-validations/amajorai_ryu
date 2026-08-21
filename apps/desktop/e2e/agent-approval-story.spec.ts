@@ -47,6 +47,16 @@ test("the permission card highlights the command it is asking about", async ({
 	await expect(token.first()).toBeVisible({ timeout: 30_000 });
 });
 
+test("Simple keeps approval language human-readable", async ({ page }) => {
+	await page.goto(STORY_URL, { waitUntil: "domcontentloaded" });
+	const card = page.getByTestId("simple-permission-prompt");
+
+	await expect(card).toBeVisible();
+	await expect(card.getByText("Ryu wants to take an action")).toBeVisible();
+	await expect(card.getByText("run a shell command")).toBeVisible();
+	await expect(card.locator("pre")).toHaveCount(0);
+});
+
 test("the bash row's approval strip renders one button per option", async ({
 	page,
 }) => {

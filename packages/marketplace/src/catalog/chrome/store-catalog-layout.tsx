@@ -123,7 +123,7 @@ export default function StoreCatalogLayout({
 					    section declares (source, filters), so the row reads as
 					    buttons rather than a full-width field that pushed them onto
 					    a second line. Sticky, so it stays reachable while scrolling. */}
-					<div className="scroll-fade-effect-y min-h-0 flex-1 overflow-auto">
+					<div className="scroll-fade min-h-0 flex-1 overflow-auto">
 						{search || filter ? (
 							<div className="sticky top-0 z-10 mx-auto flex w-full max-w-4xl items-center justify-end gap-1 bg-background px-4 pb-2">
 								{search ? (
@@ -167,7 +167,7 @@ export default function StoreCatalogLayout({
 
 				{showSidePane ? (
 					<aside className="w-[26rem] shrink-0 py-2 pr-2">
-						<div className="scroll-fade-effect-y relative flex size-full flex-col overflow-auto rounded-3xl border border-border/60 bg-sidebar shadow-sm dark:bg-sidebar/50">
+						<div className="scroll-fade relative flex size-full flex-col overflow-auto rounded-3xl border border-border/60 bg-sidebar shadow-sm dark:bg-sidebar/50">
 							<button
 								aria-label="Close preview"
 								className="absolute top-3 right-3 z-10 flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -212,7 +212,7 @@ export default function StoreCatalogLayout({
 					    Matching `sm:` here removes `sm:max-w-md` from the output entirely. */}
 					<DialogContent className="max-h-[85vh] w-[min(80rem,94vw)] max-w-[min(80rem,94vw)] overflow-hidden p-0 sm:max-w-[min(80rem,94vw)]">
 						<DialogTitle className="sr-only">{detailTitle}</DialogTitle>
-						<div className="scroll-fade-effect-y max-h-[85vh] overflow-auto">
+						<div className="scroll-fade max-h-[85vh] overflow-auto">
 							{detail}
 						</div>
 					</DialogContent>

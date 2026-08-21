@@ -1,11 +1,14 @@
 mod acl;
+mod acp_runtime;
 mod activity;
+mod agent_control;
+mod agent_execution;
 mod agent_routing;
 mod agent_selection;
 mod agents;
 mod approvals;
-mod background_processes;
 mod auth;
+mod background_processes;
 mod capabilities;
 mod catalog;
 mod catalog_source;
@@ -36,7 +39,7 @@ mod entitlement;
 mod events;
 mod exec_approval;
 /// Derived app-API tools: an installed app's own OpenAPI document lowered into
-/// `ryu_ext__*` tools addressed through the ext-proxy. Sibling of [`self_api`],
+/// `ryu_ext.*` tools addressed through the ext-proxy. Sibling of [`self_api`],
 /// which does the same for Core's own generated document.
 mod ext_api;
 mod fal_auth;
@@ -109,6 +112,7 @@ mod plugin_secrets;
 mod plugin_storage;
 mod plugins;
 mod policy_alerts;
+mod portable_packages;
 mod predict;
 mod predict_host;
 mod privacy;
@@ -122,6 +126,7 @@ mod replicate_auth;
 mod routing_policy;
 mod rtk_config;
 mod runnable;
+mod ryu_platform;
 /// The OS-style "boot with the extension layer off" switch (apps, plugins,
 /// skills, user MCP servers, the scheduler). Resolved once, below, BEFORE
 /// anything it suppresses has a chance to spawn.
@@ -146,6 +151,7 @@ mod teams_client;
 mod telemetry;
 mod tool_exec;
 mod tool_registry_host;
+mod treg_catalog;
 mod update;
 mod usage_host;
 mod voice;
@@ -597,7 +603,7 @@ async fn main() {
         // NOT in startup_order — it only starts once a user installs it or runs
         // `python -m ryu_research` (adopt-mode). Its consumers are both
         // out-of-process now (the `@ryu/research` app's sidecar for /api/research,
-        // and its `ryu-research mcp` stdio server for the research__* tools); they
+        // and its `ryu-research mcp` stdio server for the research.* tools); they
         // reach this engine over loopback, so Core keeps only its lifecycle.
         Arc::new(ResearchManager::new().with_downloads(download_center.clone())),
         Arc::new(LlmFit::new()),
@@ -749,6 +755,7 @@ async fn main() {
         Ok(store) => store,
         Err(e) => boot_fail!("failed to open agent store: {e:#}"),
     };
+    crate::agents::set_global(agent_store.clone());
     // Persisted agent teams (collections of agents + a coordination strategy) now
     // live OUT-OF-PROCESS in the `ryu-teams` sidecar (single owner of `teams.db`).
     // Core reaches them over loopback via `TeamsClient`, constructed below once the
@@ -872,6 +879,16 @@ async fn main() {
         Ok(store) => store,
         Err(e) => boot_fail!("failed to open preferences store: {e:#}"),
     };
+    if let Ok(raw) = preferences
+        .get(server::conversations::ConversationStore::CHAT_MEMORY_ENABLED_PREF_KEY)
+        .await
+    {
+        let enabled =
+            server::conversations::ConversationStore::parse_chat_memory_enabled(raw.as_deref());
+        if let Err(error) = conversations.set_chat_memory_enabled(enabled).await {
+            tracing::warn!(error = %error, "could not apply saved chat-memory preference");
+        }
+    }
     // ── Safe Mode (see `crate::safe_mode`) ────────────────────────────────────
     //
     // Resolved HERE and nowhere else. Everything the flag suppresses — the
@@ -1040,6 +1057,12 @@ async fn main() {
     {
         entitlement::set_active(&v);
     }
+    if let Ok(Some(v)) = preferences
+        .get(entitlement::MANAGED_INFERENCE_ENTITLED_PREF_KEY)
+        .await
+    {
+        entitlement::set_managed_inference_entitled(&v);
+    }
     // Same for the Artificial Analysis API key, which enriches the model catalog
     // with independent benchmark stats (intelligence/speed/price).
     if let Ok(Some(key)) = preferences
@@ -1054,8 +1077,8 @@ async fn main() {
         model_catalog::aa::set_mode(&mode);
     }
     // Claude Code gateway-routing toggle: seed the in-process flag so the (sync)
-    // ACP spawn path injects `ANTHROPIC_BASE_URL` only when the user opted in.
-    // Off by default — it changes how the subscription credential flows.
+    // ACP spawn path keeps the governed default unless an explicit direct-egress
+    // opt-out is persisted.
     if let Ok(Some(value)) = preferences
         .get(claude_config::CLAUDE_GATEWAY_ROUTING_PREF_KEY)
         .await
@@ -1088,10 +1111,10 @@ async fn main() {
     {
         sidecar::untrusted::set_enabled(&value);
     }
-    // Codex gateway-routing toggle (subscription passthrough). Same opt-in story
-    // as Claude: seed the in-process flag so the (sync) ACP spawn path points the
-    // Codex subprocess at an isolated CODEX_HOME → gateway passthrough only when
-    // the user opted in.
+    // Codex gateway-routing toggle (subscription passthrough). Same governed
+    // default as Claude: seed the in-process flag so the (sync) ACP spawn path
+    // points the Codex subprocess at an isolated CODEX_HOME → gateway passthrough
+    // unless the user explicitly opts out.
     if let Ok(Some(value)) = preferences
         .get(codex_config::CODEX_GATEWAY_ROUTING_PREF_KEY)
         .await
@@ -1101,7 +1124,8 @@ async fn main() {
     // Generic per-agent gateway-routing toggles (the "point any agent at the
     // gateway via the OpenAI base-URL swap" feature). One pref holds a JSON map of
     // agent id → enabled; seed the in-process map so the (sync) ACP spawn path
-    // injects OPENAI_BASE_URL only for the agents the user opted in.
+    // injects OPENAI_BASE_URL by default. Explicit false entries keep provider
+    // egress direct.
     if let Ok(Some(value)) = preferences
         .get(agent_routing::AGENT_GATEWAY_ROUTING_PREF_KEY)
         .await
@@ -1140,11 +1164,18 @@ async fn main() {
     // The node-wide default selection every unset agent/model setting falls back
     // to. Seeded into an in-process snapshot for the same reason as agent-auto:
     // the sync routing path has no preference-store handle.
-    if let Ok(Some(value)) = preferences
+    if let Ok(Some(value)) = preferences.get(agent_selection::LOCAL_SELECTION_PREF).await {
+        agent_selection::set_local_selection_from_json(&value);
+    } else if let Ok(Some(value)) = preferences
         .get(agent_selection::GLOBAL_SELECTION_PREF)
         .await
     {
+        // Legacy installations seed the local-lane snapshot from the former
+        // one-default key until the new key is written.
         agent_selection::set_default_selection_from_json(&value);
+    }
+    if let Ok(Some(value)) = preferences.get(agent_selection::CLOUD_SELECTION_PREF).await {
+        agent_selection::set_cloud_selection_from_json(&value);
     }
     // Apply the user's saved default embedding model (if any) to the Spaces store,
     // re-indexing in the background when it differs from what the store opened with.
@@ -1336,11 +1367,11 @@ async fn main() {
         tracing::info!("safe mode: skipping default-on plugin seed and one-time migrations");
     } else {
         let manifests = app_manifests.read().await.clone();
-        crate::plugins::seed::seed_default_on(&app_store, &manifests).await;
-        // Repairs ALREADY-INSTALLED stores that the seed loop deliberately skips
-        // (it leaves any existing record alone so the user's choice wins). Runs at
-        // most once per install, gated on the store's schema version.
+        // Repair ALREADY-INSTALLED stores before seeding fresh defaults. The
+        // migration must see the user's legacy disabled record first; seeding it
+        // before migration would recreate a default-on row and erase that choice.
         crate::plugins::seed::run_one_time_migrations(&app_store, &manifests).await;
+        crate::plugins::seed::seed_default_on(&app_store, &manifests).await;
     }
     // Re-read dictation after default-on seed: a fresh install may have just
     // created the enabled record, and the pre-seed AtomicBool read above would
@@ -1359,6 +1390,15 @@ async fn main() {
     // not the crate's `$RYU_DIR`/`~/.ryu` fallback.
     ryu_skills::set_data_dir(crate::paths::ryu_dir());
     let skill_registry = ryu_skills::SkillRegistry::load();
+    // The flagship Ryu assistant owns the platform operating layer, while the
+    // detailed reference stays a normal progressive skill that other assistants
+    // can load when they need to help configure Ryu.
+    skill_registry.register_builtin_skill(
+        crate::ryu_platform::SKILL_ID.to_owned(),
+        crate::ryu_platform::SKILL_NAME.to_owned(),
+        Some(crate::ryu_platform::SKILL_DESCRIPTION.to_owned()),
+        crate::ryu_platform::SKILL_INSTRUCTIONS.to_owned(),
+    );
 
     // Per-run worktree diff cache, shared by the chat path and the off-chat agent
     // runner. Built once here so both `ServerState`, the runner, and the in-process
@@ -1376,7 +1416,7 @@ async fn main() {
             // Wire the agent store so the `agent_builder` tools can edit agent
             // records in chat (the desktop agent-edit page's builder pane).
             .with_agent_store(agent_store.clone())
-            // Wire the teams sidecar client so `agent_builder__create_agent_team`
+            // Wire the teams sidecar client so `agent_builder.create_agent_team`
             // can mint a roster of agents and persist them as a reusable team over
             // loopback HTTP (the sidecar owns the store).
             .with_teams_client(teams.clone())
@@ -1389,7 +1429,7 @@ async fn main() {
             // Wire the preferences store so the built-in `advisor` tool resolves
             // the configured `advisor-model` (the stronger reviewer model).
             .with_preferences(preferences.clone())
-            // Wire the Spaces store so the built-in `artifact__create` tool can save
+            // Wire the Spaces store so the built-in `artifact.create` tool can save
             // agent-generated files into a Space (default: the Artifacts space).
             .with_spaces(spaces.clone()),
     );
@@ -1587,7 +1627,24 @@ async fn main() {
     // the store simply stays unpublished and `env:` resolves from process env only,
     // exactly as it did before this store existed.
     match crate::plugin_secrets::open_default() {
-        Ok(store) => crate::plugin_secrets::set_global(store),
+        Ok(store) => {
+            // Hydrate the Composio verifier from the encrypted Webhooks-app
+            // slot before the public ingress starts. An operator-provided
+            // `COMPOSIO_WEBHOOK_SECRET` still wins inside the verifier.
+            match store
+                .get(
+                    ryu_composio::triggers::WEBHOOK_SECRET_STORE_OWNER,
+                    ryu_composio::triggers::WEBHOOK_SECRET_STORE_KEY,
+                )
+                .await
+            {
+                Ok(secret) => ryu_composio::triggers::set_stored_webhook_secret(secret),
+                Err(e) => tracing::warn!(
+                    "stored Composio webhook secret unavailable; falling back to env: {e:#}"
+                ),
+            }
+            crate::plugin_secrets::set_global(store)
+        }
         Err(e) => tracing::warn!("plugin secret store unavailable: {e:#}"),
     }
     // Pi provider / ACP agent account vault: the sealed multi-account store for
@@ -1697,6 +1754,16 @@ async fn main() {
         Err(e) => boot_fail!("failed to open Agent-UI template store: {e:#}"),
     };
 
+    // Agent-root sync has its own SQLite ledger so import/export retries and ACP
+    // session bindings do not mutate the conversation schema. It is installed
+    // before the router and remains OFF until a profile explicitly enables a
+    // direction.
+    let agent_sync = match server::agent_sync::AgentSyncStore::open_default() {
+        Ok(store) => store,
+        Err(e) => boot_fail!("failed to open agent sync store: {e:#}"),
+    };
+    server::agent_sync::install_global(agent_sync);
+
     // Handed to the scheduler further down, which is spawned after `ServerState`
     // has taken ownership of the store. `PluginStore` clones share one pool.
     let scheduler_apps = app_store.clone();
@@ -1773,6 +1840,12 @@ async fn main() {
     let healing = crate::healing_client::HealingClient::new(healing_sidecar_port);
     crate::healing_client::set_global_client(healing.clone());
     crate::healing_client::spawn(healing, server_state.clone());
+    server::agent_sync::spawn_worker(server_state.clone());
+    if !crate::safe_mode::is_active() {
+        server::memory_dream::spawn_automatic_review(server_state.clone());
+    } else {
+        tracing::info!("safe mode: automatic Dream review not started");
+    }
     let auth_token = crate::node_token::active_token();
 
     // Ordinary first-party plugins are official marketplace packages, not

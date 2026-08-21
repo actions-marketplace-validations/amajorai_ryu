@@ -17,6 +17,17 @@ describe("SignedOutState", () => {
 		expect(html).toContain("Sign in required");
 		expect(html).toContain("Log in to continue.");
 	});
+
+	test("renders the provided action", () => {
+		const html = renderToStaticMarkup(
+			<SignedOutState
+				action={<button type="button">Sign in</button>}
+				description="Log in to continue."
+				title="Sign in required"
+			/>
+		);
+		expect(html).toContain("Sign in");
+	});
 });
 
 describe("NoOrgState", () => {

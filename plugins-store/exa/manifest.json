@@ -1,4 +1,10 @@
 {
+  "tags": ["search","web"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/exa",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/exa",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/exa",
   "name": "Exa Search",
   "version": "0.1.14",
@@ -28,7 +34,7 @@
       "name": "Exa Neural Search",
       "kind": "tool",
       "config": {
-        "slug": "exa__search",
+        "slug": "exa.search",
         "backend": "http",
         "method": "POST",
         "url": "https://api.exa.ai/search",
@@ -72,14 +78,14 @@
       "name": "Exa Search (no key)",
       "kind": "tool",
       "config": {
-        "slug": "exa__free_search",
+        "slug": "exa.free_search",
         "backend": "http",
         "method": "POST",
         "url": "https://mcp.exa.ai/mcp",
         "header_params": ["Accept"],
         "fail_open": true,
         "unwrap_body": true,
-        "description": "Web search through Exa's PUBLIC MCP endpoint, which needs no API key. Rate-limited free tier, intended as the zero-setup fallback when RYU_EXA_API_KEY is unset; add a key to use the higher-limit exa__search instead. Speaks JSON-RPC: the caller supplies the whole `tools/call` envelope, and the reply is a text/event-stream frame, so the capability adapter parses it rather than a response map.",
+        "description": "Web search through Exa's PUBLIC MCP endpoint, which needs no API key. Rate-limited free tier, intended as the zero-setup fallback when RYU_EXA_API_KEY is unset; add a key to use the higher-limit exa.search instead. Speaks JSON-RPC: the caller supplies the whole `tools/call` envelope, and the reply is a text/event-stream frame, so the capability adapter parses it rather than a response map.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -113,7 +119,7 @@
       "name": "Exa Find Similar",
       "kind": "tool",
       "config": {
-        "slug": "exa__find_similar",
+        "slug": "exa.find_similar",
         "backend": "http",
         "method": "POST",
         "url": "https://api.exa.ai/findSimilar",
@@ -153,11 +159,11 @@
       "selectable": true,
       "default": true,
       "tools": {
-        "web__search": {
-          "tool": "exa__search",
+        "web.search": {
+          "tool": "exa.search",
           "adapter": {
-            "tools": ["exa__free_search"],
-            "code_file": "adapters/web__search.js"
+            "tools": ["exa.free_search"],
+            "code_file": "adapters/web.search.js"
           }
         }
       }

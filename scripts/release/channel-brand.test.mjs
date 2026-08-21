@@ -64,3 +64,9 @@ test("an unknown channel still announces itself", () => {
 	// A future prerelease id must not silently read as stable.
 	assert.equal(labelFor("rc", TABLE), "Rc");
 });
+
+test("branding never installs a CLI from the registry", () => {
+	const source = readFileSync(join(HERE, "channel-brand.mjs"), "utf8");
+	assert.doesNotMatch(source, /\bnpx\b/);
+	assert.match(source, /--no-install/);
+});

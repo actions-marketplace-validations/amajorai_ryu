@@ -7,9 +7,9 @@ import {
 	BrowserIcon,
 	Cancel01Icon,
 	CloudServerIcon,
-	ComputerIcon,
 	Copy01Icon,
 	CpuIcon,
+	CursorMagicSelection04Icon,
 	Database01Icon,
 	Delete01Icon,
 	DollarCircleIcon,
@@ -19,6 +19,7 @@ import {
 	GlobeIcon,
 	Image01Icon,
 	LaptopIcon,
+	LayerIcon,
 	Layers01Icon,
 	Link01Icon,
 	Mic01Icon,
@@ -84,6 +85,7 @@ import { useNodeSandboxes } from "@/src/hooks/useNodeSandboxes.ts";
 import { useNodeSelectorDetail } from "@/src/hooks/useNodeSelectorDetail.ts";
 import { useNodeSystemInfo } from "@/src/hooks/useNodeSystemInfo.ts";
 import { useNodeVersion } from "@/src/hooks/useNodeVersion.ts";
+import { useOrgBillingStatus } from "@/src/hooks/useOrgBillingStatus.ts";
 import {
 	type CapabilityProvider,
 	canServe,
@@ -222,11 +224,11 @@ function resolveTone(
 	return "green";
 }
 
-const TONE_TEXT: Record<Tone, string> = {
-	green: "text-success",
-	amber: "text-warning",
-	red: "text-destructive",
-	pending: "text-muted-foreground/40",
+const TONE_DOT: Record<Tone, string> = {
+	green: "bg-success",
+	amber: "bg-warning",
+	red: "bg-destructive",
+	pending: "bg-muted-foreground/40",
 };
 
 const displayName = (name: string) =>
@@ -245,6 +247,45 @@ function StatusDot({ online }: { online: boolean | null }) {
 				online ? "bg-success" : "bg-warning"
 			)}
 		/>
+	);
+}
+
+function NodeStatusIcon({
+	borderClassName,
+	icon,
+	subdued = false,
+	tone,
+}: {
+	borderClassName: string;
+	icon: IconSvgElement;
+	subdued?: boolean;
+	tone?: Tone;
+}) {
+	return (
+		<span
+			aria-hidden
+			className="relative inline-flex size-3.5 shrink-0"
+			data-slot="node-status-icon"
+		>
+			<HugeiconsIcon
+				className={cn(
+					"size-3.5",
+					subdued ? "text-muted-foreground/30" : "text-muted-foreground/70"
+				)}
+				icon={icon}
+				size={14}
+			/>
+			{tone && (
+				<span
+					className={cn(
+						"absolute -right-0.5 -bottom-0.5 size-2 rounded-full border-2",
+						borderClassName,
+						TONE_DOT[tone]
+					)}
+					data-slot="node-status-dot"
+				/>
+			)}
+		</span>
 	);
 }
 
@@ -1339,12 +1380,12 @@ const RETRIEVAL_ENGINES: Array<{
 ];
 
 /**
- * A block of the node dropdown whose body folds away at the Simple interface
+ * A block of the node dropdown whose body folds away at the Ryu Work interface
  * level.
  *
- * Above Simple this is byte-for-byte the flat block it always was — same
+ * Above Ryu Work this is byte-for-byte the flat block it always was — same
  * wrapper, same heading, no chevron, no disclosure — so the audience that
- * manages engines and toolkits from this menu sees no change at all. At Simple
+ * manages engines and toolkits from this menu sees no change at all. At Ryu Work
  * the heading BECOMES the trigger and the rows below it start closed, which
  * turns a 300px column of runtime plumbing back into a node menu about the node
  * (who it is, what it costs, what is connected). Collapsing, not hiding: the
@@ -1375,7 +1416,7 @@ const RETRIEVAL_ENGINES: Array<{
  *
  * Open state is plain `useState`, so the block is closed on every open of the
  * menu. `DropdownMenuContent` unmounts on close anyway; persisting the choice
- * would need `usePersistedToggle`, and at Simple "it stayed open from last time"
+ * would need `usePersistedToggle`, and at Ryu Work "it stayed open from last time"
  * is the outcome the level is trying to avoid.
  */
 function CollapsibleSection({
@@ -1473,7 +1514,7 @@ function EngineQueueBadge({
 
 /**
  * The node's engine spine: the catalog (what's installed), a live sidecar sample
- * (running + memory/CPU), the resident chat engine and the admission-queue depth.
+ * (running + memory/CPU), the resident chat and the admission-queue depth.
  *
  * Both engine-bearing sections share this ONE query — same key, same fetcher, so
  * React Query serves them from a single 5s poll instead of two.
@@ -1487,7 +1528,7 @@ function useNodeEngines(target: ApiTarget) {
 				fetchSidecarDetails(target).catch(
 					() => ({}) as Record<string, SidecarDetail>
 				),
-				// The resident chat engine (mutually-exclusive slot). Best-effort:
+				// The resident chat (mutually-exclusive slot). Best-effort:
 				// on failure we fall back to the running provider below.
 				fetchActiveEngine(target).catch(() => null),
 				// Live admission-queue + slot depth (Layer 2). Best-effort.
@@ -1552,14 +1593,14 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 		await refresh();
 	};
 
-	/** Swap the resident chat engine. NOT a sidecar start/stop — the mutually-
+	/** Swap the resident chat. NOT a sidecar start/stop — the mutually-
 	 *  exclusive slot moves via `/api/engine/active`, which also stops the engine
 	 *  it displaced and refreshes the gateway's model list. */
 	const activate = async (item: CatalogItem) => {
 		try {
 			const swap = await setActiveEngine(target, item.name);
 			if (!swap.unchanged) {
-				sileo.success({ title: `Chat engine → ${item.displayName}` });
+				sileo.success({ title: `Chat → ${item.displayName}` });
 			}
 		} catch (e) {
 			sileo.error({
@@ -1657,11 +1698,11 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 					available={availableOptions(providers)}
 					caption={
 						activeChatItem
-							? `Resident chat engine${chatRunning ? ` · ${chatUsage ?? "running"}` : " · idle"}`
-							: "No chat engine selected"
+							? `Resident chat${chatRunning ? ` · ${chatUsage ?? "running"}` : " · idle"}`
+							: "No chat selected"
 					}
 					currentLabel={activeChatItem?.displayName ?? "None"}
-					icon={CpuIcon}
+					icon={LayerIcon}
 					installed={chatInstalled.map(
 						(item): LayerOption => ({
 							name: item.name,
@@ -1677,7 +1718,7 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 									: () => uninstall(item),
 						})
 					)}
-					label="Chat engine"
+					label="Chat"
 					running={chatRunning}
 					version={activeChatItem?.installedVersion}
 				/>
@@ -1702,7 +1743,7 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 						available={availableOptions(group.items)}
 						caption={
 							installed.length > 0
-								? `${runningItems.length} of ${installed.length} running · these run alongside the chat engine`
+								? `${runningItems.length} of ${installed.length} running · these run alongside Chat`
 								: "Nothing installed yet"
 						}
 						currentLabel={currentLabel}
@@ -1918,10 +1959,10 @@ function SandboxesSection({
 
 /**
  * The remaining swappable layers of a node that aren't catalog sidecars: the
- * text-to-speech engine + voice, the speech-to-text engine, and the sandbox
+ * Audio engine + voice, the Voice Recognition engine, and the sandbox
  * backend the agent's `sandbox_exec` tool runs in.
  *
- * These share ONE poll (TTS engines + STT preference + sandbox backends + a
+ * These share ONE poll (Audio engines + Voice Recognition preference + sandbox backends + a
  * sidecar sample) so adding three layers to the dropdown costs one request, not
  * four. Each layer renders as the same submenu as the engines above it.
  *
@@ -1936,7 +1977,7 @@ function VoiceAndSandboxSection({
 	target: ApiTarget;
 	enabled: boolean;
 }) {
-	// The TTS default is device-local (localStorage), so it is not reactive on its
+	// The Audio default is device-local (localStorage), so it is not reactive on its
 	// own — mirror it into state and re-read whenever any surface writes it.
 	const [ttsPrefs, setTtsPrefs] = useState(getDesktopTtsPrefs);
 	useEffect(
@@ -1946,7 +1987,7 @@ function VoiceAndSandboxSection({
 
 	// The catalog + live sidecar sample, shared with the Engines section above (same
 	// query key ⇒ one poll). Both voice layers are backed by catalog sidecars —
-	// `ryutts` for the extra TTS voices, `whispercpp`/`parakeet` for transcription —
+	// `ryutts` for the extra Audio voices, `whispercpp`/`parakeet` for transcription —
 	// so install/uninstall here goes through the same generic endpoints.
 	const { catalog, details, refresh: refreshEngines } = useNodeEngines(target);
 
@@ -1999,7 +2040,7 @@ function VoiceAndSandboxSection({
 
 	/** The install/start action a voice layer needs before it can actually run —
 	 *  null once its sidecar is installed AND up. Mirrors the Voice settings tab's
-	 *  "Install / Start Ryu TTS engine" prompt, so the dropdown isn't a dead end
+	 *  "Install / Start Ryu Audio engine" prompt, so the dropdown isn't a dead end
 	 *  for an engine the node hasn't downloaded yet. */
 	const sidecarReadyAction = (
 		name: string,
@@ -2044,13 +2085,16 @@ function VoiceAndSandboxSection({
 		}
 	};
 
-	// The multi-engine TTS sidecar that serves every non-built-in voice.
-	const ttsReadyAction = sidecarReadyAction("ryutts", "Ryu TTS engine");
+	// The multi-engine Audio sidecar that serves every non-built-in voice.
+	const ttsReadyAction = sidecarReadyAction("ryutts", "Ryu Audio engine");
 
 	// ---- Speech-to-text -----------------------------------------------------
 	const selectedStt =
 		VOICE_ENGINES.find((e) => e.engine === sttPrefs.engine) ?? VOICE_ENGINES[0];
-	const sttRunning = details[selectedStt.sidecar]?.running ?? false;
+	const selectedSttSidecar = selectedStt.sidecar;
+	const sttRunning = selectedSttSidecar
+		? (details[selectedSttSidecar]?.running ?? false)
+		: true;
 
 	const pickStt = async (entry: (typeof VOICE_ENGINES)[number]) => {
 		try {
@@ -2069,19 +2113,24 @@ function VoiceAndSandboxSection({
 	};
 
 	const toggleStt = (next: boolean) =>
-		toggleSidecar(selectedStt.sidecar, selectedStt.label, next);
+		selectedSttSidecar
+			? toggleSidecar(selectedSttSidecar, selectedStt.label, next)
+			: Promise.resolve();
 
 	// Transcription needs its sidecar present before Start means anything, so an
 	// uninstalled engine offers Install first.
 	const sttActions: LayerAction[] = [];
-	const sttReady = sidecarReadyAction(selectedStt.sidecar, selectedStt.label);
+	const sttReady = selectedSttSidecar
+		? sidecarReadyAction(selectedSttSidecar, selectedStt.label)
+		: null;
 	if (sttReady) {
 		sttActions.push(sttReady);
 	} else {
 		sttActions.push(startStopAction(sttRunning, toggleStt));
 	}
-	const sttInstalled =
-		catalogItem(selectedStt.sidecar)?.installState === "installed";
+	const sttInstalled = selectedSttSidecar
+		? catalogItem(selectedSttSidecar)?.installState === "installed"
+		: true;
 
 	// ---- Sandbox backend ----------------------------------------------------
 	const activeBackend =
@@ -2100,8 +2149,8 @@ function VoiceAndSandboxSection({
 		await refresh();
 	};
 
-	// Speech-to-text is a fixed, always-valid list, so it shows on any reachable
-	// node — its visibility is deliberately NOT tied to the TTS/sandbox probes.
+	// Voice Recognition is a fixed, always-valid list, so it shows on any reachable
+	// node — its visibility is deliberately NOT tied to the Audio/sandbox probes.
 	if (!enabled) {
 		return null;
 	}
@@ -2132,7 +2181,7 @@ function VoiceAndSandboxSection({
 							select: () => pickTtsEngine(engine),
 						})
 					)}
-					label="Text-to-speech"
+					label="Audio"
 					running={selectedTts?.loaded ?? null}
 					trailing={selectedTts?.display_name ?? ttsPrefs.engine}
 				>
@@ -2164,9 +2213,9 @@ function VoiceAndSandboxSection({
 				currentLabel={selectedStt.label}
 				icon={Mic01Icon}
 				installed={VOICE_ENGINES.map((entry): LayerOption => {
-					const item = catalogItem(entry.sidecar);
+					const item = entry.sidecar ? catalogItem(entry.sidecar) : null;
 					let detail = entry.model;
-					if (details[entry.sidecar]?.running) {
+					if (entry.sidecar && details[entry.sidecar]?.running) {
 						detail = "running";
 					} else if (item && item.installState !== "installed") {
 						detail = "not installed";
@@ -2188,7 +2237,7 @@ function VoiceAndSandboxSection({
 									},
 					};
 				})}
-				label="Speech-to-text"
+				label="Voice Recognition"
 				running={sttRunning}
 			/>
 			{sandboxBackends && (
@@ -2225,7 +2274,7 @@ function VoiceAndSandboxSection({
  *
  *  A "layer" here is a CAPABILITY (`web.search`, `browser.control`, …) that
  *  several enabled apps can provide at once; picking a row pins the capability to
- *  that app, exactly like swapping the chat engine pins the resident runtime.
+ *  that app, exactly like swapping Chat pins the resident runtime.
  *
  *  It carries NO label. The layer's name comes from the capability's own
  *  providers now (`ProvidesEntry.title` → Core's `CapabilityInfo.title` →
@@ -2259,7 +2308,7 @@ const CAPABILITY_LAYERS: Array<{
 	{
 		capability: "computer.control",
 		fallbackLabel: "Computer",
-		icon: ComputerIcon,
+		icon: CursorMagicSelection04Icon,
 	},
 	{ capability: "memory", fallbackLabel: "Memory", icon: BrainIcon },
 	// Route-backed, not verb-backed (see `providerDetail`) — it is a layer like any
@@ -2698,7 +2747,7 @@ function LayersSection({
 		label: string
 	) => {
 		// Re-clicking the row that is ALREADY serving the capability is a no-op, the
-		// same way re-picking the resident chat engine is. Writing here would turn
+		// same way re-picking Chat is. Writing here would turn
 		// Core's auto-pick into an explicit pin with no visible change and no way
 		// back — the dropdown has no "Auto" row to undo it with.
 		if (provider.id === entry.bound) {
@@ -3029,6 +3078,7 @@ function ConnectedSection({
  */
 function ManagedNodeWallet() {
 	const openSettings = useSettingsDialog((s) => s.openSettings);
+	const { organization } = useOrgBillingStatus();
 	const { authed, wallet, entitlement, walletEmpty, loading } =
 		useCreditsWallet();
 
@@ -3057,8 +3107,13 @@ function ManagedNodeWallet() {
 				icon={walletEmpty ? Alert02Icon : DollarCircleIcon}
 				size={13}
 			/>
-			<span className="flex-1 truncate">
-				{walletEmpty ? "Credits empty — top up" : "Cloud credits"}
+			<span className="flex min-w-0 flex-1 flex-col">
+				<span className="truncate">
+					{walletEmpty ? "Credits empty — top up" : "Cloud credits"}
+				</span>
+				<span className="truncate text-[10px] text-muted-foreground/70">
+					{organization?.name ?? "Organization wallet"}
+				</span>
 			</span>
 			<span className="shrink-0 font-heading font-medium tabular-nums">
 				{balanceLabel}
@@ -3218,6 +3273,7 @@ function AutoSelectRow({ compact = false }: { compact?: boolean }) {
 export function NodeSelector({ mode }: NodeSelectorProps) {
 	const { nodes, defaultNode, setDefault, removeNode, addNode } =
 		useNodeStore();
+	const simpleInterface = useInterfaceLevel() === "simple";
 	const [addOpen, setAddOpen] = useState(false);
 	// The Gateway dialog is backed by a global store so other surfaces (command
 	// palette, deep links, the Settings page) can open it at a chosen section.
@@ -3355,7 +3411,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 		return (
 			<div className="space-y-0.5">
 				<p className="mb-1 px-2 font-medium text-[10px] text-muted-foreground/60 uppercase tracking-wider">
-					Nodes
+					{simpleInterface ? "Computers" : "Nodes"}
 				</p>
 				<div className="space-y-0.5">
 					{nodes.map((node) => (
@@ -3383,7 +3439,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 					type="button"
 				>
 					<HugeiconsIcon icon={Add01Icon} size={11} />
-					Add node
+					{simpleInterface ? "Add computer" : "Add node"}
 				</button>
 				<button
 					className="flex w-full items-center gap-1.5 px-2 py-1.5 text-muted-foreground/60 text-xs hover:text-muted-foreground"
@@ -3391,7 +3447,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 					type="button"
 				>
 					<HugeiconsIcon icon={Share08Icon} size={11} />
-					Manage cloud servers
+					{simpleInterface ? "Manage cloud computers" : "Manage cloud servers"}
 				</button>
 				<AddNodeDialog onClose={() => setAddOpen(false)} open={addOpen} />
 				<ShareNodeDialog
@@ -3423,16 +3479,16 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 					}
 				>
 					{isLocalNode(activeNode ?? LOCAL_FALLBACK) ? (
-						<HugeiconsIcon
-							className={cn("size-3.5 shrink-0", TONE_TEXT[tone])}
+						<NodeStatusIcon
+							borderClassName="border-sidebar"
 							icon={LaptopIcon}
-							size={14}
+							tone={tone}
 						/>
 					) : (
-						<HugeiconsIcon
-							className={cn("size-3.5 shrink-0", TONE_TEXT[tone])}
+						<NodeStatusIcon
+							borderClassName="border-sidebar"
 							icon={Link01Icon}
-							size={14}
+							tone={tone}
 						/>
 					)}
 					<span className="min-w-0 truncate">
@@ -3451,19 +3507,22 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 					<div className="border-border/60 border-b bg-muted/20 px-3 py-3">
 						<div className="flex items-start justify-between gap-3">
 							<div>
-								<p className="font-semibold text-sm">Choose a node</p>
+								<p className="font-semibold text-sm">
+									Choose a {simpleInterface ? "computer" : "node"}
+								</p>
 								<p className="mt-0.5 text-muted-foreground text-xs">
 									Where should Ryu run this conversation?
 								</p>
 							</div>
 							<span className="rounded-full bg-primary/10 px-2 py-1 font-medium text-[10px] text-primary uppercase tracking-wide">
-								{nodes.length} connected
+								{nodes.length} {simpleInterface ? "computer" : "node"}
+								{nodes.length === 1 ? "" : "s"} connected
 							</span>
 						</div>
 					</div>
 					<div className="max-h-[min(68vh,520px)] overflow-y-auto p-2">
 						<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/60 uppercase tracking-wider">
-							Available nodes
+							Available {simpleInterface ? "computers" : "nodes"}
 						</p>
 						{nodes.map((node) => (
 							<DropdownMenuItem
@@ -3475,26 +3534,18 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 								onClick={() => setDefault(node.name)}
 							>
 								{isLocalNode(node) ? (
-									<HugeiconsIcon
-										className={cn(
-											"size-3.5 shrink-0",
-											node.name === defaultNode
-												? TONE_TEXT[tone]
-												: "text-muted-foreground/30"
-										)}
+									<NodeStatusIcon
+										borderClassName="border-accent"
 										icon={LaptopIcon}
-										size={14}
+										subdued={node.name !== defaultNode}
+										tone={node.name === defaultNode ? tone : undefined}
 									/>
 								) : (
-									<HugeiconsIcon
-										className={cn(
-											"size-3.5 shrink-0",
-											node.name === defaultNode
-												? TONE_TEXT[tone]
-												: "text-muted-foreground/30"
-										)}
+									<NodeStatusIcon
+										borderClassName="border-accent"
 										icon={Link01Icon}
-										size={14}
+										subdued={node.name !== defaultNode}
+										tone={node.name === defaultNode ? tone : undefined}
 									/>
 								)}
 								<span className="min-w-0 flex-1">
@@ -3636,15 +3687,27 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 					/>
 					<DropdownMenuItem onClick={() => setAddOpen(true)}>
 						<HugeiconsIcon icon={Add01Icon} size={12} />
-						<span className="flex-1">Add node</span>
+						<span className="flex-1">
+							{simpleInterface ? "Add computer" : "Add node"}
+						</span>
 					</DropdownMenuItem>
-					<DropdownMenuItem onClick={() => openGateway()}>
+					<DropdownMenuItem
+						onClick={() =>
+							openGateway(simpleInterface ? "computer" : undefined)
+						}
+					>
 						<HugeiconsIcon icon={Settings01Icon} size={12} />
-						<span className="flex-1">Gateway settings</span>
+						<span className="flex-1">
+							{simpleInterface ? "Computer settings" : "Gateway settings"}
+						</span>
 					</DropdownMenuItem>
 					<DropdownMenuItem onClick={openManageCloudServers}>
 						<HugeiconsIcon icon={Share08Icon} size={12} />
-						<span className="flex-1">Manage cloud servers</span>
+						<span className="flex-1">
+							{simpleInterface
+								? "Manage cloud computers"
+								: "Manage cloud servers"}
+						</span>
 					</DropdownMenuItem>
 				</DropdownMenuContent>
 			</DropdownMenu>

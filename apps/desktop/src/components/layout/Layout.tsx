@@ -30,8 +30,10 @@ import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatDisplayPrefs } from "@/src/components/chat/ChatDisplayPrefsProvider.tsx";
 import { DeepLinkController } from "@/src/components/deeplink/DeepLinkController.tsx";
+import { AnimatedTitle } from "@/src/components/layout/animated-title.tsx";
 import { EmptyTabsState } from "@/src/components/layout/EmptyTabsState.tsx";
 import { DesktopReportHost } from "@/src/components/marketplace/report-host.tsx";
+import { MediaPipDock } from "@/src/components/media/MediaPip.tsx";
 import { ProjectDockHost } from "@/src/components/panels/ProjectDockHost.tsx";
 import { PrivacyDisclosure } from "@/src/components/settings/privacy-disclosure.tsx";
 import { SupportAccessBanner } from "@/src/components/settings/support-access-banner.tsx";
@@ -63,6 +65,7 @@ import {
 import { seedBuiltinRoutes } from "@/src/contributions/builtins.ts";
 import { RouteOutlet } from "@/src/contributions/RouteOutlet.tsx";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
+import { useAgentAmbientAudio } from "@/src/hooks/useAgentAmbientAudio.ts";
 import { useApprovalEvents } from "@/src/hooks/useApprovalEvents.ts";
 import { usePluginThemeSync } from "@/src/hooks/useContributedThemes.ts";
 import { useCreditAlertEvents } from "@/src/hooks/useCreditAlertEvents.ts";
@@ -228,11 +231,11 @@ function PaneBadge({
 				/>
 				{busy && !tab.unloaded ? (
 					<span className="an-text-shimmer an-text-shimmer--active max-w-32 truncate font-medium text-xs [animation-duration:2s]">
-						{tab.title}
+						<AnimatedTitle text={tab.title} />
 					</span>
 				) : (
 					<span className="max-w-32 truncate font-medium text-xs">
-						{tab.title}
+						<AnimatedTitle text={tab.title} />
 					</span>
 				)}
 			</div>
@@ -272,6 +275,9 @@ function LayoutContent({
 	// meetings / contributed) → the shared live-activity store that powers the
 	// empty-shell "Dynamic Island" dock and the sidebar Live section.
 	useLiveActivities();
+	// One singleton ambient player driven by the aggregate agent-run state. The
+	// plugin contribution supplies the source; this hook supplies lifecycle.
+	useAgentAmbientAudio();
 
 	// One app-wide subscription to Core's monitor-alert SSE stream → in-app toast
 	// + native OS notification when a watched site changes.
@@ -290,7 +296,7 @@ function LayoutContent({
 	useApprovalEvents();
 
 	// App-wide subscription to Core's desktop-notification SSE stream → in-app
-	// toast + native OS notification from built-in agent actions (notify__desktop).
+	// toast + native OS notification from built-in agent actions (notify.desktop).
 	useDesktopNotificationsStream();
 
 	// Cloud credit alerts are edge-triggered after the server's atomic threshold
@@ -720,6 +726,7 @@ function LayoutContent({
 			    own dialog. */}
 			<SaveSplitPresetDialog />
 			<DeepLinkController />
+			<MediaPipDock />
 			<PrivacyDisclosure />
 			<SupportAccessBanner />
 			{/* Mounted app-wide, not per-page: Safe Mode changes what the whole node

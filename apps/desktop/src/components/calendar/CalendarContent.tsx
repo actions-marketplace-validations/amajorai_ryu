@@ -211,7 +211,7 @@ function DayPanel({
 					<HugeiconsIcon className="size-4" icon={ArrowLeft01Icon} />
 				</Button>
 			</div>
-			<div className="scroll-fade-effect-y flex-1 overflow-auto p-3">
+			<div className="scroll-fade flex-1 overflow-auto p-3">
 				{events.length === 0 ? (
 					<div className="flex h-full flex-col items-center justify-center gap-2 text-center text-muted-foreground">
 						<HugeiconsIcon
@@ -326,11 +326,8 @@ export function CalendarContent({
 						connection and try again.
 					</EmptyDescription>
 				</EmptyHeader>
-				<Button className="mt-4" disabled={loading} onClick={handleRefresh}>
-					<HugeiconsIcon
-						className={cn("size-4", loading && "animate-spin")}
-						icon={Refresh01Icon}
-					/>
+				<Button className="mt-4" loading={loading} onClick={handleRefresh}>
+					<HugeiconsIcon className="size-4" icon={Refresh01Icon} />
 					Try again
 				</Button>
 			</Empty>
@@ -471,16 +468,13 @@ export function CalendarContent({
 					<Button
 						aria-label="Refresh"
 						className="rounded-full"
-						disabled={loading}
+						loading={loading}
 						onClick={handleRefresh}
 						size="icon-sm"
 						title="Refresh"
 						variant="ghost"
 					>
-						<HugeiconsIcon
-							className={cn("size-4", loading && "animate-spin")}
-							icon={Refresh01Icon}
-						/>
+						<HugeiconsIcon className="size-4" icon={Refresh01Icon} />
 					</Button>
 					<Button
 						className="rounded-full"

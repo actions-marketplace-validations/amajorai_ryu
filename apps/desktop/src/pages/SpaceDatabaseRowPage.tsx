@@ -1,8 +1,10 @@
 import { LibraryIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { Button } from "@ryu/ui/components/button";
 import { Checkbox } from "@ryu/ui/components/checkbox";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -189,7 +191,7 @@ export default function SpaceDatabaseRowPage({
 	rowId: string;
 }) {
 	const { getDocument, saveDocument, createPage } = useSpacesContext();
-	const { updateTabTitle } = useTabsContext();
+	const { openTab, updateTabTitle } = useTabsContext();
 	const tabId = useCurrentTabId();
 	const node = useActiveNode();
 
@@ -409,6 +411,19 @@ export default function SpaceDatabaseRowPage({
 					<EmptyTitle>Could not open row</EmptyTitle>
 					<EmptyDescription>{error}</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button
+						onClick={() =>
+							openTab(`/spaces/${spaceId}/db/${databaseId}`, {
+								title: "Database",
+							})
+						}
+						size="sm"
+						variant="ghost"
+					>
+						Back to database
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
@@ -431,6 +446,19 @@ export default function SpaceDatabaseRowPage({
 					<EmptyTitle>Row not found</EmptyTitle>
 					<EmptyDescription>This row may have been deleted.</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button
+						onClick={() =>
+							openTab(`/spaces/${spaceId}/db/${databaseId}`, {
+								title: "Database",
+							})
+						}
+						size="sm"
+						variant="ghost"
+					>
+						Back to database
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}

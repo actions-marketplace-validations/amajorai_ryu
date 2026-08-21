@@ -32,9 +32,17 @@ export interface LoginViewProps {
 	coreStarting?: boolean;
 	/** Plain-language copy shown under the disabled button when startup failed. */
 	coreStatusLabel?: string | null;
+	/** True while the anonymous guest request is in flight. */
+	guestLoading?: boolean;
 	/** Whether the verification URI is known (shows the "Open" button). */
 	hasVerificationUri?: boolean;
+	/** Keeps the local Core download copy honest on phones and tablets. */
+	isMobileBrowser?: boolean;
 	onCancel?: () => void;
+	/** Browser-only guest session action; omitted from native desktop login. */
+	onContinueAsGuest?: () => void | Promise<void>;
+	/** Browser-only link to the standalone, headless Core binary download. */
+	onDownloadCore?: () => void | Promise<void>;
 	onOpenVerification?: () => void;
 	/** Retry startup after it failed; renders a "Try again" button in that state. */
 	onRetry?: () => void;
@@ -42,6 +50,8 @@ export interface LoginViewProps {
 	/** True while silently polling for approval (adds a waiting hint; the manual
 	 *  "Open" button stays reachable throughout). */
 	polling?: boolean;
+	/** Show the computer-only Core download option. */
+	showLocalCoreDownload?: boolean;
 	/** The user code to enter on the verification page. */
 	userCode?: string | null;
 	/** When set, the device-auth flow is in progress (shows the code panel). */
@@ -131,6 +141,11 @@ export function LoginView({
 	onOpenVerification,
 	onCancel,
 	onRetry,
+	onContinueAsGuest,
+	guestLoading = false,
+	onDownloadCore,
+	showLocalCoreDownload = false,
+	isMobileBrowser = false,
 }: LoginViewProps) {
 	return (
 		// The empty area around the centered column is the start page's window
@@ -215,6 +230,48 @@ export function LoginView({
 							>
 								Get Started
 							</Button>
+							{onContinueAsGuest ? (
+								<Button
+									className="w-full"
+									disabled={guestLoading}
+									onClick={onContinueAsGuest}
+									size="lg"
+									variant="outline"
+								>
+									{guestLoading ? (
+										<span className="flex items-center justify-center gap-2">
+											<Spinner className="size-4" /> Starting guest session…
+										</span>
+									) : (
+										"Try Ryu without an account"
+									)}
+								</Button>
+							) : null}
+							{showLocalCoreDownload && onDownloadCore ? (
+								<div className="flex w-full flex-col gap-2 pt-2">
+									<Button
+										className="w-full"
+										onClick={onDownloadCore}
+										size="sm"
+										variant="ghost"
+									>
+										Download Ryu Core for this computer
+									</Button>
+									<p className="text-center text-muted-foreground text-xs">
+										A standalone local runtime — no desktop app required.
+									</p>
+								</div>
+							) : null}
+							{isMobileBrowser ? (
+								<p className="text-center text-muted-foreground text-xs">
+									Local Core downloads are for computers. You can use Ryu in
+									this browser instead.
+								</p>
+							) : null}
+							{/* Browser-extension CTA intentionally stays dormant until the
+							    public extension release. At that point, use the browser family
+							    detector to show the matching Chrome, Edge, Firefox, or Safari
+							    store link here. */}
 							{coreReady || coreStarting ? null : (
 								<div className="flex flex-col items-center gap-2">
 									<p className="text-muted-foreground text-xs">

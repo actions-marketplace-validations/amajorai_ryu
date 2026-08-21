@@ -214,10 +214,11 @@ pub fn builtin_model_list() -> Vec<serde_json::Value> {
         // Core agents
         json!({"id": "zeroclaw", "object": "model", "created": now, "owned_by": "core"}),
         json!({"id": "openclaw", "object": "model", "created": now, "owned_by": "core"}),
-        // OpenRouter — openrouter/auto lets OpenRouter pick the best model on its
-        // side AFTER Ryu's own guardrails/budgets have already run. Use any
-        // openrouter/<model-slug> pattern to target a specific model via OpenRouter.
+        // OpenRouter — these upstream routers select a model AFTER Ryu's own
+        // guardrails/budgets have already run. Use any openrouter/<model-slug>
+        // pattern to target a specific model via OpenRouter.
         json!({"id": "openrouter/auto", "object": "model", "created": now, "owned_by": "openrouter"}),
+        json!({"id": "openrouter/pareto-code", "object": "model", "created": now, "owned_by": "openrouter"}),
         // Local
         json!({"id": "llama3.2:latest", "object": "model", "created": now, "owned_by": "local"}),
         json!({"id": "mistral:latest", "object": "model", "created": now, "owned_by": "local"}),
@@ -392,6 +393,13 @@ mod tests {
         let decision = router.route("openrouter/mistralai/mistral-7b-instruct");
         assert_eq!(decision.provider, ProviderKind::OpenRouter);
         assert_eq!(decision.model, "openrouter/mistralai/mistral-7b-instruct");
+    }
+
+    #[test]
+    fn builtin_models_include_openrouter_pareto_code() {
+        assert!(builtin_model_list()
+            .iter()
+            .any(|model| model["id"] == "openrouter/pareto-code"));
     }
 
     #[test]

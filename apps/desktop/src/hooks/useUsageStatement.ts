@@ -8,7 +8,7 @@
 // this app shares. Using `useQuery` here would key a control-plane read against a
 // node URL that has nothing to do with it.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	type CreditsError,
 	fetchUsage,
@@ -16,6 +16,7 @@ import {
 	type UsageFilters,
 	type UsageStats,
 } from "@/src/lib/api/credits.ts";
+import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
 
 export interface UseUsageStatement {
 	/** Apply a new filter set, resetting to the first page. */
@@ -23,14 +24,14 @@ export interface UseUsageStatement {
 	entries: LedgerEntry[];
 	error: CreditsError | null;
 	filters: UsageFilters;
+	/** Whether another page exists. */
+	hasMore: boolean;
 	/** True while the first page (or a re-filtered first page) is loading. */
 	loading: boolean;
 	/** True while an additional page is being appended. */
 	loadingMore: boolean;
 	/** Fetch the next page and append it. No-op when exhausted. */
 	loadMore: () => void;
-	/** Whether another page exists. */
-	hasMore: boolean;
 	refresh: () => void;
 	stats: UsageStats | null;
 }
@@ -45,35 +46,61 @@ export function useUsageStatement(): UseUsageStatement {
 	const [loading, setLoading] = useState(true);
 	const [loadingMore, setLoadingMore] = useState(false);
 	const [error, setError] = useState<CreditsError | null>(null);
+	const activeOrgId = useActiveOrgId();
+	const latestOrgId = useRef(activeOrgId);
+	latestOrgId.current = activeOrgId;
 
-	const load = useCallback(async (next: UsageFilters) => {
-		setLoading(true);
-		setError(null);
-		try {
-			const res = await fetchUsage({ ...next, limit: PAGE_SIZE });
-			setEntries(res.entries);
-			setStats(res.stats);
-			setCursor(res.nextCursor);
-		} catch (err) {
-			setError(err as CreditsError);
-		} finally {
-			setLoading(false);
-		}
-	}, []);
+	const load = useCallback(
+		async (next: UsageFilters) => {
+			const requestOrgId = activeOrgId;
+			setLoading(true);
+			setError(null);
+			try {
+				const res = await fetchUsage({ ...next, limit: PAGE_SIZE });
+				if (latestOrgId.current !== requestOrgId) {
+					return;
+				}
+				setEntries(res.entries);
+				setStats(res.stats);
+				setCursor(res.nextCursor);
+			} catch (err) {
+				if (latestOrgId.current === requestOrgId) {
+					setError(err as CreditsError);
+				}
+			} finally {
+				if (latestOrgId.current === requestOrgId) {
+					setLoading(false);
+				}
+			}
+		},
+		[activeOrgId]
+	);
 
 	const loadMore = useCallback(() => {
 		if (!cursor || loadingMore) {
 			return;
 		}
+		const requestOrgId = activeOrgId;
 		setLoadingMore(true);
 		fetchUsage({ ...filters, before: cursor, limit: PAGE_SIZE })
 			.then((res) => {
+				if (latestOrgId.current !== requestOrgId) {
+					return;
+				}
 				setEntries((prev) => [...prev, ...res.entries]);
 				setCursor(res.nextCursor);
 			})
-			.catch((err) => setError(err as CreditsError))
-			.finally(() => setLoadingMore(false));
-	}, [cursor, filters, loadingMore]);
+			.catch((err) => {
+				if (latestOrgId.current === requestOrgId) {
+					setError(err as CreditsError);
+				}
+			})
+			.finally(() => {
+				if (latestOrgId.current === requestOrgId) {
+					setLoadingMore(false);
+				}
+			});
+	}, [activeOrgId, cursor, filters, loadingMore]);
 
 	const applyFilters = useCallback(
 		(next: UsageFilters) => {
@@ -91,8 +118,14 @@ export function useUsageStatement(): UseUsageStatement {
 	}, [filters, load]);
 
 	useEffect(() => {
+		setFilters({});
+		setEntries([]);
+		setStats(null);
+		setCursor(null);
+		setLoadingMore(false);
+		setError(null);
 		void load({});
-	}, [load]);
+	}, [activeOrgId, load]);
 
 	return {
 		entries,

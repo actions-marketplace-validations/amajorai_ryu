@@ -18,10 +18,12 @@ import {
 	type CreditLedgerRow,
 	CreditsView,
 } from "@ryu/blocks/desktop/credits.tsx";
+import { formatMinorCurrency } from "@ryu/ui/lib/number-format.ts";
 import { useCallback, useMemo, useState } from "react";
 import { sileo } from "sileo";
 import { FRONTEND_URL } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
+import { OrgBillingContext } from "@/src/components/billing/OrgBillingContext.tsx";
 import { CreditTransferCard } from "@/src/components/settings/CreditTransferCard.tsx";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import {
@@ -114,7 +116,7 @@ export default function CreditsPage() {
 				const { url, quote } = await createTopup(input);
 				await openExternal(url);
 				const feeNote = quote
-					? ` $${(quote.faceCents / 100).toFixed(2)} credited, $${(quote.feeCents / 100).toFixed(2)} deposit fee ($${(quote.chargeCents / 100).toFixed(2)} charged).`
+					? ` ${formatMinorCurrency(quote.faceCents)} credited, ${formatMinorCurrency(quote.feeCents)} deposit fee (${formatMinorCurrency(quote.chargeCents)} charged).`
 					: "";
 				sileo.success({
 					title: "Opening checkout…",
@@ -203,6 +205,7 @@ export default function CreditsPage() {
 
 	return (
 		<div className="space-y-4">
+			<OrgBillingContext description="Shared credits for managed inference, top-ups, and organization usage." />
 			<CreditsView
 				authed={authed}
 				billingUnavailable={billingUnavailable}
@@ -240,6 +243,11 @@ export default function CreditsPage() {
 				onPrevPage={() => setLedgerPage(Math.max(0, safeLedgerPage - 1))}
 				onRefresh={() => {
 					refresh().catch(() => undefined);
+				}}
+				onSignIn={() => {
+					openExternal(`${FRONTEND_URL.replace(/\/$/, "")}/login`).catch(
+						() => undefined
+					);
 				}}
 				onTopupCustom={handleCustomTopup}
 				onTopupPack={(pack) => {

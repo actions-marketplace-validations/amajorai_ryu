@@ -73,6 +73,7 @@ use crate::commands::{self, ChannelCommand};
 use crate::media::{self, Attachment, AttachmentKind, VoiceDelivery};
 use crate::pairing::{Decision, PairingStore};
 use crate::status::StatusReporter;
+use crate::whatsapp_format;
 use crate::{
     handle_turn, Channel, ChannelCaps, ChannelHost, ChannelRuntime, InboundMessage,
     WhatsAppChannelConfig,
@@ -332,7 +333,11 @@ impl Channel for WhatsAppChannel {
     }
 
     async fn send_message(&self, chat_id: &str, text: &str) -> anyhow::Result<()> {
-        self.post_message(&text_payload(chat_id, text)).await
+        let rendered = whatsapp_format::render_markdown(text);
+        for part in whatsapp_format::split_text(&rendered) {
+            self.post_message(&text_payload(chat_id, &part)).await?;
+        }
+        Ok(())
     }
 
     /// Show "typing…" against the newest inbound message in this conversation.
@@ -694,6 +699,7 @@ fn parse_inbound(payload: &Value) -> Vec<InboundMessage> {
                 }
                 out.push(InboundMessage {
                     chat_id: from.to_string(),
+                    access_chat_id: None,
                     text,
                     author_name: contact_name(change, from),
                     sender_id: Some(from.to_string()),
@@ -713,6 +719,32 @@ fn parse_inbound(payload: &Value) -> Vec<InboundMessage> {
 fn message_text(message: &Value) -> String {
     if let Some(body) = message["text"]["body"].as_str() {
         return body.to_string();
+    }
+    if let Some(title) = message["interactive"]["button_reply"]["title"].as_str() {
+        return title.to_string();
+    }
+    if let Some(title) = message["interactive"]["list_reply"]["title"].as_str() {
+        return title.to_string();
+    }
+    if let Some(location) = message["location"].as_object() {
+        let latitude = location
+            .get("latitude")
+            .and_then(Value::as_f64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let longitude = location
+            .get("longitude")
+            .and_then(Value::as_f64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let label = location
+            .get("name")
+            .or_else(|| location.get("address"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!(" ({value})"))
+            .unwrap_or_default();
+        return format!("[location: {latitude}, {longitude}{label}]");
     }
     message["type"]
         .as_str()

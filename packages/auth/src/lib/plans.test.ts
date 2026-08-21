@@ -4,6 +4,7 @@ import {
 	type CachedEntitlement,
 	capabilityTier,
 	channelUserLimitForEntitlement,
+	currentPlanVersionFor,
 	DEPOSIT_FEE_FIXED_MICRO_USD,
 	DESKTOP_GATE,
 	type DesktopGateConfig,
@@ -11,7 +12,7 @@ import {
 	decideDesktopAccess,
 	decideUpdateEligibility,
 	depositFee,
-	EMAIL_QUOTA_NONE,
+	EMAIL_QUOTA_FREE,
 	type Entitlement,
 	emailQuotaForPlan,
 	FREE_TIER_LIMITS,
@@ -23,6 +24,7 @@ import {
 	type PlanLimitField,
 	type PolarBinding,
 	planLimit,
+	planVersionFor,
 	QUOTAS,
 	quotaOwner,
 	resolveEntitlement,
@@ -78,9 +80,13 @@ describe("depositFee (max of the plan rate or the $2.40 floor)", () => {
 });
 
 describe("emailQuotaForPlan (Agent Inboxes)", () => {
-	it("disables email for the free baseline (null plan)", () => {
-		expect(emailQuotaForPlan(null)).toEqual(EMAIL_QUOTA_NONE);
-		expect(emailQuotaForPlan(null).enabled).toBe(false);
+	it("gives the free baseline a small branded growth-loop allowance", () => {
+		expect(emailQuotaForPlan(null)).toEqual(EMAIL_QUOTA_FREE);
+		expect(emailQuotaForPlan(null)).toMatchObject({
+			enabled: true,
+			inboxLimit: 1,
+			monthlySendLimit: 50,
+		});
 	});
 
 	it("disables email for the desktop license (one-time, no managed cloud)", () => {
@@ -177,45 +183,81 @@ describe("resolveEntitlement — subscriptions", () => {
 	});
 });
 
-describe("resolveEntitlement — Teams per-seat pool", () => {
+describe("plan audience — personal versus organization ownership", () => {
+	it("keeps Pro and Max personal while Teams owns the shared boundary", () => {
+		expect(PLANS.pro.audience).toBe("individual");
+		expect(PLANS.max.audience).toBe("individual");
+		expect(PLANS.teams.audience).toBe("organization");
+	});
+});
+
+describe("resolveEntitlement — Teams member-seat billing with bundled org credits", () => {
 	const teamsProduct = () =>
 		resolveProductId(
 			requireBinding(PLANS.teams.bindings.monthly, "teams.monthly"),
 			defaultsOnly
 		);
 
-	it("multiplies the pool by the seat count", () => {
+	it("resolves the billed seat count while keeping credits pooled", () => {
 		const e = resolveEntitlement(
-			{ productId: teamsProduct(), status: "active", seats: 5 },
+			{
+				planVersion: currentPlanVersionFor("teams"),
+				productId: teamsProduct(),
+				status: "active",
+				seats: 5,
+			},
 			null,
 			defaultsOnly
 		);
 		expect(e.plan).toBe("teams");
 		expect(e.seats).toBe(5);
-		expect(e.monthlyCreditPoolMicroUsd).toBe(
-			PLANS.teams.monthlyCreditPoolMicroUsd * 5
-		);
+		expect(e.monthlyCreditPoolMicroUsd).toBe(usdToMicro(50));
 	});
 
-	it("enforces the minimum seat count", () => {
+	it("adds $50 for every additional five billed seats", () => {
+		const ten = resolveEntitlement(
+			{
+				planVersion: currentPlanVersionFor("teams"),
+				productId: teamsProduct(),
+				status: "active",
+				seats: 10,
+			},
+			null,
+			defaultsOnly
+		);
+		const eleven = resolveEntitlement(
+			{
+				planVersion: currentPlanVersionFor("teams"),
+				productId: teamsProduct(),
+				status: "active",
+				seats: 11,
+			},
+			null,
+			defaultsOnly
+		);
+		expect(ten.monthlyCreditPoolMicroUsd).toBe(usdToMicro(100));
+		expect(eleven.monthlyCreditPoolMicroUsd).toBe(usdToMicro(150));
+	});
+
+	it("enforces the five-seat floor when a smaller count is supplied", () => {
 		const e = resolveEntitlement(
 			{ productId: teamsProduct(), status: "active", seats: 1 },
 			null,
 			defaultsOnly
 		);
-		expect(e.seats).toBe(2);
+		expect(e.seats).toBe(5);
 		expect(e.monthlyCreditPoolMicroUsd).toBe(
-			PLANS.teams.monthlyCreditPoolMicroUsd * 2
+			planVersionFor("teams").monthlyCreditPoolMicroUsd
 		);
 	});
 
-	it("falls back to quantity then minimum when seats is absent", () => {
+	it("accepts Polar quantity as a seat-count fallback", () => {
 		const e = resolveEntitlement(
 			{ productId: teamsProduct(), status: "active", quantity: 4 },
 			null,
 			defaultsOnly
 		);
-		expect(e.seats).toBe(4);
+		expect(e.seats).toBe(5);
 	});
 });
 
@@ -233,7 +275,7 @@ describe("channelUserLimitForEntitlement", () => {
 		expect(channelUserLimitForEntitlement(e)).toBe(1);
 	});
 
-	it("uses Teams seats as the configured channel-user limit", () => {
+	it("allows one hosted channel user per billed Teams seat", () => {
 		const productId = resolveProductId(
 			requireBinding(PLANS.teams.bindings.monthly, "teams.monthly"),
 			defaultsOnly
@@ -572,19 +614,19 @@ describe("CAPABILITY_TIERS — Band-2 pro capabilities (2026-07-11)", () => {
 
 describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 	it("returns the free baseline for a null plan", () => {
-		expect(planLimit(null, "maxOpenTabs")).toBe(8);
-		expect(planLimit(null, "maxAgents")).toBe(10);
-		expect(planLimit(null, "maxWorkflows")).toBe(10);
-		expect(planLimit(null, "maxSpaces")).toBe(5);
-		expect(planLimit(null, "maxMonitors")).toBe(5);
-		expect(planLimit(null, "maxMcpServers")).toBe(5);
-		expect(planLimit(null, "maxPlugins")).toBe(10);
-		expect(planLimit(null, "maxSkills")).toBe(10);
-		expect(planLimit(null, "maxSchedules")).toBe(3);
+		expect(planLimit(null, "maxOpenTabs")).toBe(3);
+		expect(planLimit(null, "maxAgents")).toBe(3);
+		expect(planLimit(null, "maxWorkflows")).toBe(3);
+		expect(planLimit(null, "maxSpaces")).toBe(1);
+		expect(planLimit(null, "maxMonitors")).toBe(3);
+		expect(planLimit(null, "maxMcpServers")).toBe(3);
+		expect(planLimit(null, "maxPlugins")).toBe(5);
+		expect(planLimit(null, "maxSkills")).toBe(5);
+		expect(planLimit(null, "maxSchedules")).toBe(1);
 		expect(planLimit(null, "maxConcurrentRuns")).toBe(1);
-		expect(planLimit(null, "maxEvalRunsMonthly")).toBe(20);
-		expect(planLimit(null, "meetingRetentionDays")).toBe(30);
-		expect(planLimit(null, "spaceStorageLimitGb")).toBe(2);
+		expect(planLimit(null, "maxEvalRunsMonthly")).toBe(10);
+		expect(planLimit(null, "meetingRetentionDays")).toBe(14);
+		expect(planLimit(null, "spaceStorageLimitGb")).toBe(1);
 		expect(planLimit(null, "maxRemoteNodes")).toBe(1);
 	});
 
@@ -629,20 +671,20 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 			PlanLimitField,
 			[free: number, license: number, pro: number, max: number, teams: number]
 		> = {
-			maxAgents: [10, INF, INF, INF, INF],
+			maxAgents: [3, INF, INF, INF, INF],
 			maxConcurrentRuns: [1, 3, 3, 3, 8],
-			maxEvalRunsMonthly: [20, INF, INF, INF, INF],
-			maxMcpServers: [5, INF, INF, INF, INF],
-			maxMonitors: [5, INF, INF, INF, INF],
-			maxOpenTabs: [8, INF, INF, INF, INF],
-			maxPlugins: [10, INF, INF, INF, INF],
+			maxEvalRunsMonthly: [10, INF, INF, INF, INF],
+			maxMcpServers: [3, INF, INF, INF, INF],
+			maxMonitors: [3, INF, INF, INF, INF],
+			maxOpenTabs: [3, INF, INF, INF, INF],
+			maxPlugins: [5, INF, INF, INF, INF],
 			maxRemoteNodes: [1, INF, INF, INF, INF],
-			maxSchedules: [3, INF, INF, INF, INF],
-			maxSkills: [10, INF, INF, INF, INF],
-			maxSpaces: [5, INF, INF, INF, INF],
-			maxWorkflows: [10, INF, INF, INF, INF],
-			meetingRetentionDays: [30, INF, INF, INF, INF],
-			spaceStorageLimitGb: [2, 20, 20, 50, 50],
+			maxSchedules: [1, INF, INF, INF, INF],
+			maxSkills: [5, INF, INF, INF, INF],
+			maxSpaces: [1, INF, INF, INF, INF],
+			maxWorkflows: [3, INF, INF, INF, INF],
+			meetingRetentionDays: [14, INF, INF, INF, INF],
+			spaceStorageLimitGb: [1, 20, 20, 50, 50],
 		};
 		// Every declared key is in the matrix, and vice versa: a new quota that
 		// forgot its numbers fails here rather than shipping a silent Infinity.

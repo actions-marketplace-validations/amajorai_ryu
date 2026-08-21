@@ -1,0 +1,118 @@
+name: Ryu
+description: Connect GitHub Actions to a self-hosted or managed Ryu Core node.
+author: A Major Pte. Ltd.
+
+inputs:
+  target:
+    description: "Node target mode: auto, self-hosted, or managed."
+    required: false
+    default: auto
+  node-url:
+    description: "Ryu Core node URL. Falls back to RYU_CORE_URL."
+    required: false
+  node-token:
+    description: "Ryu Core bearer token. Falls back to RYU_CORE_TOKEN."
+    required: false
+  managed-node-url:
+    description: "Managed Ryu Core node URL. Falls back to RYU_MANAGED_NODE_URL."
+    required: false
+  managed-node-token:
+    description: "Managed Ryu Core bearer token. Falls back to RYU_MANAGED_NODE_TOKEN."
+    required: false
+  operation:
+    description: "Action operation: setup, run, or tool."
+    required: false
+    default: setup
+  prompt:
+    description: "Prompt to send when operation is run."
+    required: false
+  agent:
+    description: "Saved Ryu agent id for a run or required allowlist for a tool call."
+    required: false
+  team:
+    description: "Saved Ryu team id for a run. Mutually exclusive with agent/workflow."
+    required: false
+  workflow:
+    description: "Saved Ryu workflow id for a run. Mutually exclusive with agent/team."
+    required: false
+  tool:
+    description: "Fully-qualified Ryu/MCP tool id for a tool operation."
+    required: false
+  tool-arguments:
+    description: "JSON arguments sent to the direct tool call."
+    required: false
+    default: "{}"
+  user-id:
+    description: "Optional Composio entity/audit user id for a direct tool call."
+    required: false
+  conversation-id:
+    description: "Existing conversation id; a UUID is generated for a run when omitted."
+    required: false
+  persist:
+    description: "Persist a run to the node conversation store."
+    required: false
+    default: "false"
+  enable-long-term:
+    description: "Enable long-term memory for a run."
+    required: false
+    default: "false"
+  inference:
+    description: "JSON object of per-run inference overrides."
+    required: false
+  plugin-flags:
+    description: "JSON object of per-run Ryu plugin flags."
+    required: false
+  cwd:
+    description: "Optional working directory visible to a local Core node."
+    required: false
+  worktree-isolation:
+    description: "Ask Core to isolate the run in a git worktree when cwd is set."
+    required: false
+    default: "false"
+  timeout-ms:
+    description: "Per-request timeout in milliseconds."
+    required: false
+    default: "600000"
+  response-file:
+    description: "Optional runner-relative file path for the response text."
+    required: false
+  export-env:
+    description: "Export validated node variables to later workflow steps."
+    required: false
+    default: "true"
+  write-summary:
+    description: "Write a metadata-only report to GITHUB_STEP_SUMMARY."
+    required: false
+    default: "true"
+
+outputs:
+  response:
+    description: "Assistant text or direct tool output as text."
+  result-json:
+    description: "Normalized operation result as JSON."
+  node-url:
+    description: "Validated Ryu Core node URL."
+  node-managed:
+    description: "Whether the validated node reports managed=true."
+  node-version:
+    description: "Ryu version reported by the node."
+  node-channel:
+    description: "Ryu release channel reported by the node."
+  health-json:
+    description: "Validated /api/health payload as JSON."
+  node-info-json:
+    description: "Validated /api/system/info payload as JSON."
+  conversation-id:
+    description: "Conversation id used by a run."
+  run-id:
+    description: "Run id reported by Core stream frames, when available."
+  tool-calls:
+    description: "Tool input/output events observed during a run as JSON."
+
+runs:
+  using: node20
+  main: packages/github-action/dist/action.cjs
+
+branding:
+  icon: cpu
+  color: purple

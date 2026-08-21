@@ -681,7 +681,7 @@ export const products: Product[] = [
 				{
 					title: "Swappable models",
 					description:
-						"Pick a different model for chat, STT, TTS, and image-gen on the same agent.",
+						"Pick a different model for chat, Voice Recognition, Audio, and image-gen on the same agent.",
 					icon: Cpu,
 				},
 				{
@@ -1606,7 +1606,7 @@ export const products: Product[] = [
 				{
 					title: "Voice input",
 					description:
-						"Talk to it: speech to text turns your words into an answer, hands-free.",
+						"Talk to it: voice recognition turns your words into an answer, hands-free.",
 					icon: Mic,
 				},
 				{

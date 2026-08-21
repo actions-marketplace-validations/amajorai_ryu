@@ -241,6 +241,22 @@ function segments(text: string): string[] {
 		.filter((s) => s.length > 0);
 }
 
+// These exact filename tokens identify GGUF files that are not standalone
+// model weights. Keep this separate from the role labels below: an importance
+// matrix is an input to quantization, not an add-on that a user can run.
+const NON_MODEL_GGUF_SEGMENTS = new Set(["draft", "imatrix", "mmproj", "mtp"]);
+
+/** Whether a GGUF filename represents a selectable model-weight quant. */
+export function isModelGgufFile(filename: string): boolean {
+	const segs = new Set(segments(filename));
+	for (const segment of NON_MODEL_GGUF_SEGMENTS) {
+		if (segs.has(segment)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /**
  * Recognize tokens in a model's name + tags. Returns one {@link MatchedToken} per
  * distinct vocabulary entry that matched (deduped), in vocabulary order.

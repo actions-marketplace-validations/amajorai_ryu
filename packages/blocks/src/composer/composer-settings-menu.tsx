@@ -14,8 +14,13 @@ import {
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu";
 import { cn } from "@ryu/ui/lib/utils";
-import { type ReactNode, useState } from "react";
+import { isValidElement, type ReactNode, useState } from "react";
 import { COMPOSER_SELECT_TRIGGER } from "./composer-select.ts";
+import {
+	FullAccessSelectionProvider,
+	isFullAccessEquivalent,
+	useFullAccessSelectionGuard,
+} from "./full-access-warning.tsx";
 
 export interface ComposerSettingItem {
 	description?: string | null;
@@ -76,7 +81,20 @@ function activeItemName(section: ComposerSettingsSection): string | undefined {
 	return activeItem(section)?.name;
 }
 
-export function ComposerSettingsMenu({
+export function ComposerSettingsMenu(props: ComposerSettingsMenuProps) {
+	const agentSection = props.sections.find(
+		(section) => section.key === "agent"
+	);
+	return (
+		<FullAccessSelectionProvider
+			agentName={agentSection ? activeItemName(agentSection) : undefined}
+		>
+			<ComposerSettingsMenuContent {...props} />
+		</FullAccessSelectionProvider>
+	);
+}
+
+function ComposerSettingsMenuContent({
 	sections,
 	className,
 	compact = false,
@@ -88,6 +106,7 @@ export function ComposerSettingsMenu({
 	align = "start",
 }: ComposerSettingsMenuProps) {
 	const [open, setOpen] = useState(false);
+	const selectionGuard = useFullAccessSelectionGuard();
 
 	const visibleSections = sections.filter((s) => s.items.length > 0);
 	if (visibleSections.length === 0) {
@@ -110,8 +129,15 @@ export function ComposerSettingsMenu({
 		);
 
 	const closeAfter = (section: ComposerSettingsSection) => (id: string) => {
-		section.onChange(id);
-		setOpen(false);
+		const item = section.items.find((candidate) => candidate.id === id);
+		const apply = () => {
+			section.onChange(id);
+			setOpen(false);
+		};
+		if (item && isFullAccessEquivalent(item, section.label)) {
+			setOpen(false);
+		}
+		selectionGuard?.request(item ?? { id, name: id }, apply, section.label);
 	};
 
 	const renderRow =
@@ -160,7 +186,22 @@ export function ComposerSettingsMenu({
 	return (
 		<DropdownMenu onOpenChange={setOpen} open={open}>
 			{trigger ? (
-				<DropdownMenuTrigger render={trigger} />
+				<DropdownMenuTrigger
+					render={
+						isValidElement(trigger) ? (
+							trigger
+						) : (
+							<Button
+								className={cn(COMPOSER_SELECT_TRIGGER, className)}
+								size="sm"
+								type="button"
+								variant="ghost"
+							>
+								{trigger}
+							</Button>
+						)
+					}
+				/>
 			) : (
 				<DropdownMenuTrigger
 					render={

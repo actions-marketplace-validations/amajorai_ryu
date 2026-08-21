@@ -403,12 +403,13 @@ pub async fn resolve_permissions(client: &reqwest::Client, user_id: &str) -> Has
 
 use std::sync::RwLock;
 
-/// The org this managed node resolved to, cached after a successful register so
-/// `GET /api/system/info` can surface it. `None` until registration succeeds.
-static NODE_ORG: RwLock<Option<RegisteredOrg>> = RwLock::new(None);
+/// The org and stable node scope this managed node resolved to, cached after a
+/// successful register so request authorization can bind to the exact node.
+/// `None` until registration succeeds.
+static REGISTERED_NODE: RwLock<Option<RegisteredNode>> = RwLock::new(None);
 
 /// The org a managed node is bound to (the registration result).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct RegisteredOrg {
     pub id: String,
     pub name: String,
@@ -416,9 +417,38 @@ pub struct RegisteredOrg {
     pub slug: Option<String>,
 }
 
+/// The node boundary returned by the control plane. The `node_id` is stable
+/// across bootstrap -> durable gateway credential rotation; `team_id` and
+/// `owner_user_id` identify the node's authorization scope.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct RegisteredNode {
+    pub org: RegisteredOrg,
+    pub node_id: String,
+    pub scope: NodeScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeScope {
+    Org,
+    Team,
+    Personal,
+}
+
 #[derive(Debug, Deserialize)]
 struct ResolveOrgResponse {
     organization: ResolveOrg,
+    /// The control plane's live managed-inference entitlement for this org.
+    /// Core uses this server-authenticated value for paid-only profile work;
+    /// the desktop preference remains only the local-node fallback.
+    #[serde(default, rename = "managedInference")]
+    managed_inference: bool,
+    #[serde(default)]
+    credential: Option<ResolveCredential>,
     /// F7: present only when the control plane just exchanged a single-use
     /// BOOTSTRAP gateway credential for a durable per-node one. When set, the node
     /// must adopt this durable token for the gateway data plane; the bootstrap it
@@ -426,6 +456,17 @@ struct ResolveOrgResponse {
     /// (the field absent) decodes unchanged.
     #[serde(default, rename = "credentialRotation")]
     credential_rotation: Option<CredentialRotation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveCredential {
+    id: String,
+    #[serde(default, rename = "nodeId")]
+    node_id: Option<String>,
+    #[serde(default, rename = "teamId")]
+    team_id: Option<String>,
+    #[serde(default, rename = "ownerUserId")]
+    owner_user_id: Option<String>,
 }
 
 /// F7: the durable gateway token minted in exchange for a bootstrap token.
@@ -451,7 +492,12 @@ pub fn is_managed_node() -> bool {
 
 /// The org this managed node is bound to, if registration has succeeded.
 pub fn registered_org() -> Option<RegisteredOrg> {
-    NODE_ORG.read().ok().and_then(|g| g.clone())
+    registered_node().map(|node| node.org)
+}
+
+/// The exact managed node scope, if registration has succeeded.
+pub fn registered_node() -> Option<RegisteredNode> {
+    REGISTERED_NODE.read().ok().and_then(|g| g.clone())
 }
 
 // ── F7: durable-token persistence (restart survival) ─────────────────────────
@@ -590,6 +636,15 @@ pub async fn register_managed_node(client: &reqwest::Client) -> Result<Option<Re
         .await
         .map_err(|e| anyhow!("managed-node register decode failed: {e}"))?;
 
+    // A managed node gets the paid gate from the authenticated control-plane
+    // handshake, not from a client preference. Local nodes still receive the
+    // same flag from the desktop entitlement sync path.
+    crate::entitlement::set_managed_inference_entitled(if body.managed_inference {
+        "true"
+    } else {
+        "false"
+    });
+
     // F7 (armed): if the control plane exchanged our single-use bootstrap KEY for a
     // durable per-node token, adopt it for BOTH gateway roles and persist it so a
     // restart survives.
@@ -631,8 +686,33 @@ pub async fn register_managed_node(client: &reqwest::Client) -> Result<Option<Re
         name: body.organization.name,
         slug: body.organization.slug,
     };
-    if let Ok(mut guard) = NODE_ORG.write() {
-        *guard = Some(org.clone());
+    let (node_id, team_id, owner_user_id) = match body.credential {
+        Some(credential) => (
+            credential.node_id.unwrap_or(credential.id),
+            credential.team_id,
+            credential.owner_user_id,
+        ),
+        // The production control plane always returns a credential block. Keep
+        // old test/dev control planes usable with one deterministic legacy node
+        // identity rather than failing registration outright.
+        None => (format!("legacy:org:{}", org.id), None, None),
+    };
+    let scope = if owner_user_id.is_some() {
+        NodeScope::Personal
+    } else if team_id.is_some() {
+        NodeScope::Team
+    } else {
+        NodeScope::Org
+    };
+    let node = RegisteredNode {
+        org: org.clone(),
+        node_id,
+        scope,
+        team_id,
+        owner_user_id,
+    };
+    if let Ok(mut guard) = REGISTERED_NODE.write() {
+        *guard = Some(node);
     }
     Ok(Some(org))
 }
@@ -708,12 +788,14 @@ mod tests {
         let json = r#"{
             "organization": { "id": "org_123", "name": "Acme", "slug": "acme" },
             "credential": { "id": "c1", "name": "node", "keyPrefix": "rgw_abc" },
+            "managedInference": true,
             "policy": { "rules": {}, "lockedFields": [] }
         }"#;
         let parsed: ResolveOrgResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.organization.id, "org_123");
         assert_eq!(parsed.organization.name, "Acme");
         assert_eq!(parsed.organization.slug.as_deref(), Some("acme"));
+        assert!(parsed.managed_inference);
     }
 
     #[test]

@@ -36,6 +36,7 @@ import {
 	type BuilderBodyFields,
 	useBuilderRuntime,
 } from "@/src/hooks/useBuilderRuntime.ts";
+import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import {
 	sidebarFloatingChrome,
 	useSidebarVariant,
@@ -140,7 +141,7 @@ function composeWithContext(content: string, block: string): string {
 
 /**
  * Build the chat-stream request body for one turn. In builder mode it injects the
- * builder preamble + drives the `*_builder__*` tools with `persist: false`; in
+ * builder preamble + drives the `*_builder.*` tools with `persist: false`; in
  * generic mode it carries the workspace cwd and persists normally. Top-level so
  * the transport closure — and the panel — stay lean.
  */
@@ -300,7 +301,7 @@ function GenericAssistantExtras(props: {
 /**
  * Scan messages (newest first) for the latest still-unresolved tool-permission
  * request an agent emitted (a `data-ryu-permission` part) — how the agent builder
- * gates `agent_builder__configure_agent`. Top-level to keep the panel lean.
+ * gates `agent_builder.configure_agent`. Top-level to keep the panel lean.
  */
 function findActivePermission(
 	messages: UIMessage[],
@@ -335,7 +336,7 @@ function findActivePermission(
  * It is ALSO context-aware: when a builder page (agent edit, workflows) registers
  * a builder takeover in the assistant store (`useAssistantBuilder`), this one
  * panel becomes that page's builder — injecting the builder preamble, driving the
- * `*_builder__*` tools with `persist: false`, showing the tool-permission prompt,
+ * `*_builder.*` tools with `persist: false`, showing the tool-permission prompt,
  * and refreshing the page after each settled turn. That is what replaced the old
  * inline `AgentBuilderChat` / `WorkflowBuilderChat` panes. When no builder is
  * registered it is the plain "Ask Ryu" chat (page context chips, onboarding,
@@ -353,6 +354,7 @@ function findActivePermission(
  * morph launcher (which owns the floating window's glass frame + animation).
  */
 export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
+	const interfaceLevel = useInterfaceLevel();
 	const mode = useAssistantStore((s) => s.mode);
 	const builder = useAssistantStore((s) => s.builder);
 	const storeConvId = useAssistantStore((s) => s.conversationId);
@@ -383,7 +385,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 
 	// Agent + model selection, shared with the main chat composer via the same
 	// per-agent storage. Builder mode uses its own key (defaults to `ryu`, which
-	// reliably runs the tool loop the `*_builder__*` tools need). Both runtimes are
+	// reliably runs the tool loop the `*_builder.*` tools need). Both runtimes are
 	// created unconditionally (no conditional hooks) and the active one is picked.
 	const genericRuntime = useBuilderRuntime(DEFAULT_AGENT_KEY);
 	const builderRuntime = useBuilderRuntime(BUILDER_AGENT_KEY);
@@ -395,6 +397,9 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	const { agents } = useAgents();
 	const genericLogo = useMemo<EmptyStateLogo>(() => {
 		const agent = agents.find((a) => a.id === genericRuntime.agentId);
+		if (agent?.avatarGlyph) {
+			return { kind: "glyph", glyph: agent.avatarGlyph };
+		}
 		if (agent?.avatarUrl) {
 			return { kind: "image", url: agent.avatarUrl };
 		}
@@ -586,7 +591,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	);
 
 	// Multimodal (speak): synthesize an assistant reply via Core's `/api/voice/speak`
-	// and play it, honouring the Voice-tab TTS engine/voice. A second click on the
+	// and play it, honouring the Voice-tab Audio engine/voice. A second click on the
 	// same turn toggles playback off (`audio.play()` resolves at start, so the hover
 	// button re-enables mid-playback). A missing TTS sidecar throws; the message
 	// toolbar's speak button swallows it (silent no-op), so the surface degrades
@@ -637,6 +642,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	// textarea and only compactifies the agent-picker trigger.
 	const genericComposer = useComposerSlot(genericRuntime, {
 		target: chatTarget,
+		surface: "ask-ryu",
 		compactTrigger: true,
 		conversationId: convId,
 		isWorking: status === "streaming" || status === "submitted",
@@ -646,6 +652,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	});
 	const builderComposer = useComposerSlot(builderRuntime, {
 		target: chatTarget,
+		surface: "dashboard",
 		compactTrigger: true,
 		placeholder: BUILDER_PLACEHOLDER,
 		conversationId: activeConvId,
@@ -724,9 +731,9 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 		}
 	}, [status, refresh]);
 
-	// Inline tool-permission prompt (Zed-style allow/deny) — surfaced whenever an
-	// agent asks to run a tool, which is how the agent builder gates
-	// `agent_builder__configure_agent`. Harmless (and useful) in generic chat too.
+	// Active tool-permission prompt (Zed-style allow/deny) — passed into the
+	// shared composer surface whenever the agent builder gates
+	// `agent_builder.configure_agent`. It is also available in generic chat.
 	const [resolvedPermissions, setResolvedPermissions] = useState<Set<string>>(
 		() => new Set()
 	);
@@ -748,6 +755,23 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 			respondPermission(chatTarget, requestId, optionId).catch(() => undefined);
 		},
 		[activePermission, chatTarget]
+	);
+	const permissionComposerPrompt = useMemo(
+		() =>
+			activePermission
+				? {
+						content: (
+							<PermissionPrompt
+								embedded
+										onRespond={handleRespondPermission}
+										permission={activePermission}
+										showTechnicalDetails={interfaceLevel !== "simple"}
+									/>
+						),
+						id: `permission:${activePermission.requestId}`,
+					}
+				: undefined,
+		[activePermission, handleRespondPermission]
 	);
 
 	// The generic "current page" context derived from the focused tab, offered
@@ -864,6 +888,16 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 			setActiveConversationId,
 			sendMessage,
 		]
+	);
+	const handleAgentUiSubmit = useCallback(
+		(value: unknown) => {
+			const content =
+				typeof value === "string"
+					? value
+					: (JSON.stringify(value) ?? String(value));
+			return handleSend({ role: "user", content });
+		},
+		[handleSend]
 	);
 
 	// An app asked a question on the user's behalf (`assistant.open({ prompt })`)
@@ -1027,19 +1061,18 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 			)}
 
 			<div className="relative min-h-0 flex-1 overflow-hidden">
-				{activePermission ? (
-					<PermissionPrompt
-						onRespond={handleRespondPermission}
-						permission={activePermission}
-					/>
-				) : null}
 				<AgentChat
 					attachments={activeComposer.attachments}
+					composerMenuGroups={activeComposer.composerMenuGroups}
+					composerPrompt={permissionComposerPrompt}
 					emptyStateHeader={emptyHeader}
 					emptyStatePosition="center"
 					error={error ?? undefined}
 					key={`${activeNode.url}-${activeConvId}`}
 					messages={messages}
+					mentionItems={activeComposer.mentionItems}
+					onAgentUiSubmit={handleAgentUiSubmit}
+					onComposerMenuSelect={activeComposer.onComposerMenuSelect}
 					onRetryGeneration={handleRetryGeneration}
 					onSend={handleSend}
 					onSpeak={handleSpeak}

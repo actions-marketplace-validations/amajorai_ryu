@@ -10,10 +10,10 @@
 // `icon` fallback glyph (shown when an item has no logo of its own).
 
 import {
-	GridIcon,
-	Mortarboard01Icon,
+	BrainIcon,
 	Package01Icon,
-	PuzzleIcon,
+	PlugSocketIcon,
+	PotionIcon,
 	ServerStack01Icon,
 	Target01Icon,
 	WorkflowCircle06Icon,
@@ -32,10 +32,10 @@ export type CatalogRealm =
 
 /** Realm → glyph. The tab nav and the card fallback both read from here. */
 export const REALM_ICONS: Record<CatalogRealm, IconSvgElement> = {
-	apps: GridIcon,
-	plugins: PuzzleIcon,
-	models: Package01Icon,
-	skills: Mortarboard01Icon,
+	apps: Package01Icon,
+	plugins: PlugSocketIcon,
+	models: BrainIcon,
+	skills: PotionIcon,
 	mcp: ServerStack01Icon,
 	agents: Target01Icon,
 	workflows: WorkflowCircle06Icon,

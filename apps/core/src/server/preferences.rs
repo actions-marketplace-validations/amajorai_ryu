@@ -156,6 +156,25 @@ impl PreferencesStore {
         Ok(())
     }
 
+    /// Delete a preference and notify live subscribers when a row existed.
+    ///
+    /// The empty event value is the existing SSE representation for a cleared
+    /// key; callers that need to distinguish clear from setting an empty value
+    /// should reread the key, which also keeps secret values out of the event.
+    pub async fn delete(&self, key: &str) -> Result<()> {
+        let removed = {
+            let conn = self.conn.lock().await;
+            conn.execute("DELETE FROM preferences WHERE key = ?1", params![key])?
+        };
+        if removed > 0 {
+            let _ = self.tx.send(PreferenceEvent {
+                key: key.to_owned(),
+                value: String::new(),
+            });
+        }
+        Ok(())
+    }
+
     /// Subscribe to live preference changes (used by the SSE endpoint).
     pub fn subscribe(&self) -> broadcast::Receiver<PreferenceEvent> {
         self.tx.subscribe()
@@ -285,6 +304,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored, "dark");
+    }
+
+    #[tokio::test]
+    async fn delete_removes_preference_and_notifies_subscribers() {
+        let store = in_memory_store();
+        store.set("theme", "dark").await.unwrap();
+        let mut events = store.subscribe();
+
+        store.delete("theme").await.unwrap();
+
+        assert_eq!(store.get("theme").await.unwrap(), None);
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.key, "theme");
+        assert!(event.value.is_empty());
     }
 
     #[test]

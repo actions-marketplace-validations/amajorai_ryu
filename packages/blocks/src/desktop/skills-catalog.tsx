@@ -15,7 +15,6 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { StatusBadge } from "@ryu/ui/components/status-badge";
 import { Switch } from "@ryu/ui/components/switch";
 
@@ -95,10 +94,8 @@ export function SkillInstallControl({
 }) {
 	if (!installed) {
 		return (
-			<Button disabled={installing} onClick={onInstall} size="sm">
-				{installing ? (
-					<Spinner className="size-4" />
-				) : (
+			<Button loading={installing} onClick={onInstall} size="sm">
+				{!installing && (
 					<HugeiconsIcon className="size-4" icon={Download01Icon} />
 				)}
 				{installing ? "Adding…" : "Add skill"}

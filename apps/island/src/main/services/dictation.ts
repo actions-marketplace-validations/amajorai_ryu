@@ -114,7 +114,7 @@ async function insertText(text: string, prefs: DictationPrefs): Promise<void> {
 		await callTool({
 			agent_id: GHOST_AGENT_ID,
 			arguments: { keys: pasteKeysFor(prefs) },
-			tool: "ghost__ghost_hotkey",
+			tool: "ghost.ghost_hotkey",
 		});
 		if (previous !== null) {
 			setTimeout(() => {
@@ -125,14 +125,14 @@ async function insertText(text: string, prefs: DictationPrefs): Promise<void> {
 		await callTool({
 			agent_id: GHOST_AGENT_ID,
 			arguments: { text },
-			tool: "ghost__ghost_type",
+			tool: "ghost.ghost_type",
 		});
 	}
 	if (prefs.autoSend) {
 		await callTool({
 			agent_id: GHOST_AGENT_ID,
 			arguments: { key: "enter" },
-			tool: "ghost__ghost_press",
+			tool: "ghost.ghost_press",
 		});
 	}
 }

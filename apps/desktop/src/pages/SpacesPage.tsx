@@ -40,7 +40,7 @@ export default function SpacesPage({
 	/** When set (e.g. opening a specific Space from the Library), select this
 	 * space on mount instead of defaulting to the first one. */
 	initialSpaceId?: string;
-} = {}) {
+	}) {
 	const {
 		appDisabled,
 		spaces,
@@ -447,6 +447,10 @@ export default function SpacesPage({
 			detail={detail}
 			error={error}
 			loading={loading}
+			onCreateSpace={() => openTab("/library/space", { title: "Spaces" })}
+			onRetry={() => {
+				reload().catch(() => undefined);
+			}}
 			onSelectSpace={setSelectedId}
 			selectedId={selectedId}
 			spaces={visibleSpaces.map((s) => ({

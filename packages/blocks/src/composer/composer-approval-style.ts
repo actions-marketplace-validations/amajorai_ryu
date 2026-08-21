@@ -9,6 +9,7 @@ import type {
 	ComposerSettingItem,
 	ItemDecoration,
 } from "./composer-settings-menu.tsx";
+import { isFullAccessEquivalent } from "./full-access-warning.tsx";
 
 const PLAN = {
 	icon: Task01Icon,
@@ -36,15 +37,7 @@ export function approvalModeStyle(
 ): ItemDecoration | undefined {
 	const hay = `${item.id} ${item.name}`.toLowerCase();
 
-	if (
-		hay.includes("bypass") ||
-		hay.includes("full access") ||
-		hay.includes("full-access") ||
-		hay.includes("fullaccess") ||
-		hay.includes("danger") ||
-		hay.includes("yolo") ||
-		hay.includes("skip")
-	) {
+	if (isFullAccessEquivalent(item)) {
 		return BYPASS;
 	}
 	if (hay.includes("plan")) {

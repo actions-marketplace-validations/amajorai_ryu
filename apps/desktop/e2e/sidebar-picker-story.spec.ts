@@ -177,8 +177,8 @@ test.describe("spaces picker body — real component in isolation", () => {
 		await page.goto(SPACES_URL);
 		await expect(bucket(page, "Today")).toBeVisible();
 		await expect(bucket(page, "Yesterday")).toBeVisible();
-		// `SpaceDocument` carries no `updatedAt`, so an unstamped read would land
-		// every row in "Undated" — this asserts `createdAt` is what is read.
+		// Page rows carry their latest edit time, with creation as the legacy fallback;
+		// an unstamped read would land every row in "Undated".
 		await expect(bucket(page, "Undated")).toHaveCount(0);
 	});
 

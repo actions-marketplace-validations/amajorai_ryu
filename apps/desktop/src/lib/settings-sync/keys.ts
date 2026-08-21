@@ -113,6 +113,16 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 		label: "Messaging-style agent rows",
 		group: "appearance",
 	},
+	{
+		key: "ryu:sidebar-chat-preview",
+		label: "Show chat activity in sidebar",
+		group: "appearance",
+	},
+	{
+		key: "ryu:chat-picker-placement",
+		label: "Chat model and agent picker placement",
+		group: "appearance",
+	},
 	{ key: "ryu:diff-view-prefs", label: "Diff viewer", group: "appearance" },
 	{ key: "ryu:file-tree-prefs", label: "File tree", group: "appearance" },
 	{ key: "ryu:usage-bar-prefs", label: "Usage meter", group: "appearance" },
@@ -194,6 +204,21 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 		label: "Search overflow in a popover",
 		group: "layout",
 	},
+	{
+		key: "ryu:tab-search-button",
+		label: "Show tab search button",
+		group: "layout",
+	},
+	{
+		key: "ryu:tab-dropdown",
+		label: "Show tabs as a dropdown",
+		group: "layout",
+	},
+	{
+		key: "ryu:notification-layout",
+		label: "Notification layout",
+		group: "layout",
+	},
 	// Saved PANE SHAPES, not the live layout: a preset is id-free and path-free
 	// (`lib/splitPresets.ts`), so "one tall pane beside two stacked" means the
 	// same thing on every machine. The open tabs and their arrangement
@@ -215,6 +240,11 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 	{
 		key: "ryu:auto-hide-titlebar",
 		label: "Auto-hide title bar",
+		group: "layout",
+	},
+	{
+		key: "ryu:floating-tabs",
+		label: "Floating tabs",
 		group: "layout",
 	},
 
@@ -304,8 +334,8 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 		label: "Show transcript in voice mode",
 		group: "chat",
 	},
-	{ key: "ryu.tts.engine", label: "Text-to-speech engine", group: "chat" },
-	{ key: "ryu.tts.voice", label: "Text-to-speech voice", group: "chat" },
+	{ key: "ryu.tts.engine", label: "Audio engine", group: "chat" },
+	{ key: "ryu.tts.voice", label: "Audio voice", group: "chat" },
 ];
 
 const SYNCABLE_SET = new Set(SYNCABLE_KEYS.map((k) => k.key));

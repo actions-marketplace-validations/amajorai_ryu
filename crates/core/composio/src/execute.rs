@@ -4,7 +4,7 @@
 //! [`super::McpRegistry::list_all_tools`]. Instead [`super::McpRegistry::search`]
 //! pulls a capped slice of Composio actions live (via
 //! [`crate::catalog::list_actions`]) when a key is configured, and the
-//! model executes a chosen action by its fully-qualified id `composio__<slug>`.
+//! model executes a chosen action by its fully-qualified id `composio.<slug>`.
 //!
 //! Placement (CLAUDE.md §1): running a Composio action is *what runs* → Core.
 //! The allowlist verdict / budget / audit is *what's allowed/measured* → Gateway
@@ -23,7 +23,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 /// Server name for Composio tools. A fully-qualified Composio tool id is
-/// `composio__<slug>`. Not registered as an MCP server; resolved by id prefix.
+/// `composio.<slug>`. Not registered as an MCP server; resolved by id prefix.
 pub const SERVER_NAME: &str = "composio";
 
 /// Env that selects the default Composio entity when no per-request `user_id` is

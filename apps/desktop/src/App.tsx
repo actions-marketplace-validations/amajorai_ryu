@@ -2,14 +2,19 @@ import { ditherAvatarSeed } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import { Logo as OrbLogo } from "@ryu/ui/components/logo.tsx";
 import { Toaster, toast } from "@ryu/ui/components/sileo.tsx";
 import { DEFAULT_THEME_MODE } from "@ryu/ui/theme/prefs.ts";
+import {
+	type QuestEventSurface,
+	recordQuestEvent,
+} from "@ryuhq/core-client/quest-events";
 import { ThemeProvider } from "next-themes";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "@/contexts/auth-context.tsx";
 import {
 	authClient,
 	BACKEND_URL,
 	clearSessionToken,
+	listAccounts,
 	TOKEN_KEY,
 	useSession,
 	vaultHydrated,
@@ -32,10 +37,14 @@ import { startSettingsSync } from "@/src/lib/settings-sync/engine.ts";
 // The gate makes an early subscription wait for the bridge instead of rejecting.
 import { listenWhenReady, withTauri } from "@/src/lib/tauri-ready.ts";
 import { AgentationToolbar } from "./components/AgentationToolbar.tsx";
+import { BotTerminologyProvider } from "./components/BotTerminologyProvider.tsx";
 import { CrashBoundary } from "./components/CrashBoundary.tsx";
 import Layout from "./components/layout/Layout.tsx";
 import { PageWrapper } from "./components/layout/PageWrapper.tsx";
+import { MediaPipWindow } from "./components/media/MediaPip.tsx";
 import { GlobalContextMenu } from "./components/shell/GlobalContextMenu.tsx";
+import { DesktopStartupChooser } from "./components/startup/DesktopStartupChooser.tsx";
+import { useAcpKeepAwake } from "./hooks/useAcpKeepAwake.ts";
 import { initBackgroundCustomization } from "./hooks/useBackgroundCustomization.ts";
 import { initChromeShadows } from "./hooks/useChromeShadows.ts";
 import { initInvertedBackgrounds } from "./hooks/useInvertedBackgrounds.ts";
@@ -48,6 +57,10 @@ import {
 } from "./lib/installer-progress.ts";
 import { isOnboardingActive } from "./lib/onboarding-active.ts";
 import { useReleaseChannel } from "./lib/release-channel.ts";
+import {
+	readStartupSelectionPreferences,
+	startupSelectionSteps,
+} from "./lib/startup-selection.ts";
 import CompanionPage from "./pages/CompanionPage.tsx";
 import LoginPage from "./pages/LoginPage.tsx";
 import OnboardingPage from "./pages/OnboardingPage.tsx";
@@ -86,14 +99,25 @@ function ignoreSubscribeFailure(error: unknown): void {
 // definite "pending" and on sign-out.
 const WAITLIST_APPROVED_KEY = "ryu_waitlist_approved";
 
-export default function App() {
+export interface DesktopAppProps {
+	/** The product surface reporting shared waitlist referral activity. */
+	surface?: QuestEventSurface;
+}
+
+export default function App({ surface = "desktop" }: DesktopAppProps = {}) {
 	// Companion overlay is a completely separate surface — no auth, no layout.
 	// Wrap both surfaces in the crash boundary so an unhandled render error is
 	// caught (recoverable fallback, not a white screen) and reported when the user
 	// consented to crash reports.
 	return (
 		<CrashBoundary>
-			{WINDOW_LABEL === "companion" ? <CompanionOverlay /> : <MainApp />}
+			{WINDOW_LABEL === "companion" ? (
+				<CompanionOverlay />
+			) : WINDOW_LABEL === "media-pip" ? (
+				<MediaPipOverlay />
+			) : (
+				<MainApp surface={surface} />
+			)}
 		</CrashBoundary>
 	);
 }
@@ -106,8 +130,25 @@ function CompanionOverlay() {
 			enableSystem
 			themes={["light", "dark", "system"]}
 		>
-			<Toaster position="bottom-right" theme="system" />
-			<CompanionPage />
+			<BotTerminologyProvider>
+				<Toaster position="bottom-right" theme="system" />
+				<CompanionPage />
+			</BotTerminologyProvider>
+		</ThemeProvider>
+	);
+}
+
+function MediaPipOverlay() {
+	return (
+		<ThemeProvider
+			attribute="class"
+			defaultTheme={DEFAULT_THEME_MODE}
+			enableSystem
+			themes={["light", "dark", "system"]}
+		>
+			<BotTerminologyProvider>
+				<MediaPipWindow />
+			</BotTerminologyProvider>
 		</ThemeProvider>
 	);
 }
@@ -149,11 +190,18 @@ function WindowTitleManager() {
 	return null;
 }
 
-function MainApp() {
+function MainApp({ surface }: { surface: QuestEventSurface }) {
+	useAcpKeepAwake();
 	const setCoreStatus = useAppStore((state) => state.setCoreStatus);
 	const coreStatus = useAppStore((state) => state.coreStatus);
 	const initNodes = useNodeStore((s) => s.init);
+	const startupNodes = useNodeStore((s) => s.nodes);
 	const { data: session, isPending } = useSession();
+	const [vaultReady, setVaultReady] = useState(false);
+	const [nodesReady, setNodesReady] = useState(false);
+	const [startupSelectionStatus, setStartupSelectionStatus] = useState<
+		"loading" | "show" | "ready"
+	>("loading");
 	const pendingAuthToken = useAppStore((s) => s.pendingAuthToken);
 	const setPendingAuthToken = useAppStore((s) => s.setPendingAuthToken);
 	const isAuthenticated = useAppStore((s) => s.isAuthenticated);
@@ -174,6 +222,18 @@ function MainApp() {
 	}, [isPending]);
 
 	useEffect(() => {
+		let active = true;
+		void vaultHydrated.then(() => {
+			if (active) {
+				setVaultReady(true);
+			}
+		});
+		return () => {
+			active = false;
+		};
+	}, []);
+
+	useEffect(() => {
 		// Initialize product analytics once. Gated: a no-op unless a PostHog key is
 		// configured AND the opt-out (seeded synchronously from the localStorage
 		// mirror of `product-analytics-enabled`) is on. The Privacy tab seeds the
@@ -188,6 +248,7 @@ function MainApp() {
 		// per-key timestamps stay accurate for the moment sync is switched on) and
 		// only uploads when the user has opted in.
 		const stopSettingsSync = startSettingsSync();
+		let active = true;
 		let unlisten: (() => void) | undefined;
 		// The gate inside the store makes a too-early `list_nodes` wait for Tauri's
 		// bridge, so this no longer rejects on a slow cold start. It can still fail
@@ -196,12 +257,21 @@ function MainApp() {
 		// so the chain terminates in a catch rather than in the window.
 		initNodes()
 			.then((fn) => {
+				if (!active) {
+					fn();
+					return;
+				}
 				unlisten = fn;
+				setNodesReady(true);
 			})
 			.catch((error: unknown) => {
 				console.error("node store init failed", error);
+				if (active) {
+					setNodesReady(true);
+				}
 			});
 		return () => {
+			active = false;
 			unlisten?.();
 			stopSettingsSync();
 		};
@@ -476,6 +546,65 @@ function MainApp() {
 	// (but a definite "pending" clears it). The 20s poll lets a fresh approval —
 	// or a recovered server — through without a restart.
 	const authed = !!session || isAuthenticated;
+	const reportedQuestEventKeys = useRef(new Set<string>());
+
+	useEffect(() => {
+		if (!(authed && vaultReady)) {
+			return;
+		}
+		const token = localStorage.getItem(TOKEN_KEY);
+		if (!token) {
+			return;
+		}
+		const eventKey = `${surface}:${session?.user?.id ?? "active-session"}`;
+		if (reportedQuestEventKeys.current.has(eventKey)) {
+			return;
+		}
+		reportedQuestEventKeys.current.add(eventKey);
+		const target = { token, url: BACKEND_URL };
+		const events = [
+			recordQuestEvent(target, "referral_sync", surface),
+			...(surface === "desktop"
+				? [recordQuestEvent(target, "desktop_app_opened", surface)]
+				: []),
+		];
+		void Promise.allSettled(events);
+	}, [authed, session?.user?.id, surface, vaultReady]);
+
+	const startupAccounts = vaultReady ? listAccounts() : [];
+	const startupPreferences = readStartupSelectionPreferences();
+	const startupNodeNames = startupNodes.map((node) => node.name).join("\u001f");
+	const startupAccountIds = startupAccounts
+		.map((account) => account.userId)
+		.join("\u001f");
+
+	useEffect(() => {
+		if (!authed) {
+			setStartupSelectionStatus("ready");
+			return;
+		}
+		if (!(vaultReady && nodesReady)) {
+			setStartupSelectionStatus("loading");
+			return;
+		}
+		const steps = startupSelectionSteps({
+			accounts: startupAccounts,
+			defaultAccountId: startupPreferences.defaultAccountId,
+			defaultNodeName: startupPreferences.defaultNodeName,
+			mode: startupPreferences.mode,
+			nodes: startupNodes,
+		});
+		setStartupSelectionStatus(steps.account || steps.node ? "show" : "ready");
+	}, [
+		authed,
+		nodesReady,
+		startupAccountIds,
+		startupNodeNames,
+		startupPreferences.defaultAccountId,
+		startupPreferences.defaultNodeName,
+		startupPreferences.mode,
+		vaultReady,
+	]);
 	const [waitlistGate, setWaitlistGate] = useState<
 		"loading" | "approved" | "pending"
 	>("loading");
@@ -494,6 +623,11 @@ function MainApp() {
 			}
 		};
 		const check = async () => {
+			if (session?.user?.isAnonymous) {
+				setWaitlistGate("approved");
+				stop();
+				return;
+			}
 			let me: Awaited<ReturnType<typeof fetchWaitlistMe>> = null;
 			try {
 				me = await fetchWaitlistMe();
@@ -532,15 +666,16 @@ function MainApp() {
 					// get-session answers 200 with a null body when the credentials are
 					// dead, so status alone can't tell "signed out" from "signed in" —
 					// checking only the status left a stuck account looking healthy.
+					const data = (res.ok ? await res.json().catch(() => null) : null) as {
+						user?: { isAnonymous?: boolean };
+					} | null;
+					if (data?.user?.isAnonymous) {
+						setWaitlistGate("approved");
+						stop();
+						return;
+					}
 					const dead =
-						res.status === 401 ||
-						res.status === 403 ||
-						(res.ok &&
-							!(
-								(await res.json().catch(() => null)) as {
-									user?: unknown;
-								} | null
-							)?.user);
+						res.status === 401 || res.status === 403 || (res.ok && !data?.user);
 					if (!active) {
 						return;
 					}
@@ -563,7 +698,7 @@ function MainApp() {
 			active = false;
 			stop();
 		};
-	}, [authed, setIsAuthenticated]);
+	}, [authed, session?.user?.isAnonymous, setIsAuthenticated]);
 
 	useEffect(() => {
 		// `initDialogOverlayBlur()` is deliberately NOT here — it runs in main.tsx
@@ -645,6 +780,9 @@ function MainApp() {
 	// the app and then bounce a pending user to the queue screen.
 	const waitlistResolving = showApp && waitlistGate === "loading";
 	const waitlisted = showApp && waitlistGate === "pending";
+	const startupSelectionLoading =
+		authed && startupSelectionStatus === "loading";
+	const startupChooserVisible = authed && startupSelectionStatus === "show";
 
 	return (
 		<ThemeProvider
@@ -653,62 +791,77 @@ function MainApp() {
 			enableSystem
 			themes={["light", "dark", "system"]}
 		>
-			<ThemeWatcher />
-			<WindowTitleManager />
-			<Toaster position="bottom-right" theme="system" />
-			<AgentationToolbar />
-			<GlobalContextMenu>
-				{showPreflight ? (
-					<PageWrapper>
-						<PreflightPage />
-					</PageWrapper>
-				) : (isPending && !sessionSettledOnce) || waitlistResolving ? (
-					<PageWrapper>
-						<div
-							className="flex h-full w-full items-center justify-center"
-							data-tauri-drag-region
-						>
-							<OrbLogo size="56px" variant="shimmer" />
-						</div>
-					</PageWrapper>
-				) : waitlisted ? (
-					<PageWrapper>
-						<WaitlistPage
-							avatarSeed={ditherAvatarSeed({
-								id: session?.user?.id,
-								email: session?.user?.email,
-								name: session?.user?.name,
-							})}
-							avatarUrl={session?.user?.image ?? null}
-							userName={session?.user?.name ?? null}
-							userNameLoading={isPending}
-						/>
-					</PageWrapper>
-				) : showApp ? (
-					<AuthProvider>
+			<BotTerminologyProvider>
+				<ThemeWatcher />
+				<WindowTitleManager />
+				<Toaster position="bottom-right" theme="system" />
+				<AgentationToolbar />
+				<GlobalContextMenu>
+					{startupSelectionLoading ? (
 						<PageWrapper>
-							<EntitlementProvider>
-								<MemoryRouter
-									initialEntries={[
-										localStorage.getItem("ryu_onboarding_complete") === "true"
-											? "/chat"
-											: "/onboarding",
-									]}
-								>
-									<Routes>
-										<Route element={<OnboardingPage />} path="/onboarding" />
-										<Route element={<Layout />} path="/*" />
-									</Routes>
-								</MemoryRouter>
-							</EntitlementProvider>
+							<div
+								className="flex h-full w-full items-center justify-center"
+								data-tauri-drag-region
+							>
+								<OrbLogo size="56px" variant="shimmer" />
+							</div>
 						</PageWrapper>
-					</AuthProvider>
-				) : (
-					<PageWrapper>
-						<LoginPage />
-					</PageWrapper>
-				)}
-			</GlobalContextMenu>
+					) : startupChooserVisible ? (
+						<PageWrapper>
+							<DesktopStartupChooser />
+						</PageWrapper>
+					) : showPreflight ? (
+						<PageWrapper>
+							<PreflightPage />
+						</PageWrapper>
+					) : (isPending && !sessionSettledOnce) || waitlistResolving ? (
+						<PageWrapper>
+							<div
+								className="flex h-full w-full items-center justify-center"
+								data-tauri-drag-region
+							>
+								<OrbLogo size="56px" variant="shimmer" />
+							</div>
+						</PageWrapper>
+					) : waitlisted ? (
+						<PageWrapper>
+							<WaitlistPage
+								avatarSeed={ditherAvatarSeed({
+									id: session?.user?.id,
+									email: session?.user?.email,
+									name: session?.user?.name,
+								})}
+								avatarUrl={session?.user?.image ?? null}
+								userName={session?.user?.name ?? null}
+								userNameLoading={isPending}
+							/>
+						</PageWrapper>
+					) : showApp ? (
+						<AuthProvider>
+							<PageWrapper>
+								<EntitlementProvider>
+									<MemoryRouter
+										initialEntries={[
+											localStorage.getItem("ryu_onboarding_complete") === "true"
+												? "/chat"
+												: "/onboarding",
+										]}
+									>
+										<Routes>
+											<Route element={<OnboardingPage />} path="/onboarding" />
+											<Route element={<Layout />} path="/*" />
+										</Routes>
+									</MemoryRouter>
+								</EntitlementProvider>
+							</PageWrapper>
+						</AuthProvider>
+					) : (
+						<PageWrapper>
+							<LoginPage />
+						</PageWrapper>
+					)}
+				</GlobalContextMenu>
+			</BotTerminologyProvider>
 		</ThemeProvider>
 	);
 }

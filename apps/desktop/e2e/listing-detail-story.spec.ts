@@ -65,6 +65,42 @@ test("never scrolls the page sideways", async ({ page }) => {
 	expect(overflow).toBeLessThanOrEqual(1);
 });
 
+test("renders GitHub presentation metadata and screenshots", async ({
+	page,
+}, testInfo) => {
+	await page.setViewportSize(WIDE);
+	await expect(page.getByText("Repository")).toBeVisible();
+	await expect(page.getByText("Privacy Policy")).toBeVisible();
+	await expect(page.getByText("Terms of Service")).toBeVisible();
+	await expect(page.getByText("Browser toolkit").first()).toBeVisible();
+	await expect(page.getByText("Example prompts")).toBeVisible();
+
+	const screenshots = page.locator("img[alt^='Example App screenshot']");
+	await expect(screenshots).toHaveCount(5);
+	expect(
+		await screenshots
+			.first()
+			.evaluate((image) => (image as HTMLImageElement).naturalWidth)
+	).toBeGreaterThan(0);
+
+	await page.screenshot({
+		fullPage: true,
+		path: testInfo.outputPath("marketplace-rich-metadata-hero.png"),
+	});
+	await page.locator("[data-testid='dialog']").evaluate((element) => {
+		element.scrollTop = 250;
+	});
+	await page.screenshot({
+		path: testInfo.outputPath("marketplace-rich-metadata-rail.png"),
+	});
+	await page.locator("[data-testid='dialog']").evaluate((element) => {
+		element.scrollTop = 650;
+	});
+	await page.screenshot({
+		path: testInfo.outputPath("marketplace-rich-metadata-capabilities.png"),
+	});
+});
+
 test("stat strip scrolls inside its own band", async ({ page }) => {
 	await page.setViewportSize(NARROW);
 	// The strip is the only `overflow-x-auto` band directly under the action bar.

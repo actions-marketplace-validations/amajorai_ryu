@@ -2,6 +2,7 @@
 
 import { PatchDiff } from "@pierre/diffs/react";
 import { Button } from "@ryu/ui/components/button";
+import { ComposerEditor } from "@ryu/ui/components/editor/composer-editor.tsx";
 import {
 	HoverCard,
 	HoverCardContent,
@@ -13,8 +14,10 @@ import {
 	PopoverTrigger,
 } from "@ryu/ui/components/popover";
 import { Wave } from "@ryu/ui/components/wave";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ChatStatus } from "ai";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { ReactNode } from "react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 
@@ -50,8 +53,10 @@ import {
 	IconWorld,
 	IconX,
 } from "@tabler/icons-react";
+import { useChatDisplayPrefs } from "./chat-display-prefs.tsx";
 import type { ContextUsage } from "./context-usage.tsx";
 import { FileTypeIcon } from "./file-type-icon.tsx";
+import { hasComposerInput } from "./input/composer-input.ts";
 import type {
 	ComposerMenuGroup,
 	ComposerMenuItem,
@@ -68,7 +73,7 @@ import type {
 import { useInputTyping } from "./input/input-typing.tsx";
 import { type SuggestionItem, Suggestions } from "./input/suggestions.tsx";
 import { findMentionAt } from "./mention-format.ts";
-import { NumberRoll } from "./number-roll.tsx";
+import { MentionToken } from "./mention-token.tsx";
 import type {
 	QuestionAnswer,
 	QuestionConfig,
@@ -161,6 +166,16 @@ export interface InputBarProps {
 	composerHeader?: React.ReactNode;
 	/** Searchable apps/plugins/context rows shown by the shared + menu. */
 	composerMenuGroups?: ComposerMenuGroup[];
+	/**
+	 * An active approval or other human-input card that temporarily replaces the
+	 * textarea. It lives in the same layout surface as the normal composer so the
+	 * surface can animate between writing and deciding without a second floating
+	 * card.
+	 */
+	composerPrompt?: {
+		content: React.ReactNode;
+		id: string;
+	};
 
 	/**
 	 * Context-window usage for the persistent composer meter (donut ring +
@@ -193,6 +208,8 @@ export interface InputBarProps {
 	 * message instead of dropping it. Defaults to false (legacy block behaviour).
 	 */
 	enableQueue?: boolean;
+	/** Render the plugin-owned control that expands the composer in place. */
+	expandComposer?: boolean;
 
 	/**
 	 * Ghost (temporary/incognito) chat active. When true, the composer box gets a
@@ -250,6 +267,8 @@ export interface InputBarProps {
 	 * video model loaded in the sdcpp engine to produce anything.
 	 */
 	onGenerateVideo?: (prompt: string) => void | Promise<void>;
+	/** Report the total composer height to a compact host surface. */
+	onHeightChange?: (height: number) => void;
 	onPaste?: (e: React.ClipboardEvent) => void;
 	onRemoveFile?: (id: string) => void;
 	onRemoveImage?: (id: string) => void;
@@ -259,8 +278,8 @@ export interface InputBarProps {
 		followUpMode?: "opposite";
 	}) => void;
 	onStop: () => void;
-	/** Optional host-level keyboard handling for the raw textarea. */
-	onTextareaKeyDown?: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+	/** Optional host-level keyboard handling for the composer editor. */
+	onTextareaKeyDown?: (e: React.KeyboardEvent<HTMLElement>) => void;
 	placeholder?: string;
 	/** Ghost prompt and keyboard-navigable prompt list supplied by a host/plugin. */
 	placeholderSuggestion?: string;
@@ -303,7 +322,7 @@ export interface InputBarProps {
 				className?: string;
 				itemClassName?: string;
 		  };
-	/** Live plan and file edits derived from the current user turn. */
+	/** Live todo list and file edits derived from the current user turn. */
 	turnProgress?: InputBarTurnProgress;
 
 	// Typing animation
@@ -357,7 +376,7 @@ export interface InputBarTurnProgress {
 		path: string;
 	}[];
 	insertions: number;
-	plan?: {
+	todos?: {
 		current: number;
 		items: {
 			label: string;
@@ -380,10 +399,10 @@ function TurnProgressFile({
 			<FileTypeIcon className="size-4 shrink-0" path={file.path} />
 			<span className="min-w-0 flex-1 truncate">{file.path}</span>
 			<span className="text-emerald-600 tabular-nums dark:text-emerald-400">
-				+{file.insertions}
+				+{formatNumber(file.insertions)}
 			</span>
 			<span className="text-red-600 tabular-nums dark:text-red-400">
-				-{file.deletions}
+				−{formatNumber(file.deletions)}
 			</span>
 		</button>
 	);
@@ -440,6 +459,8 @@ export const InputBar = memo(function InputBar({
 	contextMeter,
 	contextMeterOnOpen,
 	disabled,
+	composerPrompt,
+	expandComposer,
 	compact,
 	ghost,
 	ghostControls,
@@ -466,6 +487,7 @@ export const InputBar = memo(function InputBar({
 	composerMenuGroups,
 	mentionItems,
 	onComposerMenuSelect,
+	onHeightChange,
 	onTextareaKeyDown,
 }: InputBarProps) {
 	const [internalInput, setInternalInput] = useState("");
@@ -488,10 +510,66 @@ export const InputBar = memo(function InputBar({
 		[isControlled, controlledOnChange]
 	);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const richEditorRef = useRef<HTMLDivElement>(null);
+	const containerRef = useRef<HTMLDivElement>(null);
 	const [plusMenuQueryStart, setPlusMenuQueryStart] = useState<number | null>(
 		null
 	);
 	const config = DEFAULT_INPUT_CONFIG;
+	const [isExpanded, setIsExpanded] = useState(false);
+	const { animationsEnabled, markdownComposer } = useChatDisplayPrefs();
+	const focusComposer = useCallback(() => {
+		if (markdownComposer) {
+			richEditorRef.current?.focus();
+			return;
+		}
+		textareaRef.current?.focus();
+	}, [markdownComposer]);
+	const reduceMotion = !animationsEnabled || (useReducedMotion() ?? false);
+	const composerTransition = reduceMotion
+		? { duration: 0 }
+		: {
+				damping: 34,
+				mass: 0.75,
+				stiffness: 420,
+				type: "spring" as const,
+			};
+
+	useEffect(() => {
+		if (!onHeightChange) {
+			return;
+		}
+		const element = containerRef.current;
+		if (!element) {
+			return;
+		}
+		const report = () => onHeightChange(element.offsetHeight);
+		report();
+		if (typeof ResizeObserver === "undefined") {
+			return;
+		}
+		const observer = new ResizeObserver(report);
+		observer.observe(element);
+		return () => observer.disconnect();
+	}, [onHeightChange]);
+
+	const openExpandedComposer = useCallback(() => {
+		setIsExpanded(true);
+	}, []);
+
+	useEffect(() => {
+		if (!expandComposer) {
+			setIsExpanded(false);
+		}
+	}, [expandComposer]);
+
+	useEffect(() => {
+		if (!isExpanded) {
+			return;
+		}
+		const frame = requestAnimationFrame(focusComposer);
+		return () => cancelAnimationFrame(frame);
+	}, [focusComposer, isExpanded]);
 
 	// Voice input: record from the default mic, show a live waveform, and append
 	// the transcript to the composer. The hook is always called (Rules of Hooks);
@@ -500,9 +578,9 @@ export const InputBar = memo(function InputBar({
 		(text: string) => {
 			const base = input.trim();
 			setInput(base ? `${base} ${text}` : text);
-			requestAnimationFrame(() => textareaRef.current?.focus());
+			requestAnimationFrame(focusComposer);
 		},
-		[input, setInput]
+		[focusComposer, input, setInput]
 	);
 	const {
 		state: voiceState,
@@ -595,34 +673,49 @@ export const InputBar = memo(function InputBar({
 
 	// Auto-resize textarea
 	useEffect(() => {
+		if (markdownComposer) {
+			return;
+		}
 		const el = textareaRef.current;
 		if (!el) {
 			return;
 		}
+		const maxHeight = isExpanded ? 360 : 120;
+		const minHeight = isExpanded ? 280 : 0;
 		el.style.height = "0";
-		const nextHeight = Math.min(el.scrollHeight, 120);
+		const nextHeight = Math.min(
+			Math.max(el.scrollHeight, minHeight),
+			maxHeight
+		);
 		el.style.height = `${nextHeight}px`;
-		el.style.overflowY = el.scrollHeight > 120 ? "auto" : "hidden";
+		el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
 		el.style.overflowX = "hidden";
 		// Re-measure on every value change so the textarea grows/shrinks with its
-		// content (one row by default, expanding up to the 120px cap). Without
+		// content (one row by default, expanding up to the 120px cap, or the
+		// roomier expanded cap). Without
 		// `input` in the deps this only ran on mount and the box never resized.
 		// A repo-wide lint/format sweep (9fed37659) emptied this array once already
 		// and the composer went back to a permanently one-line box — `input` is
 		// load-bearing, not a lint artefact.
-	}, [input]);
+	}, [input, isExpanded, markdownComposer]);
 
 	useEffect(() => {
 		if (!autoFocus) {
 			return;
 		}
-		textareaRef.current?.focus();
-	}, [autoFocus]);
+		focusComposer();
+	}, [autoFocus, focusComposer]);
+
+	const hasContextItems = attachedImages.length > 0 || attachedFiles.length > 0;
+	const hasInput = hasComposerInput(
+		input,
+		attachedImages.length + attachedFiles.length
+	);
 
 	const handleSubmit = useCallback(
 		(followUpMode?: "opposite") => {
 			const trimmed = input.trim();
-			if (!trimmed) {
+			if (!hasInput) {
 				// Empty composer: Enter sends the first queued message now (same as the
 				// queue row's "send now" affordance).
 				const first = queueBar?.items[0];
@@ -639,7 +732,16 @@ export const InputBar = memo(function InputBar({
 			onSend({ role: "user", content: trimmed, followUpMode });
 			setInput("");
 		},
-		[input, isStreaming, disabled, enableQueue, onSend, setInput, queueBar]
+		[
+			disabled,
+			enableQueue,
+			hasInput,
+			input,
+			isStreaming,
+			onSend,
+			queueBar,
+			setInput,
+		]
 	);
 
 	const handleInfoBarClose = useCallback(() => {
@@ -662,7 +764,7 @@ export const InputBar = memo(function InputBar({
 	const infoBarNode = shouldShowInfoBar ? (
 		<div
 			className={cn(
-				"flex h-[34px] items-center justify-between gap-3 px-3",
+				"mx-3 flex h-[34px] items-center justify-between gap-3 px-3",
 				"overflow-hidden transition-[max-height,opacity] duration-150 ease-out",
 				isInfoBarOpen ? "max-h-[34px] opacity-100" : "max-h-0 opacity-0",
 				infoBarPosition === "top" ? "rounded-t-2xl" : "rounded-b-2xl",
@@ -741,13 +843,13 @@ export const InputBar = memo(function InputBar({
 	// full-width footer directly beneath the textarea, part of the outer card — a thin
 	// muted row with rounded bottom corners, exactly like the info bar's bottom variant.
 	//
-	// It carries its OWN fill and a hairline above it. The comment above has always
-	// described a "muted row", but the element had neither, so it inherited the
-	// composer card's background and read as part of the textarea rather than as a
-	// strip under it — most obviously in compact mode, where the textarea block is
-	// short enough that the two became one undifferentiated box.
+	// It carries its OWN fill. The comment above has always described a "muted row",
+	// but the element had neither, so it inherited the composer card's background
+	// and read as part of the textarea rather than as a strip under it — most
+	// obviously in compact mode, where the textarea block is short enough that the
+	// two became one undifferentiated box.
 	const actionBarNode = workspaceBar ? (
-		<div className="flex h-[34px] min-w-0 items-center gap-0.5 rounded-b-2xl border-border/60 border-t bg-muted/40 px-2">
+		<div className="flex h-[34px] min-w-0 items-center gap-0.5 rounded-b-2xl bg-muted/40 px-2">
 			{workspaceBar}
 		</div>
 	) : null;
@@ -821,15 +923,11 @@ export const InputBar = memo(function InputBar({
 		queueBar && queueBar.items.length > 0 ? (
 			<QueueBar {...queueBar} roundTop={noTopInfoBar} />
 		) : null;
-	const hasQueue = queueBarNode !== null;
-
 	const questionBarNode =
 		shouldShowQuestionBar && activeQuestion ? (
 			<div
-				className={cn(
-					"mx-auto w-full max-w-[calc(100%-24px)] border-border border-x border-t",
-					noTopInfoBar && !hasQueue ? "rounded-t-2xl" : null
-				)}
+				className="w-full overflow-hidden rounded-[1.25rem] border border-border/70 bg-background/80"
+				data-composer-prompt="question"
 			>
 				<div className="flex h-7 items-center justify-between border-border border-b px-3 text-muted-foreground text-xs">
 					<div className="inline-flex items-center gap-1.5">
@@ -883,14 +981,28 @@ export const InputBar = memo(function InputBar({
 					skipLabel={questionBarData?.skipLabel}
 					submitLabel={questionBarData?.submitLabel}
 					totalQuestions={totalQuestions}
+					voice={voice}
 				/>
 			</div>
 		) : null;
+	const activeComposerPrompt = composerPrompt
+		? composerPrompt
+		: questionBarNode
+			? {
+					id: `question:${questionBarData?.id ?? "pending"}`,
+					content: questionBarNode,
+				}
+			: undefined;
 
 	const handleKeyDown = useCallback(
-		(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+		(e: React.KeyboardEvent<HTMLElement>) => {
 			onTextareaKeyDown?.(e);
 			if (e.defaultPrevented) {
+				return;
+			}
+			if (e.key === "Escape" && isExpanded) {
+				e.preventDefault();
+				setIsExpanded(false);
 				return;
 			}
 			const promptItems = Array.isArray(suggestions)
@@ -942,6 +1054,7 @@ export const InputBar = memo(function InputBar({
 		[
 			handleSubmit,
 			input,
+			isExpanded,
 			isStreaming,
 			onTextareaKeyDown,
 			setInput,
@@ -950,13 +1063,11 @@ export const InputBar = memo(function InputBar({
 		]
 	);
 
-	const hasInput = input.trim().length > 0;
 	const composerSuggestions = Array.isArray(suggestions)
 		? suggestions
 		: (suggestions?.items ?? []);
 	const showComposerSuggestions =
 		composerSuggestions.length > 0 && !hasInput && !isStreaming;
-	const hasContextItems = attachedImages.length > 0 || attachedFiles.length > 0;
 	const showContextItems =
 		hasContextItems && config.attachmentPreviewStyle !== "hidden";
 	const imageDisplayMode =
@@ -974,23 +1085,26 @@ export const InputBar = memo(function InputBar({
 				effectiveChangeSummary.insertions > 0 ||
 				effectiveChangeSummary.deletions > 0)
 	);
-	const showTurnProgress = showChangeSummary || Boolean(turnProgress?.plan);
+	const showTurnProgress = showChangeSummary || Boolean(turnProgress?.todos);
 
-	const handleContainerClick = useCallback((e: React.MouseEvent) => {
-		const target = e.target as HTMLElement;
-		// Portaled menus/popovers (agent picker search, etc.) still bubble through
-		// the React tree into this container. Skip any interactive control so a
-		// click on the picker's search field cannot yank focus back to the prompt.
-		if (
-			target !== e.currentTarget &&
-			target.closest(
-				"button, textarea, input, select, a, [role='menuitem'], [contenteditable='true']"
-			)
-		) {
-			return;
-		}
-		textareaRef.current?.focus();
-	}, []);
+	const handleContainerClick = useCallback(
+		(e: React.MouseEvent) => {
+			const target = e.target as HTMLElement;
+			// Portaled menus/popovers (agent picker search, etc.) still bubble through
+			// the React tree into this container. Skip any interactive control so a
+			// click on the picker's search field cannot yank focus back to the prompt.
+			if (
+				target !== e.currentTarget &&
+				target.closest(
+					"button, textarea, input, select, a, [role='menuitem'], [contenteditable='true']"
+				)
+			) {
+				return;
+			}
+			focusComposer();
+		},
+		[focusComposer]
+	);
 
 	const handleSuggestionSelect = useCallback(
 		(item: SuggestionItem) => {
@@ -999,6 +1113,10 @@ export const InputBar = memo(function InputBar({
 			}
 			setInput(item.value ?? item.label);
 			requestAnimationFrame(() => {
+				if (markdownComposer) {
+					focusComposer();
+					return;
+				}
 				const el = textareaRef.current;
 				if (!el) {
 					return;
@@ -1008,7 +1126,7 @@ export const InputBar = memo(function InputBar({
 				el.setSelectionRange(end, end);
 			});
 		},
-		[disabled, isStreaming, setInput]
+		[disabled, focusComposer, isStreaming, markdownComposer, setInput]
 	);
 	const renderComposerPreview = useCallback((): ReactNode[] => {
 		const parts: ReactNode[] = [];
@@ -1033,12 +1151,22 @@ export const InputBar = memo(function InputBar({
 			parts.push(input.slice(cursor, index));
 			const token = input.slice(index, end);
 			parts.push(
-				<span className="font-semibold text-primary" key={`${index}-${token}`}>
-					<span aria-hidden="true" className="mr-1 inline-flex align-[-2px]">
-						{mention?.item?.icon ?? <IconWorld className="size-3.5" />}
+				mention?.item ? (
+					<MentionToken item={mention.item} key={`${index}-${token}`}>
+						{mention.item.label}
+					</MentionToken>
+				) : (
+					<span
+						className="font-semibold text-primary"
+						key={`${index}-${token}`}
+					>
+						<IconWorld
+							aria-hidden="true"
+							className="mr-1 inline-flex size-3.5 align-[-2px]"
+						/>
+						{token}
 					</span>
-					{mention?.item ? `@${mention.item.label}` : token}
-				</span>
+				)
 			);
 			cursor = end;
 			index = end - 1;
@@ -1058,6 +1186,19 @@ export const InputBar = memo(function InputBar({
 	const suggestionItemClassName = Array.isArray(suggestions)
 		? undefined
 		: suggestions?.itemClassName;
+	const handleRichChange = useCallback(
+		(next: string) => {
+			setSuggestionIndex(-1);
+			setInput(next);
+		},
+		[setInput]
+	);
+	const renderRichMention = useCallback(
+		(label: string, item?: MentionItem) => (
+			<MentionToken item={item}>{label}</MentionToken>
+		),
+		[]
+	);
 
 	// The textarea (or its typing-animation stand-in). It always sits in its own
 	// padded block above the controls row; `compact` only tightens that block's
@@ -1084,6 +1225,20 @@ export const InputBar = memo(function InputBar({
 				barCount={RECORDING_WAVE_BARS}
 				className="h-6 w-full text-primary"
 				levels={voiceLevels}
+			/>
+		);
+	} else if (markdownComposer) {
+		inputContent = (
+			<ComposerEditor
+				disabled={disabled}
+				editorRef={richEditorRef}
+				markdown={input}
+				mentionItems={mentionItems}
+				mentionRenderer={renderRichMention}
+				onChange={handleRichChange}
+				onKeyDown={handleKeyDown}
+				onPaste={onPaste}
+				placeholder={effectivePlaceholder}
 			/>
 		);
 	} else {
@@ -1148,6 +1303,7 @@ export const InputBar = memo(function InputBar({
 	// every surface and in both densities.
 	const composerToolbar = (
 		<ComposerToolbar
+			compact={compact}
 			contextMeter={contextMeter}
 			contextMeterOnOpen={contextMeterOnOpen}
 			directoryGroups={composerMenuGroups}
@@ -1176,12 +1332,15 @@ export const InputBar = memo(function InputBar({
 				setPlusMenuQueryStart(null);
 				onComposerMenuSelect?.(item);
 			}}
+			onExpand={
+				expandComposer && !isExpanded ? openExpandedComposer : undefined
+			}
 			onGenerateImage={handleGenerateImage}
 			onGenerateVideo={handleGenerateVideo}
 			onMenuOpenChange={(open) => {
 				setPlusMenuQueryStart(open ? input.length : null);
 				if (open) {
-					requestAnimationFrame(() => textareaRef.current?.focus());
+					requestAnimationFrame(focusComposer);
 				}
 			}}
 			onStartVoice={startVoice}
@@ -1193,16 +1352,18 @@ export const InputBar = memo(function InputBar({
 				<>
 					{draftControls && (
 						<Popover>
-							<PopoverTrigger asChild>
-								<Button
-									aria-label="Drafts"
-									className="size-8"
-									size="icon"
-									variant="ghost"
-								>
-									<IconBookmark className="size-4" />
-								</Button>
-							</PopoverTrigger>
+							<PopoverTrigger
+								render={
+									<Button
+										aria-label="Drafts"
+										className="size-8"
+										size="icon"
+										variant="ghost"
+									>
+										<IconBookmark className="size-4" />
+									</Button>
+								}
+							/>
 							<PopoverContent align="end" className="w-80 p-2">
 								<div className="mb-1 px-2 py-1 font-medium text-sm">Drafts</div>
 								{draftControls.items.length === 0 ? (
@@ -1261,143 +1422,67 @@ export const InputBar = memo(function InputBar({
 		/>
 	);
 
-	return (
-		<div className={cn("shrink-0 px-3 pb-3", className)}>
-			<div className="mx-auto max-w-[720px]">
-				{showTurnProgress ? (
-					<div
-						aria-live="polite"
-						className="mb-2 flex justify-center text-[13px]"
-					>
-						<div className="inline-flex h-8 items-center rounded-full border border-border/70 bg-popover/95 px-1.5 text-muted-foreground shadow-sm backdrop-blur">
-							{turnProgress?.plan ? (
-								<Popover>
-									<PopoverTrigger
-										render={
-											<button
-												className="inline-flex h-7 items-center gap-1.5 rounded-full px-1.5 transition-colors hover:bg-muted"
-												type="button"
-											/>
-										}
-									>
-										<IconLoader2 className="size-3.5 text-primary" />
-										<span>
-											Step {turnProgress.plan.current} /{" "}
-											{turnProgress.plan.total}
-										</span>
-									</PopoverTrigger>
-									<PopoverContent
-										align="center"
-										className="max-h-80 w-[min(30rem,calc(100vw-2rem))] gap-0 overflow-y-auto rounded-2xl p-2"
-										side="top"
-										sideOffset={8}
-									>
-										{turnProgress.plan.items.map((item, index) => {
-											const PlanIcon =
-												item.status === "completed"
-													? IconCircleCheck
-													: item.status === "in_progress"
-														? IconLoader2
-														: IconCircle;
-											return (
-												<div
-													className="flex items-start gap-2 rounded-xl px-2 py-1.5 text-sm"
-													key={`${index}-${item.label}`}
-												>
-													<PlanIcon
-														className={cn(
-															"mt-0.5 size-4 shrink-0",
-															item.status === "in_progress" &&
-																"animate-spin text-primary"
-														)}
-													/>
-													<span>{item.label}</span>
-												</div>
-											);
-										})}
-									</PopoverContent>
-								</Popover>
-							) : null}
-							{turnProgress?.plan && showChangeSummary ? (
-								<span aria-hidden className="px-0.5 text-border">
-									·
-								</span>
-							) : null}
-							{showChangeSummary && effectiveChangeSummary ? (
-								<Popover>
-									<PopoverTrigger
-										render={
-											<button
-												className="inline-flex h-7 items-center gap-1.5 rounded-full px-1.5 transition-colors hover:bg-muted"
-												type="button"
-											/>
-										}
-									>
-										<span>
-											<NumberRoll value={effectiveChangeSummary.files} /> file
-											{effectiveChangeSummary.files === 1 ? "" : "s"} changed
-										</span>
-										<span className="font-medium text-emerald-600 dark:text-emerald-400">
-											+
-											<NumberRoll
-												trend="up"
-												value={effectiveChangeSummary.insertions}
-											/>
-										</span>
-										<span className="font-medium text-red-600 dark:text-red-400">
-											-
-											<NumberRoll
-												trend="down"
-												value={effectiveChangeSummary.deletions}
-											/>
-										</span>
-									</PopoverTrigger>
-									{turnProgress?.files.length ? (
-										<PopoverContent
-											align="center"
-											className="max-h-80 w-[min(24rem,calc(100vw-2rem))] gap-0 overflow-y-auto rounded-2xl p-1.5"
-											side="top"
-											sideOffset={8}
-										>
-											{turnProgress.files.map((file) => (
-												<TurnProgressFile file={file} key={file.path} />
-											))}
-										</PopoverContent>
-									) : null}
-								</Popover>
-							) : null}
-						</div>
-					</div>
-				) : null}
-				<div
-					className={cn(
-						"flex flex-col gap-0",
-						// Reference architecture: the outer wrapper is the FRAME color
-						// (distinct from the input box), so the bars — which carry no bg of
-						// their own — show this color, and the sliver at the input box's
-						// rounded corners is the same color as the bars (seamless).
-						shouldShowInfoBar || goalBar || workspaceBar
-							? "rounded-2xl bg-card"
-							: null
-					)}
+	const renderComposerSuggestions = (expanded: boolean) =>
+		suggestionItems.length > 0 && !activeComposerPrompt ? (
+			<Suggestions
+				className={cn(
+					expanded ? "mt-2 px-1" : "mt-4 px-3",
+					suggestionsClassName
+				)}
+				disabled={disabled || isStreaming}
+				itemClassName={suggestionItemClassName}
+				items={suggestionItems}
+				onSelect={handleSuggestionSelect}
+			/>
+		) : null;
+
+	const renderComposerSurface = (expanded: boolean) => (
+		<motion.div
+			className={cn(
+				"composer-container relative cursor-text rounded-2xl bg-muted",
+				expanded && "border border-border/70 shadow-sm",
+				isDragOver && "ring-2 ring-primary ring-inset"
+			)}
+			initial={false}
+			onClick={handleContainerClick}
+			transition={composerTransition}
+		>
+			{expanded && (
+				<Button
+					aria-label="Collapse composer"
+					className="absolute top-2.5 right-2.5 z-10 size-7 text-muted-foreground hover:text-foreground"
+					onClick={(event) => {
+						event.stopPropagation();
+						setIsExpanded(false);
+					}}
+					size="icon"
+					title="Collapse composer"
+					type="button"
+					variant="ghost"
 				>
-					{goalBar && <GoalBar {...goalBar} />}
-					{ghostBarNode}
-					{infoBarPosition === "top" && infoBarNode}
-					{queueBarNode}
-					{questionBarNode}
-					{/* biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: custom drag/resize interaction */}
-					<div
-						className={cn(
-							// No border/ring: the box is distinguished from the darker
-							// `bg-card` frame (and its bars) purely by its lighter `bg-muted`
-							// fill, so there is no ring on the textarea and no sliver.
-							"composer-container relative cursor-text rounded-2xl bg-muted",
-							// A drag-over ring always wins for the duration of the drag so
-							// the drop target stays legible.
-							isDragOver && "ring-2 ring-primary ring-inset"
-						)}
-						onClick={handleContainerClick}
+					<IconX className="size-4" />
+				</Button>
+			)}
+			<AnimatePresence initial={false} mode="wait">
+				{activeComposerPrompt ? (
+					<motion.div
+						animate={{ opacity: 1, scale: 1, y: 0 }}
+						className="w-full"
+						exit={{ opacity: 0, scale: 0.985, y: -6 }}
+						initial={reduceMotion ? false : { opacity: 0, scale: 0.985, y: 8 }}
+						key={`composer-prompt-${activeComposerPrompt.id}`}
+						transition={{ duration: reduceMotion ? 0 : 0.2 }}
+					>
+						{activeComposerPrompt.content}
+					</motion.div>
+				) : (
+					<motion.div
+						animate={{ opacity: 1, scale: 1, y: 0 }}
+						className="w-full"
+						exit={{ opacity: 0, scale: 0.985, y: 6 }}
+						initial={reduceMotion ? false : { opacity: 0, scale: 0.985, y: -8 }}
+						key="composer-input"
+						transition={{ duration: reduceMotion ? 0 : 0.2 }}
 					>
 						{/* Composer header (e.g. pending quote preview), above the chips. */}
 						{composerHeader}
@@ -1459,32 +1544,24 @@ export const InputBar = memo(function InputBar({
 						)}
 
 						{/* Text input or typing animation text. `compact` is purely this
-						    block's density — it buys the transcript back some height once
-						    a chat has history; the controls row below is the same on
-						    every surface.
-
-						    The roomy block CENTRES its content rather than pinning it with a
-						    top pad: `pt-3` against a 56px floor put a 22px line 12px from the
-						    top and left 22px of dead air under it, so the caret sat visibly
-						    high in an apparently empty box. `justify-center` with symmetric
-						    padding makes one line sit in the middle and a grown textarea
-						    simply push the block taller — no fixed pad to re-tune when the
-						    floor or the line-height changes. */}
+			    block's density — it buys the transcript back some height once
+			    a chat has history; the controls row below is the same on
+			    every surface. */}
 						<div
 							className={
-								compact
-									? "min-h-[40px] pt-2 pr-3 pb-0.5 pl-3"
-									: "flex min-h-[56px] flex-col justify-center py-2 pr-3 pl-3.5"
+								expanded
+									? "min-h-[320px] pt-4 pr-14 pb-3 pl-5"
+									: compact
+										? "min-h-[40px] pt-2 pr-3 pb-0.5 pl-3"
+										: "flex min-h-[56px] flex-col justify-center py-2 pr-3 pl-3.5"
 							}
 						>
 							{inputContent}
 						</div>
 
 						{/* Controls row, INSIDE the composer box (Codex-style): the "+",
-						    agent selector, voice/image, and send button all share the
-						    textarea's rounded card and background. `compact` forces it on:
-						    that layout always carried the send button, so a compact surface
-						    wiring none of the optional controls must not lose it. */}
+			    agent selector, voice/image, and send button all share the
+			    textarea's rounded card and background. */}
 						{(compact ||
 							leftActions ||
 							rightActions ||
@@ -1496,26 +1573,145 @@ export const InputBar = memo(function InputBar({
 							goalControls ||
 							ghostControls ||
 							pluginControls?.length ||
-							contextMeter) &&
+							composerMenuGroups?.some((group) => group.items.length > 0) ||
+							contextMeter ||
+							expandComposer) &&
 							composerToolbar}
-					</div>
+					</motion.div>
+				)}
+			</AnimatePresence>
+		</motion.div>
+	);
 
-					{suggestionItems.length > 0 && (
-						<Suggestions
-							className={cn("mt-4 px-3", suggestionsClassName)}
-							disabled={disabled || isStreaming}
-							itemClassName={suggestionItemClassName}
-							items={suggestionItems}
-							onSelect={handleSuggestionSelect}
-						/>
+	return (
+		<div className={cn("shrink-0 px-3 pb-3", className)} ref={containerRef}>
+			<motion.div
+				className={cn(
+					"mx-auto w-full",
+					isExpanded ? "max-w-[900px]" : "max-w-[720px]"
+				)}
+				transition={composerTransition}
+			>
+				{showTurnProgress ? (
+					<div
+						aria-live="polite"
+						className="mb-2 flex flex-wrap items-center justify-center gap-1.5 text-[13px]"
+					>
+						{turnProgress?.todos ? (
+							<Popover>
+								<PopoverTrigger
+									render={
+										<button
+											className="inline-flex h-8 items-center gap-1.5 rounded-full border border-border/30 bg-popover/80 px-2 text-muted-foreground shadow-sm backdrop-blur transition-colors hover:bg-muted"
+											data-testid="turn-progress-steps"
+											type="button"
+										/>
+									}
+								>
+									<IconLoader2 className="size-3.5 text-primary" />
+									<span>
+										Step {turnProgress.todos.current} of{" "}
+										{turnProgress.todos.total}
+									</span>
+								</PopoverTrigger>
+								<PopoverContent
+									align="center"
+									className="max-h-80 w-[min(24rem,calc(100vw-2rem))] gap-0 overflow-y-auto rounded-2xl p-2"
+									side="top"
+									sideOffset={8}
+								>
+									{turnProgress.todos.items.map((item, index) => {
+										const TodoIcon =
+											item.status === "completed"
+												? IconCircleCheck
+												: item.status === "in_progress"
+													? IconLoader2
+													: IconCircle;
+										return (
+											<div
+												className="flex items-start gap-2 rounded-xl px-2 py-1.5 text-sm"
+												key={`${index}-${item.label}`}
+											>
+												<TodoIcon
+													className={cn(
+														"mt-0.5 size-4 shrink-0",
+														item.status === "in_progress" &&
+															cn(
+																"text-primary",
+																!reduceMotion && "animate-spin"
+															)
+													)}
+												/>
+												<span>{item.label}</span>
+											</div>
+										);
+									})}
+								</PopoverContent>
+							</Popover>
+						) : null}
+						{showChangeSummary && effectiveChangeSummary ? (
+							<Popover>
+								<PopoverTrigger
+									render={
+										<button
+											className="inline-flex h-8 items-center gap-1.5 rounded-full border border-border/30 bg-popover/80 px-2 text-muted-foreground shadow-sm backdrop-blur transition-colors hover:bg-muted"
+											data-testid="turn-progress-files"
+											type="button"
+										/>
+									}
+								>
+									<span>
+										{formatNumber(effectiveChangeSummary.files)} file
+										{effectiveChangeSummary.files === 1 ? "" : "s"} changed
+									</span>
+									<span className="font-medium text-emerald-600 dark:text-emerald-400">
+										+{formatNumber(effectiveChangeSummary.insertions)}
+									</span>
+									<span className="font-medium text-red-600 dark:text-red-400">
+										-{formatNumber(effectiveChangeSummary.deletions)}
+									</span>
+								</PopoverTrigger>
+								{turnProgress?.files.length ? (
+									<PopoverContent
+										align="center"
+										className="max-h-80 w-[min(24rem,calc(100vw-2rem))] gap-0 overflow-y-auto rounded-2xl p-1.5"
+										side="top"
+										sideOffset={8}
+									>
+										{turnProgress.files.map((file) => (
+											<TurnProgressFile file={file} key={file.path} />
+										))}
+									</PopoverContent>
+								) : null}
+							</Popover>
+						) : null}
+					</div>
+				) : null}
+				<div
+					className={cn(
+						"flex flex-col gap-0",
+						// Reference architecture: the outer wrapper is the FRAME color
+						// (distinct from the input box), so the bars — which carry no bg of
+						// their own — show this color, and the sliver at the input box's
+						// rounded corners is the same color as the bars (seamless).
+						shouldShowInfoBar || goalBar || workspaceBar
+							? "rounded-2xl bg-card"
+							: null
 					)}
+				>
+					{goalBar && <GoalBar {...goalBar} />}
+					{ghostBarNode}
+					{infoBarPosition === "top" && infoBarNode}
+					{queueBarNode}
+					{renderComposerSurface(isExpanded)}
+					{renderComposerSuggestions(isExpanded)}
 					{infoBarPosition === "bottom" && infoBarNode}
 					{/* Action bar (project ▸ branch ▸ worktree): full-width footer inside
 					    the card, directly beneath the input — same slot as the bottom
 					    info bar. */}
 					{actionBarNode}
 				</div>
-			</div>
+			</motion.div>
 		</div>
 	);
 });

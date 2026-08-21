@@ -10,7 +10,7 @@
 //!   `public_mount`;
 //! - **Core** owns the orchestration that *interprets* the strategy
 //!   (`sidecar::adapters::route_team_chat_stream` / `run_team_reply_text`) and the
-//!   `agent_builder__create_agent_team` roster minter, reaching the store over
+//!   `agent_builder.create_agent_team` roster minter, reaching the store over
 //!   loopback HTTP (`crate::teams_client::TeamsClient`).
 //!
 //! Both halves need the same three shapes, and neither may link the other. This

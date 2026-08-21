@@ -85,7 +85,7 @@ const getHeadingList = (editor?: SlateEditor) => {
 		const depth = headingDepth[type];
 		const id = node.id as string;
 
-		if (title) {
+		if (title && depth !== undefined) {
 			headingList.push({ id, depth, path, title, type });
 		}
 	});

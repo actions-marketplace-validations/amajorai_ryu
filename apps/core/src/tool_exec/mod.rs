@@ -106,7 +106,7 @@ pub fn resolve_agent_allowlist(
     let Some(agent_id) = agent_id.filter(|s| !s.is_empty()) else {
         return Err("agent_id is required to execute a program".to_owned());
     };
-    if agents.find_by_prefix(agent_id).is_none() {
+    if agents.find_exact(agent_id).is_none() {
         return Err(format!("unknown agent '{agent_id}'"));
     }
     Ok(agents.allowlist_for(agent_id))
@@ -2737,7 +2737,7 @@ mod tests {
         // declarative knobs (not exa-specific code) close both parity gaps.
         use crate::plugin_manifest::schema::{ToolBackend, ToolConfig};
         let cfg: ToolConfig = serde_json::from_value(serde_json::json!({
-            "slug": "exa__search",
+            "slug": "exa.search",
             "backend": "http",
             "method": "POST",
             "url": "https://api.exa.ai/search",
@@ -2967,6 +2967,14 @@ mod tests {
             resolved.is_none(),
             "flagship ryu must default to no restriction"
         );
+    }
+
+    #[test]
+    fn allowlist_rejects_an_agent_id_that_only_prefix_matches() {
+        let reg = AcpAgentRegistry::new();
+        let err = resolve_agent_allowlist(&reg, Some("ryu-forged"))
+            .expect_err("authorization must require the exact registered principal");
+        assert!(err.contains("unknown agent"));
     }
 
     #[test]

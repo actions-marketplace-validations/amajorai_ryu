@@ -32,6 +32,7 @@ interface ScratchCardProps {
 	discountLabel: string;
 	/** The teaser line above the card. */
 	headline?: string;
+	onNeverShowAgain?: () => void;
 }
 
 const paintFoil = (canvas: HTMLCanvasElement) => {
@@ -72,6 +73,7 @@ export default function ScratchCard({
 	headline = "I have a 30% discount. Just scratch this card!",
 	caption,
 	className,
+	onNeverShowAgain,
 }: ScratchCardProps) {
 	const canvasRef = useRef<HTMLCanvasElement | null>(null);
 	const scratchingRef = useRef(false);
@@ -237,7 +239,7 @@ export default function ScratchCard({
 				/>
 			</div>
 
-			<div className="mt-5 flex items-center justify-center gap-2">
+			<div className="mt-5 flex flex-wrap items-center justify-center gap-2">
 				{revealed ? (
 					<button
 						className={cn(buttonVariants({ variant: "default", size: "sm" }))}
@@ -260,6 +262,18 @@ export default function ScratchCard({
 						Can't scratch? Reveal code
 					</button>
 				)}
+				{onNeverShowAgain ? (
+					<button
+						className={cn(
+							buttonVariants({ variant: "ghost", size: "sm" }),
+							"text-muted-foreground hover:text-foreground"
+						)}
+						onClick={onNeverShowAgain}
+						type="button"
+					>
+						Never show again
+					</button>
+				) : null}
 			</div>
 
 			{caption ? (

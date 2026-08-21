@@ -21,6 +21,7 @@ import {
 	setConversationArchived,
 	setConversationPinned,
 } from "@/src/lib/api/conversation-flags.ts";
+import { stopConversation } from "@/src/lib/chat-stop-registry.ts";
 import { useNodeStore } from "./useNodeStore.ts";
 
 const UNREAD_KEY = "ryu:unread-convs";
@@ -98,6 +99,9 @@ export const useConversationFlagsStore = create<ConversationFlagsState>(
 
 		toggleArchive: (id) => {
 			const next = !get().archivedIds.has(id);
+			if (next) {
+				stopConversation(id);
+			}
 			set((state) => {
 				const ids = new Set(state.archivedIds);
 				if (next) {

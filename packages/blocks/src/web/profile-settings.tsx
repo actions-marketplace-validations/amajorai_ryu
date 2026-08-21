@@ -34,6 +34,10 @@ import {
 	TabsTrigger,
 } from "@ryu/ui/components/tabs";
 import {
+	formatCurrency,
+	formatCount as formatSharedCount,
+} from "@ryu/ui/lib/number-format.ts";
+import {
 	Activity,
 	Bot,
 	CalendarDays,
@@ -90,29 +94,22 @@ export type ProfileTab =
 
 const SECONDS_PER_HOUR = 3600;
 
-const compactNumberFormatter = new Intl.NumberFormat("en-US", {
-	notation: "compact",
-	maximumFractionDigits: 1,
-});
-
 const joinedDateFormatter = new Intl.DateTimeFormat("en-US", {
 	month: "long",
 	year: "numeric",
 });
 
 const formatCompact = (value: number): string =>
-	compactNumberFormatter.format(value);
+	formatSharedCount(value) ?? "—";
 
 const formatCost = (microUsd: number): string => {
 	const dollars = microUsd / 1_000_000;
 	if (dollars < 0.01 && dollars > 0) {
 		return "<$0.01";
 	}
-	return new Intl.NumberFormat("en-US", {
-		style: "currency",
-		currency: "USD",
+	return formatCurrency(dollars, "USD", {
 		maximumFractionDigits: dollars >= 10 ? 0 : 2,
-	}).format(dollars);
+	});
 };
 
 const formatHourUtc = (hour: string | null | undefined): string =>
@@ -290,16 +287,14 @@ function UnlockCard({
 
 				{!isUnlocked && isProgressive ? (
 					<Button
-						disabled={!canAfford || isUnlocking}
+						disabled={!canAfford}
+						loading={isUnlocking}
 						onClick={() => onUnlock?.(feature.key)}
 						size="sm"
 						variant={canAfford ? "default" : "outline"}
 					>
 						{isUnlocking ? (
-							<>
-								<Spinner className="mr-1.5 size-3" />
-								Unlocking…
-							</>
+							"Unlocking…"
 						) : (
 							<>
 								<Coins className="size-3" />
@@ -655,9 +650,10 @@ export interface ProfileSettingsProps {
 	onTabChange?: (tab: string) => void;
 	onUnlinkGoogle?: () => void;
 	onUsernameChange?: (username: string) => void;
+	/** App-local Better-Auth tabs (injected by the live page). */
+	passkeysSlot?: ReactNode;
 	publicProfileHref?: string;
 	referralsSlot?: ReactNode;
-	/** App-local Better-Auth tabs (injected by the live page). */
 	sessionsSlot?: ReactNode;
 	/** Stats tab (web): the live page injects a data-fetching
 	 * <ProfileStatsPanel>. Omitted by surfaces that don't ship stats. */
@@ -711,6 +707,7 @@ export default function ProfileSettings({
 	onConnectGoogle = noop,
 	onUnlinkGoogle = noop,
 	sessionsSlot,
+	passkeysSlot,
 	statsSlot,
 	authorizedAppsSlot,
 	supportAccessSlot,
@@ -769,15 +766,8 @@ export default function ProfileSettings({
 							</div>
 
 							<div className="flex justify-end">
-								<Button disabled={isSaving} onClick={onSaveName}>
-									{isSaving ? (
-										<>
-											<Spinner className="mr-2 size-4" />
-											Saving…
-										</>
-									) : (
-										"Save Profile"
-									)}
+								<Button loading={isSaving} onClick={onSaveName}>
+									{isSaving ? "Saving…" : "Save Profile"}
 								</Button>
 							</div>
 
@@ -798,54 +788,48 @@ export default function ProfileSettings({
 								</div>
 								<div className="flex items-end">
 									<Button
-										disabled={isSavingUsername}
+										loading={isSavingUsername}
 										onClick={onSaveUsername}
 										variant="outline"
 									>
-										{isSavingUsername ? (
-											<>
-												<Spinner className="mr-2 size-4" />
-												Claiming…
-											</>
-										) : (
-											"Claim Username"
-										)}
+										{isSavingUsername ? "Claiming…" : "Claim Username"}
 									</Button>
 								</div>
 							</div>
-
-							<div className="rounded-4xl bg-card p-4 shadow-sm">
-								<div className="flex items-start justify-between gap-4">
-									<div className="flex gap-3">
-										<div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-muted">
-											{isProfilePublic ? (
-												<Globe2 className="size-4" />
-											) : (
-												<Lock className="size-4" />
-											)}
-										</div>
-										<div className="space-y-1">
-											<p className="font-medium">Public profile</p>
-											<p className="text-muted-foreground text-sm">
-												Show your public stats page. New profiles are public by
-												default.
-											</p>
-											{publicProfileHref && isProfilePublic ? (
-												<a
-													className="inline-flex text-primary text-sm hover:underline"
-													href={publicProfileHref}
-												>
-													View public profile
-												</a>
-											) : null}
-										</div>
+						</CardContent>
+					</Card>
+					<Card>
+						<CardContent>
+							<div className="flex items-start justify-between gap-4">
+								<div className="flex gap-3">
+									<div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-muted">
+										{isProfilePublic ? (
+											<Globe2 className="size-4" />
+										) : (
+											<Lock className="size-4" />
+										)}
 									</div>
-									<Switch
-										checked={isProfilePublic}
-										disabled={isSavingProfileVisibility}
-										onCheckedChange={onProfilePublicToggle}
-									/>
+									<div className="space-y-1">
+										<p className="font-medium">Public profile</p>
+										<p className="text-muted-foreground text-sm">
+											Show your public stats page. New profiles are public by
+											default.
+										</p>
+										{publicProfileHref && isProfilePublic ? (
+											<a
+												className="inline-flex text-primary text-sm hover:underline"
+												href={publicProfileHref}
+											>
+												View public profile
+											</a>
+										) : null}
+									</div>
 								</div>
+								<Switch
+									checked={isProfilePublic}
+									disabled={isSavingProfileVisibility}
+									onCheckedChange={onProfilePublicToggle}
+								/>
 							</div>
 						</CardContent>
 					</Card>
@@ -951,6 +935,22 @@ export default function ProfileSettings({
 										)}
 									</ItemActions>
 								</Item>
+
+								{passkeysSlot ? (
+									<>
+										<ItemSeparator />
+										<Item>
+											<ItemContent>
+												<ItemTitle>Passkeys</ItemTitle>
+												<ItemDescription>
+													Sign in with your device or a security key instead of
+													a password.
+												</ItemDescription>
+											</ItemContent>
+											<ItemActions>{passkeysSlot}</ItemActions>
+										</Item>
+									</>
+								) : null}
 
 								<ItemSeparator />
 

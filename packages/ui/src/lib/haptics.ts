@@ -58,7 +58,7 @@ export function haptic(kind: HapticKind): void {
 		return;
 	}
 	try {
-		vibrate.call(navigator, PATTERNS[kind]);
+		vibrate(PATTERNS[kind]);
 	} catch {
 		// A vibration that throws (permissions policy, headless) must never take
 		// the interaction down with it.

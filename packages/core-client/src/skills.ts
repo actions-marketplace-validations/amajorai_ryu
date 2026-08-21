@@ -166,7 +166,7 @@ export async function installSkill(
 		body: { id },
 		// Forward the buyer's control-plane session so a PAID marketplace item's
 		// entitlement check (#491) can resolve the org + license. Free items ignore it.
-		headers: buyerTokenHeader(),
+		headers: buyerTokenHeader(target),
 	});
 	if (json.success === false || !json.result) {
 		throw new Error(json.error ?? `Failed to install ${id}`);

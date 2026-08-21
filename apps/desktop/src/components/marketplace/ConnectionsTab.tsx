@@ -22,6 +22,7 @@ import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -63,9 +64,11 @@ import type {
 	AppInfo,
 	McpOAuthServerDeclaration,
 } from "@/src/lib/api/plugins.ts";
+import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 
 export default function ConnectionsTab() {
 	const { apps, loading: appsLoading } = useApps();
+	const openGateway = useGatewayDialog((state) => state.openGateway);
 	const status = useComposioStatus();
 	const keyConfigured = status.data?.configured ?? false;
 
@@ -126,7 +129,9 @@ export default function ConnectionsTab() {
 					<Spinner className="size-5" />
 				</div>
 			) : null}
-			{status.isLoading || keyConfigured ? null : <KeyMissingState />}
+			{status.isLoading || keyConfigured ? null : (
+				<KeyMissingState onOpenKeys={() => openGateway("keys")} />
+			)}
 			{!status.isLoading && keyConfigured ? (
 				<>
 					<div className="relative mb-5">
@@ -148,6 +153,7 @@ export default function ConnectionsTab() {
 						connectionByToolkit={connectionByToolkit}
 						error={toolkits.error as Error | null}
 						isLoading={toolkits.isLoading}
+						onClearQuery={() => setQuery("")}
 						query={query}
 						toolkits={filtered}
 					/>
@@ -199,7 +205,7 @@ export function OAuthConnections({
 	);
 }
 
-function OAuthServerCard({
+export function OAuthServerCard({
 	app,
 	profileIds,
 	server,
@@ -334,16 +340,16 @@ function OAuthServerCard({
 						size="sm"
 						variant="ghost"
 					>
-						Disconnect
+						Log out
 					</Button>
 				) : null}
 				<Button
-					disabled={pending || profileId.trim().length === 0 || !app.enabled}
+					disabled={profileId.trim().length === 0 || !app.enabled}
+					loading={pending}
 					onClick={handleConnect}
 					size="sm"
 					variant={connected ? "outline" : "default"}
 				>
-					{pending ? <Spinner className="mr-2 size-3.5" /> : null}
 					{connected ? "Reconnect" : "Connect"}
 				</Button>
 			</div>
@@ -358,12 +364,14 @@ function ToolkitResults({
 	connectionByToolkit,
 	isLoading,
 	error,
+	onClearQuery,
 	query,
 }: {
 	toolkits: ComposioToolkit[];
 	connectionByToolkit: Map<string, ComposioConnection>;
 	isLoading: boolean;
 	error: Error | null;
+	onClearQuery: () => void;
 	query: string;
 }) {
 	if (isLoading) {
@@ -390,6 +398,11 @@ function ToolkitResults({
 					<EmptyTitle>No integrations match “{query}”</EmptyTitle>
 					<EmptyDescription>Try a different search term.</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onClearQuery} size="sm" variant="ghost">
+						Clear search
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
@@ -406,7 +419,7 @@ function ToolkitResults({
 	);
 }
 
-function KeyMissingState() {
+function KeyMissingState({ onOpenKeys }: { onOpenKeys: () => void }) {
 	return (
 		<Empty className="h-full">
 			<EmptyHeader>
@@ -419,6 +432,11 @@ function KeyMissingState() {
 					Gateway → API keys, then your available integrations appear here.
 				</EmptyDescription>
 			</EmptyHeader>
+			<EmptyContent>
+				<Button onClick={onOpenKeys} size="sm">
+					Open Gateway keys
+				</Button>
+			</EmptyContent>
 		</Empty>
 	);
 }
@@ -513,14 +531,12 @@ function ToolkitCard({
 				</Button>
 
 				<Button
-					disabled={initiate.isPending}
+					loading={initiate.isPending}
 					onClick={handleConnect}
 					size="sm"
 					variant={isConnected ? "outline" : "default"}
 				>
-					{initiate.isPending ? (
-						<Spinner className="mr-2 size-3.5" />
-					) : (
+					{!initiate.isPending && (
 						<HugeiconsIcon className="mr-1.5 size-3.5" icon={Link01Icon} />
 					)}
 					{isConnected ? "Reconnect" : "Connect"}

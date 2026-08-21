@@ -24,6 +24,8 @@ import {
 	useContext,
 	useMemo,
 } from "react";
+import type { SkillPacksState } from "./pack-types.ts";
+import type { Scorecard } from "./scorecard.ts";
 import { describeIncompatibility } from "./surface-labels.ts";
 import type {
 	AppsCatalogState,
@@ -37,7 +39,6 @@ import type {
 	VersionSnapshot,
 } from "./types.ts";
 import { evaluateCompatibility } from "./types.ts";
-import type { SkillPacksState } from "./pack-types.ts";
 
 /** Which realm an affordance target belongs to (drives the web deep-link page). */
 export type CatalogRealm = "app" | "model" | "skill";
@@ -93,6 +94,34 @@ export interface CatalogInstallButtonProps {
 export interface CatalogNode {
 	token: string | null;
 	url: string;
+}
+
+/** The catalog realms that can be reviewed by the configured agent. */
+export type CatalogScanKind = "app" | "plugin" | "skill";
+
+export interface CatalogScanFile {
+	contents?: string | null;
+	path: string;
+}
+
+/** Evidence sent to Core for the bounded, read-only agent review. The
+ * deterministic {@link Scorecard} is included as evidence, but the agent never
+ * gets to replace its grade. */
+export interface CatalogScanInput {
+	description?: string | null;
+	files?: CatalogScanFile[];
+	id: string;
+	kind: CatalogScanKind;
+	metadata?: Record<string, unknown>;
+	name: string;
+	readme?: string | null;
+	scorecard: Scorecard;
+}
+
+export interface CatalogScanResult {
+	agentId: string;
+	report: string;
+	status: "complete" | "partial";
 }
 
 /** The install layer a surface provides, or `null` for a read-only surface. */
@@ -165,6 +194,12 @@ export interface CatalogMarkdownProps {
 	content: string;
 }
 
+/** Optional model inputs used to make a detail-page llmfit estimate specific. */
+export interface LlmfitEstimateOptions {
+	context?: number;
+	quant?: string;
+}
+
 /** The full set of services the shared catalog sections need from their host. */
 export interface CatalogHost {
 	/** The "Use this model" control for an installed model (desktop-only; a
@@ -184,7 +219,11 @@ export interface CatalogHost {
 	 *  its old behaviour and only `navigate` gates authoring. */
 	canAuthorSkills?: boolean;
 	/** On-demand llmfit hardware fit + tok/s estimate for one repo. */
-	estimateLlmfit: (node: CatalogNode, repo: string) => Promise<LlmFitEstimate>;
+	estimateLlmfit: (
+		node: CatalogNode,
+		repo: string,
+		options?: LlmfitEstimateOptions
+	) => Promise<LlmFitEstimate>;
 	/** Read the release trains a listing publishes (`stable`, `beta`, `nightly`,
 	 *  …), each with the version it resolves to right now.
 	 *
@@ -244,6 +283,10 @@ export interface CatalogHost {
 	/** Read-only primary affordance, rendered where the install button would be
 	 *  when {@link install} is null (web: an "Open in Ryu" button). */
 	renderAffordance?: (target: CatalogAffordanceTarget) => ReactNode;
+	/** Run the configured, read-only agent review for one catalog item. Web omits
+	 *  this because it has no Core node to execute against, so the Scan button is
+	 *  absent there rather than pretending a browser-only review ran. */
+	runCatalogScan?: (input: CatalogScanInput) => Promise<CatalogScanResult>;
 	/** Active Core node identity (url + token). Read-only surfaces return a stub;
 	 *  the model detail's node-coupled extras (llmfit, fine-tunes, active-model) are
 	 *  gated behind {@link install} anyway, so a stub is never actually dereferenced. */
@@ -284,8 +327,6 @@ export interface CatalogHost {
 	 *  Omitted by read-only surfaces (web has no settings dialog to open); the
 	 *  sections fall back to {@link useNoSettingsOpener}. */
 	usePluginSettingsOpener?: () => PluginSettingsOpener;
-	/** The surface's Skills catalog hook (called at component top level). */
-	useSkillsCatalog: (initialQuery: string) => SkillsCatalogState;
 	/** The surface's Skill **packs** hook (called at component top level).
 	 *
 	 *  Optional, and its absence is meaningful rather than cosmetic: a surface
@@ -294,6 +335,8 @@ export interface CatalogHost {
 	 *  does nothing. A surface that CAN resolve packs returns one; desktop backs
 	 *  it with Core's `/api/skills/packs`, web with the federated mirror. */
 	useSkillPacks?: () => SkillPacksState;
+	/** The surface's Skills catalog hook (called at component top level). */
+	useSkillsCatalog: (initialQuery: string) => SkillsCatalogState;
 }
 
 const CatalogHostContext = createContext<CatalogHost | null>(null);

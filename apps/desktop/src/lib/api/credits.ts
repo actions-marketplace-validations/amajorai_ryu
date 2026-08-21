@@ -23,11 +23,12 @@
 // checkout the UI re-fetches the wallet (the balance may lag a moment behind a
 // completed payment).
 
+import { formatMicroUsd as formatSharedMicroUsd } from "@ryu/ui/lib/number-format.ts";
 import { openSse, SseConnectError, type SseMessage } from "@ryuhq/protocol/sse";
 import { BACKEND_URL, TOKEN_KEY } from "@/lib/auth-client.ts";
 
 /** Micro-USD (millionths of a dollar) per US cent; the server's wallet unit. */
-const MICRO_USD_PER_DOLLAR = 1_000_000;
+export const MICRO_USD_PER_DOLLAR = 1_000_000;
 
 /** Convert a micro-USD integer (wallet balance / ledger delta) to dollars. */
 export function microUsdToUsd(microUsd: number): number {
@@ -36,13 +37,7 @@ export function microUsdToUsd(microUsd: number): number {
 
 /** Format a micro-USD amount as a localized USD currency string. */
 export function formatMicroUsd(microUsd: number, currency = "usd"): string {
-	return microUsdToUsd(microUsd).toLocaleString(undefined, {
-		style: "currency",
-		currency: currency.toUpperCase(),
-		// Metered usage debits are tiny; show enough precision to be meaningful.
-		minimumFractionDigits: 2,
-		maximumFractionDigits: 4,
-	});
+	return formatSharedMicroUsd(microUsd, currency);
 }
 
 /** The named credit packs the top-up checkout offers, in whole dollars. */

@@ -17,7 +17,10 @@ import {
 	updateToastBody,
 	updateToastId,
 } from "@/src/components/updater/ReleaseNotes.tsx";
-import { useActiveNode, useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
+import {
+	useActiveNode,
+	useActiveNodeGetter,
+} from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	getNodeTimeZone,
@@ -55,7 +58,7 @@ export function UpdatesSettings() {
 		void (async () => {
 			const [info, enabled] = await Promise.all([
 				getVersionInfo(target).catch(() => null),
-				getAutoUpdateEnabled(target),
+				getAutoUpdateEnabled(target).catch(() => true),
 			]);
 			if (!active) {
 				return;
@@ -69,10 +72,17 @@ export function UpdatesSettings() {
 	}, [getNode]);
 
 	const onToggle = async (next: boolean) => {
+		const previous = autoUpdate;
 		setAutoUpdate(next);
-		const ok = await setAutoUpdateEnabled(toTarget(getNode()), next);
-		if (!ok) {
-			setAutoUpdate(!next);
+		try {
+			const ok = await setAutoUpdateEnabled(toTarget(getNode()), next);
+			if (ok) {
+				return;
+			}
+			setAutoUpdate(previous);
+			sileo.error({ title: "Could not save the auto-update setting" });
+		} catch {
+			setAutoUpdate(previous);
 			sileo.error({ title: "Could not save the auto-update setting" });
 		}
 	};

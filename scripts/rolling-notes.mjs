@@ -145,7 +145,7 @@ try {
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify({
-				model: process.env.OPENCODE_MODEL || "deepseek-v4-flash",
+				model: process.env.OPENCODE_MODEL || "mimo-v2.5",
 				temperature: 0.2,
 				max_tokens: Number(process.env.OPENCODE_MAX_TOKENS || 16000),
 				messages: [

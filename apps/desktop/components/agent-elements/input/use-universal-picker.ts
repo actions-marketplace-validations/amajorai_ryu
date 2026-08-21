@@ -30,6 +30,7 @@ import { createElement, type ReactNode, useCallback, useMemo } from "react";
 import { sileo } from "sileo";
 import type { ComposerSettingsSection } from "@/components/agent-elements/input/composer-settings-menu.tsx";
 import { isChatModelStem } from "@/components/agent-elements/input/model-groups.ts";
+import { modelMenuItem } from "@/components/agent-elements/input/model-router.ts";
 import {
 	type ProviderEntry,
 	type TeamEntry,
@@ -61,6 +62,11 @@ import {
 	switchProviderAccount,
 } from "@/src/lib/api/pi-config.ts";
 import type { Team } from "@/src/lib/api/teams.ts";
+import {
+	type BrowserSurface,
+	browserProviderHost,
+	useBrowserProviderSnapshot,
+} from "@/src/lib/extension-host.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 
 /** The flagship agent id (mirrors Core `DEFAULT_AGENT_ID`). */
@@ -81,6 +87,7 @@ const RYU_AGENT_ID = "ryu";
  */
 const LOCAL_PROVIDER_ID = "local";
 const GATEWAY_PROVIDER_ID = "gateway";
+const BROWSER_PROVIDER_ID = "browser";
 
 /** Map a Pi provider id to the engine key its brand logo is registered under. */
 const PROVIDER_ENGINE_KEY: Record<string, string> = {
@@ -160,9 +167,19 @@ export interface UseUniversalPickerParams {
 	activeModelSection: ComposerSettingsSection | null;
 	agentId: string | null;
 	agents: AgentSummary[];
+	/** Keep model rows visible for setup surfaces at every interface level. */
+	forceModelPicker?: boolean;
 	onCreateAgent?: () => void;
 	onSelectAgent: (id: string) => void;
+	/** Optional host override for a concrete provider/model pick. */
+	onSelectProviderModel?: (providerId: string, modelId: string) => void;
+	/** Optional host override for a provider thinking-level pick. */
+	onSelectProviderThinking?: (providerId: string, level: string) => void;
 	onSelectTeam?: (id: string) => void;
+	/** Optional host override for provider picks (used by setup surfaces). */
+	onUseProvider?: (providerId: string, modelId: string | null) => void;
+	/** Browser-only surface used for the synthetic Browser provider selection. */
+	surface?: BrowserSurface;
 	teamId?: string | null;
 	teams?: Team[];
 }
@@ -186,9 +203,15 @@ export function useUniversalPicker(
 		onSelectAgent,
 		onSelectTeam,
 		onCreateAgent,
+		onUseProvider,
+		onSelectProviderModel,
+		onSelectProviderThinking,
 		activeModelSection,
 		activeExtraSections,
+		forceModelPicker = false,
+		surface = "dashboard",
 	} = params;
+	const browserSnapshot = useBrowserProviderSnapshot();
 
 	const { config, catalog, save } = usePiConfig();
 	const catalogAgents = useAgentsCatalog();
@@ -443,12 +466,54 @@ export function useUniversalPicker(
 					// row's own current model is exempt (see `filterEnabledModels`), and
 					// the submenu applies the same rule to the live-discovered list.
 					models: filterEnabledModels(
-						p.suggestedModels.map((m) => ({ id: m, name: m })),
+						p.suggestedModels.map((m) => modelMenuItem(m)),
 						p.modelOverrides,
 						isActive ? config?.model : null
 					),
 				};
 			});
+
+			// Browser is a synthetic provider owned by the extension adapter. It sits
+			// beside Core-local and cloud routes in the same universal picker, but its
+			// picks never call `saveProvider` or send an inference request to Core.
+			if (browserSnapshot) {
+				const browserModelId =
+					browserSnapshot.currentModelBySurface[surface] ??
+					browserSnapshot.models[0]?.id ??
+					null;
+				const browserModel = browserSnapshot.models.find(
+					(model) => model.id === browserModelId
+				);
+				if (browserModel) {
+					providers.unshift({
+						id: BROWSER_PROVIDER_ID,
+						label: "Browser",
+						engineKey: "browser",
+						authKind: "none",
+						managed: false,
+						supportsDiscovery: false,
+						configured: true,
+						upsell: false,
+						isActive:
+							browserSnapshot.activeAgentId === agentId &&
+							browserSnapshot.activeSurface === surface,
+						currentModel: browserModelId,
+						currentThinking: null,
+						status: browserModel.status,
+						statusMessage: browserModel.statusMessage,
+						browserCapabilities: browserModel.capabilities,
+						models: browserSnapshot.models.map((model) => ({
+							id: model.id,
+							name: `${model.name} · ${
+								model.status === "ready" ? "Ready" : model.status
+							}`,
+							description: model.capabilities.actionSupport
+								? `Browser actions · ${model.status}`
+								: `Chat-only · ${model.status}`,
+						})),
+					});
+				}
+			}
 
 			// The Local route, offered as its own provider row so "run this on my
 			// machine" is a first-class choice next to the vendors rather than a few
@@ -495,6 +560,7 @@ export function useUniversalPicker(
 				agents,
 				activeModelSection,
 				activeExtraSections,
+				forceModelPicker,
 				ryuAgent,
 				ryuActive,
 				providers,
@@ -520,6 +586,21 @@ export function useUniversalPicker(
 				onUseProvider: (providerId) => {
 					const p = providers.find((x) => x.id === providerId);
 					const model = p?.currentModel ?? p?.models[0]?.id ?? null;
+					if (onUseProvider) {
+						onUseProvider(providerId, model);
+						return;
+					}
+					if (providerId === BROWSER_PROVIDER_ID) {
+						if (model) {
+							browserProviderHost.selectModel(
+								agentId ?? RYU_AGENT_ID,
+								surface,
+								model
+							);
+						}
+						onSelectAgent(RYU_AGENT_ID);
+						return;
+					}
 					if (providerId === LOCAL_PROVIDER_ID) {
 						if (model) {
 							switchToLocalModel(model, null);
@@ -529,6 +610,19 @@ export function useUniversalPicker(
 					saveProvider(providerId, model, null);
 				},
 				onSelectProviderModel: (providerId, modelId) => {
+					if (onSelectProviderModel) {
+						onSelectProviderModel(providerId, modelId);
+						return;
+					}
+					if (providerId === BROWSER_PROVIDER_ID) {
+						browserProviderHost.selectModel(
+							agentId ?? RYU_AGENT_ID,
+							surface,
+							modelId
+						);
+						onSelectAgent(RYU_AGENT_ID);
+						return;
+					}
 					if (providerId === LOCAL_PROVIDER_ID) {
 						switchToLocalModel(modelId, null);
 						return;
@@ -536,6 +630,15 @@ export function useUniversalPicker(
 					saveProvider(providerId, modelId, null);
 				},
 				onSelectProviderThinking: (providerId, level) => {
+					if (onSelectProviderThinking) {
+						onSelectProviderThinking(providerId, level);
+						return;
+					}
+					if (providerId === BROWSER_PROVIDER_ID) {
+						void level;
+						onSelectAgent(RYU_AGENT_ID);
+						return;
+					}
 					const p = providers.find((x) => x.id === providerId);
 					const model = p?.currentModel ?? p?.models[0]?.id ?? null;
 					if (providerId === LOCAL_PROVIDER_ID) {
@@ -621,6 +724,8 @@ export function useUniversalPicker(
 			agentId,
 			activeModelSection,
 			activeExtraSections,
+			forceModelPicker,
+			browserSnapshot,
 			ryuActive,
 			activeProviderId,
 			localActive,
@@ -638,10 +743,14 @@ export function useUniversalPicker(
 			onSelectAgent,
 			onSelectTeam,
 			onCreateAgent,
+			onUseProvider,
+			onSelectProviderModel,
+			onSelectProviderThinking,
 			openGateway,
 			requestUpgrade,
 			saveProvider,
 			applyCatalog,
+			surface,
 		]
 	);
 

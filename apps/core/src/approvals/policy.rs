@@ -121,21 +121,47 @@ const RISKY_PATTERNS: &[&str] = &[
     "configure_workflow",
 ];
 
-/// Governance-mutating actions (exact action-segment match): tools that let an
+/// Governance-mutating actions (exact two-segment suffix match): tools that let an
 /// agent alter its own damage-limiting controls (e.g. raise or remove the
-/// Gateway spend cap via `ryu.gateway__budget.set`). Like the CoreApi-mutation
+/// Gateway spend cap via `ryu.gateway.budget.set`). Like the CoreApi-mutation
 /// rule, these gate whenever the operator has not EXPLICITLY opted out with
 /// `approval-mode=off` — the verb heuristic alone would miss them.
 const GOVERNANCE_ACTIONS: &[&str] = &["budget.set"];
 
-/// The action segment of a tool id: the part after the last `__`
-/// (`<server>__<tool>` → `<tool>`), lowercased. Falls back to the whole id.
+/// Spaces mutations change user-owned knowledge or the calling agent's access
+/// scope, so they must be explicitly approved unless the operator selected the
+/// global `off` mode. Reads remain outside this list.
+const SPACE_MUTATION_ACTIONS: &[&str] = &[
+    "attach_space",
+    "create_file",
+    "create_page",
+    "create_space",
+    "detach_space",
+    "rename_space",
+];
+
+/// The action segment of a tool id: the part after the last namespace separator
+/// (`<server>.<tool>` → `<tool>`), lowercased. Legacy ids are normalized at the
+/// Core tool ingress before this policy reads them. Falls back to the whole id.
 fn action_segment(tool_id: &str) -> String {
-    tool_id
-        .rsplit("__")
+    crate::sidecar::mcp::canonical_tool_id(tool_id)
+        .rsplit('.')
         .next()
         .unwrap_or(tool_id)
         .to_ascii_lowercase()
+}
+
+/// The final namespace plus action (`budget.set` for
+/// `ryu.gateway.budget.set`). Governance rules use this narrower shape so a
+/// generic `set` tool cannot accidentally inherit governance semantics.
+fn action_suffix(tool_id: &str) -> String {
+    let canonical = crate::sidecar::mcp::canonical_tool_id(tool_id);
+    let mut segments = canonical.rsplit('.');
+    let action = segments.next().unwrap_or(&canonical);
+    let Some(namespace) = segments.next() else {
+        return action.to_ascii_lowercase();
+    };
+    format!("{namespace}.{action}").to_ascii_lowercase()
 }
 
 /// Risk tags for a tool id (empty ⇒ not classified risky by the name heuristic).
@@ -167,7 +193,7 @@ pub fn should_require_approval_local(
         tags.push("agent-gated".to_owned());
         return Some(tags);
     }
-    // Layer B′ — Core self-API mutations. A mutating (non-GET) `ryu_api__*` tool
+    // Layer B′ — Core self-API mutations. A mutating (non-GET) `ryu_api.*` tool
     // lets an agent drive Ryu itself (create/delete/update Core state), so it is
     // treated as risky *regardless* of whether the verb heuristic fires — closing
     // the gap where `put`/`patch` slip past `RISKY_PATTERNS`.
@@ -190,13 +216,13 @@ pub fn should_require_approval_local(
         return Some(tags);
     }
     // Layer B′ (continued) — DERIVED app-API mutations. A derived tool
-    // (`ryu_ext__…`, generated from an app sidecar's OpenAPI document) reaches an
+    // (`ryu_ext.…`, generated from an app sidecar's OpenAPI document) reaches an
     // endpoint nobody hand-picked: a single installed app can contribute hundreds
     // of them, so a non-GET one is the same "the model is writing to real state"
     // shape as the CoreApi rule, over a far wider surface.
     //
     // It needs its own arm because neither existing layer covers it.
-    // `self_api::is_mutating` keys on the `ryu_api__` prefix and returns false
+    // `self_api::is_mutating` keys on the `ryu_api.` prefix and returns false
     // for these, and `RISKY_PATTERNS` carries no `put`/`patch` entry — so a
     // derived PUT or PATCH was gated by *nothing*, on a node whose operator had
     // explicitly chosen `approval-mode=smart`. (`post` and `delete` do happen to
@@ -207,7 +233,7 @@ pub fn should_require_approval_local(
     //
     // The grammar has exactly ONE definition, [`crate::ext_api::is_mutating`],
     // which reads the method from a fixed position (the first token after the last
-    // `__`) rather than scanning for a verb word anywhere in the id. That is not a
+    // `.`) rather than scanning for a verb word anywhere in the id. That is not a
     // refactor of the same rule: a scan classifies `…__get_blog_post` as a WRITE
     // because the slug contains `post`, and gating plain reads is how operators
     // learn to click through prompts — which is how the real writes stop being
@@ -223,9 +249,14 @@ pub fn should_require_approval_local(
     // Layer B′ (continued) — governance mutations. Same escape-hatch semantics
     // as the CoreApi rule: an agent must never silently loosen its own
     // damage-limiting controls unless the operator explicitly opted out.
-    if !core_api_opted_out && GOVERNANCE_ACTIONS.contains(&action_segment(tool_id).as_str()) {
+    if !core_api_opted_out && GOVERNANCE_ACTIONS.contains(&action_suffix(tool_id).as_str()) {
         let mut tags = classify_risk(tool_id);
         tags.push("governance-mutation".to_owned());
+        return Some(tags);
+    }
+    if !core_api_opted_out && SPACE_MUTATION_ACTIONS.contains(&action_segment(tool_id).as_str()) {
+        let mut tags = classify_risk(tool_id);
+        tags.push("spaces-mutation".to_owned());
         return Some(tags);
     }
     // Layer B: global mode.
@@ -267,7 +298,7 @@ mod tests {
         // `budget.set` lets the agent raise/remove its own spend cap; the verb
         // heuristic misses it, so the governance rule must gate it — including
         // under the unset default — with only explicit `off` opting out.
-        let t = "ryu.gateway__budget.set";
+        let t = "ryu.gateway.budget.set";
         let tags = should_require_approval_local(&[], t, ApprovalMode::Smart, None)
             .expect("governance mutation must gate under the default");
         assert!(tags.iter().any(|t| t == "governance-mutation"));
@@ -281,12 +312,12 @@ mod tests {
     ///
     /// The ids here are chosen so the test cannot pass for the wrong reason. `put`
     /// and `patch` are absent from `RISKY_PATTERNS` and the ids are not
-    /// `ryu_api__*`, so *nothing else in this module* gates them — asserted
+    /// `ryu_api.*`, so *nothing else in this module* gates them — asserted
     /// explicitly, because a POST/DELETE id would have been caught by the verb
     /// heuristic and this test would have been green with the new arm deleted.
     #[test]
     fn non_get_derived_tool_requires_approval_under_smart() {
-        let put = "ryu_ext__ryu_crm__put_contacts_id";
+        let put = "ryu_ext.ryu_crm.put_contacts_id";
         assert!(
             classify_risk(put).is_empty(),
             "the verb heuristic must NOT be what gates this, or the derived rule is untested"
@@ -300,7 +331,7 @@ mod tests {
         assert!(tags.iter().any(|t| t == "ext-api-mutation"));
 
         // PATCH is the other verb the heuristic misses entirely.
-        let patch = "ryu_ext__ryu_crm__patch_contacts_id";
+        let patch = "ryu_ext.ryu_crm.patch_contacts_id";
         assert!(classify_risk(patch).is_empty());
         let tags = should_require_approval_local(&[], patch, ApprovalMode::Smart, Some("smart"))
             .expect("a derived PATCH must gate under smart");
@@ -309,8 +340,8 @@ mod tests {
         // POST/DELETE gate through the same arm (and so carry the same tag), even
         // though the verb heuristic would also have flagged them.
         for id in [
-            "ryu_ext__ryu_crm__post_contacts",
-            "ryu_ext__ryu_crm__delete_contacts_id",
+            "ryu_ext.ryu_crm.post_contacts",
+            "ryu_ext.ryu_crm.delete_contacts_id",
         ] {
             let tags = should_require_approval_local(&[], id, ApprovalMode::Smart, Some("smart"))
                 .expect("a derived write must gate under smart");
@@ -318,13 +349,13 @@ mod tests {
         }
 
         // The id grammar puts the method at a FIXED position (the first token after
-        // the last `__`), so a slug that merely contains a verb word no longer
+        // the last namespace separator), so a slug that merely contains a verb word no longer
         // over-gates: `get_blog_post` is a read. That precision is the point — an
         // earlier draft scanned every token, which read `post` out of the slug and
         // gated plain reads, and an operator who is prompted on reads stops reading
         // the prompts that guard the writes.
         assert!(!crate::ext_api::is_mutating(
-            "ryu_ext__ryu_news__get_blog_post"
+            "ryu_ext.ryu_news.get_blog_post"
         ));
     }
 
@@ -333,7 +364,7 @@ mod tests {
     /// how the writes above stop being read either.
     #[test]
     fn get_derived_tool_does_not_require_approval() {
-        let get = "ryu_ext__ryu_crm__get_contacts";
+        let get = "ryu_ext.ryu_crm.get_contacts";
         assert!(
             should_require_approval_local(&[], get, ApprovalMode::Smart, Some("smart")).is_none()
         );
@@ -344,19 +375,19 @@ mod tests {
         );
         // An id that is not on the derived plane is not this rule's business, even
         // when its action segment looks identical.
-        assert!(!crate::ext_api::is_mutating("crm__put_contacts_id"));
+        assert!(!crate::ext_api::is_mutating("crm.put_contacts_id"));
         // An id that carries the derived PREFIX but not the grammar has no method
         // token to read, so it gates. That is the deliberate fail-safe direction:
         // an unparseable derived id costs one extra prompt, whereas guessing "read"
         // on a shape we do not understand is the expensive way to be wrong.
-        assert!(crate::ext_api::is_mutating("ryu_ext__crm_contacts"));
+        assert!(crate::ext_api::is_mutating("ryu_ext.crm_contacts"));
     }
 
     /// Same escape-hatch semantics as the CoreApi rule: the operator has to say
     /// `off` out loud. Unset and empty are "never chose", not "chose off".
     #[test]
     fn derived_mutation_gate_is_disabled_only_by_explicit_off() {
-        let put = "ryu_ext__ryu_crm__put_contacts_id";
+        let put = "ryu_ext.ryu_crm.put_contacts_id";
         assert!(should_require_approval_local(&[], put, ApprovalMode::Off, None).is_some());
         assert!(should_require_approval_local(&[], put, ApprovalMode::Off, Some("")).is_some());
         assert!(
@@ -374,57 +405,57 @@ mod tests {
 
     #[test]
     fn classify_flags_worktree_and_workflow_minting_verbs() {
-        assert!(!classify_risk("ryu.worktree__apply").is_empty());
-        assert!(!classify_risk("ryu.worktree__discard").is_empty());
-        assert!(!classify_risk("ryu.worktree__open_pr").is_empty());
-        assert!(!classify_risk("workflow_builder__create_workflow").is_empty());
-        assert!(!classify_risk("workflow_builder__configure_workflow").is_empty());
+        assert!(!classify_risk("ryu.worktree.apply").is_empty());
+        assert!(!classify_risk("ryu.worktree.discard").is_empty());
+        assert!(!classify_risk("ryu.worktree.open_pr").is_empty());
+        assert!(!classify_risk("workflow_builder.create_workflow").is_empty());
+        assert!(!classify_risk("workflow_builder.configure_workflow").is_empty());
         // Reads on the same servers stay free.
-        assert!(classify_risk("workflow_builder__get_workflow").is_empty());
+        assert!(classify_risk("workflow_builder.get_workflow").is_empty());
     }
 
     #[test]
     fn classify_uses_action_segment() {
-        assert!(!classify_risk("gmail__send_email").is_empty());
-        assert!(!classify_risk("fs__delete_file").is_empty());
+        assert!(!classify_risk("gmail.send_email").is_empty());
+        assert!(!classify_risk("fs.delete_file").is_empty());
         // Broad read verbs are not risky.
-        assert!(classify_risk("web_fetch__get").is_empty());
-        assert!(classify_risk("shadow__semantic_search").is_empty());
+        assert!(classify_risk("web_fetch.get").is_empty());
+        assert!(classify_risk("shadow.semantic_search").is_empty());
         // The server prefix must not leak a match (only the action segment counts).
-        assert!(classify_risk("sender__list_items").is_empty());
+        assert!(classify_risk("sender.list_items").is_empty());
     }
 
     #[test]
     fn classify_flags_exec_and_mutating_verbs() {
         // `rtk` executes arbitrary dev commands — it must classify risky so Smart
         // mode gates it (security M6/M11). As a declarative `command` plugin tool
-        // its callable id is now `app__rtk__run`, but `classify_risk` keys on the
-        // action segment after the last `__`, so the `run` verb still classifies.
-        assert!(classify_risk("app__rtk__run").iter().any(|t| t == "run"));
+        // its callable id is now `app.rtk.run`, but `classify_risk` keys on the
+        // action segment after the last namespace separator, so the `run` verb still classifies.
+        assert!(classify_risk("app.rtk.run").iter().any(|t| t == "run"));
         // Exec / write / transfer verb classes.
-        assert!(!classify_risk("shell__exec").is_empty());
-        assert!(!classify_risk("db__execute_query").is_empty());
-        assert!(!classify_risk("fs__write_file").is_empty());
-        assert!(!classify_risk("fs__overwrite").is_empty());
-        assert!(!classify_risk("s3__upload_object").is_empty());
-        assert!(!classify_risk("model__download").is_empty());
-        assert!(!classify_risk("web__fetch").is_empty());
+        assert!(!classify_risk("shell.exec").is_empty());
+        assert!(!classify_risk("db.execute_query").is_empty());
+        assert!(!classify_risk("fs.write_file").is_empty());
+        assert!(!classify_risk("fs.overwrite").is_empty());
+        assert!(!classify_risk("s3.upload_object").is_empty());
+        assert!(!classify_risk("model.download").is_empty());
+        assert!(!classify_risk("web.fetch").is_empty());
         // `read` is deliberately not risky.
-        assert!(classify_risk("fs__read_file").is_empty());
+        assert!(classify_risk("fs.read_file").is_empty());
     }
 
     #[test]
     fn smart_mode_gates_rtk_run_and_write_tools() {
         assert!(should_require_approval_local(
             &[],
-            "app__rtk__run",
+            "app.rtk.run",
             ApprovalMode::Smart,
             Some("smart")
         )
         .is_some());
         assert!(should_require_approval_local(
             &[],
-            "fs__write_file",
+            "fs.write_file",
             ApprovalMode::Smart,
             Some("smart")
         )
@@ -435,7 +466,7 @@ mod tests {
     fn off_mode_gates_nothing_without_agent_layer() {
         assert!(should_require_approval_local(
             &[],
-            "gmail__send_email",
+            "gmail.send_email",
             ApprovalMode::Off,
             Some("off")
         )
@@ -446,7 +477,7 @@ mod tests {
     fn manual_mode_gates_everything() {
         assert!(should_require_approval_local(
             &[],
-            "web_fetch__get",
+            "web_fetch.get",
             ApprovalMode::Manual,
             Some("manual")
         )
@@ -457,14 +488,14 @@ mod tests {
     fn smart_mode_gates_only_risky() {
         assert!(should_require_approval_local(
             &[],
-            "gmail__send_email",
+            "gmail.send_email",
             ApprovalMode::Smart,
             Some("smart")
         )
         .is_some());
         assert!(should_require_approval_local(
             &[],
-            "web_fetch__get",
+            "web_fetch.get",
             ApprovalMode::Smart,
             Some("smart")
         )
@@ -475,7 +506,7 @@ mod tests {
     fn core_api_mutation_gates_in_smart_and_manual_but_not_explicit_off() {
         // A PUT self-API tool: the verb heuristic would NOT catch it, but the
         // CoreApi-mutation rule must — in both smart and manual.
-        let put = "ryu_api__put_api_agents_id";
+        let put = "ryu_api.put_api_agents_id";
         assert!(
             should_require_approval_local(&[], put, ApprovalMode::Smart, Some("smart")).is_some()
         );
@@ -495,7 +526,7 @@ mod tests {
         // The user mandate: mutations need HITL even under the default (unset)
         // approval mode. Unset pref (`None`) collapses to `ApprovalMode::Off`, but
         // the CoreApi rule still gates it — only an *explicit* `off` opts out.
-        let put = "ryu_api__put_api_agents_id";
+        let put = "ryu_api.put_api_agents_id";
         let tags = should_require_approval_local(&[], put, ApprovalMode::Off, None)
             .expect("CoreApi mutation must gate under the unset default");
         assert!(tags.iter().any(|t| t == "core-api-mutation"));
@@ -508,10 +539,10 @@ mod tests {
         // Ordinary (non-CoreApi) tools are NOT gated under the unset default —
         // only the CoreApi-mutation rule fires on unset; Layer B stays `Off`.
         assert!(
-            should_require_approval_local(&[], "web_fetch__get", ApprovalMode::Off, None).is_none()
+            should_require_approval_local(&[], "web_fetch.get", ApprovalMode::Off, None).is_none()
         );
         assert!(
-            should_require_approval_local(&[], "gmail__send_email", ApprovalMode::Off, None)
+            should_require_approval_local(&[], "gmail.send_email", ApprovalMode::Off, None)
                 .is_none()
         );
     }
@@ -520,7 +551,7 @@ mod tests {
     fn core_api_get_flows_free() {
         // A GET self-API tool is a read: never gated by the CoreApi rule (smart
         // leaves it free; only the ordinary Layer-B `manual` blanket-gates it).
-        let get = "ryu_api__get_api_quests";
+        let get = "ryu_api.get_api_quests";
         assert!(
             should_require_approval_local(&[], get, ApprovalMode::Smart, Some("smart")).is_none()
         );
@@ -533,9 +564,9 @@ mod tests {
 
     #[test]
     fn agent_layer_gates_regardless_of_mode() {
-        let agent = vec!["custom__thing".to_owned()];
+        let agent = vec!["custom.thing".to_owned()];
         let tags =
-            should_require_approval_local(&agent, "custom__thing", ApprovalMode::Off, Some("off"))
+            should_require_approval_local(&agent, "custom.thing", ApprovalMode::Off, Some("off"))
                 .expect("agent-gated tool must require approval even in Off mode");
         assert!(tags.iter().any(|t| t == "agent-gated"));
     }

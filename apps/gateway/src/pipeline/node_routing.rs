@@ -34,7 +34,7 @@
 //! | firewall/DLP dials          | `FirewallResolver::resolve` — request scope applies under locked = ALL fields |
 //! | credit envelope             | `preflight_credit_gate` (per credit pool)           |
 //! | wallet-empty action         | `wallet_empty_decision` + `[credits].fail_closed`   |
-//! | token / session budgets     | `state.with_budget`                                 |
+//! | spend / session budgets     | `state.with_budget`                                 |
 //! | rate limit bucket           | `check_request_for_key(&ctx.api_key, …)` — the key is `rgw_org:<id>`, so a preference cannot move the bucket |
 //! | prompt-cache override       | `[prompt_cache].allow_request_override`             |
 //! | post-call debit attribution | reads the provider that actually answered, never a preference |

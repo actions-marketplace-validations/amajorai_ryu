@@ -29,7 +29,6 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@ryu/ui/components/select";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
 import { Textarea } from "@ryu/ui/components/textarea";
 import { useMemo, useState } from "react";
@@ -409,8 +408,12 @@ export function EvaluatorEditorDialog({
 					<Button onClick={() => onOpenChange(false)} size="sm" variant="ghost">
 						Cancel
 					</Button>
-					<Button disabled={!canSave} onClick={handleSave} size="sm">
-						{saving ? <Spinner className="size-3" /> : null}
+					<Button
+						disabled={!canSave}
+						loading={saving}
+						onClick={handleSave}
+						size="sm"
+					>
 						Save evaluator
 					</Button>
 				</DialogFooter>

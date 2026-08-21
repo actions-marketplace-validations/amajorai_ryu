@@ -1,4 +1,10 @@
 {
+  "tags": ["agents.md","context","instructions","prompt","acp"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/agents-md-tail",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/agents-md-tail",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/agents-md-tail",
   "name": "AGENTS.md Tail",
   "version": "0.1.14",

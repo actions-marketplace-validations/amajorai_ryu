@@ -34,12 +34,83 @@ pub struct AuditQueryParams {
     #[serde(default)]
     pub errors_only: bool,
     pub limit: Option<u32>,
+    /// Inclusive lower bound for the ISO/UTC timestamp range.
+    pub from: Option<String>,
+    /// Exclusive upper bound for the ISO/UTC timestamp range.
+    pub until: Option<String>,
     /// Filter by gateway-internal request id (M4 / #176).
     pub request_id: Option<String>,
     /// Filter by Core session/conversation id (M4 / #176).
     pub session_id: Option<String>,
     /// Filter by widget instance id (Ryu Apps, §4.4).
     pub widget_instance_id: Option<String>,
+    /// Filter by event discriminator, including `control_change`.
+    pub event_type: Option<String>,
+}
+
+/// Body accepted by `POST /v1/audit/control`. The gateway derives the actor
+/// from the authenticated admin context; Core may additionally submit a
+/// bounded, already-verified actor identity so the local row can name the user
+/// who initiated the control-plane call. Raw config payloads are never accepted.
+#[derive(Debug, Deserialize)]
+pub struct ControlAuditBody {
+    pub action: String,
+    pub target: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Optional verified Core user identity for a local proxy call. Direct
+    /// gateway-admin callers omit this and are recorded as gateway admins.
+    #[serde(default)]
+    pub actor_id: Option<String>,
+    #[serde(default)]
+    pub actor_name: Option<String>,
+}
+
+fn bounded_control_value(value: String, max_len: usize) -> Result<String, GatewayError> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(GatewayError::BadRequest(
+            "control audit action and target are required".to_string(),
+        ));
+    }
+    if value.chars().count() > max_len {
+        return Err(GatewayError::BadRequest(
+            "control audit fields are too long".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
+fn bounded_control_summary(value: Option<String>) -> Result<Option<String>, GatewayError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > 400 {
+        return Err(GatewayError::BadRequest(
+            "control audit summary is too long".to_string(),
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn bounded_control_actor(value: Option<String>) -> Result<Option<String>, GatewayError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > 240 {
+        return Err(GatewayError::BadRequest(
+            "control audit actor fields are too long".to_string(),
+        ));
+    }
+    Ok(Some(value))
 }
 
 /// Local audit-log query endpoint. Restricted to the master key: audit data is
@@ -82,9 +153,13 @@ pub async fn query_audit(
         model: params.model,
         errors_only: params.errors_only,
         limit: params.limit,
+        timestamp_from: params.from,
+        timestamp_until: params.until,
         request_id: params.request_id,
         session_id: params.session_id,
         widget_instance_id: params.widget_instance_id,
+        event_type: params.event_type,
+        id_after: None,
     };
 
     let entries = state
@@ -92,31 +167,32 @@ pub async fn query_audit(
         .query(&query)
         .map_err(|e| GatewayError::Internal(anyhow::anyhow!("audit query failed: {e}")))?;
 
-    // Enrich each model-call row with a DERIVED estimated cost (#548, P6) so the
-    // desktop trace viewer can show per-run cost without re-deriving the rate. The
-    // GenAI OTel conventions define no cost attribute (cost is derived from tokens),
-    // so this is the one place the gateway exposes its estimate. This flat rate
-    // matches the control-plane report and shared-budget basis. NOTE: it is only
-    // an ESTIMATE — OpenRouter wallet debits now use the provider's real
-    // `usage.cost`, so this trace-view figure intentionally diverges from the
-    // authoritative wallet charge for OpenRouter runs. A rate of 0 (cost
-    // attribution disabled) maps to `null` — not a misleading "$0.00".
+    // Enrich managed model-call rows with the provider-reported transaction cost
+    // when one exists. OpenRouter's value is already its final discounted price,
+    // so this keeps the desktop trace viewer aligned with the wallet debit. Rows
+    // without a provider cost use the configured estimate as an explicit
+    // fallback. BYOK, self-hosted, and local rows deliberately stay `null`.
     let per_1k = state.config.control_plane.cost_per_1k_micro_usd;
     let entries: Vec<Value> = entries
         .into_iter()
         .map(|e| {
-            let cost_micro_usd: Option<u64> = if per_1k == 0 {
+            let source = usage_source_for_provider(
+                &e.provider,
+                e.managed_inference,
+                state.config.credits.enabled && state.config.credits.internal_secret.is_some(),
+            );
+            let cost_micro_usd: Option<u64> = if source != "managed" {
                 None
             } else {
-                Some(estimate_cost_micro_usd(
-                    e.input_tokens,
-                    e.output_tokens,
-                    per_1k,
-                ))
+                e.provider_cost_micro_usd.or_else(|| {
+                    (per_1k > 0)
+                        .then(|| estimate_cost_micro_usd(e.input_tokens, e.output_tokens, per_1k))
+                })
             };
             let mut v = serde_json::to_value(&e).unwrap_or_else(|_| json!({}));
             if let Value::Object(map) = &mut v {
                 map.insert("cost_micro_usd".to_string(), json!(cost_micro_usd));
+                map.insert("source".to_string(), json!(source));
             }
             v
         })
@@ -126,6 +202,78 @@ pub async fn query_audit(
         "count": entries.len(),
         "entries": entries,
     })))
+}
+
+/// Record a successful gateway-local control mutation after the caller's
+/// authenticated admin boundary has been enforced.
+pub async fn record_control_change(
+    State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<ControlAuditBody>,
+) -> Result<Json<Value>, GatewayError> {
+    let raw_key = headers.get("authorization").and_then(|v| v.to_str().ok());
+    let ctx = authenticate(&state, AuthInputs::with_key(raw_key)).await?;
+    crate::api::config::require_local_admin(
+        &state,
+        &peer,
+        ctx.is_master_key,
+        &headers,
+        "Control audit writes",
+    )?;
+
+    let action = bounded_control_value(body.action, 120)?;
+    let target = bounded_control_value(body.target, 120)?;
+    let summary = bounded_control_summary(body.summary)?;
+    let actor_id = bounded_control_actor(body.actor_id)?;
+    let actor_name = bounded_control_actor(body.actor_name)?;
+    if state.audit.is_enabled() {
+        let actor = if ctx.is_master_key {
+            actor_name.as_deref().unwrap_or("master-key")
+        } else {
+            actor_name.as_deref().unwrap_or("loopback-admin")
+        };
+        state.log_audit(AuditLogger::make_control_record(
+            Uuid::new_v4().to_string(),
+            ctx.api_key,
+            actor.to_string(),
+            actor_id,
+            action,
+            target,
+            summary,
+        ));
+    }
+
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Classify audit rows for the usage surface without treating every token
+/// count as a credit debit. The provider id is the durable signal for the
+/// donated managed slots; untagged vendor slots are the operator's own key.
+fn usage_source_for_provider(
+    provider: &str,
+    managed_inference: bool,
+    managed_node: bool,
+) -> &'static str {
+    let base_provider = provider.split(':').next().unwrap_or(provider);
+    match base_provider {
+        "local" | "ollama" | "llamacpp" | "lmstudio" | "vllm" => "local",
+        "openrouter" => {
+            if managed_inference {
+                "managed"
+            } else {
+                "byok"
+            }
+        }
+        "openai" | "anthropic" | "genai" => "byok",
+        "cloudflare" | "bedrock" | "vertex" | "openai-credits"
+            if managed_inference || managed_node =>
+        {
+            "managed"
+        }
+        _ if managed_inference => "managed",
+        _ => "self_hosted",
+    }
 }
 
 /// Estimated spend in micro-USD for the given token totals at the configured
@@ -440,8 +588,8 @@ pub async fn check_exec_budget(
 mod tests {
     use super::{
         check_exec_budget, estimate_cost_micro_usd, ingest_exec_audit, query_audit,
-        widget_call_allowed, widget_followup_allowed, AuditQueryParams, ExecAuditBody,
-        ExecBudgetCheckBody, WidgetRateLimiter,
+        usage_source_for_provider, widget_call_allowed, widget_followup_allowed, AuditQueryParams,
+        ExecAuditBody, ExecBudgetCheckBody, WidgetRateLimiter,
     };
     use crate::audit::{AuditLogger, AuditRecord};
     use crate::config::{ApiKeyConfig, AuditConfig, AuthConfig, EvalsConfig, GatewayConfig};
@@ -473,6 +621,7 @@ mod tests {
             name: "core".to_string(),
             org_id: None,
             team_id: None,
+            channel_id: None,
             project_id: None,
             requests_per_minute: None,
             tokens_per_minute: None,
@@ -492,6 +641,10 @@ mod tests {
     }
 
     fn state_with(audit_enabled: bool) -> SharedState {
+        state_with_credits(audit_enabled, false)
+    }
+
+    fn state_with_credits(audit_enabled: bool, managed_credits: bool) -> SharedState {
         let db_path = if audit_enabled {
             unique_db_path()
         } else {
@@ -502,7 +655,7 @@ mod tests {
             db_path,
         })
         .expect("audit logger");
-        let config = GatewayConfig {
+        let mut config = GatewayConfig {
             auth: AuthConfig {
                 require_auth: true,
                 master_key: Some("sk-master".to_string()),
@@ -510,6 +663,10 @@ mod tests {
             },
             ..GatewayConfig::default()
         };
+        if managed_credits {
+            config.credits.enabled = true;
+            config.credits.internal_secret = Some("test-internal-secret".to_string());
+        }
         Arc::new(AppState::new_for_test(
             config,
             audit,
@@ -765,7 +922,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_audit_returns_rows_with_derived_cost() {
-        let state = state_with(true);
+        let state = state_with_credits(true, true);
         // Log one model_call row, then let the background writer flush.
         state.log_audit(AuditRecord {
             request_id: "r1".to_string(),
@@ -774,7 +931,7 @@ mod tests {
             org_id: None,
             team_id: None,
             project_id: None,
-            provider: "openai".to_string(),
+            provider: "openai-credits".to_string(),
             model: "gpt-4o".to_string(),
             input_tokens: 1000,
             output_tokens: 0,
@@ -787,6 +944,8 @@ mod tests {
             user_id: None,
             agent_id: None,
             feature: None,
+            managed_inference: true,
+            provider_cost_micro_usd: None,
             event_type: crate::audit::EventType::ModelCall,
             backend: None,
             command: None,
@@ -812,6 +971,52 @@ mod tests {
         assert_eq!(body["entries"][0]["cost_micro_usd"], 2000);
     }
 
+    #[tokio::test]
+    async fn query_audit_returns_openrouter_transaction_cost_for_managed_rows() {
+        let state = state_with_credits(true, true);
+        state.log_audit(AuditRecord {
+            request_id: "managed-openrouter".to_string(),
+            api_key: "sk-master".to_string(),
+            user_name: None,
+            org_id: Some("org-1".to_string()),
+            team_id: None,
+            project_id: None,
+            provider: "openrouter".to_string(),
+            model: "openai/gpt-5.6-sol".to_string(),
+            input_tokens: 1000,
+            output_tokens: 0,
+            cache_hit: false,
+            latency_ms: 5,
+            eval_score: None,
+            error: None,
+            skill_ids: None,
+            session_id: None,
+            user_id: None,
+            agent_id: None,
+            feature: None,
+            managed_inference: true,
+            provider_cost_micro_usd: Some(1250),
+            event_type: crate::audit::EventType::ModelCall,
+            backend: None,
+            command: None,
+            duration_ms: None,
+            exit_code: None,
+            widget_instance_id: None,
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let Json(body) = query_audit(
+            State(Arc::clone(&state)),
+            loopback(),
+            bearer("sk-master"),
+            empty_params(),
+        )
+        .await
+        .expect("master key may read the audit log");
+        assert_eq!(body["entries"][0]["source"], "managed");
+        assert_eq!(body["entries"][0]["cost_micro_usd"], 1250);
+    }
+
     #[test]
     fn cost_estimate_matches_pipeline_rounding() {
         // 1000 in + 0 out at $0.002/1k = 2000 micro-USD.
@@ -826,5 +1031,29 @@ mod tests {
         // A zero rate (cost attribution disabled) yields zero here; the endpoint
         // maps a zero RATE to `null`, not this function.
         assert_eq!(estimate_cost_micro_usd(1000, 1000, 0), 0);
+    }
+
+    #[test]
+    fn usage_source_keeps_non_credit_traffic_distinct() {
+        assert_eq!(usage_source_for_provider("local", false, true), "local");
+        assert_eq!(usage_source_for_provider("ollama", false, true), "local");
+        assert_eq!(usage_source_for_provider("openai", false, true), "byok");
+        assert_eq!(
+            usage_source_for_provider("openai-credits", false, true),
+            "managed"
+        );
+        assert_eq!(
+            usage_source_for_provider("openrouter", true, true),
+            "managed"
+        );
+        assert_eq!(usage_source_for_provider("openrouter", false, true), "byok");
+        assert_eq!(
+            usage_source_for_provider("openrouter:embedding", true, true),
+            "managed"
+        );
+        assert_eq!(
+            usage_source_for_provider("custom-provider", false, false),
+            "self_hosted"
+        );
     }
 }

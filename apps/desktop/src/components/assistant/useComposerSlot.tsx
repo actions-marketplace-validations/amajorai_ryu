@@ -14,10 +14,15 @@
 // every keystroke, so every injected prop rides a ref the memoized slot reads — the
 // same pattern as ChatPage's `councilInputBar`.
 
+import { createComposerDirectory } from "@ryu/blocks/composer/composer-directory";
 import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts";
+import type {
+	ComposerMenuGroup,
+	ComposerMenuItem,
+} from "@ryu/blocks/desktop/agent-elements/input/composer-menu";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import type { ReactNode } from "react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useComposerAgentControls } from "@/components/agent-elements/input/composer-agent-controls.tsx";
 import type { ComposerSettingsSection } from "@/components/agent-elements/input/composer-settings-menu.tsx";
 import type { GhostControls } from "@/components/agent-elements/input/goal-plus-button.tsx";
@@ -28,7 +33,10 @@ import {
 	type InputBarInfoBar,
 	type InputBarProps,
 } from "@/components/agent-elements/input-bar.tsx";
-import type { ModelOption } from "@/components/agent-elements/types.ts";
+import type {
+	MentionItem,
+	ModelOption,
+} from "@/components/agent-elements/types.ts";
 import { VoiceModeSurface } from "@/src/components/voice/VoiceModeSurface.tsx";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import {
@@ -37,11 +45,14 @@ import {
 	useComposerSelectionApplyMode,
 } from "@/src/hooks/useComposerSelectionApplyMode.ts";
 import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
+import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { useVoiceMode } from "@/src/hooks/useVoiceMode.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type { Team } from "@/src/lib/api/teams.ts";
 import { stageImageUpload } from "@/src/lib/api/uploads.ts";
 import { transcribeAudio } from "@/src/lib/api/voice.ts";
+import type { SimpleApprovalDefaults } from "@/src/lib/chat-routing.ts";
+import type { BrowserSurface } from "@/src/lib/extension-host.ts";
 import { recordRecent } from "@/src/lib/picker-favorites.ts";
 
 /** An AI-SDK file part, ready for `sendMessage({ text, files })`. */
@@ -77,6 +88,10 @@ export interface ComposerSlot {
 	};
 	/** Stable `InputBar` slot for `AgentChat`'s `slots.InputBar`. */
 	inputBar: (props: InputBarProps) => ReactNode;
+	/** Directory rows shared by the `+` menu and inline mention tokens. */
+	composerMenuGroups: ComposerMenuGroup[];
+	mentionItems: MentionItem[];
+	onComposerMenuSelect: (item: ComposerMenuItem) => void;
 	/**
 	 * The universal picker body (Ryu (providers nested) · External Agents) — pass
 	 * to `EmptyStateHeader`'s `renderBody` so its logo opens the identical grouped
@@ -122,7 +137,7 @@ export interface ComposerSlot {
 
 /**
  * The agent/model selection a composer drives. `BuilderRuntime` satisfies it, and
- * so does any surface that owns those five bindings itself (the launchpad keeps
+ * so does any surface that owns those agent/model bindings itself (the launchpad keeps
  * its pick in localStorage, not in a builder runtime) — the slot never needed the
  * rest of a runtime, and demanding one is what pushed the launchpad into
  * hand-rolling its own bar.
@@ -133,9 +148,12 @@ export interface ComposerRuntime {
 	modelOptions: ModelOption[];
 	setAgentId: (id: string) => void;
 	setModel: (id: string) => void;
+	setSimpleApprovalDefaults?: (defaults: SimpleApprovalDefaults | null) => void;
 }
 
 export interface ComposerSlotOptions {
+	/** Browser model-selection namespace for this shared composer surface. */
+	surface?: BrowserSurface;
 	/** Single-row compact layout (used once the thread has history). */
 	compact?: boolean;
 	/**
@@ -194,6 +212,7 @@ export function useComposerSlot(
 		target,
 		compact = false,
 		compactTrigger = false,
+		surface = "ask-ryu",
 		placeholder,
 		conversationId,
 		ghost,
@@ -205,6 +224,11 @@ export function useComposerSlot(
 		teams,
 	} = options;
 	const { agents } = useAgents();
+	const interfaceLevel = useInterfaceLevel();
+	const selectableAgents = useMemo(
+		() => agents.filter((agent) => agent.lifecycleStatus !== "draft"),
+		[agents]
+	);
 	const [composerSelectionApplyMode] = useComposerSelectionApplyMode();
 	const announceComposerSelection = useCallback(
 		(setting: string, value: string) => {
@@ -246,12 +270,22 @@ export function useComposerSlot(
 
 	const acp = useComposerAcpSections({
 		agentId: runtime.agentId,
-		agents,
+		agents: selectableAgents,
 		modelOptions: runtime.modelOptions,
 		engineModel: runtime.effectiveModel,
 		onEngineModelChange: handleModelChange,
 		onSelectionApplied: handleAcpSelectionApplied,
+		preferSimpleApprovalDefaults: interfaceLevel === "simple",
 	});
+	useEffect(() => {
+		runtime.setSimpleApprovalDefaults?.(
+			interfaceLevel === "simple" ? acp.simpleApprovalDefaults : null
+		);
+	}, [
+		acp.simpleApprovalDefaults,
+		interfaceLevel,
+		runtime.setSimpleApprovalDefaults,
+	]);
 
 	// The shared composer controls, driven by this surface's runtime selection.
 	// Record every pick so the picker can offer "Recents" (see
@@ -261,12 +295,12 @@ export function useComposerSlot(
 		(nextAgentId: string) => {
 			recordRecent({ kind: "agent", agentId: nextAgentId });
 			runtime.setAgentId(nextAgentId);
-			const selectedAgent = agents.find(
+			const selectedAgent = selectableAgents.find(
 				(candidate) => candidate.id === nextAgentId
 			);
 			announceComposerSelection("Agent", selectedAgent?.name ?? nextAgentId);
 		},
-		[agents, announceComposerSelection, runtime.setAgentId]
+		[announceComposerSelection, runtime.setAgentId, selectableAgents]
 	);
 	const handleSelectTeam = useCallback(
 		(nextTeamId: string) => {
@@ -287,7 +321,7 @@ export function useComposerSlot(
 		triggerSections,
 		renderBody,
 	} = useComposerAgentControls({
-		agents,
+		agents: selectableAgents,
 		// Derived, never hardcoded: a dock/builder pane with no conversation yet
 		// is opening one, which is the same first clause the turn path tests
 		// (`req.conversation_id.is_none()`). Hardcoding false here would let a
@@ -304,9 +338,14 @@ export function useComposerSlot(
 		onModelChange: handleModelChange,
 		modelSection: acp.modelSection,
 		extraSections: acp.extraSections,
-		compact,
-		compactTrigger,
-	});
+			compact,
+			compactTrigger,
+		surface,
+		});
+	const composerDirectory = useMemo(
+		() => createComposerDirectory(sections),
+		[sections]
+	);
 
 	// Staged image attachments (the composer "+"). Data URL for the model turn;
 	// also persisted into the Uploads system space (best-effort), matching ChatPage.
@@ -414,6 +453,7 @@ export function useComposerSlot(
 		// A surface can sit on no agent at all (the launchpad before a pick), which
 		// voice mode reads as "use the node default".
 		agentId: runtime.agentId ?? undefined,
+		agentName: agents.find((agent) => agent.id === runtime.agentId)?.name,
 		conversationId,
 	});
 	const composerShortcuts = useComposerShortcutBindings();
@@ -503,9 +543,12 @@ export function useComposerSlot(
 			images,
 			onAttach,
 			onPaste,
-			onRemoveImage,
+			 onRemoveImage,
 		},
+		composerMenuGroups: composerDirectory.groups,
 		inputBar,
+		mentionItems: composerDirectory.mentionItems,
+		onComposerMenuSelect: composerDirectory.onSelect,
 		renderBody,
 		sections,
 		triggerSections,

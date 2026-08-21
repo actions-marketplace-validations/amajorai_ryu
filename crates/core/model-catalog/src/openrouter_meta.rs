@@ -2,7 +2,8 @@
 //! that models.dev doesn't cover (or when the caller is on the OpenRouter provider).
 //!
 //! Fail-open: an unreachable OpenRouter leaves the cache empty and callers fall
-//! through to whatever other sources they have. 24h TTL matches models.dev.
+//! through to whatever other sources they have. Prices can change with short
+//! provider promotions, so this cache is intentionally shorter than models.dev.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,7 +16,7 @@ use tokio::sync::Mutex;
 use crate::models_dev::ModelMeta;
 
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
-const TTL_SECS: u64 = 24 * 60 * 60;
+const TTL_SECS: u64 = 15 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedMetas {
@@ -282,5 +283,19 @@ mod tests {
         assert_eq!(m.tool_call, Some(true));
         assert_eq!(m.source, "openrouter");
         assert!(metas.get("claude-opus-4-6").is_some());
+    }
+
+    #[test]
+    fn preserves_zero_pricing_from_a_provider_promotion() {
+        let payload = serde_json::json!({
+            "data": [{
+                "id": "openai/gpt-5.6-sol",
+                "pricing": { "prompt": "0", "completion": "0.000015" }
+            }]
+        });
+        let metas = parse_metas(&payload);
+        let meta = metas.get("openai/gpt-5.6-sol").expect("qualified");
+        assert_eq!(meta.cost_input_per_1m, Some(0.0));
+        assert_eq!(meta.cost_output_per_1m, Some(15.0));
     }
 }

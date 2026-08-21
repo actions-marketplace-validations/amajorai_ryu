@@ -23,7 +23,10 @@ import {
 import { stageImageUpload } from "@/src/lib/api/uploads.ts";
 
 /** A staged composer attachment. Images and documents share one list and one chip. */
-export type ComposerAttachment = AttachedImage;
+export type ComposerAttachment = AttachedImage & {
+	error?: string;
+	state?: "processing" | "done" | "error";
+};
 
 /**
  * The `accept` used before (or instead of) Core's answer.
@@ -147,6 +150,16 @@ export function markdownToDataUrl(markdown: string): string {
 		binary += String.fromCharCode(byte);
 	}
 	return `data:text/markdown;base64,${btoa(binary)}`;
+}
+
+/** Encode UTF-8 text as a plain-text data URL for a staged composer file. */
+export function textToDataUrl(text: string): string {
+	const bytes = new TextEncoder().encode(text);
+	let binary = "";
+	for (const byte of bytes) {
+		binary += String.fromCharCode(byte);
+	}
+	return `data:text/plain;base64,${btoa(binary)}`;
 }
 
 function patch(

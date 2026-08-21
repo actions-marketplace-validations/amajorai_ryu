@@ -109,7 +109,7 @@ const PANEL_META: Record<string, PanelMeta> = {
 	},
 	appearance: {
 		description:
-			"The terminal client renders with the built-in ryu theme. Appearance is customized from the desktop app.",
+			"Terminal appearance follows the active theme preference. Use /theme in Chat to choose system, light, dark, Ryu, or Ryu Mono.",
 	},
 	island: {
 		description: "The floating Island HUD is a native macOS surface.",
@@ -123,7 +123,7 @@ const PANEL_META: Record<string, PanelMeta> = {
 	},
 	voice: {
 		description:
-			"Voice input, audio devices, and TTS engines are native audio features.",
+			"Voice Recognition, audio devices, and Audio engines are native audio features.",
 		tone: "desktop",
 		note: "Open the desktop app to configure Voice.",
 	},

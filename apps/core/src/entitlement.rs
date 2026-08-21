@@ -12,29 +12,34 @@
 //! Mechanism mirrors [`crate::sidecar::untrusted`] and the auth resolvers
 //! ([`crate::openrouter_auth`]): a process-global [`AtomicBool`] seeded from a
 //! preference at startup and updated on change, read synchronously by the
-//! scheduler tick. The desktop pushes the flag whenever its entitlement verdict
-//! resolves (see `apps/desktop/src/hooks/useEntitlement.ts`).
+//! scheduler tick. The desktop pushes the flag for local nodes, while managed
+//! nodes refresh it from the authenticated control-plane handshake.
 //!
 //! Default is **ON (active)**: a fresh node, a headless / self-hosted OSS Core,
 //! or one that has never been told otherwise must run automations normally. The
-//! paywall is a desktop product decision, not an OSS-Core lock — the desktop is
-//! the only thing that ever writes `false` here (when its trial hard-expires).
+//! paywall is a desktop product decision, not an OSS-Core lock. Paid-only
+//! profile bootstrap is a separate, fail-closed gate below.
 //!
 //! Placement note (Core vs Gateway): this pauses *what runs* (autonomous
-//! automation) based on a state the desktop pushes; it enforces no billing
-//! policy of its own and classifies nothing. It is Core orchestration config,
-//! not a Gateway policy decision.
+//! automation) based on a state the desktop or authenticated control-plane
+//! handshake supplies; it enforces no billing policy of its own and classifies
+//! nothing. It is Core orchestration config, not a Gateway policy decision.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Preferences key the desktop writes on every entitlement verdict change; Core
 /// loads it on startup and on change. Absent ⇒ the default-ON behaviour holds.
 pub const ENTITLEMENT_ACTIVE_PREF_KEY: &str = "entitlement-active";
+/// Desktop-pushed snapshot of the control-plane plan capability used by
+/// Core-owned profile bootstrap. Unlike the autonomy flag, this defaults OFF:
+/// a free or headless node must never start a paid-only profile job.
+pub const MANAGED_INFERENCE_ENTITLED_PREF_KEY: &str = "managed-inference-entitled";
 
 /// In-process flag, populated from preferences. Defaults to `true` (active): a
 /// node with no signal must run automations normally (headless / OSS Core / a
 /// desktop still within its trial or subscribed).
 static ACTIVE: AtomicBool = AtomicBool::new(true);
+static MANAGED_INFERENCE_ENTITLED: AtomicBool = AtomicBool::new(false);
 
 /// Set the in-process flag from a preferences value. Accepts the common truthy
 /// string forms the desktop may persist (`"true"`, `"1"`, `"on"`, `"yes"`);
@@ -52,6 +57,18 @@ pub fn set_active(value: &str) {
 /// jobs until entitlement is restored.
 pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
+}
+
+pub fn set_managed_inference_entitled(value: &str) {
+    let on = matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "on" | "yes"
+    );
+    MANAGED_INFERENCE_ENTITLED.store(on, Ordering::Relaxed);
+}
+
+pub fn managed_inference_entitled() -> bool {
+    MANAGED_INFERENCE_ENTITLED.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]

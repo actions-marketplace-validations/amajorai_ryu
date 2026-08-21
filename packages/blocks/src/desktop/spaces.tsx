@@ -14,6 +14,8 @@ import {
 	LibraryIcon,
 	Search01Icon,
 	Upload01Icon,
+	UserMultiple02Icon,
+	ViewOffSlashIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
@@ -27,6 +29,7 @@ import {
 } from "@ryu/ui/components/card";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -47,6 +50,74 @@ import type { ChangeEvent, FormEvent, ReactNode } from "react";
  * Both are the wire spellings from `RetrievalMode::as_str` in Core.
  */
 export type SpaceRetrievalMode = "graph" | "vector";
+
+/** The user-facing sharing choices for a Space and its inherited pages. */
+export type SpaceVisibility = "org" | "private";
+
+const SPACE_VISIBILITY_OPTIONS: readonly {
+	blurb: string;
+	icon: typeof ViewOffSlashIcon;
+	label: string;
+	value: SpaceVisibility;
+}[] = [
+	{
+		value: "private",
+		label: "Private",
+		blurb: "Only you can see this space and its pages.",
+		icon: ViewOffSlashIcon,
+	},
+	{
+		value: "org",
+		label: "Team",
+		blurb: "Everyone on this shared node can see this space and its pages.",
+		icon: UserMultiple02Icon,
+	},
+];
+
+/** Shared visibility choice used by the create dialog and future Space settings. */
+export function SpaceVisibilityChoice({
+	disabled,
+	idPrefix,
+	onVisibilityChange,
+	visibility,
+}: {
+	disabled?: boolean;
+	idPrefix: string;
+	onVisibilityChange: (visibility: SpaceVisibility) => void;
+	visibility: SpaceVisibility;
+}) {
+	return (
+		<RadioGroup
+			aria-label="Space visibility"
+			disabled={disabled}
+			onValueChange={(next: unknown) => {
+				if (next === "private" || next === "org") {
+					onVisibilityChange(next);
+				}
+			}}
+			value={visibility}
+		>
+			{SPACE_VISIBILITY_OPTIONS.map((option) => {
+				const id = `${idPrefix}-${option.value}`;
+				return (
+					<div className="flex items-start gap-2.5" key={option.value}>
+						<RadioGroupItem className="mt-0.5" id={id} value={option.value} />
+						<HugeiconsIcon
+							className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+							icon={option.icon}
+						/>
+						<div className="flex flex-col gap-0.5">
+							<Label className="font-medium text-sm" htmlFor={id}>
+								{option.label}
+							</Label>
+							<p className="text-muted-foreground text-xs">{option.blurb}</p>
+						</div>
+					</div>
+				);
+			})}
+		</RadioGroup>
+	);
+}
 
 /**
  * The ONE definition of how the two retrieval modes are named and explained.
@@ -474,6 +545,8 @@ export interface SpacesViewProps {
 	detail?: SpacesDetailProps | null;
 	error?: string | null;
 	loading?: boolean;
+	onCreateSpace?: () => void;
+	onRetry?: () => void;
 	onSelectSpace?: (id: string) => void;
 	selectedId?: string | null;
 	spaces: SpaceRow[];
@@ -789,10 +862,13 @@ function SpaceDetail(props: SpacesDetailProps) {
 							<p className="text-destructive text-sm">{ingestError}</p>
 						) : null}
 						<div>
-							<Button disabled={ingestDisabled} size="sm" type="submit">
-								{ingestBusy ? (
-									<Spinner className="size-4" />
-								) : (
+							<Button
+								disabled={ingestDisabled && !ingestBusy}
+								loading={ingestBusy}
+								size="sm"
+								type="submit"
+							>
+								{!ingestBusy && (
 									<HugeiconsIcon className="size-4" icon={Upload01Icon} />
 								)}
 								Ingest
@@ -856,13 +932,12 @@ function SpaceDetail(props: SpacesDetailProps) {
 						value={searchQuery}
 					/>
 					<Button
-						disabled={searchBusy || !searchQuery.trim()}
+						disabled={!searchQuery.trim()}
+						loading={searchBusy}
 						size="sm"
 						type="submit"
 					>
-						{searchBusy ? (
-							<Spinner className="size-4" />
-						) : (
+						{!searchBusy && (
 							<HugeiconsIcon className="size-4" icon={Search01Icon} />
 						)}
 						Search
@@ -897,6 +972,8 @@ export function SpacesView({
 	error,
 	spaces,
 	detail,
+	onCreateSpace,
+	onRetry,
 }: SpacesViewProps) {
 	if (loading) {
 		return (
@@ -916,6 +993,13 @@ export function SpacesView({
 					<EmptyTitle>Could not load spaces</EmptyTitle>
 					<EmptyDescription>{error}</EmptyDescription>
 				</EmptyHeader>
+				{onRetry ? (
+					<EmptyContent>
+						<Button onClick={onRetry} size="sm" variant="ghost">
+							Try again
+						</Button>
+					</EmptyContent>
+				) : null}
 			</Empty>
 		);
 	}
@@ -926,7 +1010,7 @@ export function SpacesView({
 	let body: ReactNode;
 	if (spaces.length === 0) {
 		body = (
-			<div className="scroll-fade-effect-y flex-1 overflow-auto p-4">
+			<div className="scroll-fade flex-1 overflow-auto p-4">
 				<Empty className="h-full">
 					<EmptyHeader>
 						<EmptyMedia variant="icon">
@@ -937,18 +1021,25 @@ export function SpacesView({
 							Create a space, ingest documents into it, then search across them.
 						</EmptyDescription>
 					</EmptyHeader>
+					{onCreateSpace ? (
+						<EmptyContent>
+							<Button onClick={onCreateSpace} size="sm">
+								Create your first space
+							</Button>
+						</EmptyContent>
+					) : null}
 				</Empty>
 			</div>
 		);
 	} else if (detail) {
 		body = (
-			<div className="scroll-fade-effect-y flex-1 overflow-auto">
+			<div className="scroll-fade flex-1 overflow-auto">
 				<SpaceDetail {...detail} />
 			</div>
 		);
 	} else {
 		body = (
-			<div className="scroll-fade-effect-y flex-1 overflow-auto p-4">
+			<div className="scroll-fade flex-1 overflow-auto p-4">
 				<Empty className="h-full">
 					<EmptyHeader>
 						<EmptyMedia variant="icon">
@@ -960,6 +1051,13 @@ export function SpacesView({
 							search.
 						</EmptyDescription>
 					</EmptyHeader>
+					{onCreateSpace ? (
+						<EmptyContent>
+							<Button onClick={onCreateSpace} size="sm" variant="ghost">
+								Create a space
+							</Button>
+						</EmptyContent>
+					) : null}
 				</Empty>
 			</div>
 		);

@@ -25,6 +25,7 @@ import {
 	fetchClipFrameDataUrl,
 	getClipContext,
 } from "@/src/lib/api/clips.ts";
+import { publishMediaSource } from "@/src/lib/media-pip.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
 /** Cap on how many key frames we attach. 24 gives real multi-frame "watch"
@@ -102,6 +103,20 @@ export function ClipComposerControls({
 
 	const attachContext = useCallback(
 		async (ctx: ClipContext) => {
+			// Inline one finished frame so the native PiP window can render evidence
+			// without forwarding the active node's bearer token across webviews.
+			const poster = await fetchClipFrameDataUrl(target, ctx.id, 0).catch(
+				() => null
+			);
+			if (poster) {
+				publishMediaSource({
+					id: `clip:${ctx.id}`,
+					imageUrl: poster,
+					kind: "recording",
+					posterUrl: poster,
+					title: ctx.title || "Evidence recording",
+				});
+			}
 			const moments = pickMoments(ctx);
 			const frames: ComposerSendFile[] = [];
 			for (const atMs of moments) {

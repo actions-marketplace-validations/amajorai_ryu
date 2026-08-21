@@ -15,6 +15,7 @@
 // section here is derived from the message stream alone, which is exactly the
 // substrate under test.
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 import { CoworkContextPanel } from "../../src/components/panels/CoworkContextPanel.tsx";
 import "../../src/index.css";
@@ -83,7 +84,7 @@ const MESSAGES = [
 			},
 			{
 				type: "dynamic-tool",
-				toolName: "mcp__linear__create_issue",
+				toolName: "mcp.linear.create_issue",
 				state: "output-available",
 				input: { name: "Brighten the dark-mode ramp" },
 			},
@@ -91,16 +92,20 @@ const MESSAGES = [
 	},
 ];
 
+const queryClient = new QueryClient();
+
 function Story() {
 	return (
-		<div className="h-screen w-[420px] bg-background text-foreground">
-			<CoworkContextPanel
-				maxItemsPerSection={5}
-				messages={MESSAGES}
-				runId={null}
-				target={{ url: "http://localhost:0", token: null }}
-			/>
-		</div>
+		<QueryClientProvider client={queryClient}>
+			<div className="h-screen w-[420px] bg-background text-foreground">
+				<CoworkContextPanel
+					maxItemsPerSection={5}
+					messages={MESSAGES}
+					runId={null}
+					target={{ url: "http://localhost:0", token: null }}
+				/>
+			</div>
+		</QueryClientProvider>
 	);
 }
 

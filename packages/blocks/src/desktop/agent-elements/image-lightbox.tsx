@@ -5,9 +5,10 @@ import { cn } from "@ryu/ui/lib/utils";
 import {
 	IconChevronLeft,
 	IconChevronRight,
+	IconDownload,
+	IconMinus,
+	IconPlus,
 	IconX,
-	IconZoomIn,
-	IconZoomOut,
 } from "@tabler/icons-react";
 import {
 	AnimatePresence,
@@ -27,7 +28,7 @@ import {
 import { createPortal } from "react-dom";
 
 export interface LightboxImage {
-	/** Optional filename used for the alt text. */
+	/** Optional image title used for the alt text, caption, and download filename. */
 	filename?: string;
 	/** Stable identifier — used for keys and to know which image is active. */
 	id: string;
@@ -84,6 +85,7 @@ const EASE = [0.23, 1, 0.32, 1] as const;
 const EXIT = { duration: 0.2, ease: [0.4, 0, 1, 1] } as const;
 
 const TOGGLE = 2.5;
+const CONTROL_ZOOM_STEP = 0.25;
 const KEY_ZOOM = 1.6;
 const KEY_PAN = 56;
 const WHEEL_RATE = 140;
@@ -138,7 +140,8 @@ function useLightbox<
 	const y = useMotionValue(0);
 
 	const [step, setStep] = useState(0);
-	const [settled, setSettled] = useState(0);
+	const [zoomValue, setZoomValue] = useState(1);
+	const [settledZoomValue, setSettledZoomValue] = useState(1);
 
 	const stepRef = useRef(0);
 	const settledRef = useRef(0);
@@ -175,10 +178,11 @@ function useLightbox<
 			}
 			const next = toStep(s);
 			if (settledRef.current === next) {
+				setSettledZoomValue(s);
 				return;
 			}
 			settledRef.current = next;
-			setSettled(next);
+			setSettledZoomValue(s);
 		},
 		[toStep]
 	);
@@ -214,9 +218,10 @@ function useLightbox<
 			scale.set(s);
 			x.set(clamp(nx, -mx, mx));
 			y.set(clamp(ny, -my, my));
+			setZoomValue(s);
 			mark(s);
 		},
-		[limit, mark, scale, x, y]
+		[limit, mark, scale, setZoomValue, x, y]
 	);
 
 	const glide = useCallback(
@@ -233,10 +238,11 @@ function useLightbox<
 				animate(x, tx, spring);
 				animate(y, ty, spring);
 			}
+			setZoomValue(s);
 			mark(s);
 			settle(s);
 		},
-		[limit, mark, reduced, scale, settle, x, y]
+		[limit, mark, reduced, scale, setZoomValue, settle, x, y]
 	);
 
 	const reset = useCallback(() => {
@@ -433,8 +439,8 @@ function useLightbox<
 		y,
 		step,
 		steps: cells,
-		zoom: 1 + (step / cells) * (top - 1),
-		settledZoom: 1 + (settled / cells) * (top - 1),
+		zoom: zoomValue,
+		settledZoom: settledZoomValue,
 		zoomed: step > 0,
 		reset,
 		zoomAt,
@@ -482,6 +488,7 @@ function Stage({
 		scale,
 		x,
 		y,
+		zoom,
 		zoomed,
 		settledZoom,
 		reset,
@@ -489,24 +496,24 @@ function Stage({
 	} = useLightbox({ maxScale, onDismiss: onClose });
 
 	const shellRef = useRef<HTMLDivElement>(null);
+	const zoomCeiling = Math.max(1.1, maxScale);
 
-	const toggleZoom = useCallback(() => {
-		const frame = frameRef.current;
-		if (!frame) {
-			return;
-		}
-		if (zoomed) {
-			reset();
-			return;
-		}
-		const r = frame.getBoundingClientRect();
-		zoomAt(
-			Math.min(TOGGLE, Math.max(1.1, maxScale)),
-			r.left + r.width / 2,
-			r.top + r.height / 2,
-			true
-		);
-	}, [frameRef, maxScale, reset, zoomAt, zoomed]);
+	const adjustZoom = useCallback(
+		(delta: number) => {
+			const frame = frameRef.current;
+			if (!frame) {
+				return;
+			}
+			const r = frame.getBoundingClientRect();
+			zoomAt(
+				scale.get() + delta,
+				r.left + r.width / 2,
+				r.top + r.height / 2,
+				true
+			);
+		},
+		[frameRef, scale, zoomAt]
+	);
 
 	const goToPrevious = useCallback(() => {
 		reset();
@@ -682,8 +689,7 @@ function Stage({
 		return null;
 	}
 
-	const filename = currentImage.filename ?? "Image preview";
-	const caption = currentImage.filename;
+	const filename = currentImage.filename?.trim() || "Image preview";
 
 	return (
 		<div
@@ -719,7 +725,7 @@ function Stage({
 			>
 				<motion.div
 					animate={{ filter: "blur(0px)" }}
-					className="absolute inset-0 flex items-center justify-center p-4 sm:p-14"
+					className="absolute inset-0 flex items-center justify-center p-4 pb-32 sm:p-14 sm:pb-32"
 					exit="away"
 					initial={reduced ? false : { filter: "blur(6px)" }}
 					style={{ x: fx, y: fy, scale: fs, opacity: fo }}
@@ -754,33 +760,22 @@ function Stage({
 			</div>
 			<motion.div
 				animate={{ opacity: 1 }}
-				className="pointer-events-none absolute inset-0 flex items-start justify-between gap-3 p-3 sm:p-4"
+				className="pointer-events-none absolute inset-0 flex items-start justify-end gap-3 p-3 sm:p-4"
 				exit={{ opacity: 0, transition: reduced ? { duration: 0 } : EXIT }}
 				initial={{ opacity: 0 }}
 				transition={reduced ? { duration: 0 } : VEIL}
 			>
-				<p
-					className="pointer-events-auto max-w-[65%] truncate rounded-full border border-white/10 bg-black/50 px-3 py-1.5 text-[12.5px] text-white/90 backdrop-blur-sm"
-					id={titleId}
-				>
-					{caption ?? filename}
-				</p>
 				<div className="pointer-events-auto flex items-center gap-2">
-					<Button
-						aria-label={zoomed ? "Zoom out" : "Zoom in"}
+					<a
+						aria-label={`Download ${filename}`}
 						className={CHROME_BUTTON}
 						data-lightbox-focus="1"
-						onClick={toggleZoom}
-						size="icon"
-						type="button"
-						variant="ghost"
+						download={filename}
+						href={currentImage.url}
+						rel="noopener noreferrer"
 					>
-						{zoomed ? (
-							<IconZoomOut className="size-[15px]" />
-						) : (
-							<IconZoomIn className="size-[15px]" />
-						)}
-					</Button>
+						<IconDownload className="size-[15px]" />
+					</a>
 					<Button
 						aria-label="Close"
 						className={CHROME_BUTTON}
@@ -794,6 +789,73 @@ function Stage({
 					</Button>
 				</div>
 			</motion.div>
+			<div className="pointer-events-none absolute inset-x-0 bottom-5 flex flex-col items-center gap-2 px-3 sm:bottom-6">
+				{hasMultipleImages && (
+					<div className="pointer-events-auto flex items-center gap-3">
+						<div className="flex items-center gap-2">
+							{images.map((_, idx) => (
+								<button
+									aria-label={`Go to image ${idx + 1}`}
+									className={cn(
+										"size-2 rounded-full transition-all",
+										idx === currentIndex
+											? "scale-125 bg-white"
+											: "bg-white/40 hover:bg-white/60"
+									)}
+									data-lightbox-focus="1"
+									key={idx}
+									onClick={() => {
+										reset();
+										setCurrentIndex(idx);
+									}}
+									type="button"
+								/>
+							))}
+						</div>
+						<span className="text-sm text-white/70">
+							{currentIndex + 1} / {images.length}
+						</span>
+					</div>
+				)}
+				<p
+					className="pointer-events-auto max-w-[80vw] truncate rounded-full border border-white/10 bg-black/50 px-3 py-1.5 text-[12.5px] text-white/90 backdrop-blur-sm sm:max-w-[32rem]"
+					id={titleId}
+				>
+					{filename}
+				</p>
+				<div className="pointer-events-auto flex items-center gap-1 rounded-full border border-white/10 bg-black/50 p-1 backdrop-blur-sm">
+					<Button
+						aria-label="Zoom out"
+						className={CHROME_BUTTON}
+						data-lightbox-focus="1"
+						disabled={zoom <= 1.01}
+						onClick={() => adjustZoom(-CONTROL_ZOOM_STEP)}
+						size="icon"
+						type="button"
+						variant="ghost"
+					>
+						<IconMinus className="size-[15px]" />
+					</Button>
+					<span
+						aria-live="polite"
+						className="min-w-12 text-center font-medium text-sm text-white tabular-nums"
+					>
+						{Math.round(zoom * 100)}%
+					</span>
+					<Button
+						aria-label="Zoom in"
+						className={CHROME_BUTTON}
+						data-lightbox-focus="1"
+						disabled={zoom >= zoomCeiling - 0.01}
+						onClick={() => adjustZoom(CONTROL_ZOOM_STEP)}
+						size="icon"
+						type="button"
+						variant="ghost"
+					>
+						<IconPlus className="size-[15px]" />
+					</Button>
+				</div>
+			</div>
 
 			{hasMultipleImages && (
 				<>
@@ -825,31 +887,6 @@ function Stage({
 					>
 						<IconChevronRight className="size-6" />
 					</Button>
-					<div className="pointer-events-none absolute bottom-6 left-1/2 flex -translate-x-1/2 flex-col items-center gap-3">
-						<div className="pointer-events-auto flex gap-2">
-							{images.map((_, idx) => (
-								<button
-									aria-label={`Go to image ${idx + 1}`}
-									className={cn(
-										"size-2 rounded-full transition-all",
-										idx === currentIndex
-											? "scale-125 bg-white"
-											: "bg-white/40 hover:bg-white/60"
-									)}
-									data-lightbox-focus="1"
-									key={idx}
-									onClick={() => {
-										reset();
-										setCurrentIndex(idx);
-									}}
-									type="button"
-								/>
-							))}
-						</div>
-						<span className="text-sm text-white/70">
-							{currentIndex + 1} / {images.length}
-						</span>
-					</div>
 				</>
 			)}
 			<p className="sr-only" id={hintId}>

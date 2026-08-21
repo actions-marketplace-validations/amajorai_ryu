@@ -32,11 +32,15 @@ import { type ApiTarget, apiUrl } from "./client.ts";
 const TARGET_SAMPLE_RATE = 16_000;
 /** ScriptProcessor buffer size (frames). 4096 ≈ 85 ms @ 48 kHz — low latency. */
 const CAPTURE_BUFFER_SIZE = 4096;
+/** Visual gain applied to the mic RMS before it reaches the UI (0..1). */
+const AUDIO_LEVEL_GAIN = 5;
 /** `WebSocket.OPEN`. */
 const WEBSOCKET_OPEN = 1;
 
 /** Lifecycle + per-frame callbacks. All optional. */
 export interface VoiceSessionHandlers {
+	/** Normalized mic RMS level for the current capture frame (0..1). */
+	onAudioLevel?: (level: number) => void;
 	/** Assistant turn ended. */
 	onChatEnd?: (conversationId: string) => void;
 	/** Socket closed. */
@@ -118,6 +122,16 @@ function floatToPcm16(samples: Float32Array): ArrayBuffer {
 	return buffer;
 }
 
+/** Convert one mono Float32 frame into a visual-friendly normalized RMS level. */
+function audioLevel(samples: Float32Array): number {
+	let sumSquares = 0;
+	for (const sample of samples) {
+		sumSquares += sample * sample;
+	}
+	const rms = Math.sqrt(sumSquares / (samples.length || 1));
+	return Math.min(1, rms * AUDIO_LEVEL_GAIN);
+}
+
 /**
  * One voice-mode session over a single WebSocket. Construct with a node target +
  * options, then {@link start}; {@link close} tears everything down. Reconnection
@@ -134,6 +148,7 @@ export class VoiceSessionConnection {
 	private audioCtx: AudioContext | null = null;
 	private source: MediaStreamAudioSourceNode | null = null;
 	private processor: ScriptProcessorNode | null = null;
+	private muted = false;
 
 	// Playback queue (sequential WAV sentences).
 	private playbackCtx: AudioContext | null = null;
@@ -150,6 +165,7 @@ export class VoiceSessionConnection {
 		if (this.socket) {
 			return;
 		}
+		this.muted = false;
 		// Acquire the mic first — with AEC/NS/AGC so the assistant's own TTS output
 		// doesn't feed back into the mic and cause false barge-in.
 		this.mic = await navigator.mediaDevices.getUserMedia({
@@ -189,6 +205,14 @@ export class VoiceSessionConnection {
 		this.sendJson({ type: "abort" });
 	}
 
+	/** Pause microphone frames without ending the voice session or playback. */
+	setMuted(muted: boolean): void {
+		this.muted = muted;
+		if (muted) {
+			this.options.handlers?.onAudioLevel?.(0);
+		}
+	}
+
 	/** Close the socket and tear down the mic + playback graph. */
 	close(): void {
 		this.stopPlayback();
@@ -225,6 +249,11 @@ export class VoiceSessionConnection {
 
 		processor.onaudioprocess = (e) => {
 			const input = e.inputBuffer.getChannelData(0);
+			if (this.muted) {
+				this.options.handlers?.onAudioLevel?.(0);
+				return;
+			}
+			this.options.handlers?.onAudioLevel?.(audioLevel(input));
 			// We already advertised 16 kHz in `start`, so resample to that.
 			const pcm = downsample(input, ctx.sampleRate, TARGET_SAMPLE_RATE);
 			if (this.socket?.readyState === WEBSOCKET_OPEN) {
@@ -253,6 +282,7 @@ export class VoiceSessionConnection {
 			});
 		}
 		this.audioCtx = null;
+		this.muted = false;
 	}
 
 	// ── Downlink: control + audio ─────────────────────────────────────────────

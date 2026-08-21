@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8">
+		<meta content="width=device-width, initial-scale=1" name="viewport">
+		<title>Multi-folder project proof</title>
+		<script>
+			window.__TAURI_INTERNALS__ = {
+				invoke: async (command) => {
+					if (command === "read_project_file") {
+						return "# Descomic instructions\n\nUse both source folders when working on this project.";
+					}
+					return null;
+				},
+			};
+
+			const nativeFetch = window.fetch.bind(window);
+			window.fetch = async (input, init) => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url.includes("/api/org-project-mappings")) {
+					return new Response(JSON.stringify({ mappings: [] }), {
+						headers: { "content-type": "application/json" },
+						status: 200,
+					});
+				}
+				if (url.includes("/api/workspace/list")) {
+					return new Response(
+						JSON.stringify({
+							entries: [
+								{
+									name: "DescomicApi",
+									path: "/Users/jiawei/Documents/DescomicApi",
+								},
+							],
+							home: "/Users/jiawei",
+							parent: null,
+							path: "/Users/jiawei",
+						}),
+						{
+							headers: { "content-type": "application/json" },
+							status: 200,
+						}
+					);
+				}
+				return nativeFetch(input, init);
+			};
+		</script>
+	</head>
+	<body>
+		<div id="root"></div>
+		<script src="./multi-folder-project-proof.tsx" type="module"></script>
+	</body>
+</html>

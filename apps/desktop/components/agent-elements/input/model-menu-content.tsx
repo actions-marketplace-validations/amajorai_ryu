@@ -24,8 +24,12 @@ import {
 	type ModelInsight,
 } from "@/src/lib/api/model-insight.ts";
 
-/** Process-lifetime cache so re-hovering the same model is instant. */
-const insightCache = new Map<string, ModelInsight | null>();
+/** Short-lived cache so re-hovering is instant without pinning promotions forever. */
+const INSIGHT_CACHE_TTL_MS = 15 * 60 * 1000;
+const insightCache = new Map<
+	string,
+	{ expiresAt: number; value: ModelInsight | null }
+>();
 
 function cacheKey(modelId: string, provider: string | null): string {
 	return `${provider ?? ""}::${modelId}`;
@@ -45,6 +49,7 @@ function ModelRow({
 	onSelect,
 	target,
 	usageAgentId,
+	insightProvider,
 }: {
 	model: ModelMenuOption;
 	isActive: boolean;
@@ -56,28 +61,35 @@ function ModelRow({
 	 * Ryu's own Gateway-routed models, which have no vendor window.
 	 */
 	usageAgentId?: string | null;
+	/** Provider registry to use for pricing when the model id is ambiguous. */
+	insightProvider?: string | null;
 }) {
 	const [open, setOpen] = useState(false);
 	const [insight, setInsight] = useState<ModelInsight | null>(null);
 	const [loading, setLoading] = useState(false);
 
-	const provider = providerFromModelId(model.id);
+	const provider = insightProvider ?? providerFromModelId(model.id);
 
 	useEffect(() => {
 		if (!open) {
 			return;
 		}
 		const key = cacheKey(model.id, provider);
-		if (insightCache.has(key)) {
-			setInsight(insightCache.get(key) ?? null);
+		const cached = insightCache.get(key);
+		if (cached && cached.expiresAt > Date.now()) {
+			setInsight(cached.value);
 			setLoading(false);
 			return;
 		}
+		insightCache.delete(key);
 		let cancelled = false;
 		setLoading(true);
 		getModelInsight(target, model.id, provider)
 			.then((result) => {
-				insightCache.set(key, result);
+				insightCache.set(key, {
+					expiresAt: Date.now() + INSIGHT_CACHE_TTL_MS,
+					value: result,
+				});
 				if (!cancelled) {
 					setInsight(result);
 				}
@@ -164,12 +176,15 @@ export function ModelMenuContent({
 	activeId,
 	onSelect,
 	usageAgentId,
+	insightProvider,
 }: {
 	models: ModelMenuOption[];
 	activeId?: string;
 	onSelect: (modelId: string) => void;
 	/** See `ModelRow.usageAgentId`. */
 	usageAgentId?: string | null;
+	/** Provider registry to use for pricing when the model id is ambiguous. */
+	insightProvider?: string | null;
 }) {
 	const node = useActiveNode();
 	const target = useMemo(
@@ -205,6 +220,7 @@ export function ModelMenuContent({
 
 	const renderRow = (model: ModelMenuOption) => (
 		<ModelRow
+			insightProvider={insightProvider}
 			isActive={model.id === activeId}
 			key={model.id}
 			model={model}
@@ -251,11 +267,13 @@ export function ModelMenuContent({
 export function createModelMenuRenderer(
 	models: ModelMenuOption[],
 	activeId?: string,
-	usageAgentId?: string | null
+	usageAgentId?: string | null,
+	insightProvider?: string | null
 ) {
 	return (onSelect: (id: string) => void) => (
 		<ModelMenuContent
 			activeId={activeId}
+			insightProvider={insightProvider}
 			models={models}
 			onSelect={onSelect}
 			usageAgentId={usageAgentId}

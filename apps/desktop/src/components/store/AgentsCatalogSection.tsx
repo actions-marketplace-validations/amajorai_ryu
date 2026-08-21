@@ -37,8 +37,7 @@ import {
 	Alert01Icon,
 	Delete01Icon,
 	Download01Icon,
-	Loading01Icon,
-	Robot01Icon,
+	Target01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { InstallProgressButton } from "@ryu/blocks/desktop/install-button.tsx";
@@ -61,6 +60,7 @@ import { useInstalledOnly } from "@ryu/marketplace/catalog/installed-filter";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -136,12 +136,8 @@ function InstallButton({
 			return <StatusBadge kind="builtin" />;
 		}
 		return (
-			<Button disabled={busy} onClick={onUninstall} size="sm" variant="ghost">
-				{busy ? (
-					<HugeiconsIcon className="size-4 animate-spin" icon={Loading01Icon} />
-				) : (
-					<HugeiconsIcon className="size-4" icon={Delete01Icon} />
-				)}
+			<Button loading={busy} onClick={onUninstall} size="sm" variant="ghost">
+				{!busy && <HugeiconsIcon className="size-4" icon={Delete01Icon} />}
 				Remove
 			</Button>
 		);
@@ -298,6 +294,8 @@ function AgentList({
 	onSelect,
 	onInstall,
 	onUninstall,
+	onClearSearch,
+	onRetry,
 	settingsOpener,
 }: {
 	agents: AgentCatalogEntry[];
@@ -310,6 +308,8 @@ function AgentList({
 	onSelect: (id: string) => void;
 	onInstall: (id: string) => void;
 	onUninstall: (id: string) => void;
+	onClearSearch: () => void;
+	onRetry: () => void;
 	settingsOpener: PluginSettingsOpener;
 }) {
 	if (loading && agents.length === 0) {
@@ -321,9 +321,20 @@ function AgentList({
 	}
 	if (error && agents.length === 0) {
 		return (
-			<div className="p-4 text-destructive text-sm">
-				Couldn't load agents: {error}
-			</div>
+			<Empty className="h-full p-6">
+				<EmptyHeader>
+					<EmptyMedia variant="icon">
+						<HugeiconsIcon icon={Target01Icon} />
+					</EmptyMedia>
+					<EmptyTitle>Couldn&apos;t load agents</EmptyTitle>
+					<EmptyDescription>{error}</EmptyDescription>
+				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onRetry} size="sm" variant="ghost">
+						Try again
+					</Button>
+				</EmptyContent>
+			</Empty>
 		);
 	}
 	if (agents.length === 0) {
@@ -331,11 +342,16 @@ function AgentList({
 			<Empty className="h-full p-6">
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={Robot01Icon} />
+						<HugeiconsIcon icon={Target01Icon} />
 					</EmptyMedia>
 					<EmptyTitle>No agents found</EmptyTitle>
 					<EmptyDescription>Try a different search.</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onClearSearch} size="sm" variant="ghost">
+						Clear search
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
@@ -381,7 +397,7 @@ function AgentDetailPanel({
 			<Empty className="h-full">
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={Robot01Icon} />
+						<HugeiconsIcon icon={Target01Icon} />
 					</EmptyMedia>
 					<EmptyTitle>No agent selected</EmptyTitle>
 					<EmptyDescription>
@@ -521,7 +537,7 @@ export default function AgentsCatalogSection({
 	// A few catalog rows are ALSO installed plugins that declare settings; the
 	// resolver returns null for the rest, so the row simply has no Settings entry.
 	const settingsOpener = usePluginSettingsOpener();
-	const { agents, loading, error, install, uninstall, pendingId } =
+	const { agents, loading, error, install, uninstall, pendingId, reload } =
 		useAgentsCatalog();
 	const [errorId, setErrorId] = useState<string | null>(null);
 
@@ -659,7 +675,11 @@ export default function AgentsCatalogSection({
 						error={error}
 						grouped={debouncedQuery.trim().length === 0}
 						loading={loading}
+						onClearSearch={() => setQuery("")}
 						onInstall={(id) => run(id, () => install(id))}
+						onRetry={() => {
+							void reload();
+						}}
 						onSelect={(id) => {
 							setSelectedCommunity(null);
 							setSelectedId(id);

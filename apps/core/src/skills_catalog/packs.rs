@@ -30,6 +30,8 @@ use serde::{Deserialize, Serialize};
 use crate::catalog_source::skill_registries::GithubTapSource;
 use crate::skills_catalog::{self, from_source, InstallResult};
 
+const ROOT_SKILL_PATH: &str = ".";
+
 /// The persisted user-pack registry file (`~/.ryu/skill-packs.json`).
 fn user_packs_path() -> PathBuf {
     crate::paths::ryu_dir().join("skill-packs.json")
@@ -80,15 +82,17 @@ pub struct PackMember {
 
 /// Parse a `skills.sh`-style or GitHub repo reference into a `owner/repo` pair.
 ///
-/// Accepts `owner/repo`, `https://github.com/owner/repo`, and
-/// `https://skills.sh/owner/repo` (skills.sh's repo "pack" pages are exactly the
-/// repo's skills). Returns `None` for anything else — the caller decides whether
-/// that is a custom manifest or an error.
+/// Accepts `owner/repo`, `https://github.com/owner/repo`, and either
+/// `https://skills.sh/owner/repo` or `https://www.skills.sh/owner/repo`
+/// (skills.sh's repo "pack" pages are exactly the repo's skills). Returns
+/// `None` for anything else — the caller decides whether that is a custom
+/// manifest or an error.
 fn repo_from_ref(raw: &str) -> Option<(String, String)> {
     let trimmed = raw.trim();
     let slug = if let Some(rest) = trimmed
         .strip_prefix("https://github.com/")
         .or_else(|| trimmed.strip_prefix("https://skills.sh/"))
+        .or_else(|| trimmed.strip_prefix("https://www.skills.sh/"))
     {
         rest
     } else {
@@ -115,8 +119,8 @@ fn repo_from_ref(raw: &str) -> Option<(String, String)> {
 
 /// Classify a user-supplied pack source string.
 ///
-/// - `owner/repo` / `https://github.com/...` / `https://skills.sh/owner/repo` → a
-///   [`PackSource::Repo`].
+/// - `owner/repo` / `https://github.com/...` / `https://[www.]skills.sh/owner/repo`
+///   → a [`PackSource::Repo`].
 /// - `{"entries": [...]}` JSON, or a bare `entries` array → a
 ///   [`PackSource::Custom`] (the manifest form the CLI and desktop "add custom
 ///   pack" surface send).
@@ -170,6 +174,18 @@ pub const BUILTIN_PACKS: &[(&str, &str)] = &[
     (
         "vercel-labs/agent-skills",
         "Vercel's curated agent skills: React, Next.js, TypeScript, testing and performance best practices.",
+    ),
+    (
+        "wshobson/agents",
+        "Wshobson's broad engineering and product skill collection: architecture, testing, security, operations and more.",
+    ),
+    (
+        "cathrynlavery/diagram-design",
+        "Editorial diagram design: branded architecture, data, flow and security diagrams with HTML, SVG, PNG, Mermaid and draw.io workflows.",
+    ),
+    (
+        "Leonxlnx/unlazy",
+        "Anti-laziness execution discipline: gate files, runnable checks, Depth Tree planning, and proof-based completion.",
     ),
     (
         "emilkowalski/skills",
@@ -337,10 +353,36 @@ impl MemberSpec {
     pub fn slug(&self) -> String {
         match self {
             MemberSpec::SkillsSh { id } => crate::skills_catalog::slug_of(id),
-            MemberSpec::RepoLeaf { path, .. } => {
-                path.rsplit('/').next().unwrap_or(path).to_string()
+            MemberSpec::RepoLeaf { repo, path } => repo_leaf_name(repo, path),
+        }
+    }
+
+    /// The stable catalog id for this member.
+    fn id(&self) -> String {
+        match self {
+            MemberSpec::SkillsSh { id } => id.clone(),
+            MemberSpec::RepoLeaf { repo, path } => {
+                format!("{repo}/{}", repo_leaf_name(repo, path))
             }
         }
+    }
+}
+
+/// Root-level skills use the repository name as their stable on-disk slug. The
+/// upstream unlazy repository is one such skill (`SKILL.md` at its root).
+fn repo_leaf_name(repo: &str, path: &str) -> String {
+    if path == ROOT_SKILL_PATH {
+        repo.rsplit('/').next().unwrap_or(repo).to_string()
+    } else {
+        path.rsplit('/').next().unwrap_or(path).to_string()
+    }
+}
+
+fn repo_skill_source(repo: &str, path: &str) -> String {
+    if path == ROOT_SKILL_PATH {
+        format!("https://github.com/{repo}")
+    } else {
+        format!("https://github.com/{repo}/tree/HEAD/{path}")
     }
 }
 
@@ -448,13 +490,7 @@ pub async fn resolve_members(
         } else {
             None
         };
-        let id = match &spec {
-            MemberSpec::SkillsSh { id } => id.clone(),
-            MemberSpec::RepoLeaf { repo, path } => {
-                let leaf = path.rsplit('/').next().unwrap_or(path).to_string();
-                format!("{repo}/{leaf}")
-            }
-        };
+        let id = spec.id();
         members.push(PackMember {
             id,
             name: humanize_pack_name(&slug),
@@ -474,13 +510,7 @@ pub async fn resolve_member_ids(
     Ok(resolve_member_specs(client, source)
         .await?
         .into_iter()
-        .map(|spec| match &spec {
-            MemberSpec::SkillsSh { id } => id.clone(),
-            MemberSpec::RepoLeaf { repo, path } => {
-                let leaf = path.rsplit('/').next().unwrap_or(path).to_string();
-                format!("{repo}/{leaf}")
-            }
-        })
+        .map(|spec| spec.id())
         .collect())
 }
 
@@ -514,15 +544,18 @@ pub async fn install_pack(client: &reqwest::Client, source: &PackSource) -> Resu
     Ok(installed)
 }
 
-/// Install one skill by its full id. A `owner/repo/slug` id installs via the
-/// skills.sh download path; a `owner/repo/leaf` id (from a repo pack) installs
-/// the leaf directory from the repo. Public so the system-skills sync installs
-/// bundled skills through the same per-skill path a user's install uses — a
-/// bundled skill and a user-chosen one of the same name must land identically.
+/// Install one skill by its full id. A nested `owner/repo/slug` id installs via
+/// the skills.sh download path; a root skill whose slug matches its repo name is
+/// fetched from the repository so its references, scripts, and assets come
+/// along. Public so the system-skills sync installs bundled skills through the
+/// same per-skill path a user's install uses.
 pub async fn install_skill_by_id(client: &reqwest::Client, id: &str) -> Result<InstallResult> {
-    if let Some((owner, repo, _slug)) = split_skill_id(id) {
+    if let Some((owner, repo, slug)) = split_skill_id(id) {
         let repo_full = format!("{owner}/{repo}");
         if repo_from_ref(&repo_full).is_some() {
+            if slug == repo {
+                return from_source::install_from_source(client, &repo_full).await;
+            }
             return skills_catalog::install_skill(client, id).await;
         }
     }
@@ -531,7 +564,7 @@ pub async fn install_skill_by_id(client: &reqwest::Client, id: &str) -> Result<I
     if repo_from_ref(repo).is_none() {
         anyhow::bail!("skill id `{id}` does not name a repo + leaf");
     }
-    let source = format!("https://github.com/{repo}/tree/HEAD/{leaf}");
+    let source = repo_skill_source(repo, leaf);
     from_source::install_from_source(client, &source).await
 }
 
@@ -543,7 +576,7 @@ async fn install_one(client: &reqwest::Client, spec: &MemberSpec) -> Result<Inst
     match spec {
         MemberSpec::SkillsSh { id } => skills_catalog::install_skill(client, id).await,
         MemberSpec::RepoLeaf { repo, path } => {
-            let source = format!("https://github.com/{repo}/tree/HEAD/{path}");
+            let source = repo_skill_source(repo, path);
             from_source::install_from_source(client, &source).await
         }
     }
@@ -571,6 +604,12 @@ mod tests {
             parse_pack_source("https://skills.sh/mattpocock/skills").unwrap(),
             PackSource::Repo {
                 repo: "mattpocock/skills".into()
+            }
+        );
+        assert_eq!(
+            parse_pack_source("https://www.skills.sh/wshobson/agents").unwrap(),
+            PackSource::Repo {
+                repo: "wshobson/agents".into()
             }
         );
     }
@@ -625,6 +664,20 @@ mod tests {
     }
 
     #[test]
+    fn root_repo_member_uses_repo_name_and_root_source() {
+        let spec = MemberSpec::RepoLeaf {
+            repo: "Leonxlnx/unlazy".into(),
+            path: ROOT_SKILL_PATH.into(),
+        };
+        assert_eq!(spec.slug(), "unlazy");
+        assert_eq!(spec.id(), "Leonxlnx/unlazy/unlazy");
+        assert_eq!(
+            repo_skill_source("Leonxlnx/unlazy", ROOT_SKILL_PATH),
+            "https://github.com/Leonxlnx/unlazy"
+        );
+    }
+
+    #[test]
     fn builtin_packs_are_repo_packs() {
         let packs = builtin_packs();
         assert!(!packs.is_empty());
@@ -639,6 +692,51 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn builtin_catalog_includes_wshobson_agents() {
+        let pack = builtin_packs()
+            .into_iter()
+            .find(|pack| pack.id == "wshobson/agents")
+            .expect("wshobson/agents should ship as a built-in pack");
+
+        assert!(pack.builtin);
+        assert_eq!(pack.name, "Wshobson Agents");
+        assert!(matches!(
+            pack.source,
+            PackSource::Repo { ref repo } if repo == "wshobson/agents"
+        ));
+    }
+
+    #[test]
+    fn builtin_catalog_includes_diagram_design() {
+        let pack = builtin_packs()
+            .into_iter()
+            .find(|pack| pack.id == "cathrynlavery/diagram-design")
+            .expect("cathrynlavery/diagram-design should ship as a built-in pack");
+
+        assert!(pack.builtin);
+        assert_eq!(pack.name, "Cathrynlavery Diagram Design");
+        assert!(matches!(
+            pack.source,
+            PackSource::Repo { ref repo } if repo == "cathrynlavery/diagram-design"
+        ));
+    }
+
+    #[test]
+    fn builtin_catalog_includes_unlazy() {
+        let pack = builtin_packs()
+            .into_iter()
+            .find(|pack| pack.id == "Leonxlnx/unlazy")
+            .expect("Leonxlnx/unlazy should ship as a built-in pack");
+
+        assert!(pack.builtin);
+        assert_eq!(pack.name, "Leonxlnx Unlazy");
+        assert!(matches!(
+            pack.source,
+            PackSource::Repo { ref repo } if repo == "Leonxlnx/unlazy"
+        ));
     }
 
     #[test]

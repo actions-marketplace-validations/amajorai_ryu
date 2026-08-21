@@ -1,4 +1,10 @@
 {
+  "tags": ["review","verification","quality","accuracy"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/double-check",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/double-check",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/double-check",
   "name": "Double Check",
   "version": "0.1.14",

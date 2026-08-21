@@ -40,9 +40,6 @@ export const POLAR_PRODUCTS = [
 		slug: "max-yearly",
 	},
 	{
-		// Teams was offered in the pricing grid but had NO entry here, so both
-		// Teams checkout buttons resolved no product and failed. Wire both
-		// intervals (per-seat products; the seat price id lives on the binding).
 		productId: resolveProductId(bindingFor(PLANS.teams.bindings.monthly)),
 		slug: "teams-monthly",
 	},
@@ -53,6 +50,7 @@ export const POLAR_PRODUCTS = [
 	// Ryu Cloud instances are now billed via a single ad-hoc Polar product
 	// (`POLAR_PRODUCT_CLOUD_INSTANCE`) with a per-checkout price computed live
 	// from the Hetzner catalog — there are no per-tier cloud products to list
-	// here. The free BASE node has no product (it is granted by Max). See
+	// here. The free BASE node has no product (it is granted by qualifying
+	// recurring hosted plans). See
 	// `cloud-tiers.ts` + `packages/api/src/routers/billing.ts`.
 ];

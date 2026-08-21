@@ -3,12 +3,24 @@ import {
 	type CollabCursor,
 	createCollabEditorKit,
 	EditorKit,
+	type MyEditor,
 } from "@ryu/ui/components/editor/editor-kit";
 import { Editor, EditorContainer } from "@ryu/ui/components/editor/ui/editor";
+import { FixedToolbar } from "@ryu/ui/components/editor/ui/fixed-toolbar";
+import { FixedToolbarButtons } from "@ryu/ui/components/editor/ui/fixed-toolbar-buttons";
 import { Plate, usePlateEditor } from "platejs/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { XmlText } from "yjs";
 import { RyuYjsProvider } from "@/src/lib/realtime/yjs-provider.ts";
+
+type EditorKitPlugin = (typeof EditorKit)[number];
+type MarkdownEditorPlugin = EditorKitPlugin & {
+	api: { markdown: MyEditor["api"]["markdown"] };
+	key: "markdown";
+};
+const markdownPlugin = EditorKit.find(
+	(plugin): plugin is MarkdownEditorPlugin => plugin.key === "markdown"
+);
 
 /** The active node target a collaborative room connects through. */
 interface CollabTarget {
@@ -56,6 +68,7 @@ export function MarkdownEditor({
 	onChangeMarkdown,
 	collab,
 	compact = false,
+	toolbar = "fixed",
 }: {
 	collab?: MarkdownCollab;
 	/**
@@ -65,6 +78,7 @@ export function MarkdownEditor({
 	compact?: boolean;
 	initialMarkdown: string;
 	onChangeMarkdown: (markdown: string) => void;
+	toolbar?: "fixed" | "inline";
 }) {
 	// Keep the page's sync callback fresh without rebuilding the provider/editor.
 	const onSyncedChangeRef = useRef(collab?.onSyncedChange);
@@ -119,10 +133,16 @@ export function MarkdownEditor({
 					skipInitialization: true,
 				}
 			: {
-					plugins: EditorKit,
+					plugins:
+						toolbar === "inline"
+							? EditorKit.filter((plugin) => plugin.key !== "fixed-toolbar")
+							: EditorKit,
 					// `value` may be a function of the editor, which is how we reach the
 					// MarkdownPlugin's deserializer to turn stored Markdown into nodes.
-					value: (ed) => ed.api.markdown.deserialize(initialMarkdown || ""),
+					value: (ed) =>
+						ed
+							.getApi(markdownPlugin)
+							.markdown.deserialize(initialMarkdown || ""),
 				}
 	);
 
@@ -154,7 +174,9 @@ export function MarkdownEditor({
 					root.length === 0 &&
 					initialMarkdown.trim().length > 0
 				) {
-					const nodes = editor.api.markdown.deserialize(initialMarkdown);
+					const nodes = editor
+						.getApi(markdownPlugin)
+						.markdown.deserialize(initialMarkdown);
 					editor.tf.insertNodes(nodes, { at: [0] });
 				}
 			}
@@ -194,9 +216,16 @@ export function MarkdownEditor({
 		<Plate
 			editor={editor}
 			onChange={({ editor: ed }) =>
-				onChangeMarkdown(ed.api.markdown.serialize())
+				onChangeMarkdown(ed.getApi(markdownPlugin).markdown.serialize())
 			}
 		>
+			{toolbar === "inline" ? (
+				<div className="border-border/60 border-b px-2 py-1">
+					<FixedToolbar>
+						<FixedToolbarButtons placement="inline" />
+					</FixedToolbar>
+				</div>
+			) : null}
 			<EditorContainer
 				className={compact ? "max-h-[min(50vh,360px)] min-h-48" : undefined}
 				variant={compact ? "select" : "default"}

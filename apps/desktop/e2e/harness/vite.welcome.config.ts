@@ -1,0 +1,39 @@
+import path from "node:path";
+import tailwindcss from "@tailwindcss/postcss";
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+const harnessDir = path.resolve(import.meta.dirname);
+// The checked-in dist-welcome directory is a static proof snapshot. Runtime
+// proof tests build from the source entrypoint into the ignored repository tmp
+// directory so Vite never rewrites tracked HTML with untracked hashed assets.
+const welcomeBuildDir = path.resolve(
+	harnessDir,
+	"../../../../tmp/ryu-welcome-proof"
+);
+
+export default defineConfig({
+	plugins: [react()],
+	css: {
+		postcss: {
+			plugins: [tailwindcss()],
+		},
+	},
+	root: harnessDir,
+	base: "./",
+	clearScreen: false,
+	publicDir: path.resolve(harnessDir, "../../public"),
+	resolve: {
+		alias: {
+			"@": path.resolve(harnessDir, "../.."),
+		},
+	},
+	build: {
+		outDir: welcomeBuildDir,
+		emptyOutDir: true,
+		target: "chrome105",
+		rollupOptions: {
+			input: path.resolve(harnessDir, "welcome-step-story.html"),
+		},
+	},
+});

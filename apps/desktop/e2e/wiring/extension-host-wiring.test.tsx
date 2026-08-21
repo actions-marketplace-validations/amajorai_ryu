@@ -26,12 +26,7 @@
 // host suite (adversarial/handshake/bridge) depends on. Run it path-scoped:
 //   bun test e2e/wiring/
 
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
-
-// Register the DOM shim BEFORE react-dom renders. Import order: this statement
-// runs at module-eval time; react-dom only touches `document` at render (inside
-// the `it` blocks), by which point the shim is live.
-GlobalRegistrator.register();
+import "./setup-dom.ts";
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { ExtensionHost, IFRAME_SANDBOX } from "@ryu/app-host/ExtensionHost";

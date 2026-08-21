@@ -2,7 +2,7 @@
 // consume THIS one vocabulary, which is the whole point:
 //   - the `apiKey` plugin stores them as access-control "statements"
 //     (resource -> allowed actions) on each scoped token, and
-//   - the `mcp` / `oidcProvider` provider advertises + grants them as flat
+//   - the `mcp` / OAuth provider advertises + grants them as flat
 //     OAuth scope strings ("resource:action") to MCP clients.
 // A scoped API token and an MCP OAuth token therefore describe the SAME blast
 // radius. Core stays the resource server that honours the scope; the Gateway is

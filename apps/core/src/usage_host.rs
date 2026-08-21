@@ -4,10 +4,11 @@
 //! per-vendor OAuth-token readers (Claude Code / Codex), the never-refresh token
 //! safety, and the normalized [`ryu_usage::UsageSnapshot`] windows. What it
 //! cannot own — because it is a kernel data-dir concept — is the one path
-//! coupling the Codex reader needs: the Ryu-isolated `CODEX_HOME`
+//! coupling the usage readers need: the Ryu-isolated `CODEX_HOME`
 //! ([`crate::codex_config::codex_home`], `RYU_CODEX_HOME` override, else the
-//! profile/relocation-aware `~/.ryu/codex-home`). This shim implements it, and
-//! Core installs it once at boot via [`ryu_usage::set_global_host`].
+//! profile/relocation-aware `~/.ryu/codex-home`) and the managed Pi's isolated
+//! subscription-login `auth.json`. This shim implements both paths, and Core
+//! installs it once at boot via [`ryu_usage::set_global_host`].
 
 use std::path::PathBuf;
 
@@ -27,5 +28,9 @@ pub struct CoreUsageHost;
 impl UsageHost for CoreUsageHost {
     fn ryu_codex_home(&self) -> PathBuf {
         crate::codex_config::codex_home()
+    }
+
+    fn ryu_pi_auth_path(&self) -> Option<PathBuf> {
+        Some(crate::pi_config::config_dir().join("auth.json"))
     }
 }

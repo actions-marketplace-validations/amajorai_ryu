@@ -39,7 +39,9 @@ import { StatusBadge } from "@ryu/ui/components/status-badge";
 import { Switch } from "@ryu/ui/components/switch";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { sileo } from "sileo";
+import { modelMenuItem } from "@/components/agent-elements/input/model-router.ts";
 import { useProviderCommandNavigation } from "@/components/agent-elements/input/provider-command-dialog.tsx";
+import { OrgBillingContext } from "@/src/components/billing/OrgBillingContext.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useLlmProviders } from "@/src/hooks/useLlmProviders.ts";
 import type {
@@ -217,9 +219,9 @@ const RETAIL_CREDIT_POOL = "openrouter";
  *  a way that costs the user the credit they already have. */
 function managedBadgeLabel(needsPlan: boolean, poolBacked: boolean): string {
 	if (poolBacked) {
-		return "Ryu credits";
+		return "Org credit pool";
 	}
-	return needsPlan ? "Requires Ryu subscription" : "Included with your plan";
+	return needsPlan ? "Requires org plan" : "Included in org plan";
 }
 
 function ProviderCard(props: ProviderCardProps) {
@@ -331,7 +333,8 @@ function ProviderCardContent({
 		const push = (m: DiscoveredModel) => {
 			if (m.id && !seen.has(m.id)) {
 				seen.add(m.id);
-				out.push(m);
+				const item = modelMenuItem(m.id, m.name);
+				out.push({ id: item.id, name: item.name });
 			}
 		};
 		for (const m of discovered) {
@@ -567,8 +570,8 @@ function ProviderCardContent({
 							</span>
 							<span className="text-muted-foreground text-xs">
 								Ryu's managed inference reaches every major model with no API
-								keys and no per-provider setup. Upgrade to use it, or add your
-								own key below.
+								keys and no per-provider setup. Upgrade the organization plan to
+								use it, or add your own key below.
 							</span>
 							<div className="flex justify-start">
 								<Button onClick={() => requestUpgrade()} size="sm">
@@ -659,7 +662,7 @@ function ProviderCardContent({
 								)}
 								{provider.configured ? (
 									<Button
-										disabled={removing}
+										loading={removing}
 										onClick={handleRemove}
 										size="sm"
 										variant="ghost"
@@ -980,8 +983,13 @@ export function LlmProvidersSettings() {
 
 	return (
 		<div className="space-y-6">
+			<OrgBillingContext
+				compact
+				description="Ryu managed inference uses this organization's shared credits; BYOK providers use keys stored on this node."
+				label="Managed provider billing"
+			/>
 			<SettingsSection
-				caption="The providers that answer chat. Configure any number, then pick one to power the Ryu agent. The Gateway toggle governs each provider's egress independently (firewall · budget · audit); the managed provider is always Gateway-routed. Model, credential, and routing choices all live in Core's isolated Pi config."
+				caption="The providers that answer chat. Configure any number, then pick one to power the Ryu agent. Managed inference spends the organization wallet shown above; BYOK providers spend the provider account behind the key stored on this node. The Gateway toggle governs egress independently."
 				title="Chat"
 			>
 				<div className="space-y-2.5">
@@ -1008,9 +1016,9 @@ export function LlmProvidersSettings() {
 				onToggleModel={handleToggleModel}
 			/>
 
-			{/* The rest of the capability surface — image, speech, video, and the
+			{/* The rest of the capability surface — image, Audio, video, and the
 			    retrieval pair. Split out because a provider list that only ever
-			    meant "chat" gave no answer to "what actually does text-to-speech
+			    meant "chat" gave no answer to "what actually generates Audio
 			    here?", and the answer lived in a node dialog most people never
 			    open. */}
 			<CapabilityProvidersSettings />

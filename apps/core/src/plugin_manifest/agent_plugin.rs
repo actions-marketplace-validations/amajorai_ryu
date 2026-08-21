@@ -22,8 +22,9 @@
 //!
 //! An imported plugin is unsigned by construction: it comes from an arbitrary
 //! directory under `~/.ryu/plugins`, with no Gateway signature over it. Its
-//! `mcp.json` therefore describes a process it wants us to SPAWN — which is exactly
-//! the surface [`crate::sidecar::mcp::may_register_mcp_servers`] gates.
+//! `mcp.json` therefore describes a process it wants us to spawn or a remote
+//! endpoint it wants us to contact — which is exactly the surface
+//! [`crate::sidecar::mcp::may_register_mcp_servers`] gates.
 //!
 //! We inherit that gate rather than re-implement it: anything loaded off disk is
 //! [`PluginTier::Community`], and Community-tier `mcp_servers` register only with
@@ -33,9 +34,6 @@
 //!
 //! ## What we deliberately do not support yet
 //!
-//! - **Remote transports.** `streamable-http` and `sse` entries are skipped and
-//!   reported. §7.2.2 rule 4 makes that conformant (a client must support at least
-//!   one of `stdio`/`streamable-http`), and our MCP client speaks stdio only.
 //! - **`cwd`.** Neither [`McpServerDecl`] nor `McpStdioCommand` carries a working
 //!   directory, so an entry that declares one is skipped rather than silently run
 //!   from the wrong directory. `${PLUGIN_ROOT}` expansion in `args`/`env` covers
@@ -217,6 +215,67 @@ fn resolve_command(command: &str, plugin_root: &Path) -> Result<String, String> 
     Ok(command.to_string())
 }
 
+/// Validate a remote MCP URL before it enters the native manifest.
+///
+/// Core applies the runtime SSRF screen again when it connects. This import-time
+/// check keeps malformed and credential-bearing endpoint events out of the
+/// registry while still allowing the same loopback HTTP endpoints that local MCP
+/// clients commonly use.
+fn validate_remote_url(name: &str, raw: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(raw)
+        .map_err(|error| format!("server '{name}' has an invalid remote url: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("server '{name}' remote url must use http or https"));
+    }
+    if parsed.host_str().is_none() {
+        return Err(format!("server '{name}' remote url has no host"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!(
+            "server '{name}' remote url must not contain credentials"
+        ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(format!(
+            "server '{name}' remote url must not contain a fragment"
+        ));
+    }
+    Ok(())
+}
+
+/// Copy and validate the optional static headers on a remote server.
+fn native_remote_headers(name: &str, value: Option<&Value>) -> Result<Option<Value>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("server '{name}' has a non-object 'headers'"))?;
+    let mut names: Vec<&str> = Vec::with_capacity(object.len());
+    let mut headers = Map::new();
+    for (key, raw_value) in object {
+        reqwest::header::HeaderName::from_bytes(key.as_bytes())
+            .map_err(|error| format!("server '{name}' has invalid header name '{key}': {error}"))?;
+        let header_value = raw_value
+            .as_str()
+            .ok_or_else(|| format!("server '{name}' has a non-string value for header '{key}'"))?;
+        reqwest::header::HeaderValue::from_str(header_value).map_err(|error| {
+            format!("server '{name}' has invalid value for header '{key}': {error}")
+        })?;
+        if names
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(key))
+        {
+            return Err(format!(
+                "server '{name}' declares duplicate headers that differ only by case: '{key}'"
+            ));
+        }
+        names.push(key);
+        headers.insert(key.clone(), Value::String(header_value.to_owned()));
+    }
+    Ok((!headers.is_empty()).then_some(Value::Object(headers)))
+}
+
 /// Translate one `mcp.json` server entry into a native `McpServerDecl` value.
 ///
 /// Returns `Ok(None)` with a note when the entry is valid spec but unsupported
@@ -242,7 +301,28 @@ fn to_native_server(
     match transport {
         "stdio" => {}
         "streamable-http" | "sse" => {
-            return Ok(None);
+            for key in object.keys() {
+                if !matches!(key.as_str(), "type" | "url" | "headers") {
+                    return Err(format!(
+                        "server '{name}' has field '{key}', which is not part of the remote variant"
+                    ));
+                }
+            }
+            let url = object
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| format!("server '{name}' has no 'url'"))?;
+            validate_remote_url(name, url)?;
+
+            let mut decl = Map::new();
+            decl.insert("type".to_string(), Value::String(transport.to_owned()));
+            decl.insert("url".to_string(), Value::String(url.to_owned()));
+            if let Some(headers) = native_remote_headers(name, object.get("headers"))? {
+                decl.insert("headers".to_string(), headers);
+            }
+            return Ok(Some(Value::Object(decl)));
         }
         other => return Err(format!("server '{name}' has unknown type '{other}'")),
     }
@@ -387,7 +467,7 @@ fn import_mcp(dir: &Path, notes: &mut Vec<String>) -> Map<String, Value> {
                 servers.insert(name.clone(), decl);
             }
             Ok(None) => notes.push(format!(
-                "mcp server '{name}' uses a remote transport, which this client does not support; skipped"
+                "mcp server '{name}' uses a transport this client does not support; skipped"
             )),
             Err(e) => notes.push(format!("mcp server skipped: {e}")),
         }
@@ -753,23 +833,48 @@ mod tests {
     }
 
     #[test]
-    fn skips_remote_transports_and_unknown_fields_per_entry() {
+    fn imports_remote_transports_and_skips_unknown_fields_per_entry() {
         let dir = tempfile::tempdir().unwrap();
         write_mcp(
             dir.path(),
             &format!(
-                r#"{{"$schema":"{MCP_SCHEMA_URL}","mcpServers":{{"remote":{{"type":"streamable-http","url":"https://x.example/mcp"}},"weird":{{"type":"stdio","command":"npx","enabled":false}},"ok":{{"type":"stdio","command":"npx"}}}}}}"#
+                r#"{{"$schema":"{MCP_SCHEMA_URL}","mcpServers":{{"remote":{{"type":"streamable-http","url":"https://x.example/mcp","headers":{{"Authorization":"Bearer static"}}}},"legacy":{{"type":"sse","url":"https://x.example/sse"}},"weird":{{"type":"stdio","command":"npx","enabled":false}},"ok":{{"type":"stdio","command":"npx"}}}}}}"#
             ),
         );
         let imported = import_manifest(dir.path(), &spec_manifest("")).unwrap();
         let servers = imported.manifest["mcp_servers"].as_object().unwrap();
-        assert_eq!(servers.len(), 1);
+        assert_eq!(servers.len(), 3);
         assert!(servers.contains_key("ok"));
-        assert!(imported
+        assert_eq!(servers["remote"]["type"], "streamable-http");
+        assert_eq!(servers["remote"]["url"], "https://x.example/mcp");
+        assert_eq!(
+            servers["remote"]["headers"]["Authorization"],
+            "Bearer static"
+        );
+        assert_eq!(servers["legacy"]["type"], "sse");
+        assert!(!imported
             .notes
             .iter()
             .any(|n| n.contains("remote transport")));
         assert!(imported.notes.iter().any(|n| n.contains("enabled")));
+    }
+
+    #[test]
+    fn preserves_http_remote_urls_and_rejects_invalid_headers_per_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        write_mcp(
+            dir.path(),
+            &format!(
+                r#"{{"$schema":"{MCP_SCHEMA_URL}","mcpServers":{{"insecure":{{"type":"streamable-http","url":"http://remote.example/mcp"}},"credentials":{{"type":"sse","url":"https://user:pass@example.com/sse"}},"headers":{{"type":"sse","url":"https://example.com/sse","headers":{{"Bad Header":"x"}}}},"ok":{{"type":"streamable-http","url":"https://x.example/mcp"}}}}}}"#
+            ),
+        );
+        let imported = import_manifest(dir.path(), &spec_manifest("")).unwrap();
+        let servers = imported.manifest["mcp_servers"].as_object().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert!(servers.contains_key("ok"));
+        assert!(servers.contains_key("insecure"));
+        assert!(imported.notes.iter().any(|n| n.contains("credentials")));
+        assert!(imported.notes.iter().any(|n| n.contains("header")));
     }
 
     #[test]

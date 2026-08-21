@@ -2,6 +2,7 @@
 
 import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
 import { Button } from "@ryu/ui/components/button";
+import { Logo as RyuLogo } from "@ryu/ui/components/logo";
 import {
 	ArrowUpRight,
 	MessageSquare,
@@ -51,6 +52,8 @@ function initialsFor(user: PopupUser): string {
 
 export interface ExtensionPopupProps {
 	coreStatus?: PopupCoreStatus;
+	/** Renders the compact per-surface model picker supplied by the extension. */
+	modelPicker?: ReactNode;
 	onOpen?: (path: string) => void;
 	onQuickMessageChange?: (value: string) => void;
 	onSubmitQuickChat?: () => void;
@@ -76,6 +79,7 @@ export function ExtensionPopup({
 	onQuickMessageChange,
 	onSubmitQuickChat,
 	onOpen,
+	modelPicker,
 }: ExtensionPopupProps) {
 	// Fall through to the stopped state for any unexpected value, mirroring the
 	// original popup's defensive ternary.
@@ -86,9 +90,7 @@ export function ExtensionPopup({
 		<div className="flex h-full flex-col">
 			<div className="flex items-center justify-between border-border border-b px-4 py-3">
 				<div className="flex items-center gap-2.5">
-					<span className="flex size-6 items-center justify-center rounded-md bg-primary font-bold text-primary-foreground text-xs">
-						R
-					</span>
+					<RyuLogo size="24px" variant="outline" />
 					<span className="font-heading font-semibold text-sm tracking-tight">
 						Ryu
 					</span>
@@ -101,23 +103,23 @@ export function ExtensionPopup({
 				</div>
 			</div>
 
-			<div className="border-border border-b px-4 py-3">
+			<div className="border-border border-b px-3 py-3">
 				<form
-					className="flex gap-2"
+					className="flex items-center gap-1 rounded-2xl bg-muted px-2 py-1"
 					onSubmit={(e) => {
 						e.preventDefault();
 						onSubmitQuickChat?.();
 					}}
 				>
 					<input
-						className="flex-1 rounded-md border bg-muted/50 px-3 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+						className="min-w-0 flex-1 bg-transparent px-2 py-1.5 text-[14px] leading-[1.6] outline-none placeholder:text-muted-foreground"
 						onChange={(e) => onQuickMessageChange?.(e.target.value)}
 						placeholder="Ask Ryu something…"
 						type="text"
 						value={quickMessage}
 					/>
 					<Button
-						className="size-8 shrink-0"
+						className="size-8 shrink-0 rounded-xl"
 						disabled={!canSend}
 						size="icon"
 						type="submit"
@@ -126,12 +128,20 @@ export function ExtensionPopup({
 						<Send className="size-3.5" />
 					</Button>
 				</form>
+				{modelPicker ? (
+					<div className="mt-2 flex items-center justify-between gap-2 border-border/60 border-t pt-2">
+						<span className="text-[11px] text-muted-foreground">
+							Browser model
+						</span>
+						{modelPicker}
+					</div>
+				) : null}
 			</div>
 
-			<div className="grid grid-cols-4 gap-1 border-border border-b px-4 py-3">
+			<div className="grid grid-cols-3 gap-1 border-border border-b px-3 py-3">
 				{QUICK_LINKS.map(({ path, icon: Icon, label }) => (
 					<button
-						className="flex flex-col items-center gap-1 rounded-md p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+						className="flex flex-col items-center gap-1 rounded-xl bg-muted/40 p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 						key={path}
 						onClick={() => onOpen?.(path)}
 						type="button"
@@ -143,13 +153,13 @@ export function ExtensionPopup({
 			</div>
 
 			<div className="flex-1 overflow-y-auto">
-				<div className="px-4 pt-3 pb-1.5">
+				<div className="px-3 pt-3 pb-1.5">
 					<span className="font-medium text-[11px] text-muted-foreground uppercase tracking-wider">
 						Recent
 					</span>
 				</div>
 				{recents.length === 0 ? (
-					<div className="px-4 py-6 text-center text-muted-foreground text-xs">
+					<div className="px-3 py-6 text-center text-muted-foreground text-xs">
 						No conversations yet
 					</div>
 				) : (
@@ -176,7 +186,7 @@ export function ExtensionPopup({
 				)}
 			</div>
 
-			<div className="border-border border-t px-4 py-2.5">
+			<div className="border-border border-t px-3 py-2.5">
 				<Button
 					className="w-full gap-1.5"
 					onClick={() => onOpen?.("/chat")}

@@ -31,7 +31,7 @@ const rows = [
 	{
 		feature: "Voice & Image",
 		bare: "Separate APIs",
-		ryu: "Image, TTS, STT built-in",
+		ryu: "Image, Audio, Voice Recognition built-in",
 	},
 	{
 		feature: "App Connections",

@@ -23,6 +23,7 @@ mod pipeline;
 mod policy;
 mod policy_alert;
 mod profile;
+mod provider_vault;
 mod providers;
 mod quota;
 mod rate_limit;
@@ -85,10 +86,29 @@ async fn main() -> anyhow::Result<()> {
     // `before_send`; never fed `tracing`/log events, so no content reaches Sentry.
     let _crash_guard = crash::init();
 
-    let config = GatewayConfig::load().unwrap_or_else(|e| {
+    let mut config = GatewayConfig::load().unwrap_or_else(|e| {
         tracing::warn!("Failed to load config ({e}), using defaults");
         GatewayConfig::default()
     });
+
+    let vault_http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        // The request carries the fleet vault secret. Never follow a redirect
+        // that could move that header to an operator-typo or attacker-controlled
+        // host; the control-plane route is a fixed endpoint.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build provider-vault client: {e}"))?;
+    match provider_vault::apply_from_env(&mut config, &vault_http).await {
+        Ok(applied) if !applied.is_empty() => {
+            tracing::info!(providers = ?applied, "provider vault loaded into gateway memory");
+        }
+        Ok(_) => {}
+        Err(error) if !provider_vault::required_from_env() => {
+            tracing::warn!("provider vault unavailable; continuing with local config: {error}");
+        }
+        Err(error) => return Err(error),
+    }
 
     let bind_addr = std::env::args()
         .skip(1)
@@ -123,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Security guard: the gateway is an LLM proxy. Binding to a non-loopback
     // interface without auth exposes a fully open, billable proxy to the network.
-    // Default bind is 0.0.0.0:7981 and require_auth is only enabled when
+    // Default bind is 127.0.0.1:7981 and require_auth is only enabled when
     // GATEWAY_MASTER_KEY is set. This is a HARD REFUSAL, not a warning (WS2): a
     // publicly-reachable fleet replica must never boot without auth. A loopback
     // bind keeps the old permissive behavior for local dev.

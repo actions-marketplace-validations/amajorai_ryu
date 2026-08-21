@@ -10,23 +10,19 @@
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Node } from "./useNodeStore.ts";
+import type { ManagedNode } from "@/src/lib/api/managed-nodes.ts";
 
-// The store's two non-test-relevant imports — the managed-node fetcher and the
-// plan-cap bridge — both transitively reach `lib/auth-client.ts` → `@ryu/settings`
-// → `@ryu/ui`, whose `"./components/*"` export is extensionless. Vite resolves
-// that; bare `bun test` does not, so merely importing the store blew up module
-// resolution before a single test could run. Stub exactly those two boundaries
-// (nothing under test calls either) and load the store dynamically afterwards, so
-// these tests actually execute instead of sitting dormant.
+// The store's non-test-relevant managed-node fetcher reaches the control-plane
+// auth client. Stub that boundary and load the store dynamically afterwards, so
+// these tests exercise the routing behavior without a network dependency.
 // Mutable so a test can decide what the control plane "returns" for this run;
 // the module factory only ever runs once, so the indirection is what makes the
 // managed-node path testable at all.
-let managedNodes: { name: string; url: string; token?: string | null }[] = [];
+type ManagedNodeFixture = Pick<ManagedNode, "name" | "token" | "url"> &
+	Partial<Pick<ManagedNode, "orgId" | "serverId">>;
+let managedNodes: ManagedNodeFixture[] = [];
 mock.module("@/src/lib/api/managed-nodes.ts", () => ({
 	fetchManagedNodes: () => Promise.resolve(managedNodes),
-}));
-mock.module("@/src/lib/gating/planCapBridge.ts", () => ({
-	enforcePlanCap: () => undefined,
 }));
 const { useNodeStore, stopAutoSelectProbe, stopCloudTokenRefresh } =
 	await import("./useNodeStore.ts");

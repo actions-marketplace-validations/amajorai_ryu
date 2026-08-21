@@ -35,6 +35,29 @@ export function chatStreamResumeUrl(
 	);
 }
 
+export interface ProactiveOpeningResponse {
+	conversation_id: string;
+	reply?: string;
+	status: "already_completed" | "completed" | "pending";
+}
+
+/** Start or resume the one-time assistant-first opening for a conversation. */
+export async function startProactiveOpening(
+	target: ApiTarget,
+	conversationId: string,
+	agentId = "ryu",
+	idempotencyKey?: string
+): Promise<ProactiveOpeningResponse> {
+	return request<ProactiveOpeningResponse>(target, "/api/proactive/opening", {
+		method: "POST",
+		body: {
+			conversation_id: conversationId,
+			agent_id: agentId,
+			idempotency_key: idempotencyKey,
+		},
+	});
+}
+
 /** Cancel a live chat turn. Aborting the client stream alone does not stop Core. */
 export async function cancelChat(
 	target: ApiTarget,
@@ -46,6 +69,27 @@ export async function cancelChat(
 		{ method: "POST", body: { conversation_id: conversationId } }
 	);
 	return response.cancelled;
+}
+
+/** Ask a supported native provider to leave reasoning and continue the answer. */
+export async function answerNowChat(
+	target: ApiTarget,
+	conversationId: string,
+	turnId: string
+): Promise<boolean> {
+	const response = await request<{ accepted: boolean }>(
+		target,
+		"/api/chat/control",
+		{
+			method: "POST",
+			body: {
+				action: "answer_now",
+				conversation_id: conversationId,
+				turn_id: turnId,
+			},
+		}
+	);
+	return response.accepted;
 }
 
 /** Fetch post-turn prompt suggestions; failures intentionally degrade to no chips. */

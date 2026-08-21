@@ -11,10 +11,10 @@
 // Two interaction models:
 //   - Text (chat) engines are mutually exclusive — exactly one is the resident
 //     engine, so the toggle SWAPS the active engine (re-points the gateway).
-//   - Image / Speech engines run *alongside* the chat engine, so their toggle is
+//   - Image / Speech engines run *alongside* Chat, so their toggle is
 //     a plain start/stop of the engine's sidecar process.
 
-import { CpuIcon } from "@hugeicons/core-free-icons";
+import { LayerIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	EngineFootnote,
@@ -43,6 +43,7 @@ import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -447,6 +448,7 @@ function EngineList({
 	onInstall,
 	onUninstall,
 	onToggle,
+	onClearSearch,
 	settingsOpener,
 }: {
 	/** Resolves a row to its settings tab; null for an engine that is not an
@@ -460,6 +462,7 @@ function EngineList({
 	onSelect: (id: string) => void;
 	onToggle: (item: EngineListItem, next: boolean) => void;
 	onUninstall: (item: EngineListItem) => void;
+	onClearSearch: () => void;
 	rowState: (name: string) => RowState;
 }) {
 	const total = groups.reduce((n, g) => n + g.items.length, 0);
@@ -483,11 +486,16 @@ function EngineList({
 			<Empty className="h-full p-6">
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={CpuIcon} />
+						<HugeiconsIcon icon={LayerIcon} />
 					</EmptyMedia>
 					<EmptyTitle>No engines found</EmptyTitle>
 					<EmptyDescription>Try a different search.</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onClearSearch} size="sm" variant="ghost">
+						Clear search
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
@@ -530,7 +538,7 @@ function EngineList({
 								// hidden — the platform answer is exactly what the user came to
 								// find. Its status glyph carries the reason.
 								dimmed={!item.available}
-								icon={<HugeiconsIcon className="size-5" icon={CpuIcon} />}
+								icon={<HugeiconsIcon className="size-5" icon={LayerIcon} />}
 								key={item.id}
 								name={item.displayName}
 								onClick={() => onSelect(item.id)}
@@ -708,7 +716,7 @@ function EngineDetailPanel({
 			<Empty className="h-full">
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={CpuIcon} />
+						<HugeiconsIcon icon={LayerIcon} />
 					</EmptyMedia>
 					<EmptyTitle>No engine selected</EmptyTitle>
 					<EmptyDescription>
@@ -800,7 +808,7 @@ function EngineDetailPanel({
 				}
 				hero={
 					<ListingHero
-						icon={<HugeiconsIcon className="size-8" icon={CpuIcon} />}
+						icon={<HugeiconsIcon className="size-8" icon={LayerIcon} />}
 						name={engine.displayName}
 						statusIcons={
 							<>
@@ -936,7 +944,7 @@ function EngineDetailPanel({
 				}
 				hero={
 					<ListingHero
-						icon={<HugeiconsIcon className="size-8" icon={CpuIcon} />}
+						icon={<HugeiconsIcon className="size-8" icon={LayerIcon} />}
 						name={engine.displayName}
 						statusIcons={
 							engine.running ? (
@@ -1030,7 +1038,7 @@ function EngineDetailPanel({
 				}
 				hero={
 					<ListingHero
-						icon={<HugeiconsIcon className="size-8" icon={CpuIcon} />}
+						icon={<HugeiconsIcon className="size-8" icon={LayerIcon} />}
 						name={backend.displayName}
 						statusIcons={
 							<>
@@ -1120,6 +1128,7 @@ export default function EnginesCatalogSection() {
 		install: installText,
 		uninstall: uninstallText,
 		activate: activateText,
+		reload: reloadText,
 	} = useEngines();
 
 	const {
@@ -1262,7 +1271,7 @@ export default function EnginesCatalogSection() {
 	};
 
 	if (error && groups.length === 0 && !loading) {
-		return <EnginesErrorState message={error} />;
+		return <EnginesErrorState message={error} onRetry={reloadText} />;
 	}
 
 	const selectedName = selectedId?.split(":")[1] ?? null;
@@ -1300,6 +1309,7 @@ export default function EnginesCatalogSection() {
 					error={error}
 					groups={groups}
 					loading={loading}
+					onClearSearch={() => setQuery("")}
 					onInstall={handleInstall}
 					onSelect={setSelectedId}
 					onToggle={handleToggle}

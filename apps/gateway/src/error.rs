@@ -58,7 +58,7 @@ pub enum GatewayError {
     #[error("Engine overloaded: {0}")]
     Overloaded(String),
 
-    /// A per-user / per-agent / per-session token budget (or the wallet-empty
+    /// A per-user / per-agent / per-session charged-spend budget (or the wallet-empty
     /// rule) hit `Stop` (402). Carries the optional [`PolicyAlert`] stamped when
     /// the matched rule's `alert` tier is `>= Warn`, so `into_response` emits
     /// `x-ryu-policy-alert` on the 402 (the F1 error-path stamp).
@@ -66,7 +66,7 @@ pub enum GatewayError {
     BudgetExceeded(Option<PolicyAlert>),
 
     /// A managed-inference org's credit balance is exhausted (pre-flight gate).
-    /// Distinct from [`GatewayError::BudgetExceeded`] (token-budget period cap):
+    /// Distinct from [`GatewayError::BudgetExceeded`] (charged-spend cap):
     /// this is the org wallet hitting zero. Stable code: `insufficient_credits`.
     #[error("Insufficient credits")]
     InsufficientCredits,
@@ -150,7 +150,7 @@ impl IntoResponse for GatewayError {
             GatewayError::BudgetExceeded(_) => (
                 StatusCode::PAYMENT_REQUIRED,
                 "budget_exceeded",
-                "Token budget exceeded for this period.",
+                "Charged spend budget exceeded for this period.",
             ),
             GatewayError::InsufficientCredits => (
                 StatusCode::PAYMENT_REQUIRED,

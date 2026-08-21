@@ -3,10 +3,10 @@
 // on it that must never leave the machine", and "does everything on it still
 // exist in the app".
 
+import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 import {
 	currentPlatform,
 	groupForKey,
@@ -61,6 +61,7 @@ const MUST_NEVER_SYNC = [
 	// Machine-local facts
 	"ryu_workspace_folder",
 	"ryu_workspace_recents",
+	"ryu_workspace_projects_v1",
 	"ryu_default_microphone",
 	"ryu_default_speaker",
 	"ryu_session_tabs",

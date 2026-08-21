@@ -1,9 +1,15 @@
 {
+  "tags": ["search","web","extract","mcp"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/parallel",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/parallel",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/parallel",
   "name": "Parallel Search",
   "version": "0.1.14",
   "stability": "experimental",
-  "description": "Web search and content extraction via Parallel (https://parallel.ai), exposed as three declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Parallel without changing what agents call. Search works with NO key through Parallel's public Search MCP endpoint; a BYOK Parallel API key unlocks the higher-limit REST API and extraction.",
+  "description": "Web search and content extraction via Parallel (https://parallel.ai), exposed as three declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web.search` / `web.extract` tools at Parallel without changing what agents call. Search works with NO key through Parallel's public Search MCP endpoint; a BYOK Parallel API key unlocks the higher-limit REST API and extraction.",
   "iconUrl": "https://avatars.githubusercontent.com/u/210743255?v=4",
   "iconDither": { "from": 168, "to": "transparent", "direction": "down" },
   "tagline": "Objective-driven web search built for agent loops",
@@ -28,7 +34,7 @@
       "name": "Parallel Search",
       "kind": "tool",
       "config": {
-        "slug": "parallel__search",
+        "slug": "parallel.search",
         "backend": "http",
         "method": "POST",
         "url": "https://api.parallel.ai/v1/search",
@@ -75,13 +81,13 @@
       "name": "Parallel Search (no key)",
       "kind": "tool",
       "config": {
-        "slug": "parallel__free_search",
+        "slug": "parallel.free_search",
         "backend": "http",
         "method": "POST",
         "url": "https://search.parallel.ai/mcp",
         "fail_open": true,
         "unwrap_body": true,
-        "description": "Web search through Parallel's PUBLIC Search MCP endpoint, which needs no API key. Rate-limited free tier, intended as the zero-setup path when RYU_PARALLEL_API_KEY is unset; add a key to use the higher-limit parallel__search instead. Speaks JSON-RPC: the caller supplies the whole `tools/call` envelope, and the reply is a plain JSON-RPC response whose result payload is a JSON string, so the capability adapter parses it rather than a response map.",
+        "description": "Web search through Parallel's PUBLIC Search MCP endpoint, which needs no API key. Rate-limited free tier, intended as the zero-setup path when RYU_PARALLEL_API_KEY is unset; add a key to use the higher-limit parallel.search instead. Speaks JSON-RPC: the caller supplies the whole `tools/call` envelope, and the reply is a plain JSON-RPC response whose result payload is a JSON string, so the capability adapter parses it rather than a response map.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -111,7 +117,7 @@
       "name": "Parallel Extract",
       "kind": "tool",
       "config": {
-        "slug": "parallel__extract",
+        "slug": "parallel.extract",
         "backend": "http",
         "method": "POST",
         "url": "https://api.parallel.ai/v1/extract",
@@ -165,11 +171,11 @@
       "title": "Search",
       "selectable": true,
       "tools": {
-        "web__search": {
-          "tool": "parallel__search",
+        "web.search": {
+          "tool": "parallel.search",
           "adapter": {
-            "tools": ["parallel__free_search"],
-            "code_file": "adapters/web__search.js"
+            "tools": ["parallel.free_search"],
+            "code_file": "adapters/web.search.js"
           }
         }
       }
@@ -180,8 +186,8 @@
       "title": "Extract",
       "selectable": true,
       "tools": {
-        "web__extract": {
-          "tool": "parallel__extract",
+        "web.extract": {
+          "tool": "parallel.extract",
           "args": {
             "url": "urls[]",
             "format": ""

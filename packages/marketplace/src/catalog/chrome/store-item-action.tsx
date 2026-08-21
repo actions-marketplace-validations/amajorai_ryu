@@ -53,17 +53,28 @@ import {
 	ContextMenuTrigger,
 } from "@ryu/ui/components/context-menu.tsx";
 import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@ryu/ui/components/dialog.tsx";
+import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu.tsx";
-import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { StatusBadge } from "@ryu/ui/components/status-badge.tsx";
-import { Fragment } from "react";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
+import type { PublisherTrustLevel } from "@ryuhq/protocol/publisher-trust";
+import { Fragment, useState } from "react";
 import { useOptionalReport } from "../../report/report-provider.tsx";
 import type { ReportTarget } from "../../report/types.ts";
+import type { PublisherHealthInput } from "../detail/publisher-health.ts";
+import { PublisherHealthCard } from "../detail/publisher-health-card.tsx";
 
 export interface StoreItemActionProps {
 	/** Rendered instead of the lifecycle buttons on a read-only surface (web). */
@@ -116,8 +127,87 @@ export interface StoreItemActionProps {
 	onUninstall?: () => void;
 	/** Live install completion 0–100 (or null when the size is unknown). */
 	percent?: number | null;
+	publisherHealth?: Omit<PublisherHealthInput, "publisherTrust">;
+	/** Server-derived publisher identity mark. Dotted publishers require the
+	 * two-step community install disclosure below. */
+	publisherTrust?: PublisherTrustLevel | null;
 	/** Identity passed to the shared ReportProvider when onReport is omitted. */
 	reportTarget?: ReportTarget;
+}
+
+export interface PublisherInstallDisclosureProps {
+	onInstall: () => void;
+	onOpenChange: (open: boolean) => void;
+	open: boolean;
+	publisherHealth?: Omit<PublisherHealthInput, "publisherTrust">;
+	publisherTrust: PublisherTrustLevel;
+}
+
+/** The shared two-step disclosure for a publisher without identity verification. */
+export function PublisherInstallDisclosure({
+	onInstall,
+	onOpenChange,
+	open,
+	publisherHealth,
+	publisherTrust,
+}: PublisherInstallDisclosureProps) {
+	const [step, setStep] = useState<"review" | "confirm">("review");
+	const handleOpenChange = (nextOpen: boolean) => {
+		if (!nextOpen) {
+			setStep("review");
+		}
+		onOpenChange(nextOpen);
+	};
+
+	return (
+		<Dialog onOpenChange={handleOpenChange} open={open}>
+			<DialogContent className="sm:max-w-lg">
+				<DialogHeader>
+					<DialogTitle>
+						{step === "review"
+							? "This publisher is not verified"
+							: "Install community package?"}
+					</DialogTitle>
+					<DialogDescription>
+						{step === "review"
+							? "Anyone can publish a community package. Ryu has not verified this publisher's identity."
+							: "This package is from a publisher without verified identity. You are responsible for reviewing the source and requested access."}
+					</DialogDescription>
+				</DialogHeader>
+				{step === "review" ? (
+					<PublisherHealthCard
+						publisherTrust={publisherTrust}
+						{...publisherHealth}
+					/>
+				) : (
+					<div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-sm">
+						<p className="font-medium">Review the source before continuing.</p>
+						<p className="mt-1 text-muted-foreground">
+							The health score is only a summary of reported signals and is not
+							a guarantee of safety.
+						</p>
+					</div>
+				)}
+				<DialogFooter>
+					{step === "review" ? (
+						<Button onClick={() => setStep("confirm")} variant="secondary">
+							Review risk and continue
+						</Button>
+					) : (
+						<Button
+							onClick={() => {
+								handleOpenChange(false);
+								onInstall();
+							}}
+							variant="destructive"
+						>
+							I understand the risk — install
+						</Button>
+					)}
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
 }
 
 export default function StoreItemAction({
@@ -141,7 +231,10 @@ export default function StoreItemAction({
 	disableLabel = "Disable",
 	downloadCount = null,
 	incompatible = null,
+	publisherTrust = null,
+	publisherHealth,
 }: StoreItemActionProps) {
+	const [communityDialogOpen, setCommunityDialogOpen] = useState(false);
 	const reportCtx = useOptionalReport();
 	const canReport = Boolean(onReport || (reportCtx && reportTarget));
 	const handleReport = () => {
@@ -153,6 +246,24 @@ export default function StoreItemAction({
 			reportCtx.open(reportTarget);
 		}
 	};
+	const needsCommunityDisclosure =
+		publisherTrust === "dotted" && Boolean(onInstall);
+	const handleInstall = () => {
+		if (needsCommunityDisclosure) {
+			setCommunityDialogOpen(true);
+			return;
+		}
+		onInstall?.();
+	};
+	const communityDisclosure = needsCommunityDisclosure ? (
+		<PublisherInstallDisclosure
+			onInstall={() => onInstall?.()}
+			onOpenChange={setCommunityDialogOpen}
+			open={communityDialogOpen}
+			publisherHealth={publisherHealth}
+			publisherTrust={publisherTrust ?? "dotted"}
+		/>
+	) : null;
 
 	// Whether the trailing overflow menu has anything to hold at all. Both the
 	// read-only-affordance and the locked paths render a static primary control, so
@@ -169,13 +280,21 @@ export default function StoreItemAction({
 
 	if (affordance) {
 		if (!hasOverflow) {
-			return <>{affordance}</>;
+			return (
+				<>
+					{affordance}
+					{communityDisclosure}
+				</>
+			);
 		}
 		return (
-			<div className="flex items-center gap-0.5">
-				{affordance}
-				{overflow}
-			</div>
+			<>
+				<div className="flex items-center gap-0.5">
+					{affordance}
+					{overflow}
+				</div>
+				{communityDisclosure}
+			</>
 		);
 	}
 
@@ -270,7 +389,7 @@ export default function StoreItemAction({
 						className={idleLabel ? "group" : undefined}
 						idleVariant="default"
 						installing={busy}
-						onClick={onInstall}
+						onClick={handleInstall}
 						percent={percent}
 					>
 						{idleLabel ? (
@@ -289,7 +408,7 @@ export default function StoreItemAction({
 					</InstallProgressButton>
 				</ContextMenuTrigger>
 				<ContextMenuContent align="end">
-					<ContextMenuItem onClick={onInstall}>
+					<ContextMenuItem onClick={handleInstall}>
 						<HugeiconsIcon className="size-4" icon={Download04Icon} />
 						Add
 					</ContextMenuItem>
@@ -344,12 +463,10 @@ export default function StoreItemAction({
 			<Button
 				aria-label="Working…"
 				className={className}
-				disabled
+				loading
 				size="icon-sm"
 				variant="ghost"
-			>
-				<Spinner className="size-4" />
-			</Button>
+			/>
 		);
 	}
 
@@ -386,16 +503,9 @@ export default function StoreItemAction({
 	);
 }
 
-/** Compact marketplace count: 12,400 → 12.4k, 1,200,000 → 1.2m. */
+/** Shared marketplace count policy: 12,400 → 12,400, 1,200,000 → 1.2m. */
 function formatDownloadCount(count: number): string {
-	if (count < 1000) {
-		return String(count);
-	}
-	if (count < 1_000_000) {
-		const value = count / 1000;
-		return `${value >= 10 ? Math.round(value) : value.toFixed(1)}k`;
-	}
-	return `${(count / 1_000_000).toFixed(1)}m`;
+	return formatCount(count) ?? "—";
 }
 
 /**

@@ -11,7 +11,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import {
 	SETTINGS_ENTRIES,
 	searchSettings,
@@ -37,7 +37,7 @@ const SECTION_SOURCES: Record<string, string[]> = {
 	// The Tabs settings, plus the pane-layout preset manager rendered beside
 	// them from its own file (same pattern as Voice's sub-panels).
 	general: ["GeneralTab.tsx", "SplitPresetSettings.tsx"],
-	appearance: ["AppearanceTab.tsx"],
+	appearance: ["AppearanceTab.tsx", "../../lib/appearance-settings.ts"],
 	developer: ["DeveloperTab.tsx", "DevMetricsPanel.tsx"],
 	account: ["AccountTab.tsx"],
 	sessions: ["SessionsTab.tsx"],
@@ -56,6 +56,7 @@ const SECTION_SOURCES: Record<string, string[]> = {
 	network: ["NetworkSettings.tsx"],
 	integrations: ["IntegrationsTab.tsx"],
 	connections: ["ConnectionsTab.tsx"],
+	runtime: ["../gateway/AcpRuntimeSection.tsx"],
 };
 
 /**

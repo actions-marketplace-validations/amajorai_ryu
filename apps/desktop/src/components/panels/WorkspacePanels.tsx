@@ -9,14 +9,15 @@ import {
 	File01Icon,
 	FileCodeIcon,
 	FolderOpenIcon,
+	GitBranchIcon,
 	Globe02Icon,
 	Megaphone01Icon,
 	MonitorDotFreeIcons,
 	PieChartIcon,
 	PinIcon,
 	PinOffIcon,
+	PlugSocketIcon,
 	PlusSignIcon,
-	PuzzleIcon,
 	Radar01Icon,
 	RefreshIcon,
 	Robot01Icon,
@@ -84,7 +85,15 @@ import {
 	RichPatchDiff,
 	splitPatchByFile,
 } from "@/src/components/diffs/RichPatchDiff.tsx";
+import { GitGraphPanel } from "@/src/components/git/GitGraphPanel.tsx";
 import { OverflowTooltip } from "@/src/components/layout/overflow-tooltip.tsx";
+import {
+	type BrowserAnnotation,
+	type BrowserAnnotationInput,
+	BrowserAnnotationSurface,
+	type BrowserContextResult,
+	type BrowserRect,
+} from "@/src/components/panels/BrowserAnnotationSurface.tsx";
 import type { ContextPanelView } from "@/src/components/panels/ContextPanel.tsx";
 import { ContextPanel } from "@/src/components/panels/ContextPanel.tsx";
 import type { CoworkContextPanelProps } from "@/src/components/panels/CoworkContextPanel.tsx";
@@ -131,6 +140,7 @@ import { useAppShellPath } from "@/src/contributions/app-shell-routes.ts";
 import { RouteOutlet } from "@/src/contributions/RouteOutlet.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
+import { useAssistantPageContext } from "@/src/hooks/useAssistantPageContext.ts";
 import {
 	diffViewPrefsToOptions,
 	setDiffViewPrefs,
@@ -157,14 +167,23 @@ import {
 import type { PluginDockPanel } from "@/src/lib/api/plugins.ts";
 import type { Artifact } from "@/src/lib/artifacts.ts";
 import { CONTRIBUTED_LINK_OPENED_EVENT } from "@/src/lib/contributed-link-handler.ts";
+import type { DefaultFileOpener } from "@/src/lib/default-file-opener.ts";
 import {
 	joinPath,
+	readGitProjectFile,
 	readProjectFile,
 	writeProjectFile,
 } from "@/src/lib/files.ts";
+import { clearMediaSource, publishMediaSource } from "@/src/lib/media-pip.ts";
 import { pageRoute, SIDE_PANEL_PAGES } from "@/src/lib/page-routes.ts";
+import type {
+	WorkspaceSessionDock,
+	WorkspaceSessionState,
+	WorkspaceSessionTab,
+} from "@/src/lib/workspace-session.ts";
 import PluginCompanionPage from "@/src/pages/PluginCompanionPage.tsx";
 import PluginViewPage from "@/src/pages/PluginViewPage.tsx";
+import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
 import { useDockPanelRequestStore } from "@/src/store/useDockPanelRequestStore.ts";
 import {
 	type ProjectDockTab,
@@ -376,6 +395,20 @@ const EDITOR_DEFS: EditorDef[] = [
 
 const SHELL_EDITOR_IDS = new Set(["terminal", "gitbash", "powershell", "cmd"]);
 
+function editorIdForDefaultFileOpener(opener: DefaultFileOpener): string {
+	return opener === "system" ? "explorer" : opener;
+}
+
+function defaultFileOpenerForEditorId(id: string): DefaultFileOpener | null {
+	if (id === "explorer") {
+		return "system";
+	}
+	if (id === "vscode" || id === "cursor" || id === "zed") {
+		return id;
+	}
+	return null;
+}
+
 function useAvailableEditorIds(): Set<string> {
 	const [availableEditorIds, setAvailableEditorIds] = useState<Set<string>>(
 		() => new Set(["explorer"])
@@ -511,7 +544,11 @@ function EditorIcon({ def }: { def: EditorDef }) {
 }
 
 function EditorButtonGroup({ folder }: { folder?: string | null }) {
-	const [activeId, setActiveId] = useState("explorer");
+	const defaultFileOpener = useWorkspaceStore((s) => s.defaultFileOpener);
+	const setDefaultFileOpener = useWorkspaceStore((s) => s.setDefaultFileOpener);
+	const [activeId, setActiveId] = useState(() =>
+		editorIdForDefaultFileOpener(defaultFileOpener)
+	);
 	const availableEditorIds = useAvailableEditorIds();
 	const editorDefs = useMemo(
 		() => EDITOR_DEFS.filter((def) => availableEditorIds.has(def.id)),
@@ -524,13 +561,16 @@ function EditorButtonGroup({ folder }: { folder?: string | null }) {
 		EDITOR_DEFS[0];
 
 	useEffect(() => {
-		setActiveId((current) =>
-			availableEditorIds.has(current) ? current : "explorer"
-		);
-	}, [availableEditorIds]);
+		const preferredId = editorIdForDefaultFileOpener(defaultFileOpener);
+		setActiveId(availableEditorIds.has(preferredId) ? preferredId : "explorer");
+	}, [availableEditorIds, defaultFileOpener]);
 
 	const run = async (id: string) => {
 		setActiveId(id);
+		const opener = defaultFileOpenerForEditorId(id);
+		if (opener) {
+			setDefaultFileOpener(opener);
+		}
 		try {
 			await invoke("open_in_editor", { editor: id, path: folder ?? null });
 		} catch (e) {
@@ -642,6 +682,7 @@ const BOTTOM_TAB_TYPES: TabTypeDef[] = [
 const RIGHT_TAB_TYPES: TabTypeDef[] = [
 	{ kind: "files", label: "Files", icon: FolderOpenIcon },
 	{ kind: "codereview", label: "Changes", icon: FileCodeIcon },
+	{ kind: "gitgraph", label: "Git graph", icon: GitBranchIcon },
 	// Offered in the menu as well as by clicking the composer ring, because the
 	// ring is hidden until a turn reports usage — and usage is live-only, so a
 	// RELOADED chat has no ring even when Core still holds a breakdown. Menu-only
@@ -677,6 +718,7 @@ const BUILTIN_TAB_ICONS: Record<BuiltinTabKind, typeof ComputerTerminal01Icon> =
 		terminal: ComputerTerminal01Icon,
 		codereview: FileCodeIcon,
 		files: FolderOpenIcon,
+		gitgraph: GitBranchIcon,
 		cowork: DashboardSquare01Icon,
 		sources: Globe02Icon,
 		subagents: Robot01Icon,
@@ -732,15 +774,72 @@ function makeTab(
 	kind: TabKind,
 	label: string,
 	n?: number,
-	artifact?: Artifact
+	artifact?: Artifact,
+	uid?: string
 ): PanelTab {
 	tabCounter += 1;
+	const suppliedUidMatch = uid?.match(/^tab-(\d+)$/);
+	if (suppliedUidMatch) {
+		tabCounter = Math.max(tabCounter, Number(suppliedUidMatch[1]));
+	}
 	return {
-		uid: `tab-${tabCounter}`,
+		uid: uid ?? `tab-${tabCounter}`,
 		kind,
 		label: n == null ? label : `${label} ${n}`,
 		artifact,
 	};
+}
+
+function restoreLocalPanelTabs(
+	dock: WorkspaceSessionDock | undefined
+): PanelTab[] {
+	return (dock?.tabs ?? [])
+		.filter((tab) => !tab.project)
+		.map((tab) => makeTab(tab.kind, tab.label, undefined, undefined, tab.uid));
+}
+
+function serializeWorkspaceDock(
+	tabs: PanelTab[],
+	activeUid: string
+): WorkspaceSessionDock {
+	return {
+		activeIndex: Math.max(
+			0,
+			tabs.findIndex((tab) => tab.uid === activeUid)
+		),
+		tabs: tabs.map((tab) => ({
+			kind: tab.kind,
+			label: tab.label,
+			uid: tab.uid,
+			...(tab.projectHosted
+				? {
+						project: true,
+						...(tab.pinned ? { pinned: true } : {}),
+					}
+				: {}),
+		})),
+	};
+}
+
+function findRestoredTabUid(
+	tabs: PanelTab[],
+	tab: WorkspaceSessionTab | undefined
+): string {
+	if (!tab) {
+		return tabs[0]?.uid ?? "";
+	}
+	const exact = tab.uid
+		? tabs.find((candidate) => candidate.uid === tab.uid)
+		: undefined;
+	const matching =
+		exact ??
+		tabs.find(
+			(candidate) =>
+				candidate.kind === tab.kind &&
+				candidate.label === tab.label &&
+				Boolean(candidate.projectHosted) === Boolean(tab.project)
+		);
+	return matching?.uid ?? tabs[0]?.uid ?? "";
 }
 
 function usePanelTabs(initial: PanelTab[]) {
@@ -876,7 +975,7 @@ function TabIcon({
 	}
 	// A contributed panel that declared no icon: the generic plugin glyph, so the
 	// tab still reads as "an app's panel" rather than as a built-in.
-	return <HugeiconsIcon className={className} icon={PuzzleIcon} />;
+	return <HugeiconsIcon className={className} icon={PlugSocketIcon} />;
 }
 
 /** The icon of a tab TYPE (the "+" menu / launchpad cards). */
@@ -1374,6 +1473,14 @@ function FileTreeContextActions({
 	folder: string;
 	item: FileTreeContextMenuItem;
 }) {
+	const defaultFileOpener = useWorkspaceStore((s) => s.defaultFileOpener);
+	const configuredEditor =
+		defaultFileOpener === "system" ? null : defaultFileOpener;
+	const defaultEditor = configuredEditor
+		? (availableEditors.find((editor) => editor.id === configuredEditor) ??
+			null)
+		: null;
+
 	const run = async (command: string, editor?: string) => {
 		context.close({ restoreFocus: false });
 		try {
@@ -1398,12 +1505,12 @@ function FileTreeContextActions({
 		>
 			<button
 				className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-sm hover:bg-foreground/10 focus-visible:bg-foreground/10 focus-visible:outline-none"
-				onClick={() => run("open_workspace_item")}
+				onClick={() => run("open_workspace_item", defaultEditor?.id)}
 				role="menuitem"
 				type="button"
 			>
 				<HugeiconsIcon className="size-4" icon={File01Icon} />
-				Open
+				{defaultEditor ? `Open in ${defaultEditor.shortLabel}` : "Open"}
 			</button>
 			<button
 				className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-sm hover:bg-foreground/10 focus-visible:bg-foreground/10 focus-visible:outline-none"
@@ -1472,10 +1579,6 @@ function shortSha(sha: string) {
 const SAFE_GIT_REF = /^[A-Za-z0-9._/-]+$/;
 function isSafeGitRef(ref: string): boolean {
 	return ref.length > 0 && !ref.startsWith("-") && SAFE_GIT_REF.test(ref);
-}
-
-function shellQuote(value: string): string {
-	return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function buildDiffCommand(
@@ -1615,7 +1718,7 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 		void Promise.all(
 			files.map(async (file): Promise<[string, FullDiffFiles]> => {
 				const [oldContents, newContents] = await Promise.all([
-					git(`git show ${shellQuote(`HEAD:${file.path}`)}`),
+					readGitProjectFile(folder, file.path).catch(() => ""),
 					readProjectFile(joinPath(folder, file.path)).catch(() => null),
 				]);
 				return [
@@ -1713,7 +1816,10 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 	return (
 		<div className="flex h-full flex-col">
 			{/* Diff source selector */}
-			<div className="flex shrink-0 items-center gap-1 px-1.5 py-1">
+			<div
+				className="flex shrink-0 items-center gap-1 border-0 border-none bg-transparent px-1.5 py-1 shadow-none"
+				data-diff-toolbar="true"
+			>
 				<DropdownMenu>
 					<DropdownMenuTrigger className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full px-2.5 py-1 text-muted-foreground text-xs transition-colors hover:bg-muted/50 hover:text-foreground">
 						<HugeiconsIcon className="size-3.5 shrink-0" icon={FileCodeIcon} />
@@ -1963,28 +2069,81 @@ interface SidecarTab {
 }
 
 // Feature-detected browser tab: when the `@ryu/browser` app is enabled, drive its
-// real-Chromium sidecar through Core's ext-proxy (tab list + open/navigate + a static
-// screenshot preview — real embedding is a followup). When it is disabled, fall back
-// to today's sandboxed IframePanel unchanged.
-function BrowserTabPanel({ title }: { title: string }) {
+// real-Chromium sidecar through Core's ext-proxy. The frame is intentionally a
+// screenshot-backed surface: it lets annotation mode freeze the exact pixels the
+// user marked while the agent still controls the real embedded WebContentsView.
+// When it is disabled, fall back to today's sandboxed IframePanel unchanged.
+export function BrowserTabPanel({
+	active = true,
+	title,
+}: {
+	active?: boolean;
+	title: string;
+}) {
 	const { apps } = useApps();
 	const enabled = apps.some((a) => a.id === BROWSER_PLUGIN_ID && a.enabled);
 	if (enabled) {
-		return <BrowserSidecarPanel />;
+		return <BrowserSidecarPanel active={active} />;
 	}
 	return <IframePanel initialUrl="https://www.google.com" title={title} />;
 }
 
-function BrowserSidecarPanel() {
+function formatBrowserContext(context: BrowserContextResult | null): string {
+	if (!context) {
+		return "The embedded browser has no active tab.";
+	}
+	const lines = [
+		`Page: ${context.page.title || "Untitled"}`,
+		`URL: ${context.page.url}`,
+		`Viewport: ${context.viewport.width}×${context.viewport.height} CSS px at scroll ${context.viewport.scroll_x},${context.viewport.scroll_y}`,
+	];
+	if (context.selection) {
+		lines.push("\nSelected browser context:");
+		for (const target of context.selection.targets) {
+			lines.push(
+				`- ${target.tag}${target.role ? ` role=${target.role}` : ""} ${target.name || target.text || target.content_preview || ""} selector=${target.selector} xpath=${target.xpath} rect=${JSON.stringify(target.rect)} styles=${JSON.stringify(target.computed_styles)}`
+			);
+		}
+		if (context.selection.targets.length === 0) {
+			lines.push(`- Visual region: ${JSON.stringify(context.selection.rect)}`);
+		}
+	}
+	if (context.annotations.length > 0) {
+		lines.push("\nSaved visual annotations:");
+		for (const annotation of context.annotations) {
+			lines.push(
+				`- [${annotation.kind}] ${annotation.comment} rect=${JSON.stringify(annotation.rect)} targets=${annotation.targets.map((target) => target.selector).join(", ") || "visual area"}${annotation.style ? ` style=${JSON.stringify(annotation.style)}` : ""}`
+			);
+		}
+	}
+	lines.push("\nAccessibility snapshot:");
+	for (const element of context.snapshot.elements.slice(0, 80)) {
+		const label = element.name || element.value || "";
+		lines.push(`- ${element.ref} ${element.role}${label ? `: ${label}` : ""}`);
+	}
+	if (context.snapshot.truncated) {
+		lines.push(
+			"- Snapshot truncated; use browser.snapshot again after narrowing the task."
+		);
+	}
+	return lines.join("\n");
+}
+
+function BrowserSidecarPanel({ active = true }: { active?: boolean }) {
 	const node = useActiveNode();
 	const [tabs, setTabs] = useState<SidecarTab[]>([]);
 	const [activeId, setActiveId] = useState<string | null>(null);
 	const [inputVal, setInputVal] = useState("");
 	const [shot, setShot] = useState<string | null>(null);
+	const [context, setContext] = useState<BrowserContextResult | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	const [isAnnotating, setIsAnnotating] = useState(false);
+	const [isFrozen, setIsFrozen] = useState(false);
 
 	const base = "/api/ext/@ryu/browser";
 	const headers = useMemo(() => makeHeaders(node.token ?? null), [node.token]);
+	const openAssistant = useAssistantStore((store) => store.open);
+	const setPendingPrompt = useAssistantStore((store) => store.setPendingPrompt);
 
 	const call = useCallback(
 		async (path: string, init?: RequestInit) => {
@@ -2003,13 +2162,64 @@ function BrowserSidecarPanel() {
 		[node.url, node.token, headers]
 	);
 
+	const publishBrowserImage = useCallback(
+		(id: string, image: string, title?: string) => {
+			const imageUrl = `data:image/png;base64,${image}`;
+			setShot(imageUrl);
+			const tab = tabs.find((candidate) => candidate.id === id);
+			publishMediaSource({
+				id: `browser:${id}`,
+				imageUrl,
+				kind: "browser",
+				tabId: id,
+				title: title || tab?.title || tab?.url || "Browser tab",
+			});
+		},
+		[tabs]
+	);
+
+	const getContext = useCallback(
+		async (
+			id: string,
+			selections: BrowserRect[] = [],
+			includeScreenshot = true
+		): Promise<BrowserContextResult> => {
+			const resp = await call(
+				`${base}/tabs/${encodeURIComponent(id)}/context`,
+				{
+					method: "POST",
+					headers: { ...headers, "Content-Type": "application/json" },
+					body: JSON.stringify({
+						include_screenshot: includeScreenshot,
+						selections,
+					}),
+				}
+			);
+			const nextContext = (await resp.json()) as BrowserContextResult;
+			setContext(nextContext);
+			if (includeScreenshot && nextContext.screenshot?.image) {
+				publishBrowserImage(
+					id,
+					nextContext.screenshot.image,
+					nextContext.page.title
+				);
+			}
+			return nextContext;
+		},
+		[call, headers, publishBrowserImage]
+	);
+
 	const refresh = useCallback(async () => {
 		setError(null);
 		try {
 			const resp = await call(`${base}/tabs`);
 			const data = (await resp.json()) as { tabs: SidecarTab[] };
 			setTabs(data.tabs);
-			setActiveId((prev) => prev ?? data.tabs[0]?.id ?? null);
+			setActiveId((prev) =>
+				prev && data.tabs.some((tab) => tab.id === prev)
+					? prev
+					: (data.tabs[0]?.id ?? null)
+			);
 		} catch (e) {
 			setError(
 				e instanceof Error
@@ -2071,12 +2281,162 @@ function BrowserSidecarPanel() {
 					}
 				);
 				const data = (await resp.json()) as { image: string };
-				setShot(`data:image/png;base64,${data.image}`);
+				publishBrowserImage(id, data.image);
 			} catch (e) {
 				setError(e instanceof Error ? e.message : "screenshot failed");
 			}
 		},
-		[call]
+		[call, publishBrowserImage]
+	);
+
+	useEffect(() => {
+		if (!activeId) {
+			setShot(null);
+			return;
+		}
+		if (!active || isFrozen) {
+			clearMediaSource(`browser:${activeId}`);
+			return;
+		}
+		const tick = () => screenshot(activeId).catch(() => undefined);
+		tick();
+		const timer = window.setInterval(tick, 800);
+		return () => window.clearInterval(timer);
+	}, [active, activeId, isFrozen, screenshot]);
+
+	useEffect(() => {
+		return () => {
+			if (activeId) {
+				clearMediaSource(`browser:${activeId}`);
+			}
+		};
+	}, [activeId]);
+
+	useEffect(() => {
+		setContext(null);
+		setIsAnnotating(false);
+		setIsFrozen(false);
+	}, [activeId]);
+
+	const toggleAnnotating = useCallback(async () => {
+		if (!activeId) {
+			return;
+		}
+		if (isAnnotating) {
+			setIsAnnotating(false);
+			setIsFrozen(false);
+			return;
+		}
+		setIsAnnotating(true);
+		setIsFrozen(true);
+		try {
+			await getContext(activeId, [], true);
+		} catch (e) {
+			setIsAnnotating(false);
+			setIsFrozen(false);
+			setError(e instanceof Error ? e.message : "browser context failed");
+		}
+	}, [activeId, getContext, isAnnotating]);
+
+	const annotate = useCallback(
+		async (
+			input: BrowserAnnotationInput
+		): Promise<BrowserAnnotation | null> => {
+			if (!activeId) {
+				return null;
+			}
+			try {
+				const resp = await call(
+					`${base}/tabs/${encodeURIComponent(activeId)}/annotations`,
+					{
+						method: "POST",
+						headers: { ...headers, "Content-Type": "application/json" },
+						body: JSON.stringify(input),
+					}
+				);
+				const annotation = (await resp.json()) as BrowserAnnotation;
+				setContext((current) =>
+					current
+						? { ...current, annotations: [...current.annotations, annotation] }
+						: current
+				);
+				return annotation;
+			} catch (e) {
+				setError(e instanceof Error ? e.message : "annotation failed");
+				return null;
+			}
+		},
+		[activeId, call, headers]
+	);
+
+	const deleteAnnotation = useCallback(
+		async (annotationId: string) => {
+			if (!activeId) {
+				return;
+			}
+			try {
+				await call(
+					`${base}/tabs/${encodeURIComponent(activeId)}/annotations/${encodeURIComponent(annotationId)}`,
+					{ method: "DELETE" }
+				);
+				setContext((current) =>
+					current
+						? {
+								...current,
+								annotations: current.annotations.filter(
+									(annotation) => annotation.id !== annotationId
+								),
+							}
+						: current
+				);
+			} catch (e) {
+				setError(e instanceof Error ? e.message : "annotation delete failed");
+			}
+		},
+		[activeId, call]
+	);
+
+	const clearAnnotations = useCallback(async () => {
+		if (!activeId) {
+			return;
+		}
+		try {
+			await call(`${base}/tabs/${encodeURIComponent(activeId)}/annotations`, {
+				method: "DELETE",
+			});
+			setContext((current) =>
+				current ? { ...current, annotations: [] } : current
+			);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : "annotation clear failed");
+		}
+	}, [activeId, call]);
+
+	const askRyu = useCallback(() => {
+		setPendingPrompt(
+			"Review the embedded browser context and every saved annotation. Address each requested visual change in the live tab, using the browser context, snapshot, and control tools as needed."
+		);
+		openAssistant("sidebar");
+	}, [openAssistant, setPendingPrompt]);
+
+	const activeTab = tabs.find((tab) => tab.id === activeId);
+	useAssistantPageContext(
+		activeId
+			? {
+					id: `browser:${activeId}:context`,
+					title: `Browser · ${activeTab?.title || activeTab?.url || "tab"}`,
+					text: "",
+					getText: async () => {
+						try {
+							return formatBrowserContext(
+								await getContext(activeId, [], false)
+							);
+						} catch {
+							return formatBrowserContext(context);
+						}
+					},
+				}
+			: null
 	);
 
 	const closeTab = useCallback(
@@ -2086,6 +2446,7 @@ function BrowserSidecarPanel() {
 					method: "DELETE",
 				});
 				setShot(null);
+				clearMediaSource(`browser:${id}`);
 				setActiveId((prev) => (prev === id ? null : prev));
 				await refresh();
 			} catch (e) {
@@ -2159,22 +2520,27 @@ function BrowserSidecarPanel() {
 						</li>
 					))}
 				</ul>
-				<div className="flex min-w-0 flex-1 items-center justify-center overflow-auto bg-muted/20 p-2">
-					{error ? (
-						<p className="text-center text-muted-foreground text-xs">{error}</p>
-					) : shot ? (
-						// biome-ignore lint/performance/noImgElement: sidecar screenshot data URI, not a static asset.
-						<img
-							alt="Browser tab preview"
-							className="max-h-full max-w-full rounded border border-border/60"
-							src={shot}
-						/>
-					) : (
-						<p className="text-center text-muted-foreground text-xs">
-							Select a tab to preview a screenshot. Live embedding is a
-							followup.
-						</p>
+				<div className="relative flex min-w-0 flex-1">
+					{error && (
+						<div className="pointer-events-none absolute top-2 right-2 left-2 z-10 rounded-md border border-destructive/30 bg-background/95 px-2 py-1 text-center text-destructive text-xs shadow-sm">
+							{error}
+						</div>
 					)}
+					<BrowserAnnotationSurface
+						context={context}
+						imageUrl={shot}
+						isAnnotating={isAnnotating}
+						onAnnotate={annotate}
+						onAskRyu={askRyu}
+						onClearAnnotations={clearAnnotations}
+						onContext={(selections) =>
+							activeId
+								? getContext(activeId, selections, true)
+								: Promise.resolve(null)
+						}
+						onDeleteAnnotation={deleteAnnotation}
+						onToggleAnnotating={() => toggleAnnotating().catch(() => undefined)}
+					/>
 				</div>
 			</div>
 		</div>
@@ -2856,7 +3222,7 @@ interface NativeDockPanelDef {
 	/** Bundled glyph, so a first-party panel's tab icon never depends on the
 	 *  network (a contributed `icon` id is the fallback for panels not listed here). */
 	icon: typeof ComputerTerminal01Icon;
-	render: (ctx: { label: string }) => ReactNode;
+	render: (ctx: { active: boolean; label: string }) => ReactNode;
 }
 
 /** Keyed `<plugin>/<id>` (see `nativeDockPanelKey`). These two entries are the
@@ -2866,7 +3232,9 @@ interface NativeDockPanelDef {
 const NATIVE_DOCK_PANELS: Record<string, NativeDockPanelDef> = {
 	"@ryu/browser/browser": {
 		icon: Globe02Icon,
-		render: ({ label }) => <BrowserTabPanel title={label} />,
+		render: ({ active, label }) => (
+			<BrowserTabPanel active={active} title={label} />
+		),
 	},
 	"@ryu/simulator/simulator": {
 		icon: SmartPhone01Icon,
@@ -2882,7 +3250,7 @@ const NATIVE_DOCK_PANELS: Record<string, NativeDockPanelDef> = {
 	},
 	"@ryu/desktop/desktop": {
 		icon: MonitorDotFreeIcons,
-		render: () => <DesktopStreamPanel />,
+		render: ({ active }) => <DesktopStreamPanel active={active} />,
 	},
 };
 
@@ -2902,10 +3270,12 @@ function DockPanelPlaceholder({ text }: { text: string }) {
  * That is the whole point of keeping `panel` an open string on the wire.
  */
 function PluginDockTabContent({
+	active,
 	dockPanels,
 	label,
 	tabKind,
 }: {
+	active: boolean;
 	dockPanels: PluginDockPanel[];
 	label: string;
 	tabKind: TabKind;
@@ -2926,7 +3296,7 @@ function PluginDockTabContent({
 				/>
 			);
 		}
-		return def.render({ label });
+		return def.render({ active, label });
 	}
 	if (panel.panel === "companion" && panel.spec?.companion) {
 		// The app's own sandboxed surface, mounted through the same gated page the
@@ -3046,6 +3416,7 @@ function DockRoutePage({
 }
 
 function TabContent({
+	active = true,
 	tab,
 	folder,
 	contextView,
@@ -3054,6 +3425,7 @@ function TabContent({
 	subagentView,
 	inspectorView,
 }: {
+	active?: boolean;
 	/** Live (not snapshotted) inputs for the context-breakdown tab. */
 	contextView?: ContextPanelView | null;
 	cowork?: CoworkData;
@@ -3067,6 +3439,7 @@ function TabContent({
 	if (isPluginTabKind(tab.kind)) {
 		return (
 			<PluginDockTabContent
+				active={active}
 				dockPanels={dockPanels}
 				label={tab.label}
 				tabKind={tab.kind}
@@ -3130,6 +3503,11 @@ function TabContent({
 	if (tab.kind === "files") {
 		return <FileTreePanel folder={folder} key={`${tab.uid}-${folder}`} />;
 	}
+	if (tab.kind === "gitgraph") {
+		return (
+			<GitGraphPanel compact folder={folder} key={`${tab.uid}-${folder}`} />
+		);
+	}
 	if (tab.kind === "mission") {
 		// Reuses the chat's `cowork` payload rather than taking a prop of its own:
 		// the digest is derived entirely from `messages[].parts`, which that payload
@@ -3165,16 +3543,19 @@ function TabContent({
  * the live panel (terminal history, browser session, …).
  */
 export function ProjectDockTabContent({
+	active = true,
 	tab,
 	folder,
 	dockPanels,
 }: {
+	active?: boolean;
 	dockPanels: PluginDockPanel[];
 	folder?: string | null;
 	tab: Pick<ProjectDockTab, "kind" | "label" | "uid">;
 }) {
 	return (
 		<TabContent
+			active={active}
 			dockPanels={dockPanels}
 			folder={folder}
 			tab={{
@@ -3456,13 +3837,36 @@ function WorkspacePanelsImpl({
 	collectionRequest,
 	renderPinnedSummary,
 }: WorkspacePanelsProps) {
+	const { tabs: windowTabs, updateTabWorkspaceSession } = useTabsContext();
+	const currentTabId = useCurrentTabId();
+	const currentWindowTab = windowTabs.find((tab) => tab.id === currentTabId);
+	// Read the snapshot once. Later writes update the parent Tab, but must not
+	// re-seed this dock and wipe the live React state we are trying to remember.
+	const initialWorkspaceRef = useRef<WorkspaceSessionState | undefined>(
+		currentWindowTab?.workspaceSession
+	);
+	const initialWorkspace = initialWorkspaceRef.current;
+	const hasProjectTabs = Boolean(
+		initialWorkspace?.bottom.tabs.some((tab) => tab.project) ||
+			initialWorkspace?.right.tabs.some((tab) => tab.project)
+	);
+	const [workspaceRestoreReady, setWorkspaceRestoreReady] = useState(
+		() => initialWorkspace === undefined
+	);
+	const restoredBottomTabs = useMemo(
+		() => restoreLocalPanelTabs(initialWorkspace?.bottom),
+		[initialWorkspace]
+	);
+	const restoredRightTabs = useMemo(
+		() => restoreLocalPanelTabs(initialWorkspace?.right),
+		[initialWorkspace]
+	);
+	const bottomLocal = usePanelTabs(restoredBottomTabs);
+	const rightLocal = usePanelTabs(restoredRightTabs);
 	// Chat-local tabs (cowork / subagent / artifact / inspector, and shareable
 	// kinds when no project folder is open). Project-shareable tabs live in
 	// `useProjectDockStore` so pinning can surface the same live instance in
 	// every chat for the folder.
-	const bottomLocal = usePanelTabs([]);
-	const rightLocal = usePanelTabs([]);
-	const currentTabId = useCurrentTabId();
 	const projectByFolder = useProjectDockStore((s) => s.byFolder);
 	const addProjectTab = useProjectDockStore((s) => s.addTab);
 	const removeProjectTab = useProjectDockStore((s) => s.removeTab);
@@ -3491,6 +3895,70 @@ function WorkspacePanelsImpl({
 		() => visibleProjectDockTabs(projectTabs, "right", currentTabId),
 		[projectTabs, currentTabId]
 	);
+
+	// Recreate unpinned project tabs after a relaunch or an auto-unload. Pinned
+	// tabs normally arrive from the project store already; matching them here
+	// avoids creating a second copy while still restoring the chat's order.
+	const restoredProjectFoldersRef = useRef(new Set<string>());
+	useEffect(() => {
+		if (
+			!(initialWorkspace && hasProjectTabs && folder && currentTabId) ||
+			restoredProjectFoldersRef.current.has(folder)
+		) {
+			return;
+		}
+
+		const restoreSide = (side: DockSide, dock: WorkspaceSessionDock) => {
+			let known = [...(useProjectDockStore.getState().byFolder[folder] ?? [])];
+			const used = new Set<string>();
+			for (const descriptor of dock.tabs) {
+				if (!descriptor.project) {
+					continue;
+				}
+				const existing = known.find(
+					(tab) =>
+						!used.has(tab.uid) &&
+						tab.side === side &&
+						((descriptor.uid !== undefined && tab.uid === descriptor.uid) ||
+							(tab.kind === descriptor.kind &&
+								tab.label === descriptor.label &&
+								(tab.pinned || tab.ownerTabId === currentTabId)))
+				);
+				const restored =
+					existing ??
+					addProjectTab(folder, {
+						kind: descriptor.kind,
+						label: descriptor.label,
+						side,
+						pinned: descriptor.pinned === true,
+						ownerTabId: currentTabId,
+						...(descriptor.uid ? { uid: descriptor.uid } : {}),
+					});
+				used.add(restored.uid);
+				if (!existing) {
+					known = [...known, restored];
+				}
+			}
+		};
+
+		restoreSide("bottom", initialWorkspace.bottom);
+		restoreSide("right", initialWorkspace.right);
+		restoredProjectFoldersRef.current.add(folder);
+		setWorkspaceRestoreReady(true);
+	}, [addProjectTab, currentTabId, folder, hasProjectTabs, initialWorkspace]);
+
+	// Restore dock visibility before the first snapshot write. Without this
+	// guard, the initial `false` props would overwrite a saved open panel.
+	useEffect(() => {
+		if (!initialWorkspace) {
+			return;
+		}
+		onBottomOpenChange(initialWorkspace.bottomOpen);
+		onRightOpenChange(initialWorkspace.rightOpen);
+		if (!hasProjectTabs) {
+			setWorkspaceRestoreReady(true);
+		}
+	}, [hasProjectTabs, initialWorkspace, onBottomOpenChange, onRightOpenChange]);
 
 	const bottomTabs = useMemo((): PanelTab[] => {
 		const project: PanelTab[] = visibleBottomProject.map((t) => ({
@@ -3559,6 +4027,57 @@ function WorkspacePanelsImpl({
 			setRightActiveUid(rightLocal.activeUid);
 		}
 	}, [rightLocal.activeUid, rightLocal.tabs]);
+
+	// The runtime uids are deliberately not persisted. Restore focus by the
+	// serialized tab identity after project-hosted tabs have been rehydrated.
+	const restoredSelectionRef = useRef(false);
+	useEffect(() => {
+		if (
+			!(initialWorkspace && workspaceRestoreReady) ||
+			restoredSelectionRef.current
+		) {
+			return;
+		}
+		const bottomTarget =
+			initialWorkspace.bottom.tabs[initialWorkspace.bottom.activeIndex];
+		const rightTarget =
+			initialWorkspace.right.tabs[initialWorkspace.right.activeIndex];
+		setBottomActiveUid(findRestoredTabUid(bottomTabs, bottomTarget));
+		setRightActiveUid(findRestoredTabUid(rightTabs, rightTarget));
+		restoredSelectionRef.current = true;
+	}, [bottomTabs, initialWorkspace, rightTabs, workspaceRestoreReady]);
+
+	const workspaceSession = useMemo<WorkspaceSessionState>(
+		() => ({
+			bottom: serializeWorkspaceDock(bottomTabs, bottomActiveUid),
+			bottomOpen,
+			right: serializeWorkspaceDock(rightTabs, rightActiveUid),
+			rightOpen,
+		}),
+		[
+			bottomActiveUid,
+			bottomOpen,
+			bottomTabs,
+			rightActiveUid,
+			rightOpen,
+			rightTabs,
+		]
+	);
+
+	// Snapshot changes on every tab add/remove/focus and on panel visibility
+	// changes. The parent owns this field so the existing top-level session
+	// restore automatically carries the dock state with the chat tab.
+	useEffect(() => {
+		if (!(currentTabId && workspaceRestoreReady)) {
+			return;
+		}
+		updateTabWorkspaceSession(currentTabId, workspaceSession);
+	}, [
+		currentTabId,
+		updateTabWorkspaceSession,
+		workspaceRestoreReady,
+		workspaceSession,
+	]);
 
 	// The enabled apps' contributed dock panels. Core only serves ENABLED plugins'
 	// contributions, so this feed IS the set of app tabs that should be offered:

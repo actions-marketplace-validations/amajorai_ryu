@@ -1,6 +1,6 @@
 // apps/desktop/src/components/settings/TtsEngineSettings.tsx
 //
-// Picks the default text-to-speech engine + voice and lets the user test it.
+// Picks the default audio engine + voice and lets the user test it.
 // The engine set is whatever Core returns from `/api/voice/tts-engines` (the
 // built-in OuteTTS plus whatever the universal Ryu TTS sidecar registry serves)
 // — nothing is hardcoded here, this is a GUI layer over the Core data path. The
@@ -55,7 +55,7 @@ export function TtsEngineSettings() {
 	);
 	const [voice, setVoice] = useState<string>(() => getDesktopTtsPrefs().voice);
 
-	// The node selector's Text-to-speech layer writes the same two keys, so pull
+	// The node selector's Audio layer writes the same two keys, so pull
 	// them back in when it changes them while this screen is open.
 	useEffect(
 		() =>
@@ -151,7 +151,10 @@ export function TtsEngineSettings() {
 		[engines, engineId]
 	);
 
-	const handleEngine = (value: string) => {
+	const handleEngine = (value: string | null) => {
+		if (value === null) {
+			return;
+		}
 		setEngineId(value);
 		setDesktopTtsPref(DESKTOP_TTS_ENGINE_KEY, value);
 		// Reset the voice to the new engine's default if the current one is invalid.
@@ -164,7 +167,10 @@ export function TtsEngineSettings() {
 		}
 	};
 
-	const handleVoice = (value: string) => {
+	const handleVoice = (value: string | null) => {
+		if (value === null) {
+			return;
+		}
 		setVoice(value);
 		setDesktopTtsPref(DESKTOP_TTS_VOICE_KEY, value);
 	};
@@ -198,11 +204,11 @@ export function TtsEngineSettings() {
 		}
 		if (ryutts.installState !== "installed") {
 			return {
-				label: sidecarPending ? "Installing…" : "Install Ryu TTS engine",
+				label: sidecarPending ? "Installing…" : "Install Ryu Audio engine",
 			};
 		}
 		if (!ryutts.running) {
-			return { label: sidecarPending ? "Starting…" : "Start Ryu TTS engine" };
+			return { label: sidecarPending ? "Starting…" : "Start Ryu Audio engine" };
 		}
 		return null;
 	}, [ryutts, sidecarPending]);
@@ -221,7 +227,7 @@ export function TtsEngineSettings() {
 	);
 
 	return (
-		<SettingsSection title="Text-to-speech">
+		<SettingsSection title="Audio">
 			<SettingsGroup>
 				<SettingsItem
 					actions={
@@ -231,7 +237,7 @@ export function TtsEngineSettings() {
 							value={engineId}
 						>
 							<SelectTrigger
-								aria-label="Text-to-speech engine"
+								aria-label="Audio engine"
 								className="h-8 w-56 text-sm"
 							>
 								<SelectValue />
@@ -398,8 +404,8 @@ export function TtsEngineSettings() {
 						})}
 					</SettingsGroup>
 					<p className="pt-2 text-muted-foreground text-xs">
-						Looking for more? Browse every Hugging Face text-to-speech model in
-						the Models tab (filter “TTS”). Those need a matching engine to run.
+						Looking for more? Browse every Hugging Face audio model in the
+						Models tab (filter “Audio”). Those need a matching engine to run.
 					</p>
 				</div>
 			)}

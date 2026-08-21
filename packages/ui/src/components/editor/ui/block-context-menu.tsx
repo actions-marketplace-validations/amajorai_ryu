@@ -63,7 +63,6 @@ export function BlockContextMenu({ children }: { children: ReactNode }) {
 
 	return (
 		<ContextMenu
-			modal={false}
 			onOpenChange={(open) => {
 				if (!open) {
 					api.blockMenu.hide();

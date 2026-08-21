@@ -3,7 +3,7 @@
 // Collapsible "Advanced inference" editor for an agent's per-request SAMPLING
 // defaults (temperature, top_p, penalties, mirostat, DRY/XTC, raw passthrough).
 // Standard OpenAI fields show for every agent; the non-standard sampler fields
-// only show when the agent's chat engine is a local engine (llama.cpp / Ollama /
+// only show when the agent's Chat runtime is a local engine (llama.cpp / Ollama /
 // vLLM / SGLang), since a remote OpenAI endpoint rejects them.
 
 import { ArrowDown01Icon, ArrowRight01Icon } from "@hugeicons/core-free-icons";
@@ -104,7 +104,7 @@ export function AdvancedInferenceSection({
 	value: SamplingConfig;
 	onChange: (next: SamplingConfig) => void;
 	disabled?: boolean;
-	/** True when the agent's chat engine accepts the non-standard sampler fields. */
+	/** True when the agent's Chat runtime accepts the non-standard sampler fields. */
 	localEngine: boolean;
 }) {
 	const [open, setOpen] = useState(false);

@@ -20,8 +20,8 @@ export {
 } from "./artifact-tool.ts";
 
 /**
- * Inline artifact surface for the built-in `artifact__render` tool (and the
- * created-file result of `artifact__create`).
+ * Inline artifact surface for the built-in `artifact.render` tool (and the
+ * created-file result of `artifact.create`).
  *
  * The agent's payload is normalized into a loose {@link HostArtifact} and handed
  * to the desktop's injected Renderer, which draws the real artifact card (preview
@@ -42,10 +42,10 @@ export interface ArtifactToolProps {
 
 export function ArtifactTool({ id, part }: ArtifactToolProps) {
 	const host = useArtifactHost();
-	const isCreate = part.type === "tool-artifact__create";
+	const isCreate = part.type === "tool-artifact.create";
 	const artifact = useMemo(() => {
-		// `artifact__create` delivers the payload in its RESULT (the tool wrote the
-		// file); `artifact__render` delivers it in its INPUT. Read both, preferring
+		// `artifact.create` delivers the payload in its RESULT (the tool wrote the
+		// file); `artifact.render` delivers it in its INPUT. Read both, preferring
 		// the created-file shape when it has arrived.
 		const input = part.input as Record<string, unknown> | undefined;
 		const output = part.output as Record<string, unknown> | undefined;

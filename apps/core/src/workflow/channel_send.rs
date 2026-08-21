@@ -47,7 +47,7 @@ pub async fn run(
     };
 
     // Gateway egress DLP gate: refuse the send if the firewall blocks the text.
-    // Shared with the agent-callable `channel__send` tool so egress never drifts.
+    // Shared with the agent-callable `channel.send` tool so egress never drifts.
     crate::sidecar::gateway::govern_egress(text).await?;
 
     let http = reqwest::Client::new();

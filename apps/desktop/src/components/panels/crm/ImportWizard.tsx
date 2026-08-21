@@ -30,6 +30,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "@ryu/ui/components/table";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { useCallback, useState } from "react";
 import type {
 	CrmClient,
@@ -188,8 +189,8 @@ export function ImportWizard({
 				{step === "map" && job && (
 					<div className="space-y-4">
 						<div className="text-muted-foreground text-xs">
-							{job.row_count.toLocaleString()} rows · {job.columns.length}{" "}
-							columns
+							{formatNumber(job.row_count)} rows ·{" "}
+							{formatNumber(job.columns.length)} columns
 							{job.filename ? ` · ${job.filename}` : ""}
 						</div>
 
@@ -367,9 +368,7 @@ export function ImportWizard({
 							<Button disabled={busy} onClick={() => void runApply()} size="sm">
 								{busy
 									? "Importing…"
-									: `Import ${(
-											preview.create_count + preview.update_count
-										).toLocaleString()} rows`}
+									: `Import ${preview.create_count + preview.update_count} rows`}
 							</Button>
 						</div>
 					</div>
@@ -410,7 +409,7 @@ function Stat({ label, value }: { label: string; value: number }) {
 	return (
 		<div className="rounded-md border bg-card p-3">
 			<div className="font-semibold text-lg tabular-nums">
-				{value.toLocaleString()}
+				{formatNumber(value)}
 			</div>
 			<div className="text-muted-foreground text-xs">{label}</div>
 		</div>

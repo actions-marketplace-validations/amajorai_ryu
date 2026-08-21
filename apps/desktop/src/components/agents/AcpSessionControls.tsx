@@ -10,6 +10,10 @@
 // renders ONLY when the agent reports something, so the flagship Pi (no auth, no
 // tracked sessions) shows nothing. Rendered from AgentEditPage's model tab.
 
+import {
+	FullAccessSelectionProvider,
+	useFullAccessSelectionGuard,
+} from "@ryu/blocks/composer/full-access-warning";
 import { Button } from "@ryu/ui/components/button";
 import { RangeSlider } from "@ryu/ui/components/motion/range-slider";
 import {
@@ -70,6 +74,7 @@ const noopModelChange = () => {
  * an unordered set and gets a select.
  */
 function AcpOptionRow({ section }: { section: ComposerSettingsSection }) {
+	const selectionGuard = useFullAccessSelectionGuard();
 	const activeIndex = Math.max(
 		0,
 		section.items.findIndex((it) => it.id === section.value)
@@ -138,7 +143,14 @@ function AcpOptionRow({ section }: { section: ComposerSettingsSection }) {
 			<Select
 				onValueChange={(next) => {
 					if (next) {
-						section.onChange(next);
+						const item = section.items.find(
+							(candidate) => candidate.id === next
+						);
+						selectionGuard?.request(
+							item ?? { id: next, name: next },
+							() => section.onChange(next),
+							section.label
+						);
 					}
 				}}
 				value={section.value ?? ""}
@@ -166,12 +178,13 @@ function AcpOptionRow({ section }: { section: ComposerSettingsSection }) {
  * (`useComposerAcpSections`, keyed by agent rather than by live chat session)
  * writing through the same per-agent store (`src/lib/acp-selections.ts`), so a
  * pick made here is the pick a new chat with this agent starts on, and the chat
- * bar shows it already selected. That shared store is the point: at the Simple
- * interface level the composer stops carrying these controls at all, and this
+ * bar shows it already selected. That shared store is the point: at Ryu Work
+ * mode the composer stops carrying these controls at all, and this
  * page is where they continue to live.
  */
 function AcpSessionOptionsSection({ agentId }: { agentId: string }) {
 	const { agents } = useAgents();
+	const agentName = agents.find((agent) => agent.id === agentId)?.name;
 	const { modelSection, extraSections } = useComposerAcpSections({
 		agentId,
 		agents,
@@ -221,11 +234,13 @@ function AcpSessionOptionsSection({ agentId }: { agentId: string }) {
 			caption="What this agent runs with by default — its own model, approval mode and reasoning effort. New chats with it start here, and picking one in the chat bar updates this."
 			title="Session defaults"
 		>
-			<SettingsCard className="flex flex-col gap-4">
-				{sections.map((section) => (
-					<AcpOptionRow key={section.key} section={section} />
-				))}
-			</SettingsCard>
+			<FullAccessSelectionProvider agentName={agentName}>
+				<SettingsCard className="flex flex-col gap-4">
+					{sections.map((section) => (
+						<AcpOptionRow key={section.key} section={section} />
+					))}
+				</SettingsCard>
+			</FullAccessSelectionProvider>
 		</SettingsSection>
 	);
 }

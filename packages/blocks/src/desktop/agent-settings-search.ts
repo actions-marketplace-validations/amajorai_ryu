@@ -232,10 +232,10 @@ export const AGENT_SETTINGS_ENTRIES: AgentSettingsEntry[] = [
 	// ── Advanced ──────────────────────────────────────────────────────────────
 	{
 		id: "agent.advanced-slots",
-		label: "Advanced slots",
+		label: "Advanced",
 		group: "",
 		tab: "advanced",
-		keywords: "speech to text tts image model gateway policy extra models",
+		keywords: "slots speech to text tts image model gateway policy extra models",
 	},
 	{
 		id: "agent.byoa",

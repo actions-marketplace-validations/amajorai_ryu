@@ -209,6 +209,17 @@ impl PluginSecretStore {
         Ok(())
     }
 
+    /// Delete every secret owned by one plugin. Secret values are never loaded
+    /// into memory for this operation; SQLite removes the encrypted rows in
+    /// place and returns the affected-row count for cleanup reporting.
+    pub async fn delete_plugin(&self, plugin_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        Ok(conn.execute(
+            "DELETE FROM plugin_secrets WHERE plugin_id = ?1",
+            params![plugin_id],
+        )?)
+    }
+
     /// Which secrets a plugin has set, newest write first. **Names and timestamps
     /// only** — the ciphertext columns are not even selected, so no code path from
     /// this function can leak a value.
@@ -306,6 +317,19 @@ mod tests {
         assert_eq!(s.get("exa", "RYU_EXA_API_KEY").await.unwrap(), None);
         // Deleting an absent key is a no-op, not an error.
         s.delete("exa", "RYU_EXA_API_KEY").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_plugin_removes_only_the_requested_plugin() {
+        let s = PluginSecretStore::in_memory().unwrap();
+        s.set("exa", "RYU_EXA_API_KEY", "sk-exa").await.unwrap();
+        s.set("tavily", "RYU_TAVILY_API_KEY", "sk-tavily")
+            .await
+            .unwrap();
+
+        assert_eq!(s.delete_plugin("exa").await.unwrap(), 1);
+        assert!(s.list_keys("exa").await.unwrap().is_empty());
+        assert_eq!(s.list_keys("tavily").await.unwrap().len(), 1);
     }
 
     /// The point of the store: the plaintext must not survive the write. Asserted

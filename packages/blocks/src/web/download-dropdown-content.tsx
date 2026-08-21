@@ -1,5 +1,7 @@
 "use client";
 
+import { InternetIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	DropdownMenuContent,
 	DropdownMenuGroup,
@@ -13,7 +15,6 @@ import {
 import { toast } from "@ryu/ui/components/sileo";
 import { cn } from "@ryu/ui/lib/utils";
 import {
-	AppWindow,
 	ArrowUpRight,
 	Blocks,
 	BookOpen,
@@ -34,6 +35,8 @@ import {
 	type DownloadArch,
 	type DownloadOS,
 	type DownloadState,
+	detectDownloadArch,
+	detectDownloadOS,
 	findChannelRelease,
 	GITHUB_REPO,
 	loadReleases,
@@ -57,41 +60,6 @@ const AGENT_LINKS = [
 	{ href: "/products/mcp", label: "MCP", Icon: Plug },
 	{ href: "/products/skills", label: "Skills", Icon: Sparkles },
 ] as const;
-
-function detectOs(): DownloadOS {
-	if (typeof window === "undefined") {
-		return "macos";
-	}
-	const userAgent = window.navigator.userAgent.toLowerCase();
-	const platform = window.navigator.platform.toLowerCase();
-	if (
-		userAgent.includes("mac") ||
-		userAgent.includes("iphone") ||
-		userAgent.includes("ipad") ||
-		platform.includes("mac")
-	) {
-		return "macos";
-	}
-	if (userAgent.includes("win") || platform.includes("win")) {
-		return "windows";
-	}
-	if (
-		userAgent.includes("linux") ||
-		platform.includes("linux") ||
-		userAgent.includes("x11")
-	) {
-		return "linux";
-	}
-	return "macos";
-}
-
-function detectArch(): DownloadArch {
-	if (typeof window === "undefined") {
-		return "intel";
-	}
-	const ua = window.navigator.userAgent.toLowerCase();
-	return ua.includes("arm") || ua.includes("aarch64") ? "arm" : "intel";
-}
 
 async function copySetupSkill() {
 	try {
@@ -280,8 +248,8 @@ export function DownloadDropdownContent({
 	const [allReleases, setAllReleases] = useState<Release[]>([]);
 
 	useEffect(() => {
-		setOs(detectOs());
-		setArch(detectArch());
+		setOs(detectDownloadOS());
+		setArch(detectDownloadArch());
 	}, []);
 
 	useEffect(() => {
@@ -334,7 +302,7 @@ export function DownloadDropdownContent({
 				<DropdownMenuItem
 					render={<a href={WEBAPP_URL} rel="noopener noreferrer" />}
 				>
-					<AppWindow className="size-4" />
+					<HugeiconsIcon className="size-4" icon={InternetIcon} />
 					Open Web App
 				</DropdownMenuItem>
 			</DropdownMenuGroup>

@@ -35,7 +35,6 @@ import {
 	NativeSelect,
 	NativeSelectOption,
 } from "@ryu/ui/components/native-select";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
 import {
 	Tooltip,
@@ -766,12 +765,8 @@ function PromptTestCases({
 
 			{/* Run controls */}
 			<div className="flex flex-wrap items-center gap-2">
-				<Button disabled={runDisabled} onClick={handleRun} size="sm">
-					{running ? (
-						<Spinner />
-					) : (
-						<HugeiconsIcon className="size-3" icon={PlayIcon} />
-					)}
+				<Button disabled={runDisabled} loading={running} onClick={handleRun} size="sm">
+					<HugeiconsIcon className="size-3" icon={PlayIcon} />
 					{running ? "Running…" : "Run test cases"}
 				</Button>
 				{running ? (
@@ -1353,15 +1348,8 @@ function PreviewPanel({ prompt, agentId, target, convId }: PreviewPanelProps) {
 	// without a system_prompt override field in ChatStreamRequest.
 	const previewMessage = `[PROMPT PREVIEW]\n\nDraft system prompt:\n\`\`\`\n${prompt}\n\`\`\`\n\nRespond as if this were your system prompt and confirm you understand your role.`;
 
-	const { messages, status, error, stop } = useChat({
+	const { messages, setMessages, status, error, stop } = useChat({
 		id: convId,
-		initialMessages: [
-			{
-				id: "preview-user",
-				role: "user",
-				parts: [{ type: "text" as const, text: previewMessage }],
-			},
-		],
 		transport: new DefaultChatTransport({
 			api: chatStreamUrl(target),
 			// Developer-mode turn timing; a plain `fetch` when metrics are off.
@@ -1374,6 +1362,18 @@ function PreviewPanel({ prompt, agentId, target, convId }: PreviewPanelProps) {
 			}),
 		}),
 	});
+	useEffect(() => {
+		if (messages.length > 0) {
+			return;
+		}
+		setMessages([
+			{
+				id: "preview-user",
+				role: "user",
+				parts: [{ type: "text", text: previewMessage }],
+			},
+		]);
+	}, [messages.length, previewMessage, setMessages]);
 
 	const isStreaming = status === "streaming" || status === "submitted";
 

@@ -1,6 +1,8 @@
 "use client";
 
 import { Button } from "@ryu/ui/components/button.tsx";
+import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
+import { GlyphDisplay } from "@ryu/ui/components/glyph-display.tsx";
 import {
 	Popover,
 	PopoverContent,
@@ -26,6 +28,7 @@ const PATH_SEPARATOR = /[\\/]/;
 export type EmptyStateLogo =
 	| { kind: "single"; engine: string | null }
 	| { kind: "image"; url: string }
+	| { kind: "glyph"; glyph: Exclude<GlyphValue, null> }
 	| { kind: "stack"; engines: (string | null)[] };
 
 /** Render the empty-state mark for the active target. */
@@ -36,6 +39,16 @@ function EmptyStateMark({
 	logo: EmptyStateLogo;
 	hovered: boolean;
 }) {
+	if (logo.kind === "glyph") {
+		return (
+			<GlyphDisplay
+				alt="Agent avatar"
+				className="size-14 rounded-full object-contain"
+				size={56}
+				value={logo.glyph}
+			/>
+		);
+	}
 	if (logo.kind === "image") {
 		return (
 			// biome-ignore lint/performance/noImgElement: Tauri/Vite app, no next/image; avatar is an inline data URL

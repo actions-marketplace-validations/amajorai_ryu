@@ -90,7 +90,7 @@ describe("create-ryu-app scaffold (agent, default)", () => {
 		};
 		expect(pkg.name).toBe("my-test-app");
 		expect(pkg.scripts.dev).toBe("bun run src/agent.ts");
-		expect(pkg.dependencies["@ryuhq/sdk"]).toBe("^0.1.15");
+		expect(pkg.dependencies["@ryuhq/sdk"]).toBe("^0.2.0");
 	});
 
 	it("manifest.json has at least one agent runnable", () => {
@@ -216,8 +216,8 @@ describe("create-ryu-app scaffold (ryu-app)", () => {
 		const widgets = parsed.contributes?.widgets ?? [];
 		expect(widgets).toHaveLength(1);
 		expect(widgets[0]?.uri).toBe("ui://widget/my-widget.html");
-		expect(widgets[0]?.tool_id).toBe("my-widget__render");
-		const render = parsed.runnables.find((r) => r.id === "my-widget__render");
+		expect(widgets[0]?.tool_id).toBe("my-widget.render");
+		const render = parsed.runnables.find((r) => r.id === "my-widget.render");
 		expect(render?.kind).toBe("tool");
 		expect((render?.config as { widget?: boolean })?.widget).toBe(true);
 	});
@@ -265,13 +265,13 @@ describe("create-ryu-app scaffold (companion-plugin)", () => {
 
 	it("declares an accessible companion tool the widget can call", () => {
 		const parsed = readManifest(projectDir);
-		const save = parsed.runnables.find((r) => r.id === "my-panel__save");
+		const save = parsed.runnables.find((r) => r.id === "my-panel.save");
 		expect(save).toBeDefined();
 		expect(
 			(save?.config as { widget_accessible?: boolean })?.widget_accessible
 		).toBe(true);
 		// The render tool's widget may call companions because one exists.
-		const render = parsed.runnables.find((r) => r.id === "my-panel__render");
+		const render = parsed.runnables.find((r) => r.id === "my-panel.render");
 		expect(
 			(render?.config as { widget_accessible?: boolean })?.widget_accessible
 		).toBe(true);
@@ -295,7 +295,7 @@ describe("create-ryu-app scaffold (companion-plugin)", () => {
 	it("the widget calls the companion tool via the host bridge", () => {
 		const widget = readFileSync(join(projectDir, "src/widget.tsx"), "utf8");
 		expect(widget).toContain("callTool");
-		expect(widget).toContain("my-panel__save");
+		expect(widget).toContain("my-panel.save");
 		expect(widget).not.toContain("fetch(");
 	});
 });

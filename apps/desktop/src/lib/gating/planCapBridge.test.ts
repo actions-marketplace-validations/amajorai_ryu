@@ -41,7 +41,7 @@ const {
 	PlanCapError,
 	resolveCapLimit,
 	syncPlanCapState,
-} = await import("./planCapBridge.ts?real");
+} = await import("./planCapBridge.ts");
 
 beforeEach(() => {
 	billingAuthOn = false;
@@ -99,8 +99,8 @@ describe("resolveCapLimit — after sync", () => {
 	test("managed path + free plan reads the finite FREE_TIER_LIMITS value", () => {
 		syncPlanCapState(null, () => undefined);
 		billingAuthOn = true;
-		// FREE_TIER_LIMITS.maxAgents === 10 (single source of truth in plans.ts).
-		expect(resolveCapLimit("maxAgents")).toBe(10);
+		// FREE_TIER_LIMITS.maxAgents === 3 (single source of truth in plans.ts).
+		expect(resolveCapLimit("maxAgents")).toBe(3);
 	});
 
 	test("a paid plan lifts the cap (Infinity) on the managed path", () => {
@@ -123,20 +123,20 @@ describe("resolveCapLimit — app-declared quotas follow their app", () => {
 		billingAuthOn = true;
 		expect(resolveCapLimit("maxMonitors")).toBe(Number.POSITIVE_INFINITY);
 		// The kernel key alongside it still binds.
-		expect(resolveCapLimit("maxAgents")).toBe(10);
+		expect(resolveCapLimit("maxAgents")).toBe(3);
 	});
 
 	test("an app-owned key binds once its app is enabled", () => {
 		syncPlanCapState(null, () => undefined, new Set(["@ryu/monitors"]));
 		billingAuthOn = true;
-		// FREE_TIER_LIMITS.maxMonitors === 5.
-		expect(resolveCapLimit("maxMonitors")).toBe(5);
+		// FREE_TIER_LIMITS.maxMonitors === 3.
+		expect(resolveCapLimit("maxMonitors")).toBe(3);
 	});
 
 	test("a retention window is a quota like any other (days, not a count)", () => {
 		syncPlanCapState(null, () => undefined, new Set(["@ryu/meetings"]));
 		billingAuthOn = true;
-		expect(resolveCapLimit("meetingRetentionDays")).toBe(30);
+		expect(resolveCapLimit("meetingRetentionDays")).toBe(14);
 		expect(QUOTAS.meetingRetentionDays.unit).toBe("days");
 	});
 
@@ -169,8 +169,8 @@ describe("enforcePlanCap", () => {
 		syncPlanCapState(null, () => {
 			upgrades += 1;
 		});
-		billingAuthOn = true; // free cap: maxAgents === 10
-		expect(() => enforcePlanCap("maxAgents", 9)).not.toThrow();
+		billingAuthOn = true; // free cap: maxAgents === 3
+		expect(() => enforcePlanCap("maxAgents", 2)).not.toThrow();
 		expect(upgrades).toBe(0);
 	});
 
@@ -182,7 +182,7 @@ describe("enforcePlanCap", () => {
 		billingAuthOn = true;
 		let caught: unknown;
 		try {
-			enforcePlanCap("maxAgents", 10);
+			enforcePlanCap("maxAgents", 3);
 		} catch (error) {
 			caught = error;
 		}
@@ -190,7 +190,7 @@ describe("enforcePlanCap", () => {
 		expect((caught as InstanceType<typeof PlanCapError>).field).toBe(
 			"maxAgents"
 		);
-		expect((caught as InstanceType<typeof PlanCapError>).limit).toBe(10);
+		expect((caught as InstanceType<typeof PlanCapError>).limit).toBe(3);
 		expect(upgrades).toBe(1);
 	});
 

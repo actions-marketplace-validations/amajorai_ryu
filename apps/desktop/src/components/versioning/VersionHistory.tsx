@@ -184,12 +184,11 @@ export function VersionHistory({
 				{disabled ? null : (
 					<Button
 						className="text-xs"
-						disabled={busy}
+						loading={busy}
 						onClick={handleSnapshot}
 						size="sm"
 						variant="ghost"
 					>
-						{busy ? <Spinner className="size-3" /> : null}
 						Save version
 					</Button>
 				)}

@@ -10,7 +10,8 @@ The transport adapters that let a bot register once at the Gateway and converse 
 - **Telegram** (`telegram`) — long-poll `getUpdates`.
 - **Slack** (`slack`) — Socket Mode.
 - **Discord** (`discord`) — gateway poll.
-- **WhatsApp** (`whatsapp`) — inbound webhook.
+- **WhatsApp Personal** (`whatsapp_personal`) — OpenWA REST/webhook bridge.
+- **WhatsApp Business** (`whatsapp`) — Meta Cloud API inbound webhook.
 - **`status`** — per-channel health/status reporting.
 
 Every adapter shares one inbound path: `handle_message` runs the allowlist gate, builds the request
@@ -30,7 +31,8 @@ control-plane store fetch, and channel registration/spawn wiring — **stays in 
 
 - `Channel`, `ChannelHost` — the two traits.
 - `InboundMessage`, `handle_message`, `build_request_body`, `extract_reply`, `spawn_channel`.
-- `TelegramChannelConfig`, `SlackChannelConfig`, `DiscordChannelConfig`, `WhatsAppChannelConfig`
+- `TelegramChannelConfig`, `SlackChannelConfig`, `DiscordChannelConfig`, `WhatsAppChannelConfig`,
+  `OpenWaChannelConfig`
   (spawn-time adapter shapes; the config-file serde shapes stay in Gateway `config.rs`, which maps
   into these and re-exports `GroupReplyMode`).
 

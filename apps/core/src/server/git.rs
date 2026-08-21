@@ -1,11 +1,11 @@
 // apps/core/src/server/git.rs
 //
-// Read-only git status for a workspace folder. Shells `git rev-parse` and
-// `git status --porcelain` against a caller-supplied cwd. This is Core (it
-// reads what-is; no policy), returned over GET /api/git/status?cwd=<path>.
+// Git workspace operations for a caller-supplied folder. The workspace crate
+// owns every `git` invocation; this module keeps the Core HTTP surface thin and
+// returns status, remote-action, and commit/PR results as JSON.
 
 use axum::{
-    extract::{rejection::JsonRejection, FromRequest, Query, Request},
+    extract::{rejection::JsonRejection, Extension, FromRequest, Query, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -58,7 +58,8 @@ fn json_rejection_response(rejection: &JsonRejection) -> Response {
 // The git engine (everything that shells `git`) lives in the `ryu-workspace`
 // crate; these handlers are the thin axum surface over it.
 use ryu_workspace::git::{
-    checkout_branch, create_branch, list_branches, query_git_state, run_git_action,
+    checkout_branch, create_branch, create_pull_request, list_branches, query_git_state,
+    run_git_action, run_git_remote_action,
 };
 
 #[derive(Deserialize)]
@@ -86,8 +87,28 @@ pub struct GitCommitPushBody {
     include_unstaged: bool,
 }
 
+#[derive(Deserialize)]
+pub struct GitRemoteBody {
+    cwd: String,
+}
+
 fn default_include_unstaged() -> bool {
     true
+}
+
+#[derive(Deserialize)]
+pub struct GitPullRequestBody {
+    cwd: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default = "default_include_unstaged")]
+    include_unstaged: bool,
 }
 
 /// `GET /api/git/status?cwd=<path>`
@@ -363,6 +384,270 @@ pub async fn git_commit_push(
     }
 }
 
+async fn git_remote(
+    body: GitRemoteBody,
+    action: &'static str,
+    operation_name: &'static str,
+) -> axum::response::Response {
+    if body.cwd.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "cwd is required" })),
+        )
+            .into_response();
+    }
+
+    let raw_path = Path::new(&body.cwd);
+    if !raw_path.is_dir() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "cwd is not a directory" })),
+        )
+            .into_response();
+    }
+    let path = match canonical_remote_workspace(&body.cwd) {
+        Ok(path) => path,
+        Err(error) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "success": false, "error": error })),
+            )
+                .into_response();
+        }
+    };
+    if !path.is_dir() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "cwd is not a directory" })),
+        )
+            .into_response();
+    }
+
+    let cwd = path.to_string_lossy().into_owned();
+    let result = tokio::task::spawn_blocking(move || run_git_remote_action(&cwd, action)).await;
+
+    match result {
+        Ok(Ok(outcome)) => Json(json!(outcome)).into_response(),
+        Ok(Err(msg)) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "success": false, "error": msg })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!("{operation_name}: join error: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "internal error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Remote Git actions mutate the node's filesystem and therefore must stay in
+/// the same node-home boundary as the remote workspace picker. The protected
+/// route's node bearer admits the request; `agent.edit` above is the shared-node
+/// user/resource gate. Canonicalizing before the check closes symlink and `..`
+/// escapes.
+fn canonical_remote_workspace(raw: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::fs::canonicalize(raw)
+        .map_err(|_| "cwd could not be resolved on the node".to_string())?;
+    let home = dirs::home_dir().ok_or_else(|| "node home directory is unavailable".to_string())?;
+    let home = std::fs::canonicalize(&home).unwrap_or(home);
+    if path != home && path.strip_prefix(&home).is_err() {
+        return Err("cwd must stay inside the node home directory".to_string());
+    }
+    Ok(path)
+}
+
+/// `POST /api/git/pull` `{ cwd }`
+///
+/// Pulls the current branch from its configured upstream with fast-forward-only
+/// semantics. It never stages or commits working-tree files.
+#[utoipa::path(
+    post,
+    path = "/api/git/pull",
+    tag = "Git",
+    summary = "{ cwd }",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn git_pull(JsonBody(body): JsonBody<GitRemoteBody>) -> axum::response::Response {
+    git_remote(body, "pull", "git_pull").await
+}
+
+pub(crate) async fn git_pull_authorized(
+    State(state): State<crate::server::ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    JsonBody(body): JsonBody<GitRemoteBody>,
+) -> axum::response::Response {
+    if crate::server::enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": "insufficient permissions: agent.edit"
+            })),
+        )
+            .into_response();
+    }
+    git_remote(body, "pull", "git_pull").await
+}
+
+/// `POST /api/git/sync` `{ cwd }`
+///
+/// Pulls the current branch fast-forward-only, then pushes it to its configured
+/// upstream. It never stages or commits working-tree files.
+#[utoipa::path(
+    post,
+    path = "/api/git/sync",
+    tag = "Git",
+    summary = "{ cwd }",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn git_sync(JsonBody(body): JsonBody<GitRemoteBody>) -> axum::response::Response {
+    git_remote(body, "sync", "git_sync").await
+}
+
+pub(crate) async fn git_sync_authorized(
+    State(state): State<crate::server::ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    JsonBody(body): JsonBody<GitRemoteBody>,
+) -> axum::response::Response {
+    if crate::server::enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": "insufficient permissions: agent.edit"
+            })),
+        )
+            .into_response();
+    }
+    git_remote(body, "sync", "git_sync").await
+}
+
+/// `POST /api/git/pull-request` `{ cwd, title?, body?, base?, draft?, include_unstaged? }`
+///
+/// Optionally commits local changes, pushes the current branch, and creates a
+/// GitHub pull request with the node's authenticated `gh` installation.
+#[utoipa::path(
+    post,
+    path = "/api/git/pull-request",
+    tag = "Git",
+    summary = "{ cwd, title?, body?, base?, draft?, include_unstaged? }",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn git_pull_request(
+    JsonBody(body): JsonBody<GitPullRequestBody>,
+) -> axum::response::Response {
+    if body.cwd.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "cwd is required" })),
+        )
+            .into_response();
+    }
+
+    let path = Path::new(&body.cwd);
+    if !path.is_dir() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "cwd is not a directory" })),
+        )
+            .into_response();
+    }
+
+    let cwd = match canonical_remote_workspace(&body.cwd) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "success": false, "error": error })),
+            )
+                .into_response();
+        }
+    };
+
+    let GitPullRequestBody {
+        cwd: _,
+        title,
+        body,
+        base,
+        draft,
+        include_unstaged,
+    } = body;
+    let result = tokio::task::spawn_blocking(move || {
+        create_pull_request(
+            &cwd,
+            title.as_deref(),
+            body.as_deref(),
+            base.as_deref(),
+            draft,
+            include_unstaged,
+        )
+    })
+    .await;
+
+    match result {
+        Ok(Ok(outcome)) => Json(json!(outcome)).into_response(),
+        Ok(Err(msg)) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "success": false, "error": msg })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("git_pull_request: join error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "internal error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub(crate) async fn git_pull_request_authorized(
+    State(state): State<crate::server::ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    JsonBody(body): JsonBody<GitPullRequestBody>,
+) -> axum::response::Response {
+    if crate::server::enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": "insufficient permissions: agent.edit"
+            })),
+        )
+            .into_response();
+    }
+    git_pull_request(JsonBody(body)).await
+}
+
 // ── Create a new project folder ("Start from scratch") ────────────────────────
 
 #[derive(Deserialize)]
@@ -467,13 +752,16 @@ fn windows_drives() -> Vec<serde_json::Value> {
     out
 }
 
-/// `GET /api/workspace/list?path=<abs>` — list the sub-directories of a folder ON
-/// THE NODE, so the desktop can present a node-aware folder picker (the native OS
-/// dialog only sees the desktop host, which is wrong when the node is remote).
+/// `GET /api/workspace/list?path=<abs>` — list the sub-directories of a folder in
+/// the node user's home tree, so the desktop can present a node-aware folder
+/// picker (the native OS dialog only sees the desktop host, which is wrong when
+/// the node is remote).
 ///
 /// Placement rationale: this is Core — it reads *what is* on the node's own
-/// filesystem, no policy. Read-only: it returns directory names only, never file
-/// contents. `~` is expanded; a missing/blank path defaults to the home directory.
+/// filesystem. Read-only: it returns directory names only, never file contents.
+/// The home-tree boundary prevents a remote picker caller from enumerating the
+/// node's arbitrary filesystem; `~` is expanded and a missing/blank path defaults
+/// to the home directory.
 /// Returns `{ path, parent, home, entries: [{ name, path }] }` (directories only,
 /// sorted, hidden entries excluded).
 #[utoipa::path(
@@ -497,7 +785,10 @@ pub async fn list_directory(Query(q): Query<ListDirQuery>) -> axum::response::Re
             "label": "This PC",
             "parent": null,
             "home": display_path(&home),
-            "entries": windows_drives(),
+            // Keep the virtual root useful without exposing every mounted drive:
+            // the picker can enter the node user's home tree, and all subsequent
+            // paths are checked against the same boundary below.
+            "entries": [{ "name": display_path(&home), "path": display_path(&home) }],
         }))
         .into_response();
     }
@@ -510,8 +801,17 @@ pub async fn list_directory(Query(q): Query<ListDirQuery>) -> axum::response::Re
         std::path::PathBuf::from(trimmed)
     };
 
-    // Canonicalize so `..` segments resolve and the returned path is absolute.
+    // Canonicalize so `..` segments and symlinks resolve before the boundary
+    // check. Existing symlinks that escape the home tree are therefore rejected.
     let target = std::fs::canonicalize(&target).unwrap_or(target);
+    let home = std::fs::canonicalize(&home).unwrap_or(home);
+    if target != home && target.strip_prefix(&home).is_err() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "workspace path must stay inside the node home directory" })),
+        )
+            .into_response();
+    }
     if !target.is_dir() {
         return (
             StatusCode::NOT_FOUND,
@@ -617,7 +917,9 @@ mod tests {
     #[tokio::test]
     async fn list_directory_returns_child_dirs_and_hides_files_and_dotfiles() {
         // A temp dir with two sub-folders, one file, and one hidden folder.
-        let base = std::env::temp_dir().join(format!("ryu_listdir_{}", std::process::id()));
+        let base = dirs::home_dir()
+            .unwrap()
+            .join(format!(".ryu_listdir_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("alpha")).unwrap();
         std::fs::create_dir_all(base.join("beta")).unwrap();
@@ -646,11 +948,27 @@ mod tests {
 
     #[tokio::test]
     async fn list_directory_404s_on_missing_path() {
+        let missing = dirs::home_dir()
+            .unwrap()
+            .join(format!(".ryu_missing_directory_{}", std::process::id()));
         let resp = list_directory(Query(ListDirQuery {
-            path: Some("/no/such/ryu/dir/xyz".to_string()),
+            path: Some(missing.to_string_lossy().into_owned()),
         }))
         .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_directory_rejects_paths_outside_home_tree() {
+        let outside = std::env::temp_dir();
+        if outside.starts_with(dirs::home_dir().unwrap()) {
+            return;
+        }
+        let resp = list_directory(Query(ListDirQuery {
+            path: Some(outside.to_string_lossy().into_owned()),
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -679,7 +997,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(json["parent"].is_null());
         assert_eq!(json["label"].as_str().unwrap(), "This PC");
-        // The system drive is always present, so at least one entry comes back.
+        // The home tree is always present, so at least one entry comes back.
         assert!(!json["entries"].as_array().unwrap().is_empty());
     }
 
@@ -817,6 +1135,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn git_pull_and_sync_reject_empty_and_non_dir_cwd() {
+        let empty = GitRemoteBody { cwd: String::new() };
+        let (status, _) = body_json(git_pull(JsonBody(empty)).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let non_dir = GitRemoteBody {
+            cwd: NON_DIR.to_string(),
+        };
+        let (status, json) = body_json(git_pull(JsonBody(non_dir)).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("not a directory"));
+
+        let empty = GitRemoteBody { cwd: String::new() };
+        let (status, _) = body_json(git_sync(JsonBody(empty)).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let non_dir = GitRemoteBody {
+            cwd: NON_DIR.to_string(),
+        };
+        let (status, json) = body_json(git_sync(JsonBody(non_dir)).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("not a directory"));
+    }
+
+    #[tokio::test]
     async fn git_commit_push_rejects_invalid_action() {
         // A real, existing directory (not a git repo) so the is_dir guard passes
         // and the action-allowlist check is what rejects. `git` is never shelled
@@ -833,6 +1176,32 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"].as_str().unwrap(), "invalid git action");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn git_pull_request_rejects_empty_and_non_dir_cwd() {
+        let empty = GitPullRequestBody {
+            cwd: String::new(),
+            title: None,
+            body: None,
+            base: None,
+            draft: false,
+            include_unstaged: true,
+        };
+        let (status, _) = body_json(git_pull_request(JsonBody(empty)).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let non_dir = GitPullRequestBody {
+            cwd: NON_DIR.to_string(),
+            title: Some("Ship it".to_string()),
+            body: None,
+            base: Some("main".to_string()),
+            draft: false,
+            include_unstaged: true,
+        };
+        let (status, json) = body_json(git_pull_request(JsonBody(non_dir)).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("not a directory"));
     }
 
     #[tokio::test]

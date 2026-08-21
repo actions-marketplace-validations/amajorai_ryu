@@ -71,6 +71,8 @@ export interface SubscriptionStatus {
 	 */
 	features?: Record<string, boolean> | null;
 	lifetime?: LifetimeUpdatesWindow | null;
+	/** The organization that owns this resolved plan, when billing is org-scoped. */
+	organizationId?: string | null;
 	plan?: PlanId | null;
 	scope?: "org" | "user";
 	seats?: number;

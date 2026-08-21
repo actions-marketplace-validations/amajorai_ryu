@@ -60,7 +60,11 @@ export default function ReviewPage() {
 				</div>
 				<Select
 					items={RANGE_OPTIONS}
-					onValueChange={(value: string) => setDays(Number(value))}
+					onValueChange={(value) => {
+						if (value !== null) {
+							setDays(Number(value));
+						}
+					}}
 					value={String(days)}
 				>
 					<SelectTrigger className="w-[150px]" size="sm">

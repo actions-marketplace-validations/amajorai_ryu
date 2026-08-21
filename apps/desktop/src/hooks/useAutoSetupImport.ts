@@ -15,6 +15,7 @@
 
 import { useEffect, useRef } from "react";
 import { readAutoSetupImportSetting } from "@/src/hooks/useAutoSetupImportSetting.ts";
+import { listAgentSyncProfiles } from "@/src/lib/api/agent-sync.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { runImport, scanImportFolder } from "@/src/lib/api/import.ts";
 import { listDirectory } from "@/src/lib/api/workspace.ts";
@@ -93,6 +94,18 @@ export function useAutoSetupImport({
 			let budget = MAX_IMPORTS_PER_SCAN;
 			let importedAny = false;
 			try {
+				// Once a root is managed by the shared Core sync ledger, the legacy
+				// localStorage scheduler must stand down. Otherwise both schedulers
+				// would race the same setup item even though Core eventually dedups it.
+				const managedRoots = new Set(
+					(
+						await listAgentSyncProfiles(targetRef.current).catch(() => ({
+							profiles: [],
+						}))
+					).profiles
+						.filter((profile) => profile.importEnabled)
+						.map((profile) => profile.root)
+				);
 				let home: string;
 				try {
 					const listing = await listDirectory(targetRef.current);
@@ -106,6 +119,9 @@ export function useAutoSetupImport({
 						break;
 					}
 					const rootPath = `${home}${sep}${root}`;
+					if (managedRoots.has(rootPath)) {
+						continue;
+					}
 					let scan: Awaited<ReturnType<typeof scanImportFolder>>;
 					try {
 						scan = await scanImportFolder(targetRef.current, rootPath);

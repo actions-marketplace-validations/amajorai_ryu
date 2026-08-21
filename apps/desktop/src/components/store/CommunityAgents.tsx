@@ -22,9 +22,8 @@
 import {
 	Alert01Icon,
 	Download01Icon,
-	Loading01Icon,
 	ShoppingCart01Icon,
-	UserGroupIcon,
+	Target01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { StoreCardGrid } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
@@ -41,12 +40,13 @@ import {
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { useQuery } from "@tanstack/react-query";
 import { AgentBadgeCard } from "@/src/components/agents/AgentBadgeCard.tsx";
 import type { AgentInstallDisclosure } from "@/src/lib/api/agents.ts";
 import {
 	fetchDetail,
-	formatPrice,
+	formatPricingLabel,
 	type MarketplaceCard,
 } from "@/src/lib/api/marketplace.ts";
 
@@ -65,9 +65,7 @@ function verificationLabel(card: MarketplaceCard): string | null {
 }
 
 function priceLabel(card: MarketplaceCard): string {
-	return card.pricing
-		? formatPrice(card.pricing.amountMinor, card.pricing.currency)
-		: "Free";
+	return card.pricing ? formatPricingLabel(card.pricing) : "Free";
 }
 
 function CommunityAgentAction({
@@ -105,7 +103,7 @@ function CommunityAgentAction({
 	}
 	return (
 		<Button
-			disabled={busy}
+			loading={busy}
 			onClick={(event) => {
 				event.stopPropagation();
 				onInstall();
@@ -113,11 +111,7 @@ function CommunityAgentAction({
 			size="sm"
 			variant="ghost"
 		>
-			{busy ? (
-				<HugeiconsIcon className="size-4 animate-spin" icon={Loading01Icon} />
-			) : (
-				<HugeiconsIcon className="size-4" icon={Download01Icon} />
-			)}
+			{!busy && <HugeiconsIcon className="size-4" icon={Download01Icon} />}
 			Add
 		</Button>
 	);
@@ -292,7 +286,7 @@ export function CommunityAgentDetail({
 								label: "Reviews",
 								value:
 									card.ratingCount > 0
-										? `${card.ratingAverage.toFixed(1)} (${card.ratingCount})`
+										? `${card.ratingAverage.toFixed(1)} (${formatNumber(card.ratingCount)})`
 										: "None yet",
 							},
 						]}
@@ -308,7 +302,7 @@ export function CommunityAgentDetail({
 						card.firstParty ? "First party" : null,
 					].filter((badge): badge is string => Boolean(badge))}
 					icon={
-						<HugeiconsIcon className="size-9 opacity-90" icon={UserGroupIcon} />
+						<HugeiconsIcon className="size-9 opacity-90" icon={Target01Icon} />
 					}
 					name={card.name}
 					tagline={card.description}

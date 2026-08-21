@@ -15,7 +15,7 @@ describe("composeRefs", () => {
 		}, objectRef);
 
 		composed("node");
-		expect(fromCallback).toBe("node");
+		expect(fromCallback!).toBe("node");
 		expect(objectRef.current).toBe("node");
 	});
 

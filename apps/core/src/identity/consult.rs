@@ -32,7 +32,7 @@
 //!   arg. No public-suffix / registrable-domain fuzzy matching (that adds a dep and
 //!   is overreach for the "browse a logged-in dashboard" case). A tool call with no
 //!   url/domain arg, or whose host is not a bound connection, simply proceeds.
-//! - **Composio is skipped** (`composio__…` ids): it owns its own connection-required
+//! - **Composio is skipped** (`composio.…` ids): it owns its own connection-required
 //!   path (`mcp::composio::detect_elicitation`); running both would collide.
 //! - **Credential capture is manual-only.** The only *registered* backend is
 //!   [`ManualImport`](super::ManualImport) — the user pastes the cookie/token and
@@ -158,7 +158,7 @@ pub async fn consult_for_tool_call(
         return ConsultOutcome::Proceed;
     }
     // Composio owns its own connection-required path; never double-handle it.
-    if tool_id.starts_with("composio__") {
+    if tool_id.starts_with("composio.") {
         return ConsultOutcome::Proceed;
     }
     let Some(store) = super::global() else {

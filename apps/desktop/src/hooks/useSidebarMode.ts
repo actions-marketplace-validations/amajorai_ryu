@@ -3,12 +3,12 @@ import { useCallback, useSyncExternalStore } from "react";
 /**
  * How the left sidebar lays out its content sections.
  *
- * - "sections": the default — every section is stacked as its own collapsible
- *   group (Agents, Workflows, Chats, …), all visible at once.
+ * - "sections": every section is stacked as its own collapsible group (Agents,
+ *   Workflows, Chats, …), all visible at once.
  * - "tabbed": the section labels become a row of buttons at the top; clicking a
  *   button reveals just that one section's list below, like browser tabs.
- * - "agent": AGENT MODE — the same tab strip as "tabbed", narrowed to exactly two
- *   tabs (Sessions ⇄ Agents), landing on Agents, with the messaging-style agent
+ * - "agent": BOT MODE — the same tab strip as "tabbed", narrowed to exactly two
+ *   tabs (Agents ⇄ Sessions), landing on Agents, with the messaging-style agent
  *   rows forced on. The posture Grok's bot mode and Hermes' Bot Mode ship: the
  *   roster of named agents is the primary surface and a chat list is the other
  *   half of one toggle, rather than one section among fifteen.
@@ -22,13 +22,14 @@ import { useCallback, useSyncExternalStore } from "react";
  *
  * The descriptors behind all four live in `layout/sidebar-modes.ts` — including
  * the built-ins, which are ordinary entries there rather than branches in the
- * renderer, so a contributed mode can do anything Agent mode does. This module
+ * renderer, so a contributed mode can do anything Bot mode does. This module
  * only owns the stored KEY.
  */
 export type SidebarMode = "sections" | "tabbed" | "agent" | `plugin:${string}`;
 
 export const SIDEBAR_MODE_KEY = "ryu:sidebar-mode";
-export const DEFAULT_SIDEBAR_MODE: SidebarMode = "sections";
+/** The persisted key stays `agent` so existing Agent mode choices keep working. */
+export const DEFAULT_SIDEBAR_MODE: SidebarMode = "agent";
 
 const listeners = new Set<() => void>();
 
@@ -45,13 +46,14 @@ function read(): SidebarMode {
 	try {
 		const stored = localStorage.getItem(SIDEBAR_MODE_KEY);
 		if (
+			stored === "sections" ||
 			stored === "tabbed" ||
 			stored === "agent" ||
 			(stored?.startsWith("plugin:") ?? false)
 		) {
 			return stored as SidebarMode;
 		}
-		return "sections";
+		return DEFAULT_SIDEBAR_MODE;
 	} catch {
 		return DEFAULT_SIDEBAR_MODE;
 	}

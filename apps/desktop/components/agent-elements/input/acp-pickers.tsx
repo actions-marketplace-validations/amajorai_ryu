@@ -2,6 +2,7 @@
 
 import { ArrowDown01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { useFullAccessSelectionGuard } from "@ryu/blocks/composer/full-access-warning";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Popover,
@@ -50,14 +51,20 @@ const SelectMenu = memo(function SelectMenu({
 	className?: string;
 }) {
 	const [open, setOpen] = useState(false);
+	const selectionGuard = useFullAccessSelectionGuard();
 	const active = items.find((it) => it.id === value) ?? items[0];
 
 	const handleSelect = useCallback(
 		(id: string) => {
-			onChange(id);
+			const item = items.find((candidate) => candidate.id === id);
+			selectionGuard?.request(
+				item ?? { id, name: id },
+				() => onChange(id),
+				leadingLabel ?? ariaLabel
+			);
 			setOpen(false);
 		},
-		[onChange]
+		[ariaLabel, items, leadingLabel, onChange, selectionGuard]
 	);
 
 	if (items.length === 0) {

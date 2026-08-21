@@ -1,4 +1,6 @@
-﻿import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
+﻿import { Target01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
 import { Bubble, BubbleContent } from "@ryu/ui/components/bubble";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -26,16 +28,18 @@ import { ImageLightbox } from "./image-lightbox.tsx";
 import { FileAttachment } from "./input/file-attachment.tsx";
 import type { LinkPreviewResolvers } from "./link-preview.tsx";
 import { Markdown } from "./markdown.tsx";
-import {
-	type MessageReactionBucket,
-	MessageReactions,
-} from "./message-reactions.tsx";
+import { MessageActionSurface } from "./message-action-surface.tsx";
 import {
 	messageSelectableProps,
 	QuoteBlock,
 	splitLeadingQuote,
 } from "./quote.tsx";
-import type { MentionItem } from "./types.ts";
+import type {
+	ContributedMessageAction,
+	MentionItem,
+	MessageActionContext,
+	MessageActionRuntimeState,
+} from "./types.ts";
 import { getWidgetMessageAttribution } from "./types.ts";
 
 export interface UserMessageProps {
@@ -81,26 +85,39 @@ export interface UserMessageProps {
 	groupPosition?: "first" | "last" | "middle" | "single";
 	mentionItems?: MentionItem[];
 	message: UIMessage;
+	/** Runtime state keyed for the message-action renderers. */
+	messageActionState?: MessageActionRuntimeState;
+	/** Message actions contributed by enabled plugins. */
+	messageActions?: readonly ContributedMessageAction[];
+	/** Dispatch a contributed action back to the shell. */
+	onContributedMessageAction?: (
+		action: ContributedMessageAction,
+		context: MessageActionContext
+	) => void;
 	onEditCancel?: () => void;
 	onEditSubmit?: (text: string) => void;
 	onOpenFile?: (path: string) => void;
 	onOpenLink?: (url: string) => void;
-	/**
-	 * Toggle the caller's own `emoji` on this message. Its presence is what turns
-	 * the reaction affordance on — a surface that does not pass it renders no
-	 * picker, which is how the island and the storyboard opt out for free.
-	 */
-	onToggleReaction?: (emoji: string) => void;
+	onOpenMention?: (item: MentionItem) => void;
 	previewResolvers?: LinkPreviewResolvers;
-	/**
-	 * True once Core has assigned this message its real id. The picker stays
-	 * hidden until then: a client-generated id 404s BY DESIGN (Core ships no
-	 * retarget fallback), so offering the affordance early would guarantee a
-	 * failed write on every freshly-sent message.
-	 */
-	reactable?: boolean;
-	/** This message's reaction buckets, in Core's first-reaction order. */
-	reactions?: readonly MessageReactionBucket[];
+}
+
+/** Compact transcript annotation shown beneath a goal-setting user message. */
+export function GoalMessageAnnotation() {
+	return (
+		<span
+			className="inline-flex items-center gap-1 text-muted-foreground/70 text-xs"
+			data-testid="goal-message-annotation"
+			title="This message was sent as a goal"
+		>
+			<HugeiconsIcon
+				aria-hidden="true"
+				className="size-3.5"
+				icon={Target01Icon}
+			/>
+			<span>Sent as goal</span>
+		</span>
+	);
 }
 
 type MessagePart = UIMessage["parts"][number];
@@ -342,15 +359,16 @@ export const UserMessage = memo(function UserMessage({
 	enableImagePreview = true,
 	editing = false,
 	groupPosition = "single",
+	messageActionState,
+	messageActions,
 	onEditSubmit,
 	onEditCancel,
 	onOpenFile,
 	onOpenLink,
+	onOpenMention,
+	onContributedMessageAction,
 	mentionItems,
 	previewResolvers,
-	onToggleReaction,
-	reactable = false,
-	reactions,
 }: UserMessageProps) {
 	const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 	const lightboxOriginRef = useRef<HTMLElement | null>(null);
@@ -417,16 +435,15 @@ export const UserMessage = memo(function UserMessage({
 		</TooltipProvider>
 	) : null;
 
-	// Rendered only when the surface wired a toggle: without one there is nothing
-	// a click could do, so a picker would be a dead control.
-	const ReactionsNode = onToggleReaction ? (
-		<MessageReactions
+	const MessageActionsNode = (
+		<MessageActionSurface
+			actions={messageActions}
 			align={isOwnMessage ? "end" : "start"}
-			buckets={reactions ?? []}
-			canReact={reactable}
-			onToggle={onToggleReaction}
+			messageId={message.id}
+			onAction={onContributedMessageAction}
+			state={messageActionState}
 		/>
-	) : null;
+	);
 
 	const MessageBubble = (
 		<>
@@ -523,6 +540,7 @@ export const UserMessage = memo(function UserMessage({
 										mentionItems={mentionItems}
 										onOpenFile={onOpenFile}
 										onOpenLink={onOpenLink}
+										onOpenMention={onOpenMention}
 										previewResolvers={previewResolvers}
 									/>
 								</div>
@@ -534,7 +552,7 @@ export const UserMessage = memo(function UserMessage({
 					    edge (start for a remote sender, end for one's own) so it
 					    overlaps the bubble corner the way every messaging client
 					    places it. */}
-					{ReactionsNode}
+					{MessageActionsNode}
 				</Bubble>
 			)}
 		</>

@@ -64,7 +64,7 @@ export const PlaceholderElement = withHOC(
 
 		const loading = isUploading && uploadingFile;
 
-		const currentContent = CONTENT[element.mediaType];
+		const currentContent = CONTENT[element.mediaType] ?? CONTENT[KEYS.file]!;
 
 		const isImage = element.mediaType === KEYS.img;
 

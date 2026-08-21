@@ -158,9 +158,11 @@ export function LinkFloatingToolbar({
 
 	return (
 		<>
-			<div className={popoverVariants()} ref={insertRef} {...insertProps}>
-				{input}
-			</div>
+			{editState.isEditing ? null : (
+				<div className={popoverVariants()} ref={insertRef} {...insertProps}>
+					{input}
+				</div>
+			)}
 
 			<div className={popoverVariants()} ref={editRef} {...editProps}>
 				{editContent}
@@ -171,7 +173,7 @@ export function LinkFloatingToolbar({
 
 function LinkOpenButton() {
 	const editor = useEditorRef();
-	const _selection = useEditorSelection();
+	useEditorSelection();
 
 	const attributes = useMemo(
 		() => {

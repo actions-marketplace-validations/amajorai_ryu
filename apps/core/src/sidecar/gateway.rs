@@ -9,12 +9,16 @@
 //! …) live in Core's environment and are inherited by the spawned gateway, so
 //! the gateway — not Core — owns provider creds and forwards to the engine.
 //!
-//! Scope (U18): only the HTTP calls Core itself makes (the OpenAI-compat chat
-//! path) go through the gateway. ACP agents are subprocesses that make their
-//! own provider calls internally; Core cannot intercept those, so they are out
-//! of scope here.
+//! Scope (U18): Core's own OpenAI-compatible calls and any ACP egress that opts
+//! into the Gateway route through the same governed surface. ACP subprocesses
+//! still own their HTTP client, so agent-scoped ACP routing is expressed through
+//! the Gateway's `/v1/agents/:agent_id` ingress rather than by intercepting the
+//! subprocess.
 
 use std::time::Duration;
+
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 use crate::sidecar::active_engine::{local_engine_url, ActiveEngineStore};
 use crate::sidecar::process::ProcessHandle;
@@ -261,6 +265,65 @@ pub fn gateway_bearer() -> anyhow::Result<String> {
     Ok("ryu-local".to_owned())
 }
 
+/// Mint the proof carried by an agent-scoped Gateway URL.
+///
+/// A managed `rgw_` bearer is intentionally not treated as a trusted-forwarder
+/// key by the Gateway: callers holding it can reach the fleet, but they must not
+/// be able to rotate `x-ryu-agent-id` and move spend between agents. Core is the
+/// holder of the bearer and therefore signs the concrete agent route with it.
+/// The fleet verifies the same HMAC before accepting the agent identity.
+pub fn gateway_agent_proof(agent_id: &str) -> anyhow::Result<String> {
+    type AgentRouteMac = Hmac<Sha256>;
+
+    let token = gateway_bearer()?;
+    let mut mac = AgentRouteMac::new_from_slice(token.as_bytes())
+        .map_err(|_| anyhow::anyhow!("gateway bearer cannot sign agent route"))?;
+    mac.update(b"ryu-agent-route-v1\0");
+    mac.update(agent_id.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// Best-effort notification that a Composio action executed in Core's ACP/MCP
+/// bridge. The Gateway owns the budget counters and wallet rail, so Core sends
+/// only the count and verified bridge identity. The request uses the Core-only
+/// admin credential; remote dynamic credentials additionally carry the
+/// bearer-bound agent proof so the fleet can accept the ACP identity safely.
+pub async fn record_tool_charge(
+    client: &reqwest::Client,
+    agent_id: Option<&str>,
+    user_id: Option<&str>,
+    session_id: Option<&str>,
+    tool_calls: u64,
+) -> anyhow::Result<()> {
+    if tool_calls == 0 {
+        return Ok(());
+    }
+    let token = gateway_admin_key()
+        .ok_or_else(|| anyhow::anyhow!("gateway admin credential is unavailable"))?;
+    let agent_proof = agent_id.and_then(|id| gateway_agent_proof(id).ok());
+    let url = format!("{}/v1/budget/charge", gateway_url().trim_end_matches('/'));
+    let body = serde_json::json!({
+        "tool_calls": tool_calls,
+        "agent_id": agent_id,
+        "agent_proof": agent_proof,
+        "user_id": user_id,
+        "session_id": session_id,
+        "request_id": format!("acp-tool:{}", uuid::Uuid::new_v4()),
+    });
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    let status = response.status();
+    let detail = response.text().await.unwrap_or_default();
+    anyhow::bail!("gateway tool charge returned {status}: {detail}");
+}
+
 /// Env var carrying the admin credential to the spawned gateway. Sets the
 /// gateway's `auth.master_key` WITHOUT flipping `require_auth` — see the block
 /// that reads it in `apps/gateway/src/config.rs`.
@@ -366,7 +429,7 @@ fn write_admin_key_file(path: &std::path::Path, key: &str) -> std::io::Result<()
 
 /// Route outbound message `text` through the Gateway firewall before it leaves
 /// the box (egress DLP). The shared governance seam for every outbound channel
-/// send — the workflow `ChannelSend` node and the agent-callable `channel__send`
+/// send — the workflow `ChannelSend` node and the agent-callable `channel.send`
 /// tool both call this, so their egress can never drift.
 ///
 /// Returns `Ok(())` when the gateway allows it (or there is nothing to scan), and
@@ -1086,6 +1149,17 @@ fn gateway_config_request(
     token: Option<&str>,
     patch: &serde_json::Value,
 ) -> reqwest::RequestBuilder {
+    gateway_config_request_with_actor(client, base, token, patch, None, None)
+}
+
+fn gateway_config_request_with_actor(
+    client: &reqwest::Client,
+    base: &str,
+    token: Option<&str>,
+    patch: &serde_json::Value,
+    actor_id: Option<&str>,
+    actor_name: Option<&str>,
+) -> reqwest::RequestBuilder {
     let base = base.trim_end_matches('/');
     let mut req = client
         .put(format!("{base}/v1/config"))
@@ -1093,6 +1167,12 @@ fn gateway_config_request(
         .json(patch);
     if let Some(t) = token {
         req = req.bearer_auth(t);
+    }
+    if let Some(actor_id) = actor_id {
+        req = req.header("x-ryu-control-actor-id", actor_id);
+    }
+    if let Some(actor_name) = actor_name {
+        req = req.header("x-ryu-control-actor-name", actor_name);
     }
     req
 }
@@ -1115,14 +1195,33 @@ pub(crate) async fn push_config(
     client: &reqwest::Client,
     patch: &serde_json::Value,
 ) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
+    push_config_with_actor(client, patch, None, None).await
+}
+
+/// Push a config patch while carrying a verified Core actor through the local
+/// admin hop. The gateway still authenticates the admin token; these bounded
+/// headers only let the resulting control row name the user who initiated it.
+pub(crate) async fn push_config_with_actor(
+    client: &reqwest::Client,
+    patch: &serde_json::Value,
+    actor_id: Option<&str>,
+    actor_name: Option<&str>,
+) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
     // Lazily start the (off-by-default) classify tier BEFORE the PUT, so a
     // transport failure below cannot skip it and the start can never fail the push.
     maybe_start_classify_tier(patch);
     let base = gateway_url();
-    let resp = gateway_config_request(client, &base, gateway_token().as_deref(), patch)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("gateway config push failed: {e}"))?;
+    let resp = gateway_config_request_with_actor(
+        client,
+        &base,
+        gateway_token().as_deref(),
+        patch,
+        actor_id,
+        actor_name,
+    )
+    .send()
+    .await
+    .map_err(|e| anyhow::anyhow!("gateway config push failed: {e}"))?;
     let status = resp.status();
     let body = resp
         .json::<serde_json::Value>()
@@ -1457,7 +1556,7 @@ const ENV_CREDITS_URL: &str = "GATEWAY_CREDITS_URL";
 /// Optional wallet-empty action override (`stop` | `downgrade`). Default `stop`.
 const ENV_CREDITS_WALLET_EMPTY_ACTION: &str = "GATEWAY_CREDITS_WALLET_EMPTY_ACTION";
 /// Per-tool-call cost in micro-USD for billable Composio executions (#496).
-/// Composio is not free, so on the managed plan each executed `composio__*` tool
+/// Composio is not free, so on the managed plan each executed `composio.*` tool
 /// call debits the org wallet by this amount (at cost). Operator-provisioned on a
 /// managed node; same name on both sides — Core forwards it to the gateway.
 /// Default `0` ⇒ tool calls stay free until a deployment sets a real rate.

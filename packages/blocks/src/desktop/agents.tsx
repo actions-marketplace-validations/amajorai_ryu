@@ -155,14 +155,12 @@ export function AgentsView({
 						type="file"
 					/>
 					<Button
-						disabled={importing}
+						loading={importing}
 						onClick={onImportClick}
 						size="sm"
 						variant="ghost"
 					>
-						{importing ? (
-							<Spinner className="size-4" />
-						) : (
+						{!importing && (
 							<HugeiconsIcon className="size-4" icon={Upload01Icon} />
 						)}
 						Import
@@ -180,7 +178,7 @@ export function AgentsView({
 				</div>
 			) : null}
 
-			<div className="scroll-fade-effect-y flex-1 overflow-auto p-2">
+			<div className="scroll-fade flex-1 overflow-auto p-2">
 				{agents.length === 0 ? (
 					<Empty className="h-full">
 						<EmptyHeader>

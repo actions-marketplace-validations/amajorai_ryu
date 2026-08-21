@@ -28,6 +28,7 @@ import {
 	AlertDialogTrigger,
 } from "@ryu/ui/components/alert-dialog";
 import { Button } from "@ryu/ui/components/button";
+import { Input } from "@ryu/ui/components/input";
 import { Kbd } from "@ryu/ui/components/kbd";
 import { toast } from "@ryu/ui/components/sileo";
 import { useCallback, useEffect, useState } from "react";
@@ -282,6 +283,8 @@ export function KeyboardShortcutsTab() {
 	const [pluginOverrides, setPluginOverrides] = useState<
 		Record<string, string | null>
 	>({});
+	const [resetDialogOpen, setResetDialogOpen] = useState(false);
+	const [search, setSearch] = useState("");
 
 	useEffect(() => {
 		getPreference(activeTarget(), PLUGIN_SHORTCUTS_KEY).then((raw) =>
@@ -297,6 +300,91 @@ export function KeyboardShortcutsTab() {
 		})
 		.filter((entry): entry is NonNullable<typeof entry> => entry !== null)
 		.sort((a, b) => a.app.name.localeCompare(b.app.name));
+
+	const query = search.trim().toLowerCase();
+	const matchesSearch = (...values: Array<string | null | undefined>) =>
+		query.length === 0 ||
+		values.some((value) => value?.toLowerCase().includes(query) === true);
+	const filteredInAppGroups = inAppGroups
+		.map((group) => ({
+			...group,
+			actions: group.actions.filter((action) => {
+				const binding = bindings.get(action.id);
+				return matchesSearch(
+					action.category,
+					action.description,
+					action.id,
+					action.label,
+					binding ? chordTokens(binding).join(" ") : "unbound"
+				);
+			}),
+		}))
+		.filter((group) => group.actions.length > 0);
+
+	const matchesGlobalSearch = (
+		label: string,
+		description: string,
+		accelerator: string
+	) =>
+		matchesSearch(
+			"global",
+			label,
+			description,
+			accelerator,
+			accelerator.replaceAll("+", " ")
+		);
+	const showGlobalDictation = matchesGlobalSearch(
+		"System-Wide Dictation",
+		"Dictate into the focused app (Dictation plugin).",
+		DEFAULT_DICTATION_PREFS.shortcut
+	);
+	const showGlobalAgentAsk = matchesGlobalSearch(
+		"Agent Ask",
+		"Speak a question; paste the agent answer (Dictation → Agent ask).",
+		DEFAULT_DICTATION_PREFS.ask.shortcut
+	);
+
+	const visibleShortcutApps = shortcutApps.filter(
+		({ app, companion, declared }) => {
+			const actionId = `plugin:${app.id}`;
+			const configured = Object.hasOwn(pluginOverrides, actionId)
+				? pluginOverrides[actionId]
+				: declared;
+			return matchesSearch(
+				"plugins and apps",
+				app.name,
+				app.id,
+				companion?.label,
+				declared,
+				configured
+			);
+		}
+	);
+	const showPluginsSection =
+		query.length === 0 ||
+		(matchesSearch(
+			"plugins and apps",
+			"No enabled plugins or apps currently declare a shortcut."
+		) &&
+			(query.length > 0
+				? shortcutApps.length === 0 || visibleShortcutApps.length > 0
+				: true));
+	const showQuickCapture = matchesSearch(
+		"quick capture",
+		"keep the selection with a double-tap of shift",
+		"which shift",
+		"input monitoring",
+		"accessibility",
+		"quests app",
+		"permissions"
+	);
+	const hasMatches =
+		filteredInAppGroups.length > 0 ||
+		showGlobalDictation ||
+		showGlobalAgentAsk ||
+		(showPluginsSection &&
+			(shortcutApps.length === 0 || visibleShortcutApps.length > 0)) ||
+		showQuickCapture;
 
 	const savePluginShortcut = async (appId: string, chord: Chord | null) => {
 		const actionId = `plugin:${appId}`;
@@ -331,63 +419,89 @@ export function KeyboardShortcutsTab() {
 	};
 
 	return (
-		<div className="space-y-6">
-			{inAppGroups.map((group, index) => (
-				<SettingsSection
-					headerAction={
-						index === 0 ? (
-							<AlertDialog>
-								<AlertDialogTrigger
-									render={
-										<Button size="sm" variant="ghost">
-											Reset all
-										</Button>
-									}
-								/>
-								<AlertDialogContent>
-									<AlertDialogHeader>
-										<AlertDialogTitle>Reset all shortcuts?</AlertDialogTitle>
-										<AlertDialogDescription>
-											Every in-app shortcut returns to its default. Cleared and
-											custom bindings are removed. This can't be undone.
-										</AlertDialogDescription>
-									</AlertDialogHeader>
-									<AlertDialogFooter>
-										<AlertDialogCancel>Cancel</AlertDialogCancel>
-										<AlertDialogAction onClick={resetAll}>
-											Reset all
-										</AlertDialogAction>
-									</AlertDialogFooter>
-								</AlertDialogContent>
-							</AlertDialog>
-						) : undefined
-					}
-					key={group.category}
-					title={group.category}
-				>
-					<SettingsGroup>
-						{group.actions.map((action) => (
-							<InAppRow
-								action={action}
-								binding={bindings.get(action.id) ?? null}
-								conflictLabels={conflictLabelsFor(action)}
-								hasOverride={Object.hasOwn(overrides, action.id)}
-								key={action.id}
-								onChange={(chord) => setOverride(action.id, chord)}
-								onClear={() => setOverride(action.id, null)}
-								onReset={() => reset(action.id)}
-							/>
-						))}
-					</SettingsGroup>
-				</SettingsSection>
-			))}
+		<div className="flex h-full min-h-0 flex-col gap-4">
+			<div className="flex items-center gap-2">
+				<Input
+					aria-label="Filter keyboard shortcuts"
+					className="min-w-0 flex-1"
+					data-testid="keyboard-shortcuts-filter"
+					onChange={(event) => setSearch(event.target.value)}
+					placeholder="Search"
+					size="lg"
+					value={search}
+				/>
 
-			<SettingsSection
-				caption="System-wide shortcuts work anywhere on your desktop and are managed by the island companion."
-				title="Global"
+				<AlertDialog
+					onOpenChange={(open) => setResetDialogOpen(open)}
+					open={resetDialogOpen}
+				>
+					<AlertDialogTrigger
+						render={
+							<Button
+								data-testid="keyboard-shortcuts-reset-all"
+								size="sm"
+								variant="default"
+							>
+								Reset all to defaults
+							</Button>
+						}
+					/>
+					<AlertDialogContent>
+						<AlertDialogHeader>
+							<AlertDialogTitle>
+								Reset all shortcuts to defaults?
+							</AlertDialogTitle>
+							<AlertDialogDescription>
+								Every in-app shortcut returns to its default. Cleared and custom
+								bindings are removed. This can't be undone.
+							</AlertDialogDescription>
+						</AlertDialogHeader>
+						<AlertDialogFooter>
+							<AlertDialogCancel>Cancel</AlertDialogCancel>
+							<AlertDialogAction
+								onClick={() => {
+									resetAll();
+									setResetDialogOpen(false);
+								}}
+							>
+								Reset all to defaults
+							</AlertDialogAction>
+						</AlertDialogFooter>
+					</AlertDialogContent>
+				</AlertDialog>
+			</div>
+
+			<div
+				className="scroll-fade min-h-0 flex-1 overflow-y-auto pr-2"
+				data-testid="keyboard-shortcuts-scroll"
 			>
-				<SettingsGroup>
-					{/* # 0.1.0: Island disabled — uncomment when re-enabling Island
+				<div className="space-y-6">
+					{filteredInAppGroups.map((group) => (
+						<SettingsSection key={group.category} title={group.category}>
+							<SettingsGroup>
+								{group.actions.map((action) => (
+									<InAppRow
+										action={action}
+										binding={bindings.get(action.id) ?? null}
+										conflictLabels={conflictLabelsFor(action)}
+										hasOverride={Object.hasOwn(overrides, action.id)}
+										key={action.id}
+										onChange={(chord) => setOverride(action.id, chord)}
+										onClear={() => setOverride(action.id, null)}
+										onReset={() => reset(action.id)}
+									/>
+								))}
+							</SettingsGroup>
+						</SettingsSection>
+					))}
+
+					{showGlobalDictation || showGlobalAgentAsk ? (
+						<SettingsSection
+							caption="System-wide shortcuts work anywhere on your desktop and are managed by the island companion."
+							title="Global"
+						>
+							<SettingsGroup>
+								{/* # 0.1.0: Island disabled — uncomment when re-enabling Island
 					<GlobalRow
 						defaultAccelerator={DEFAULT_ISLAND_COMMAND_SHORTCUT}
 						description="Open the island command bar from anywhere."
@@ -411,105 +525,126 @@ export function KeyboardShortcutsTab() {
 						}}
 					/>
 					*/}
-					<GlobalRow
-						defaultAccelerator={DEFAULT_DICTATION_PREFS.shortcut}
-						description="Dictate into the focused app (Dictation plugin)."
-						label="System-Wide Dictation"
-						load={() =>
-							getDictationPrefs(activeTarget()).then((p) => p.shortcut)
-						}
-						save={async (acc) => {
-							const prefs = await getDictationPrefs(activeTarget());
-							return setDictationPrefs(activeTarget(), {
-								...prefs,
-								shortcut: acc,
-							});
-						}}
-					/>
-					<GlobalRow
-						defaultAccelerator={DEFAULT_DICTATION_PREFS.ask.shortcut}
-						description="Speak a question; paste the agent answer (Dictation → Agent ask)."
-						label="Agent Ask"
-						load={() =>
-							getDictationPrefs(activeTarget()).then((p) => p.ask.shortcut)
-						}
-						save={async (acc) => {
-							const prefs = await getDictationPrefs(activeTarget());
-							return setDictationPrefs(activeTarget(), {
-								...prefs,
-								ask: { ...prefs.ask, shortcut: acc },
-							});
-						}}
-					/>
-				</SettingsGroup>
-			</SettingsSection>
+								{showGlobalDictation ? (
+									<GlobalRow
+										defaultAccelerator={DEFAULT_DICTATION_PREFS.shortcut}
+										description="Dictate into the focused app (Dictation plugin)."
+										label="System-Wide Dictation"
+										load={() =>
+											getDictationPrefs(activeTarget()).then((p) => p.shortcut)
+										}
+										save={async (acc) => {
+											const prefs = await getDictationPrefs(activeTarget());
+											return setDictationPrefs(activeTarget(), {
+												...prefs,
+												shortcut: acc,
+											});
+										}}
+									/>
+								) : null}
+								{showGlobalAgentAsk ? (
+									<GlobalRow
+										defaultAccelerator={DEFAULT_DICTATION_PREFS.ask.shortcut}
+										description="Speak a question; paste the agent answer (Dictation → Agent ask)."
+										label="Agent Ask"
+										load={() =>
+											getDictationPrefs(activeTarget()).then(
+												(p) => p.ask.shortcut
+											)
+										}
+										save={async (acc) => {
+											const prefs = await getDictationPrefs(activeTarget());
+											return setDictationPrefs(activeTarget(), {
+												...prefs,
+												ask: { ...prefs.ask, shortcut: acc },
+											});
+										}}
+									/>
+								) : null}
+							</SettingsGroup>
+						</SettingsSection>
+					) : null}
 
-			<SettingsSection
-				caption="Shortcuts contributed by enabled plugins and apps. Changes apply to the Island global shortcut bridge."
-				title="Plugins and apps"
-			>
-				{shortcutApps.length === 0 ? (
-					<p className="px-3 text-muted-foreground text-sm">
-						No enabled plugins or apps currently declare a shortcut.
-					</p>
-				) : (
-					shortcutApps.map(({ app, companion, declared }) => {
-						const actionId = `plugin:${app.id}`;
-						const configured = Object.hasOwn(pluginOverrides, actionId)
-							? pluginOverrides[actionId]
-							: declared;
-						return (
-							<SettingsSection key={app.id} title={app.name}>
-								<SettingsGroup>
-									<SettingsItem
-										actions={
-											<div className="flex items-center gap-1.5">
-												<ChordRecorder
-													onChange={(chord) =>
-														savePluginShortcut(app.id, chord)
+					{showPluginsSection ? (
+						<SettingsSection
+							caption="Shortcuts contributed by enabled plugins and apps. Changes apply to the Island global shortcut bridge."
+							title="Plugins and apps"
+						>
+							{shortcutApps.length === 0 ? (
+								<p className="px-3 text-muted-foreground text-sm">
+									No enabled plugins or apps currently declare a shortcut.
+								</p>
+							) : (
+								visibleShortcutApps.map(({ app, companion, declared }) => {
+									const actionId = `plugin:${app.id}`;
+									const configured = Object.hasOwn(pluginOverrides, actionId)
+										? pluginOverrides[actionId]
+										: declared;
+									return (
+										<SettingsSection key={app.id} title={app.name}>
+											<SettingsGroup>
+												<SettingsItem
+													actions={
+														<div className="flex items-center gap-1.5">
+															<ChordRecorder
+																onChange={(chord) =>
+																	savePluginShortcut(app.id, chord)
+																}
+																value={
+																	configured
+																		? chordFromElectron(configured)
+																		: null
+																}
+															/>
+															<Button
+																disabled={
+																	!Object.hasOwn(pluginOverrides, actionId)
+																}
+																onClick={() => {
+																	const next = { ...pluginOverrides };
+																	delete next[actionId];
+																	setPluginOverrides(next);
+																	setPreference(
+																		activeTarget(),
+																		PLUGIN_SHORTCUTS_KEY,
+																		JSON.stringify(next)
+																	);
+																}}
+																size="sm"
+																variant="ghost"
+															>
+																Reset
+															</Button>
+														</div>
 													}
-													value={
-														configured ? chordFromElectron(configured) : null
+													title={
+														<span className="flex flex-col gap-0.5">
+															<span>{companion?.label ?? app.name}</span>
+															<span className="text-muted-foreground text-xs">
+																{app.id}
+															</span>
+														</span>
 													}
 												/>
-												<Button
-													disabled={!Object.hasOwn(pluginOverrides, actionId)}
-													onClick={() => {
-														const next = { ...pluginOverrides };
-														delete next[actionId];
-														setPluginOverrides(next);
-														setPreference(
-															activeTarget(),
-															PLUGIN_SHORTCUTS_KEY,
-															JSON.stringify(next)
-														);
-													}}
-													size="sm"
-													variant="ghost"
-												>
-													Reset
-												</Button>
-											</div>
-										}
-										title={
-											<span className="flex flex-col gap-0.5">
-												<span>{companion?.label ?? app.name}</span>
-												<span className="text-muted-foreground text-xs">
-													{app.id}
-												</span>
-											</span>
-										}
-									/>
-								</SettingsGroup>
-							</SettingsSection>
-						);
-					})
-				)}
-			</SettingsSection>
+											</SettingsGroup>
+										</SettingsSection>
+									);
+								})
+							)}
+						</SettingsSection>
+					) : null}
 
-			{/* The one "shortcut" that is not an accelerator: a bare-modifier double
+					{/* The one "shortcut" that is not an accelerator: a bare-modifier double
 			    tap, owned by the native layer rather than the hotkey registry. */}
-			<QuickCaptureSettings />
+					{showQuickCapture ? <QuickCaptureSettings /> : null}
+
+					{query.length > 0 && !hasMatches ? (
+						<p className="px-3 text-muted-foreground text-sm">
+							No keyboard shortcuts match “{search.trim()}”.
+						</p>
+					) : null}
+				</div>
+			</div>
 		</div>
 	);
 }

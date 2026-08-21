@@ -44,6 +44,7 @@ import { useEffect, useLayoutEffect, useRef } from "react";
 import {
 	asAgentRunArg,
 	asFinetuneIdArg,
+	asRealtimeConnectionArg,
 	asRpcRequest,
 	assertGranted,
 	type Capability,
@@ -152,6 +153,9 @@ export interface ExtensionHostProps {
 	/** The plugin's sandboxed document. Must already have `nonce` interpolated by
 	 *  its builder (see `example-plugin.ts`). */
 	srcdoc: string;
+	/** Resolved host theme tokens to push into a mounted companion without
+	 *  requiring the app to request the shell-integration capability. */
+	themeTokens?: Readonly<Record<string, string>>;
 	title: string;
 }
 
@@ -162,6 +166,7 @@ export function ExtensionHost({
 	services,
 	onConnected,
 	pushRef,
+	themeTokens,
 	title,
 }: ExtensionHostProps) {
 	const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -294,6 +299,22 @@ export function ExtensionHost({
 						streamError = new CodedRpcError(
 							"server_error",
 							"finetune.stream is not available"
+						);
+					}
+				} else if (req.method === "realtime.subscribe") {
+					const arg = asRealtimeConnectionArg(req.args[0]);
+					const svc = servicesRef.current.realtimeSubscribe;
+					if (!arg) {
+						streamError = new CodedRpcError(
+							"invalid_args",
+							"realtime.subscribe requires a { connection_id: string }"
+						);
+					} else if (svc) {
+						start = (emit, signal) => svc(arg, emit, signal);
+					} else {
+						streamError = new CodedRpcError(
+							"server_error",
+							"realtime.subscribe is not available"
 						);
 					}
 				} else {
@@ -435,6 +456,17 @@ export function ExtensionHost({
 			}
 		};
 	}, [granted, nonce]);
+
+	useEffect(() => {
+		const iframe = iframeRef.current;
+		if (!(iframe && themeTokens)) {
+			return;
+		}
+		iframe.contentWindow?.postMessage(
+			{ kind: "ryu-plugin-theme", nonce, tokens: themeTokens },
+			"*"
+		);
+	}, [nonce, themeTokens]);
 
 	return (
 		<iframe

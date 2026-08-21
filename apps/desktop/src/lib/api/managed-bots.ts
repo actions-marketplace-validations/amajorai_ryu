@@ -101,6 +101,10 @@ export interface ManagedBotPairingRequest {
 	model?: string | null;
 	/** Name for the channel config. Falls back to the created bot's `@handle`. */
 	name?: string;
+	/** Let Ryu send one welcome message when the channel starts. */
+	proactive_opening?: boolean;
+	/** Explicit approved chat id that should receive the welcome. */
+	proactive_target?: string | null;
 	/** Name Telegram pre-fills in its create-a-bot dialog (a hint, not a promise). */
 	suggested_name?: string;
 	system_prompt?: string | null;

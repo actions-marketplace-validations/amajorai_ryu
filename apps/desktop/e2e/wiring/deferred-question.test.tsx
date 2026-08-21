@@ -1,6 +1,4 @@
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
-
-GlobalRegistrator.register();
+import "./setup-dom.ts";
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { act } from "react";

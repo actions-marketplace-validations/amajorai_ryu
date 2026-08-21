@@ -51,6 +51,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		template: null,
 		force: false,
 		cascade: false,
+		dryRun: false,
+		fix: false,
+		includeSecrets: false,
 		help: false,
 		version: false,
 	};
@@ -63,6 +66,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			flags.force = true;
 		} else if (tok === "--cascade") {
 			flags.cascade = true;
+		} else if (tok === "--dry-run") {
+			flags.dryRun = true;
+		} else if (tok === "--fix") {
+			flags.fix = true;
+		} else if (tok === "--include-secrets") {
+			flags.includeSecrets = true;
 		} else if (tok === "-h" || tok === "--help") {
 			flags.help = true;
 		} else if (tok === "--version") {

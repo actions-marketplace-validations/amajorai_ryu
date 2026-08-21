@@ -30,7 +30,7 @@ use ryu_teams_contracts::{Coordination, CreateTeam};
 use crate::teams_client::{TeamSink, TeamsClient};
 
 /// Reserved server name for the agent-builder tool provider. Must not contain
-/// `__` (the tool-id separator).
+/// `.` (the tool-id namespace separator).
 pub const SERVER_NAME: &str = "agent_builder";
 
 // ── Tool definitions ────────────────────────────────────────────────────────────
@@ -40,7 +40,7 @@ pub const SERVER_NAME: &str = "agent_builder";
 pub fn tools() -> Vec<RegistryTool> {
     vec![
         RegistryTool {
-            id: "agent_builder__get_agent".to_owned(),
+            id: "agent_builder.get_agent".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "get_agent".to_owned(),
             description: Some(
@@ -54,7 +54,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "agent_builder__configure_agent".to_owned(),
+            id: "agent_builder.configure_agent".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "configure_agent".to_owned(),
             description: Some(
@@ -70,7 +70,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "agent_builder__create_agent".to_owned(),
+            id: "agent_builder.create_agent".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "create_agent".to_owned(),
             description: Some(
@@ -83,7 +83,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "agent_builder__create_agent_team".to_owned(),
+            id: "agent_builder.create_agent_team".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "create_agent_team".to_owned(),
             description: Some(
@@ -319,7 +319,7 @@ async fn configure_agent(args: Value, store: AgentStore) -> Result<Value> {
         patch.persona = Some(PersonaSlot {
             display_name: persona["display_name"].as_str().map(str::to_owned),
             tone: persona["tone"].as_str().map(str::to_owned),
-            // Avatar glyph fields (avatar_url / emoji / icon / dicebear / dither)
+            // Avatar glyph fields (avatar_url / emoji / icon / dicebear / expressive / dither)
             // are edited through the desktop GlyphPicker, not the builder tools —
             // leave them unset here so a builder patch doesn't wipe a custom glyph.
             ..Default::default()
@@ -503,14 +503,14 @@ mod tests {
         assert_eq!(tools.len(), 4);
         for t in &tools {
             assert_eq!(t.server, SERVER_NAME);
-            assert!(t.id.starts_with("agent_builder__"));
-            assert!(!t.name.contains("__"));
+            assert!(t.id.starts_with("agent_builder."));
+            assert!(!t.name.contains('.'));
         }
         let ids: Vec<&str> = tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(ids.contains(&"agent_builder__get_agent"));
-        assert!(ids.contains(&"agent_builder__configure_agent"));
-        assert!(ids.contains(&"agent_builder__create_agent"));
-        assert!(ids.contains(&"agent_builder__create_agent_team"));
+        assert!(ids.contains(&"agent_builder.get_agent"));
+        assert!(ids.contains(&"agent_builder.configure_agent"));
+        assert!(ids.contains(&"agent_builder.create_agent"));
+        assert!(ids.contains(&"agent_builder.create_agent_team"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 // Standalone browser story for the REAL edge-fade label family exported from
 // `src/components/layout/overflow-tooltip.tsx` — `FadeLabel` (sidebar chat rows,
-// which carry their own hover preview) and `OverflowTooltip fade` (tab titles).
+// which carry their own hover preview) and `OverflowTooltip fade` (tab titles),
+// plus the legacy `AutoScrollText` label that must remain static.
 //
 // What only a real browser can settle: whether the clipped-edge mask engages at
 // all. The decision is a LAYOUT measurement, so happy-dom cannot judge it — every
@@ -14,11 +15,13 @@
 // why the old single-element `scrollWidth > clientWidth` check decided "not
 // clipped" and never faded, no matter how long the text was.
 
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
 	FadeLabel,
 	OverflowTooltip,
 } from "../../src/components/layout/overflow-tooltip.tsx";
+import { AutoScrollText } from "../../src/components/shell/AutoScrollText.tsx";
 import "../../src/index.css";
 
 const UNBROKEN = "z".repeat(200);
@@ -49,8 +52,22 @@ function Row({
 }
 
 function Story() {
+	const [title, setTitle] = useState("Old title");
+
 	return (
 		<div className="flex flex-col gap-4 p-6">
+			<div className="flex items-center gap-2">
+				<button
+					data-testid="rename-title"
+					onClick={() => setTitle("New title")}
+					type="button"
+				>
+					Rename
+				</button>
+				<span className="min-w-0 flex-1 text-sm" data-testid="animated-title">
+					<OverflowTooltip fade text={title} />
+				</span>
+			</div>
 			<Row testid="fade-unbroken">
 				<FadeLabel className="flex-1 text-sm" text={UNBROKEN} />
 			</Row>
@@ -62,6 +79,11 @@ function Story() {
 			</Row>
 			<Row testid="fade-short">
 				<FadeLabel className="flex-1 text-sm" text={SHORT} />
+			</Row>
+			<Row testid="auto-scroll-text">
+				<AutoScrollText className="flex-1 text-sm" title={UNBROKEN}>
+					{UNBROKEN}
+				</AutoScrollText>
 			</Row>
 			<Row testid="tooltip-shimmer">
 				<OverflowTooltip

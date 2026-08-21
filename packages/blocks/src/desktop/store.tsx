@@ -23,9 +23,9 @@ import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
-import { EdgeScroller } from "@ryu/ui/components/edge-scroller.tsx";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -35,10 +35,15 @@ import { Icon } from "@ryu/ui/components/icon.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs.tsx";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 
 export interface StoreSectionTab {
+	/** Total items in the section. This is intentionally separate from the
+	 * currently loaded page length so paginated catalogs can report an
+	 * authoritative total without lying in the tab chrome. */
+	count?: number;
 	/**
 	 * Optional cluster key. Adjacent sections sharing a group render together; a
 	 * thin divider is drawn where the group changes, so the wrapped pill reads as
@@ -114,15 +119,12 @@ const noop = () => {
  * other tab strip in the app and inherits Base UI's roving arrow-key navigation.
  * `pills`, not `pills-lg`: this is an open-ended, horizontally scrolling section
  * nav under a page title, not the primary control of the surface, and a
- * 56px-tall pill × a dozen sections reads as a toolbar, not a nav. The list is
- * forced `flex-nowrap` inside the shared {@link EdgeScroller} because the variant
- * ships `flex-wrap` — wrapping would turn a long strip back into the multi-row
- * blob the inline design replaced. The scroller fades each overflowing edge and
- * reveals a bare chevron over it on hover, so a clipped pill reads as "there is
- * more" and can be paged without a scrollbar under the row. It used to carry its
- * own copy of that logic plus a `scrollbar-none` class that is defined in no
- * stylesheet in this repo, so the strip shipped with BOTH bars visible (an
- * `overflow-x-auto` with no explicit `overflow-y` resolves to `auto` as well).
+ * 56px-tall pill × a dozen sections reads as a toolbar, not a nav. The shared
+ * `TabsList` owns the overflow behavior: it stays on one line, fades only the
+ * edges that still have content, hides the native scrollbar, and reveals a
+ * compact hover popover with fully rounded back/forward buttons. That keeps the
+ * behavior at the tab primitive instead of making Library and Store each carry
+ * a second scrolling wrapper.
  *
  * A thin divider is drawn wherever `group` changes, so clusters still read as
  * clusters without a second component.
@@ -144,32 +146,40 @@ export function StoreSectionTabs({
 			onValueChange={(value) => onSelect(String(value))}
 			value={active}
 		>
-			<EdgeScroller
-				className="w-full"
-				contentClassName="w-full"
+			<TabsList
+				aria-label="Sections"
+				className="w-full flex-nowrap"
 				data-slot="store-section-tabs-scroller"
+				manageLayout={false}
+				variant="pills"
 			>
-				<TabsList aria-label="Sections" className="flex-nowrap" variant="pills">
-					{sections.map((s, i) => {
-						const prev = i > 0 ? sections[i - 1] : undefined;
-						const showDivider = Boolean(prev && prev.group !== s.group);
-						return (
-							<Fragment key={s.value}>
-								{showDivider ? (
+				{sections.map((s, i) => {
+					const prev = i > 0 ? sections[i - 1] : undefined;
+					const showDivider = Boolean(prev && prev.group !== s.group);
+					return (
+						<Fragment key={s.value}>
+							{showDivider ? (
+								<span
+									aria-hidden
+									className="mx-1 h-4 w-px shrink-0 self-center bg-border"
+								/>
+							) : null}
+							<TabsTrigger className="shrink-0 gap-1.5" value={s.value}>
+								<SectionTabIcon icon={s.icon} iconNode={s.iconNode} />
+								<span className="whitespace-nowrap">{s.label}</span>
+								{s.count === undefined ? null : (
 									<span
-										aria-hidden
-										className="mx-1 h-4 w-px shrink-0 self-center bg-border"
-									/>
-								) : null}
-								<TabsTrigger className="shrink-0 gap-1.5" value={s.value}>
-									<SectionTabIcon icon={s.icon} iconNode={s.iconNode} />
-									<span className="whitespace-nowrap">{s.label}</span>
-								</TabsTrigger>
-							</Fragment>
-						);
-					})}
-				</TabsList>
-			</EdgeScroller>
+										className="text-muted-foreground tabular-nums"
+										data-slot="store-section-tab-count"
+									>
+										{formatCount(s.count) ?? "—"}
+									</span>
+								)}
+							</TabsTrigger>
+						</Fragment>
+					);
+				})}
+			</TabsList>
 		</Tabs>
 	);
 }
@@ -363,9 +373,11 @@ export function StoreSearchButton({
 export function StoreComingSoon({
 	icon,
 	label,
+	onBrowse,
 }: {
 	icon: IconSvgElement;
 	label: string;
+	onBrowse?: () => void;
 }) {
 	return (
 		<Empty className="h-full">
@@ -379,6 +391,13 @@ export function StoreComingSoon({
 					way.
 				</EmptyDescription>
 			</EmptyHeader>
+			{onBrowse ? (
+				<EmptyContent>
+					<Button onClick={onBrowse} size="sm">
+						Browse the Store home
+					</Button>
+				</EmptyContent>
+			) : null}
 		</Empty>
 	);
 }
@@ -509,7 +528,7 @@ export function StoreCardRating({
 			<span className="font-medium text-foreground tabular-nums">
 				{(Math.round((average ?? 0) * 10) / 10).toFixed(1)}
 			</span>
-			<span className="tabular-nums">({count})</span>
+			<span className="tabular-nums">({formatCount(count) ?? "—"})</span>
 		</span>
 	);
 }

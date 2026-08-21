@@ -12,7 +12,15 @@
 // Both are asserted here against a stubbed `fetch` — no Core required.
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { applyWorktree, checkoutBranch, commitPush } from "./git.ts";
+import {
+	applyWorktree,
+	checkoutBranch,
+	commitPush,
+	createPullRequest,
+	isPullRequestBranch,
+	pullGit,
+	syncGit,
+} from "./git.ts";
 import { createProjectFolder } from "./workspace.ts";
 
 const TARGET = { url: "http://127.0.0.1:7980", token: "node-token" };
@@ -25,15 +33,81 @@ afterEach(() => {
 	globalThis.fetch = realFetch;
 });
 
+describe("pull-request branch eligibility", () => {
+	it("excludes both default branch spellings", () => {
+		expect(isPullRequestBranch("main")).toBe(false);
+		expect(isPullRequestBranch("MASTER")).toBe(false);
+	});
+
+	it("allows a feature branch", () => {
+		expect(isPullRequestBranch("codex/simple-chat")).toBe(true);
+		expect(isPullRequestBranch(null)).toBe(false);
+	});
+});
+
 /** Stub `fetch` with a fixed response, capturing the request init it received. */
-function stubFetch(response: Response): { init: RequestInit | undefined } {
-	const captured: { init: RequestInit | undefined } = { init: undefined };
-	globalThis.fetch = ((_url: string, init?: RequestInit) => {
+
+function stubFetch(response: Response): {
+	init: RequestInit | undefined;
+	url: string | undefined;
+} {
+	const captured: { init: RequestInit | undefined; url: string | undefined } = {
+		init: undefined,
+		url: undefined,
+	};
+	globalThis.fetch = ((url: string, init?: RequestInit) => {
+		captured.url = url;
 		captured.init = init;
 		return Promise.resolve(response);
 	}) as typeof fetch;
 	return captured;
 }
+
+describe("git remote actions", () => {
+	it("pulls the current workspace from its upstream", async () => {
+		const captured = stubFetch(
+			new Response(
+				JSON.stringify({ commit: "abc123", pulled: true, success: true }),
+				{ status: 200, headers: { "content-type": "application/json" } }
+			)
+		);
+		const result = await pullGit(TARGET, "/repo");
+
+		expect(captured.url).toBe("http://127.0.0.1:7980/api/git/pull");
+		expect(JSON.parse(String(captured.init?.body))).toEqual({ cwd: "/repo" });
+		expect(result).toMatchObject({
+			commit: "abc123",
+			pulled: true,
+			success: true,
+		});
+		expect(headerEntries(captured.init, "content-type")).toEqual([
+			"application/json",
+		]);
+	});
+
+	it("syncs the workspace and preserves the push result", async () => {
+		const captured = stubFetch(
+			new Response(
+				JSON.stringify({
+					commit: "def456",
+					pulled: true,
+					pushed: true,
+					success: true,
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } }
+			)
+		);
+		const result = await syncGit(TARGET, "/repo");
+
+		expect(captured.url).toBe("http://127.0.0.1:7980/api/git/sync");
+		expect(result).toMatchObject({
+			commit: "def456",
+			pulled: true,
+			pushed: true,
+			success: true,
+		});
+	});
+});
 
 /** How many times a header name appears once `fetch` has normalized the init. */
 function headerEntries(init: RequestInit | undefined, name: string): string[] {
@@ -92,6 +166,46 @@ describe("git client request headers", () => {
 		expect(new Headers(captured.init?.headers).get("authorization")).toBe(
 			"Bearer node-token"
 		);
+	});
+
+	it("sends pull-request title, base, draft, and staging choices", async () => {
+		const captured = stubFetch(
+			new Response(
+				JSON.stringify({
+					already_exists: true,
+					comments_count: 3,
+					number: 1,
+					pr_url: "https://github.com/pr/1",
+					title: "Ship it",
+					success: true,
+				}),
+				{
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}
+			)
+		);
+		const result = await createPullRequest(TARGET, "/repo", {
+			base: "main",
+			body: "Details",
+			draft: true,
+			includeUnstaged: false,
+			title: "Ship it",
+		});
+		expect(result).toMatchObject({
+			already_exists: true,
+			comments_count: 3,
+			number: 1,
+			title: "Ship it",
+		});
+		expect(JSON.parse(String(captured.init?.body))).toEqual({
+			base: "main",
+			body: "Details",
+			cwd: "/repo",
+			draft: true,
+			include_unstaged: false,
+			title: "Ship it",
+		});
 	});
 });
 

@@ -1,11 +1,13 @@
 import { isDitherColor } from "@ryu/ui/components/dither-kit/palette";
+import { isExpressiveExpressionSelection } from "@ryu/ui/components/expressive.ts";
+import { isExpressiveAnimationSelection } from "@ryu/ui/components/expressive-animation.ts";
 import type { GlyphDitherValue, GlyphValue } from "@ryu/ui/components/glyph.ts";
 import type { AgentPersona } from "@/src/lib/api/agents.ts";
 
 // Persona ⇄ GlyphPicker conversion.
 //
-// An agent's avatar has five mutually-exclusive sources (uploaded image, icon,
-// emoji, dicebear, dither), with dither additionally allowed as a BACKGROUND
+// An agent's avatar has six mutually-exclusive sources (uploaded image, icon,
+// emoji, dicebear, expressive, dither), with dither additionally allowed as a BACKGROUND
 // behind an icon or emoji. Getting that exclusivity wrong writes two sources at
 // once and the wrong one wins at render.
 //
@@ -22,6 +24,17 @@ export function personaToGlyphValue(
 	}
 	if (persona.avatar_url) {
 		return { kind: "avatar", dataUrl: persona.avatar_url };
+	}
+	const expressive = persona.expressive?.expression;
+	if (expressive && isExpressiveExpressionSelection(expressive)) {
+		const animation = persona.expressive?.animation;
+		return {
+			kind: "expressive",
+			expression: expressive,
+			...(animation && isExpressiveAnimationSelection(animation)
+				? { animation }
+				: {}),
+		};
 	}
 	const ditherLayer: GlyphDitherValue | undefined =
 		persona.dither && isDitherColor(persona.dither.from)
@@ -70,7 +83,13 @@ export function glyphToPersonaFields(
 	glyph: GlyphValue
 ): Pick<
 	AgentPersona,
-	"avatar_url" | "emoji" | "icon" | "icon_color" | "dicebear" | "dither"
+	| "avatar_url"
+	| "emoji"
+	| "icon"
+	| "icon_color"
+	| "dicebear"
+	| "expressive"
+	| "dither"
 > {
 	const ditherBg =
 		glyph?.kind === "icon" || glyph?.kind === "emoji"
@@ -80,6 +99,13 @@ export function glyphToPersonaFields(
 				: null;
 	return {
 		avatar_url: glyph?.kind === "avatar" ? glyph.dataUrl : null,
+		expressive:
+			glyph?.kind === "expressive"
+				? {
+						expression: glyph.expression,
+						...(glyph.animation ? { animation: glyph.animation } : {}),
+					}
+				: null,
 		emoji: glyph?.kind === "emoji" ? glyph.emoji : null,
 		icon: glyph?.kind === "icon" ? glyph.id : null,
 		icon_color: glyph?.kind === "icon" ? (glyph.color ?? null) : null,

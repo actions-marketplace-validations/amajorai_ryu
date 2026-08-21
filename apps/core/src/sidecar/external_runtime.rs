@@ -126,8 +126,8 @@ pub enum ProvisionError {
     /// An asset `source` is neither an `https://` URL nor a resolvable
     /// `hf:<owner>/<repo>/<path>` reference.
     UnsupportedAssetSource(String),
-    /// An asset's resolved destination would escape `~/.ryu` (traversal / absolute
-    /// path in `dest_under_ryu` or an unsafe derived filename). Fail-closed.
+    /// An asset's resolved destination would escape the runtime's dedicated
+    /// `assets/` directory (traversal / absolute path or unsafe filename).
     UnsafeAssetPath(String),
     /// Fetching a declared asset failed (SSRF screen rejected it, or the download
     /// errored / mismatched its checksum).
@@ -237,14 +237,18 @@ fn is_safe_rel_dir(rel: &Path) -> bool {
     })
 }
 
-/// Derive the destination path for an asset: `<ryu_dir>/<dest_under_ryu>/<file>`,
+/// Derive the destination path for an asset: `<runtime_dir>/assets/<dest>/<file>`,
 /// where `<file>` is the last path segment of `url`. Rejects a traversing
-/// `dest_under_ryu` or an unsafe derived filename (fail-closed). Pure.
-fn asset_dest(ryu_dir: &Path, dest_under_ryu: &str, url: &str) -> Result<PathBuf, ProvisionError> {
-    let rel = Path::new(dest_under_ryu.trim());
+/// destination or an unsafe derived filename (fail-closed). Pure.
+fn asset_dest(
+    runtime_dir: &Path,
+    dest_under_runtime: &str,
+    url: &str,
+) -> Result<PathBuf, ProvisionError> {
+    let rel = Path::new(dest_under_runtime.trim());
     if !is_safe_rel_dir(rel) {
         return Err(ProvisionError::UnsafeAssetPath(format!(
-            "dest_under_ryu '{dest_under_ryu}' must be a traversal-safe relative path"
+            "asset destination '{dest_under_runtime}' must be a traversal-safe relative path"
         )));
     }
     let parsed = url::Url::parse(url)
@@ -259,7 +263,7 @@ fn asset_dest(ryu_dir: &Path, dest_under_ryu: &str, url: &str) -> Result<PathBuf
             "cannot derive a safe filename from '{url}'"
         )));
     }
-    Ok(ryu_dir.join(rel).join(filename))
+    Ok(runtime_dir.join("assets").join(rel).join(filename))
 }
 
 /// Marker file whose presence means the source tree is already extracted into the
@@ -361,7 +365,7 @@ async fn fetch_and_extract_source(
     Ok(())
 }
 
-/// Fetch every declared asset into `<ryu_dir>/<dest_under_ryu>/<file>` via the
+/// Fetch every declared asset into `<runtime_dir>/assets/<dest>/<file>` via the
 /// shared [`crate::downloads::DownloadCenter`] (streaming `.part` + resume +
 /// checksum). Runs BEFORE the venv/pip step. Fails closed on the first error.
 ///
@@ -376,12 +380,12 @@ async fn fetch_and_extract_source(
 /// mistaken for a pinned fetch.
 async fn fetch_assets(
     cfg: &ExternalRuntimeConfig,
-    ryu_dir: &Path,
+    runtime_dir: &Path,
     downloads: &crate::downloads::DownloadCenter,
 ) -> Result<(), ProvisionError> {
     for asset in &cfg.assets {
         let url = resolve_asset_url(&asset.source)?;
-        let dest = asset_dest(ryu_dir, &asset.dest_under_ryu, &url)?;
+        let dest = asset_dest(runtime_dir, &asset.dest_under_runtime, &url)?;
         let sha = asset.sha256.clone().filter(|s| !s.is_empty());
 
         // Idempotency: without a checksum, an already-present file is left as-is
@@ -461,8 +465,9 @@ pub async fn provision(
     // `pip install -e ".[extra]"` finds the package's `pyproject.toml` at the root.
     fetch_and_extract_source(cfg, dir, downloads).await?;
 
-    // Fetch declared single-file assets (models, etc.) into `~/.ryu`.
-    fetch_assets(cfg, &crate::paths::ryu_dir(), downloads).await?;
+    // Fetch declared single-file assets into this plugin/sidecar's dedicated
+    // runtime directory. A manifest can never overwrite shared Core data.
+    fetch_assets(cfg, dir, downloads).await?;
 
     let python = venv_python(dir);
     if !python.exists() {
@@ -527,7 +532,7 @@ mod tests {
             pyproject_extra: Some("kitten".to_owned()),
             assets: vec![AssetSpec {
                 source: "hf:KittenML/kitten-tts".to_owned(),
-                dest_under_ryu: "models/hf".to_owned(),
+                dest_under_runtime: "models/hf".to_owned(),
                 sha256: None,
             }],
             port: Some(8085),
@@ -736,9 +741,13 @@ mod tests {
 
     #[test]
     fn asset_dest_joins_dir_and_filename() {
-        let base = Path::new("/ryu");
+        let base = Path::new("/ryu/plugins/example/runtime");
         let dest = asset_dest(base, "models/hf", "https://example.com/a/model.gguf").unwrap();
-        assert_eq!(dest, Path::new("/ryu").join("models/hf").join("model.gguf"));
+        assert_eq!(
+            dest,
+            Path::new("/ryu/plugins/example/runtime").join("assets/models/hf/model.gguf")
+        );
+        assert!(dest.starts_with(base.join("assets")));
     }
 
     #[test]

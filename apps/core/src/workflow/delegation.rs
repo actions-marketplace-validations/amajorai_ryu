@@ -28,6 +28,7 @@
 //! their recorded result reused, preserving input-order results without
 //! re-running completed delegates.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -255,6 +256,97 @@ pub enum DelegateProgress {
     Finished { result: DelegateResult },
 }
 
+/// The intentionally small lifecycle carrier for delegated-agent activity.
+///
+/// This is a transition, not a snapshot of the delegate or its work: no task,
+/// transcript, command, cwd, prompt, or result crosses this seam.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationLifecycleTransition {
+    pub run_id: String,
+    pub agent_id: String,
+    pub active_count: usize,
+    pub transition_id: u64,
+}
+
+static NEXT_LIFECYCLE_TRANSITION_ID: AtomicU64 = AtomicU64::new(1);
+static ACTIVE_DELEGATES: AtomicU64 = AtomicU64::new(0);
+
+fn lifecycle_dispatch_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn next_lifecycle_transition_id() -> u64 {
+    NEXT_LIFECYCLE_TRANSITION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn emit_lifecycle_transition(run_id: &str, agent_id: &str, active_count: usize) {
+    let transition = DelegationLifecycleTransition {
+        run_id: run_id.to_owned(),
+        agent_id: agent_id.to_owned(),
+        active_count,
+        transition_id: next_lifecycle_transition_id(),
+    };
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        let _guard = lifecycle_dispatch_lock().lock().await;
+        let _ = crate::plugin_host::dispatch_global(
+            crate::plugin_host::ON_DELEGATION_LIFECYCLE,
+            crate::plugin_host::HookContext {
+                event: Some(serde_json::to_value(transition).unwrap_or_default()),
+                ..Default::default()
+            },
+        )
+        .await;
+    });
+}
+
+/// One admitted delegate owns exactly one lease. Drop is the safety net for a
+/// panic/abort path; the finished bit prevents normal completion from
+/// decrementing the global registry a second time.
+struct DelegationLifecycleLease {
+    run_id: String,
+    agent_id: String,
+    finished: bool,
+}
+
+impl DelegationLifecycleLease {
+    fn admit(run_id: &str, agent_id: &str) -> Self {
+        let active_count = ACTIVE_DELEGATES.fetch_add(1, Ordering::AcqRel) + 1;
+        emit_lifecycle_transition(run_id, agent_id, active_count as usize);
+        Self {
+            run_id: run_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let previous = ACTIVE_DELEGATES
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_sub(1)
+            })
+            .unwrap_or(0);
+        emit_lifecycle_transition(
+            &self.run_id,
+            &self.agent_id,
+            previous.saturating_sub(1) as usize,
+        );
+    }
+}
+
+impl Drop for DelegationLifecycleLease {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 /// Errors raised before any delegate runs (validation failures).
 #[derive(Debug)]
 pub enum DelegationError {
@@ -421,7 +513,38 @@ pub async fn run_fanout(
     depth: usize,
     progress: Option<tokio::sync::mpsc::UnboundedSender<DelegateProgress>>,
 ) -> Result<Vec<DelegateResult>, DelegationError> {
-    run_fanout_with_checkpoint(delegates, caps, depth, progress, None).await
+    run_fanout_with_policy(
+        delegates,
+        caps,
+        depth,
+        progress,
+        None,
+        DelegationExecutionPolicy::Normal,
+        format!("delegation-{}", uuid::Uuid::new_v4().simple()),
+    )
+    .await
+}
+
+/// Run a catalog review through the clean Gateway completion path, even when
+/// the delegate names a registered agent. A registered agent owns its own tool
+/// loop, so it cannot be used for a read-only catalog review without making the
+/// preset prompt-only. The clean path exposes no executable tools.
+pub async fn run_read_only_fanout(
+    delegates: Vec<DelegateSpec>,
+    caps: DelegationCaps,
+    depth: usize,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<DelegateProgress>>,
+) -> Result<Vec<DelegateResult>, DelegationError> {
+    run_fanout_with_policy(
+        delegates,
+        caps,
+        depth,
+        progress,
+        None,
+        DelegationExecutionPolicy::ReadOnly,
+        format!("delegation-{}", uuid::Uuid::new_v4().simple()),
+    )
+    .await
 }
 
 /// Like [`run_fanout`] but accepts an optional [`FanoutCheckpointKey`] that
@@ -432,6 +555,37 @@ pub async fn run_fanout_with_checkpoint(
     depth: usize,
     progress: Option<tokio::sync::mpsc::UnboundedSender<DelegateProgress>>,
     checkpoint_key: Option<Arc<FanoutCheckpointKey>>,
+) -> Result<Vec<DelegateResult>, DelegationError> {
+    let lifecycle_run_id = checkpoint_key
+        .as_ref()
+        .map(|key| key.run_id.clone())
+        .unwrap_or_else(|| format!("delegation-{}", uuid::Uuid::new_v4().simple()));
+    run_fanout_with_policy(
+        delegates,
+        caps,
+        depth,
+        progress,
+        checkpoint_key,
+        DelegationExecutionPolicy::Normal,
+        lifecycle_run_id,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DelegationExecutionPolicy {
+    Normal,
+    ReadOnly,
+}
+
+async fn run_fanout_with_policy(
+    delegates: Vec<DelegateSpec>,
+    caps: DelegationCaps,
+    depth: usize,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<DelegateProgress>>,
+    checkpoint_key: Option<Arc<FanoutCheckpointKey>>,
+    execution_policy: DelegationExecutionPolicy,
+    run_id: String,
 ) -> Result<Vec<DelegateResult>, DelegationError> {
     if delegates.is_empty() {
         return Err(DelegationError::Empty);
@@ -474,6 +628,7 @@ pub async fn run_fanout_with_checkpoint(
         let caps = Arc::clone(&caps);
         let progress = progress.clone();
         let checkpoint_key = checkpoint_key.clone();
+        let run_id = run_id.clone();
 
         let id = spec.id.clone();
         let handle = tokio::spawn(async move {
@@ -491,7 +646,15 @@ pub async fn run_fanout_with_checkpoint(
                 });
             }
 
-            let result = run_one(&spec, &caps).await;
+            let agent_id = spec
+                .agent_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .unwrap_or(&spec.id);
+            let mut lifecycle_lease = DelegationLifecycleLease::admit(&run_id, agent_id);
+
+            let result = run_one(&spec, &caps, execution_policy).await;
+            lifecycle_lease.finish();
 
             // SubagentStop hooks (Claude parity): fire detached when a delegated
             // sub-agent finishes, observation-only. Fires for every delegation
@@ -553,9 +716,13 @@ fn fire_subagent_stop_hooks(spec: &DelegateSpec, result: &DelegateResult) {
 }
 
 /// Execute a single delegate with a clean context under its wall-time cap.
-async fn run_one(spec: &DelegateSpec, caps: &DelegationCaps) -> DelegateResult {
+async fn run_one(
+    spec: &DelegateSpec,
+    caps: &DelegationCaps,
+    execution_policy: DelegationExecutionPolicy,
+) -> DelegateResult {
     let wall_time = Duration::from_secs(caps.wall_time_secs.max(1));
-    let fut = call_sub_agent(spec, caps.max_tokens);
+    let fut = call_sub_agent(spec, caps.max_tokens, execution_policy);
 
     match tokio::time::timeout(wall_time, fut).await {
         Ok(Ok(call)) => DelegateResult::ok(spec.id.clone(), spec.preset, call.text)
@@ -604,9 +771,19 @@ impl SubAgentError {
     }
 }
 
+fn should_use_registered_agent(
+    spec: &DelegateSpec,
+    execution_policy: DelegationExecutionPolicy,
+) -> bool {
+    matches!(execution_policy, DelegationExecutionPolicy::Normal)
+        && spec.inline.is_none()
+        && spec.agent_id.as_deref().is_some_and(|id| !id.is_empty())
+}
+
 async fn call_sub_agent(
     spec: &DelegateSpec,
     max_tokens: u32,
+    execution_policy: DelegationExecutionPolicy,
 ) -> Result<SubAgentCall, SubAgentError> {
     // A configured delegate agent + an available runner: invoke the real agent
     // through the chat path so its own engine binding, gateway routing, tools, and
@@ -617,10 +794,10 @@ async fn call_sub_agent(
     //
     // An **inline** ephemeral definition always takes the clean-context Gateway
     // path below, regardless of any `agent_id` also present. This keeps precedence
-    // identical across every entry point (the `delegate__fanout` tool, the workflow
+    // identical across every entry point (the `delegate.fanout` tool, the workflow
     // `AgentDelegate` node, and the raw `/api/delegate/stream` API) and independent
     // of whether a runner happens to be live: `inline` set ⇒ inline runs, period.
-    if spec.inline.is_none() {
+    if should_use_registered_agent(spec, execution_policy) {
         if let Some(id) = spec.agent_id.as_deref().filter(|s| !s.is_empty()) {
             if let Some(runner) = crate::sidecar::agent_runner::global_agent_runner() {
                 let conversation_id = format!("delegate-{}", uuid::Uuid::new_v4().simple());
@@ -824,6 +1001,26 @@ mod tests {
     }
 
     #[test]
+    fn catalog_read_only_execution_skips_write_capable_registered_agent() {
+        let spec = DelegateSpec {
+            id: "catalog-review".into(),
+            task: "review the listing".into(),
+            agent_id: Some("write-capable-agent".into()),
+            preset: PermissionPreset::CodeRead,
+            inline: None,
+        };
+
+        assert!(!should_use_registered_agent(
+            &spec,
+            DelegationExecutionPolicy::ReadOnly
+        ));
+        assert!(should_use_registered_agent(
+            &spec,
+            DelegationExecutionPolicy::Normal
+        ));
+    }
+
+    #[test]
     fn caps_clamp_concurrency() {
         let caps = DelegationCaps {
             max_concurrent: 99,
@@ -851,6 +1048,43 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(caps.effective_max_tokens(), 1);
+    }
+
+    #[test]
+    fn lifecycle_transition_is_narrow_and_monotonic() {
+        let first = next_lifecycle_transition_id();
+        let second = next_lifecycle_transition_id();
+        assert!(second > first);
+        let transition = DelegationLifecycleTransition {
+            run_id: "run-1".into(),
+            agent_id: "agent-a".into(),
+            active_count: 0,
+            transition_id: second,
+        };
+        let value = serde_json::to_value(transition).expect("transition serialises");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "run_id": "run-1",
+                "agent_id": "agent-a",
+                "active_count": 0,
+                "transition_id": second,
+            })
+        );
+        assert_eq!(value.as_object().expect("object").len(), 4);
+    }
+
+    #[test]
+    fn lifecycle_registry_is_global_across_overlapping_runs() {
+        let baseline = ACTIVE_DELEGATES.load(Ordering::Acquire);
+        let mut first = DelegationLifecycleLease::admit("run-a", "agent-a");
+        assert_eq!(ACTIVE_DELEGATES.load(Ordering::Acquire), baseline + 1);
+        let mut second = DelegationLifecycleLease::admit("run-b", "agent-b");
+        assert_eq!(ACTIVE_DELEGATES.load(Ordering::Acquire), baseline + 2);
+        first.finish();
+        assert_eq!(ACTIVE_DELEGATES.load(Ordering::Acquire), baseline + 1);
+        second.finish();
+        assert_eq!(ACTIVE_DELEGATES.load(Ordering::Acquire), baseline);
     }
 
     #[tokio::test]
@@ -1198,7 +1432,7 @@ mod tests {
     #[test]
     fn inline_agent_def_survives_json_round_trip() {
         // The inline field must (de)serialize so workflow-authored `AgentDelegate`
-        // nodes and the `delegate__fanout` tool can carry inline sub-agents.
+        // nodes and the `delegate.fanout` tool can carry inline sub-agents.
         let spec = DelegateSpec {
             id: "d0".into(),
             task: "t".into(),

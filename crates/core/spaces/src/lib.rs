@@ -314,6 +314,19 @@ const DOC_TENANCY_VISIBLE_PREDICATE: &str = "(
         OR (:uid IS NOT NULL AND :org IS NOT NULL AND d.org_id = :org
             AND (d.visibility = 'org'
                  OR (d.visibility = 'team' AND :team IS NOT NULL AND d.team_id = :team)))
+        OR EXISTS (
+            SELECT 1 FROM spaces inherited_space
+            WHERE inherited_space.id = d.space_id
+              AND (
+                  inherited_space.system = 1
+                  OR (:uid IS NOT NULL AND :org IS NOT NULL
+                      AND inherited_space.org_id = :org
+                      AND (inherited_space.visibility = 'org'
+                           OR (inherited_space.visibility = 'team'
+                               AND :team IS NOT NULL
+                               AND inherited_space.team_id = :team)))
+              )
+        )
      )";
 
 /// Space visibility filter — the SQL twin for the `spaces` table (alias `s`).
@@ -458,12 +471,39 @@ fn upsert_space_row(
     system: i64,
     tenancy: &DocOwner,
 ) -> Result<()> {
+    upsert_space_row_with_visibility(
+        conn,
+        space_id,
+        name,
+        description,
+        now,
+        retrieval_mode,
+        system,
+        tenancy,
+        "private",
+        None,
+    )
+}
+
+fn upsert_space_row_with_visibility(
+    conn: &Connection,
+    space_id: &str,
+    name: &str,
+    description: Option<&str>,
+    now: i64,
+    retrieval_mode: &str,
+    system: i64,
+    tenancy: &DocOwner,
+    visibility: &str,
+    team_id: Option<&str>,
+) -> Result<()> {
     let (owner_user_id, org_id) = tenancy.parts();
     conn.execute(
         "INSERT INTO spaces
             (id, name, description, created_at, updated_at, retrieval_mode, system,
-             owner_user_id, org_id)
-         VALUES (:id, :name, :description, :now, :now, :mode, :system, :owner, :org)
+             owner_user_id, org_id, visibility, team_id)
+         VALUES (:id, :name, :description, :now, :now, :mode, :system, :owner, :org,
+                 :visibility, :team_id)
          ON CONFLICT(id) DO UPDATE SET
              owner_user_id = COALESCE(spaces.owner_user_id, excluded.owner_user_id),
              org_id        = COALESCE(spaces.org_id, excluded.org_id)",
@@ -476,6 +516,8 @@ fn upsert_space_row(
             ":system": system,
             ":owner": owner_user_id,
             ":org": org_id,
+            ":visibility": visibility,
+            ":team_id": team_id,
         },
     )
     .context("inserting space (choke point)")?;
@@ -643,10 +685,21 @@ pub struct Space {
     /// suppression + the "Artifacts" resolver.
     #[serde(default)]
     pub system: bool,
+    /// `private` keeps the Space owner-only; `org`/`team` share it with the
+    /// matching organization scope. Pages inherit this effective visibility.
+    #[serde(default = "default_private_visibility")]
+    pub visibility: String,
+    /// The owning team when `visibility == "team"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
     /// Optional Notion-style glyph (`GlyphValue` JSON from `@ryu/ui`). Null =
     /// use the surface fallback icon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<serde_json::Value>,
+}
+
+fn default_private_visibility() -> String {
+    "private".to_owned()
 }
 
 /// A document belonging to a Space.
@@ -657,6 +710,9 @@ pub struct Document {
     pub title: String,
     /// Unix milliseconds.
     pub created_at: i64,
+    /// Unix milliseconds. Older rows may carry `0`; callers should fall back to
+    /// `created_at` when displaying an age.
+    pub updated_at: i64,
     pub chunk_count: i64,
     /// `"page"` (markdown) or `"database"` (data-grid JSON in `source`).
     pub kind: String,
@@ -672,6 +728,20 @@ pub struct Document {
     /// Optional Notion-style glyph (`GlyphValue` JSON). Null = kind default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<serde_json::Value>,
+}
+
+/// A permission-filtered lexical hit from the global Spaces search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LexicalDocumentMatch {
+    pub document_id: String,
+    pub space_id: String,
+    pub space_name: String,
+    pub title: String,
+    pub snippet: String,
+    /// Unix milliseconds.
+    pub created_at: i64,
+    /// Unix milliseconds. Falls back to `created_at` for legacy rows.
+    pub updated_at: i64,
 }
 
 /// A document with its full editable markdown source (Notion-style page).
@@ -718,6 +788,18 @@ pub struct AppDocSummary {
     pub title: String,
     /// Unix milliseconds.
     pub updated_at: i64,
+}
+
+/// Per-Space inventory for documents owned by one Companion app. The count and
+/// byte total are intentionally derived from document rows so an uninstall
+/// preview never needs to expose document contents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSpaceUsage {
+    pub id: String,
+    pub name: String,
+    pub document_count: i64,
+    pub storage_bytes: i64,
+    pub system: bool,
 }
 
 /// Metadata for a binary file document (`kind = 'file'`). The bytes live in the
@@ -1733,10 +1815,34 @@ impl SpaceStore {
         mode: RetrievalMode,
         tenancy: &DocOwner,
     ) -> Result<String> {
+        self.create_space_with_mode_and_visibility(
+            name,
+            description,
+            mode,
+            tenancy,
+            "private",
+            None,
+        )
+        .await
+    }
+
+    /// Create a Space with an explicit retrieval mode and sharing visibility.
+    /// `visibility` is validated at the HTTP boundary; this method keeps the
+    /// storage choke point explicit so a shared Space cannot be created without
+    /// its ACL fields being stamped in the same insert.
+    pub async fn create_space_with_mode_and_visibility(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        mode: RetrievalMode,
+        tenancy: &DocOwner,
+        visibility: &str,
+        team_id: Option<&str>,
+    ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_millis();
         let conn = self.conn.lock().await;
-        upsert_space_row(
+        upsert_space_row_with_visibility(
             &conn,
             &id,
             name,
@@ -1745,6 +1851,8 @@ impl SpaceStore {
             mode.as_str(),
             0,
             tenancy,
+            visibility,
+            team_id,
         )?;
         Ok(id)
     }
@@ -1759,7 +1867,7 @@ impl SpaceStore {
             "SELECT s.id, s.name, s.description, s.created_at, s.updated_at,
                     (SELECT COUNT(*) FROM documents d
                         WHERE d.space_id = s.id AND d.parent_id IS NULL),
-                    s.retrieval_mode, s.system, s.icon
+                    s.retrieval_mode, s.system, s.icon, s.visibility, s.team_id
              FROM spaces s
              WHERE {SPACE_TENANCY_VISIBLE_PREDICATE}
              ORDER BY s.updated_at DESC"
@@ -1785,6 +1893,8 @@ impl SpaceStore {
                     retrieval_mode: RetrievalMode::from_str(&mode_str),
                     system: row.get(7)?,
                     icon: icon_raw.and_then(|s| serde_json::from_str(&s).ok()),
+                    visibility: row.get(9)?,
+                    team_id: row.get(10)?,
                 })
             },
         )?;
@@ -1806,7 +1916,7 @@ impl SpaceStore {
     ) -> Result<Vec<Document>> {
         let conn = self.conn.lock().await;
         let sql = format!(
-            "SELECT d.id, d.space_id, d.title, d.created_at,
+            "SELECT d.id, d.space_id, d.title, d.created_at, d.updated_at,
                     (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id),
                     d.kind, d.parent_id, d.mime, d.byte_size, d.icon
              FROM documents d
@@ -1824,18 +1934,146 @@ impl SpaceStore {
                 ":team": filter.team_id,
             },
             |row| {
-                let icon_raw: Option<String> = row.get(9)?;
+                let icon_raw: Option<String> = row.get(10)?;
                 Ok(Document {
                     id: row.get(0)?,
                     space_id: row.get(1)?,
                     title: row.get(2)?,
                     created_at: row.get(3)?,
-                    chunk_count: row.get(4)?,
-                    kind: row.get(5)?,
-                    parent_id: row.get(6)?,
-                    mime: row.get(7)?,
-                    byte_size: row.get(8)?,
+                    updated_at: row.get(4)?,
+                    chunk_count: row.get(5)?,
+                    kind: row.get(6)?,
+                    parent_id: row.get(7)?,
+                    mime: row.get(8)?,
+                    byte_size: row.get(9)?,
                     icon: icon_raw.and_then(|s| serde_json::from_str(&s).ok()),
+                })
+            },
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Search page titles, Space metadata, editable source, and extracted chunk
+    /// text using literal substring matching. This intentionally sits beside the
+    /// vector/graph RAG path: a global palette needs predictable lexical recall
+    /// without starting an embedder or reranker, while normal Space answers keep
+    /// their richer retrieval behavior.
+    pub async fn search_documents_lexical(
+        &self,
+        query: &str,
+        limit: usize,
+        filter: DocFilter<'_>,
+    ) -> Result<Vec<LexicalDocumentMatch>> {
+        let terms: Vec<String> = query
+            .split_whitespace()
+            .map(str::trim)
+            .filter(|term| !term.is_empty())
+            .take(8)
+            .map(ToOwned::to_owned)
+            .collect();
+        if terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut matches = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for term in terms {
+            let term_matches = self
+                .search_documents_lexical_term(&term, limit, filter)
+                .await?;
+            for hit in term_matches {
+                if seen.insert(hit.document_id.clone()) {
+                    matches.push(hit);
+                    if matches.len() >= limit {
+                        return Ok(matches);
+                    }
+                }
+            }
+        }
+        Ok(matches)
+    }
+
+    async fn search_documents_lexical_term(
+        &self,
+        term: &str,
+        limit: usize,
+        filter: DocFilter<'_>,
+    ) -> Result<Vec<LexicalDocumentMatch>> {
+        let escaped = term
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
+        let conn = self.conn.lock().await;
+        let sql = format!(
+            "SELECT d.id, d.space_id, s.name, d.title, d.created_at,
+                    CASE WHEN d.updated_at > 0 THEN d.updated_at ELSE d.created_at END,
+                    CASE
+                        WHEN lower(COALESCE(s.name, '')) LIKE lower(:pattern) ESCAPE '\\'
+                            THEN s.name
+                        WHEN lower(COALESCE(s.description, '')) LIKE lower(:pattern) ESCAPE '\\'
+                            THEN COALESCE(s.description, s.name)
+                        WHEN lower(COALESCE(d.title, '')) LIKE lower(:pattern) ESCAPE '\\'
+                            THEN d.title
+                        WHEN lower(COALESCE(d.source, '')) LIKE lower(:pattern) ESCAPE '\\'
+                            THEN substr(d.source, 1, 280)
+                        ELSE COALESCE(
+                            (SELECT substr(c.content, 1, 280)
+                             FROM chunks c
+                             WHERE c.document_id = d.id
+                               AND lower(c.content) LIKE lower(:pattern) ESCAPE '\\'
+                             ORDER BY c.ordinal ASC
+                             LIMIT 1),
+                            d.title
+                        )
+                    END AS snippet
+             FROM documents d
+             JOIN spaces s ON s.id = d.space_id
+             WHERE {SPACE_TENANCY_VISIBLE_PREDICATE}
+               AND {DOC_TENANCY_VISIBLE_PREDICATE}
+               AND (
+                    lower(COALESCE(s.name, '')) LIKE lower(:pattern) ESCAPE '\\'
+                    OR lower(COALESCE(s.description, '')) LIKE lower(:pattern) ESCAPE '\\'
+                    OR lower(COALESCE(d.title, '')) LIKE lower(:pattern) ESCAPE '\\'
+                    OR lower(COALESCE(d.source, '')) LIKE lower(:pattern) ESCAPE '\\'
+                    OR EXISTS (
+                        SELECT 1 FROM chunks c
+                        WHERE c.document_id = d.id
+                          AND lower(c.content) LIKE lower(:pattern) ESCAPE '\\'
+                    )
+               )
+             ORDER BY CASE
+                        WHEN lower(d.title) = lower(:term) THEN 0
+                        WHEN lower(s.name) = lower(:term) THEN 1
+                        ELSE 2
+                      END,
+                      CASE WHEN d.updated_at > 0 THEN d.updated_at ELSE d.created_at END DESC
+             LIMIT :limit"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            named_params! {
+                ":bound": filter.bound_flag(),
+                ":uid": filter.owner_user_id,
+                ":org": filter.org_id,
+                ":team": filter.team_id,
+                ":pattern": pattern,
+                ":term": term,
+                ":limit": limit as i64,
+            },
+            |row| {
+                Ok(LexicalDocumentMatch {
+                    document_id: row.get(0)?,
+                    space_id: row.get(1)?,
+                    space_name: row.get(2)?,
+                    title: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    snippet: row.get(6)?,
                 })
             },
         )?;
@@ -2181,6 +2419,89 @@ impl SpaceStore {
         }
         self.delete_document(doc_id).await?;
         Ok(())
+    }
+
+    /// Summarize every visible Space containing documents owned by an app.
+    /// App ownership is the exact `kind = app:<plugin_id>` contract used by the
+    /// Companion document bridge; the caller filter still applies to both the
+    /// Space and document rows on an org-bound node.
+    pub async fn app_space_usage(
+        &self,
+        plugin_id: &str,
+        filter: DocFilter<'_>,
+    ) -> Result<Vec<AppSpaceUsage>> {
+        let conn = self.conn.lock().await;
+        let sql = format!(
+            "SELECT s.id, s.name, COUNT(d.id),
+                    COALESCE(SUM(COALESCE(d.byte_size, length(d.source))), 0), s.system
+             FROM spaces s
+             JOIN documents d ON d.space_id = s.id
+             WHERE d.kind = :kind
+               AND {SPACE_TENANCY_VISIBLE_PREDICATE}
+               AND {DOC_TENANCY_VISIBLE_PREDICATE}
+             GROUP BY s.id, s.name, s.system
+             ORDER BY MAX(s.updated_at) DESC, s.id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            named_params! {
+                ":kind": Self::app_kind(plugin_id),
+                ":bound": filter.bound_flag(),
+                ":uid": filter.owner_user_id,
+                ":org": filter.org_id,
+                ":team": filter.team_id,
+            },
+            |row| {
+                Ok(AppSpaceUsage {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    document_count: row.get(2)?,
+                    storage_bytes: row.get(3)?,
+                    system: row.get(4)?,
+                })
+            },
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Delete all visible documents owned by an app, preserving the normal
+    /// document deletion transaction for vectors, graph rows, links, versions,
+    /// and child pages. Spaces themselves are shared Core resources and are not
+    /// removed by app cleanup.
+    pub async fn delete_app_data(&self, plugin_id: &str, filter: DocFilter<'_>) -> Result<u64> {
+        let ids = {
+            let conn = self.conn.lock().await;
+            let sql = format!(
+                "SELECT d.id
+                 FROM documents d
+                 JOIN spaces s ON s.id = d.space_id
+                 WHERE d.kind = :kind
+                   AND {SPACE_TENANCY_VISIBLE_PREDICATE}
+                   AND {DOC_TENANCY_VISIBLE_PREDICATE}
+                 ORDER BY d.parent_id IS NOT NULL, d.id"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                named_params! {
+                    ":kind": Self::app_kind(plugin_id),
+                    ":bound": filter.bound_flag(),
+                    ":uid": filter.owner_user_id,
+                    ":org": filter.org_id,
+                    ":team": filter.team_id,
+                },
+                |row| row.get::<_, String>(0),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut removed = 0;
+        for id in ids {
+            if self.delete_document(&id).await? {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     /// Shared constructor for an empty document of a given `kind`
@@ -2761,8 +3082,20 @@ impl SpaceStore {
         let conn = self.conn.lock().await;
         let meta = conn
             .query_row(
-                "SELECT owner_user_id, org_id, visibility, team_id
-                 FROM documents WHERE id = ?1",
+                "SELECT d.owner_user_id, d.org_id,
+                        CASE
+                            WHEN s.system = 1 THEN 'org'
+                            WHEN s.visibility IN ('org', 'team') THEN s.visibility
+                            ELSE d.visibility
+                        END,
+                        CASE
+                            WHEN s.system = 1 OR s.visibility IN ('org', 'team')
+                                THEN s.team_id
+                            ELSE d.team_id
+                        END
+                 FROM documents d
+                 JOIN spaces s ON s.id = d.space_id
+                 WHERE d.id = ?1",
                 params![doc_id],
                 |row| {
                     Ok(DocAccessMeta {
@@ -2838,6 +3171,36 @@ impl SpaceStore {
         Ok(doc)
     }
 
+    /// Rename an ordinary Space without changing its documents or retrieval
+    /// index. System Spaces are node-owned filing drawers and cannot be renamed.
+    /// Returns `false` when no Space row matches.
+    pub async fn rename_space(&self, space_id: &str, name: &str) -> Result<bool> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("space name is required");
+        }
+        let now = now_millis();
+        let conn = self.conn.lock().await;
+        let is_system: Option<i64> = conn
+            .query_row(
+                "SELECT system FROM spaces WHERE id = ?1",
+                params![space_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("checking system flag before rename")?;
+        if is_system == Some(1) {
+            anyhow::bail!("space '{space_id}' is a system space and cannot be renamed");
+        }
+        let updated = conn
+            .execute(
+                "UPDATE spaces SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                params![name, now, space_id],
+            )
+            .context("renaming space")?;
+        Ok(updated > 0)
+    }
+
     /// Set (or clear) a Space's Notion-style glyph. Does not touch documents.
     /// Returns `false` when no such space exists.
     pub async fn set_space_icon(
@@ -2858,6 +3221,61 @@ impl SpaceStore {
             )
             .context("updating space icon")?;
         Ok(n > 0)
+    }
+
+    /// Set a Space's sharing visibility. Pages in the Space inherit this scope
+    /// through the document visibility predicates and by-id access metadata.
+    /// System Spaces remain node-owned and cannot be changed.
+    pub async fn set_visibility(
+        &self,
+        space_id: &str,
+        visibility: &str,
+        team_id: Option<&str>,
+        admin_authorized: bool,
+    ) -> Result<bool> {
+        if !matches!(visibility, "private" | "org" | "team") {
+            anyhow::bail!(
+                "unknown visibility {visibility:?}: expected \"private\", \"org\", or \"team\""
+            );
+        }
+        if visibility == "team" && team_id.is_none() {
+            anyhow::bail!("team visibility requires team_id");
+        }
+        let now = now_millis();
+        let conn = self.conn.lock().await;
+        let system: Option<i64> = conn
+            .query_row(
+                "SELECT system FROM spaces WHERE id = ?1",
+                params![space_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("checking system flag before changing visibility")?;
+        if system == Some(1) {
+            anyhow::bail!("system spaces cannot change visibility");
+        }
+        if visibility == "private" {
+            let current: Option<String> = conn
+                .query_row(
+                    "SELECT visibility FROM spaces WHERE id = ?1",
+                    params![space_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("reading current space visibility")?;
+            if matches!(current.as_deref(), Some("org" | "team")) && !admin_authorized {
+                anyhow::bail!(
+                    "only organization admins can make shared spaces private"
+                );
+            }
+        }
+        let updated = conn
+            .execute(
+                "UPDATE spaces SET visibility = ?1, team_id = ?2, updated_at = ?3 WHERE id = ?4",
+                params![visibility, team_id, now, space_id],
+            )
+            .context("updating space visibility")?;
+        Ok(updated > 0)
     }
 
     /// Change a Space's [`RetrievalMode`], **rebuilding its entity graph so the new
@@ -5913,6 +6331,146 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn shared_space_visibility_is_inherited_by_pages_and_space_listing() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let shared_space = store
+            .create_space_with_mode_and_visibility(
+                "Team notes",
+                None,
+                RetrievalMode::Vector,
+                &owned("alice"),
+                "org",
+                None,
+            )
+            .await
+            .unwrap();
+        let private_space = store
+            .create_space("Alice only", None, &owned("alice"))
+            .await
+            .unwrap();
+        let shared_page = store
+            .create_page(&shared_space, "Roadmap", &owned("alice"))
+            .await
+            .unwrap();
+        let private_page = store
+            .create_page(&private_space, "Private plan", &owned("alice"))
+            .await
+            .unwrap();
+
+        let bob_spaces = store
+            .list_spaces(DocFilter::for_caller(Some("bob"), Some("org1"), true))
+            .await
+            .unwrap();
+        assert!(bob_spaces.iter().any(|space| space.id == shared_space));
+        assert!(bob_spaces.iter().all(|space| space.id != private_space));
+        let shared = bob_spaces
+            .iter()
+            .find(|space| space.id == shared_space)
+            .expect("shared space is visible to the organization");
+        assert_eq!(shared.visibility, "org");
+
+        let bob_pages = store
+            .list_documents(
+                &shared_space,
+                DocFilter::for_caller(Some("bob"), Some("org1"), true),
+            )
+            .await
+            .unwrap();
+        assert!(bob_pages.iter().any(|page| page.id == shared_page));
+
+        let private_pages = store
+            .list_documents(
+                &private_space,
+                DocFilter::for_caller(Some("bob"), Some("org1"), true),
+            )
+            .await
+            .unwrap();
+        assert!(private_pages.iter().all(|page| page.id != private_page));
+
+        let effective = store
+            .get_access_meta(&shared_page)
+            .await
+            .unwrap()
+            .expect("shared page has ACL metadata");
+        assert_eq!(effective.visibility, "org");
+
+        store
+            .set_visibility(&shared_space, "private", None, true)
+            .await
+            .unwrap();
+        let bob_after_private = store
+            .list_spaces(DocFilter::for_caller(Some("bob"), Some("org1"), true))
+            .await
+            .unwrap();
+        assert!(bob_after_private
+            .iter()
+            .all(|space| space.id != shared_space));
+        let no_pages = store
+            .list_documents(
+                &shared_space,
+                DocFilter::for_caller(Some("bob"), Some("org1"), true),
+            )
+            .await
+            .unwrap();
+        assert!(no_pages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn space_visibility_validates_team_scope_and_protects_system_spaces() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Team notes", None, &owned("alice"))
+            .await
+            .unwrap();
+
+        assert!(store
+            .set_visibility(&space, "team", None, true)
+            .await
+            .is_err());
+        assert!(store
+            .set_visibility(&space, "team", Some("team-1"), true)
+            .await
+            .unwrap());
+        let listed = store
+            .list_spaces(DocFilter::for_caller_with_team(
+                Some("bob"),
+                Some("org1"),
+                Some("team-1"),
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(listed[0].visibility, "team");
+        assert_eq!(listed[0].team_id.as_deref(), Some("team-1"));
+        assert!(store
+            .list_spaces(DocFilter::for_caller_with_team(
+                Some("bob"),
+                Some("org1"),
+                Some("team-2"),
+                true,
+            ))
+            .await
+            .unwrap()
+            .iter()
+            .all(|listed_space| listed_space.id != space));
+
+        assert!(store
+            .set_visibility(&space, "private", None, false)
+            .await
+            .is_err());
+        assert!(store
+            .set_visibility(&space, "private", None, true)
+            .await
+            .unwrap());
+
+        let system = store.ensure_system_space("Artifacts", None).await.unwrap();
+        assert!(store
+            .set_visibility(&system, "private", None, true)
+            .await
+            .is_err());
+    }
+
     /// The link graph must not leak another member's private document node, title,
     /// or link topology on a bound node — and must be byte-identical (full graph)
     /// on an unbound / unrestricted call. Twin of
@@ -6225,6 +6783,63 @@ mod tests {
         assert!(store.delete_document(&doc).await.unwrap());
         assert!(store.get_document(&doc).await.unwrap().is_none());
         assert!(!store.delete_document(&doc).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn global_lexical_search_matches_metadata_source_and_respects_tenancy() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let owner = DocOwner::owned(Some("alice"), Some("org-1"));
+        let space = store
+            .create_space("Research Notes", Some("Quarterly planning"), &owner)
+            .await
+            .unwrap();
+        let doc = store
+            .create_page(&space, "Zephyr roadmap", &owner)
+            .await
+            .unwrap();
+        store
+            .update_document(
+                &doc,
+                "Zephyr roadmap",
+                "The launch checklist covers the migration window.",
+            )
+            .await
+            .unwrap();
+
+        let source_hits = store
+            .search_documents_lexical(
+                "migration window",
+                10,
+                DocFilter::for_caller(Some("alice"), Some("org-1"), true),
+            )
+            .await
+            .unwrap();
+        assert_eq!(source_hits.len(), 1);
+        assert_eq!(source_hits[0].document_id, doc);
+        assert_eq!(source_hits[0].title, "Zephyr roadmap");
+        assert_eq!(source_hits[0].space_name, "Research Notes");
+        assert!(source_hits[0].updated_at >= source_hits[0].created_at);
+
+        let metadata_hits = store
+            .search_documents_lexical(
+                "Quarterly",
+                10,
+                DocFilter::for_caller(Some("alice"), Some("org-1"), true),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metadata_hits.len(), 1);
+        assert_eq!(metadata_hits[0].document_id, doc);
+
+        let hidden_hits = store
+            .search_documents_lexical(
+                "migration",
+                10,
+                DocFilter::for_caller(Some("bob"), Some("org-1"), true),
+            )
+            .await
+            .unwrap();
+        assert!(hidden_hits.is_empty());
     }
 
     // ── Wiki page-links: extraction, backlinks, graph, link-expansion ───────────
@@ -6541,7 +7156,11 @@ mod tests {
             .await;
 
         assert!(
-            store.search(&space, "old width", 5).await.unwrap().is_empty(),
+            store
+                .search(&space, "old width", 5)
+                .await
+                .unwrap()
+                .is_empty(),
             "a dimension-swapped embedder must not query the old vec0 table"
         );
     }
@@ -6766,8 +7385,36 @@ mod tests {
             .iter()
             .any(|c| c.content.contains("searchable app content")));
 
-        // App A can delete its own doc; afterwards its list is empty.
-        store.app_delete_doc("app.a", &doc).await.unwrap();
+        // Usage is scoped to the owning app and reports the updated source size.
+        let usage = store
+            .app_space_usage("app.a", DocFilter::unrestricted())
+            .await
+            .unwrap();
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].id, space);
+        assert_eq!(usage[0].document_count, 1);
+        assert!(usage[0].storage_bytes > 0);
+
+        let foreign_doc = store
+            .app_create_doc("app.b", &space, "Doc B", &DocOwner::unattributed())
+            .await
+            .unwrap();
+
+        // Bulk deletion removes only the requested app's docs and preserves the
+        // shared Space plus documents owned by other apps.
+        assert_eq!(
+            store
+                .delete_app_data("app.a", DocFilter::unrestricted())
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store.app_get_doc("app.a", &doc).await.unwrap().is_none());
+        assert!(store
+            .app_get_doc("app.b", &foreign_doc)
+            .await
+            .unwrap()
+            .is_some());
         assert!(store
             .app_list_docs("app.a", &space)
             .await

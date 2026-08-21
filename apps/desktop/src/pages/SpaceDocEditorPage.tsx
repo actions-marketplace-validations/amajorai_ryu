@@ -1,4 +1,4 @@
-import { LibraryIcon, WorkflowSquare01Icon } from "@hugeicons/core-free-icons";
+import { LibraryIcon, WorkflowCircle06Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -434,7 +434,7 @@ export default function SpaceDocEditorPage({
 					title="Open the knowledge graph for this space"
 					variant="ghost"
 				>
-					<HugeiconsIcon className="size-4" icon={WorkflowSquare01Icon} />
+					<HugeiconsIcon className="size-4" icon={WorkflowCircle06Icon} />
 					Graph
 				</Button>
 			</div>

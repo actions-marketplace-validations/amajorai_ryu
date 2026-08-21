@@ -510,19 +510,40 @@ async fn cached_github_repo(
         return Ok(value);
     }
     let url = format!("https://api.github.com/repos/{owner}/{repo}");
-    let resp = get(client, &url)
-        .send()
-        .await
-        .context("requesting GitHub repo metadata")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("GitHub repo metadata returned HTTP {}", resp.status());
+    let fetched = async {
+        let resp = get(client, &url)
+            .send()
+            .await
+            .context("requesting GitHub repo metadata")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("GitHub repo metadata returned HTTP {}", resp.status());
+        }
+        let repo = resp
+            .json::<GithubRepo>()
+            .await
+            .context("parsing GitHub repo metadata")?;
+        Ok::<GithubRepo, anyhow::Error>(repo)
     }
-    let repo = resp
-        .json::<GithubRepo>()
-        .await
-        .context("parsing GitHub repo metadata")?;
-    write_cache(&path, &repo);
-    Ok(repo)
+    .await;
+    match fetched {
+        Ok(repo) => {
+            write_cache(&path, &repo);
+            Ok(repo)
+        }
+        Err(error) => {
+            if let Some(cached) = read_stale_cache::<GithubRepo>(&path) {
+                tracing::warn!(
+                    owner,
+                    repo,
+                    error = %error,
+                    "GitHub repo metadata unavailable; using stale cached metadata"
+                );
+                Ok(cached)
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 async fn cached_github_tree(
@@ -535,24 +556,46 @@ async fn cached_github_tree(
         return Ok(value);
     }
     let url = format!("https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1");
-    let resp = get(client, &url)
-        .send()
-        .await
-        .context("requesting GitHub repo tree")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("GitHub repo tree returned HTTP {}", resp.status());
+    let fetched = async {
+        let resp = get(client, &url)
+            .send()
+            .await
+            .context("requesting GitHub repo tree")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("GitHub repo tree returned HTTP {}", resp.status());
+        }
+        let parsed = resp
+            .json::<GithubTreeResponse>()
+            .await
+            .context("parsing GitHub repo tree")?;
+        Ok::<Vec<GithubTreeItem>, anyhow::Error>(
+            parsed
+                .tree
+                .into_iter()
+                .filter(|item| item.kind == "blob")
+                .collect::<Vec<_>>(),
+        )
     }
-    let parsed = resp
-        .json::<GithubTreeResponse>()
-        .await
-        .context("parsing GitHub repo tree")?;
-    let tree = parsed
-        .tree
-        .into_iter()
-        .filter(|item| item.kind == "blob")
-        .collect::<Vec<_>>();
-    write_cache(&path, &tree);
-    Ok(tree)
+    .await;
+    match fetched {
+        Ok(tree) => {
+            write_cache(&path, &tree);
+            Ok(tree)
+        }
+        Err(error) => {
+            if let Some(cached) = read_stale_cache::<Vec<GithubTreeItem>>(&path) {
+                tracing::warn!(
+                    owner,
+                    repo,
+                    error = %error,
+                    "GitHub repo tree unavailable; using stale cached tree"
+                );
+                Ok(cached)
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 async fn enrich_file_contents_from_github(
@@ -575,8 +618,20 @@ async fn enrich_file_contents_from_github(
     if let Some(cached) = read_fresh_cache::<Vec<DownloadFile>>(&cache_path) {
         return merge_cached_file_contents(files, cached);
     }
-    let Ok(tree) = cached_github_tree(client, &owner, &repo).await else {
-        return files;
+    let tree = match cached_github_tree(client, &owner, &repo).await {
+        Ok(tree) => tree,
+        Err(error) => {
+            if let Some(cached) = read_stale_cache::<Vec<DownloadFile>>(&cache_path) {
+                tracing::warn!(
+                    owner,
+                    repo,
+                    error = %error,
+                    "GitHub skill files unavailable; using stale cached contents"
+                );
+                return merge_cached_file_contents(files, cached);
+            }
+            return files;
+        }
     };
     let mut enriched = Vec::with_capacity(files.len());
     for mut file in files {
@@ -691,13 +746,31 @@ pub(crate) fn read_fresh_cache<T>(path: &std::path::Path) -> Option<T>
 where
     T: serde::de::DeserializeOwned,
 {
+    let envelope = read_cache::<T>(path)?;
+    (now_unix_seconds().saturating_sub(envelope.fetched_at) <= GITHUB_CACHE_TTL_SECONDS)
+        .then_some(envelope.value)
+}
+
+/// Read a GitHub cache without applying the freshness window.
+///
+/// GitHub-backed catalog metadata is safe to serve stale: it describes what was
+/// seen previously, while the actual install path still fetches and validates the
+/// source before writing anything locally. Keeping this separate from
+/// [`read_fresh_cache`] lets callers choose stale-on-outage without weakening the
+/// normal refresh cadence.
+pub(crate) fn read_stale_cache<T>(path: &std::path::Path) -> Option<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    read_cache::<T>(path).map(|envelope| envelope.value)
+}
+
+fn read_cache<T>(path: &std::path::Path) -> Option<CacheEnvelope<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
     let raw = std::fs::read_to_string(path).ok()?;
-    let envelope = serde_json::from_str::<CacheEnvelope<T>>(&raw).ok()?;
-    if now_unix_seconds().saturating_sub(envelope.fetched_at) <= GITHUB_CACHE_TTL_SECONDS {
-        Some(envelope.value)
-    } else {
-        None
-    }
+    serde_json::from_str::<CacheEnvelope<T>>(&raw).ok()
 }
 
 pub(crate) fn write_cache<T>(path: &std::path::Path, value: &T)
@@ -1108,7 +1181,7 @@ fn load_provenance() -> std::collections::HashMap<String, String> {
         .unwrap_or_default()
 }
 
-fn record_provenance(slug: &str, id: &str) {
+pub(crate) fn record_provenance(slug: &str, id: &str) {
     let mut map = load_provenance();
     map.insert(slug.to_string(), id.to_string());
     if let Ok(json) = serde_json::to_string_pretty(&map) {
@@ -1118,6 +1191,12 @@ fn record_provenance(slug: &str, id: &str) {
         }
         let _ = std::fs::write(path, json);
     }
+}
+
+pub(crate) fn skill_provenance_matches(slug: &str, id: &str) -> bool {
+    load_provenance()
+        .get(slug)
+        .is_some_and(|installed_id| installed_id == id)
 }
 
 // ── Installed detection ─────────────────────────────────────────────────────
@@ -1405,5 +1484,27 @@ mod tests {
         );
         // Nothing matches → None.
         assert_eq!(find_repo_file_path(&[], "x", "SKILL.md"), None);
+    }
+
+    #[test]
+    fn stale_github_cache_survives_the_freshness_window() {
+        let path = std::env::temp_dir().join(format!(
+            "ryu-skill-cache-test-{}-{}.json",
+            std::process::id(),
+            now_unix_seconds()
+        ));
+        let envelope = CacheEnvelope {
+            fetched_at: 0,
+            value: vec!["skills/pdf".to_string()],
+        };
+        std::fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+        assert_eq!(read_fresh_cache::<Vec<String>>(&path), None);
+        assert_eq!(
+            read_stale_cache::<Vec<String>>(&path),
+            Some(vec!["skills/pdf".to_string()])
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -18,6 +18,10 @@ import {
 } from "../../shared/auto-update.ts";
 import type { UpdateState } from "../../shared/ipc.ts";
 import { IPC } from "../../shared/ipc.ts";
+import {
+	ELECTRON_UPDATE_INSTALL_OPTIONS,
+	shouldAutoInstallDownloadedUpdate,
+} from "../../shared/update-policy.ts";
 import { coreHeaders, loadConfig } from "./config.ts";
 
 const { autoUpdater } = electronUpdater;
@@ -26,8 +30,9 @@ const { autoUpdater } = electronUpdater;
 const PREF_TIMEOUT_MS = 5000;
 
 // The latest update lifecycle state, held in main so a settings panel that
-// mounts AFTER an update already downloaded can still render the restart
-// affordance (the `downloaded` event likely fired while the panel was closed).
+// mounts AFTER an update already downloaded can still render the update state
+// (the `downloaded` event likely fired while the panel was closed). Automatic
+// installs still keep this state updated for observers and diagnostics.
 let updateState: UpdateState = {
 	available: false,
 	downloaded: false,
@@ -108,9 +113,9 @@ function emit(channel: string, getWindow: () => BrowserWindow | null): void {
  * Listeners attach unconditionally (harmless in dev), but every trigger is
  * guarded by `app.isPackaged`: an unpackaged app has no update feed and
  * `checkForUpdates*` throws ("feed not provided"). The shared `auto-updates`
- * pref decides behaviour: enabled → `checkForUpdatesAndNotify()` (auto-download);
- * disabled → `autoDownload = false` + `checkForUpdates()` to merely surface
- * availability without downloading.
+ * pref decides behaviour: enabled → `checkForUpdatesAndNotify()` (auto-download)
+ * followed by a silent install; disabled → `autoDownload = false` plus
+ * `checkForUpdates()` to merely surface availability without downloading.
  */
 export function initAutoUpdater(getWindow: () => BrowserWindow | null): void {
 	autoUpdater.on("update-available", (info: { version?: string }) => {
@@ -128,6 +133,18 @@ export function initAutoUpdater(getWindow: () => BrowserWindow | null): void {
 			version: info?.version ?? updateState.version,
 		};
 		emit(IPC.update.downloaded, getWindow);
+
+		// `checkForUpdatesAndNotify()` downloads but does not install. Complete the
+		// automatic path here, after the signed update is ready. Read the shared
+		// preference again so a user who turns automatic updates off while a download
+		// is in flight keeps control of the restart.
+		void getAutoUpdateEnabled()
+			.then((enabled) => {
+				if (shouldAutoInstallDownloadedUpdate(app.isPackaged, enabled)) {
+					installDownloadedUpdateSilently();
+				}
+			})
+			.catch(() => undefined);
 	});
 
 	if (!app.isPackaged) {
@@ -149,9 +166,17 @@ export function initAutoUpdater(getWindow: () => BrowserWindow | null): void {
 		});
 }
 
-/** Quit and install a downloaded update. No-op unless packaged + downloaded. */
+/** Quit and silently install a downloaded update. No-op unless packaged + downloaded. */
 export function quitAndInstall(): void {
 	if (app.isPackaged && updateState.downloaded) {
-		autoUpdater.quitAndInstall();
+		installDownloadedUpdateSilently();
 	}
+}
+
+/** Run the downloaded installer without exposing its OS-level wizard. */
+function installDownloadedUpdateSilently(): void {
+	autoUpdater.quitAndInstall(
+		ELECTRON_UPDATE_INSTALL_OPTIONS.isSilent,
+		ELECTRON_UPDATE_INSTALL_OPTIONS.isForceRunAfter
+	);
 }

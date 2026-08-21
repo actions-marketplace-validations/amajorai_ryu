@@ -291,7 +291,7 @@ const MIME_FLOOR_EXTENSIONS: &[(&str, &str)] = &[
 ///
 /// [`is_builtin_readable`] keys on the extension, and two of the three
 /// [`crate::space_file_index::create_file_indexed`] callers pass a **title**, not a
-/// filename: `POST /api/spaces/:id/files` takes `body.title` and the `artifact__create`
+/// filename: `POST /api/spaces/:id/files` takes `body.title` and the `artifact.create`
 /// MCP tool takes a `title` argument. So a note called `notes` with `mime:
 /// text/plain` answered `false`, went to the bound provider, and landed on
 /// `skipped/no_provider` — telling the user to install a document parser for a file
@@ -1331,7 +1331,7 @@ const MAX_REPLACEMENT_RATIO: f64 = 0.10;
 /// - `payload.txt` holding a zip takes the extension arm;
 /// - `notes` + `mime: text/plain` takes the [`mime_floor_name`] arm, and title and mime
 ///   arrive independently from the same request body (`POST /api/spaces/:id/files`), the
-///   same tool arguments (`artifact__create`), or the request's own `content-type`
+///   same tool arguments (`artifact.create`), or the request's own `content-type`
 ///   (`POST /api/uploads`).
 ///
 /// Either way the bytes reached the decoder and came back as a page of replacement
@@ -1987,7 +1987,7 @@ mod tests {
 
     #[test]
     fn a_title_with_no_extension_reaches_the_floor_through_its_mime() {
-        // The defect: `POST /api/spaces/:id/files` and `artifact__create` pass a
+        // The defect: `POST /api/spaces/:id/files` and `artifact.create` pass a
         // TITLE, so a plain-text note called `notes` answered `false` to the
         // extension-keyed floor and was sent to a provider that would refuse it —
         // `skipped/no_provider`, "install a document parser", for a file Core reads

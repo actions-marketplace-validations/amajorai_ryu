@@ -36,7 +36,7 @@ use crate::dashboards_client::{global_client, DashboardsClient};
 use crate::sidecar::mcp::RegistryTool;
 
 /// Reserved server name for the dashboard-builder tool provider. Must not contain
-/// `__` (the tool-id separator).
+/// `.` (the tool-id namespace separator).
 pub const SERVER_NAME: &str = "dashboard_builder";
 
 /// Compact reference for the widget object shape + the allowed kinds and sources,
@@ -63,7 +63,7 @@ config hints by kind: stat → { value_key?, label?, unit? }; *_chart → { data
 pub fn tools() -> Vec<RegistryTool> {
     vec![
         RegistryTool {
-            id: "dashboard_builder__get_dashboard".to_owned(),
+            id: "dashboard_builder.get_dashboard".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "get_dashboard".to_owned(),
             description: Some(
@@ -76,7 +76,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "dashboard_builder__create_dashboard".to_owned(),
+            id: "dashboard_builder.create_dashboard".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "create_dashboard".to_owned(),
             description: Some(format!(
@@ -88,7 +88,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "dashboard_builder__configure_dashboard".to_owned(),
+            id: "dashboard_builder.configure_dashboard".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "configure_dashboard".to_owned(),
             description: Some(format!(
@@ -350,8 +350,8 @@ mod tests {
         assert_eq!(tools.len(), 3);
         for t in &tools {
             assert_eq!(t.server, SERVER_NAME);
-            assert!(t.id.starts_with("dashboard_builder__"));
-            assert!(!t.name.contains("__"));
+            assert!(t.id.starts_with("dashboard_builder."));
+            assert!(!t.name.contains('.'));
         }
     }
 

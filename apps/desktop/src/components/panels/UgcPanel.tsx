@@ -71,6 +71,10 @@ import {
 	TabsTrigger,
 } from "@ryu/ui/components/tabs.tsx";
 import { Textarea } from "@ryu/ui/components/textarea.tsx";
+import {
+	formatMinorCurrency,
+	formatCount as formatSharedCount,
+} from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -255,28 +259,15 @@ interface UgcOverview {
 
 // ── Formatting ───────────────────────────────────────────────────────────────
 
-const USD_FORMATTER = new Intl.NumberFormat(undefined, {
-	currency: "USD",
-	style: "currency",
-});
-
-const COUNT_FORMATTER = new Intl.NumberFormat();
-
 /** Integer cents in, display string out. This single division is the ONLY place
  *  money touches a float, and it happens after all arithmetic is done. A field
  *  the sidecar did not send renders as "—" rather than "$NaN". */
 function formatCents(cents: number): string {
-	if (!Number.isFinite(cents)) {
-		return "—";
-	}
-	return USD_FORMATTER.format(cents / 100);
+	return formatMinorCurrency(cents, "USD");
 }
 
 function formatCount(value: number): string {
-	if (!Number.isFinite(value)) {
-		return "—";
-	}
-	return COUNT_FORMATTER.format(value);
+	return formatSharedCount(value) ?? "—";
 }
 
 function formatDate(iso: string | null | undefined): string {
@@ -814,8 +805,9 @@ function UgcWorkspace() {
 				<span className="flex-1" />
 				{overview ? (
 					<span className="hidden truncate text-[11px] text-muted-foreground tabular-nums sm:inline">
-						{overview.campaigns} campaigns · {overview.creators} creators ·{" "}
-						{overview.submissions.pending} pending ·{" "}
+						{formatCount(overview.campaigns)} campaigns ·{" "}
+						{formatCount(overview.creators)} creators ·{" "}
+						{formatCount(overview.submissions.pending)} pending ·{" "}
 						<span className="font-heading">
 							{formatCents(overview.accrued_cents)}
 						</span>{" "}
@@ -1803,7 +1795,7 @@ function LeaderboardTable({
 							{formatCount(row.views)}
 						</TableCell>
 						<TableCell className="p-2 text-right tabular-nums">
-							{row.approved_submissions}
+							{formatCount(row.approved_submissions)}
 						</TableCell>
 						<TableCell className="p-2 text-right font-heading tabular-nums">
 							{formatCents(row.accrued_cents)}
@@ -2262,13 +2254,13 @@ function ComposioSettingsDialog({
 						Cancel
 					</Button>
 					<Button
-						disabled={busy || apiKey.trim().length === 0}
+						disabled={apiKey.trim().length === 0}
+						loading={busy}
 						onClick={() => {
 							save().catch(() => undefined);
 						}}
 						type="button"
 					>
-						{busy ? <Spinner className="size-3.5" /> : null}
 						Save key
 					</Button>
 				</DialogFooter>
@@ -2503,13 +2495,13 @@ function NewCampaignDialog({
 						Cancel
 					</Button>
 					<Button
-						disabled={saving || brand.trim().length === 0}
+						disabled={brand.trim().length === 0}
+						loading={saving}
 						onClick={() => {
 							submit().catch(() => undefined);
 						}}
 						type="button"
 					>
-						{saving ? <Spinner className="size-3.5" /> : null}
 						Create campaign
 					</Button>
 				</DialogFooter>
@@ -2614,13 +2606,13 @@ function NewCreatorDialog({
 						Cancel
 					</Button>
 					<Button
-						disabled={saving || displayName.trim().length === 0}
+						disabled={displayName.trim().length === 0}
+						loading={saving}
 						onClick={() => {
 							submit().catch(() => undefined);
 						}}
 						type="button"
 					>
-						{saving ? <Spinner className="size-3.5" /> : null}
 						Add creator
 					</Button>
 				</DialogFooter>
@@ -2770,17 +2762,16 @@ function NewSubmissionDialog({
 					</Button>
 					<Button
 						disabled={
-							saving ||
 							creatorId.length === 0 ||
 							platform.length === 0 ||
 							postUrl.trim().length === 0
 						}
+						loading={saving}
 						onClick={() => {
 							submit().catch(() => undefined);
 						}}
 						type="button"
 					>
-						{saving ? <Spinner className="size-3.5" /> : null}
 						Record submission
 					</Button>
 				</DialogFooter>
@@ -2950,13 +2941,12 @@ function RecordMetricsDialog({
 						Cancel
 					</Button>
 					<Button
-						disabled={saving}
+						loading={saving}
 						onClick={() => {
 							submit().catch(() => undefined);
 						}}
 						type="button"
 					>
-						{saving ? <Spinner className="size-3.5" /> : null}
 						Record metrics
 					</Button>
 				</DialogFooter>

@@ -3,13 +3,20 @@ import { sileo } from "sileo";
 // Importing the wrapper is what installs the slot rules on the shared `sileo`
 // singleton — the ~40 call sites that import "sileo" directly rely on exactly
 // this side effect, so the test exercises the same entry point they do.
-import "./sileo.tsx";
+import { Toaster } from "./sileo.tsx";
 
 const PROGRESS_ID = "ryu-toast-progress";
 
 describe("sileo slot ids", () => {
 	beforeEach(() => {
 		sileo.clear();
+	});
+
+	test("shared toaster preserves sentence casing in titles", () => {
+		const element = Toaster({ position: "bottom-center" });
+
+		expect(element.props.position).toBe("bottom-center");
+		expect(element.props.options.styles.title).toBe("ryu-sileo-title");
 	});
 
 	test("chained progress toasts share one slot", () => {

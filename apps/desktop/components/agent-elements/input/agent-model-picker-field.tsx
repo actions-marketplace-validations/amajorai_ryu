@@ -26,6 +26,7 @@ import { Input } from "@ryu/ui/components/input.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
+import { modelMenuItem } from "@/components/agent-elements/input/model-router.ts";
 import { ProviderCommandDialog } from "@/components/agent-elements/input/provider-command-dialog.tsx";
 import {
 	type ProviderEntry,
@@ -33,7 +34,11 @@ import {
 	type UniversalPickerData,
 } from "@/components/agent-elements/input/universal-picker-body.tsx";
 import { useAgents } from "@/src/hooks/useAgents.ts";
-import { AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
+import {
+	AgentAvatar,
+	AgentLogo,
+	engineForAgent,
+} from "@/src/lib/agent-logos.tsx";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
@@ -152,14 +157,13 @@ function ValueMark({
 		return null;
 	}
 	if (mode === "agent") {
-		if (agent?.avatarUrl) {
-			// biome-ignore lint/performance/noImgElement: Tauri/Vite, data URL avatar
-			// biome-ignore lint/correctness/useImageSize: sized via class
+		if (agent?.avatarGlyph) {
 			return (
-				<img
-					alt=""
-					className="size-4 shrink-0 rounded-full object-cover"
-					src={agent.avatarUrl}
+				<AgentAvatar
+					className="size-4 shrink-0 rounded-full object-contain"
+					engine={engineForAgent(agent)}
+					glyph={agent.avatarGlyph}
+					size="16px"
 				/>
 			);
 		}
@@ -243,6 +247,14 @@ export function AgentModelPickerField({
 						engineKey: PROVIDER_ENGINE_KEY[p.id] ?? p.id,
 						authKind: p.authKind,
 						managed: false,
+						// The managed OpenRouter provider exposes its catalog through the
+						// Gateway under a logical id. Keep pricing on the authoritative
+						// OpenRouter registry in field-mode pickers too, just like the
+						// composer's managed row.
+						discoveryProviderId:
+							p.id === "managed-openrouter" || p.id === "ryu-openrouter"
+								? "openrouter"
+								: undefined,
 						// Field mode never activates a Pi route, but we keep the provider's
 						// real discovery capability so a discovery-capable provider
 						// (OpenRouter's hundreds of models) shows its FULL list — the same
@@ -260,7 +272,7 @@ export function AgentModelPickerField({
 						// Hidden models drop out; the field's current value survives so a
 						// setting made before the model was hidden is still readable.
 						models: filterEnabledModels(
-							p.suggestedModels.map((m) => ({ id: m, name: m })),
+							p.suggestedModels.map((m) => modelMenuItem(m)),
 							p.modelOverrides,
 							owns ? value : null
 						),

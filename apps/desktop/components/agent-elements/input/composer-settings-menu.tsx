@@ -8,6 +8,12 @@ import {
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { composeTriggerSummary } from "@ryu/blocks/composer/composer-trigger-summary";
+import {
+	FullAccessSelectionProvider,
+	isFullAccessEquivalent,
+	useFullAccessSelectionGuard,
+} from "@ryu/blocks/composer/full-access-warning";
+import { useChatDisplayPrefs } from "@ryu/blocks/desktop/agent-elements/chat-display-prefs.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	DropdownMenu,
@@ -208,7 +214,20 @@ function EffortMeter({
  * an agent that advertises no model or no permission modes simply shows fewer
  * rows — nothing is hardcoded.
  */
-export function ComposerSettingsMenu({
+export function ComposerSettingsMenu(props: ComposerSettingsMenuProps) {
+	const agentSection = props.sections.find(
+		(section) => section.key === "agent"
+	);
+	return (
+		<FullAccessSelectionProvider
+			agentName={agentSection ? activeItemName(agentSection) : undefined}
+		>
+			<ComposerSettingsMenuContent {...props} />
+		</FullAccessSelectionProvider>
+	);
+}
+
+function ComposerSettingsMenuContent({
 	sections,
 	className,
 	compact = false,
@@ -221,6 +240,8 @@ export function ComposerSettingsMenu({
 	align = "start",
 }: ComposerSettingsMenuProps) {
 	const [open, setOpen] = useState(false);
+	const selectionGuard = useFullAccessSelectionGuard();
+	const { animationsEnabled } = useChatDisplayPrefs();
 
 	// A section stays visible while its options are still being probed, even with
 	// no items yet — so an in-flight agent switch shows a loading row, not nothing.
@@ -313,7 +334,12 @@ export function ComposerSettingsMenu({
 
 	/** Apply a setting without dismissing — users often chain model + thinking. */
 	const selectItem = (section: ComposerSettingsSection) => (id: string) => {
-		section.onChange(id);
+		const item = section.items.find((candidate) => candidate.id === id);
+		const apply = () => section.onChange(id);
+		if (item && isFullAccessEquivalent(item, section.label)) {
+			setOpen(false);
+		}
+		selectionGuard?.request(item ?? { id, name: id }, apply, section.label);
 	};
 	const closeMenu = () => setOpen(false);
 	const footerContent =
@@ -408,7 +434,10 @@ export function ComposerSettingsMenu({
 											)}
 											{segment.loading ? (
 												<HugeiconsIcon
-													className="shrink-0 animate-spin text-muted-foreground"
+													className={cn(
+														"shrink-0 text-muted-foreground",
+														animationsEnabled && "animate-spin"
+													)}
 													icon={Loading03Icon}
 													size={13}
 													strokeWidth={2}
@@ -476,7 +505,10 @@ export function ComposerSettingsMenu({
 										)}
 										{loading ? (
 											<HugeiconsIcon
-												className="shrink-0 animate-spin text-muted-foreground"
+												className={cn(
+													"shrink-0 text-muted-foreground",
+													animationsEnabled && "animate-spin"
+												)}
 												icon={Loading03Icon}
 												size={13}
 												strokeWidth={2}
@@ -553,7 +585,10 @@ export function ComposerSettingsMenu({
 								sectionBody = (
 									<div className="flex items-center gap-2 px-2.5 py-2 text-[13px] text-muted-foreground">
 										<HugeiconsIcon
-											className="shrink-0 animate-spin"
+											className={cn(
+												"shrink-0",
+												animationsEnabled && "animate-spin"
+											)}
 											icon={Loading03Icon}
 											size={14}
 											strokeWidth={2}
@@ -580,7 +615,10 @@ export function ComposerSettingsMenu({
 										>
 											{loadingEmpty ? (
 												<HugeiconsIcon
-													className="shrink-0 animate-spin"
+													className={cn(
+														"shrink-0",
+														animationsEnabled && "animate-spin"
+													)}
 													icon={Loading03Icon}
 													size={14}
 													strokeWidth={2}

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const FINISHED_RETENTION: Duration = Duration::from_secs(5 * 60);
 const RUNNING_RETENTION: Duration = Duration::from_secs(30);
 const MAX_RECORDS: usize = 512;
+const MAX_RECORDS_PER_OWNER: usize = 128;
 const MAX_TEXT_LENGTH: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -43,9 +44,30 @@ pub struct BackgroundProcess {
 }
 
 struct RegistryEntry {
+    owner: String,
     process: BackgroundProcess,
     updated_at: Instant,
     stop_reason: Option<String>,
+}
+
+/// Resolve the caller partition used by the in-memory registry.
+///
+/// An unbound node is intentionally single-tenant (`local`). Once Core is
+/// registered to an organization, every process operation must carry a
+/// verified user identity; a missing identity is never allowed to fall back to
+/// the shared partition.
+pub fn owner_for_caller(
+    caller: Option<&crate::identity_verify::VerifiedCaller>,
+) -> Result<String, String> {
+    if let Some(caller) = caller {
+        return Ok(format!("user:{}", caller.user_id));
+    }
+    if crate::sidecar::control_plane::registered_org().is_some() {
+        return Err(
+            "background process identity is required on an organization-bound node".to_string(),
+        );
+    }
+    Ok("local".to_string())
 }
 
 fn registry() -> &'static Mutex<HashMap<String, RegistryEntry>> {
@@ -126,36 +148,82 @@ fn prune_locked(entries: &mut HashMap<String, RegistryEntry>) {
     }
 }
 
-pub fn upsert(mut process: BackgroundProcess) -> Result<BackgroundProcess, String> {
+fn trim_owner_to_limit(entries: &mut HashMap<String, RegistryEntry>, owner: &str) {
+    let mut finished: Vec<(String, Instant)> = entries
+        .iter()
+        .filter(|(_, entry)| entry.owner == owner && !entry.process.running)
+        .map(|(id, entry)| (id.clone(), entry.updated_at))
+        .collect();
+    finished.sort_by_key(|(_, updated_at)| *updated_at);
+
+    while entries
+        .values()
+        .filter(|entry| entry.owner == owner)
+        .count()
+        > MAX_RECORDS_PER_OWNER
+    {
+        let Some((id, _)) = finished.first().cloned() else {
+            break;
+        };
+        finished.remove(0);
+        entries.remove(&id);
+    }
+}
+
+pub fn upsert(owner: &str, mut process: BackgroundProcess) -> Result<BackgroundProcess, String> {
+    validate_text("owner", owner, true)?;
     validate(&process)?;
     refresh_elapsed(&mut process);
     let process_id = process.process_id.clone();
     let mut entries = registry()
         .lock()
         .map_err(|_| "background process registry is unavailable".to_string())?;
+    if let Some(existing) = entries.get(&process_id) {
+        if existing.owner != owner {
+            return Err(format!(
+                "background process '{process_id}' belongs to another caller"
+            ));
+        }
+    }
     let stop_reason = entries
         .get(&process_id)
         .and_then(|entry| entry.stop_reason.clone());
     entries.insert(
-        process_id,
+        process_id.clone(),
         RegistryEntry {
+            owner: owner.to_string(),
             process: process.clone(),
             updated_at: Instant::now(),
             stop_reason,
         },
     );
+    trim_owner_to_limit(&mut entries, owner);
+    if entries
+        .values()
+        .filter(|entry| entry.owner == owner)
+        .count()
+        > MAX_RECORDS_PER_OWNER
+    {
+        entries.remove(&process_id);
+        return Err(format!(
+            "background process owner '{owner}' exceeded the registry limit"
+        ));
+    }
     prune_locked(&mut entries);
     Ok(process)
 }
 
-pub fn release(process_id: &str) -> bool {
+pub fn release(owner: &str, process_id: &str) -> bool {
     let Ok(mut entries) = registry().lock() else {
         return false;
     };
-    entries.remove(process_id).is_some()
+    entries
+        .get(process_id)
+        .is_some_and(|entry| entry.owner == owner)
+        && entries.remove(process_id).is_some()
 }
 
-pub fn list(running_only: bool, producer: Option<&str>) -> Vec<BackgroundProcess> {
+pub fn list(owner: &str, running_only: bool, producer: Option<&str>) -> Vec<BackgroundProcess> {
     let Ok(mut entries) = registry().lock() else {
         return Vec::new();
     };
@@ -163,9 +231,11 @@ pub fn list(running_only: bool, producer: Option<&str>) -> Vec<BackgroundProcess
     let mut processes = entries
         .values_mut()
         .filter_map(|entry| {
+            if entry.owner != owner {
+                return None;
+            }
             refresh_elapsed(&mut entry.process);
-            let producer_matches =
-                producer.map_or(true, |value| entry.process.producer == value);
+            let producer_matches = producer.map_or(true, |value| entry.process.producer == value);
             let running_matches = !running_only || entry.process.running;
             (producer_matches && running_matches).then(|| entry.process.clone())
         })
@@ -178,7 +248,7 @@ pub fn list(running_only: bool, producer: Option<&str>) -> Vec<BackgroundProcess
     processes
 }
 
-pub fn request_stop(process_id: &str) -> Result<(), String> {
+pub fn request_stop(owner: &str, process_id: &str) -> Result<(), String> {
     let process_id = process_id.trim();
     if process_id.is_empty() {
         return Err("process_id must not be empty".to_string());
@@ -186,7 +256,10 @@ pub fn request_stop(process_id: &str) -> Result<(), String> {
     let mut entries = registry()
         .lock()
         .map_err(|_| "background process registry is unavailable".to_string())?;
-    let Some(entry) = entries.get_mut(process_id) else {
+    let Some(entry) = entries
+        .get_mut(process_id)
+        .filter(|entry| entry.owner == owner)
+    else {
         return Err(format!("background process '{process_id}' was not found"));
     };
     if !entry.process.running {
@@ -201,14 +274,16 @@ pub struct StopRequest {
     pub reason: String,
 }
 
-pub fn take_stop_requests(process_ids: &[String]) -> Vec<StopRequest> {
+pub fn take_stop_requests(owner: &str, process_ids: &[String]) -> Vec<StopRequest> {
     let Ok(mut entries) = registry().lock() else {
         return Vec::new();
     };
     process_ids
         .iter()
         .filter_map(|process_id| {
-            let entry = entries.get_mut(process_id)?;
+            let entry = entries
+                .get_mut(process_id)
+                .filter(|entry| entry.owner == owner)?;
             let reason = entry.stop_reason.take()?;
             Some(StopRequest {
                 process_id: process_id.clone(),
@@ -228,6 +303,11 @@ fn reset() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_lock() -> &'static Mutex<()> {
+        static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        TEST_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn process(id: &str, running: bool) -> BackgroundProcess {
         BackgroundProcess {
@@ -250,40 +330,56 @@ mod tests {
 
     #[test]
     fn upsert_lists_running_processes_and_refreshes_elapsed() {
+        let _guard = test_lock().lock().expect("test lock");
         reset();
         let mut running = process("running", true);
         running.started_at -= 250;
-        upsert(running).expect("upsert");
-        upsert(process("finished", false)).expect("upsert");
+        upsert("owner-a", running).expect("upsert");
+        upsert("owner-a", process("finished", false)).expect("upsert");
 
-        let processes = list(true, Some("test"));
+        let processes = list("owner-a", true, Some("test"));
         assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].process_id, "running");
         assert!(processes[0].elapsed_ms >= 250);
-        assert_eq!(list(false, Some("test")).len(), 2);
+        assert_eq!(list("owner-a", false, Some("test")).len(), 2);
         reset();
     }
 
     #[test]
     fn stop_requests_are_one_shot_and_unknown_processes_fail() {
+        let _guard = test_lock().lock().expect("test lock");
         reset();
-        upsert(process("one", true)).expect("upsert");
-        assert!(request_stop("one").is_ok());
+        upsert("owner-a", process("one", true)).expect("upsert");
+        assert!(request_stop("owner-a", "one").is_ok());
         let ids = vec!["one".to_string()];
-        let stops = take_stop_requests(&ids);
+        let stops = take_stop_requests("owner-a", &ids);
         assert_eq!(stops.len(), 1);
         assert_eq!(stops[0].process_id, "one");
-        assert_eq!(take_stop_requests(&ids).len(), 0);
-        assert!(request_stop("missing").is_err());
+        assert_eq!(take_stop_requests("owner-a", &ids).len(), 0);
+        assert!(request_stop("owner-a", "missing").is_err());
         reset();
     }
 
     #[test]
     fn invalid_processes_are_rejected() {
+        let _guard = test_lock().lock().expect("test lock");
         reset();
         let mut invalid = process("", true);
         invalid.command.clear();
-        assert!(upsert(invalid).is_err());
+        assert!(upsert("owner-a", invalid).is_err());
+        reset();
+    }
+
+    #[test]
+    fn owners_cannot_read_stop_or_replace_each_other() {
+        let _guard = test_lock().lock().expect("test lock");
+        reset();
+        upsert("owner-a", process("shared-id", true)).expect("upsert");
+        assert!(list("owner-b", false, None).is_empty());
+        assert!(request_stop("owner-b", "shared-id").is_err());
+        assert!(upsert("owner-b", process("shared-id", true)).is_err());
+        assert!(!release("owner-b", "shared-id"));
+        assert_eq!(list("owner-a", true, None).len(), 1);
         reset();
     }
 }

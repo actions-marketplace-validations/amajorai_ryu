@@ -41,7 +41,7 @@ This plugin bundles an MCP bridge to one Ryu Core node. Every tool below is name
 ## MCP bridge (reach any registered server)
 
 - `ryu_list_mcp_servers` - MCP servers Ryu has registered.
-- `ryu_call_mcp_tool` `{ tool, server?, agentId, args? }` - invoke a tool on any registered MCP server. `tool` may be fully qualified `server__tool` or a bare name plus `server`. `agentId` is required. This is how you reach Ghost, Shadow, Composio, and every other server Ryu governs, through one call.
+- `ryu_call_mcp_tool` `{ tool, server?, agentId, args? }` - invoke a tool on any registered MCP server. `tool` may be fully qualified `server.tool` or a bare name plus `server`. `agentId` is required. This is how you reach Ghost, Shadow, Composio, and every other server Ryu governs, through one call.
 
 ## Knowledge and memory (RAG)
 

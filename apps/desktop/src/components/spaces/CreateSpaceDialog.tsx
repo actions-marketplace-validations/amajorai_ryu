@@ -2,6 +2,8 @@ import {
 	RetrievalModeChoice,
 	retrievalModeLabel,
 	type SpaceRetrievalMode,
+	type SpaceVisibility,
+	SpaceVisibilityChoice,
 } from "@ryu/blocks/desktop/spaces";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -15,7 +17,6 @@ import {
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import { toast } from "@ryu/ui/components/sileo";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { useFriendlyMode } from "@ryu/ui/hooks/use-friendly-mode.ts";
 import { type ChangeEvent, type FormEvent, useState } from "react";
 
@@ -57,7 +58,8 @@ export function CreateSpaceDialog({
 	onCreate: (
 		name: string,
 		description: string | null,
-		retrievalMode?: SpaceRetrievalMode
+		retrievalMode?: SpaceRetrievalMode,
+		visibility?: SpaceVisibility
 	) => Promise<SpaceRetrievalMode | null>;
 }) {
 	const [name, setName] = useState("");
@@ -67,6 +69,7 @@ export function CreateSpaceDialog({
 	// the node-wide `rag_strategy` default still apply; always transmitting the
 	// displayed value would make that operator setting unreachable from here.
 	const [mode, setMode] = useState<SpaceRetrievalMode | null>(null);
+	const [visibility, setVisibility] = useState<SpaceVisibility>("private");
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [friendly] = useFriendlyMode();
@@ -75,6 +78,7 @@ export function CreateSpaceDialog({
 		setName("");
 		setDescription("");
 		setMode(null);
+		setVisibility("private");
 		setError(null);
 	};
 
@@ -89,7 +93,8 @@ export function CreateSpaceDialog({
 			const created = await onCreate(
 				name.trim(),
 				description.trim() || null,
-				mode ?? undefined
+				mode ?? undefined,
+				visibility
 			);
 			// The picker showed `mode ?? DEFAULT_MODE`. On a node whose operator set
 			// `rag_strategy` to something else, an untouched picker produces a Space
@@ -156,6 +161,15 @@ export function CreateSpaceDialog({
 							/>
 						</div>
 						<div className="flex flex-col gap-2">
+							<Label>Visibility</Label>
+							<SpaceVisibilityChoice
+								disabled={busy}
+								idPrefix="new-space-visibility"
+								onVisibilityChange={setVisibility}
+								visibility={visibility}
+							/>
+						</div>
+						<div className="flex flex-col gap-2">
 							<Label>Retrieval</Label>
 							<RetrievalModeChoice
 								disabled={busy}
@@ -177,8 +191,7 @@ export function CreateSpaceDialog({
 						>
 							Cancel
 						</Button>
-						<Button disabled={busy || !name.trim()} type="submit">
-							{busy ? <Spinner className="size-4" /> : null}
+						<Button disabled={!name.trim()} loading={busy} type="submit">
 							Create
 						</Button>
 					</DialogFooter>

@@ -117,7 +117,10 @@ export function MeetingsSettings() {
 		[templates]
 	);
 
-	const updateTemplate = useCallback(async (next: string) => {
+	const updateTemplate = useCallback(async (next: string | null) => {
+		if (next === null) {
+			return;
+		}
 		let previous = "default";
 		setTemplateId((prev) => {
 			previous = prev;

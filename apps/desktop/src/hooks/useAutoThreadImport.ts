@@ -21,6 +21,7 @@
 import { useEffect, useRef } from "react";
 import { readAutoImportThreads } from "@/src/hooks/useAutoImportThreads.ts";
 import { engineForAgent } from "@/src/lib/agent-logos.tsx";
+import { listAgentSyncProfiles } from "@/src/lib/api/agent-sync.ts";
 import {
 	importAgentThread,
 	listAgentThreads,
@@ -125,7 +126,26 @@ export function useAutoThreadImport({
 			if (cancelled || scanningRef.current || !readAutoImportThreads()) {
 				return;
 			}
-			const candidates = historyAgentsByEngine(agentsRef.current);
+			const managedEngines = new Set<string>();
+			try {
+				const profiles = (await listAgentSyncProfiles(targetRef.current))
+					.profiles;
+				for (const profile of profiles) {
+					if (profile.importEnabled) {
+						managedEngines.add(profile.provider);
+					}
+				}
+			} catch {
+				// The legacy scheduler remains the safe fallback while Core is offline.
+			}
+			const candidates = historyAgentsByEngine(agentsRef.current).filter(
+				(agent) => {
+					const engine = (engineForAgent(agent) ?? agent.id)
+						.replace(/^acp:/i, "")
+						.toLowerCase();
+					return !managedEngines.has(engine);
+				}
+			);
 			if (candidates.length === 0) {
 				return;
 			}

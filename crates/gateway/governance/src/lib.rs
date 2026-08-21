@@ -49,7 +49,7 @@ impl GrantDecision {
     }
 }
 
-/// The policy inputs the capability grammar decides against. All three are
+/// The policy inputs the capability grammar decides against. All four are
 /// resolved by the gateway (env override + built-in defaults) and passed in, so
 /// this crate stays a pure function of caller-supplied data.
 pub struct GrantPolicy<'a> {
@@ -68,6 +68,12 @@ pub struct GrantPolicy<'a> {
     /// off for a pure-allowlist (pre-grammar) posture. `false` reduces this to
     /// exact allowlist membership.
     pub owner_scoped: bool,
+    /// First-party manifest ids that own protected app capability namespaces.
+    /// A plugin may self-grant an ordinary app namespace when its id ends in
+    /// that namespace, but a protected namespace also requires an exact id
+    /// match. This prevents `com.evil.monitors` from squatting on
+    /// `@ryu/monitors`'s grants.
+    pub protected_owner_ids: &'a [String],
 }
 
 /// The **namespace** of a capability scope: the token before the first `:` or
@@ -111,17 +117,6 @@ pub fn capability_namespace(scope: &str) -> Option<&str> {
 /// segment with characters outside `[A-Za-z0-9_-]`), which disables owner-scoped
 /// approval for that caller — fail-closed.
 ///
-/// ## Known limitation: same-segment squatting
-///
-/// Capability namespaces are a flat global vocabulary while plugin ids are
-/// hierarchical, so `com.evil.monitors` derives the same owner namespace as
-/// `@ryu/monitors` and could self-approve `monitors:crud`. Two things bound
-/// that: (a) host primitives live in [`GrantPolicy::reserved_namespaces`] and
-/// are never owner-scopable, so the squat can only reach another *app's*
-/// surface, never Core's; and (b) Core's enforcement points additionally gate on
-/// the owning app being installed and enabled. The real fix is id-namespace
-/// ownership at publish time (a marketplace publisher owning `com.acme.*`),
-/// which is a registry concern, not a grammar one.
 pub fn owner_namespace(app_id: &str) -> Option<&str> {
     let id = app_id.trim();
     if id.is_empty() || id.chars().any(char::is_whitespace) {
@@ -152,6 +147,7 @@ pub fn validate_grants(grants: &[String], allowlist: &[String]) -> GrantDecision
             allowlist,
             reserved_namespaces: &[],
             owner_scoped: false,
+            protected_owner_ids: &[],
         },
     )
 }
@@ -195,7 +191,7 @@ pub fn validate_grants_for(
         if scope.is_empty() {
             continue;
         }
-        if scope_allowed(scope, owner, policy) {
+        if scope_allowed(scope, app_id, owner, policy) {
             approved.push(scope.to_string());
         } else {
             denied.push(scope.to_string());
@@ -207,7 +203,12 @@ pub fn validate_grants_for(
 /// The single-scope decision. Split out so both the allowlist rule and the
 /// owner-scoped rule are readable in isolation and testable through the public
 /// entry point.
-fn scope_allowed(scope: &str, owner: Option<&str>, policy: &GrantPolicy<'_>) -> bool {
+fn scope_allowed(
+    scope: &str,
+    app_id: Option<&str>,
+    owner: Option<&str>,
+    policy: &GrantPolicy<'_>,
+) -> bool {
     // Rule 1 — reviewed policy. Checked first so an operator override can
     // approve a reserved scope the grammar would otherwise refuse.
     if policy
@@ -233,6 +234,17 @@ fn scope_allowed(scope: &str, owner: Option<&str>, policy: &GrantPolicy<'_>) -> 
         // itself after it. This is what keeps `sidecar:process`, `model.*`,
         // `memory.*` … exactly as gated as they are today.
         return false;
+    }
+    if policy.protected_owner_ids.iter().any(|protected_id| {
+        owner_namespace(protected_id)
+            .is_some_and(|protected| protected.eq_ignore_ascii_case(namespace))
+    }) {
+        return app_id.is_some_and(|id| {
+            policy
+                .protected_owner_ids
+                .iter()
+                .any(|protected_id| protected_id.trim().eq_ignore_ascii_case(id.trim()))
+        });
     }
     namespace.eq_ignore_ascii_case(owner)
 }
@@ -372,6 +384,20 @@ mod tests {
             allowlist,
             reserved_namespaces: reserved,
             owner_scoped: true,
+            protected_owner_ids: &[],
+        }
+    }
+
+    fn protected_policy<'a>(
+        allowlist: &'a [String],
+        reserved: &'a [String],
+        protected_owner_ids: &'a [String],
+    ) -> GrantPolicy<'a> {
+        GrantPolicy {
+            allowlist,
+            reserved_namespaces: reserved,
+            owner_scoped: true,
+            protected_owner_ids,
         }
     }
 
@@ -474,6 +500,34 @@ mod tests {
                 "'{id}' must not self-approve another app's namespace"
             );
         }
+    }
+
+    #[test]
+    fn protected_owner_namespace_requires_exact_first_party_id() {
+        let reserved = scopes(&["model"]);
+        let protected = scopes(&["@ryu/monitors", "com.ryu.monitors"]);
+        let policy = protected_policy(&[], &reserved, &protected);
+
+        for id in ["@ryu/monitors", "com.ryu.monitors"] {
+            let decision = validate_grants_for(Some(id), &scopes(&["monitors:crud"]), &policy);
+            assert!(
+                decision.all_approved(),
+                "{id} should own the protected scope"
+            );
+        }
+
+        for id in ["com.evil.monitors", "monitors", "@evil/monitors"] {
+            let decision = validate_grants_for(Some(id), &scopes(&["monitors:crud"]), &policy);
+            assert_eq!(
+                decision.denied,
+                vec!["monitors:crud".to_string()],
+                "{id} must not squat on a protected namespace"
+            );
+        }
+
+        let third_party =
+            validate_grants_for(Some("com.acme.notes"), &scopes(&["notes:crud"]), &policy);
+        assert!(third_party.all_approved());
     }
 
     #[test]
@@ -591,6 +645,7 @@ mod tests {
             allowlist: &[],
             reserved_namespaces: &reserved,
             owner_scoped: false,
+            protected_owner_ids: &[],
         };
         let d = validate_grants_for(Some("com.acme.notes"), &scopes(&["notes:crud"]), &strict);
         assert_eq!(d.denied, vec!["notes:crud".to_string()]);

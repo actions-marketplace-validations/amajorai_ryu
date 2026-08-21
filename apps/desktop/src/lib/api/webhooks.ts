@@ -138,3 +138,43 @@ export async function fetchWebhookIngressStatus(
 		up: json.up ?? false,
 	};
 }
+
+interface WebhookSecretWire {
+	secret?: string | null;
+}
+
+/** GET /api/webhooks/:id/secret — explicit protected read of one secret. */
+export async function fetchWebhookSecret(
+	target: ApiTarget,
+	id: string
+): Promise<string | null> {
+	const json = await request<WebhookSecretWire>(
+		target,
+		`/api/webhooks/${encodeURIComponent(id)}/secret`
+	);
+	return json.secret ?? null;
+}
+
+/**
+ * POST /api/webhooks/:id/secret — persist a supplied secret, or ask Core to
+ * mint one when `secret` is omitted. The returned value is the only secret
+ * material this client receives; the registry remains metadata-only.
+ */
+export async function setWebhookSecret(
+	target: ApiTarget,
+	id: string,
+	secret?: string
+): Promise<string> {
+	const json = await request<{ secret?: string }>(
+		target,
+		`/api/webhooks/${encodeURIComponent(id)}/secret`,
+		{
+			body: secret === undefined ? {} : { secret },
+			method: "POST",
+		}
+	);
+	if (!json.secret) {
+		throw new Error("webhook secret response was empty");
+	}
+	return json.secret;
+}

@@ -7,6 +7,13 @@ export const env = createEnv({
 		DATABASE_URL: z.string().min(1),
 		BETTER_AUTH_SECRET: z.string().min(32),
 		BETTER_AUTH_URL: z.url(),
+		// Optional Better Auth secret rollover list. The first versioned entry is
+		// current; older entries remain valid for verification until retired.
+		BETTER_AUTH_SECRETS: z.string().optional(),
+		// Better Auth rate-limit/session IP resolution. Keep the header list and
+		// trusted proxy ranges explicit at the deployment boundary.
+		BETTER_AUTH_IP_ADDRESS_HEADERS: z.string().optional(),
+		BETTER_AUTH_TRUSTED_PROXIES: z.string().optional(),
 		POLAR_ACCESS_TOKEN: z.string().min(1),
 		POLAR_SUCCESS_URL: z.url(),
 		CORS_ORIGIN: z.string().optional(),
@@ -47,6 +54,9 @@ export const env = createEnv({
 		USESEND_CONTACT_BOOK_ID: z.string().optional(),
 		FROM_EMAIL: z.string().email().optional(),
 		FRONTEND_URL: z.string().optional(),
+		// Browser build of the desktop app. Better Auth must trust this origin for
+		// the anonymous guest session and any future browser-only auth methods.
+		WEBAPP_URL: z.url().optional(),
 		// Server-side control-plane base URL (non-public). Used when code must
 		// reach the Hono server without going through the browser bundle's
 		// NEXT_PUBLIC_SERVER_URL (e.g. SSR cert pages, Composio relay fallback).
@@ -70,6 +80,19 @@ export const env = createEnv({
 		// forces it OFF even with admins. Unset (the default) keeps the historical
 		// behaviour of deriving the state from whether ADMIN_EMAILS is empty.
 		WAITLIST_ENABLED: z.string().optional(),
+		// Development/test-only organization ids that receive Enterprise identity
+		// capabilities without a commercial contract record. This is intentionally
+		// ignored in production by @ryu/auth/lib/enterprise-entitlement.
+		RYU_ENTERPRISE_ORG_IDS: z.string().optional(),
+		// Vendor-signed RS256 Enterprise license for self-hosted deployments.
+		// The public key is verification-only and should be distributed with the
+		// deployment; neither value is exposed to browser bundles.
+		RYU_ENTERPRISE_LICENSE: z.string().optional(),
+		RYU_ENTERPRISE_LICENSE_PUBLIC_KEY: z.string().optional(),
+		// Optional exact domain allowlist for Teams admission. When set, every
+		// Teams member must use one of these verified domains; when unset, the
+		// built-in public-mailbox denylist (Gmail, Outlook, etc.) is used.
+		RYU_TEAMS_ALLOWED_EMAIL_DOMAINS: z.string().optional(),
 		// Rough waitlist throughput estimate (invites per week). Optional:
 		// packages/auth defaults to 50 when unset or invalid.
 		WAITLIST_INVITES_PER_WEEK: z.string().optional(),
@@ -103,10 +126,12 @@ export const env = createEnv({
 		// Polar
 		POLAR_ORGANIZATION_ID: z.string().optional(),
 		POLAR_SERVER: z.enum(["sandbox", "production"]).default("sandbox"),
-		// Plan-catalog product/price ids (epic #496). All optional: each falls back
-		// to the documented default in `@ryu/auth/lib/plans`. See
-		// `docs/polar-products.md` for which products/prices/benefits to create.
+		// Plan-catalog product/price ids. All optional: each falls back to the
+		// documented default in `@ryu/auth/lib/plans`.
 		POLAR_PRODUCT_DESKTOP_LICENSE: z.string().optional(),
+		// Fixed $71 discount that turns the $200 lifetime list product into the
+		// $129 launch offer. The checkout route fails closed when it is absent.
+		POLAR_LIFETIME_LAUNCH_DISCOUNT_ID: z.string().optional(),
 		POLAR_PRODUCT_PRO_MONTHLY: z.string().optional(),
 		POLAR_PRODUCT_PRO_YEARLY: z.string().optional(),
 		POLAR_PRODUCT_MAX_MONTHLY: z.string().optional(),
@@ -115,10 +140,13 @@ export const env = createEnv({
 		POLAR_PRICE_TEAMS_MONTHLY_SEAT: z.string().optional(),
 		POLAR_PRODUCT_TEAMS_YEARLY: z.string().optional(),
 		POLAR_PRICE_TEAMS_YEARLY_SEAT: z.string().optional(),
+		// Legacy compatibility product for hosted business-automation plans. New
+		// public checkout uses the Pro catalog product and a quoted amount.
+		POLAR_PRODUCT_HOSTED_AGENTS: z.string().optional(),
 		// Single recurring product cloud-instance checkouts attach an ad-hoc
 		// fixed price to (per-checkout amount = round(live Hetzner cost × markup);
-		// the product's own base price is only a catalog placeholder). The Max
-		// plan already includes a free BASE (cx23) node, so BASE has no charge.
+		// the product's own base price is only a catalog placeholder). Qualifying
+		// hosted plans include their documented base node, so BASE has no charge.
 		// Optional: absent ⇒ ad-hoc cloud-instance checkout is refused.
 		POLAR_PRODUCT_CLOUD_INSTANCE: z.string().optional(),
 		// Pay-what-you-want product credit top-ups check out against (Unit B2).
@@ -272,6 +300,11 @@ export const env = createEnv({
 		// The hosted gateway fleet base URL a managed node routes chat egress to
 		// (threaded into a node's cloud-init as RYU_GATEWAY_URL). Optional.
 		RYU_GATEWAY_URL: z.string().optional(),
+		// Legacy bootstrap only: dedicated company-owned Telegram/Discord bots are
+		// now imported through the platform-admin inventory route and stored sealed
+		// in ManagedBotAllocation. Keep this only while migrating older deploys;
+		// once imported, remove it so MongoDB is the source of truth.
+		RYU_MANAGED_BOT_POOL: z.string().optional(),
 		// Shared secret the hosted gateway fleet presents (as `x-ryu-internal-
 		// secret`) to read UNSEALED provider keys from the vault. Mirrors
 		// RYU_CREDITS_INTERNAL_SECRET. Optional: when unset, the unsealed vault

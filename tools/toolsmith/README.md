@@ -80,9 +80,9 @@ the real runtime would refuse.
 
 ```jsonc
 {
-  "tool": "web__extract",
+  "tool": "web.extract",
   "kind": "adapter",              // inline_tool | adapter | turn_hook
-  "code_file": "adapters/web__extract.js",
+  "code_file": "adapters/web.extract.js",
   "adapter_tools": [],            // adapter only: the callNamed allowlist
   "cases": [
     {
@@ -93,7 +93,7 @@ the real runtime would refuse.
       "defaults": { },                       // adapter only
       "provider": {                          // adapter only
         "call":  [ { "structuredContent": { "content": ["a", "b"] } } ],
-        "named": { "job__status": [ { "done": true } ] }
+        "named": { "job.status": [ { "done": true } ] }
       },
       "host": {                              // inline_tool / turn_hook only
         "sideModel": [ { "text": "…" } ],    // a QUEUE, one entry per expected call

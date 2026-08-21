@@ -33,6 +33,7 @@ import type {
 	AcpSelectionStore,
 	ComposerModelSection,
 	StreamedAcpConfig,
+	StreamedAcpControl,
 } from "@ryu/blocks/composer/composer-acp-sections";
 import { useAcpSections } from "@ryu/blocks/composer/composer-acp-sections";
 import { useQuery } from "@tanstack/react-query";
@@ -129,6 +130,11 @@ export interface ComposerAcpSectionsParams {
 	 */
 	onSelectionApplied?: (setting: string, value: string) => void;
 	/**
+	 * Ryu Work mode has no approval picker. Derive a safe hidden default from the
+	 * active agent's advertised permission options when requested.
+	 */
+	preferSimpleApprovalDefaults?: boolean;
+	/**
 	 * Session-config values the AGENT asked the client to update, observed on the
 	 * live chat stream (Core's `data-ryu-acp-config` part). Session-scoped
 	 * surfaces (launchpad/dock) leave this undefined. See the shared primitive.
@@ -151,6 +157,8 @@ export interface ComposerAcpSectionsParams {
 	 * using the probe alone.
 	 */
 	streamedConfigOptions?: AcpConfigOption[] | null;
+	/** Accepted conversation-scoped model/effort control from Core's live stream. */
+	streamedControl?: StreamedAcpControl | null;
 	/**
 	 * An agent-INITIATED permission-mode change observed on the live chat stream
 	 * (Core's `data-ryu-acp-mode` part). Session-scoped surfaces leave it undefined.
@@ -176,9 +184,11 @@ export function useComposerAcpSections({
 	engineModel,
 	onEngineModelChange,
 	onSelectionApplied,
+	preferSimpleApprovalDefaults = false,
 	streamedMode,
 	streamedConfig,
 	streamedConfigOptions,
+	streamedControl,
 }: ComposerAcpSectionsParams): ComposerAcpSectionsResult {
 	const activeNode = useActiveNode();
 	const isRyuAgent = agentId === "ryu";
@@ -300,6 +310,7 @@ export function useComposerAcpSections({
 		activeAgentIsAcp,
 		extraSections,
 		modelSection,
+		simpleApprovalDefaults,
 	} = useAcpSections({
 		acpSessionConfig,
 		agentId,
@@ -310,9 +321,11 @@ export function useComposerAcpSections({
 		modelOptions,
 		onEngineModelChange,
 		onSelectionApplied,
+		preferSimpleApprovalDefaults,
 		reasoningOff,
 		store: ACP_SELECTION_STORE,
 		streamedConfig,
+		streamedControl,
 		streamedMode,
 	});
 
@@ -339,12 +352,14 @@ export function useComposerAcpSections({
 			acpMode,
 			acpModel,
 			acpOptionValues,
+			simpleApprovalDefaults,
 			reasoningOff,
 		};
 	}, [
 		acpMode,
 		acpModel,
 		acpOptionValues,
+		simpleApprovalDefaults,
 		acpConfigLoading,
 		activeAgentIsAcp,
 		agentId,

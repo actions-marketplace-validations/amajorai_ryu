@@ -21,8 +21,8 @@ import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
 	type BackgroundProcess,
 	type Capability,
-	capabilitiesFromGrants,
 	type CryptoStatus,
+	capabilitiesFromGrants,
 	type HostServices,
 	validatePluginRoute,
 } from "@ryu/app-host/rpc";
@@ -140,7 +140,7 @@ export function IslandPluginHost({
 					companion.pluginId,
 					"background.list",
 					input
-			) as Promise<BackgroundProcess[]>,
+				) as Promise<BackgroundProcess[]>,
 			backgroundStop: (input) =>
 				pluginHostInvoke(
 					companion.pluginId,

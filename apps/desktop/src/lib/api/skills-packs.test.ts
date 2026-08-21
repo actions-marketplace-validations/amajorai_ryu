@@ -33,8 +33,8 @@ interface CapturedCall {
 /** Install a mock fetch that records every call and returns `body`. */
 function mockFetch(body: unknown): CapturedCall[] {
 	const calls: CapturedCall[] = [];
-	globalThis.fetch = mock(
-		async (input: RequestInfo | URL, init?: RequestInit) => {
+	globalThis.fetch = Object.assign(
+		mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 			let parsed: unknown;
 			if (init?.body && typeof init.body === "string") {
 				parsed = JSON.parse(init.body);
@@ -45,7 +45,8 @@ function mockFetch(body: unknown): CapturedCall[] {
 				body: parsed,
 			});
 			return jsonResponse(body);
-		}
+		}),
+		{ preconnect: globalThis.fetch.preconnect }
 	);
 	return calls;
 }

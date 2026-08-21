@@ -1041,6 +1041,7 @@ async fn ext_ws_tunnel(
         return StatusCode::NOT_FOUND.into_response();
     };
     let auth = route.auth;
+    let required = required_permission_for(route, sub_path, plugin_id);
     let mount = http
         .mount
         .as_deref()
@@ -1064,6 +1065,32 @@ async fn ext_ws_tunnel(
             if provided != Some(expected) {
                 return StatusCode::UNAUTHORIZED.into_response();
             }
+        }
+    }
+
+    // WebSocket upgrades cannot carry the REST user-JWT header from a browser,
+    // so accept the same verified JWT in `?jwt=` that the realtime socket uses.
+    // The route permission must be checked before waking the sidecar or accepting
+    // the upgrade; otherwise a view-only caller could reach the control stream.
+    if let Some((permission, resource_id)) = required {
+        let caller = match query
+            .get("jwt")
+            .map(String::as_str)
+            .filter(|token| !token.trim().is_empty())
+        {
+            Some(token) => crate::server::verified_caller_from_token(token).await,
+            None => crate::server::verified_caller_from_headers(headers).await,
+        };
+        if let Err(status) = crate::server::enforce_permission_on(
+            state,
+            &caller,
+            &permission,
+            plugin_id,
+            &resource_id,
+        )
+        .await
+        {
+            return status.into_response();
         }
     }
 
@@ -1624,6 +1651,13 @@ const KERNEL_CAPABILITIES: &[KernelCapability] = &[
         cap: "events.emit",
         grant: None,
     },
+    // Publish a bounded named event into the caller's own generic application
+    // room. The room key is constructed from the authenticated plugin id, never
+    // from the request body, so a sidecar cannot publish into another app's room.
+    KernelCapability {
+        cap: "realtime.publish",
+        grant: Some("app:realtime"),
+    },
 ];
 
 /// The [`KernelCapability`] row for `cap`, or `None` when the name belongs to the
@@ -1655,6 +1689,54 @@ pub(crate) struct EventEmitBody {
     /// delivery failure never fails the emit.
     #[serde(default)]
     notify: Option<EventEmitNotify>,
+}
+
+/// Body of the generic application-room sidecar publish capability. The caller
+/// identity is authenticated from the ext token and supplies the app namespace;
+/// `room_id` is the only room coordinate accepted from the sidecar.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct RealtimePublishBody {
+    room_id: String,
+    event: String,
+    #[serde(default)]
+    data: serde_json::Value,
+}
+
+async fn host_realtime_publish(
+    state: ServerState,
+    headers: HeaderMap,
+    Json(body): Json<RealtimePublishBody>,
+) -> Response {
+    let plugin_id = match authenticate_sidecar(&state, &headers).await {
+        Ok((id, _)) => id,
+        Err((status, msg)) => return (status, Json(json!({ "error": msg }))).into_response(),
+    };
+    let room_id = body.room_id.trim();
+    if room_id.is_empty() || room_id.len() > 512 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "room_id must be 1..512 bytes" })),
+        )
+            .into_response();
+    }
+    let event = ryu_realtime::ApplicationEvent {
+        name: body.event,
+        payload: body.data,
+    };
+    if !ryu_realtime::is_valid_application_event(&event) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid or oversized application event" })),
+        )
+            .into_response();
+    }
+    state.realtime.publish_application_event(
+        &plugin_id,
+        room_id,
+        event.name.clone(),
+        event.payload,
+    );
+    Json(json!({ "published": true })).into_response()
 }
 
 /// The `notify` hint carried on an `events.emit` request.
@@ -1915,6 +1997,9 @@ async fn dispatch_kernel_capability(
             crate::recipes_client::host_recipes_record_stop(State(state), headers).await
         }
         "events.emit" => host_events_emit(state, headers, body!(EventEmitBody)).await,
+        "realtime.publish" => {
+            host_realtime_publish(state, headers, body!(RealtimePublishBody)).await
+        }
         // Unreachable: the caller only gets here after `kernel_capability` matched,
         // and that reads the same table this match implements. Fail closed anyway so
         // a future row added to one and not the other cannot 500 or, worse, fall
@@ -3189,6 +3274,7 @@ mod tests {
                 "ghost.recordStatus",
                 "ghost.recordStop",
                 "events.emit",
+                "realtime.publish",
             ],
             "KERNEL_CAPABILITIES changed — add the matching arm to \
              `dispatch_kernel_capability` (a missing arm 501s) and update this list"

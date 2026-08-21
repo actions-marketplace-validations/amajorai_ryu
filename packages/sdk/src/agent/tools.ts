@@ -6,7 +6,7 @@
  *  - **Local** tools are `ToolRunnable`s from `defineTool` — they run in-process
  *    via their `run(input, ctx)` implementation.
  *  - **Remote** tools are references to existing Ryu tools (e.g.
- *    `composio__GMAIL_SEARCH_EMAILS`) created with `ryuTool(id)`. Their schema is
+ *    `composio.GMAIL_SEARCH_EMAILS`) created with `ryuTool(id)`. Their schema is
  *    lazily fetched from Core `GET /api/tools/describe` and they execute through
  *    Core `POST /api/mcp/tools/call`, which enforces the agent's allowlist and
  *    selects the Composio connected-account entity via `user_id`.
@@ -26,7 +26,7 @@ import type { ToolFunctionDef } from "./model-call.ts";
 export interface RemoteToolRef {
 	/** One-line description shown to the model (overrides Core's describe). */
 	description?: string;
-	/** Fully-qualified Ryu tool id, e.g. `composio__GMAIL_SEARCH_EMAILS`. */
+	/** Fully-qualified Ryu tool id, e.g. `composio.GMAIL_SEARCH_EMAILS`. */
 	id: string;
 	readonly kind: "remote";
 	/**
@@ -48,7 +48,7 @@ export interface RyuToolOptions {
  *
  * @example
  * ```ts
- * ryuTool("composio__GMAIL_SEARCH_EMAILS", {
+ * ryuTool("composio.GMAIL_SEARCH_EMAILS", {
  *   description: "Search the user's Gmail",
  *   parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
  * });

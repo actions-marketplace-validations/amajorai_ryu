@@ -20,7 +20,7 @@
 //! migration so their chat slot matches the old fields — no data is lost.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -29,6 +29,114 @@ use tokio::sync::Mutex;
 
 use crate::sidecar::adapters::AcpAgentRegistry;
 use crate::sidecar::download_manager::ryu_dir;
+
+/// Marker used by new agent records to keep access open as tools are added to
+/// the node. An empty legacy tool list is also treated as unrestricted by
+/// [`AgentRecord::mcp_tool_allowlist`].
+pub const ALL_MCP_TOOLS: &str = "*";
+
+/// Private wire marker used when a user explicitly turns every capability in a
+/// category off. It is intentionally not a real tool or skill id.
+pub const NO_AGENT_CAPABILITIES: &str = "__ryu_none__";
+
+/// Whether an agent is still being authored, being evaluated, or available for
+/// normal use. This is intentionally separate from [`AgentSafetyProfile`]: a
+/// trial agent is read-only even when its saved profile is autonomous.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLifecycleStatus {
+    Draft,
+    Trial,
+    Active,
+}
+
+impl AgentLifecycleStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Trial => "trial",
+            Self::Active => "active",
+        }
+    }
+
+    /// Whether changing from `self` to `next` is an intentional, reviewable
+    /// lifecycle transition. Repeated updates are idempotent.
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Draft, Self::Draft)
+                | (Self::Draft, Self::Trial)
+                | (Self::Trial, Self::Draft)
+                | (Self::Trial, Self::Trial)
+                | (Self::Trial, Self::Active)
+                | (Self::Active, Self::Draft)
+                | (Self::Active, Self::Trial)
+                | (Self::Active, Self::Active)
+        )
+    }
+}
+
+impl Default for AgentLifecycleStatus {
+    fn default() -> Self {
+        Self::Active
+    }
+}
+
+impl std::str::FromStr for AgentLifecycleStatus {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "draft" => Ok(Self::Draft),
+            "trial" => Ok(Self::Trial),
+            "active" => Ok(Self::Active),
+            other => anyhow::bail!("unknown agent lifecycle status '{other}'"),
+        }
+    }
+}
+
+/// The least-permissive execution profile saved on an agent. The runtime also
+/// applies global and per-run policy, so this is never an escalation grant.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSafetyProfile {
+    ReadOnly,
+    ApprovalRequired,
+    Autonomous,
+}
+
+impl AgentSafetyProfile {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::ApprovalRequired => "approval_required",
+            Self::Autonomous => "autonomous",
+        }
+    }
+}
+
+impl Default for AgentSafetyProfile {
+    fn default() -> Self {
+        Self::Autonomous
+    }
+}
+
+impl std::str::FromStr for AgentSafetyProfile {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "read_only" => Ok(Self::ReadOnly),
+            "approval_required" => Ok(Self::ApprovalRequired),
+            "autonomous" => Ok(Self::Autonomous),
+            other => anyhow::bail!("unknown agent safety profile '{other}'"),
+        }
+    }
+}
+
+fn default_create_safety_profile() -> AgentSafetyProfile {
+    AgentSafetyProfile::ReadOnly
+}
 
 // ── Per-attribute slot types ───────────────────────────────────────────────────
 
@@ -141,12 +249,22 @@ pub struct DicebearSpec {
     pub seed: Option<String>,
 }
 
+/// Expressive Ryu ghost avatar: a named mood plus an animation selection. Core
+/// stores both opaque values and the clients render the animated ghost.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ExpressiveSpec {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub animation: Option<String>,
+}
+
 /// Persona slot: name, avatar, and tone instructions.
 ///
 /// Glyph sources from the shared GlyphPicker, resolved client-side:
 /// uploaded image ([`avatar_url`]), emoji ([`emoji`]), custom icon
-/// ([`icon`] + optional [`icon_color`]), DiceBear ([`dicebear`]), or a
-/// dither-gradient ([`dither`]). Dither may layer as a *background* under
+/// ([`icon`] + optional [`icon_color`]), DiceBear ([`dicebear`]), expressive
+/// ghost ([`expressive`]), or a dither-gradient ([`dither`]). Dither may layer as a *background* under
 /// emoji or icon (never under DiceBear or an uploaded image). Setting a
 /// primary source clears the others on save; Core stores whatever is present
 /// and never interprets the fields.
@@ -170,6 +288,10 @@ pub struct PersonaSlot {
     /// DiceBear generative avatar (style + seed). Does not mix with dither.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dicebear: Option<DicebearSpec>,
+    /// Ryu ghost eyes with a named expression or the cycling `random` selection,
+    /// plus a named animation or the cycling `random` selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expressive: Option<ExpressiveSpec>,
     /// Dither-gradient: standalone avatar, or background under [`emoji`]/[`icon`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dither: Option<DitherSpec>,
@@ -193,15 +315,29 @@ pub struct PolicyRef {
 pub struct AgentRecord {
     pub id: String,
     pub name: String,
+    /// Authoring/runtime lifecycle. Legacy rows default to active during the
+    /// additive migration so existing automations keep their behavior.
+    #[serde(default)]
+    pub lifecycle_status: AgentLifecycleStatus,
+    /// Saved safety posture. Trial lifecycle always overrides this to read-only
+    /// at dispatch time.
+    #[serde(default)]
+    pub safety_profile: AgentSafetyProfile,
+    /// Optional role/title shown beside the agent's human name.
+    #[serde(default)]
+    pub title: String,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub system_prompt: Option<String>,
-    /// Names of the tools / MCP servers this agent may use.
+    /// Tool or MCP server ids this agent may use. `*` means all tools currently
+    /// registered (including plugin/app tools) and future tools added to the
+    /// node; a non-empty list narrows access. Empty is retained as the legacy
+    /// unrestricted value, while `__ryu_none__` is the explicit no-tools value.
     #[serde(default)]
     pub tools: Vec<String>,
     /// Composio action names this agent may call (e.g. `GMAIL_SEND_EMAIL`). Kept
-    /// separate from `tools` (which holds MCP `<server>__<tool>` ids) because the
+    /// separate from `tools` (which holds MCP `<server>.<tool>` ids) because the
     /// gateway gates these via a distinct per-request allowlist
     /// (`x-ryu-composio-actions`). Only effective on the gateway/openai-compat
     /// route — ACP agents bypass the gateway.
@@ -214,7 +350,7 @@ pub struct AgentRecord {
     /// inactive skill). Enforced in Core (skills are injected, not gateway-gated)
     /// on both the openai-compat and ACP planes via the skill registry — and, since
     /// it is the model itself that pulls L2 bodies under progressive disclosure,
-    /// also at `skills__search` / `skills__load` dispatch (`sidecar::mcp::skills_tool`),
+    /// also at `skills.search` / `skills.load` dispatch (`sidecar::mcp::skills_tool`),
     /// so what an agent can load equals what its index shows.
     #[serde(default)]
     pub skills: Vec<String>,
@@ -226,7 +362,7 @@ pub struct AgentRecord {
     /// [`crate::identity`] vault), governed by the Gateway grant + audit.
     #[serde(default)]
     pub identity_profile_ids: Vec<String>,
-    /// Tool ids (MCP `<server>__<tool>`) that require a human-in-the-loop
+    /// Tool ids (MCP `<server>.<tool>`) that require a human-in-the-loop
     /// approval before this agent may execute them (Layer A of the approval
     /// policy — see [`crate::approvals::policy`]). An **empty** list means the
     /// agent has no per-agent gated tools (the safe default — opt-in, like
@@ -295,15 +431,15 @@ pub struct AgentRecord {
     pub locked: bool,
 
     // ── Orchestration capabilities ─────────────────────────────────────────
-    /// Whether this agent may discover peers (`orchestrator__discover_agents`)
-    /// and delegate work to them (`delegate__*`). `None` is the default and is
+    /// Whether this agent may discover peers (`orchestrator.discover_agents`)
+    /// and delegate work to them (`delegate.*`). `None` is the default and is
     /// treated as **on**: delegation has always been default-available, so
     /// legacy rows keep it. `Some(false)` withholds delegation/discovery from
     /// this agent's offered tool set. See [`AgentRecord::orchestrator_enabled`].
     #[serde(default)]
     pub orchestrator: Option<bool>,
     /// Whether this agent may mint or reconfigure custom agents via the
-    /// `agent_builder__create_agent` tool. Defaults to **off** (`None` /
+    /// `agent_builder.create_agent` tool. Defaults to **off** (`None` /
     /// `Some(false)`): agent creation is a privileged capability (a created
     /// child can be granted tools, so it is a privilege-escalation surface) and
     /// must be enabled explicitly per agent. See
@@ -324,17 +460,55 @@ impl AgentRecord {
     pub fn can_create_agents_enabled(&self) -> bool {
         self.can_create_agents.unwrap_or(false)
     }
+
+    /// Resolve the persisted tool setting into the shape used by the MCP
+    /// registry: `None` is unrestricted, `Some([])` is explicitly empty.
+    pub fn mcp_tool_allowlist(&self) -> Option<Vec<String>> {
+        if self.tools.is_empty() || self.tools.iter().any(|tool| tool == ALL_MCP_TOOLS) {
+            return None;
+        }
+        if self.tools.iter().any(|tool| tool == NO_AGENT_CAPABILITIES) {
+            return Some(Vec::new());
+        }
+        Some(self.tools.clone())
+    }
+
+    /// Resolve the persisted skill setting into the empty-means-all contract
+    /// already used by the skill registry. The private no-capabilities marker
+    /// is deliberately non-matching, so it produces an explicit empty scope.
+    pub fn skill_allowlist(&self) -> Vec<String> {
+        if self.skills.is_empty() {
+            return Vec::new();
+        }
+        if self
+            .skills
+            .iter()
+            .any(|skill| skill == NO_AGENT_CAPABILITIES)
+        {
+            return vec![NO_AGENT_CAPABILITIES.to_owned()];
+        }
+        self.skills.clone()
+    }
 }
 
 /// Fields a client may supply when creating an agent. `id` is server-assigned.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateAgent {
     pub name: String,
+    /// New agents begin in `trial`; this saved profile is still surfaced so a
+    /// later promotion cannot accidentally make them autonomous by default.
+    #[serde(default = "default_create_safety_profile")]
+    pub safety_profile: AgentSafetyProfile,
+    /// Optional role/title shown beside the agent's human name.
+    #[serde(default)]
+    pub title: String,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub system_prompt: Option<String>,
-    #[serde(default)]
+    /// Tool/MCP allowlist. Omitted on create means all current and future
+    /// registered tools (`*`); an explicit list narrows it.
+    #[serde(default = "default_all_mcp_tools")]
     pub tools: Vec<String>,
     /// Composio action names this agent may call (gateway-route only).
     #[serde(default)]
@@ -345,6 +519,10 @@ pub struct CreateAgent {
     /// Identity Vault profile ids to bind (empty = none). See [`AgentRecord::identity_profile_ids`].
     #[serde(default)]
     pub identity_profile_ids: Vec<String>,
+    /// Tool ids that always require a human approval before execution. This is
+    /// an opt-in safety layer and never grants the agent additional capability.
+    #[serde(default)]
+    pub approval_tools: Vec<String>,
     /// Legacy flat model; maps to `chat_model.model_id` when `chat_model` is absent.
     #[serde(default)]
     pub model: Option<String>,
@@ -389,12 +567,15 @@ impl Default for CreateAgent {
     fn default() -> Self {
         Self {
             name: String::new(),
+            safety_profile: default_create_safety_profile(),
+            title: String::new(),
             description: None,
             system_prompt: None,
-            tools: vec![],
+            tools: default_all_mcp_tools(),
             composio_actions: vec![],
             skills: vec![],
             identity_profile_ids: vec![],
+            approval_tools: vec![],
             model: None,
             engine: None,
             chat_model: None,
@@ -413,11 +594,39 @@ impl Default for CreateAgent {
     }
 }
 
+impl CreateAgent {
+    /// Apply the shared capability defaults at the persistence boundary.
+    ///
+    /// `serde(default = "default_all_mcp_tools")` covers normal API payloads,
+    /// but internal creators and older template/import paths can construct a
+    /// `CreateAgent` literal with an empty `tools` vector. Treat that legacy
+    /// shape as the same broad default so ACP installs, onboarding records,
+    /// plugin-provided agents, and user-created cards cannot drift. The
+    /// private marker remains the explicit opt-out for users who turn every
+    /// tool off.
+    pub fn with_capability_defaults(mut self) -> Self {
+        if self.tools.is_empty() {
+            self.tools = default_all_mcp_tools();
+        }
+        self
+    }
+}
+
 /// Fields a client may patch on update. Absent fields are left unchanged.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UpdateAgent {
     #[serde(default)]
     pub name: Option<String>,
+    /// Explicit lifecycle transition. `draft -> active` is rejected; callers
+    /// must pass through trial so the agent has a real evaluation checkpoint.
+    #[serde(default)]
+    pub lifecycle_status: Option<AgentLifecycleStatus>,
+    /// Saved safety posture for active agents. Trial still forces read-only.
+    #[serde(default)]
+    pub safety_profile: Option<AgentSafetyProfile>,
+    /// Replaces the role/title. An empty string clears it.
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -433,6 +642,10 @@ pub struct UpdateAgent {
     /// Identity profile binding patch (`Some(_)` replaces the list; empty = none).
     #[serde(default)]
     pub identity_profile_ids: Option<Vec<String>>,
+    /// Approval-tool patch (`Some(_)` replaces the list; empty = no per-agent
+    /// approval rules).
+    #[serde(default)]
+    pub approval_tools: Option<Vec<String>>,
     /// Legacy flat model patch.
     #[serde(default)]
     pub model: Option<String>,
@@ -482,6 +695,10 @@ fn default_version() -> String {
     "1.0.0".to_owned()
 }
 
+fn default_all_mcp_tools() -> Vec<String> {
+    vec![ALL_MCP_TOOLS.to_owned()]
+}
+
 fn db_path() -> PathBuf {
     ryu_dir().join("agents.db")
 }
@@ -490,6 +707,19 @@ fn db_path() -> PathBuf {
 #[derive(Clone)]
 pub struct AgentStore {
     conn: Arc<Mutex<Connection>>,
+}
+
+static GLOBAL_AGENT_STORE: OnceLock<AgentStore> = OnceLock::new();
+
+/// Publish the process-wide agent store for Core-owned runtimes that do not
+/// carry `ServerState` (workflows, scheduler jobs, and trigger fan-out).
+pub fn set_global(store: AgentStore) {
+    let _ = GLOBAL_AGENT_STORE.set(store);
+}
+
+/// Return the process-wide agent store when Core has finished bootstrapping it.
+pub fn global() -> Option<&'static AgentStore> {
+    GLOBAL_AGENT_STORE.get()
 }
 
 impl AgentStore {
@@ -529,7 +759,7 @@ impl AgentStore {
                 name          TEXT NOT NULL,
                 description   TEXT,
                 system_prompt TEXT,
-                tools         TEXT NOT NULL DEFAULT '[]',
+                tools         TEXT NOT NULL DEFAULT '[\"*\"]',
                 model         TEXT,
                 engine        TEXT,
                 built_in      INTEGER NOT NULL DEFAULT 0,
@@ -701,6 +931,51 @@ impl AgentStore {
             }
         }
 
+        // Step 10: an explicit role/title for the agent identity. Keep the
+        // existing persona.display_name slot separate: it is the voice the
+        // agent uses when introducing itself, while this field is the compact
+        // badge shown beside the human name across the product.
+        match conn.execute_batch("ALTER TABLE agents ADD COLUMN title TEXT NOT NULL DEFAULT ''") {
+            Ok(()) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column") {
+                    return Err(e).context("adding column: title");
+                }
+            }
+        }
+
+        // Step 11: lifecycle and safety posture. Existing rows are deliberately
+        // active/autonomous so adding the feature cannot silently pause a user's
+        // deployed agents or change their tool behavior. New rows choose trial
+        // in `insert_with_id` and therefore never rely on the SQL default.
+        for col_def in [
+            "lifecycle_status TEXT NOT NULL DEFAULT 'active'",
+            "safety_profile TEXT NOT NULL DEFAULT 'autonomous'",
+        ] {
+            match conn.execute_batch(&format!("ALTER TABLE agents ADD COLUMN {col_def}")) {
+                Ok(()) => {}
+                Err(e) => {
+                    if !e.to_string().contains("duplicate column") {
+                        return Err(e).context(format!("adding column: {col_def}"));
+                    }
+                }
+            }
+        }
+
+        // Step 12: per-agent approval requirements. JSON array of tool ids;
+        // defaults to `[]` so legacy agents keep their existing approval policy.
+        match conn.execute_batch(
+            "ALTER TABLE agents ADD COLUMN approval_tools TEXT NOT NULL DEFAULT '[]'",
+        ) {
+            Ok(()) => {}
+            Err(e) => {
+                if !e.to_string().contains("duplicate column") {
+                    return Err(e).context("adding column: approval_tools");
+                }
+            }
+        }
+
         // Published-agent installs are keyed separately from agent ids. The
         // idempotency key is client-controlled, so bind it to the server-verified
         // caller scope before it can select an existing agent or disclosure.
@@ -818,7 +1093,7 @@ impl AgentStore {
                     (id, name, description, system_prompt, tools, model, engine, built_in,
                      chat_model, installed, orchestrator, can_create_agents,
                      created_at, updated_at)
-                 VALUES (?1, ?2, ?3, NULL, '[]', NULL, ?4, 1, ?5, ?6, ?8, ?8, ?7, ?7)",
+                 VALUES (?1, ?2, ?3, NULL, '[\"*\"]', NULL, ?4, 1, ?5, ?6, ?8, ?8, ?7, ?7)",
                 params![
                     entry.id,
                     entry.name,
@@ -841,7 +1116,8 @@ impl AgentStore {
                     created_at, updated_at,
                     chat_model, stt, tts, image_model, memory, persona, policy_ref,
                     version, locked, inference, composio_actions, skills,
-                    identity_profile_ids, orchestrator, can_create_agents, video_model
+                    identity_profile_ids, orchestrator, can_create_agents, video_model, title,
+                    lifecycle_status, safety_profile, approval_tools
              FROM agents ORDER BY built_in DESC, created_at ASC",
         )?;
         let rows = stmt
@@ -886,13 +1162,95 @@ impl AgentStore {
                         created_at, updated_at,
                         chat_model, stt, tts, image_model, memory, persona, policy_ref,
                         version, locked, inference, composio_actions, skills,
-                        identity_profile_ids, orchestrator, can_create_agents, video_model
+                        identity_profile_ids, orchestrator, can_create_agents, video_model, title,
+                        lifecycle_status, safety_profile, approval_tools
                  FROM agents WHERE id = ?1",
                 params![id],
                 row_to_record,
             )
             .optional()?;
         Ok(record)
+    }
+
+    /// Attach or detach one Space from an agent's persisted memory slot.
+    ///
+    /// This is deliberately a narrow mutation rather than a caller-facing
+    /// `UpdateAgent` shortcut: the Spaces tool has a server-derived calling agent
+    /// id, so it cannot target a different agent or replace unrelated memory
+    /// settings. Locked agents remain immutable, and a no-op detach does not
+    /// materialize a new memory slot.
+    pub async fn set_space_access(
+        &self,
+        id: &str,
+        space_id: &str,
+        attached: bool,
+    ) -> Result<Option<AgentRecord>> {
+        // Keep the read-modify-write under the same store mutex as update(). A
+        // separate get() followed by update() could serialize a stale full
+        // record and erase a concurrent slot patch.
+        let conn = self.conn.lock().await;
+        let Some(record) = conn
+            .query_row(
+                "SELECT id, name, description, system_prompt, tools, model, engine, built_in,
+                        created_at, updated_at,
+                        chat_model, stt, tts, image_model, memory, persona, policy_ref,
+                        version, locked, inference, composio_actions, skills,
+                        identity_profile_ids, orchestrator, can_create_agents, video_model, title,
+                        lifecycle_status, safety_profile, approval_tools
+                 FROM agents WHERE id = ?1",
+                params![id],
+                row_to_record,
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        if record.locked {
+            anyhow::bail!("cannot edit locked agent '{id}'");
+        }
+        let mut memory = record.memory.clone().unwrap_or_default();
+        let was_attached = memory
+            .space_ids
+            .iter()
+            .any(|candidate| candidate == space_id);
+        if was_attached == attached {
+            return Ok(Some(record));
+        }
+        if attached {
+            memory.space_ids.push(space_id.to_owned());
+        } else {
+            memory.space_ids.retain(|candidate| candidate != space_id);
+        }
+        let memory = if memory.space_ids.is_empty()
+            && memory.read_levels.is_empty()
+            && !memory.write_enabled
+        {
+            None
+        } else {
+            Some(memory)
+        };
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let changed = conn.execute(
+            "UPDATE agents SET memory = ?1, updated_at = ?2 WHERE id = ?3",
+            params![serialize_slot(&memory), now, id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(conn
+            .query_row(
+                "SELECT id, name, description, system_prompt, tools, model, engine, built_in,
+                    created_at, updated_at,
+                    chat_model, stt, tts, image_model, memory, persona, policy_ref,
+                    version, locked, inference, composio_actions, skills,
+                    identity_profile_ids, orchestrator, can_create_agents, video_model, title,
+                    lifecycle_status, safety_profile, approval_tools
+             FROM agents WHERE id = ?1",
+                params![id],
+                row_to_record,
+            )
+            .optional()?)
     }
 
     pub async fn create(&self, input: CreateAgent) -> Result<AgentRecord> {
@@ -953,7 +1311,8 @@ impl AgentStore {
                     "SELECT id, name, description, system_prompt, tools, model, engine, built_in,
                             created_at, updated_at, chat_model, stt, tts, image_model, memory,
                             persona, policy_ref, version, locked, inference, composio_actions,
-                            skills, identity_profile_ids, orchestrator, can_create_agents, video_model
+                            skills, identity_profile_ids, orchestrator, can_create_agents, video_model, title,
+                            lifecycle_status, safety_profile, approval_tools
                      FROM agents WHERE id = ?1",
                     params![agent_id],
                     row_to_record,
@@ -1056,7 +1415,8 @@ impl AgentStore {
                 "SELECT id, name, description, system_prompt, tools, model, engine, built_in,
                         created_at, updated_at, chat_model, stt, tts, image_model, memory,
                         persona, policy_ref, version, locked, inference, composio_actions,
-                        skills, identity_profile_ids, orchestrator, can_create_agents, video_model
+                        skills, identity_profile_ids, orchestrator, can_create_agents, video_model, title,
+                        lifecycle_status, safety_profile, approval_tools
                  FROM agents WHERE id = ?1",
                 params![agent_id],
                 row_to_record,
@@ -1079,6 +1439,7 @@ impl AgentStore {
     }
 
     fn insert_with_id(conn: &Connection, id: String, input: CreateAgent) -> Result<AgentRecord> {
+        let input = input.with_capability_defaults();
         let now = chrono::Utc::now().to_rfc3339();
         let tools_json = serde_json::to_string(&input.tools).unwrap_or_else(|_| "[]".to_owned());
         let composio_json =
@@ -1086,6 +1447,8 @@ impl AgentStore {
         let skills_json = serde_json::to_string(&input.skills).unwrap_or_else(|_| "[]".to_owned());
         let identity_json =
             serde_json::to_string(&input.identity_profile_ids).unwrap_or_else(|_| "[]".to_owned());
+        let approval_json =
+            serde_json::to_string(&input.approval_tools).unwrap_or_else(|_| "[]".to_owned());
 
         // Resolve the chat slot: prefer explicit `chat_model`, fall back to
         // legacy `model`/`engine` fields so old clients keep working.
@@ -1106,11 +1469,11 @@ impl AgentStore {
                  chat_model, stt, tts, image_model, video_model, memory, persona, policy_ref,
                  inference, version, locked, composio_actions, skills,
                  identity_profile_ids, orchestrator, can_create_agents,
-                 created_at, updated_at)
+                 created_at, updated_at, title, lifecycle_status, safety_profile, approval_tools)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0,
                      ?8, ?9, ?10, ?11, ?23, ?12, ?13, ?14,
                      ?15, ?16, 0, ?17, ?18,
-                     ?19, ?21, ?22, ?20, ?20)",
+                     ?19, ?21, ?22, ?20, ?20, ?24, ?25, ?26, ?27)",
             params![
                 id,
                 input.name,
@@ -1135,17 +1498,22 @@ impl AgentStore {
                 input.orchestrator.map(i64::from),
                 input.can_create_agents.map(i64::from),
                 serialize_slot(&input.video_model),
+                input.title.trim().to_owned(),
+                AgentLifecycleStatus::Trial.as_str(),
+                input.safety_profile.as_str(),
+                approval_json,
             ],
         )?;
         Ok(AgentRecord {
             id,
             name: input.name,
+            lifecycle_status: AgentLifecycleStatus::Trial,
+            safety_profile: input.safety_profile,
+            title: input.title.trim().to_owned(),
             description: input.description,
             system_prompt: input.system_prompt,
             tools: input.tools,
-            // Concurrent wip(orchestrator) added `approval_tools` to AgentRecord
-            // without wiring an input/DB source; default empty so the crate builds.
-            approval_tools: Vec::new(),
+            approval_tools: input.approval_tools,
             composio_actions: input.composio_actions,
             skills: input.skills,
             identity_profile_ids: input.identity_profile_ids,
@@ -1182,7 +1550,8 @@ impl AgentStore {
                             created_at, updated_at,
                             chat_model, stt, tts, image_model, memory, persona, policy_ref,
                             version, locked, inference, composio_actions, skills,
-                            identity_profile_ids, orchestrator, can_create_agents, video_model
+                            identity_profile_ids, orchestrator, can_create_agents, video_model, title,
+                            lifecycle_status, safety_profile, approval_tools
                      FROM agents WHERE id = ?1",
                     params![id],
                     row_to_record,
@@ -1192,6 +1561,16 @@ impl AgentStore {
                 return Ok(None);
             };
 
+            if let Some(next_status) = patch.lifecycle_status {
+                if !record.lifecycle_status.can_transition_to(next_status) {
+                    anyhow::bail!(
+                        "invalid lifecycle transition for agent '{id}': {} -> {}",
+                        record.lifecycle_status.as_str(),
+                        next_status.as_str()
+                    );
+                }
+            }
+
             // Locked agents are immutable: reject patch attempts UNLESS the patch
             // only unlocks the agent (i.e., the only field being set is `locked:
             // false`). This allows a user to unlock a locked agent without having
@@ -1199,12 +1578,14 @@ impl AgentStore {
             // locked is rejected.
             let is_unlock_only = matches!(patch.locked, Some(false))
                 && patch.name.is_none()
+                && patch.title.is_none()
                 && patch.description.is_none()
                 && patch.system_prompt.is_none()
                 && patch.tools.is_none()
                 && patch.composio_actions.is_none()
                 && patch.skills.is_none()
                 && patch.identity_profile_ids.is_none()
+                && patch.approval_tools.is_none()
                 && patch.model.is_none()
                 && patch.engine.is_none()
                 && patch.chat_model.is_none()
@@ -1226,6 +1607,15 @@ impl AgentStore {
             if let Some(name) = patch.name {
                 record.name = name;
             }
+            if let Some(lifecycle_status) = patch.lifecycle_status {
+                record.lifecycle_status = lifecycle_status;
+            }
+            if let Some(safety_profile) = patch.safety_profile {
+                record.safety_profile = safety_profile;
+            }
+            if let Some(title) = patch.title {
+                record.title = title.trim().to_owned();
+            }
             if patch.description.is_some() {
                 record.description = patch.description;
             }
@@ -1233,7 +1623,11 @@ impl AgentStore {
                 record.system_prompt = patch.system_prompt;
             }
             if let Some(tools) = patch.tools {
-                record.tools = tools;
+                record.tools = if tools.is_empty() {
+                    default_all_mcp_tools()
+                } else {
+                    tools
+                };
             }
             if let Some(composio_actions) = patch.composio_actions {
                 record.composio_actions = composio_actions;
@@ -1243,6 +1637,9 @@ impl AgentStore {
             }
             if let Some(identity_profile_ids) = patch.identity_profile_ids {
                 record.identity_profile_ids = identity_profile_ids;
+            }
+            if let Some(approval_tools) = patch.approval_tools {
+                record.approval_tools = approval_tools;
             }
             if patch.model.is_some() {
                 record.model = patch.model;
@@ -1301,6 +1698,8 @@ impl AgentStore {
                 serde_json::to_string(&record.skills).unwrap_or_else(|_| "[]".to_owned());
             let identity_json = serde_json::to_string(&record.identity_profile_ids)
                 .unwrap_or_else(|_| "[]".to_owned());
+            let approval_json =
+                serde_json::to_string(&record.approval_tools).unwrap_or_else(|_| "[]".to_owned());
 
             conn.execute(
                 "UPDATE agents SET name = ?2, description = ?3, system_prompt = ?4,
@@ -1310,7 +1709,8 @@ impl AgentStore {
                     memory = ?12, persona = ?13, policy_ref = ?14, inference = ?15,
                     version = ?16, locked = ?17, composio_actions = ?18, skills = ?19,
                     identity_profile_ids = ?20, orchestrator = ?22,
-                    can_create_agents = ?23, updated_at = ?21
+                    can_create_agents = ?23, updated_at = ?21, title = ?25,
+                    lifecycle_status = ?26, safety_profile = ?27, approval_tools = ?28
                  WHERE id = ?1",
                 params![
                     id,
@@ -1337,6 +1737,10 @@ impl AgentStore {
                     record.orchestrator.map(i64::from),
                     record.can_create_agents.map(i64::from),
                     serialize_slot(&record.video_model),
+                    record.title,
+                    record.lifecycle_status.as_str(),
+                    record.safety_profile.as_str(),
+                    approval_json,
                 ],
             )?;
         }
@@ -1411,6 +1815,9 @@ pub struct AgentTemplate {
 /// The agent-specific fields inside an [`AgentTemplate`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTemplateConfig {
+    /// Optional role/title shown beside the agent's human name.
+    #[serde(default)]
+    pub title: String,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -1455,6 +1862,28 @@ pub struct AgentTemplateConfig {
     pub persona: Option<PersonaSlot>,
     #[serde(default)]
     pub policy_ref: Option<PolicyRef>,
+    /// Portable schedules that should be materialized after the agent is
+    /// imported. The scheduler owns the runtime job record; this field is only
+    /// the validated template representation.
+    #[serde(default)]
+    pub schedules: Vec<AgentScheduleTemplate>,
+}
+
+/// One scheduler job embedded in an exported/imported agent template.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentScheduleTemplate {
+    #[serde(default)]
+    pub name: String,
+    pub schedule: crate::scheduler::store::Schedule,
+    pub instructions: String,
+    #[serde(default = "default_schedule_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub require_approval: bool,
+}
+
+fn default_schedule_enabled() -> bool {
+    true
 }
 
 impl AgentRecord {
@@ -1465,6 +1894,7 @@ impl AgentRecord {
             name: self.name.clone(),
             version: self.version.clone(),
             agent_config: AgentTemplateConfig {
+                title: self.title.clone(),
                 description: self.description.clone(),
                 system_prompt: self.system_prompt.clone(),
                 tools: self.tools.clone(),
@@ -1482,6 +1912,7 @@ impl AgentRecord {
                 memory: self.memory.clone(),
                 persona: self.persona.clone(),
                 policy_ref: self.policy_ref.clone(),
+                schedules: Vec::new(),
             },
         }
     }
@@ -1516,7 +1947,7 @@ pub struct AgentInstallDisclosure {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_plugins: Vec<String>,
     /// Composio actions the template requested. **Removed** — their
-    /// `composio__<slug>` ids are merged into the effective tool allowlist, so
+    /// `composio.<slug>` ids are merged into the effective tool allowlist, so
     /// carrying them widens what the agent may call, against the installer's own
     /// connected accounts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1552,6 +1983,11 @@ pub struct AgentInstallDisclosure {
     /// [`UNTRUSTED_SYSTEM_PROMPT_MAX_BYTES`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub system_prompt_truncated: bool,
+    /// ACP command bindings removed from a published template before it is
+    /// persisted. Ordinary registry engine ids remain portable; `acp-exec:` is
+    /// executable configuration and must be selected locally by the installer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_engine_bindings: Vec<String>,
 }
 
 impl AgentTemplate {
@@ -1565,11 +2001,11 @@ impl AgentTemplate {
     /// identities/Spaces would break the round-trip the export exists for.
     ///
     /// What is kept, and why keeping it is not a grant:
-    /// * `tools` — a *narrowing* declaration. Runtime tool enforcement reads the
-    ///   env-backed [`crate::sidecar::adapters::acp::AcpAgentRegistry::allowlist_for`],
-    ///   not this field, and blanking it would read as "unrestricted" wherever an
-    ///   empty list means no filter. Carrying the list verbatim is therefore never
-    ///   worse than dropping it; it is disclosed rather than silently applied.
+    /// * `tools` — a *narrowing* declaration. Runtime enforcement applies the
+    ///   persisted list, with the operator env-backed
+    ///   [`crate::sidecar::adapters::acp::AcpAgentRegistry::allowlist_for`]
+    ///   override taking precedence. The `*` marker keeps the imported card live
+    ///   as tools are added; a non-empty list remains a narrowing declaration.
     /// * `skills` — a non-empty list only narrows (it intersects with the
     ///   globally-enabled skills and never re-activates a disabled one), and empty
     ///   is what every locally-created agent gets.
@@ -1624,6 +2060,19 @@ impl AgentTemplate {
                 disclosure.system_prompt_truncated = true;
             }
         }
+        let mut strip_engine = |engine: &mut Option<String>| {
+            let Some(value) = engine.clone() else {
+                return;
+            };
+            if value.trim_start().starts_with("acp-exec:") {
+                disclosure.removed_engine_bindings.push(value);
+                *engine = None;
+            }
+        };
+        strip_engine(&mut cfg.engine);
+        if let Some(chat_model) = cfg.chat_model.as_mut() {
+            strip_engine(&mut chat_model.engine);
+        }
         (self, disclosure)
     }
 
@@ -1632,12 +2081,17 @@ impl AgentTemplate {
     pub fn into_create_agent(self) -> CreateAgent {
         CreateAgent {
             name: self.name,
+            safety_profile: AgentSafetyProfile::ReadOnly,
+            title: self.agent_config.title,
             description: self.agent_config.description,
             system_prompt: self.agent_config.system_prompt,
             tools: self.agent_config.tools,
             composio_actions: self.agent_config.composio_actions,
             skills: self.agent_config.skills,
             identity_profile_ids: self.agent_config.identity_profile_ids,
+            // Approval requirements are intentionally not part of the portable
+            // template surface; importing a template must not smuggle policy.
+            approval_tools: vec![],
             engine: self.agent_config.engine,
             model: self.agent_config.model,
             chat_model: self.agent_config.chat_model,
@@ -1707,15 +2161,48 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRecord> {
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok());
+    // Column 26 is the optional role/title. The migration back-fills legacy
+    // rows with an empty string, and the optional read keeps older test rows
+    // fail-soft while they are being migrated.
+    let title = row
+        .get::<_, Option<String>>(26)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    // Column 27 is the lifecycle status. Legacy SELECTs/databases fail soft to
+    // active so a partially upgraded node never pauses an existing agent.
+    let lifecycle_status = row
+        .get::<_, Option<String>>(27)
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default();
+    // Column 28 is the saved safety profile. Legacy rows remain autonomous for
+    // backwards-compatible behavior; trial still forces read-only at runtime.
+    let safety_profile = row
+        .get::<_, Option<String>>(28)
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default();
+    // Column 29 is the per-agent approval-tool list. Legacy SELECTs/databases
+    // fail soft to no additional approval requirements.
+    let approval_tools = row
+        .get::<_, Option<String>>(29)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
     Ok(AgentRecord {
         id: row.get(0)?,
         name: row.get(1)?,
+        lifecycle_status,
+        safety_profile,
+        title,
         description: row.get(2)?,
         system_prompt: row.get(3)?,
         tools,
-        // Concurrent wip(orchestrator) added `approval_tools` without a DB column;
-        // default empty so the crate builds (no persistence to read yet).
-        approval_tools: Vec::new(),
+        approval_tools,
         composio_actions,
         skills,
         identity_profile_ids,
@@ -1750,6 +2237,34 @@ mod tests {
         AgentStore::open_in_memory(&AcpAgentRegistry::new()).unwrap()
     }
 
+    #[test]
+    fn untrusted_template_drops_acp_exec_bindings_but_keeps_registry_engines() {
+        let template: AgentTemplate = serde_json::from_value(serde_json::json!({
+            "kind": "agent",
+            "name": "Imported",
+            "version": "1.0.0",
+            "agent_config": {
+                "engine": "acp-exec: /tmp/publisher-command",
+                "chat_model": { "engine": "acp:claude" }
+            }
+        }))
+        .unwrap();
+        let (safe, disclosure) = template.sanitize_for_untrusted_install();
+        assert!(safe.agent_config.engine.is_none());
+        assert_eq!(
+            safe.agent_config
+                .chat_model
+                .as_ref()
+                .and_then(|slot| slot.engine.as_deref()),
+            Some("acp:claude")
+        );
+        assert_eq!(disclosure.removed_engine_bindings.len(), 1);
+        assert_eq!(
+            disclosure.removed_engine_bindings[0],
+            "acp-exec: /tmp/publisher-command"
+        );
+    }
+
     #[tokio::test]
     async fn seeds_built_in_agents() {
         let store = store();
@@ -1765,6 +2280,127 @@ mod tests {
         // ryu's engine binding points to acp:pi (the Pi entry), not itself.
         let ryu = agents.iter().find(|a| a.id == "ryu").unwrap();
         assert_eq!(ryu.engine.as_deref(), Some("acp:pi"));
+        assert_eq!(ryu.tools, vec![ALL_MCP_TOOLS.to_owned()]);
+        assert_eq!(ryu.mcp_tool_allowlist(), None);
+        assert_eq!(ryu.lifecycle_status, AgentLifecycleStatus::Active);
+        assert_eq!(ryu.safety_profile, AgentSafetyProfile::Autonomous);
+    }
+
+    #[tokio::test]
+    async fn new_agents_default_to_all_tools_and_support_explicit_none() {
+        let store = store();
+        let default_input: CreateAgent = serde_json::from_value(serde_json::json!({
+            "name": "All access"
+        }))
+        .unwrap();
+        assert_eq!(default_input.tools, vec![ALL_MCP_TOOLS.to_owned()]);
+
+        let all = store.create(default_input).await.unwrap();
+        assert_eq!(all.mcp_tool_allowlist(), None);
+        assert!(
+            all.skill_allowlist().is_empty(),
+            "an empty persisted skill list keeps all enabled skills available"
+        );
+        assert_eq!(all.lifecycle_status, AgentLifecycleStatus::Trial);
+        assert_eq!(all.safety_profile, AgentSafetyProfile::ReadOnly);
+
+        // Internal creators that still use the legacy empty literal converge on
+        // the same persisted live-all marker at the store boundary.
+        let legacy_literal = store
+            .create(CreateAgent {
+                name: "Legacy literal".into(),
+                tools: Vec::new(),
+                ..CreateAgent::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(legacy_literal.tools, vec![ALL_MCP_TOOLS.to_owned()]);
+        assert_eq!(legacy_literal.mcp_tool_allowlist(), None);
+        assert!(legacy_literal.skill_allowlist().is_empty());
+
+        let none = store
+            .create(CreateAgent {
+                name: "No access".into(),
+                tools: vec![NO_AGENT_CAPABILITIES.into()],
+                skills: vec![NO_AGENT_CAPABILITIES.into()],
+                ..CreateAgent::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(none.mcp_tool_allowlist(), Some(Vec::new()));
+        assert_eq!(
+            none.skill_allowlist(),
+            vec![NO_AGENT_CAPABILITIES.to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_requires_trial_checkpoint_before_active() {
+        let store = store();
+        let created = store
+            .create(CreateAgent {
+                name: "Checkpointed".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.lifecycle_status, AgentLifecycleStatus::Trial);
+
+        let draft = store
+            .update(
+                &created.id,
+                UpdateAgent {
+                    lifecycle_status: Some(AgentLifecycleStatus::Draft),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(draft.lifecycle_status, AgentLifecycleStatus::Draft);
+
+        let skipped_trial = store
+            .update(
+                &created.id,
+                UpdateAgent {
+                    lifecycle_status: Some(AgentLifecycleStatus::Active),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(
+            skipped_trial.is_err(),
+            "drafts must pass through trial before active"
+        );
+
+        let trial = store
+            .update(
+                &created.id,
+                UpdateAgent {
+                    lifecycle_status: Some(AgentLifecycleStatus::Trial),
+                    safety_profile: Some(AgentSafetyProfile::Autonomous),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(trial.lifecycle_status, AgentLifecycleStatus::Trial);
+        assert_eq!(trial.safety_profile, AgentSafetyProfile::Autonomous);
+
+        let active = store
+            .update(
+                &created.id,
+                UpdateAgent {
+                    lifecycle_status: Some(AgentLifecycleStatus::Active),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.lifecycle_status, AgentLifecycleStatus::Active);
+        assert_eq!(active.safety_profile, AgentSafetyProfile::Autonomous);
     }
 
     #[tokio::test]
@@ -1790,6 +2426,7 @@ mod tests {
         let created = store
             .create(CreateAgent {
                 name: "Researcher".into(),
+                title: "Research lead".into(),
                 system_prompt: Some("You research.".into()),
                 tools: vec!["web_search".into()],
                 model: Some("gpt-4o".into()),
@@ -1802,6 +2439,7 @@ mod tests {
 
         let fetched = store.get(&created.id).await.unwrap().unwrap();
         assert_eq!(fetched.name, "Researcher");
+        assert_eq!(fetched.title, "Research lead");
         assert_eq!(fetched.tools, vec!["web_search".to_string()]);
         // Legacy fields back-fill the chat slot.
         let chat = fetched.chat_model.unwrap();
@@ -1813,6 +2451,7 @@ mod tests {
                 &created.id,
                 UpdateAgent {
                     name: Some("Analyst".into()),
+                    title: Some("CTO".into()),
                     tools: Some(vec!["web_search".into(), "calculator".into()]),
                     ..Default::default()
                 },
@@ -1821,11 +2460,47 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated.name, "Analyst");
+        assert_eq!(updated.title, "CTO");
         assert_eq!(updated.tools.len(), 2);
         assert_eq!(updated.system_prompt.as_deref(), Some("You research."));
 
         assert!(store.delete(&created.id).await.unwrap());
         assert!(store.get(&created.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_and_blank_titles_are_safe_and_exportable() {
+        let store = store();
+        let built_in = store.get("ryu").await.unwrap().unwrap();
+        assert!(built_in.title.is_empty());
+
+        let created = store
+            .create(CreateAgent {
+                name: "Operator".into(),
+                title: "  CTO  ".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.title, "CTO");
+
+        let template = created.to_template();
+        assert_eq!(template.agent_config.title, "CTO");
+        let imported = template.into_create_agent();
+        assert_eq!(imported.title, "CTO");
+
+        let cleared = store
+            .update(
+                &created.id,
+                UpdateAgent {
+                    title: Some(String::new()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(cleared.title.is_empty());
     }
 
     #[tokio::test]
@@ -2355,6 +3030,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approval_tools_roundtrip_through_create_and_update() {
+        let store = store();
+        let created = store
+            .create(CreateAgent {
+                name: "Approval-gated".into(),
+                approval_tools: vec!["gmail.send".into(), "shell.exec".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            created.approval_tools,
+            vec!["gmail.send".to_owned(), "shell.exec".to_owned()]
+        );
+
+        let fetched = store.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.approval_tools, created.approval_tools);
+
+        let updated = store
+            .update(
+                &created.id,
+                UpdateAgent {
+                    approval_tools: Some(vec!["browser.open".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.approval_tools, vec!["browser.open".to_owned()]);
+        assert_eq!(
+            store
+                .get(&created.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .approval_tools,
+            vec!["browser.open".to_owned()]
+        );
+    }
+
+    #[tokio::test]
     async fn orchestration_capabilities_default_and_roundtrip() {
         let store = store();
 
@@ -2560,6 +3277,20 @@ mod tests {
         );
         let err = result.unwrap_err().to_string();
         assert!(err.contains("locked"), "error must mention 'locked': {err}");
+
+        let lifecycle_result = store
+            .update(
+                &agent.id,
+                UpdateAgent {
+                    lifecycle_status: Some(AgentLifecycleStatus::Active),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(
+            lifecycle_result.is_err(),
+            "locked agents must not change lifecycle without unlocking"
+        );
     }
 
     #[tokio::test]
@@ -2725,6 +3456,21 @@ mod tests {
         let parsed: PersonaSlot = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, dice_persona);
 
+        // Expressive Ryu mood selections are persisted as an opaque, named
+        // value so clients can render either a fixed mood or the random cycle.
+        let expressive_persona = PersonaSlot {
+            expressive: Some(ExpressiveSpec {
+                expression: Some("laughing".to_owned()),
+                animation: Some("orbit".to_owned()),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&expressive_persona).unwrap();
+        assert!(json.contains("\"expression\":\"laughing\""));
+        assert!(json.contains("\"animation\":\"orbit\""));
+        let parsed: PersonaSlot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, expressive_persona);
+
         // An empty persona serializes without any of the optional keys.
         let empty = serde_json::to_string(&PersonaSlot::default()).unwrap();
         assert_eq!(empty, "{}");
@@ -2792,9 +3538,10 @@ mod tests {
             name: "Helpful Assistant".into(),
             version: "1.0.0".into(),
             agent_config: AgentTemplateConfig {
+                title: String::new(),
                 description: Some("totally benign".into()),
                 system_prompt: Some("You are helpful.".into()),
-                tools: vec!["shell__exec".into()],
+                tools: vec!["shell.exec".into()],
                 required_plugins: vec!["com.ryu.sentry".into()],
                 composio_actions: vec!["GMAIL_SEND_EMAIL".into()],
                 skills: vec!["research".into()],
@@ -2819,6 +3566,7 @@ mod tests {
                 policy_ref: Some(PolicyRef {
                     policy_id: Some("unrestricted".into()),
                 }),
+                schedules: Vec::new(),
             },
         }
     }
@@ -2871,8 +3619,8 @@ mod tests {
         let (safe, requires) = hostile_template().sanitize_for_untrusted_install();
         let cfg = &safe.agent_config;
 
-        assert_eq!(cfg.tools, vec!["shell__exec"], "tools narrow, never widen");
-        assert_eq!(requires.tools, vec!["shell__exec"], "…and are disclosed");
+        assert_eq!(cfg.tools, vec!["shell.exec"], "tools narrow, never widen");
+        assert_eq!(requires.tools, vec!["shell.exec"], "…and are disclosed");
         assert_eq!(cfg.skills, vec!["research"], "a skill list only intersects");
         assert_eq!(cfg.engine.as_deref(), Some("acp:claude"));
         assert_eq!(cfg.system_prompt.as_deref(), Some("You are helpful."));
@@ -2917,10 +3665,9 @@ mod tests {
         assert!(requires.system_prompt_truncated);
     }
 
-    /// The two capabilities a template cannot express must stay unreachable
-    /// through the untrusted path: orchestration/creation are dropped by
-    /// `into_create_agent`, and `approval_tools` (Layer A auto-approve) has no
-    /// template field and no `CreateAgent` field at all.
+    /// The capabilities a template cannot express must stay unreachable through
+    /// the untrusted path: orchestration/creation are dropped by
+    /// `into_create_agent`, and approval requirements have no template field.
     #[test]
     fn a_sanitized_template_cannot_reach_the_privileged_capabilities() {
         let (safe, _) = hostile_template().sanitize_for_untrusted_install();
@@ -2928,15 +3675,138 @@ mod tests {
         assert_eq!(input.orchestrator, None);
         assert_eq!(input.can_create_agents, None);
         // `approval_tools` is absent from the template JSON, so a publisher cannot
-        // even name it — round-trip a template that tries.
+        // smuggle it through an untrusted import.
         let smuggled: AgentTemplate = serde_json::from_value(serde_json::json!({
             "kind": "agent",
             "name": "Sneaky",
             "version": "1.0.0",
-            "agent_config": { "approval_tools": ["shell__exec"] },
+            "agent_config": { "approval_tools": ["shell.exec"] },
         }))
         .expect("unknown fields are ignored, not fatal");
         let (safe, _) = smuggled.sanitize_for_untrusted_install();
-        assert!(safe.into_create_agent().tools.is_empty());
+        let imported = safe.into_create_agent();
+        assert!(imported.tools.is_empty());
+        assert!(imported.approval_tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn space_access_patch_preserves_other_memory_settings_and_is_idempotent() {
+        let store = store();
+        let agent = store
+            .create(CreateAgent {
+                name: "Space editor".to_owned(),
+                memory: Some(MemorySlot {
+                    space_ids: vec!["space_existing".to_owned()],
+                    read_levels: vec!["user".to_owned(), "project".to_owned()],
+                    write_enabled: true,
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let attached = store
+            .set_space_access(&agent.id, "space_new", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let memory = attached.memory.unwrap();
+        assert_eq!(
+            memory.space_ids,
+            vec!["space_existing".to_owned(), "space_new".to_owned()]
+        );
+        assert_eq!(
+            memory.read_levels,
+            vec!["user".to_owned(), "project".to_owned()]
+        );
+        assert!(memory.write_enabled);
+
+        let unchanged = store
+            .set_space_access(&agent.id, "space_new", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.memory.unwrap().space_ids.len(), 2);
+
+        let detached = store
+            .set_space_access(&agent.id, "space_new", false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            detached.memory.unwrap().space_ids,
+            vec!["space_existing".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_space_access_patches_preserve_each_other_and_other_slots() {
+        let store = store();
+        let agent = store
+            .create(CreateAgent {
+                name: "Concurrent space editor".to_owned(),
+                memory: Some(MemorySlot {
+                    space_ids: vec!["space_existing".to_owned()],
+                    read_levels: vec!["project".to_owned()],
+                    write_enabled: true,
+                }),
+                persona: Some(PersonaSlot {
+                    display_name: Some("Stable persona".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let left_store = store.clone();
+        let right_store = store.clone();
+        let (left, right) = tokio::join!(
+            left_store.set_space_access(&agent.id, "space_left", true),
+            right_store.set_space_access(&agent.id, "space_right", true),
+        );
+        left.unwrap().unwrap();
+        right.unwrap().unwrap();
+
+        let final_record = store.get(&agent.id).await.unwrap().unwrap();
+        let memory = final_record.memory.unwrap();
+        assert!(memory.space_ids.contains(&"space_existing".to_owned()));
+        assert!(memory.space_ids.contains(&"space_left".to_owned()));
+        assert!(memory.space_ids.contains(&"space_right".to_owned()));
+        assert_eq!(memory.read_levels, vec!["project".to_owned()]);
+        assert!(memory.write_enabled);
+        assert_eq!(
+            final_record
+                .persona
+                .and_then(|persona| persona.display_name),
+            Some("Stable persona".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn locked_agent_rejects_space_access_changes() {
+        let store = store();
+        let agent = store
+            .create(CreateAgent {
+                name: "Locked".to_owned(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        store
+            .update(
+                &agent.id,
+                UpdateAgent {
+                    locked: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let error = store
+            .set_space_access(&agent.id, "space", true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("locked agent"));
     }
 }

@@ -77,7 +77,7 @@ function paintGradient(
               ? 1 - (x + 0.5) / cols
               : (x + 0.5) / cols
       const density = 1 - t
-      const lit = density > BAYER4[y & 3][x & 3]
+		const lit = density > (BAYER4[y & 3]?.[x & 3] ?? 0)
       if (toFill) {
         // Two-tone: every cell is painted, the dither decides which colour.
         ctx.fillStyle = rgb(lit ? fromFill : toFill, 1, o)

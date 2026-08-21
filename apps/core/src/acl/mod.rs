@@ -99,7 +99,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// one. The desktop previously kept its own list, which said only `space` while
 /// Core had grown three more kinds — so agents and workflows were uneditable and
 /// nothing failed to say so. A single exported source cannot drift.
-pub const ENFORCED_KINDS: &[&str] = &[KIND_SPACE, KIND_AGENT, KIND_WORKFLOW];
+pub const ENFORCED_KINDS: &[&str] = &[KIND_SPACE, KIND_AGENT, KIND_WORKFLOW, KIND_NODE];
 
 pub const KIND_SPACE: &str = "space";
 /// A conversation (the realtime/chat plane's resource).
@@ -108,6 +108,9 @@ pub const KIND_CONVERSATION: &str = "conversation";
 pub const KIND_AGENT: &str = "agent";
 /// A workflow definition.
 pub const KIND_WORKFLOW: &str = "workflow";
+/// A managed Core node. App lifecycle ACLs are node-wide rather than package-
+/// specific, so every installable package action resolves against this key.
+pub const KIND_NODE: &str = "node";
 
 // ── Vocabulary ───────────────────────────────────────────────────────────────
 

@@ -49,5 +49,5 @@ appending puts the template last. No other Rust changes.
   `max_iterations`; the final carry is the refined work. Splitting it back into
   separate evaluate/optimize nodes would lose the critique between iterations.
 - **`autoresearch`** — the agent task text is the operating manual for the
-  `research__*` sidecar tools (init workspace → read → edit → run → keep/reset →
+  `research.*` sidecar tools (init workspace → read → edit → run → keep/reset →
   ledger). Editing the numbered steps changes what the researcher actually does.

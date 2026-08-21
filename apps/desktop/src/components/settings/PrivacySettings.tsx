@@ -1,16 +1,16 @@
 // apps/desktop/src/components/settings/PrivacySettings.tsx
 //
 // The Privacy tab (P0 of docs/observability-analytics-support-access.md). It
-// surfaces the four independent consent toggles from the §6 defaults table, each
+// surfaces the independent consent toggles from the §6 defaults table, each
 // defaulting per that table — closed-UI product analytics + crash reports are
-// opt-out (ON by default), while the data-plane OTLP diagnostics export and the
-// local Core support-access channel are opt-in (OFF). A first-run disclosure
-// notice is shown even though analytics defaults ON, so consent is informed.
+// opt-out (ON by default), while data-plane OTLP diagnostics export and local
+// Core support access are opt-in (OFF). A first-run disclosure notice is shown
+// even though analytics defaults ON, so consent is informed.
 //
-// IMPORTANT: this unit ships the CONTROLS ONLY. No analytics SDK, crash reporter,
-// or OTLP exporter is wired here — the toggles persist to Core's preferences
-// (the canonical kebab keys) so later phases read one source of truth and so
-// collection can never precede consent.
+// The canonical Core preferences are the source of truth. This tab also seeds
+// the live analytics and crash gates immediately, while Core/Gateway read the
+// same preferences when their exporters start; collection cannot precede the
+// user's persisted choice.
 
 import {
 	Alert01Icon,

@@ -12,6 +12,10 @@
 // `apps/core/src/server/{mod,spaces}.rs` (snake_case on the wire).
 
 import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
+import {
+	type ResourceVisibility,
+	toResourceVisibility,
+} from "@/src/lib/resource-visibility.ts";
 import { type ApiTarget, apiUrl, request, requestHeaders } from "./client.ts";
 
 /**
@@ -93,8 +97,11 @@ export interface Space {
 	 * greying out every Space against a node that cannot say.
 	 */
 	system: boolean;
+	teamId?: string | null;
 	/** Unix milliseconds. */
 	updatedAt: number;
+	/** Owner-only, organization-wide, or named-team visibility. */
+	visibility?: ResourceVisibility;
 }
 
 /** Whether a document is a markdown page, a data-grid database, or an
@@ -184,6 +191,8 @@ export interface SpaceDocument {
 	rawKind: string;
 	spaceId: string;
 	title: string;
+	/** Unix milliseconds. */
+	updatedAt: number;
 }
 
 /** Whether a listed document is a stored binary file rather than an editable doc. */
@@ -297,7 +306,9 @@ interface SpaceWire {
 	/** `spaces::Space.system` — `#[serde(default)]` on the Rust side, so treat an
 	 *  absent field as "not a system space". See {@link Space.system}. */
 	system?: boolean;
+	team_id?: string | null;
 	updated_at: number;
+	visibility?: string;
 }
 
 /**
@@ -345,6 +356,28 @@ interface DocumentWire {
 	mime?: string | null;
 	space_id: string;
 	title: string;
+	updated_at?: number;
+}
+
+/** A literal global page hit returned by `GET /api/spaces/search`. */
+export interface SpaceLexicalHit {
+	createdAt: number;
+	documentId: string;
+	snippet: string;
+	spaceId: string;
+	spaceName: string;
+	title: string;
+	updatedAt: number;
+}
+
+interface SpaceLexicalHitWire {
+	created_at: number;
+	document_id: string;
+	snippet: string;
+	space_id: string;
+	space_name: string;
+	title: string;
+	updated_at: number;
 }
 
 interface MatchWire {
@@ -365,6 +398,8 @@ function toSpace(s: SpaceWire): Space {
 		icon: s.icon ?? null,
 		retrievalMode: toRetrievalMode(s.retrieval_mode),
 		system: s.system ?? false,
+		teamId: s.team_id ?? null,
+		visibility: toResourceVisibility(s.visibility),
 	};
 }
 
@@ -384,6 +419,7 @@ function toDocument(d: DocumentWire): SpaceDocument {
 		spaceId: d.space_id,
 		title: d.title,
 		createdAt: d.created_at,
+		updatedAt: d.updated_at ?? d.created_at,
 		chunkCount: d.chunk_count,
 		kind: toDocumentKind(d.kind),
 		rawKind: d.kind ?? "",
@@ -519,11 +555,15 @@ export async function createSpace(
 	target: ApiTarget,
 	name: string,
 	description: string | null,
-	retrievalMode?: RetrievalMode
+	retrievalMode?: RetrievalMode,
+	visibility?: ResourceVisibility
 ): Promise<CreatedSpace> {
 	const body: Record<string, unknown> = { name, description };
 	if (retrievalMode !== undefined) {
 		body.retrieval_mode = retrievalMode;
+	}
+	if (visibility !== undefined) {
+		body.visibility = visibility;
 	}
 	const json = await request<{ id: string; retrieval_mode?: string }>(
 		target,
@@ -531,6 +571,34 @@ export async function createSpace(
 		{ method: "POST", body }
 	);
 	return { id: json.id, retrievalMode: toRetrievalMode(json.retrieval_mode) };
+}
+
+/** Change a Space's sharing scope without touching its pages or retrieval index. */
+export async function setSpaceVisibility(
+	target: ApiTarget,
+	id: string,
+	visibility: ResourceVisibility,
+	teamId?: string | null
+): Promise<void> {
+	await request(target, `/api/spaces/${encodeURIComponent(id)}/visibility`, {
+		method: "POST",
+		body: {
+			visibility,
+			...(visibility === "team" && teamId ? { team_id: teamId } : {}),
+		},
+	});
+}
+
+/** Rename a user-created Space without touching its documents or retrieval index. */
+export async function renameSpace(
+	target: ApiTarget,
+	id: string,
+	name: string
+): Promise<void> {
+	await request(target, `/api/spaces/${id}/name`, {
+		method: "POST",
+		body: { name },
+	});
 }
 
 /**
@@ -873,6 +941,37 @@ export async function fetchDocuments(
 		`/api/spaces/${spaceId}/documents`
 	);
 	return (json.documents ?? []).map(toDocument);
+}
+
+/** Search visible Space metadata and document text with literal lexical matching. */
+export async function searchSpaceDocuments(
+	target: ApiTarget,
+	query: string,
+	limit = 8,
+	signal?: AbortSignal
+): Promise<SpaceLexicalHit[] | null> {
+	try {
+		const params = new URLSearchParams({
+			limit: String(limit),
+			q: query,
+		});
+		const json = await request<{ hits?: SpaceLexicalHitWire[] }>(
+			target,
+			`/api/spaces/search?${params.toString()}`,
+			{ signal }
+		);
+		return (json.hits ?? []).map((hit) => ({
+			createdAt: hit.created_at,
+			documentId: hit.document_id,
+			spaceId: hit.space_id,
+			spaceName: hit.space_name,
+			snippet: hit.snippet,
+			title: hit.title,
+			updatedAt: hit.updated_at || hit.created_at,
+		}));
+	} catch {
+		return null;
+	}
 }
 
 /**

@@ -12,10 +12,10 @@
 // inside this component — everything that needs the backend (channel configs,
 // agents, auth status, save/delete) is passed in as props.
 
-import { Add01Icon, BubbleChatIcon } from "@hugeicons/core-free-icons";
+import { Add01Icon, Tv01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Alert, AlertDescription, AlertTitle } from "@ryu/ui/components/alert";
-import { Button } from "@ryu/ui/components/button";
+import { Button, buttonVariants } from "@ryu/ui/components/button";
 import {
 	Empty,
 	EmptyDescription,
@@ -40,6 +40,7 @@ export const CHANNEL_TYPES = [
 	"telegram",
 	"slack",
 	"whatsapp",
+	"whatsapp_personal",
 	"discord",
 	"bluebubbles",
 ] as const;
@@ -96,8 +97,7 @@ export const VOICE_REPLY_LABELS: Record<VoiceReplyMode, string> = {
 	always: "Speak every reply",
 };
 
-// Every platform below has a real, registered gateway adapter
-// (apps/gateway/src/channels/{telegram,slack,whatsapp,discord}.rs), so none are
+// Every platform below has a real, registered gateway adapter, so none are
 // gated. What differs is the setup each one demands — see CHANNEL_SETUP.
 //
 // The required keys MUST match what the adapter actually bails on at construction
@@ -108,17 +108,293 @@ export const VOICE_REPLY_LABELS: Record<VoiceReplyMode, string> = {
 //   whatsapp → whatsapp.rs:88-102 (access_token, phone_number_id, verify_token,
 //              app_secret — app_secret is mandatory: it verifies the inbound
 //              X-Hub-Signature-256 on every Meta webhook POST)
-//   discord  → discord.rs:88-92 (bot_token, channel_ids — the adapter bails on an
-//              empty channel_ids, and it is stored as one comma-separated secret
-//              which discord_cfg_from_store splits on ',')
+//   whatsapp_personal → openwa.rs (openwa_url, openwa_api_key,
+//              openwa_session_id, webhook_url, webhook_secret)
+//   discord  → discord.rs (bot_token; channel ids are optional so DMs work)
 export const REQUIRED_SECRETS: Record<ChannelType, string[]> = {
 	telegram: ["bot_token"],
 	slack: ["app_token", "bot_token"],
 	whatsapp: ["access_token", "phone_number_id", "verify_token", "app_secret"],
-	discord: ["bot_token", "channel_ids"],
+	whatsapp_personal: [
+		"openwa_url",
+		"openwa_api_key",
+		"openwa_session_id",
+		"webhook_url",
+		"webhook_secret",
+	],
+	discord: ["bot_token"],
 	//   bluebubbles → bluebubbles.rs (server_url, password — the adapter bails on
 	//              either being blank, since both are needed for every call)
 	bluebubbles: ["server_url", "password"],
+};
+
+/** Optional per-channel transport settings. These are kept in the same
+ * encrypted map so two WhatsApp records can listen on different local routes
+ * without turning node-local webhook plumbing into a global setting. */
+export const OPTIONAL_SECRETS: Record<ChannelType, string[]> = {
+	telegram: ["webhook_secret"],
+	slack: [],
+	whatsapp: ["webhook_bind", "webhook_path", "graph_version"],
+	whatsapp_personal: ["webhook_bind", "webhook_path", "self_chat_only"],
+	discord: ["channel_ids"],
+	bluebubbles: [],
+};
+
+type PlatformOptionKind = "boolean" | "list" | "number" | "text" | "url";
+
+interface PlatformOptionField {
+	help: string;
+	key: string;
+	kind: PlatformOptionKind;
+	label: string;
+}
+
+/** Non-secret transport and mention controls stored in platformOptions. */
+export const PLATFORM_OPTION_FIELDS: Partial<
+	Record<ChannelType, PlatformOptionField[]>
+> = {
+	telegram: [
+		{
+			key: "webhook_url",
+			label: "Public webhook URL",
+			help: "Optional. Set this to use Telegram webhooks instead of long polling.",
+			kind: "url",
+		},
+		{
+			key: "webhook_bind",
+			label: "Webhook bind",
+			help: "Optional local listener address; defaults to the Gateway's Telegram listener.",
+			kind: "text",
+		},
+		{
+			key: "webhook_path",
+			label: "Webhook path",
+			help: "Optional route for Telegram webhook delivery.",
+			kind: "text",
+		},
+		{
+			key: "base_url",
+			label: "Bot API base URL",
+			help: "Optional custom Bot API endpoint for a local server or proxy.",
+			kind: "url",
+		},
+		{
+			key: "base_file_url",
+			label: "Bot API file URL",
+			help: "Optional custom file endpoint paired with the Bot API base URL.",
+			kind: "url",
+		},
+		{
+			key: "local_mode",
+			label: "Local media mode",
+			help: "Read Telegram file paths from the Gateway filesystem.",
+			kind: "boolean",
+		},
+		{
+			key: "mention_patterns",
+			label: "Additional mention patterns",
+			help: "Comma-separated case-insensitive phrases that address the bot in groups.",
+			kind: "list",
+		},
+		{
+			key: "ignored_threads",
+			label: "Ignored topic IDs",
+			help: "Comma-separated Telegram topic tags that the bot must ignore.",
+			kind: "list",
+		},
+		{
+			key: "exclusive_bot_mentions",
+			label: "Require the bot mention",
+			help: "Ignore generic patterns unless the bot itself is mentioned or invoked.",
+			kind: "boolean",
+		},
+		{
+			key: "guest_mode",
+			label: "Guest queries",
+			help: "Accept Telegram guest-query updates. Enabled by default.",
+			kind: "boolean",
+		},
+		{
+			key: "command_menu_max",
+			label: "Maximum menu commands",
+			help: "Telegram command-menu limit; clamped to 1–100.",
+			kind: "number",
+		},
+	],
+	slack: [
+		{
+			key: "reply_in_thread",
+			label: "Reply in threads",
+			help: "Keep channel replies in the triggering Slack thread.",
+			kind: "boolean",
+		},
+		{
+			key: "reply_broadcast",
+			label: "Broadcast thread replies",
+			help: "Also show a threaded reply in the parent channel.",
+			kind: "boolean",
+		},
+		{
+			key: "strict_mention",
+			label: "Strict mentions",
+			help: "Require a fresh mention for every channel message, including active threads.",
+			kind: "boolean",
+		},
+		{
+			key: "thread_require_mention",
+			label: "Mention in active threads",
+			help: "Require a mention even when a thread is already active.",
+			kind: "boolean",
+		},
+		{
+			key: "free_response_channels",
+			label: "Free-response channels",
+			help: "Comma-separated channel ids where the bot answers without a mention.",
+			kind: "list",
+		},
+		{
+			key: "require_mention_channels",
+			label: "Mention-required channels",
+			help: "Comma-separated channel ids that always require a mention.",
+			kind: "list",
+		},
+		{
+			key: "allowed_channels",
+			label: "Allowed channels",
+			help: "Comma-separated Slack channel ids to serve.",
+			kind: "list",
+		},
+		{
+			key: "ignored_channels",
+			label: "Ignored channels",
+			help: "Comma-separated Slack channel ids to ignore.",
+			kind: "list",
+		},
+		{
+			key: "allow_bots",
+			label: "Accept bot messages",
+			help: "Allow messages authored by other Slack bots.",
+			kind: "boolean",
+		},
+		{
+			key: "reply_prefix",
+			label: "Reply prefix",
+			help: "Optional text prepended to each Slack reply.",
+			kind: "text",
+		},
+		{
+			key: "mention_patterns",
+			label: "Additional mention patterns",
+			help: "Comma-separated case-insensitive phrases that address the bot.",
+			kind: "list",
+		},
+		{
+			key: "rich_blocks",
+			label: "Rich blocks",
+			help: "Render replies as native Slack Block Kit sections.",
+			kind: "boolean",
+		},
+		{
+			key: "feedback_buttons",
+			label: "Feedback buttons",
+			help: "Add Helpful and Needs work actions that confirm with a reaction.",
+			kind: "boolean",
+		},
+	],
+	discord: [
+		{
+			key: "history_backfill",
+			label: "Backfill after reconnect",
+			help: "Fetch messages missed while the Discord Gateway was disconnected.",
+			kind: "boolean",
+		},
+		{
+			key: "free_response_channels",
+			label: "Free-response channels",
+			help: "Comma-separated channel ids where the bot answers without a mention.",
+			kind: "list",
+		},
+		{
+			key: "allowed_channels",
+			label: "Allowed channels",
+			help: "Comma-separated Discord channel ids to serve.",
+			kind: "list",
+		},
+		{
+			key: "allowed_roles",
+			label: "Allowed roles",
+			help: "Comma-separated Discord role ids allowed to trigger the bot in guilds.",
+			kind: "list",
+		},
+		{
+			key: "thread_require_mention",
+			label: "Mention in threads",
+			help: "Require a mention even inside an active Discord thread.",
+			kind: "boolean",
+		},
+		{
+			key: "mention_patterns",
+			label: "Additional mention patterns",
+			help: "Comma-separated case-insensitive phrases that address the bot.",
+			kind: "list",
+		},
+		{
+			key: "ignored_channels",
+			label: "Ignored channels",
+			help: "Comma-separated Discord channel ids to ignore.",
+			kind: "list",
+		},
+		{
+			key: "no_thread_channels",
+			label: "No-thread channels",
+			help: "Comma-separated channel ids where replies stay in the channel.",
+			kind: "list",
+		},
+		{
+			key: "allow_bots",
+			label: "Accept bot messages",
+			help: "Allow messages authored by other Discord bots.",
+			kind: "boolean",
+		},
+		{
+			key: "home_channel",
+			label: "Home channel",
+			help: "Optional Discord channel for operator-triggered outbound sends.",
+			kind: "text",
+		},
+	],
+	bluebubbles: [
+		{
+			key: "webhook_bind",
+			label: "Webhook bind",
+			help: "Optional local bind for BlueBubbles webhook delivery.",
+			kind: "text",
+		},
+		{
+			key: "webhook_path",
+			label: "Webhook path",
+			help: "Optional path BlueBubbles posts to.",
+			kind: "text",
+		},
+		{
+			key: "private_api",
+			label: "Private API helper",
+			help: "Enable typing, read receipts, and tapbacks when installed on the Mac.",
+			kind: "boolean",
+		},
+		{
+			key: "mention_patterns",
+			label: "Additional mention patterns",
+			help: "Comma-separated phrases that address the bot in iMessage groups.",
+			kind: "list",
+		},
+		{
+			key: "home_channel",
+			label: "Home chat",
+			help: "Optional phone number, email, or BlueBubbles chat GUID for outbound sends.",
+			kind: "text",
+		},
+	],
 };
 
 export const SECRET_LABELS: Record<string, string> = {
@@ -128,7 +404,16 @@ export const SECRET_LABELS: Record<string, string> = {
 	phone_number_id: "Phone number ID",
 	verify_token: "Verify token",
 	app_secret: "App secret",
-	channel_ids: "Channel IDs (comma-separated)",
+	openwa_url: "OpenWA base URL",
+	openwa_api_key: "OpenWA API key",
+	openwa_session_id: "OpenWA session ID",
+	webhook_url: "Public webhook URL",
+	webhook_secret: "Webhook secret",
+	webhook_bind: "Local webhook bind",
+	webhook_path: "Webhook path",
+	graph_version: "Meta Graph API version",
+	self_chat_only: "Self-chat mode (true/false)",
+	channel_ids: "Legacy channel IDs (comma-separated, optional)",
 	server_url: "BlueBubbles server URL",
 	password: "BlueBubbles password",
 };
@@ -136,7 +421,8 @@ export const SECRET_LABELS: Record<string, string> = {
 export const CHANNEL_LABELS: Record<ChannelType, string> = {
 	telegram: "Telegram",
 	slack: "Slack",
-	whatsapp: "WhatsApp",
+	whatsapp: "WhatsApp Business (Cloud API)",
+	whatsapp_personal: "WhatsApp Personal",
 	discord: "Discord",
 	bluebubbles: "iMessage (BlueBubbles)",
 };
@@ -158,12 +444,16 @@ interface ChannelSetup {
  * UI verbatim because the user must proxy exactly this to a public HTTPS URL. */
 const WHATSAPP_WEBHOOK_BIND = "0.0.0.0:8443";
 const WHATSAPP_WEBHOOK_PATH = "/webhooks/whatsapp";
+const WHATSAPP_PERSONAL_WEBHOOK_BIND = "0.0.0.0:8444";
+const WHATSAPP_PERSONAL_WEBHOOK_PATH = "/webhooks/whatsapp-personal";
 
 export const CHANNEL_SETUP: Record<ChannelType, ChannelSetup> = {
 	telegram: {
 		note: "Create a bot with @BotFather and paste its token. No public URL needed — the gateway long-polls Telegram.",
 		secretHelp: {
 			bot_token: "From @BotFather (/newbot), e.g. 123456:ABC-DEF…",
+			webhook_secret:
+				"Required when Public webhook URL is set. Telegram sends it as X-Telegram-Bot-Api-Secret-Token.",
 		},
 	},
 	slack: {
@@ -186,16 +476,41 @@ export const CHANNEL_SETUP: Record<ChannelType, ChannelSetup> = {
 				"A random string you invent. You paste the same value into Meta's webhook callback config; it's only used for the subscription handshake.",
 			app_secret:
 				"Meta app → Settings → Basic → App Secret. Used to verify the X-Hub-Signature-256 on every inbound webhook — without it, the payload is spoofable, so it is required.",
+			webhook_bind: `Local address for this channel's receiver. Defaults to ${WHATSAPP_WEBHOOK_BIND}; choose a distinct port per Cloud API channel.`,
+			webhook_path: `Local path for this channel's receiver. Defaults to ${WHATSAPP_WEBHOOK_PATH}; register the same path in Meta's callback URL.`,
+			graph_version:
+				"Optional Graph API version override. Leave blank to use the gateway default.",
 		},
-		warning: `The gateway serves the WhatsApp webhook on ${WHATSAPP_WEBHOOK_BIND}${WHATSAPP_WEBHOOK_PATH}, but Meta only delivers to a public HTTPS URL. Put an HTTPS reverse proxy in front of that port, then register https://<your-domain>${WHATSAPP_WEBHOOK_PATH} — with the same Verify token as above — as the callback URL in Meta app → WhatsApp → Configuration. Until you do, the bot can send but will never receive. The port is fixed today, so only one WhatsApp bot can run per gateway.`,
+		warning: `The gateway serves the WhatsApp webhook on ${WHATSAPP_WEBHOOK_BIND}${WHATSAPP_WEBHOOK_PATH} by default, but Meta only delivers to a public HTTPS URL. Put an HTTPS reverse proxy in front of that port, then register https://<your-domain>${WHATSAPP_WEBHOOK_PATH} — with the same Verify token as above — as the callback URL in Meta app → WhatsApp → Configuration. Use the optional bind/path fields below when this gateway hosts more than one Cloud API channel.`,
+	},
+	whatsapp_personal: {
+		note: "WhatsApp Personal connects an OpenWA session you run yourself. Create and start the session in OpenWA, scan its QR code (or use its pairing code), then paste the session id and OpenWA operator key here. Ryu registers the webhook automatically.",
+		secretHelp: {
+			openwa_url:
+				"The OpenWA base URL, e.g. http://127.0.0.1:2785. It must be reachable from the Ryu gateway.",
+			openwa_api_key:
+				"An OpenWA API key with OPERATOR access to this session. Send it only to Ryu; it is stored encrypted.",
+			openwa_session_id:
+				"The OpenWA session id/name you created. OpenWA uses it for QR linking, lifecycle, webhooks, and sends.",
+			webhook_url:
+				"The URL OpenWA can POST to, including the path, e.g. https://ryu.example.com/webhooks/whatsapp-personal.",
+			webhook_secret:
+				"A random shared secret. OpenWA signs every delivery with X-OpenWA-Signature and Ryu verifies it before parsing.",
+			webhook_bind: `Local address for this channel's receiver. Defaults to ${WHATSAPP_PERSONAL_WEBHOOK_BIND}; choose a distinct port per personal channel.`,
+			webhook_path: `Local path for this channel's receiver. Defaults to ${WHATSAPP_PERSONAL_WEBHOOK_PATH}; it must match the path in Public webhook URL.`,
+			self_chat_only:
+				"Optional true/false switch for Hermes-style self-chat mode. Leave blank for normal personal-account DMs and groups.",
+		},
+		warning:
+			"This is an unofficial WhatsApp Web bridge, not Meta's Cloud API. Use a dedicated number: WhatsApp may restrict or ban linked personal accounts. OpenWA must be running and its session must be linked before messages can flow. The public webhook URL must reach the gateway; use a distinct bind/path for each channel record.",
 	},
 	discord: {
-		note: "Discord runs over the gateway WebSocket — no public URL needed. Enable the Message Content privileged intent in the Discord Developer Portal.",
+		note: "Discord runs over the gateway WebSocket — no public URL needed. Create each Discord application and bot in the Discord Developer Portal, enable the Message Content privileged intent, then paste its token here. Ryu can run multiple bot records, but Discord does not expose a public API for Ryu to create applications on your behalf.",
 		secretHelp: {
 			bot_token:
 				"Discord Developer Portal → your application → Bot → Reset/Copy Token.",
 			channel_ids:
-				"The channels the bot listens in, comma-separated. Enable Developer Mode in Discord, then right-click a channel → Copy Channel ID. At least one is required — the adapter refuses to start without it.",
+				"Optional comma-separated guild channel ids. Leave blank to keep DMs working and use the advanced channel allowlist instead.",
 		},
 	},
 	bluebubbles: {
@@ -207,7 +522,7 @@ export const CHANNEL_SETUP: Record<ChannelType, ChannelSetup> = {
 				"The server password set in BlueBubbles Server → Settings. Sent on every request, so treat it like a token.",
 		},
 		warning:
-			"Inbound iMessages arrive by webhook, so BlueBubbles Server must be pointed at the gateway's BlueBubbles webhook URL (BlueBubbles Server → Settings → Webhooks). Typing indicators, read receipts and tapback reactions additionally need the BlueBubbles Private API helper installed on the Mac — without it the bot can still send and receive plain messages, it just cannot show that it is typing.",
+			"Inbound iMessages arrive by webhook, so BlueBubbles Server must be pointed at the tokenized webhook URL reported by the Gateway for this channel (BlueBubbles Server → Settings → Webhooks). Typing indicators, read receipts and tapback reactions additionally need the BlueBubbles Private API helper installed on the Mac — without it the bot can still send and receive plain messages and media.",
 	},
 };
 
@@ -229,6 +544,14 @@ export interface ChannelBehaviorSettings {
 	groupAllowlist: string[];
 	/** Whether the bot answers in groups at all. */
 	groupPolicy: GroupPolicy;
+	/** Sender ids admitted inside groups. */
+	groupUserAllowlist: string[];
+	/** Add lightweight 👀/✅/❌ reactions around a turn where supported. */
+	lifecycleReactions: boolean;
+	/** Send Ryu's first welcome without waiting for a user message. */
+	proactiveOpening: boolean;
+	/** Direct-chat id that may receive the first welcome. */
+	proactiveTarget: string | null;
 	/** Longer description shown in an empty chat (Telegram caps at 512). */
 	profileDescription: string | null;
 	/** Display name pushed to the platform. */
@@ -258,6 +581,10 @@ export function defaultBehaviorSettings(): ChannelBehaviorSettings {
 		groupPolicy: DEFAULT_GROUP_POLICY,
 		dmAllowlist: [],
 		groupAllowlist: [],
+		groupUserAllowlist: [],
+		lifecycleReactions: true,
+		proactiveOpening: false,
+		proactiveTarget: null,
 		typingIndicator: true,
 		publishCommands: true,
 		richText: true,
@@ -293,7 +620,10 @@ export function supportedSettings(channelType: ChannelType): {
 		richText: channelType === "telegram" || channelType === "slack",
 		streaming: channelType === "telegram",
 		threadReplies: channelType === "discord",
-		readReceipts: channelType === "whatsapp" || channelType === "bluebubbles",
+		readReceipts:
+			channelType === "whatsapp" ||
+			channelType === "whatsapp_personal" ||
+			channelType === "bluebubbles",
 		// Slack cannot send a true typing indicator and Telegram's expires in 5s,
 		// but both have SOMETHING; iMessage needs the Private API helper.
 		typing: true,
@@ -304,19 +634,51 @@ export function supportedSettings(channelType: ChannelType): {
 /** A channel config as the view needs it. */
 export interface ChannelConfigView extends ChannelBehaviorSettings {
 	agentId: string | null;
+	/** Warning shown when the persisted binding no longer resolves to an agent. */
+	bindingWarning?: string | null;
 	channelType: ChannelType;
+	/** Ryu-managed credentials are dedicated to one managed node, never shared. */
+	credentialSource?: "ryu_managed" | "customer";
 	enabled: boolean;
 	/** When the bot replies in a group chat (mentions-only vs every message). */
 	groupReplyMode: GroupReplyMode;
 	id: string;
+	managedBotId?: string | null;
+	managedBotUsername?: string | null;
+	managedProvisioningState?: "ready" | "awaiting_provider" | null;
 	model: string | null;
 	name: string;
+	platformOptions?: Record<string, unknown>;
+	provisionedServerId?: string | null;
 	/** Credential keys already stored server-side (shown as "set"). */
 	secrets: Record<string, string>;
 	systemPrompt: string | null;
 	/** Team this bot routes to instead of a single agent (lead orchestrates
 	 * the members). Mutually exclusive with agentId. */
 	teamId: string | null;
+}
+
+const TELEGRAM_BOT_USERNAME_PATTERN = /^[A-Za-z0-9_]{5,32}$/;
+const DISCORD_APPLICATION_ID_PATTERN = /^\d{15,20}$/;
+
+/** Build the public Telegram entry point for a node's dedicated bot. */
+export function managedTelegramBotUrl(
+	username: string | null | undefined
+): string | null {
+	const normalized = username?.trim().replace(/^@+/, "") ?? "";
+	return TELEGRAM_BOT_USERNAME_PATTERN.test(normalized)
+		? `https://t.me/${encodeURIComponent(normalized)}`
+		: null;
+}
+
+/** Build Discord's standard app-install link for a node's dedicated bot. */
+export function managedDiscordInstallUrl(
+	applicationId: string | null | undefined
+): string | null {
+	const normalized = applicationId?.trim() ?? "";
+	return DISCORD_APPLICATION_ID_PATTERN.test(normalized)
+		? `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(normalized)}`
+		: null;
 }
 
 /** Payload the container persists on save (create or update). */
@@ -327,6 +689,7 @@ export interface ChannelSavePayload extends ChannelBehaviorSettings {
 	groupReplyMode: GroupReplyMode;
 	model: string | null;
 	name: string;
+	platformOptions: Record<string, unknown>;
 	secrets: Record<string, string>;
 	systemPrompt: string | null;
 	teamId: string | null;
@@ -340,6 +703,8 @@ export interface AgentOption {
 export interface ChannelsViewProps {
 	agents: AgentOption[];
 	authed?: boolean;
+	/** Whether the current caller may delete channel configurations. */
+	canDelete?: boolean;
 	channels: ChannelConfigView[];
 	error?: string | null;
 	/** Seed the "new channel" form open. */
@@ -347,7 +712,7 @@ export interface ChannelsViewProps {
 	/** Seed selection for storyboard determinism (e.g. the "edit" variant). */
 	initialSelectedId?: string | null;
 	loading?: boolean;
-	onDelete?: (id: string) => void;
+	onDelete?: (id: string) => boolean | Promise<boolean>;
 	/** Returns true on success so the view can leave the new-channel mode. */
 	onSave?: (
 		payload: ChannelSavePayload,
@@ -374,6 +739,7 @@ interface FormState extends ChannelBehaviorSettings {
 	groupReplyMode: GroupReplyMode;
 	model: string;
 	name: string;
+	platformOptionInputs: Record<string, string>;
 	secrets: Record<string, string>;
 	systemPrompt: string;
 }
@@ -393,6 +759,7 @@ function emptyForm(): FormState {
 		groupReplyMode: DEFAULT_GROUP_REPLY_MODE,
 		enabled: false,
 		secrets: {},
+		platformOptionInputs: {},
 		existingSecretKeys: [],
 		...defaultBehaviorSettings(),
 	};
@@ -409,6 +776,10 @@ function behaviorFromConfig(
 		groupPolicy: c.groupPolicy ?? defaults.groupPolicy,
 		dmAllowlist: c.dmAllowlist ?? defaults.dmAllowlist,
 		groupAllowlist: c.groupAllowlist ?? defaults.groupAllowlist,
+		groupUserAllowlist: c.groupUserAllowlist ?? defaults.groupUserAllowlist,
+		lifecycleReactions: c.lifecycleReactions ?? defaults.lifecycleReactions,
+		proactiveOpening: c.proactiveOpening ?? defaults.proactiveOpening,
+		proactiveTarget: c.proactiveTarget ?? defaults.proactiveTarget,
 		typingIndicator: c.typingIndicator ?? defaults.typingIndicator,
 		publishCommands: c.publishCommands ?? defaults.publishCommands,
 		richText: c.richText ?? defaults.richText,
@@ -420,6 +791,61 @@ function behaviorFromConfig(
 		profileShortBio: c.profileShortBio ?? defaults.profileShortBio,
 		profileDescription: c.profileDescription ?? defaults.profileDescription,
 	};
+}
+
+function platformOptionInputsFromConfig(
+	channelType: ChannelType,
+	options: Record<string, unknown> | undefined
+): Record<string, string> {
+	const inputs: Record<string, string> = {};
+	for (const field of PLATFORM_OPTION_FIELDS[channelType] ?? []) {
+		const value = options?.[field.key];
+		if (Array.isArray(value)) {
+			inputs[field.key] = value
+				.filter((entry): entry is string => typeof entry === "string")
+				.join(", ");
+		} else if (typeof value === "string" || typeof value === "number") {
+			inputs[field.key] = String(value);
+		} else if (typeof value === "boolean") {
+			inputs[field.key] = value ? "true" : "false";
+		}
+	}
+	return inputs;
+}
+
+function parsePlatformOptions(
+	channelType: ChannelType,
+	inputs: Record<string, string>
+): Record<string, unknown> {
+	const options: Record<string, unknown> = {};
+	for (const field of PLATFORM_OPTION_FIELDS[channelType] ?? []) {
+		const raw = inputs[field.key]?.trim() ?? "";
+		if (!raw) {
+			continue;
+		}
+		if (field.kind === "boolean") {
+			if (raw === "true" || raw === "false") {
+				options[field.key] = raw === "true";
+			}
+			continue;
+		}
+		if (field.kind === "number") {
+			const value = Number(raw);
+			if (Number.isFinite(value)) {
+				options[field.key] = value;
+			}
+			continue;
+		}
+		if (field.kind === "list") {
+			options[field.key] = raw
+				.split(",")
+				.map((value) => value.trim())
+				.filter(Boolean);
+			continue;
+		}
+		options[field.key] = raw;
+	}
+	return options;
 }
 
 function formFromConfig(c: ChannelConfigView): FormState {
@@ -440,6 +866,10 @@ function formFromConfig(c: ChannelConfigView): FormState {
 		groupReplyMode: c.groupReplyMode ?? DEFAULT_GROUP_REPLY_MODE,
 		enabled: c.enabled,
 		secrets: {},
+		platformOptionInputs: platformOptionInputsFromConfig(
+			c.channelType,
+			c.platformOptions
+		),
 		existingSecretKeys: Object.keys(c.secrets ?? {}),
 		...behaviorFromConfig(c),
 	};
@@ -455,6 +885,7 @@ export function ChannelsView({
 	saving,
 	initialSelectedId = null,
 	initialNew = false,
+	canDelete = true,
 	onSignIn,
 	onSave,
 	onDelete,
@@ -491,15 +922,33 @@ export function ChannelsView({
 	}, []);
 
 	const requiredKeys = REQUIRED_SECRETS[form.channelType];
+	const optionalKeys = OPTIONAL_SECRETS[form.channelType];
+	const platformOptionFields = PLATFORM_OPTION_FIELDS[form.channelType] ?? [];
 	// Only render a toggle the selected platform can actually honour — a control
 	// that does nothing reads as a promise the bot won't keep.
 	const supported = supportedSettings(form.channelType);
 	const setup = CHANNEL_SETUP[form.channelType];
+	const managedBotReady =
+		selected?.credentialSource === "ryu_managed" &&
+		selected.managedProvisioningState === "ready";
+	const managedBotActionUrl = managedBotReady
+		? selected.channelType === "telegram"
+			? managedTelegramBotUrl(selected.managedBotUsername)
+			: selected.channelType === "discord"
+				? managedDiscordInstallUrl(selected.managedBotId)
+				: null
+		: null;
 
 	const handleSave = useCallback(async () => {
 		setFormError(null);
 		if (!form.name.trim()) {
 			setFormError("Name is required.");
+			return;
+		}
+		if (form.proactiveOpening && !form.proactiveTarget?.trim()) {
+			setFormError(
+				"Choose the approved chat that should receive Ryu's welcome."
+			);
 			return;
 		}
 
@@ -538,6 +987,10 @@ export function ChannelsView({
 				agentId,
 				teamId,
 				groupReplyMode: form.groupReplyMode,
+				platformOptions: parsePlatformOptions(
+					form.channelType,
+					form.platformOptionInputs
+				),
 				model: form.model.trim() || null,
 				systemPrompt: form.systemPrompt.trim() || null,
 				enabled: form.enabled,
@@ -551,9 +1004,9 @@ export function ChannelsView({
 	}, [form, isNew, selected, requiredKeys, onSave]);
 
 	const handleDelete = useCallback(
-		(c: ChannelConfigView) => {
-			onDelete?.(c.id);
-			if (selectedId === c.id) {
+		async (c: ChannelConfigView) => {
+			const removed = await onDelete?.(c.id);
+			if (removed !== false && selectedId === c.id) {
 				setSelectedId(null);
 				setIsNew(false);
 			}
@@ -566,7 +1019,7 @@ export function ChannelsView({
 			<Empty className="h-full">
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={BubbleChatIcon} />
+						<HugeiconsIcon icon={Tv01Icon} />
 					</EmptyMedia>
 					<EmptyTitle>Sign in to manage channels</EmptyTitle>
 					<EmptyDescription>
@@ -603,7 +1056,7 @@ export function ChannelsView({
 			<Empty className="h-full">
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={BubbleChatIcon} />
+						<HugeiconsIcon icon={Tv01Icon} />
 					</EmptyMedia>
 					<EmptyTitle>{emptyTitle}</EmptyTitle>
 					<EmptyDescription>{emptyDescription}</EmptyDescription>
@@ -621,6 +1074,58 @@ export function ChannelsView({
 			<div className="scroll-fade flex-1 overflow-y-auto">
 				<div className="mx-auto max-w-xl space-y-5 p-6">
 					{error ? <p className="text-destructive text-sm">{error}</p> : null}
+					{selected?.bindingWarning ? (
+						<Alert>
+							<AlertTitle>Agent binding needs attention</AlertTitle>
+							<AlertDescription>{selected.bindingWarning}</AlertDescription>
+						</Alert>
+					) : null}
+					{selected?.credentialSource === "ryu_managed" ? (
+						<Alert>
+							<AlertTitle>
+								{selected.managedProvisioningState === "ready"
+									? "Dedicated Ryu-managed bot"
+									: "Managed bot setup is waiting"}
+							</AlertTitle>
+							<AlertDescription>
+								{selected.managedProvisioningState === "ready" ? (
+									<>
+										{selected.managedBotUsername
+											? `@${selected.managedBotUsername.replace(/^@+/, "")} is dedicated to this managed node. `
+											: "This bot is dedicated to this managed node. "}
+										It is not shared with another customer. To use your own bot,
+										paste its token below and save; provider ownership transfer
+										is not automatic.
+										{managedBotActionUrl ? (
+											<div className="mt-3 flex flex-wrap items-center gap-2">
+												<a
+													className={buttonVariants({
+														size: "sm",
+														variant: "outline",
+													})}
+													data-slot="button"
+													href={managedBotActionUrl}
+													rel="noopener noreferrer"
+													target="_blank"
+												>
+													{selected.channelType === "telegram"
+														? "Open in Telegram"
+														: "Install in Discord"}
+												</a>
+												<span className="text-muted-foreground text-xs">
+													{selected.channelType === "telegram"
+														? "Open the bot, then press Start."
+														: "Choose a server where you have Manage Server permission."}
+												</span>
+											</div>
+										) : null}
+									</>
+								) : (
+									"Ryu reserved this node's Telegram/Discord channel slot, but no company bot credential is available yet. Paste your own token below to use this channel now."
+								)}
+							</AlertDescription>
+						</Alert>
+					) : null}
 					<h1 className="font-semibold text-lg">
 						{isNew ? "New channel bot" : selected?.name}
 					</h1>
@@ -645,6 +1150,7 @@ export function ChannelsView({
 									...f,
 									channelType: e.target.value as ChannelType,
 									secrets: {},
+									platformOptionInputs: {},
 								}))
 							}
 							value={form.channelType}
@@ -675,30 +1181,57 @@ export function ChannelsView({
 						    gateway adapter refuses to start without. */}
 					<div className="space-y-3 rounded-lg border bg-card p-4">
 						<p className="font-medium text-sm">Credentials</p>
-						<p className="text-muted-foreground text-xs">{setup.note}</p>
+						<p className="text-muted-foreground text-xs">
+							{managedBotReady
+								? "Ryu has already connected this dedicated bot to your managed node. Leave the field blank to keep it, or paste your own token below to switch credentials."
+								: setup.note}
+						</p>
 						{requiredKeys.map((key) => {
 							const isSet = form.existingSecretKeys.includes(key);
 							const help = setup.secretHelp[key];
+							const isManagedBotToken = managedBotReady && key === "bot_token";
 							return (
 								<div className="space-y-1.5" key={key}>
 									<Label htmlFor={`secret-${key}`}>
-										{SECRET_LABELS[key] ?? key}
+										{isManagedBotToken
+											? "Replace with your own bot token (optional)"
+											: (SECRET_LABELS[key] ?? key)}
 									</Label>
 									<Input
 										aria-describedby={help ? `secret-${key}-help` : undefined}
 										autoComplete="off"
 										id={`secret-${key}`}
+										name={`secret-${key}`}
 										onChange={(e) =>
 											setForm((f) => ({
 												...f,
 												secrets: { ...f.secrets, [key]: e.target.value },
 											}))
 										}
-										placeholder={isSet ? "•••••••• (unchanged)" : "Paste value"}
-										type="password"
+										placeholder={
+											isManagedBotToken
+												? "Leave blank to keep the Ryu-managed bot"
+												: isSet
+													? "•••••••• (unchanged)"
+													: "Paste value…"
+										}
+										type={
+											key === "openwa_url" || key === "webhook_url"
+												? "url"
+												: "password"
+										}
 										value={form.secrets[key] ?? ""}
 									/>
-									{help ? (
+									{isManagedBotToken ? (
+										<p
+											className="text-muted-foreground text-xs"
+											id={`secret-${key}-help`}
+										>
+											Saving a token here changes this channel to
+											customer-managed credentials. Provider ownership transfer
+											is not automatic.
+										</p>
+									) : help ? (
 										<p
 											className="text-muted-foreground text-xs"
 											id={`secret-${key}-help`}
@@ -709,6 +1242,108 @@ export function ChannelsView({
 								</div>
 							);
 						})}
+						{optionalKeys.length > 0 || platformOptionFields.length > 0 ? (
+							<div className="space-y-3 border-t pt-3">
+								<div>
+									<p className="font-medium text-sm">Advanced delivery</p>
+									<p className="text-muted-foreground text-xs">
+										Optional settings stay with this channel, so another bot can
+										use different delivery, mention, and thread behavior.
+									</p>
+								</div>
+								{optionalKeys.map((key) => {
+									const isSet = form.existingSecretKeys.includes(key);
+									const help = setup.secretHelp[key];
+									const isBoolean = key === "self_chat_only";
+									return (
+										<div className="space-y-1.5" key={key}>
+											<Label htmlFor={`secret-${key}`}>
+												{SECRET_LABELS[key] ?? key}
+											</Label>
+											<Input
+												aria-describedby={
+													help ? `secret-${key}-help` : undefined
+												}
+												autoComplete="off"
+												id={`secret-${key}`}
+												name={`secret-${key}`}
+												onChange={(e) =>
+													setForm((f) => ({
+														...f,
+														secrets: { ...f.secrets, [key]: e.target.value },
+													}))
+												}
+												placeholder={
+													isSet
+														? "•••••••• (unchanged)"
+														: isBoolean
+															? "true or false"
+															: "Leave blank for default…"
+												}
+												type={
+													isBoolean ||
+													[
+														"webhook_bind",
+														"webhook_path",
+														"graph_version",
+														"channel_ids",
+													].includes(key)
+														? "text"
+														: "password"
+												}
+												value={form.secrets[key] ?? ""}
+											/>
+											{help ? (
+												<p
+													className="text-muted-foreground text-xs"
+													id={`secret-${key}-help`}
+												>
+													{help}
+												</p>
+											) : null}
+										</div>
+									);
+								})}
+								{platformOptionFields.map((field) => (
+									<div className="space-y-1.5" key={field.key}>
+										<Label htmlFor={`platform-option-${field.key}`}>
+											{field.label}
+										</Label>
+										<Input
+											aria-describedby={`platform-option-${field.key}-help`}
+											id={`platform-option-${field.key}`}
+											inputMode={
+												field.kind === "number" ? "numeric" : undefined
+											}
+											onChange={(e) =>
+												setForm((f) => ({
+													...f,
+													platformOptionInputs: {
+														...f.platformOptionInputs,
+														[field.key]: e.target.value,
+													},
+												}))
+											}
+											placeholder={
+												field.kind === "boolean"
+													? "true or false"
+													: field.kind === "list"
+														? "id1, id2"
+														: "Leave blank for default…"
+											}
+											type={field.kind === "url" ? "url" : "text"}
+											value={form.platformOptionInputs[field.key] ?? ""}
+										/>
+										<p
+											className="text-muted-foreground text-xs"
+											id={`platform-option-${field.key}-help`}
+										>
+											{field.help}
+										</p>
+									</div>
+								))}
+							</div>
+						) : null}
 						<p className="text-muted-foreground text-xs">
 							Values are stored encrypted and never shown again. On edit, leave
 							a field blank to keep the stored value.
@@ -718,7 +1353,7 @@ export function ChannelsView({
 					{/* Hard external prerequisite (today: WhatsApp's public webhook). */}
 					{setup.warning ? (
 						<Alert>
-							<AlertTitle>Needs a public HTTPS webhook</AlertTitle>
+							<AlertTitle>Before you connect</AlertTitle>
 							<AlertDescription>{setup.warning}</AlertDescription>
 						</Alert>
 					) : null}
@@ -879,10 +1514,99 @@ export function ChannelsView({
 								bot is not consent from the whole room.
 							</p>
 						</div>
+
+						<div className="space-y-1.5">
+							<Label htmlFor="channel-group-allowlist">
+								Allowed group/chat IDs
+							</Label>
+							<Input
+								id="channel-group-allowlist"
+								onChange={(e) =>
+									setForm((f) => ({
+										...f,
+										groupAllowlist: e.target.value
+											.split(",")
+											.map((value) => value.trim())
+											.filter(Boolean),
+									}))
+								}
+								placeholder="room-id-1, room-id-2"
+								value={form.groupAllowlist.join(", ")}
+							/>
+							<p className="text-muted-foreground text-xs">
+								Used when Groups is set to the allowlist policy. Discord's
+								watched channels are admitted automatically as well.
+							</p>
+						</div>
+
+						<div className="space-y-1.5">
+							<Label htmlFor="channel-group-user-allowlist">
+								Allowed group sender IDs
+							</Label>
+							<Input
+								id="channel-group-user-allowlist"
+								onChange={(e) =>
+									setForm((f) => ({
+										...f,
+										groupUserAllowlist: e.target.value
+											.split(",")
+											.map((value) => value.trim())
+											.filter(Boolean),
+									}))
+								}
+								placeholder="user-id-1, user-id-2"
+								value={form.groupUserAllowlist.join(", ")}
+							/>
+							<p className="text-muted-foreground text-xs">
+								Optional sender-level exception for Telegram, Slack, Discord,
+								and BlueBubbles groups.
+							</p>
+						</div>
 					</div>
 
 					<div className="space-y-3 rounded-lg border bg-card p-4">
 						<p className="font-medium text-sm">Behaviour</p>
+
+						<div className="space-y-3 rounded-md border border-dashed p-3">
+							<div className="flex items-center justify-between gap-4">
+								<div>
+									<p className="text-sm">Say hello first</p>
+									<p className="text-muted-foreground text-xs">
+										Let Ryu introduce itself and ask what to do next when this
+										bot is ready. It waits for a local model to finish
+										installing.
+									</p>
+								</div>
+								<Switch
+									aria-label="Send a welcome message first"
+									checked={form.proactiveOpening}
+									onCheckedChange={(v) =>
+										setForm((f) => ({ ...f, proactiveOpening: v }))
+									}
+								/>
+							</div>
+							<div className="space-y-1.5">
+								<Label htmlFor="channel-proactive-target">
+									Where should Ryu say hello?
+								</Label>
+								<Input
+									disabled={!form.proactiveOpening}
+									id="channel-proactive-target"
+									onChange={(e) =>
+										setForm((f) => ({
+											...f,
+											proactiveTarget: e.target.value || null,
+										}))
+									}
+									placeholder="The approved chat address or phone number"
+									value={form.proactiveTarget ?? ""}
+								/>
+								<p className="text-muted-foreground text-xs">
+									Use a chat that is already approved for this bot. Ryu never
+									guesses a recipient or sends this to every chat.
+								</p>
+							</div>
+						</div>
 
 						{supported.typing ? (
 							<div className="flex items-center justify-between gap-4">
@@ -901,6 +1625,23 @@ export function ChannelsView({
 								/>
 							</div>
 						) : null}
+
+						<div className="flex items-center justify-between gap-4">
+							<div>
+								<p className="text-sm">Lifecycle reactions</p>
+								<p className="text-muted-foreground text-xs">
+									Acknowledge received, completed, and failed turns with
+									reactions where the platform supports them.
+								</p>
+							</div>
+							<Switch
+								aria-label="Lifecycle reactions"
+								checked={form.lifecycleReactions}
+								onCheckedChange={(v) =>
+									setForm((f) => ({ ...f, lifecycleReactions: v }))
+								}
+							/>
+						</div>
 
 						{supported.commandMenu ? (
 							<div className="flex items-center justify-between gap-4">
@@ -1116,7 +1857,16 @@ export function ChannelsView({
 							{saving ? "Saving…" : isNew ? "Create bot" : "Save changes"}
 						</Button>
 						{!isNew && selected ? (
-							<Button onClick={() => handleDelete(selected)} variant="ghost">
+							<Button
+								disabled={!canDelete}
+								onClick={() => handleDelete(selected)}
+								title={
+									canDelete
+										? undefined
+										: "Requires the channel.delete permission"
+								}
+								variant="ghost"
+							>
 								Delete
 							</Button>
 						) : null}

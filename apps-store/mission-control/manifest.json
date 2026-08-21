@@ -1,4 +1,10 @@
 {
+  "tags": ["dashboard","summary","history","tasks","review"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-mission-control",
+  "homepage": "https://github.com/amajorai/ryu-mission-control",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/mission-control",
   "name": "Mission Control",
   "version": "0.1.14",
@@ -69,6 +75,7 @@
     }
   ],
   "contributes": {
+  "chat_widget_templates": [{"id":"mission-control.chat","title":"Mission Control widget","description":"Mission Control chat widget metadata is coming soon; no render tool is available yet.","triggers":["mission control widget"],"examples":["Show me a mission control widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}],
     "sidebar_buttons": [
       {
         "id": "home",

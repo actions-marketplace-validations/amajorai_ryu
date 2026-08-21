@@ -10,11 +10,12 @@ import {
 	Dollar01Icon,
 	EyeIcon,
 	GitBranchIcon,
-	GridIcon,
 	Key01Icon,
+	LaptopIcon,
+	Package01Icon,
 	PencilEdit01Icon,
 	Plug01Icon,
-	PuzzleIcon,
+	PlugSocketIcon,
 	Refresh01Icon,
 	Settings01Icon,
 	Share08Icon,
@@ -47,6 +48,7 @@ import {
 } from "@ryu/ui/components/dialog.tsx";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -78,6 +80,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
+import { formatNumber as formatSharedNumber } from "@ryu/ui/lib/number-format.ts";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -90,10 +93,23 @@ import {
 	EvaluatorEditorDialog,
 	type EvaluatorEditorMode,
 } from "@/src/components/evaluators/EvaluatorEditorDialog.tsx";
+import { AcpRuntimeSection } from "@/src/components/gateway/AcpRuntimeSection.tsx";
 import { AgentEgressSection } from "@/src/components/gateway/AgentEgressSection.tsx";
+import {
+	AgentSyncExportSection,
+	AgentSyncImportSection,
+} from "@/src/components/gateway/AgentSyncSections.tsx";
 import { ApiSection } from "@/src/components/gateway/ApiSection.tsx";
 import { AutoRetrySection } from "@/src/components/gateway/AutoRetrySection.tsx";
+import { BudgetChargeInclusionFields } from "@/src/components/gateway/BudgetRuleFields.tsx";
+import {
+	budgetUsdToMicroUsd,
+	formatBudgetUsd,
+	microUsdToBudgetInput,
+} from "@/src/components/gateway/budget-copy.ts";
+import { ComputerUseSettings } from "@/src/components/gateway/ComputerUseSettings.tsx";
 import { FallbackRulesSection } from "@/src/components/gateway/FallbackRulesSection.tsx";
+import { GatewayPostureCard } from "@/src/components/gateway/GatewayPostureCard.tsx";
 import { McpSection } from "@/src/components/gateway/McpSection.tsx";
 import { ProviderControlCenter } from "@/src/components/gateway/ProviderControlCenter.tsx";
 import { UsageCostSection } from "@/src/components/gateway/UsageCostSection.tsx";
@@ -124,6 +140,7 @@ import {
 import { UpdatesSettings } from "@/src/components/settings/UpdatesSettings.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
+import { useGatewayConfigurable } from "@/src/hooks/useGatewayConfigurable.ts";
 import { useGatewayStatus } from "@/src/hooks/useGatewayStatus.ts";
 import {
 	APP_SECTION_PREFIX,
@@ -136,10 +153,12 @@ import {
 import { useSettingReveal } from "@/src/hooks/useSettingReveal.ts";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import { fetchAgents } from "@/src/lib/api/agents.ts";
+import { CATALOG_SCAN_AGENT_PREF } from "@/src/lib/api/catalog-scan.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type {
 	AuditEntry,
 	BudgetAction,
+	BudgetChargeInclusion,
 	BudgetRule,
 	BudgetSpend,
 	ByokProvider,
@@ -167,10 +186,12 @@ import type {
 	Modality,
 	ModalityMapping,
 	ModelMapping,
+	ModelRouterType,
 	ProviderCircuitState,
 	ProviderKind,
 	RouteStrategy,
 	SmartRoutingConfig,
+	StagePicker,
 } from "@/src/lib/api/gateway.ts";
 import {
 	ALERT_TIERS,
@@ -180,6 +201,7 @@ import {
 	classifyTierCannotServeModel,
 	classifyTierServable,
 	clearGatewayProvider,
+	DEFAULT_BUDGET_INCLUSION,
 	DEFAULT_INSPECTOR,
 	DEFAULT_SESSION_BUDGET,
 	DEFAULT_SMART_ROUTING,
@@ -191,6 +213,8 @@ import {
 	fetchGatewayAudit,
 	fetchGatewayConfig,
 	MODALITIES,
+	MODEL_ROUTER_TYPE_DESCRIPTIONS,
+	MODEL_ROUTER_TYPE_LABELS,
 	routeStrategyCopy,
 	routingViewIncludesModalityMap,
 	routingViewIncludesSmartRouting,
@@ -200,27 +224,18 @@ import {
 	withModalityMapping,
 } from "@/src/lib/api/gateway.ts";
 import {
-	fetchMyPermissions,
-	fetchOrgs,
-	hasOrgAuth,
-} from "@/src/lib/api/org.ts";
-// A different module from `org.ts` above: `orgs.ts` owns the SESSION's active
-// org, which `org.ts` (the org list + RBAC routes) has no accessor for.
-import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
-import {
 	type AgentSelection,
-	DEFAULT_AGENT_SELECTION_PREF_KEY,
 	EMPTY_AGENT_SELECTION,
-	getAgentSelection,
 	getComposioApiKey,
 	getExecApprovalEnabled,
 	getFalApiKey,
+	getLaneAgentSelection,
 	getPreference,
 	getReplicateApiKey,
-	setAgentSelection,
 	setComposioApiKey,
 	setExecApprovalEnabled,
 	setFalApiKey,
+	setLaneAgentSelection,
 	setPreference,
 	setReplicateApiKey,
 } from "@/src/lib/api/preferences.ts";
@@ -232,42 +247,6 @@ import { formatTime } from "@/src/lib/timezone.ts";
 import { PreflightPage } from "@/src/pages/PreflightPage.tsx";
 import type { GatewaySection } from "@/src/store/useGatewayDialog.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
-
-/**
- * Whether the signed-in caller may change gateway policy in their workspace,
- * derived from their effective org permissions (the RBAC `gateway.configure`
- * key). Fail-OPEN, mirroring Core's `None => full trust` for unidentified
- * callers: we default to `true` and only return `false` once we have
- * SUCCESSFULLY loaded the caller's permissions AND `gateway.configure` is absent.
- * A local / offline / no-org node therefore keeps its config editable; Core is
- * the real enforcement point, this only reflects it in the UI. Shares the
- * `workspace-orgs` / `workspace-my-permissions` query keys with WorkspaceSection
- * so both surfaces read one deduplicated fetch — and resolves the org the same
- * way it does, off the session's active org rather than the first membership,
- * so a workspace switch cannot leave the previous org's permissions applied
- * here (fail-open means that failure is silent).
- */
-function useGatewayConfigurable(): boolean {
-	const authed = hasOrgAuth();
-	const activeOrgId = useActiveOrgId();
-	const orgsQuery = useQuery({
-		enabled: authed,
-		queryKey: ["workspace-orgs"],
-		queryFn: fetchOrgs,
-	});
-	const orgs = orgsQuery.data ?? [];
-	const orgId =
-		orgs.find((org) => org.id === activeOrgId)?.id ?? orgs[0]?.id ?? null;
-	const permissionsQuery = useQuery({
-		enabled: authed && Boolean(orgId),
-		queryKey: ["workspace-my-permissions", orgId],
-		queryFn: () => fetchMyPermissions(orgId as string),
-	});
-	if (!(permissionsQuery.isSuccess && permissionsQuery.data)) {
-		return true;
-	}
-	return permissionsQuery.data.includes("gateway.configure");
-}
 
 /**
  * Banner shown atop a policy section when the caller lacks `gateway.configure`.
@@ -291,7 +270,7 @@ function PolicyReadOnlyBanner() {
 }
 
 function formatNumber(value: number): string {
-	return value.toLocaleString();
+	return formatSharedNumber(value);
 }
 
 function formatPercent(rate: number): string {
@@ -670,14 +649,12 @@ function ProviderRow({
 					)}
 					{!readOnly && isSet && (
 						<Button
-							disabled={clearing}
+							loading={clearing}
 							onClick={() => handleClear()}
 							size="sm"
 							variant="ghost"
 						>
-							{clearing ? (
-								<Spinner className="size-3" />
-							) : (
+							{!clearing && (
 								<HugeiconsIcon className="size-3" icon={Delete01Icon} />
 							)}
 							Clear
@@ -728,11 +705,11 @@ function ProviderRow({
 						</button>
 					</div>
 					<Button
-						disabled={saving || !input.trim() || canConfigure === false}
+						disabled={!input.trim() || canConfigure === false}
+						loading={saving}
 						onClick={() => handleSave()}
 						size="sm"
 					>
-						{saving ? <Spinner className="size-3" /> : null}
 						Save
 					</Button>
 				</div>
@@ -919,14 +896,12 @@ function ComposioKeyCard({
 							)}
 							{!managed && isSet && (
 								<Button
-									disabled={saving}
+									loading={saving}
 									onClick={() => handleClear()}
 									size="sm"
 									variant="ghost"
 								>
-									{saving ? (
-										<Spinner className="size-3" />
-									) : (
+									{!saving && (
 										<HugeiconsIcon className="size-3" icon={Delete01Icon} />
 									)}
 									Clear
@@ -978,13 +953,11 @@ function ComposioKeyCard({
 								</button>
 							</div>
 							<Button
-								disabled={
-									!loaded || saving || !input.trim() || canConfigure === false
-								}
+								disabled={!(loaded && input.trim()) || canConfigure === false}
+								loading={saving}
 								onClick={() => handleSave()}
 								size="sm"
 							>
-								{saving ? <Spinner className="size-3" /> : null}
 								Save
 							</Button>
 						</div>
@@ -1119,14 +1092,12 @@ function MediaKeyCard({
 							)}
 							{!managed && isSet && (
 								<Button
-									disabled={saving}
+									loading={saving}
 									onClick={() => handleClear()}
 									size="sm"
 									variant="ghost"
 								>
-									{saving ? (
-										<Spinner className="size-3" />
-									) : (
+									{!saving && (
 										<HugeiconsIcon className="size-3" icon={Delete01Icon} />
 									)}
 									Clear
@@ -1180,13 +1151,11 @@ function MediaKeyCard({
 								</button>
 							</div>
 							<Button
-								disabled={
-									!loaded || saving || !input.trim() || canConfigure === false
-								}
+								disabled={!(loaded && input.trim()) || canConfigure === false}
+								loading={saving}
 								onClick={() => handleSave()}
 								size="sm"
 							>
-								{saving ? <Spinner className="size-3" /> : null}
 								Save
 							</Button>
 						</div>
@@ -1267,13 +1236,15 @@ interface BudgetFormState {
 	/** Notification tier for this rule. Round-trips, so an edit cannot demote it. */
 	alert: GatewayAlertTier;
 	downgrade_to: string;
-	limit: string;
+	include: BudgetChargeInclusion;
+	limitUsd: string;
 	restrict_max_tokens: string;
 }
 
 const DEFAULT_FORM: BudgetFormState = {
 	agentId: "",
-	limit: "100000",
+	include: { ...DEFAULT_BUDGET_INCLUSION },
+	limitUsd: "1.00",
 	action: "notify",
 	alert: "silent",
 	downgrade_to: "",
@@ -1290,10 +1261,11 @@ const DEFAULT_FORM: BudgetFormState = {
  */
 function formToRule(form: BudgetFormState): BudgetRule {
 	return buildBudgetRule({
-		limit: Number(form.limit),
+		limit: budgetUsdToMicroUsd(form.limitUsd) ?? 0,
 		action: form.action,
 		alert: form.alert,
 		downgradeTo: form.downgrade_to,
+		include: form.include,
 		restrictMaxTokens: form.restrict_max_tokens,
 	});
 }
@@ -1388,9 +1360,8 @@ function BudgetRuleDialog({
 			setErr(idRequiredError);
 			return;
 		}
-		const limitNum = Number(form.limit);
-		if (!Number.isInteger(limitNum) || limitNum < 0) {
-			setErr("Limit must be a non-negative integer.");
+		if (budgetUsdToMicroUsd(form.limitUsd) === null) {
+			setErr("Spend cap must be a non-negative USD amount (up to 6 decimals).");
 			return;
 		}
 		setSaving(true);
@@ -1451,23 +1422,32 @@ function BudgetRuleDialog({
 						)}
 					</div>
 					<div className="flex flex-col gap-1.5">
-						<Label htmlFor="budget-limit">Token limit</Label>
+						<Label htmlFor="budget-limit">Spend cap (USD)</Label>
 						<Input
 							id="budget-limit"
 							min={0}
 							onChange={(e) =>
-								setForm((f) => ({ ...f, limit: e.target.value }))
+								setForm((f) => ({ ...f, limitUsd: e.target.value }))
 							}
-							placeholder="100000"
+							placeholder="1.00"
+							step="0.01"
 							type="number"
-							value={form.limit}
+							value={form.limitUsd}
 						/>
 						<p className="text-muted-foreground text-xs">
-							Lifetime input + output token cap. 0 = unlimited.
+							Lifetime charged spend. 0 = unlimited. The Gateway stores this as
+							micro-USD.
 						</p>
 					</div>
+					<BudgetChargeInclusionFields
+						idPrefix="budget-include"
+						onChange={(include) => setForm((f) => ({ ...f, include }))}
+						value={form.include}
+					/>
 					<div className="flex flex-col gap-1.5">
-						<Label htmlFor="budget-action">Action when limit is reached</Label>
+						<Label htmlFor="budget-action">
+							Action when spend cap is reached
+						</Label>
 						<Select
 							items={ACTION_LABELS}
 							onValueChange={(v) =>
@@ -1550,8 +1530,7 @@ function BudgetRuleDialog({
 					>
 						Cancel
 					</Button>
-					<Button disabled={saving} onClick={() => handleSave()}>
-						{saving ? <Spinner className="size-4" /> : null}
+					<Button loading={saving} onClick={() => handleSave()}>
 						Save
 					</Button>
 				</DialogFooter>
@@ -1654,8 +1633,10 @@ function ModelMappingDialog({
 						/>
 						<p className="text-muted-foreground text-xs">
 							Exact or prefix match against the model name in the request. Use{" "}
-							<span className="font-mono">openrouter/auto</span> to route to
-							OpenRouter's auto-selected model.
+							<span className="font-mono">openrouter/auto</span> for general
+							requests, or{" "}
+							<span className="font-mono">openrouter/pareto-code</span> for
+							coding-focused selection.
 						</p>
 					</div>
 					<div className="flex flex-col gap-1.5">
@@ -1711,8 +1692,7 @@ function ModelMappingDialog({
 					>
 						Cancel
 					</Button>
-					<Button disabled={saving} onClick={() => handleSave()}>
-						{saving ? <Spinner className="size-4" /> : null}
+					<Button loading={saving} onClick={() => handleSave()}>
 						Save
 					</Button>
 				</DialogFooter>
@@ -1782,11 +1762,11 @@ const MODALITY_COPY: Record<Modality, { label: string; note: string }> = {
 		note: "Used by POST /v1/images/generations.",
 	},
 	tts: {
-		label: "Text to speech",
+		label: "Audio",
 		note: "Used by POST /v1/audio/speech.",
 	},
 	stt: {
-		label: "Speech to text",
+		label: "Voice Recognition",
 		note: "Used by POST /v1/audio/transcriptions.",
 	},
 	video: {
@@ -1924,8 +1904,7 @@ function ModalityMappingDialog({
 					>
 						Cancel
 					</Button>
-					<Button disabled={saving} onClick={() => handleSave()}>
-						{saving ? <Spinner className="size-4" /> : null}
+					<Button loading={saving} onClick={() => handleSave()}>
 						Save
 					</Button>
 				</DialogFooter>
@@ -2107,6 +2086,7 @@ interface RuleRow {
 	description: string;
 	id: string;
 	model: string;
+	weight: string;
 }
 
 // ── Local classify tier (shared by the two "cheap model" fields) ──────────────
@@ -2227,7 +2207,7 @@ function ClassifyTierNote({
 	);
 }
 
-function SmartRoutingCard({
+export function SmartRoutingCard({
 	target,
 	reachable,
 	canConfigure,
@@ -2291,6 +2271,7 @@ function SmartRoutingCard({
 						id: crypto.randomUUID(),
 						description: r.description,
 						model: r.model,
+						weight: String(r.weight ?? 1),
 					}))
 				);
 				setLoadError(null);
@@ -2315,7 +2296,7 @@ function SmartRoutingCard({
 
 	const updateRule = (
 		id: string,
-		field: "description" | "model",
+		field: "description" | "model" | "weight",
 		value: string
 	) => {
 		setRules((prev) =>
@@ -2328,7 +2309,7 @@ function SmartRoutingCard({
 	const addRule = () => {
 		setRules((prev) => [
 			...prev,
-			{ id: crypto.randomUUID(), description: "", model: "" },
+			{ id: crypto.randomUUID(), description: "", model: "", weight: "1" },
 		]);
 		setSaveOk(false);
 	};
@@ -2368,17 +2349,64 @@ function SmartRoutingCard({
 				.map((r) => ({
 					description: r.description.trim(),
 					model: r.model.trim(),
+					weight: Number(r.weight),
 				}))
-				.filter((r) => r.description && r.model);
+				.filter(
+					(r) =>
+						(routerType === "random" || r.description) &&
+						r.model &&
+						Number.isFinite(r.weight) &&
+						r.weight >= 0
+				);
 			const defaultModel = draft.default_model?.trim();
+			const escalationConfirmations = draft.escalation_confirmations;
 			const smart_routing: SmartRoutingConfig = {
 				...draft,
+				router_type: draft.router_type ?? "llm_classifier",
 				strategy: draft.strategy ?? "llm",
 				classifier_model: draft.classifier_model.trim(),
 				embedding_model: draft.embedding_model?.trim() ?? "",
 				similarity_threshold: Number.isFinite(draft.similarity_threshold)
 					? draft.similarity_threshold
 					: 0.35,
+				random_seed:
+					draft.random_seed === null || draft.random_seed === undefined
+						? null
+						: Number.isSafeInteger(draft.random_seed) && draft.random_seed >= 0
+							? draft.random_seed
+							: null,
+				stage_capable_model: draft.stage_capable_model?.trim() ?? "",
+				stage_efficient_model: draft.stage_efficient_model?.trim() ?? "",
+				stage_picker: draft.stage_picker ?? "capable_first",
+				stage_confidence_threshold: Number.isFinite(
+					draft.stage_confidence_threshold
+				)
+					? draft.stage_confidence_threshold
+					: 0.5,
+				stage_recent_message_window: Number.isInteger(
+					draft.stage_recent_message_window
+				)
+					? draft.stage_recent_message_window
+					: 3,
+				escalation_weak_model: draft.escalation_weak_model?.trim() ?? "",
+				escalation_strong_model: draft.escalation_strong_model?.trim() ?? "",
+				escalation_judge_model: draft.escalation_judge_model?.trim() ?? "",
+				escalation_confirmations:
+					typeof escalationConfirmations === "number" &&
+					Number.isInteger(escalationConfirmations) &&
+					escalationConfirmations >= 1
+						? escalationConfirmations
+						: 2,
+				escalation_recent_message_window: Number.isInteger(
+					draft.escalation_recent_message_window
+				)
+					? draft.escalation_recent_message_window
+					: 28,
+				escalation_message_chars: Number.isInteger(
+					draft.escalation_message_chars
+				)
+					? draft.escalation_message_chars
+					: 500,
 				rules: cleanRules,
 				default_model: defaultModel ? defaultModel : null,
 			};
@@ -2421,8 +2449,11 @@ function SmartRoutingCard({
 	//    more important: a cleared box now lands on the local tier by default, so
 	//    the unreachable case is easier to hit than it was.
 	const classifierModel = draft?.classifier_model.trim() ?? "";
+	const routerType: ModelRouterType = draft?.router_type ?? "llm_classifier";
 	const smartLlm =
-		draft?.enabled === true && (draft.strategy ?? "llm") === "llm";
+		draft?.enabled === true &&
+		routerType === "llm_classifier" &&
+		(draft.strategy ?? "llm") === "llm";
 	// What the GATEWAY will actually use. `de_classifier_model` resolves a blank
 	// `classifier_model` to the classify tier's id as it comes off the wire, so a
 	// cleared box is not "off" — it is "the local classifier". Both the note and
@@ -2439,15 +2470,15 @@ function SmartRoutingCard({
 
 	return (
 		<SettingsSection
-			caption="Custom routing instructions. A cheap classifier model reads each message and sends it to the model you picked for that kind of request. For example, route coding questions to Claude and casual chat to a local model. Changes take effect after the gateway restarts. The classifier runs once per conversation; if it errors, times out, or matches no rule, the request keeps the model it originally asked for."
+			caption="Choose how Gateway selects a model for each chat request. The selected model then follows Ryu's normal provider routing, governance, budgets, and audit path."
 			headerAction={
 				<Button
-					disabled={isDisabled || saving}
+					disabled={isDisabled}
+					loading={saving}
 					onClick={() => handleSave()}
 					size="sm"
 					variant="ghost"
 				>
-					{saving ? <Spinner className="size-4" /> : null}
 					Save
 				</Button>
 			}
@@ -2485,42 +2516,84 @@ function SmartRoutingCard({
 								onCheckedChange={(v) => patch({ enabled: v })}
 							/>
 						}
-						description="Classify and re-route each chat request based on the rules below."
+						description="Enable one model-selection algorithm for unpinned chat requests."
 						title="Enable smart routing"
 					/>
 				</SettingsGroup>
 
 				<div className="flex flex-col gap-1.5">
-					<Label htmlFor="smart-strategy">Strategy</Label>
+					<Label htmlFor="smart-router-type">Router type</Label>
 					<Select
-						items={strategyCopy.labels}
-						onValueChange={(v) => v && patch({ strategy: v as RouteStrategy })}
-						value={draft?.strategy ?? "llm"}
+						items={MODEL_ROUTER_TYPE_LABELS}
+						onValueChange={(v) =>
+							v && patch({ router_type: v as ModelRouterType })
+						}
+						value={routerType}
 					>
-						<SelectTrigger disabled={isDisabled} id="smart-strategy">
+						<SelectTrigger disabled={isDisabled} id="smart-router-type">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
 							{(
-								Object.entries(strategyCopy.labels) as [RouteStrategy, string][]
-							).map(([val, label]) => (
-								<SelectItem key={val} value={val}>
+								Object.entries(MODEL_ROUTER_TYPE_LABELS) as [
+									ModelRouterType,
+									string,
+								][]
+							).map(([value, label]) => (
+								<SelectItem key={value} value={value}>
 									<span className="font-medium">{label}</span>
 									<span className="ml-1 text-muted-foreground text-xs">
-										— {strategyCopy.descriptions[val]}
+										— {MODEL_ROUTER_TYPE_DESCRIPTIONS[value]}
 									</span>
 								</SelectItem>
 							))}
 						</SelectContent>
 					</Select>
 					<p className="text-muted-foreground text-xs">
-						How the matching rule is chosen. LLM asks a cheap classifier;
-						Embedding cosine-matches rule text; Keyword is a zero-cost word
-						match.
+						Choose the model-selection algorithm. The normal provider routing,
+						governance, budgets, and audit path still run after this choice.
 					</p>
 				</div>
 
-				{(draft?.strategy ?? "llm") === "llm" ? (
+				{routerType === "llm_classifier" ? (
+					<div className="flex flex-col gap-1.5">
+						<Label htmlFor="smart-strategy">Strategy</Label>
+						<Select
+							items={strategyCopy.labels}
+							onValueChange={(v) =>
+								v && patch({ strategy: v as RouteStrategy })
+							}
+							value={draft?.strategy ?? "llm"}
+						>
+							<SelectTrigger disabled={isDisabled} id="smart-strategy">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								{(
+									Object.entries(strategyCopy.labels) as [
+										RouteStrategy,
+										string,
+									][]
+								).map(([val, label]) => (
+									<SelectItem key={val} value={val}>
+										<span className="font-medium">{label}</span>
+										<span className="ml-1 text-muted-foreground text-xs">
+											— {strategyCopy.descriptions[val]}
+										</span>
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+						<p className="text-muted-foreground text-xs">
+							How the matching rule is chosen. LLM asks a cheap classifier;
+							Embedding cosine-matches rule text; Keyword is a zero-cost word
+							match.
+						</p>
+					</div>
+				) : null}
+
+				{routerType === "llm_classifier" &&
+				(draft?.strategy ?? "llm") === "llm" ? (
 					<div className="flex flex-col gap-1.5">
 						<Label htmlFor="smart-classifier-model">Classifier model</Label>
 						<AgentModelPickerField
@@ -2560,7 +2633,7 @@ function SmartRoutingCard({
 					</div>
 				) : null}
 
-				{draft?.strategy === "embedding" ? (
+				{routerType === "llm_classifier" && draft?.strategy === "embedding" ? (
 					<>
 						<div className="flex flex-col gap-1.5">
 							<Label htmlFor="smart-embedding-model">Embedding model</Label>
@@ -2597,85 +2670,274 @@ function SmartRoutingCard({
 					</>
 				) : null}
 
-				<div className="flex flex-col gap-2">
-					<div className="flex items-center justify-between">
-						<Label>Rules</Label>
-						<Button
+				{routerType === "random" ? (
+					<div className="flex flex-col gap-1.5">
+						<Label htmlFor="smart-random-seed">Seed (optional)</Label>
+						<Input
 							disabled={isDisabled}
-							onClick={addRule}
-							size="sm"
-							variant="ghost"
-						>
-							<HugeiconsIcon className="size-4" icon={Add01Icon} />
-							Add rule
-						</Button>
-					</div>
-					{rules.length === 0 ? (
-						<p className="text-muted-foreground text-sm">
-							No rules yet. Add one like “writing or debugging code” →
-							“claude-sonnet-4-5”.
+							id="smart-random-seed"
+							inputMode="numeric"
+							onChange={(event) => {
+								const raw = event.target.value.trim();
+								const seed = Number(raw);
+								patch({
+									random_seed:
+										raw === "" || !Number.isSafeInteger(seed) || seed < 0
+											? null
+											: seed,
+								});
+							}}
+							placeholder="Leave blank for normal traffic"
+							value={draft?.random_seed ?? ""}
+						/>
+						<p className="text-muted-foreground text-xs">
+							Targets are selected independently per request. A seed reproduces
+							the sequence for tests and benchmarks; it does not make a
+							conversation sticky.
 						</p>
-					) : (
-						<div className="flex flex-col gap-3">
-							{rules.map((rule, idx) => (
-								<div className="flex items-start gap-2" key={rule.id}>
-									<div className="flex flex-1 flex-col gap-1.5">
-										<Input
-											disabled={isDisabled}
-											onChange={(e) =>
-												updateRule(rule.id, "description", e.target.value)
-											}
-											placeholder="When the request is about… (plain language)"
-											value={rule.description}
-										/>
-										<AgentModelPickerField
-											ariaLabel={`Route to model for rule ${idx + 1}`}
-											disabled={isDisabled}
-											mode="model"
-											onChange={(next) => updateRule(rule.id, "model", next)}
-											placeholder="Route to model id (e.g. claude-sonnet-4-5)"
-											target={target}
-											value={rule.model}
-										/>
-									</div>
-									<Button
-										onClick={() => removeRule(rule.id)}
-										size="icon"
-										variant="ghost"
-									>
-										<HugeiconsIcon
-											className="size-3.5 text-destructive"
-											icon={Delete01Icon}
-										/>
-										<span className="sr-only">Remove rule {idx + 1}</span>
-									</Button>
-								</div>
-							))}
-						</div>
-					)}
-				</div>
+					</div>
+				) : null}
 
-				<div className="flex flex-col gap-1.5">
-					<Label htmlFor="smart-default-model">
-						Default model when no rule matches
-					</Label>
-					<AgentModelPickerField
-						ariaLabel="Default model when no rule matches"
-						disabled={isDisabled}
-						mode="model"
-						onChange={(next) => patch({ default_model: next })}
-						placeholder="Leave blank to keep the originally requested model"
-						target={target}
-						value={draft?.default_model ?? ""}
-					/>
-				</div>
+				{routerType === "stage_router" ? (
+					<div className="flex flex-col gap-4 rounded-md border p-3">
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="smart-stage-capable">Capable model</Label>
+							<AgentModelPickerField
+								ariaLabel="Stage capable model"
+								disabled={isDisabled}
+								mode="model"
+								onChange={(next) => patch({ stage_capable_model: next })}
+								placeholder="Model for exploration and recovery"
+								target={target}
+								value={draft?.stage_capable_model ?? ""}
+							/>
+						</div>
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="smart-stage-efficient">Efficient model</Label>
+							<AgentModelPickerField
+								ariaLabel="Stage efficient model"
+								disabled={isDisabled}
+								mode="model"
+								onChange={(next) => patch({ stage_efficient_model: next })}
+								placeholder="Model for settled mechanical work"
+								target={target}
+								value={draft?.stage_efficient_model ?? ""}
+							/>
+						</div>
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="smart-stage-picker">Ambiguous-turn default</Label>
+							<Select
+								items={{
+									capable_first: "Capable first",
+									efficient_first: "Efficient first",
+								}}
+								onValueChange={(value) =>
+									value && patch({ stage_picker: value as StagePicker })
+								}
+								value={draft?.stage_picker ?? "capable_first"}
+							>
+								<SelectTrigger disabled={isDisabled} id="smart-stage-picker">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="capable_first">Capable first</SelectItem>
+									<SelectItem value="efficient_first">
+										Efficient first
+									</SelectItem>
+								</SelectContent>
+							</Select>
+						</div>
+						<FluidSlider
+							disabled={isDisabled}
+							format={(value) => value.toFixed(2)}
+							label="Signal confidence threshold"
+							max={1}
+							min={0}
+							onValueChange={(stage_confidence_threshold) =>
+								patch({ stage_confidence_threshold })
+							}
+							step={0.05}
+							value={draft?.stage_confidence_threshold ?? 0.5}
+						/>
+						<p className="text-muted-foreground text-xs">
+							Ryu reads recent tool/result history. Errors and exploration favor
+							the capable model; writes and passing tests favor the efficient
+							model.
+						</p>
+					</div>
+				) : null}
+
+				{routerType === "escalation" ? (
+					<div className="flex flex-col gap-4 rounded-md border p-3">
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="smart-escalation-weak">Weak model</Label>
+							<AgentModelPickerField
+								ariaLabel="Escalation weak model"
+								disabled={isDisabled}
+								mode="model"
+								onChange={(next) => patch({ escalation_weak_model: next })}
+								placeholder="Default model for routine turns"
+								target={target}
+								value={draft?.escalation_weak_model ?? ""}
+							/>
+						</div>
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="smart-escalation-strong">Strong model</Label>
+							<AgentModelPickerField
+								ariaLabel="Escalation strong model"
+								disabled={isDisabled}
+								mode="model"
+								onChange={(next) => patch({ escalation_strong_model: next })}
+								placeholder="Model for confirmed trouble"
+								target={target}
+								value={draft?.escalation_strong_model ?? ""}
+							/>
+						</div>
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="smart-escalation-judge">Judge model</Label>
+							<AgentModelPickerField
+								ariaLabel="Escalation judge model"
+								disabled={isDisabled}
+								mode="model"
+								onChange={(next) => patch({ escalation_judge_model: next })}
+								placeholder="Small model that returns ESCALATE or DECLINE"
+								target={target}
+								value={draft?.escalation_judge_model ?? ""}
+							/>
+						</div>
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="smart-escalation-confirmations">
+								Confirmations before escalation
+							</Label>
+							<Input
+								disabled={isDisabled}
+								id="smart-escalation-confirmations"
+								inputMode="numeric"
+								min={1}
+								onChange={(event) =>
+									patch({
+										escalation_confirmations: Number(event.target.value),
+									})
+								}
+								placeholder="2"
+								value={draft?.escalation_confirmations ?? 2}
+							/>
+						</div>
+						<p className="text-muted-foreground text-xs">
+							The judge sees the current transcript before routing. Consecutive
+							ESCALATE verdicts latch sessions to the strong model; judge
+							failures use the weak model. This preflight mode does not replay a
+							completed weak response through the strong model.
+						</p>
+					</div>
+				) : null}
+
+				{routerType === "llm_classifier" || routerType === "random" ? (
+					<>
+						<div className="flex flex-col gap-2">
+							<div className="flex items-center justify-between">
+								<Label>Rules</Label>
+								<Button
+									disabled={isDisabled}
+									onClick={addRule}
+									size="sm"
+									variant="ghost"
+								>
+									<HugeiconsIcon className="size-4" icon={Add01Icon} />
+									Add rule
+								</Button>
+							</div>
+							{rules.length === 0 ? (
+								<p className="text-muted-foreground text-sm">
+									No targets yet. Add a model below
+									{routerType === "random"
+										? " and give it a relative weight"
+										: " with a matching rule"}
+									.
+								</p>
+							) : (
+								<div className="flex flex-col gap-3">
+									{rules.map((rule, idx) => (
+										<div className="flex items-start gap-2" key={rule.id}>
+											<div className="flex flex-1 flex-col gap-1.5">
+												<Input
+													disabled={isDisabled}
+													onChange={(e) =>
+														updateRule(rule.id, "description", e.target.value)
+													}
+													placeholder={
+														routerType === "random"
+															? "Optional target label"
+															: "When the request is about… (plain language)"
+													}
+													value={rule.description}
+												/>
+												<AgentModelPickerField
+													ariaLabel={`Route to model for rule ${idx + 1}`}
+													disabled={isDisabled}
+													mode="model"
+													onChange={(next) =>
+														updateRule(rule.id, "model", next)
+													}
+													placeholder="Route to model id (e.g. claude-sonnet-4-5)"
+													target={target}
+													value={rule.model}
+												/>
+												{routerType === "random" ? (
+													<Input
+														disabled={isDisabled}
+														inputMode="decimal"
+														min={0}
+														onChange={(e) =>
+															updateRule(rule.id, "weight", e.target.value)
+														}
+														placeholder="Relative weight (default 1)"
+														value={rule.weight}
+													/>
+												) : null}
+											</div>
+											<Button
+												onClick={() => removeRule(rule.id)}
+												size="icon"
+												variant="ghost"
+											>
+												<HugeiconsIcon
+													className="size-3.5 text-destructive"
+													icon={Delete01Icon}
+												/>
+												<span className="sr-only">Remove rule {idx + 1}</span>
+											</Button>
+										</div>
+									))}
+								</div>
+							)}
+						</div>
+
+						{routerType === "llm_classifier" ? (
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="smart-default-model">
+									Default model when no rule matches
+								</Label>
+								<AgentModelPickerField
+									ariaLabel="Default model when no rule matches"
+									disabled={isDisabled}
+									mode="model"
+									onChange={(next) => patch({ default_model: next })}
+									placeholder="Leave blank to keep the originally requested model"
+									target={target}
+									value={draft?.default_model ?? ""}
+								/>
+							</div>
+						) : null}
+					</>
+				) : null}
 
 				{saveError ? (
 					<p className="text-destructive text-sm">{saveError}</p>
 				) : null}
 				{saveOk ? (
 					<p className="text-sm text-success">
-						Saved. Restart the gateway for changes to take effect.
+						Saved. New requests use the updated router.
 					</p>
 				) : null}
 			</div>
@@ -2882,7 +3144,9 @@ function RoutingCard({
 					run as an additional layer on top; they do not replace Ryu's
 					user-level controls. Use{" "}
 					<span className="font-mono">openrouter/auto</span> to let OpenRouter
-					pick the best available model; any{" "}
+					pick the best available model, or{" "}
+					<span className="font-mono">openrouter/pareto-code</span> to pick a
+					coding model; any{" "}
 					<span className="font-mono">openrouter/&lt;model&gt;</span> slug is
 					supported.
 				</>
@@ -3151,11 +3415,11 @@ function RoutingCard({
 
 				<div className="flex items-center gap-3">
 					<Button
-						disabled={isDisabled || saving || draft === config}
+						disabled={isDisabled || draft === config}
+						loading={saving}
 						onClick={() => handleSave()}
 						size="sm"
 					>
-						{saving ? <Spinner className="size-3" /> : null}
 						Save
 					</Button>
 					{saveOk ? (
@@ -3200,8 +3464,8 @@ function SpendRows({
 					<SettingsItem
 						actions={
 							<span className="font-mono text-muted-foreground text-xs tabular-nums">
-								{formatNumber(spent)}
-								{cap > 0 ? ` / ${formatNumber(cap)}` : ""}
+								{formatBudgetUsd(spent)}
+								{cap > 0 ? ` / ${formatBudgetUsd(cap)}` : ""}
 							</span>
 						}
 						key={`${idPrefix}-${id}`}
@@ -3219,7 +3483,7 @@ function SpendRows({
 
 /**
  * Live budget spend readout (M2 control-layer UX). Polls Core's proxy of the
- * gateway's in-memory per-user / per-agent / per-session token counters and
+ * gateway's in-memory per-user / per-agent / per-session charged-spend counters and
  * shows spend-vs-limit. The gateway only tracks ids with a CONFIGURED budget
  * (a session cap of 0 records nothing), so with no budget set the maps are
  * empty and this renders a hint instead of an empty pane. Counters are
@@ -3267,7 +3531,7 @@ function LiveSpendCard({ target }: { target: ApiTarget }) {
 
 	return (
 		<SettingsSection
-			caption="Live token spend per user, per agent, and per session, read from the gateway's in-memory counters. Only scopes with a configured budget are tracked; counters reset when the gateway restarts."
+			caption="Live charged spend per user, per agent, and per session, read from the gateway's in-memory counters. Only scopes with a configured budget are tracked; counters reset when the gateway restarts."
 			title="Live spend"
 		>
 			{loading && !spend ? (
@@ -3425,7 +3689,7 @@ function BudgetsCard({
 
 	return (
 		<SettingsSection
-			caption="Token caps per user, per agent, and a single global per-session cap. When a cap is reached the gateway applies the configured action (notify / downgrade / restrict / stop) and, separately, the rule's notification tier decides who is told. Changes take effect after the gateway restarts."
+			caption="Spend caps per user, per agent, and a single global per-session cap. Choose whether model, media, or paid-tool charges count. When a cap is reached the gateway applies the configured action (notify / downgrade / restrict / stop) and, separately, the rule's notification tier decides who is told. Changes take effect immediately."
 			title="Budgets"
 		>
 			{loading ? (
@@ -3442,7 +3706,7 @@ function BudgetsCard({
 					<BudgetScopeSection
 						addDialog={
 							<BudgetRuleDialog
-								description="Set a token cap and action for a user. The limit counts lifetime input + output tokens."
+								description="Set a charged-spend cap and action for a user. The limit is in USD."
 								idLabel="User ID"
 								idPlaceholder="e.g. user_123 (the x-ryu-user-id value)"
 								idRequiredError="User ID is required."
@@ -3465,7 +3729,7 @@ function BudgetsCard({
 						}
 						canConfigure={canConfigure}
 						editIdLabel="User ID"
-						emptyText="No per-user budgets set. Add one to cap a user's token usage."
+						emptyText="No per-user budgets set. Add one to cap a user's spend."
 						entries={userEntries}
 						label="Per-user"
 						onRemove={(id) => removeRule("users", id)}
@@ -3476,7 +3740,7 @@ function BudgetsCard({
 						addDialog={
 							<BudgetRuleDialog
 								agents={agents}
-								description="Set a token cap and action for an agent. The limit counts lifetime input + output tokens."
+								description="Set a charged-spend cap and action for an agent. The limit is in USD."
 								onSave={async (form) => {
 									await saveRule(
 										"agents",
@@ -3496,7 +3760,7 @@ function BudgetsCard({
 						}
 						canConfigure={canConfigure}
 						editIdLabel="Agent ID"
-						emptyText="No per-agent budgets set. Add one to cap an agent's token usage."
+						emptyText="No per-agent budgets set. Add one to cap an agent's spend."
 						entries={agentEntries}
 						label="Per-agent"
 						onRemove={(id) => removeRule("agents", id)}
@@ -3559,11 +3823,15 @@ function BudgetScopeSection({
 								<div className="flex shrink-0 items-center gap-1">
 									<BudgetRuleDialog
 										agentIdReadOnly
-										description="Update the token cap or action for this entry."
+										description="Update the charged-spend cap, categories, or action for this entry."
 										idLabel={editIdLabel}
 										initial={{
 											agentId: id,
-											limit: String(rule.limit),
+											include: {
+												...DEFAULT_BUDGET_INCLUSION,
+												...rule.include,
+											},
+											limitUsd: microUsdToBudgetInput(rule.limit),
 											action: rule.action,
 											// Seeded, not defaulted: without this the edit dialog opens
 											// at `silent` and Save demotes a rule that was fanning out.
@@ -3610,7 +3878,7 @@ function BudgetScopeSection({
 								<>
 									{rule.limit === 0
 										? "unlimited"
-										: `${formatNumber(rule.limit)} tokens`}
+										: `${formatBudgetUsd(rule.limit)} spend`}
 									{" · "}
 									{ACTION_LABELS[rule.action] ?? rule.action}
 									{rule.action === "downgrade" && rule.downgrade_to
@@ -3637,7 +3905,7 @@ function BudgetScopeSection({
 }
 
 /**
- * The single global per-session token cap (#510). Unlike user/agent budgets
+ * The single global per-session charged-spend cap (#510). Unlike user/agent budgets
  * this is one rule, not a map, so it renders as an inline field set (limit +
  * action + conditional downgrade/restrict) with its own Save button.
  */
@@ -3654,8 +3922,12 @@ function SessionBudgetEditor({
 	/** Node target — powers the "Downgrade to model" catalog picker. */
 	target: ApiTarget;
 }) {
-	const [limit, setLimit] = useState(String(rule.limit));
+	const [limitUsd, setLimitUsd] = useState(microUsdToBudgetInput(rule.limit));
 	const [action, setAction] = useState<BudgetAction>(rule.action);
+	const [include, setInclude] = useState<BudgetChargeInclusion>({
+		...DEFAULT_BUDGET_INCLUSION,
+		...rule.include,
+	});
 	// `SessionBudgetConfig.alert` exists in Rust (crates/gateway/budget/src/lib.rs)
 	// and the pipeline folds a session decision's tier into the same `max_tier` as
 	// user/agent rules, so leaving it out of this editor made the session cap's tier
@@ -3670,16 +3942,19 @@ function SessionBudgetEditor({
 	const [saveOk, setSaveOk] = useState(false);
 
 	const handleSave = async () => {
-		const limitNum = Number(limit);
-		if (!Number.isInteger(limitNum) || limitNum < 0) {
-			setSaveError("Limit must be a non-negative integer.");
+		const limitMicroUsd = budgetUsdToMicroUsd(limitUsd);
+		if (limitMicroUsd === null) {
+			setSaveError(
+				"Spend cap must be a non-negative USD amount (up to 6 decimals)."
+			);
 			return;
 		}
 		const next = buildBudgetRule({
-			limit: limitNum,
+			limit: limitMicroUsd,
 			action,
 			alert,
 			downgradeTo,
+			include,
 			restrictMaxTokens: restrictMax,
 		});
 		setSaving(true);
@@ -3703,40 +3978,50 @@ function SessionBudgetEditor({
 			<div className="flex items-center justify-between px-3">
 				<Label>Per-session (global)</Label>
 				<Button
-					disabled={saving || !canConfigure}
+					disabled={!canConfigure}
+					loading={saving}
 					onClick={() => handleSave()}
 					size="sm"
 					variant="ghost"
 				>
-					{saving ? <Spinner className="size-4" /> : null}
 					Save
 				</Button>
 			</div>
 			<div className="flex flex-col gap-4 px-3">
 				<p className="text-muted-foreground text-xs">
-					One cap applied to every chat session (keyed by session id). Set the
-					limit to 0 to turn the per-session cap off.
+					One spend cap applied to every chat session (keyed by session id). Set
+					the cap to 0 to turn it off.
 				</p>
 				<div className="flex flex-col gap-1.5">
-					<Label htmlFor="session-budget-limit">Token limit</Label>
+					<Label htmlFor="session-budget-limit">Spend cap (USD)</Label>
 					<Input
 						id="session-budget-limit"
 						min={0}
 						onChange={(e) => {
-							setLimit(e.target.value);
+							setLimitUsd(e.target.value);
 							setSaveOk(false);
 						}}
 						placeholder="0 = off"
+						step="0.01"
 						type="number"
-						value={limit}
+						value={limitUsd}
 					/>
 					<p className="text-muted-foreground text-xs">
-						Lifetime input + output token cap per session. 0 = unlimited (off).
+						Lifetime charged spend per session. 0 = unlimited (off). The Gateway
+						stores this as micro-USD.
 					</p>
 				</div>
+				<BudgetChargeInclusionFields
+					idPrefix="session-budget-include"
+					onChange={(next) => {
+						setInclude(next);
+						setSaveOk(false);
+					}}
+					value={include}
+				/>
 				<div className="flex flex-col gap-1.5">
 					<Label htmlFor="session-budget-action">
-						Action when limit is reached
+						Action when spend cap is reached
 					</Label>
 					<Select
 						items={ACTION_LABELS}
@@ -3824,7 +4109,7 @@ function SessionBudgetEditor({
 				) : null}
 				{saveOk ? (
 					<p className="text-sm text-success">
-						Saved. Restart the gateway for changes to take effect.
+						Saved. Changes take effect immediately.
 					</p>
 				) : null}
 			</div>
@@ -5353,11 +5638,11 @@ function GuardrailsSection({
 					/>
 					<div className="flex items-center gap-3 px-1">
 						<Button
-							disabled={!reachable || saving || !dirty || !canConfigure}
+							disabled={!(reachable && dirty && canConfigure)}
+							loading={saving}
 							onClick={() => handleSave()}
 							size="sm"
 						>
-							{saving ? <Spinner className="size-3" /> : null}
 							Save guardrails
 						</Button>
 						{saveOk ? (
@@ -5371,12 +5656,96 @@ function GuardrailsSection({
 			) : null}
 
 			<CommandApprovalCard target={target} />
+			<CatalogScannerCard canConfigure={canConfigure} target={target} />
 
 			{/* Which agents these filters actually see. Every rule above only
 			    applies to model calls that traverse the gateway, and three of the
 			    four agent families route through it only when opted in — so a
 			    guardrails page without this list overstates its own reach. */}
 			<AgentEgressSection target={target} />
+		</div>
+	);
+}
+
+/** Gateway-owned choice of which registered, read-only agent reviews catalog
+ *  listings after the deterministic scorecard. Stored as a node preference so
+ *  every catalog surface and the Security Scanner command share one choice. */
+function CatalogScannerCard({
+	target,
+	canConfigure,
+}: {
+	target: ApiTarget;
+	canConfigure: boolean;
+}) {
+	const [agentId, setAgentId] = useState("ryu");
+	const [loaded, setLoaded] = useState(false);
+	const [status, setStatus] = useState<string | null>(null);
+
+	useEffect(() => {
+		let cancelled = false;
+		setLoaded(false);
+		getPreference(target, CATALOG_SCAN_AGENT_PREF).then((value) => {
+			if (cancelled) {
+				return;
+			}
+			setAgentId(value?.trim() || "ryu");
+			setLoaded(true);
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [target]);
+
+	const updateAgent = async (next: string) => {
+		const trimmed = next.trim();
+		if (!trimmed) {
+			return;
+		}
+		const previous = agentId;
+		setAgentId(trimmed);
+		setStatus(null);
+		const ok = await setPreference(target, CATALOG_SCAN_AGENT_PREF, trimmed);
+		if (ok) {
+			setStatus("Saved for this node.");
+		} else {
+			setAgentId(previous);
+			setStatus("Could not save the scanning agent.");
+		}
+	};
+
+	return (
+		<div data-testid="catalog-scanner-settings">
+			<SettingsSection
+				caption="Choose the registered agent that reviews Skills, Apps, and Plugins after their deterministic scorecard runs. The review is bounded and read-only: listing text is untrusted evidence, and the agent cannot install, edit, or change settings."
+				title="Catalog scanner"
+			>
+				<div className="flex flex-col gap-3">
+					<SettingsGroup>
+						<SettingsItem
+							actions={
+								<AgentModelPickerField
+									ariaLabel="Catalog scanning agent"
+									className="min-w-[220px]"
+									disabled={!(canConfigure && loaded)}
+									mode="agent"
+									onChange={(next) => {
+										void updateAgent(next);
+									}}
+									placeholder="Select a scanning agent"
+									target={target}
+									value={agentId}
+								/>
+							}
+							description="Used by every catalog Scan button and the Security Scanner catalog review."
+							settingsId="catalog-scan-agent"
+							title="Scanning agent"
+						/>
+					</SettingsGroup>
+					{status ? (
+						<p className="px-3 text-muted-foreground text-sm">{status}</p>
+					) : null}
+				</div>
+			</SettingsSection>
 		</div>
 	);
 }
@@ -5404,7 +5773,7 @@ function formatTokens(input: number | null, output: number | null): string {
 	}
 	const i = input ?? 0;
 	const o = output ?? 0;
-	return `${i.toLocaleString()} / ${o.toLocaleString()}`;
+	return `${formatNumber(i)} / ${formatNumber(o)}`;
 }
 
 function AuditTable({ entries }: { entries: AuditEntry[] }) {
@@ -5566,6 +5935,7 @@ function AuditPanel({ target }: { target: ApiTarget }) {
 					entries={entries}
 					loadError={loadError}
 					loading={loading}
+					onRefresh={() => load({ errorsOnly })}
 					reachable={reachable}
 				/>
 			</div>
@@ -5585,11 +5955,13 @@ function AuditPanel({ target }: { target: ApiTarget }) {
 function AuditBody({
 	loading,
 	loadError,
+	onRefresh,
 	reachable,
 	entries,
 }: {
 	loading: boolean;
 	loadError: string | null;
+	onRefresh: () => void;
 	reachable: boolean | null;
 	entries: AuditEntry[];
 }) {
@@ -5602,7 +5974,22 @@ function AuditBody({
 		);
 	}
 	if (loadError) {
-		return <p className="text-destructive text-sm">{loadError}</p>;
+		return (
+			<Empty>
+				<EmptyHeader>
+					<EmptyMedia variant="icon">
+						<HugeiconsIcon icon={Activity01Icon} />
+					</EmptyMedia>
+					<EmptyTitle>Could not load audit log</EmptyTitle>
+					<EmptyDescription>{loadError}</EmptyDescription>
+				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onRefresh} size="sm" variant="ghost">
+						Try again
+					</Button>
+				</EmptyContent>
+			</Empty>
+		);
 	}
 	if (reachable === false) {
 		return (
@@ -5618,6 +6005,11 @@ function AuditBody({
 						enable audit logging.
 					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onRefresh} size="sm" variant="ghost">
+						Try again
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
@@ -5633,6 +6025,11 @@ function AuditBody({
 						Drive a chat turn through the gateway and refresh to see entries.
 					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onRefresh} size="sm" variant="ghost">
+						Refresh audit log
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
@@ -5807,12 +6204,11 @@ function RunEvalsPanel({ target }: { target: ApiTarget }) {
 						/>
 					</div>
 					<Button
-						disabled={running}
+						loading={running}
 						onClick={() => {
 							handleRun().catch((_e: unknown) => undefined);
 						}}
 					>
-						{running ? <Spinner className="size-3" /> : null}
 						{running ? "Running…" : "Run"}
 					</Button>
 				</div>
@@ -5858,7 +6254,10 @@ const LOCAL_MODEL_IDLE_OPTIONS = [
 ];
 
 function DefaultsSection({ target }: { target: ApiTarget }) {
-	const [selection, setSelection] = useState<AgentSelection>(
+	const [localSelection, setLocalSelection] = useState<AgentSelection>(
+		EMPTY_AGENT_SELECTION
+	);
+	const [cloudSelection, setCloudSelection] = useState<AgentSelection>(
 		EMPTY_AGENT_SELECTION
 	);
 	const [loaded, setLoaded] = useState(false);
@@ -5866,10 +6265,14 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 	const [idleLoaded, setIdleLoaded] = useState(false);
 	useEffect(() => {
 		let cancelled = false;
-		getAgentSelection(target, DEFAULT_AGENT_SELECTION_PREF_KEY)
-			.then((stored) => {
+		Promise.all([
+			getLaneAgentSelection(target, "local"),
+			getLaneAgentSelection(target, "cloud"),
+		])
+			.then(([local, cloud]) => {
 				if (!cancelled) {
-					setSelection(stored);
+					setLocalSelection(local);
+					setCloudSelection(cloud);
 					setLoaded(true);
 				}
 			})
@@ -5884,17 +6287,12 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 	}, [target]);
 
 	const save = useCallback(
-		async (next: AgentSelection) => {
-			let previous = EMPTY_AGENT_SELECTION;
-			setSelection((prev) => {
-				previous = prev;
-				return next;
-			});
-			const ok = await setAgentSelection(
-				target,
-				DEFAULT_AGENT_SELECTION_PREF_KEY,
-				next
-			);
+		async (lane: "local" | "cloud", next: AgentSelection) => {
+			const previous = lane === "local" ? localSelection : cloudSelection;
+			const setSelection =
+				lane === "local" ? setLocalSelection : setCloudSelection;
+			setSelection(next);
+			const ok = await setLaneAgentSelection(target, lane, next);
 			if (!ok) {
 				setSelection(previous);
 				toast.error("Couldn't save the default", {
@@ -5902,7 +6300,7 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 				});
 			}
 		},
-		[target]
+		[target, cloudSelection, localSelection]
 	);
 
 	useEffect(() => {
@@ -5943,32 +6341,59 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 
 	return (
 		<SettingsSection
-			caption="Anything on this node that needs an agent or a model, but has none configured of its own, uses this: plugin settings left blank, chat auto-rename, side questions, the advisor, context compaction, and follow-up suggestions. A setting that names its own target always wins over this one. Leave it unset to keep each feature's built-in fallback. For chat titles and suggestions that fallback is the on-device local model, so setting a cloud default here does route those through the Gateway."
-			title="Default agent & model"
+			caption="Ryu keeps two node-scoped defaults. Normal chats use the cloud lane when it is configured; plugins, side-model calls, and local utilities use the local lane. Ryu can carry its agent, provider, model, and effort together. External ACP agents retain their own controls."
+			title="Default agents & models"
 		>
 			<SettingsCard className="space-y-4">
 				<div className="flex flex-col gap-1.5">
 					<Label className="text-muted-foreground text-xs">
-						Default target
+						Default local agent
 					</Label>
 					{loaded ? (
 						<AgentSelectionField
-							ariaLabel="Default agent or model"
+							allowedProviderIds={["local"]}
+							ariaLabel="Default local agent or model"
 							onChange={(next) => {
-								save(next).catch(() => undefined);
+								save("local", next).catch(() => undefined);
 							}}
-							placeholder="No default — each feature uses its own fallback"
+							placeholder="Ryu · local · Gemma 4"
+							preserveRyuRoute
 							target={target}
-							value={selection}
+							value={localSelection}
 						/>
 					) : (
 						<Skeleton className="h-8 w-full" />
 					)}
 					<p className="text-muted-foreground text-xs">
-						Pick an agent to run the work, or a provider and model to answer it
-						directly. Features that make a plain model call can't run an agent.
-						If you pick one, they use the model it is configured with, and fall
-						back to their own default when it has none.
+						Local lane for plugins, side-model calls, and utility work. Fresh
+						nodes start at Ryu on the installed Gemma 4 model.
+					</p>
+				</div>
+			</SettingsCard>
+
+			<SettingsCard className="space-y-4">
+				<div className="flex flex-col gap-1.5">
+					<Label className="text-muted-foreground text-xs">
+						Default cloud agent
+					</Label>
+					{loaded ? (
+						<AgentSelectionField
+							ariaLabel="Default cloud agent or model"
+							onChange={(next) => {
+								save("cloud", next).catch(() => undefined);
+							}}
+							placeholder="No cloud default — use local"
+							preserveRyuRoute
+							target={target}
+							value={cloudSelection}
+						/>
+					) : (
+						<Skeleton className="h-8 w-full" />
+					)}
+					<p className="text-muted-foreground text-xs">
+						Normal interactive chats use this lane when set. Paid onboarding
+						starts with Ryu on managed OpenRouter; free users can choose a
+						configured BYOK provider or leave this unset.
 					</p>
 				</div>
 			</SettingsCard>
@@ -6016,7 +6441,7 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 }
 
 /**
- * The 19 built-in gateway sections.
+ * The 21 built-in gateway sections.
  *
  * `value` is a deep-link key (`openGateway("keys")`, `?section=privacy`, the
  * command palette) — **never rename one**. `label` and `hint` are free to change
@@ -6076,6 +6501,14 @@ const GATEWAY_SECTIONS: {
 			"pair pairing device token access approve revoke browser remote security auth",
 	},
 	{
+		value: "computer",
+		label: "Computer settings",
+		hint: "Choose how Ghost may use this computer, including locked-session access.",
+		icon: LaptopIcon,
+		keywords:
+			"computer computers ghost computer use locked lock background accessibility screen recording",
+	},
+	{
 		value: "permissions",
 		label: "Permissions",
 		hint: "Give a team access to one space, or take it away from someone.",
@@ -6097,6 +6530,14 @@ const GATEWAY_SECTIONS: {
 		icon: Shield01Icon,
 		keywords:
 			"guardrails firewall pii moderation safety filter egress agents routing governed bypass",
+	},
+	{
+		value: "runtime",
+		label: "Agent runtime",
+		hint: "Bound ACP session lifetime, parallel agents, and sleep behavior on this node.",
+		icon: CpuIcon,
+		keywords:
+			"acp agents idle timeout garbage collection memory oom concurrency parallel keep awake sleep power",
 	},
 	{
 		value: "routing",
@@ -6165,6 +6606,21 @@ const GATEWAY_SECTIONS: {
 		keywords: "mcp model context protocol server tools claude cursor stdio",
 	},
 	{
+		value: "import",
+		label: "Import agents",
+		hint: "Preview Claude, Codex, and Cursor setup before bringing it into Ryu.",
+		icon: ArrowDown01Icon,
+		keywords:
+			"import sync claude codex cursor skills mcp plugins threads sessions",
+	},
+	{
+		value: "export",
+		label: "Export Ryu",
+		hint: "Write an explicit, versioned Ryu bundle to a selected agent root.",
+		icon: ArrowUp01Icon,
+		keywords: "export sync bundle conversations sessions acp resume replay",
+	},
+	{
 		value: "evals",
 		label: "Quality tests",
 		hint: "Score models against a set of prompts and compare the results.",
@@ -6223,13 +6679,17 @@ const GATEWAY_SECTIONS: {
 
 /** Health + metrics observability block, shown on the Overview tab. */
 function OverviewSection({
+	canConfigure,
 	reachable,
 	status,
 	metrics,
+	target,
 }: {
+	canConfigure: boolean;
 	reachable: boolean;
 	status: GatewayStatus | null;
 	metrics: GatewayMetrics | null;
+	target: ApiTarget;
 }) {
 	if (!reachable) {
 		return (
@@ -6246,6 +6706,11 @@ function OverviewSection({
 
 	return (
 		<>
+			<GatewayPostureCard
+				canConfigure={canConfigure}
+				reachable={reachable}
+				target={target}
+			/>
 			<SettingsSection
 				caption={`${status?.url ?? "gateway"}${h?.version ? ` · v${h.version}` : ""}`}
 				title="Health"
@@ -6353,8 +6818,7 @@ function OverviewSection({
 
 /**
  * Sidebar-grouped layout for the gateway sections, mirroring the main
- * SettingsDialog (inset sidebar + scrollable content pane). Cosmetic only —
- * groups the 7 gateway sections.
+ * SettingsDialog (inset sidebar + scrollable content pane).
  */
 /**
  * Nav groups, retitled around the question each group answers rather than the
@@ -6374,7 +6838,7 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 	},
 	{
 		title: "Limits & safety",
-		items: ["budgets", "guardrails"],
+		items: ["budgets", "guardrails", "runtime"],
 	},
 	{
 		title: "Connect",
@@ -6384,6 +6848,10 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 		title: "Developer",
 		items: ["mcp"],
 	},
+	{
+		title: "Transfer",
+		items: ["import", "export"],
+	},
 	{ title: "Reports", items: ["usage", "audit", "evals"] },
 	// Node-level Core-infra tabs moved out of the App Settings dialog (not apps —
 	// apps register their own tabs dynamically under the Apps/Plugins headers).
@@ -6391,14 +6859,22 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 		title: "This computer",
 		// A section listed in GATEWAY_SECTIONS but missing from a group here renders
 		// NOWHERE, with no type error and no warning, so the two lists move together.
-		items: ["privacy", "access", "storage", "encryption", "updates", "health"],
+		items: [
+			"computer",
+			"privacy",
+			"access",
+			"storage",
+			"encryption",
+			"updates",
+			"health",
+		],
 	},
 	{ title: "Danger", items: ["danger"] },
 ];
 
 /**
  * Tile colour per section, kept as one map rather than a field on each of the
- * nineteen entries so the palette can be read — and kept sane — in one glance.
+ * entries so the palette can be read — and kept sane — in one glance.
  *
  * The colour carries meaning by GROUP, the way iOS/macOS Settings does it:
  * money is green, anything destructive or blocking is red, keys and access are
@@ -6416,16 +6892,20 @@ const SECTION_TINTS: Partial<Record<GatewaySection, SettingsTint>> = {
 	routing: "teal",
 	budgets: "green",
 	guardrails: "red",
+	runtime: "purple",
 	network: "blue",
 	integrations: "indigo",
 	connections: "teal",
 	api: "blue",
 	mcp: "teal",
+	import: "blue",
+	export: "indigo",
 	"email-alerts": "orange",
 	usage: "green",
 	audit: "gray",
 	evals: "pink",
 	privacy: "blue",
+	computer: "indigo",
 	access: "orange",
 	storage: "gray",
 	encryption: "indigo",
@@ -6470,7 +6950,7 @@ export function GatewayDialog({
 	// Section is a string, not just GatewaySection: dynamic app/plugin entities use
 	// `app:<id>` / `plugin:<id>` values that aren't part of the static union.
 	const [section, setSection] = useState<string>(defaultSection);
-	// Nineteen built-in sections plus one nav row per node-scoped app means the
+	// Twenty built-in sections plus one nav row per node-scoped app means the
 	// list outgrew "just read it" — a filter is the shortest path from "I know
 	// what I want" to the pane that holds it.
 	const [search, setSearch] = useState("");
@@ -6582,7 +7062,7 @@ export function GatewayDialog({
 				)
 				.map((item) => ({
 					...item,
-					icon: group.title === "Apps" ? GridIcon : PuzzleIcon,
+					icon: group.title === "Apps" ? Package01Icon : PlugSocketIcon,
 					tint: "gray" as SettingsTint,
 				})),
 		});
@@ -6648,9 +7128,11 @@ export function GatewayDialog({
 			<div className="flex flex-col gap-4">
 				{section === "overview" ? (
 					<OverviewSection
+						canConfigure={canConfigure}
 						metrics={metrics}
 						reachable={reachable}
 						status={status}
+						target={target}
 					/>
 				) : null}
 				{section === "workspace" ? <WorkspaceSection /> : null}
@@ -6753,6 +7235,12 @@ export function GatewayDialog({
 						/>
 					</>
 				) : null}
+				{section === "runtime" ? (
+					<>
+						{canConfigure ? null : <PolicyReadOnlyBanner />}
+						<AcpRuntimeSection canConfigure={canConfigure} target={target} />
+					</>
+				) : null}
 				{section === "budgets" ? (
 					<>
 						{canConfigure ? null : <PolicyReadOnlyBanner />}
@@ -6825,11 +7313,24 @@ export function GatewayDialog({
 					/>
 				) : null}
 				{section === "mcp" ? <McpSection target={target} /> : null}
+				{section === "import" ? (
+					<AgentSyncImportSection target={target} />
+				) : null}
+				{section === "export" ? (
+					<AgentSyncExportSection target={target} />
+				) : null}
 				{section === "evals" ? <RunEvalsPanel target={target} /> : null}
 				{/* Node-level Core-infra tabs (moved out of the App Settings dialog). */}
 				{section === "connections" ? <ConnectionsTab /> : null}
 				{section === "email-alerts" ? <EmailAlertsSettings /> : null}
 				{section === "privacy" ? <PrivacySettings /> : null}
+				{section === "computer" ? (
+					<ComputerUseSettings
+						canConfigure={canConfigure}
+						reachable={reachable}
+						target={target}
+					/>
+				) : null}
 				{section === "access" ? <NodeAccessSettings /> : null}
 				{section === "permissions" ? <NodePermissionsSettings /> : null}
 				{/* Also carries the node's upload ceiling, which used to be the one
@@ -6838,7 +7339,17 @@ export function GatewayDialog({
 				{section === "storage" ? <StorageSettings /> : null}
 				{section === "encryption" ? <EncryptionSettings /> : null}
 				{section === "updates" ? <UpdatesSettings /> : null}
-				{section === "health" ? <PreflightPage embedded /> : null}
+				{section === "health" ? (
+					<>
+						<GatewayPostureCard
+							canConfigure={canConfigure}
+							compact={false}
+							reachable={reachable}
+							target={target}
+						/>
+						<PreflightPage embedded />
+					</>
+				) : null}
 				{section === "danger" ? <DangerZoneSettings /> : null}
 				{/* Dynamic node-scoped app/plugin settings (manifest-registered). */}
 				{activeEntity ? (

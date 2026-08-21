@@ -22,7 +22,7 @@ const FULL_HEIGHT_VAR = "--collapsible-full-height";
  * form drives the `max-height` tween; the tuple form drives the motion fades.
  * Both classes are written LITERALLY in the JSX below — Tailwind's scanner does
  * not resolve template-literal candidates, so interpolating the curve here would
- * silently drop the `ease-[...]` and `[max-height:var(...)]` utilities.
+ * silently drop the custom ease and max-height custom-property utilities.
  */
 const MORPH_CURVE_MOTION = [0.22, 1, 0.36, 1] as const;
 

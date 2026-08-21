@@ -12,8 +12,8 @@
 //!
 //! ## Why the hooks reuse the capability facade instead of a new plugin protocol
 //!
-//! The `memory` capability already defines canonical verbs — `memory__search`,
-//! `memory__store` — and the facade already resolves them to whichever provider is
+//! The `memory` capability already defines canonical verbs — `memory.search`,
+//! `memory.store` — and the facade already resolves them to whichever provider is
 //! selected, renames arguments, and normalizes responses. So a "hook" here is just a
 //! facade call. A provider that wants to participate in automatic recall needs to
 //! implement nothing beyond the verbs it already declares to be a provider at all.
@@ -147,7 +147,7 @@ pub async fn prefetch(query: &str, limit: usize) -> Vec<String> {
         return Vec::new();
     }
     let limit = limit.clamp(1, MAX_INJECTED_FACTS);
-    let Some(raw) = call_verb("memory__search", json!({ "query": query, "limit": limit })).await
+    let Some(raw) = call_verb("memory.search", json!({ "query": query, "limit": limit })).await
     else {
         return Vec::new();
     };
@@ -159,13 +159,13 @@ pub async fn prefetch(query: &str, limit: usize) -> Vec<String> {
 /// Distinct from [`prefetch`]: prefetch asks for RAW FACTS matching this turn, while
 /// context asks the provider for ITS synthesis — the thing providers that model a
 /// user over time (Honcho's dialectic, Mem0's summaries) actually offer and a pure
-/// retrieval store does not. A provider that does not declare `memory__context`
+/// retrieval store does not. A provider that does not declare `memory.context`
 /// simply contributes none, and the facade never advertises the verb for it.
 pub async fn context(query: &str) -> Option<String> {
     if !is_external().await {
         return None;
     }
-    let raw = call_verb("memory__context", json!({ "query": query.trim() })).await?;
+    let raw = call_verb("memory.context", json!({ "query": query.trim() })).await?;
     let text = summary_text(&raw)?;
     let clipped: String = text.trim().chars().take(MAX_CONTEXT_CHARS).collect();
     if clipped.is_empty() {
@@ -187,7 +187,7 @@ pub async fn context(query: &str) -> Option<String> {
 /// want either, both, or neither, so they are two settings rather than one.
 pub fn sync_turn(content: &str, role: &str) {
     detach(
-        "memory__sync",
+        "memory.sync",
         json!({ "content": content.trim(), "role": role }),
         content,
     );
@@ -218,7 +218,7 @@ fn detach(verb: &'static str, arguments: serde_json::Value, content: &str) {
     });
 }
 
-/// The prose of a `memory__context` response, over the shapes a provider might use.
+/// The prose of a `memory.context` response, over the shapes a provider might use.
 fn summary_text(value: &serde_json::Value) -> Option<String> {
     if let Some(s) = value.as_str() {
         return Some(s.to_owned());
@@ -285,7 +285,7 @@ pub fn render_context_block(summary: &str) -> Option<String> {
 /// source of truth, so a mirror failure must not surface anywhere.
 pub fn mirror(content: &str, scope: &str) {
     detach(
-        "memory__store",
+        "memory.store",
         json!({ "content": content.trim(), "scope": scope }),
         content,
     );

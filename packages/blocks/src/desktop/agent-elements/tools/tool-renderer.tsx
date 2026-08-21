@@ -11,13 +11,13 @@ import type {
 import { getToolStatus } from "../utils/format-tool.ts";
 import { unwrapMcpOutput } from "../utils/unwrap-mcp-output.ts";
 import { useWidgetHost } from "../widget-host-context.tsx";
+import { AgentMessageTool } from "./agent-message-tool.tsx";
+import { isAgentMessageToolPart } from "./agent-message-tool-logic.ts";
 import {
 	ArtifactTool,
 	artifactIdForPart,
 	isArtifactPart,
 } from "./artifact-tool.tsx";
-import { AgentMessageTool } from "./agent-message-tool.tsx";
-import { isAgentMessageToolPart } from "./agent-message-tool-logic.ts";
 import { BashTool } from "./bash-tool.tsx";
 import { EditTool } from "./edit-tool.tsx";
 import { GenericTool } from "./generic-tool.tsx";
@@ -148,7 +148,7 @@ const ToolRendererInner = memo(function ToolRendererInner({
 		useChatDisplayPrefs();
 	const widgetHost = useWidgetHost();
 
-	// Built-in artifact surface (artifact__render inline, or artifact__create's
+	// Built-in artifact surface (artifact.render inline, or artifact.create's
 	// created file): render the agent's artifact as a live card with an "Open in
 	// panel / tab" affordance. Rendered through the desktop-injected host, so it
 	// degrades to a plain tool row on surfaces without one.
@@ -156,15 +156,19 @@ const ToolRendererInner = memo(function ToolRendererInner({
 		return <ArtifactTool id={artifactIdForPart(part.toolCallId)} part={part} />;
 	}
 
-	// Generative UI (ui__render): render the agent's spec inline as the app's own
+	// Generative UI (ui.render): render the agent's spec inline as the app's own
 	// @ryu/ui components instead of a tool row. Core surfaces it either as a typed
-	// `tool-ui__render` part or as a `dynamic-tool` whose toolName is `ui__render`.
+	// `tool-ui.render` part or as a `dynamic-tool` whose toolName is `ui.render`.
 	const isUiRender =
-		partType === "tool-ui__render" ||
-		(partType === "dynamic-tool" && part.toolName === "ui__render");
+		partType === "tool-ui.render" ||
+		(partType === "dynamic-tool" && part.toolName === "ui.render");
 	if (isUiRender) {
 		const status = deriveToolStatus(part, chatStatus);
-		const input = (part.input ?? {}) as { spec?: unknown; title?: string };
+		const input = (part.input ?? {}) as {
+			format?: "json-render" | "a2ui";
+			spec?: unknown;
+			title?: string;
+		};
 		// Wait for the spec to finish streaming before rendering, so a partial spec
 		// doesn't flash the fallback. Core's dispatch is a near-instant no-op echo.
 		if (status === "streaming" || status === "pending" || input.spec == null) {
@@ -172,6 +176,7 @@ const ToolRendererInner = memo(function ToolRendererInner({
 		}
 		return (
 			<AgentUI
+				format={input.format}
 				onSubmit={onAgentUiSubmit}
 				spec={input.spec}
 				title={input.title}

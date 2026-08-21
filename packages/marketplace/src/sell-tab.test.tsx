@@ -35,6 +35,7 @@ function makeStatus(over: Partial<SellerStatus> = {}): SellerStatus {
 		onboardingStatus: "none",
 		payoutsEnabled: false,
 		stripeConnectAccountId: null,
+		stripeIdentityStatus: "none",
 		...over,
 	};
 }

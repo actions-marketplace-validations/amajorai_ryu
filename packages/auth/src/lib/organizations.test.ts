@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 
-import { resolveInitialActiveOrganization } from "./organizations.ts";
+import {
+	cancelOrganizationInvitation,
+	resolveInitialActiveOrganization,
+} from "./organizations.ts";
+
+const headers = new Headers({ cookie: "session=test" });
 
 /**
  * What a new session starts scoped to.
@@ -77,5 +82,86 @@ describe("resolveInitialActiveOrganization", () => {
 					Promise.reject(new Error("organization plugin exploded")),
 			})
 		).rejects.toThrow("organization plugin exploded");
+	});
+});
+
+describe("cancelOrganizationInvitation", () => {
+	it("cancels only a live pending invitation through Better Auth", async () => {
+		let canceled = 0;
+		const result = await cancelOrganizationInvitation(
+			{
+				listInvitations: () =>
+					Promise.resolve([
+						{
+							expiresAt: new Date(Date.now() + 60_000),
+							id: "invite_1",
+							status: "pending",
+						},
+					]),
+				cancelInvitation: () => {
+					canceled += 1;
+					return Promise.resolve();
+				},
+			},
+			{ headers, invitationId: "invite_1", organizationId: "org_1" }
+		);
+
+		expect(result).toEqual({ changed: true, status: "canceled" });
+		expect(canceled).toBe(1);
+	});
+
+	it("is idempotent for a canceled invitation and protects terminal states", async () => {
+		let canceled = 0;
+		const api = {
+			listInvitations: () =>
+				Promise.resolve([
+					{ id: "canceled", status: "canceled" },
+					{ id: "accepted", status: "accepted" },
+				]),
+			cancelInvitation: () => {
+				canceled += 1;
+				return Promise.resolve();
+			},
+		};
+
+		expect(
+			await cancelOrganizationInvitation(api, {
+				headers,
+				invitationId: "canceled",
+				organizationId: "org_1",
+			})
+		).toEqual({ changed: false, status: "canceled" });
+		expect(
+			await cancelOrganizationInvitation(api, {
+				headers,
+				invitationId: "accepted",
+				organizationId: "org_1",
+			})
+		).toEqual({ changed: false, status: "accepted" });
+		expect(canceled).toBe(0);
+	});
+
+	it("does not rewrite an expired pending invitation", async () => {
+		let canceled = 0;
+		const result = await cancelOrganizationInvitation(
+			{
+				listInvitations: () =>
+					Promise.resolve([
+						{
+							expiresAt: new Date(1),
+							id: "expired",
+							status: "pending",
+						},
+					]),
+				cancelInvitation: () => {
+					canceled += 1;
+					return Promise.resolve();
+				},
+			},
+			{ headers, invitationId: "expired", organizationId: "org_1" }
+		);
+
+		expect(result).toEqual({ changed: false, status: "expired" });
+		expect(canceled).toBe(0);
 	});
 });

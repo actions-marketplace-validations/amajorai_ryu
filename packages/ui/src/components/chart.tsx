@@ -1,5 +1,6 @@
 "use client";
 
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import {
 	type ComponentProps,
@@ -263,7 +264,7 @@ function ChartTooltipContent({
 											{item.value != null && (
 												<span className="font-medium font-mono text-foreground tabular-nums">
 													{typeof item.value === "number"
-														? item.value.toLocaleString()
+														? formatNumber(item.value)
 														: String(item.value)}
 												</span>
 											)}

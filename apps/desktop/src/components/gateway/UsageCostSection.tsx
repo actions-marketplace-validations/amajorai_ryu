@@ -32,8 +32,13 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select";
 import { Spinner } from "@ryu/ui/components/spinner";
+import {
+	formatCurrency,
+	formatNumber as formatSharedNumber,
+} from "@ryu/ui/lib/number-format.ts";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import { OrgBillingContext } from "@/src/components/billing/OrgBillingContext.tsx";
 import {
 	SettingsGroup,
 	SettingsItem,
@@ -98,15 +103,13 @@ function formatCost(microUsd: number): string {
 	if (dollars > 0 && dollars < 0.01) {
 		return "<$0.01";
 	}
-	return new Intl.NumberFormat("en-US", {
-		style: "currency",
-		currency: "USD",
+	return formatCurrency(dollars, "USD", {
 		maximumFractionDigits: dollars >= 10 ? 0 : 2,
-	}).format(dollars);
+	});
 }
 
 function formatNumber(value: number): string {
-	return value.toLocaleString();
+	return formatSharedNumber(value);
 }
 
 /** "2m 05s" / "42s" / "now" / "—" for a whole-seconds countdown. */
@@ -303,8 +306,8 @@ function ModelSpendCard() {
 
 	return (
 		<SettingsSection
-			caption="Your account's usage rollup: lifetime spend (in USD) and the most-used models by request count. Per-model dollar attribution is not yet broken out; only the aggregate cost and per-model request share are available."
-			title="Spend by model"
+			caption="This is the signed-in account profile rollup, not the shared organization wallet. Organization credits and managed-inference debits are shown in Credits and Usage."
+			title="Account usage rollup"
 		>
 			{renderBody()}
 		</SettingsSection>
@@ -421,12 +424,12 @@ function ProviderTierEditor({
 			caption="Cost tier per provider, used to order the fallback chain: a rate-limited or failed primary demotes down the cost ladder (subscription → cheap → free) instead of retrying at random. Absent providers default to Subscription. Takes effect after the gateway restarts."
 			headerAction={
 				<Button
-					disabled={isDisabled || saving}
+					disabled={isDisabled}
+					loading={saving}
 					onClick={() => handleSave()}
 					size="sm"
 					variant="ghost"
 				>
-					{saving ? <Spinner className="size-4" /> : null}
 					Save
 				</Button>
 			}
@@ -597,8 +600,8 @@ function AccountKeysDisplay({
 function ProviderCreditsCard() {
 	return (
 		<SettingsSection
-			caption="Prepaid balance left on the API keys stored on this node. Only OpenAI-compatible vendors that publish a balance to an inference key can be shown. OpenAI and Anthropic expose theirs only to a browser session or a separate admin key, so they cannot appear here."
-			title="API credit balance"
+			caption="Provider-side prepaid balance left on API keys stored on this node. This is separate from the active organization's shared Ryu credits. Only vendors that publish a balance to an inference key can be shown."
+			title="BYOK provider key balance"
 		>
 			<SettingsGroup>
 				{CREDIT_PROVIDER_IDS.map((id) => (
@@ -635,7 +638,10 @@ function ProviderCreditsRow({ providerId }: { providerId: string }) {
 	let value = "Checking…";
 	if (data) {
 		if (amount) {
-			value = `$${amount.number.toFixed(2)} left`;
+			value = `${formatCurrency(amount.number, "USD", {
+				maximumFractionDigits: 2,
+				minimumFractionDigits: 2,
+			})} left`;
 		} else if (data.reason === "not_logged_in") {
 			value = "No key stored";
 		} else if (data.reason === "token_expired") {
@@ -657,6 +663,7 @@ function ProviderCreditsRow({ providerId }: { providerId: string }) {
 					{value}
 				</span>
 			}
+			description="Provider-side balance on this node · not Ryu organization credits"
 			title={label}
 		/>
 	);
@@ -676,15 +683,22 @@ export function UsageCostSection({
 	return (
 		<div className="flex flex-col gap-6">
 			<SettingsSection
-				caption="Live provider rate-limit windows, your spend rollup, and the cost knobs that shape routing and account rotation."
+				caption="Live provider rate-limit windows, the account rollup, and the cost knobs that shape routing. Managed inference debits the organization wallet shown here; BYOK balances belong to keys stored on this node."
 				title="Usage & cost"
 			>
-				<div className="flex items-center gap-2 px-3.5 text-muted-foreground text-sm">
-					<HugeiconsIcon className="size-4" icon={Dollar01Icon} />
-					<span>
-						Quota countdowns refresh with the gateway status poll; spend comes
-						from your account usage rollup.
-					</span>
+				<div className="space-y-2">
+					<OrgBillingContext
+						compact
+						description="Ryu managed inference spends from this organization's shared credits."
+						label="Managed inference billing"
+					/>
+					<div className="flex items-center gap-2 px-3.5 text-muted-foreground text-sm">
+						<HugeiconsIcon className="size-4" icon={Dollar01Icon} />
+						<span>
+							Quota countdowns refresh with the gateway status poll; the account
+							rollup below is separate from the organization wallet.
+						</span>
+					</div>
 				</div>
 			</SettingsSection>
 			<ProviderQuotaCard metrics={metrics} />

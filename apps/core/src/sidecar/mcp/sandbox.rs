@@ -8,7 +8,7 @@
 //! ## Tool surface
 //!
 //! A single tool is exposed:
-//!   - `sandbox__sandbox_exec` — run a WASM/WASI module and return its
+//!   - `sandbox.sandbox_exec` — run a WASM/WASI module and return its
 //!     stdout, stderr, and exit code.
 //!
 //! The tool receives WASM bytecode as a base-64 encoded string (`wasm_b64`)
@@ -36,8 +36,6 @@
 //! egress from the sandbox) is Gateway.  This module enforces only the
 //! structural default-deny (no FS preopens, no socket WASI ABI) — policy
 //! belongs in the Gateway.
-
-use std::path::PathBuf;
 
 use anyhow::Result;
 use base64::Engine as _;
@@ -91,7 +89,7 @@ fn sandbox_exec_schema() -> Value {
         "properties": {
             "backend": {
                 "type": "string",
-                "enum": ["wasmtime", "docker", "microsandbox", "opensandbox"],
+                "enum": crate::sidecar::sandbox::KNOWN_BACKENDS,
                 "description": "Which sandbox backend to run in. Omit to use the node default \
                                 (RYU_SANDBOX_BACKEND, or 'wasmtime'). 'wasmtime' runs a WASM \
                                 module (`wasm_b64`); the others run a `command` in a container/microVM."
@@ -120,20 +118,6 @@ fn sandbox_exec_schema() -> Value {
                     "required": ["key", "value"]
                 },
                 "description": "Environment variables available to the workload (wasmtime backend)."
-            },
-            "network": {
-                "type": "boolean",
-                "description": "Allow outbound network (process backends). Defaults to false (deny-all)."
-            },
-            "read_paths": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Host paths the sandbox may read (process backends). Defaults to none."
-            },
-            "write_paths": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Host paths the sandbox may write (process backends). Defaults to none."
             },
             "stdin_b64": {
                 "type": "string",
@@ -188,22 +172,22 @@ fn sandbox_destroy_schema() -> Value {
 pub fn tools() -> Vec<RegistryTool> {
     vec![
         RegistryTool {
-            id: format!("{SERVER_NAME}__sandbox_exec"),
+            id: format!("{SERVER_NAME}.sandbox_exec"),
             server: SERVER_NAME.to_owned(),
             name: "sandbox_exec".to_owned(),
             description: Some(
                 "Execute code in an isolated, swappable sandbox backend (default-deny). \
                  `backend` selects the runtime: 'wasmtime' (default) runs a base-64 WASM module \
                  (`wasm_b64`); 'docker', 'microsandbox', or 'opensandbox' run a `command` in a \
-                 container/microVM. No FS or network access unless explicitly granted \
-                 (`network`/`read_paths`/`write_paths`). Returns stdout, stderr, and exit code."
+                 container/microVM. Process backends receive no caller-controlled FS or network \
+                 capabilities. Returns stdout, stderr, and exit code."
                     .to_owned(),
             ),
             input_schema: Some(sandbox_exec_schema()),
             ..Default::default()
         },
         RegistryTool {
-            id: format!("{SERVER_NAME}__sandbox_create"),
+            id: format!("{SERVER_NAME}.sandbox_create"),
             server: SERVER_NAME.to_owned(),
             name: "sandbox_create".to_owned(),
             description: Some(
@@ -217,7 +201,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: format!("{SERVER_NAME}__sandbox_run"),
+            id: format!("{SERVER_NAME}.sandbox_run"),
             server: SERVER_NAME.to_owned(),
             name: "sandbox_run".to_owned(),
             description: Some(
@@ -229,7 +213,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: format!("{SERVER_NAME}__sandbox_destroy"),
+            id: format!("{SERVER_NAME}.sandbox_destroy"),
             server: SERVER_NAME.to_owned(),
             name: "sandbox_destroy".to_owned(),
             description: Some(
@@ -244,7 +228,7 @@ pub fn tools() -> Vec<RegistryTool> {
 }
 
 /// Dispatch a sandbox tool call. `tool` is the bare name (stripped of the
-/// `sandbox__` prefix by the registry).
+/// `sandbox.` prefix by the registry).
 pub async fn dispatch(tool: &str, arguments: Value) -> Result<Value> {
     match tool {
         "sandbox_exec" => run_sandbox_exec(arguments).await,
@@ -335,7 +319,7 @@ async fn run_sandbox_exec(arguments: Value) -> Result<Value> {
 
     // Resolve which backend to run in: explicit `backend` arg wins, else the
     // node default (RYU_SANDBOX_BACKEND, falling back to wasmtime).
-    let backend = resolve_backend(&arguments);
+    let backend = resolve_backend(&arguments)?;
     if !matches!(backend, SandboxBackend::Wasmtime) {
         return run_process_exec(backend, arguments).await;
     }
@@ -504,15 +488,14 @@ async fn run_sandbox_exec(arguments: Value) -> Result<Value> {
 
 /// Resolve the backend from the call args, falling back to the node default.
 ///
-/// A non-empty `backend` string always parses (unknown names become
-/// `Custom(name)` and surface a clear error when built); empty/absent uses
+/// A non-empty `backend` string must be in the shared backend vocabulary;
+/// unknown names are rejected immediately. Empty/absent uses
 /// [`configured_backend`].
-fn resolve_backend(arguments: &Value) -> SandboxBackend {
+fn resolve_backend(arguments: &Value) -> Result<SandboxBackend> {
     match arguments.get("backend").and_then(Value::as_str) {
-        Some(name) if !name.trim().is_empty() => {
-            SandboxBackend::from_name(name.trim()).unwrap_or_else(|_| configured_backend())
-        }
-        _ => configured_backend(),
+        Some(name) if !name.trim().is_empty() => SandboxBackend::from_name(name.trim()),
+        Some(_) => Err(anyhow::anyhow!("sandbox backend name must not be empty")),
+        None => Ok(configured_backend()),
     }
 }
 
@@ -532,19 +515,9 @@ fn parse_str_array(arguments: &Value, key: &str) -> Vec<String> {
 /// Build deny-by-default [`SandboxCapabilities`] from the call args.
 fn parse_capabilities(arguments: &Value) -> SandboxCapabilities {
     let mut caps = SandboxCapabilities::default();
-    caps.network = arguments
-        .get("network")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    for p in parse_str_array(arguments, "read_paths") {
-        caps.fs_read_paths.insert(PathBuf::from(p));
-    }
-    for p in parse_str_array(arguments, "write_paths") {
-        caps.fs_write_paths.insert(PathBuf::from(p));
-    }
-    // Optional agent-declared scope + workspace access. Unknown/absent values
-    // keep the deny-safe defaults (per-exec scope, honor-the-path-sets access),
-    // matching this module's "bad value falls through to default" idiom.
+    // Scope and workspace mode are internal policy selectors. The capability
+    // sets themselves remain deny-all for process backends; callers cannot turn
+    // arbitrary JSON paths or a network flag into host access.
     if let Some(Ok(scope)) = arguments
         .get("scope")
         .and_then(Value::as_str)
@@ -791,15 +764,15 @@ mod tests {
         let tools = tools();
         assert_eq!(tools.len(), 4);
         let tool = &tools[0];
-        assert_eq!(tool.id, "sandbox__sandbox_exec");
+        assert_eq!(tool.id, "sandbox.sandbox_exec");
         assert_eq!(tool.server, SERVER_NAME);
         assert!(tool.input_schema.is_some());
         assert!(tool.description.is_some());
         // Persistent (Daytona-only) lifecycle tools live alongside the one-shot exec.
         let ids: Vec<&str> = tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(ids.contains(&"sandbox__sandbox_create"));
-        assert!(ids.contains(&"sandbox__sandbox_run"));
-        assert!(ids.contains(&"sandbox__sandbox_destroy"));
+        assert!(ids.contains(&"sandbox.sandbox_create"));
+        assert!(ids.contains(&"sandbox.sandbox_run"));
+        assert!(ids.contains(&"sandbox.sandbox_destroy"));
         for t in &tools {
             assert_eq!(t.server, SERVER_NAME);
             assert!(t.input_schema.is_some());
@@ -827,15 +800,34 @@ mod tests {
     #[test]
     fn resolve_backend_reads_arg_then_default() {
         std::env::remove_var(crate::sidecar::sandbox::ENV_SANDBOX_BACKEND);
-        assert_eq!(resolve_backend(&json!({})), SandboxBackend::Wasmtime);
         assert_eq!(
-            resolve_backend(&json!({ "backend": "docker" })),
+            resolve_backend(&json!({})).unwrap(),
+            SandboxBackend::Wasmtime
+        );
+        assert_eq!(
+            resolve_backend(&json!({ "backend": "docker" })).unwrap(),
             SandboxBackend::Docker
         );
         assert_eq!(
-            resolve_backend(&json!({ "backend": "microsandbox" })),
-            SandboxBackend::from_name("microsandbox").unwrap()
+            resolve_backend(&json!({ "backend": "microsandbox" })).unwrap(),
+            SandboxBackend::Microsandbox
         );
+    }
+
+    #[test]
+    fn tool_schema_lists_every_known_backend_in_stable_order() {
+        let schema = sandbox_exec_schema();
+        assert_eq!(
+            schema["properties"]["backend"]["enum"],
+            json!(crate::sidecar::sandbox::KNOWN_BACKENDS)
+        );
+        assert!(crate::sidecar::sandbox::KNOWN_BACKENDS.contains(&"daytona"));
+    }
+
+    #[test]
+    fn unknown_backend_is_rejected_without_fallback() {
+        let err = resolve_backend(&json!({ "backend": "typo" })).unwrap_err();
+        assert!(err.to_string().contains("unknown sandbox backend 'typo'"));
     }
 
     #[test]
@@ -845,9 +837,16 @@ mod tests {
         assert!(caps.fs_read_paths.is_empty());
         assert!(caps.fs_write_paths.is_empty());
 
-        let caps = parse_capabilities(&json!({ "network": true, "write_paths": ["/tmp/x"] }));
-        assert!(caps.network);
-        assert_eq!(caps.fs_write_paths.len(), 1);
+        let caps = parse_capabilities(&json!({
+            "network": true,
+            "read_paths": ["/tmp/x"],
+            "write_paths": ["/tmp/y"],
+            "scope": "workspace",
+            "workspace_access": "read-write"
+        }));
+        assert!(!caps.network);
+        assert!(caps.fs_read_paths.is_empty());
+        assert!(caps.fs_write_paths.is_empty());
     }
 
     #[tokio::test]

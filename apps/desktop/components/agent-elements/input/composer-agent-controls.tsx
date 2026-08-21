@@ -29,14 +29,8 @@ import { Add01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { ComposerModelSection } from "@ryu/blocks/composer/composer-acp-sections";
 import { acpHarnessSuffix } from "@ryu/blocks/composer/composer-trigger-summary";
-import {
-	Command,
-	CommandDialog,
-	CommandInput,
-	CommandList,
-} from "@ryu/ui/components/command";
 import { IconCpu, IconGitBranch } from "@tabler/icons-react";
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useMemo } from "react";
 import { CapabilityBadges } from "@/components/agent-elements/input/capability-badges.tsx";
 import {
 	ComposerSettingsMenu,
@@ -50,6 +44,7 @@ import {
 	ModeMenuContent,
 	type ModeOption,
 } from "@/components/agent-elements/input/mode-selector.tsx";
+import { ProviderCommandDialog } from "@/components/agent-elements/input/provider-command-dialog.tsx";
 import { AUTO_AGENT_ID } from "@/components/agent-elements/input/universal-picker-body.tsx";
 import { UsageBar } from "@/components/agent-elements/input/usage-bar.tsx";
 import { useComposerOutputStyleSection } from "@/components/agent-elements/input/use-composer-output-style-section.ts";
@@ -58,10 +53,12 @@ import type { InputBarInfoBar } from "@/components/agent-elements/input-bar.tsx"
 import type { ModelOption } from "@/components/agent-elements/types.ts";
 import { isComposerPluginSectionKey } from "@/src/components/composer/plugin-composer-controls.ts";
 import { useAgentCapabilities } from "@/src/hooks/useAgentCapabilities.ts";
+import type { ChatPickerPlacement } from "@/src/hooks/useChatPickerPlacement.ts";
 import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { usePiConfig } from "@/src/hooks/usePiConfig.ts";
 import { useRoutingAdvice } from "@/src/hooks/useRoutingAdvice.ts";
 import {
+	AgentAvatar,
 	engineForAgent,
 	getAgentIcon,
 	getTeamStackIcon,
@@ -69,6 +66,7 @@ import {
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import { filterEnabledModels } from "@/src/lib/api/pi-config.ts";
 import type { Team } from "@/src/lib/api/teams.ts";
+import type { BrowserSurface } from "@/src/lib/extension-host.ts";
 import {
 	showsComposerTuning,
 	showsModelPicker,
@@ -111,7 +109,13 @@ export function useComposerAgentModes(
 		const agentOptions = agents.map<ModeOption>((a) => ({
 			id: a.id,
 			label: a.name,
-			icon: getAgentIcon(a.avatarUrl, engineForAgent(a)),
+			icon: getAgentIcon(
+				a.avatarUrl,
+				engineForAgent(a),
+				undefined,
+				undefined,
+				a.avatarGlyph
+			),
 			description: a.description ?? undefined,
 			group: "Agents",
 		}));
@@ -188,6 +192,8 @@ export interface ComposerAgentControlsConfig {
 	 * options. Empty sections are auto-hidden by the menu.
 	 */
 	extraSections?: ComposerSettingsSection[];
+	/** Keep the model control visible on setup surfaces at every interface level. */
+	forceModelPicker?: boolean;
 	/** Currently selected model id (used when `modelSection` is omitted). */
 	model: string | null;
 	/** Map a model's display name (e.g. friendly mode). Ignored with `modelSection`. */
@@ -202,8 +208,18 @@ export interface ComposerAgentControlsConfig {
 	onModelChange: (modelId: string) => void;
 	/** Pick an agent as the driving target (real agent id only; sentinels handled here). */
 	onSelectAgent: (agentId: string) => void;
+	/** Optional setup-surface override for a concrete provider/model pick. */
+	onSelectProviderModel?: (providerId: string, modelId: string) => void;
+	/** Optional setup-surface override for provider thinking-level picks. */
+	onSelectProviderThinking?: (providerId: string, level: string) => void;
 	/** Pick a team as the driving target. Omit to hide the Teams section. */
 	onSelectTeam?: (teamId: string) => void;
+	/** Optional setup-surface override for a provider pick. */
+	onUseProvider?: (providerId: string, modelId: string | null) => void;
+	/** Put the shared model/agent picker in the chat tab bar instead of the composer. */
+	placement?: ChatPickerPlacement;
+	/** Browser surface key; desktop defaults to the dashboard-compatible no-op host. */
+	surface?: BrowserSurface;
 	/** Currently selected team id, or null when an agent is the active target. */
 	teamId?: string | null;
 	/** Live teams; pass `[]` (or omit `onSelectTeam`) to disable the Teams section. */
@@ -237,6 +253,8 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	 */
 	infoBar: InputBarInfoBar | undefined;
 	leftActions: ReactNode;
+	/** The same model/agent picker node, exposed for a host action tray. */
+	picker: ReactNode;
 	/**
 	 * Re-ask Core for the fallback verdict. A host calls this right after sending
 	 * a turn, so the bar reflects the headroom that turn just consumed.
@@ -271,14 +289,20 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		onSelectAgent,
 		onSelectTeam,
 		onCreateAgent,
+		onUseProvider,
+		onSelectProviderModel,
+		onSelectProviderThinking,
 		modelOptions,
 		model,
 		onModelChange,
 		modelSection,
+		forceModelPicker = false,
 		modelLabel,
 		extraSections = [],
 		compact = false,
 		compactTrigger = false,
+		placement = "composer",
+		surface = "dashboard",
 	} = config;
 
 	const modes = useComposerAgentModes(agents, teams, {
@@ -433,13 +457,13 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// outlives whichever agent is selected. Empty when the node has no styles, and
 	// every consumer auto-hides an empty section.
 	const outputStyleSection = useComposerOutputStyleSection();
-	// Interface level decides how much of this bar exists at all (see
-	// `@/src/lib/interface-level.ts`). At Simple the composer is the agent picker
-	// and nothing else; Standard adds the model; Advanced/Expert add the tuning
+	// Interface mode decides how much of this bar exists at all (see
+	// `@/src/lib/interface-level.ts`). At Ryu Work the composer is the agent picker
+	// and nothing else; Code adds the model and tuning
 	// sections (approval mode, thinking budget, agent config options, output
 	// style). Gating happens HERE, in the one hook all three composer surfaces
 	// share, so the chat page, the launchpad and the Ask Ryu dock cannot disagree
-	// about what a level means.
+	// about what a mode means.
 	//
 	// Hidden is not disabled: an agent still runs on whatever model, approval mode
 	// and thinking budget it is configured with — the per-agent settings page is
@@ -449,20 +473,21 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// Auto selects an agent per turn, not a model. Its placeholder model has the
 	// same label, so surfacing it would make the trigger read "Auto · Auto".
 	const showModelSection =
-		showsModelPicker(interfaceLevel) && agentId !== AUTO_AGENT_ID;
+		(forceModelPicker || showsModelPicker(interfaceLevel)) &&
+		agentId !== AUTO_AGENT_ID;
 	const showTuningSections = showsComposerTuning(interfaceLevel);
 	// Output style is NOT gated with the tuning sections, deliberately.
 	//
 	// The others (approval mode, thinking budget, agent config) are knobs on how
-	// hard the model works and how freely it may act — the things Simple exists to
+	// hard the model works and how freely it may act — the things Ryu Work exists to
 	// keep out of a beginner's way. A style is the opposite kind of choice: it
 	// picks how replies should READ, it is the most legible control on the bar, and
 	// it is node-wide rather than a property of the selected agent. Hiding it below
-	// Advanced meant a user who authored a style had nowhere in the product to
+	// Code used to mean a user who authored a style had nowhere in the product to
 	// apply it, which reads as the feature not existing.
 	//
 	// The section self-hides when the node has no styles, so this adds nothing to a
-	// Simple composer that has not opted into styles at all.
+	// Ryu Work composer that has not opted into styles at all.
 	const bodySections = useMemo(
 		() => [...(showTuningSections ? extraSections : []), outputStyleSection],
 		[extraSections, outputStyleSection, showTuningSections]
@@ -524,29 +549,32 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		onSelectAgent,
 		onSelectTeam,
 		onCreateAgent,
+		onUseProvider,
+		onSelectProviderModel,
+		onSelectProviderThinking,
 		activeModelSection: showModelSection ? modelSectionResolved : null,
 		activeExtraSections: bodySections,
+		forceModelPicker,
+		surface,
 	});
-	const [modelsOpen, setModelsOpen] = useState(false);
 	const activeModelName =
 		modelSectionResolved.items.find(
 			(item) => item.id === modelSectionResolved.value
 		)?.name ?? "Choose model";
 
-	// Leading mark: a custom-agent avatar image wins, else the active mode's engine
+	// Leading mark: a custom-agent glyph wins, else the active mode's engine
 	// logo (agents) or fanned team-stack icon (teams). ActiveIcon is the same stable
 	// component the picker rows use, so the trigger never drifts. Shown beside the
 	// agent name on EVERY surface (compact and full), not just compact mode.
 	const ActiveIcon = activeMode?.icon;
 	let leading: React.ReactNode = null;
-	if (activeAgent?.avatarUrl) {
+	if (activeAgent?.avatarGlyph) {
 		leading = (
-			// biome-ignore lint/performance/noImgElement: Tauri/Vite app, no next/image; avatar is an inline data URL
-			// biome-ignore lint/correctness/useImageSize: sized via the `size-4` class
-			<img
-				alt=""
-				className="size-4 shrink-0 rounded-full object-cover"
-				src={activeAgent.avatarUrl}
+			<AgentAvatar
+				className="size-4 shrink-0 rounded-full object-contain"
+				engine={engineForAgent(activeAgent)}
+				glyph={activeAgent.avatarGlyph}
+				size="16px"
 			/>
 		);
 	} else if (ActiveIcon) {
@@ -575,32 +603,38 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 					) : undefined
 				}
 			/>
-			<button
-				aria-label="Choose provider and model"
-				className="composer-model-trigger max-w-44 truncate rounded-md px-2 py-1 text-muted-foreground text-xs hover:bg-muted/50 hover:text-foreground"
-				onClick={() => setModelsOpen(true)}
-				title={activeModelName}
-				type="button"
-			>
-				<IconCpu
-					aria-hidden="true"
-					className="composer-model-icon size-3.5 shrink-0"
-				/>
-				<span className="composer-model-name truncate">{activeModelName}</span>
-			</button>
-			<CommandDialog
-				onOpenChange={setModelsOpen}
-				open={modelsOpen}
-				title="Choose provider and model"
-			>
-				<Command>
-					<CommandInput placeholder="Search providers and models…" />
-					<CommandList className="max-h-[min(60vh,480px)]">
-						{renderBody(() => setModelsOpen(false), "models")}
-					</CommandList>
-				</Command>
-			</CommandDialog>
+			<ProviderCommandDialog
+				renderBody={(close) => renderBody(close, "models")}
+				trigger={
+					<button
+						aria-label="Choose provider and model"
+						className="composer-model-trigger max-w-44 truncate rounded-md px-2 py-1 text-muted-foreground text-xs hover:bg-muted/50 hover:text-foreground"
+						title={activeModelName}
+						type="button"
+					>
+						<IconCpu
+							aria-hidden="true"
+							className="composer-model-icon size-3.5 shrink-0"
+						/>
+						<span className="composer-model-name truncate">
+							{activeModelName}
+						</span>
+					</button>
+				}
+			/>
 		</>
+	);
+	const picker = (
+		<div
+			className={
+				placement === "tab-bar"
+					? "flex min-w-0 max-w-[18rem] items-center gap-0.5"
+					: undefined
+			}
+			data-testid="chat-model-agent-picker"
+		>
+			{settingsMenu}
+		</div>
 	);
 
 	// ONE cluster, one place: the settings menu, the badges and (full trigger only)
@@ -610,7 +644,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// behind one flag. Compact is a density now, so there is nothing left to fork.
 	const leftActions = (
 		<div className="flex min-w-0 items-center gap-0.5">
-			{settingsMenu}
+			{placement === "composer" ? picker : null}
 			{/* Read-only capability badges (tools / thinking / vision) — local
 			    models / flagship Ryu only; hidden for external ACP harnesses. */}
 			{showCapabilityBadges && (
@@ -631,6 +665,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	return {
 		infoBar,
 		leftActions,
+		picker,
 		refreshRoutingAdvice,
 		rightActions: null,
 		sections,

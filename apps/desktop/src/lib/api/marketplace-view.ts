@@ -7,23 +7,9 @@
 
 import type { MarketplaceCardData } from "@ryu/blocks/desktop/marketplace";
 import {
-	formatPrice,
+	formatPricingLabel,
 	type MarketplaceCard,
-	type MarketplaceKind,
 } from "@/src/lib/api/marketplace.ts";
-
-/** The marketplace kinds, in the order the browse filter shows them. */
-export const MARKETPLACE_KINDS: { value: MarketplaceKind; label: string }[] = [
-	{ value: "skill", label: "Skills" },
-	{ value: "plugin", label: "Plugins" },
-	{ value: "mcp", label: "Tools" },
-	{ value: "model", label: "Models" },
-	// Published agent definitions. They browse in the Store's Agents tab (the
-	// community shelf), not through a browse filter — the entry is here so this
-	// list stays a complete statement of the kinds, and so a reader does not
-	// conclude agents were left out on purpose.
-	{ value: "agent", label: "Agents" },
-];
 
 /**
  * Map a control-plane catalog card to the block's presentational shape,
@@ -35,11 +21,7 @@ export function toCardData(
 	owned: boolean,
 	buying: boolean
 ): MarketplaceCardData {
-	const priceLabel = card.pricing
-		? `${formatPrice(card.pricing.amountMinor, card.pricing.currency)}${
-				card.pricing.model === "subscription" ? "/mo" : ""
-			}`
-		: null;
+	const priceLabel = card.pricing ? formatPricingLabel(card.pricing) : null;
 	return {
 		id: card.id,
 		kind: card.kind,

@@ -17,12 +17,14 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { type KeyboardEvent, useCallback, useRef, useState } from "react";
 import { useCatalogHost } from "../host.tsx";
@@ -48,7 +50,8 @@ function PacksShelfBody({
 	canInstall: boolean;
 	state: SkillPacksState;
 }) {
-	const { install, opened, open, packs, loading, error, installing } = state;
+	const { error, install, installing, opened, open, packs, loading, refresh } =
+		state;
 	const onInstall = useCallback(
 		(id: string) => {
 			install(id).catch(() => {
@@ -176,6 +179,11 @@ function PacksShelfBody({
 						<EmptyTitle>Couldn't load packs</EmptyTitle>
 						<EmptyDescription>{error}</EmptyDescription>
 					</EmptyHeader>
+					<EmptyContent>
+						<Button onClick={refresh} size="sm" variant="ghost">
+							Try again
+						</Button>
+					</EmptyContent>
 				</Empty>
 			</section>
 		);
@@ -198,7 +206,8 @@ function PacksShelfBody({
 						</p>
 					</div>
 					<span className="shrink-0 text-muted-foreground text-xs">
-						{packs.length} pack{packs.length === 1 ? "" : "s"}
+						{formatCount(packs.length) ?? "—"} pack
+						{packs.length === 1 ? "" : "s"}
 					</span>
 				</div>
 				<div

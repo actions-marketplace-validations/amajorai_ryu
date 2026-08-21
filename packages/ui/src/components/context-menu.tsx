@@ -5,6 +5,7 @@ import { ArrowRight01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
+import { FadeOverflowTextChildren } from "./fade-overflow-text.tsx";
 
 function ContextMenu({ ...props }: ContextMenuPrimitive.Root.Props) {
 	return <ContextMenuPrimitive.Root data-slot="context-menu" {...props} />;
@@ -35,14 +36,24 @@ function ContextMenuContent({
 	alignOffset = 4,
 	side = "right",
 	sideOffset = 0,
+	withBackdrop = true,
 	...props
 }: ContextMenuPrimitive.Popup.Props &
 	Pick<
 		ContextMenuPrimitive.Positioner.Props,
 		"align" | "alignOffset" | "side" | "sideOffset"
-	>) {
+	> & {
+		/** Render the shared full-window backdrop for a top-level menu. */
+		withBackdrop?: boolean;
+	}) {
 	return (
 		<ContextMenuPrimitive.Portal>
+			{withBackdrop && (
+				<ContextMenuPrimitive.Backdrop
+					className="ryu-popup-overlay"
+					data-slot="context-menu-overlay"
+				/>
+			)}
 			<ContextMenuPrimitive.Positioner
 				align={align}
 				alignOffset={alignOffset}
@@ -52,7 +63,7 @@ function ContextMenuContent({
 			>
 				<ContextMenuPrimitive.Popup
 					className={cn(
-						"data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 relative z-50 max-h-[var(--available-height)] min-w-48 origin-[var(--transform-origin)] animate-none! overflow-y-auto overflow-x-hidden rounded-3xl border border-border/50 bg-popover/70 text-popover-foreground outline-none backdrop-blur-2xl backdrop-saturate-150 duration-100 before:pointer-events-none before:absolute before:inset-0 before:-z-1 before:rounded-[inherit] data-closed:animate-out data-open:animate-in **:data-[slot$=-item]:data-highlighted:bg-foreground/10 **:data-[slot$=-separator]:bg-foreground/5 **:data-[variant=destructive]:**:text-accent-foreground! **:data-[variant=destructive]:text-accent-foreground! **:data-[slot$=-trigger]:aria-expanded:bg-foreground/10! **:data-[slot$=-item]:focus:bg-foreground/10 **:data-[slot$=-trigger]:focus:bg-foreground/10 **:data-[variant=destructive]:focus:bg-foreground/10!",
+						"data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 relative z-50 max-h-[var(--available-height)] min-w-48 origin-[var(--transform-origin)] animate-none! overflow-y-auto overflow-x-hidden rounded-3xl border border-border/50 bg-popover/70 text-popover-foreground outline-none backdrop-blur-2xl backdrop-saturate-150 duration-0 before:pointer-events-none before:absolute before:inset-0 before:-z-1 before:rounded-[inherit] data-closed:animate-out data-open:animate-in **:data-[slot$=-item]:data-highlighted:bg-foreground/10 **:data-[slot$=-separator]:bg-foreground/5 **:data-[variant=destructive]:**:text-accent-foreground! **:data-[variant=destructive]:text-accent-foreground! **:data-[slot$=-trigger]:aria-expanded:bg-foreground/10! **:data-[slot$=-item]:focus:bg-foreground/10 **:data-[slot$=-trigger]:focus:bg-foreground/10 **:data-[variant=destructive]:focus:bg-foreground/10!",
 						className
 					)}
 					data-slot="context-menu-content"
@@ -136,7 +147,9 @@ function ContextMenuSubTrigger({
 			data-slot="context-menu-sub-trigger"
 			{...props}
 		>
-			{children}
+			<FadeOverflowTextChildren className="flex-1">
+				{children}
+			</FadeOverflowTextChildren>
 			<HugeiconsIcon
 				className="ml-auto"
 				icon={ArrowRight01Icon}
@@ -155,6 +168,7 @@ function ContextMenuSubContent({
 			data-slot="context-menu-sub-content"
 			side="right"
 			{...props}
+			withBackdrop={false}
 		/>
 	);
 }
@@ -163,6 +177,7 @@ function ContextMenuCheckboxItem({
 	className,
 	children,
 	checked,
+	closeOnClick = true,
 	inset,
 	...props
 }: ContextMenuPrimitive.CheckboxItem.Props & {
@@ -175,6 +190,7 @@ function ContextMenuCheckboxItem({
 				"relative flex cursor-default select-none items-center gap-1.5 rounded-2xl py-1 pr-8 pl-2 font-medium text-sm outline-hidden focus:bg-accent focus:text-accent-foreground data-disabled:pointer-events-none data-inset:pl-9.5 data-disabled:opacity-50 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
 				className
 			)}
+			closeOnClick={closeOnClick}
 			data-inset={inset}
 			data-slot="context-menu-checkbox-item"
 			{...props}

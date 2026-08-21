@@ -8,11 +8,13 @@ import {
 // wildcard that is matched literally, so an extensionless specifier resolves to
 // nothing. See the header of `entity-avatar.tsx`.
 import { EntityAvatar } from "@ryu/ui/components/entity-avatar.tsx";
+import { PlanBadge } from "@ryu/ui/components/plan-badge.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronsUpDown } from "lucide-react";
 import { useSession } from "@/lib/auth-client.ts";
+import { useOrgBillingStatus } from "@/src/hooks/useOrgBillingStatus.ts";
 import {
 	ACTIVE_ORG_KEY,
 	hasOrgAuth,
@@ -74,6 +76,8 @@ export function ServicesOrgSwitcher() {
 	const authed = hasOrgAuth();
 	const { data: session } = useSession();
 	const activeOrgId = useActiveOrgId();
+	const { activeOrgId: billingOrgId, plan: billingPlan } =
+		useOrgBillingStatus();
 
 	const orgsQuery = useQuery({
 		enabled: authed,
@@ -121,9 +125,7 @@ export function ServicesOrgSwitcher() {
 	});
 
 	const orgs = orgsQuery.data ?? [];
-	// Nothing to switch BETWEEN: a solo user has exactly one org, and a picker
-	// with one entry is a control that can only tell you what you already know.
-	if (!authed || orgs.length < 2) {
+	if (!authed || orgs.length === 0) {
 		return null;
 	}
 
@@ -161,7 +163,7 @@ export function ServicesOrgSwitcher() {
 			<DropdownMenu>
 				<DropdownMenuTrigger
 					className="flex w-full items-center gap-2 rounded-md border bg-background px-2 py-1.5 text-left text-sm hover:bg-accent disabled:opacity-60"
-					disabled={switchMutation.isPending}
+					disabled={switchMutation.isPending || orgs.length < 2}
 				>
 					{active ? (
 						<EntityAvatar
@@ -174,44 +176,52 @@ export function ServicesOrgSwitcher() {
 					<span className="min-w-0 flex-1 truncate">
 						{active?.name ?? "Workspace"}
 					</span>
+					{active?.id === billingOrgId ? (
+						<PlanBadge plan={billingPlan} size="sm" />
+					) : null}
 					{switchMutation.isPending ? (
 						<Spinner className="size-3.5 shrink-0" />
-					) : (
+					) : orgs.length > 1 ? (
 						<ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" />
-					)}
+					) : null}
 				</DropdownMenuTrigger>
-				<DropdownMenuContent align="start" className="w-56">
-					{orgs.map((org) => (
-						<DropdownMenuItem
-							key={org.id}
-							onClick={() => {
-								if (org.id !== activeId) {
-									switchMutation.mutate(org.id);
-								}
-							}}
-						>
-							{/* The role is the fact that decides what the tabs below will let
+				{orgs.length > 1 ? (
+					<DropdownMenuContent align="start" className="w-64">
+						{orgs.map((org) => (
+							<DropdownMenuItem
+								key={org.id}
+								onClick={() => {
+									if (org.id !== activeId) {
+										switchMutation.mutate(org.id);
+									}
+								}}
+							>
+								{/* The role is the fact that decides what the tabs below will let
 							    this person DO — an org they are a plain member of shows the
 							    same billing screen with every control disabled — so it is
 							    worth the line it costs. */}
-							<span className="mr-1 flex size-4 shrink-0 items-center justify-center">
-								{org.id === activeId ? <Check className="size-3.5" /> : null}
-							</span>
-							<EntityAvatar
-								className="size-4 shrink-0"
-								name={org.name}
-								size="sm"
-								{...avatarFor(org)}
-							/>
-							<span className="min-w-0 flex-1 truncate">{org.name}</span>
-							{org.role ? (
-								<span className="ml-2 shrink-0 text-muted-foreground text-xs">
-									{org.role}
+								<span className="mr-1 flex size-4 shrink-0 items-center justify-center">
+									{org.id === activeId ? <Check className="size-3.5" /> : null}
 								</span>
-							) : null}
-						</DropdownMenuItem>
-					))}
-				</DropdownMenuContent>
+								<EntityAvatar
+									className="size-4 shrink-0"
+									name={org.name}
+									size="sm"
+									{...avatarFor(org)}
+								/>
+								<span className="min-w-0 flex-1 truncate">{org.name}</span>
+								{org.id === billingOrgId ? (
+									<PlanBadge plan={billingPlan} size="sm" />
+								) : null}
+								{org.role ? (
+									<span className="ml-2 shrink-0 text-muted-foreground text-xs">
+										{org.role}
+									</span>
+								) : null}
+							</DropdownMenuItem>
+						))}
+					</DropdownMenuContent>
+				) : null}
 			</DropdownMenu>
 		</div>
 	);

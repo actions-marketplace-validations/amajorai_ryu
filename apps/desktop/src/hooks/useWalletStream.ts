@@ -89,16 +89,19 @@ async function runWalletStream(
  * {@link WalletUpdate} (null until the first snapshot frame arrives), updating in
  * place as top-ups/debits land.
  */
-export function useWalletStream(): WalletUpdate | null {
+export function useWalletStream(
+	activeOrgId: string | null
+): WalletUpdate | null {
 	const [wallet, setWallet] = useState<WalletUpdate | null>(null);
 
 	useEffect(() => {
+		setWallet(null);
 		const controller = new AbortController();
 		runWalletStream(controller.signal, setWallet).catch(() => {
 			// runWalletStream swallows its own errors and never rejects.
 		});
 		return () => controller.abort();
-	}, []);
+	}, [activeOrgId]);
 
 	return wallet;
 }

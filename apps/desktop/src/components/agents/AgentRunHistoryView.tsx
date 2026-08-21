@@ -28,6 +28,7 @@ import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -277,6 +278,19 @@ export function AgentRunHistoryView({ agentId }: AgentRunHistoryViewProps) {
 							appear here so you can trace back its output.
 						</EmptyDescription>
 					</EmptyHeader>
+					<EmptyContent>
+						<Button
+							onClick={() =>
+								openTab("/chat", {
+									forceNew: true,
+									initialAgent: agentId ?? undefined,
+								})
+							}
+							size="sm"
+						>
+							Chat with this agent
+						</Button>
+					</EmptyContent>
 				</Empty>
 			) : (
 				<ScrollArea className="max-h-[60vh]">

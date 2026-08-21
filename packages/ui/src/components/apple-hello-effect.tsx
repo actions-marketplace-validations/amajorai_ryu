@@ -54,11 +54,11 @@ export function AppleHelloEffect({
 				animate={inView ? { opacity: 1, y: 0 } : { opacity: 0, y: 10 }}
 				className={cn("h-20 font-light italic tracking-tight", className)}
 				initial={{ opacity: 0, y: 10 }}
+				onAnimationComplete={onAnimationComplete}
 				ref={textContainerRef}
 				transition={{
 					duration: calc(1.2),
 					ease: "easeOut",
-					onAnimationComplete,
 				}}
 			>
 				{text}

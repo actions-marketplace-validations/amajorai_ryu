@@ -9,9 +9,9 @@
 //! [`product_analytics_enabled`] / [`crash_reports_enabled`], and P5 (the local
 //! Core support channel) reads [`support_access_local`].
 //!
-//! **This unit ships the keys + resolution only — NO collector, SDK, or exporter
-//! is wired here.** Controls exist before any collection so collection can never
-//! precede consent.
+//! This unit owns the canonical keys + resolution. The consented runtime seams
+//! in `telemetry.rs`, `crash.rs`, and `support_access/` consume these resolvers,
+//! so collection/export cannot precede the persisted choice.
 //!
 //! Placement (Core vs Gateway): these store *what the user chose* about their own
 //! diagnostics, not policy about what is allowed for others — so they live in

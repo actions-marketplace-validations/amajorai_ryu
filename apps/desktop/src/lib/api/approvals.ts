@@ -25,7 +25,10 @@ export type ApprovalStatus =
 	| "cancelled";
 
 export interface PendingAction {
+	arguments?: Record<string, unknown>;
+	tool_id?: string;
 	type:
+		| "tool_call"
 		| "scheduled_job"
 		| "workflow_resume"
 		| "trigger_workflow"
@@ -46,6 +49,8 @@ export interface ApprovalRequest {
 	id: string;
 	kind: ApprovalKind;
 	note?: string | null;
+	/** First-person intent shown above the approval summary when available. */
+	question?: string | null;
 	result?: string | null;
 	risk_tags: string[];
 	source_ref?: string | null;

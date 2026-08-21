@@ -1,4 +1,10 @@
 {
+  "tags": ["observer","watchdog","review","agents","safety"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/observer-agents",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/observer-agents",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/observer-agents",
   "name": "Observer Agents",
   "version": "0.1.0",

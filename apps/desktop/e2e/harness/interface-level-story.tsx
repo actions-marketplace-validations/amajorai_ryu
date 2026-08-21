@@ -1,20 +1,15 @@
-// Standalone browser story for the REAL `InterfaceLevelSubmenu` — the account
-// menu's Interface level ladder — mounted inside a real account-shaped
-// `DropdownMenu`, opened through its real sub-trigger.
+// Standalone browser story for the REAL `InterfaceLevelMenuItem` — the account
+// menu's inline Interface mode switch — mounted inside a real account-shaped
+// `DropdownMenu`.
 //
 // Two things need a browser to be true, and neither is typecheckable:
 //
-//   1. The fill ramp. `levelFillColor` returns a `color-mix()` over
-//      `--effort-top`, a variable that exists only where `LEVEL_RAMP_CLASS` is
-//      applied. Forget the class and the declaration is DROPPED — the fill goes
-//      colourless rather than falling back to something duller, which a
-//      class-name assertion sails straight past.
-//   2. A slider hosted in a menu. The menu owns Arrow/Home/End for row
-//      navigation and closes on outward pointer activity; the row has to trap
-//      keys and not be an item, or nudging the level moves the highlight or
-//      shuts the popover.
+//   1. The Google gradient is painted and animated on the checked switch, not
+//      merely present as a class name.
+//   2. A switch hosted in the account menu stays open after a click, so changing
+//      the mode does not dismiss the menu before the user can inspect it.
 //
-// The story also reads back localStorage, because moving this ladder is supposed
+// The story also reads back localStorage, because moving this switch is supposed
 // to WRITE the prefs it implies (Detail level, run stats) rather than shadow
 // them — see `src/lib/interface-level.ts`.
 
@@ -25,23 +20,25 @@ import {
 } from "@ryu/ui/components/dropdown-menu";
 import { useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
-import { InterfaceLevelSubmenu } from "../../src/components/layout/InterfaceLevelSubmenu.tsx";
+import { InterfaceLevelMenuItem } from "../../src/components/layout/InterfaceLevelMenuItem.tsx";
+import { SIDEBAR_MODE_KEY } from "../../src/hooks/useSidebarMode.ts";
 import {
 	INTERFACE_LEVEL_KEY,
 	subscribeInterfaceLevel,
 } from "../../src/lib/interface-level.ts";
 import "../../src/index.css";
 
-/** The keys the ladder writes, echoed into the DOM for the spec to read. */
+/** The keys the switch writes, echoed into the DOM for the spec to read. */
 const WATCHED = [
 	INTERFACE_LEVEL_KEY,
+	SIDEBAR_MODE_KEY,
 	"ryu:hide-tool-detail",
 	"ryu:expand-commands",
 	"ryu:inference-stats",
 ] as const;
 
 function StoredPrefs() {
-	// Re-read on every level change — the same store the submenu writes through.
+	// Re-read on every mode change — the same store the menu item writes through.
 	useSyncExternalStore(
 		subscribeInterfaceLevel,
 		() => localStorage.getItem(INTERFACE_LEVEL_KEY) ?? "",
@@ -64,8 +61,8 @@ function Story() {
 		<div style={{ padding: 40 }}>
 			<DropdownMenu>
 				<DropdownMenuTrigger>Account</DropdownMenuTrigger>
-				<DropdownMenuContent className="min-w-56">
-					<InterfaceLevelSubmenu />
+				<DropdownMenuContent className="min-w-64">
+					<InterfaceLevelMenuItem />
 				</DropdownMenuContent>
 			</DropdownMenu>
 			<StoredPrefs />

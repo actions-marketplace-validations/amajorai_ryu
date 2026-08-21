@@ -1,7 +1,7 @@
 //! Budget spend read surface.
 //!
 //! `GET /v1/budget/spend` exposes the live in-memory per-user / per-agent /
-//! per-session token spend the budget stage already tracks
+//! per-session charged spend in micro-USD that the budget stage already tracks
 //! ([`crate::budget::BudgetBackend::spend_snapshot`]). The counters existed but
 //! had no HTTP read surface, so the desktop could not show spend (P2 #1).
 //!
@@ -13,7 +13,7 @@
 //!
 //! There is no per-org *spend* number here — org budgets are a control-plane
 //! wallet, and what the node caches is the balance the last debit reported, not
-//! a running total. The three token-counter scopes the built-in enforcer keeps
+//! a running total. The three charged-spend scopes the built-in enforcer keeps
 //! (users / agents / sessions) are what this returns; the remaining balance is
 //! [`get_wallet`].
 
@@ -55,10 +55,10 @@ fn filter_scope(
     }
 }
 
-/// `GET /v1/budget/spend` — live per-scope token spend.
+/// `GET /v1/budget/spend` — live per-scope charged spend in micro-USD.
 ///
-/// Returns `{ users, agents, sessions }` maps of id → lifetime tokens
-/// (input + output), plus the configured limits so the desktop can render
+/// Returns `{ users, agents, sessions }` maps of id → lifetime charged micro-USD,
+/// plus the configured limits so the desktop can render
 /// spend-vs-limit without a second `/v1/config` round-trip. In-memory only: a
 /// gateway restart resets the counters.
 pub async fn get_spend(
@@ -84,14 +84,105 @@ pub async fn get_spend(
         "users": filter_scope(snapshot.users, &q.user_id),
         "agents": filter_scope(snapshot.agents, &q.agent_id),
         "sessions": filter_scope(snapshot.sessions, &q.session_id),
-        // Configured caps so a caller can compute spend / limit inline. The
-        // per-user / per-agent limits are keyed by id (0 = unlimited); the
+        // Configured caps so a caller can compute spend / limit inline. All
+        // values are charged micro-USD (1_000_000 = $1). The per-user /
+        // per-agent limits are keyed by id (0 = unlimited); the
         // session cap is a single global rule (0 = disabled).
+        "currency": "USD",
+        "unit": "micro_usd",
         "limits": {
             "users": config.users.iter().map(|(k, r)| (k.clone(), r.limit)).collect::<std::collections::HashMap<_, _>>(),
             "agents": config.agents.iter().map(|(k, r)| (k.clone(), r.limit)).collect::<std::collections::HashMap<_, _>>(),
             "session": config.session.limit,
         },
+    })))
+}
+
+/// Internal charge event emitted by Core after a Composio action executes in an
+/// ACP/MCP bridge. The caller is authenticated as a Gateway master key, a
+/// configured trusted forwarder, or a Core bearer-bound agent proof; the
+/// identity fields are therefore not a public quota-rotation mechanism.
+#[derive(Debug, Default, Deserialize)]
+pub struct ToolChargeBody {
+    #[serde(default)]
+    pub tool_calls: u64,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub agent_proof: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
+/// `POST /v1/budget/charge` — record a tool charge that was executed outside
+/// the Gateway's OpenAI tool loop. This is deliberately a narrow internal
+/// endpoint: it accepts only Composio action counts and delegates all category
+/// filtering, local counters, markup, and wallet debit behavior to the same
+/// pipeline helper used by the normal tool loop.
+pub async fn charge_tool(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<ToolChargeBody>,
+) -> Result<Json<Value>, GatewayError> {
+    let raw_key = headers.get("authorization").and_then(|v| v.to_str().ok());
+    let ctx = authenticate(
+        &state,
+        AuthInputs {
+            raw_api_key: raw_key,
+            user_id: body.user_id.clone(),
+            agent_id: body.agent_id.clone(),
+            agent_proof: body.agent_proof.clone(),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let trusted_forwarder = ctx
+        .key_config
+        .as_ref()
+        .is_some_and(|config| config.trusted_forwarder);
+    let trusted_agent_route = !ctx.is_master_key
+        && ctx.key_config.is_none()
+        && ctx.org_id.is_some()
+        && ctx.agent_id.is_some()
+        && body.agent_proof.is_some();
+    if !ctx.is_master_key && !trusted_forwarder && !trusted_agent_route {
+        return Err(GatewayError::Unauthorized(
+            "tool budget charges require a master key, trusted forwarder, or Core agent proof"
+                .to_owned(),
+        ));
+    }
+
+    let user_id = if ctx.key_config.is_none() && !ctx.is_master_key {
+        ctx.user_id
+    } else {
+        body.user_id.or(ctx.user_id)
+    };
+    let agent_id = ctx.agent_id.or(body.agent_id);
+    let session_id = body.session_id.or(ctx.session_id);
+    let request_id = body
+        .request_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(ctx.request_id);
+    crate::pipeline::spawn_tool_call_debit_for_ids(
+        &state,
+        user_id.as_deref(),
+        agent_id.as_deref(),
+        session_id.as_deref(),
+        ctx.org_id.as_deref(),
+        &request_id,
+        ctx.managed_inference,
+        body.tool_calls,
+    );
+
+    Ok(Json(json!({
+        "accepted": true,
+        "tool_calls": body.tool_calls,
+        "currency": "USD",
+        "unit": "micro_usd",
     })))
 }
 

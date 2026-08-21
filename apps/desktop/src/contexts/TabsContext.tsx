@@ -51,6 +51,11 @@ import {
 	setSizesAt,
 	swapLeaves,
 } from "@/src/lib/splitTree.ts";
+import {
+	parseWorkspaceSessionState,
+	sameWorkspaceSessionState,
+	type WorkspaceSessionState,
+} from "@/src/lib/workspace-session.ts";
 import { useArtifactStore } from "@/src/store/useArtifactStore.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
@@ -86,11 +91,13 @@ export interface Tab {
 	    the fresh chat tab so files picked before a conversation exists aren't lost.
 	    Runtime-only (blob data URLs) — never persisted across a session restart. */
 	initialImages?: AttachedImage[];
+	/** One-shot Core assistant opening. Unlike `initialSubmit`, this never adds
+	    a synthetic user row and waits for model readiness. Runtime-only. */
+	initialProactiveOpening?: boolean;
 	initialProject?: string;
-	/** One-shot composer seeds for a chat tab opened from a `ryu://chat/new`
-	    deep link. ChatPage consumes them once on mount: the prompt PRE-FILLS the
-	    composer (never auto-sent), the agent/project pre-select. Harmless if they
-	    linger on the tab object after consumption. */
+	/** One-shot composer seed for a chat tab opened from a `ryu://chat/new`
+	    deep link. ChatPage consumes it once on mount: the prompt PRE-FILLS the
+	    composer (never auto-sent), and the agent/project pre-select. */
 	initialPrompt?: string;
 	/** When true, the seeded `initialPrompt` (and any `initialImages`) is SENT
 	    automatically once the chat is ready, rather than only pre-filling the
@@ -119,6 +126,11 @@ export interface Tab {
 	/** When true the tab's React tree is unmounted to free memory; it remounts
 	    (cold) the next time the tab is activated. */
 	unloaded?: boolean;
+	/** Bottom/right workspace dock state remembered with this chat tab. */
+	workspaceSession?: WorkspaceSessionState;
+	/** Per-tab run-mode override, used when a fork is explicitly sent to a new
+	 * worktree without changing the workspace mode of other open chats. */
+	worktreeMode?: boolean;
 }
 
 /** A Chrome-style tab group: a named, colored bracket over contiguous tabs. */
@@ -292,11 +304,13 @@ interface TabsContextValue {
 			conversationId?: string;
 			forceNew?: boolean;
 			initialPrompt?: string;
+			initialProactiveOpening?: boolean;
 			initialSubmit?: boolean;
 			initialImages?: AttachedImage[];
 			initialAgent?: string;
 			initialGhost?: boolean;
 			initialProject?: string;
+			worktreeMode?: boolean;
 			/** Entity glyph to show in the tab strip (mirrors the sidebar). */
 			icon?: GlyphValue;
 		}
@@ -371,6 +385,11 @@ interface TabsContextValue {
 	 */
 	updateTabsIconWhere: (match: (tab: Tab) => boolean, icon: GlyphValue) => void;
 	updateTabTitle: (id: string, title: string) => void;
+	/** Save the workspace dock state belonging to one chat tab. */
+	updateTabWorkspaceSession: (
+		id: string,
+		workspaceSession: WorkspaceSessionState
+	) => void;
 }
 
 /** Exported ONLY so the e2e harness can supply a stub value for a component under
@@ -557,6 +576,7 @@ const AGENT_EDIT_TITLE_RE = /^\/agents\/.+\/edit$/;
 const CHANNEL_DETAIL_TITLE_RE = /^\/channels\/[^/]+$/;
 const IDENTITY_PROFILE_TITLE_RE = /^\/identities\/profile\/[^/]+$/;
 const ARTIFACT_TITLE_RE = /^\/artifact\/[^/]+$/;
+const PROJECT_GRAPH_TITLE_RE = /^\/project\/graph\/[^/]+$/;
 
 /** Title-case a path segment (`downloads` → `Downloads`, `weekly-review` → `Weekly Review`). */
 function humanizePathSegment(segment: string): string {
@@ -584,6 +604,9 @@ function defaultTitle(path: string): string {
 	if (ARTIFACT_TITLE_RE.test(base)) {
 		const artifact = useArtifactStore.getState().get(base.split("/")[2]);
 		return artifact ? artifact.title : "Artifact";
+	}
+	if (PROJECT_GRAPH_TITLE_RE.test(base)) {
+		return "Git graph";
 	}
 	// After the entity regexes (so `/agents/:id/edit` stays "Edit agent") and
 	// before the per-path map, which no longer carries the shells' routes.
@@ -723,6 +746,8 @@ interface PersistedTab {
 	path: string;
 	pinned?: boolean;
 	title: string;
+	workspaceSession?: WorkspaceSessionState;
+	worktreeMode?: boolean;
 }
 
 /** A split tree serialized over tab INDEXES (ids are regenerated on restore):
@@ -813,6 +838,8 @@ function persistSession(tabs: Tab[], activeTabId: string, splits: Split[]) {
 			initialProject: t.initialProject,
 			pinned: t.pinned,
 			icon: t.icon,
+			workspaceSession: t.workspaceSession,
+			worktreeMode: t.worktreeMode,
 		}));
 		const activeIndex = Math.max(
 			0,
@@ -956,6 +983,8 @@ function restoreSession(): StartupState | null {
 				initialProject: t.initialProject,
 				pinned: t.pinned,
 				icon: resolveTabGlyph(path, t.icon),
+				workspaceSession: parseWorkspaceSessionState(t.workspaceSession),
+				worktreeMode: t.worktreeMode,
 			};
 		});
 		// Revive split layouts over the fresh ids, then stamp membership onto the
@@ -1216,11 +1245,13 @@ export function TabsProvider({
 				conversationId?: string;
 				forceNew?: boolean;
 				initialPrompt?: string;
+				initialProactiveOpening?: boolean;
 				initialSubmit?: boolean;
 				initialImages?: AttachedImage[];
 				initialAgent?: string;
 				initialGhost?: boolean;
 				initialProject?: string;
+				worktreeMode?: boolean;
 				icon?: GlyphValue;
 			}
 			// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
@@ -1372,11 +1403,14 @@ export function TabsProvider({
 					icon: resolveTabGlyph(base, opts?.icon ?? activeTab.icon),
 					conversationId: opts?.conversationId,
 					initialPrompt: opts?.initialPrompt,
+					initialProactiveOpening: opts?.initialProactiveOpening,
 					initialSubmit: opts?.initialSubmit,
 					initialImages: opts?.initialImages,
 					initialAgent: opts?.initialAgent,
 					initialGhost: opts?.initialGhost,
 					initialProject: opts?.initialProject,
+					worktreeMode: opts?.worktreeMode,
+					workspaceSession: undefined,
 					// Force a fresh mount so the page re-seeds from the new props
 					// (otherwise ChatPage keeps rendering the previous thread).
 					navToken: (activeTab.navToken ?? 0) + 1,
@@ -1410,11 +1444,13 @@ export function TabsProvider({
 				icon: resolveTabGlyph(base, opts?.icon),
 				conversationId: opts?.conversationId,
 				initialPrompt: opts?.initialPrompt,
+				initialProactiveOpening: opts?.initialProactiveOpening,
 				initialSubmit: opts?.initialSubmit,
 				initialImages: opts?.initialImages,
 				initialAgent: opts?.initialAgent,
 				initialGhost: opts?.initialGhost,
 				initialProject: opts?.initialProject,
+				worktreeMode: opts?.worktreeMode,
 			};
 			setTabs((prev) => {
 				const next = normalize([...prev, newTab]);
@@ -1599,6 +1635,23 @@ export function TabsProvider({
 	const updateTabTitle = useCallback((id: string, title: string) => {
 		setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, title } : t)));
 	}, []);
+
+	const updateTabWorkspaceSession = useCallback(
+		(id: string, workspaceSession: WorkspaceSessionState) => {
+			setTabs((prev) => {
+				const current = prev.find((tab) => tab.id === id)?.workspaceSession;
+				if (sameWorkspaceSessionState(current, workspaceSession)) {
+					return prev;
+				}
+				const next = prev.map((tab) =>
+					tab.id === id ? { ...tab, workspaceSession } : tab
+				);
+				tabsRef.current = next;
+				return next;
+			});
+		},
+		[]
+	);
 
 	// See the interface doc: this is the write-back that makes a chat tab's thread
 	// durable. `bindConversation` returns the array unchanged when nothing moves,
@@ -2331,10 +2384,13 @@ export function TabsProvider({
 				icon: resolveTabGlyph(base, opts?.icon ?? target.icon),
 				// One-shot seeds belong to the route being left behind.
 				initialPrompt: undefined,
+				initialProactiveOpening: undefined,
 				initialSubmit: undefined,
 				initialImages: undefined,
 				initialGhost: undefined,
 				scrollToMessageId: undefined,
+				worktreeMode: undefined,
+				workspaceSession: undefined,
 				// Force a fresh mount so the page re-seeds from the new props
 				// (otherwise ChatPage keeps rendering the previous thread).
 				navToken: (target.navToken ?? 0) + 1,
@@ -2573,6 +2629,7 @@ export function TabsProvider({
 				updateTabsIconWhere,
 				updateTabBusy,
 				bindTabConversation,
+				updateTabWorkspaceSession,
 				requestScrollToMessage,
 				clearScrollToMessage,
 				restoreTab,

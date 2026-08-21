@@ -14,6 +14,7 @@
 //!   retrain always derives a *fresh* LoRA from the original base, never from a
 //!   previous merge (avoids model collapse).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -190,6 +191,36 @@ impl ExperienceStore {
         collect(rows)
     }
 
+    /// Most recent rows belonging to a caller-visible conversation set.
+    ///
+    /// The visibility set is produced by Core's conversation ACL query. Keep the
+    /// filtering here, next to the durable rows, so an HTTP caller cannot receive
+    /// another user's captured text merely by listing the learning buffer.
+    pub async fn list_visible(
+        &self,
+        limit: usize,
+        visible_conversation_ids: &HashSet<String>,
+    ) -> Result<Vec<Experience>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, conversation_id, agent_id, user_text, assistant_text, outcome,
+                    reward, base_model, skill_generation, excluded, created_at
+             FROM experience ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], Self::map_row)?;
+        let mut visible = Vec::new();
+        for row in rows {
+            let row = row?;
+            if visible_conversation_ids.contains(&row.conversation_id) {
+                visible.push(row);
+                if visible.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(visible)
+    }
+
     /// Captured-but-unscored, non-excluded rows — the PRM work queue.
     pub async fn list_unscored(&self, limit: usize) -> Result<Vec<Experience>> {
         let conn = self.conn.lock().await;
@@ -202,6 +233,34 @@ impl ExperienceStore {
         )?;
         let rows = stmt.query_map(params![limit as i64], Self::map_row)?;
         collect(rows)
+    }
+
+    /// Captured-but-unscored rows restricted to a caller-visible conversation set.
+    pub async fn list_unscored_visible(
+        &self,
+        limit: usize,
+        visible_conversation_ids: &HashSet<String>,
+    ) -> Result<Vec<Experience>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, conversation_id, agent_id, user_text, assistant_text, outcome,
+                    reward, base_model, skill_generation, excluded, created_at
+             FROM experience
+             WHERE reward IS NULL AND excluded = 0 AND outcome = 'completed'
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], Self::map_row)?;
+        let mut visible = Vec::new();
+        for row in rows {
+            let row = row?;
+            if visible_conversation_ids.contains(&row.conversation_id) {
+                visible.push(row);
+                if visible.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(visible)
     }
 
     /// High-reward, non-excluded rows — the reward-filtered training set (RFT).
@@ -222,6 +281,35 @@ impl ExperienceStore {
         collect(rows)
     }
 
+    /// High-reward rows restricted to a caller-visible conversation set.
+    pub async fn list_for_training_visible(
+        &self,
+        min_reward: f64,
+        limit: usize,
+        visible_conversation_ids: &HashSet<String>,
+    ) -> Result<Vec<Experience>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, conversation_id, agent_id, user_text, assistant_text, outcome,
+                    reward, base_model, skill_generation, excluded, created_at
+             FROM experience
+             WHERE reward IS NOT NULL AND reward >= ?1 AND excluded = 0
+             ORDER BY reward DESC",
+        )?;
+        let rows = stmt.query_map(params![min_reward], Self::map_row)?;
+        let mut visible = Vec::new();
+        for row in rows {
+            let row = row?;
+            if visible_conversation_ids.contains(&row.conversation_id) {
+                visible.push(row);
+                if visible.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(visible)
+    }
+
     /// `(total, scored, trainable_at_min)` counts for the buffer overview.
     pub async fn counts(&self, min_reward: f64) -> Result<(usize, usize, usize)> {
         let conn = self.conn.lock().await;
@@ -237,6 +325,40 @@ impl ExperienceStore {
             |r| r.get(0),
         )?;
         Ok((total as usize, scored as usize, trainable as usize))
+    }
+
+    /// Counts for only the conversations visible to a caller.
+    pub async fn counts_visible(
+        &self,
+        min_reward: f64,
+        visible_conversation_ids: &HashSet<String>,
+    ) -> Result<(usize, usize, usize)> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare("SELECT conversation_id, reward, excluded FROM experience")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<f64>>(1)?,
+                row.get::<_, i64>(2)? != 0,
+            ))
+        })?;
+        let mut total = 0usize;
+        let mut scored = 0usize;
+        let mut trainable = 0usize;
+        for row in rows {
+            let (conversation_id, reward, excluded) = row?;
+            if !visible_conversation_ids.contains(&conversation_id) {
+                continue;
+            }
+            total += 1;
+            if reward.is_some() {
+                scored += 1;
+            }
+            if reward.is_some_and(|value| value >= min_reward) && !excluded {
+                trainable += 1;
+            }
+        }
+        Ok((total, scored, trainable))
     }
 
     fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Experience> {
@@ -348,5 +470,38 @@ mod tests {
         let n = store.exclude_conversation("conv-1", true).await.unwrap();
         assert_eq!(n, 1);
         assert_eq!(store.list_for_training(0.7, 10).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn scoped_queries_hide_other_conversations() {
+        let store = open_tmp("scoped").await;
+        let mut other = sample("other", Some(0.95));
+        other.conversation_id = "conv-2".to_string();
+        other.user_text = "private prompt".to_string();
+        other.assistant_text = "private reply".to_string();
+        store
+            .record_if_absent(&sample("visible", Some(0.9)))
+            .await
+            .unwrap();
+        store.record_if_absent(&other).await.unwrap();
+
+        let visible = HashSet::from(["conv-1".to_string()]);
+        let rows = store.list_visible(10, &visible).await.unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["visible"]
+        );
+        assert_eq!(
+            store
+                .list_for_training_visible(0.7, 10, &visible)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.counts_visible(0.7, &visible).await.unwrap(),
+            (1, 1, 1)
+        );
     }
 }

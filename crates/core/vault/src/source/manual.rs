@@ -25,7 +25,7 @@
 //!   sweep. The **live** Composio path is untouched and lives elsewhere:
 //!   [`crate::composio_connect`] (`initiate` / `connection_status`) and
 //!   [`crate::sidecar::mcp::composio`]'s `dispatch`, which returns the
-//!   `__ryu_elicitation__` connect URL; the tool seam skips `composio__…` ids
+//!   `__ryu_elicitation__` connect URL; the tool seam skips `composio.…` ids
 //!   entirely ([`crate::identity::consult_for_tool_call`]). Wiring Composio in as
 //!   a real vault backend would need a domain→toolkit map plus sealed-marker /
 //!   health semantics: a separate unit, not a stub.

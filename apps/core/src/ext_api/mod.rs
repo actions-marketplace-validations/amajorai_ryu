@@ -1,8 +1,8 @@
 //! Ext-API: an installed app's OWN HTTP surface, lowered into derived agent tools.
 //!
 //! Where [`crate::self_api`] turns *Core's* generated OpenAPI document into
-//! `ryu_api__*` tools, this module turns an **app sidecar's** OpenAPI document
-//! (already parsed by [`crate::openapi_import`]) into `ryu_ext__*` tools. The
+//! `ryu_api.*` tools, this module turns an **app sidecar's** OpenAPI document
+//! (already parsed by [`crate::openapi_import`]) into `ryu_ext.*` tools. The
 //! shapes are deliberately parallel — same file layout, same guards, same
 //! `is_mutating` role in the approval policy — because the two planes differ only
 //! in *whose* API is being exposed.
@@ -81,16 +81,18 @@ use serde_json::Value;
 /// The synthetic MCP "server" segment shared by every derived tool id.
 ///
 /// It matters that this is a *server* segment and not a bare prefix:
-/// [`crate::sidecar::mcp::McpRegistry::split_tool_id`] is `split_once("__")`, so
-/// the text before the FIRST `__` decides which dispatch lane a tool id lands in.
+/// [`crate::sidecar::mcp::McpRegistry::split_tool_id`] splits the first namespace
+/// separator, so the text before the first `.` decides which dispatch lane a tool
+/// id lands in. The old `__` spelling remains accepted at the call boundary.
 /// Putting derived tools on their own `ryu_ext` server keeps them out of the `app`
 /// lane, which would otherwise demand membership in the `app_tools` bag and a
 /// `manifest.runnables` scan — a scan derived tools are absent from by
 /// construction, so every call would die with "unknown app tool".
 pub const SERVER_NAME: &str = "ryu_ext";
 
-/// Fully-qualified id prefix (`<server>__`). Every derived tool id starts here.
-pub const ID_PREFIX: &str = "ryu_ext__";
+/// Fully-qualified id prefix (`<server>.`). Every newly derived tool id starts here.
+pub const ID_PREFIX: &str = "ryu_ext.";
+const LEGACY_ID_PREFIX: &str = "ryu_ext__";
 
 /// Byte ceiling on the model-visible [`ExtApiRoute::name`].
 ///
@@ -127,8 +129,8 @@ pub const INJECTED_HEADERS: &[&str] = &[AUTHORIZATION_HEADER];
 /// One derived operation, already rewritten to a `core:` ext-proxy URL.
 #[derive(Debug, Clone)]
 pub struct ExtApiRoute {
-    /// `ryu_ext__<plugin_slug>__<method>_<op_slug>`. See [`is_mutating`] for why
-    /// the method is the first token after the last `__` and not anywhere else.
+    /// `ryu_ext.<plugin_slug>.<method>_<op_slug>`. See [`is_mutating`] for why
+    /// the method is the first token after the last namespace separator.
     pub id: String,
     /// The owning plugin's real id (`@ryu/crm`), not its slug — dispatch needs the
     /// id the app store and the manifest are keyed by.
@@ -307,7 +309,7 @@ pub fn lower(
 
         // ── 5. Mint the id ───────────────────────────────────────────────────
         let id = format!(
-            "{ID_PREFIX}{plugin_slug}__{}_{}",
+            "{ID_PREFIX}{plugin_slug}.{}_{}",
             tool.method.to_ascii_lowercase(),
             tool.slug
         );
@@ -368,18 +370,18 @@ pub fn lower(
 
 /// Whether a tool id belongs to the derived ext-API plane.
 pub fn is_ext_api(id: &str) -> bool {
-    id.starts_with(ID_PREFIX)
+    id.starts_with(ID_PREFIX) || id.starts_with(LEGACY_ID_PREFIX)
 }
 
 /// Whether `id` names a **mutating** derived tool (anything that is not a GET).
 ///
-/// ## Why the first token after the last `__`, and nothing else
+/// ## Why the first token after the last namespace separator, and nothing else
 ///
-/// The id grammar is `ryu_ext__<plugin_slug>__<method>_<op_slug>`, and it was
+/// The id grammar is `ryu_ext.<plugin_slug>.<method>_<op_slug>`, and it was
 /// chosen so that this predicate can be an *exact* compare rather than a scan:
 ///
-/// - `approvals::policy::action_segment` keeps the text after the LAST `__`,
-///   which under this grammar is exactly `<method>_<op_slug>`. So the method is
+/// - `approvals::policy::action_segment` keeps the text after the LAST namespace
+///   separator, which under this grammar is exactly `<method>_<op_slug>`. So the method is
 ///   the first token of that segment — a fixed position, not a search.
 /// - Both `<plugin_slug>` and `<op_slug>` may themselves contain `_`
 ///   (`openapi_import::slugify` collapses every non-alphanumeric run to `_`), so
@@ -390,7 +392,7 @@ pub fn is_ext_api(id: &str) -> bool {
 ///   to click through approval prompts. That is not a harmless over-gate: it is
 ///   how the real writes stop being read.
 ///
-/// A malformed id — one carrying the prefix but not the two-`__` shape — has no
+/// A malformed id — one carrying the prefix but not the two-separator shape — has no
 /// method token to read, so its "first token" is a slug fragment and it comes out
 /// **mutating**. That is the deliberate fail-safe direction: an unrecognised
 /// derived id costs one extra approval prompt (cheap, visible, self-correcting),
@@ -671,9 +673,10 @@ fn without_injected_headers(
 }
 
 /// The lowercased first token of the id's action segment (the text after the last
-/// `__`), or `None` when there is no action segment at all.
+/// namespace separator), or `None` when there is no action segment at all.
 fn method_token(id: &str) -> Option<String> {
-    let action = id.rsplit("__").next()?;
+    let normalized = crate::sidecar::mcp::canonical_tool_id(id);
+    let action = normalized.rsplit('.').next()?;
     let first = action.split('_').next()?;
     if first.is_empty() {
         None
@@ -856,8 +859,8 @@ mod tests {
 
         let crm_get = crm.iter().find(|r| r.method == "GET").unwrap();
         let news_get = news.iter().find(|r| r.method == "GET").unwrap();
-        assert_eq!(crm_get.id, "ryu_ext__ryu_crm__get_get_record");
-        assert_eq!(news_get.id, "ryu_ext__ryu_news__get_get_record");
+        assert_eq!(crm_get.id, "ryu_ext.ryu_crm.get_get_record");
+        assert_eq!(news_get.id, "ryu_ext.ryu_news.get_get_record");
         assert_ne!(crm_get.id, news_get.id);
         // The plugin id itself is carried through unslugged — dispatch keys the app
         // store and the manifest by the real id, not by the slug.
@@ -876,18 +879,26 @@ mod tests {
     #[test]
     fn is_mutating_reads_the_method_token_not_the_slug() {
         // `post` appears in the op slug, but the METHOD token is `get`.
-        assert!(!is_mutating("ryu_ext__ryu_news__get_blog_post"));
-        assert!(!is_mutating("ryu_ext__ryu_crm__get_records_id"));
+        assert!(!is_mutating("ryu_ext.ryu_news.get_blog_post"));
+        assert!(!is_mutating("ryu_ext.ryu_crm.get_records_id"));
         // Real writes, every verb.
-        assert!(is_mutating("ryu_ext__ryu_crm__post_records"));
-        assert!(is_mutating("ryu_ext__ryu_crm__put_records_id"));
-        assert!(is_mutating("ryu_ext__ryu_crm__patch_records_id"));
-        assert!(is_mutating("ryu_ext__ryu_crm__delete_records_id"));
+        assert!(is_mutating("ryu_ext.ryu_crm.post_records"));
+        assert!(is_mutating("ryu_ext.ryu_crm.put_records_id"));
+        assert!(is_mutating("ryu_ext.ryu_crm.patch_records_id"));
+        assert!(is_mutating("ryu_ext.ryu_crm.delete_records_id"));
         // Not on this plane at all → not this predicate's business.
-        assert!(!is_mutating("crm__put_contacts_id"));
-        assert!(!is_ext_api("crm__put_contacts_id"));
+        assert!(!is_mutating("crm.put_contacts_id"));
+        assert!(!is_ext_api("crm.put_contacts_id"));
         // Carries the prefix but not the grammar → fails SAFE (over-gates).
-        assert!(is_mutating("ryu_ext__crm_contacts"));
+        assert!(is_mutating("ryu_ext.crm_contacts"));
+    }
+
+    #[test]
+    fn legacy_ext_api_ids_are_accepted_at_the_boundary() {
+        let legacy = "ryu_ext__ryu_crm__post_records";
+        assert!(is_ext_api(legacy));
+        assert!(is_mutating(legacy));
+        assert!(!is_mutating("ryu_ext__ryu_crm__get_records"));
     }
 
     /// A spec is app-authored data. A `..` segment matters specifically because the
@@ -992,17 +1003,17 @@ mod tests {
     /// would fail with "unknown app tool".
     #[test]
     fn split_tool_id_puts_derived_tools_on_the_ryu_ext_server() {
-        let id = "ryu_ext__ryu_crm__post_tools_search";
+        let id = "ryu_ext.ryu_crm.post_tools_search";
         let (server, tool) =
             crate::sidecar::mcp::McpRegistry::split_tool_id(id).expect("derived id splits");
         assert_eq!(server, SERVER_NAME);
         assert_eq!(
-            tool, "ryu_crm__post_tools_search",
+            tool, "ryu_crm.post_tools_search",
             "the remainder keeps the namespace, so `app` dispatch is never reached"
         );
-        // And the approval policy's own split (after the LAST `__`) lands on the
+        // And the approval policy's own split (after the LAST namespace separator) lands on the
         // method token, which is what makes `is_mutating` an exact compare.
-        assert_eq!(id.rsplit("__").next(), Some("post_tools_search"));
+        assert_eq!(id.rsplit('.').next(), Some("post_tools_search"));
         assert!(is_mutating(id));
     }
 
@@ -1058,7 +1069,7 @@ mod tests {
             .iter()
             .map(|t| {
                 format!(
-                    "{ID_PREFIX}{}__{}_{}",
+                    "{ID_PREFIX}{}.{}_{}",
                     slug_plugin("@ryu/collide"),
                     t.method.to_ascii_lowercase(),
                     t.slug

@@ -1400,6 +1400,9 @@ mod tests {
 
     #[tokio::test]
     async fn adopted_official_provenance_survives_reload_as_core() {
+        let _guard = crate::plugins::builtins::VERIFIED_OFFICIAL_TEST_LOCK
+            .lock()
+            .expect("test lock");
         use crate::plugin_manifest::PluginTier;
         use crate::plugins::builtins::tier_for_manifest;
         use crate::plugins::isolation::{

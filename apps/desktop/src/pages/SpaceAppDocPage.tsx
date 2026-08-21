@@ -9,15 +9,18 @@
 // path, so this page needs no document fetch to resolve the app — it just finds the
 // enabled companion and mounts it).
 
-import { PuzzleIcon } from "@hugeicons/core-free-icons";
+import { Package01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { PluginHostPanel } from "@/src/contributions/host/PluginHostPanel.tsx";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 
@@ -31,6 +34,7 @@ export default function SpaceAppDocPage({
 	documentId: string;
 }) {
 	const { companions } = usePluginContributions();
+	const { openTab } = useTabsContext();
 	// The owning app's companion (its UI bundle carries the editor). Resolve by the
 	// plugin id baked in the route; the companion id is `app__<runnable>`, so match on
 	// the manifest pluginId, not the companion id.
@@ -50,7 +54,7 @@ export default function SpaceAppDocPage({
 			<Empty>
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={PuzzleIcon} />
+						<HugeiconsIcon icon={Package01Icon} />
 					</EmptyMedia>
 					<EmptyTitle>App not available</EmptyTitle>
 					<EmptyDescription>
@@ -59,6 +63,11 @@ export default function SpaceAppDocPage({
 						document.
 					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={() => openTab("/apps", { title: "Apps" })} size="sm">
+						Open Apps
+					</Button>
+				</EmptyContent>
 			</Empty>
 		</div>
 	);

@@ -3883,22 +3883,22 @@ mod tests {
         registry.set_ext_api_routes_for_sidecar(
             "@ryu/twin",
             &alpha_key,
-            vec![derived_row("ryu_ext__ryu_twin__get_alpha", "@ryu/twin")],
+            vec![derived_row("ryu_ext.ryu_twin.get_alpha", "@ryu/twin")],
         );
         registry.set_ext_api_routes_for_sidecar(
             "@ryu/twin",
             &beta_key,
-            vec![derived_row("ryu_ext__ryu_twin__get_beta", "@ryu/twin")],
+            vec![derived_row("ryu_ext.ryu_twin.get_beta", "@ryu/twin")],
         );
         assert!(
             registry
-                .describe("ryu_ext__ryu_twin__get_alpha")
+                .describe("ryu_ext.ryu_twin.get_alpha")
                 .await
                 .is_some(),
             "the first sidecar's rows must survive the second's lowering"
         );
         assert!(registry
-            .describe("ryu_ext__ryu_twin__get_beta")
+            .describe("ryu_ext.ryu_twin.get_beta")
             .await
             .is_some());
     }
@@ -3921,7 +3921,7 @@ mod tests {
         registry.set_ext_api_routes_for_sidecar(
             "@ryu/twin",
             &alpha,
-            vec![derived_row("ryu_ext__ryu_twin__get_alpha", "@ryu/twin")],
+            vec![derived_row("ryu_ext.ryu_twin.get_alpha", "@ryu/twin")],
         );
         // A zero-route entry is still an entry — it is what makes the latch terminate,
         // so a clear that only removed non-empty ones would re-arm nothing.
@@ -3929,7 +3929,7 @@ mod tests {
         registry.set_ext_api_routes_for_sidecar(
             "@ryu/twin-x",
             &neighbour,
-            vec![derived_row("ryu_ext__ryu_twin_x__get_alpha", "@ryu/twin-x")],
+            vec![derived_row("ryu_ext.ryu_twin_x.get_alpha", "@ryu/twin-x")],
         );
 
         registry.clear_ext_api_routes("@ryu/twin");
@@ -3952,7 +3952,7 @@ mod tests {
         );
         assert!(
             registry
-                .describe("ryu_ext__ryu_twin_x__get_alpha")
+                .describe("ryu_ext.ryu_twin_x.get_alpha")
                 .await
                 .is_some(),
             "…and its rows must still dispatch"

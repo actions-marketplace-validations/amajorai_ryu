@@ -27,26 +27,38 @@ export interface VoiceTurnLog {
 export interface VoiceModeOptions {
 	/** Route turns through the active agent/persona. */
 	agentId?: string;
+	/** Display name shown on the call screen. */
+	agentName?: string;
 	/** Bind turns to the active conversation (so history persists). */
 	conversationId?: string;
-	/** TTS engine + voice (from the user's TTS prefs). */
+	/** Audio engine + voice (from the user's Audio preferences). */
 	ttsEngine?: string;
 	ttsVoice?: string;
 }
 
 export interface VoiceMode {
+	/** Display name of the agent on the call screen. */
+	agentName: string;
 	/** True while a voice-mode session is open (drives overlay visibility). */
 	active: boolean;
 	/** The assistant's streaming caption for this turn. */
 	caption: string;
+	/** Seconds since this voice session started. */
+	elapsedSeconds: number;
 	/** A transient error message, if the session hit one. */
 	error: string | null;
 	/** Manually interrupt the assistant (barge-in via a button). */
 	interrupt: () => void;
+	/** Whether microphone frames are currently paused. */
+	muted: boolean;
+	/** Rolling mic RMS history, oldest-to-newest, bounded to 24 samples. */
+	levels: number[];
 	/** Current turn phase. */
 	phase: VoiceModePhase;
 	/** Open the session + mic. */
 	start: () => void;
+	/** Toggle the microphone without ending the call. */
+	toggleMute: () => void;
 	/** Close the session + mic. */
 	stop: () => void;
 	/** The user's latest (final) transcript for this turn. */
@@ -55,22 +67,46 @@ export interface VoiceMode {
 	turns: VoiceTurnLog[];
 }
 
+const AUDIO_LEVEL_HISTORY_SIZE = 24;
+const SILENT_LEVELS = new Array<number>(AUDIO_LEVEL_HISTORY_SIZE).fill(0);
+
+function clampAudioLevel(level: number): number {
+	return Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
+}
+
 export function useVoiceMode(
 	target: ApiTarget,
 	options: VoiceModeOptions = {}
 ): VoiceMode {
 	const [active, setActive] = useState(false);
+	const [elapsedSeconds, setElapsedSeconds] = useState(0);
+	const [levels, setLevels] = useState<number[]>(() => SILENT_LEVELS.slice());
 	const [phase, setPhase] = useState<VoiceModePhase>("idle");
 	const [transcript, setTranscript] = useState("");
 	const [caption, setCaption] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [turns, setTurns] = useState<VoiceTurnLog[]>([]);
+	const [muted, setMuted] = useState(false);
 
 	// Id of the assistant transcript line currently streaming deltas, or null when
 	// the next delta should open a fresh line.
 	const assistantIdRef = useRef<string | null>(null);
 	// Monotonic id source for transcript lines (avoids Date.now/random churn).
 	const turnSeqRef = useRef(0);
+	const levelsRef = useRef<number[]>(SILENT_LEVELS.slice());
+	const callStartedAtRef = useRef<number | null>(null);
+
+	const resetLevels = useCallback(() => {
+		const silent = SILENT_LEVELS.slice();
+		levelsRef.current = silent;
+		setLevels(silent);
+	}, []);
+	const pushAudioLevel = useCallback((level: number) => {
+		const next = levelsRef.current.slice(-(AUDIO_LEVEL_HISTORY_SIZE - 1));
+		next.push(clampAudioLevel(level));
+		levelsRef.current = next;
+		setLevels(next);
+	}, []);
 
 	const connRef = useRef<VoiceSessionConnection | null>(null);
 	// Keep the latest target/options reachable without re-subscribing handlers.
@@ -83,8 +119,12 @@ export function useVoiceMode(
 		connRef.current?.close();
 		connRef.current = null;
 		setActive(false);
+		setElapsedSeconds(0);
 		setPhase("idle");
-	}, []);
+		setMuted(false);
+		callStartedAtRef.current = null;
+		resetLevels();
+	}, [resetLevels]);
 
 	const start = useCallback(() => {
 		if (connRef.current) {
@@ -94,6 +134,10 @@ export function useVoiceMode(
 		setTranscript("");
 		setCaption("");
 		setTurns([]);
+		setElapsedSeconds(0);
+		setMuted(false);
+		callStartedAtRef.current = Date.now();
+		resetLevels();
 		assistantIdRef.current = null;
 		turnSeqRef.current = 0;
 		setPhase("connecting");
@@ -105,6 +149,7 @@ export function useVoiceMode(
 			ttsEngine: optionsRef.current.ttsEngine,
 			ttsVoice: optionsRef.current.ttsVoice,
 			handlers: {
+				onAudioLevel: pushAudioLevel,
 				onState: (s) => setPhase(s),
 				onSpeechStart: () => {
 					// A new user turn — clear the previous turn's live text and close
@@ -153,7 +198,11 @@ export function useVoiceMode(
 				onClose: () => {
 					connRef.current = null;
 					setActive(false);
+					setElapsedSeconds(0);
 					setPhase("idle");
+					setMuted(false);
+					callStartedAtRef.current = null;
+					resetLevels();
 				},
 			},
 		});
@@ -166,24 +215,53 @@ export function useVoiceMode(
 			);
 			stop();
 		});
-	}, [stop]);
+	}, [pushAudioLevel, resetLevels, stop]);
 
 	const interrupt = useCallback(() => {
 		connRef.current?.abort();
 	}, []);
 
+	const toggleMute = useCallback(() => {
+		setMuted((current) => {
+			const next = !current;
+			connRef.current?.setMuted(next);
+			if (next) {
+				resetLevels();
+			}
+			return next;
+		});
+	}, [resetLevels]);
+
+	useEffect(() => {
+		const startedAt = callStartedAtRef.current;
+		if (!active || startedAt === null) {
+			return;
+		}
+		const updateElapsed = () => {
+			setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+		};
+		updateElapsed();
+		const timer = window.setInterval(updateElapsed, 1000);
+		return () => window.clearInterval(timer);
+	}, [active]);
+
 	// Tear down if the component using voice mode unmounts.
 	useEffect(() => () => connRef.current?.close(), []);
 
 	return {
+		agentName: options.agentName?.trim() || "Ryu",
 		active,
 		phase,
+		elapsedSeconds,
+		levels,
 		transcript,
 		caption,
 		error,
 		start,
 		stop,
 		interrupt,
+		muted,
 		turns,
+		toggleMute,
 	};
 }

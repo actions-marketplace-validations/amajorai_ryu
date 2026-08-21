@@ -1,3 +1,4 @@
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import {
 	type ContextBand,
@@ -47,7 +48,7 @@ function BandRow({ band, total }: { band: ContextBand; total: number }) {
 			</div>
 			<div className="shrink-0 text-right">
 				<div className="font-mono text-foreground text-xs tabular-nums">
-					{band.tokens.toLocaleString()}
+					{formatCount(band.tokens)}
 				</div>
 				{total > 0 ? (
 					<div className="font-mono text-[11px] text-muted-foreground tabular-nums">
@@ -118,7 +119,7 @@ function BreakdownBar({
 						)}
 						key={band.key}
 						style={{ width: `${width}%` }}
-						title={`${band.label} — ${band.tokens.toLocaleString()} tokens`}
+						title={`${band.label} — ${formatCount(band.tokens)} tokens`}
 					/>
 				);
 			})}
@@ -210,32 +211,32 @@ export function ContextBreakdownPanel({
 				{reported > 0 ? (
 					<SummaryRow
 						label="Reported by provider"
-						value={reported.toLocaleString()}
+						value={formatCount(reported) ?? "—"}
 					/>
 				) : null}
 				<SummaryRow
 					label="Attributed by Core"
-					value={breakdown.attributed.toLocaleString()}
+					value={formatCount(breakdown.attributed) ?? "—"}
 				/>
 				{overEstimate > 0 ? (
 					<SummaryRow
 						label="Over-estimated"
 						muted
-						value={`${overEstimate.toLocaleString()} tokens`}
+						value={`${formatCount(overEstimate)} tokens`}
 					/>
 				) : null}
 				{breakdown.reserveOutput > 0 ? (
 					<SummaryRow
 						label="Reserved for reply"
 						muted
-						value={`${breakdown.reserveOutput.toLocaleString()} tokens`}
+						value={`${formatCount(breakdown.reserveOutput)} tokens`}
 					/>
 				) : null}
 				{windowSize > 0 ? (
 					<SummaryRow
 						label="Free"
 						muted
-						value={`${free.toLocaleString()} of ${windowSize.toLocaleString()}`}
+						value={`${formatCount(free)} of ${formatCount(windowSize)}`}
 					/>
 				) : null}
 			</div>

@@ -1,9 +1,15 @@
 {
+  "tags": ["search","web","google","scrape"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/serper",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/serper",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/serper",
   "name": "Serper",
   "version": "0.1.14",
   "stability": "experimental",
-  "description": "Google's own search results as JSON via the Serper API (https://serper.dev), plus single-page scraping, exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Serper without changing what agents call. Serper is a paid, credit-metered API with a free allowance; requires a BYOK Serper API key.",
+  "description": "Google's own search results as JSON via the Serper API (https://serper.dev), plus single-page scraping, exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web.search` / `web.extract` tools at Serper without changing what agents call. Serper is a paid, credit-metered API with a free allowance; requires a BYOK Serper API key.",
   "icon": "google",
   "iconDither": { "from": 257, "to": "transparent", "direction": "down" },
   "tagline": "Google's real results, as JSON, in a second",
@@ -28,7 +34,7 @@
       "name": "Serper Google Search",
       "kind": "tool",
       "config": {
-        "slug": "serper__search",
+        "slug": "serper.search",
         "backend": "http",
         "method": "POST",
         "url": "https://google.serper.dev/search",
@@ -81,7 +87,7 @@
       "name": "Serper Scrape",
       "kind": "tool",
       "config": {
-        "slug": "serper__scrape",
+        "slug": "serper.scrape",
         "backend": "http",
         "method": "POST",
         "url": "https://scrape.serper.dev",
@@ -118,8 +124,8 @@
       "title": "Search",
       "selectable": true,
       "tools": {
-        "web__search": {
-          "tool": "serper__search",
+        "web.search": {
+          "tool": "serper.search",
           "args": {
             "query": "q",
             "limit": "num"
@@ -142,8 +148,8 @@
       "title": "Extract",
       "selectable": true,
       "tools": {
-        "web__extract": {
-          "tool": "serper__scrape",
+        "web.extract": {
+          "tool": "serper.scrape",
           "args": {
             "format": ""
           },

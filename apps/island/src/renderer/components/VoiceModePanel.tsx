@@ -3,7 +3,9 @@
 // transcript and streaming assistant caption, and Interrupt / Close controls.
 // Driven entirely by the `useVoiceMode` hook state — no logic here.
 
+import { VoiceActivityBeam } from "@ryu/ui/components/voice-activity-beam.tsx";
 import { motion } from "motion/react";
+import { useReducedMotion } from "../hooks/use-reduced-motion.ts";
 import type { VoiceMode } from "../hooks/use-voice-mode.ts";
 
 /** Label + orb tint per phase. */
@@ -29,6 +31,7 @@ export function VoiceModePanel({
 }: VoiceModePanelProps) {
 	const meta = PHASE_META[voice.phase];
 	const canInterrupt = voice.phase === "speaking" || voice.phase === "thinking";
+	const reducedMotion = useReducedMotion();
 
 	return (
 		<div className="flex h-full w-full flex-col items-center gap-4 px-5 py-4 text-neutral-100">
@@ -39,14 +42,23 @@ export function VoiceModePanel({
 			<div className="flex flex-col items-center gap-2">
 				<div className="relative flex size-16 items-center justify-center">
 					<motion.div
-						animate={{ scale: [1, 1.25, 1], opacity: [0.5, 0.15, 0.5] }}
+						animate={
+							reducedMotion
+								? { scale: 1, opacity: 0.35 }
+								: { scale: [1, 1.25, 1], opacity: [0.5, 0.15, 0.5] }
+						}
 						className={`absolute inset-0 rounded-full ${meta.tint}`}
-						transition={{ duration: 1.6, repeat: Number.POSITIVE_INFINITY }}
+						transition={
+							reducedMotion
+								? { duration: 0 }
+								: { duration: 1.6, repeat: Number.POSITIVE_INFINITY }
+						}
 					/>
 					<div className={`size-8 rounded-full ${meta.tint}`} />
 				</div>
 				<p className="font-medium text-neutral-300 text-sm">{meta.label}</p>
 			</div>
+			<VoiceActivityBeam className="h-7 w-40" levels={voice.levels} />
 
 			{/* Transcript + caption */}
 			<div className="flex min-h-16 w-full flex-col gap-2 overflow-y-auto text-center">

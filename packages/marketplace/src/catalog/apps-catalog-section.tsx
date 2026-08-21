@@ -1,18 +1,17 @@
 import {
 	Add01Icon,
-	BookOpen01Icon,
 	CheckmarkCircle02Icon,
 	Download01Icon,
 	GridIcon,
 	InformationCircleIcon,
-	LayoutGridIcon,
 	Link01Icon,
-	PackageIcon,
-	Robot01Icon,
+	Package01Icon,
+	PotionIcon,
 	ServerStack01Icon,
 	Settings01Icon,
 	SquareLock01Icon,
-	WorkflowSquare01Icon,
+	Target01Icon,
+	WorkflowCircle06Icon,
 	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
@@ -31,6 +30,7 @@ import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -77,7 +77,9 @@ import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "./chrome/store-catalog-layout.tsx";
 import StoreCategoryPage from "./chrome/store-category-page.tsx";
+
 import StoreItemAction, {
+	PublisherInstallDisclosure,
 	StoreItemOverflowMenu,
 	storeItemContextMenu,
 } from "./chrome/store-item-action.tsx";
@@ -129,6 +131,7 @@ import {
 	type AppCatalogItem,
 	type CatalogEntry,
 	type CatalogModelProvider,
+	catalogLayerBadges,
 	evaluateCompatibility,
 	type PluginCatalogDetail,
 	type PluginCatalogSource,
@@ -242,6 +245,14 @@ export function dedupeById(items: readonly AppCatalogItem[]): AppCatalogItem[] {
 		out.push(item);
 	}
 	return out;
+}
+
+/** Shared predicate for the Marketplace tag filter and its focused tests. */
+export function matchesCatalogTag(
+	item: AppCatalogItem,
+	selectedTag: string | null
+): boolean {
+	return selectedTag === null || item.entry.tags.includes(selectedTag);
 }
 
 /** One marketplace's slice of the all-marketplaces list. */
@@ -461,6 +472,30 @@ export default function AppsCatalogSection({
 			.filter(splitForVariant)
 			.filter(passesInstalledFilter)
 	);
+	const [selectedTag, setSelectedTag] = useState<string | null>(null);
+	const availableTags = useMemo(() => {
+		const tags = new Set<string>();
+		for (const item of [...visibleItems, ...communityItems]) {
+			for (const tag of item.entry.tags) {
+				const normalized = tag.trim();
+				if (normalized) {
+					tags.add(normalized);
+				}
+			}
+		}
+		return [...tags].sort((a, b) => a.localeCompare(b));
+	}, [communityItems, visibleItems]);
+	useEffect(() => {
+		if (selectedTag && !availableTags.includes(selectedTag)) {
+			setSelectedTag(null);
+		}
+	}, [availableTags, selectedTag]);
+	const filteredVisibleItems = visibleItems.filter((item) =>
+		matchesCatalogTag(item, selectedTag)
+	);
+	const filteredCommunityItems = communityItems.filter((item) =>
+		matchesCatalogTag(item, selectedTag)
+	);
 	const copy = VARIANT_COPY[variant];
 
 	// Which feed owns the current selection. The two hooks each track their own
@@ -595,25 +630,38 @@ export default function AppsCatalogSection({
 		selectFirstParty(id);
 	};
 
-	const filter = host.install
-		? {
-				label: "Source & install",
-				icon: Link01Icon,
-				panel: (
-					<div className="flex flex-col gap-4 p-4">
-						<PluginSourcePicker
-							activeSource={activeSource}
-							addingMarketplace={addingMarketplace}
-							addMarketplace={addMarketplace}
-							selectingSource={selectingSource}
-							selectSource={selectSource}
-							sources={sources}
-						/>
-						<InstallFromUrl install={installFromUrl} />
-					</div>
-				),
-			}
-		: undefined;
+	const filter =
+		host.install || availableTags.length > 0
+			? {
+					label: availableTags.length > 0 ? "Filters" : "Source & install",
+					icon: Link01Icon,
+					activeCount: selectedTag ? 1 : 0,
+					panel: (
+						<div className="flex flex-col gap-4 p-4">
+							{availableTags.length > 0 ? (
+								<TagFilter
+									onChange={setSelectedTag}
+									tags={availableTags}
+									value={selectedTag}
+								/>
+							) : null}
+							{host.install ? (
+								<>
+									<PluginSourcePicker
+										activeSource={activeSource}
+										addingMarketplace={addingMarketplace}
+										addMarketplace={addMarketplace}
+										selectingSource={selectingSource}
+										selectSource={selectSource}
+										sources={sources}
+									/>
+									<InstallFromUrl install={installFromUrl} />
+								</>
+							) : null}
+						</div>
+					),
+				}
+			: undefined;
 
 	return (
 		<StoreCatalogLayout
@@ -647,7 +695,7 @@ export default function AppsCatalogSection({
 					communityFetchNextPage={community.fetchNextPage}
 					communityHasNextPage={community.hasNextPage}
 					communityInstallingId={communityInstallingId}
-					communityItems={communityItems}
+					communityItems={filteredCommunityItems}
 					communityLoading={community.loading}
 					communitySelectedId={communitySelected ? community.selectedId : null}
 					error={error}
@@ -656,13 +704,15 @@ export default function AppsCatalogSection({
 					groupBySource={activeSource === ALL_PLUGIN_SOURCES_ID}
 					hasNextPage={hasNextPage}
 					isInstalling={isInstalling}
-					items={visibleItems}
+					items={filteredVisibleItems}
 					loading={loading}
 					loadingMore={loadingMore}
 					nounPlural={copy.nounPlural}
+					onClearSearch={() => setQuery("")}
 					onDisable={cardDisable}
 					onInstall={cardInstall}
 					onInstallCommunity={onInstallCommunity}
+					onRetry={fetchNextPage}
 					onSelect={selectFirstParty}
 					onSelectCommunity={selectCommunity}
 					searching={query.trim().length > 0}
@@ -684,6 +734,44 @@ export default function AppsCatalogSection({
 						: copy.searchPlaceholder,
 			}}
 		/>
+	);
+}
+
+function TagFilter({
+	onChange,
+	tags,
+	value,
+}: {
+	onChange: (value: string | null) => void;
+	tags: string[];
+	value: string | null;
+}) {
+	return (
+		<div className="flex flex-col gap-1.5">
+			<span className="font-medium text-muted-foreground text-xs">Tag</span>
+			<Select
+				items={[
+					{ value: "__all__", label: "All tags" },
+					...tags.map((tag) => ({ value: tag, label: tag })),
+				]}
+				onValueChange={(next) =>
+					onChange(next === "__all__" ? null : (next ?? null))
+				}
+				value={value ?? "__all__"}
+			>
+				<SelectTrigger className="h-8 w-full text-sm" size="sm">
+					<SelectValue placeholder="All tags" />
+				</SelectTrigger>
+				<SelectContent>
+					<SelectItem value="__all__">All tags</SelectItem>
+					{tags.map((tag) => (
+						<SelectItem key={tag} value={tag}>
+							{tag}
+						</SelectItem>
+					))}
+				</SelectContent>
+			</Select>
+		</div>
 	);
 }
 
@@ -815,15 +903,13 @@ function PluginSourcePicker({
 						</div>
 						{addError && <p className="text-destructive text-xs">{addError}</p>}
 						<Button
-							disabled={addingMarketplace}
+							loading={addingMarketplace}
 							onClick={() => {
 								submit().catch(() => undefined);
 							}}
 							size="sm"
 						>
-							{addingMarketplace ? (
-								<Spinner className="size-4" />
-							) : (
+							{!addingMarketplace && (
 								<HugeiconsIcon className="size-4" icon={Add01Icon} />
 							)}
 							{addingMarketplace ? "Adding…" : "Add marketplace"}
@@ -880,12 +966,13 @@ function InstallFromUrl({
 				/>
 			</div>
 			<Button
-				disabled={busy || url.trim().length === 0}
+				disabled={url.trim().length === 0}
+				loading={busy}
 				onClick={submit}
 				size="sm"
 				variant="ghost"
 			>
-				{busy ? <Spinner className="size-4" /> : "Add from URL"}
+				Add from URL
 			</Button>
 		</div>
 	);
@@ -915,6 +1002,8 @@ function AppList({
 	communityInstallingId,
 	onSelectCommunity,
 	onInstallCommunity,
+	onClearSearch,
+	onRetry,
 	settingsOpener,
 	groupBySource,
 }: {
@@ -934,7 +1023,8 @@ function AppList({
 	hasNextPage: boolean;
 	nounPlural: string;
 	/** Realm glyph shown when an item has no icon of its own (apps→grid,
-	 *  plugins→puzzle), sourced from the shared REALM_ICONS so it matches the tab. */
+	 *  plugins→plug socket), sourced from the shared REALM_ICONS so it matches the tab.
+	 */
 	fallbackIcon: IconSvgElement;
 	/** Unreviewed GitHub topic-discovered listings, already narrowed to this tab's
 	 *  apps/plugins slice. Rendered as a trailing shelf under their own heading and
@@ -951,6 +1041,8 @@ function AppList({
 	onSelectCommunity: (id: string) => void;
 	/** Install a community row from its repository — see {@link communityInstallUrl}. */
 	onInstallCommunity: (item: AppCatalogItem) => void;
+	onClearSearch: () => void;
+	onRetry: () => void;
 	/** True while the user has a search query typed. Suppresses category shelves —
 	 *  a result list is ranked by relevance, and slicing it into headed sections
 	 *  fights that. */
@@ -1018,12 +1110,14 @@ function AppList({
 			// Ryu would bring it back. The reason rides the row's action slot.
 			dimmed={Boolean(incompatibilityOf(it))}
 			dither={it.entry.icon_dither}
+			external={it.entry.external}
 			icon={<HugeiconsIcon className="size-5" icon={fallbackIcon} />}
 			iconBackground={it.entry.icon_background ?? undefined}
 			iconId={it.entry.icon}
 			iconPadding={it.entry.icon_padding}
 			iconUrl={it.entry.icon_url}
 			key={it.entry.id}
+			layers={it.entry.layers}
 			// The heart, keyed by the listing's NAMESPACE. `entry.id` IS that
 			// namespace (`@ryu/crm`) — the same string the install path and the
 			// settings join already key on — so a community listing discovered
@@ -1034,6 +1128,7 @@ function AppList({
 			onClick={() => onSelect(it.entry.id)}
 			orgVerified={it.entry.org_verified}
 			orgVerifiedTier={it.entry.org_verified_tier}
+			publisherTrust={it.entry.publisher_trust}
 			seedId={it.entry.id}
 			selected={it.entry.id === selectedId}
 			stability={it.entry.stability}
@@ -1074,9 +1169,20 @@ function AppList({
 	if (error && items.length === 0) {
 		return (
 			<div className="flex flex-col gap-3" ref={setScrollEl}>
-				<div className="p-4 text-destructive text-sm">
-					Couldn't load {nounPlural}: {error}
-				</div>
+				<Empty className="h-full p-6">
+					<EmptyHeader>
+						<EmptyMedia variant="icon">
+							<HugeiconsIcon icon={fallbackIcon} />
+						</EmptyMedia>
+						<EmptyTitle>Couldn&apos;t load {nounPlural}</EmptyTitle>
+						<EmptyDescription>{error}</EmptyDescription>
+					</EmptyHeader>
+					<EmptyContent>
+						<Button onClick={onRetry} size="sm" variant="ghost">
+							Try again
+						</Button>
+					</EmptyContent>
+				</Empty>
 				{communityShelf}
 			</div>
 		);
@@ -1093,6 +1199,11 @@ function AppList({
 							<EmptyTitle>No {nounPlural} found</EmptyTitle>
 							<EmptyDescription>Try a different search.</EmptyDescription>
 						</EmptyHeader>
+						<EmptyContent>
+							<Button onClick={onClearSearch} size="sm" variant="ghost">
+								Clear search
+							</Button>
+						</EmptyContent>
 					</Empty>
 				) : null}
 				{communityShelf}
@@ -1175,7 +1286,7 @@ function AppList({
 				<div className="flex flex-col gap-6">
 					{sections.map((section) => (
 						<StoreShelf
-							description={`${section.items.length} ${section.items.length === 1 ? "listing" : "listings"}`}
+							description={`${formatCount(section.items.length) ?? "—"} ${section.items.length === 1 ? "listing" : "listings"}`}
 							items={section.items}
 							key={section.label}
 							onOpenCategory={() => setOpenCategory(section.label)}
@@ -1282,12 +1393,14 @@ function CommunityShelf({
 			}
 			description={it.entry.description}
 			dither={it.entry.icon_dither}
+			external={it.entry.external}
 			icon={<HugeiconsIcon className="size-5" icon={fallbackIcon} />}
 			iconBackground={it.entry.icon_background ?? undefined}
 			iconId={it.entry.icon}
 			iconPadding={it.entry.icon_padding}
 			iconUrl={it.entry.icon_url}
 			key={it.entry.id}
+			layers={it.entry.layers}
 			// A community listing has no marketplace document — the namespace
 			// key is the whole reason it can be liked at all. See the model.
 			likeNamespace={it.entry.id}
@@ -1302,6 +1415,7 @@ function CommunityShelf({
 			// leave the one case the split exists to express unmarked.
 			orgVerified={it.entry.org_verified}
 			orgVerifiedTier={it.entry.org_verified_tier}
+			publisherTrust={it.entry.publisher_trust}
 			seedId={it.entry.id}
 			// A GitHub repo rarely declares a wash, so without this its card
 			// was a bare glyph on flat `bg-muted` in a grid of painted plates.
@@ -1425,6 +1539,31 @@ function AppCardContextMenu({
 	const target = reportTargetForApp(item);
 	const canReport = Boolean(reportCtx && target);
 	const onReport = () => reportCtx?.open(target);
+	const [communityDialogOpen, setCommunityDialogOpen] = useState(false);
+	const publisherTrust = item.entry.publisher_trust;
+	const needsCommunityDisclosure =
+		!item.installed && publisherTrust === "dotted";
+	const guardedInstall = () => {
+		if (needsCommunityDisclosure) {
+			setCommunityDialogOpen(true);
+			return;
+		}
+		onInstall();
+	};
+	const communityDisclosure = needsCommunityDisclosure ? (
+		<PublisherInstallDisclosure
+			onInstall={onInstall}
+			onOpenChange={setCommunityDialogOpen}
+			open={communityDialogOpen}
+			publisherHealth={{
+				capabilities: item.entry.capabilities,
+				packageChecksum: item.entry.package_checksum,
+				reviewed: item.entry.reviewed,
+				signatureStatus: "unknown",
+			}}
+			publisherTrust={publisherTrust ?? "dotted"}
+		/>
+	) : null;
 
 	// A mandatory listing is un-removable and un-disableable (Core 403s both), so
 	// it gets the locked shape: Settings and Report only.
@@ -1438,6 +1577,7 @@ function AppCardContextMenu({
 					onOpenSettings: onOpenSettings ?? undefined,
 					onReport,
 				})}
+				{communityDisclosure}
 			</>
 		);
 	}
@@ -1450,10 +1590,11 @@ function AppCardContextMenu({
 				installed: item.installed,
 				onDisable,
 				onEnable: onOpen,
-				onInstall,
+				onInstall: guardedInstall,
 				onOpenSettings: onOpenSettings ?? undefined,
 				onReport,
 			})}
+			{communityDisclosure}
 		</>
 	);
 }
@@ -1536,6 +1677,13 @@ function AppCardAction({
 				onEnable={onOpen}
 				onInstall={onInstall}
 				onOpenSettings={onOpenSettings ?? undefined}
+				publisherHealth={{
+					capabilities: item.entry.capabilities,
+					packageChecksum: item.entry.package_checksum,
+					reviewed: item.entry.reviewed,
+					signatureStatus: "unknown",
+				}}
+				publisherTrust={item.entry.publisher_trust}
 				reportTarget={reportTargetForApp(item)}
 			/>
 		</div>
@@ -1799,23 +1947,21 @@ function AppPrimaryAction({
 		action = (
 			<Button
 				className={HERO_CTA_CLASS}
-				disabled={lifecyclePending}
+				loading={lifecyclePending}
 				onClick={runDisable}
 				size="sm"
 				variant="secondary"
 			>
-				{lifecyclePending ? <Spinner className="size-4" /> : null}
 				Disable
 			</Button>
 		);
 	} else {
 		action = (
 			<Button
-				disabled={lifecyclePending}
+				loading={lifecyclePending}
 				onClick={() => setConfirmOpen(true)}
 				size="sm"
 			>
-				{lifecyclePending ? <Spinner className="size-4" /> : null}
 				Enable
 			</Button>
 		);
@@ -2098,6 +2244,7 @@ function AppDetailPanel({
 	settingsOpener: PluginSettingsOpener;
 }) {
 	const host = useCatalogHost();
+	const runScan = host.runCatalogScan;
 	const { Markdown, fetchVersionDetail: hostFetchVersionDetail } = host;
 	// How much of this listing the user has asked to see. Read ONCE here and
 	// threaded down as a narrow boolean: a detail panel must not learn the ladder,
@@ -2240,6 +2387,10 @@ function AppDetailPanel({
 		// reader nothing. The remaining kinds still distinguish one listing from
 		// another and stay.
 		...entry.kinds.filter((k) => k !== "companion").map((k) => k.toUpperCase()),
+		...catalogLayerBadges(
+			detail?.layers ?? entry.layers,
+			detail?.external ?? entry.external
+		),
 	].filter((b): b is string => Boolean(b));
 
 	return (
@@ -2276,7 +2427,7 @@ function AppDetailPanel({
 			gallery={
 				<ListingGalleryRail
 					name={entry.name}
-					screenshots={detail?.screenshots}
+					screenshots={detail?.screenshots ?? entry.screenshots}
 				/>
 			}
 			hero={
@@ -2346,6 +2497,26 @@ function AppDetailPanel({
 
 			<ListingDetailTabs
 				activeTab={tab}
+				agentScan={
+					scorecard && runScan
+						? () =>
+								runScan({
+									description: detail?.description ?? entry.description,
+									id: entry.id,
+									kind: "plugin",
+									metadata: {
+										developer: detail?.developer ?? entry.developer,
+										license: detail?.license ?? entry.license,
+										origin: detail?.origin ?? entry.origin,
+										repositoryUrl: detail?.repositoryUrl ?? entry.repo_url,
+										version: detail?.version ?? entry.version,
+									},
+									name: entry.name,
+									readme: detail?.readme,
+									scorecard,
+								})
+						: undefined
+				}
 				detail={detail}
 				entry={entry}
 				fetchVersionDetail={
@@ -2467,16 +2638,28 @@ function AppDetailAside({
 	 *  exactly what a non-technical buyer scans. */
 	showTechnical: boolean;
 }) {
-	// Both gated cards resolve BEFORE the emptiness check below. Gating only the
-	// children would leave the shell reserving a whole 18rem column for a fragment
-	// of three nulls, which is truthy — a wide empty gutter on every listing.
-	const showTags = entry.tags.length > 0 && showTechnical;
+	const detailPrompts = detail?.examplePrompts ?? entry.example_prompts ?? [];
+	const detailCapabilities = detail?.capabilities ?? entry.capabilities ?? [];
+	const keywords = entry.keywords ?? [];
+	const showTags = entry.tags.length > 0;
+	const showKeywords = keywords.length > 0;
+	const showPrompts = detailPrompts.length > 0;
+	const showCapabilities = detailCapabilities.length > 0;
 	// The Trust card's only control jumps to the Health tab, which is itself hidden
 	// at the same level — so gating them together is what stops Simple offering a
 	// click that goes nowhere.
 	const showTrust = Boolean(scorecard) && showTechnical;
 	const hasInfo = appInfoRows({ detail, entry }).length > 0;
-	if (!(hasInfo || showTags || showTrust)) {
+	if (
+		!(
+			hasInfo ||
+			showTags ||
+			showKeywords ||
+			showPrompts ||
+			showCapabilities ||
+			showTrust
+		)
+	) {
 		return null;
 	}
 	return (
@@ -2498,19 +2681,54 @@ function AppDetailAside({
 					</div>
 				</ListingAsideCard>
 			) : null}
+			{showKeywords ? (
+				<ListingAsideCard title="Keywords">
+					<div className="flex flex-wrap gap-1">
+						{keywords.map((keyword) => (
+							<Badge
+								className="font-normal text-xs"
+								key={keyword}
+								variant="secondary"
+							>
+								{keyword}
+							</Badge>
+						))}
+					</div>
+				</ListingAsideCard>
+			) : null}
+			{showCapabilities ? (
+				<ListingAsideCard title="Capabilities">
+					<ul className="flex flex-col gap-1 text-muted-foreground text-sm">
+						{detailCapabilities.map((capability) => (
+							<li key={capability}>{capability}</li>
+						))}
+					</ul>
+				</ListingAsideCard>
+			) : null}
+			{showPrompts ? (
+				<ListingAsideCard title="Example prompts">
+					<ul className="flex flex-col gap-2 text-muted-foreground text-sm">
+						{detailPrompts.map((prompt) => (
+							<li className="rounded-md bg-muted px-2.5 py-2" key={prompt}>
+								{prompt}
+							</li>
+						))}
+					</ul>
+				</ListingAsideCard>
+			) : null}
 		</>
 	);
 }
 
 /** Presentational icon per bundled-runnable kind. Falls back to a package glyph
  *  for unknown kinds so an unrecognized runnable still renders a row. */
-const RUNNABLE_KIND_ICONS: Record<string, typeof PackageIcon> = {
-	agent: Robot01Icon,
-	companion: LayoutGridIcon,
+const RUNNABLE_KIND_ICONS: Record<string, typeof Package01Icon> = {
+	agent: Target01Icon,
+	companion: Package01Icon,
 	mcp: ServerStack01Icon,
-	skill: BookOpen01Icon,
+	skill: PotionIcon,
 	tool: Wrench01Icon,
-	workflow: WorkflowSquare01Icon,
+	workflow: WorkflowCircle06Icon,
 };
 
 /** Short human label per runnable kind (falls back to a capitalized kind). */
@@ -2523,8 +2741,8 @@ const RUNNABLE_KIND_LABELS: Record<string, string> = {
 	workflow: "Workflow",
 };
 
-function runnableKindIcon(kind: string): typeof PackageIcon {
-	return RUNNABLE_KIND_ICONS[kind] ?? PackageIcon;
+function runnableKindIcon(kind: string): typeof Package01Icon {
+	return RUNNABLE_KIND_ICONS[kind] ?? Package01Icon;
 }
 
 /** Exported for unit tests — see the note on {@link isCompanionApp}. */
@@ -2550,7 +2768,7 @@ function AppIncludedSection({
 			<h3 className="flex items-center gap-1.5 font-medium text-sm">
 				<HugeiconsIcon
 					className="size-4 text-muted-foreground"
-					icon={PackageIcon}
+					icon={Package01Icon}
 				/>
 				What&apos;s included
 			</h3>
@@ -2628,24 +2846,39 @@ function appInfoRows({
 }): { href?: string | null; label: string; value: string }[] {
 	const version = entry.descriptor_only ? null : (entry.version ?? null);
 	return [
-		{ label: "Developer", value: detail?.developer ?? entry.developer ?? null },
+		{
+			label: "Developer",
+			value:
+				detail?.developer ??
+				detail?.author ??
+				entry.developer ??
+				entry.author ??
+				null,
+		},
 		{ label: "Category", value: detail?.category ?? entry.category ?? null },
 		{ label: "Version", value: version },
-		{ label: "License", value: detail?.license ?? null },
+		{ label: "License", value: detail?.license ?? entry.license ?? null },
 		{
-			href: detail?.website ?? null,
+			href:
+				detail?.repositoryUrl ?? entry.repository_url ?? entry.repo_url ?? null,
+			label: "Repository",
+			value:
+				detail?.repositoryUrl ?? entry.repository_url ?? entry.repo_url ?? null,
+		},
+		{
+			href: detail?.website ?? entry.website ?? entry.homepage ?? null,
 			label: "Website",
-			value: detail?.website ?? null,
+			value: detail?.website ?? entry.website ?? entry.homepage ?? null,
 		},
 		{
-			href: detail?.privacyPolicyUrl ?? null,
+			href: detail?.privacyPolicyUrl ?? entry.privacy_policy_url ?? null,
 			label: "Privacy Policy",
-			value: detail?.privacyPolicyUrl ?? null,
+			value: detail?.privacyPolicyUrl ?? entry.privacy_policy_url ?? null,
 		},
 		{
-			href: detail?.termsOfServiceUrl ?? null,
+			href: detail?.termsOfServiceUrl ?? entry.terms_of_service_url ?? null,
 			label: "Terms of Service",
-			value: detail?.termsOfServiceUrl ?? null,
+			value: detail?.termsOfServiceUrl ?? entry.terms_of_service_url ?? null,
 		},
 	].filter(
 		(row): row is { href?: string | null; label: string; value: string } =>
@@ -2748,11 +2981,14 @@ function AppHero({
 	const orgVerifiedTier = detailKnowsOrgVerification
 		? detail?.orgVerifiedTier
 		: entry.org_verified_tier;
+	const publisherTrust = detailKnowsOrgVerification
+		? detail?.publisherTrust
+		: entry.publisher_trust;
 	return (
 		<ListingHero
 			actions={actions}
 			badges={badges}
-			banner={showArt ? entry.banner : null}
+			banner={showArt ? (detail?.banner ?? entry.banner) : null}
 			dither={showArt ? entry.icon_dither : null}
 			fallback={entry.accent_color ?? null}
 			icon={
@@ -2778,6 +3014,7 @@ function AppHero({
 				// blue-on-tint chip would be unreadable here.
 				<VerifiedBadge
 					orgVerified={orgVerified}
+					publisherTrust={publisherTrust}
 					tier={orgVerifiedTier}
 					tone="hero"
 				/>

@@ -16,6 +16,7 @@ import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Checkbox } from "@ryu/ui/components/checkbox";
 import { Skeleton } from "@ryu/ui/components/skeleton";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import { useCallback, useEffect, useState } from "react";
 import { formatCents } from "@/src/components/panels/crm/fields.tsx";
@@ -217,7 +218,7 @@ export function Insights({
 										pipeline.currency_code
 									)}
 								</span>{" "}
-								across {pipeline.total_records.toLocaleString()} ·{" "}
+								across {formatNumber(pipeline.total_records)} ·{" "}
 								{Math.round(pipeline.win_rate * 100)}% win rate
 							</span>
 						</div>
@@ -279,7 +280,7 @@ function Stat({ label, value }: { label: string; value: number }) {
 	return (
 		<div className="rounded-md border bg-card p-3">
 			<div className="font-semibold text-lg tabular-nums">
-				{value.toLocaleString()}
+				{formatNumber(value)}
 			</div>
 			<div className="text-muted-foreground text-xs">{label}</div>
 		</div>

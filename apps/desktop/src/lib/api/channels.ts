@@ -20,6 +20,7 @@ export const CHANNEL_TYPES = [
 	"telegram",
 	"slack",
 	"whatsapp",
+	"whatsapp_personal",
 	"discord",
 	"bluebubbles",
 ] as const;
@@ -47,6 +48,9 @@ export type GroupPolicy = (typeof GROUP_POLICIES)[number];
 export const VOICE_REPLY_MODES = ["never", "mirror", "always"] as const;
 export type VoiceReplyMode = (typeof VOICE_REPLY_MODES)[number];
 
+export type ChannelCredentialSource = "ryu_managed" | "customer";
+export type ManagedChannelProvisioningState = "ready" | "awaiting_provider";
+
 /**
  * Per-bot behaviour settings: who may talk to it, how it behaves while working,
  * and what its profile says. Flat across every platform — a channel that cannot
@@ -59,6 +63,12 @@ export interface ChannelBehavior {
 	dmPolicy: DmPolicy;
 	groupAllowlist: string[];
 	groupPolicy: GroupPolicy;
+	groupUserAllowlist: string[];
+	lifecycleReactions: boolean;
+	/** Send Ryu's first welcome without waiting for a user message. */
+	proactiveOpening: boolean;
+	/** Direct-chat id that may receive the first welcome. */
+	proactiveTarget: string | null;
 	profileDescription: string | null;
 	profileName: string | null;
 	profileShortBio: string | null;
@@ -83,7 +93,8 @@ export interface ChannelBehavior {
 export const CHANNEL_LABELS: Record<ChannelType, string> = {
 	telegram: "Telegram",
 	slack: "Slack",
-	whatsapp: "WhatsApp",
+	whatsapp: "WhatsApp Business (Cloud API)",
+	whatsapp_personal: "WhatsApp Personal",
 	discord: "Discord",
 	bluebubbles: "iMessage (BlueBubbles)",
 };
@@ -94,13 +105,20 @@ export interface ChannelConfig extends ChannelBehavior {
 	channelType: ChannelType;
 	createdAt: string;
 	createdBy: string;
+	credentialSource: ChannelCredentialSource;
 	enabled: boolean;
 	/** When the bot replies in a group chat (mentions-only vs every message). */
 	groupReplyMode: GroupReplyMode;
 	id: string;
+	managedBotId: string | null;
+	managedBotUsername: string | null;
+	managedProvisioningState: ManagedChannelProvisioningState | null;
 	model: string | null;
 	name: string;
 	organizationId: string | null;
+	platformOptions?: Record<string, unknown>;
+	/** Node binding for Ryu-created credentials; null means org-global. */
+	provisionedServerId: string | null;
 	secrets: Record<string, string>;
 	systemPrompt: string | null;
 	/** Team this bot routes to instead of a single agent. Mutually exclusive
@@ -116,6 +134,7 @@ export interface ChannelInput extends Partial<ChannelBehavior> {
 	groupReplyMode?: GroupReplyMode;
 	model?: string | null;
 	name: string;
+	platformOptions?: Record<string, unknown>;
 	/** Only the secret keys being set/changed; the server merges on update. */
 	secrets?: Record<string, string>;
 	systemPrompt?: string | null;

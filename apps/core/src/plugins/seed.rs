@@ -360,7 +360,7 @@ fn seed_overrides() -> [SeedSpec; 26] {
             // runtime. `storage:kv` is the Study-mode handoff: the turn hook has no
             // HTTP and cannot reach the sidecar, so it queues candidates in Core's KV
             // and the sidecar drains them. `mcp:tuition` registers the app's own MCP
-            // server so `tuition__quiz` and friends exist for agents and workflows.
+            // server so `tuition.quiz` and friends exist for agents and workflows.
             grants: &[
                 "tuition:crud",
                 "hook:side-model",
@@ -394,7 +394,7 @@ fn seed_overrides() -> [SeedSpec; 26] {
             // approved here as well as in `host_api.grants` or every draft/check 403s),
             // `hook:run-agent` is the turn hook's only route to the solver (the plugin
             // sandbox has no HTTP), and `mcp:reasoning` registers the app's own MCP
-            // server so `reasoning__solve` exists for agents and workflow `mcp` nodes.
+            // server so `reasoning.solve` exists for agents and workflow `mcp` nodes.
             grants: &[
                 "reasoning:check",
                 "hook:side-model",
@@ -418,7 +418,7 @@ fn seed_overrides() -> [SeedSpec; 26] {
             // approved here as well as in `host_api.grants` or every query 403s and the
             // app can read nothing at all), `hook:run-agent` is the turn hook's only
             // route to the engine (the plugin sandbox has no HTTP), and `mcp:rlm`
-            // registers the app's own MCP server so `rlm__ask` exists for agents and
+            // registers the app's own MCP server so `rlm.ask` exists for agents and
             // workflow `mcp` nodes — which is this app's main surface, not a side one.
             grants: &["rlm:query", "hook:side-model", "hook:run-agent", "mcp:rlm"],
             ui_code: Some(RLM_UI_HTML),
@@ -435,7 +435,7 @@ fn seed_overrides() -> [SeedSpec; 26] {
             // sidecar is spawned by the manifest loader, not by a grant.
             //
             // Only two grants, and the short list is the point. `mcp:blueprint`
-            // registers the app's own MCP server so `blueprint__plan_publish` /
+            // registers the app's own MCP server so `blueprint.plan_publish` /
             // `plan_status` / `plan_get` / `step_update` exist for agents and workflow
             // `mcp` nodes — the ONLY way a plan ever gets published, since the app
             // ships no turn hooks (the plugin sandbox has no HTTP, so a hook could not
@@ -782,20 +782,10 @@ pub(crate) fn compiled_in_ui_code(id: &str) -> Option<&'static str> {
 /// pre-loaded surface — which is the posture `CORE_DEFAULT_ON`'s default-off note
 /// set out to avoid.
 ///
-/// The reason it could not simply be dropped before is now gone:
-/// [`crate::plugins::lifecycle::install_app`] sources the compiled-in bundle at
-/// INSTALL time via [`compiled_in_ui_code`], so `Install` → `Enable` from the Store
-/// mounts a real UI with no seeded record. Grants follow the ordinary path too —
-/// `enable_app` validates each app's own `permission_grants` through the Gateway and
-/// persists the approved set, which for these two is byte-identical to the `grants`
-/// their [`seed_overrides`] rows hardcode (the Gateway's capability grammar allows
-/// `spaces:docs` / `media:*` / `hook:*` / `core:list_agents` for their owners).
+/// Manifests and UI bundles for these opt-in apps are sourced through the
+/// ordinary install path rather than this seed table. Satellite UI and grant
+/// ownership are intentionally absent from Core's seed path.
 ///
-/// Membership is a PRODUCT decision — "should a fresh install list this app as
-/// installed?" — so it stays a hand-maintained list, not a derived one. Uninstall
-/// protection is unaffected: `is_uninstall_protected` keys off `SYSTEM_PLUGINS` /
-/// default-on, and neither id is in either, so the Store could already uninstall
-/// them; this is what makes that uninstall STICK across a reboot.
 pub(crate) const NOT_PRE_INSTALLED: &[&str] = &[
     // Two Space-document boards. Both are pure leaf features (a Space owns the
     // documents; nothing in Core reads their records), so an install that never
@@ -876,7 +866,7 @@ pub(crate) const NOT_PRE_INSTALLED: &[&str] = &[
     // Blueprint. Same posture as Automated Reasoning above, and for a sharper version
     // of its second reason: the app is not merely inert until someone uses it, it is
     // inert until an *agent* publishes a plan into it. Every plan arrives over
-    // `blueprint__plan_publish`, so a fresh store has literally nothing to show — a
+    // `blueprint.plan_publish`, so a fresh store has literally nothing to show — a
     // pre-installed record would list a plan-review surface with no plans and no way
     // for the user to make one by hand. It carries a compiled-in bundle
     // (`BLUEPRINT_UI_HTML`), which is what keeps this side of the either/or safe:
@@ -902,6 +892,10 @@ pub(crate) const NOT_PRE_INSTALLED: &[&str] = &[
     crate::plugins::builtins::TEAMS_PLUGIN_ID,
     crate::plugins::builtins::CLIPS_PLUGIN_ID,
     crate::plugins::builtins::RECIPES_PLUGIN_ID,
+    // Pull Requests is an opt-in companion with a compiled-in UI bundle. Keep
+    // its frame available through an explicit install, but do not seed a
+    // disabled record for an app the user has not asked for.
+    "@ryu/pull-requests",
 ];
 
 /// The ids migration **v5** un-seeds, frozen as a literal rather than derived.

@@ -182,8 +182,8 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   claiming no `default` (`spider` keeps it). Three things about it are
 ///   deliberate and each is silent if reverted:
 ///   1. It is **MCP-backed with empty `runnables`** — its tools come from
-///      `scrapling mcp`, so the verb binds `web__extract` to `scrapling__get`
-///      exactly as `agentbrowser` binds `browser__*`. Capability providers are not
+///      `scrapling mcp`, so the verb binds `web.extract` to `scrapling.get`
+///      exactly as `agentbrowser` binds `browser.*`. Capability providers are not
 ///      required to be manifest runnables; nothing in `resolve_verbs` reads them.
 ///   2. It is **Core-tier but NOT in `CORE_DEFAULT_ON`**. Core-tier is a
 ///      requirement, not a promotion: `may_register_mcp_servers` auto-allows
@@ -219,7 +219,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   make them vanish the moment the user swapped to `tavily`.
 /// - `tavily.manifest.json` — Tavily search+extract tool plugin (BYOK). The second
 ///   provider of `web.search`, which is what makes the layer demonstrably swappable:
-///   selecting it re-points the stable `web__search` tool without changing the id or
+///   selecting it re-points the stable `web.search` tool without changing the id or
 ///   schema an agent sees.
 /// - `brave.manifest.json` — Brave Search tool plugin (BYOK). A third `web.search`
 ///   provider, and the one that proves the capability SPLIT was right: Brave's API is
@@ -267,7 +267,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 /// but it is NOT a system plugin: there is no sidecar and no Core-managed process,
 /// only a BYO binary Core launches on demand. The plugin record is the
 /// install/enable/tier **governance shell** around that provider; declaring the
-/// tools again here would double-list every one as an `app__<slug>` alias
+/// tools again here would double-list every one as an `app.<slug>` alias
 /// (`fire_activation_event` → the Tool handler in `server/mod.rs`). Do not
 /// re-add tool runnables to these fixtures.
 ///
@@ -276,7 +276,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 /// there is nothing to double-list. The "no runnables" rule above exists solely to
 /// avoid double-listing a provider-owned tool; it does not apply once the provider
 /// is gone. `spider`/`rtk` are declarative `command`-backend tools; `advisor`
-/// (`advisor__consult`) and `shadow` (`shadow__search`/`semantic_search`/`timeline`/
+/// (`advisor.consult`) and `shadow` (`shadow.search`/`semantic_search`/`timeline`/
 /// `recent_context`) are declarative `http`-backend tools reaching Core loopback
 /// bridges (`/api/advisor/consult` and the `/api/shadow/*` proxy). `spider`/`rtk`
 /// are reached through the
@@ -294,7 +294,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   provide `web.crawl`, even though Firecrawl has a crawl endpoint: `POST
 ///   /v2/crawl` is ASYNCHRONOUS — it answers `{success, id, url}` and the pages only
 ///   arrive from a second `GET /v2/crawl/{id}` poll. A declarative `http` tool is one
-///   request with no polling loop, so binding `web__crawl` to it would hand the model
+///   request with no polling loop, so binding `web.crawl` to it would hand the model
 ///   a job id where the verb promises page content. Declaring the capability with a
 ///   partial `tools` map would be worse still: the entry would join resolution for
 ///   `web.crawl` and could win the pick away from `spider`, silently killing a layer
@@ -305,7 +305,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   `memory_provider.rs`'s four kernel bridges (each guarded by `if !is_external()`)
 ///   were unreachable by construction. It is `selectable` and claims NO `default`:
 ///   `@ryu/memory` keeps that, so the built-in stays the zero-config pick.
-///   It binds `memory__search`, `memory__forget`, `memory__store` and `memory__sync`.
+///   It binds `memory.search`, `memory.forget`, `memory.store` and `memory.sync`.
 ///   The two WRITE verbs became bindable only with `CapabilityToolBinding.arg_template`:
 ///   Mem0's write endpoint is `POST /v3/memories/add/`, whose `messages` field is an
 ///   array of `{role, content}` OBJECTS, and the flat rename table's one shape
@@ -313,13 +313,13 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   i.e. `["fact"]`, which is not the documented item type. The template builds the
 ///   documented shape directly, so `memory_provider`'s `mirror` and `sync` bridges are
 ///   now reachable. Both verbs post to the SAME endpoint and differ in one documented
-///   field: `memory__store` sends `infer: false` (the caller already decided the fact,
-///   so Mem0 stores the text as-is) while `memory__sync` leaves Mem0's default
+///   field: `memory.store` sends `infer: false` (the caller already decided the fact,
+///   so Mem0 stores the text as-is) while `memory.sync` leaves Mem0's default
 ///   inference on and lets it mine the raw turn. That endpoint is ASYNCHRONOUS —
 ///   it answers `{message, status: "PENDING", event_id}` — so neither verb returns a
-///   fact id and `event_id` must never be fed to `memory__forget`; both bridges are
+///   fact id and `event_id` must never be fed to `memory.forget`; both bridges are
 ///   fire-and-forget and never read the response, which is why this is acceptable.
-///   `memory__context` stays UNBOUND because Mem0 publishes no standing-summary
+///   `memory.context` stays UNBOUND because Mem0 publishes no standing-summary
 ///   endpoint (see the memory section of https://docs.mem0.ai/llms.txt), so while Mem0
 ///   is selected the facade serves four of the five memory verbs.
 ///   The entity id is pinned from ONE `mem0.user-id` preference through `arg_defaults`
@@ -328,11 +328,11 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   Copying the search shape onto add would drop the entity and the write would be
 ///   rejected — see `plugins-store/mem0/README.md`.
 /// - `honcho.manifest.json` — Honcho hosted memory tool plugin (BYOK, `api.honcho.dev`
-///   v3 REST API). The FIRST provider of `memory__context`, which is why it exists:
+///   v3 REST API). The FIRST provider of `memory.context`, which is why it exists:
 ///   `memory_provider::context` and the `memory.provider-context` setting had no
 ///   provider that declared the verb, so that kernel bridge was unreachable by
 ///   construction. `selectable`, claiming NO `default` — `@ryu/memory` keeps it.
-///   `memory__context` binds Honcho's Dialectic endpoint,
+///   `memory.context` binds Honcho's Dialectic endpoint,
 ///   `POST /v3/workspaces/{workspace_id}/peers/{peer_id}/chat`, whose documented
 ///   response is `{content}` — one of the four keys `memory_provider::summary_text`
 ///   reads. That is why the binding declares NO `response` map: the facade's
@@ -340,12 +340,12 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   where `summary_text` finds it, whereas ANY `response` map would rewrite the
 ///   payload into `{provider, results:[…]}` — a shape that function cannot read, so
 ///   mapping it "properly" would silently produce no context at all.
-///   `memory__search` binds `POST .../peers/{peer_id}/search`, which searches that
+///   `memory.search` binds `POST .../peers/{peer_id}/search`, which searches that
 ///   peer's MESSAGES (conversation text) rather than Honcho's derived conclusions;
 ///   worth knowing because the `prefetch` bridge is on by default. Honcho's `limit`
 ///   maxes at 100 against the canonical 50, so it NARROWS nothing and no `arg_clamp`
 ///   is declared.
-///   Both WRITE verbs (`memory__sync`, `memory__store`) are bound through an
+///   Both WRITE verbs (`memory.sync`, `memory.store`) are bound through an
 ///   ADAPTER, and the reason they need one is the cleanest example of why adapters
 ///   exist. Honcho's only documented write is
 ///   `POST /v3/workspaces/{workspace_id}/sessions/{session_id}/messages`, whose
@@ -361,7 +361,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   only when the write reports the resource missing), so nothing has to be created
 ///   by hand. Ryu's own replies are written as a SEPARATE peer — attributing an
 ///   assistant turn to the user's peer would poison the representation Honcho derives
-///   about them. `memory__forget` is still unbound: Honcho documents no
+///   about them. `memory.forget` is still unbound: Honcho documents no
 ///   message-delete endpoint, which no adapter can invent.
 ///   Workspace and peer are pinned per install from `honcho.workspace-id` /
 ///   `honcho.peer-id` through `arg_defaults`, filling the two URL path placeholders;
@@ -394,13 +394,13 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   is never seeded into the preferences store).
 ///   FIVE of the six verbs are served, and the three exclusions are each a rule, not
 ///   an omission:
-///   * `computer__focus_app` is UNBOUND. Bytebot's `application` action validates a
+///   * `computer.focus_app` is UNBOUND. Bytebot's `application` action validates a
 ///     closed seven-value enum (firefox/1password/thunderbird/vscode/terminal/
 ///     desktop/directory) while the canonical verb takes a free-form app name, so
 ///     `focus_app("Safari")` would be a schema-legal call that 400s. The action is
-///     still reachable natively as `bytebot__application`, whose own `input_schema`
+///     still reachable natively as `bytebot.application`, whose own `input_schema`
 ///     carries that enum so an illegal call cannot be composed.
-///   * `computer__scroll` DROPS the canonical `x`/`y` instead of templating them.
+///   * `computer.scroll` DROPS the canonical `x`/`y` instead of templating them.
 ///     `arg_template` builds an object shape unconditionally, and Bytebot's
 ///     `coordinates` is `@IsOptional @ValidateNested` over a `{x, y}` both
 ///     `@IsNumber` — so a scroll with no coordinates (legal: they are optional in the
@@ -411,10 +411,10 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///     and sleeps 150ms between them, so an `amount` a model intends as pixels (500)
 ///     would wedge the desktop for over a minute. `count` gets no clamp: the
 ///     canonical max is 3 and Bytebot has no upper bound, so it would narrow nothing.
-///   `computer__key` binds `type_keys` (nut.js `pressKey`-all then `releaseKey`-all =
+///   `computer.key` binds `type_keys` (nut.js `pressKey`-all then `releaseKey`-all =
 ///   one chord), NOT the similarly-named `press_keys`, which is a half-action taking
 ///   a required `press: up|down` and would leave modifiers physically held down.
-///   Only `bytebot__screenshot` sets `unwrap_body` (its `{image}` base64 payload is
+///   Only `bytebot.screenshot` sets `unwrap_body` (its `{image}` base64 payload is
 ///   the result); the five action tools return an EMPTY body on success, which
 ///   unwrapped reaches the caller as a bare empty string that reads like a failure —
 ///   the same trap `mem0`'s 204 DELETE documents. Nothing is `fail_open`: for a tool
@@ -427,6 +427,10 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../plugins-store/spider/manifest.json"),
     include_str!("../../../../plugins-store/scrapling/manifest.json"),
     include_str!("../../../../plugins-store/agentbrowser/manifest.json"),
+    // Ego Browser is the opt-in inline-Deno browser.control provider. Its
+    // manifest is compiled into test catalogs so the Core tier and capability
+    // binding invariants cover the same package that the marketplace ships.
+    include_str!("../../../../plugins-store/ego-browser/manifest.json"),
     include_str!("../../../../plugins-store/expect/manifest.json"),
     include_str!("../../../../plugins-store/agentation/manifest.json"),
     include_str!("../../../../plugins-store/exa/manifest.json"),
@@ -440,9 +444,22 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Nothing to spawn, nothing to install: Core-tier so the server registers
     // (see the `CORE_PLUGINS` row), default-on so every agent can look up docs.
     include_str!("../../../../plugins-store/docs/manifest.json"),
+    // Composio Connect is a hosted OAuth MCP bridge. Keep the fixture in the
+    // hermetic catalog so its remote transport, OAuth declaration, and reserved
+    // governance grants are validated with every built-in manifest.
+    include_str!("../../../../plugins-store/composio-connect/manifest.json"),
     // Generic workflow fan-out tool. Core owns the host bridge and delegation
     // engine; the plugin contributes only the validated inline tool surface.
     include_str!("../../../../plugins-store/dynamic-workflows/manifest.json"),
+    // Declarative message reactions: the desktop owns the safe native renderer
+    // while this manifest owns whether the action is contributed at all.
+    include_str!("../../../../plugins-store/reactions/manifest.json"),
+    // Side questions and temporary chats are host-rendered chat features. Their
+    // manifests own discoverability and lifecycle even though Core keeps the
+    // side-model bridge and the desktop chat implementation.
+    include_str!("../../../../plugins-store/side-chats/manifest.json"),
+    include_str!("../../../../plugins-store/ghost-chats/manifest.json"),
+    include_str!("../../../../plugins-store/expanded-composer/manifest.json"),
     include_str!("fixtures/layers.manifest.json"),
     include_str!("../../../../plugins-store/ghost/manifest.json"),
     include_str!("../../../../plugins-store/shadow/manifest.json"),
@@ -529,8 +546,8 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `CORE_DEFAULT_ON` for `recap`'s reason, doubled: a sandbox spawn per turn AND
     // a sub-agent per reviewed answer, on the user's budget.
     include_str!("../../../../plugins-store/no-ai-slop/manifest.json"),
-    // `agent-comms` is the agent-to-agent mailbox: `agents__directory` /
-    // `agents__send` / `agents__ask` / `agents__thread`, shipped as ordinary
+    // `agent-comms` is the agent-to-agent mailbox: `agents.directory` /
+    // `agents.send` / `agents.thread`, shipped as ordinary
     // registry tools so EVERY agent gets them (Pi through its MCP extension, an
     // ACP agent through the in-process `mcp_bridge`, the gateway plane through
     // the tool loop) rather than one runtime's private feature.
@@ -549,7 +566,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // address itself. Not in `CORE_DEFAULT_ON` for `no-ai-slop`'s reason: the
     // delivery hook has no `match` gate (the inbox is keyed by agent, and
     // `stateful` matches on the conversation), so it costs a sandbox spawn per
-    // turn, and `agents__ask` spends a whole agent run per call.
+    // turn.
     include_str!("../../../../plugins-store/agent-comms/manifest.json"),
     // `rules` discovers Cursor- and Claude-style project rules and exposes the
     // agent-edit panel contract. Its context hook injects normalized project
@@ -609,7 +626,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // that mirrors a first-class Claude Code tool would read as a regression.
     include_str!("../../../../plugins-store/pi-monitor/manifest.json"),
     // `rtk` surfaces the built-in RTK (Rust Token Killer) command-wrapping tool
-    // (`rtk__run`) as an installable plugin. Like `spider`, it is a fully
+    // (`rtk.run`) as an installable plugin. Like `spider`, it is a fully
     // declarative `command`-backend tool: the fixture CARRIES its runnable (the
     // native `sidecar/mcp/rtk.rs` provider was deleted, so there is nothing to
     // double-list — same EXCEPTION as spider). The `rtk` binary is BYO, reached
@@ -624,8 +641,13 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // surfacing findings as an out-of-band note. Toggle + `/security` command +
     // reviewer-model picker mirror `double-check`. Community-tier, opt-in.
     include_str!("../../../../plugins-store/security-guidance/manifest.json"),
+    // security-scanner is a model-agnostic, read-only security workbench:
+    // independent architecture, hunt, configuration, and attack-path delegates;
+    // report synthesis; diff mode; finding verification; and patch proposals
+    // that never apply a change. No vendor-specific model is embedded.
+    include_str!("../../../../plugins-store/security-scanner/manifest.json"),
     // `bitwarden` surfaces the Bitwarden Secrets Manager CLI (`bws`) as four
-    // declarative `command`-backend tools (`bitwarden__status` / `__projects` /
+    // declarative `command`-backend tools (`bitwarden.status` / `__projects` /
     // `__list` / `__get`). Faithful to Hermes's Bitwarden Secrets Manager feature:
     // one machine-account bootstrap token (`BWS_ACCESS_TOKEN`, read from Core's
     // process env via `command_env`) replaces N provider keys, and the agent pulls
@@ -715,6 +737,15 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `plugins::seed` row. OPT-IN: not in `CORE_DEFAULT_ON`, so a normal install never
     // spawns the sidecar unless a user enables the app.
     include_str!("../../../../apps-store/social/manifest.json"),
+    // ReelFarm Studio — a local-first short-form content Companion. It owns no
+    // sidecar; its frame talks only through the generic model/media/storage bridges
+    // and can optionally hand captions to Outpost through `social:crud`.
+    include_str!("../../../../apps-store/reelfarm/manifest.json"),
+    // Token Table — a cosmetic six-seat Hold'em Companion over the generic
+    // `app:http` + `app:realtime` bridges. Its authoritative SQLite game state
+    // lives in the standalone `ryu-token-table` sidecar; Core only loads the
+    // manifest and generic transport contracts.
+    include_str!("../../../../apps-store/token-table/manifest.json"),
     // Harbor — an object-first CRM over the `ryu-crm` sidecar (a `local` sibling binary
     // on 8009; 8007 was contested by three concurrently built apps and 8008 taken by
     // `@ryu/news`). Same zero-coupling posture as Outpost above — Core links no CRM code
@@ -911,6 +942,10 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // about it exists in Core beyond this registration. It is the reference for
     // "an app that only rearranges what the shell already knows".
     include_str!("../../../../apps-store/agent-status/manifest.json"),
+    // Ambient Elevator — a desktop-only declarative audio contribution. The
+    // desktop consumes its opaque live-activity spec and owns the singleton
+    // player; Core only forwards the manifest contract.
+    include_str!("../../../../plugins-store/ambient-elevator/manifest.json"),
     // The Drafts app — a durable outbox. Owns one `sidebar_sections` entry over its
     // own store and one app-shell page, and its state lives OUT-OF-PROCESS in the
     // `ryu-drafts` sidecar (`public_mount` at `/api/drafts`, App-gated via the ext
@@ -925,7 +960,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // template; source lives at `plugins-store/sample-widget/`). It declares a
     // local Node MCP server (`node server.mjs`) whose `render` tool advertises
     // `_meta.openai/outputTemplate = ui://widget/sample.html` and serves that
-    // resource, plus a `contributes.widgets` entry binding `sample_widget__render`
+    // resource, plus a `contributes.widgets` entry binding `sample_widget.render`
     // to it and the `widget:render` grant. Registered so it parses/loads like every
     // built-in and shows up as an installable example, but deliberately OPT-IN — it
     // is NOT in `plugins::builtins::CORE_DEFAULT_ON`, so it never seeds enabled and
@@ -954,7 +989,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `spidercloud` is the SECOND `web.crawl` provider, which is what finally makes
     // that layer swappable rather than merely marked selectable: the local `spider`
     // CLI stays the declared default, and this one runs the same engine hosted, so a
-    // node with no `spider` binary can still serve `web__crawl`. Bound only because
+    // node with no `spider` binary can still serve `web.crawl`. Bound only because
     // Spider Cloud's crawl is SYNCHRONOUS (`run_in_background` defaults to false) —
     // `firecrawl` is deliberately still not a crawl provider because its `/v2/crawl`
     // hands back a job id, and a declarative http tool is one request with no polling
@@ -1013,7 +1048,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Three seams, all generic, none of them Core knowing this app exists beyond
     // this line: the `/api/reasoning/*` surface is a `public_mount` sidecar behind
     // the ext-proxy; the agent/workflow surface is the manifest's own `mcp_servers`
-    // entry (`reasoning__solve` is the id a workflow `mcp` node takes), auto-allowed
+    // entry (`reasoning.solve` is the id a workflow `mcp` node takes), auto-allowed
     // because a compiled-in built-in is Core-tier; and the per-turn guardrail is an
     // ordinary `contributes.turn_hooks` entry whose body is embedded in
     // `builtin_code::BUILTIN_CODE_FILES` — the first apps-store row in that table,
@@ -1051,10 +1086,10 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // ext-proxy; Core owns no GitHub client, route, port or provider behavior.
     include_str!("../../../../apps-store/pull-requests/manifest.json"),
     // Blueprint — visual plan review. An agent publishes its plan over the app's own
-    // MCP server (`blueprint__plan_publish`), a human reads it as rendered markdown
+    // MCP server (`blueprint.plan_publish`), a human reads it as rendered markdown
     // blocks plus a dependency graph derived from `steps[].depends_on`, annotates it,
     // and approves or requests changes; the agent reads the verdict back as
-    // deterministic text (`blueprint__plan_status`). Opt-in — outside `CORE_DEFAULT_ON`,
+    // deterministic text (`blueprint.plan_status`). Opt-in — outside `CORE_DEFAULT_ON`,
     // like Reasoning, because it owns an out-of-process binary a normal install does
     // not have, and because it is inert until an agent publishes something.
     //
@@ -1095,7 +1130,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // boolean topic grammar and the ranking are all deterministic and offline; a model
     // writes only the brief prose and a neutral cluster title.
     //
-    // Its `news__search` MCP tool is the reason this is more than a reader: it queries
+    // Its `news.search` MCP tool is the reason this is more than a reader: it queries
     // the user's OWN vetted corpus with no web request at all, so an agent can ground
     // an answer in the sources they chose rather than in whatever a fresh search
     // returns. Same generic seams as `tuition` above, with the KV handoff running the
@@ -1159,6 +1194,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../plugins-store/ghost/manifest.json"),
     include_str!("../../../../plugins-store/shadow/manifest.json"),
     include_str!("../../../../plugins-store/agentbrowser/manifest.json"),
+    include_str!("../../../../plugins-store/ambient-elevator/manifest.json"),
     include_str!("../../../../apps-store/browser/manifest.json"),
 ];
 
@@ -3663,12 +3699,57 @@ mod tests {
             .unwrap_or_default();
         let widget = widgets
             .iter()
-            .find(|w| w.tool_id == "sample_widget__render")
-            .expect("sample-widget must contribute the sample_widget__render widget");
-        // tool_id MUST be `<mcp_servers-key>__<toolName>` and the uri must match the
+            .find(|w| w.tool_id == "sample_widget.render")
+            .expect("sample-widget must contribute the sample_widget.render widget");
+        // tool_id MUST be `<mcp_servers-key>.<toolName>` and the uri must match the
         // resource the server serves (and the tool _meta.outputTemplate).
         assert_eq!(widget.uri, "ui://widget/sample.html");
         assert_eq!(widget.mime, "text/html+skybridge");
+    }
+
+    #[test]
+    fn security_scanner_fixture_has_two_gated_hooks() {
+        let manifests = PluginManifestLoader::load();
+        let m = manifests
+            .iter()
+            .find(|m| m.id == "@ryu/security-scanner")
+            .expect("security-scanner must load");
+        assert!(
+            m.permission_grants.iter().any(|g| g == "hook:run-agent"),
+            "must declare the delegated-agent grant"
+        );
+        assert!(
+            m.permission_grants.iter().any(|g| g == "hook:side-model"),
+            "must declare the side-model grant"
+        );
+        let hooks = &m.contributes.as_ref().expect("contributes").turn_hooks;
+        assert_eq!(hooks.len(), 2, "command and automatic-review hooks");
+        let command = hooks
+            .iter()
+            .find(|hook| hook.id == "security-scanner.command")
+            .expect("command hook");
+        assert_eq!(command.on, "pre_user_turn");
+        assert!(command.code.contains("runFanout"));
+        assert!(command
+            .run_when
+            .as_ref()
+            .expect("command gate")
+            .commands
+            .iter()
+            .any(|command| command == "/security-scan"));
+        let review = hooks
+            .iter()
+            .find(|hook| hook.id == "security-scanner.auto-review")
+            .expect("automatic-review hook");
+        assert_eq!(review.on, "post_assistant_turn");
+        assert!(review.code.contains("sideModel"));
+        assert_eq!(
+            review
+                .run_when
+                .as_ref()
+                .and_then(|gate| gate.flag.as_deref()),
+            Some("io.ryu.security-scanner.auto-review")
+        );
     }
 
     #[test]

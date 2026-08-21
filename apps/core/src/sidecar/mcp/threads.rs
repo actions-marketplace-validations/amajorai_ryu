@@ -1,4 +1,4 @@
-//! Built-in coordinator-threads tools (`threads__*`) — Codex-style cross-thread
+//! Built-in coordinator-threads tools (`threads.*`) — Codex-style cross-thread
 //! orchestration.
 //!
 //! A single *coordinator* agent thread can spin up and manage *worker* threads:
@@ -8,10 +8,10 @@
 //! so workers are durable, searchable, and resumable exactly like any chat.
 //!
 //! Registered as a reserved registry server (`threads`) like spider/exa/
-//! search_conversations, so the `<server>__<tool>` id scheme, per-agent allowlist,
+//! search_conversations, so the `<server>.<tool>` id scheme, per-agent allowlist,
 //! catalog search, and the single `call_tool` entry all work for free — and it is
 //! allowlist-gated + audited on BOTH planes (ACP + openai-compat). Only an agent
-//! whose allowlist grants `threads__*` can coordinate, so the capability is opt-in
+//! whose allowlist grants `threads.*` can coordinate, so the capability is opt-in
 //! per agent.
 //!
 //! The hard tool is `send_message_to_thread`: it appends the instruction to a
@@ -153,7 +153,7 @@ fn fork_thread_schema() -> Value {
 /// The coordinator tools exposed through the registry.
 pub fn tools() -> Vec<RegistryTool> {
     let def = |name: &str, description: &str, schema: Value| RegistryTool {
-        id: format!("{SERVER_NAME}__{name}"),
+        id: format!("{SERVER_NAME}.{name}"),
         server: SERVER_NAME.to_owned(),
         name: name.to_owned(),
         description: Some(description.to_owned()),
@@ -553,10 +553,10 @@ mod tests {
         let tools = tools();
         assert_eq!(tools.len(), 8);
         assert!(tools.iter().all(|t| t.server == SERVER_NAME));
-        assert!(tools.iter().all(|t| t.id.starts_with("threads__")));
+        assert!(tools.iter().all(|t| t.id.starts_with("threads.")));
         assert!(tools
             .iter()
-            .any(|t| t.id == "threads__send_message_to_thread"));
+            .any(|t| t.id == "threads.send_message_to_thread"));
     }
 
     #[tokio::test]

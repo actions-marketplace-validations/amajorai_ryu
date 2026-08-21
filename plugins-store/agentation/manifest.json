@@ -1,4 +1,9 @@
 {
+  "tags": ["ui","feedback","annotations","browser"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/agentation",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/agentation",
   "name": "Agentation",
   "version": "0.1.15",

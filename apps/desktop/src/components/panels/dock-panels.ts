@@ -28,6 +28,7 @@ export type BuiltinTabKind =
 	| "terminal"
 	| "codereview"
 	| "files"
+	| "gitgraph"
 	| "cowork"
 	| "sources"
 	| "subagents"
@@ -137,7 +138,12 @@ export function isPinnableDockTabKind(kind: DockTabKind): boolean {
 	if (isRouteTabKind(kind)) {
 		return true;
 	}
-	return kind === "terminal" || kind === "files" || kind === "codereview";
+	return (
+		kind === "terminal" ||
+		kind === "files" ||
+		kind === "codereview" ||
+		kind === "gitgraph"
+	);
 }
 
 /**

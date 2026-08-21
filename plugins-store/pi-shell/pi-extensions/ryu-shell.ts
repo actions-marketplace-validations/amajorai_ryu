@@ -407,6 +407,10 @@ async function coreBackgroundRequest<T>(
 	if (token) {
 		headers.set("authorization", `Bearer ${token}`);
 	}
+	const userJwt = process.env.RYU_MCP_USER_JWT?.trim();
+	if (userJwt) {
+		headers.set("x-ryu-user-jwt", userJwt);
+	}
 	try {
 		const response = await fetch(`${base}${requestPath}`, {
 			...init,
@@ -418,7 +422,9 @@ async function coreBackgroundRequest<T>(
 		return (await response.json()) as T;
 	} catch (error) {
 		if (!quiet) {
-			log(`Core background bridge ${requestPath} failed (${errorText(error)}).`);
+			log(
+				`Core background bridge ${requestPath} failed (${errorText(error)}).`
+			);
 		}
 		return undefined;
 	}
@@ -502,10 +508,7 @@ async function pollStopRequests(): Promise<void> {
 			(candidate) => backgroundProcessId(candidate) === stop.process_id
 		);
 		if (shell && isLive(shell)) {
-			await terminate(
-				shell,
-				stop.reason?.trim() || "stopped from Ryu"
-			);
+			await terminate(shell, stop.reason?.trim() || "stopped from Ryu");
 		}
 	}
 	if (liveShells().length === 0) {

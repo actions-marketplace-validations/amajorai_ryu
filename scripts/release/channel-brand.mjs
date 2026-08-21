@@ -276,9 +276,11 @@ function buildIconSet(channel) {
 	if (existsSync(join(out, "icon.icns"))) {
 		return true;
 	}
+	// `--no-install` keeps branding a build-time operation, never a trigger for
+	// downloading and executing a mutable npm package. If the pinned local CLI is
+	// unavailable, retain the stable icon set below.
 	for (const runner of [
-		["bunx", ["tauri", "icon", source, "-o", out]],
-		["npx", ["--yes", "@tauri-apps/cli", "icon", source, "-o", out]],
+		["bunx", ["--no-install", "tauri", "icon", source, "-o", out]],
 	]) {
 		const run = spawnSync(runner[0], runner[1], {
 			cwd: join(REPO, "apps/desktop"),

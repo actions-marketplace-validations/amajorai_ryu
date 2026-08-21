@@ -15,6 +15,7 @@
 
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { useCallback, useEffect, useState } from "react";
 import {
 	SettingsCard,
@@ -74,9 +75,9 @@ function coverageLine(store: StoreCoverage): string | null {
 		return null;
 	}
 	if (store.sealed === store.total) {
-		return `All ${store.total.toLocaleString()} stored items encrypted`;
+		return `All ${formatNumber(store.total)} stored items encrypted`;
 	}
-	return `${store.sealed.toLocaleString()} of ${store.total.toLocaleString()} stored items encrypted`;
+	return `${formatNumber(store.sealed)} of ${formatNumber(store.total)} stored items encrypted`;
 }
 
 function KeySection({ custody }: { custody: KeyCustody }) {

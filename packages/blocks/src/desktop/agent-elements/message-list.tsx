@@ -5,11 +5,11 @@
 	InformationCircleIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { AgentTitleBadge } from "@ryu/ui/components/agent-title-badge.tsx";
 import {
 	type CitationItem,
 	CitationList,
 } from "@ryu/ui/components/agents/citations";
-import { ReasoningText } from "@ryu/ui/components/agents/loading-states";
 import { MessageScroller as BeuiMessageScroller } from "@ryu/ui/components/agents/message-scroller";
 import { Bubble, BubbleContent } from "@ryu/ui/components/bubble";
 import { Button } from "@ryu/ui/components/button";
@@ -37,6 +37,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import {
 	formatDateTime,
 	formatTime,
@@ -63,11 +64,12 @@ import {
 	memo,
 	useCallback,
 	useEffect,
-	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
 } from "react";
+import type { AnswerNowControl } from "./answer-now.ts";
+import { AnswerNowButton } from "./answer-now-button.tsx";
 import { useChatDisplayPrefs } from "./chat-display-prefs.tsx";
 import type { ChatTocFileChange, ChatTocItem } from "./chat-toc.tsx";
 import {
@@ -79,12 +81,19 @@ import { DateSeparator } from "./date-separator.tsx";
 import { ErrorMessage } from "./error-message.tsx";
 import { FileTypeIcon } from "./file-type-icon.tsx";
 import { FloatingDateHeader } from "./floating-date-header.tsx";
+import { isGoalMessage } from "./goal-message.ts";
 import { usePinnedUserMessage } from "./hooks/use-pinned-user-message.ts";
 import { useTranscriptAnchor } from "./hooks/use-transcript-anchor.ts";
 import type { LinkPreviewResolvers } from "./link-preview.tsx";
 import { Markdown } from "./markdown.tsx";
-import { isServerAssignedMessageId } from "./message-reaction-id.ts";
-import type { MessageReactionBucket } from "./message-reactions.tsx";
+import { isMessageReactionAction } from "./message-action-types.ts";
+import {
+	clearUnreadMessageState,
+	getIncomingMessageIds,
+	getUnreadMessageLabel,
+	reconcileUnreadMessageState,
+	type UnreadMessageState,
+} from "./message-list-unread.ts";
 import { AcpUsageStats, MessageStats } from "./message-stats.tsx";
 import { PinnedUserMessageBar } from "./pinned-user-message-bar.tsx";
 import { shouldShowPlanning } from "./planning-visibility.ts";
@@ -97,13 +106,26 @@ import { ToolGroup } from "./tools/tool-group.tsx";
 import { isToolActivityGroupCandidate } from "./tools/tool-grouping.ts";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer.tsx";
 import {
+	deriveEditedFiles,
+	deriveTurnEndCards,
+	isEditedFilePart,
+	isTurnEndArtifactPart,
+	isTurnEndJsonRenderPart,
+} from "./turn-end-cards.ts";
+import { TurnEndCards } from "./turn-end-cards.tsx";
+import {
 	type AgentMessageContext,
 	type AgentUiSubmit,
+	type ContributedMessageAction,
 	type CustomToolRendererProps,
 	type MentionItem,
+	type MessageActionContext,
+	type MessageActionRuntimeState,
 	widgetMessageProvenanceKey,
 } from "./types.ts";
+import { TypingIndicator } from "./typing-indicator.tsx";
 import {
+	GoalMessageAnnotation,
 	MESSAGE_TIME_OPTIONS,
 	MESSAGE_TOOLTIP_OPTIONS,
 	UserMessage,
@@ -113,6 +135,10 @@ import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer.ts";
 import { WorkflowRunProgressCard } from "./workflow-run-part.tsx";
 
 export interface MessageListProps {
+	/** Agent identities used when an agent-comms tool becomes a transcript activity. */
+	agentMessageContext?: AgentMessageContext;
+	/** Native-provider action shown directly below the active thinking row. */
+	answerNow?: AnswerNowControl;
 	/**
 	 * Avatar node shown beside each assistant turn (e.g. the active agent's
 	 * logo, or a fanned stack of member logos for a team). When omitted, no
@@ -131,8 +157,8 @@ export interface MessageListProps {
 	 * to the spiral loader when there is no avatar at all.
 	 */
 	assistantPlanningAvatars?: React.ReactNode[];
-	/** Agent identities used when an agent-comms tool becomes a transcript activity. */
-	agentMessageContext?: AgentMessageContext;
+	/** Optional role/title badge shown beside each assistant name. */
+	assistantTitle?: string;
 	className?: string;
 	classNames?: {
 		userMessage?: string;
@@ -169,6 +195,8 @@ export interface MessageListProps {
 	 * render a lit thumb; absent ids are unrated.
 	 */
 	feedback?: Record<string, "up" | "down">;
+	/** True when a page older than the visible transcript is available. */
+	hasOlderMessages?: boolean;
 	/**
 	 * A non-model notice about the THREAD rather than about a turn — "this
 	 * conversation was imported", "history before this point was trimmed" — drawn
@@ -186,6 +214,13 @@ export interface MessageListProps {
 		id: string;
 		title: string;
 	};
+	/** Thread-level notices rendered as separator markers in arrival order. */
+	historyNotices?: {
+		actions?: { label: string; onClick: () => void }[];
+		description?: string;
+		id: string;
+		title: string;
+	}[];
 	/**
 	 * Where to position the scroll container on initial mount.
 	 * - "bottom" (default): classic chat behavior, pinned to the latest message.
@@ -193,8 +228,12 @@ export interface MessageListProps {
 	 *   or read-only transcripts where the user should read top-to-bottom.
 	 */
 	initialScrollBehavior?: "bottom" | "top";
+	/** True while the transcript is fetching the page above the current one. */
+	loadingOlderMessages?: boolean;
 	/** Resolved @ mentions used by user and assistant Markdown. */
 	mentionItems?: MentionItem[];
+	/** Runtime state keyed by message id for contributed action renderers. */
+	messageActionStates?: ReadonlyMap<string, MessageActionRuntimeState>;
 	/** Contributed per-message toolbar actions (see {@link ContributedMessageAction}),
 	 *  rendered after the built-ins. Filtered to the message's `target` by the shell. */
 	messageActions?: ContributedMessageAction[];
@@ -209,7 +248,7 @@ export interface MessageListProps {
 	/** Fire a contributed message action (see {@link ContributedMessageAction}). */
 	onContributedMessageAction?: (
 		action: ContributedMessageAction,
-		value?: string
+		context: MessageActionContext
 	) => void;
 	/**
 	 * Edit a previously-sent user message into a new version (ChatGPT/Claude-style
@@ -230,11 +269,14 @@ export interface MessageListProps {
 		rating: "up" | "down" | null,
 		isLatest: boolean
 	) => void;
+	/** Request the next older message page when the viewport reaches the top. */
+	onLoadOlderMessages?: () => Promise<void>;
 	/**
 	 * Open a project file referenced by assistant output or tool summaries.
 	 */
 	onOpenFile?: (path: string) => void;
 	onOpenLink?: (url: string) => void;
+	onOpenMention?: (item: MentionItem) => void;
 	/**
 	 * Quote a text selection made inside a message. When provided, selecting text
 	 * in any message surfaces a floating "Quote" button; clicking it calls this
@@ -274,21 +316,8 @@ export interface MessageListProps {
 	 * this with the turn's combined text. When omitted, no speak button is shown.
 	 */
 	onSpeak?: (text: string) => void;
-	/**
-	 * Toggle an emoji reaction on a message. When provided, each user message
-	 * grows a reaction chip row and an "add reaction" picker; without it the whole
-	 * feature is absent, which is how surfaces that have no realtime room (the
-	 * island, the storyboard) opt out.
-	 */
-	onToggleReaction?: (messageId: string, emoji: string) => void;
 	onWorkflowResume?: (runId: string, payload: string) => Promise<unknown>;
 	previewResolvers?: LinkPreviewResolvers;
-	/**
-	 * Reaction buckets keyed by message id, in Core's first-reaction order.
-	 * Ordering is preserved rather than re-sorted so a chip row does not reshuffle
-	 * under the reader's cursor as counts change.
-	 */
-	reactionsByMessage?: ReadonlyMap<string, readonly MessageReactionBucket[]>;
 	showCopyToolbar?: boolean;
 	slots?: {
 		UserMessage?: React.ComponentType<{
@@ -305,10 +334,11 @@ export interface MessageListProps {
 			enableImagePreview?: boolean;
 			editing?: boolean;
 			mentionItems?: MentionItem[];
+			onOpenMention?: (item: MentionItem) => void;
 			onEditSubmit?: (text: string) => void;
 			onEditCancel?: () => void;
 		}>;
-	ToolRenderer?: React.ComponentType<ToolRendererProps>;
+		ToolRenderer?: React.ComponentType<ToolRendererProps>;
 	};
 	status: ChatStatus;
 	suppressQuestionTool?: boolean;
@@ -392,9 +422,9 @@ function getLastAssistantHasContent(
 type PlanningActivity = "thinking" | "working" | "typing";
 
 const PLANNING_LABELS: Record<PlanningActivity, string> = {
-	thinking: "Thinking",
-	working: "Working",
-	typing: "Typing",
+	thinking: "Assistant is thinking",
+	working: "Assistant is working",
+	typing: "Assistant is typing",
 };
 
 /**
@@ -846,45 +876,17 @@ function getTextFromParts(parts: unknown[], joiner: string): string {
 		.join(joiner);
 }
 
-/** Collect unique file paths touched by Edit/Write/Read tool parts in a turn. */
+/** Collect the edit summary used by the message-navigation preview rail. */
 function getChangedFilesFromParts(parts: unknown[]): ChatTocFileChange[] {
-	const seen = new Set<string>();
-	const files: ChatTocFileChange[] = [];
-	for (const part of parts) {
-		if (!isV5ToolPart(part)) {
-			continue;
-		}
-		// Read once into a local and let `typeof` narrow it, instead of testing
-		// one cast and then re-asserting a second, incompatible one — the old
-		// `part as { toolName: string }` did not overlap `ToolPartBase` at all.
-		const rawToolName = (part as { toolName?: unknown }).toolName;
-		const toolName =
-			typeof rawToolName === "string"
-				? rawToolName
-				: typeof part.type === "string" && part.type.startsWith("tool-")
-					? part.type.slice("tool-".length)
-					: "";
-		if (!/^(Edit|Write|Read)$/i.test(toolName)) {
-			continue;
-		}
-		const input = isRecord((part as { input?: unknown }).input)
-			? (part as { input: Record<string, unknown> }).input
-			: {};
-		const output = (part as { output?: unknown }).output;
-		const pathRaw =
-			typeof input.file_path === "string"
-				? input.file_path
-				: isRecord(output) && typeof output.path === "string"
-					? output.path
-					: null;
-		if (!pathRaw || seen.has(pathRaw)) {
-			continue;
-		}
-		seen.add(pathRaw);
-		const name = pathRaw.split(/[\\/]/).pop() ?? pathRaw;
-		files.push({ name });
-	}
-	return files;
+	return deriveEditedFiles(parts).map((file) => {
+		const stats = [
+			file.insertions > 0 ? `+${formatCount(file.insertions) ?? "0"}` : "",
+			file.deletions > 0 ? `-${formatCount(file.deletions) ?? "0"}` : "",
+		]
+			.filter(Boolean)
+			.join(" ");
+		return { name: file.path, stats: stats || undefined };
+	});
 }
 
 const MAX_PREVIEW_FILES = 4;
@@ -1030,14 +1032,14 @@ function CopyButton({
 	);
 }
 
-// Restore a checkpoint: forks a new chat from this point (history up to and
+// Fork a chat from this point (history up to and
 // including this message is copied), leaving the original thread intact. The
 // bookmark affordance mirrors the AI SDK "Checkpoint" element over Ryu's
 // existing non-destructive fork.
 function BranchButton({ onBranch }: { onBranch: () => void }) {
 	return (
 		<Button
-			aria-label="Restore checkpoint"
+			aria-label="Fork chat from here"
 			className={cn("size-6 rounded-md opacity-50 hover:opacity-100")}
 			onClick={onBranch}
 			onMouseDown={(event) => event.stopPropagation()}
@@ -1046,7 +1048,7 @@ function BranchButton({ onBranch }: { onBranch: () => void }) {
 			}}
 			size="icon"
 			tabIndex={-1}
-			title="Restore checkpoint (branch a new chat from here)"
+			title="Fork chat from here"
 			type="button"
 			variant="ghost"
 		>
@@ -1208,30 +1210,6 @@ function VersionPager({
 // (toggle); the lit state is driven by `rating` (persisted server-side), so it
 // survives reloads. The vote seeds the learning + memory sinks in Core.
 type FeedbackRating = "up" | "down";
-
-/** A presentational per-message toolbar action contributed by an enabled plugin
- *  (`contributes.message_actions`), as served by `GET /api/plugins/contributions`
- *  and tagged with its owning `plugin`. Blocks stays presentational: the shell
- *  resolves the feed and passes resolved actions in; blocks never fetches. */
-export interface ContributedMessageAction {
-	/** Capability the shell dispatches when the action fires (never inline code). */
-	capability?: string;
-	icon?: string;
-	id: string;
-	kind: string;
-	label: string;
-	/** The owning plugin's manifest id (tagged by Core). */
-	plugin: string;
-	/** For `toggle-group`: `{ value, label, icon?, active_icon? }[]`. */
-	states?: {
-		active_icon?: string;
-		icon?: string;
-		label: string;
-		value: string;
-	}[];
-	/** Which messages the action attaches to (`assistant` | `user` | `any`). */
-	target: string;
-}
 
 /** One state button of a contributed `toggle-group` message action. Rendered
  *  exactly like the built-in thumbs: the active state is lit by `activeValue` and
@@ -1611,6 +1589,7 @@ function OpenAtBottom({
 export const MessageList = memo(function MessageList({
 	messages,
 	status,
+	answerNow,
 	className,
 	showCopyToolbar = true,
 	onBranch,
@@ -1619,11 +1598,13 @@ export const MessageList = memo(function MessageList({
 	onRegenerateMessage,
 	onRetryGeneration,
 	onFeedback,
-	onToggleReaction,
-	reactionsByMessage,
 	feedback,
 	historyNotice,
+	historyNotices,
+	hasOlderMessages,
+	loadingOlderMessages,
 	messageActions,
+	messageActionStates,
 	onContributedMessageAction,
 	onSelectVersion,
 	versions,
@@ -1631,6 +1612,7 @@ export const MessageList = memo(function MessageList({
 	onQuote,
 	onOpenFile,
 	onOpenLink,
+	onOpenMention,
 	onWorkflowResume,
 	previewResolvers,
 	mentionItems,
@@ -1639,6 +1621,7 @@ export const MessageList = memo(function MessageList({
 	enableImagePreview = true,
 	assistantAvatar,
 	assistantName,
+	assistantTitle,
 	assistantPlanningAvatars,
 	agentMessageContext,
 	currentUser,
@@ -1647,6 +1630,7 @@ export const MessageList = memo(function MessageList({
 	toolRenderers,
 	contextSize,
 	conversationKey,
+	onLoadOlderMessages,
 }: MessageListProps) {
 	const [activeCopyId, setActiveCopyId] = useState<string | null>(null);
 	// Which user message is currently in inline-edit mode (null = none).
@@ -1668,10 +1652,85 @@ export const MessageList = memo(function MessageList({
 		openAtBottom,
 		pinUserMessage,
 	} = useChatDisplayPrefs();
+	const followOutput = openAtBottom && initialScrollBehavior !== "top";
+	const followingRef = useRef(true);
+	const unreadStateRef = useRef<UnreadMessageState | null>(null);
+	const unreadMarkerRef = useRef<HTMLDivElement | null>(null);
+	const preserveUnreadBoundaryRef = useRef(false);
+	const [unreadMessageIds, setUnreadMessageIds] = useState<string[]>([]);
+	const clearUnreadBoundaryPreservation = useCallback(() => {
+		preserveUnreadBoundaryRef.current = false;
+	}, []);
 	// A narrow surface (island mini-chat, companion popover) renders the same
-	// parts, just without the aids that need width: no centring column, tighter
-	// padding, no TOC, no pinned user bar.
+	// parts with tighter padding. The shared preview rail remains available; its
+	// own overflow behavior collapses it to a popover when the surface is narrow.
 	const isCompact = density === "compact";
+
+	const clearUnreadMessages = useCallback(() => {
+		const state = unreadStateRef.current;
+		if (!state || state.unreadIds.length === 0) {
+			return;
+		}
+		unreadStateRef.current = clearUnreadMessageState(state);
+		setUnreadMessageIds([]);
+	}, []);
+
+	const handleFollowChange = useCallback(
+		(next: boolean) => {
+			if (next && preserveUnreadBoundaryRef.current) {
+				return;
+			}
+			followingRef.current = next;
+			setFollowing(next);
+			if (next) {
+				clearUnreadMessages();
+			}
+		},
+		[clearUnreadMessages]
+	);
+	const olderLoadInFlightRef = useRef(false);
+	const handleViewportScroll = useCallback(
+		(event: React.UIEvent<HTMLElement>) => {
+			const viewport = event.currentTarget;
+			if (
+				!(onLoadOlderMessages && hasOlderMessages) ||
+				loadingOlderMessages ||
+				viewport.scrollTop > 96 ||
+				olderLoadInFlightRef.current
+			) {
+				return;
+			}
+			olderLoadInFlightRef.current = true;
+			const previousHeight = viewport.scrollHeight;
+			const previousTop = viewport.scrollTop;
+			void onLoadOlderMessages()
+				.then(() => {
+					const restoreScrollAnchor = (framesRemaining: number) => {
+						if (!viewport.isConnected || framesRemaining <= 0) {
+							return;
+						}
+						viewport.scrollTop =
+							previousTop + viewport.scrollHeight - previousHeight;
+						window.requestAnimationFrame(() =>
+							restoreScrollAnchor(framesRemaining - 1)
+						);
+					};
+					window.requestAnimationFrame(() => restoreScrollAnchor(8));
+				})
+				.finally(() => {
+					olderLoadInFlightRef.current = false;
+				});
+		},
+		[hasOlderMessages, loadingOlderMessages, onLoadOlderMessages]
+	);
+
+	useEffect(() => {
+		followingRef.current = followOutput;
+		setFollowing(followOutput);
+		if (followOutput) {
+			clearUnreadMessages();
+		}
+	}, [clearUnreadMessages, followOutput]);
 
 	const { pinnedMessage, registerAnchor, scrollToPinned } =
 		usePinnedUserMessage({
@@ -1679,36 +1738,6 @@ export const MessageList = memo(function MessageList({
 			messages,
 			scrollerRef,
 		});
-
-	// Publish the pinned bar's measured height to the scroller root as
-	// `--chat-pin-bar-h`, so the floating date chip can sit UNDER the bar instead
-	// of in a fixed lane above it.
-	//
-	// Measured rather than hard-coded because the bar is 1–3 lines of the pinned
-	// message, so its height moves with the message. Written straight to the DOM
-	// with no React state on purpose: this component's scroll bookkeeping is what
-	// produced the React #185 update loop the comments below keep warning about,
-	// and a setState driven by a ResizeObserver is exactly the shape of that bug.
-	// A CSS variable re-styles the chip without re-rendering anything.
-	const pinBarRef = useRef<HTMLDivElement>(null);
-	useLayoutEffect(() => {
-		const root = scrollerRef.current;
-		if (!root) {
-			return;
-		}
-		const bar = pinBarRef.current;
-		if (!bar) {
-			root.style.setProperty("--chat-pin-bar-h", "0px");
-			return;
-		}
-		const measure = () => {
-			root.style.setProperty("--chat-pin-bar-h", `${bar.offsetHeight}px`);
-		};
-		measure();
-		const observer = new ResizeObserver(measure);
-		observer.observe(bar);
-		return () => observer.disconnect();
-	}, [pinnedMessage?.id, pinUserMessage, isCompact]);
 
 	const CustomUserMessage = slots?.UserMessage || UserMessage;
 	const CustomToolRenderer = slots?.ToolRenderer || DefaultToolRenderer;
@@ -1735,13 +1764,105 @@ export const MessageList = memo(function MessageList({
 		() => normalizeMessages(messages),
 		[messages]
 	);
+	const conversationStateKey =
+		conversationKey ?? normalizedMessages[0]?.id ?? null;
+	useEffect(() => {
+		const nextState = reconcileUnreadMessageState(
+			unreadStateRef.current,
+			conversationStateKey,
+			getIncomingMessageIds(normalizedMessages),
+			followingRef.current && !preserveUnreadBoundaryRef.current
+		);
+		unreadStateRef.current = nextState;
+		setUnreadMessageIds((current) => {
+			if (
+				current.length === nextState.unreadIds.length &&
+				current.every((id, index) => id === nextState.unreadIds[index])
+			) {
+				return current;
+			}
+			return [...nextState.unreadIds];
+		});
+	}, [conversationStateKey, normalizedMessages]);
+
+	const unreadMessageIdSet = useMemo(
+		() => new Set(unreadMessageIds),
+		[unreadMessageIds]
+	);
+	const firstUnreadMessageId = useMemo(
+		() =>
+			normalizedMessages.find(
+				(message) =>
+					message.role === "assistant" && unreadMessageIdSet.has(message.id)
+			)?.id ?? null,
+		[normalizedMessages, unreadMessageIdSet]
+	);
+	const unreadMessageCount = unreadMessageIds.length;
+	const unreadMessageLabel = getUnreadMessageLabel(unreadMessageCount);
+
+	useEffect(() => {
+		if (!(unreadMessageCount > 0 && firstUnreadMessageId)) {
+			return;
+		}
+		const marker = unreadMarkerRef.current;
+		const viewport = viewportRef.current;
+		if (!(marker && viewport)) {
+			return;
+		}
+		const clearAtUnreadBoundary = () => {
+			if (preserveUnreadBoundaryRef.current) {
+				return;
+			}
+			clearUnreadMessages();
+			// Reaching the marker is not the same as choosing the live edge. The
+			// browser may place a marker near the end of a short transcript at the
+			// bottom when it is revealed; keep the latest-message affordance visible
+			// until the reader explicitly follows the newest reply.
+			if (followingRef.current) {
+				followingRef.current = false;
+				setFollowing(false);
+			}
+			preserveUnreadBoundaryRef.current = true;
+		};
+
+		const clearWhenVisible = () => {
+			const markerRect = marker.getBoundingClientRect();
+			const viewportRect = viewport.getBoundingClientRect();
+			if (
+				markerRect.top < viewportRect.bottom &&
+				markerRect.bottom > viewportRect.top
+			) {
+				clearAtUnreadBoundary();
+			}
+		};
+
+		const observer =
+			typeof IntersectionObserver === "undefined"
+				? null
+				: new IntersectionObserver(
+						(entries) => {
+							if (entries.some((entry) => entry.isIntersecting)) {
+								clearAtUnreadBoundary();
+							}
+						},
+						{ root: viewport, threshold: 0.1 }
+					);
+		observer?.observe(marker);
+		viewport.addEventListener("scroll", clearWhenVisible, { passive: true });
+		clearWhenVisible();
+
+		return () => {
+			observer?.disconnect();
+			viewport.removeEventListener("scroll", clearWhenVisible);
+		};
+	}, [clearUnreadMessages, firstUnreadMessageId, unreadMessageCount]);
 	const planningLabel =
 		PLANNING_LABELS[getPlanningActivity(normalizedMessages)];
 	// Who is on the turn, drawn in the row's leading slot. Several agents overlap
 	// slightly (`-space-x-1`) so three marks still read as one group rather than a
 	// row of loose icons; a single agent is unaffected by the negative margin.
 	// `undefined` (not an empty node) when there is nothing to draw, so the
-	// planning row leads with the shimmer label alone.
+	// planning row leads with the typing indicator alone.
 	const planningMarks = (
 		assistantPlanningAvatars?.length
 			? assistantPlanningAvatars
@@ -2023,16 +2144,40 @@ export const MessageList = memo(function MessageList({
 					isCompact ? "px-0.5 py-1" : "mx-auto max-w-[744px] px-3 py-6"
 				)}
 				contentProps={{ "data-slot": "message-scroller-content" }}
-				followOutput={openAtBottom && initialScrollBehavior !== "top"}
+				followOutput={followOutput}
 				label="Conversation"
-				navigation={isCompact ? undefined : "rail"}
-				onFollowChange={setFollowing}
+				navigation="rail"
+				onFollowChange={handleFollowChange}
 				railItems={railItems}
 				renderPreview={(item) => <ChatRailPreview item={item} />}
+				showScrollToLatest={false}
+				showUnreadMessages={false}
 				smooth
-				viewportProps={{ "data-slot": "message-scroller-viewport" }}
+				viewportProps={{
+					"data-slot": "message-scroller-viewport",
+					onKeyDown: (event) => {
+						if (["ArrowDown", "End", "PageDown"].includes(event.key)) {
+							clearUnreadBoundaryPreservation();
+						}
+					},
+					onScroll: handleViewportScroll,
+					onTouchStart: clearUnreadBoundaryPreservation,
+					onWheel: clearUnreadBoundaryPreservation,
+				}}
 				viewportRef={viewportRef}
 			>
+				{hasOlderMessages ? (
+					<div
+						aria-busy={loadingOlderMessages}
+						aria-live="polite"
+						className="mx-auto w-full max-w-[744px] px-3 py-2 text-center text-muted-foreground text-xs"
+						data-older-messages-loader
+					>
+						{loadingOlderMessages
+							? "Loading older messages…"
+							: "Scroll up for older messages"}
+					</div>
+				) : null}
 				{pinUserMessage && !isCompact && pinnedMessage ? (
 					// `data-slot` is load-bearing: the pin bar sits IN FLOW, so
 					// mounting it pushes every anchor below it down by its own
@@ -2040,22 +2185,17 @@ export const MessageList = memo(function MessageList({
 					// release hysteresis that stops the bar un-electing its own
 					// anchor (see PIN_RELEASE_SLACK).
 					//
-					// `top-0`: the bar owns the TOP lane, and the floating date chip
-					// now paints below it (see `pinBarRef` for how the chip learns
-					// this bar's height). It used to be the other way round —
-					// `top-9`, reserving 36px above for the chip — which put the
-					// chip in the topmost band of the transcript, where it collided
-					// with the tab bar and read as chrome rather than as part of the
-					// conversation.
+					// `top-9` reserves the fixed date-chip lane above the bar. The
+					// bar remains in flow so its measured height continues to drive
+					// pin-election hysteresis without moving the floating chip.
 					//
 					// It MUST be a sticky top offset and NOT padding — an offset
 					// only moves where the bar paints, whereas padding would change
 					// its offsetHeight, which is the very number PINNED_BAR_SLOT /
 					// PIN_RELEASE_SLACK measure.
 					<div
-						className="sticky top-0 z-20 -mb-1"
+						className="sticky top-9 z-20 -mb-1"
 						data-slot="pinned-user-message-bar"
-						ref={pinBarRef}
 					>
 						<div className="mx-auto w-full max-w-[744px] px-3 pt-2 pb-1">
 							<PinnedUserMessageBar
@@ -2096,6 +2236,9 @@ export const MessageList = memo(function MessageList({
 					const groupPosition = userRunPositions[turnIndex] ?? "single";
 					const continuesRun =
 						groupPosition === "middle" || groupPosition === "last";
+					const hasUnreadMessage = turn.assistantMsgs.some(
+						(msg) => msg.id === firstUnreadMessageId
+					);
 
 					return (
 						// A Fragment, NOT a wrapper element: the separator and the
@@ -2128,12 +2271,28 @@ export const MessageList = memo(function MessageList({
 										}
 										const userCopyKey = `user-${turn.userMsg.id}`;
 										const userCopyVisible = activeCopyId === userCopyKey;
+										const goalAnnotation = isGoalMessage(turn.userMsg) ? (
+											<GoalMessageAnnotation />
+										) : null;
 										// Only render the toolbar when it has content — copy
 										// button (gated by showCopyToolbar).
 										// Otherwise a 28px-tall empty row inflates the gap to the
 										// assistant reply.
 										const showUserToolbar = showCopyToolbar && Boolean(text);
 										const userMsgId = turn.userMsg.id;
+										const userActions = messageActions?.filter(
+											(a) => a.target === "user" || a.target === "any"
+										);
+										const userToolbarActions = userActions?.filter(
+											(a) => !isMessageReactionAction(a)
+										);
+										const onContributedActionUser = onContributedMessageAction
+											? (action: ContributedMessageAction, value?: string) =>
+													onContributedMessageAction(action, {
+														messageId: userMsgId,
+														value,
+													})
+											: undefined;
 										const userVersion = versions?.[userMsgId];
 										const isEditingThis = editingId === userMsgId;
 										return (
@@ -2156,25 +2315,35 @@ export const MessageList = memo(function MessageList({
 													// a left edge with the assistant toolbar for turns whose
 													// bubble spans the column.
 													actions={
-														!isEditingThis && showUserToolbar ? (
-															<MessageToolbar
-																alignClass="justify-start"
-																heightClass="h-[28px]"
-																hoverClass="group-hover/user-message:opacity-100 group-hover/user-message:pointer-events-auto"
-																isVisible={userCopyVisible}
-																onBranch={
-																	onBranch
-																		? () => onBranch(userMsgId)
-																		: undefined
-																}
-																onCopied={() => markCopied(userCopyKey)}
-																onEdit={
-																	onEditMessage && text
-																		? () => setEditingId(userMsgId)
-																		: undefined
-																}
-																text={showCopyToolbar ? text : ""}
-															/>
+														!isEditingThis &&
+														(showUserToolbar || goalAnnotation) ? (
+															<div className="flex items-center gap-2">
+																{showUserToolbar && (
+																	<MessageToolbar
+																		alignClass="justify-start"
+																		contributedActions={userToolbarActions}
+																		heightClass="h-[28px]"
+																		hoverClass="group-hover/user-message:opacity-100 group-hover/user-message:pointer-events-auto"
+																		isVisible={userCopyVisible}
+																		onBranch={
+																			onBranch
+																				? () => onBranch(userMsgId)
+																				: undefined
+																		}
+																		onContributedAction={
+																			onContributedActionUser
+																		}
+																		onCopied={() => markCopied(userCopyKey)}
+																		onEdit={
+																			onEditMessage && text
+																				? () => setEditingId(userMsgId)
+																				: undefined
+																		}
+																		text={showCopyToolbar ? text : ""}
+																	/>
+																)}
+																{goalAnnotation}
+															</div>
 														) : null
 													}
 													className={classNames?.userMessage}
@@ -2184,6 +2353,13 @@ export const MessageList = memo(function MessageList({
 													groupPosition={groupPosition}
 													mentionItems={mentionItems}
 													message={turn.userMsg}
+													messageActionState={messageActionStates?.get(
+														userMsgId
+													)}
+													messageActions={userActions}
+													onContributedMessageAction={
+														onContributedMessageAction
+													}
 													onEditCancel={() => setEditingId(null)}
 													onEditSubmit={(next: string) => {
 														setEditingId(null);
@@ -2191,17 +2367,8 @@ export const MessageList = memo(function MessageList({
 													}}
 													onOpenFile={onOpenFile}
 													onOpenLink={onOpenLink}
-													onToggleReaction={
-														onToggleReaction
-															? (emoji: string) =>
-																	onToggleReaction(userMsgId, emoji)
-															: undefined
-													}
+													onOpenMention={onOpenMention}
 													previewResolvers={previewResolvers}
-													// A message still carrying its client-generated id
-													// cannot take a reaction: Core 404s it by design.
-													reactable={isServerAssignedMessageId(userMsgId)}
-													reactions={reactionsByMessage?.get(userMsgId)}
 												/>
 												{!isEditingThis &&
 													userVersion &&
@@ -2226,13 +2393,20 @@ export const MessageList = memo(function MessageList({
 									// own message (or the planning row) — see the
 									// filter above.
 									!assistantHiddenTurns.has(turn) &&
-									!(isLastTurn && showPlanning) &&
+									!(isLastTurn && showPlanning && !hasUnreadMessage) &&
 									(() => {
+										const assistantParts = turn.assistantMsgs.flatMap(
+											(msg) => msg.parts ?? []
+										);
 										const assistantText = getTextFromParts(
-											turn.assistantMsgs.flatMap((msg) => msg.parts ?? []),
+											assistantParts,
 											"\n\n"
 										);
 										const isTurnStreaming = isStreaming && isLastTurn;
+										const turnEndCards = deriveTurnEndCards(
+											assistantParts,
+											turnKey
+										);
 										// Only reserve toolbar height when there's actually
 										// something to show in it. With showCopyToolbar=false the
 										// toolbar would otherwise render as a 48px-tall empty box,
@@ -2281,11 +2455,17 @@ export const MessageList = memo(function MessageList({
 										// filtered to `assistant`/`any` targets (the shell resolved the
 										// feed; blocks stays presentational).
 										const assistantActions = messageActions?.filter(
-											(a) => a.target === "assistant" || a.target === "any"
+											(a) =>
+												(a.target === "assistant" || a.target === "any") &&
+												!isMessageReactionAction(a)
 										);
 										const onContributedActionTurn = onContributedMessageAction
 											? (action: ContributedMessageAction, value?: string) =>
-													onContributedMessageAction(action, value)
+													branchMsgId &&
+													onContributedMessageAction(action, {
+														messageId: branchMsgId,
+														value,
+													})
 											: undefined;
 										const assistantVersion = branchMsgId
 											? versions?.[branchMsgId]
@@ -2304,6 +2484,7 @@ export const MessageList = memo(function MessageList({
 													{assistantName ? (
 														<MessageHeader className="gap-2 px-0">
 															<span>{assistantName}</span>
+															<AgentTitleBadge title={assistantTitle ?? ""} />
 															{assistantTimestamp && (
 																<TooltipProvider delay={0}>
 																	<Tooltip>
@@ -2337,26 +2518,56 @@ export const MessageList = memo(function MessageList({
 																isLastTurn &&
 																i === turn.assistantMsgs.length - 1;
 															return (
-																<AssistantParts
-																	isLast={isLastMsg}
-																	isStreaming={isStreaming}
-																	key={msg.id}
-																	mentionItems={mentionItems}
-																	msg={msg}
-																	onAgentUiSubmit={onAgentUiSubmit}
-																	onOpenFile={onOpenFile}
-																	onOpenLink={onOpenLink}
-																	onRetryGeneration={onRetryGeneration}
-																	onWorkflowResume={onWorkflowResume}
-																	previewResolvers={previewResolvers}
-																	suppressQuestionTool={suppressQuestionTool}
-																	ToolRendererComponent={CustomToolRenderer}
-																	agentMessageContext={agentMessageContext}
-																	toolRenderers={toolRenderers}
-																/>
+																<Fragment key={msg.id}>
+																	{msg.id === firstUnreadMessageId ? (
+																		<div
+																			data-slot="unread-message-marker"
+																			ref={unreadMarkerRef}
+																		>
+																			<Marker
+																				aria-label={unreadMessageLabel}
+																				className="my-1 text-primary before:bg-primary/30 after:bg-primary/30"
+																				role="status"
+																				variant="separator"
+																			>
+																				<MarkerIcon>
+																					<span className="size-2 rounded-full bg-primary" />
+																				</MarkerIcon>
+																				<MarkerContent>
+																					{unreadMessageLabel}
+																				</MarkerContent>
+																			</Marker>
+																		</div>
+																	) : null}
+																	<AssistantParts
+																		agentMessageContext={agentMessageContext}
+																		deferTurnEndCards={!isTurnStreaming}
+																		isLast={isLastMsg}
+																		isStreaming={isStreaming}
+																		mentionItems={mentionItems}
+																		msg={msg}
+																		onAgentUiSubmit={onAgentUiSubmit}
+																		onOpenFile={onOpenFile}
+																		onOpenLink={onOpenLink}
+																		onOpenMention={onOpenMention}
+																		onRetryGeneration={onRetryGeneration}
+																		onWorkflowResume={onWorkflowResume}
+																		previewResolvers={previewResolvers}
+																		suppressQuestionTool={suppressQuestionTool}
+																		ToolRendererComponent={CustomToolRenderer}
+																		toolRenderers={toolRenderers}
+																	/>
+																</Fragment>
 															);
 														})}
 													</div>
+													{!isTurnStreaming && turnEndCards.length > 0 ? (
+														<TurnEndCards
+															cards={turnEndCards}
+															onAgentUiSubmit={onAgentUiSubmit}
+															onOpenFile={onOpenFile}
+														/>
+													) : null}
 													{turnInterrupted ? (
 														// The turn the node died in the middle of. Driven by
 														// `_interrupted` — server-stamped and reconciled at Core boot —
@@ -2365,7 +2576,10 @@ export const MessageList = memo(function MessageList({
 														// trailing text part, so a crash notice was indistinguishable
 														// from something the agent wrote, came along when you copied the
 														// reply, and had to be pattern-matched back out on resume.
-														<Marker className="pt-0.5 text-destructive">
+														<Marker
+															className="pt-0.5 text-destructive"
+															variant="separator"
+														>
 															<MarkerIcon>
 																<HugeiconsIcon
 																	icon={Alert02Icon}
@@ -2464,36 +2678,42 @@ export const MessageList = memo(function MessageList({
 								{isLastTurn && showPlanning && (
 									<div className="flex items-center gap-2 py-0.5">
 										{planningLeading}
-										<ReasoningText
-											className="text-sm"
-											indicator={null}
-											interval={2600}
-											phrases={[planningLabel]}
-											variant="swap"
-										/>
+										<TypingIndicator label={planningLabel} />
 									</div>
 								)}
+								{isLastTurn && answerNow ? (
+									<div
+										className={cn("flex", planningLeading ? "pl-6" : undefined)}
+									>
+										<AnswerNowButton control={answerNow} />
+									</div>
+								) : null}
 							</div>
 						</Fragment>
 					);
 				})}
-				{historyNotice ? (
+				{[
+					...(historyNotices ?? []),
+					...(historyNotice ? [historyNotice] : []),
+				].map((notice) => (
 					// A thread-level notice, not a turn-level one, so it is the LAST
 					// direct child of Content rather than part of any message. No
 					// `messageId` and no scroll anchor, so it can never become the
 					// scroll target and steal the jump from the user's next question —
 					// the same rule the date separators follow.
-					<Marker className="mt-2 shrink-0 py-1" key={historyNotice.id}>
+					<Marker
+						className="mt-2 shrink-0 py-1"
+						key={notice.id}
+						variant="separator"
+					>
 						<MarkerIcon>
 							<HugeiconsIcon icon={InformationCircleIcon} strokeWidth={2} />
 						</MarkerIcon>
 						<MarkerContent>
-							<span className="font-medium">{historyNotice.title}</span>
-							{historyNotice.description ? (
-								<span> {historyNotice.description}</span>
-							) : null}
+							<span className="font-medium">{notice.title}</span>
+							{notice.description ? <span> {notice.description}</span> : null}
 						</MarkerContent>
-						{historyNotice.actions?.map((action) => (
+						{notice.actions?.map((action) => (
 							<button
 								className="shrink-0 underline underline-offset-3 hover:text-foreground"
 								key={action.label}
@@ -2504,7 +2724,7 @@ export const MessageList = memo(function MessageList({
 							</button>
 						))}
 					</Marker>
-				) : null}
+				))}
 			</BeuiMessageScroller>
 			{/* The scrolled-up escape hatch: beUI keeps following output only while
 			    the reader stays at the live edge, so once they scroll up there is no
@@ -2512,9 +2732,15 @@ export const MessageList = memo(function MessageList({
 			    and returns to the newest message. `onFollowChange` drives it. */}
 			{isCompact || following ? null : (
 				<Button
-					aria-label="Scroll to end"
-					className="absolute inset-x-0 bottom-3 z-30 mx-auto flex h-8 w-8 items-center justify-center rounded-full border border-border bg-background/85 text-muted-foreground shadow-sm backdrop-blur-sm transition-colors hover:text-foreground"
+					aria-label={`Scroll to latest${unreadMessageCount > 0 ? `, ${unreadMessageLabel}` : ""}`}
+					className={cn(
+						"absolute bottom-3 left-1/2 z-30 flex h-8 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background/85 text-muted-foreground shadow-sm backdrop-blur-sm transition-colors hover:text-foreground",
+						unreadMessageCount > 0
+							? "max-w-[calc(100%-1.5rem)] gap-1.5 px-3"
+							: "w-8"
+					)}
 					onClick={() => {
+						preserveUnreadBoundaryRef.current = false;
 						const viewport = viewportRef.current;
 						if (!viewport) {
 							return;
@@ -2528,7 +2754,7 @@ export const MessageList = memo(function MessageList({
 							viewport.scrollTop = viewport.scrollHeight;
 						}
 					}}
-					size="icon"
+					size={unreadMessageCount > 0 ? "sm" : "icon"}
 					type="button"
 					variant="ghost"
 				>
@@ -2542,7 +2768,13 @@ export const MessageList = memo(function MessageList({
 					) : (
 						<HugeiconsIcon icon={ArrowDown02Icon} strokeWidth={2} />
 					)}
-					<span className="sr-only">Scroll to end</span>
+					{unreadMessageCount > 0 ? (
+						<span className="truncate text-xs tabular-nums">
+							{unreadMessageLabel}
+						</span>
+					) : (
+						<span className="sr-only">Scroll to latest</span>
+					)}
 				</Button>
 			)}
 			{/* FloatingDateHeader is OUT OF FLOW BY CONSTRUCTION — it absolutely
@@ -2587,12 +2819,14 @@ function AssistantParts({
 	toolRenderers = NO_TOOL_RENDERERS,
 	onOpenFile,
 	onOpenLink,
+	onOpenMention,
 	mentionItems,
 	previewResolvers,
 	onRetryGeneration,
 	onWorkflowResume,
 	onAgentUiSubmit,
 	agentMessageContext,
+	deferTurnEndCards,
 }: {
 	agentMessageContext?: AgentMessageContext;
 	msg: UIMessage;
@@ -2603,11 +2837,13 @@ function AssistantParts({
 	toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
 	onOpenFile?: (path: string) => void;
 	onOpenLink?: (url: string) => void;
+	onOpenMention?: (item: MentionItem) => void;
 	mentionItems?: MentionItem[];
 	previewResolvers?: LinkPreviewResolvers;
 	onRetryGeneration?: MessageListProps["onRetryGeneration"];
 	onWorkflowResume?: MessageListProps["onWorkflowResume"];
 	onAgentUiSubmit?: MessageListProps["onAgentUiSubmit"];
+	deferTurnEndCards: boolean;
 }) {
 	const { expandCommands, expandFileEdits, groupToolUses, hideToolDetail } =
 		useChatDisplayPrefs();
@@ -2615,6 +2851,7 @@ function AssistantParts({
 		() => normalizeAssistantToolParts(msg.parts ?? []) as unknown[],
 		[msg.parts]
 	);
+	const editedFiles = useMemo(() => deriveEditedFiles(parts), [parts]);
 
 	const { elements } = useMemo(() => {
 		// Each part is tagged as prose or not, because only the PROSE runs get a
@@ -2696,6 +2933,16 @@ function AssistantParts({
 		while (i < parts.length) {
 			const part = parts[i]!;
 
+			if (
+				deferTurnEndCards &&
+				((editedFiles.length > 0 && isEditedFilePart(part)) ||
+					isTurnEndArtifactPart(part) ||
+					isTurnEndJsonRenderPart(part))
+			) {
+				i++;
+				continue;
+			}
+
 			if (isV5ToolPart(part) && part.type === "tool-TaskOutput") {
 				i++;
 				continue;
@@ -2761,6 +3008,7 @@ function AssistantParts({
 								mentionItems={mentionItems}
 								onOpenFile={onOpenFile}
 								onOpenLink={onOpenLink}
+								onOpenMention={onOpenMention}
 								previewResolvers={previewResolvers}
 							/>
 						</BubbleContent>,
@@ -3070,9 +3318,12 @@ function AssistantParts({
 		onRetryGeneration,
 		onOpenFile,
 		onOpenLink,
+		onOpenMention,
 		onWorkflowResume,
 		previewResolvers,
 		mentionItems,
+		deferTurnEndCards,
+		editedFiles,
 	]);
 
 	// Nothing to draw for this message — return null, not an empty div. Inside

@@ -1,12 +1,12 @@
 import {
-	BubbleChatIcon,
-	CpuIcon,
 	DatabaseIcon,
 	GitBranchIcon,
-	PuzzleIcon,
+	LayerIcon,
+	PlugSocketIcon,
 	Store01Icon,
+	Tv01Icon,
 	Wallet01Icon,
-	WorkflowSquare01Icon,
+	WorkflowCircle06Icon,
 	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
@@ -50,19 +50,19 @@ export default function SettingsPage() {
 		{
 			onClick: () => openTab("/library/channel", { title: "Channels" }),
 			label: "Channels",
-			icon: BubbleChatIcon,
+			icon: Tv01Icon,
 			description: "Connect Telegram, Slack, WhatsApp, and Discord bots",
 		},
 		{
 			to: "/engines",
 			label: "Engines",
-			icon: CpuIcon,
+			icon: LayerIcon,
 			description: "Set up AI models that run on this device",
 		},
 		{
 			to: "/apps",
 			label: "Plugins",
-			icon: PuzzleIcon,
+			icon: PlugSocketIcon,
 			description: "Installed plugins",
 		},
 	];
@@ -88,7 +88,7 @@ export default function SettingsPage() {
 		{
 			to: "/library/workflow",
 			label: "Workflows",
-			icon: WorkflowSquare01Icon,
+			icon: WorkflowCircle06Icon,
 			description: "Automate multi-step tasks, schedules, and triggers",
 		},
 		{
@@ -119,7 +119,7 @@ export default function SettingsPage() {
 
 			<section className="mb-8">
 				<h2 className="mb-4 font-medium text-muted-foreground text-sm uppercase tracking-wide">
-					Voice input
+					Voice Recognition
 				</h2>
 				<VoiceInputSettings />
 			</section>
@@ -133,7 +133,7 @@ export default function SettingsPage() {
 
 			<section className="mb-8">
 				<h2 className="mb-4 font-medium text-muted-foreground text-sm uppercase tracking-wide">
-					Text-to-speech
+					Audio
 				</h2>
 				<TtsEngineSettings />
 			</section>

@@ -31,17 +31,17 @@ const PRODUCT_HUNT_HREF = "https://www.producthunt.com/products/ryu";
 const SHOW_AWARD_BADGE = false;
 
 /**
- * Leads with the buyer's pain, not our category. Nobody wakes up wanting
- * agents — they wake up buried in paperwork nobody will sign off on. The
- * safety half of the pitch (the record, the cost ceiling) is why they are
- * ALLOWED to buy, never why they want to, so it stays out of the hero and
- * lands in the trust strip directly below it.
+ * Leads with the buyer's pain, not our category. Small teams are often capped
+ * by the work they can safely take on, not by demand. The safety half of the
+ * pitch (the record, the cost ceiling) is why they are ALLOWED to buy, never
+ * why they want to, so it stays out of the hero and lands in the trust strip
+ * directly below it.
  *
  * Two lines. Anything longer stops reading as a claim and starts reading as
  * a paragraph.
  */
 const HERO_TITLE =
-	"Secure and reliable AI agents automating critical business work 24/7";
+	"Small teams use Ryu to scale their work output without hiring";
 
 /**
  * The headline gets the same chromatic sweep every section header on this page
@@ -133,6 +133,7 @@ export default function Hero() {
 							<PageHeader
 								className="max-w-2xl whitespace-pre-line"
 								stagger={false}
+								subtitle="Hire agents, not headcount. Start with the document-heavy process that is quietly capping your team's capacity."
 								title={
 									<>
 										{HERO_TITLE_PREFIX}

@@ -399,8 +399,8 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 				case "plugin": {
 					const res = await updateInstalledPlugin(target, update.id);
 					return {
-						detail: res.installedVersion
-							? `${update.name} updated to ${res.installedVersion}.`
+						detail: res.version
+							? `${update.name} updated to ${res.version}.`
 							: `${update.name} updated.`,
 						silent: false,
 					};

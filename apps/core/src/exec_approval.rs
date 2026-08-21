@@ -10,10 +10,9 @@
 //! keeps headless (non-interactive) runs from auto-approving unscanned commands.
 //!
 //! This module lets the desktop set the gate's mode via a preference instead of
-//! requiring the env var to be exported by hand. The pref seeds the env var
-//! **once at startup** — before any request thread runs — so there is no
-//! concurrent `set_var`/`var` race. Changing the pref is therefore
-//! **restart-to-apply**, mirroring the crash-reporting / OTLP prefs.
+//! requiring the env var to be exported by hand. The pref seeds the env var at
+//! startup and owns that value for subsequent preference updates. A
+//! hand-exported env override remains authoritative.
 //!
 //! We intentionally do NOT add filesystem hooks (Claude `settings.json` /
 //! Codex `config.toml`): that would re-implement the tool gate the ACP
@@ -25,6 +24,9 @@
 /// Env var the gateway scan gate reads (`sidecar::gateway`). Kept in sync here so
 /// the pref maps onto exactly the value that module checks.
 const ENV_EXEC_APPROVAL_MODE: &str = "RYU_EXEC_APPROVAL_MODE";
+
+static PREF_OWNS_ENV: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Preferences key the desktop writes to enable/disable the command-approval
 /// gate. Value is the mode string forwarded to the gateway scan (`off` disarms;
@@ -49,6 +51,7 @@ pub fn seed_from_pref(value: &str) {
     {
         return;
     }
+    PREF_OWNS_ENV.store(true, std::sync::atomic::Ordering::Relaxed);
     let v = value.trim();
     if v.is_empty() {
         // No stored preference → leave unset; the gate's default (armed) rules.
@@ -57,6 +60,28 @@ pub fn seed_from_pref(value: &str) {
     // SAFETY: called once at startup before any other thread reads the env.
     // `off` is seeded verbatim so the user's opt-out survives the armed default.
     std::env::set_var(ENV_EXEC_APPROVAL_MODE, v);
+}
+
+/// Apply a later preference write without replacing an operator-provided env
+/// override. A node with no startup preference can claim the empty slot on the
+/// first desktop write.
+pub fn apply_from_pref(value: &str) {
+    let env_is_external = std::env::var(ENV_EXEC_APPROVAL_MODE)
+        .map(|current| {
+            !current.trim().is_empty()
+                && !PREF_OWNS_ENV.load(std::sync::atomic::Ordering::Relaxed)
+        })
+        .unwrap_or(false);
+    if env_is_external {
+        return;
+    }
+    PREF_OWNS_ENV.store(true, std::sync::atomic::Ordering::Relaxed);
+    let value = value.trim();
+    if value.is_empty() {
+        std::env::remove_var(ENV_EXEC_APPROVAL_MODE);
+    } else {
+        std::env::set_var(ENV_EXEC_APPROVAL_MODE, value);
+    }
 }
 
 #[cfg(test)]

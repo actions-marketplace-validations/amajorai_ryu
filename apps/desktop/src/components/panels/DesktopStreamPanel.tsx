@@ -16,23 +16,29 @@ import RFB from "@novnc/novnc";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
+import { clearMediaSource, publishMediaSource } from "@/src/lib/media-pip.ts";
+import { getRealtimeJwt } from "@/src/lib/realtime/jwt.ts";
 
 const DESKTOP_PLUGIN_ID = "@ryu/desktop";
 
 /** Build the noVNC WebSocket URL for the active node, mirroring `voiceWsUrl`. */
 export function desktopWsUrl(
 	url: string,
-	token: string | null
+	token: string | null,
+	jwt: string | null = null
 ): string {
 	const wsUrl = new URL("/api/ext/ws/@ryu/desktop/ws", url);
 	wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
 	if (token) {
 		wsUrl.searchParams.set("token", token);
 	}
+	if (jwt) {
+		wsUrl.searchParams.set("jwt", jwt);
+	}
 	return wsUrl.toString();
 }
 
-export function DesktopStreamPanel() {
+export function DesktopStreamPanel({ active = true }: { active?: boolean }) {
 	const { apps } = useApps();
 	const node = useActiveNode();
 	const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -40,21 +46,28 @@ export function DesktopStreamPanel() {
 	const [connected, setConnected] = useState(false);
 	const [status, setStatus] = useState<string>("idle");
 	const [error, setError] = useState<string | null>(null);
+	const sourceId = `desktop:${node.url}`;
 
-	const enabled = apps.some(
-		(a) => a.id === DESKTOP_PLUGIN_ID && a.enabled
-	);
+	const enabled = apps.some((a) => a.id === DESKTOP_PLUGIN_ID && a.enabled);
 
-	const connect = useCallback(() => {
+	const connect = useCallback(async () => {
 		if (!canvasRef.current || rfbRef.current) {
 			return;
 		}
 		setError(null);
 		setStatus("connecting");
 		try {
-			const rfb = new RFB(canvasRef.current, desktopWsUrl(node.url, node.token ?? null), {
-				credentials: {},
-			});
+			const jwt = await getRealtimeJwt();
+			if (!canvasRef.current || rfbRef.current) {
+				return;
+			}
+			const rfb = new RFB(
+				canvasRef.current,
+				desktopWsUrl(node.url, node.token ?? null, jwt),
+				{
+					credentials: {},
+				}
+			);
 			rfb.scaleViewport = true;
 			rfb.resizeSession = false;
 			rfbRef.current = rfb;
@@ -68,6 +81,7 @@ export function DesktopStreamPanel() {
 				(e: CustomEvent<{ clean?: boolean; message?: string }>) => {
 					setConnected(false);
 					setStatus("disconnected");
+					clearMediaSource(sourceId);
 					setError(
 						e.detail?.message ?? "Disconnected from the virtual desktop."
 					);
@@ -88,10 +102,10 @@ export function DesktopStreamPanel() {
 					: "Couldn't connect to the virtual desktop."
 			);
 		}
-	}, [node.url, node.token]);
+	}, [node.url, node.token, sourceId]);
 
 	useEffect(() => {
-		if (enabled && !connected && !rfbRef.current) {
+		if (enabled && active && !connected && !rfbRef.current) {
 			connect();
 		}
 		// Reconnect when the active node changes.
@@ -101,23 +115,55 @@ export function DesktopStreamPanel() {
 			setConnected(false);
 			setStatus("idle");
 		};
-	}, [enabled, node.url, node.token, connect, connected]);
+	}, [active, enabled, node.url, node.token, connect, connected]);
+
+	useEffect(() => {
+		if (!(active && connected)) {
+			if (!active) {
+				clearMediaSource(sourceId);
+			}
+			return;
+		}
+		const publishFrame = () => {
+			const canvas = canvasRef.current;
+			if (!(canvas && canvas.width > 0 && canvas.height > 0)) {
+				return;
+			}
+			try {
+				publishMediaSource({
+					id: sourceId,
+					imageUrl: canvas.toDataURL("image/jpeg", 0.76),
+					kind: "desktop",
+					title: node.name || "Remote desktop",
+				});
+			} catch {
+				// A canvas can be cleared while noVNC is tearing down. The next frame
+				// retries once the client paints again.
+			}
+		};
+		publishFrame();
+		const timer = window.setInterval(publishFrame, 350);
+		return () => window.clearInterval(timer);
+	}, [active, connected, node.name, sourceId]);
+
+	useEffect(() => {
+		return () => clearMediaSource(sourceId);
+	}, [sourceId]);
 
 	if (!enabled) {
 		return (
 			<div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-muted-foreground text-xs">
 				<p className="max-w-xs">
-					Enable the <span className="font-medium">Virtual Desktop</span> app
-					to stream this node's desktop live. Install the virtual-desktop
-					toolchain (xvfb, a window manager, tigervnc) on the node when
-					prompted.
+					Enable the <span className="font-medium">Virtual Desktop</span> app to
+					stream this node's desktop live. Install the virtual-desktop toolchain
+					(xvfb, a window manager, tigervnc) on the node when prompted.
 				</p>
 			</div>
 		);
 	}
 
 	return (
-		<div className="flex h-full flex-col">
+		<div className="flex h-full flex-col" data-live-media-source="desktop">
 			<div className="flex shrink-0 items-center gap-2 border-border/60 border-b bg-sidebar px-2 py-1.5">
 				<span className="min-w-0 flex-1 truncate text-muted-foreground text-xs">
 					{node.name}
@@ -144,12 +190,9 @@ export function DesktopStreamPanel() {
 				</button>
 			</div>
 			<div className="relative min-h-0 flex-1 bg-black">
-				<canvas
-					ref={canvasRef}
-					className="absolute inset-0 h-full w-full"
-				/>
+				<canvas className="absolute inset-0 h-full w-full" ref={canvasRef} />
 				{error && (
-					<div className="pointer-events-none absolute inset-0 flex items-center justify-center p-4 text-center text-xs text-muted-foreground">
+					<div className="pointer-events-none absolute inset-0 flex items-center justify-center p-4 text-center text-muted-foreground text-xs">
 						{error}
 					</div>
 				)}

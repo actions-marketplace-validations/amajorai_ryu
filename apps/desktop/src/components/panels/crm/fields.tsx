@@ -18,6 +18,10 @@ import {
 	NativeSelectOption,
 } from "@ryu/ui/components/native-select";
 import { Textarea } from "@ryu/ui/components/textarea";
+import {
+	formatMinorCurrency,
+	formatNumber,
+} from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import { safeHref } from "@/src/components/panels/crm/url-safety.ts";
 import type { Field, SelectOption, ValueBag } from "@/src/lib/api/crm.ts";
@@ -37,14 +41,11 @@ export const EMPTY = "—";
  *  `/ 100` with two decimals would render ¥4,200.00 for ¥420,000. */
 export function formatCents(cents: number, currency = "USD"): string {
 	try {
-		return new Intl.NumberFormat(undefined, {
-			currency,
-			style: "currency",
-		}).format(cents / 100);
+		return formatMinorCurrency(cents, currency);
 	} catch {
 		// An unknown/invalid currency code from a hand-edited field config must not
 		// take the grid down with it.
-		return `${(cents / 100).toFixed(2)} ${currency}`;
+		return `${formatNumber(cents / 100)} ${currency}`;
 	}
 }
 

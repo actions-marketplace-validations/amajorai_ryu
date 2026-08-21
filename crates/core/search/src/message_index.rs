@@ -284,6 +284,20 @@ impl MessageIndex {
         Ok(set)
     }
 
+    /// Remove every semantic message vector and its metadata.
+    ///
+    /// The message bodies remain encrypted in the conversation store. Clearing
+    /// this derived index is the destructive half of turning chat remembering
+    /// off; enabling it again can safely backfill from those retained messages.
+    pub async fn clear(&self) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute("DELETE FROM message_vectors", [])
+            .context("clearing message vectors")?;
+        conn.execute("DELETE FROM message_embeddings", [])
+            .context("clearing message embedding metadata")?;
+        Ok(())
+    }
+
     /// KNN search. Embeds `query`, runs a cosine-distance KNN over the vec0 table
     /// filtered to the *current* embedder's model (incomparable vector spaces are
     /// skipped), optionally scoping to a set of conversation ids. Returns hits
@@ -473,5 +487,29 @@ mod tests {
             .expect("reindex");
         let ids = index.indexed_ids().await.expect("ids");
         assert_eq!(ids.len(), 1, "re-index must not duplicate the row");
+    }
+
+    #[tokio::test]
+    async fn clear_removes_vectors_without_touching_the_index_schema() {
+        let index = MessageIndex::open_in_memory(test_embedder()).expect("open index");
+        let model = index.embedder().model_id().to_string();
+        let emb = index
+            .embedder()
+            .embed("remember this")
+            .await
+            .expect("embed");
+        index
+            .index_message("m1", "c1", "user", &emb, &model, 0)
+            .await
+            .expect("index");
+
+        index.clear().await.expect("clear");
+
+        assert!(index.indexed_ids().await.expect("ids").is_empty());
+        assert!(index
+            .search("remember", 5, None)
+            .await
+            .expect("search")
+            .is_empty());
     }
 }

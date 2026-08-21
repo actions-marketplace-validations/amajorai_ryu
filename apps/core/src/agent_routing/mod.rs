@@ -5,14 +5,15 @@
 //!
 //! | | what it changes | default | risk if wrong |
 //! |---|---|---|---|
-//! | **Egress routing** ([`is_gateway_routing`]) | swaps the agent's OpenAI base URL + API key to the local gateway | **OFF** (opt-in) | a subscription credential and the billing path move |
+//! | **Egress routing** ([`is_gateway_routing`]) | swaps the agent's OpenAI base URL + API key to the local gateway | **ON** until explicitly disabled | a subscription credential and the billing path move |
 //! | **Tool bridge** ([`is_tool_bridge_enabled`]) | injects Ryu's in-process MCP server into the ACP session | **ON** | none — see below |
 //!
-//! Sharing one preference meant a user who (correctly, deliberately) declined to
-//! have their credential re-pointed at the gateway ALSO silently lost every Ryu
-//! tool, which is why a freshly installed ACP agent had no tools out of the box.
+//! Sharing one preference meant a user who declined to have their credential
+//! re-pointed at the gateway ALSO silently lost every Ryu tool, which is why a
+//! freshly installed ACP agent had no tools out of the box.
 //! Splitting them is the whole point of this module's two maps: **do not** re-merge
-//! them, and do not give the bridge the egress default.
+//! them. They now have independent switches: both the tool bridge and credential
+//! egress routing default ON, with separate per-agent opt-outs.
 //!
 //! ## Why the bridge may default ON
 //!
@@ -44,14 +45,16 @@
 //! user's configured tools silently never arrive. Narrowing what any of those planes
 //! reaches is a separate, worthwhile change; it should move all three together.
 //!
-//! Egress is the opposite kind of decision: flipping it on moves a credential and
-//! changes who bills the request, so it stays opt-in per agent.
+//! Egress still moves a credential and changes who bills the request, so the UI
+//! keeps the direct-egress opt-out visible and explicit. A new or auto-installed
+//! routable ACP agent starts with Gateway-governed provider traffic. An explicit
+//! `true` or `false` entry is preserved across restarts and upgrades.
 //!
-//! That asymmetry runs all the way down to the parse failure mode. A blank or
-//! unparseable preference **clears** both maps, which means "everything OFF" for
-//! egress (fail closed: never move a credential on a parse error) and "everything
-//! ON" for the bridge (fail open: never strip a user's configured tools on a parse
-//! error). Both are the safe direction for their own gate.
+//! The independent maps still have their own parse-failure behavior. A blank or
+//! unparseable preference **clears** both maps, which means Gateway egress for
+//! routing and "everything ON" for the bridge (fail open: never strip a user's
+//! configured tools on a parse error). Both are the baseline direction for their
+//! own gate.
 //!
 //! ## Migration: none, deliberately
 //!
@@ -60,10 +63,10 @@
 //! - An agent whose old `agent-gateway-routing` entry was **true** keeps that
 //!   entry verbatim, so it keeps egress routing (it was opted into) and — because
 //!   a missing tool-bridge entry means ON — keeps its tools. Nothing lost.
-//! - An agent whose entry was **false** (or absent) still has no egress entry, so
-//!   it still gets no credential swap; it *gains* the bridge. That gain is the fix
-//!   rather than a regression, because the bridge offers only the allowlist the
-//!   user already configured (above).
+//! - An agent whose entry was **false** keeps its direct-egress opt-out and still
+//!   *gains* the bridge. An absent entry now gets Gateway egress and the bridge.
+//!   This preserves explicit choices while making the governed baseline available
+//!   until the user narrows either plane.
 //!
 //! The third case is the one worth naming because Core cannot resolve it: an
 //! existing **true** may have been set *only* to get tools, by a user who never
@@ -83,8 +86,8 @@
 //!
 //! The three first-class agents that can route through the gateway each have a
 //! dedicated config module: the managed Pi ([`crate::pi_config`], default ON),
-//! Claude Code ([`crate::claude_config`], opt-in, Anthropic passthrough) and
-//! Codex ([`crate::codex_config`], opt-in, ChatGPT-login passthrough). This
+//! Claude Code ([`crate::claude_config`], default ON, Anthropic passthrough) and
+//! Codex ([`crate::codex_config`], default ON, ChatGPT-login passthrough). This
 //! module is the *generic* equivalent for **any other ACP agent** — most
 //! importantly a BYO OpenAI-compatible agent the user added themselves
 //! (`engine = "acp-exec:<command>"`).
@@ -115,6 +118,17 @@ pub mod auto;
 pub use auto::{
     resolve_auto_agent, set_auto_config_from_json, AGENT_AUTO_ROUTING_PREF_KEY, AUTO_AGENT_ID,
 };
+
+/// Shared governed-by-default posture for new and auto-installed routable agents.
+/// An explicit `false` remains the per-agent direct-egress opt-out.
+pub const DEFAULT_GATEWAY_ROUTING: bool = true;
+
+/// Generic per-agent alias kept for the preference/API contract.
+pub const DEFAULT_AGENT_GATEWAY_ROUTING: bool = DEFAULT_GATEWAY_ROUTING;
+
+/// Shared default for the ACP tool bridge. It remains a separate preference and
+/// runtime gate, but a fresh agent gets the same broad governed baseline.
+pub const DEFAULT_AGENT_TOOL_BRIDGE: bool = DEFAULT_GATEWAY_ROUTING;
 
 /// Preferences key the desktop writes; Core loads it on startup and on change.
 /// The value is a JSON object mapping agent id → enabled boolean.
@@ -188,38 +202,47 @@ pub fn smart_route_override(agent_id: &str) -> Option<serde_json::Value> {
 }
 
 /// In-process map of agent id → gateway-routing enabled, populated from the
-/// preference. A missing entry means OFF (opt-in), matching the claude/codex
-/// defaults.
+/// preference. A missing entry means ON, so only an explicit `false` opts out of
+/// Gateway egress.
 fn routing_map() -> &'static RwLock<HashMap<String, bool>> {
     static MAP: OnceLock<RwLock<HashMap<String, bool>>> = OnceLock::new();
     MAP.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Coerce one of the truthy string forms the desktop may persist into a bool.
-fn truthy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "true" | "1" | "on" | "yes"
-    )
+/// Parse a persisted boolean string without treating an unknown value as an
+/// opt-in. An unreadable preference must fall back to the governed default.
+fn parse_bool_string(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" | "yes" => Some(true),
+        "false" | "0" | "off" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parse one JSON map entry. Invalid entries are skipped so the caller's
+/// missing-entry default remains in force.
+fn parse_json_bool(value: &serde_json::Value) -> Option<bool> {
+    match value {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::String(value) => parse_bool_string(value),
+        serde_json::Value::Number(value) => value.as_i64().map(|value| value != 0),
+        _ => None,
+    }
 }
 
 /// Replace the in-process map from the persisted preference value (a JSON object
 /// of agent id → boolean, or one of the truthy string forms per value). A blank
-/// or unparseable value clears the map (everything reverts to OFF) rather than
-/// erroring — the spawn path must never panic.
+/// or unparseable value clears the map (everything reverts to the governed default)
+/// rather than erroring — the spawn path must never panic.
 pub fn set_from_json(value: &str) {
     let mut next: HashMap<String, bool> = HashMap::new();
     let trimmed = value.trim();
     if !trimmed.is_empty() {
         if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str(trimmed) {
             for (id, raw) in obj {
-                let on = match raw {
-                    serde_json::Value::Bool(b) => b,
-                    serde_json::Value::String(s) => truthy(&s),
-                    serde_json::Value::Number(n) => n.as_i64().is_some_and(|v| v != 0),
-                    _ => false,
-                };
-                next.insert(id, on);
+                if let Some(on) = parse_json_bool(&raw) {
+                    next.insert(id, on);
+                }
             }
         }
     }
@@ -229,13 +252,13 @@ pub fn set_from_json(value: &str) {
 }
 
 /// Whether `agent_id` should route its egress through the Ryu gateway via the
-/// OpenAI base-URL swap. Read on the synchronous spawn path; defaults to OFF.
+/// OpenAI base-URL swap. Read on the synchronous spawn path; defaults to ON.
 pub fn is_gateway_routing(agent_id: &str) -> bool {
     routing_map()
         .read()
         .ok()
         .and_then(|m| m.get(agent_id).copied())
-        .unwrap_or(false)
+        .unwrap_or(DEFAULT_AGENT_GATEWAY_ROUTING)
 }
 
 /// In-process map of agent id → MCP-tool-bridge enabled, populated from
@@ -243,8 +266,8 @@ pub fn is_gateway_routing(agent_id: &str) -> bool {
 ///
 /// Semantically the INVERSE of [`routing_map`]: a missing entry means ON, so only
 /// an explicit opt-OUT is ever stored. A separate map (not a second value in the
-/// routing map) because the two have different defaults and a shared container
-/// would make the "absent ⇒ on" rule collide with "absent ⇒ off".
+/// routing map) because the two gates have independent opt-outs and a shared
+/// container would make one plane's writes affect the other.
 fn bridge_map() -> &'static RwLock<HashMap<String, bool>> {
     static MAP: OnceLock<RwLock<HashMap<String, bool>>> = OnceLock::new();
     MAP.get_or_init(|| RwLock::new(HashMap::new()))
@@ -265,15 +288,9 @@ pub fn set_bridge_from_json(value: &str) {
     if !trimmed.is_empty() {
         if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str(trimmed) {
             for (id, raw) in obj {
-                let on = match raw {
-                    serde_json::Value::Bool(b) => b,
-                    serde_json::Value::String(s) => truthy(&s),
-                    serde_json::Value::Number(n) => n.as_i64().is_some_and(|v| v != 0),
-                    // An entry Core cannot read must not be taken as an opt-out;
-                    // fall back to this gate's default rather than to `false`.
-                    _ => true,
-                };
-                next.insert(id, on);
+                if let Some(on) = parse_json_bool(&raw) {
+                    next.insert(id, on);
+                }
             }
         }
     }
@@ -295,7 +312,7 @@ pub fn is_tool_bridge_enabled(agent_id: &str) -> bool {
         .read()
         .ok()
         .and_then(|m| m.get(agent_id).copied())
-        .unwrap_or(true)
+        .unwrap_or(DEFAULT_AGENT_TOOL_BRIDGE)
 }
 
 /// Serializes every test that mutates the process-global routing map (one map is
@@ -317,25 +334,26 @@ mod tests {
         assert!(is_gateway_routing("my-byo-agent"));
         assert!(is_gateway_routing("truthy"));
         assert!(!is_gateway_routing("other"));
-        // Unknown agents default to OFF.
-        assert!(!is_gateway_routing("never-seen"));
+        // Unknown agents keep Gateway egress until explicitly opted out.
+        assert!(is_gateway_routing("never-seen"));
     }
 
     #[test]
-    fn blank_or_garbage_clears_to_off() {
+    fn blank_or_garbage_clears_to_governed_default() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_from_json(r#"{"x": true}"#);
         assert!(is_gateway_routing("x"));
         set_from_json("");
-        assert!(!is_gateway_routing("x"));
+        assert!(is_gateway_routing("x"));
         set_from_json("not json at all");
-        assert!(!is_gateway_routing("x"));
+        assert!(is_gateway_routing("x"));
     }
 
     /// The headline of the split: a fresh agent nobody has configured gets the
-    /// tool bridge and does NOT get egress routing. Same id, opposite answers.
+    /// tool bridge and Gateway-governed provider egress. The controls remain
+    /// separate even though their defaults now share the same broad posture.
     #[test]
-    fn fresh_agent_gets_the_bridge_but_not_egress_routing() {
+    fn fresh_agent_gets_the_bridge_and_egress_routing() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_from_json("");
         set_bridge_from_json("");
@@ -344,14 +362,14 @@ mod tests {
             "an unconfigured agent must get Ryu's tools out of the box"
         );
         assert!(
-            !is_gateway_routing("brand-new-agent"),
-            "the bridge default must NOT drag credential/egress routing on with it"
+            is_gateway_routing("brand-new-agent"),
+            "new ACP agents must start with governed egress"
         );
     }
 
-    /// The off-switch has to actually reach the sessions it names. Under the old
-    /// default-OFF gate an unreachable key was invisible; under default-ON an
-    /// unreachable key would make the toggle a lie that can only ever read "on".
+    /// The off-switch has to actually reach the sessions it names. Under the
+    /// default-ON gate an unreachable key would make the toggle a lie that can
+    /// only ever read "on".
     #[test]
     fn explicit_false_withholds_the_bridge_for_that_agent_only() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -374,10 +392,10 @@ mod tests {
         set_from_json(r#"{"a": true}"#);
         assert!(is_gateway_routing("a"));
         assert!(is_tool_bridge_enabled("a"));
-        // ...and opting an agent OUT of the bridge must not grant it egress.
+        // ...and opting an agent OUT of the bridge must not change its egress.
         set_bridge_from_json(r#"{"b": false}"#);
         assert!(!is_tool_bridge_enabled("b"));
-        assert!(!is_gateway_routing("b"));
+        assert!(is_gateway_routing("b"));
         // The egress map is untouched by the bridge write.
         assert!(is_gateway_routing("a"));
     }
@@ -386,7 +404,7 @@ mod tests {
     /// preference, mapped to what the split must produce. Written as a table so a
     /// future default flip cannot quietly change one row without failing here.
     #[test]
-    fn legacy_gateway_routing_values_migrate_to_the_right_pair() {
+    fn legacy_gateway_routing_values_keep_explicit_opt_outs() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A node upgrading in place: its `agent-gateway-routing` survives verbatim
         // and `agent-tool-bridge` has never been written.
@@ -396,21 +414,20 @@ mod tests {
         // Previously ON  ⇒ egress kept (opted into) AND tools kept. Nothing lost.
         assert!(is_gateway_routing("was-on"));
         assert!(is_tool_bridge_enabled("was-on"));
-        // Previously OFF ⇒ still no credential swap, but tools are no longer
-        // withheld. This gain is the bug fix: the bridge offers only the agent's
-        // own allowlist, so it grants nothing the user had not configured.
+        // An explicit old false remains a direct-egress opt-out, but tools are
+        // still available because the bridge has its own default-on switch.
         assert!(!is_gateway_routing("was-off"));
         assert!(is_tool_bridge_enabled("was-off"));
-        // Never configured at all ⇒ same as previously-OFF.
-        assert!(!is_gateway_routing("never-listed"));
+        // Never configured at all ⇒ governed egress.
+        assert!(is_gateway_routing("never-listed"));
         assert!(is_tool_bridge_enabled("never-listed"));
     }
 
-    /// The clear-on-garbage behaviour is deliberately asymmetric: fail CLOSED for
-    /// egress (never move a credential on a parse error) and fail OPEN for the
-    /// bridge (never strip configured tools on a parse error).
+    /// The clear-on-garbage behaviour is deliberately asymmetric: egress returns
+    /// to its governed default and the bridge returns to ON (never strip
+    /// configured tools on a parse error).
     #[test]
-    fn unparseable_preference_fails_closed_for_egress_and_open_for_the_bridge() {
+    fn unparseable_preference_returns_to_safe_defaults() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_from_json(r#"{"x": true}"#);
         set_bridge_from_json(r#"{"x": false}"#);
@@ -419,7 +436,7 @@ mod tests {
 
         set_from_json("not json at all");
         set_bridge_from_json("not json at all");
-        assert!(!is_gateway_routing("x"), "egress clears to OFF");
+        assert!(is_gateway_routing("x"), "egress clears to its ON default");
         assert!(is_tool_bridge_enabled("x"), "bridge clears to ON");
 
         set_bridge_from_json("");
@@ -427,6 +444,10 @@ mod tests {
         // A malformed per-agent VALUE is not an opt-out either.
         set_bridge_from_json(r#"{"x": {"nested": "junk"}}"#);
         assert!(is_tool_bridge_enabled("x"));
+
+        // An unreadable per-agent egress value is not an opt-out either.
+        set_from_json(r#"{"x": "not-a-boolean"}"#);
+        assert!(is_gateway_routing("x"));
     }
 
     #[test]

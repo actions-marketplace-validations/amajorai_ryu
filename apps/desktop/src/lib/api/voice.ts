@@ -1,6 +1,6 @@
 // apps/desktop/src/lib/api/voice.ts
 //
-// Typed client for Core's speech-to-text data path (`POST /api/voice/transcribe`).
+// Typed client for Core's Voice Recognition data path (`POST /api/voice/transcribe`).
 // Core proxies the uploaded audio to the whisper.cpp voice sidecar's `/inference`
 // endpoint and returns `{ text }`. The whisper-server build decodes WAV, so the
 // recorder uploads 16 kHz mono PCM WAV (see hooks/useVoiceRecorder.ts) rather
@@ -52,8 +52,8 @@ export async function transcribeAudio(
 	return (body.text ?? "").trim();
 }
 
-/** One selectable text-to-speech engine, as Core's `/api/voice/tts-engines`
- * returns it (built-in OuteTTS + whatever the Ryu TTS sidecar registry serves). */
+/** One selectable Audio engine, as Core's `/api/voice/tts-engines`
+ * returns it (built-in OuteTTS + whatever the Ryu Audio sidecar registry serves). */
 export interface TtsEngine {
 	default_voice: string;
 	description: string;
@@ -68,20 +68,20 @@ export interface TtsEngine {
 	voices: string[];
 }
 
-/** List the TTS engines available on this node (nothing hardcoded — Core mirrors
+/** List the Audio engines available on this node (nothing hardcoded — Core mirrors
  * the sidecar registry). Always includes the built-in `outetts`. */
 export async function listTtsEngines(target: ApiTarget): Promise<TtsEngine[]> {
 	const resp = await fetch(apiUrl(target, "/api/voice/tts-engines"), {
 		headers: makeHeaders(target.token),
 	});
 	if (!resp.ok) {
-		throw new Error(`tts-engines failed: ${resp.status}`);
+		throw new Error(`audio engines failed: ${resp.status}`);
 	}
 	const body = (await resp.json()) as { data?: TtsEngine[] };
 	return body.data ?? [];
 }
 
-/** One curated, installable TTS model (voicebox-style), bound to its engine. */
+/** One curated, installable Audio model (voicebox-style), bound to its engine. */
 export interface TtsModel {
 	default: boolean;
 	display_name: string;
@@ -94,20 +94,20 @@ export interface TtsModel {
 	size_mb: number;
 }
 
-/** List the curated, installable TTS models (the known-good set Core can install
+/** List the curated, installable Audio models (the known-good set Core can install
  * + run), distinct from the raw HF text-to-speech browse in the Models tab. */
 export async function listTtsModels(target: ApiTarget): Promise<TtsModel[]> {
 	const resp = await fetch(apiUrl(target, "/api/voice/tts-models"), {
 		headers: makeHeaders(target.token),
 	});
 	if (!resp.ok) {
-		throw new Error(`tts-models failed: ${resp.status}`);
+		throw new Error(`audio models failed: ${resp.status}`);
 	}
 	const body = (await resp.json()) as { data?: TtsModel[] };
 	return body.data ?? [];
 }
 
-/** Download a curated TTS model into Core's HF cache. Resolves when the snapshot
+/** Download a curated Audio model into Core's HF cache. Resolves when the snapshot
  * is present (idempotent — a cache hit returns immediately). */
 export async function installTtsModel(
 	target: ApiTarget,
@@ -149,7 +149,7 @@ export interface SpeakOptions {
 
 /** Synthesize speech via Core's `/api/voice/speak`, returning a playable WAV blob.
  * The engine is whatever the caller selects — Core routes built-ins to OuteTTS and
- * everything else to the universal Ryu TTS sidecar. */
+ * everything else to the universal Ryu Audio sidecar. */
 export async function speakText(
 	target: ApiTarget,
 	text: string,

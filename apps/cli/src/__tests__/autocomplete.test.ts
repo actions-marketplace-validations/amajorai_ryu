@@ -30,6 +30,10 @@ test("detects slash and mention contexts only at the active token", () => {
 
 test("filters local commands and agents safely", () => {
 	expect(commandSuggestions("mo").map((item) => item.name)).toEqual(["model"]);
+	expect(commandSuggestions("double").map((item) => item.name)).toEqual([
+		"check",
+	]);
+	expect(commandSuggestions("th").map((item) => item.name)).toEqual(["theme"]);
 	expect(agentSuggestions(agents, "WRI")).toEqual([
 		{ kind: "agent", id: "writer", name: "Writer" },
 	]);

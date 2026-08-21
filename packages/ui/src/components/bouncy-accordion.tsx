@@ -198,6 +198,7 @@ function BouncyAccordionRow({
 								"grid h-7 w-7 shrink-0 place-items-center text-muted-foreground",
 								classNames?.icon
 							)}
+							data-slot="bouncy-accordion-item-icon"
 						>
 							{item.icon}
 						</span>

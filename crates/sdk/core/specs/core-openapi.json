@@ -5432,7 +5432,7 @@
           "MCP"
         ],
         "summary": "Register an MCP server",
-        "description": "Validation:\n- `name` must be non-empty and must not contain `__` (the tool-id separator\n  that `split_tool_id` uses to route calls).\n- `command` must be non-empty.\n- `name` must not already be registered (built-ins included).\n\nWrite strategy: read the current `mcp.json` user map (parse-fail \u2192 400 to\navoid clobbering a hand-edited file), insert the new entry, write back\natomically via `write_secret_file` + rename, then call `McpRegistry::reload`\nso the change takes effect without a restart.",
+        "description": "Validation:\n- `name` must be non-empty and must not contain `__` (the legacy tool-id separator\n  that `split_tool_id` uses to route calls).\n- exactly one of `command` (stdio) or `url` (remote) must be non-empty.\n- `name` must not already be registered (built-ins included).\n\nWrite strategy: read the current `mcp.json` user map (parse-fail \u2192 400 to\navoid clobbering a hand-edited file), insert the new entry, write back\natomically via `write_secret_file` + rename, then call `McpRegistry::reload`\nso the change takes effect without a restart.",
         "operationId": "create_mcp_server",
         "requestBody": {
           "content": {
@@ -10512,7 +10512,7 @@
           {
             "name": "id",
             "in": "query",
-            "description": "Fully-qualified tool id (<server>__<tool>)",
+            "description": "Fully-qualified tool id (<server>.<tool>)",
             "required": true,
             "schema": {
               "type": "string"

@@ -124,6 +124,14 @@ pub struct BlueBubblesChannel {
     /// The operator installed the Private API helper, so typing indicators, read
     /// receipts and tapbacks are available.
     private_api: bool,
+    /// Explicit group-addressing patterns. BlueBubbles webhooks do not carry a
+    /// native mention entity, so these are the only configurable way to address
+    /// the bot in a group beyond the built-in `ryu`/`@ryu` prefixes.
+    mention_patterns: Vec<String>,
+    /// Optional operator-selected home chat for future outbound sends. It is kept
+    /// on the adapter so store/config parity does not collapse it into a global
+    /// channel setting.
+    home_channel: Option<String>,
     /// Shared secret an inbound webhook must present. Derived, not random — see the
     /// module doc.
     webhook_secret: String,
@@ -191,6 +199,8 @@ impl BlueBubblesChannel {
             webhook_bind: cfg.webhook_bind,
             webhook_path,
             private_api: cfg.private_api,
+            mention_patterns: cfg.mention_patterns,
+            home_channel: cfg.home_channel,
             webhook_secret,
         })
     }
@@ -202,6 +212,28 @@ impl BlueBubblesChannel {
             self.server_url,
             path.trim_start_matches('/')
         )
+    }
+
+    /// BlueBubbles accepts a direct phone number or email address as the
+    /// `any;-;<address>` chat GUID form. Preserve full GUIDs for group chats and
+    /// webhook-originated replies, while making configured home/outbound targets
+    /// ergonomic instead of requiring operators to discover an opaque GUID.
+    fn target_chat_guid(&self, chat_id: &str) -> anyhow::Result<String> {
+        let raw = if chat_id.trim().is_empty() {
+            self.home_channel.as_deref().unwrap_or_default()
+        } else {
+            chat_id
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            anyhow::bail!(
+                "bluebubbles outbound message has no chat target; set home_channel or provide a chat id"
+            );
+        }
+        if raw.contains(";-;") || raw.contains(";+;") {
+            return Ok(raw.to_string());
+        }
+        Ok(format!("any;-;{raw}"))
     }
 
     /// A request against the server with the `password` auth parameter and the
@@ -311,6 +343,9 @@ impl BlueBubblesChannel {
         if !self.private_api {
             return;
         }
+        let Ok(chat_guid) = self.target_chat_guid(chat_guid) else {
+            return;
+        };
         self.best_effort(
             "stop typing",
             self.request(Method::DELETE, &format!("chat/{chat_guid}/typing")),
@@ -393,9 +428,10 @@ impl Channel for BlueBubblesChannel {
     /// Returns `Err` on transport failure, a non-2xx, or an error envelope from the
     /// server (a chat guid that no longer exists, AppleScript refusing the send).
     async fn send_message(&self, chat_id: &str, text: &str) -> anyhow::Result<()> {
+        let chat_guid = self.target_chat_guid(chat_id)?;
         let payload = send_text_payload(
-            chat_id,
-            &temp_guid(chat_id, text, nanos()),
+            &chat_guid,
+            &temp_guid(&chat_guid, text, nanos()),
             text,
             self.private_api,
         );
@@ -408,7 +444,7 @@ impl Channel for BlueBubblesChannel {
             .json()
             .await?;
         check_envelope(&body)?;
-        self.clear_typing(chat_id).await;
+        self.clear_typing(&chat_guid).await;
         Ok(())
     }
 
@@ -434,13 +470,14 @@ impl Channel for BlueBubblesChannel {
         if delivery == VoiceDelivery::Unsupported {
             anyhow::bail!("bluebubbles cannot carry this audio format");
         }
+        let chat_guid = self.target_chat_guid(chat_id)?;
         let name = "reply.wav";
-        let temp = temp_guid(chat_id, name, nanos());
+        let temp = temp_guid(&chat_guid, name, nanos());
         let part = reqwest::multipart::Part::bytes(wav)
             .file_name(name.to_string())
             .mime_str("audio/wav")?;
         let form = reqwest::multipart::Form::new()
-            .text("chatGuid", chat_id.to_string())
+            .text("chatGuid", chat_guid.clone())
             .text("tempGuid", temp)
             .text("name", name.to_string())
             .part("attachment", part);
@@ -449,7 +486,7 @@ impl Channel for BlueBubblesChannel {
             .send()
             .await?
             .error_for_status()?;
-        self.clear_typing(chat_id).await;
+        self.clear_typing(&chat_guid).await;
         Ok(())
     }
 
@@ -465,6 +502,7 @@ impl Channel for BlueBubblesChannel {
         if !self.private_api {
             return Ok(());
         }
+        let chat_guid = self.target_chat_guid(chat_id)?;
         let Some(reaction) = tapback_for_emoji(emoji) else {
             debug!(
                 channel = "bluebubbles",
@@ -475,7 +513,7 @@ impl Channel for BlueBubblesChannel {
         self.best_effort(
             "react",
             self.request(Method::POST, "message/react").json(&json!({
-                "chatGuid": chat_id,
+                "chatGuid": chat_guid,
                 "selectedMessageGuid": message_id,
                 "reaction": reaction,
             })),
@@ -493,9 +531,10 @@ impl Channel for BlueBubblesChannel {
         if !(self.private_api && self.runtime.cfg.send_read_receipts) {
             return Ok(());
         }
+        let chat_guid = self.target_chat_guid(chat_id)?;
         self.best_effort(
             "mark read",
-            self.request(Method::POST, &format!("chat/{chat_id}/read")),
+            self.request(Method::POST, &format!("chat/{chat_guid}/read")),
         )
         .await;
         Ok(())
@@ -514,7 +553,8 @@ impl Channel for BlueBubblesChannel {
         if !self.private_api {
             anyhow::bail!("bluebubbles typing indicator needs the Private API helper");
         }
-        self.request(Method::POST, &format!("chat/{chat_id}/typing"))
+        let chat_guid = self.target_chat_guid(chat_id)?;
+        self.request(Method::POST, &format!("chat/{chat_guid}/typing"))
             .send()
             .await?
             .error_for_status()?;
@@ -710,7 +750,11 @@ async fn ingest(state: WebhookState, presented: &str, body: &[u8]) -> StatusCode
         }
 
         if message.is_group
-            && !should_reply_in_group(channel.runtime.cfg.group_reply_mode, &message.text)
+            && !should_reply_in_group(
+                channel.runtime.cfg.group_reply_mode,
+                &message.text,
+                &channel.mention_patterns,
+            )
         {
             debug!(
                 channel = "bluebubbles",
@@ -776,6 +820,7 @@ fn parse_inbound(payload: &Value) -> Option<InboundMessage> {
 
     Some(InboundMessage {
         chat_id,
+        access_chat_id: None,
         text,
         // iMessage has no display name on the wire — the address IS the identity,
         // and resolving a contact card is the recipient's device's job, not ours.
@@ -922,7 +967,7 @@ fn is_publicly_routable(ip: IpAddr) -> bool {
 /// name. That is a heuristic and is documented as one — the alternative, answering
 /// every message in a family group chat, is the failure mode this mode exists to
 /// prevent.
-fn should_reply_in_group(mode: GroupReplyMode, text: &str) -> bool {
+fn should_reply_in_group(mode: GroupReplyMode, text: &str, mention_patterns: &[String]) -> bool {
     match mode {
         GroupReplyMode::All => true,
         GroupReplyMode::Mentions => {
@@ -930,9 +975,16 @@ fn should_reply_in_group(mode: GroupReplyMode, text: &str) -> bool {
                 return true;
             }
             let lowered = text.trim_start().to_ascii_lowercase();
-            ["ryu", "@ryu", "hey ryu"]
+            if ["ryu", "@ryu", "hey ryu"]
                 .iter()
                 .any(|prefix| lowered.starts_with(prefix))
+            {
+                return true;
+            }
+            mention_patterns.iter().any(|pattern| {
+                let pattern = pattern.trim().to_ascii_lowercase();
+                !pattern.is_empty() && lowered.contains(&pattern)
+            })
         }
     }
 }
@@ -999,6 +1051,8 @@ mod tests {
             webhook_bind: "127.0.0.1:8765".to_string(),
             webhook_path: "/webhooks/bluebubbles".to_string(),
             private_api: false,
+            mention_patterns: Vec::new(),
+            home_channel: None,
             common: CommonChannelConfig::default(),
         }
     }
@@ -1286,16 +1340,33 @@ mod tests {
 
     #[test]
     fn group_reply_mode_approximates_mentions() {
-        assert!(should_reply_in_group(GroupReplyMode::All, "anything"));
-        assert!(should_reply_in_group(GroupReplyMode::Mentions, "/help"));
+        assert!(should_reply_in_group(GroupReplyMode::All, "anything", &[]));
         assert!(should_reply_in_group(
             GroupReplyMode::Mentions,
-            "Ryu what's up"
+            "/help",
+            &[]
         ));
-        assert!(should_reply_in_group(GroupReplyMode::Mentions, "hey ryu"));
+        assert!(should_reply_in_group(
+            GroupReplyMode::Mentions,
+            "Ryu what's up",
+            &[]
+        ));
+        assert!(should_reply_in_group(
+            GroupReplyMode::Mentions,
+            "hey ryu",
+            &[]
+        ));
         assert!(!should_reply_in_group(
             GroupReplyMode::Mentions,
-            "dinner at 7?"
+            "dinner at 7?",
+            &[]
+        ));
+
+        let patterns = vec!["assistant".to_string()];
+        assert!(should_reply_in_group(
+            GroupReplyMode::Mentions,
+            "assistant, summarize this",
+            &patterns
         ));
     }
 

@@ -275,12 +275,14 @@ export function StorageSettings() {
 			// master key is moved BEFORE any file is written — a failure there aborts
 			// with nothing copied rather than leaving unreadable ciphertext behind.
 			await invoke("copy_data_folder_to_profile", { toProfile });
-			sileo.success(`Copied to the ${toProfile} profile`, {
+			sileo.success({
+				title: `Copied to the ${toProfile} profile`,
 				description:
 					"Start Ryu on that profile to use it. This profile is unchanged.",
 			});
 		} catch (e) {
-			sileo.error("Could not copy to that profile", {
+			sileo.error({
+				title: "Could not copy to that profile",
 				description: String(e),
 			});
 		} finally {

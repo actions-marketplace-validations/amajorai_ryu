@@ -3,7 +3,7 @@
 // The Gateway "MCP" surface — the Ryu MCP server layer. Two blocks:
 //
 //  1. Servers — every MCP server Core has registered (`/api/mcp/servers`), with
-//     its command/args, enabled state, and whether the binary is on disk.
+//     its transport and command/endpoint, enabled state, and availability.
 //  2. Tools — every tool the registered servers advertise (`/api/mcp/tools`),
 //     grouped by server, so you can see what a host (Claude Desktop, Cursor)
 //     can reach through this node.
@@ -69,6 +69,10 @@ function ServersList({
 				<SettingsItem
 					actions={
 						<div className="flex items-center gap-2">
+							{s.transport ? (
+								<Badge variant="secondary">{s.transport}</Badge>
+							) : null}
+							<McpAuthStatus server={s} />
 							{s.enabled ? (
 								<Badge variant="default">enabled</Badge>
 							) : (
@@ -81,8 +85,8 @@ function ServersList({
 					}
 					description={
 						<span className="block max-w-full truncate font-mono text-xs">
-							{s.command}
-							{s.args.length > 0 ? ` ${s.args.join(" ")}` : ""}
+							{s.url ?? s.command}
+							{!s.url && s.args.length > 0 ? ` ${s.args.join(" ")}` : ""}
 						</span>
 					}
 					key={s.name}
@@ -90,6 +94,20 @@ function ServersList({
 				/>
 			))}
 		</SettingsGroup>
+	);
+}
+
+function McpAuthStatus({ server }: { server: McpServer }) {
+	if (!server.authRequired) {
+		return <Badge variant="outline">no auth</Badge>;
+	}
+	if (server.authType === "oauth") {
+		return <Badge variant="outline">OAuth</Badge>;
+	}
+	return (
+		<Badge variant={server.authConfigured ? "default" : "destructive"}>
+			{server.authConfigured ? "credentials set" : "auth required"}
+		</Badge>
 	);
 }
 

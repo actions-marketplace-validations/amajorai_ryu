@@ -1,4 +1,5 @@
 import type { AgentSummary } from "@ryuhq/core-client/agents";
+import { commandCompletions } from "./commands.ts";
 
 export interface SlashCommandSuggestion {
 	readonly description: string;
@@ -28,25 +29,16 @@ export interface AutocompleteState {
 
 const MAX_SUGGESTIONS = 8;
 
-/** Commands handled locally by the chat composer, including aliases. */
-export const LOCAL_SLASH_COMMANDS: SlashCommandSuggestion[] = [
-	{ kind: "command", name: "agent", description: "choose an agent" },
-	{ kind: "command", name: "btw", description: "ask a side question" },
-	{ kind: "command", name: "check", description: "toggle double-check" },
-	{ kind: "command", name: "config", description: "choose ACP settings" },
-	{ kind: "command", name: "fork", description: "fork this conversation" },
-	{ kind: "command", name: "model", description: "choose or set a model" },
-	{ kind: "command", name: "new", description: "start a new chat" },
-	{ kind: "command", name: "reasoning", description: "choose ACP settings" },
-	{ kind: "command", name: "resume", description: "resume a conversation" },
-	{ kind: "command", name: "rename", description: "rename this conversation" },
-	{ kind: "command", name: "delete", description: "delete a conversation" },
-	{ kind: "command", name: "sessions", description: "list turn sessions" },
-	{ kind: "command", name: "team", description: "route turns to a team" },
-	{ kind: "command", name: "goal", description: "send a goal turn" },
-	{ kind: "command", name: "proof", description: "send a proof turn" },
-	{ kind: "command", name: "receipt", description: "send a receipt turn" },
-];
+/**
+ * Compatibility view for existing chat surfaces. The registry owns command
+ * metadata; aliases influence matching but do not create duplicate rows.
+ */
+export const LOCAL_SLASH_COMMANDS: SlashCommandSuggestion[] =
+	commandCompletions("").map(({ description, name }) => ({
+		description,
+		kind: "command" as const,
+		name,
+	}));
 
 /** Return a completion context only when the token at the cursor is completeable. */
 export function getAutocompleteContext(
@@ -72,10 +64,13 @@ export function getAutocompleteContext(
 }
 
 export function commandSuggestions(query: string): SlashCommandSuggestion[] {
-	const normalized = query.toLowerCase();
-	return LOCAL_SLASH_COMMANDS.filter((command) =>
-		command.name.startsWith(normalized)
-	).slice(0, MAX_SUGGESTIONS);
+	return commandCompletions(query)
+		.map(({ description, name }) => ({
+			description,
+			kind: "command" as const,
+			name,
+		}))
+		.slice(0, MAX_SUGGESTIONS);
 }
 
 export function agentSuggestions(

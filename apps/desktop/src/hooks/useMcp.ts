@@ -4,6 +4,8 @@ import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	callMcpTool as apiCallMcpTool,
 	createMcpServer as apiCreateMcpServer,
+	deleteMcpServer as apiDeleteMcpServer,
+	updateMcpServer as apiUpdateMcpServer,
 	type CreateMcpServerInput,
 	type CreateMcpServerResult,
 	fetchMcpServers,
@@ -11,6 +13,8 @@ import {
 	type McpCallResult,
 	type McpServer,
 	type McpTool,
+	type UpdateMcpServerInput,
+	type UpdateMcpServerResult,
 } from "@/src/lib/api/mcp.ts";
 import { useCoreRefresh } from "@/src/lib/core-refresh.ts";
 import { useActiveNode } from "./useActiveNode.ts";
@@ -26,12 +30,17 @@ export interface UseMcpResult {
 	) => Promise<McpCallResult>;
 	/** Register a new MCP server and reload the list on success. */
 	createServer: (input: CreateMcpServerInput) => Promise<CreateMcpServerResult>;
+	deleteServer: (name: string) => Promise<{ error?: string; ok: boolean }>;
 	error: string | null;
 	loading: boolean;
 	reload: () => Promise<void>;
 	servers: McpServer[];
 	setAgentFilter: (agentId: string | null) => void;
 	tools: McpTool[];
+	updateServer: (
+		name: string,
+		input: UpdateMcpServerInput
+	) => Promise<UpdateMcpServerResult>;
 }
 
 /// Loads MCP servers, tools, and user agents from the active Core node. The tool
@@ -99,6 +108,31 @@ export function useMcp(): UseMcpResult {
 		[url, token, reload]
 	);
 
+	const updateServer = useCallback(
+		async (
+			name: string,
+			input: UpdateMcpServerInput
+		): Promise<UpdateMcpServerResult> => {
+			const result = await apiUpdateMcpServer({ url, token }, name, input);
+			if (result.ok) {
+				await reload();
+			}
+			return result;
+		},
+		[url, token, reload]
+	);
+
+	const deleteServer = useCallback(
+		async (name: string) => {
+			const result = await apiDeleteMcpServer({ url, token }, name);
+			if (result.ok) {
+				await reload();
+			}
+			return result;
+		},
+		[url, token, reload]
+	);
+
 	return {
 		servers,
 		tools,
@@ -110,5 +144,7 @@ export function useMcp(): UseMcpResult {
 		reload,
 		callTool,
 		createServer,
+		updateServer,
+		deleteServer,
 	};
 }

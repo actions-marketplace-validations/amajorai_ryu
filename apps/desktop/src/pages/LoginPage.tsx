@@ -2,8 +2,13 @@ import { LoginView } from "@ryu/blocks/desktop/login";
 import { toast } from "@ryu/ui/components/sileo";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
-import { BACKEND_URL, storeSessionToken } from "@/lib/auth-client.ts";
-import { pollAuthStatus, startDeviceAuth } from "@/lib/oauth.ts";
+import { WEB_URL } from "@/lib/app-urls.ts";
+import {
+	authClient,
+	BACKEND_URL,
+	storeSessionToken,
+} from "@/lib/auth-client.ts";
+import { detectBrowserDevice } from "@/lib/browser-device.ts";
 import {
 	markLocalNudgeShown,
 	preferLocalOrCloud,
@@ -11,6 +16,9 @@ import {
 } from "@/lib/prefer-local-node.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { reportError } from "@/src/lib/crash.ts";
+// Keep device auth on the shared desktop implementation; the extension
+// supplies its own auth-client module through the host adapter.
+import { pollAuthStatus, startDeviceAuth } from "../../lib/oauth.ts";
 import { useAppStore } from "../store/useAppStore.ts";
 
 const IS_WEBAPP = import.meta.env.VITE_RYU_SURFACE === "webapp";
@@ -20,6 +28,7 @@ export default function LoginPage() {
 	const [userCode, setUserCode] = useState<string | null>(null);
 	const [verificationUri, setVerificationUri] = useState<string | null>(null);
 	const [polling, setPolling] = useState(false);
+	const [guestLoading, setGuestLoading] = useState(false);
 	const cancelPoll = useRef<(() => void) | null>(null);
 	const coreStatus = useAppStore((s) => s.coreStatus);
 	// Signing in is device auth against the web backend — it never touches Core.
@@ -30,6 +39,7 @@ export default function LoginPage() {
 	// sign-in on a local Core locked coreless users out of the very screen that
 	// tells them they don't need one.
 	const coreReady = IS_WEBAPP ? coreStatus === "running" : true;
+	const browserDevice = detectBrowserDevice();
 
 	useEffect(() => {
 		return () => {
@@ -108,6 +118,37 @@ export default function LoginPage() {
 		}
 	}
 
+	async function handleContinueAsGuest() {
+		if (guestLoading) {
+			return;
+		}
+		setGuestLoading(true);
+		try {
+			const result = await authClient.signIn.anonymous();
+			if (result.error) {
+				throw new Error(result.error.message || "Guest sign-in failed");
+			}
+			const token = result.data?.token;
+			if (!token) {
+				throw new Error("Guest sign-in did not return a session");
+			}
+			// The bearer is stored in the existing local vault. It is never rendered
+			// or put in the URL; the app only uses it for authenticated API calls.
+			await storeSessionToken(token);
+			const pick = await preferLocalOrCloud();
+			if (pick === "local") {
+				toast.success("Connected to your local node");
+			}
+			useAppStore.getState().setPendingAuthToken(token);
+		} catch (err) {
+			const message =
+				err instanceof Error ? err.message : "Guest sign-in failed";
+			toast.error("Couldn't continue as guest", { description: message });
+		} finally {
+			setGuestLoading(false);
+		}
+	}
+
 	function handleCancel() {
 		cancelPoll.current?.();
 		cancelPoll.current = null;
@@ -142,14 +183,21 @@ export default function LoginPage() {
 				coreReady={coreReady}
 				coreStarting={IS_WEBAPP && coreStatus === "starting"}
 				coreStatusLabel={coreStatusLabel}
+				guestLoading={guestLoading}
 				hasVerificationUri={verificationUri !== null}
+				isMobileBrowser={IS_WEBAPP && browserDevice.isMobile}
 				onCancel={handleCancel}
+				onContinueAsGuest={IS_WEBAPP ? handleContinueAsGuest : undefined}
+				onDownloadCore={
+					IS_WEBAPP ? () => openExternal(`${WEB_URL}/download/core`) : undefined
+				}
 				onOpenVerification={() =>
 					verificationUri && openExternal(verificationUri)
 				}
 				onRetry={handleRetry}
 				onSignIn={handleSignIn}
 				polling={polling}
+				showLocalCoreDownload={IS_WEBAPP && browserDevice.isComputer}
 				userCode={userCode}
 				waiting={waiting}
 			/>

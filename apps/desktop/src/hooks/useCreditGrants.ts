@@ -9,8 +9,7 @@
 // both.
 //
 // Unlike the node-scoped hooks, this targets the control plane (:3000, session
-// bearer), so the key carries no node url — grants belong to the signed-in
-// account, not to whichever Core node is active.
+// bearer), so the key carries the active organization id rather than a node url.
 //
 // Everything about this hook is fail-quiet by design. Grants are a minority
 // feature: most accounts hold none, and a control plane that predates the route
@@ -29,6 +28,7 @@ import {
 	type MyCampaignsResponse,
 } from "@/src/lib/api/campaigns.ts";
 import { hasCreditsAuth } from "@/src/lib/api/credits.ts";
+import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
 
 /** One pool's remaining granted balance, flattened for rendering. */
 export interface GrantPoolBalance {
@@ -118,8 +118,9 @@ const selectGrantPools = (
 		}));
 
 export function useCreditGrants(): UseCreditGrantsResult {
+	const activeOrgId = useActiveOrgId();
 	const query = useQuery({
-		queryKey: ["credit-grants"],
+		queryKey: ["credit-grants", activeOrgId ?? "unscoped"],
 		queryFn: fetchMyCampaigns,
 		enabled: hasCreditsAuth(),
 		retry: false,

@@ -177,7 +177,9 @@ describe("AppsCatalogSection — list states", () => {
 			makeAppsState({ error: "boom", items: [], loading: false })
 		);
 		// The apostrophe in "Couldn't" is HTML-escaped in static markup.
-		expect(html).toContain("load plugins: boom");
+		expect(html).toContain("Couldn&#x27;t load plugins");
+		expect(html).toContain("boom");
+		expect(html).toContain("Try again");
 	});
 
 	test("empty (loaded, no items, no error) shows the empty state", () => {
@@ -350,7 +352,9 @@ describe("AppsCatalogSection — community shelf", () => {
 			community,
 			variant: "plugins",
 		});
-		expect(errorHtml).toContain("load plugins: boom");
+		expect(errorHtml).toContain("Couldn&#x27;t load plugins");
+		expect(errorHtml).toContain("boom");
+		expect(errorHtml).toContain("Try again");
 		expect(errorHtml).toContain("Community Plugin");
 	});
 

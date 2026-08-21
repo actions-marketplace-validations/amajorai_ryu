@@ -42,11 +42,41 @@ const SERVER_SNAPSHOT: IslandSnapshot = {
 	hasPromo: false,
 	suppressed: false,
 };
+const PROMO_DISMISSED_STORAGE_KEY = "ryu:launch-promo-dismissed";
 const listeners = new Set<() => void>();
 
 function emit(): void {
 	for (const listener of listeners) {
 		listener();
+	}
+}
+
+/** Read the browser-local opt-out without making the store depend on SSR globals. */
+export function hasIslandPromoBeenDismissed(): boolean {
+	if (typeof window === "undefined") {
+		return false;
+	}
+	try {
+		return window.localStorage.getItem(PROMO_DISMISSED_STORAGE_KEY) === "1";
+	} catch {
+		return false;
+	}
+}
+
+/** Permanently hide this browser's surprise promo and close any active panel. */
+export function dismissIslandPromo(): void {
+	if (typeof window !== "undefined") {
+		try {
+			window.localStorage.setItem(PROMO_DISMISSED_STORAGE_KEY, "1");
+		} catch {
+			// Storage can be unavailable in private or restricted browser contexts.
+		}
+	}
+
+	const changed = snapshot.state !== "collapsed" || snapshot.hasPromo;
+	snapshot = { ...snapshot, hasPromo: false, state: "collapsed" };
+	if (changed) {
+		emit();
 	}
 }
 

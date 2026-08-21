@@ -9,6 +9,11 @@
 // `bindAppearanceThemeMode(setTheme)` from AppearanceTab so reset can update it.
 
 import {
+	BOT_TERMINOLOGY_STORAGE_KEY,
+	DEFAULT_BOT_TERMINOLOGY,
+	setBotTerminology,
+} from "@ryu/ui/hooks/use-bot-terminology.ts";
+import {
 	DEFAULT_AGENT_ROW_STYLE,
 	setAgentRowStyle,
 } from "@/src/hooks/useAgentRowStyle.ts";
@@ -17,6 +22,11 @@ import {
 	DEFAULT_CHAT_DATE_GROUPING,
 	setChatDateGrouping,
 } from "@/src/hooks/useChatDateGrouping.ts";
+import {
+	CHAT_PICKER_PLACEMENT_KEY,
+	DEFAULT_CHAT_PICKER_PLACEMENT,
+	setChatPickerPlacement,
+} from "@/src/hooks/useChatPickerPlacement.ts";
 import { setChromeShadows } from "@/src/hooks/useChromeShadows.ts";
 import { setDialogOverlayBlur } from "@/src/hooks/useDialogOverlayBlur.ts";
 import { resetDiffViewPrefs } from "@/src/hooks/useDiffViewPrefs.ts";
@@ -33,11 +43,20 @@ import {
 import { setPersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import { setPointerCursor } from "@/src/hooks/usePointerCursor.ts";
 import {
+	DEFAULT_POPUP_OVERLAY_BLUR,
+	POPUP_OVERLAY_BLUR_STORAGE_KEY,
+	setPopupOverlayBlur,
+} from "@/src/hooks/usePopupOverlayBlur.ts";
+import {
 	DEFAULT_SEASONAL_EFFECTS,
 	DEFAULT_SEASONAL_THEME,
 	SEASONAL_EFFECTS_KEY,
 	setSeasonalThemeSetting,
 } from "@/src/hooks/useSeasonalEffects.ts";
+import {
+	DEFAULT_SIDEBAR_CHAT_PREVIEW,
+	SIDEBAR_CHAT_PREVIEW_KEY,
+} from "@/src/hooks/useSidebarChatPreview.ts";
 import {
 	DEFAULT_SIDEBAR_GROUPED_NAV,
 	setSidebarGroupedNav,
@@ -50,6 +69,14 @@ import {
 	DEFAULT_SIDEBAR_VARIANT,
 	setSidebarVariant,
 } from "@/src/hooks/useSidebarVariant.ts";
+import {
+	DEFAULT_TAB_DROPDOWN,
+	TAB_DROPDOWN_KEY,
+} from "@/src/hooks/useTabDropdown.ts";
+import {
+	DEFAULT_TAB_SEARCH_BUTTON,
+	TAB_SEARCH_BUTTON_KEY,
+} from "@/src/hooks/useTabSearchButton.ts";
 import {
 	CODE_FONTS,
 	DEFAULT_CHAT_WIDTH,
@@ -77,6 +104,11 @@ import {
 	DEFAULT_INTERFACE_LEVEL,
 	setInterfaceLevel,
 } from "@/src/lib/interface-level.ts";
+import {
+	DEFAULT_NOTIFICATION_LAYOUT,
+	NOTIFICATION_LAYOUT_KEY,
+	setNotificationLayout,
+} from "@/src/lib/notification-layout.ts";
 import { registerSetting, resetCategory } from "@/src/lib/settings-registry.ts";
 import { DEFAULT_DARK_ID, DEFAULT_LIGHT_ID } from "@/src/lib/themes/presets.ts";
 import { DEFAULT_TIMEZONE, resetTimezone } from "@/src/lib/timezone.ts";
@@ -84,6 +116,9 @@ import { DEFAULT_TIMEZONE, resetTimezone } from "@/src/lib/timezone.ts";
 /** localStorage / toggle keys owned by Appearance. Use these in the tab too. */
 export const APPEARANCE_KEYS = {
 	sidebarOverflowPopover: "ryu:sidebar-overflow-popover",
+	tabDropdown: TAB_DROPDOWN_KEY,
+	tabSearchButton: TAB_SEARCH_BUTTON_KEY,
+	notificationLayout: NOTIFICATION_LAYOUT_KEY,
 	groupToolUses: "ryu:group-tool-uses",
 	hideToolDetail: "ryu:hide-tool-detail",
 	expandFileEdits: "ryu:expand-file-edits",
@@ -93,11 +128,16 @@ export const APPEARANCE_KEYS = {
 	openChatAtBottom: "ryu:open-chat-at-bottom",
 	animationsEnabled: "ryu:animations-enabled",
 	streamAnimation: "ryu:stream-animation",
+	markdownComposer: "ryu:markdown-composer",
+	sidebarChatPreview: SIDEBAR_CHAT_PREVIEW_KEY,
+	chatPickerPlacement: CHAT_PICKER_PLACEMENT_KEY,
 	inferenceStats: "ryu:inference-stats",
+	popupOverlayBlur: POPUP_OVERLAY_BLUR_STORAGE_KEY,
 	// Re-exported from useSeasonalEffects so the seasonal switch reads its key
 	// from the same place as every other Appearance toggle.
 	seasonalEffects: SEASONAL_EFFECTS_KEY,
 	nodeSelectorDetail: NODE_SELECTOR_DETAIL_KEY,
+	botTerminology: BOT_TERMINOLOGY_STORAGE_KEY,
 } as const;
 
 /** Defaults for Appearance toggles / presets (local UI sync after reset). */
@@ -115,6 +155,7 @@ export const APPEARANCE_DEFAULTS = {
 	chatWidth: DEFAULT_CHAT_WIDTH,
 	sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
 	friendlyNames: DEFAULT_FRIENDLY_MODE,
+	botTerminology: DEFAULT_BOT_TERMINOLOGY,
 	pointerCursor: false,
 	chromeShadows: true,
 	// Flat transparent dialog backdrops are the shared default (see
@@ -122,22 +163,28 @@ export const APPEARANCE_DEFAULTS = {
 	// the dimmed + blurred look. Keep this in step with
 	// DEFAULT_DIALOG_OVERLAY_BLUR — two defaults that disagree is the bug.
 	dialogOverlayBlur: false,
+	popupOverlayBlur: DEFAULT_POPUP_OVERLAY_BLUR,
 	invertedBackgrounds: false,
 	sidebarMode: DEFAULT_SIDEBAR_MODE,
 	sidebarVariant: DEFAULT_SIDEBAR_VARIANT,
 	agentRowStyle: DEFAULT_AGENT_ROW_STYLE,
+	sidebarChatPreview: DEFAULT_SIDEBAR_CHAT_PREVIEW,
+	chatPickerPlacement: DEFAULT_CHAT_PICKER_PLACEMENT,
 	interfaceLevel: DEFAULT_INTERFACE_LEVEL,
 	groupChatsByDate: DEFAULT_CHAT_DATE_GROUPING,
 	sidebarGroupedNav: DEFAULT_SIDEBAR_GROUPED_NAV,
 	sidebarOverflowPopover: false,
+	tabDropdown: DEFAULT_TAB_DROPDOWN,
+	tabSearchButton: DEFAULT_TAB_SEARCH_BUTTON,
+	notificationLayout: DEFAULT_NOTIFICATION_LAYOUT,
 	groupToolUses: true,
 	// Detail level "None". OFF as the SHIPPED default — must stay in step with
 	// DEFAULT_PREFS.hideToolDetail in
 	// packages/blocks/src/desktop/agent-elements/chat-display-prefs.tsx and the
 	// usePersistedToggle default in ChatDisplayPrefsProvider.tsx.
 	//
-	// A fresh install nevertheless starts at "None", because Interface level
-	// defaults to Simple and `seedInterfaceLevel()` writes this key on first run
+	// A fresh install nevertheless starts at "None", because Interface mode
+	// defaults to Ryu Work and `seedInterfaceLevel()` writes this key on first run
 	// (`src/lib/interface-level.ts`). That is a SEEDED value, not a changed
 	// default: it only ever writes a key nobody has written, so this three-way
 	// chain still describes what an unseeded consumer falls back to.
@@ -150,6 +197,7 @@ export const APPEARANCE_DEFAULTS = {
 	openChatAtBottom: true,
 	animationsEnabled: true,
 	streamAnimation: true,
+	markdownComposer: false,
 	// OFF by default: token counts, tokens/sec and first-response time are a
 	// developer readout, and most turns run against agents that report no usage at
 	// all. Must stay in step with DEFAULT_PREFS.inferenceStats in
@@ -281,6 +329,13 @@ function registerAppearanceSettings(): void {
 	});
 
 	registerSetting({
+		id: "appearance.bot-terminology",
+		category: "appearance",
+		label: "Use Bot terminology",
+		reset: () => setBotTerminology(APPEARANCE_DEFAULTS.botTerminology),
+	});
+
+	registerSetting({
 		id: "appearance.pointer-cursor",
 		category: "appearance",
 		label: "Pointer cursor",
@@ -299,6 +354,13 @@ function registerAppearanceSettings(): void {
 		category: "appearance",
 		label: "Dialog overlay blur",
 		reset: () => setDialogOverlayBlur(APPEARANCE_DEFAULTS.dialogOverlayBlur),
+	});
+
+	registerSetting({
+		id: "appearance.popup-overlay-blur",
+		category: "appearance",
+		label: "Popup overlay blur",
+		reset: () => setPopupOverlayBlur(APPEARANCE_DEFAULTS.popupOverlayBlur),
 	});
 
 	registerSetting({
@@ -330,6 +392,36 @@ function registerAppearanceSettings(): void {
 		reset: () => setAgentRowStyle(APPEARANCE_DEFAULTS.agentRowStyle),
 	});
 
+	registerSetting({
+		id: "appearance.sidebar-chat-preview",
+		category: "appearance",
+		label: "Show chat activity in sidebar",
+		reset: () =>
+			setPersistedToggle(
+				APPEARANCE_KEYS.sidebarChatPreview,
+				APPEARANCE_DEFAULTS.sidebarChatPreview
+			),
+	});
+
+	registerSetting({
+		id: "appearance.chat-picker-placement",
+		category: "appearance",
+		label: "Chat model and agent picker placement",
+		reset: () =>
+			setChatPickerPlacement(APPEARANCE_DEFAULTS.chatPickerPlacement),
+	});
+
+	registerSetting({
+		id: "appearance.markdown-composer",
+		category: "appearance",
+		label: "Rich Markdown composer",
+		reset: () =>
+			setPersistedToggle(
+				APPEARANCE_KEYS.markdownComposer,
+				APPEARANCE_DEFAULTS.markdownComposer
+			),
+	});
+
 	// Restores the level ONLY — deliberately not the transcript prefs the level
 	// implies, even though picking a level in the account menu does write those.
 	// `resetCategory` runs every registered reset, and `appearance.hide-tool-detail`
@@ -340,7 +432,7 @@ function registerAppearanceSettings(): void {
 	registerSetting({
 		id: "appearance.interface-level",
 		category: "appearance",
-		label: "Interface level",
+		label: "Interface mode",
 		reset: () =>
 			setInterfaceLevel(APPEARANCE_DEFAULTS.interfaceLevel, {
 				applyPrefs: false,
@@ -375,6 +467,35 @@ function registerAppearanceSettings(): void {
 				APPEARANCE_KEYS.sidebarOverflowPopover,
 				APPEARANCE_DEFAULTS.sidebarOverflowPopover
 			),
+	});
+
+	registerSetting({
+		id: "appearance.tab-dropdown",
+		category: "appearance",
+		label: "Show tabs as a dropdown",
+		reset: () =>
+			setPersistedToggle(
+				APPEARANCE_KEYS.tabDropdown,
+				APPEARANCE_DEFAULTS.tabDropdown
+			),
+	});
+
+	registerSetting({
+		id: "appearance.tab-search-button",
+		category: "appearance",
+		label: "Show tab search button",
+		reset: () =>
+			setPersistedToggle(
+				APPEARANCE_KEYS.tabSearchButton,
+				APPEARANCE_DEFAULTS.tabSearchButton
+			),
+	});
+
+	registerSetting({
+		id: "appearance.notification-layout",
+		category: "appearance",
+		label: "Notification layout",
+		reset: () => setNotificationLayout(APPEARANCE_DEFAULTS.notificationLayout),
 	});
 
 	registerSetting({

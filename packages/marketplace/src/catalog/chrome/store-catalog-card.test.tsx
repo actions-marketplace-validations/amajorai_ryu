@@ -15,14 +15,25 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { LikesProvider } from "../../likes/likes-provider.tsx";
-import type { MarketplaceLikesService } from "../../likes/likes-store.ts";
+import type {
+	LikeSnapshot,
+	MarketplaceLikesService,
+} from "../../likes/likes-store.ts";
 import StoreCatalogCard from "./store-catalog-card.tsx";
+
+function snapshot(
+	namespace: string,
+	count: number,
+	liked: boolean
+): LikeSnapshot {
+	return { count, liked, namespace };
+}
 
 const LIKES: MarketplaceLikesService = {
 	canLike: () => true,
-	fetchCounts: () => Promise.resolve({}),
-	like: () => Promise.resolve({ count: 1, liked: true }),
-	unlike: () => Promise.resolve({ count: 0, liked: false }),
+	fetchCounts: () => Promise.resolve<LikeSnapshot[]>([]),
+	like: (namespace) => Promise.resolve(snapshot(namespace, 1, true)),
+	unlike: (namespace) => Promise.resolve(snapshot(namespace, 0, false)),
 };
 
 function render(node: React.ReactNode): string {
@@ -113,5 +124,20 @@ describe("StoreCatalogCard", () => {
 		);
 		expect(html).not.toContain("<a ");
 		expect(html).toContain('aria-label="Harbor"');
+	});
+
+	test("shows external and declared layer badges", () => {
+		const html = render(
+			<StoreCatalogCard
+				external
+				layers={[
+					{ capability: "browser.control", title: "Browser", toolkit: true },
+				]}
+				name="Cloudflare Browser Run"
+				onClick={() => undefined}
+			/>
+		);
+		expect(html).toContain("External");
+		expect(html).toContain("Browser toolkit");
 	});
 });

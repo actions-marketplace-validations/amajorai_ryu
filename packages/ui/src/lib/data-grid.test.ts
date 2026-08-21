@@ -145,7 +145,7 @@ describe("getIsFileCellData", () => {
 
 describe("getOptionColorClass", () => {
 	test("resolves a known color key to its badge class", () => {
-		expect(getOptionColorClass("blue")).toBe(SELECT_OPTION_COLORS.blue);
+		expect(getOptionColorClass("blue")).toBe(SELECT_OPTION_COLORS.blue!);
 	});
 
 	test("returns empty string for unset or unknown colors", () => {

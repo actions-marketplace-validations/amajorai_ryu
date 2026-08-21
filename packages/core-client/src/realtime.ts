@@ -6,7 +6,7 @@
 // verbatim. It speaks the gateway's wire protocol exactly:
 //
 //   Client -> server (the FIRST frame MUST be `join`):
-//     - join:     text `{ type: "join", room_id, kind }` (kind: conversation|document)
+//     - join:     text `{ type: "join", room_id, kind, app_id? }` (kind: conversation|document|application)
 //     - presence: text `{ type: "presence", data }`   (the server stamps member_id)
 //     - ping:     text `{ type: "ping" }`             (server replies `{type:"pong"}`)
 //     - leave:    text `{ type: "leave" }`
@@ -28,7 +28,34 @@
 import { type ApiTarget, apiUrl } from "./client.ts";
 
 /** Which resource a room maps to. Mirrors the gateway's `RoomKind`. */
-export type RealtimeKind = "conversation" | "document";
+export type RealtimeKind = "conversation" | "document" | "application";
+
+/** A named event published by an application room. */
+export interface RealtimeNamedEvent {
+	data: unknown;
+	name: string;
+}
+
+/** Encode the application-room event control frame. */
+export function encodeRealtimeEvent(event: RealtimeNamedEvent): string {
+	return JSON.stringify({ type: "event", event: event.name, data: event.data });
+}
+
+/** Decode an application-room event control frame, or `null` for another frame. */
+export function decodeRealtimeEvent(raw: string): RealtimeNamedEvent | null {
+	try {
+		const value: unknown = JSON.parse(raw);
+		if (typeof value !== "object" || value === null) {
+			return null;
+		}
+		const frame = value as Record<string, unknown>;
+		return frame.type === "event" && typeof frame.event === "string"
+			? { name: frame.event, data: frame.data }
+			: null;
+	} catch {
+		return null;
+	}
+}
 
 // ── DocSync wire framing (1-byte tag, mirrors `collab::DocSyncMessage`) ──────
 
@@ -117,6 +144,8 @@ export interface RealtimeHandlers {
 	onEvent?: (data: unknown) => void;
 	/** The resolved access level for this connection, sent right after join. */
 	onJoinAck?: (ack: JoinAck) => void;
+	/** A named event from an application room. */
+	onNamedEvent?: (event: RealtimeNamedEvent) => void;
 	onOpen?: () => void;
 	/** A `{ channel: "presence" }` payload — an awareness delta or leave. */
 	onPresence?: (data: unknown) => void;
@@ -127,6 +156,8 @@ export interface RealtimeOptions {
 	/** The user-identity JWT (Better Auth, EdDSA). Omit for an anonymous join. */
 	jwt?: string | null;
 	kind: RealtimeKind;
+	/** Required when `kind` is `application`; never sent by the host bridge to the iframe. */
+	appId?: string;
 	roomId: string;
 }
 
@@ -188,6 +219,9 @@ export class RealtimeConnection {
 				type: "join",
 				room_id: this.options.roomId,
 				kind: this.options.kind,
+				...(this.options.kind === "application" && this.options.appId
+					? { app_id: this.options.appId }
+					: {}),
 			});
 			this.startKeepalive();
 			handlers?.onOpen?.();
@@ -222,6 +256,11 @@ export class RealtimeConnection {
 	/** Send a DocSync frame (CRDT sync/update) for a document room. */
 	sendDocSync(message: DocSyncMessage): void {
 		this.sendBinary(encodeDocSync(message));
+	}
+
+	/** Publish a named event to an application room. */
+	sendEvent(name: string, data: unknown): void {
+		this.sendText(encodeRealtimeEvent({ name, data }));
 	}
 
 	/** Liveness ping; the server replies with a `pong` (ignored by the dispatcher). */
@@ -308,6 +347,9 @@ export class RealtimeConnection {
 		}
 		if (frame.channel === "events") {
 			handlers?.onEvent?.(frame.data);
+			if (typeof frame.event === "string") {
+				handlers?.onNamedEvent?.({ name: frame.event, data: frame.data });
+			}
 			return;
 		}
 		if (frame.channel === "presence") {

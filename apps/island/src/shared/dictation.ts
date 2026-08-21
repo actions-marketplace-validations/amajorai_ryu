@@ -49,8 +49,8 @@ export type DictationTask = "transcribe" | "ask";
 /**
  * How the transcribed (and optionally post-processed) text lands in the focused
  * app:
- * - `"type"`: synthetic Unicode keystrokes via ghost (`ghost__ghost_type`).
- * - `"paste"`: clipboard + paste chord via ghost (`ghost__ghost_hotkey`).
+ * - `"type"`: synthetic Unicode keystrokes via ghost (`ghost.ghost_type`).
+ * - `"paste"`: clipboard + paste chord via ghost (`ghost.ghost_hotkey`).
  */
 export type DictationInsertMode = "type" | "paste";
 

@@ -7,12 +7,12 @@
 //! capability's provider be swapped: `provides`/`requires` edges resolve to a
 //! concrete app id, overridable per capability. What it does NOT do is keep the
 //! *model-visible tool surface* stable — binding lowers to a dependency-graph edge,
-//! not to a tool route. So swapping Exa for Tavily used to rename `exa__search` to
-//! `tavily__search` and reshape its arguments, breaking every agent allowlist and
+//! not to a tool route. So swapping Exa for Tavily used to rename `exa.search` to
+//! `tavily.search` and reshape its arguments, breaking every agent allowlist and
 //! every prompt that named the tool.
 //!
 //! This module closes that gap the way Hermes does: one canonical verb per thing an
-//! agent actually wants to do (`web__search`, `browser__navigate`, `memory__store`,
+//! agent actually wants to do (`web.search`, `browser.navigate`, `memory.store`,
 //! …), registered as reserved built-in tools. At call time the facade resolves the
 //! capability's bound provider, renames the arguments per the provider's manifest,
 //! re-enters dispatch on the provider's own tool, and normalizes the response back
@@ -33,7 +33,7 @@
 //!
 //! ## Invariants
 //!
-//! * Provider-native ids (`exa__search`, `spider__crawl`) stay registered. The facade
+//! * Provider-native ids (`exa.search`, `spider.crawl`) stay registered. The facade
 //!   is purely additive, so existing agents and allowlists are untouched.
 //! * The facade adds no authority **relative to a direct tool call**: the re-entered
 //!   call is the provider's own tool, gated by the provider's own grants exactly as
@@ -49,7 +49,7 @@
 //!   grant set to check against; gating on one would refuse every facade call.
 //!   The consequence to keep in view is that a privileged verb is only as safe as
 //!   the allowlist, so a genuinely dangerous capability should not become a verb at
-//!   all. `browser__eval` (arbitrary JS in a page carrying the user's live session)
+//!   all. `browser.eval` (arbitrary JS in a page carrying the user's live session)
 //!   was left OUT of the table for exactly this reason, on an app that ships
 //!   default-on.
 //! * A verb is only listed when its capability resolves over the ENABLED set AND the
@@ -104,7 +104,8 @@ pub fn server_description(name: &str) -> Option<&'static str> {
              provider serves them (Exa, Tavily, Spider, …) is selected in the layer picker.",
         ),
         SERVER_BROWSER => Some(
-            "Swappable browser layer: navigate, snapshot, click, type, screenshot. Backed by \
+            "Swappable browser layer: navigate, snapshot, context, annotate, click, type, screenshot and \
+             coordinate input. Backed by \
              whichever browser provider is selected (local Chromium or a cloud browser).",
         ),
         SERVER_COMPUTER => Some(
@@ -122,7 +123,7 @@ pub fn server_description(name: &str) -> Option<&'static str> {
 /// One canonical capability verb — a stable tool the model sees regardless of which
 /// provider is bound.
 pub struct Verb {
-    /// Fully-qualified tool id (`<server>__<name>`), e.g. `"web__search"`.
+    /// Fully-qualified tool id (`<server>.<name>`), e.g. `"web.search"`.
     pub id: &'static str,
     /// The reserved server this verb belongs to.
     pub server: &'static str,
@@ -191,12 +192,12 @@ fn schema_browser_tab_only() -> Value {
     // `tab_id` is REQUIRED, not "omit for the active tab". A declarative provider
     // tool interpolates it into a static URL path, so omitting it is a hard error
     // rather than a fall back to some active tab — and providers have no shared
-    // notion of an active tab anyway. Call `browser__tabs` or `browser__navigate`
+    // notion of an active tab anyway. Call `browser.tabs` or `browser.navigate`
     // first; both return the id.
     json!({
         "type": "object",
         "properties": {
-            "tab_id": { "type": "string", "description": "Target tab id, from browser__tabs or browser__navigate." }
+            "tab_id": { "type": "string", "description": "Target tab id, from browser.tabs or browser.navigate." }
         },
         "required": ["tab_id"]
     })
@@ -206,7 +207,7 @@ fn schema_browser_click() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "ref": { "type": "string", "description": "Element reference from a prior browser__snapshot (e.g. \"@e3\")." },
+            "ref": { "type": "string", "description": "Element reference from a prior browser.snapshot (e.g. \"@e3\")." },
             "tab_id": { "type": "string", "description": "Target tab; omit for the active tab." }
         },
         "required": ["ref"]
@@ -217,7 +218,7 @@ fn schema_browser_type() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "ref": { "type": "string", "description": "Element reference from a prior browser__snapshot." },
+            "ref": { "type": "string", "description": "Element reference from a prior browser.snapshot." },
             "text": { "type": "string", "description": "Text to type into the element." },
             "replace": { "type": "boolean", "description": "Overwrite the field's current value instead of appending to it. Default false: text is inserted at the caret, so a field that already has a value ends up with both." },
             "submit": { "type": "boolean", "description": "Press Enter after typing." },
@@ -236,6 +237,95 @@ fn schema_browser_scroll() -> Value {
             "tab_id": { "type": "string", "description": "Target tab; omit for the active tab." }
         },
         "required": ["direction"]
+    })
+}
+
+fn schema_browser_context() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "tab_id": { "type": "string", "description": "Target tab id." },
+            "include_screenshot": { "type": "boolean", "description": "Include the current PNG frame; set false for a text-only context refresh." },
+            "selections": {
+                "type": "array",
+                "description": "Optional CSS-pixel points or rectangles to inspect. The result includes DOM identity, selectors, attributes, computed styles, component hints and text.",
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "number" },
+                        "y": { "type": "number" },
+                        "width": { "type": "number", "minimum": 0 },
+                        "height": { "type": "number", "minimum": 0 }
+                    },
+                    "required": ["x", "y"]
+                }
+            }
+        },
+        "required": ["tab_id"]
+    })
+}
+
+fn schema_browser_annotate() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "tab_id": { "type": "string", "description": "Target tab id." },
+            "kind": { "type": "string", "enum": ["area", "element", "elements"] },
+            "rect": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "width": { "type": "number", "minimum": 0 }, "height": { "type": "number", "minimum": 0 } }, "required": ["x", "y"] },
+            "selections": { "type": "array", "maxItems": 8, "items": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "width": { "type": "number", "minimum": 0 }, "height": { "type": "number", "minimum": 0 } }, "required": ["x", "y"] } },
+            "comment": { "type": "string", "description": "Specific change request for the pointed target or region." },
+            "style": { "type": "object", "description": "Optional safe style feedback such as font_size, color, letter_spacing, padding, or margin." }
+        },
+        "required": ["tab_id", "kind", "rect", "comment"]
+    })
+}
+
+fn schema_browser_hover() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": { "type": "string", "description": "Element reference from browser.snapshot." },
+            "tab_id": { "type": "string", "description": "Target tab; omit for the active tab." }
+        },
+        "required": ["ref"]
+    })
+}
+
+fn schema_browser_click_at() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "x": { "type": "number", "description": "Viewport x coordinate in CSS pixels." },
+            "y": { "type": "number", "description": "Viewport y coordinate in CSS pixels." },
+            "button": { "type": "string", "enum": ["left", "middle", "right"] },
+            "count": { "type": "integer", "minimum": 1, "maximum": 3 },
+            "tab_id": { "type": "string", "description": "Target tab; omit for the active tab." }
+        },
+        "required": ["x", "y"]
+    })
+}
+
+fn schema_browser_key() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "keys": { "type": "array", "description": "Key tokens pressed together, e.g. [\"cmd\", \"l\"] or [\"Escape\"].", "items": { "type": "string" } },
+            "tab_id": { "type": "string", "description": "Target tab; omit for the active tab." }
+        },
+        "required": ["keys"]
+    })
+}
+
+fn schema_browser_drag() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "from": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["x", "y"] },
+            "to": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["x", "y"] },
+            "tab_id": { "type": "string", "description": "Target tab; omit for the active tab." }
+        },
+        "required": ["from", "to"]
     })
 }
 
@@ -386,7 +476,7 @@ fn schema_memory_forget() -> Value {
 pub fn verbs() -> &'static [Verb] {
     &[
         Verb {
-            id: "web__search",
+            id: "web.search",
             server: SERVER_WEB,
             name: "search",
             capability: CAP_WEB_SEARCH,
@@ -396,7 +486,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_search,
         },
         Verb {
-            id: "web__extract",
+            id: "web.extract",
             server: SERVER_WEB,
             name: "extract",
             capability: CAP_WEB_EXTRACT,
@@ -405,7 +495,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_extract,
         },
         Verb {
-            id: "web__crawl",
+            id: "web.crawl",
             server: SERVER_WEB,
             name: "crawl",
             capability: CAP_WEB_CRAWL,
@@ -414,7 +504,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_crawl,
         },
         Verb {
-            id: "browser__navigate",
+            id: "browser.navigate",
             server: SERVER_BROWSER,
             name: "navigate",
             capability: CAP_BROWSER,
@@ -423,34 +513,34 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_browser_navigate,
         },
         Verb {
-            id: "browser__snapshot",
+            id: "browser.snapshot",
             server: SERVER_BROWSER,
             name: "snapshot",
             capability: CAP_BROWSER,
             description: "Return the page's accessibility tree with stable element references \
-                          (@e1, @e2, …) to use with browser__click and browser__type.",
+                          (@e1, @e2, …) to use with browser.click and browser.type.",
             schema: schema_browser_tab_only,
         },
         Verb {
-            id: "browser__click",
+            id: "browser.click",
             server: SERVER_BROWSER,
             name: "click",
             capability: CAP_BROWSER,
-            description: "Click an element identified by a reference from browser__snapshot.",
+            description: "Click an element identified by a reference from browser.snapshot.",
             schema: schema_browser_click,
         },
         Verb {
-            id: "browser__type",
+            id: "browser.type",
             server: SERVER_BROWSER,
             name: "type",
             capability: CAP_BROWSER,
-            description: "Type text into an element identified by a reference from browser__snapshot. \
+            description: "Type text into an element identified by a reference from browser.snapshot. \
                           Text is inserted at the caret and APPENDS by default — pass `replace` to \
                           overwrite a field that already has a value.",
             schema: schema_browser_type,
         },
         Verb {
-            id: "browser__scroll",
+            id: "browser.scroll",
             server: SERVER_BROWSER,
             name: "scroll",
             capability: CAP_BROWSER,
@@ -458,7 +548,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_browser_scroll,
         },
         Verb {
-            id: "browser__screenshot",
+            id: "browser.screenshot",
             server: SERVER_BROWSER,
             name: "screenshot",
             capability: CAP_BROWSER,
@@ -467,7 +557,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_browser_tab_only,
         },
         Verb {
-            id: "browser__tabs",
+            id: "browser.tabs",
             server: SERVER_BROWSER,
             name: "tabs",
             capability: CAP_BROWSER,
@@ -475,16 +565,72 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_empty,
         },
         Verb {
-            id: "computer__capture",
+            id: "browser.context",
+            server: SERVER_BROWSER,
+            name: "context",
+            capability: CAP_BROWSER,
+            description: "Return the current page's screenshot, accessibility snapshot, saved annotations, and optional DOM context for pointed elements.",
+            schema: schema_browser_context,
+        },
+        Verb {
+            id: "browser.annotate",
+            server: SERVER_BROWSER,
+            name: "annotate",
+            capability: CAP_BROWSER,
+            description: "Attach a frozen-frame visual comment to a browser element, group of elements, or area so the next agent turn can act on it.",
+            schema: schema_browser_annotate,
+        },
+        Verb {
+            id: "browser.clear_annotations",
+            server: SERVER_BROWSER,
+            name: "clear_annotations",
+            capability: CAP_BROWSER,
+            description: "Clear the saved visual annotations from a browser tab.",
+            schema: schema_browser_tab_only,
+        },
+        Verb {
+            id: "browser.hover",
+            server: SERVER_BROWSER,
+            name: "hover",
+            capability: CAP_BROWSER,
+            description: "Move the real pointer over a snapshot element without clicking it.",
+            schema: schema_browser_hover,
+        },
+        Verb {
+            id: "browser.click_at",
+            server: SERVER_BROWSER,
+            name: "click_at",
+            capability: CAP_BROWSER,
+            description: "Click a CSS-pixel viewport coordinate when no accessibility reference exists, such as a canvas control.",
+            schema: schema_browser_click_at,
+        },
+        Verb {
+            id: "browser.key",
+            server: SERVER_BROWSER,
+            name: "key",
+            capability: CAP_BROWSER,
+            description: "Press a browser key or key chord at the current focus.",
+            schema: schema_browser_key,
+        },
+        Verb {
+            id: "browser.drag",
+            server: SERVER_BROWSER,
+            name: "drag",
+            capability: CAP_BROWSER,
+            description: "Drag the real browser pointer between two CSS-pixel viewport coordinates.",
+            schema: schema_browser_drag,
+        },
+        Verb {
+            id: "computer.capture",
             server: SERVER_COMPUTER,
             name: "capture",
             capability: CAP_COMPUTER,
-            description: "Capture the screen with accessibility metadata, so subsequent computer__* \
+            description: "Capture the screen with accessibility metadata, so subsequent computer.* \
                           calls can target what is on screen.",
             schema: schema_computer_capture,
         },
         Verb {
-            id: "computer__click",
+            id: "computer.click",
             server: SERVER_COMPUTER,
             name: "click",
             capability: CAP_COMPUTER,
@@ -492,7 +638,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_computer_click,
         },
         Verb {
-            id: "computer__type",
+            id: "computer.type",
             server: SERVER_COMPUTER,
             name: "type",
             capability: CAP_COMPUTER,
@@ -500,7 +646,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_computer_type,
         },
         Verb {
-            id: "computer__key",
+            id: "computer.key",
             server: SERVER_COMPUTER,
             name: "key",
             capability: CAP_COMPUTER,
@@ -508,7 +654,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_computer_key,
         },
         Verb {
-            id: "computer__scroll",
+            id: "computer.scroll",
             server: SERVER_COMPUTER,
             name: "scroll",
             capability: CAP_COMPUTER,
@@ -516,7 +662,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_computer_scroll,
         },
         Verb {
-            id: "computer__focus_app",
+            id: "computer.focus_app",
             server: SERVER_COMPUTER,
             name: "focus_app",
             capability: CAP_COMPUTER,
@@ -524,7 +670,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_computer_focus_app,
         },
         Verb {
-            id: "memory__search",
+            id: "memory.search",
             server: SERVER_MEMORY,
             name: "search",
             capability: CAP_MEMORY,
@@ -533,7 +679,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_memory_search,
         },
         Verb {
-            id: "memory__store",
+            id: "memory.store",
             server: SERVER_MEMORY,
             name: "store",
             capability: CAP_MEMORY,
@@ -542,7 +688,7 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_memory_store,
         },
         Verb {
-            id: "memory__context",
+            id: "memory.context",
             server: SERVER_MEMORY,
             name: "context",
             capability: CAP_MEMORY,
@@ -553,18 +699,18 @@ pub fn verbs() -> &'static [Verb] {
             schema: schema_memory_context,
         },
         Verb {
-            id: "memory__sync",
+            id: "memory.sync",
             server: SERVER_MEMORY,
             name: "sync",
             capability: CAP_MEMORY,
             description: "Hand a raw conversation turn to the memory provider and let IT decide \
-                          what is worth remembering. Distinct from memory__store, which records \
+                          what is worth remembering. Distinct from memory.store, which records \
                           a fact you have already decided on: sync delegates the extraction, \
                           which is how server-side-extraction providers are meant to be fed.",
             schema: schema_memory_sync,
         },
         Verb {
-            id: "memory__forget",
+            id: "memory.forget",
             server: SERVER_MEMORY,
             name: "forget",
             capability: CAP_MEMORY,
@@ -576,7 +722,8 @@ pub fn verbs() -> &'static [Verb] {
 
 /// Look up a verb by its fully-qualified id.
 pub fn verb_by_id(id: &str) -> Option<&'static Verb> {
-    verbs().iter().find(|v| v.id == id)
+    let normalized = super::canonical_tool_id(id);
+    verbs().iter().find(|v| v.id == normalized)
 }
 
 /// The preference key holding the user's default for one canonical argument of a
@@ -807,7 +954,11 @@ pub fn resolve_verbs(enabled: &[PluginManifest], config: &BindingConfig) -> Vec<
         let Some((provider_id, provides)) = entry.as_ref() else {
             continue;
         };
-        let Some(binding) = provides.tools.get(verb.id) else {
+        let Some(binding) = provides.tools.get(verb.id).or_else(|| {
+            provides.tools.iter().find_map(|(id, binding)| {
+                (super::canonical_tool_id(id) == verb.id).then_some(binding)
+            })
+        }) else {
             continue;
         };
         out.push(ResolvedVerb {
@@ -1121,7 +1272,7 @@ mod tests {
             .collect(),
         });
         let mut tools = BTreeMap::new();
-        tools.insert("web__search".to_owned(), binding);
+        tools.insert("web.search".to_owned(), binding);
         PluginManifest {
             id: id.to_owned(),
             name: id.to_owned(),
@@ -1144,8 +1295,8 @@ mod tests {
     // can see a typo in a shipped fixture. These four can. They matter more than
     // usual here because Core's manifest loader never calls `validate_capabilities`,
     // so nothing else validates a `provides` block at all: a single-underscore verb
-    // key (`web_search` for `web__search`) is not an error anywhere — it just makes
-    // `tools.get(verb.id)` return `None` and the layer silently serve nothing.
+    // key (`web_search` for `web.search`) is not an error anywhere — it simply
+    // makes the layer silently serve nothing.
 
     fn builtins() -> Vec<PluginManifest> {
         crate::plugin_manifest::PluginManifestLoader::load_builtins()
@@ -1159,7 +1310,7 @@ mod tests {
                     let verb = verb_by_id(key).unwrap_or_else(|| {
                         panic!(
                             "plugin '{}' binds unknown capability verb '{key}' — check for a \
-                             single-underscore typo; the canonical ids are `<server>__<name>`",
+                            single-underscore typo; the canonical ids are `<server>.<name>`",
                             m.id
                         )
                     });
@@ -1324,13 +1475,13 @@ mod tests {
         let default_pick = resolve_verbs(&all, &BindingConfig::default());
         let search = default_pick
             .iter()
-            .find(|r| r.verb.id == "web__search")
-            .expect("the shipped fixtures must serve web__search");
+            .find(|r| r.verb.id == "web.search")
+            .expect("the shipped fixtures must serve web.search");
         assert_eq!(
             search.provider_id, "@ryu/exa",
             "exa declares itself the default"
         );
-        assert_eq!(search.binding.tool, "exa__search");
+        assert_eq!(search.binding.tool, "exa.search");
 
         let mut cfg = BindingConfig::default();
         cfg.overrides
@@ -1338,16 +1489,17 @@ mod tests {
         let swapped = resolve_verbs(&all, &cfg);
         let search_after = swapped
             .iter()
-            .find(|r| r.verb.id == "web__search")
-            .expect("web__search must survive the swap");
+            .find(|r| r.verb.id == "web.search")
+            .expect("web.search must survive the swap");
         assert_eq!(search_after.provider_id, "@ryu/tavily");
-        assert_eq!(search_after.binding.tool, "tavily__search");
+        assert_eq!(search_after.binding.tool, "tavily.search");
     }
 
     #[test]
     fn the_shipped_browser_layer_serves_the_whole_verb_set() {
-        // The browser sidecar now answers snapshot/click/type/scroll over its own CDP
-        // session, so all seven browser verbs must resolve to it. Pinned because the
+        // The browser sidecar now answers snapshot/context/annotation and full
+        // mouse/keyboard input over its own CDP session, so the local browser's
+        // extended verb set must resolve to it. Pinned because the
         // failure is silent in both directions: a mistyped verb key just stops being
         // advertised, and a runnable renamed out from under `binding.tool` only fails
         // at call time, on someone's turn.
@@ -1359,13 +1511,20 @@ mod tests {
             .map(|r| (r.verb.id, (r.provider_id.as_str(), r.binding.tool.as_str())))
             .collect();
         for (verb, tool) in [
-            ("browser__tabs", "chromium__list_tabs"),
-            ("browser__navigate", "chromium__open_tab"),
-            ("browser__screenshot", "chromium__screenshot_tab"),
-            ("browser__snapshot", "chromium__snapshot_tab"),
-            ("browser__click", "chromium__click"),
-            ("browser__type", "chromium__type"),
-            ("browser__scroll", "chromium__scroll"),
+            ("browser.tabs", "chromium.list_tabs"),
+            ("browser.navigate", "chromium.open_tab"),
+            ("browser.screenshot", "chromium.screenshot_tab"),
+            ("browser.snapshot", "chromium.snapshot_tab"),
+            ("browser.click", "chromium.click"),
+            ("browser.type", "chromium.type"),
+            ("browser.scroll", "chromium.scroll"),
+            ("browser.context", "chromium.context"),
+            ("browser.annotate", "chromium.annotate"),
+            ("browser.clear_annotations", "chromium.clear_annotations"),
+            ("browser.hover", "chromium.hover"),
+            ("browser.click_at", "chromium.click_at"),
+            ("browser.key", "chromium.key"),
+            ("browser.drag", "chromium.drag"),
         ] {
             assert_eq!(
                 served.get(verb),
@@ -1373,11 +1532,11 @@ mod tests {
                 "the shipped browser provider must serve {verb} via {tool}"
             );
         }
-        // `browser__eval` is not a verb at all (see the module docs); nothing may
+        // `browser.eval` is not a verb at all (see the module docs); nothing may
         // reintroduce it through a binding.
-        assert!(verb_by_id("browser__eval").is_none());
+        assert!(verb_by_id("browser.eval").is_none());
 
-        // Every `chromium__*` target must be a runnable the app actually registers,
+        // Every `chromium.*` target must be a runnable the app actually registers,
         // and each declared route must exist on the sidecar — a binding pointing at a
         // slug or path that is not there 404s at call time and nowhere else.
         let browser = all
@@ -1400,7 +1559,18 @@ mod tests {
                 "verb target '{tool}' is not a runnable slug on @ryu/browser"
             );
         }
-        for url in ["/tabs/{id}/snapshot", "/click", "/type", "/scroll"] {
+        for url in [
+            "/tabs/{id}/snapshot",
+            "/tabs/{id}/context",
+            "/tabs/{id}/annotations",
+            "/click",
+            "/type",
+            "/scroll",
+            "/hover",
+            "/click-at",
+            "/key",
+            "/drag",
+        ] {
             let full = format!("core:/api/ext/@ryu/browser{url}");
             assert!(
                 urls.contains(&full.as_str()),
@@ -1501,7 +1671,7 @@ mod tests {
 
     #[test]
     fn layer_defaults_sit_under_the_caller_but_over_the_provider() {
-        let search = verb_by_id("web__search").unwrap();
+        let search = verb_by_id("web.search").unwrap();
         let mut defaults = Map::new();
         defaults.insert("limit".to_owned(), json!(25));
 
@@ -1516,7 +1686,7 @@ mod tests {
         // And the layer default outranks the provider's own arg_defaults, because
         // `map_args` merges arg_defaults first and the merged args overwrite them.
         let mut binding = CapabilityToolBinding {
-            tool: "exa__search".to_owned(),
+            tool: "exa.search".to_owned(),
             ..Default::default()
         };
         binding.arg_defaults.insert("limit".to_owned(), json!(10));
@@ -1535,7 +1705,7 @@ mod tests {
 
     #[test]
     fn a_stored_default_is_coerced_to_the_type_the_schema_declares() {
-        let search = verb_by_id("web__search").unwrap();
+        let search = verb_by_id("web.search").unwrap();
         // `limit` is an integer in the canonical schema; preferences store strings.
         assert_eq!(
             coerce_to_schema_type(search, "limit", "25"),
@@ -1554,7 +1724,7 @@ mod tests {
 
     #[test]
     fn booleans_and_unset_defaults_behave() {
-        let crawl = verb_by_id("web__crawl").unwrap();
+        let crawl = verb_by_id("web.crawl").unwrap();
         assert_eq!(coerce_to_schema_type(crawl, "depth", "3"), Some(json!(3)));
         // No defaults at all is a pure pass-through.
         assert_eq!(
@@ -1568,20 +1738,24 @@ mod tests {
         // The settings UI enumerates these to know which keys it may offer, so a
         // verb whose schema has no readable properties would silently be
         // un-configurable.
-        let search = verb_by_id("web__search").unwrap();
+        let search = verb_by_id("web.search").unwrap();
         let mut args = canonical_args(search);
         args.sort();
         assert_eq!(args, vec!["limit".to_owned(), "query".to_owned()]);
     }
 
     #[test]
+    fn legacy_provider_ids_resolve_through_the_canonical_lookup() {
+        assert_eq!(
+            verb_by_id("web__search").map(|verb| verb.id),
+            Some("web.search")
+        );
+    }
+
+    #[test]
     fn verb_ids_match_their_server_and_name() {
         for v in verbs() {
-            assert_eq!(
-                v.id,
-                format!("{}__{}", v.server, v.name),
-                "verb id mismatch"
-            );
+            assert_eq!(v.id, format!("{}.{}", v.server, v.name), "verb id mismatch");
             assert!(is_server(v.server), "verb {} has unreserved server", v.id);
         }
     }
@@ -1597,30 +1771,30 @@ mod tests {
 
     #[test]
     fn only_verbs_the_bound_provider_declares_are_listed() {
-        let enabled = vec![search_provider("@ryu/exa", true, "exa__search")];
+        let enabled = vec![search_provider("@ryu/exa", true, "exa.search")];
         let resolved = resolve_verbs(&enabled, &BindingConfig::default());
-        // exa declares web__search only — no extract/crawl/browser/computer/memory.
+        // exa declares web.search only — no extract/crawl/browser/computer/memory.
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].verb.id, "web__search");
+        assert_eq!(resolved[0].verb.id, "web.search");
         assert_eq!(resolved[0].provider_id, "@ryu/exa");
-        assert_eq!(resolved[0].binding.tool, "exa__search");
+        assert_eq!(resolved[0].binding.tool, "exa.search");
 
         let rows = tools(&resolved);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, "web__search");
+        assert_eq!(rows[0].id, "web.search");
         assert_eq!(rows[0].server, "web");
     }
 
     #[test]
     fn swapping_the_provider_keeps_the_verb_and_changes_only_the_target() {
         let enabled = vec![
-            search_provider("@ryu/exa", true, "exa__search"),
-            search_provider("@ryu/tavily", false, "tavily__search"),
+            search_provider("@ryu/exa", true, "exa.search"),
+            search_provider("@ryu/tavily", false, "tavily.search"),
         ];
         // Zero-config: the declared default wins.
         let before = resolve_verbs(&enabled, &BindingConfig::default());
-        assert_eq!(before[0].verb.id, "web__search");
-        assert_eq!(before[0].binding.tool, "exa__search");
+        assert_eq!(before[0].verb.id, "web.search");
+        assert_eq!(before[0].binding.tool, "exa.search");
 
         // One override later, the model-visible id is identical and only the
         // forwarding target moved.
@@ -1629,7 +1803,7 @@ mod tests {
             .insert(CAP_WEB_SEARCH.to_owned(), "@ryu/tavily".to_owned());
         let after = resolve_verbs(&enabled, &cfg);
         assert_eq!(after[0].verb.id, before[0].verb.id);
-        assert_eq!(after[0].binding.tool, "tavily__search");
+        assert_eq!(after[0].binding.tool, "tavily.search");
         assert_eq!(
             tools(&after)[0].input_schema,
             tools(&before)[0].input_schema
@@ -1670,7 +1844,7 @@ mod tests {
     #[test]
     fn a_batch_argument_is_wrapped_declaratively() {
         let mut binding = CapabilityToolBinding {
-            tool: "tavily__extract".to_owned(),
+            tool: "tavily.extract".to_owned(),
             ..Default::default()
         };
         binding.args.insert("url".to_owned(), "urls[]".to_owned());
@@ -1693,7 +1867,7 @@ mod tests {
         // templating, clamping or substituting. Providers are DATA; parsing them from
         // JSON is the path that actually runs.
         let binding: CapabilityToolBinding = serde_json::from_value(json!({
-            "tool": "mem0__add",
+            "tool": "mem0.add",
             "args": { "limit": "top_k", "scope": "" },
             "arg_defaults": { "user_id": "pref:mem0.user-id" },
             "arg_template": { "messages": [{ "role": "user", "content": "{content}" }] },
@@ -1702,7 +1876,7 @@ mod tests {
         }))
         .expect("the manifest form must deserialize");
 
-        assert_eq!(binding.tool, "mem0__add");
+        assert_eq!(binding.tool, "mem0.add");
         assert_eq!(binding.args.get("limit").map(String::as_str), Some("top_k"));
         assert!(
             !binding.arg_template.is_empty(),
@@ -1742,7 +1916,7 @@ mod tests {
         // an array of objects, which is why the whole write half of that provider —
         // and with it the `mirror` and `sync` kernel bridges — was unbindable.
         let mut binding = CapabilityToolBinding {
-            tool: "mem0__add".to_owned(),
+            tool: "mem0.add".to_owned(),
             ..Default::default()
         };
         binding.arg_template.insert(
@@ -1763,7 +1937,7 @@ mod tests {
     #[test]
     fn a_whole_string_placeholder_preserves_the_arguments_json_type() {
         let mut binding = CapabilityToolBinding {
-            tool: "p__x".to_owned(),
+            tool: "p.x".to_owned(),
             ..Default::default()
         };
         binding
@@ -1778,7 +1952,7 @@ mod tests {
     #[test]
     fn interpolation_inside_a_larger_string_still_works() {
         let mut binding = CapabilityToolBinding {
-            tool: "p__x".to_owned(),
+            tool: "p.x".to_owned(),
             ..Default::default()
         };
         binding
@@ -1795,7 +1969,7 @@ mod tests {
         // Emitting a literal "{role}" would be sent upstream and treated as real
         // content — the same class of silent-wrongness as an unresolved `pref:` token.
         let mut binding = CapabilityToolBinding {
-            tool: "p__x".to_owned(),
+            tool: "p.x".to_owned(),
             ..Default::default()
         };
         binding.arg_template.insert(
@@ -1811,7 +1985,7 @@ mod tests {
     #[test]
     fn a_binding_with_no_template_is_completely_unaffected() {
         let mut binding = CapabilityToolBinding {
-            tool: "exa__search".to_owned(),
+            tool: "exa.search".to_owned(),
             ..Default::default()
         };
         binding
@@ -1828,7 +2002,7 @@ mod tests {
         // canonical verb argument. Hard-coding it gives every install the same fixed
         // bucket, so the provider returns nothing forever, silently.
         let mut binding = CapabilityToolBinding {
-            tool: "mem0__search".to_owned(),
+            tool: "mem0.search".to_owned(),
             ..Default::default()
         };
         binding.arg_defaults.insert(
@@ -1860,7 +2034,7 @@ mod tests {
         // entity id and silently match nothing. A missing field at least makes the
         // provider say so.
         let mut binding = CapabilityToolBinding {
-            tool: "mem0__search".to_owned(),
+            tool: "mem0.search".to_owned(),
             ..Default::default()
         };
         binding.arg_defaults.insert(
@@ -1885,7 +2059,7 @@ mod tests {
     #[test]
     fn a_binding_with_no_tokens_is_untouched_by_resolution() {
         let mut binding = CapabilityToolBinding {
-            tool: "exa__search".to_owned(),
+            tool: "exa.search".to_owned(),
             ..Default::default()
         };
         binding
@@ -1900,11 +2074,11 @@ mod tests {
 
     #[test]
     fn a_provider_ceiling_clamps_instead_of_failing_the_call() {
-        // The real case: `web__search.limit` allows up to 100, but Brave's `count`
+        // The real case: `web.search.limit` allows up to 100, but Brave's `count`
         // maxes at 20. Without clamping, selecting Brave turns a valid `limit: 50`
         // into an upstream 4xx and the swap stops being transparent.
         let mut binding = CapabilityToolBinding {
-            tool: "brave__search".to_owned(),
+            tool: "brave.search".to_owned(),
             ..Default::default()
         };
         binding.args.insert("limit".to_owned(), "count".to_owned());
@@ -1939,7 +2113,7 @@ mod tests {
     #[test]
     fn clamping_is_keyed_by_the_canonical_name_and_ignores_the_irrelevant() {
         let mut binding = CapabilityToolBinding {
-            tool: "p__search".to_owned(),
+            tool: "p.search".to_owned(),
             ..Default::default()
         };
         binding.arg_clamp.insert(
@@ -1961,7 +2135,7 @@ mod tests {
             .is_none());
         // A binding with no clamps is a pure pass-through.
         let plain = CapabilityToolBinding {
-            tool: "p__x".to_owned(),
+            tool: "p.x".to_owned(),
             ..Default::default()
         };
         assert_eq!(map_args(&plain, json!({ "limit": 99 }))["limit"], json!(99));
@@ -1980,8 +2154,8 @@ mod tests {
 
     #[test]
     fn response_is_normalized_and_keeps_the_raw_item() {
-        let provider = search_provider("@ryu/exa", true, "exa__search");
-        let binding = provider.provides[0].tools.get("web__search").unwrap();
+        let provider = search_provider("@ryu/exa", true, "exa.search");
+        let binding = provider.provides[0].tools.get("web.search").unwrap();
         let mapped = map_response(
             binding,
             "@ryu/exa",
@@ -1998,12 +2172,12 @@ mod tests {
 
     #[test]
     fn two_providers_normalize_to_the_same_canonical_shape() {
-        let exa = search_provider("@ryu/exa", true, "exa__search");
-        let exa_binding = exa.provides[0].tools.get("web__search").unwrap();
+        let exa = search_provider("@ryu/exa", true, "exa.search");
+        let exa_binding = exa.provides[0].tools.get("web.search").unwrap();
 
         // A provider with a different envelope and different field names.
         let mut tavily_binding = CapabilityToolBinding {
-            tool: "tavily__search".to_owned(),
+            tool: "tavily.search".to_owned(),
             ..Default::default()
         };
         tavily_binding.response = Some(CapabilityResponseMap {
@@ -2056,7 +2230,7 @@ mod tests {
         // adapter, which is what adapters exist for. Guard the boundary so the next
         // provider-specific transform does not get added here either.
         let mut binding = CapabilityToolBinding {
-            tool: "firecrawl__scrape".to_owned(),
+            tool: "firecrawl.scrape".to_owned(),
             ..Default::default()
         };
         binding.response = Some(CapabilityResponseMap {
@@ -2104,8 +2278,8 @@ mod tests {
         // missing API key) and the generic non-2xx envelope. Reporting either as
         // `results: []` would tell the model "no search results" when the truth is
         // "your key is rejected" — the failure this test exists to prevent.
-        let provider = search_provider("@ryu/exa", true, "exa__search");
-        let binding = provider.provides[0].tools.get("web__search").unwrap();
+        let provider = search_provider("@ryu/exa", true, "exa.search");
+        let binding = provider.provides[0].tools.get("web.search").unwrap();
 
         for failure in [
             json!({ "available": false, "reason": "endpoint returned HTTP 401", "hint": "check the key" }),
@@ -2125,8 +2299,8 @@ mod tests {
         // The other side of the coin: a provider that really found nothing returns
         // its envelope with an empty array, and that MUST stay a normal empty result
         // set rather than being mistaken for a failure.
-        let provider = search_provider("@ryu/exa", true, "exa__search");
-        let binding = provider.provides[0].tools.get("web__search").unwrap();
+        let provider = search_provider("@ryu/exa", true, "exa.search");
+        let binding = provider.provides[0].tools.get("web.search").unwrap();
         let mapped = map_response(binding, "@ryu/exa", json!({ "results": [] }));
         assert_eq!(mapped["results"], json!([]));
     }
@@ -2138,8 +2312,8 @@ mod tests {
         // VERBATIM, no envelope" for a 2xx in that mode. So the declared `results`
         // paths are relative to the provider's OWN body — this test pins that
         // assumption, since a wrapped envelope would make every mapping miss.
-        let provider = search_provider("@ryu/exa", true, "exa__search");
-        let binding = provider.provides[0].tools.get("web__search").unwrap();
+        let provider = search_provider("@ryu/exa", true, "exa.search");
+        let binding = provider.provides[0].tools.get("web.search").unwrap();
         let upstream_body_verbatim = json!({
             "requestId": "abc",
             "results": [{ "title": "T", "url": "https://e", "text": "body" }]

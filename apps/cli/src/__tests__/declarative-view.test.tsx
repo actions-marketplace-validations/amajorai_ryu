@@ -7,7 +7,7 @@
 
 import { afterEach, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
-import type { ReactNode } from "react";
+import { act, type ReactNode } from "react";
 import { ThemeProvider } from "@/components/ui/theme-provider.tsx";
 import { InputFocusProvider } from "../core/InputFocusContext.tsx";
 import type { ViewAction, ViewActionContext, ViewSpec } from "../core/views.ts";
@@ -37,21 +37,19 @@ async function press(
 	setup: Awaited<ReturnType<typeof testRender>>,
 	name: string
 ): Promise<void> {
-	const { keyInput } = setup.renderer as unknown as {
-		keyInput: { emit: (event: string, data: unknown) => void };
-	};
-	keyInput.emit("keypress", {
-		name,
-		sequence: name.length === 1 ? name : "",
-		ctrl: false,
-		shift: false,
-		meta: false,
-		option: false,
-		eventType: "press",
-		repeated: false,
+	await act(async () => {
+		if (name === "return") {
+			setup.mockInput.pressEnter();
+		} else if (name === "space") {
+			setup.mockInput.pressKey(" ");
+		} else {
+			setup.mockInput.pressKey(name);
+		}
 	});
-	await new Promise((resolve) => setTimeout(resolve, 0));
-	await setup.renderOnce();
+	await act(async () => {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		await setup.renderOnce();
+	});
 }
 
 const LIST_SPEC: ViewSpec = {

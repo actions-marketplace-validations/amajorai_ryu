@@ -27,10 +27,37 @@ describe("htmlCompanionSrcdoc", () => {
 
 	it("injects the bridge bootstrap and mount context into the frame", () => {
 		expect(out).toContain("window.ryu = ryu");
+		expect(out).toContain("tokenTable");
 		expect(out).toContain("ryu-plugin-ready");
+		expect(out).toContain("ryu-plugin-theme");
+		expect(out).toContain("applyThemeTokens");
 		expect(out).toContain('"spaceId"');
 		expect(out).toContain('"docId"');
 		expect(out).toContain(NONCE);
+	});
+
+	it("adds compatibility aliases to the initial theme snapshot", () => {
+		const themed = htmlCompanionSrcdoc(
+			NONCE,
+			APP_HTML,
+			PLUGIN_ID,
+			undefined,
+			undefined,
+			{
+				"--background": "#101114",
+				"--foreground": "#f5f5f5",
+				"--card": "#181a20",
+			}
+		);
+		expect(themed).toContain("--bg: #101114;");
+		expect(themed).toContain("--fg: #f5f5f5;");
+		expect(themed).toContain("--panel: #181a20;");
+	});
+
+	it("does not inject a node target, token, or realtime URL into the frame", () => {
+		expect(out).not.toContain("/api/realtime/ws");
+		expect(out).not.toContain("node-secret");
+		expect(out).not.toContain("Authorization");
 	});
 
 	it("keeps the egress lock and only widens asset sources", () => {

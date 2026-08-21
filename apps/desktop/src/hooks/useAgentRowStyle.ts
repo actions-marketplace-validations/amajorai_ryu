@@ -7,7 +7,7 @@
 //                   left, the agent name and the time of its last message on the
 //                   first line, and a one-line preview of that message below.
 //
-// Agent mode (`useSidebarMode() === "agent"`) forces "messaging" without writing
+// Bot mode (`useSidebarMode() === "agent"`) forces "messaging" without writing
 // it, so the stored preference survives a trip through that mode. Read
 // `useAgentRowStylePref` when you need what the user chose rather than what is
 // drawn.
@@ -83,11 +83,11 @@ export function setAgentRowStyle(style: AgentRowStyle): void {
 }
 
 /**
- * The STORED preference, ignoring Agent mode's override.
+ * The STORED preference, ignoring Bot mode's override.
  *
  * Only the Appearance tab wants this: its switch must reflect what the user
- * actually chose, or turning Agent mode on would silently flip a switch the user
- * never touched — and leaving Agent mode would then leave the rows messaging-style
+ * actually chose, or turning Bot mode on would silently flip a switch the user
+ * never touched — and leaving Bot mode would then leave the rows messaging-style
  * with no record of who asked for that. Every rendering surface wants
  * {@link useAgentRowStyle} instead.
  */
@@ -98,7 +98,7 @@ export function useAgentRowStylePref(): AgentRowStyle {
 /**
  * The EFFECTIVE sidebar agent-row style.
  *
- * Agent mode forces "messaging": the whole point of that mode is the roster of
+ * Bot mode forces "messaging": the whole point of that mode is the roster of
  * named agents with avatar, last message and stamp, so a compact single-line row
  * there would be the mode without the thing the mode is. The override is derived,
  * never written — flipping back to Sections/Tabbed restores the stored choice.

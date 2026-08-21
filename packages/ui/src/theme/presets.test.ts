@@ -451,7 +451,7 @@ describe("Ryu brand colour", () => {
 			if (!m) {
 				throw new Error(`no \`${prop}\` declaration in block`);
 			}
-			return m[1].trim();
+			return m[1]!.trim();
 		}
 
 		for (const [label, selector] of [

@@ -338,6 +338,8 @@ export function TelegramManagedBotPanel({
 	}, [abandon, pairing, reset]);
 
 	const nameMissing = !botName.trim();
+	const openingTargetMissing =
+		form.proactive_opening === true && !form.proactive_target?.trim();
 
 	if (phase === "waiting" && pairing) {
 		return (
@@ -472,20 +474,25 @@ export function TelegramManagedBotPanel({
 				@BotFather, and Ryu never sees your Telegram login.
 			</p>
 			<Button
-				disabled={phase === "starting" || nameMissing}
+				disabled={nameMissing || openingTargetMissing}
+				loading={phase === "starting"}
 				onClick={() => {
 					start().catch(() => undefined);
 				}}
 				size="sm"
 				variant="ghost"
 			>
-				{phase === "starting" ? <Spinner className="size-4" /> : null}
 				Create a bot for me
 			</Button>
 			{nameMissing ? (
 				<p className="text-muted-foreground text-xs">
 					Give this bot a name above first — it's used as the suggested name in
 					Telegram.
+				</p>
+			) : null}
+			{openingTargetMissing ? (
+				<p className="text-muted-foreground text-xs">
+					Choose the approved chat for Ryu's welcome first.
 				</p>
 			) : null}
 		</div>

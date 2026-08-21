@@ -1,9 +1,24 @@
 import { isDitherColor } from "@ryu/ui/components/dither-kit/palette";
+import { isExpressiveExpressionSelection } from "@ryu/ui/components/expressive.ts";
+import { isExpressiveAnimationSelection } from "@ryu/ui/components/expressive-animation.ts";
 import type { GlyphDitherValue, GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { create } from "zustand";
 import { listDirectory } from "@/src/lib/api/workspace.ts";
-import { sameFolder } from "@/src/lib/folder-path.ts";
+import {
+	type DefaultFileOpener,
+	normalizeDefaultFileOpener,
+} from "@/src/lib/default-file-opener.ts";
+import { dedupeFolders, sameFolder } from "@/src/lib/folder-path.ts";
+import {
+	findWorkspaceProject,
+	normalizeWorkspaceProjects,
+	primaryProjectFolder,
+	projectIdForFolder,
+	type WorkspaceProject,
+} from "@/src/lib/workspace-projects.ts";
 import { isLocalNode, useNodeStore } from "./useNodeStore.ts";
+
+export type { WorkspaceProject } from "@/src/lib/workspace-projects.ts";
 
 const STORAGE_KEY = "ryu_workspace_folder";
 const RECENTS_KEY = "ryu_workspace_recents";
@@ -11,15 +26,17 @@ const REMOVED_KEY = "ryu_workspace_removed";
 const WORKTREE_MODE_KEY = "ryu_workspace_worktree_mode";
 const WORKTREE_BRANCH_KEY = "ryu_workspace_worktree_branch";
 const TERMINAL_SHELL_KEY = "ryu_workspace_terminal_shell";
+const DEFAULT_FILE_OPENER_KEY = "ryu_workspace_default_file_opener";
 const ICONS_KEY = "ryu_workspace_icons";
 const NAMES_KEY = "ryu_workspace_names";
 const ENVIRONMENTS_KEY = "ryu_workspace_environments_v1";
 const ACTIVE_ENVIRONMENTS_KEY = "ryu_workspace_active_environments_v1";
+const PROJECTS_KEY = "ryu_workspace_projects_v1";
 const MAX_RECENTS = 10;
 
 /**
  * A per-project custom glyph, keyed by folder path. Uses the shared
- * {@link GlyphValue} shape (avatar / icon / emoji / dicebear) — purely
+ * {@link GlyphValue} shape (avatar / icon / emoji / dicebear / expressive) — purely
  * presentational desktop-local state in localStorage.
  */
 export type ProjectIcon = Exclude<GlyphValue, null>;
@@ -59,6 +76,12 @@ export const emptyEnvironmentScripts = (): ProjectEnvironmentScripts => ({
 	linux: "",
 	windows: "",
 });
+
+function loadDefaultFileOpener(): DefaultFileOpener {
+	return normalizeDefaultFileOpener(
+		localStorage.getItem(DEFAULT_FILE_OPENER_KEY)
+	);
+}
 
 /** Parse an optional dither layer from a stored glyph object. */
 function normalizeDither(raw: unknown): GlyphDitherValue | undefined {
@@ -121,6 +144,18 @@ function normalizeProjectIcon(raw: unknown): ProjectIcon | null {
 	) {
 		return { kind: "dicebear", style: r.style, seed: r.seed };
 	}
+	if (
+		r.kind === "expressive" &&
+		isExpressiveExpressionSelection(r.expression)
+	) {
+		return {
+			kind: "expressive",
+			expression: r.expression,
+			...(isExpressiveAnimationSelection(r.animation)
+				? { animation: r.animation }
+				: {}),
+		};
+	}
 	if (r.kind === "dither" && dither) {
 		return { kind: "dither", dither };
 	}
@@ -144,6 +179,8 @@ interface WorkspaceState {
 	clearProjectIcon: (path: string) => void;
 	/** Clear a custom display name, reverting to the folder basename. */
 	clearProjectName: (path: string) => void;
+	/** Default workspace file opener, persisted in localStorage. */
+	defaultFileOpener: DefaultFileOpener;
 	folder: string | null;
 	/** Named local setup profiles, keyed by project folder path. */
 	projectEnvironments: Record<string, ProjectEnvironment[]>;
@@ -155,6 +192,8 @@ interface WorkspaceState {
 	 * path is unchanged.
 	 */
 	projectNames: Record<string, string>;
+	/** Named projects and their ordered source folders. */
+	projects: WorkspaceProject[];
 	recentFolders: string[];
 	/** Replace the suggested branch name with a freshly generated friendly one. */
 	regenerateWorktreeBranch: () => void;
@@ -175,12 +214,19 @@ interface WorkspaceState {
 	/** Drop a recent without marking it removed (e.g. a stale/missing path). */
 	removeRecentFolder: (path: string) => void;
 	selectProjectEnvironment: (path: string, environmentId: string) => void;
+	/**
+	 * Choose what the workspace file tree's default Open action uses. `system`
+	 * delegates to Finder, Explorer, or the platform's default file handler.
+	 */
+	setDefaultFileOpener: (opener: DefaultFileOpener) => void;
 	setFolder: (path: string) => Promise<void>;
 	setProjectEnvironments: (
 		path: string,
 		environments: ProjectEnvironment[],
 		activeId: string | null
 	) => void;
+	/** Add or replace the ordered source folders for a named project. */
+	setProjectFolders: (projectRef: string, folders: string[]) => void;
 	/** Assign a custom glyph (avatar/icon/emoji/dicebear) to a project folder. */
 	setProjectIcon: (path: string, icon: ProjectIcon) => void;
 	/** Assign a custom sidebar/picker label for a project folder. */
@@ -220,6 +266,20 @@ function loadRecents(): string[] {
 	} catch {
 		return [];
 	}
+}
+
+function loadProjects(): WorkspaceProject[] {
+	try {
+		const raw = localStorage.getItem(PROJECTS_KEY);
+		const parsed = raw ? JSON.parse(raw) : null;
+		return normalizeWorkspaceProjects(parsed, loadRecents());
+	} catch {
+		return normalizeWorkspaceProjects(null, loadRecents());
+	}
+}
+
+function saveProjects(projects: WorkspaceProject[]) {
+	localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
 }
 
 function saveRecents(recents: string[]) {
@@ -457,6 +517,7 @@ function loadWorktreeBranch(): string {
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
+	projects: loadProjects(),
 	folder: localStorage.getItem(STORAGE_KEY) ?? null,
 	projectIcons: loadIcons(),
 	projectNames: loadNames(),
@@ -465,6 +526,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 	recentFolders: loadRecents(),
 	removedProjects: loadRemoved(),
 	terminalShell: localStorage.getItem(TERMINAL_SHELL_KEY) ?? "auto",
+	defaultFileOpener: loadDefaultFileOpener(),
 	worktreeMode: localStorage.getItem(WORKTREE_MODE_KEY) === "true",
 	worktreeBranch: loadWorktreeBranch(),
 
@@ -487,6 +549,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 		}
 		localStorage.setItem(STORAGE_KEY, path);
 		set((state) => {
+			const projects = state.projects.some((project) =>
+				project.folders.some((folder) => sameFolder(folder, path))
+			)
+				? state.projects
+				: [
+						...state.projects,
+						{ folders: [path], id: projectIdForFolder(path) },
+					];
+			if (projects !== state.projects) {
+				saveProjects(projects);
+			}
 			// Compared by `folderKey`, not raw equality: the same directory reaches
 			// this store spelled three different ways (picker, Core, an imported
 			// thread's cwd), and raw equality let those pile up as separate recents.
@@ -498,17 +571,34 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 			if (removed.length !== state.removedProjects.length) {
 				saveRemoved(removed);
 			}
-			return { folder: path, recentFolders: next, removedProjects: removed };
+			return {
+				folder: path,
+				recentFolders: next,
+				removedProjects: removed,
+				projects,
+			};
 		});
 	},
 
 	addProjectFolder: (path) => {
 		set((state) => {
+			const alreadyInProject = state.projects.some((project) =>
+				project.folders.some((folder) => sameFolder(folder, path))
+			);
+			const projects = alreadyInProject
+				? state.projects
+				: [
+						...state.projects,
+						{ folders: [path], id: projectIdForFolder(path) },
+					];
+			if (projects !== state.projects) {
+				saveProjects(projects);
+			}
 			const alreadyKnown = state.recentFolders.some((p) => sameFolder(p, path));
 			const wasRemoved = state.removedProjects.some((p) => sameFolder(p, path));
 			// Nothing to do if it's already a known, non-removed project.
 			if (alreadyKnown && !wasRemoved) {
-				return state;
+				return projects === state.projects ? state : { ...state, projects };
 			}
 			const next = alreadyKnown
 				? state.recentFolders
@@ -520,13 +610,63 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 			if (wasRemoved) {
 				saveRemoved(removed);
 			}
-			return { recentFolders: next, removedProjects: removed };
+			return { recentFolders: next, removedProjects: removed, projects };
 		});
 	},
 
 	clearFolder: () => {
 		localStorage.removeItem(STORAGE_KEY);
 		set({ folder: null });
+	},
+
+	setProjectFolders: (projectRef, folders) => {
+		set((state) => {
+			const project = findWorkspaceProject(state.projects, projectRef);
+			if (!project) {
+				return state;
+			}
+			const nextFolders = dedupeFolders(folders);
+			const removedFolders = project.folders.filter(
+				(path) => !nextFolders.some((next) => sameFolder(next, path))
+			);
+			const projects = state.projects.map((item) =>
+				item.id === project.id ? { ...item, folders: nextFolders } : item
+			);
+			const recentFolders = state.recentFolders.filter(
+				(path) => !removedFolders.some((removed) => sameFolder(removed, path))
+			);
+			const removedProjects = [
+				...state.removedProjects.filter(
+					(path) => !nextFolders.some((next) => sameFolder(next, path))
+				),
+				...removedFolders.filter(
+					(path) =>
+						!state.removedProjects.some((removed) => sameFolder(removed, path))
+				),
+			];
+			// A project selection follows its primary root, including when the user
+			// reorders an existing source folder to the front.
+			const currentFolder = state.folder;
+			const activeFolder =
+				currentFolder &&
+				project.folders.some((path) => sameFolder(path, currentFolder))
+					? (nextFolders[0] ?? null)
+					: currentFolder;
+			if (activeFolder) {
+				localStorage.setItem(STORAGE_KEY, activeFolder);
+			} else {
+				localStorage.removeItem(STORAGE_KEY);
+			}
+			saveProjects(projects);
+			saveRecents(recentFolders);
+			saveRemoved(removedProjects);
+			return {
+				folder: activeFolder,
+				projects,
+				recentFolders,
+				removedProjects,
+			};
+		});
 	},
 
 	setProjectIcon: (path, icon) => {
@@ -551,6 +691,29 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 	setProjectName: (path, name) => {
 		const trimmed = name.trim();
 		set((state) => {
+			const project = findWorkspaceProject(state.projects, path);
+			if (project) {
+				const primary = primaryProjectFolder(project);
+				const projects = state.projects.map((item) =>
+					item.id === project.id
+						? {
+								...item,
+								...(trimmed ? { name: trimmed } : { name: undefined }),
+							}
+						: item
+				);
+				const projectNames = { ...state.projectNames };
+				if (primary) {
+					if (trimmed) {
+						projectNames[primary] = trimmed;
+					} else {
+						delete projectNames[primary];
+					}
+				}
+				saveProjects(projects);
+				saveNames(projectNames);
+				return { projectNames, projects };
+			}
 			if (!trimmed) {
 				if (!(path in state.projectNames)) {
 					return state;
@@ -567,6 +730,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
 	clearProjectName: (path) => {
 		set((state) => {
+			const project = findWorkspaceProject(state.projects, path);
+			if (project) {
+				const projects = state.projects.map((item) =>
+					item.id === project.id ? { ...item, name: undefined } : item
+				);
+				const projectNames = { ...state.projectNames };
+				const primary = primaryProjectFolder(project);
+				if (primary) {
+					delete projectNames[primary];
+				}
+				saveProjects(projects);
+				saveNames(projectNames);
+				return { projectNames, projects };
+			}
 			if (!(path in state.projectNames)) {
 				return state;
 			}
@@ -645,37 +822,61 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
 	removeProject: (path) => {
 		set((state) => {
-			const next = state.recentFolders.filter((p) => !sameFolder(p, path));
+			const project = findWorkspaceProject(state.projects, path);
+			const projectFolders = project?.folders ?? [path];
+			const next = state.recentFolders.filter(
+				(p) => !projectFolders.some((folder) => sameFolder(folder, p))
+			);
 			saveRecents(next);
-			const removed = state.removedProjects.some((p) => sameFolder(p, path))
-				? state.removedProjects
-				: [...state.removedProjects, path];
+			const removed = [
+				...state.removedProjects,
+				...projectFolders.filter(
+					(folder) => !state.removedProjects.some((p) => sameFolder(p, folder))
+				),
+			];
 			saveRemoved(removed);
 			const folder =
-				state.folder && sameFolder(state.folder, path) ? null : state.folder;
+				state.folder &&
+				projectFolders.some((projectFolder) =>
+					sameFolder(state.folder ?? "", projectFolder)
+				)
+					? null
+					: state.folder;
 			if (folder === null) {
 				localStorage.removeItem(STORAGE_KEY);
 			}
 			// Drop any custom icon / display name so a re-imported folder starts
 			// fresh and stale data URLs don't linger in localStorage.
 			let projectIcons = state.projectIcons;
-			if (path in projectIcons) {
-				const { [path]: _dropped, ...rest } = projectIcons;
-				projectIcons = rest;
-				saveIcons(rest);
+			for (const projectFolder of projectFolders) {
+				if (projectFolder in projectIcons) {
+					const { [projectFolder]: _dropped, ...rest } = projectIcons;
+					projectIcons = rest;
+				}
 			}
+			saveIcons(projectIcons);
 			let projectNames = state.projectNames;
-			if (path in projectNames) {
-				const { [path]: _dropped, ...rest } = projectNames;
-				projectNames = rest;
-				saveNames(rest);
+			for (const projectFolder of projectFolders) {
+				if (projectFolder in projectNames) {
+					const { [projectFolder]: _dropped, ...rest } = projectNames;
+					projectNames = rest;
+				}
 			}
+			saveNames(projectNames);
+			const projects = project
+				? state.projects.filter((item) => item.id !== project.id)
+				: state.projects;
+			saveProjects(projects);
 			const projectEnvironments = { ...state.projectEnvironments };
-			delete projectEnvironments[path];
+			for (const projectFolder of projectFolders) {
+				delete projectEnvironments[projectFolder];
+			}
 			const activeProjectEnvironments = {
 				...state.activeProjectEnvironments,
 			};
-			delete activeProjectEnvironments[path];
+			for (const projectFolder of projectFolders) {
+				delete activeProjectEnvironments[projectFolder];
+			}
 			localStorage.setItem(
 				ENVIRONMENTS_KEY,
 				JSON.stringify(projectEnvironments)
@@ -688,6 +889,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 				recentFolders: next,
 				removedProjects: removed,
 				folder,
+				projects,
 				projectIcons,
 				projectNames,
 				projectEnvironments,
@@ -699,6 +901,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 	setTerminalShell: (shell) => {
 		localStorage.setItem(TERMINAL_SHELL_KEY, shell);
 		set({ terminalShell: shell });
+	},
+
+	setDefaultFileOpener: (opener) => {
+		localStorage.setItem(DEFAULT_FILE_OPENER_KEY, opener);
+		set({ defaultFileOpener: opener });
 	},
 
 	setWorktreeMode: (on) => {

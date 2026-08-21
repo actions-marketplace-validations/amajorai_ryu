@@ -27,13 +27,13 @@ function TextShimmerComponent({
 		animationTimingFunction: "linear",
 	} as React.CSSProperties;
 
-	return (
-		<Component
-			className={cn("an-text-shimmer", "an-text-shimmer--active", className)}
-			style={style}
-		>
-			{children}
-		</Component>
+	return React.createElement(
+		Component,
+		{
+			className: cn("an-text-shimmer", "an-text-shimmer--active", className),
+			style,
+		},
+		children
 	);
 }
 

@@ -35,7 +35,6 @@ const RESOURCE_ACTIVE_PREFIXES = [
 	"/marketplace",
 	"/compare",
 	"/pricing",
-	"/engines",
 	"/subscriptions",
 	"/community",
 	"/blog",

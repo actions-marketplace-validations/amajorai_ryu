@@ -480,20 +480,20 @@ export interface EnginesClient {
 
 /** One process visible through the shared Core background registry. */
 export interface BackgroundProcess {
-	process_id: string;
-	shell_id?: string | null;
-	producer: string;
-	kind: string;
-	label?: string | null;
-	description?: string | null;
 	command: string;
 	cwd: string;
-	pid?: number | null;
-	started_at: number;
+	description?: string | null;
 	elapsed_ms: number;
-	running: boolean;
 	exit_code?: number | null;
 	exit_signal?: string | null;
+	kind: string;
+	label?: string | null;
+	pid?: number | null;
+	process_id: string;
+	producer: string;
+	running: boolean;
+	shell_id?: string | null;
+	started_at: number;
 }
 
 /** Background-process registry and cooperative stop requests. */

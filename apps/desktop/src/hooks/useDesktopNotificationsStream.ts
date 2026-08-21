@@ -39,7 +39,7 @@ function osNotify(n: DesktopNotification): void {
 
 /**
  * Subscribe to Core's desktop-notification SSE stream for the active node. Each
- * notification (pushed by a built-in agent action like `notify__desktop`) raises
+ * notification (pushed by a built-in agent action like `notify.desktop`) raises
  * an in-app toast and a native OS notification. Auto-reconnects on drop and
  * re-subscribes when the active node changes. Mount once high in the tree.
  */

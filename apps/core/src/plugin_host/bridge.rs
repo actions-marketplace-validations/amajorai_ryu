@@ -52,6 +52,11 @@ const GRANT_LEARNING_SYNTHESIZE: &str = "learning:crud";
 /// or similar: this is the one capability whose effect is "everything that hook is
 /// allowed to do", so it has to be approved as its own line in the install dialog.
 const GRANT_RUN_SELF_HOOK: &str = "hook:run-self";
+/// Grant required to raise one bounded notification for the active user.
+const GRANT_NOTIFY: &str = "notifications:send";
+
+const MAX_NOTIFICATION_TITLE_CHARS: usize = 120;
+const MAX_NOTIFICATION_BODY_CHARS: usize = 2000;
 
 /// Map a kernel-contracts host-API method name (dotted, e.g. `"model.complete"`,
 /// `"storage.get"`, `"spaces.createDoc"`) to the closed `host.<...>` path
@@ -134,14 +139,28 @@ pub struct PluginHookBridge {
     plugin_id: String,
     grants: HashSet<String>,
     state: ServerState,
+    verified_caller: Option<crate::identity_verify::VerifiedCaller>,
+    authorized_conversation_id: Option<String>,
 }
 
 impl PluginHookBridge {
     pub fn new(plugin_id: String, grants: HashSet<String>, state: ServerState) -> Self {
+        Self::new_for_request(plugin_id, grants, state, None, None)
+    }
+
+    pub fn new_for_request(
+        plugin_id: String,
+        grants: HashSet<String>,
+        state: ServerState,
+        verified_caller: Option<crate::identity_verify::VerifiedCaller>,
+        authorized_conversation_id: Option<String>,
+    ) -> Self {
         Self {
             plugin_id,
             grants,
             state,
+            verified_caller,
+            authorized_conversation_id,
         }
     }
 
@@ -177,6 +196,7 @@ impl PluginHookBridge {
             "recordFeedback" => self.record_feedback(args).await,
             "synthesizeSkill" => self.synthesize_skill(args).await,
             "runHook" => self.run_own_hook(args).await,
+            "notify" => self.notify(args).await,
             "navigate" => self.navigate(args),
             other => err(format!("unknown host capability '{other}'")),
         }
@@ -201,7 +221,13 @@ impl PluginHookBridge {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        let owner =
+            match crate::background_processes::owner_for_caller(self.verified_caller.as_ref()) {
+                Ok(owner) => owner,
+                Err(error) => return err(error),
+            };
         match serde_json::to_value(crate::background_processes::list(
+            &owner,
             running_only,
             producer,
         )) {
@@ -227,7 +253,12 @@ impl PluginHookBridge {
         if process_id.is_empty() {
             return err("host.background.stop requires a non-empty 'process_id'".to_string());
         }
-        match crate::background_processes::request_stop(process_id) {
+        let owner =
+            match crate::background_processes::owner_for_caller(self.verified_caller.as_ref()) {
+                Ok(owner) => owner,
+                Err(error) => return err(error),
+            };
+        match crate::background_processes::request_stop(&owner, process_id) {
             Ok(()) => ok(json!({
                 "ok": true,
                 "requested": true,
@@ -464,6 +495,30 @@ impl PluginHookBridge {
         if conversation_id.is_empty() {
             return err("host.runHook requires a non-empty 'conversation_id'".to_string());
         }
+        let Some(caller) = self.verified_caller.as_ref() else {
+            return err(
+                "host.runHook requires a verified user caller; node-token-only requests are denied"
+                    .to_string(),
+            );
+        };
+        if self.authorized_conversation_id.as_deref() != Some(conversation_id.as_str()) {
+            return err(
+                "host.runHook conversation_id is not the conversation authorized for this request"
+                    .to_string(),
+            );
+        }
+        if let Err(response) = crate::server::require_conversation_read_by_id(
+            &self.state,
+            &Some(caller.clone()),
+            &conversation_id,
+        )
+        .await
+        {
+            return err(format!(
+                "host.runHook conversation is not authorized (HTTP {})",
+                response.status()
+            ));
+        }
 
         let hooks = crate::plugin_host::collect_enabled_hooks(&self.state).await;
         let Some(hook) = hooks
@@ -699,6 +754,51 @@ impl PluginHookBridge {
                 "results": results,
             })),
             Err(e) => err(e.to_string()),
+        }
+    }
+
+    /// `host.notify({ title, body })` — deliver one bounded, informational
+    /// notification for the active user through Core's shared inbox/toast/push
+    /// fan-out. This is intentionally not an app-host RPC or an external-target
+    /// alert primitive: a plugin cannot choose a recipient, channel, or level.
+    async fn notify(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_NOTIFY) {
+            return err(format!(
+                "capability '{GRANT_NOTIFY}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let title = bounded_notification_text(
+            args.get("title").and_then(Value::as_str),
+            MAX_NOTIFICATION_TITLE_CHARS,
+        );
+        if title.is_empty() {
+            return err("host.notify requires a usable 'title'".to_string());
+        }
+        let body = bounded_notification_text(
+            args.get("body").and_then(Value::as_str),
+            MAX_NOTIFICATION_BODY_CHARS,
+        );
+        let Some(store) = crate::notify::global_store() else {
+            return err("host.notify unavailable: notification store is not ready".to_string());
+        };
+        let Some(user_id) = crate::auth::load_accounts().active_user_id else {
+            return err("host.notify unavailable: no active user".to_string());
+        };
+        match crate::notify::deliver_app_notification(
+            &store,
+            &self.plugin_id,
+            &user_id,
+            &title,
+            &body,
+            "info",
+        )
+        .await
+        {
+            Ok(notification_id) => {
+                ok(json!({ "queued": true, "notification_id": notification_id }))
+            }
+            Err(error) => err(format!("host.notify failed: {error}")),
         }
     }
 
@@ -1097,7 +1197,7 @@ impl PluginHookBridge {
             }
         } else if let Some(resolved) = crate::agent_selection::resolve_side_model(
             &self.state.preferences,
-            crate::agent_selection::GLOBAL_SELECTION_PREF,
+            crate::agent_selection::LOCAL_SELECTION_PREF,
             None,
         )
         .await
@@ -1137,6 +1237,17 @@ fn parse_preset(s: Option<&str>) -> PermissionPreset {
         "summarise" | "summarize" => PermissionPreset::Summarise,
         _ => PermissionPreset::CodeRead,
     }
+}
+
+fn bounded_notification_text(value: Option<&str>, max_chars: usize) -> String {
+    value
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// A successful host result.
@@ -1188,6 +1299,7 @@ mod tests {
         assert_eq!(GRANT_SET_TITLE, "conversation:set-title");
         assert_eq!(GRANT_PREFERENCES_READ, "preferences:read");
         assert_eq!(GRANT_BACKGROUND_CONTROL, "background:control");
+        assert_eq!(GRANT_NOTIFY, "notifications:send");
     }
 
     #[test]
@@ -1216,10 +1328,7 @@ mod tests {
         assert_eq!(grant_for("finetune.start"), Some(GRANT_FINETUNE));
         assert_eq!(grant_for("conversation.setTitle"), Some(GRANT_SET_TITLE));
         assert_eq!(grant_for("preferences.get"), Some(GRANT_PREFERENCES_READ));
-        assert_eq!(
-            grant_for("background.list"),
-            Some(GRANT_BACKGROUND_CONTROL)
-        );
+        assert_eq!(grant_for("background.list"), Some(GRANT_BACKGROUND_CONTROL));
     }
 
     /// Every method `dispatch_path_for` maps MUST (a) carry a grant in the
@@ -1306,11 +1415,13 @@ mod tests {
                 | "finetune_merge"
                 | "setConversationTitle"
                 | "getPreference"
+                | "usageSnapshot"
                 | "background_list"
                 | "background_stop"
                 | "recordFeedback"
                 | "synthesizeSkill"
                 | "runHook"
+                | "notify"
                 | "navigate"
         )
     }
@@ -1356,6 +1467,25 @@ mod tests {
         let g = grants(&["hook:side-model"]);
         assert!(g.contains(GRANT_SIDE_MODEL));
         assert!(!g.contains(GRANT_STORAGE));
+    }
+
+    #[test]
+    fn notification_text_is_control_free_and_bounded() {
+        assert_eq!(
+            bounded_notification_text(Some(" \u{0000}ready\n "), 20),
+            "ready"
+        );
+        assert_eq!(bounded_notification_text(Some("abcdef"), 3), "abc");
+        assert_eq!(bounded_notification_text(Some("\u{0001}\u{0002}"), 20), "");
+    }
+
+    #[test]
+    fn notification_grant_is_independent_from_rpc_dispatch_table() {
+        let g = grants(&["hook:run-agent"]);
+        assert!(!g.contains(GRANT_NOTIFY));
+        let g = grants(&[GRANT_NOTIFY]);
+        assert!(g.contains(GRANT_NOTIFY));
+        assert_eq!(dispatch_path_for("notifications.send"), None);
     }
 
     /// The sealing key is derived from the CANONICAL plugin id, so canonicalization

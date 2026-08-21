@@ -9,6 +9,7 @@ function checklistApp(grants?: string[]) {
 		slug: "checklist",
 		title: "Checklist",
 		version: "1.0.0",
+		uiEntry: "src/checklist.tsx",
 		...(grants ? { grants } : {}),
 		tools: [{ name: "render", description: "Render a checklist" }],
 	});
@@ -48,6 +49,7 @@ describe("defineApp widget grant", () => {
 			slug: "tools",
 			title: "Tools",
 			version: "1.0.0",
+			uiEntry: "src/tools.tsx",
 			tools: [{ name: "toggle", description: "Toggle", accessible: true }],
 		});
 		expect(manifest.contributes?.widgets ?? []).toHaveLength(0);

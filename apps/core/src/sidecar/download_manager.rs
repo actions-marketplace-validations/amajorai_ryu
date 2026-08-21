@@ -843,8 +843,9 @@ impl SidecarManifest for LlamaCppManifest {
 
     fn target_version(&self) -> &str {
         // Keep in sync with `providers::llamacpp::downloader::TARGET_VERSION`
-        // (the canonical install path). b9670 adds MTP speculative decoding.
-        "b9670"
+        // (the canonical install path). b10218 adds the native reasoning
+        // control endpoint used by the Answer now composer affordance.
+        "b10218"
     }
 }
 
@@ -2135,9 +2136,9 @@ mod download_tests {
     fn llamacpp_manifest_metadata() {
         let m = LlamaCppManifest;
         assert_eq!(m.name(), "llamacpp");
-        assert_eq!(m.target_version(), "b9670");
+        assert_eq!(m.target_version(), "b10218");
         let url = m.release_url();
-        assert!(url.contains("b9670"));
+        assert!(url.contains("b10218"));
         assert!(url.ends_with(".zip"));
         // binary_name is OS-conditional; both accepted forms end in the stem.
         assert!(m.binary_name().starts_with("llama-server"));
@@ -2162,10 +2163,10 @@ mod download_tests {
     #[test]
     fn version_store_serde_round_trips() {
         let mut store = VersionStore::default();
-        store.record("llamacpp", "b9670", "deadbeef");
+        store.record("llamacpp", "b10218", "deadbeef");
         let json = serde_json::to_string(&store).unwrap();
         let back: VersionStore = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.versions.get("llamacpp"), Some(&"b9670".to_string()));
+        assert_eq!(back.versions.get("llamacpp"), Some(&"b10218".to_string()));
         assert_eq!(back.installed_checksum("llamacpp"), Some("deadbeef"));
     }
 
@@ -2173,7 +2174,7 @@ mod download_tests {
     fn installed_version_parses_semver_only() {
         let mut store = VersionStore::default();
         store.record("ollama", "0.5.1", "x");
-        store.record("llamacpp", "b9670", "y"); // not semver
+        store.record("llamacpp", "b10218", "y"); // not semver
         assert_eq!(
             store.installed_version("ollama"),
             Some(semver::Version::new(0, 5, 1))
@@ -2295,13 +2296,13 @@ mod download_tests {
         let s = SidecarDownloadStatus {
             name: "llamacpp".into(),
             state: DownloadState::Installed,
-            installed_version: Some("b9670".into()),
-            target_version: "b9670".into(),
+            installed_version: Some("b10218".into()),
+            target_version: "b10218".into(),
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["name"], "llamacpp");
         assert_eq!(v["state"], "installed");
-        assert_eq!(v["installed_version"], "b9670");
+        assert_eq!(v["installed_version"], "b10218");
     }
 
     #[test]

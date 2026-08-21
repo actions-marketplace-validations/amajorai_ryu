@@ -6,6 +6,7 @@
 import {
 	IconApps,
 	IconDatabase,
+	IconFileText,
 	IconFolder,
 	IconGitBranch,
 	IconMessages,
@@ -19,10 +20,108 @@ import type { MentionGroup, MentionItem, MentionSources } from "./types.ts";
 const PATH_SEPARATOR = /[\\/]/;
 /** The in-progress "@word" fragment at the cursor (after start or whitespace). */
 const TRAILING_MENTION = /(?<=(?:^|\s))@\w*$/;
+const MENTION_BOUNDARY = /[\s<>()[\]{}"'.,;:!?]/;
 /** Last path segment of a folder path (the folder's display name). */
 function basename(path: string): string {
 	const parts = path.split(PATH_SEPARATOR).filter(Boolean);
 	return parts.at(-1) ?? path;
+}
+
+export interface ComposioMentionConnection {
+	active: boolean;
+	toolkit: string;
+}
+
+export interface ComposioMentionToolkit {
+	description: string | null;
+	name: string;
+	slug: string;
+}
+
+function humanizeToolkitSlug(slug: string): string {
+	return slug
+		.replace(/[-_]+/g, " ")
+		.replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+/**
+ * Convert active Composio connections into mention sources.
+ *
+ * `configured` is Core's redacted setup signal: it is true when the active node
+ * has a usable BYOK credential or a provisioned managed/proxy credential. Keep
+ * this gate here as well as on the query so stale cached connections can never
+ * reappear after setup is removed or the user changes nodes.
+ */
+export function buildComposioMentionSources(
+	configured: boolean,
+	connections: readonly ComposioMentionConnection[],
+	toolkits: readonly ComposioMentionToolkit[]
+): MentionSources["integrations"] {
+	if (!configured) {
+		return [];
+	}
+
+	const toolkitBySlug = new Map(
+		toolkits
+			.filter((toolkit) => toolkit.slug.trim().length > 0)
+			.map((toolkit) => [toolkit.slug.trim().toLowerCase(), toolkit])
+	);
+	const seen = new Set<string>();
+	const result: MentionSources["integrations"] = [];
+
+	for (const connection of connections) {
+		if (!connection.active) {
+			continue;
+		}
+		const slug = connection.toolkit.trim();
+		const key = slug.toLowerCase();
+		if (!key || seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+
+		const toolkit = toolkitBySlug.get(key);
+		result.push({
+			description: toolkit?.description?.trim() || "Connected through Composio",
+			id: toolkit?.slug ?? slug,
+			name: toolkit?.name?.trim() || humanizeToolkitSlug(slug),
+		});
+	}
+
+	return result;
+}
+
+/** Resolve the first exact named @mention, including labels containing spaces. */
+export function resolveFirstNamedMentionId(
+	text: string,
+	candidates: readonly { id: string; name: string }[]
+): string | null {
+	const lowerText = text.toLowerCase();
+	const ordered = [...candidates]
+		.filter((candidate) => candidate.name.trim().length > 0)
+		.sort((left, right) => right.name.length - left.name.length);
+
+	for (const candidate of ordered) {
+		const token = `@${candidate.name.trim().toLowerCase()}`;
+		let fromIndex = 0;
+		while (fromIndex < lowerText.length) {
+			const index = lowerText.indexOf(token, fromIndex);
+			if (index < 0) {
+				break;
+			}
+			const previous = lowerText[index - 1];
+			const next = lowerText[index + token.length];
+			if (
+				(index === 0 || /\s/.test(previous ?? "")) &&
+				(next === undefined || MENTION_BOUNDARY.test(next))
+			) {
+				return candidate.id;
+			}
+			fromIndex = index + token.length;
+		}
+	}
+
+	return null;
 }
 
 /**
@@ -95,11 +194,44 @@ export function buildMentionGroups(
 		(sources.apps ?? [])
 			.filter((app) => matches(app.name, app.id, app.description ?? ""))
 			.map((app) => ({
+				accentColor: app.accentColor,
 				kind: "app",
 				id: app.id,
 				label: app.name,
 				description: app.description,
 				icon: IconApps,
+				visualIcon: app.visualIcon,
+			}))
+	);
+	add(
+		"app-item",
+		"App items",
+		(sources.appItems ?? [])
+			.filter((item) => matches(item.name, item.id, item.description ?? ""))
+			.map((item) => ({
+				accentColor: item.accentColor,
+				kind: "app-item",
+				id: item.id,
+				label: item.name,
+				description: item.description,
+				target: item.target,
+				icon: IconApps,
+				visualIcon: item.visualIcon,
+			}))
+	);
+	add(
+		"integration",
+		"Integrations",
+		sources.integrations
+			.filter((integration) =>
+				matches(integration.name, integration.id, integration.description ?? "")
+			)
+			.map((integration) => ({
+				kind: "integration",
+				id: integration.id,
+				label: integration.name,
+				description: integration.description,
+				icon: IconPlug,
 			}))
 	);
 	add(
@@ -108,11 +240,13 @@ export function buildMentionGroups(
 		sources.plugins
 			.filter((p) => matches(p.name, p.id, p.description ?? ""))
 			.map((p) => ({
+				accentColor: p.accentColor,
 				kind: "plugin",
 				id: p.id,
 				label: p.name,
 				description: p.description,
 				icon: IconPlug,
+				visualIcon: p.visualIcon,
 			}))
 	);
 	add(
@@ -144,6 +278,38 @@ export function buildMentionGroups(
 				id: s.id,
 				label: s.name,
 				icon: IconDatabase,
+			}))
+	);
+	add(
+		"page",
+		"Space pages",
+		(sources.pages ?? [])
+			.filter((page) => matches(page.name, page.id, page.description ?? ""))
+			.map((page) => ({
+				accentColor: page.accentColor,
+				kind: "page",
+				id: page.id,
+				label: page.name,
+				description: page.description,
+				target: page.target,
+				icon: IconFileText,
+				visualIcon: page.visualIcon,
+			}))
+	);
+	add(
+		"output-style",
+		"Output styles",
+		(sources.outputStyles ?? [])
+			.filter((style) => matches(style.name, style.id, style.description ?? ""))
+			.map((style) => ({
+				accentColor: style.accentColor,
+				kind: "output-style",
+				id: style.id,
+				label: style.name,
+				description: style.description,
+				target: style.target,
+				icon: IconSparkles,
+				visualIcon: style.visualIcon,
 			}))
 	);
 	add(

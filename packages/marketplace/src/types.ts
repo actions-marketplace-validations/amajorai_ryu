@@ -11,25 +11,35 @@
 // navigation). Those differences live behind the MarketplaceHost seam (./host);
 // the data SHAPES below are identical on both and belong here.
 
+import { formatMinorCurrency } from "@ryu/ui/lib/number-format.ts";
+
 /** The catalog kinds the money layer covers, matching the server's kind.
  *  `agent` is a user-published agent definition — the one kind whose listing is
  *  a configuration rather than code. */
 export type MarketplaceKind =
+	| "app"
 	| "plugin"
 	| "skill"
 	| "model"
 	| "mcp"
 	| "agent"
-	| "stack_template";
+	| "stack_template"
+	| "workflow"
+	| "theme"
+	| "space"
+	| "profile"
+	| "output_style"
+	| "bundle";
 
 /** Purchase/license lifecycle, mirroring the server's LicenseStatus. */
-export type LicenseStatus = "active" | "refunded" | "disputed";
+export type LicenseStatus = "active" | "expired" | "refunded" | "disputed";
 
 /** One owned license, enriched with the item's display name (#492). */
 export interface OwnedLicense {
 	buyerOrgId: string;
 	buyerUserId: string;
 	currency: string;
+	entitlementUntil: string | null;
 	id: string;
 	itemId: string;
 	itemKind: MarketplaceKind;
@@ -40,6 +50,7 @@ export interface OwnedLicense {
 	purchasedAt: string;
 	status: LicenseStatus;
 	stripePaymentIntentId: string | null;
+	stripeSubscriptionId: string | null;
 }
 
 /** Onboarding lifecycle, mirroring the server's SellerOnboardingStatus. */
@@ -49,11 +60,19 @@ export type SellerOnboardingStatus =
 	| "active"
 	| "restricted";
 
+/** Stripe's identity signal; it is not Ryu staff endorsement. */
+export type SellerIdentityStatus =
+	| "none"
+	| "pending"
+	| "verified"
+	| "restricted";
+
 /** The stored seller state for the caller's active org. */
 export interface SellerStatus {
 	onboardingStatus: SellerOnboardingStatus;
 	payoutsEnabled: boolean;
 	stripeConnectAccountId: string | null;
+	stripeIdentityStatus: SellerIdentityStatus;
 }
 
 /** The result of starting a purchase: a Stripe URL to open, or already-owned. */
@@ -85,10 +104,5 @@ export interface MarketplaceDetailTarget {
 
 /** Format a minor-unit (cents) amount as a localized currency string. */
 export function formatPrice(amountMinor: number, currency = "usd"): string {
-	return (amountMinor / 100).toLocaleString(undefined, {
-		style: "currency",
-		currency: currency.toUpperCase(),
-		minimumFractionDigits: 2,
-		maximumFractionDigits: 2,
-	});
+	return formatMinorCurrency(amountMinor, currency);
 }

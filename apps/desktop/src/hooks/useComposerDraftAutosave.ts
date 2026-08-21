@@ -19,12 +19,13 @@
 //  3. Nothing is written until the text is worth keeping: the app must be enabled,
 //     autosave must be on, and the text must clear `autosave_min_chars`.
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAppShellPath } from "@/src/contributions/app-shell-routes.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	DRAFTS_BUTTON_ID,
 	DRAFTS_PLUGIN_ID,
+	getDraft,
 	getDraftsSettings,
 	saveDraft,
 } from "@/src/lib/api/drafts.ts";
@@ -63,6 +64,15 @@ export interface ComposerDraftContext {
 	conversationId?: string;
 	folderPath?: string;
 	model?: string;
+	/** Temporary chats must not write to or restore from the durable outbox. */
+	persist?: boolean;
+}
+
+interface PendingDraftWrite {
+	context: ComposerDraftContext;
+	draft: string;
+	ids: string[];
+	version: number;
 }
 
 /**
@@ -75,45 +85,31 @@ export function useComposerDraftAutosave(
 	context: ComposerDraftContext
 ): (draft: string) => void {
 	const node = useActiveNode();
-	const enabled = useAppShellPath(DRAFTS_PLUGIN_ID, DRAFTS_BUTTON_ID) !== null;
+	const enabled =
+		context.persist !== false &&
+		useAppShellPath(DRAFTS_PLUGIN_ID, DRAFTS_BUTTON_ID) !== null;
 	const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const settings = useRef<{ at: number; enabled: boolean; min: number } | null>(
 		null
 	);
+	const pending = useRef<PendingDraftWrite | null>(null);
+	const lastDraftId = useRef(draftIdFor(context.conversationId));
+	const observedInitialDraft = useRef(false);
+	const writeVersion = useRef(0);
 	// The context in a ref so a changing folder/agent does not re-create the
 	// callback and reset the debounce mid-sentence.
 	const ctx = useRef(context);
 	ctx.current = context;
 
-	useEffect(
-		() => () => {
-			if (timer.current) {
-				clearTimeout(timer.current);
-			}
-		},
-		[]
-	);
-
-	return useCallback(
-		(draft: string) => {
-			if (!enabled) {
+	const flush = useCallback(
+		async (item: PendingDraftWrite): Promise<void> => {
+			if (item.version !== writeVersion.current) {
 				return;
 			}
-			if (timer.current) {
-				clearTimeout(timer.current);
-			}
-			// Snapshot the id NOW, from the context the text was typed under — never
-			// at flush time. Sending from the launchpad creates the conversation, so
-			// `ctx.current.conversationId` moves between the keystroke and the flush
-			// 1.5s later. Reading it late made the clearing flush blank-upsert
-			// `composer_<newConvId>` (a row that never existed) while
-			// `composer_launchpad` survived holding the text that had just been sent —
-			// a permanent draft of an already-sent message after every new chat.
-			const id = draftIdFor(ctx.current.conversationId);
-			const context = ctx.current;
-			timer.current = setTimeout(async () => {
-				const target = toTarget(node);
-				try {
+			const target = toTarget(node);
+			try {
+				const text = item.draft.trim();
+				if (text.length > 0) {
 					const now = Date.now();
 					if (
 						!settings.current ||
@@ -126,33 +122,141 @@ export function useComposerDraftAutosave(
 							min: fetched.autosave_min_chars,
 						};
 					}
-					if (!settings.current.enabled) {
+					if (
+						!settings.current.enabled ||
+						text.length < settings.current.min ||
+						item.version !== writeVersion.current
+					) {
 						return;
 					}
-					const text = draft.trim();
-					// A blank composer is a DELETE, and it must not be gated on the
-					// minimum-length check — otherwise clearing a long draft down to two
-					// characters and then to nothing would leave the old text behind.
-					if (text.length > 0 && text.length < settings.current.min) {
+				}
+
+				for (const id of item.ids) {
+					if (item.version !== writeVersion.current) {
 						return;
 					}
 					await saveDraft(target, {
 						id,
-						text: draft,
-						conversation_id: context.conversationId,
-						agent_id: context.agentId,
-						model: context.model,
-						folder_path: context.folderPath,
+						text: item.draft,
+						conversation_id: item.context.conversationId,
+						agent_id: item.context.agentId,
+						model: item.context.model,
+						folder_path: item.context.folderPath,
 						source: "composer-autosave",
 					});
-				} catch {
-					// Autosave is a courtesy, not a promise the user is waiting on. A
-					// disabled app, a down node or a 404 route all mean "no draft kept",
-					// and surfacing that as an error while someone is typing would be
-					// worse than the thing it reports.
 				}
+			} catch {
+				// Autosave is a courtesy, not a promise the user is waiting on. A
+				// disabled app, a down node or a 404 route all mean "no draft kept",
+				// and surfacing that as an error while someone is typing would be
+				// worse than the thing it reports.
+			}
+		},
+		[node]
+	);
+
+	useEffect(() => {
+		if (!enabled) {
+			if (timer.current) {
+				clearTimeout(timer.current);
+				timer.current = null;
+			}
+			pending.current = null;
+		}
+	}, [enabled]);
+
+	useEffect(() => {
+		return () => {
+			if (timer.current) {
+				clearTimeout(timer.current);
+			}
+			const item = pending.current;
+			pending.current = null;
+			if (item) {
+				void flush(item);
+			}
+		};
+	}, [flush]);
+
+	return useCallback(
+		(draft: string) => {
+			if (!enabled) {
+				return;
+			}
+			if (timer.current) {
+				clearTimeout(timer.current);
+			}
+			writeVersion.current += 1;
+			const version = writeVersion.current;
+			const id = draftIdFor(ctx.current.conversationId);
+			const previousId = lastDraftId.current;
+			lastDraftId.current = id;
+			// The first empty notification is AgentChat's mount-time observation, not
+			// the user clearing a draft. Ignoring it prevents a slow restore request
+			// from racing with a blank delete and destroying the only saved copy.
+			if (!observedInitialDraft.current && draft.trim().length === 0) {
+				observedInitialDraft.current = true;
+				return;
+			}
+			observedInitialDraft.current = true;
+			const ids =
+				draft.trim().length === 0 ? [...new Set([id, previousId])] : [id];
+			const item: PendingDraftWrite = {
+				context: ctx.current,
+				draft,
+				ids,
+				version,
+			};
+			pending.current = item;
+			timer.current = setTimeout(() => {
+				if (pending.current?.version !== version) {
+					return;
+				}
+				pending.current = null;
+				void flush(item);
 			}, DEBOUNCE_MS);
 		},
-		[enabled, node]
+		[enabled, flush]
 	);
+}
+
+/**
+ * Load the durable composer row for this tab. The text is returned as a seed for
+ * `AgentChat`; the component still owns the live value, so a user edit that wins
+ * the race with this request is never overwritten.
+ */
+export function useComposerDraftRestore(
+	context: ComposerDraftContext
+): string | undefined {
+	const node = useActiveNode();
+	const enabled =
+		context.persist !== false &&
+		useAppShellPath(DRAFTS_PLUGIN_ID, DRAFTS_BUTTON_ID) !== null;
+	const [restoredDraft, setRestoredDraft] = useState<string | undefined>();
+	const conversationId = context.conversationId;
+
+	useEffect(() => {
+		if (!enabled) {
+			setRestoredDraft(undefined);
+			return;
+		}
+		let cancelled = false;
+		setRestoredDraft(undefined);
+		void getDraft(toTarget(node), draftIdFor(conversationId))
+			.then((draft) => {
+				if (!cancelled) {
+					setRestoredDraft(draft?.text || undefined);
+				}
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setRestoredDraft(undefined);
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [conversationId, enabled, node]);
+
+	return restoredDraft;
 }

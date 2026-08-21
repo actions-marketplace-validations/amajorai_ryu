@@ -65,9 +65,15 @@ pub const MANAGED_OPENROUTER_ID: &str = "managed-openrouter";
 pub const MANAGED_CLOUDFLARE_ID: &str = "managed-cloudflare";
 pub const MANAGED_BEDROCK_ID: &str = "managed-bedrock";
 
-/// The Gateway's OpenRouter Auto Router model — routes each prompt to a good
-/// model at no extra fee. The zero-decision default for managed users.
-const MANAGED_DEFAULT_MODEL: &str = "openrouter/auto";
+/// OpenRouter's general-purpose model router. The zero-decision default for
+/// managed users.
+const OPENROUTER_AUTO_MODEL_ID: &str = "openrouter/auto";
+
+/// OpenRouter's coding-focused Pareto model router. It selects a coding model
+/// without requiring Ryu to maintain a changing model shortlist.
+const OPENROUTER_PARETO_CODE_MODEL_ID: &str = "openrouter/pareto-code";
+
+const MANAGED_DEFAULT_MODEL: &str = OPENROUTER_AUTO_MODEL_ID;
 
 /// Ryu-namespaced settings key holding the per-provider routing map
 /// (`{ "<providerId>": "gateway" | "direct" }`). Pi ignores unknown keys, so it
@@ -2120,7 +2126,8 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         // this row keeps its own label rather than borrowing the pool's ("Ryu").
         credit_pool: "openrouter",
         suggested_models: &[
-            "openrouter/auto",
+            OPENROUTER_AUTO_MODEL_ID,
+            OPENROUTER_PARETO_CODE_MODEL_ID,
             "anthropic/claude-sonnet-4",
             "openai/gpt-4o",
         ],
@@ -2437,7 +2444,8 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_kind: "api-key",
         credit_pool: "",
         suggested_models: &[
-            "openrouter/auto",
+            OPENROUTER_AUTO_MODEL_ID,
+            OPENROUTER_PARETO_CODE_MODEL_ID,
             "anthropic/claude-sonnet-4",
             "openai/gpt-4o",
         ],
@@ -3397,7 +3405,10 @@ pub async fn discover_models(input: DiscoverInput) -> Value {
 
     // Tier 1 — a live provider `GET /v1/models` (freshest, provider-authoritative).
     if let Some((url, auth)) = resolved {
-        if let Ok(models) = fetch_models(&url, auth).await {
+        let allow_trusted_local = provider_id
+            .as_deref()
+            .is_some_and(|id| id == GATEWAY_PROVIDER_ID || id == MANAGED_OPENROUTER_ID);
+        if let Ok(models) = fetch_models(&url, auth, allow_trusted_local).await {
             if !models.is_empty() {
                 return json!({ "models": models, "source": "discovery" });
             }
@@ -3487,7 +3498,10 @@ pub async fn check_provider(input: CheckInput) -> CheckResult {
     };
 
     let started = std::time::Instant::now();
-    match fetch_models(&url, auth).await {
+    let allow_trusted_local = provider_id
+        .as_deref()
+        .is_some_and(|id| id == GATEWAY_PROVIDER_ID || id == MANAGED_OPENROUTER_ID);
+    match fetch_models(&url, auth, allow_trusted_local).await {
         Ok(models) => CheckResult {
             ok: true,
             latency_ms: started.elapsed().as_millis() as u64,
@@ -3559,9 +3573,29 @@ fn resolve_provider_discovery(
 
 /// GET the `/models` endpoint and parse the OpenAI/Anthropic `{ data: [{id,…}] }`
 /// shape into `[{id}]`. Short timeout so a dead endpoint fails fast to fallback.
-async fn fetch_models(url: &str, auth: DiscoveryAuth) -> Result<Vec<Value>> {
-    let client = reqwest::Client::new();
-    let mut req = client.get(url).timeout(std::time::Duration::from_secs(8));
+async fn fetch_models(
+    url: &str,
+    auth: DiscoveryAuth,
+    allow_trusted_local: bool,
+) -> Result<Vec<Value>> {
+    let parsed = reqwest::Url::parse(url).context("parse discovery URL")?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("discovery URL has no host"))?;
+    let trusted_local = allow_trusted_local && is_trusted_gateway_endpoint(&parsed);
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none());
+    if !trusted_local {
+        let (_, screened) = crate::server::screen_egress_url_pinned(url, true, None)
+            .await
+            .context("screen discovery endpoint")?;
+        if let crate::server::ScreenedEgress::Pinned(addresses) = screened {
+            builder = builder.resolve_to_addrs(host, &addresses);
+        }
+    }
+    let client = builder.build().context("build discovery client")?;
+    let mut req = client.get(parsed);
     match auth {
         DiscoveryAuth::Bearer(token) => req = req.bearer_auth(token),
         DiscoveryAuth::Anthropic(key) => {
@@ -3608,6 +3642,18 @@ async fn fetch_models(url: &str, auth: DiscoveryAuth) -> Result<Vec<Value>> {
         })
         .collect();
     Ok(models)
+}
+
+/// The built-in Gateway provider is the one intentional loopback discovery
+/// target. Compare the complete authority so a custom provider cannot opt into
+/// this exception merely by using the logical `gateway` id or a similar path.
+fn is_trusted_gateway_endpoint(url: &reqwest::Url) -> bool {
+    let Ok(gateway) = reqwest::Url::parse(&crate::sidecar::gateway::gateway_url()) else {
+        return false;
+    };
+    url.scheme() == gateway.scheme()
+        && url.host_str() == gateway.host_str()
+        && url.port_or_known_default() == gateway.port_or_known_default()
 }
 
 #[cfg(test)]
@@ -5081,6 +5127,14 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|m| m["id"] == json!(MANAGED_DEFAULT_MODEL)));
+            assert!(PROVIDERS
+                .iter()
+                .find(|provider| provider.id == MANAGED_OPENROUTER_ID)
+                .is_some_and(|provider| {
+                    provider
+                        .suggested_models
+                        .contains(&OPENROUTER_PARETO_CODE_MODEL_ID)
+                }));
         });
     }
 
@@ -5304,5 +5358,21 @@ mod tests {
                 "agent scopes must not be treated as custom providers"
             );
         });
+    }
+
+    #[test]
+    fn provider_discovery_rejects_loopback_before_connecting() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let error = runtime
+            .block_on(fetch_models(
+                "http://127.0.0.1:1/models",
+                DiscoveryAuth::None,
+                false,
+            ))
+            .expect_err("custom provider checks must reject loopback");
+        assert!(
+            error.to_string().contains("screen discovery endpoint"),
+            "unexpected loopback rejection: {error}"
+        );
     }
 }

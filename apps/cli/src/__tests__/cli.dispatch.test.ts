@@ -137,6 +137,17 @@ test("parseArgs: --force and --cascade set their flags", () => {
 	expect(parsed.flags.help).toBe(false);
 });
 
+test("parseArgs: doctor repair flags are explicit and default off", () => {
+	const parsed = parseArgs(["doctor", "--fix", "--dry-run"]);
+	expect(parsed.command).toBe("doctor");
+	expect(parsed.flags.fix).toBe(true);
+	expect(parsed.flags.dryRun).toBe(true);
+
+	const defaults = parseArgs(["doctor"]);
+	expect(defaults.flags.fix).toBe(false);
+	expect(defaults.flags.dryRun).toBe(false);
+});
+
 test("parseArgs: an unknown --flag is ignored (never a positional/command)", () => {
 	const parsed = parseArgs(["--nope", "list", "--also-unknown", "arg"]);
 	expect(parsed.command).toBe("list");
@@ -183,6 +194,98 @@ test("isInteractive: bare and 'tui' are interactive; a subcommand is not", () =>
 	// --help / --version are non-interactive (handled by runCli, not the shell).
 	expect(isInteractive(["--help"])).toBe(false);
 	expect(isInteractive(["--version"])).toBe(false);
+});
+
+// ── Gateway / plugin doctor ──────────────────────────────────────────────────
+
+const doctorReport = {
+	counts: { errors: 0, info: 0, warnings: 0 },
+	findings: [],
+	posture: "balanced",
+};
+
+const pluginDoctorReport = {
+	counts: { errors: 0, info: 0, plugins: 1, warnings: 0 },
+	findings: [],
+	plugins: [
+		{
+			findingCount: 0,
+			id: "com.example.mail",
+			name: "Mail",
+			status: "healthy",
+		},
+	],
+	score: 100,
+};
+
+test("doctor: read-only audit uses the GET endpoint", async () => {
+	const cap = makeIo();
+	let capturedPath = "";
+	let capturedMethod = "";
+	const code = await runCli(["doctor"], {
+		io: cap.io,
+		api: stubApi({
+			call: (_target, path, options) => {
+				capturedPath = path;
+				capturedMethod = options?.method ?? "";
+				return Promise.resolve(doctorReport);
+			},
+		}),
+	});
+	expect(code).toBe(0);
+	expect(capturedPath).toBe("/api/gateway/doctor");
+	expect(capturedMethod).toBe("GET");
+	expect(cap.out()).toContain("Gateway Doctor");
+});
+
+test("doctor --dry-run previews without applying", async () => {
+	const cap = makeIo();
+	let body: unknown;
+	const code = await runCli(["doctor", "--dry-run", "--json"], {
+		io: cap.io,
+		api: stubApi({
+			call: (_target, path, options) => {
+				expect(path).toBe("/api/gateway/doctor/fix");
+				expect(options?.method).toBe("POST");
+				body = options?.body;
+				return Promise.resolve({
+					appliedFixes: [],
+					dryRun: true,
+					plannedFixes: [
+						{
+							action: "Enable PII and secret redaction",
+							checkId: "security.redaction-disabled",
+							settingPath: "firewall.redact_pii",
+							summary: "Enable redaction",
+						},
+					],
+					report: doctorReport,
+				});
+			},
+		}),
+	});
+	expect(code).toBe(0);
+	expect(body).toEqual({ dryRun: true });
+	expect(JSON.parse(cap.out()).dryRun).toBe(true);
+});
+
+test("plugin doctor: audits an installed app and supports the app alias", async () => {
+	const cap = makeIo();
+	let capturedPath = "";
+	const code = await runCli(["app", "doctor", "com.example.mail"], {
+		io: cap.io,
+		api: stubApi({
+			call: (_target, path, options) => {
+				capturedPath = path;
+				expect(options?.method).toBe("GET");
+				return Promise.resolve(pluginDoctorReport);
+			},
+		}),
+	});
+	expect(code).toBe(0);
+	expect(capturedPath).toBe("/api/plugins/doctor?id=com.example.mail");
+	expect(cap.out()).toContain("com.example.mail");
+	expect(cap.out()).toContain("no findings");
 });
 
 // ── list ──────────────────────────────────────────────────────────────────────

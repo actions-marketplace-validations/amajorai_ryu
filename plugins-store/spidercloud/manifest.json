@@ -1,9 +1,15 @@
 {
+  "tags": ["web","crawl","scraping"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/spidercloud",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/spidercloud",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/spidercloud",
   "name": "Spider Cloud",
   "version": "0.1.14",
   "stability": "experimental",
-  "description": "Hosted multi-page web crawling via the Spider Cloud API (https://spider.cloud), exposed as one declarative HTTP tool. Provides the swappable `web.crawl` layer as a SECOND provider alongside the local `spider` CLI, so selecting it re-points the stable `web__crawl` tool at a hosted crawler that needs no local binary. The crawl is synchronous — `run_in_background` defaults to false and one request returns every fetched page's content, so there is no job id to poll. The canonical `depth` argument is deliberately DROPPED: Spider Cloud documents `depth: 0` as \"no limit will be applied\", the exact inverse of the canonical contract's \"0 = the start page only\". Requires a BYOK Spider Cloud API key.",
+  "description": "Hosted multi-page web crawling via the Spider Cloud API (https://spider.cloud), exposed as one declarative HTTP tool. Provides the swappable `web.crawl` layer as a SECOND provider alongside the local `spider` CLI, so selecting it re-points the stable `web.crawl` tool at a hosted crawler that needs no local binary. The crawl is synchronous — `run_in_background` defaults to false and one request returns every fetched page's content, so there is no job id to poll. The canonical `depth` argument is deliberately DROPPED: Spider Cloud documents `depth: 0` as \"no limit will be applied\", the exact inverse of the canonical contract's \"0 = the start page only\". Requires a BYOK Spider Cloud API key.",
   "iconUrl": "https://avatars.githubusercontent.com/u/112983871?v=4",
   "iconPadding": "md",
   "iconDither": { "from": 335, "to": "transparent", "direction": "down" },
@@ -29,7 +35,7 @@
       "name": "Spider Cloud Crawl",
       "kind": "tool",
       "config": {
-        "slug": "spidercloud__crawl",
+        "slug": "spidercloud.crawl",
         "backend": "http",
         "method": "POST",
         "url": "https://api.spider.cloud/crawl",
@@ -44,7 +50,7 @@
           "metadata": true,
           "depth": 3
         },
-        "description": "Crawl a site from a start URL with the hosted Spider Cloud crawler and return every fetched page as markdown, in a single request. Requires RYU_SPIDERCLOUD_API_KEY. Crawl depth is pinned to 3 hops: Spider Cloud's `depth` is a maximum where 0 means NO limit — the inverse of the canonical `web__crawl.depth`, where 0 means the start page only — so the canonical argument cannot be translated by a rename and is dropped. Without a pin an unqualified crawl would run at Spider Cloud's own default of 25.",
+        "description": "Crawl a site from a start URL with the hosted Spider Cloud crawler and return every fetched page as markdown, in a single request. Requires RYU_SPIDERCLOUD_API_KEY. Crawl depth is pinned to 3 hops: Spider Cloud's `depth` is a maximum where 0 means NO limit — the inverse of the canonical `web.crawl.depth`, where 0 means the start page only — so the canonical argument cannot be translated by a rename and is dropped. Without a pin an unqualified crawl would run at Spider Cloud's own default of 25.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -72,8 +78,8 @@
       "title": "Crawl",
       "selectable": true,
       "tools": {
-        "web__crawl": {
-          "tool": "spidercloud__crawl",
+        "web.crawl": {
+          "tool": "spidercloud.crawl",
           "args": {
             "depth": ""
           },

@@ -124,7 +124,7 @@ export function VoiceInputSettings() {
 	return (
 		<SettingsSection
 			caption="The push-to-talk shortcut and enable toggle live in the Island settings."
-			title="Voice input"
+			title="Voice Recognition"
 		>
 			<SettingsGroup>
 				<SettingsItem
@@ -142,7 +142,7 @@ export function VoiceInputSettings() {
 							value={prefs.engine}
 						>
 							<SelectTrigger
-								aria-label="Voice engine"
+								aria-label="Voice Recognition engine"
 								className="h-8 w-56 text-sm"
 							>
 								<SelectValue />

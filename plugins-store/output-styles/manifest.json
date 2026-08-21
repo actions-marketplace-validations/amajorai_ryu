@@ -1,4 +1,10 @@
 {
+  "tags": ["output-style","tone","prompt","accessibility","writing"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/output-styles",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/output-styles",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/output-styles",
   "name": "Output Styles",
   "version": "0.1.15",
@@ -13,7 +19,7 @@
     "accessibility",
     "writing"
   ],
-  "icon": "quill-write-01",
+  "icon": "file-export",
   "iconDither": {
     "from": 150,
     "to": "transparent",
@@ -100,7 +106,7 @@
         "id": "output-styles",
         "title": "Output Styles",
         "subtitle": "A style changes how the agent talks \u2014 its role, tone and the shape of its answers. It never changes what the agent knows or which model runs.",
-        "icon": "lucide:message-square-quote",
+        "icon": "file-export",
         "group": "catalog",
         "order": 80,
         "spec": {

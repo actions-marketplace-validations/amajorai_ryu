@@ -1,5 +1,6 @@
 "use client";
 
+import { formatCount as formatSharedCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import { GITHUB_SVGL, SvglIcon } from "./svgl-icon.tsx";
 
@@ -11,14 +12,9 @@ export interface GitHubStarsProps {
 
 function formatCompactCount(
 	count: number,
-	locales: Intl.LocalesArgument
+	_locales: Intl.LocalesArgument
 ): string {
-	return new Intl.NumberFormat(locales, {
-		notation: "compact",
-		compactDisplay: "short",
-	})
-		.format(count)
-		.toLowerCase();
+	return formatSharedCount(count) ?? "—";
 }
 
 export function GitHubStars({

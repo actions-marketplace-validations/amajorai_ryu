@@ -18,7 +18,7 @@ const messagePart = {
 		type: "text",
 	},
 	state: "output-available",
-	type: "tool-mcp__agent-comms__agents__send",
+	type: "tool-mcp-agent-comms.agents.send",
 };
 
 const identityContext: AgentMessageContext = {

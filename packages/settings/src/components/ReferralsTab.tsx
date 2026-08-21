@@ -131,12 +131,8 @@ function EnableAffiliateCard({
 						</p>
 					</div>
 				</div>
-				<Button disabled={pending} onClick={onEnable} type="button">
-					{pending ? (
-						<Spinner className="size-4" />
-					) : (
-						<Gift className="size-4" />
-					)}
+				<Button loading={pending} onClick={onEnable} type="button">
+					{!pending && <Gift className="size-4" />}
 					Enable cash commission
 				</Button>
 			</CardContent>
@@ -423,31 +419,22 @@ export function ReferralsTab({
 									<Badge variant="secondary">Payouts enabled</Badge>
 									<Button
 										className="sm:ml-auto"
-										disabled={
-											payoutMutation.isPending || stats.approvedMinor <= 0
-										}
+										disabled={stats.approvedMinor <= 0}
+										loading={payoutMutation.isPending}
 										onClick={() => payoutMutation.mutate()}
 										type="button"
 									>
-										{payoutMutation.isPending ? (
-											<Spinner className="size-4" />
-										) : (
-											<Wallet className="size-4" />
-										)}
+										{!payoutMutation.isPending && <Wallet className="size-4" />}
 										Pay out approved balance
 									</Button>
 								</div>
 							) : (
 								<Button
-									disabled={onboardMutation.isPending}
+									loading={onboardMutation.isPending}
 									onClick={() => onboardMutation.mutate()}
 									type="button"
 								>
-									{onboardMutation.isPending ? (
-										<Spinner className="size-4" />
-									) : (
-										<Wallet className="size-4" />
-									)}
+									{!onboardMutation.isPending && <Wallet className="size-4" />}
 									Set up payouts
 								</Button>
 							)}
@@ -592,13 +579,10 @@ export function ReferralsTab({
 
 									<div className="flex flex-wrap gap-2">
 										<Button
-											disabled={commissionMutation.isPending}
+											loading={commissionMutation.isPending}
 											onClick={() => commissionMutation.mutate(rule)}
 											type="button"
 										>
-											{commissionMutation.isPending ? (
-												<Spinner className="size-4" />
-											) : null}
 											Save
 										</Button>
 										<Button

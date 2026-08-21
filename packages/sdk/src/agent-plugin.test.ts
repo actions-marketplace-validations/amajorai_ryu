@@ -183,6 +183,64 @@ describe("toAgentPlugin", () => {
 		});
 	});
 
+	test("exports Streamable HTTP, legacy SSE, and inferred remote servers", () => {
+		const { mcp, notes } = toAgentPlugin({
+			id: "@ryu/remote",
+			name: "Remote",
+			mcp_servers: {
+				hosted: {
+					type: "streamable-http",
+					url: "https://mcp.example.com/mcp",
+					headers: { Authorization: "Bearer static" },
+				},
+				legacy: {
+					type: "sse",
+					url: "https://legacy.example.com/sse",
+				},
+				inferred: { url: "https://inferred.example.com/mcp" },
+			},
+		});
+		expect(mcp?.mcpServers.hosted).toEqual({
+			type: "streamable-http",
+			url: "https://mcp.example.com/mcp",
+			headers: { Authorization: "Bearer static" },
+		});
+		expect(mcp?.mcpServers.legacy).toEqual({
+			type: "sse",
+			url: "https://legacy.example.com/sse",
+		});
+		expect(mcp?.mcpServers.inferred).toEqual({
+			type: "streamable-http",
+			url: "https://inferred.example.com/mcp",
+		});
+		expect(notes).toEqual([]);
+	});
+
+	test("omits malformed remote URLs while preserving valid HTTP endpoints", () => {
+		const { mcp, notes } = toAgentPlugin({
+			id: "@ryu/remote",
+			name: "Remote",
+			mcp_servers: {
+				insecure: {
+					type: "streamable-http",
+					url: "http://remote.example.com/mcp",
+				},
+				bad: { type: "streamable-http", url: "file:///tmp/mcp" },
+				local: { type: "sse", url: "http://127.0.0.1:8787/sse" },
+			},
+		});
+		expect(mcp?.mcpServers.insecure).toEqual({
+			type: "streamable-http",
+			url: "http://remote.example.com/mcp",
+		});
+		expect(mcp?.mcpServers.local).toEqual({
+			type: "sse",
+			url: "http://127.0.0.1:8787/sse",
+		});
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("http or https");
+	});
+
 	test("omits a disabled server but records it", () => {
 		const { plugin, mcp, notes } = toAgentPlugin({
 			id: "@ryu/a",

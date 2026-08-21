@@ -10,6 +10,7 @@
 //
 // No telemetry; purely local storage. Disabled by default per CLAUDE.md.
 
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useCallback, useEffect, useState } from "react";
 import type { CaptureControl } from "@/src/lib/api/shadow.ts";
 import { setCaptureControl } from "@/src/lib/api/shadow.ts";
@@ -248,7 +249,7 @@ export default function ConsentSettings({
 					Comma-separated list of app names. Leave empty to allow all apps.
 					{allowlist.length > 0 && (
 						<span className="ml-1 font-medium text-foreground">
-							Active ({allowlist.length} app
+							Active ({formatCount(allowlist.length) ?? "—"} app
 							{allowlist.length === 1 ? "" : "s"}).
 						</span>
 					)}

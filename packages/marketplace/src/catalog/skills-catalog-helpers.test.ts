@@ -55,14 +55,14 @@ describe("skillAuthoringEnabled", () => {
 });
 
 describe("formatCount", () => {
-	test("millions render as N.NM", () => {
-		expect(formatCount(1_234_567)).toBe("1.2M");
-		expect(formatCount(2_000_000)).toBe("2.0M");
+	test("million-scale counts render with a lowercase m", () => {
+		expect(formatCount(1_234_567)).toBe("1.2m");
+		expect(formatCount(2_000_000)).toBe("2m");
 	});
 
-	test("thousands render as N.Nk", () => {
-		expect(formatCount(1500)).toBe("1.5k");
-		expect(formatCount(1000)).toBe("1.0k");
+	test("thousands keep comma separators", () => {
+		expect(formatCount(1500)).toBe("1,500");
+		expect(formatCount(1000)).toBe("1,000");
 	});
 
 	test("under 1000 renders the raw integer", () => {
@@ -71,8 +71,8 @@ describe("formatCount", () => {
 	});
 
 	test("the 1000 / 1_000_000 boundaries flip the unit", () => {
-		expect(formatCount(999_999)).toBe("1000.0k");
-		expect(formatCount(1_000_000)).toBe("1.0M");
+		expect(formatCount(999_999)).toBe("999,999");
+		expect(formatCount(1_000_000)).toBe("1m");
 	});
 });
 

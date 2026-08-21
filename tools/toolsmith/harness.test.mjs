@@ -130,9 +130,9 @@ test("callNamed refuses an id outside the manifest's adapter.tools allowlist", a
 	await assert.rejects(
 		runOnce({
 			kind: "adapter",
-			code: "return await callNamed('other__tool', {});",
+			code: "return await callNamed('other.tool', {});",
 			testCase: { name: "t", input: {}, provider: { named: {} } },
-			adapterTools: ["allowed__tool"],
+			adapterTools: ["allowed.tool"],
 		}),
 		/not in the manifest's adapter.tools allowlist/
 	);

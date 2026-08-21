@@ -16,7 +16,7 @@
 // It renders NOTHING until the caller (PluginCompanionPage) decides the plugin
 // actually carries a UI bundle.
 
-import { PuzzleIcon } from "@hugeicons/core-free-icons";
+import { PlugSocketIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
@@ -58,8 +58,9 @@ import {
 import { asGlyphValue } from "@ryu/ui/components/glyph.ts";
 import { iconToUrl } from "@ryu/ui/components/icon";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { RealtimeConnection } from "@ryuhq/core-client/realtime";
 import { useQuery } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getActiveUserId, useSession } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
@@ -97,6 +98,7 @@ import {
 	subscribeChannel,
 } from "@/src/lib/api/eventStream.ts";
 import { getHealingStatus } from "@/src/lib/api/healing.ts";
+import { getRealtimeJwt } from "@/src/lib/realtime/jwt.ts";
 import { generateImage as apiGenerateImage } from "@/src/lib/api/images.ts";
 import { getLearningConfig, listExperience } from "@/src/lib/api/learn.ts";
 import {
@@ -207,7 +209,9 @@ import {
 } from "@/src/lib/api/warmup.ts";
 import {
 	fetchWebhookIngressStatus,
+	fetchWebhookSecret,
 	fetchWebhooks,
+	setWebhookSecret,
 } from "@/src/lib/api/webhooks.ts";
 import {
 	createWorkflow,
@@ -530,6 +534,73 @@ const STALL_AFTER_MS = 8000;
  *  frame slower by restarting it. */
 const RETRY_COOLDOWN_MS = 15_000;
 
+type ApplicationRealtimePush =
+	| { data: unknown; name: string; type: "event" }
+	| { data: unknown; type: "presence" }
+	| { code: number; reason: string; type: "close" };
+
+class ApplicationRealtimeQueue {
+	private closed = false;
+	private readonly pending: Array<{
+		onAbort: () => void;
+		resolve: (value: ApplicationRealtimePush | null) => void;
+	}> = [];
+	private readonly values: ApplicationRealtimePush[] = [];
+
+	push(value: ApplicationRealtimePush): void {
+		if (this.closed) {
+			return;
+		}
+		const waiter = this.pending.shift();
+		if (waiter) {
+			waiter.resolve(value);
+			return;
+		}
+		this.values.push(value);
+	}
+
+	end(): void {
+		if (this.closed) {
+			return;
+		}
+		this.closed = true;
+		for (const waiter of this.pending.splice(0)) {
+			waiter.resolve(null);
+		}
+	}
+
+	take(signal: AbortSignal): Promise<ApplicationRealtimePush | null> {
+		if (this.values.length > 0) {
+			return Promise.resolve(this.values.shift() ?? null);
+		}
+		if (this.closed || signal.aborted) {
+			return Promise.resolve(null);
+		}
+		return new Promise((resolve) => {
+			const waiter = {
+				onAbort: () => {
+					const index = this.pending.indexOf(waiter);
+					if (index >= 0) {
+						this.pending.splice(index, 1);
+					}
+					resolve(null);
+				},
+				resolve: (value: ApplicationRealtimePush | null) => {
+					signal.removeEventListener("abort", waiter.onAbort);
+					resolve(value);
+				},
+			};
+			this.pending.push(waiter);
+			signal.addEventListener("abort", waiter.onAbort, { once: true });
+		});
+	}
+}
+
+interface ApplicationRealtimeSession {
+	connection: RealtimeConnection;
+	queue: ApplicationRealtimeQueue;
+}
+
 /**
  * The panel's centered state — startup, failure, and "nothing to show" all render
  * through this one shape so they cannot drift into three different-looking screens.
@@ -555,7 +626,7 @@ function PanelPlaceholder({
 			<Empty>
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						{busy ? <Spinner /> : <HugeiconsIcon icon={PuzzleIcon} />}
+					{busy ? <Spinner /> : <HugeiconsIcon icon={PlugSocketIcon} />}
 					</EmptyMedia>
 					<EmptyTitle>{title}</EmptyTitle>
 					<EmptyDescription>{description}</EmptyDescription>
@@ -588,11 +659,37 @@ export function PluginHostPanel({
 }) {
 	const node = useActiveNode();
 	const [connected, setConnected] = useState(false);
-	// The theme-token bridge (W7): read the host's live resolved theme tokens ONCE
-	// at mount and inject them into the sandboxed companion so it renders in the
-	// desktop's active light/dark/custom theme. Lazy-init (mount-time snapshot) — a
-	// companion's own hardcoded token block is the fallback for anything unread.
-	const [themeTokens] = useState(readHostThemeTokens);
+	const realtimeSessionsRef = useRef(
+		new Map<string, ApplicationRealtimeSession>()
+	);
+	useEffect(() => {
+		return () => {
+			for (const session of realtimeSessionsRef.current.values()) {
+				session.connection.close();
+				session.queue.end();
+			}
+			realtimeSessionsRef.current.clear();
+		};
+	}, []);
+	// The theme-token bridge (W7): seed the companion's first paint from the
+	// desktop's resolved theme, then push subsequent changes into the already
+	// mounted null-origin frame. Keeping the initial snapshot separate avoids
+	// remounting a running app when the user changes appearance.
+	const [initialThemeTokens] = useState(readHostThemeTokens);
+	const [themeTokens, setThemeTokens] = useState(initialThemeTokens);
+	useEffect(() => {
+		if (typeof MutationObserver === "undefined") {
+			return;
+		}
+		const observer = new MutationObserver(() => {
+			setThemeTokens(readHostThemeTokens());
+		});
+		observer.observe(document.documentElement, {
+			attributes: true,
+			attributeFilter: ["class", "style", "data-theme"],
+		});
+		return () => observer.disconnect();
+	}, []);
 	// The managed-path numeric cap on monitors (free-tier gating). Read from the
 	// React entitlement context so the guard is always fresh — the `@ryu/monitors`
 	// companion re-applies it in `monitorsCreate` below (the old `useMonitors` hook
@@ -1243,13 +1340,17 @@ export function PluginHostPanel({
 			ghostRecordStart: ({ task }) => startRecording(toTarget(node), task),
 			ghostRecordStatus: () => getRecordingStatus(toTarget(node)),
 			ghostRecordStop: () => stopRecording(toTarget(node)),
-			// Inbound webhook registry — the @ryu/webhooks companion renders Core's
-			// read-only `/api/webhooks` + `/api/webhook-ingress/status`. Host-direct (the
-			// monitors pattern): the host holds the node token and calls the existing
-			// ungated reads; both return the camelCase-normalized shape the desktop page
-			// used, forwarded verbatim over the bridge (webhooks:crud).
+			// Inbound webhook registry + protected secret management — the
+			// @ryu/webhooks companion uses explicit secret reads/writes while the host
+			// keeps the node token out of the sandboxed frame (webhooks:crud).
 			webhooksList: () => fetchWebhooks(toTarget(node)),
 			webhooksIngressStatus: () => fetchWebhookIngressStatus(toTarget(node)),
+			webhooksSecretGet: ({ id }) =>
+				fetchWebhookSecret(toTarget(node), id).then((secret) => ({ secret })),
+			webhooksSecretSet: ({ id, secret }) =>
+				setWebhookSecret(toTarget(node), id, secret).then((value) => ({
+					secret: value,
+				})),
 			// Quests — the @ryu/quests companion drives Core's `/api/quests/*`
 			// auto-detecting-todo orchestration. Host-direct (the monitors pattern): the
 			// host holds the node token and calls the existing `/api/quests/*` client,
@@ -1624,6 +1725,110 @@ export function PluginHostPanel({
 			// the frame can choose only the relative path/method/body.
 			appRequest: (input) =>
 				ownAppRequest(toTarget(node), companion.pluginId, input),
+			// Generic application-room realtime. The node target, node bearer and
+			// user JWT remain in this trusted host; only the opaque join result crosses
+			// the RPC boundary into the null-origin companion.
+			realtimeConnect: async ({ room_id }) => {
+				const connectionId = crypto.randomUUID();
+				const queue = new ApplicationRealtimeQueue();
+				let connection: RealtimeConnection;
+				let resolveJoin: (ack: {
+					access: "read" | "write";
+					memberId: string;
+					presence: unknown[];
+					roomId: string;
+				}) => void;
+				let rejectJoin: (error: Error) => void;
+				const join = new Promise<{
+					access: "read" | "write";
+					memberId: string;
+					presence: unknown[];
+					roomId: string;
+				}>((resolve, reject) => {
+					resolveJoin = resolve;
+					rejectJoin = reject;
+				});
+				const timeout = window.setTimeout(() => {
+					rejectJoin(new Error("realtime join timed out"));
+				}, 15_000);
+				const jwt = await getRealtimeJwt();
+				connection = new RealtimeConnection(toTarget(node), {
+					appId: companion.pluginId,
+					handlers: {
+						onClose: (event) => {
+							queue.push({
+								code: event.code,
+								reason: event.reason,
+								type: "close",
+							});
+							queue.end();
+							rejectJoin(new Error(`realtime closed: ${event.reason || event.code}`));
+							realtimeSessionsRef.current.delete(connectionId);
+						},
+						onJoinAck: (ack) => resolveJoin(ack),
+						onNamedEvent: ({ name, data }) =>
+							queue.push({ data, name, type: "event" }),
+						onPresence: (data) => queue.push({ data, type: "presence" }),
+					},
+					jwt,
+					kind: "application",
+					roomId: room_id,
+				});
+				realtimeSessionsRef.current.set(connectionId, { connection, queue });
+				connection.connect();
+				try {
+					const ack = await join;
+					window.clearTimeout(timeout);
+					return {
+						access: ack.access,
+						member_id: ack.memberId,
+						presence: ack.presence,
+						room_id: ack.roomId,
+					};
+				} catch (error) {
+					window.clearTimeout(timeout);
+					connection.close();
+					queue.end();
+					realtimeSessionsRef.current.delete(connectionId);
+					throw error;
+				}
+			},
+			realtimePublish: async ({ connection_id, event, data }) => {
+				const session = realtimeSessionsRef.current.get(connection_id);
+				if (!session) {
+					throw new Error("realtime connection is not available");
+				}
+				session.connection.sendEvent(event, data);
+			},
+			realtimePresence: async ({ connection_id, data }) => {
+				const session = realtimeSessionsRef.current.get(connection_id);
+				if (!session) {
+					throw new Error("realtime connection is not available");
+				}
+				session.connection.publishPresence(data);
+			},
+			realtimeSubscribe: async (input, emit, signal) => {
+				const session = realtimeSessionsRef.current.get(input.connection_id);
+				if (!session) {
+					throw new Error("realtime connection is not available");
+				}
+			while (!signal.aborted) {
+					const push = await session.queue.take(signal);
+					if (push === null) {
+						return;
+					}
+					emit(JSON.stringify(push));
+				}
+			},
+			realtimeClose: async ({ connection_id }) => {
+				const session = realtimeSessionsRef.current.get(connection_id);
+				if (!session) {
+					return;
+				}
+				session.connection.close();
+				session.queue.end();
+				realtimeSessionsRef.current.delete(connection_id);
+			},
 			socialOpen: ({ postId, title }) =>
 				openTab(postId ? `/social/${postId}` : "/social", {
 					title: title ?? "Outpost",
@@ -1917,7 +2122,7 @@ export function PluginHostPanel({
 				companion.id,
 				mountContext,
 				companion.csp,
-				themeTokens
+				initialThemeTokens
 			);
 		}
 		return thirdPartyPluginSrcdoc(
@@ -1926,7 +2131,7 @@ export function PluginHostPanel({
 			companion.id,
 			mountContext
 		);
-	}, [code, nonce, companion.id, mountContext, themeTokens]);
+	}, [code, nonce, companion.id, mountContext, initialThemeTokens]);
 
 	const panelTitle = companion.label || companion.name;
 
@@ -1983,6 +2188,7 @@ export function PluginHostPanel({
 					onConnected={() => setConnected(true)}
 					services={services}
 					srcdoc={srcdoc}
+					themeTokens={themeTokens}
 					title={`Plugin: ${companion.name}`}
 				/>
 			</div>

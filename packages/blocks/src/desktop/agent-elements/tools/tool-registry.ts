@@ -437,7 +437,8 @@ export const toolRegistry: Record<string, ToolMeta> = {
 };
 
 // MCP tool parsing
-const MCP_TOOL_PREFIX = "tool-mcp__";
+const MCP_TOOL_PREFIX = "tool-mcp-";
+const LEGACY_MCP_TOOL_PREFIX = "tool-mcp__";
 
 export interface McpToolInfo {
 	category: string;
@@ -448,9 +449,14 @@ export interface McpToolInfo {
 
 /** Human-facing label for a qualified tool id; the id itself remains the call key. */
 export function formatToolDisplayName(toolName: string): string {
-	const separatorIndex = toolName.indexOf("__");
+	const dotIndex = toolName.lastIndexOf(".");
+	const legacyIndex = toolName.lastIndexOf("__");
+	const separatorIndex = Math.max(dotIndex, legacyIndex);
+	const separatorLength = separatorIndex === legacyIndex ? 2 : 1;
 	const displayName =
-		separatorIndex === -1 ? toolName : toolName.slice(separatorIndex + 2);
+		separatorIndex === -1
+			? toolName
+			: toolName.slice(separatorIndex + separatorLength);
 	return displayName
 		.replace(/[_-]+/g, " ")
 		.replace(/\b\w/g, (character) => character.toUpperCase())
@@ -489,16 +495,19 @@ export function parseMcpToolType(partType: string): McpToolInfo | null {
 	if (builtin) {
 		return builtin;
 	}
-	if (!partType.startsWith(MCP_TOOL_PREFIX)) {
+	const isLegacy = partType.startsWith(LEGACY_MCP_TOOL_PREFIX);
+	if (!isLegacy && !partType.startsWith(MCP_TOOL_PREFIX)) {
 		return null;
 	}
-	const withoutPrefix = partType.slice(MCP_TOOL_PREFIX.length);
-	const separatorIndex = withoutPrefix.indexOf("__");
+	const prefix = isLegacy ? LEGACY_MCP_TOOL_PREFIX : MCP_TOOL_PREFIX;
+	const separator = isLegacy ? "__" : ".";
+	const withoutPrefix = partType.slice(prefix.length);
+	const separatorIndex = withoutPrefix.indexOf(separator);
 	if (separatorIndex === -1) {
 		return null;
 	}
 	const serverName = withoutPrefix.slice(0, separatorIndex);
-	const toolName = withoutPrefix.slice(separatorIndex + 2);
+	const toolName = withoutPrefix.slice(separatorIndex + separator.length);
 	return {
 		serverName,
 		toolName,

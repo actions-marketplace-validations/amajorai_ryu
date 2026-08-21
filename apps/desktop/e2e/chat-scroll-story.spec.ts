@@ -126,3 +126,51 @@ test("with the Appearance toggle off a tab that hydrated while hidden is left wh
 	await page.waitForTimeout(500);
 	expect(await distanceFromBottom(scroller)).toBeGreaterThan(BOTTOM_SLACK_PX);
 });
+
+test("scrolling to the top prepends an older message page and preserves the reading anchor", async ({
+	page,
+}, testInfo) => {
+	await page.goto(`${STORY_URL}?paging=1`);
+
+	await expect(page.getByTestId("story-state")).toHaveAttribute(
+		"data-message-count",
+		"20",
+		{ timeout: 60_000 }
+	);
+	await expect(page.getByTestId("story-state")).toHaveAttribute(
+		"data-page-start",
+		"30"
+	);
+
+	const scroller = viewport(page);
+	await expect
+		.poll(async () =>
+			scroller.evaluate((el) => el.scrollHeight - el.clientHeight)
+		)
+		.toBeGreaterThan(500);
+
+	await scroller.evaluate((el) => {
+		el.scrollTop = 0;
+		el.dispatchEvent(new Event("scroll", { bubbles: true }));
+	});
+
+	await expect(page.getByTestId("story-state")).toHaveAttribute(
+		"data-message-count",
+		"40",
+		{ timeout: 30_000 }
+	);
+	await expect(page.getByTestId("story-state")).toHaveAttribute(
+		"data-page-start",
+		"20"
+	);
+	await expect
+		.poll(async () => scroller.evaluate((el) => el.scrollTop), {
+			message:
+				"prepending older messages should keep the previous top message in view",
+		})
+		.toBeGreaterThan(0);
+	await page.screenshot({
+		fullPage: true,
+		path: testInfo.outputPath("chat-pagination-proof.png"),
+	});
+});

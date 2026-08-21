@@ -160,6 +160,11 @@ pub enum PendingAction {
     ToolCall {
         tool_id: String,
         arguments: serde_json::Value,
+        /// The agent whose governed call created this approval. Keeping this
+        /// identity across the queue prevents approval re-dispatch from
+        /// bypassing lifecycle and safety checks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allowlist: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -185,6 +190,10 @@ pub struct ApprovalRequest {
     pub kind: ApprovalKind,
     /// Short human title ("Scheduled run: Morning digest").
     pub title: String,
+    /// First-person question shown above the summary in an approval card.
+    /// Optional for older/non-tool requests that do not have a tool intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
     /// One or two sentences describing what will run and why it is gated.
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,6 +240,7 @@ impl ApprovalRequest {
             id: format!("appr_{}", uuid::Uuid::new_v4().simple()),
             kind,
             title,
+            question: None,
             summary,
             agent_id: None,
             conversation_id: None,
@@ -287,6 +297,7 @@ impl ApprovalRequest {
             format!("An agent wants to run the tool `{tool_id}`, which is configured to require your approval before it executes."),
             Some(action),
         );
+        req.question = Some(format!("Can I run `{tool_id}` now?"));
         req.source_ref = Some(tool_id.to_owned());
         req.risk_tags = risk_tags;
         req
@@ -298,13 +309,14 @@ impl ApprovalRequest {
             ApprovalKind::ScheduledRun,
             format!("Scheduled run: {}", job.name),
             format!(
-                "The automation \"{}\" is due and is configured to require approval before each run.",
+                "The automation \"{}\" is due. It will wait in your Inbox until you approve this run.",
                 job.name
             ),
             Some(PendingAction::ScheduledJob {
                 target: job.target.clone(),
             }),
         );
+        req.question = Some(format!("Run \"{}\" now?", job.name));
         req.source_ref = Some(job.id.clone());
         req.risk_tags = vec!["scheduled".to_owned()];
         if let crate::scheduler::store::JobTarget::Agent { agent_id, .. } = &job.target {
@@ -803,6 +815,7 @@ impl ApprovalEngine {
             PendingAction::ToolCall {
                 tool_id,
                 arguments,
+                agent_id,
                 allowlist,
                 user_id,
                 profile_ids,
@@ -816,11 +829,7 @@ impl ApprovalEngine {
                 // exactly once and does not re-raise an approval (infinite loop).
                 let result = registry
                     .call_tool_with_identity_no_gate(
-                        // The approval row carries the call, not the agent card that
-                        // raised it, so per-agent record state (the skill allowlist)
-                        // is unavailable here and degrades to unscoped — the exact
-                        // behaviour this path already had.
-                        None,
+                        agent_id.as_deref(),
                         tool_id,
                         arguments.clone(),
                         allowlist.as_deref(),
@@ -876,7 +885,7 @@ async fn reject_action(action: &PendingAction) {
 /// `agent_approval_tools` is Layer A — the calling agent's configured
 /// `approval_tools` list (pass `&[]` for agent-less callers). Composio tools are
 /// NOT exempt: the connection flow is authentication, not approval, so a risky
-/// `composio__*` action (send/delete/pay across 250+ SaaS apps) gates like any
+/// `composio.*` action (send/delete/pay across 250+ SaaS apps) gates like any
 /// other tool; only its connect/consent elicitation runs ungated (that path
 /// returns an `__ryu_elicitation__` envelope instead of executing).
 #[allow(clippy::too_many_arguments)]
@@ -923,6 +932,7 @@ pub async fn execute_app_send_turn(action: &PendingAction) -> anyhow::Result<()>
 pub async fn gate_tool_call(
     tool_id: &str,
     arguments: &serde_json::Value,
+    agent_id: Option<&str>,
     agent_approval_tools: &[String],
     allowlist: Option<&[String]>,
     user_id: Option<&str>,
@@ -943,6 +953,7 @@ pub async fn gate_tool_call(
     let action = PendingAction::ToolCall {
         tool_id: tool_id.to_owned(),
         arguments: arguments.clone(),
+        agent_id: agent_id.map(str::to_owned),
         allowlist: allowlist.map(<[String]>::to_vec),
         user_id: user_id.map(str::to_owned),
         profile_ids: profile_ids.to_vec(),
@@ -986,8 +997,9 @@ mod tests {
     #[test]
     fn for_tool_call_carries_kind_source_and_action() {
         let action = PendingAction::ToolCall {
-            tool_id: "gmail__send_email".to_owned(),
+            tool_id: "gmail.send_email".to_owned(),
             arguments: serde_json::json!({ "to": "x" }),
+            agent_id: None,
             allowlist: None,
             user_id: None,
             profile_ids: Vec::new(),
@@ -995,11 +1007,51 @@ mod tests {
             host_conversation_id: None,
         };
         let req =
-            ApprovalRequest::for_tool_call("gmail__send_email", vec!["send".to_owned()], action);
+            ApprovalRequest::for_tool_call("gmail.send_email", vec!["send".to_owned()], action);
         assert_eq!(req.kind, ApprovalKind::ToolCall);
-        assert_eq!(req.source_ref.as_deref(), Some("gmail__send_email"));
+        assert_eq!(
+            req.question.as_deref(),
+            Some("Can I run `gmail.send_email` now?")
+        );
+        assert_eq!(req.source_ref.as_deref(), Some("gmail.send_email"));
         assert!(matches!(req.action, Some(PendingAction::ToolCall { .. })));
         assert!(req.risk_tags.iter().any(|t| t == "send"));
+    }
+
+    #[test]
+    fn for_scheduled_job_uses_inbox_language_and_dedup_key() {
+        let job = crate::scheduler::store::ScheduledJob {
+            id: "job-morning-digest".to_owned(),
+            name: "Morning digest".to_owned(),
+            schedule: crate::scheduler::store::Schedule::Every {
+                interval: "1h".to_owned(),
+            },
+            target: crate::scheduler::store::JobTarget::Agent {
+                agent_id: "ryu".to_owned(),
+                prompt: "Summarize the inbox".to_owned(),
+                model: None,
+            },
+            enabled: true,
+            require_approval: true,
+            owner_app: None,
+            created_at: "2026-08-20T00:00:00Z".to_owned(),
+            updated_at: "2026-08-20T00:00:00Z".to_owned(),
+            last_run_at: None,
+            last_outcome: None,
+            history: Vec::new(),
+        };
+
+        let req = ApprovalRequest::for_scheduled_job(&job);
+        assert_eq!(req.kind, ApprovalKind::ScheduledRun);
+        assert_eq!(req.question.as_deref(), Some("Run \"Morning digest\" now?"));
+        assert!(req.summary.contains("Inbox"));
+        assert_eq!(req.source_ref.as_deref(), Some("job-morning-digest"));
+        assert_eq!(req.agent_id.as_deref(), Some("ryu"));
+        assert!(req.risk_tags.iter().any(|tag| tag == "scheduled"));
+        assert!(matches!(
+            req.action,
+            Some(PendingAction::ScheduledJob { .. })
+        ));
     }
 
     #[test]

@@ -30,11 +30,22 @@ pub const SPACE_DELETE: &str = "space.delete";
 pub const AGENT_VIEW: &str = "agent.view";
 pub const AGENT_RUN: &str = "agent.run";
 pub const AGENT_EDIT: &str = "agent.edit";
+pub const AGENT_DELETE: &str = "agent.delete";
+pub const CHANNEL_MANAGE: &str = "channel.manage";
+pub const CHANNEL_DELETE: &str = "channel.delete";
 pub const TOOL_EXEC: &str = "tool.exec";
 pub const MEMBERS_MANAGE: &str = "members.manage";
 pub const ROLES_MANAGE: &str = "roles.manage";
 pub const BILLING_MANAGE: &str = "billing.manage";
 pub const AUDIT_VIEW: &str = "audit.view";
+pub const APP_INSTALL: &str = "app.install";
+pub const APP_UPDATE: &str = "app.update";
+pub const APP_ENABLE: &str = "app.enable";
+pub const APP_DISABLE: &str = "app.disable";
+pub const APP_UNINSTALL: &str = "app.uninstall";
+pub const MARKETPLACE_VIEW: &str = "marketplace.view";
+pub const MARKETPLACE_PUBLISH: &str = "marketplace.publish";
+pub const MARKETPLACE_TRANSFER: &str = "marketplace.transfer";
 
 /// Every permission key, in the same order as the shared contract's `PERMISSIONS`
 /// array. `owner` is derived from this full set; `admin` from this set minus
@@ -52,11 +63,22 @@ pub const PERMISSIONS: &[&str] = &[
     AGENT_VIEW,
     AGENT_RUN,
     AGENT_EDIT,
+    AGENT_DELETE,
+    CHANNEL_MANAGE,
+    CHANNEL_DELETE,
     TOOL_EXEC,
     MEMBERS_MANAGE,
     ROLES_MANAGE,
     BILLING_MANAGE,
     AUDIT_VIEW,
+    APP_INSTALL,
+    APP_UPDATE,
+    APP_ENABLE,
+    APP_DISABLE,
+    APP_UNINSTALL,
+    MARKETPLACE_VIEW,
+    MARKETPLACE_PUBLISH,
+    MARKETPLACE_TRANSFER,
 ];
 
 /// The `member` built-in set (a working teammate: run and author, but no
@@ -70,10 +92,17 @@ const MEMBER_PERMISSIONS: &[&str] = &[
     AGENT_VIEW,
     AGENT_RUN,
     TOOL_EXEC,
+    MARKETPLACE_VIEW,
 ];
 
 /// The `viewer` built-in set (read-only). MUST match the TS `viewer` set exactly.
-const VIEWER_PERMISSIONS: &[&str] = &[GATEWAY_VIEW, WORKFLOW_VIEW, SPACE_READ, AGENT_VIEW];
+const VIEWER_PERMISSIONS: &[&str] = &[
+    GATEWAY_VIEW,
+    WORKFLOW_VIEW,
+    SPACE_READ,
+    AGENT_VIEW,
+    MARKETPLACE_VIEW,
+];
 
 /// The built-in permission set for an [`OrgRole`]. Fail-closed: an unknown BA role
 /// already maps to [`OrgRole::Viewer`] (see [`OrgRole::from_ba_str`]), so the
@@ -128,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn member_set_is_exactly_the_eight_keys() {
+    fn member_set_includes_marketplace_read_access() {
         let member = permissions_for_role(OrgRole::Member);
         let expected: HashSet<&str> = [
             "gateway.view",
@@ -139,6 +168,7 @@ mod tests {
             "agent.view",
             "agent.run",
             "tool.exec",
+            "marketplace.view",
         ]
         .into_iter()
         .collect();
@@ -146,11 +176,17 @@ mod tests {
     }
 
     #[test]
-    fn viewer_set_is_exactly_the_four_keys() {
+    fn viewer_set_includes_marketplace_read_access() {
         let viewer = permissions_for_role(OrgRole::Viewer);
-        let expected: HashSet<&str> = ["gateway.view", "workflow.view", "space.read", "agent.view"]
-            .into_iter()
-            .collect();
+        let expected: HashSet<&str> = [
+            "gateway.view",
+            "workflow.view",
+            "space.read",
+            "agent.view",
+            "marketplace.view",
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(viewer, expected);
     }
 
@@ -162,5 +198,35 @@ mod tests {
         assert!(!can(OrgRole::Member, WORKFLOW_EDIT));
         assert!(can(OrgRole::Viewer, AGENT_VIEW));
         assert!(!can(OrgRole::Viewer, AGENT_RUN));
+    }
+
+    #[test]
+    fn deleting_agents_is_admin_only_by_default() {
+        assert!(can(OrgRole::Owner, AGENT_DELETE));
+        assert!(can(OrgRole::Admin, AGENT_DELETE));
+        assert!(!can(OrgRole::Member, AGENT_DELETE));
+        assert!(!can(OrgRole::Viewer, AGENT_DELETE));
+    }
+
+    #[test]
+    fn lifecycle_permissions_are_admin_only_by_default() {
+        for permission in [
+            APP_INSTALL,
+            APP_UPDATE,
+            APP_ENABLE,
+            APP_DISABLE,
+            APP_UNINSTALL,
+        ] {
+            assert!(
+                can(OrgRole::Owner, permission),
+                "owner missing {permission}"
+            );
+            assert!(
+                can(OrgRole::Admin, permission),
+                "admin missing {permission}"
+            );
+            assert!(!can(OrgRole::Member, permission), "member has {permission}");
+            assert!(!can(OrgRole::Viewer, permission), "viewer has {permission}");
+        }
     }
 }

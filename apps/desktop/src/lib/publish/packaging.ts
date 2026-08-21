@@ -211,6 +211,10 @@ export interface AgentPublishPersona {
 		to?: string | null;
 	} | null;
 	emoji?: string | null;
+	expressive?: {
+		animation?: string | null;
+		expression?: string | null;
+	} | null;
 	icon?: string | null;
 	icon_color?: string | null;
 	tone?: string | null;
@@ -247,6 +251,7 @@ export interface AgentAvatarDeclaration {
 		to: string | null;
 	} | null;
 	emoji: string | null;
+	expressive: { animation: string | null; expression: string | null } | null;
 	icon: string | null;
 	icon_color: string | null;
 	tone: string | null;
@@ -289,8 +294,8 @@ export interface AgentPublishPackage {
 
 const HTTP_URL_RE = /^https?:\/\//i;
 // Composio ids arrive either as the raw action slug (`GITHUB_CREATE_AN_ISSUE`)
-// or with the tool-allowlist prefix Core merges them under (`composio__…`).
-const COMPOSIO_PREFIX_RE = /^composio__/i;
+// or with the tool-allowlist prefix Core merges them under (`composio.…`).
+const COMPOSIO_PREFIX_RE = /^composio./i;
 
 function trimOrNull(value: string | null | undefined): string | null {
 	const trimmed = (value ?? "").trim();
@@ -357,10 +362,18 @@ function buildAvatar(persona: AgentPublishPersona | null): {
 				to: trimOrNull(persona.dither.to),
 			}
 		: null;
+	const expressive = persona.expressive
+		? {
+				animation: trimOrNull(persona.expressive.animation),
+				expression: trimOrNull(persona.expressive.expression),
+			}
+		: null;
 	const avatar: AgentAvatarDeclaration = {
 		avatar_url: httpUrl,
 		dicebear: dicebear?.seed || dicebear?.style ? dicebear : null,
 		dither: dither?.from || dither?.to ? dither : null,
+		expressive:
+			expressive?.expression || expressive?.animation ? expressive : null,
 		emoji: trimOrNull(persona.emoji),
 		icon: trimOrNull(persona.icon),
 		icon_color: trimOrNull(persona.icon_color),
@@ -373,7 +386,8 @@ function buildAvatar(persona: AgentPublishPersona | null): {
 			avatar.emoji ||
 			avatar.icon ||
 			avatar.dicebear ||
-			avatar.dither
+			avatar.dither ||
+			avatar.expressive
 	);
 	return {
 		avatar: hasGlyph || avatar.tone ? avatar : null,

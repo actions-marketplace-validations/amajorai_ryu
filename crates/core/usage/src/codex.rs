@@ -134,11 +134,55 @@ fn load_auth() -> Option<AuthFile> {
     None
 }
 
+/// Read the managed Pi OAuth entry for Ryu's ChatGPT subscription provider and
+/// adapt it to the Codex CLI auth shape consumed by this reader.
+fn auth_from_ryu_json(root: &serde_json::Value) -> Option<AuthFile> {
+    let entry = root.get("openai-codex")?;
+    let access_token = entry
+        .get("access")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            entry
+                .get("access_token")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|token| !token.is_empty())?
+        .to_string();
+    let account_id = entry
+        .get("account_id")
+        .or_else(|| entry.get("accountId"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Some(AuthFile {
+        tokens: Some(Tokens {
+            access_token: Some(access_token),
+            account_id,
+        }),
+        api_key: None,
+    })
+}
+
+fn load_ryu_auth() -> Option<AuthFile> {
+    let path = super::host()?.ryu_pi_auth_path()?;
+    let text = read_file(&path)?;
+    let root = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    auth_from_ryu_json(&root)
+}
+
 pub(super) async fn fetch(agent_id: &str) -> UsageSnapshot {
+    fetch_from_auth(agent_id, load_auth()).await
+}
+
+pub(super) async fn fetch_ryu(agent_id: &str) -> UsageSnapshot {
+    fetch_from_auth(agent_id, load_ryu_auth()).await
+}
+
+async fn fetch_from_auth(agent_id: &str, auth: Option<AuthFile>) -> UsageSnapshot {
     let unavailable =
         |reason: UsageUnavailable| UsageSnapshot::unavailable(agent_id, "codex", reason);
 
-    let Some(auth) = load_auth() else {
+    let Some(auth) = auth else {
         return unavailable(UsageUnavailable::NotLoggedIn);
     };
 
@@ -1180,5 +1224,21 @@ mod tests {
         )
         .unwrap();
         assert!(!format!("{parsed:?}").is_empty());
+    }
+
+    #[test]
+    fn ryu_auth_entry_maps_to_codex_tokens() {
+        let root = serde_json::json!({
+            "openai-codex": {
+                "type": "oauth",
+                "access": "pi-access",
+                "account_id": "account-1",
+            }
+        });
+        let auth = auth_from_ryu_json(&root).expect("oauth entry");
+        let tokens = auth.tokens.expect("oauth tokens");
+        assert_eq!(tokens.access_token.as_deref(), Some("pi-access"));
+        assert_eq!(tokens.account_id.as_deref(), Some("account-1"));
+        assert!(auth.api_key.is_none());
     }
 }

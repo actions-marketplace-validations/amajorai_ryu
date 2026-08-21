@@ -10,24 +10,36 @@ import {
 	type ChannelSavePayload,
 	ChannelsView,
 } from "@ryu/blocks/desktop/channels";
+import { toast } from "@ryu/ui/components/sileo.tsx";
 import { useState } from "react";
+import { DestructiveConfirmDialog } from "@/src/components/ui/DestructiveConfirmDialog.tsx";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useChannels } from "@/src/hooks/useChannels.ts";
+import { useCanManagePermission } from "@/src/hooks/useGatewayConfigurable.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import type { ChannelConfig } from "@/src/lib/api/channels.ts";
 
-function toView(c: ChannelConfig): ChannelConfigView {
+function toView(
+	c: ChannelConfig,
+	overrides: Pick<ChannelConfigView, "bindingWarning"> = {}
+): ChannelConfigView {
 	return {
 		id: c.id,
 		name: c.name,
 		channelType: c.channelType,
+		credentialSource: c.credentialSource,
 		enabled: c.enabled,
 		agentId: c.agentId,
 		teamId: c.teamId,
 		groupReplyMode: c.groupReplyMode ?? "mentions",
 		model: c.model,
+		managedBotId: c.managedBotId,
+		managedBotUsername: c.managedBotUsername,
+		managedProvisioningState: c.managedProvisioningState,
 		systemPrompt: c.systemPrompt,
+		provisionedServerId: c.provisionedServerId,
+		platformOptions: c.platformOptions ?? {},
 		secrets: c.secrets ?? {},
 		// Behaviour settings round-trip unmasked (they are configuration, not
 		// credentials). Each falls back to the server's own default so a bot saved
@@ -36,6 +48,10 @@ function toView(c: ChannelConfig): ChannelConfigView {
 		groupPolicy: c.groupPolicy ?? "allowlist",
 		dmAllowlist: c.dmAllowlist ?? [],
 		groupAllowlist: c.groupAllowlist ?? [],
+		groupUserAllowlist: c.groupUserAllowlist ?? [],
+		lifecycleReactions: c.lifecycleReactions ?? true,
+		proactiveOpening: c.proactiveOpening ?? false,
+		proactiveTarget: c.proactiveTarget ?? null,
 		typingIndicator: c.typingIndicator ?? true,
 		publishCommands: c.publishCommands ?? true,
 		richText: c.richText ?? true,
@@ -46,6 +62,7 @@ function toView(c: ChannelConfig): ChannelConfigView {
 		profileName: c.profileName ?? null,
 		profileShortBio: c.profileShortBio ?? null,
 		profileDescription: c.profileDescription ?? null,
+		...overrides,
 	};
 }
 
@@ -63,6 +80,10 @@ function behaviorFields(payload: ChannelSavePayload) {
 		groupPolicy: payload.groupPolicy,
 		dmAllowlist: payload.dmAllowlist,
 		groupAllowlist: payload.groupAllowlist,
+		groupUserAllowlist: payload.groupUserAllowlist,
+		lifecycleReactions: payload.lifecycleReactions,
+		proactiveOpening: payload.proactiveOpening,
+		proactiveTarget: payload.proactiveTarget,
 		typingIndicator: payload.typingIndicator,
 		publishCommands: payload.publishCommands,
 		richText: payload.richText,
@@ -86,12 +107,18 @@ export default function ChannelsPage({
 	const { channels, loading, error, authed, create, update, remove } =
 		useChannels();
 	const { agents } = useAgents();
+	const activeAgents = agents.filter(
+		(agent) => agent.lifecycleStatus === "active"
+	);
 	const { teams } = useTeams();
+	const canDelete = useCanManagePermission("channel.delete");
 	// Adapter types contributed by enabled plugins — surfaced as disabled options
 	// in the create picker (functional channels await the plugin runtime).
 	const { channels: pluginChannels } = usePluginContributions();
 
 	const [saving, setSaving] = useState(false);
+	const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+	const [deleting, setDeleting] = useState(false);
 
 	const handleSave = async (
 		payload: ChannelSavePayload,
@@ -108,6 +135,7 @@ export default function ChannelsPage({
 					agentId: payload.agentId,
 					teamId: payload.teamId,
 					groupReplyMode: payload.groupReplyMode,
+					platformOptions: payload.platformOptions,
 					model: payload.model,
 					systemPrompt: payload.systemPrompt,
 					enabled: payload.enabled,
@@ -120,6 +148,7 @@ export default function ChannelsPage({
 					agentId: payload.agentId,
 					teamId: payload.teamId,
 					groupReplyMode: payload.groupReplyMode,
+					platformOptions: payload.platformOptions,
 					model: payload.model,
 					systemPrompt: payload.systemPrompt,
 					enabled: payload.enabled,
@@ -136,17 +165,35 @@ export default function ChannelsPage({
 		}
 	};
 
-	const handleDelete = async (id: string) => {
-		const channel = channels.find((c) => c.id === id);
-		if (!window.confirm(`Delete the "${channel?.name ?? id}" bot?`)) {
-			return;
+	const requestDelete = (id: string) => {
+		if (!canDelete) {
+			return false;
 		}
+		setPendingDeleteId(id);
+		return false;
+	};
+
+	const confirmDelete = async () => {
+		if (!pendingDeleteId) {
+			return false;
+		}
+		setDeleting(true);
 		try {
-			await remove(id);
+			await remove(pendingDeleteId);
+			setPendingDeleteId(null);
+			return true;
 		} catch {
-			// Surfaced via the list error state on next refresh.
+			toast.error("Couldn't delete this channel", {
+				description: "The bot configuration was kept. Please try again.",
+			});
+			return false;
+		} finally {
+			setDeleting(false);
 		}
 	};
+	const pendingDelete = channels.find(
+		(channel) => channel.id === pendingDeleteId
+	);
 
 	// Sidebar is the channel picker; this page is create/edit only (no in-page
 	// list). Bots are account-global on the gateway — not scoped to the active node.
@@ -154,14 +201,23 @@ export default function ChannelsPage({
 		<div className="flex h-full flex-col overflow-hidden">
 			<div className="min-h-0 flex-1 overflow-hidden">
 				<ChannelsView
-					agents={agents.map((a) => ({ id: a.id, name: a.name }))}
+					agents={activeAgents.map((a) => ({ id: a.id, name: a.name }))}
 					authed={authed}
-					channels={channels.map(toView)}
+					canDelete={canDelete}
+					channels={channels.map((channel) =>
+						toView(channel, {
+							bindingWarning:
+								channel.agentId &&
+								!agents.some((agent) => agent.id === channel.agentId)
+									? "This channel was reverted to the default agent because its original agent was deleted. Rebind it to another agent to clear this warning."
+									: null,
+						})
+					)}
 					error={error}
 					initialNew={initialNew}
 					initialSelectedId={initialSelectedId}
 					loading={loading}
-					onDelete={handleDelete}
+					onDelete={requestDelete}
 					onSave={handleSave}
 					pluginPlatforms={pluginChannels.map((c) => ({
 						id: c.id,
@@ -172,6 +228,25 @@ export default function ChannelsPage({
 					teams={teams.map((t) => ({ id: t.id, name: t.name }))}
 				/>
 			</div>
+			<DestructiveConfirmDialog
+				busy={deleting}
+				description="The bot credentials and channel configuration will be deleted. Its shared Core session history will stay available to desktop and other channel participants."
+				impact={
+					<p className="text-muted-foreground">
+						Deleting this channel does not delete the agent or the conversation
+						history.
+					</p>
+				}
+				label={`Delete ${pendingDelete?.name ?? "this channel"}`}
+				onConfirm={confirmDelete}
+				onOpenChange={(open) => {
+					if (!(open || deleting)) {
+						setPendingDeleteId(null);
+					}
+				}}
+				open={pendingDeleteId !== null}
+				title={`Delete ${pendingDelete?.name ?? "this channel"}?`}
+			/>
 		</div>
 	);
 }

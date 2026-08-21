@@ -1,9 +1,15 @@
 {
+  "tags": ["memory","recall","facts","mem0"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/mem0",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/mem0",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/mem0",
   "name": "Mem0",
   "version": "0.1.14",
   "stability": "experimental",
-  "description": "Read and write a hosted Mem0 memory project (https://mem0.ai) through the Mem0 Platform REST API, exposed as three declarative HTTP tools. The SECOND provider of the swappable `memory` layer — the built-in store stays the default and keeps running alongside it — so selecting Mem0 re-points the stable `memory__search` / `memory__store` / `memory__sync` / `memory__forget` tools at your Mem0 project without changing what agents call, and turns on the kernel bridges that fold Mem0 into every turn's recall and echo this node's writes out to it. The one canonical verb Mem0 does NOT serve is `memory__context`: Mem0 publishes no standing-summary endpoint, and forcing the verb onto its get-all would dump raw facts at system rank under a label promising a synthesis. The two WRITE verbs both post to `POST /v3/memories/add/`, which is ASYNCHRONOUS — it answers `{message, status: \"PENDING\", event_id}` and never a fact id — so `memory__store` returns an accepted-for-processing envelope, not the id of the fact it created, and nothing may chain `memory__forget` onto its result. That is fine for the way both verbs are used: the kernel `mirror` and `sync` bridges are fire-and-forget and never read the response. The two verbs differ in ONE documented field: `store` sends `infer: false` because the caller has already decided the fact and Mem0 should keep the text as-is, while `sync` hands over a raw turn with Mem0's default inference on and lets Mem0 mine it. Note the entity id lives in two different places in Mem0's own API — nested inside `filters` for search, top-level for add — and both are pinned from the same `mem0.user-id` preference. Requires a BYOK Mem0 API key.",
+  "description": "Read and write a hosted Mem0 memory project (https://mem0.ai) through the Mem0 Platform REST API, exposed as three declarative HTTP tools. The SECOND provider of the swappable `memory` layer — the built-in store stays the default and keeps running alongside it — so selecting Mem0 re-points the stable `memory.search` / `memory.store` / `memory.sync` / `memory.forget` tools at your Mem0 project without changing what agents call, and turns on the kernel bridges that fold Mem0 into every turn's recall and echo this node's writes out to it. The one canonical verb Mem0 does NOT serve is `memory.context`: Mem0 publishes no standing-summary endpoint, and forcing the verb onto its get-all would dump raw facts at system rank under a label promising a synthesis. The two WRITE verbs both post to `POST /v3/memories/add/`, which is ASYNCHRONOUS — it answers `{message, status: \"PENDING\", event_id}` and never a fact id — so `memory.store` returns an accepted-for-processing envelope, not the id of the fact it created, and nothing may chain `memory.forget` onto its result. That is fine for the way both verbs are used: the kernel `mirror` and `sync` bridges are fire-and-forget and never read the response. The two verbs differ in ONE documented field: `store` sends `infer: false` because the caller has already decided the fact and Mem0 should keep the text as-is, while `sync` hands over a raw turn with Mem0's default inference on and lets Mem0 mine it. Note the entity id lives in two different places in Mem0's own API — nested inside `filters` for search, top-level for add — and both are pinned from the same `mem0.user-id` preference. Requires a BYOK Mem0 API key.",
   "iconUrl": "https://avatars.githubusercontent.com/u/137054526?v=4",
   "iconDither": { "from": 9, "to": "transparent", "direction": "down" },
   "tagline": "Recall and record in an existing Mem0 project inside Ryu",
@@ -28,7 +34,7 @@
       "name": "Mem0 Search",
       "kind": "tool",
       "config": {
-        "slug": "mem0__search",
+        "slug": "mem0.search",
         "backend": "http",
         "method": "POST",
         "url": "https://api.mem0.ai/v3/memories/search/",
@@ -80,7 +86,7 @@
       "name": "Mem0 Add",
       "kind": "tool",
       "config": {
-        "slug": "mem0__add",
+        "slug": "mem0.add",
         "backend": "http",
         "method": "POST",
         "url": "https://api.mem0.ai/v3/memories/add/",
@@ -89,7 +95,7 @@
         },
         "fail_open": true,
         "unwrap_body": true,
-        "description": "Hand conversation turns to a hosted Mem0 project so it can extract and store memories. ASYNCHRONOUS: Mem0 answers `{message, status, event_id}` with status PENDING and queues the work, so this tool reports that the write was ACCEPTED and never returns the id of a stored fact — do not feed `event_id` to mem0__delete, it is a job id, not a memory id. Unlike mem0__search, this endpoint takes the entity id TOP-LEVEL (`user_id`), not inside `filters`. Requires RYU_MEM0_API_KEY.",
+        "description": "Hand conversation turns to a hosted Mem0 project so it can extract and store memories. ASYNCHRONOUS: Mem0 answers `{message, status, event_id}` with status PENDING and queues the work, so this tool reports that the write was ACCEPTED and never returns the id of a stored fact — do not feed `event_id` to mem0.delete, it is a job id, not a memory id. Unlike mem0.search, this endpoint takes the entity id TOP-LEVEL (`user_id`), not inside `filters`. Requires RYU_MEM0_API_KEY.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -115,7 +121,7 @@
             },
             "user_id": {
               "type": "string",
-              "description": "Entity the memory is associated with. Mem0 requires at least one entity id (`user_id`, `agent_id`, `app_id`, or `run_id`) and takes it TOP-LEVEL on this endpoint — the nesting under `filters` that mem0__search needs would be silently ignored here and the write would be rejected for having no entity."
+              "description": "Entity the memory is associated with. Mem0 requires at least one entity id (`user_id`, `agent_id`, `app_id`, or `run_id`) and takes it TOP-LEVEL on this endpoint — the nesting under `filters` that mem0.search needs would be silently ignored here and the write would be rejected for having no entity."
             },
             "infer": {
               "type": "boolean",
@@ -131,7 +137,7 @@
       "name": "Mem0 Delete",
       "kind": "tool",
       "config": {
-        "slug": "mem0__delete",
+        "slug": "mem0.delete",
         "backend": "http",
         "method": "DELETE",
         "url": "https://api.mem0.ai/v1/memories/{memory_id}/",
@@ -140,7 +146,7 @@
         },
         "fail_open": true,
         "unwrap_body": false,
-        "description": "Delete one memory from the Mem0 project by its id, as returned by mem0__search. Answers `{status, body}` rather than the raw upstream body: Mem0 documents this as a 204, and an unwrapped 204 with an empty payload reaches the caller as a bare empty string, which reads like a failure. Requires RYU_MEM0_API_KEY.",
+        "description": "Delete one memory from the Mem0 project by its id, as returned by mem0.search. Answers `{status, body}` rather than the raw upstream body: Mem0 documents this as a 204, and an unwrapped 204 with an empty payload reaches the caller as a bare empty string, which reads like a failure. Requires RYU_MEM0_API_KEY.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -161,8 +167,8 @@
       "title": "Memory",
       "selectable": true,
       "tools": {
-        "memory__search": {
-          "tool": "mem0__search",
+        "memory.search": {
+          "tool": "mem0.search",
           "args": {
             "limit": "top_k",
             "scope": ""
@@ -181,8 +187,8 @@
             }
           }
         },
-        "memory__store": {
-          "tool": "mem0__add",
+        "memory.store": {
+          "tool": "mem0.add",
           "args": {
             "scope": "",
             "category": "",
@@ -202,8 +208,8 @@
             "infer": false
           }
         },
-        "memory__sync": {
-          "tool": "mem0__add",
+        "memory.sync": {
+          "tool": "mem0.add",
           "arg_template": {
             "messages": [
               {
@@ -216,8 +222,8 @@
             "user_id": "pref:mem0.user-id"
           }
         },
-        "memory__forget": {
-          "tool": "mem0__delete",
+        "memory.forget": {
+          "tool": "mem0.delete",
           "args": {
             "id": "memory_id"
           }

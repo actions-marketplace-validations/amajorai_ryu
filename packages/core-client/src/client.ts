@@ -97,12 +97,44 @@ export function setBuyerTokenProvider(fn: () => string | null): void {
 	buyerTokenProvider = fn;
 }
 
+/** Only a Core running on this machine may receive the control-plane session. */
+function isLoopbackTarget(url: string): boolean {
+	try {
+		const parsed = new URL(url);
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+			return false;
+		}
+		if (parsed.username || parsed.password) {
+			return false;
+		}
+		const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+		if (hostname === "localhost" || hostname === "::1") {
+			return true;
+		}
+		const octets = hostname.split(".");
+		return (
+			octets.length === 4 &&
+			octets.every(
+				(octet) => /^(?:0|[1-9]\d{0,2})$/.test(octet) && Number(octet) <= 255
+			) &&
+			octets[0] === "127"
+		);
+	} catch {
+		return false;
+	}
+}
+
 /**
- * Build the buyer-token header from the injected control-plane session token, or
- * `{}` when not signed in (an anonymous install — fine for free items; a paid
- * item is denied with an actionable error).
+ * Build the buyer-token header from the injected control-plane session token,
+ * but only for a loopback Core target. A remote or malformed target gets no
+ * session credential; the node token remains the only credential sent there.
  */
-export function buyerTokenHeader(): Record<string, string> {
+export function buyerTokenHeader(
+	target: Pick<ApiTarget, "url">
+): Record<string, string> {
+	if (!isLoopbackTarget(target.url)) {
+		return {};
+	}
 	const token = buyerTokenProvider();
 	return token ? { [BUYER_TOKEN_HEADER]: token } : {};
 }

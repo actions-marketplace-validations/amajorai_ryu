@@ -1,3 +1,4 @@
+import type { BetterAuthPlugin } from "better-auth";
 import {
 	APIError,
 	createAuthMiddleware,
@@ -57,7 +58,10 @@ async function resolveSessionId(ctx: {
 		// silently leave the gate open, so try the whole value first and only then
 		// its leading segment.
 		const candidates = [token, token.split(".")[0]].filter(
-			(value, index, all) => value && all.indexOf(value) === index
+			(value, index, all): value is string =>
+				typeof value === "string" &&
+				value.length > 0 &&
+				all.indexOf(value) === index
 		);
 		for (const candidate of candidates) {
 			const found = await ctx.context.internalAdapter.findSession(candidate);
@@ -93,16 +97,16 @@ async function resolveSessionId(ctx: {
  * cookie and token callers are both seen. Keep this plugin LAST in the `plugins`
  * array for that reason.
  */
-export function stepUpGate() {
+export function stepUpGate(): BetterAuthPlugin {
 	return {
 		id: "ryu-step-up",
 		hooks: {
 			before: [
 				{
-					matcher: (context: { path: string }) =>
-						stepUpScopeForAuthPath(context.path) !== null,
+					matcher: (context: { path?: string }) =>
+						stepUpScopeForAuthPath(context.path ?? "") !== null,
 					handler: createAuthMiddleware(async (ctx) => {
-						const scope = stepUpScopeForAuthPath(ctx.path);
+						const scope = stepUpScopeForAuthPath(ctx.path ?? "");
 						if (!scope) {
 							return;
 						}

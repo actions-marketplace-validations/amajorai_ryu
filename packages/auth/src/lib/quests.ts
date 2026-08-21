@@ -8,13 +8,14 @@
  * the `PointsLedger` / grant `refId` idempotency keys. Never rename one in
  * flight; re-keying orphan every row that already recorded it.
  *
- * CADENCE IS WHAT A QUEST RESETS ON. `one_time` never resets (claim once,
- * forever). `weekly` and `monthly` reset on their calendar boundary via a
- * `periodKey` ("2026-W33" / "2026-08") — the same "YYYY-MM" discipline the
- * referral campaign instances use, generalized to weeks. `permanent` is a
- * non-resetting REPEATABLE quest: the user can claim it again whenever the
- * target is met again (a "refer one more friend" style treadmill), and the
- * claim's `refId` carries a nonce so each claim is its own idempotent row.
+ * CADENCE IS WHAT A QUEST RESETS ON. `daily`, `weekly`, and `monthly` reset on
+ * their calendar boundary via a `periodKey` ("2026-08-17" / "2026-W33" /
+ * "2026-08") — the same "YYYY-MM" discipline the referral campaign instances
+ * use, generalized to shorter windows. `one_time` never resets (claim once,
+ * forever). `permanent` is a non-resetting REPEATABLE quest: the user can claim
+ * it again whenever the target is met again (a "refer one more friend" style
+ * treadmill), and the claim's `refId` carries a nonce so each claim is its own
+ * idempotent row.
  *
  * VERIFICATION IS HOW COMPLETION IS KNOWN, AND IT IS THE FRAUD SURFACE.
  *  - `auto` — the server derives progress from data it already trusts (referral
@@ -33,6 +34,7 @@ import type { CreditPoolId } from "./credit-pools.ts";
 
 /** How a quest's window is defined. `periodKey` derives from this. */
 export const QUEST_CADENCES = [
+	"daily",
 	"one_time",
 	"weekly",
 	"monthly",
@@ -75,11 +77,11 @@ const usd = (dollars: number): number => Math.round(dollars * 1_000_000);
 /**
  * The catalog.
  *
- * The one-time row is the onboarding ladder (connect, join, link). The weekly
- * rows are the outreach/inbound treadmill — posted on cadence, so a user has a
- * reason to come back every week rather than once. The monthly rows inherit the
- * referral campaign's already-monthly window. The permanent rows are the
- * repeatable "one more" rewards.
+ * The daily row is the return habit. The one-time rows are the onboarding ladder
+ * (connect, join, link). The weekly rows are the outreach/inbound treadmill —
+ * posted on cadence, so a user has a reason to come back every week rather than
+ * once. The monthly rows inherit the referral campaign's already-monthly window.
+ * The permanent rows are the repeatable "one more" rewards.
  *
  * QUEST REWARDS ARE DIFFERENT ON PURPOSE. The low-friction connection quests pay
  * points (the store currency); the ones that move actual people pay credits. A
@@ -87,6 +89,18 @@ const usd = (dollars: number): number => Math.round(dollars * 1_000_000);
  * shape the admin must watch, so those pay small.
  */
 export const QUESTS: readonly QuestDef[] = [
+	/* ---- daily: the habit loop ---- */
+	{
+		key: "daily-check-in",
+		title: "Daily check-in",
+		description: "Check in once a day to keep earning points toward rewards.",
+		icon: "calendar-check",
+		cadence: "daily",
+		target: 1,
+		verification: "auto",
+		reward: { kind: "points", points: 25 },
+	},
+
 	/* ---- one-time: the onboarding ladder ---- */
 	{
 		key: "connect-x",
@@ -98,6 +112,17 @@ export const QUESTS: readonly QuestDef[] = [
 		target: 1,
 		verification: "submit",
 		reward: { kind: "points", points: 150 },
+	},
+	{
+		key: "download-desktop-app",
+		title: "Download the Ryu desktop app",
+		description:
+			"Install Ryu Desktop and open it once while signed in to earn 100 points.",
+		icon: "download",
+		cadence: "one_time",
+		target: 1,
+		verification: "auto",
+		reward: { kind: "points", points: 100 },
 	},
 	{
 		key: "join-discord",
@@ -216,14 +241,24 @@ export const questByKey = (key: string): QuestDef | undefined =>
 /* -------------------------------------------------------------------------- *
  * Period keys — the window a quest row belongs to.
  *
- * `null` for one-time/permanent (never resets); "YYYY-MM" for monthly (the
- * same shape the referral campaign instances use, derived in UTC here); and
- * "YYYY-Www" for weekly (ISO-8601 week, so week 1 is the first week with a
- * Thursday — the same definition calendar apps use). The value is persisted in
- * `UserQuest.periodKey` and is what "reset" means: a new period is a new row.
+ * `null` for one-time/permanent (never resets); "YYYY-MM-DD" for daily,
+ * "YYYY-MM" for monthly (the same shape the referral campaign instances use,
+ * derived in UTC here), and "YYYY-Www" for weekly (ISO-8601 week, so week 1 is
+ * the first week with a Thursday — the same definition calendar apps use). The
+ * value is persisted in `UserQuest.periodKey` and is what "reset" means: a new
+ * period is a new row.
  * -------------------------------------------------------------------------- */
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** "YYYY-MM-DD" for the UTC day `date` falls in. */
+export function dayPeriodKey(date: Date): string {
+	return [
+		date.getUTCFullYear(),
+		String(date.getUTCMonth() + 1).padStart(2, "0"),
+		String(date.getUTCDate()).padStart(2, "0"),
+	].join("-");
+}
 
 /** "YYYY-MM" for the month `date` falls in, UTC. */
 export function monthPeriodKey(date: Date): string {
@@ -257,6 +292,9 @@ export function weekPeriodKey(date: Date): string {
  * one-time/permanent quests.
  */
 export function periodKeyFor(date: Date, cadence: QuestCadence): string | null {
+	if (cadence === "daily") {
+		return dayPeriodKey(date);
+	}
 	if (cadence === "weekly") {
 		return weekPeriodKey(date);
 	}

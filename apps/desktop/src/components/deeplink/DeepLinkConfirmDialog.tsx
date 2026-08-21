@@ -240,17 +240,19 @@ export function DeepLinkConfirmDialog() {
 	// True when the link named a node we do not have — say so rather than
 	// silently installing somewhere the user did not pick.
 	const hintUnresolved = Boolean(hintedUrl) && hintedNode === undefined;
+	const modelId = intent?.kind === "model" ? intent.id : undefined;
+	const skillId = intent?.kind === "skill" ? intent.id : undefined;
 
 	const modelDetail = useQuery({
-		queryKey: ["deeplink", "model", target.url, pending?.nonce, intent?.id],
-		queryFn: () => fetchModelDetail(target, intent?.id as string),
-		enabled: open && intent?.kind === "model",
+		queryKey: ["deeplink", "model", target.url, pending?.nonce, modelId],
+		queryFn: () => fetchModelDetail(target, modelId ?? ""),
+		enabled: open && modelId !== undefined,
 	});
 
 	const skillDetail = useQuery({
-		queryKey: ["deeplink", "skill", target.url, pending?.nonce, intent?.id],
-		queryFn: () => fetchSkillDetail(target, intent?.id as string),
-		enabled: open && intent?.kind === "skill",
+		queryKey: ["deeplink", "skill", target.url, pending?.nonce, skillId],
+		queryFn: () => fetchSkillDetail(target, skillId ?? ""),
+		enabled: open && skillId !== undefined,
 	});
 
 	const appId = intent?.kind === "app" ? intent.id : undefined;

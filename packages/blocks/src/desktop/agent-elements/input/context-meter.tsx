@@ -3,6 +3,7 @@ import {
 	HoverCardContent,
 	HoverCardTrigger,
 } from "@ryu/ui/components/hover-card";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import {
 	CONTEXT_CRITICAL_PCT,
@@ -77,25 +78,25 @@ export function ContextMeter({
 	if (typeof usage.promptTokens === "number") {
 		rows.push({
 			label: "Input",
-			value: usage.promptTokens.toLocaleString(),
+			value: formatCount(usage.promptTokens) ?? "—",
 		});
 	}
 	if (typeof usage.cachedTokens === "number") {
 		rows.push({
 			label: "Cached",
-			value: usage.cachedTokens.toLocaleString(),
+			value: formatCount(usage.cachedTokens) ?? "—",
 		});
 	}
 	if (typeof usage.completionTokens === "number") {
 		rows.push({
 			label: "Output",
-			value: usage.completionTokens.toLocaleString(),
+			value: formatCount(usage.completionTokens) ?? "—",
 		});
 	}
 	if (typeof usage.reasoningTokens === "number") {
 		rows.push({
 			label: "Reasoning",
-			value: usage.reasoningTokens.toLocaleString(),
+			value: formatCount(usage.reasoningTokens) ?? "—",
 		});
 	}
 
@@ -145,12 +146,12 @@ export function ContextMeter({
 					))}
 					<BreakdownRow
 						label="Used"
-						value={`${used.toLocaleString()} / ${total.toLocaleString()}`}
+						value={`${formatCount(used)} / ${formatCount(total)}`}
 					/>
 					<BreakdownRow
 						label="Remaining"
 						muted
-						value={`${remaining.toLocaleString()} tokens`}
+						value={`${formatCount(remaining)} tokens`}
 					/>
 					{onOpen ? (
 						<div className="pt-1 text-[11px] text-muted-foreground">

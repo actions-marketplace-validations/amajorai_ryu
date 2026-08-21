@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { personaToGlyphValue } from "@/src/lib/agent-persona.ts";
 import {
 	type Agent,
 	type AgentInput,
@@ -39,20 +40,26 @@ function recordToSummary(agent: Agent): AgentSummary {
 		id: agent.id,
 		name: agent.name,
 		avatarUrl: agent.persona?.avatar_url ?? null,
+		avatarGlyph: personaToGlyphValue(agent.persona),
 		description: agent.description,
 		systemPrompt: agent.systemPrompt,
 		engine: agent.engine,
-		model: agent.model,
+		model: agent.model ?? agent.chatModel?.modelId ?? null,
+		title: agent.title,
 		installed: null,
 		installHint: null,
 		builtIn: agent.builtIn,
 		createdAt: agent.createdAt,
 		version: agent.version,
+		latestVersion: null,
+		versionStatus: null,
 		locked: agent.locked,
 		// Custom agents (the only records that flow through here) aren't backed
 		// by a registry transport entry, and are never the flagship.
 		transport: null,
 		recommended: false,
+		lifecycleStatus: agent.lifecycleStatus,
+		safetyProfile: agent.safetyProfile,
 	};
 }
 

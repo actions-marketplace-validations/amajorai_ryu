@@ -68,7 +68,7 @@ export function formatMentionContent(
 			continue;
 		}
 		result += content.slice(cursor, index);
-		const displayToken = match.item ? `@${match.item.label}` : match.token;
+		const displayToken = match.item ? match.item.label : match.token;
 		const kind = match.item?.kind ?? "mention";
 		const label = match.item?.label ?? match.token.slice(1);
 		result += `[**${displayToken}**](#ryu-mention-${kind}-${encodeURIComponent(label)})`;

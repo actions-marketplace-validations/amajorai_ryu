@@ -16,7 +16,7 @@
 //     arrow-key focus;
 //   • the scrolled-edge fade engages ONLY while that edge has more to show
 //     (`data-edges`: none → end → both → start), and an overflowing edge also
-//     carries its scroll chevron — the affordance that replaced the strip's
+//     reveals the compact rounded popover controls that replaced the strip's
 //     visible scrollbars;
 //   • NEITHER scrollbar is reachable on the strip: the old code hid them with a
 //     `scrollbar-none` class defined in no stylesheet, and left `overflow-y` to
@@ -54,7 +54,7 @@ test.describe("store section tabs — pills, edges, and the global search", () =
 	}) => {
 		await page.goto(STORY_URL);
 		const tabs = page.locator('[data-testid="narrow-panel"] [role="tab"]');
-		await expect(tabs).toHaveCount(10);
+		await expect(tabs).toHaveCount(12);
 		// Base UI owns the selected state; the strip only passes `value`.
 		await expect(
 			page.locator(
@@ -62,9 +62,103 @@ test.describe("store section tabs — pills, edges, and the global search", () =
 			)
 		).toHaveText(/Home/);
 		// The list is the `pills` variant of the shared primitive.
+		await expect(narrowScroller(page)).toHaveAttribute("data-variant", "pills");
+	});
+
+	test("renders authoritative totals as muted bare numbers", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		const apps = page
+			.getByTestId("narrow-panel")
+			.locator('[role="tab"]')
+			.filter({ hasText: "Apps" });
+		const appCount = apps.locator('[data-slot="store-section-tab-count"]');
+		await expect(appCount).toHaveText("12");
+		await expect(appCount).toHaveClass(/text-muted-foreground/);
+		await expect(appCount).toHaveClass(/tabular-nums/);
+		await expect(apps).not.toContainText("(");
 		await expect(
-			page.locator('[data-testid="narrow-panel"] [data-slot="tabs-list"]')
-		).toHaveAttribute("data-variant", "pills");
+			page
+				.getByTestId("narrow-panel")
+				.getByRole("tab", { name: "Models" })
+				.locator('[data-slot="store-section-tab-count"]')
+		).toHaveText("1.2m");
+
+		const library = page.getByTestId("library-counts-panel");
+		await expect(
+			library
+				.getByRole("tab", { name: "Recents" })
+				.locator('[data-slot="store-section-tab-count"]')
+		).toHaveText("1,234");
+		const appSection = library
+			.locator('[role="tab"]')
+			.filter({ hasText: "Apps" });
+		await expect(
+			appSection.locator('[data-slot="store-section-tab-count"]')
+		).toHaveText("4");
+		const contributedSection = library
+			.locator('[role="tab"]')
+			.filter({ hasText: "Meeting notes" });
+		await expect(
+			contributedSection.locator('[data-slot="store-section-tab-count"]')
+		).toHaveText("14");
+		await expect(page.getByTestId("library-registry-note")).toContainText(
+			"app-registered sections"
+		);
+	});
+
+	test("renders the icon parity React proof", async ({ page }, testInfo) => {
+		await page.goto(STORY_URL);
+		const proof = page.getByTestId("icon-parity-proof");
+		await expect(proof).toBeVisible();
+		for (const name of [
+			"Package01Icon",
+			"PlugSocketIcon",
+			"PotionIcon",
+			"WorkflowCircle06Icon",
+			"Chat01Icon",
+			"UserMultiple02Icon",
+			"Tv01Icon",
+			"FingerPrintIcon",
+			"StarIcon",
+			"LayerIcon",
+			"BrainIcon",
+			"Download01Icon",
+			"FileExportIcon",
+			"ColorsIcon",
+			"Target01Icon",
+			"Cursor02Icon",
+			"CursorMagicSelection04Icon",
+		]) {
+			await expect(proof.locator(`[data-icon-name="${name}"]`)).toHaveCount(1);
+		}
+		await proof.screenshot({
+			path: testInfo.outputPath("icon-parity-proof.png"),
+		});
+	});
+
+	test("renders the shared count-format React proof", async ({
+		page,
+	}, testInfo) => {
+		await page.goto(STORY_URL);
+		const proof = page.getByTestId("count-format-proof");
+		await expect(proof).toBeVisible();
+		await expect(proof.getByRole("tab", { name: "Downloads" })).toContainText(
+			"1,234"
+		);
+		await expect(proof.getByRole("tab", { name: "Likes" })).toContainText(
+			"4,200"
+		);
+		await expect(proof.getByRole("tab", { name: "Library" })).toContainText(
+			"1.2m"
+		);
+		await expect(proof.getByTestId("line-count-proof")).toHaveText(
+			"+1.2m lines · 1,234 files · 4,200 likes · 1.2m library items"
+		);
+		await proof.screenshot({
+			path: testInfo.outputPath("count-format-proof.png"),
+		});
 	});
 
 	test("selecting a tab reports the section value", async ({ page }) => {
@@ -93,6 +187,7 @@ test.describe("store section tabs — pills, edges, and the global search", () =
 		const agents = page
 			.getByTestId("narrow-panel")
 			.getByRole("tab", { name: "Agents" });
+		await agents.scrollIntoViewIfNeeded();
 		await agents.click();
 		await agents.focus();
 		await page.keyboard.press("ArrowRight");
@@ -107,7 +202,7 @@ test.describe("store section tabs — pills, edges, and the global search", () =
 	}) => {
 		await page.goto(STORY_URL);
 		const scroller = narrowScroller(page);
-		// 10 sections in a 420px column overflow, and the strip starts at scrollLeft
+		// 12 sections in a 420px column overflow, and the strip starts at scrollLeft
 		// 0 — so only the trailing edge is faded.
 		const metrics = await scroller.evaluate((el) => ({
 			client: el.clientWidth,
@@ -158,8 +253,8 @@ test.describe("store section tabs — pills, edges, and the global search", () =
 		// No input, button-that-is-not-a-tab, or select smuggled into the list —
 		// non-tab children are what made the strip's overflow measurement a moving
 		// target in the first place.
-		const strays = page.locator(
-			'[data-testid="narrow-panel"] [data-slot="tabs-list"] input, [data-testid="narrow-panel"] [data-slot="tabs-list"] select, [data-testid="narrow-panel"] [data-slot="tabs-list"] button:not([role="tab"])'
+		const strays = narrowScroller(page).locator(
+			'input, select, button:not([role="tab"])'
 		);
 		await expect(strays).toHaveCount(0);
 	});
@@ -251,24 +346,39 @@ test.describe("store section tabs — pills, edges, and the global search", () =
 		expect(metrics.gutterY).toBeLessThanOrEqual(1);
 	});
 
-	test("an overflowing edge offers a chevron that pages the strip", async ({
+	test("an overflowing edge offers rounded popover controls that page the strip", async ({
 		page,
-	}) => {
+	}, testInfo) => {
 		await page.goto(STORY_URL);
 		const scroller = narrowScroller(page);
 		await expect(scroller).toHaveAttribute("data-edges", "end", {
 			timeout: 10_000,
 		});
-		const forward = page
-			.locator('[data-testid="narrow-panel"]')
-			.getByRole("button", { name: "Scroll right" });
-		await expect(forward).toHaveCount(1);
-		// At rest it is invisible; the strip's hover is what reveals it.
-		expect(await forward.evaluate((el) => getComputedStyle(el).opacity)).toBe(
+		const panel = page.getByTestId("narrow-panel");
+		const trigger = panel.getByRole("button", {
+			name: "Open tab scroll controls",
+		});
+		await expect(trigger).toHaveCount(1);
+		// At rest it is invisible; the strip's hover is what reveals the compact
+		// trigger and its two-button popover.
+		expect(await trigger.evaluate((el) => getComputedStyle(el).opacity)).toBe(
 			"0"
 		);
+		await scroller.hover();
+		const controls = page.locator('[data-slot="tabs-overflow-controls"]');
+		await expect(controls).toBeVisible();
+		const backward = controls.getByRole("button", { name: "Scroll tabs left" });
+		const forward = controls.getByRole("button", { name: "Scroll tabs right" });
+		await expect(backward).toBeDisabled();
+		await expect(forward).toBeEnabled();
+		await expect(controls).toHaveClass(/rounded-full/);
+		await expect(backward).toHaveClass(/rounded-full/);
+		await expect(forward).toHaveClass(/rounded-full/);
+		await page.screenshot({
+			path: testInfo.outputPath("tabs-overflow-controls-proof.png"),
+		});
 		const before = await scroller.evaluate((el) => el.scrollLeft);
-		await forward.dispatchEvent("click");
+		await forward.click();
 		await expect
 			.poll(async () => scroller.evaluate((el) => el.scrollLeft), {
 				timeout: 10_000,
@@ -276,12 +386,12 @@ test.describe("store section tabs — pills, edges, and the global search", () =
 			.toBeGreaterThan(before);
 	});
 
-	test("a strip that fits offers no chevrons", async ({ page }) => {
+	test("a strip that fits offers no overflow controls", async ({ page }) => {
 		await page.goto(STORY_URL);
 		await expect(
 			page
 				.locator('[data-testid="wide-panel"]')
-				.getByRole("button", { name: /Scroll (left|right)/ })
+				.getByRole("button", { name: "Open tab scroll controls" })
 		).toHaveCount(0);
 	});
 

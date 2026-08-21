@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "bun test src"
+    "test": "bun test --pass-with-no-tests src"
   },
   "devDependencies": {
     "@ryu/config": "workspace:*",

@@ -72,6 +72,28 @@ export function selectLiveActivityCount(s: LiveActivityState): number {
 	return Object.keys(s.activities).length;
 }
 
+/** True when at least one built-in agent run is actively working. This is a
+ * boolean on purpose: consumers such as ambient audio must not acquire one
+ * playback owner per run. */
+export function hasWorkingAgent(activities: readonly LiveActivity[]): boolean {
+	return activities.some(
+		(activity) =>
+			activity.appId === "shell" &&
+			activity.kind === "agent-run" &&
+			activity.status === "running"
+	);
+}
+
+/** Zustand selector for the aggregate working-run state. */
+export function selectWorkingAgent(s: LiveActivityState): boolean {
+	return hasWorkingAgent(Object.values(s.activities));
+}
+
+/** Subscribe to whether any agent run is currently working. */
+export function useWorkingAgent(): boolean {
+	return useLiveActivityStore(selectWorkingAgent);
+}
+
 /** The ordered live-activity list for a consumer that wants one subscription. */
 export function useLiveActivities(): LiveActivity[] {
 	return useLiveActivityStore(useShallow(selectActiveActivities));

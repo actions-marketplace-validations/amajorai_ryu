@@ -6,6 +6,9 @@ import { Button } from "@ryu/ui/components/button.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
 
+const MOBILE_DRAWER_CONTENT_CLASSES =
+	"max-sm:!inset-x-0 max-sm:!top-auto max-sm:!bottom-0 max-sm:!left-0 max-sm:!w-full max-sm:!max-w-none max-sm:!translate-x-0 max-sm:!translate-y-0 max-sm:!rounded-t-4xl max-sm:!rounded-b-none max-sm:!max-h-[calc(100dvh-0.5rem)] max-sm:!overflow-y-auto max-sm:data-open:slide-in-from-bottom-4 max-sm:data-closed:slide-out-to-bottom-4 max-sm:data-open:zoom-in-100 max-sm:data-closed:zoom-out-100";
+
 function AlertDialog({ ...props }: AlertDialogPrimitive.Root.Props) {
 	return <AlertDialogPrimitive.Root data-slot="alert-dialog" {...props} />;
 }
@@ -41,6 +44,7 @@ function AlertDialogOverlay({
 function AlertDialogContent({
 	className,
 	size = "default",
+	children,
 	...props
 }: AlertDialogPrimitive.Popup.Props & {
 	size?: "default" | "sm";
@@ -51,12 +55,19 @@ function AlertDialogContent({
 			<AlertDialogPrimitive.Popup
 				className={cn(
 					"group/alert-dialog-content data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 fixed top-1/2 left-1/2 z-50 grid w-full -translate-x-1/2 -translate-y-1/2 gap-4 rounded-4xl bg-popover/90 p-4 text-popover-foreground shadow-xl outline-none backdrop-blur-xl duration-(--modal-open-dur) ease-(--modal-ease) data-[size=default]:max-w-xs data-[size=sm]:max-w-xs data-closed:animate-out data-open:animate-in data-closed:duration-(--modal-close-dur) data-[size=default]:sm:max-w-md",
-					className
+					className,
+					MOBILE_DRAWER_CONTENT_CLASSES
 				)}
 				data-size={size}
 				data-slot="alert-dialog-content"
 				{...props}
-			/>
+			>
+				<div
+					aria-hidden="true"
+					className="mx-auto mb-1 hidden h-1.5 w-16 shrink-0 rounded-full bg-muted max-sm:block"
+				/>
+				{children}
+			</AlertDialogPrimitive.Popup>
 		</AlertDialogPortal>
 	);
 }

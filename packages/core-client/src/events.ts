@@ -1,7 +1,7 @@
 // apps/desktop/src/lib/api/events.ts
 //
 // Client for Core's app-events SSE stream (`/api/events/notifications/stream`).
-// Built-in agent actions (e.g. `notify__desktop`) publish desktop notifications
+// Built-in agent actions (e.g. `notify.desktop`) publish desktop notifications
 // in Core; this reads them so the desktop can render a native OS notification.
 // Uses a fetch-based SSE reader (not EventSource) so the node's bearer token can
 // be sent as a header — mirrors `streamMonitorAlerts`.

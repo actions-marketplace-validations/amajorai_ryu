@@ -1,5 +1,6 @@
 "use client";
 
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { motion, useInView, useReducedMotion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 
@@ -96,7 +97,9 @@ export function NumberTicker({
 		setMounted(true);
 	}, []);
 
-	const formatted = locale ? value.toLocaleString("en-US") : String(value);
+	const formatted = locale
+		? (formatCount(value) ?? String(value))
+		: String(value);
 	const chars = formatted.split("");
 	const animate = mounted && !reduce && (!startOnView || inView);
 

@@ -98,6 +98,10 @@ pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
 /// iframe fallback, which works.
 pub const BROWSER_PLUGIN_ID: &str = "@ryu/browser";
 
+/// The first-party Composio Connect plugin id. It is a hosted remote MCP bridge,
+/// separate from the direct `composio.<action>` API-key integration.
+pub const COMPOSIO_CONNECT_PLUGIN_ID: &str = "@ryu/composio-connect";
+
 /// The Spaces app's plugin id — the document store + RAG index other apps write
 /// into. It is a **dependency target**: an app that owns Space documents declares
 /// `requires.apps = [{ id: SPACES_PLUGIN_ID }]` so the graph refuses to disable
@@ -122,6 +126,10 @@ pub const MEETINGS_PLUGIN_ID: &str = "@ryu/meetings";
 /// Gateway denies that grant at enable. Core links zero social code; everything it
 /// serves arrives through the generic ext-proxy `public_mount`.
 pub const SOCIAL_PLUGIN_ID: &str = "@ryu/social";
+
+/// The Token Table app's plugin id — a cosmetic six-max Hold'em Companion over
+/// the standalone `ryu-token-table` sidecar and generic app/realtime bridges.
+pub const TOKEN_TABLE_PLUGIN_ID: &str = "@ryu/token-table";
 
 /// The Subtitles app's plugin id — local transcription + translation of a video into
 /// a timed `.srt`/`.vtt`, over the `ryu-subtitles` sidecar (`apps-store/subtitles/`).
@@ -279,6 +287,24 @@ pub const WARMUP_PLUGIN_ID: &str = "@ryu/warmup";
 /// third-party provider app can bind the `rag` capability to swap the implementation.
 pub const RAG_PLUGIN_ID: &str = "@ryu/rag";
 
+/// The Message Reactions plugin id. Core supplies the persistence handlers and
+/// the desktop supplies the native picker; this id governs both through the
+/// generic AppGate and the message-action contribution.
+pub const REACTIONS_PLUGIN_ID: &str = "@ryu/reactions";
+
+/// The Side Chats plugin id. The `/btw` model bridge remains in Core, while this
+/// plugin owns the slash command, chat feature declaration, and persisted aside
+/// route lifecycle.
+pub const SIDE_CHATS_PLUGIN_ID: &str = "@ryu/side-chats";
+
+/// The Temporary Chats plugin id. It governs the desktop-only `ghostMode` chat
+/// behavior; unlike `@ryu/ghost`, it is not the computer-control provider.
+pub const GHOST_CHATS_PLUGIN_ID: &str = "@ryu/ghost-chats";
+
+/// The Expanded Composer plugin id. The desktop host owns the shared dialog
+/// surface; this id gates the feature contribution and its toolbar affordance.
+pub const EXPANDED_COMPOSER_PLUGIN_ID: &str = "@ryu/expanded-composer";
+
 /// The Quests app's plugin id — the `/api/quests/*` auto-detecting todo board.
 /// Governance-shell leaf: default-on, no `requires` (the scheduler is kernel infra).
 /// The engine + store + HTTP surface are physically extracted to `crates/ryu-quests`
@@ -403,13 +429,9 @@ pub const MEDIA_PLUGIN_ID: &str = "@ryu/media";
 /// The gate covers ONLY the HTTP CRUD surface; the in-process chat auto-recall path is
 /// kernel and never HTTP-loops back through `/api/memory`.
 ///
-/// **default-OFF**: absent from [`CORE_DEFAULT_ON`]. This doc used to say "default-on",
-/// which is what made it worth writing down — the HTTP surface is gated, so on a fresh
-/// install `/api/memory` 503s and the Memory Library has nothing to show. The clients
-/// no longer offer a route into it regardless of this bit (the app contributes its own
-/// `sidebar_buttons` entry only while enabled, and the desktop palette's hardcoded
-/// Memory row — which additionally suppressed that contribution — is gone), so flipping
-/// this is a product call about what a fresh install ships, not a correctness fix.
+/// Default-on for fresh installs. Existing explicit disabled records remain
+/// respected by the lifecycle seeder, so this does not silently re-enable a
+/// user's previous choice.
 pub const MEMORY_PLUGIN_ID: &str = "@ryu/memory";
 
 /// The Layers app's plugin id — a settings-only governance shell for the swappable
@@ -561,10 +583,17 @@ pub const CORE_PLUGINS: &[&str] = &[
     "@ryu/shadow",
     "@ryu/spider",
     "@ryu/agentbrowser",
+    // Ambient Elevator is a desktop-only, no-sidecar plugin. Core-tier keeps its
+    // compiled manifest trusted while the desktop owns the actual audio element.
+    "@ryu/ambient-elevator",
+    // Ego Browser is an official, opt-in browser.control provider. It is Core
+    // tier so a verified marketplace package can use its reviewed inline-Deno
+    // bridge, but it is not default-on because Ego lite is a separate BYO app.
+    "@ryu/ego-browser",
     // Expect and Agentation are local Node MCP servers. Core-tier is required so
     // their manifest-owned stdio servers can register without the reserved
-    // `mcp:server` marketplace grant; both are default-on so browser QA and visual
-    // feedback are available alongside the built-in skills on a fresh install.
+    // `mcp:server` marketplace grant; both remain explicit opt-ins because their
+    // npm launchers download third-party code when enabled.
     "@ryu/expect",
     "@ryu/agentation",
     // Third `web.extract` provider (Scrapling's MCP server). Core-tier is a
@@ -597,6 +626,12 @@ pub const CORE_PLUGINS: &[&str] = &[
     // Unlike `scrapling` it needs no install step: the server is REMOTE (a hosted
     // https URL, not a spawned command), so it is also in `CORE_DEFAULT_ON`.
     "@ryu/docs",
+    // Composio Connect is the OAuth-backed hosted MCP alternative to the direct
+    // `COMPOSIO_API_KEY` action backend. Core-tier is required for the reserved
+    // `mcp:server` + `identity.read` grants; it is default-on because it has no
+    // local process or secret to provision and remains inert until the user
+    // authorizes a Composio account.
+    COMPOSIO_CONNECT_PLUGIN_ID,
     // The two Pi extensions that stopped being hardcoded: background bash and
     // sub-agents. Core-tier is a REQUIREMENT, not a promotion, exactly as for
     // `scrapling` above — `pi_config::app_extensions::may_ship_pi_extensions`
@@ -658,6 +693,14 @@ pub const CORE_PLUGINS: &[&str] = &[
     "@ryu/receipts",
     "@ryu/double-check",
     "@ryu/chat-title",
+    // Chat feature extraction: the side-question, temporary-chat, and expanded
+    // composer lifecycles are plugin-owned declarations over host implementations.
+    // Reactions are the adjacent message-action plugin; all four remain default-on
+    // for parity with the previously built-in desktop experience.
+    SIDE_CHATS_PLUGIN_ID,
+    GHOST_CHATS_PLUGIN_ID,
+    EXPANDED_COMPOSER_PLUGIN_ID,
+    REACTIONS_PLUGIN_ID,
     // End-of-turn recap + `/recap`. Installable and governed like the turn-hook
     // plugins above it, but deliberately absent from `CORE_DEFAULT_ON`: each recap is
     // a real side-model call on the user's budget, so it ships off and is enabled from
@@ -676,11 +719,12 @@ pub const CORE_PLUGINS: &[&str] = &[
     // inside the hook), meaning a sandbox spawn per user turn plus a side-model call
     // on each correction it does catch.
     "@ryu/no-more-mistakes",
-    // Agent-to-agent mailbox: every agent gets `agents__directory` / `agents__send` /
-    // `agents__ask` / `agents__thread`, and a `pre_user_turn` hook delivers whatever
+    // Agent-to-agent mailbox: every agent gets `agents.directory` / `agents.send` /
+    // `agents.thread`, and a `pre_user_turn` hook delivers whatever
     // arrived for it. Off by default — the delivery hook cannot be `match`-gated (the
     // inbox is keyed by agent, `stateful` matches on the conversation) so it spawns a
-    // sandbox per turn, and one `agents__ask` is a full agent run on the user's budget.
+    // sandbox per turn. It is opt-in because the hook still incurs a sandbox
+    // spawn per turn.
     "@ryu/agent-comms",
     // Bounded dynamic workflow fan-out through the generic Core host bridge.
     // Opt-in: each run can spend model budget and may launch write-capable
@@ -758,6 +802,10 @@ pub const CORE_PLUGINS: &[&str] = &[
     // the last thing that should arrive switched on. No `requires` edge — it owns its
     // sidecar and its own database.
     SOCIAL_PLUGIN_ID,
+    // Token Table — opt-in like Outpost: Core-tier is what allows its managed
+    // sidecar to spawn, while the absence from CORE_DEFAULT_ON keeps a normal
+    // install from starting an unrequested game service.
+    TOKEN_TABLE_PLUGIN_ID,
     // Subtitles — same posture as Outpost: Core-tier and installable, neither
     // default-on nor pre-installed (see `seed::NOT_PRE_INSTALLED`), because the
     // `ryu-subtitles` binary is not on a normal install. Core-tier is what actually
@@ -896,7 +944,7 @@ pub const CORE_PLUGINS: &[&str] = &[
     // permits one at Community tier only against a Gateway-approved
     // `sidecar:process` grant the Gateway denies at enable — so tier here is what
     // decides whether the binary ever spawns. Its manifest `mcp_servers` entry
-    // (`reasoning__solve`, the id a workflow `mcp` node takes) needs the same tier
+    // (`reasoning.solve`, the id a workflow `mcp` node takes) needs the same tier
     // via `may_register_mcp_servers`.
     //
     // This row was MISSING while the app's own comments (seed.rs, plugin_manifest)
@@ -917,8 +965,8 @@ pub const CORE_PLUGINS: &[&str] = &[
     // above, and worth restating because NOTHING TESTS THIS ROW: it declares a
     // managed `ryu-blueprint` sidecar, and `may_run_sidecar` permits one at Community
     // tier only against a Gateway-approved `sidecar:process` grant the Gateway denies
-    // at enable; its manifest `mcp_servers` entry (`blueprint__plan_publish` /
-    // `blueprint__plan_status`, the ids an agent and a workflow `mcp` node take) is
+    // at enable; its manifest `mcp_servers` entry (`blueprint.plan_publish` /
+    // `blueprint.plan_status`, the ids an agent and a workflow `mcp` node take) is
     // gated the same way by `may_register_mcp_servers`. Omit this line and the app
     // installs, enables, reports itself healthy — and the binary never spawns while
     // its four MCP tools never appear, with no error anywhere to say why.
@@ -931,8 +979,8 @@ pub const CORE_PLUGINS: &[&str] = &[
     // the reason Reasoning did. Each declares a managed sidecar (`ryu-tuition` /
     // `ryu-news`), and `may_run_sidecar` permits one at Community tier only against a
     // Gateway-approved `sidecar:process` grant the Gateway DENIES at enable; each also
-    // declares an `mcp_servers` entry (`tuition__due`/`quiz`/`grade`…,
-    // `news__search`/`brief`…, the ids an agent or a workflow `mcp` node takes) gated
+    // declares an `mcp_servers` entry (`tuition.due`/`quiz`/`grade`…,
+    // `news.search`/`brief`…, the ids an agent or a workflow `mcp` node takes) gated
     // the same way by `may_register_mcp_servers`. Without this line both apps install,
     // enable, seed their grants and report themselves healthy — while the binary never
     // spawns and the MCP tools never appear, with no error anywhere to say why.
@@ -996,6 +1044,10 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     "@ryu/receipts",
     "@ryu/double-check",
     "@ryu/chat-title",
+    SIDE_CHATS_PLUGIN_ID,
+    GHOST_CHATS_PLUGIN_ID,
+    EXPANDED_COMPOSER_PLUGIN_ID,
+    REACTIONS_PLUGIN_ID,
     // Rules are configuration, not an optional side effect: a fresh node should
     // honor Ryu agent rules and compatible project rule files immediately. The
     // per-agent preference still lets users disable injection or bound its turns.
@@ -1030,8 +1082,8 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // CAVEAT this list cannot fix on its own: seeding is what surfaces those tools,
     // so a default-on app whose PROCESS cannot start ships tools that fail on every
     // call. `ghost` and `shadow` are in that state today — neither has a public
-    // release repo (see `sidecar/tools/ghost/downloader.rs`), so `computer__*` /
-    // `ghost__*` / the four shadow `http` tools are offered and then die on spawn.
+    // release repo (see `sidecar/tools/ghost/downloader.rs`), so `computer.*` /
+    // `ghost.*` / the four shadow `http` tools are offered and then die on spawn.
     // Removing them from here is NOT the fix (ghost is the `"default": true` provider
     // of `computer.control`, and its tools are a headline capability): the fix is CI
     // publishing `ghost-<os>-<arch>` / `shadow-<os>-<arch>`. Until then Core at least
@@ -1043,12 +1095,13 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     "@ryu/shadow",
     "@ryu/spider",
     "@ryu/agentbrowser",
-    "@ryu/expect",
-    "@ryu/agentation",
+    // Expect and Agentation launch third-party npm MCP servers. They remain
+    // Core-tier and can be enabled explicitly, but must not execute mutable
+    // registry code just because a node was freshly installed.
     // `exa` is default-ON so the `web.search` toolkit has a provider out of the
     // box. Without this the capability had ZERO enabled providers on a fresh
     // install, and because the read model derives its capability list from the
-    // ENABLED set, the whole toolkit vanished: no `web__search` tool for agents
+    // ENABLED set, the whole toolkit vanished: no `web.search` tool for agents
     // and no row in the node selector, so nothing pointed at the Store either.
     // `web.extract` / `web.crawl` only escaped that because `spider` happens to be
     // default-on. Declaring `"default": true` in exa's manifest does NOT fix it —
@@ -1067,6 +1120,10 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // whenever the docs site is reachable — a fail-open read of a public site,
     // the same posture as `web_fetch`.
     "@ryu/docs",
+    // Composio Connect is a remote OAuth MCP server. The plugin is registered on
+    // a fresh install, but no provider token exists until the user explicitly
+    // connects an identity profile from Marketplace → Connections.
+    COMPOSIO_CONNECT_PLUGIN_ID,
     // NOTE: @ryu/browser is deliberately NOT default-on, and this is the one
     // membership decision here that is driven by RELEASE reality rather than product
     // taste. It was default-on ("so the Browser tab uses the real-Chromium sidecar out
@@ -1219,11 +1276,10 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // half of the argument: it is record-independent too, but gated on
     // `learning.enabled` (default OFF) and reached only from the explicit
     // thumbs-up/down feedback path.
-    // An ungated kernel path is NOT on its own a reason to be default-on — `memory`
-    // has the same asymmetry and stays opt-in (see the note below); the difference is
-    // that memory's auto-recall has no consent switch that would disappear with the
-    // record. Seeded after `skills` (its `requires` dep, right above); `seed_order`
-    // topologically enforces that anyway.
+    // Memory is default-on for fresh installs so onboarding can materialize the
+    // first user/org profile immediately. Existing explicit disabled records are
+    // still authoritative in `seed_default_on`, and the profile job enables
+    // long-term memory only after the onboarding consent step.
     // CONSEQUENCE, deliberate: default-on ⇒ `is_uninstall_protected`, so Learning can
     // no longer be uninstalled by anyone, and a user who HAD uninstalled it gets it
     // back once — installed and enabled — on the next boot after upgrading, because
@@ -1239,11 +1295,10 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // The W0 data-path shells that stay default-on so their always-on routes stay
     // reachable after gating (see CORE_PLUGINS). Neither has a `requires` edge.
     //
-    // NOTE: `memory` is deliberately absent — it is in CORE_PLUGINS (installable,
-    // Core-tier) but ships OPT-IN (NOT default-on). Its `/api/memory/*` routes gate
-    // on the app being enabled, matching canvas/whiteboard/meetings/workflows; the
-    // in-process chat auto-recall path is kernel (ungated), so it keeps working on a
-    // fresh install — only the explicit Memory surface waits until the user enables it.
+    // Memory is default-on for fresh installs so profile bootstrap can write and
+    // recall durable user/org facts immediately. `seed_default_on` still honors an
+    // existing explicit disabled record, preserving a user's previous choice.
+    MEMORY_PLUGIN_ID,
     //
     // NOTE: `predict` is deliberately absent — it is in CORE_PLUGINS but stays OPT-IN
     // (NOT default-on). Enabling the Predict plugin flips the system-wide autocomplete
@@ -1398,6 +1453,9 @@ static VERIFIED_OFFICIAL_PACKAGES: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, String>>,
 > = std::sync::OnceLock::new();
 
+#[cfg(test)]
+pub(crate) static VERIFIED_OFFICIAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Whether a Core-tier plugin should be seeded enabled on first run.
 pub fn is_default_on(manifest_id: &str) -> bool {
     CORE_DEFAULT_ON.contains(&manifest_id)
@@ -1523,8 +1581,8 @@ pub fn is_load_bearing(manifest_id: &str) -> bool {
 /// something with nothing on disk to remove.
 ///
 /// `memory` is deliberately NOT here despite being the same tier of subsystem: it
-/// is default-OFF (see [`MEMORY_PLUGIN_ID`]), and a plugin that ships disabled
-/// cannot also be one the user may never disable. Mandatory is a strict subset of
+/// is default-on but user-disableable (see [`MEMORY_PLUGIN_ID`]), and a plugin that
+/// ships disabled cannot also be one the user may never disable. Mandatory is a strict subset of
 /// [`CORE_DEFAULT_ON`], asserted by `mandatory_plugins_are_all_default_on`.
 ///
 /// **The manifest's `mandatory: true` does not put anything here.** This constant
@@ -1622,6 +1680,13 @@ mod tests {
             "output-styles must be default-ON or its contributions are filtered out of \
              the composer picker and the Store tab, with no way for a user to reach it"
         );
+    }
+
+    #[test]
+    fn memory_is_default_on_for_fresh_installs() {
+        assert!(CORE_PLUGINS.contains(&MEMORY_PLUGIN_ID));
+        assert!(CORE_DEFAULT_ON.contains(&MEMORY_PLUGIN_ID));
+        assert!(!MANDATORY_PLUGINS.contains(&MEMORY_PLUGIN_ID));
     }
 
     #[test]
@@ -1728,6 +1793,7 @@ mod tests {
 
     #[test]
     fn signed_official_package_retains_core_tier() {
+        let _guard = VERIFIED_OFFICIAL_TEST_LOCK.lock().expect("test lock");
         use crate::plugin_manifest::PluginTier;
         use crate::plugins::isolation::{
             manifest_sha256, PluginProvenance, OFFICIAL_MARKETPLACE_SOURCE_ID,
@@ -1754,6 +1820,7 @@ mod tests {
 
     #[test]
     fn clearing_verified_official_digest_revokes_core_tier() {
+        let _guard = VERIFIED_OFFICIAL_TEST_LOCK.lock().expect("test lock");
         use crate::plugin_manifest::PluginTier;
         use crate::plugins::isolation::{
             manifest_sha256, PluginProvenance, OFFICIAL_MARKETPLACE_SOURCE_ID,
@@ -1784,6 +1851,7 @@ mod tests {
 
     #[test]
     fn spoofed_official_id_does_not_retain_core_tier() {
+        let _guard = VERIFIED_OFFICIAL_TEST_LOCK.lock().expect("test lock");
         use crate::plugin_manifest::PluginTier;
 
         let spoofed: crate::plugin_manifest::PluginManifest =
@@ -2368,6 +2436,20 @@ mod tests {
         // Dictation is Core-tier and default-on (Island surface, previously hardcoded).
         assert!(CORE_PLUGINS.contains(&"@ryu/dictation"));
         assert!(is_default_on("@ryu/dictation"));
+        // Reactions are Core-tier and default-on so the built-in message-action
+        // contribution is present on a fresh install while remaining disableable.
+        assert!(CORE_PLUGINS.contains(&"@ryu/reactions"));
+        assert!(is_default_on("@ryu/reactions"));
+        // Side chats own the `/btw` command, persisted side-chat routes, and the
+        // desktop context/sidebar affordances.
+        assert!(CORE_PLUGINS.contains(&SIDE_CHATS_PLUGIN_ID));
+        assert!(is_default_on(SIDE_CHATS_PLUGIN_ID));
+        // Temporary chats own the desktop-only privacy/lifecycle behavior. Keep
+        // this separate from `@ryu/ghost`, which is the computer-control plugin.
+        assert!(CORE_PLUGINS.contains(&GHOST_CHATS_PLUGIN_ID));
+        assert!(is_default_on(GHOST_CHATS_PLUGIN_ID));
+        assert!(CORE_PLUGINS.contains(&EXPANDED_COMPOSER_PLUGIN_ID));
+        assert!(is_default_on(EXPANDED_COMPOSER_PLUGIN_ID));
         // The Island companion is Core-tier but OPT-IN: no release auto-installs the
         // Electron bundle, so its record must never seed enabled (a fresh store has no
         // Island settings tab until the user installs the app from the Store).
@@ -2427,12 +2509,12 @@ mod tests {
             .expect("scrapling fixture did not load");
 
         // The tools come from the MCP server, so empty `runnables` is correct here —
-        // re-adding them would double-list every tool as an `app__<slug>` alias.
+        // re-adding them would double-list every tool as an `app.<slug>` alias.
         assert!(manifest.runnables.is_empty());
         assert!(
             manifest.mcp_servers.contains_key("scrapling"),
             "the MCP server key IS the tool-id prefix: `tool_id(server, tool)` builds \
-             `scrapling__get`, which is exactly what the capability binding names"
+             `scrapling.get`, which is exactly what the capability binding names"
         );
 
         // Exactly one capability, and deliberately NOT `web.crawl`: only Scrapling's
@@ -2456,9 +2538,9 @@ mod tests {
 
         let binding = entry
             .tools
-            .get("web__extract")
-            .expect("no web__extract binding");
-        assert_eq!(binding.tool, "scrapling__get");
+            .get("web.extract")
+            .expect("no web.extract binding");
+        assert_eq!(binding.tool, "scrapling.get");
         // An adapter, not a `response` map: `structuredContent.content` is an ARRAY of
         // chunks and the canonical `content` is a string, which the declarative mapper
         // cannot join. Running both would apply the mapping twice, so they are
@@ -2471,7 +2553,7 @@ mod tests {
                 .permission_grants
                 .iter()
                 .any(|g| g == crate::tool_exec::GRANT_TOOL_EXECUTE),
-            "an adapter-mapped provider must hold tool:execute or every web__extract \
+            "an adapter-mapped provider must hold tool:execute or every web.extract \
              call through it fails"
         );
     }

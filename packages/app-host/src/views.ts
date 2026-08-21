@@ -211,6 +211,14 @@ export interface ViewSource {
 	 * floor and pauses it when the surface is not visible; absent = fetch once.
 	 */
 	refreshMs?: number;
+	/**
+	 * Optional response key containing the authoritative total for the source.
+	 * This is used by shared Library/sidebar surfaces when the rows are paged or
+	 * capped; it must not be inferred from the rendered page. When absent, the
+	 * renderer recognises the conventional `total`, `total_count`, `count`, and
+	 * cursor fields without requiring an app-specific declaration.
+	 */
+	total?: string;
 }
 
 /**
@@ -295,6 +303,76 @@ export interface ViewSourceMap {
 export interface SourceItem {
 	item: ViewItem;
 	raw: Record<string, unknown>;
+}
+
+/**
+ * Library layouts are a deliberately closed host vocabulary. The wire field is
+ * still a string so a newer app can pass through a future kind without breaking
+ * an older shell; the desktop resolves only the entries registered here.
+ */
+export const LIBRARY_VIEW_KINDS = [
+	"board",
+	"kanban",
+	"data-table",
+	"database",
+	"calendar",
+	"map",
+	"feed",
+	"timeline",
+	"list",
+	"gallery",
+	"table",
+	"card",
+	"custom",
+] as const;
+
+export type LibraryViewKind = (typeof LIBRARY_VIEW_KINDS)[number];
+
+export type LibraryViewRenderer =
+	| "board"
+	| "calendar"
+	| "card"
+	| "custom"
+	| "feed"
+	| "gallery"
+	| "list"
+	| "map"
+	| "table"
+	| "timeline";
+
+interface LibraryViewDefinition {
+	kind: LibraryViewKind;
+	renderer: LibraryViewRenderer;
+}
+
+/** Pure registry: aliases are explicit, and unknown values remain unsupported. */
+export const LIBRARY_VIEW_REGISTRY: readonly LibraryViewDefinition[] = [
+	{ kind: "board", renderer: "board" },
+	{ kind: "kanban", renderer: "board" },
+	{ kind: "data-table", renderer: "table" },
+	{ kind: "database", renderer: "table" },
+	{ kind: "calendar", renderer: "calendar" },
+	{ kind: "map", renderer: "map" },
+	{ kind: "feed", renderer: "feed" },
+	{ kind: "timeline", renderer: "timeline" },
+	{ kind: "list", renderer: "list" },
+	{ kind: "gallery", renderer: "gallery" },
+	{ kind: "table", renderer: "table" },
+	{ kind: "card", renderer: "card" },
+	{ kind: "custom", renderer: "custom" },
+] as const;
+
+export function isKnownLibraryViewKind(kind: unknown): kind is LibraryViewKind {
+	return (
+		typeof kind === "string" &&
+		(LIBRARY_VIEW_KINDS as readonly string[]).includes(kind)
+	);
+}
+
+export function libraryViewDefinition(
+	kind: unknown
+): LibraryViewDefinition | undefined {
+	return LIBRARY_VIEW_REGISTRY.find((entry) => entry.kind === kind);
 }
 
 /**
@@ -390,7 +468,7 @@ export interface SidebarSectionSpec {
 	 *   (a stamp) on the first line, `subtitle` (a last-message preview) below.
 	 *
 	 * Declared per SECTION, not per sidebar mode, because it is a property of this
-	 * feed: a roster of named bots wants avatars whether the user is in Agent mode
+	 * feed: a roster of named bots wants avatars whether the user is in Bot mode
 	 * or reading the section stacked among fifteen others. A `"messaging"` section
 	 * whose rows resolve no avatar still draws the two-line row, falling back to
 	 * the section glyph — that is a feed missing a picture, not a reason to
@@ -399,6 +477,8 @@ export interface SidebarSectionSpec {
 	rowStyle?: "compact" | "messaging";
 	/** Live rows for the section (same primitive `list-detail` uses). */
 	source?: ViewSource;
+	/** Optional host-owned Library layout. Absent preserves the historical cards. */
+	view?: LibraryViewKind | string;
 }
 
 /** The render-mode vocabulary of a manifest `dock_panels` contribution — the
@@ -883,6 +963,65 @@ export function sourceItemsFromResponse(
 	return out;
 }
 
+/**
+ * Read the total row count for a source response without confusing a rendered
+ * page with the collection total. A cursor or an explicit row limit means the
+ * response is not safe to count from its array; callers get `null` until the
+ * producer supplies `source.total` (or a conventional total field).
+ */
+export function sourceTotalFromResponse(
+	source: ViewSource,
+	payload: unknown
+): number | null {
+	if (Array.isArray(payload)) {
+		if (
+			source.limit !== undefined &&
+			source.limit > 0 &&
+			payload.length >= source.limit
+		) {
+			return null;
+		}
+		return payload.length;
+	}
+	if (!isRecord(payload)) {
+		return null;
+	}
+
+	const keys = [
+		source.total,
+		"total",
+		"total_count",
+		"totalCount",
+		"count",
+	].filter((key): key is string => Boolean(key));
+	for (const key of keys) {
+		const value = payload[key];
+		if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+			return Math.floor(value);
+		}
+	}
+
+	const cursor = payload.next_cursor ?? payload.nextCursor ?? payload.cursor;
+	if (cursor !== null && cursor !== undefined && cursor !== "") {
+		return null;
+	}
+
+	const rows = source.items
+		? payload[source.items]
+		: Object.values(payload).find((value) => Array.isArray(value));
+	if (!Array.isArray(rows)) {
+		return null;
+	}
+	if (
+		source.limit !== undefined &&
+		source.limit > 0 &&
+		rows.length >= source.limit
+	) {
+		return null;
+	}
+	return rows.length;
+}
+
 /** One catalog row a {@link StoreTabSpec} renders as a card, plus the RAW response
  *  row that `{{item.<key>}}` templating resolves against. */
 export interface StoreCatalogItem {
@@ -964,6 +1103,14 @@ export function storeItemsFromResponse(
 		});
 	}
 	return out;
+}
+
+/** Read a contributed Store tab's authoritative total without counting its page. */
+export function storeTotalFromResponse(
+	spec: StoreTabSpec,
+	payload: unknown
+): number | null {
+	return spec.source ? sourceTotalFromResponse(spec.source, payload) : null;
 }
 
 /** One node of a {@link StoreDetailGraphSpec} graph, already mapped. */

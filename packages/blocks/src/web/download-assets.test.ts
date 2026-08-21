@@ -3,6 +3,8 @@ import {
 	type DownloadArch,
 	type DownloadOS,
 	findChannelRelease,
+	findCoreReleaseAsset,
+	findCoreReleaseWithAsset,
 	findReleaseAsset,
 	findReleaseWithAsset,
 	isDesktopAsset,
@@ -153,6 +155,44 @@ describe("findReleaseAsset", () => {
 		const rel = release(V011_ASSETS);
 		expect(findReleaseAsset(rel, "windows", "arm")).toBeNull();
 		expect(findReleaseAsset(rel, "linux", "arm")).toBeNull();
+	});
+});
+
+describe("findCoreReleaseAsset", () => {
+	it("resolves the standalone Core binary instead of a desktop installer", () => {
+		const asset = findCoreReleaseAsset(
+			release(V011_ASSETS),
+			"windows",
+			"intel"
+		);
+		expect(asset?.name).toBe("ryu-core-windows-x86_64.exe");
+		expect(asset?.name).not.toMatch(/Ryu_/);
+	});
+
+	it("resolves the shipped macOS ARM and Linux Intel Core binaries", () => {
+		const rel = release(V011_ASSETS);
+		expect(findCoreReleaseAsset(rel, "macos", "arm")?.name).toBe(
+			"ryu-core-macos-aarch64"
+		);
+		expect(findCoreReleaseAsset(rel, "linux", "intel")?.name).toBe(
+			"ryu-core-linux-x86_64"
+		);
+	});
+
+	it("falls back to the last release carrying Core while a new one uploads", () => {
+		const found = findCoreReleaseWithAsset(
+			[release([], { id: 2, tag_name: "v0.1.2" }), release(V011_ASSETS)],
+			"windows",
+			"intel"
+		);
+		expect(found?.release.tag_name).toBe("v0.1.1");
+		expect(found?.asset.name).toBe("ryu-core-windows-x86_64.exe");
+	});
+
+	it("reports a missing target instead of matching the desktop release", () => {
+		expect(
+			findCoreReleaseAsset(release(V011_ASSETS), "macos", "intel")
+		).toBeNull();
 	});
 });
 

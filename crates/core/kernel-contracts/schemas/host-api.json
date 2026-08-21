@@ -1,6 +1,34 @@
 {
   "methods": [
     {
+      "capability": "host.capabilities",
+      "grant": null,
+      "method": "host.capabilities",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "native.haptics",
+      "grant": "native:haptics",
+      "method": "native.haptics",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "native.notifications",
+      "grant": "native:notifications",
+      "method": "native.notifications.create",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "native.liveActivities",
+      "grant": "native:live_activities",
+      "method": "native.liveActivities.update",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "core.listAgents",
       "grant": "core:list_agents",
       "method": "core.listAgents",
@@ -228,6 +256,13 @@
       "capability": "preferences.read",
       "grant": "preferences:read",
       "method": "preferences.get",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
+      "capability": "usage.read",
+      "grant": "usage:read",
+      "method": "usage.snapshot",
       "streaming": false,
       "tsHost": false
     },
@@ -673,6 +708,20 @@
       "tsHost": true
     },
     {
+      "capability": "webhooks.crud",
+      "grant": "webhooks:crud",
+      "method": "webhooks.secretGet",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "webhooks.crud",
+      "grant": "webhooks:crud",
+      "method": "webhooks.secretSet",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "quests.crud",
       "grant": "quests:crud",
       "method": "quests.list",
@@ -788,6 +837,20 @@
       "capability": "activity.read",
       "grant": "activity:read",
       "method": "activity.openSession",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "background.control",
+      "grant": "background:control",
+      "method": "background.list",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "background.control",
+      "grant": "background:control",
+      "method": "background.stop",
       "streaming": false,
       "tsHost": true
     },
@@ -1254,5 +1317,5 @@
       "tsHost": false
     }
   ],
-  "version": "1.2.0"
+  "version": "1.6.0"
 }

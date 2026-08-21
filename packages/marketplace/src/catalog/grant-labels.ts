@@ -31,6 +31,25 @@ const GRANT_META: Record<string, GrantMeta> = {
 		description:
 			"Save its own settings and state locally, isolated to this app.",
 	},
+	"native:haptics": {
+		label: "Use haptic feedback",
+		description: "Give you bounded tactile feedback on supported devices.",
+	},
+	"native:notifications": {
+		label: "Send native notifications",
+		description:
+			"Show a bounded notification on a supported phone, browser, or desktop host.",
+	},
+	"native:live_activities": {
+		label: "Update live status",
+		description:
+			"Update a bounded Live Activity or ongoing run status on supported devices.",
+	},
+	"notifications:send": {
+		label: "Send Ryu notifications",
+		description:
+			"Add a notification to your Ryu inbox when a subscribed event occurs.",
+	},
 	// Common coarse OS-style grants (kept from the prior InstalledSection map).
 	fs: {
 		label: "Access your files",

@@ -12,9 +12,24 @@ import {
 	DOC_SYNC_STEP2,
 	DOC_SYNC_UPDATE,
 	decodeDocSync,
+	decodeRealtimeEvent,
+	encodeRealtimeEvent,
 	encodeDocSync,
 	realtimeWsUrl,
 } from "./realtime.ts";
+
+test("application event codec round-trips and ignores other frames", () => {
+	const wire = encodeRealtimeEvent({
+		name: "table.snapshot",
+		data: { version: 3, players: [] },
+	});
+	expect(decodeRealtimeEvent(wire)).toEqual({
+		name: "table.snapshot",
+		data: { version: 3, players: [] },
+	});
+	expect(decodeRealtimeEvent(JSON.stringify({ type: "presence" }))).toBeNull();
+	expect(decodeRealtimeEvent("not-json")).toBeNull();
+});
 
 test("docsync framing round-trips for every tag", () => {
 	for (const tag of [
@@ -82,4 +97,23 @@ test("realtimeWsUrl uses wss for an https node and omits an absent jwt", () => {
 	expect(parsed.protocol).toBe("wss:");
 	expect(parsed.searchParams.get("token")).toBeNull();
 	expect(parsed.searchParams.get("jwt")).toBeNull();
+});
+
+test("application room options carry app_id only in the join frame contract", () => {
+	const wire = encodeRealtimeEvent({ name: "table.snapshot", data: null });
+	expect(JSON.parse(wire)).toEqual({
+		type: "event",
+		event: "table.snapshot",
+		data: null,
+	});
+	const url = realtimeWsUrl(
+		{ url: "http://127.0.0.1:7980", token: "node-secret" },
+		{
+			appId: "com.example.app",
+			kind: "application",
+			roomId: "room_1",
+		}
+	);
+	expect(url).not.toContain("com.example.app");
+	expect(url).toContain("token=node-secret");
 });

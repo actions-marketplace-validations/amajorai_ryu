@@ -1,5 +1,7 @@
 "use client";
 
+import { PinIcon, PinOffIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@ryu/ui/lib/utils";
 import {
 	type ReactNode,
@@ -34,7 +36,22 @@ export interface ComposerMenuProps {
 	groups: ComposerMenuGroup[];
 	onDismiss: () => void;
 	onSelect: (item: ComposerMenuItem) => void;
+	onTogglePin?: (item: ComposerMenuItem) => void;
+	pinnedItemIds?: readonly string[];
 	query?: string;
+}
+
+function matchesComposerMenuQuery(
+	item: ComposerMenuItem,
+	normalizedQuery: string
+): boolean {
+	return (
+		!normalizedQuery ||
+		[item.label, item.description ?? "", ...(item.keywords ?? [])]
+			.join(" ")
+			.toLowerCase()
+			.includes(normalizedQuery)
+	);
 }
 
 /** One searchable, keyboard-driven list used by +, @ mentions, and / commands. */
@@ -45,36 +62,60 @@ export function ComposerMenu({
 	groups,
 	onDismiss,
 	onSelect,
+	onTogglePin,
+	pinnedItemIds = [],
 	query = "",
 }: ComposerMenuProps) {
 	const rootRef = useRef<HTMLDivElement>(null);
 	const [active, setActive] = useState(0);
 	const normalizedQuery = query.trim().toLowerCase();
+	const pinnedSet = useMemo(() => new Set(pinnedItemIds), [pinnedItemIds]);
 	const filteredGroups = useMemo(
 		() =>
 			groups.flatMap((group) => {
-				const items = group.items.filter((item) => {
-					if (!normalizedQuery) {
-						return true;
-					}
-					return [item.label, item.description ?? "", ...(item.keywords ?? [])]
-						.join(" ")
-						.toLowerCase()
-						.includes(normalizedQuery);
-				});
+				const items = group.items.filter((item) =>
+					matchesComposerMenuQuery(item, normalizedQuery)
+				);
 				return items.length > 0 ? [{ ...group, items }] : [];
 			}),
 		[groups, normalizedQuery]
 	);
+	const renderedGroups = useMemo(() => {
+		const pinnedItems = pinnedItemIds.flatMap((id) => {
+			for (const group of filteredGroups) {
+				const item = group.items.find((candidate) => candidate.id === id);
+				if (item) {
+					return [item];
+				}
+			}
+			return [];
+		});
+		const visibleGroups = filteredGroups.flatMap((group) => {
+			const items = group.items.filter((item) => !pinnedSet.has(item.id));
+			return items.length > 0 ? [{ ...group, items }] : [];
+		});
+		return pinnedItems.length > 0
+			? [
+					{ id: "pinned", items: pinnedItems, label: "Pinned" },
+					...visibleGroups,
+				]
+			: visibleGroups;
+	}, [filteredGroups, pinnedItemIds, pinnedSet]);
 	const flat = useMemo(
-		() => filteredGroups.flatMap((group) => group.items),
-		[filteredGroups]
+		() => renderedGroups.flatMap((group) => group.items),
+		[renderedGroups]
 	);
 
 	useEffect(() => setActive(0), [normalizedQuery, flat.length]);
 
 	useEffect(() => {
 		const handleKeyDown = (event: KeyboardEvent) => {
+			if (
+				event.target instanceof Element &&
+				event.target.closest("[data-composer-pin-control]")
+			) {
+				return;
+			}
 			if (event.key === "Escape") {
 				event.preventDefault();
 				onDismiss();
@@ -135,7 +176,7 @@ export function ComposerMenu({
 			ref={rootRef}
 			role="listbox"
 		>
-			{filteredGroups.map((group) => (
+			{renderedGroups.map((group) => (
 				<div className="py-0.5" key={group.id}>
 					<div className="px-2 pt-1.5 pb-1 text-muted-foreground text-xs">
 						{group.label}
@@ -144,41 +185,78 @@ export function ComposerMenu({
 						rowIndex += 1;
 						const index = rowIndex;
 						return (
-							<button
-								aria-selected={index === active}
-								className={cn(
-									"flex min-h-9 w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent",
-									index === active && "bg-accent",
-									item.disabled && "pointer-events-none opacity-45"
-								)}
-								disabled={item.disabled}
+							<div
+								className="group/option flex items-center rounded-xl"
 								key={item.id}
-								onClick={() => onSelect(item)}
-								onMouseDown={(event) => event.preventDefault()}
-								onMouseEnter={() => setActive(index)}
-								role="option"
-								type="button"
 							>
-								{item.icon ? (
-									<span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground">
-										{item.icon}
-									</span>
-								) : null}
-								<span className="min-w-0 flex-1">
-									<span className="block truncate">{item.label}</span>
-									{item.description ? (
-										<span className="block truncate text-muted-foreground text-xs">
-											{item.description}
+								<button
+									aria-label={item.label}
+									aria-selected={index === active}
+									className={cn(
+										"flex min-h-9 min-w-0 flex-1 items-center gap-2 rounded-xl px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent",
+										index === active && "bg-accent",
+										item.disabled && "cursor-not-allowed opacity-45"
+									)}
+									disabled={item.disabled}
+									onClick={() => onSelect(item)}
+									onMouseDown={(event) => event.preventDefault()}
+									onMouseEnter={() => setActive(index)}
+									role="option"
+									type="button"
+								>
+									{item.icon ? (
+										<span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground">
+											{item.icon}
 										</span>
 									) : null}
-								</span>
-								{item.badge ? (
-									<span className="shrink-0 text-[11px] text-muted-foreground">
-										{item.badge}
+									<span className="min-w-0 flex-1">
+										<span className="block truncate">{item.label}</span>
+										{item.description ? (
+											<span className="block truncate text-muted-foreground text-xs">
+												{item.description}
+											</span>
+										) : null}
 									</span>
+									{item.badge ? (
+										<span className="shrink-0 text-[11px] text-muted-foreground">
+											{item.badge}
+										</span>
+									) : null}
+									{item.trailing}
+								</button>
+								{onTogglePin ? (
+									<button
+										aria-label={
+											pinnedSet.has(item.id)
+												? `Unpin ${item.label}`
+												: `Pin ${item.label}`
+										}
+										aria-pressed={pinnedSet.has(item.id)}
+										className={cn(
+											"flex size-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+											"group-hover/option:opacity-100",
+											pinnedSet.has(item.id) && "text-primary opacity-100"
+										)}
+										data-composer-pin-control
+										onClick={(event) => {
+											event.stopPropagation();
+											onTogglePin(item);
+										}}
+										onMouseDown={(event) => event.preventDefault()}
+										title={
+											pinnedSet.has(item.id)
+												? `Unpin ${item.label}`
+												: `Pin ${item.label}`
+										}
+										type="button"
+									>
+										<HugeiconsIcon
+											className="size-3.5"
+											icon={pinnedSet.has(item.id) ? PinOffIcon : PinIcon}
+										/>
+									</button>
 								) : null}
-								{item.trailing}
-							</button>
+							</div>
 						);
 					})}
 				</div>

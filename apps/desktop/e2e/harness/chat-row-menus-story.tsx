@@ -67,6 +67,7 @@ const CONV = {
 	branch: null,
 	participants: [],
 	agentId: null,
+	messageCount: 6,
 } as unknown as Conversation;
 
 /** Records the capability a menu row dispatched, so the spec can assert the row
@@ -95,6 +96,8 @@ const handlers = {
 	onRenameConversation: () => undefined,
 	onSelectConversation: () => undefined,
 	onSetConversationIcon: () => undefined,
+	onRequestConversationVisibility: () => undefined,
+	canMakePrivate: true,
 	onToggleArchive: () => undefined,
 	onTogglePin: () => undefined,
 	target: { url: "http://127.0.0.1:8980", token: null },

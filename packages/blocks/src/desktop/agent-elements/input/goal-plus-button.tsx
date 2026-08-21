@@ -20,7 +20,8 @@ import {
 } from "@ryu/ui/components/popover";
 import { Switch } from "@ryu/ui/components/switch";
 import { cn } from "@ryu/ui/lib/utils";
-import { memo, useState } from "react";
+import { memo, useCallback, useState } from "react";
+import { useComposerPins } from "../../../composer/composer-pins.ts";
 import {
 	ComposerMenu,
 	type ComposerMenuGroup,
@@ -153,6 +154,11 @@ export const GoalPlusButton = memo(function GoalPlusButton({
 	onMenuOpenChange,
 }: GoalPlusButtonProps) {
 	const [open, setOpen] = useState(false);
+	const { pinnedIds, togglePin } = useComposerPins();
+	const handleTogglePin = useCallback(
+		(item: ComposerMenuItem) => togglePin(item.id),
+		[togglePin]
+	);
 	const handleOpenChange = (next: boolean) => {
 		setOpen(next);
 		onMenuOpenChange?.(next);
@@ -338,6 +344,8 @@ export const GoalPlusButton = memo(function GoalPlusButton({
 						groups={menuGroups}
 						onDismiss={() => handleOpenChange(false)}
 						onSelect={handleMenuSelect}
+						onTogglePin={handleTogglePin}
+						pinnedItemIds={pinnedIds}
 						query={directoryQuery}
 					/>
 				</PopoverContent>

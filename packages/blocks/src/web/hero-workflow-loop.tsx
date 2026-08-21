@@ -53,11 +53,7 @@ import {
 	SUGGESTION_STACK_GAP,
 	TRANSLUCENT_SKIN,
 } from "./island-shapes.tsx";
-import {
-	type IslandState,
-	setIslandHasPromo,
-	setIslandSuppressed,
-} from "./island-store.ts";
+import { type IslandState, setIslandSuppressed } from "./island-store.ts";
 
 /* ── the transcript the desktop half plays back ────────────────────────────── */
 
@@ -155,7 +151,7 @@ const SCENARIOS: Scenario[] = [
 				caption:
 					"Step 2 — it drafts the follow-up in Gmail, using the connector you already granted.",
 				part: toolPart(
-					"mcp__gmail__create_draft",
+					"mcp.gmail.create_draft",
 					{ to: "sarah@acme.com", subject: "Acme — follow-up and next steps" },
 					{ id: "draft_8241", status: "draft saved" }
 				),
@@ -163,7 +159,7 @@ const SCENARIOS: Scenario[] = [
 			{
 				caption: "Step 3 — it logs the outcome against the deal in your CRM.",
 				part: toolPart(
-					"mcp__hubspot__create_note",
+					"mcp.hubspot.create_note",
 					{
 						deal: "Acme — pilot",
 						body: "3 action items agreed, decision due Friday.",
@@ -174,7 +170,7 @@ const SCENARIOS: Scenario[] = [
 			{
 				caption: "Step 4 — it posts the summary where your team will see it.",
 				part: toolPart(
-					"mcp__slack__send_message",
+					"mcp.slack.send_message",
 					{
 						channel: "#sales",
 						text: "Acme pilot: follow-up drafted, decision due Friday.",
@@ -210,7 +206,7 @@ const SCENARIOS: Scenario[] = [
 				caption:
 					"Step 1 — it reads the mail you already gave it access to, and sorts the noise from the six that matter.",
 				part: toolPart(
-					"mcp__gmail__list_messages",
+					"mcp.gmail.list_messages",
 					{ query: "is:unread newer_than:1d" },
 					{ unread: 84, needs_reply: 6, newsletters: 71 }
 				),
@@ -219,7 +215,7 @@ const SCENARIOS: Scenario[] = [
 				caption:
 					"Step 2 — the easy ones come back as drafts, not sent mail. You still hit send.",
 				part: toolPart(
-					"mcp__gmail__create_draft",
+					"mcp.gmail.create_draft",
 					{
 						to: "priya@northwind.com",
 						subject: "Re: Thursday deadline — confirmed",
@@ -231,7 +227,7 @@ const SCENARIOS: Scenario[] = [
 				caption:
 					"Step 3 — the ones that genuinely need you get flagged, at the top.",
 				part: toolPart(
-					"mcp__gmail__add_label",
+					"mcp.gmail.add_label",
 					{ label: "Needs you", count: 6 },
 					{ ok: true }
 				),
@@ -240,7 +236,7 @@ const SCENARIOS: Scenario[] = [
 				caption:
 					"Step 4 — the other 71 are archived, so the inbox you open is the inbox that matters.",
 				part: toolPart(
-					"mcp__gmail__update_messages",
+					"mcp.gmail.update_messages",
 					{ action: "archive", count: 71 },
 					{ archived: 71 }
 				),
@@ -273,7 +269,7 @@ const SCENARIOS: Scenario[] = [
 				caption:
 					"Step 1 — it reads the week you actually had, instead of asking you to remember it.",
 				part: toolPart(
-					"mcp__github__list_commits",
+					"mcp.github.list_commits",
 					{ author: "me", since: "Monday" },
 					{ commits: 37, repos: 3 }
 				),
@@ -281,7 +277,7 @@ const SCENARIOS: Scenario[] = [
 			{
 				caption: "Step 2 — it checks what closed and what is still in flight.",
 				part: toolPart(
-					"mcp__linear__list_issues",
+					"mcp.linear.list_issues",
 					{ assignee: "me", state: "done, in progress" },
 					{ done: 9, in_progress: 2, blocked: 1 }
 				),
@@ -290,7 +286,7 @@ const SCENARIOS: Scenario[] = [
 				caption:
 					"Step 3 — the update is written where your team already keeps them.",
 				part: toolPart(
-					"mcp__notion__create_page",
+					"mcp.notion.create_page",
 					{ title: "Weekly update — week 32", parent: "Team updates" },
 					{ id: "page_2291", status: "published" }
 				),
@@ -299,7 +295,7 @@ const SCENARIOS: Scenario[] = [
 				caption:
 					"Step 4 — and posted in your voice, without you re-typing your own week.",
 				part: toolPart(
-					"mcp__slack__send_message",
+					"mcp.slack.send_message",
 					{
 						channel: "#standup",
 						text: "Shipped 9, 2 in flight, blocked on the billing API key.",
@@ -354,7 +350,7 @@ const SCENARIOS: Scenario[] = [
 			{
 				caption: "Step 3 — the sheet gets filled in, categorised and totalled.",
 				part: toolPart(
-					"mcp__sheets__update_rows",
+					"mcp.sheets.update_rows",
 					{ sheet: "Expenses — March", rows: 14 },
 					{ total: "$1,284.40" }
 				),
@@ -362,7 +358,7 @@ const SCENARIOS: Scenario[] = [
 			{
 				caption: "Step 4 — the submission email is drafted and waiting on you.",
 				part: toolPart(
-					"mcp__gmail__create_draft",
+					"mcp.gmail.create_draft",
 					{
 						to: "finance@yourcompany.com",
 						subject: "March expenses — $1,284.40 (14 receipts)",
@@ -397,7 +393,7 @@ const SCENARIOS: Scenario[] = [
 				caption:
 					"Step 1 — it reads the day and finds the clash you hadn't noticed.",
 				part: toolPart(
-					"mcp__gcal__list_events",
+					"mcp.gcal.list_events",
 					{ day: "Thursday" },
 					{ events: 7, conflicts: 1 }
 				),
@@ -405,7 +401,7 @@ const SCENARIOS: Scenario[] = [
 			{
 				caption: "Step 2 — it checks everyone's availability, not just yours.",
 				part: toolPart(
-					"mcp__gcal__check_availability",
+					"mcp.gcal.check_availability",
 					{ attendees: 5, window: "Thu–Fri" },
 					{ slot: "Friday 10:00", all_free: true }
 				),
@@ -413,7 +409,7 @@ const SCENARIOS: Scenario[] = [
 			{
 				caption: "Step 3 — the meeting moves to the slot that actually works.",
 				part: toolPart(
-					"mcp__gcal__update_event",
+					"mcp.gcal.update_event",
 					{ event: "Design review", time: "Friday 10:00" },
 					{ ok: true, invites_sent: 5 }
 				),
@@ -422,7 +418,7 @@ const SCENARIOS: Scenario[] = [
 				caption:
 					"Step 4 — and the room hears it from you, not from a silent calendar ping.",
 				part: toolPart(
-					"mcp__slack__send_message",
+					"mcp.slack.send_message",
 					{
 						channel: "#design",
 						text: "Design review moved to Fri 10:00 — clash on my side. Same agenda.",
@@ -900,8 +896,6 @@ function useStageScale() {
 
 /* ── the loop ──────────────────────────────────────────────────────────────── */
 
-// The launch discount is a rare surprise: it only surfaces on ~1 in 10 loads.
-const PROMO_CHANCE = 0.1;
 const TAKEOVER_REPLY =
 	"Happy to. On the desktop I can run that end to end — tools, files and all — and the Island will ping you when it's done.";
 
@@ -989,12 +983,6 @@ export function HeroWorkflowLoop({
 	onScenarioChange: (next: number) => void;
 	scenarioIndex: number;
 }) {
-	// Rolled once on mount (client-only) so SSR/hydration stay in sync. Seeds the
-	// persistent GlobalIsland (root layout) with whether the promo is available.
-	useEffect(() => {
-		setIslandHasPromo(Math.random() < PROMO_CHANCE);
-	}, []);
-
 	// While the visitor is typing in the demo, the script stops and the chat is
 	// theirs — the same "take it over" affordance the old showcase had.
 	const [takeover, setTakeover] = useState<UIMessage[] | null>(null);

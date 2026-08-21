@@ -23,6 +23,10 @@ import {
 //    the JSON — their whole job is to be an INDEPENDENT copy. ──────────────────
 
 const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
+	"host.capabilities": "host.capabilities",
+	"native.haptics": "native.haptics",
+	"native.notifications.create": "native.notifications",
+	"native.liveActivities.update": "native.liveActivities",
 	"app.request": "app.http",
 	"core.listAgents": "core.listAgents",
 	"ui.registerRoute": "ui.render",
@@ -110,6 +114,8 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"ghost.recipes": "ghost.record",
 	"webhooks.list": "webhooks.crud",
 	"webhooks.ingressStatus": "webhooks.crud",
+	"webhooks.secretGet": "webhooks.crud",
+	"webhooks.secretSet": "webhooks.crud",
 	"quests.list": "quests.crud",
 	"quests.create": "quests.crud",
 	"quests.update": "quests.crud",
@@ -225,6 +231,9 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 };
 
 const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
+	"native:haptics": "native.haptics",
+	"native:notifications": "native.notifications",
+	"native:live_activities": "native.liveActivities",
 	"app:http": "app.http",
 	"core:list_agents": "core.listAgents",
 	"ui:render": "ui.render",

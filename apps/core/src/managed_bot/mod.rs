@@ -335,11 +335,13 @@ pub fn create_channel_body(
         ("model", intent.model.as_deref()),
         ("systemPrompt", intent.system_prompt.as_deref()),
         ("groupReplyMode", intent.group_reply_mode.as_deref()),
+        ("proactiveTarget", intent.proactive_target.as_deref()),
     ] {
         if let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) {
             body[key] = json!(value);
         }
     }
+    body["proactiveOpening"] = json!(intent.proactive_opening);
     body
 }
 
@@ -363,6 +365,11 @@ pub struct ChannelIntent {
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     pub group_reply_mode: Option<String>,
+    /// Send Ryu's first plain-language welcome to the approved target when the
+    /// gateway starts. The target is deliberately explicit; it is never inferred
+    /// from a token or broadcast to a whole platform.
+    pub proactive_opening: bool,
+    pub proactive_target: Option<String>,
     /// The form's Enabled switch. Honoured rather than forced on: the manual paste
     /// path respects it, and a disabled row is visible in the sidebar with a toggle,
     /// whereas a silently-flipped one is a setting the user cannot trust. Defaults
@@ -382,6 +389,8 @@ impl Default for ChannelIntent {
             model: None,
             system_prompt: None,
             group_reply_mode: None,
+            proactive_opening: false,
+            proactive_target: None,
             enabled: true,
         }
     }
@@ -1106,6 +1115,8 @@ mod tests {
             model: Some("sonnet".into()),
             system_prompt: Some("Be brief.".into()),
             group_reply_mode: Some("mentions".into()),
+            proactive_opening: true,
+            proactive_target: Some("123456".into()),
             enabled: false,
         };
         let body = create_channel_body("Support bot", "123:ABC", "claim", NONCE, &intent);
@@ -1113,6 +1124,8 @@ mod tests {
         assert_eq!(body["model"], "sonnet");
         assert_eq!(body["systemPrompt"], "Be brief.");
         assert_eq!(body["groupReplyMode"], "mentions");
+        assert_eq!(body["proactiveOpening"], true);
+        assert_eq!(body["proactiveTarget"], "123456");
         // The user's own switch, not a forced `true`: the control plane reads
         // `body.enabled === true`, so this field must always be present.
         assert_eq!(body["enabled"], false);

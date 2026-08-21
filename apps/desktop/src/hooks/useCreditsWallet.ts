@@ -19,7 +19,7 @@
 // up the new balance without a manual reload.
 
 import type { Entitlement } from "@ryu/auth/lib/plans";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchEntitlement } from "@/src/lib/api/billing.ts";
 import {
 	type CreditsError,
@@ -28,6 +28,7 @@ import {
 	hasCreditsAuth,
 	type LedgerEntry,
 } from "@/src/lib/api/credits.ts";
+import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
 import { type GrantPoolBalance, useCreditGrants } from "./useCreditGrants.ts";
 import { useWalletStream } from "./useWalletStream.ts";
 
@@ -63,12 +64,16 @@ export function useCreditsWallet(): UseCreditsWallet {
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<CreditsError | null>(null);
 	const authed = hasCreditsAuth();
+	const activeOrgId = useActiveOrgId();
+	const latestOrgId = useRef(activeOrgId);
+	latestOrgId.current = activeOrgId;
 	// Grants ride their own cached query rather than this hook's manual refresh:
 	// the composer picker needs the same data with a different lifecycle, and a
 	// missing/failed grants route must never delay or fail the wallet load.
 	const { pools: grantPools } = useCreditGrants();
 
 	const refresh = useCallback(async () => {
+		const requestOrgId = activeOrgId;
 		if (!hasCreditsAuth()) {
 			setWallet(null);
 			setLedger([]);
@@ -78,22 +83,34 @@ export function useCreditsWallet(): UseCreditsWallet {
 			return;
 		}
 		setLoading(true);
+		setWallet(null);
+		setLedger([]);
+		setEntitlement(null);
+		setError(null);
 		// The plan entitlement is purely additive context for the surface; a failed
 		// or absent entitlement (free user / offline) must never block the wallet,
 		// so resolve it in parallel and swallow its errors independently.
 		const entitlementPromise = fetchEntitlement().catch(() => null);
 		try {
 			const data = await fetchWallet();
+			if (latestOrgId.current !== requestOrgId) {
+				return;
+			}
 			setWallet(data.wallet);
 			setLedger(data.ledger ?? []);
 			setError(null);
 		} catch (e) {
-			setError(e as CreditsError);
+			if (latestOrgId.current === requestOrgId) {
+				setError(e as CreditsError);
+			}
 		} finally {
-			setEntitlement(await entitlementPromise);
-			setLoading(false);
+			const nextEntitlement = await entitlementPromise;
+			if (latestOrgId.current === requestOrgId) {
+				setEntitlement(nextEntitlement);
+				setLoading(false);
+			}
 		}
-	}, []);
+	}, [activeOrgId]);
 
 	useEffect(() => {
 		refresh().catch(() => undefined);
@@ -115,7 +132,7 @@ export function useCreditsWallet(): UseCreditsWallet {
 	// replacing it — the initial `fetchWallet` above supplies fields the event
 	// omits (e.g. `ownerType`). A frame before the first fetch is ignored; the
 	// snapshot frame on the next (re)connect re-syncs it.
-	const liveWallet = useWalletStream();
+	const liveWallet = useWalletStream(activeOrgId);
 	useEffect(() => {
 		if (!liveWallet) {
 			return;

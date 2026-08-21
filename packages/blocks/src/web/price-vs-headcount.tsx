@@ -9,7 +9,7 @@ import {
 	type LandingCardTone,
 	landingCardSurfaceClass,
 } from "./landing-card-tones.ts";
-import { PRO_MONTHLY_USD } from "./pricing.tsx";
+import { TEAMS_MIN_SEATS, TEAMS_MONTHLY_PER_SEAT_USD } from "./pricing.tsx";
 import { Reveal } from "./reveal.tsx";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 import { StaggerLines } from "./stagger-lines.tsx";
@@ -29,8 +29,8 @@ const ALTERNATIVES: {
 	{
 		icon: UserRoundPlus,
 		tone: "orange",
-		title: "The junior you would otherwise hire",
-		body: "A junior costs more in their first month than a Ryu seat costs in a year, and they still need training, review, and cover when they leave.",
+		title: "The capacity you need before another hire",
+		body: "A Ryu agent owns one repeatable business process, with your rules and review points built in. Add capacity without adding another person to train.",
 	},
 	{
 		icon: CalendarX,
@@ -51,10 +51,11 @@ export default function PriceVsHeadcount() {
 		<section className="container mx-auto px-4 py-20 md:py-28">
 			<div className="mx-auto max-w-5xl">
 				<StaggerLines className="max-w-2xl">
-					<SectionTitle title="Compare us to the hire, not to a chat subscription." />
+					<SectionTitle title="Compare us to the loaded cost of the hire, not to a chat subscription." />
 					<p className={sectionSubtitleClass}>
-						You are buying the paperwork getting done, and a record you can show
-						a client.
+						Anchor on the salary, benefits, management hours, and backlog you
+						would carry to add capacity. You are buying the work getting done,
+						and a record you can show a client.
 					</p>
 				</StaggerLines>
 
@@ -98,15 +99,15 @@ export default function PriceVsHeadcount() {
 								<span className="mr-1 font-normal text-lg text-muted-foreground">
 									From
 								</span>
-								${PRO_MONTHLY_USD}
+								${TEAMS_MONTHLY_PER_SEAT_USD}
 								<span className="ml-1 font-normal text-lg text-muted-foreground">
-									per person, per month
+									/seat · {TEAMS_MIN_SEATS}-seat minimum, per month
 								</span>
 							</p>
 							<p className="mt-2 max-w-md text-muted-foreground text-sm leading-relaxed">
-								A monthly price with a spending ceiling on top of it. A workflow
-								we set up around your firm is quoted on the first call, as a
-								monthly figure, not a scoping exercise or a six month rollout.
+								A member-seat price with a spending ceiling on top of it. Start
+								with the five-seat minimum, then expand only when the hours and
+								dollars justify it.
 							</p>
 						</div>
 						<div className="flex shrink-0 flex-col gap-3 sm:flex-row">

@@ -3,6 +3,7 @@ import type { PluginSidebarMode } from "@/src/lib/api/plugins.ts";
 import {
 	BUILTIN_SIDEBAR_MODES,
 	contributedSidebarModes,
+	orderedSidebarModeSections,
 	resolveSidebarMode,
 } from "./sidebar-modes.ts";
 
@@ -89,11 +90,11 @@ describe("resolveSidebarMode", () => {
 		).toBe("Bot mode");
 	});
 
-	it("falls back without calling a mode stale while the feed is unsettled", () => {
+	it("falls back to built-in Bot mode without calling a mode stale while the feed is unsettled", () => {
 		// Cold start: the mode is unknown because nothing has answered yet. Clearing
 		// here would silently un-choose a mode the user did pick.
 		const pending = resolveSidebarMode("plugin:@acme/bots:bots", [], false);
-		expect(pending.mode.key).toBe("sections");
+		expect(pending.mode.key).toBe("agent");
 		expect(pending.stale).toBe(false);
 	});
 
@@ -103,7 +104,7 @@ describe("resolveSidebarMode", () => {
 			modes.slice(0, 3),
 			true
 		);
-		expect(gone.mode.key).toBe("sections");
+		expect(gone.mode.key).toBe("agent");
 		expect(gone.stale).toBe(true);
 	});
 
@@ -113,13 +114,25 @@ describe("resolveSidebarMode", () => {
 });
 
 describe("built-in modes", () => {
-	it("expresses Agent mode with the same fields a contributed mode gets", () => {
+	it("expresses Bot mode with the same fields a contributed mode gets", () => {
 		const agent = BUILTIN_SIDEBAR_MODES.find((m) => m.key === "agent");
-		expect(agent?.sections).toEqual(["chats", "agents"]);
-		// Lists Sessions first, opens on the roster — the opinion that makes it a
-		// mode rather than a filter, declared not branched.
+		expect(agent?.title).toBe("Bot mode");
+		expect(agent?.sections).toEqual(["agents", "chats"]);
+		// Agents is primary, Sessions is secondary, and the mode opens on the
+		// roster — the opinion that makes it a mode rather than a filter.
 		expect(agent?.defaultSection).toBe("agents");
 		expect(agent?.layout).toBe("strip");
+	});
+
+	it("keeps Bot mode Agents first despite global sidebar ordering", () => {
+		const agent = BUILTIN_SIDEBAR_MODES.find((m) => m.key === "agent");
+		if (!agent) {
+			throw new Error("Bot mode descriptor is missing");
+		}
+		expect(orderedSidebarModeSections(agent, ["chats", "agents"])).toEqual([
+			"agents",
+			"chats",
+		]);
 	});
 
 	it("leaves the two shell-wide modes naming no sections", () => {

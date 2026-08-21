@@ -17,7 +17,8 @@ import { createContext, useContext } from "react";
 export interface StoreSectionTab {
 	/** Optional cluster key; a divider is drawn where the group changes. */
 	group?: string;
-	icon: IconSvgElement;
+	/** Built-in tabs use Hugeicons; contributed tabs may carry a manifest icon id. */
+	icon: IconSvgElement | string;
 	label: string;
 	value: string;
 }

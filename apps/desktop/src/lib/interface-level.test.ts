@@ -1,57 +1,75 @@
-// The pure rules behind the Interface level ladder. Kept separate from the
-// browser story (`e2e/interface-level-story.spec.ts`, which covers the slider,
-// the fill ramp and the writes) because these are the parts that decide what the
-// composer and the node dropdown show, and they regress silently: a level added
-// in the middle, or a gate flipped to `!==`, still typechecks and still renders a
-// slider.
+// The pure rules behind the Interface mode switch. Kept separate from the
+// browser story (`e2e/interface-level-story.spec.ts`, which covers the switch,
+// gradient and writes) because these are the parts that decide what the
+// composer and node dropdown show, and they regress silently: a level added
+// in the middle, or a gate flipped to `!==`, still typechecks and still renders
+// the UI.
 
-import { describe, expect, it } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+
+if (!GlobalRegistrator.isRegistered) {
+	GlobalRegistrator.register();
+}
+
+import { beforeEach, describe, expect, it } from "bun:test";
+import {
+	readBotTerminology,
+	setBotTerminology,
+} from "@ryu/ui/hooks/use-bot-terminology.ts";
+import {
+	DEFAULT_SIDEBAR_MODE,
+	SIDEBAR_MODE_KEY,
+	setSidebarMode,
+} from "@/src/hooks/useSidebarMode.ts";
 import {
 	collapsesNodeSections,
 	DEFAULT_INTERFACE_LEVEL,
+	INTERFACE_LEVEL_KEY,
 	INTERFACE_LEVELS,
 	type InterfaceLevel,
 	interfaceLevelIndex,
+	seedInterfaceLevel,
+	setInterfaceLevel,
 	showsComposerTuning,
 	showsModelPicker,
 } from "./interface-level.ts";
 
 const IDS = INTERFACE_LEVELS.map((l) => l.id);
 
-describe("the ladder", () => {
-	it("defaults to the least surface, which is the first detent", () => {
+describe("the binary mode", () => {
+	it("defaults to the least surface, which is the first switch position", () => {
 		expect(DEFAULT_INTERFACE_LEVEL).toBe("simple");
 		expect(interfaceLevelIndex(DEFAULT_INTERFACE_LEVEL)).toBe(0);
 	});
 
-	it("orders least → most surface", () => {
-		expect(IDS).toEqual(["simple", "standard", "advanced", "expert"]);
+	it("keeps the internal ids and exact user-facing labels", () => {
+		expect(IDS).toEqual(["simple", "expert"]);
+		expect(INTERFACE_LEVELS.map((level) => level.label)).toEqual([
+			"Ryu Work",
+			"Code",
+		]);
 	});
 
-	it("gives every level a distinct detent", () => {
+	it("gives each mode a distinct switch position", () => {
 		const indexes = IDS.map((id) => interfaceLevelIndex(id));
 		expect(new Set(indexes).size).toBe(IDS.length);
 		expect(Math.max(...indexes)).toBe(IDS.length - 1);
 	});
 
-	it("parks an unknown level on the first detent rather than -1", () => {
-		// -1 would render a slider with no thumb; the floor is load-bearing.
+	it("parks an unknown mode on the first position rather than -1", () => {
+		// -1 would render a switch with no active position; the floor is load-bearing.
 		expect(interfaceLevelIndex("nonsense" as InterfaceLevel)).toBe(0);
 	});
 });
 
 describe("what the composer shows", () => {
-	it("hides the model picker only at Simple", () => {
+	it("hides the model picker only at Ryu Work", () => {
 		expect(showsModelPicker("simple")).toBe(false);
-		expect(showsModelPicker("standard")).toBe(true);
-		expect(showsModelPicker("advanced")).toBe(true);
 		expect(showsModelPicker("expert")).toBe(true);
 	});
 
-	it("shows approval / thinking / style from Advanced up", () => {
+	it("shows approval / thinking / style in Code", () => {
 		expect(showsComposerTuning("simple")).toBe(false);
-		expect(showsComposerTuning("standard")).toBe(false);
-		expect(showsComposerTuning("advanced")).toBe(true);
 		expect(showsComposerTuning("expert")).toBe(true);
 	});
 
@@ -80,10 +98,8 @@ describe("what the node selector shows", () => {
 	// relative to the composer's — true is LESS surface — so folding it into the
 	// "only ever adds surface" loop would need a negation and would read as the
 	// opposite of what it asserts.
-	it("collapses the technical blocks only at Simple", () => {
+	it("collapses the technical blocks only at Ryu Work", () => {
 		expect(collapsesNodeSections("simple")).toBe(true);
-		expect(collapsesNodeSections("standard")).toBe(false);
-		expect(collapsesNodeSections("advanced")).toBe(false);
 		expect(collapsesNodeSections("expert")).toBe(false);
 	});
 
@@ -92,5 +108,65 @@ describe("what the node selector shows", () => {
 		// without choosing it; if the default ever moves, the trigger's keyboard
 		// story stops being load-bearing and this test should be revisited.
 		expect(collapsesNodeSections(DEFAULT_INTERFACE_LEVEL)).toBe(true);
+	});
+});
+
+describe("interface level vocabulary preset", () => {
+	beforeEach(() => {
+		localStorage.clear();
+		setInterfaceLevel("expert", { applyPrefs: false });
+		setBotTerminology(true);
+	});
+
+	it("forces Bot terminology on when Ryu Work is selected", () => {
+		setBotTerminology(false);
+		setSidebarMode("sections");
+
+		setInterfaceLevel("simple");
+
+		expect(readBotTerminology()).toBe(true);
+		expect(localStorage.getItem(SIDEBAR_MODE_KEY)).toBe(DEFAULT_SIDEBAR_MODE);
+	});
+
+	it("preserves an explicit choice in Code", () => {
+		setBotTerminology(false);
+		setSidebarMode("sections");
+
+		setInterfaceLevel("expert");
+
+		expect(readBotTerminology()).toBe(false);
+		expect(localStorage.getItem(SIDEBAR_MODE_KEY)).toBe("sections");
+	});
+
+	it("repairs an older stored Ryu Work selection on boot", () => {
+		localStorage.setItem(INTERFACE_LEVEL_KEY, "simple");
+		localStorage.setItem(SIDEBAR_MODE_KEY, "sections");
+		setBotTerminology(false);
+
+		seedInterfaceLevel();
+
+		expect(readBotTerminology()).toBe(true);
+		expect(localStorage.getItem(SIDEBAR_MODE_KEY)).toBe(DEFAULT_SIDEBAR_MODE);
+	});
+
+	it("seeds Bot mode for a fresh Ryu Work install", () => {
+		localStorage.removeItem(INTERFACE_LEVEL_KEY);
+
+		seedInterfaceLevel();
+
+		expect(localStorage.getItem(SIDEBAR_MODE_KEY)).toBe(DEFAULT_SIDEBAR_MODE);
+	});
+
+	it("migrates old intermediate detents to Code and applies Code prefs", () => {
+		localStorage.setItem(INTERFACE_LEVEL_KEY, "standard");
+		setBotTerminology(false);
+
+		seedInterfaceLevel();
+
+		expect(localStorage.getItem(INTERFACE_LEVEL_KEY)).toBe("expert");
+		expect(localStorage.getItem("ryu:hide-tool-detail")).toBe("false");
+		expect(localStorage.getItem("ryu:expand-commands")).toBe("true");
+		expect(localStorage.getItem("ryu:inference-stats")).toBe("true");
+		expect(readBotTerminology()).toBe(false);
 	});
 });

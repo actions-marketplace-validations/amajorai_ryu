@@ -8,6 +8,7 @@ import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -23,9 +24,9 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select";
 import { toast } from "@ryu/ui/components/sileo";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
 import { Textarea } from "@ryu/ui/components/textarea";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import {
 	type ChangeEvent,
 	type FormEvent,
@@ -134,7 +135,7 @@ const BUDGET_ITEMS = [
 	},
 	...CONTEXT_PRESETS.map((n) => ({
 		value: String(n),
-		label: `${n.toLocaleString()} tokens`,
+		label: `${formatNumber(n)} tokens`,
 	})),
 	{ value: BUDGET_CUSTOM, label: "Custom…" },
 ];
@@ -354,7 +355,7 @@ function ContextWindowSection({ target }: { target: ApiTarget }) {
 							value={customText}
 						/>
 						<p className="text-muted-foreground text-xs">
-							Minimum {CONTEXT_MIN_BUDGET_TOKENS.toLocaleString()}. Below that
+							Minimum {formatNumber(CONTEXT_MIN_BUDGET_TOKENS)}. Below that
 							there is no room left for history and every turn would be sent
 							with just your last message.
 						</p>
@@ -380,7 +381,7 @@ function ContextWindowSection({ target }: { target: ApiTarget }) {
 						Held back from the budget so the answer has room.{" "}
 						{historyCeiling === null
 							? "Applies once a budget is set."
-							: `Leaves at most ${historyCeiling.toLocaleString()} tokens for history, less once your system prompt, recalled memory and skills are counted.`}
+							: `Leaves at most ${formatNumber(historyCeiling)} tokens for history, less once your system prompt, recalled memory and skills are counted.`}
 					</p>
 				</div>
 
@@ -448,7 +449,7 @@ function ToolRankerSection({ target }: { target: ApiTarget }) {
 	}, [target]);
 
 	const handleChange = useCallback(
-		(value: ToolRankerId | null) => {
+		(value: string) => {
 			// Mirrors Core's `ToolRanker::from_pref`: only the exact "semantic"
 			// selects semantic ranking, so a cleared selection means BM25 — the
 			// same thing an unset preference means.
@@ -578,7 +579,7 @@ export function MemoryTab() {
 	}, [target, topKSaved, topKText]);
 
 	// Skills disclosure: progressive (default) injects only an L1 skill index and
-	// loads full bodies on demand via the `skills__load` tool, saving context on
+	// loads full bodies on demand via the `skills.load` tool, saving context on
 	// low-context models; full injects every enabled skill body each turn.
 	const [skillsProgressive, setSkillsProgressiveState] =
 		useState<boolean>(true);
@@ -775,10 +776,8 @@ export function MemoryTab() {
 							placeholder="What do you want to recall?"
 							value={query}
 						/>
-						<Button disabled={searching || !query.trim()} type="submit">
-							{searching ? (
-								<Spinner />
-							) : (
+						<Button disabled={!query.trim()} loading={searching} type="submit">
+							{!searching && (
 								<HugeiconsIcon className="size-4" icon={Search01Icon} />
 							)}
 							Search
@@ -800,6 +799,11 @@ export function MemoryTab() {
 									Nothing in memory or Spaces matched that query yet.
 								</EmptyDescription>
 							</EmptyHeader>
+							<EmptyContent>
+								<Button onClick={() => setQuery("")} size="sm" variant="ghost">
+									Clear search
+								</Button>
+							</EmptyContent>
 						</Empty>
 					) : null}
 
@@ -853,10 +857,12 @@ export function MemoryTab() {
 							<p className="text-destructive text-sm">{indexError}</p>
 						) : null}
 						<div className="flex justify-end">
-							<Button disabled={indexing || !indexContent.trim()} type="submit">
-								{indexing ? (
-									<Spinner />
-								) : (
+							<Button
+								disabled={!indexContent.trim()}
+								loading={indexing}
+								type="submit"
+							>
+								{!indexing && (
 									<HugeiconsIcon className="size-4" icon={Add01Icon} />
 								)}
 								Add to memory

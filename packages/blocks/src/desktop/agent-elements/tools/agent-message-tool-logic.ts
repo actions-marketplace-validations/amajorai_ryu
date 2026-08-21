@@ -5,11 +5,16 @@ export interface AgentMessageToolPart {
 	output?: unknown;
 	result?: unknown;
 	state?: string;
+	toolName?: string;
 	type?: string;
 }
 
+export type AgentMessageKind = "ask" | "send";
+
 export interface AgentMessagePayload {
 	from?: string;
+	kind: AgentMessageKind;
+	reply?: string;
 	text: string;
 	to: string;
 }
@@ -36,28 +41,49 @@ export function isAgentMessageToolPart(
 	toolName?: string
 ): boolean {
 	return (
-		toolName === "agents__send" ||
-		partType === "tool-agents__send" ||
-		partType.endsWith("__agents__send")
+		toolName === "agents.send" ||
+		toolName === "agents.ask" ||
+		partType === "tool-agents.send" ||
+		partType === "tool-agents.ask" ||
+		partType.endsWith(".agents.send") ||
+		partType.endsWith(".agents.ask")
 	);
 }
 
-/** Read the send arguments and the host-derived sender from a tool part. */
+function messageKind(part: AgentMessageToolPart): AgentMessageKind {
+	const type = part.type ?? "";
+	return part.toolName === "agents.ask" ||
+		type === "tool-agents.ask" ||
+		type.endsWith(".agents.ask")
+		? "ask"
+		: "send";
+}
+
+/** Read send/ask arguments and the host-derived sender from a tool part. */
 export function readAgentMessagePayload(
 	part: AgentMessageToolPart
 ): AgentMessagePayload | null {
+	const kind = messageKind(part);
 	const input = unwrapMcpOutput(part.input);
 	const inputRecord = isRecord(input) ? input : null;
 	const output = readAgentMessageOutput(part);
 	const outputRecord = isRecord(output) ? output : null;
 	const to = readString(inputRecord, "to") ?? readString(outputRecord, "to");
 	const text =
-		readString(inputRecord, "text") ?? readString(outputRecord, "text");
-	if (!to || !text) {
+		(kind === "ask"
+			? (readString(inputRecord, "question") ??
+				readString(outputRecord, "question"))
+			: (readString(inputRecord, "text") ??
+				readString(outputRecord, "text"))) ??
+		readString(inputRecord, "text") ??
+		readString(outputRecord, "text");
+	if (!(to && text)) {
 		return null;
 	}
 	return {
 		from: readString(outputRecord, "from"),
+		kind,
+		reply: kind === "ask" ? readString(outputRecord, "reply") : undefined,
 		text,
 		to,
 	};

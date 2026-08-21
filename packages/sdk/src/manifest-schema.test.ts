@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	CompanionSurfaceSchema,
+	ChatWidgetTemplateSchema,
 	labelImpersonatesSystemChrome,
 	PluginManifestSchema,
 	RunnableMetaSchema,
@@ -21,6 +22,34 @@ function baseManifest(overrides: Record<string, unknown> = {}) {
 		...overrides,
 	};
 }
+
+test("chat widget templates keep host rendering data-only and forward compatible", () => {
+	const available = ChatWidgetTemplateSchema.safeParse({
+		id: "meetings.chat",
+		title: "Meetings widget",
+		triggers: ["meetings widget"],
+		examples: ["Show my meetings"],
+		backing: { view_id: "surface:meetings" },
+		display_mode: "inline",
+		safe_action_ids: ["refresh"],
+	}).success;
+	const comingSoon = ChatWidgetTemplateSchema.safeParse({
+		id: "future.chat",
+		title: "Future widget",
+		backing: {},
+		display_mode: "compact-future-mode",
+		availability: "coming-soon",
+	}).success;
+	const unsafe = ChatWidgetTemplateSchema.safeParse({
+		id: "future/chat",
+		title: "Unsafe",
+		backing: { tool_id: "future.render" },
+		display_mode: "inline",
+	}).success;
+	expect(available).toBe(true);
+	expect(comingSoon).toBe(true);
+	expect(unsafe).toBe(false);
+});
 
 // ── semver regex ──────────────────────────────────────────────────────────────
 
@@ -171,7 +200,7 @@ describe("RunnableMetaSchema", () => {
 			id: "x",
 			name: "X",
 			kind: "tool",
-			config: { widget: true, slug: "x__render" },
+			config: { widget: true, slug: "x.render" },
 		});
 		expect(parsed.success).toBe(true);
 		if (!parsed.success) {

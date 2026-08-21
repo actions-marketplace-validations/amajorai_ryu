@@ -15,7 +15,6 @@
 
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { useState } from "react";
 import {
 	TrayRow,
@@ -67,8 +66,7 @@ function CompactUpdateRow({
 	return (
 		<TrayRow
 			actions={
-				<Button disabled={applying} onClick={onApply} size="xs">
-					{applying ? <Spinner className="size-3" /> : null}
+				<Button loading={applying} onClick={onApply} size="xs">
 					Update
 				</Button>
 			}
@@ -110,11 +108,10 @@ function PageUpdateRow({
 			</div>
 			<Button
 				className="shrink-0"
-				disabled={applying}
+				loading={applying}
 				onClick={onApply}
 				size="sm"
 			>
-				{applying ? <Spinner className="size-4" /> : null}
 				Update
 			</Button>
 		</div>
@@ -196,8 +193,7 @@ export function AvailableUpdates({ compact = false }: { compact?: boolean }) {
 						Newer versions of installed agents, engines, tools, and plugins.
 					</span>
 				</div>
-				<Button disabled={updatingAll} onClick={startAll} size="sm">
-					{updatingAll ? <Spinner className="size-4" /> : null}
+				<Button loading={updatingAll} onClick={startAll} size="sm">
 					Update all
 				</Button>
 			</div>

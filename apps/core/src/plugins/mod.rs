@@ -714,6 +714,7 @@ mod tests {
         let verified = isolation::PluginProvenance {
             source_id: Some(isolation::OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
             org_verified: true,
+            signature_verified: true,
             ..isolation::PluginProvenance::default()
         };
         s.insert_with_provenance("com.acme.app", "1.0.0", Some(&verified))
@@ -724,6 +725,7 @@ mod tests {
         let revoked = isolation::PluginProvenance {
             source_id: Some(isolation::OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
             org_verified: false,
+            signature_verified: true,
             ..isolation::PluginProvenance::default()
         };
         let updated = s

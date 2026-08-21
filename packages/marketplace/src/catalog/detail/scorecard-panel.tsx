@@ -20,7 +20,11 @@ import {
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
+import { Button } from "@ryu/ui/components/button.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
+import type { ReactNode } from "react";
+import { useState } from "react";
+import type { CatalogScanResult } from "../host.tsx";
 import {
 	CATEGORY_DESCRIPTIONS,
 	CATEGORY_LABELS,
@@ -145,8 +149,40 @@ function CheckRow({ check }: { check: ScorecardCheck }) {
 }
 
 /** The Health tab: the score, then every check grouped by family. */
-export function ScorecardPanel({ scorecard }: { scorecard: Scorecard }) {
+export function ScorecardPanel({
+	agentScan,
+	developerDoctor,
+	developerCommand,
+	scorecard,
+}: {
+	agentScan?: () => Promise<CatalogScanResult>;
+	developerCommand?: string;
+	developerDoctor?: ReactNode;
+	scorecard: Scorecard;
+}) {
 	const unknownCount = scorecard.checks.length - scorecard.evaluated;
+	const [scanError, setScanError] = useState<string | null>(null);
+	const [scanResult, setScanResult] = useState<CatalogScanResult | null>(null);
+	const [scanning, setScanning] = useState(false);
+
+	const runAgentScan = async () => {
+		if (!agentScan || scanning) {
+			return;
+		}
+		setScanError(null);
+		setScanning(true);
+		try {
+			setScanResult(await agentScan());
+		} catch (error) {
+			setScanResult(null);
+			setScanError(
+				error instanceof Error ? error.message : "The agent scan failed."
+			);
+		} finally {
+			setScanning(false);
+		}
+	};
+
 	return (
 		<div className="flex flex-col gap-6">
 			<section className="flex items-start gap-4 rounded-lg bg-muted p-4">
@@ -164,7 +200,23 @@ export function ScorecardPanel({ scorecard }: { scorecard: Scorecard }) {
 					</span>
 				</div>
 				<div className="min-w-0 flex-1">
-					<h3 className="font-medium text-sm">Automated checks</h3>
+					<div className="flex flex-wrap items-center justify-between gap-2">
+						<h3 className="font-medium text-sm">Automated checks</h3>
+						{agentScan ? (
+							<Button
+								data-testid="catalog-scan-button"
+								disabled={scanning}
+								loading={scanning}
+								onClick={() => {
+									void runAgentScan();
+								}}
+								size="sm"
+								variant="outline"
+							>
+								{scanning ? "Scanning…" : "Scan with agent"}
+							</Button>
+						) : null}
+					</div>
 					<p className="text-muted-foreground text-sm leading-relaxed">
 						{scorecard.summary}
 					</p>
@@ -175,8 +227,48 @@ export function ScorecardPanel({ scorecard }: { scorecard: Scorecard }) {
 							? `, ${unknownCount} not answerable from this source (excluded).`
 							: "."}
 					</p>
+					<p
+						className="mt-1 text-[11px] text-muted-foreground"
+						data-scorecard-ruleset={scorecard.rulesetVersion}
+					>
+						Catalog ruleset {scorecard.rulesetVersion}
+					</p>
 				</div>
 			</section>
+
+			{scanError ? (
+				<section
+					className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-destructive text-sm"
+					data-testid="catalog-scan-error"
+				>
+					Agent scan failed: {scanError}
+				</section>
+			) : null}
+			{scanResult ? (
+				<section
+					className="flex flex-col gap-2 rounded-lg border border-primary/25 bg-primary/5 p-4"
+					data-testid="catalog-scan-result"
+				>
+					<div className="flex flex-wrap items-center justify-between gap-2">
+						<h3 className="font-medium text-sm">Agent review</h3>
+						<Badge
+							variant={
+								scanResult.status === "complete" ? "secondary" : "outline"
+							}
+						>
+							{scanResult.status === "complete" ? "Complete" : "Partial"}
+						</Badge>
+					</div>
+					<p className="text-muted-foreground text-xs">
+						Reviewed by{" "}
+						<span className="font-medium">{scanResult.agentId}</span>. The
+						deterministic score above remains the source of the grade.
+					</p>
+					<p className="whitespace-pre-wrap text-sm leading-relaxed">
+						{scanResult.report || "The agent returned no narrative report."}
+					</p>
+				</section>
+			) : null}
 
 			{scorecard.categories.map((category) => {
 				const checks = scorecard.checks.filter(
@@ -205,6 +297,29 @@ export function ScorecardPanel({ scorecard }: { scorecard: Scorecard }) {
 					</section>
 				);
 			})}
+
+			{developerDoctor ??
+				(developerCommand ? (
+					<section
+						className="flex flex-col gap-2 rounded-lg border border-primary/25 bg-primary/5 p-4"
+						data-scorecard-runtime-doctor="true"
+					>
+						<h3 className="font-medium text-sm">Developer runtime doctor</h3>
+						<p className="text-muted-foreground text-xs leading-relaxed">
+							This marketplace score is a read-only catalog scan. After
+							installing, run the Core loader doctor to validate the actual
+							manifest, lifecycle state, dependencies, permissions, and
+							contribution shape.
+						</p>
+						<code className="rounded-md bg-background px-3 py-2 font-mono text-xs">
+							{developerCommand}
+						</code>
+						<p className="text-muted-foreground text-xs leading-relaxed">
+							The runtime doctor is also lint-only: it does not execute plugin
+							code, start sidecars, or change settings.
+						</p>
+					</section>
+				) : null)}
 
 			<p className="text-muted-foreground text-xs leading-relaxed">
 				These checks are automated and read only what the listing publishes.

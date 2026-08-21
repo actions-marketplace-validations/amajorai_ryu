@@ -5,7 +5,7 @@
 // `return` is correct.
 //
 // WHY A REDACTION HOOK EXISTS AT ALL.
-// `agents__directory` is a declarative HTTP tool onto Core's own `GET /api/agents`,
+// `agents.directory` is a declarative HTTP tool onto Core's own `GET /api/agents`,
 // and that response carries each custom agent's `system_prompt`. Handing it to the
 // model would push every other agent's instructions into this agent's context on a
 // call whose entire purpose is "who is on this node" — noise at best, and at worst
@@ -16,7 +16,7 @@
 // Gated by `match.tools` in the manifest, so an unrelated tool call does not spawn
 // this sandbox.
 
-const TOOL_ID = "agents__directory";
+const TOOL_ID = "agents.directory";
 const MAX_DESCRIPTION = 400;
 
 if (String(ctx.tool_name ?? "") !== TOOL_ID) {
@@ -72,6 +72,6 @@ return {
 		ok: true,
 		agents: rows.filter((r) => r.id !== ""),
 		count: rows.filter((r) => r.id !== "").length,
-		hint: "Message one with agents__send (leaves a message, no waiting) or agents__ask (runs it now and returns its answer).",
+		hint: "Message one with agents.send; delivery happens at the recipient's next turn.",
 	},
 };

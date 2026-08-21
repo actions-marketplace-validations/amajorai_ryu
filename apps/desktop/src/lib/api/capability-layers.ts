@@ -81,7 +81,7 @@ export interface CapabilityProvider {
 	 * tells the user something false.
 	 */
 	target: ProviderTarget | null;
-	/** The facade verb ids this provider can serve (`web__search`, …). */
+	/** The facade verb ids this provider can serve (`web.search`, …). */
 	verbs: string[];
 	/** The capability version it serves. */
 	version: string;

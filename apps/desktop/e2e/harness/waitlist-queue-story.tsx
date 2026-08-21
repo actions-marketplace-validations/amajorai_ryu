@@ -37,11 +37,13 @@ function Column({ dark, label }: { dark: boolean; label: string }) {
 				onBack={() => undefined}
 				onChangeHandle={setHandle}
 				onCopyReferral={() => undefined}
+				onLifetimeAccess={() => undefined}
 				onRefresh={() => undefined}
 				onReserve={() => setReserved(handle.toLowerCase())}
 				onShare={() => undefined}
 				onSignOut={() => undefined}
 				onUnreserve={() => setReserved(null)}
+				onUpgrade={() => undefined}
 				position={642}
 				referralCount={7}
 				referralUrl="https://ryuhq.com/r/ABCD2345"

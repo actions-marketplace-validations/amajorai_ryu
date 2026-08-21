@@ -102,6 +102,11 @@ impl AgentRunner {
         text: String,
         model: Option<String>,
     ) -> anyhow::Result<String> {
+        crate::agent_execution::ensure_noninteractive_run_allowed(
+            &self.agent_store,
+            agent_id.as_deref(),
+        )
+        .await?;
         run_text_turn(
             conversation_id,
             agent_id,
@@ -134,6 +139,11 @@ impl AgentRunner {
         text: String,
         max_tokens: u32,
     ) -> anyhow::Result<String> {
+        crate::agent_execution::ensure_noninteractive_run_allowed(
+            &self.agent_store,
+            agent_id.as_deref(),
+        )
+        .await?;
         run_text_turn(
             conversation_id,
             agent_id,
@@ -173,6 +183,11 @@ impl AgentRunner {
         cwd: Option<String>,
         isolate: bool,
     ) -> anyhow::Result<String> {
+        crate::agent_execution::ensure_noninteractive_run_allowed(
+            &self.agent_store,
+            agent_id.as_deref(),
+        )
+        .await?;
         crate::sidecar::adapters::run_text_turn_in(
             conversation_id,
             agent_id,

@@ -102,6 +102,31 @@ describe("hasVisibleContentAtNoDetail", () => {
 		).toBe(false);
 	});
 
+	it("keeps a completed end-of-turn result card visible", () => {
+		expect(
+			hasVisibleContentAtNoDetail([
+				{
+					input: {
+						file_path: "src/result.ts",
+						new_string: "ready",
+						old_string: "draft",
+					},
+					type: "tool-Edit",
+				},
+				{
+					input: {
+						placement: "turn-end",
+						spec: {
+							elements: {},
+							root: "result",
+						},
+					},
+					type: "tool-ui.render",
+				},
+			])
+		).toBe(true);
+	});
+
 	it("is false for a turn whose only text is empty", () => {
 		expect(
 			hasVisibleContentAtNoDetail([

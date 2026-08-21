@@ -120,6 +120,45 @@ fn read_credentials() -> Option<String> {
     }
 }
 
+/// Translate Pi's managed OAuth entry into the Claude CLI credential shape the
+/// rest of this reader already understands. Pi stores expiry in unix seconds;
+/// Claude's usage credential uses epoch milliseconds.
+fn ryu_credentials_from_auth(root: &serde_json::Value) -> Option<String> {
+    let entry = root.get("anthropic")?;
+    let access = entry
+        .get("access")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| entry.get("accessToken").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())?;
+    let expiry = ["expires_at", "expires", "expiresAt"]
+        .iter()
+        .find_map(|key| entry.get(*key).and_then(serde_json::Value::as_f64))
+        .map(|value| {
+            if value < 100_000_000_000.0 {
+                value * 1000.0
+            } else {
+                value
+            }
+        });
+    let oauth = serde_json::json!({
+        "accessToken": access,
+        "expiresAt": expiry,
+        "subscriptionType": entry.get("subscriptionType").cloned(),
+        "rateLimitTier": entry.get("rateLimitTier").cloned(),
+        "scopes": entry.get("scopes").cloned(),
+    });
+    Some(serde_json::json!({ "claudeAiOauth": oauth }).to_string())
+}
+
+/// Read the managed Pi auth entry for the Ryu Claude subscription provider.
+fn read_ryu_credentials() -> Option<String> {
+    let path = super::host()?.ryu_pi_auth_path()?;
+    let text = read_file(&path)?;
+    let root = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    ryu_credentials_from_auth(&root)
+}
+
 /// macOS stores the `claude` CLI OAuth blob as a login-Keychain generic
 /// password (service `Claude Code-credentials`), not on disk. Shell out to the
 /// signed `security` tool to read the same JSON payload. Runs off the async
@@ -148,12 +187,20 @@ fn read_keychain() -> Option<String> {
 }
 
 pub(super) async fn fetch(agent_id: &str) -> UsageSnapshot {
+    fetch_from_credentials(agent_id, read_credentials).await
+}
+
+pub(super) async fn fetch_ryu(agent_id: &str) -> UsageSnapshot {
+    fetch_from_credentials(agent_id, read_ryu_credentials).await
+}
+
+async fn fetch_from_credentials(agent_id: &str, reader: fn() -> Option<String>) -> UsageSnapshot {
     let unavailable =
         |reason: UsageUnavailable| UsageSnapshot::unavailable(agent_id, "claude", reason);
 
     // Off the async worker: the macOS Keychain fallback can block on an
     // authorization dialog, and the file read is sync IO either way.
-    let text = match tokio::task::spawn_blocking(read_credentials).await {
+    let text = match tokio::task::spawn_blocking(reader).await {
         Ok(Some(text)) => text,
         Ok(None) => return unavailable(UsageUnavailable::NotLoggedIn),
         Err(_) => return unavailable(UsageUnavailable::Error),
@@ -795,5 +842,22 @@ mod tests {
         )
         .unwrap();
         assert!(!format!("{parsed:?}").is_empty());
+    }
+
+    #[test]
+    fn ryu_auth_entry_maps_to_claude_credentials() {
+        let root = serde_json::json!({
+            "anthropic": {
+                "type": "oauth",
+                "access": "pi-access",
+                "refresh": "pi-refresh",
+                "expires_at": 1_800_000_000_u64,
+            }
+        });
+        let text = ryu_credentials_from_auth(&root).expect("oauth entry");
+        let parsed: CredentialsFile = serde_json::from_str(&text).expect("claude shape");
+        let oauth = parsed.oauth.expect("oauth payload");
+        assert_eq!(oauth.access_token.as_deref(), Some("pi-access"));
+        assert_eq!(oauth.expires_at, Some(1_800_000_000_000.0));
     }
 }

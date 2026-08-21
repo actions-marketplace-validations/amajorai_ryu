@@ -191,7 +191,7 @@ export function DictationSettings() {
 								</SelectContent>
 							</Select>
 						}
-						description="Speech-to-text engine used for dictation."
+						description="Voice Recognition engine used for dictation."
 						title="Engine"
 					/>
 					<SettingsItem
@@ -293,28 +293,26 @@ export function DictationSettings() {
 						title="Clean up with a model"
 					/>
 					{prefs.postProcess.enabled ? (
-						<>
-							<SettingsItem
-								description="Pick an agent (uses its tools/Spaces) or a model for one-shot cleanup. Empty = fast local default."
-								title="Cleanup agent or model"
-							>
-								<AgentSelectionField
-									ariaLabel="Dictation cleanup agent or model"
-									onChange={(selection) =>
-										writePrefs({
-											...prefs,
-											postProcess: {
-												...prefs.postProcess,
-												selection,
-											},
-										})
-									}
-									placeholder="Default local model"
-									target={activeTarget()}
-									value={prefs.postProcess.selection}
-								/>
-							</SettingsItem>
-						</>
+						<SettingsItem
+							description="Pick an agent (uses its tools/Spaces) or a model for one-shot cleanup. Empty = fast local default."
+							title="Cleanup agent or model"
+						>
+							<AgentSelectionField
+								ariaLabel="Dictation cleanup agent or model"
+								onChange={(selection) =>
+									writePrefs({
+										...prefs,
+										postProcess: {
+											...prefs.postProcess,
+											selection,
+										},
+									})
+								}
+								placeholder="Default local model"
+								target={activeTarget()}
+								value={prefs.postProcess.selection}
+							/>
+						</SettingsItem>
 					) : null}
 				</SettingsGroup>
 				{/* Outside the group on purpose: a prompt is a tall text block, so it

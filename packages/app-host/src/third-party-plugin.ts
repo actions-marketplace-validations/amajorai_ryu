@@ -177,6 +177,16 @@ export function thirdPartyPluginSrcdoc(
       }
       var plugin = {
         host: {
+          capabilities: function () { return call("host.capabilities", []); },
+          native: {
+            haptics: function (a) { return call("native.haptics", [a || {}]); },
+            notifications: {
+              create: function (a) { return call("native.notifications.create", [a || {}]); }
+            },
+            liveActivities: {
+              update: function (a) { return call("native.liveActivities.update", [a || {}]); }
+            }
+          },
           // Projected {id,name}[] — the host never returns a secret (invariant #5).
           listAgents: function () { return call("core.listAgents", []); },
           // App host-bridge capabilities. Each is an RPC over the gated port; the host
@@ -252,6 +262,18 @@ export function thirdPartyPluginSrcdoc(
     // ADOPT this host-installed bridge instead of stranding calls in a port-less outbox.
     function installWindowRyu() {
       var ryu = {
+        host: {
+          capabilities: function () { return call("host.capabilities", []); },
+          native: {
+            haptics: function (a) { return call("native.haptics", [a || {}]); },
+            notifications: {
+              create: function (a) { return call("native.notifications.create", [a || {}]); }
+            },
+            liveActivities: {
+              update: function (a) { return call("native.liveActivities.update", [a || {}]); }
+            }
+          }
+        },
         listAgents: function () { return call("core.listAgents", []); },
         model: {
           complete: function (args) { return call("model.complete", [args || {}]); }
@@ -403,6 +425,49 @@ export function thirdPartyPluginSrcdoc(
         // from this companion's owning plugin id; the frame supplies no host/id.
         app: {
           request: function (a) { return call("app.request", [a || {}]); }
+        },
+        // Generic application-room realtime (grant app:realtime). The trusted
+        // host owns the node target/token and returns only opaque connection
+        // metadata; this namespace never receives a URL or credential.
+        tokenTable: {
+          connect: function (a, opts) {
+            a = a || {}; opts = opts || {};
+            return call("realtime.connect", [{ room_id: a.roomId }]).then(function (info) {
+              var stream = callStream("realtime.subscribe", [{ connection_id: info.connection_id }], function (raw) {
+                var push;
+                try { push = JSON.parse(raw); } catch (_) { return; }
+                if (push && push.type === "event" && typeof opts.onEvent === "function") {
+                  opts.onEvent({ name: push.name, data: push.data });
+                } else if (push && push.type === "presence" && typeof opts.onPresence === "function") {
+                  opts.onPresence({ data: push.data });
+                } else if (push && push.type === "close" && typeof opts.onClose === "function") {
+                  opts.onClose({ code: push.code, reason: push.reason });
+                }
+              });
+              stream.promise.catch(function (error) {
+                if (typeof opts.onError === "function") opts.onError(error);
+              });
+              var closed = false;
+              return {
+                access: info.access,
+                memberId: info.member_id,
+                presence: info.presence,
+                roomId: info.room_id,
+                publish: function (name, data) {
+                  return call("realtime.publish", [{ connection_id: info.connection_id, event: name, data: data }]);
+                },
+                publishPresence: function (data) {
+                  return call("realtime.presence", [{ connection_id: info.connection_id, data: data }]);
+                },
+                close: function () {
+                  if (closed) return Promise.resolve();
+                  closed = true;
+                  stream.cancel();
+                  return call("realtime.close", [{ connection_id: info.connection_id }]);
+                }
+              };
+            });
+          }
         },
         // Host-vetted browser navigation. ui.openExternal accepts only http(s)
         // and is a local host capability, so the sandbox never opens URLs itself.
@@ -702,12 +767,14 @@ function htmlCompanionHeadFragment(
 	mountContextLiteral: string,
 	cspString: string
 ): string {
+	const themeAliases = JSON.stringify(COMPANION_THEME_ALIASES);
 	return `<meta http-equiv="Content-Security-Policy" content="${cspString}" />
 <script>
   (function () {
     var NONCE = ${nonceLiteral};
     var PLUGIN_ID = ${pluginIdLiteral};
     var MOUNT_CONTEXT = ${mountContextLiteral};
+    var THEME_ALIASES = ${themeAliases};
     var port = null;
     var nextId = 1;
     var pending = {};
@@ -736,6 +803,27 @@ function htmlCompanionHeadFragment(
         if (port) port.postMessage(c); else outbox.push(c);
       }
       return { promise: promise, cancel: cancel };
+    }
+
+    // The host owns the active theme. Apply the canonical tokens plus the small
+    // legacy alias set used by older self-contained companions so every app can
+    // follow custom Ryu themes without importing the shell's CSS bundle.
+    function applyThemeTokens(tokens) {
+      if (!tokens || typeof tokens !== "object") return;
+      var root = document.documentElement;
+      Object.keys(tokens).forEach(function (name) {
+        var value = tokens[name];
+        if (/^--[a-z0-9-]+$/.test(name) && typeof value === "string" && value.length > 0 && !/[{}<>;]/.test(value)) {
+          root.style.setProperty(name, value);
+        }
+      });
+      Object.keys(THEME_ALIASES).forEach(function (alias) {
+        var source = THEME_ALIASES[alias];
+        var value = tokens[source];
+        if (typeof value === "string" && value.length > 0 && !/[{}<>;]/.test(value)) {
+          root.style.setProperty(alias, value);
+        }
+      });
     }
 
     function onPortMessage(ev) {
@@ -893,11 +981,14 @@ function htmlCompanionHeadFragment(
         recordStatus: function () { return call("ghost.recordStatus", []); },
         recordStop: function () { return call("ghost.recordStop", []); }
       },
-      // Inbound webhook registry (needs grant webhooks:crud). The @ryu/webhooks
-      // companion renders Core's read-only /api/webhooks + /api/webhook-ingress/status.
+      // Inbound webhook registry + protected secret management (needs grant
+      // webhooks:crud). Secret values are explicit get/set calls, not part of the
+      // metadata list response.
       webhooks: {
         list: function () { return call("webhooks.list", []); },
-        ingressStatus: function () { return call("webhooks.ingressStatus", []); }
+        ingressStatus: function () { return call("webhooks.ingressStatus", []); },
+        getSecret: function (id) { return call("webhooks.secretGet", [{ id: id }]); },
+        setSecret: function (input) { return call("webhooks.secretSet", [input]); }
       },
       // Quests (needs grant quests:crud). The @ryu/quests companion drives Core's
       // /api/quests/* auto-detecting-todo orchestration; the host calls that API
@@ -1013,6 +1104,48 @@ function htmlCompanionHeadFragment(
       app: {
         request: function (a) { return call("app.request", [a || {}]); }
       },
+      // Generic application-room realtime (grant app:realtime). Kept in sync
+      // with the Path A bridge; credentials remain in the trusted host.
+      tokenTable: {
+        connect: function (a, opts) {
+          a = a || {}; opts = opts || {};
+          return call("realtime.connect", [{ room_id: a.roomId }]).then(function (info) {
+            var stream = callStream("realtime.subscribe", [{ connection_id: info.connection_id }], function (raw) {
+              var push;
+              try { push = JSON.parse(raw); } catch (_) { return; }
+              if (push && push.type === "event" && typeof opts.onEvent === "function") {
+                opts.onEvent({ name: push.name, data: push.data });
+              } else if (push && push.type === "presence" && typeof opts.onPresence === "function") {
+                opts.onPresence({ data: push.data });
+              } else if (push && push.type === "close" && typeof opts.onClose === "function") {
+                opts.onClose({ code: push.code, reason: push.reason });
+              }
+            });
+            stream.promise.catch(function (error) {
+              if (typeof opts.onError === "function") opts.onError(error);
+            });
+            var closed = false;
+            return {
+              access: info.access,
+              memberId: info.member_id,
+              presence: info.presence,
+              roomId: info.room_id,
+              publish: function (name, data) {
+                return call("realtime.publish", [{ connection_id: info.connection_id, event: name, data: data }]);
+              },
+              publishPresence: function (data) {
+                return call("realtime.presence", [{ connection_id: info.connection_id, data: data }]);
+              },
+              close: function () {
+                if (closed) return Promise.resolve();
+                closed = true;
+                stream.cancel();
+                return call("realtime.close", [{ connection_id: info.connection_id }]);
+              }
+            };
+          });
+        }
+      },
       // Host-vetted browser navigation. Kept in step with the Path A bridge.
       ui: {
         openExternal: function (a) { return call("ui.openExternal", [a || {}]); }
@@ -1108,13 +1241,17 @@ function htmlCompanionHeadFragment(
       // the live theme / palette commands / node event stream. openTab is unary; the
       // subscribe/register verbs stream host→frame and return { dispose } (cancel on
       // unmount is automatic via the host's activeStreams; dispose is for early release).
-      shell: {
-        openTab: function (a) { return call("shell.openTab", [a || {}]); },
-        subscribeTheme: function (opts) {
-          opts = opts || {};
-          var h = callStream("shell.themeSubscribe", [{}], function (d) {
-            if (opts.onChange) { try { opts.onChange(JSON.parse(d)); } catch (e) {} }
-          });
+        shell: {
+          openTab: function (a) { return call("shell.openTab", [a || {}]); },
+          subscribeTheme: function (opts) {
+            opts = opts || {};
+            var h = callStream("shell.themeSubscribe", [{}], function (d) {
+              try {
+                var tokens = JSON.parse(d);
+                applyThemeTokens(tokens);
+                if (opts.onChange) opts.onChange(tokens);
+              } catch (e) {}
+            });
           h.promise.catch(function () {});
           return { dispose: h.cancel };
         },
@@ -1167,6 +1304,15 @@ function htmlCompanionHeadFragment(
       window.__ryuHostBridge = true;
     } catch (e) { /* frame globals writable in sandbox; ignore if not */ }
 
+    // Theme updates are host-owned and do not require the companion to request
+    // shell integration. The parent sends this message after the frame mounts,
+    // while the srcdoc style below still provides the first-paint snapshot.
+    window.addEventListener("message", function (ev) {
+      var msg = ev.data;
+      if (ev.source !== window.parent || !msg || msg.kind !== "ryu-plugin-theme" || msg.nonce !== NONCE) return;
+      applyThemeTokens(msg.tokens);
+    });
+
     // Accept the port ONLY from the host message carrying our nonce, once.
     window.addEventListener("message", function (ev) {
       var msg = ev.data;
@@ -1188,6 +1334,52 @@ ${handshakeAnnounceScript()}
   })();
 </script>`;
 }
+
+/**
+ * Compatibility aliases for self-contained companions that predate the shared
+ * semantic token names. New UI should use the canonical names directly; the
+ * aliases keep shipped app bundles in the active Ryu theme until they are
+ * rebuilt.
+ */
+const COMPANION_THEME_ALIASES = {
+	"--bg": "--background",
+	"--fg": "--foreground",
+	"--text": "--foreground",
+	"--ink": "--foreground",
+	"--panel": "--card",
+	"--panel-2": "--muted",
+	"--raised": "--card",
+	"--glass": "--card",
+	"--line": "--border",
+	"--accent-fg": "--accent-foreground",
+	"--ok": "--success",
+	"--good": "--success",
+	"--warn": "--warning",
+	"--bad": "--destructive",
+	"--err": "--destructive",
+	"--danger": "--destructive",
+	"--cv-bg": "--background",
+	"--cv-card": "--card",
+	"--cv-border": "--border",
+	"--cv-fg": "--foreground",
+	"--cv-muted": "--muted-foreground",
+	"--cv-primary": "--primary",
+	"--cv-danger": "--destructive",
+	"--wb-bg": "--background",
+	"--wb-border": "--border",
+	"--wb-fg": "--foreground",
+	"--wb-muted": "--muted-foreground",
+	"--wb-accent": "--primary",
+	"--rf-paper": "--background",
+	"--rf-paper-deep": "--muted",
+	"--rf-ink": "--foreground",
+	"--rf-muted": "--muted-foreground",
+	"--rf-line": "--border",
+	"--rf-white": "--card",
+	"--rf-sage": "--secondary",
+	"--rf-moss": "--success",
+	"--rf-blue": "--primary",
+} as const;
 
 /** A CSS custom-property name is safe to emit only if it is exactly `--<kebab>`;
  *  everything else is dropped so the theme-token bridge can never inject a stray
@@ -1234,6 +1426,17 @@ export function buildThemeTokenStyle(
 			!THEME_TOKEN_VALUE_UNSAFE_RE.test(value)
 		) {
 			decls.push(`${name}: ${value.trim()};`);
+		}
+	}
+	for (const [alias, source] of Object.entries(COMPANION_THEME_ALIASES)) {
+		const value = themeTokens[source];
+		if (
+			!(alias in themeTokens) &&
+			typeof value === "string" &&
+			value.length > 0 &&
+			!THEME_TOKEN_VALUE_UNSAFE_RE.test(value)
+		) {
+			decls.push(`${alias}: ${value.trim()};`);
 		}
 	}
 	if (decls.length === 0) {

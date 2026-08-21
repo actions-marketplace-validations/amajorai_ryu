@@ -36,7 +36,7 @@ const agent = new Agent({
 		"expense emails, read the relevant ones, and return a concise list of " +
 		"expenses with amount, merchant, date, and a category.",
 	tools: {
-		gmailSearch: ryuTool("composio__GMAIL_SEARCH_EMAILS", {
+		gmailSearch: ryuTool("composio.GMAIL_SEARCH_EMAILS", {
 			description: "Search the user's Gmail messages",
 			parameters: {
 				type: "object",
@@ -50,7 +50,7 @@ const agent = new Agent({
 				required: ["query"],
 			},
 		}),
-		gmailGet: ryuTool("composio__GMAIL_GET_EMAIL", {
+		gmailGet: ryuTool("composio.GMAIL_GET_EMAIL", {
 			description: "Fetch a single Gmail message by id",
 		}),
 	},

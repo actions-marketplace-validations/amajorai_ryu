@@ -1,6 +1,6 @@
 import { Copy01Icon, Tick01Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
+import { MorphIconSwap } from "@ryu/ui/components/morph-icon";
 import { useState } from "react";
 import { sileo } from "sileo";
 import { TitleTooltip } from "@/src/components/layout/overflow-tooltip.tsx";
@@ -56,9 +56,11 @@ export function CopyableId({
 				size="icon"
 				variant="ghost"
 			>
-				<HugeiconsIcon
+				<MorphIconSwap
+					a={Copy01Icon}
+					b={Tick01Icon}
 					className="size-4"
-					icon={copied ? Tick01Icon : Copy01Icon}
+					state={copied ? "b" : "a"}
 				/>
 			</Button>
 		</div>

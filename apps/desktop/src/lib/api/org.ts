@@ -54,6 +54,8 @@ export const PERMISSIONS = [
 	"agent.view",
 	"agent.run",
 	"agent.edit",
+	"agent.delete",
+	"channel.delete",
 	"tool.exec",
 	"members.manage",
 	"roles.manage",

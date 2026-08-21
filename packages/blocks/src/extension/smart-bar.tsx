@@ -59,6 +59,8 @@ export interface SmartBarProps {
 	 * real `route()` engine rather than mocked.
 	 */
 	defaultValue?: string;
+	/** Match the desktop launchpad composer surface when embedded in a frame. */
+	embedded?: boolean;
 	/**
 	 * Side-effecting executor (navigate / open chat). Optional so the block
 	 * renders standalone; the live extension injects the browser `executeIntent`.
@@ -74,6 +76,7 @@ export interface SmartBarProps {
 export function SmartBar({
 	defaultValue = "",
 	autoFocus = false,
+	embedded = false,
 	onExecute,
 }: SmartBarProps) {
 	const [value, setValue] = useState(defaultValue);
@@ -112,12 +115,18 @@ export function SmartBar({
 
 	return (
 		<div className="w-full">
-			<div className="flex items-center gap-3 rounded-2xl border bg-card px-4 py-3 shadow-sm focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/30">
+			<div
+				className={
+					embedded
+						? "flex items-center gap-3 rounded-2xl bg-muted px-3 py-3 focus-within:ring-1 focus-within:ring-primary/30"
+						: "flex items-center gap-3 rounded-2xl border bg-card px-4 py-3 shadow-sm focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/30"
+				}
+			>
 				<ActiveIcon className="size-5 shrink-0 text-muted-foreground" />
 				<input
 					aria-label={PLACEHOLDER}
 					autoFocus={autoFocus}
-					className="flex-1 bg-transparent text-base outline-none placeholder:text-muted-foreground"
+					className="flex-1 bg-transparent text-[14px] leading-[1.6] outline-none placeholder:text-muted-foreground"
 					onChange={(e) => {
 						setValue(e.target.value);
 						setCycle(0);

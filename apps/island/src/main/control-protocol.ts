@@ -8,7 +8,25 @@
 // out of its HTTP server for exactly this reason.
 
 import type { IncomingMessage } from "node:http";
-import type { GhostCursorEvent } from "./ghost-cursor.ts";
+
+export type GhostCursorPhase =
+	| "move"
+	| "down"
+	| "up"
+	| "type"
+	| "scroll"
+	| "done";
+
+export interface GhostCursorEvent {
+	agent: string;
+	intent: string;
+	phase: GhostCursorPhase;
+	seq: number;
+	tool: string;
+	ts: number;
+	x: number;
+	y: number;
+}
 
 /** Base loopback port the desktop tray dials (kept distinct from Core/Shadow). */
 export const ISLAND_CONTROL_BASE_PORT = 7989;
@@ -49,7 +67,60 @@ export function isControlAction(value: unknown): value is ControlAction {
 	return typeof value === "string" && VALID_ACTIONS.has(value as ControlAction);
 }
 
-const GHOST_PHASES = new Set(["move", "down", "up", "type", "scroll", "done"]);
+const GHOST_PHASES = new Set<GhostCursorPhase>([
+	"move",
+	"down",
+	"up",
+	"type",
+	"scroll",
+	"done",
+]);
+
+const MAX_GHOST_INTENT_LENGTH = 72;
+
+/** Give older Ghost sidecars a useful label while they roll forward. */
+export function defaultGhostIntent(
+	phase: GhostCursorPhase,
+	tool: string
+): string {
+	if (tool === "ghost_click") {
+		return "Clicking";
+	}
+	if (tool === "ghost_type") {
+		return "Typing";
+	}
+	if (tool === "ghost_scroll") {
+		return "Scrolling";
+	}
+	if (tool === "ghost_drag") {
+		return "Dragging";
+	}
+	if (tool === "ghost_hover") {
+		return "Hovering";
+	}
+	if (tool === "ghost_long_press") {
+		return "Holding";
+	}
+	if (phase === "done") {
+		return "Done";
+	}
+	return "Working";
+}
+
+function normalizeGhostIntent(
+	value: unknown,
+	phase: GhostCursorPhase,
+	tool: string
+): string {
+	const intent = typeof value === "string" ? value.trim() : "";
+	if (!intent) {
+		return defaultGhostIntent(phase, tool);
+	}
+	if (intent.length <= MAX_GHOST_INTENT_LENGTH) {
+		return intent;
+	}
+	return `${intent.slice(0, MAX_GHOST_INTENT_LENGTH - 1).trimEnd()}…`;
+}
 
 /**
  * Validate a raw `/ghost-cursor` body into a {@link GhostCursorEvent}. The agent
@@ -70,20 +141,26 @@ export function parseGhostCursorEvent(
 		return null;
 	}
 	const e = parsed as Record<string, unknown>;
-	if (typeof e.phase !== "string" || !GHOST_PHASES.has(e.phase)) {
+	if (typeof e.phase !== "string") {
+		return null;
+	}
+	const phase = e.phase as GhostCursorPhase;
+	if (!GHOST_PHASES.has(phase)) {
 		return null;
 	}
 	if (typeof e.x !== "number" || typeof e.y !== "number") {
 		return null;
 	}
+	const tool = typeof e.tool === "string" ? e.tool : "";
 	return {
+		agent,
+		intent: normalizeGhostIntent(e.intent, phase, tool),
+		phase,
 		seq: typeof e.seq === "number" ? e.seq : 0,
-		phase: e.phase as GhostCursorEvent["phase"],
+		tool,
+		ts: typeof e.ts === "number" ? e.ts : 0,
 		x: e.x,
 		y: e.y,
-		tool: typeof e.tool === "string" ? e.tool : "",
-		ts: typeof e.ts === "number" ? e.ts : 0,
-		agent,
 	};
 }
 

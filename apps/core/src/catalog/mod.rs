@@ -61,6 +61,15 @@ impl CatalogManager {
         let install_states = install_status.get_all().await;
         let version_store = VersionStore::load();
 
+        self.get_catalog_from_parts(versions, install_states, &version_store)
+    }
+
+    fn get_catalog_from_parts(
+        &self,
+        versions: HashMap<String, String>,
+        install_states: HashMap<String, InstallState>,
+        version_store: &VersionStore,
+    ) -> Vec<CatalogItem> {
         static_registry()
             .into_iter()
             .map(|entry| {
@@ -80,7 +89,7 @@ impl CatalogManager {
                     InstallState::Installed { version, .. } => {
                         // Several install arms have no version to report and hand
                         // back a marker like "installed". Taking that literally made
-                        // the row read `installed → b9670` and claim an update
+                        // the row read `installed → b10218` and claim an update
                         // forever after a same-session install. `versions.json` is
                         // the durable record and holds the real tag, so prefer it
                         // whenever the in-session value isn't a version.
@@ -199,7 +208,11 @@ mod tests {
     async fn get_catalog_returns_all_entries() {
         let manager = CatalogManager::new();
         let store = InstallStatusStore::new();
-        let items = manager.get_catalog(&store).await;
+        let items = manager.get_catalog_from_parts(
+            manager.resolve_versions().await,
+            store.get_all().await,
+            &VersionStore::default(),
+        );
         // get_catalog is a 1:1 map of the static registry (no filtering), so the
         // counts must stay in lock-step — assert against the registry length
         // rather than a magic number that drifts when entries are added.
@@ -317,7 +330,14 @@ mod tests {
         store
             .set_installed("llamacpp", "installed".to_string())
             .await;
-        let items = manager.get_catalog(&store).await;
+        // This test is about the marker fallback, not the user's persisted
+        // profile. Keep it hermetic when the suite runs on a developer machine
+        // that already has a llamacpp entry in versions.json.
+        let items = manager.get_catalog_from_parts(
+            manager.resolve_versions().await,
+            store.get_all().await,
+            &VersionStore::default(),
+        );
         let llamacpp = items.iter().find(|i| i.name == "llamacpp").unwrap();
         assert_ne!(llamacpp.installed_version.as_deref(), Some("installed"));
         assert!(!llamacpp.update_available);
@@ -328,7 +348,7 @@ mod tests {
         for sentinel in ["latest", "adopted", "brew", "pip-git", "unknown", ""] {
             assert!(!super::registry::is_comparable_version(sentinel));
         }
-        for version in ["b9670", "v1.8.6", "0.0.5"] {
+        for version in ["b10218", "v1.8.6", "0.0.5"] {
             assert!(super::registry::is_comparable_version(version));
         }
     }

@@ -27,6 +27,7 @@ import {
 	type ComposerSettingsSection,
 } from "../../components/agent-elements/input/composer-settings-menu.tsx";
 import "../../src/index.css";
+import { useMemo, useState } from "react";
 
 function noop() {
 	return undefined;
@@ -160,11 +161,21 @@ function ComposerPreview({
 }
 
 function Story() {
+	const [approval, setApproval] = useState("acceptEdits");
+	const ryuSections = useMemo(
+		() =>
+			RYU_SECTIONS.map((section) =>
+				section.key === "approval"
+					? { ...section, onChange: setApproval, value: approval }
+					: section
+			),
+		[approval]
+	);
 	return (
 		<div className="flex min-h-screen flex-col gap-8 bg-background p-6">
 			<section className="flex flex-col gap-2" data-testid="ryu">
 				<h2 className="font-medium text-sm">Flagship</h2>
-				<ComposerSettingsMenu sections={RYU_SECTIONS} />
+				<ComposerSettingsMenu sections={ryuSections} />
 			</section>
 			<section className="flex flex-col gap-2" data-testid="opencode">
 				<h2 className="font-medium text-sm">opencode</h2>
@@ -176,7 +187,7 @@ function Story() {
 			    because that is the trigger a user looks at all day. */}
 			<section className="flex flex-col gap-2" data-testid="ryu-compact">
 				<h2 className="font-medium text-sm">Flagship (compact)</h2>
-				<ComposerSettingsMenu compact sections={RYU_SECTIONS} />
+				<ComposerSettingsMenu compact sections={ryuSections} />
 			</section>
 			<section className="flex flex-col gap-3" data-testid="adaptive">
 				<h2 className="font-medium text-sm">Composer width adaptation</h2>

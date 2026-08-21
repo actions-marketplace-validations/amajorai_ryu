@@ -19,6 +19,7 @@ export type GatewaySection =
 	| "routing"
 	| "guardrails"
 	| "budgets"
+	| "runtime"
 	| "keys"
 	| "integrations"
 	// The node's network surface (mesh / Tailscale / Headscale), extracted from
@@ -32,11 +33,18 @@ export type GatewaySection =
 	| "api"
 	// The Ryu MCP server layer: registered servers + the tools they expose.
 	| "mcp"
+	// Ryu-canonical import/export sync for Claude, Codex, Cursor, and portable
+	// bundles. Kept as two sections because each direction has an independent
+	// opt-in toggle and a different safety model.
+	| "import"
+	| "export"
 	// Moved from the App Settings dialog (node-level Core infra, not apps):
 	| "connections"
 	| "email-alerts"
+	| "computer"
 	| "privacy"
 	| "storage"
+	| "encryption"
 	// Who may talk to this node: pending device-pairing approvals, already-paired
 	// devices, and the node's own access token.
 	| "access"

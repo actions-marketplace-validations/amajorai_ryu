@@ -29,6 +29,7 @@ use reqwest::Client;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::sync::RwLock;
 use tokio::sync::Mutex;
 
 /// A persisted Composio-trigger subscription. The `target_kind` selects what the
@@ -76,11 +77,51 @@ pub fn global() -> Option<&'static ComposioTriggerStore> {
 /// hardcoded — when unset the route fails closed (rejects every request).
 const WEBHOOK_SECRET_ENV: &str = "COMPOSIO_WEBHOOK_SECRET";
 
-/// The configured webhook signing secret, if any.
-pub fn webhook_secret() -> Option<String> {
+/// The encrypted-at-rest secret-store slot used by the Webhooks companion when
+/// an operator does not provide `COMPOSIO_WEBHOOK_SECRET` in the environment.
+/// These are public so Core can hydrate the process-local verifier at startup
+/// without duplicating the storage key in a second crate.
+pub const WEBHOOK_SECRET_STORE_OWNER: &str = "@ryu/webhooks";
+pub const WEBHOOK_SECRET_STORE_KEY: &str = WEBHOOK_SECRET_ENV;
+
+/// A process-local copy of the encrypted store value. The verifier is called
+/// from public ingress paths that do not carry `ServerState`, so Core hydrates
+/// this once at boot and updates it after a successful Webhooks-app write.
+static STORED_WEBHOOK_SECRET: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+
+fn stored_webhook_secret() -> &'static RwLock<Option<String>> {
+    STORED_WEBHOOK_SECRET.get_or_init(|| RwLock::new(None))
+}
+
+/// Install the Webhooks-app secret for the in-process verifier. The value is
+/// never logged; the at-rest copy lives in Core's encrypted plugin-secret store.
+pub fn set_stored_webhook_secret(secret: Option<String>) {
+    if let Ok(mut current) = stored_webhook_secret().write() {
+        *current = secret
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+    }
+}
+
+/// Return the operator-provided environment secret, if present. Core uses this
+/// to make the UI explain why a persisted value cannot override the env source.
+pub fn env_webhook_secret() -> Option<String> {
     std::env::var(WEBHOOK_SECRET_ENV)
         .ok()
-        .filter(|s| !s.trim().is_empty())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// The configured webhook signing secret, if any. An explicit environment value
+/// wins over the encrypted app-managed value so existing deployments retain the
+/// operator-controlled configuration contract.
+pub fn webhook_secret() -> Option<String> {
+    env_webhook_secret().or_else(|| {
+        stored_webhook_secret()
+            .read()
+            .ok()
+            .and_then(|current| current.clone())
+    })
 }
 
 /// Constant-time byte comparison (no early return on first mismatch) so the

@@ -1,7 +1,7 @@
 //! Core-side typed HTTP client for the out-of-process `ryu-teams` sidecar.
 //!
 //! Agent **teams** used to live in an in-process `ryu_teams::TeamStore` that the
-//! `@team` chat orchestration, the `agent_builder__create_agent_team` MCP tool, and
+//! `@team` chat orchestration, the `agent_builder.create_agent_team` MCP tool, and
 //! the `/api/teams/*` CRUD surface all shared. Teams is now an out-of-process app
 //! (`@ryu/teams`): the `ryu-teams` sidecar owns `teams.db` and serves
 //! `/api/teams/*`, which Core exposes verbatim through the generic ext-proxy
@@ -88,7 +88,7 @@ impl TeamsClient {
         Ok(Some(team))
     }
 
-    /// Create a team (used by `agent_builder__create_agent_team` after minting its
+    /// Create a team (used by `agent_builder.create_agent_team` after minting its
     /// members). The contract struct is posted verbatim — it derives `Serialize`
     /// with no `skip_serializing_if`, so the body is the full five keys the
     /// sidecar's handler reads, and a field added to the contract reaches the

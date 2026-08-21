@@ -45,18 +45,16 @@ pub trait ToolCaller: Send + Sync {
     ) -> Result<Value, String>;
 }
 
-/// Map a JS tool path (`<server>.<tool>` / `<server>.<a>.<b>`) to the registry
-/// id `<server>__<tool>`: first dot segment = server, the remainder (re-joined
-/// on `.`) = tool name (Contract 4). Composio actions arrive as
-/// `composio.<SLUG>` → `composio__<SLUG>`, matching the built-in id form.
+/// Keep a JS tool path (`<server>.<tool>` / `<server>.<a>.<b>`) in the registry's
+/// canonical dotted id form. The first dot still names the server and the rest
+/// is the tool name (Contract 4); preserving the path avoids minting the legacy
+/// double-underscore spelling at this boundary.
 ///
 /// A path with no dot is treated as already-qualified (returned as-is) so a
-/// caller that hands us a literal `spider__crawl` still works.
+/// caller that hands us a legacy literal `spider__crawl` still reaches Core's
+/// single compatibility ingress and remains callable.
 pub fn tool_path_to_id(path: &str) -> String {
-    match path.split_once('.') {
-        Some((server, rest)) => format!("{server}__{rest}"),
-        None => path.to_owned(),
-    }
+    path.to_owned()
 }
 
 /// Detect the P1 `__ryu_elicitation__` envelope (B-7) in a tool result and
@@ -242,10 +240,10 @@ mod tests {
 
     #[test]
     fn path_first_segment_is_server() {
-        assert_eq!(tool_path_to_id("spider.crawl"), "spider__crawl");
+        assert_eq!(tool_path_to_id("spider.crawl"), "spider.crawl");
         assert_eq!(
             tool_path_to_id("composio.GITHUB_CREATE_ISSUE"),
-            "composio__GITHUB_CREATE_ISSUE"
+            "composio.GITHUB_CREATE_ISSUE"
         );
         // Already-qualified passthrough.
         assert_eq!(tool_path_to_id("spider__crawl"), "spider__crawl");
@@ -255,8 +253,9 @@ mod tests {
 
     #[test]
     fn path_with_dotted_tool_name_keeps_remainder() {
-        // First dot is the server split; the rest re-joins on `__`'s source `.`.
-        assert_eq!(tool_path_to_id("server.group.tool"), "server__group.tool");
+        // The complete dotted path is the canonical id; the first dot remains
+        // the server boundary and later dots stay part of the tool name.
+        assert_eq!(tool_path_to_id("server.group.tool"), "server.group.tool");
     }
 
     #[test]

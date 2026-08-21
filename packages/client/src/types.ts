@@ -24,6 +24,8 @@ export interface AgentSummary {
 	model: string | null;
 	name: string;
 	systemPrompt: string | null;
+	/** Optional role/title badge shown beside the agent name. */
+	title: string;
 	version: string | null;
 }
 
@@ -38,6 +40,8 @@ export interface Agent {
 	model: string | null;
 	name: string;
 	systemPrompt: string | null;
+	/** Optional role/title badge shown beside the agent name. */
+	title: string;
 	tools: string[];
 	updatedAt: string | null;
 	version: string;

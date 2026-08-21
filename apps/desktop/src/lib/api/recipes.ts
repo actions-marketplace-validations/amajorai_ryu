@@ -191,7 +191,7 @@ export function draftRecipeFromEvents(
 	task: string,
 	events: LearnedEvent[]
 ): Recipe {
-	const steps: RecipeStep[] = events.map((e, i) => {
+	const steps: RecipeStep[] = events.map((e, i): RecipeStep => {
 		const id = i + 1;
 		const target: RecipeLocator | null =
 			e.element_name || e.element_role || e.element_id || e.app_name

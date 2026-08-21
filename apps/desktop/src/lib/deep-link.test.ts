@@ -75,4 +75,22 @@ describe("pickRecommendedQuant", () => {
 		]);
 		expect(best?.filename).toBe("installed.gguf");
 	});
+
+	it("never selects an importance matrix as the model quant", () => {
+		const best = pickRecommendedQuant([
+			file({
+				filename: "imatrix_unsloth.gguf",
+				fit: "great",
+				quant: null,
+				sizeBytes: 13_000_000,
+			}),
+			file({
+				filename: "model-Q4_K_M.gguf",
+				fit: "ok",
+				quant: "Q4_K_M",
+				sizeBytes: 2_500_000_000,
+			}),
+		]);
+		expect(best?.filename).toBe("model-Q4_K_M.gguf");
+	});
 });

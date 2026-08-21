@@ -384,7 +384,7 @@ export async function installModelFile(
 		body: { id, file, format: "gguf" },
 		// Forward the buyer's control-plane session so a PAID marketplace item's
 		// entitlement check (#491) can resolve the org + license. Free items ignore it.
-		headers: buyerTokenHeader(),
+		headers: buyerTokenHeader(target),
 	});
 	if (json.success === false || !json.result) {
 		throw new Error(json.error ?? `Failed to install ${file}`);
@@ -413,7 +413,7 @@ export async function installModelSnapshot(
 	}>(target, "/api/models/catalog/install", {
 		method: "POST",
 		body: { id, format },
-		headers: buyerTokenHeader(),
+		headers: buyerTokenHeader(target),
 	});
 	if (json.success === false || !json.result) {
 		throw new Error(json.error ?? `Failed to install ${id}`);
@@ -466,7 +466,7 @@ export interface ActiveModel {
 	repoId: string | null;
 }
 
-/** Read which installed model the local chat engine is currently serving. */
+/** Read which installed model local Chat is currently serving. */
 export async function getActiveModel(target: ApiTarget): Promise<ActiveModel> {
 	const json = await request<{
 		active?: string;

@@ -31,6 +31,7 @@ const COLLAPSE_AT_END_OF_LIFE = Number.MAX_SAFE_INTEGER;
 const DEFAULT_TOASTER_OPTIONS = {
 	autopilot: { collapse: COLLAPSE_AT_END_OF_LIFE, expand: 150 },
 	duration: 6000,
+	styles: { title: "ryu-sileo-title" },
 } as const;
 
 const Toaster = ({ options, ...props }: ToasterProps) => {
@@ -58,7 +59,8 @@ type ToastInput = string | ToastOptions;
 // apps/desktop alone) and, worse, the whole second argument was DROPPED at
 // runtime: every one of those descriptions silently never rendered.
 const asOptions = (input: ToastInput, rest?: ToastOptions): ToastOptions => {
-	const base: ToastOptions = typeof input === "string" ? { title: input } : input;
+	const base: ToastOptions =
+		typeof input === "string" ? { title: input } : input;
 	return rest ? { ...base, ...rest } : base;
 };
 

@@ -8,6 +8,7 @@
 
 import { afterEach, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
+import { act } from "react";
 import { ThemeProvider } from "@/components/ui/theme-provider.tsx";
 import { ChatIntentProvider } from "../core/ChatIntentContext.tsx";
 import { CoreProvider } from "../core/CoreContext.tsx";
@@ -19,6 +20,7 @@ import {
 } from "../overlays/OverlayHost.tsx";
 // Side-effect import: swaps the skeleton overlay bodies for the real ones.
 import "../overlays/register.ts";
+import { TerminalThemeProvider } from "../ui/TerminalThemeProvider.tsx";
 import { ryuTheme } from "../ui/theme.ts";
 import { ToastHost, ToastProvider } from "../ui/toast.tsx";
 import { listSurfaces, resolveSurface } from "../workspace/router.ts";
@@ -75,23 +77,25 @@ function Harness() {
 	return (
 		<ThemeProvider theme={ryuTheme}>
 			<CoreProvider initial={LOCAL_TARGET}>
-				<InputFocusProvider>
-					<ToastProvider>
-						<ChatIntentProvider>
-							<WorkspaceProvider>
-								<OverlayProvider>
-									<Capture />
-									<box flexDirection="column" height="100%" width="100%">
-										<TabStrip />
-										<SplitView />
-										<OverlayHost />
-										<ToastHost />
-									</box>
-								</OverlayProvider>
-							</WorkspaceProvider>
-						</ChatIntentProvider>
-					</ToastProvider>
-				</InputFocusProvider>
+				<TerminalThemeProvider>
+					<InputFocusProvider>
+						<ToastProvider>
+							<ChatIntentProvider>
+								<WorkspaceProvider>
+									<OverlayProvider>
+										<Capture />
+										<box flexDirection="column" height="100%" width="100%">
+											<TabStrip />
+											<SplitView />
+											<OverlayHost />
+											<ToastHost />
+										</box>
+									</OverlayProvider>
+								</WorkspaceProvider>
+							</ChatIntentProvider>
+						</ToastProvider>
+					</InputFocusProvider>
+				</TerminalThemeProvider>
 			</CoreProvider>
 		</ThemeProvider>
 	);
@@ -99,8 +103,10 @@ function Harness() {
 
 let testSetup: Awaited<ReturnType<typeof testRender>> | null = null;
 
-afterEach(() => {
-	testSetup?.renderer.destroy();
+afterEach(async () => {
+	await act(async () => {
+		testSetup?.renderer.destroy();
+	});
 	testSetup = null;
 	ws = null;
 	ov = null;
@@ -109,8 +115,10 @@ afterEach(() => {
 async function flush(
 	setup: Awaited<ReturnType<typeof testRender>>
 ): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, 0));
-	await setup.renderOnce();
+	await act(async () => {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		await setup.renderOnce();
+	});
 }
 
 test("every registered surface opens as a tab and resolves through the router", async () => {
@@ -127,7 +135,9 @@ test("every registered surface opens as a tab and resolves through the router", 
 		// The router owns the path with no earlier-registered collision.
 		expect(resolveSurface(path)?.id).toBe(surface.id);
 
-		ws?.openTab(path);
+		await act(async () => {
+			ws?.openTab(path);
+		});
 		await flush(testSetup);
 		const frame = testSetup.captureCharFrame();
 		expect(frame).not.toContain("No surface registered");
@@ -141,12 +151,18 @@ test("a tab can be pinned and shows the pin glyph in the tab strip", async () =>
 	// Before pinning, the Agents chip carries no leading pin glyph.
 	expect(testSetup.captureCharFrame()).not.toContain("*Agents");
 
-	const id = ws?.openTab("/agents");
+	let id: string | undefined;
+	await act(async () => {
+		id = ws?.openTab("/agents");
+	});
 	await flush(testSetup);
 	expect(id).toBeDefined();
 
 	if (id) {
-		ws?.pinTab(id);
+		const tabId = id;
+		await act(async () => {
+			ws?.pinTab(tabId);
+		});
 	}
 	await flush(testSetup);
 
@@ -160,7 +176,9 @@ test("Settings overlay mounts the real grouped body (not the skeleton)", async (
 	testSetup = await testRender(<Harness />, { width: 140, height: 40 });
 	await testSetup.renderOnce();
 
-	ov?.openOverlay("settings");
+	await act(async () => {
+		ov?.openOverlay("settings");
+	});
 	await flush(testSetup);
 	const frame = testSetup.captureCharFrame();
 	expect(frame).not.toContain("Error:");
@@ -173,7 +191,9 @@ test("Gateway overlay mounts the real grouped body (not the skeleton)", async ()
 	testSetup = await testRender(<Harness />, { width: 140, height: 40 });
 	await testSetup.renderOnce();
 
-	ov?.openOverlay("gateway");
+	await act(async () => {
+		ov?.openOverlay("gateway");
+	});
 	await flush(testSetup);
 	const frame = testSetup.captureCharFrame();
 	expect(frame).not.toContain("Error:");

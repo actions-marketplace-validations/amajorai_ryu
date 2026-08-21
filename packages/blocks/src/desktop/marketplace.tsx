@@ -30,6 +30,7 @@ import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -48,11 +49,19 @@ import type { ReactNode } from "react";
 /** Mirrors the control plane's `MarketplaceKind`. `agent` is a user-published
  *  agent definition — a configuration, not code. */
 export type MarketplaceItemKind =
+	| "app"
 	| "plugin"
 	| "skill"
 	| "model"
 	| "mcp"
-	| "agent";
+	| "agent"
+	| "stack_template"
+	| "workflow"
+	| "theme"
+	| "space"
+	| "profile"
+	| "output_style"
+	| "bundle";
 
 export type MarketplaceVerification =
 	| "verified"
@@ -273,10 +282,8 @@ export function MarketplaceItemCard({
 							Owned
 						</Badge>
 					) : (
-						<Button disabled={card.buying} onClick={onBuy} size="sm">
-							{card.buying ? (
-								<Spinner className="mr-2 size-3.5" />
-							) : (
+						<Button loading={card.buying} onClick={onBuy} size="sm">
+							{!card.buying && (
 								<HugeiconsIcon
 									className="mr-2 size-3.5"
 									icon={DollarCircleIcon}
@@ -329,9 +336,20 @@ export function MarketplaceBrowseView({
 		);
 	} else if (error) {
 		body = (
-			<p className="px-1 text-destructive text-sm">
-				Couldn't load the marketplace: {error}
-			</p>
+			<Empty className="py-12">
+				<EmptyHeader>
+					<EmptyMedia variant="icon">
+						<HugeiconsIcon icon={Alert02Icon} />
+					</EmptyMedia>
+					<EmptyTitle>Couldn&apos;t load the marketplace</EmptyTitle>
+					<EmptyDescription>{error}</EmptyDescription>
+				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onRefresh} size="sm" variant="ghost">
+						Try again
+					</Button>
+				</EmptyContent>
+			</Empty>
 		);
 	} else if (cards.length === 0) {
 		body = (
@@ -346,6 +364,17 @@ export function MarketplaceBrowseView({
 						search.
 					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button
+						onClick={() =>
+								query.trim() ? onQueryChange("") : onRefresh()
+						}
+						size="sm"
+						variant="ghost"
+					>
+						{query.trim() ? "Clear search" : "Refresh marketplace"}
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	} else {

@@ -59,6 +59,9 @@ pub enum EventType {
     /// Apps, §4.4). Distinct from `ExecCall` so widget follow-ups are filterable
     /// on their own and never look like a sandbox/tool execution.
     WidgetFollowUp,
+    /// An administrative gateway control change (config, policy, key, or
+    /// similar control-plane mutation). It carries no model token usage.
+    ControlChange,
 }
 
 impl EventType {
@@ -68,6 +71,7 @@ impl EventType {
             Self::ExecCall => "exec_call",
             Self::CredentialRead => "credential_read",
             Self::WidgetFollowUp => "widget_follow_up",
+            Self::ControlChange => "control_change",
         }
     }
 }
@@ -125,6 +129,14 @@ pub struct AuditRecord {
     /// (`chat` | `island` | `predict` | `agent`). `None` when untagged. Powers
     /// the per-feature usage breakdown in the daily rollup.
     pub feature: Option<String>,
+    /// True when this request was billed through the managed inference wallet.
+    /// This stays separate from `provider`: managed and BYOK OpenRouter calls
+    /// share the provider name but have different Ryu billing semantics.
+    pub managed_inference: bool,
+    /// Provider-reported transaction cost in micro-USD, before any Ryu deposit
+    /// markup. OpenRouter's `usage.cost` is the discounted final transaction
+    /// price, so zero is a valid value and must not be treated as missing.
+    pub provider_cost_micro_usd: Option<u64>,
     // ── Widget (Ryu Apps) attribution (§4.4) ─────────────────────────────────
     /// Opaque per-render widget instance id (`widget: { instance_id }` on the
     /// exec envelope). Set on widget `callTool` (`ExecCall`) and follow-up
@@ -146,6 +158,10 @@ pub struct AuditQuery {
     /// Only return entries that recorded an error.
     pub errors_only: bool,
     pub limit: Option<u32>,
+    /// Inclusive lower bound for the ISO/UTC timestamp range.
+    pub timestamp_from: Option<String>,
+    /// Exclusive upper bound for the ISO/UTC timestamp range.
+    pub timestamp_until: Option<String>,
     /// Filter by gateway-internal request id (M4 / #176).
     pub request_id: Option<String>,
     /// Filter by Core session/conversation id (M4 / #176).
@@ -154,6 +170,13 @@ pub struct AuditQuery {
     /// Filter by widget instance id (Ryu Apps, §4.4). When set, returns only the
     /// `callTool` / follow-up rows that belong to the given rendered widget.
     pub widget_instance_id: Option<String>,
+    /// Filter by the event discriminator (`model_call`, `exec_call`,
+    /// `credential_read`, `widget_follow_up`, or `control_change`).
+    pub event_type: Option<String>,
+    /// Only return rows with an id greater than this cursor. Cursor queries are
+    /// oldest-first so callers can advance exactly once after a successful
+    /// batch delivery; ordinary queries remain newest-first.
+    pub id_after: Option<i64>,
 }
 
 /// Rolled-up totals across the whole local audit store. Used by the control-
@@ -164,6 +187,12 @@ pub struct AuditSummary {
     pub error_count: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Sum of provider-reported transaction costs for managed model calls.
+    pub reported_cost_micro_usd: u64,
+    /// Managed model-call tokens whose provider returned no transaction cost;
+    /// reporters use the configured estimate for this fallback portion only.
+    pub unpriced_input_tokens: u64,
+    pub unpriced_output_tokens: u64,
 }
 
 /// A persisted audit entry as returned by [`AuditLogger::query`].
@@ -202,6 +231,11 @@ pub struct AuditEntry {
     pub agent_id: Option<String>,
     /// Product surface (`x-ryu-feature`): `chat` | `island` | `predict` | `agent`.
     pub feature: Option<String>,
+    /// True when this request was billed through the managed inference wallet.
+    pub managed_inference: bool,
+    /// Provider-reported transaction cost in micro-USD, before any Ryu deposit
+    /// markup. `Some(0)` is a valid free/promotional transaction.
+    pub provider_cost_micro_usd: Option<u64>,
     /// Widget instance id (Ryu Apps, §4.4); `None` for non-widget rows.
     pub widget_instance_id: Option<String>,
 }
@@ -342,6 +376,14 @@ impl AuditLogger {
              CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_log(agent_id);",
         );
         let _ = conn.execute_batch("ALTER TABLE audit_log ADD COLUMN feature TEXT;");
+        // Add managed billing attribution and provider-reported cost. Both are
+        // safe for existing audit databases and default old rows to unmanaged
+        // with no provider-reported cost.
+        let _ = conn.execute_batch(
+            "ALTER TABLE audit_log ADD COLUMN managed_inference INTEGER NOT NULL DEFAULT 0;",
+        );
+        let _ =
+            conn.execute_batch("ALTER TABLE audit_log ADD COLUMN provider_cost_micro_usd INTEGER;");
         // Add the widget instance id column (Ryu Apps, §4.4) for existing tables.
         // Indexed so per-widget governance queries are efficient.
         let _ = conn.execute_batch(
@@ -381,9 +423,10 @@ impl AuditLogger {
                          provider, model, input_tokens, output_tokens,
                          cache_hit, latency_ms, eval_score, error, skill_ids, session_id,
                          event_type, backend, command, duration_ms, exit_code,
-                         user_id, agent_id, feature, widget_instance_id
+                         user_id, agent_id, feature, managed_inference, provider_cost_micro_usd,
+                         widget_instance_id
                      ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
-                               ?18,?19,?20,?21,?22,?23,?24,?25,?26)",
+                               ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)",
                     params![
                         record.request_id,
                         api_key_storage_key(&record.api_key),
@@ -410,6 +453,8 @@ impl AuditLogger {
                         record.user_id,
                         record.agent_id,
                         record.feature,
+                        record.managed_inference as i32,
+                        record.provider_cost_micro_usd.map(|v| v as i64),
                         record.widget_instance_id,
                     ],
                 ) {
@@ -488,6 +533,8 @@ impl AuditLogger {
             user_id: None,
             agent_id: None,
             feature: None,
+            managed_inference: false,
+            provider_cost_micro_usd: None,
             widget_instance_id: None,
         }
     }
@@ -535,6 +582,8 @@ impl AuditLogger {
             user_id: None,
             agent_id,
             feature: Some("widget".to_string()),
+            managed_inference: false,
+            provider_cost_micro_usd: None,
             widget_instance_id: Some(widget_instance_id),
         }
     }
@@ -583,6 +632,8 @@ impl AuditLogger {
             user_id: None,
             agent_id: None,
             feature: Some("widget".to_string()),
+            managed_inference: false,
+            provider_cost_micro_usd: None,
             widget_instance_id: Some(widget_instance_id),
         }
     }
@@ -628,6 +679,58 @@ impl AuditLogger {
             user_id: None,
             agent_id: None,
             feature: None,
+            managed_inference: false,
+            provider_cost_micro_usd: None,
+            widget_instance_id: None,
+        }
+    }
+
+    /// Convenience constructor for an administrative gateway control change.
+    ///
+    /// The actor is stored in the existing `user_name` slot, the target in
+    /// `model`, and a bounded action/summary in `command` so the row remains
+    /// compatible with the existing SQLite/reporting shape. No request payload
+    /// or secret is accepted here.
+    pub fn make_control_record(
+        request_id: String,
+        api_key: String,
+        actor: String,
+        actor_id: Option<String>,
+        action: String,
+        target: String,
+        summary: Option<String>,
+    ) -> AuditRecord {
+        let command = summary
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("{action}: {value}"))
+            .unwrap_or(action);
+        AuditRecord {
+            request_id,
+            api_key,
+            user_name: Some(actor),
+            org_id: None,
+            team_id: None,
+            project_id: None,
+            provider: "gateway_control".to_string(),
+            model: target,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_hit: false,
+            latency_ms: 0,
+            eval_score: None,
+            error: None,
+            skill_ids: None,
+            session_id: None,
+            event_type: EventType::ControlChange,
+            backend: Some("gateway_admin".to_string()),
+            command: Some(command),
+            duration_ms: None,
+            exit_code: None,
+            user_id: actor_id,
+            agent_id: None,
+            feature: Some("control".to_string()),
+            managed_inference: false,
+            provider_cost_micro_usd: None,
             widget_instance_id: None,
         }
     }
@@ -663,6 +766,14 @@ impl AuditLogger {
         // Build a parameterised WHERE clause so filters can never inject SQL.
         let mut clauses: Vec<&str> = Vec::new();
         let mut binds: Vec<String> = Vec::new();
+        if let Some(timestamp_from) = &query.timestamp_from {
+            clauses.push("timestamp >= datetime(?)");
+            binds.push(timestamp_from.clone());
+        }
+        if let Some(timestamp_until) = &query.timestamp_until {
+            clauses.push("timestamp < datetime(?)");
+            binds.push(timestamp_until.clone());
+        }
         if let Some(api_key) = &query.api_key {
             clauses.push("api_key = ?");
             binds.push(api_key_storage_key(api_key));
@@ -681,8 +792,13 @@ impl AuditLogger {
         push("request_id = ?", &query.request_id);
         push("session_id = ?", &query.session_id);
         push("widget_instance_id = ?", &query.widget_instance_id);
+        push("event_type = ?", &query.event_type);
         if query.errors_only {
             clauses.push("error IS NOT NULL");
+        }
+        if let Some(id_after) = query.id_after {
+            clauses.push("id > ?");
+            binds.push(id_after.to_string());
         }
 
         let where_sql = if clauses.is_empty() {
@@ -696,13 +812,18 @@ impl AuditLogger {
             .unwrap_or(DEFAULT_QUERY_LIMIT)
             .clamp(1, MAX_QUERY_LIMIT);
 
+        let order = if query.id_after.is_some() {
+            "ORDER BY id ASC"
+        } else {
+            "ORDER BY id DESC"
+        };
         let sql = format!(
             "SELECT id, timestamp, request_id, api_key, api_key_prefix, user_name, org_id, team_id, \
              project_id, provider, model, input_tokens, output_tokens, cache_hit, \
              latency_ms, eval_score, error, skill_ids, session_id, \
              event_type, backend, command, duration_ms, exit_code, \
-             user_id, agent_id, feature, widget_instance_id \
-             FROM audit_log {where_sql} ORDER BY id DESC LIMIT {limit}"
+             user_id, agent_id, feature, widget_instance_id, managed_inference, provider_cost_micro_usd \
+             FROM audit_log {where_sql} {order} LIMIT {limit}"
         );
 
         let conn = reader
@@ -747,6 +868,11 @@ impl AuditLogger {
                 agent_id: row.get(25).unwrap_or(None),
                 feature: row.get(26).unwrap_or(None),
                 widget_instance_id: row.get(27).unwrap_or(None),
+                managed_inference: row.get::<_, i64>(28).unwrap_or(0) != 0,
+                provider_cost_micro_usd: row
+                    .get::<_, Option<i64>>(29)
+                    .unwrap_or(None)
+                    .map(|v| v as u64),
             })
         })?;
 
@@ -771,8 +897,17 @@ impl AuditLogger {
             "SELECT COUNT(*), \
              COALESCE(SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END), 0), \
              COALESCE(SUM(input_tokens), 0), \
-             COALESCE(SUM(output_tokens), 0) \
-             FROM audit_log",
+             COALESCE(SUM(output_tokens), 0), \
+             COALESCE(SUM(CASE WHEN event_type = 'model_call' AND managed_inference != 0 \
+                               AND provider_cost_micro_usd IS NOT NULL \
+                              THEN provider_cost_micro_usd ELSE 0 END), 0), \
+             COALESCE(SUM(CASE WHEN event_type = 'model_call' AND managed_inference != 0 \
+                               AND provider_cost_micro_usd IS NULL \
+                              THEN input_tokens ELSE 0 END), 0), \
+             COALESCE(SUM(CASE WHEN event_type = 'model_call' AND managed_inference != 0 \
+                               AND provider_cost_micro_usd IS NULL \
+                              THEN output_tokens ELSE 0 END), 0) \
+             FROM audit_log WHERE event_type != 'control_change'",
             [],
             |row| {
                 Ok(AuditSummary {
@@ -780,6 +915,9 @@ impl AuditLogger {
                     error_count: row.get::<_, i64>(1)? as u64,
                     input_tokens: row.get::<_, i64>(2)? as u64,
                     output_tokens: row.get::<_, i64>(3)? as u64,
+                    reported_cost_micro_usd: row.get::<_, i64>(4)? as u64,
+                    unpriced_input_tokens: row.get::<_, i64>(5)? as u64,
+                    unpriced_output_tokens: row.get::<_, i64>(6)? as u64,
                 })
             },
         )?;
@@ -980,6 +1118,8 @@ mod tests {
             user_id: None,
             agent_id: None,
             feature: None,
+            managed_inference: false,
+            provider_cost_micro_usd: None,
             widget_instance_id: None,
         }
     }
@@ -1140,6 +1280,36 @@ mod tests {
     }
 
     #[test]
+    fn cursor_queries_are_exclusive_and_oldest_first() {
+        let dir = std::env::temp_dir().join(format!("ryu-audit-cursor-{}", unique_suffix()));
+        let db_path = dir.join("audit.db");
+        let logger = AuditLogger::new(&AuditConfig {
+            enabled: true,
+            db_path: db_path.to_str().unwrap().to_owned(),
+        })
+        .unwrap();
+        logger.log(sample_record("req-1", None));
+        logger.log(sample_record("req-2", None));
+        logger.log(sample_record("req-3", None));
+
+        let all = wait_for_rows(&logger, &AuditQuery::default(), 3);
+        let cursor = all.last().expect("oldest row").id;
+        let next = logger
+            .query(&AuditQuery {
+                id_after: Some(cursor),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            next.iter()
+                .map(|entry| entry.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["req-2", "req-3"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn disabled_logger_returns_empty() {
         let logger = AuditLogger::disabled();
         assert!(!logger.is_enabled());
@@ -1161,7 +1331,16 @@ mod tests {
         let logger = AuditLogger::new(&config).expect("logger");
         logger.log(sample_record("req-1", None));
         logger.log(sample_record("req-2", Some("boom")));
-        wait_for_rows(&logger, &AuditQuery::default(), 2);
+        logger.log(AuditLogger::make_control_record(
+            "control-1".to_string(),
+            "master".to_string(),
+            "master-key".to_string(),
+            None,
+            "config.apply".to_string(),
+            "gateway_config".to_string(),
+            Some("firewall".to_string()),
+        ));
+        wait_for_rows(&logger, &AuditQuery::default(), 3);
 
         let summary = logger.summary().expect("summary");
         assert_eq!(summary.request_count, 2);
@@ -1170,7 +1349,76 @@ mod tests {
         assert_eq!(summary.input_tokens, 20);
         assert_eq!(summary.output_tokens, 10);
 
+        let controls = logger
+            .query(&AuditQuery {
+                event_type: Some("control_change".to_string()),
+                ..Default::default()
+            })
+            .expect("control query");
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0].user_name.as_deref(), Some("master-key"));
+
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persists_managed_provider_cost_and_separates_unpriced_tokens() {
+        let dir = std::env::temp_dir().join(format!("ryu-audit-cost-{}", unique_suffix()));
+        let db_path = dir.join("audit.db");
+        let logger = AuditLogger::new(&AuditConfig {
+            enabled: true,
+            db_path: db_path.to_str().unwrap().to_string(),
+        })
+        .expect("logger");
+
+        let mut priced = sample_record("priced", None);
+        priced.managed_inference = true;
+        priced.provider_cost_micro_usd = Some(1_250);
+        logger.log(priced);
+
+        let mut unpriced = sample_record("unpriced", None);
+        unpriced.managed_inference = true;
+        logger.log(unpriced);
+        let rows = wait_for_rows(&logger, &AuditQuery::default(), 2);
+
+        let priced_row = rows
+            .iter()
+            .find(|row| row.request_id == "priced")
+            .expect("priced row");
+        assert!(priced_row.managed_inference);
+        assert_eq!(priced_row.provider_cost_micro_usd, Some(1_250));
+
+        let summary = logger.summary().expect("summary");
+        assert_eq!(summary.reported_cost_micro_usd, 1_250);
+        assert_eq!(summary.unpriced_input_tokens, 10);
+        assert_eq!(summary.unpriced_output_tokens, 5);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn control_record_shape() {
+        let record = AuditLogger::make_control_record(
+            "control-id".to_string(),
+            "master".to_string(),
+            "loopback-admin".to_string(),
+            Some("user-123".to_string()),
+            "firewall.update".to_string(),
+            "firewall_policy".to_string(),
+            Some("enabled, policy".to_string()),
+        );
+        assert_eq!(record.event_type, EventType::ControlChange);
+        assert_eq!(record.event_type.as_str(), "control_change");
+        assert_eq!(record.user_name.as_deref(), Some("loopback-admin"));
+        assert_eq!(record.user_id.as_deref(), Some("user-123"));
+        assert_eq!(record.model, "firewall_policy");
+        assert_eq!(
+            record.command.as_deref(),
+            Some("firewall.update: enabled, policy")
+        );
+        assert_eq!(record.backend.as_deref(), Some("gateway_admin"));
+        assert_eq!(record.input_tokens, 0);
+        assert_eq!(record.output_tokens, 0);
     }
 
     /// Log a record with an explicit session_id.
@@ -1228,6 +1476,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn timestamp_range_accepts_iso_bounds_and_excludes_upper_bound() {
+        let dir = std::env::temp_dir().join(format!("ryu-audit-timestamp-{}", unique_suffix()));
+        let db_path = dir.join("audit.db");
+        let config = AuditConfig {
+            enabled: true,
+            db_path: db_path.to_str().unwrap().to_owned(),
+        };
+        let logger = AuditLogger::new(&config).expect("logger");
+        logger.log(sample_record("req-time", None));
+        let rows = wait_for_rows(&logger, &AuditQuery::default(), 1);
+        let iso_timestamp = format!("{}Z", rows[0].timestamp.replace(' ', "T"));
+
+        let in_range = logger
+            .query(&AuditQuery {
+                timestamp_from: Some(iso_timestamp.clone()),
+                timestamp_until: Some("2999-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            })
+            .expect("query by ISO timestamp range");
+        assert_eq!(in_range.len(), 1);
+
+        let at_upper_bound = logger
+            .query(&AuditQuery {
+                timestamp_until: Some(iso_timestamp),
+                ..Default::default()
+            })
+            .expect("query by exclusive upper bound");
+        assert!(at_upper_bound.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// #523: the credential-read constructor produces a distinct, attributable
     /// record (domain in `command`, source in `backend`/`model`) that is NOT a
     /// sandbox exec — so identity reads are filterable and never look like execs.
@@ -1265,7 +1546,7 @@ mod tests {
             "req-id".to_string(),
             "sk-core".to_string(),
             "io.ryu.checklist".to_string(),
-            "checklist__toggle".to_string(),
+            "checklist.toggle".to_string(),
             Some("agent-1".to_string()),
             Some("conv-9".to_string()),
             "wi-abc".to_string(),
@@ -1275,7 +1556,7 @@ mod tests {
         assert_eq!(rec.event_type, EventType::ExecCall);
         assert_eq!(rec.feature.as_deref(), Some("widget"));
         assert_eq!(rec.backend.as_deref(), Some("io.ryu.checklist"));
-        assert_eq!(rec.command.as_deref(), Some("checklist__toggle"));
+        assert_eq!(rec.command.as_deref(), Some("checklist.toggle"));
         assert_eq!(rec.agent_id.as_deref(), Some("agent-1"));
         assert_eq!(rec.session_id.as_deref(), Some("conv-9"));
         assert_eq!(rec.widget_instance_id.as_deref(), Some("wi-abc"));
@@ -1318,7 +1599,7 @@ mod tests {
             "req-w1".to_string(),
             "sk-core".to_string(),
             "io.ryu.checklist".to_string(),
-            "checklist__toggle".to_string(),
+            "checklist.toggle".to_string(),
             None,
             Some("conv-9".to_string()),
             "wi-A".to_string(),

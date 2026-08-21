@@ -1,4 +1,10 @@
 {
+  "tags": ["calendar","scheduling","automation","runs"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-calendar",
+  "homepage": "https://github.com/amajorai/ryu-calendar",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/calendar",
   "name": "Calendar",
   "version": "0.1.14",
@@ -51,5 +57,9 @@
   "companion": {
     "label": "Calendar",
     "icon": "calendar-04"
+  }
+,
+  "contributes": {
+ "chat_widget_templates": [{"id":"calendar.chat","title":"Calendar widget","description":"Calendar chat widget metadata is coming soon; no render tool is available yet.","triggers":["calendar widget"],"examples":["Show me a calendar widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}]
   }
 }

@@ -19,6 +19,7 @@ import {
 	Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { MorphIconSwap } from "@ryu/ui/components/morph-icon";
 import { type ReactNode, useState } from "react";
 
 // A rendered part is an opaque AI-SDK shape; we read it defensively.
@@ -148,9 +149,11 @@ function CopyJsonButton({ value }: { value: string }) {
 			onClick={handleCopy}
 			type="button"
 		>
-			<HugeiconsIcon
+			<MorphIconSwap
+				a={Copy01Icon}
+				b={Tick02Icon}
 				className="size-3.5"
-				icon={copied ? Tick02Icon : Copy01Icon}
+				state={copied ? "b" : "a"}
 			/>
 			{copied ? "Copied" : "Copy JSON"}
 		</button>

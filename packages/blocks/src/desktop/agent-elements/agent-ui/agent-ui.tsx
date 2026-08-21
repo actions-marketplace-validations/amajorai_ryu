@@ -8,15 +8,14 @@
 // model output omits; `<Renderer>` is lenient and treats missing fields as defaults.
 
 import {
-	ActionProvider,
 	type ComponentRenderProps,
 	JSONUIProvider,
 	Renderer,
 	type Spec,
-	StateProvider,
 } from "@json-render/react";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { Component, type ReactNode, useCallback, useState } from "react";
+import { normalizeA2ui } from "./a2ui.ts";
 import { registry } from "./registry.tsx";
 import { AgentUiSubmissionStateProvider } from "./submission-context.tsx";
 
@@ -46,6 +45,8 @@ function UnknownComponent({ element }: ComponentRenderProps) {
 
 interface AgentUIProps {
 	className?: string;
+	/** Input protocol. A2UI is normalized into the closed native catalog. */
+	format?: "json-render" | "a2ui";
 	/** Receives values from the spec's `submit` action. */
 	onSubmit?: (value: unknown) => void | Promise<void>;
 	/** The json-render spec emitted by the agent (tool input). */
@@ -102,6 +103,16 @@ interface BoundaryState {
 	hasError: boolean;
 }
 
+function initialStateFor(spec: unknown): Record<string, unknown> | undefined {
+	if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
+		return undefined;
+	}
+	const state = (spec as Record<string, unknown>).state;
+	return typeof state === "object" && state !== null && !Array.isArray(state)
+		? (state as Record<string, unknown>)
+		: undefined;
+}
+
 // React error boundaries have no functional equivalent, so a class is required here.
 // biome-ignore lint/style/useReactFunctionComponents: error boundaries must be class components
 class RenderErrorBoundary extends Component<BoundaryProps, BoundaryState> {
@@ -122,11 +133,19 @@ class RenderErrorBoundary extends Component<BoundaryProps, BoundaryState> {
 	}
 }
 
-export function AgentUI({ spec, title, className, onSubmit }: AgentUIProps) {
+export function AgentUI({
+	className,
+	format = "json-render",
+	onSubmit,
+	spec,
+	title,
+}: AgentUIProps) {
 	const submit = onSubmit;
 	const [pending, setPending] = useState(false);
 	const [submitted, setSubmitted] = useState(false);
 	const [submitError, setSubmitError] = useState<string | null>(null);
+	const normalized = format === "a2ui" ? normalizeA2ui(spec) : null;
+	const renderSpec = normalized?.spec ?? spec;
 	const handleSubmit = useCallback(
 		async (value: unknown) => {
 			if (!submit || pending || submitted) {
@@ -148,7 +167,7 @@ export function AgentUI({ spec, title, className, onSubmit }: AgentUIProps) {
 		},
 		[pending, submit, submitted]
 	);
-	if (!isRenderableSpec(spec)) {
+	if (!isRenderableSpec(renderSpec)) {
 		return (
 			<RawSpecFallback
 				reason="This UI spec couldn't be rendered."
@@ -168,19 +187,17 @@ export function AgentUI({ spec, title, className, onSubmit }: AgentUIProps) {
 				}
 			>
 				<AgentUiSubmissionStateProvider state={{ pending, submitted }}>
-					<StateProvider>
-						<ActionProvider
-							handlers={createAgentUiActionHandlers(handleSubmit)}
-						>
-							<JSONUIProvider registry={registry}>
-								<Renderer
-									fallback={UnknownComponent}
-									registry={registry}
-									spec={spec}
-								/>
-							</JSONUIProvider>
-						</ActionProvider>
-					</StateProvider>
+					<JSONUIProvider
+						handlers={createAgentUiActionHandlers(handleSubmit)}
+						initialState={initialStateFor(renderSpec)}
+						registry={registry}
+					>
+						<Renderer
+							fallback={UnknownComponent}
+							registry={registry}
+							spec={renderSpec}
+						/>
+					</JSONUIProvider>
 				</AgentUiSubmissionStateProvider>
 			</RenderErrorBoundary>
 			{submitError ? (

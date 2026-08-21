@@ -15,10 +15,11 @@
 // the composer) but emits the full object, and it is *controlled*: it mutates
 // nothing live, unlike `useUniversalPicker`, which drives the running turn.
 //
-// The two halves are mutually exclusive by construction, because Core resolves
-// them differently: picking an agent clears the provider/model, and picking a
-// model clears the agent. A selection that named both would leave "which one
-// wins" to the reader.
+// Ordinary ACP agent selections and provider/model selections are mutually
+// exclusive. Ryu is the one intentional exception: it is the built-in agent
+// facade for both lanes, so a lane default may carry `agent_id: "ryu"` together
+// with its provider, model, and effort. The controlled field opts into that
+// exception explicitly so older settings fields keep their original shape.
 //
 // Access mode and effort are read from what the picked agent actually advertises
 // (`GET /api/agents/:id/acp-config`, the same data-driven contract the composer
@@ -30,6 +31,10 @@ import {
 	ArrowTurnBackwardIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import {
+	FullAccessSelectionProvider,
+	useFullAccessSelectionGuard,
+} from "@ryu/blocks/composer/full-access-warning";
 import { Input } from "@ryu/ui/components/input.tsx";
 import { Label } from "@ryu/ui/components/label.tsx";
 import {
@@ -42,6 +47,7 @@ import {
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
+import { modelMenuItem } from "@/components/agent-elements/input/model-router.ts";
 import { ProviderCommandDialog } from "@/components/agent-elements/input/provider-command-dialog.tsx";
 import {
 	type ProviderEntry,
@@ -49,7 +55,11 @@ import {
 	type UniversalPickerData,
 } from "@/components/agent-elements/input/universal-picker-body.tsx";
 import { useAgents } from "@/src/hooks/useAgents.ts";
-import { AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
+import {
+	AgentAvatar,
+	AgentLogo,
+	engineForAgent,
+} from "@/src/lib/agent-logos.tsx";
 import { fetchAcpConfig } from "@/src/lib/api/acp.ts";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
@@ -80,6 +90,10 @@ const NOOP = () => {
 };
 
 export interface AgentSelectionFieldProps {
+	/** Restrict the picker to the agents offered by the preceding onboarding step. */
+	allowedAgentIds?: readonly string[];
+	/** Restrict provider/model choices to the providers usable in this lane. */
+	allowedProviderIds?: readonly string[];
 	/** Accessible label for the trigger. */
 	ariaLabel: string;
 	className?: string;
@@ -87,9 +101,20 @@ export interface AgentSelectionFieldProps {
 	onChange: (next: AgentSelection) => void;
 	/** Shown when nothing is selected. */
 	placeholder?: string;
+	/** Keep Ryu's provider/model/effort alongside its agent id. */
+	preserveRyuRoute?: boolean;
 	/** The Core node whose catalog/agents/ACP config this field reads. */
 	target: ApiTarget;
 	value: AgentSelection;
+}
+
+export function AgentSelectionField(props: AgentSelectionFieldProps) {
+	const agentName = props.value.agent_id?.replace(/^acp:/, "") || undefined;
+	return (
+		<FullAccessSelectionProvider agentName={agentName}>
+			<AgentSelectionFieldContent {...props} />
+		</FullAccessSelectionProvider>
+	);
 }
 
 /** Free-text escape hatch: local, pinned and fine-tuned ids are in no catalog. */
@@ -166,14 +191,13 @@ function SelectionMark({
 	selection: AgentSelection;
 }) {
 	if (selection.agent_id) {
-		if (agent?.avatarUrl) {
-			// biome-ignore lint/performance/noImgElement: Tauri/Vite, data URL avatar
-			// biome-ignore lint/correctness/useImageSize: sized via class
+		if (agent?.avatarGlyph) {
 			return (
-				<img
-					alt=""
-					className="size-4 shrink-0 rounded-full object-cover"
-					src={agent.avatarUrl}
+				<AgentAvatar
+					className="size-4 shrink-0 rounded-full object-contain"
+					engine={agent ? engineForAgent(agent) : null}
+					glyph={agent.avatarGlyph}
+					size="16px"
 				/>
 			);
 		}
@@ -205,6 +229,9 @@ function summarize(
 	const parts: string[] = [];
 	if (selection.agent_id) {
 		parts.push(agent?.name ?? selection.agent_id);
+		if (selection.provider && selection.model) {
+			parts.push(selection.model);
+		}
 		if (selection.access_mode) {
 			parts.push(selection.access_mode);
 		}
@@ -220,7 +247,7 @@ function summarize(
 	return parts.join(" · ");
 }
 
-export function AgentSelectionField({
+function AgentSelectionFieldContent({
 	value,
 	onChange,
 	target,
@@ -228,7 +255,11 @@ export function AgentSelectionField({
 	placeholder = "Use the default",
 	className,
 	disabled,
+	allowedAgentIds,
+	allowedProviderIds,
+	preserveRyuRoute = false,
 }: AgentSelectionFieldProps) {
+	const selectionGuard = useFullAccessSelectionGuard();
 	const catalogQuery = useQuery({
 		queryKey: ["pi-config-catalog", target.url],
 		queryFn: () => fetchPiCatalog(target),
@@ -236,6 +267,24 @@ export function AgentSelectionField({
 		refetchOnWindowFocus: false,
 	});
 	const { agents } = useAgents();
+	const allowedAgentIdSet = useMemo(
+		() => (allowedAgentIds ? new Set(allowedAgentIds) : null),
+		[allowedAgentIds]
+	);
+	const availableAgents = useMemo(
+		() =>
+			allowedAgentIdSet
+				? agents.filter((agent) => allowedAgentIdSet.has(agent.id))
+				: agents,
+		[agents, allowedAgentIdSet]
+	);
+	const flagship = useMemo(
+		() =>
+			agents.find((agent) => agent.id === "ryu") ??
+			agents.find((agent) => agent.recommended) ??
+			null,
+		[agents]
+	);
 
 	// What the SELECTED agent advertises: its permission modes and any
 	// reasoning-effort-style config option. Only fetched once an agent is picked
@@ -243,7 +292,7 @@ export function AgentSelectionField({
 	const acpQuery = useQuery({
 		queryKey: ["acp-config", target.url, value.agent_id],
 		queryFn: () => fetchAcpConfig(target, value.agent_id),
-		enabled: Boolean(value.agent_id),
+		enabled: Boolean(value.agent_id) && value.agent_id !== "ryu",
 		staleTime: 5 * 60 * 1000,
 		refetchOnWindowFocus: false,
 		retry: 1,
@@ -256,23 +305,36 @@ export function AgentSelectionField({
 				: null,
 		[value.agent_id, agents]
 	);
+	const keepsRyuRoute =
+		preserveRyuRoute && value.agent_id === (flagship?.id ?? "ryu");
 
-	// An agent pick and a provider/model pick are mutually exclusive: Core
-	// resolves each differently, so storing both would be ambiguous.
-	const pickAgent = (agentId: string) =>
+	const pickAgent = (agentId: string) => {
+		const ryuId = flagship?.id ?? "ryu";
+		if (preserveRyuRoute && agentId === ryuId) {
+			const keepsRyuRoute = value.agent_id === "" || value.agent_id === ryuId;
+			onChange(
+				keepsRyuRoute
+					? { ...value, agent_id: agentId, access_mode: "" }
+					: { ...EMPTY_AGENT_SELECTION, agent_id: agentId }
+			);
+			return;
+		}
 		onChange({
 			...value,
 			agent_id: agentId,
 			provider: "",
 			model: "",
 			thinking_level: "",
+			effort: "",
+			access_mode: "",
 		});
+	};
 
 	const pickModel = (providerId: string | null, modelId: string) =>
 		onChange({
 			...value,
-			agent_id: "",
-			access_mode: "",
+			agent_id: keepsRyuRoute ? value.agent_id : "",
+			access_mode: keepsRyuRoute ? value.access_mode : "",
 			provider: providerId ?? "",
 			model: modelId,
 		});
@@ -281,8 +343,15 @@ export function AgentSelectionField({
 		const providers: ProviderEntry[] = (catalogQuery.data?.providers ?? [])
 			// The synthetic gateway pseudo-provider carries no models of its own.
 			.filter((p) => p.id !== "gateway")
+			.filter(
+				(p) =>
+					!allowedProviderIds ||
+					allowedProviderIds.includes(p.id) ||
+					p.id === value.provider
+			)
 			.map((p) => {
-				const isActive = !value.agent_id && value.provider === p.id;
+				const isActive =
+					(value.agent_id === "" || keepsRyuRoute) && value.provider === p.id;
 				return {
 					id: p.id,
 					label: p.label,
@@ -303,28 +372,23 @@ export function AgentSelectionField({
 					// Hidden models are not offerable here either; the field's own
 					// recorded model stays visible so an existing setting is readable.
 					models: filterEnabledModels(
-						p.suggestedModels.map((m) => ({ id: m, name: m })),
+						p.suggestedModels.map((m) => modelMenuItem(m)),
 						p.modelOverrides,
 						isActive ? value.model : null
 					),
 				};
 			});
 
-		const flagship =
-			agents.find((a) => a.id === "ryu") ??
-			agents.find((a) => a.recommended) ??
-			null;
-
 		return {
 			activeAgentId: value.agent_id || null,
-			agents,
+			agents: availableAgents,
 			activeModelSection: null,
 			activeExtraSections: [],
 			availableExternal: [],
-			customAgents: agents.filter(
+			customAgents: availableAgents.filter(
 				(a) => a.transport !== "acp" && a.id !== flagship?.id
 			),
-			installedExternal: agents.filter(
+			installedExternal: availableAgents.filter(
 				(a) => a.transport === "acp" && a.id !== flagship?.id
 			),
 			installPendingId: null,
@@ -342,8 +406,8 @@ export function AgentSelectionField({
 			onSelectProviderThinking: (providerId, level) =>
 				onChange({
 					...value,
-					agent_id: "",
-					access_mode: "",
+					agent_id: keepsRyuRoute ? value.agent_id : "",
+					access_mode: keepsRyuRoute ? value.access_mode : "",
 					provider: providerId,
 					thinking_level: level,
 				}),
@@ -367,7 +431,16 @@ export function AgentSelectionField({
 			onRemoveAgentAccount: NOOP,
 		};
 		// `onChange`/`value` drive every handler above; agents + catalog drive the rows.
-	}, [catalogQuery.data, agents, value, onChange]);
+	}, [
+		allowedProviderIds,
+		availableAgents,
+		catalogQuery.data,
+		flagship,
+		keepsRyuRoute,
+		onChange,
+		preserveRyuRoute,
+		value,
+	]);
 
 	// Effort options: what the picked agent advertises (its `thoughtLevel`-style
 	// select), else Pi's thinking levels for a provider/model pick.
@@ -490,9 +563,21 @@ export function AgentSelectionField({
 							{ value: INHERIT, label: "Agent default" },
 							...accessModes.map((m) => ({ value: m.id, label: m.name })),
 						]}
-						onValueChange={(v) =>
-							onChange({ ...value, access_mode: v && v !== INHERIT ? v : "" })
-						}
+						onValueChange={(v) => {
+							if (!v) {
+								return;
+							}
+							const mode = accessModes.find((candidate) => candidate.id === v);
+							selectionGuard?.request(
+								mode ?? { id: v, name: v },
+								() =>
+									onChange({
+										...value,
+										access_mode: v === INHERIT ? "" : v,
+									}),
+								"Access mode"
+							);
+						}}
 						value={value.access_mode || INHERIT}
 					>
 						<SelectTrigger className="h-8 text-sm">

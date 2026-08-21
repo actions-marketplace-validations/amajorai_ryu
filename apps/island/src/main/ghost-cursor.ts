@@ -5,7 +5,8 @@
 // control server (POST /ghost-cursor); that server forwards the event here. This
 // module owns a single frameless, transparent, click-through, always-on-top window
 // (cloned from the snap-zone overlay's `ensureOverlay`) that covers the active
-// display and draws a distinct tinted "ryu" cursor which eases to each target,
+// display and draws a small monochrome cursor with a tinted intent dot which eases
+// to each target,
 // ripples on a click, fades after a short idle, and — with a distinct hue per agent
 // pid — visually separates concurrent agents.
 //
@@ -15,25 +16,17 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { app, BrowserWindow, type Display, screen } from "electron";
+import type { GhostCursorEvent } from "./control-protocol.ts";
 
-/** One narrated Ghost input action (mirrors apps/ghost `GhostEvent` + the agent id
- * carried in the `x-ghost-agent` header). */
-export interface GhostCursorEvent {
-	/** The emitting agent's pid (from `x-ghost-agent`); drives the per-agent hue. */
-	agent: string;
-	phase: "move" | "down" | "up" | "type" | "scroll" | "done";
-	seq: number;
-	tool: string;
-	ts: number;
-	x: number;
-	y: number;
-}
+const GHOST_CURSOR_OPACITY = 0.68;
 
 // Self-contained overlay document. Exposes one global the main process calls:
-//   window.__ghost(phase, x, y, hue) -- x/y are overlay-window-local px; hue is 0-360.
+//   window.__ghost(phase, x, y, hue, intent) -- x/y are overlay-window-local px;
+//   hue is 0-360 and intent is a short, human-readable action label.
 // The sprite CSS-transitions its transform, so setting the target position eases the
 // cursor there for free. A `down` phase spawns a click ripple; every event resets a
-// 3s idle fade. The "ryu" label + the hue make each agent's cursor recognisable.
+// short idle fade. The intent chip makes the agent's next action legible without
+// touching the user's real pointer or blocking the target.
 const OVERLAY_HTML = `<!doctype html>
 <html>
 <head>
@@ -48,27 +41,47 @@ const OVERLAY_HTML = `<!doctype html>
   #cursor {
     position: absolute; top: 0; left: 0;
     transform: translate(-100px, -100px);
-    transition: transform .18s cubic-bezier(.22,.61,.36,1), opacity .4s ease;
+    transition: transform .2s cubic-bezier(.22,.61,.36,1), opacity .42s ease;
     opacity: 0; will-change: transform, opacity;
   }
-  /* Arrow pointer, tinted by the per-agent hue. */
-  #arrow {
-    width: 0; height: 0;
-    border-left: 9px solid transparent;
-    border-right: 9px solid transparent;
-    border-top: 15px solid hsl(var(--hue, 210), 90%, 60%);
-    transform: rotate(-35deg);
-    filter: drop-shadow(0 1px 2px rgba(0,0,0,.45));
+  #pointer {
+    position: absolute; left: 0; top: 0;
+    transform-origin: 3px 3px;
+    transition: transform .16s ease;
   }
-  /* The "ryu" tag riding next to the cursor. */
+  #pointer svg {
+    display: block; width: 22px; height: 26px;
+    overflow: visible;
+    filter: drop-shadow(0 2px 3px rgba(0,0,0,.28));
+  }
+  #pointer path {
+    fill: rgba(248,250,252,.98);
+    stroke: rgba(15,23,42,.9);
+    stroke-width: 1.2;
+    stroke-linejoin: round;
+  }
+  #cursor.pressing #pointer { transform: scale(.86); }
+  /* The short intent chip floating beside the cursor. */
   #label {
-    position: absolute; left: 12px; top: 12px;
-    padding: 1px 6px; border-radius: 6px;
-    font-size: 11px; font-weight: 600; line-height: 1.4;
-    color: #fff; white-space: nowrap;
-    background: hsl(var(--hue, 210), 85%, 52%);
-    box-shadow: 0 2px 8px rgba(0,0,0,.35);
+    position: absolute; left: 40px; top: -18px;
+    display: inline-flex; align-items: center; gap: 6px;
+    max-width: 260px; box-sizing: border-box;
+    padding: 5px 9px 5px 7px; border: 1px solid rgba(255,255,255,.16);
+    border-radius: 999px;
+    color: #fff; white-space: nowrap; overflow: hidden;
+    font-size: 11px; font-weight: 600; line-height: 1.25;
+    text-overflow: ellipsis;
+    background: rgba(15, 23, 42, .88);
+    box-shadow: 0 3px 12px rgba(0,0,0,.28);
+    backdrop-filter: blur(10px);
   }
+  #label::before {
+    content: ''; flex: 0 0 auto; width: 6px; height: 6px;
+    border-radius: 50%; background: hsl(var(--hue, 210), 90%, 62%);
+    box-shadow: 0 0 0 2px hsl(var(--hue, 210), 90%, 62%, .16);
+  }
+  #label.flip-x { left: auto; right: 40px; }
+  #label.flip-y { top: auto; bottom: -18px; }
   .ripple {
     position: absolute; border-radius: 50%;
     border: 2px solid hsl(var(--hue, 210), 90%, 62%);
@@ -82,12 +95,18 @@ const OVERLAY_HTML = `<!doctype html>
 </head>
 <body>
   <div id="cursor">
-    <div id="arrow"></div>
-    <div id="label">ryu</div>
+    <div id="pointer" aria-hidden="true">
+      <svg viewBox="0 0 27 31" aria-hidden="true">
+        <path d="M2 1L21 13.5L13.3 14.8L17.2 24L13.7 25.4L9.7 16.2L3.7 20.2Z" />
+      </svg>
+    </div>
+    <div id="label">Working</div>
   </div>
   <script>
     var cursor = document.getElementById('cursor');
+    var label = document.getElementById('label');
     var fadeTimer = null;
+    var hasPosition = false;
     function ripple(x, y, hue) {
       var r = document.createElement('div');
       r.className = 'ripple';
@@ -99,17 +118,34 @@ const OVERLAY_HTML = `<!doctype html>
       document.body.appendChild(r);
       setTimeout(function () { r.remove(); }, 520);
     }
-    function ghost(phase, x, y, hue) {
+    function positionLabel(x, y) {
+      label.classList.toggle('flip-x', x > window.innerWidth - 300);
+      label.classList.toggle('flip-y', y < 32);
+    }
+    function ghost(phase, x, y, hue, intent) {
       cursor.style.setProperty('--hue', hue);
-      // Reposition only for phases that carry a real target; type/done keep the
-      // last position so the cursor doesn't jump to (0,0) for a keystroke.
-      if (phase === 'move' || phase === 'down' || phase === 'up' || phase === 'scroll') {
+      label.textContent = intent || 'Working';
+      // Reposition for pointer-bearing phases. A typed event may carry a real
+      // target, while legacy sidecars use (0, 0) and should keep the last point.
+      var hasTarget = phase === 'move' || phase === 'down' || phase === 'up' ||
+        phase === 'scroll' || (phase === 'type' && (x !== 0 || y !== 0));
+      if (hasTarget) {
+        hasPosition = true;
         cursor.style.transform = 'translate(' + x + 'px, ' + y + 'px)';
+        positionLabel(x, y);
       }
-      cursor.style.opacity = '1';
+      if (!hasPosition) { return; }
+      // Keep the marker visibly distinct from the user's physical pointer.
+      cursor.style.opacity = String(${GHOST_CURSOR_OPACITY});
+      cursor.classList.toggle('pressing', phase === 'down');
       if (phase === 'down') { ripple(x, y, hue); }
       if (fadeTimer) { clearTimeout(fadeTimer); }
-      fadeTimer = setTimeout(function () { cursor.style.opacity = '0'; }, 3000);
+      // Keep the action legible long enough to read, then let the compositor fade
+      // it rather than leaving a permanent second cursor on the desktop.
+      fadeTimer = setTimeout(function () {
+        cursor.style.opacity = '0';
+        cursor.classList.remove('pressing');
+      }, 2400);
     }
     window.__ghost = ghost;
   </script>
@@ -119,7 +155,13 @@ const OVERLAY_HTML = `<!doctype html>
 let overlay: BrowserWindow | null = null;
 let ready = false;
 /** Events that arrived before the page finished loading; flushed on ready. */
-const pending: Array<{ phase: string; x: number; y: number; hue: number }> = [];
+const pending: Array<{
+	intent: string;
+	phase: string;
+	x: number;
+	y: number;
+	hue: number;
+}> = [];
 /** The display id the overlay is currently sized to, so bounds only change on move. */
 let currentDisplayId: number | null = null;
 /** Destroy-on-idle timer; reset on every event. */
@@ -182,7 +224,7 @@ function ensureOverlay(display: Display): BrowserWindow {
 	win.webContents.once("did-finish-load", () => {
 		ready = true;
 		for (const ev of pending.splice(0)) {
-			forward(win, ev.phase, ev.x, ev.y, ev.hue);
+			forward(win, ev.phase, ev.x, ev.y, ev.hue, ev.intent);
 		}
 		if (!win.isDestroyed()) {
 			win.showInactive();
@@ -207,14 +249,15 @@ function forward(
 	phase: string,
 	x: number,
 	y: number,
-	hue: number
+	hue: number,
+	intent: string
 ): void {
 	if (win.isDestroyed()) {
 		return;
 	}
 	win.webContents
 		.executeJavaScript(
-			`window.__ghost(${JSON.stringify(phase)},${x},${y},${hue})`
+			`window.__ghost(${JSON.stringify(phase)},${x},${y},${hue},${JSON.stringify(intent)})`
 		)
 		.catch(() => {
 			// Ignore: the window may be tearing down between events.
@@ -251,9 +294,15 @@ export function pushGhostCursorEvent(event: GhostCursorEvent): void {
 		const localY = point.y - display.bounds.y;
 		const hue = hueForAgent(event.agent || "0");
 		if (ready) {
-			forward(win, event.phase, localX, localY, hue);
+			forward(win, event.phase, localX, localY, hue, event.intent);
 		} else {
-			pending.push({ phase: event.phase, x: localX, y: localY, hue });
+			pending.push({
+				intent: event.intent,
+				phase: event.phase,
+				x: localX,
+				y: localY,
+				hue,
+			});
 		}
 		resetIdleDestroy();
 	} catch {

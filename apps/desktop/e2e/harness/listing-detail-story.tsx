@@ -36,6 +36,7 @@ import "../../src/index.css";
  *  is the thing under test, so it is spelled out here rather than trusted. */
 const DIALOG_CLASS =
 	"mx-auto max-h-[88vh] w-[min(80rem,94vw)] overflow-y-auto overflow-x-hidden rounded-xl border bg-background shadow-lg";
+const LISTING_SCREENSHOT = "http://localhost:5177/mouse-navigation-proof.png";
 
 /** A deliberately LONG value set. A layout that only survives short strings is
  *  what produced the early-wrapping preview in the first place. */
@@ -44,8 +45,10 @@ const INFO_ROWS = [
 	{ label: "Category", value: "Productivity" },
 	{ label: "Version", value: "2026.7.1-1" },
 	{ label: "License", value: "Apache-2.0" },
+	{ label: "Repository", value: "github.com/amajorai/ryu-marketplace" },
 	{ label: "Website", value: "https://example.com/a-fairly-long-path/page" },
 	{ label: "Privacy Policy", value: "https://example.com/privacy" },
+	{ label: "Terms of Service", value: "https://example.com/terms" },
 ];
 
 function Story() {
@@ -91,18 +94,37 @@ function Story() {
 									)}
 								</div>
 							</ListingAsideCard>
+							<ListingAsideCard title="Keywords">
+								<p className="text-muted-foreground text-xs leading-relaxed">
+									browser, automation, headless, chromium, remote desktop
+								</p>
+							</ListingAsideCard>
+							<ListingAsideCard title="Capabilities">
+								<div className="flex flex-col gap-2 text-xs">
+									<div className="flex items-center justify-between gap-3">
+										<span className="font-medium">Browser control</span>
+										<Badge variant="secondary">Browser toolkit</Badge>
+									</div>
+									<p className="text-muted-foreground">
+										Remote browser navigation, snapshots, and screenshots.
+									</p>
+								</div>
+							</ListingAsideCard>
+							<ListingAsideCard title="Example prompts">
+								<ul className="flex flex-col gap-2 text-muted-foreground text-xs">
+									<li>“Open the product dashboard and summarize it.”</li>
+									<li>“Take a screenshot of the checkout flow.”</li>
+								</ul>
+							</ListingAsideCard>
 						</>
 					}
 					gallery={
 						<ListingGalleryRail
 							name="Example App"
-							// Real https URLs the harness cannot fetch: what is under test
-							// is the RAIL (frame size, snap, horizontal scroll), and the
-							// component's `safeHttpUrl` guard rejects data: URLs by design,
-							// so a data-URL placeholder would silently render nothing and
-							// prove the opposite of what it looks like it proves.
+							// The bundled asset keeps the gallery visible in the proof while
+							// exercising the same http(s)-only URL guard as a GitHub image.
 							screenshots={[1, 2, 3, 4, 5].map(
-								(n) => `https://example.invalid/shot-${n}.png`
+								(n) => `${LISTING_SCREENSHOT}?shot=${n}`
 							)}
 						/>
 					}
@@ -131,7 +153,11 @@ function Story() {
 							// "Built-in" is a STATUS glyph now, not a word in this array, and
 							// "COMPANION" is gone entirely — every listing in the Apps tab is
 							// one, so the chip said nothing.
-							badges={["Required", "TOOL"]}
+							badges={["Required", "TOOL", "Browser toolkit"]}
+							banner={{
+								colors: ["#0f172a", "#2563eb", "#06b6d4"],
+								style: "gradient",
+							}}
 							dither={{ from: 250, to: "transparent", direction: "down" }}
 							icon={
 								<span className="font-semibold text-2xl text-white">E</span>

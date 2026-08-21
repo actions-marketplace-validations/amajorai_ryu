@@ -14,8 +14,18 @@
 //   - user attachments come from the same file parts the transcript renders;
 //   - items dedupe, so reading one file ten times is one row.
 
-import { describe, expect, test } from "bun:test";
-import { extractSources } from "@/src/components/panels/CoworkContextPanel.tsx";
+import { describe, expect, mock, test } from "bun:test";
+
+// This suite exercises the pure Sources derivation, not the visual shimmer. The
+// block's production module imports the UI package through a Vite-only
+// extensionless path, so keep that unrelated renderer out of Bun's test graph.
+mock.module("@ryu/blocks/desktop/agent-elements/text-shimmer", () => ({
+	TextShimmer: () => null,
+}));
+
+const { extractSources } = await import(
+	"@/src/components/panels/CoworkContextPanel.tsx"
+);
 
 function toolMessage(parts: Record<string, unknown>[]) {
 	return { role: "assistant", parts };
@@ -169,7 +179,7 @@ describe("extractSources", () => {
 			toolMessage([
 				{
 					type: "dynamic-tool",
-					toolName: "mcp__linear__create_issue",
+					toolName: "mcp.linear.create_issue",
 					input: { name: "Fix the rail" },
 				},
 			]),

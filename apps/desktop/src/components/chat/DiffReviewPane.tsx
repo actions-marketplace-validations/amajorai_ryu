@@ -27,6 +27,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -122,7 +123,7 @@ function FileSummaryRow({
 				<TooltipContent>{file.path}</TooltipContent>
 			</Tooltip>
 			{(file.additions > 0 || file.deletions > 0) && (
-				<span className="ml-auto flex shrink-0 items-center gap-1.5 text-muted-foreground">
+				<span className="ml-auto flex shrink-0 items-center gap-1.5 font-heading text-muted-foreground tabular-nums">
 					{file.additions > 0 && (
 						<span className="flex items-center gap-0.5 text-success dark:text-success">
 							<HugeiconsIcon
@@ -130,7 +131,7 @@ function FileSummaryRow({
 								className="size-2.5"
 								icon={Add01Icon}
 							/>
-							{file.additions}
+							{formatCount(file.additions)}
 						</span>
 					)}
 					{file.deletions > 0 && (
@@ -140,7 +141,7 @@ function FileSummaryRow({
 								className="size-2.5"
 								icon={MinusSignIcon}
 							/>
-							{file.deletions}
+							{formatCount(file.deletions)}
 						</span>
 					)}
 				</span>
@@ -335,17 +336,18 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 						icon={WorkflowCircle06Icon}
 					/>
 					<span className="font-medium text-sm">
-						{diff.files.length} file{diff.files.length === 1 ? "" : "s"} changed
+						{formatCount(diff.files.length) ?? "—"} file
+						{diff.files.length === 1 ? "" : "s"} changed
 					</span>
-					<span className="ml-auto flex items-center gap-2 text-muted-foreground text-xs">
+					<span className="ml-auto flex items-center gap-2 font-heading text-muted-foreground text-xs tabular-nums">
 						{totalAdditions > 0 && (
 							<span className="text-success dark:text-success">
-								+{totalAdditions}
+								+{formatCount(totalAdditions)}
 							</span>
 						)}
 						{totalDeletions > 0 && (
 							<span className="text-destructive dark:text-destructive">
-								-{totalDeletions}
+								-{formatCount(totalDeletions)}
 							</span>
 						)}
 					</span>
@@ -389,12 +391,12 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 									{selectedFile?.path ?? "Changes"}
 								</span>
 								{selectedFile && (
-									<span className="flex shrink-0 gap-1.5 tabular-nums">
+									<span className="flex shrink-0 gap-1.5 font-heading tabular-nums">
 										<span className="text-success">
-											+{selectedFile.additions}
+											+{formatCount(selectedFile.additions)}
 										</span>
 										<span className="text-destructive">
-											-{selectedFile.deletions}
+											-{formatCount(selectedFile.deletions)}
 										</span>
 									</span>
 								)}
@@ -430,7 +432,7 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 								<HugeiconsIcon className="size-3.5" icon={FolderOpenIcon} />
 								<span>Changed files</span>
 								<span className="ml-auto tabular-nums">
-									{visibleFiles.length}
+									{formatCount(visibleFiles.length) ?? "—"}
 								</span>
 							</div>
 							<div className="scroll-fade max-h-64 overflow-y-auto">

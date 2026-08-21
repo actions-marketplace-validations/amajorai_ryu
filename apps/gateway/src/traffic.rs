@@ -105,6 +105,8 @@ pub fn traffic_event(record: &AuditRecord) -> Value {
         "session_id": record.session_id,
         "user_id": record.user_id,
         "agent_id": record.agent_id,
+        "managed_inference": record.managed_inference,
+        "provider_cost_micro_usd": record.provider_cost_micro_usd,
         "ts": chrono::Utc::now().to_rfc3339(),
     })
 }
@@ -151,6 +153,8 @@ mod tests {
             user_id: None,
             agent_id: None,
             feature: None,
+            managed_inference: false,
+            provider_cost_micro_usd: None,
             widget_instance_id: None,
         }
     }

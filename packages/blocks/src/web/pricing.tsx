@@ -9,7 +9,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@ryu/ui/components/card";
-import { Input } from "@ryu/ui/components/input";
+import { RangeSlider } from "@ryu/ui/components/motion/range-slider";
 import { NumberTicker } from "@ryu/ui/components/number-ticker";
 import {
 	PlanBadge,
@@ -26,7 +26,6 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs";
 import { cn } from "@ryu/ui/lib/utils";
 import {
-	ArrowLeft,
 	Bot,
 	Calendar,
 	ChevronDown,
@@ -37,9 +36,7 @@ import {
 	Key,
 	Loader2,
 	Mail,
-	Minus,
 	Monitor,
-	Plus,
 	Scale,
 	Server,
 	Shield,
@@ -59,6 +56,8 @@ export type PricingPlanSlug =
 	| "max-yearly"
 	| "teams-monthly"
 	| "teams-yearly"
+	| "business-agents-monthly"
+	| "enterprise-agents-monthly"
 	// Ryu Cloud hosting tiers, e.g. "cloud-base" / "cloud-2x" / "cloud-3x". The
 	// exact ids come from the tier catalog (`@ryu/auth/lib/cloud-tiers`), injected
 	// by the page; this stays presentational.
@@ -70,18 +69,18 @@ export type CurrentPricingPlan = "desktop-license" | "pro" | "max" | "teams";
  * Display shape for a Ryu Cloud hosting tier row (injected by the page). Specs +
  * price come from the live Hetzner catalog with a markup, but the USER never sees
  * Hetzner/CX/CPX names — only CPU / RAM / SSD + a perf label. `monthlyAddUsd` is
- * the cost ON TOP of Max (0 for the free BASE node bundled with Max, flagged by
- * `includedWithMax`).
+ * the cost of a paid add-on (0 for the generic base candidate, flagged by
+ * `includedWithMax`). The server resolves the exact plan and region.
  */
 export interface CloudHostingTier {
 	readonly cores: number;
 	readonly diskGb: number;
 	/** Canonical tier id (BASE / 2X / 3X). */
 	readonly id: string;
-	/** True for the BASE node bundled free with every recurring plan. */
+	/** True for the generic base candidate; the server resolves the exact plan. */
 	readonly includedWithMax: boolean;
 	readonly memoryGb: number;
-	/** Monthly add-on price on top of Max (USD). 0 for the included BASE node. */
+	/** Monthly add-on price (USD). 0 for the generic included-base candidate. */
 	readonly monthlyAddUsd: number;
 	readonly name: string;
 	/** User-facing performance label ("Cost-optimized" | "Performance"). */
@@ -106,25 +105,24 @@ const noop = () => {
  * -------------------------------------------------------------------------- */
 export const PRO_MONTHLY_USD = 39;
 /**
- * Max is $99, charm-priced under $100 on purpose. It was $200 with a $150 credit
- * pool, which made it a credit pack priced ABOVE what the same credits cost as a
- * top-up — see `plans.ts` for the arithmetic. It now differentiates on the
- * machine, the mail limits and the deposit rate.
+ * Max is the original hidden individual plan price. The public business shelf
+ * uses the separate Teams automation offer below.
  */
 export const MAX_MONTHLY_USD = 99;
 /**
- * Teams is $49/seat — ABOVE Pro, not equal to it. A team seat buys governance,
- * not more inference, which is the market convention (a Cursor Teams seat is
- * double Pro's price for identical included usage). Pricing it at Pro made Teams
- * invisible: same price, smaller pool, and forced on any multi-member org.
+ * Teams is a native member-seat offer: $50/member/month with a five-seat
+ * minimum ($250 floor). The old agent names remain as compatibility exports for
+ * internal callers that have not migrated to the hosted card yet.
  */
-export const TEAMS_MONTHLY_PER_SEAT_USD = 49;
+export const TEAMS_MONTHLY_USD = 250;
+/** @deprecated Use {@link TEAMS_MONTHLY_USD}. */
+export const TEAMS_MONTHLY_PER_SEAT_USD = 50;
 /**
- * Seat minimums, mirroring `PLANS.<plan>.seatModel.minSeats`. Same duplication
- * bargain as the prices above: presentational surfaces read these, and the one
- * page that has the catalog on hand may override them via props.
+ * Keep the compatibility export because older card call sites still pass a
+ * `minSeats` prop.
  */
-export const TEAMS_MIN_SEATS = 2;
+export const TEAMS_MIN_SEATS = 5;
+export const TEAMS_MAX_SEATS = 50;
 /**
  * Max is SINGLE-SEAT. The constant stays at 1 (and the card shows no seat
  * stepper) because Max used to be seat-scalable, which put two multi-seat
@@ -134,24 +132,153 @@ export const TEAMS_MIN_SEATS = 2;
 export const MAX_MIN_SEATS = 1;
 
 /* -------------------------------------------------------------------------- *
- * Included AI usage, in whole USD per month (per SEAT for Teams).
+ * Legacy plan-card included AI usage, in whole USD per month. Hosted business
+ * automation uses the dynamic helpers below.
  *
- * Mirrors `PLANS.<plan>.monthlyCreditPoolMicroUsd`, and exists as constants
- * rather than literals because these numbers appear in three places — the plan
- * card bullets, the savings-calculator footnote, and the comparison copy — and
- * the footnote used to DERIVE its figure from a "50% of price" rule. When the
- * pools were pinned per plan that rule stopped being true, and the page quietly
- * advertised $19.50 of included usage on a plan granting $15.
+ * The base values are duplicated here because this presentational package does
+ * not depend on the control-plane catalog. Hosted cards use
+ * `hostedAgentIncludedCreditUsd`, so the Teams pool grows in five-seat bundles
+ * while its member-seat quantity changes.
  * -------------------------------------------------------------------------- */
 export const PRO_INCLUDED_USD = 15;
 export const MAX_INCLUDED_USD = 30;
-export const TEAMS_INCLUDED_PER_SEAT_USD = 15;
+export const TEAMS_INCLUDED_USD = 50;
+/** Current Teams credit grant: one $50 pool for each five billed seats. */
+export const TEAMS_INCLUDED_CREDIT_BUNDLE_SIZE = 5;
+export const TEAMS_INCLUDED_PER_BUNDLE_USD = 50;
+/** @deprecated Use {@link TEAMS_INCLUDED_USD}. */
+export const TEAMS_INCLUDED_PER_SEAT_USD = TEAMS_INCLUDED_USD;
 
 /**
- * Teams volume discount, mirrored from `@ryu/auth/lib/seat-tiers` for the same
- * reason the prices above are mirrored: `@ryu/blocks` is presentational and must
- * not depend on the control-plane package. Polar enforces the real ladder via
- * native seat tiers; this only renders it.
+ * Hosted business-automation prices. These mirror
+ * `@ryu/auth/lib/agent-plans` without making this presentational package depend
+ * on the control-plane catalog.
+ */
+export type HostedAgentPricingPlanId = "teams" | "pro" | "max";
+
+export const PRO_AGENT_INCLUDED = 5;
+export const PRO_AGENT_BASE_USD = 250;
+export const PRO_AGENT_STANDARD_USD = 50;
+export const PRO_AGENT_PACK_USD = 40;
+/** Shared monthly AI-credit grant added for each paid Pro agent after the floor. */
+export const PRO_INCLUDED_PER_ADDITIONAL_AGENT_USD = 25;
+export const PRO_AGENT_MAX_ORG_MEMBERS = 50;
+export const MAX_AGENT_INCLUDED = 50;
+export const MAX_AGENT_BASE_USD = 2500;
+export const MAX_AGENT_STANDARD_USD = 30;
+export const MAX_AGENT_PACK_USD = 25;
+/** Shared monthly AI-credit grant added for each paid Max agent after the floor. */
+export const MAX_INCLUDED_PER_ADDITIONAL_AGENT_USD = 5;
+/** Public business offer: the Teams card owns the new five-agent price. */
+export const TEAMS_AGENT_INCLUDED = 5;
+export const TEAMS_AGENT_BASE_USD = 250;
+export const TEAMS_AGENT_STANDARD_USD = 50;
+export const TEAMS_AGENT_PACK_USD = 40;
+export const TEAMS_INCLUDED_PER_ADDITIONAL_AGENT_USD = 25;
+export const HOSTED_AGENT_BUNDLE_SIZE = 5;
+export const HOSTED_AGENT_SLIDER_MIN = TEAMS_AGENT_INCLUDED;
+export const HOSTED_AGENT_SLIDER_MAX = 1000;
+
+/** Normalize a public Teams member-seat selection without inventing bundles. */
+export function normalizeTeamsSeatCount(seats: number): number {
+	return Number.isFinite(seats)
+		? Math.max(TEAMS_MIN_SEATS, Math.floor(seats))
+		: TEAMS_MIN_SEATS;
+}
+
+const normalizeHostedAgentCount = (
+	agentCount: number,
+	minimum: number
+): number => {
+	const bounded = Number.isFinite(agentCount)
+		? Math.max(minimum, Math.floor(agentCount))
+		: minimum;
+	return (
+		Math.ceil(bounded / HOSTED_AGENT_BUNDLE_SIZE) * HOSTED_AGENT_BUNDLE_SIZE
+	);
+};
+
+/**
+ * Shared monthly AI credits for a hosted organization. Teams owns one pooled
+ * organization wallet; the current grant adds $50 for every five billed seats.
+ */
+export function hostedAgentIncludedCreditUsd(
+	planId: HostedAgentPricingPlanId,
+	agentCount: number
+): number {
+	const isTeams = planId === "teams";
+	if (isTeams) {
+		const seats = normalizeTeamsSeatCount(agentCount);
+		return (
+			Math.ceil(seats / TEAMS_INCLUDED_CREDIT_BUNDLE_SIZE) *
+			TEAMS_INCLUDED_PER_BUNDLE_USD
+		);
+	}
+	const floor = isTeams ? TEAMS_AGENT_INCLUDED : PRO_AGENT_INCLUDED;
+	const count = normalizeHostedAgentCount(agentCount, floor);
+	if (planId === "pro") {
+		return (
+			PRO_INCLUDED_USD +
+			Math.max(0, count - PRO_AGENT_INCLUDED) *
+				PRO_INCLUDED_PER_ADDITIONAL_AGENT_USD
+		);
+	}
+	const maxCount = normalizeHostedAgentCount(agentCount, MAX_AGENT_INCLUDED);
+	return (
+		MAX_INCLUDED_USD +
+		Math.max(0, maxCount - MAX_AGENT_INCLUDED) *
+			MAX_INCLUDED_PER_ADDITIONAL_AGENT_USD
+	);
+}
+
+/** The monthly price at a contracted hosted-agent count. */
+export function hostedAgentMonthlyPriceUsd(
+	planId: HostedAgentPricingPlanId,
+	agentCount: number
+): number {
+	if (planId === "teams") {
+		return TEAMS_MONTHLY_PER_SEAT_USD * normalizeTeamsSeatCount(agentCount);
+	}
+	const count = normalizeHostedAgentCount(
+		agentCount,
+		planId === "pro" ? PRO_AGENT_INCLUDED : MAX_AGENT_INCLUDED
+	);
+	if (planId === "pro") {
+		const throughTen = Math.max(0, Math.min(count, 10) - PRO_AGENT_INCLUDED);
+		const afterTen = Math.max(0, count - 10);
+		return (
+			PRO_AGENT_BASE_USD +
+			throughTen * PRO_AGENT_STANDARD_USD +
+			afterTen * PRO_AGENT_PACK_USD
+		);
+	}
+
+	const throughHundred = Math.max(0, Math.min(count, 100) - MAX_AGENT_INCLUDED);
+	const afterHundred = Math.max(0, count - 100);
+	return (
+		MAX_AGENT_BASE_USD +
+		throughHundred * MAX_AGENT_STANDARD_USD +
+		afterHundred * MAX_AGENT_PACK_USD
+	);
+}
+
+/** Recommend the better-value shelf at the selected agent volume. */
+export function hostedAgentRecommendedPlan(
+	agentCount: number
+): HostedAgentPricingPlanId {
+	const count = normalizeHostedAgentCount(agentCount, HOSTED_AGENT_SLIDER_MIN);
+	const teamsPrice = hostedAgentMonthlyPriceUsd("teams", count);
+	const maxPrice = hostedAgentMonthlyPriceUsd(
+		"max",
+		Math.max(count, MAX_AGENT_INCLUDED)
+	);
+	return maxPrice <= teamsPrice ? "max" : "teams";
+}
+
+/**
+ * Legacy seat-volume helpers retained for compatibility with older card
+ * consumers. The public Teams automation offer is priced in member seats; the
+ * old volume helpers remain only for compatibility callers.
  */
 export const TEAMS_VOLUME_TIERS: readonly {
 	minSeats: number;
@@ -163,14 +290,15 @@ export const TEAMS_VOLUME_TIERS: readonly {
 ];
 
 /**
- * The per-seat price at `seats`, volume discount applied.
+ * The old per-seat price at `seats`, volume discount applied.
  *
  * THIS MUST EXIST, and its absence was a bug: the card rendered the volume
  * ladder as a NOTE while `PriceBlock` still multiplied the LIST seat price by
  * the seat count. At 25 seats the page quoted $1,225/mo against the $1,102.50
  * Polar actually charges — the page overstating by $122.50/mo, which is the same
- * class of page-vs-checkout disagreement as Teams advertising $39 while billing
- * $49. A discount nobody sees until the invoice is worse than no discount.
+ * class of page-vs-checkout disagreement as a page advertising one unit while
+ * checkout bills another. A discount nobody sees until the invoice is worse
+ * than no discount.
  *
  * Rounded to whole cents to match `seatPriceUsd` in `@ryu/auth/lib/seat-tiers`,
  * which is what the provisioning script writes into Polar's native seat tiers.
@@ -223,13 +351,6 @@ export function effectiveMonthlyPrice(
 export function annualTotalPrice(monthly: number): number {
 	return monthly * PAID_MONTHS_ON_ANNUAL;
 }
-
-/** US-dollar formatter for whole-dollar totals ("$1,170"). */
-const usd = new Intl.NumberFormat("en-US", {
-	style: "currency",
-	currency: "USD",
-	maximumFractionDigits: 0,
-});
 
 /**
  * The price block for a recurring plan. Always shows the *monthly* figure with a
@@ -308,128 +429,111 @@ function PriceBlock({
 }
 
 /**
- * Seat count control for the per-seat plans (Teams, and Max — which is
- * seat-scalable from one seat). A minus/plus stepper around a numeric input,
- * clamped to `[minSeats, MAX_SEAT_SELECTOR]`; anything larger is an Enterprise
- * conversation, so the copy points there rather than letting the field run away.
- *
- * Presentational and CONTROLLED: it renders only when the host passes an
- * `onSeatsChange`, so surfaces that show the cards read-only (the desktop
- * paywall, storyboard) are unaffected.
+ * Shared effort-style control for the hosted automation shelf. One slider owns
+ * the member-seat quantity so the Teams price and Enterprise handoff update
+ * together.
  */
-/**
- * Where self-serve stops and sales starts.
- *
- * 100 because that is the same line `docs/enterprise-pricing-framework.md` draws:
- * above it a buyer almost always needs something self-serve cannot do anyway —
- * SSO, invoicing and a PO, a security review, custom terms — so letting the
- * slider run to 500 sold a purchase that procurement would have blocked at
- * checkout. It was 500, which disagreed with the framework and quoted six-figure
- * annual commitments through a card form with no contract behind them.
- *
- * The cap is a ROUTING decision, not a limit on how many seats we will sell: the
- * copy beside it points at Enterprise, which is where 100+ is priced properly
- * (and more cheaply per seat than this ladder bottoms out at).
- *
- * MIRRORS `SELF_SERVE_MAX_SEATS` in `@ryu/auth/lib/seat-tiers`, which is where
- * it is ENFORCED — both `/checkout/teams` and `validateSeatChange` refuse above
- * it. This constant only stops the slider; a cap that lived only here would be a
- * suggestion, since both routes read a seat count straight off the request body.
- */
-const MAX_SEAT_SELECTOR = 100;
+function hostedAgentBenchmark(agentCount: number): {
+	description: string;
+	label: string;
+} {
+	if (agentCount <= 5) {
+		return {
+			description: "A set of recurring processes owned by one team.",
+			label: "A five-person team",
+		};
+	}
+	if (agentCount <= 10) {
+		return {
+			description: "Several processes sharing a team or department.",
+			label: "One function",
+		};
+	}
+	if (agentCount <= PRO_AGENT_MAX_ORG_MEMBERS) {
+		return {
+			description: "A broader process portfolio across multiple teams.",
+			label: "Multiple teams",
+		};
+	}
+	return {
+		description: "Scope the right rollout, governance, and deployment with us.",
+		label: "Enterprise scale",
+	};
+}
 
-function SeatSelector({
-	seats,
-	minSeats,
-	onSeatsChange,
-	inputId,
+export function HostedAgentEffortSlider({
+	agentCount = HOSTED_AGENT_SLIDER_MIN,
+	onAgentCountChange = noop,
 }: {
-	seats: number;
-	minSeats: number;
-	onSeatsChange: (seats: number) => void;
-	inputId: string;
+	agentCount?: number;
+	onAgentCountChange?: (agentCount: number) => void;
 }) {
-	const clamp = (next: number) =>
-		Math.min(MAX_SEAT_SELECTOR, Math.max(minSeats, Math.floor(next)));
-	// The seat count SPINS like every other figure on the card, but the field
-	// must stay typeable — a 250-seat buyer is not pressing "+" 248 times. So the
-	// ticker is what you see, and clicking it swaps in the real input.
-	const [editing, setEditing] = useState(false);
+	const selectedCount = Math.min(
+		HOSTED_AGENT_SLIDER_MAX,
+		normalizeTeamsSeatCount(agentCount)
+	);
+	const benchmark = hostedAgentBenchmark(selectedCount);
+	const includedCredits = hostedAgentIncludedCreditUsd("teams", selectedCount);
 
 	return (
-		<div className="mb-6">
-			<label
-				className="mb-2 block font-medium text-muted-foreground text-xs"
-				htmlFor={inputId}
-			>
-				Seats
-			</label>
-			<div className="flex items-center gap-3">
-				{/* ONE control, not three. The stepper buttons live INSIDE the field's
-				    border and share its height, so it reads as a single seat picker
-				    rather than a text box that happens to have buttons parked beside
-				    it. `lg` sizing because this is the only interactive control on the
-				    card and it competes with a 4xl price. */}
-				<div className="inline-flex h-11 items-center rounded-lg border bg-background shadow-xs focus-within:ring-[3px] focus-within:ring-ring/50">
-					<button
-						aria-label="Remove a seat"
-						className="flex h-full w-10 shrink-0 items-center justify-center rounded-l-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-						disabled={seats <= minSeats}
-						onClick={() => onSeatsChange(clamp(seats - 1))}
-						type="button"
-					>
-						<Minus className="size-4" />
-					</button>
-					<Input
-						// Borderless and transparent: the WRAPPER owns the border now, so
-						// the input keeping its own would draw a box inside a box. The
-						// appearance triple removes the native spinners, which would
-						// otherwise duplicate the buttons either side of them.
-						className={cn(
-							"h-full w-14 border-0 bg-transparent px-0 text-center font-medium text-base tabular-nums shadow-none focus-visible:ring-0",
-							"[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none",
-							editing ? "" : "sr-only"
-						)}
-						id={inputId}
-						inputMode="numeric"
-						max={MAX_SEAT_SELECTOR}
-						min={minSeats}
-						onBlur={() => setEditing(false)}
-						onChange={(event) => {
-							const next = Number.parseInt(event.target.value, 10);
-							if (Number.isFinite(next)) {
-								onSeatsChange(clamp(next));
-							}
-						}}
-						type="number"
-						value={seats}
-					/>
-					{editing ? null : (
-						<button
-							aria-label={`${seats} seats — click to type a different number`}
-							className="flex h-full w-14 items-center justify-center font-medium text-base tabular-nums"
-							onClick={() => setEditing(true)}
-							type="button"
-						>
-							<NumberTicker value={seats} />
-						</button>
-					)}
-					<button
-						aria-label="Add a seat"
-						className="flex h-full w-10 shrink-0 items-center justify-center rounded-r-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-						disabled={seats >= MAX_SEAT_SELECTOR}
-						onClick={() => onSeatsChange(clamp(seats + 1))}
-						type="button"
-					>
-						<Plus className="size-4" />
-					</button>
+		<div className="mx-auto mb-10 max-w-5xl px-1 sm:px-2">
+			<div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+				<div>
+					<h2 className="font-heading font-semibold text-xl tracking-tight">
+						How many people need access?
+					</h2>
+					<p className="mt-1 max-w-xl text-muted-foreground text-sm">
+						Start with the people who will use and govern the shared workspace.
+						Seats are added one at a time; the included AI credits stay pooled
+						and grow by $50 at each five-seat bundle.
+					</p>
 				</div>
-				<span className="text-muted-foreground text-xs">
-					{seats >= MAX_SEAT_SELECTOR
-						? "Need more? Talk to sales"
-						: minSeats > 1
-							? `minimum ${minSeats}`
-							: "1 seat = 1 person"}
+				<div className="flex items-baseline gap-2 sm:text-right">
+					<NumberTicker
+						className="font-heading font-semibold text-4xl tabular-nums"
+						value={selectedCount}
+					/>
+					<span className="text-muted-foreground text-sm">
+						{selectedCount === 1 ? "seat" : "seats"}
+					</span>
+				</div>
+			</div>
+			<div className="mt-7">
+				<RangeSlider
+					aria-label="Number of Teams member seats"
+					className="h-10"
+					formatValueText={(value) =>
+						`${value} ${value === 1 ? "seat" : "seats"}`
+					}
+					max={HOSTED_AGENT_SLIDER_MAX}
+					min={HOSTED_AGENT_SLIDER_MIN}
+					onValueChange={(value) =>
+						onAgentCountChange(normalizeTeamsSeatCount(value))
+					}
+					step={1}
+					value={selectedCount}
+				/>
+			</div>
+			<div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 font-medium text-muted-foreground text-xs tabular-nums sm:grid-cols-4">
+				<span>5 · minimum</span>
+				<span>10 · one function</span>
+				<span>25 · multiple teams</span>
+				<span>51+ · enterprise</span>
+			</div>
+			<div className="mt-5 flex flex-col gap-1 text-muted-foreground text-xs sm:flex-row sm:items-baseline sm:justify-between">
+				<span>
+					<strong className="font-medium text-foreground">
+						{benchmark.label}
+					</strong>{" "}
+					· {benchmark.description}
+				</span>
+				<span className="flex items-baseline gap-1">
+					<NumberTicker
+						className="font-medium text-foreground tabular-nums"
+						prefix="$"
+						value={includedCredits}
+					/>
+					/month shared AI credits · +$50 per 5 billed seats
 				</span>
 			</div>
 		</div>
@@ -437,17 +541,15 @@ function SeatSelector({
 }
 
 /**
- * Who the plans on screen are for. The pricing page splits on this BEFORE the
- * billing period, because the two audiences do not shop the same shelf: an
- * individual comparing Lifetime against Pro should never have to read past two
- * seat-priced business plans to find them.
+ * Which public shelf is rendered. The live page uses the organization shelf;
+ * the union remains for self-hosted and legacy callers.
  */
 export type PricingAudience = "business" | "individual";
 
 /** Which plans each audience sees, and in which order. */
 export const PRICING_AUDIENCE_PLANS = {
-	business: ["teams", "max", "enterprise"],
-	individual: ["lifetime", "pro"],
+	business: ["teams", "enterprise"],
+	individual: ["pro", "max"],
 } as const;
 
 /** Where the customer runs Ryu — the outermost pricing choice. */
@@ -456,19 +558,10 @@ export type PricingDeployment = "platform" | "self-hosted";
 /**
  * THE DEPLOYMENT SWITCH — platform vs self-hosted.
  *
- * DELIBERATELY NOT A THIRD PILL ROW. The page already carries two `TabsList`
- * pill switches (audience, then billing), and adding a third identical row makes
- * three controls that LOOK like peers while being nested: deployment decides
- * whether billing is even a concept, audience narrows the shelf inside it, and
- * billing only restyles what is already visible. Three equal pill rows stacked
- * on top of each other flatten that hierarchy into a wall of tabs, and the
- * reader has to try them to learn which one matters.
- *
- * So this one is rendered as a segmented CARD control — bigger, captioned, its
- * own surface — and the two pill rows below it are hidden entirely on the
- * self-hosted side (there is no seat billing to toggle and no audience split).
- * The result is at most two visible controls at any time, in a visual order that
- * matches the logical one, rather than four.
+ * This is the page's large, label-only text switch. It sits above the two
+ * pricing controls below it: audience uses `pills-lg`, while billing stays on
+ * the compact `pills` treatment. The two lower controls disappear entirely on
+ * the self-hosted side because there is no seat billing or audience split.
  */
 export function PricingDeploymentToggle({
 	deployment = "platform",
@@ -477,58 +570,20 @@ export function PricingDeploymentToggle({
 	deployment?: PricingDeployment;
 	onDeploymentChange?: (deployment: PricingDeployment) => void;
 }) {
-	const OPTIONS: {
-		caption: string;
-		icon: typeof Cloud;
-		label: string;
-		value: PricingDeployment;
-	}[] = [
-		{
-			caption: "We run it. Credits included, no keys to hold.",
-			icon: Cloud,
-			label: "Ryu Platform",
-			value: "platform",
-		},
-		{
-			caption: "You run it. Open source, on your own infrastructure.",
-			icon: Server,
-			label: "Self-hosted",
-			value: "self-hosted",
-		},
-	];
 	return (
-		<div className="mx-auto mb-8 grid max-w-2xl grid-cols-1 gap-3 sm:grid-cols-2">
-			{OPTIONS.map((option) => {
-				const active = deployment === option.value;
-				const Icon = option.icon;
-				return (
-					<button
-						aria-pressed={active}
-						className={cn(
-							"rounded-2xl border p-4 text-left transition-colors",
-							active
-								? "border-primary bg-primary/5"
-								: "border-border bg-card hover:bg-accent/40"
-						)}
-						key={option.value}
-						onClick={() => onDeploymentChange(option.value)}
-						type="button"
-					>
-						<span className="flex items-center gap-2 font-semibold text-sm">
-							<Icon
-								className={cn(
-									"size-4",
-									active ? "text-primary" : "text-muted-foreground"
-								)}
-							/>
-							{option.label}
-						</span>
-						<span className="mt-1 block text-muted-foreground text-xs">
-							{option.caption}
-						</span>
-					</button>
-				);
-			})}
+		<div className="mx-auto mb-8 flex justify-center">
+			<Tabs
+				aria-label="Deployment"
+				onValueChange={(value) =>
+					onDeploymentChange(value as PricingDeployment)
+				}
+				value={deployment}
+			>
+				<TabsList className="min-w-max" manageLayout={false} variant="text">
+					<TabsTrigger value="platform">Ryu Platform</TabsTrigger>
+					<TabsTrigger value="self-hosted">Self-hosted</TabsTrigger>
+				</TabsList>
+			</Tabs>
 		</div>
 	);
 }
@@ -555,9 +610,13 @@ export function PricingAudienceToggle({
 				onValueChange={(val) => onAudienceChange(val as PricingAudience)}
 				value={audience}
 			>
-				<TabsList variant="pills-lg">
-					<TabsTrigger value="individual">Individual</TabsTrigger>
-					<TabsTrigger value="business">Business &amp; Enterprise</TabsTrigger>
+				<TabsList className="min-w-max" manageLayout={false} variant="pills-lg">
+					<TabsTrigger className="text-base" value="individual">
+						Individual
+					</TabsTrigger>
+					<TabsTrigger className="text-base" value="business">
+						Teams &amp; Enterprise
+					</TabsTrigger>
 				</TabsList>
 			</Tabs>
 		</div>
@@ -578,7 +637,11 @@ export function PricingBillingToggle({
 				onValueChange={(val) => onToggleYearly(val === "yearly")}
 				value={isYearly ? "yearly" : "monthly"}
 			>
-				<TabsList variant="pills">
+				<TabsList
+					className="min-w-max p-0"
+					manageLayout={false}
+					variant="default"
+				>
 					<TabsTrigger value="monthly">Monthly</TabsTrigger>
 					<TabsTrigger
 						className="[&_span]:text-primary data-active:[&_span]:text-white/90 dark:data-active:[&_span]:text-black/80"
@@ -718,23 +781,29 @@ function CloudUpgradePanel({
 }
 
 /**
- * Wraps a plan card in a 2px gradient border. Pro uses an always-on animated
- * conic sweep (`.t-pro-card-border`); other tiers (max/teams/lifetime) show a
- * static default border in the 2px frame in LIGHT mode only (`bg-border`;
- * `dark:bg-transparent` = borderless in dark) that MORPHS into a matching
- * animated conic ring on hover (`.t-card-border-spin` +
- * {@link planTierConicGradient}).
+ * Wraps a plan card in a 2px gradient border. The legacy Pro card keeps its
+ * always-on animated conic sweep (`.t-pro-card-border`). Hosted pricing passes
+ * `isRecommended` explicitly so only the recommended card keeps the same
+ * conic ring visible; the other card returns to the static default border and
+ * only animates on hover (`.t-card-border-spin` + {@link planTierConicGradient}).
  */
 function PricingCardBorder({
+	isRecommended = false,
 	variant,
 	children,
 }: {
+	isRecommended?: boolean;
 	variant: PlanTier;
 	children: ReactNode;
 }) {
-	if (variant === "pro") {
+	const showHighlightedBorder = isRecommended || variant === "pro";
+	if (variant === "pro" && showHighlightedBorder) {
 		return (
-			<div className="t-pro-card-border relative rounded-[calc(var(--radius-4xl)+2px)] p-[2px]">
+			<div
+				className={cn(
+					"t-pro-card-border relative rounded-[calc(var(--radius-4xl)+2px)] p-[2px]"
+				)}
+			>
 				<Card className="relative flex h-full flex-col border-transparent">
 					{children}
 				</Card>
@@ -743,10 +812,19 @@ function PricingCardBorder({
 	}
 
 	return (
-		<div className="group relative rounded-[calc(var(--radius-4xl)+2px)] bg-border p-[2px] dark:bg-transparent">
+		<div
+			className={cn(
+				"group relative rounded-[calc(var(--radius-4xl)+2px)] bg-border p-[2px] dark:bg-transparent"
+			)}
+		>
 			<div
 				aria-hidden
-				className="t-card-border-spin pointer-events-none absolute inset-0 rounded-[inherit] opacity-0 transition-opacity duration-500 ease-out group-hover:opacity-100"
+				className={cn(
+					"t-card-border-spin pointer-events-none absolute inset-0 rounded-[inherit] transition-opacity duration-500 ease-out",
+					showHighlightedBorder
+						? "opacity-100"
+						: "opacity-0 group-hover:opacity-100"
+				)}
 				style={{ backgroundImage: planTierConicGradient(variant) }}
 			/>
 			<Card className="relative flex h-full flex-col border-transparent">
@@ -795,25 +873,28 @@ function PlanCta({
 	return (
 		<Button
 			className="w-full"
-			disabled={isCurrent || isLoading}
+			disabled={isCurrent}
+			loading={isLoading}
 			onClick={onClick}
 			variant={variant}
 		>
-			{isCurrent ? (
-				"Current plan"
-			) : isLoading ? (
-				<>
-					<Loader2 className="mr-2 size-4 animate-spin" />
-					Processing…
-				</>
-			) : (
-				label
-			)}
+			{isCurrent ? "Current plan" : isLoading ? "Processing…" : label}
 		</Button>
 	);
 }
 
-/** Lifetime (desktop license) plan card — one-time purchase, local-first. */
+/** Keeps inherited entitlements visually separate from a plan's own features. */
+function IncludedPlanBanner({ plan }: { plan: string }) {
+	return (
+		<div className="mb-6 border-border/70 border-t pt-4">
+			<p className="text-muted-foreground text-xs">
+				Everything in {plan}, plus:
+			</p>
+		</div>
+	);
+}
+
+/** Local desktop license card — retained for the desktop paywall, not hosted pricing. */
 export function LifetimePlanCard({
 	loadingPlan = null,
 	onCheckout = noop,
@@ -824,11 +905,11 @@ export function LifetimePlanCard({
 		<PricingCardBorder variant="desktop-license">
 			<CardHeader>
 				<CardTitle className="flex items-center gap-2 text-xl">
-					Lifetime Access
-					<PlanBadge label="Lifetime" plan="desktop-license" size="md" />
+					Local Desktop
+					<PlanBadge label="One-time" plan="desktop-license" size="md" />
 				</CardTitle>
 				<CardDescription>
-					Run AI on your own computer. Pay once.
+					Use Ryu on your own hardware; hosted business automation is separate.
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
@@ -836,20 +917,20 @@ export function LifetimePlanCard({
 					<NumberTicker
 						className="font-heading font-semibold text-4xl tabular-nums"
 						prefix="$"
-						value={29}
+						value={129}
 					/>
-					<span className="font-heading text-muted-foreground text-xl line-through tabular-nums">
-						$69
+					<span className="font-heading text-muted-foreground text-xl tabular-nums line-through">
+						$200
 					</span>
 					<span className="ml-1 text-muted-foreground">once</span>
 				</div>
 				<p className="mb-6 font-medium text-primary text-xs">
-					Launch price · save 58%
+					Launch price · save 36%
 				</p>
 				<ul className="space-y-3">
 					<li className="flex items-center">
 						<Monitor className="mr-2 size-4" />
-						<span>Run AI on your own computer, forever</span>
+						<span>Run local agents and workflows on your computer</span>
 					</li>
 					<li className="flex items-center">
 						<Key className="mr-2 size-4" />
@@ -857,7 +938,7 @@ export function LifetimePlanCard({
 					</li>
 					<li className="flex items-center">
 						<Wrench className="mr-2 size-4" />
-						<span>Private: nothing leaves your machine</span>
+						<span>No hosted agents, node, or monthly credits included</span>
 					</li>
 					<li className="flex items-center">
 						<Calendar className="mr-2 size-4" />
@@ -865,7 +946,7 @@ export function LifetimePlanCard({
 					</li>
 					<li className="flex items-center">
 						<Star className="mr-2 size-4" />
-						<span>7-day free trial, no card needed</span>
+						<span>7-day local trial, no card needed</span>
 					</li>
 				</ul>
 			</CardContent>
@@ -873,7 +954,7 @@ export function LifetimePlanCard({
 				<PlanCta
 					isCurrent={isCurrent}
 					isLoading={loadingPlan === "lifetime"}
-					label="Get lifetime access"
+					label="Get desktop license"
 					onClick={() => onCheckout("lifetime")}
 					variant="outline"
 				/>
@@ -900,18 +981,24 @@ export function ProPlanCard({
 					Pro Plan
 					<PlanBadge plan="pro" size="md" />
 				</CardTitle>
-				<CardDescription>We run AI for you. Nothing to set up.</CardDescription>
+				<CardDescription>
+					Managed AI for one person. Bring a shared workspace to Teams.
+				</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
 				<PriceBlock isYearly={isYearly} monthly={PRO_MONTHLY_USD} />
 				<ul className="space-y-3">
+					<li className="flex items-center">
+						<Users className="mr-2 size-4" />
+						<span>One person · personal workspace</span>
+					</li>
 					<li className="flex items-center">
 						<Download className="mr-2 size-4" />
 						<span>The full app on all your devices</span>
 					</li>
 					<li className="flex items-center">
 						<Bot className="mr-2 size-4" />
-						<span>Unlimited chats, agents & spaces</span>
+						<span>Unlimited personal chats, agents &amp; spaces</span>
 					</li>
 					<li className="flex items-center">
 						<Cloud className="mr-2 size-4" />
@@ -928,7 +1015,7 @@ export function ProPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Zap className="mr-2 size-4" />
-						<span>We handle all the setup for you</span>
+						<span>We handle setup for your personal workspace</span>
 					</li>
 					<li className="flex items-center">
 						<Monitor className="mr-2 size-4" />
@@ -937,22 +1024,18 @@ export function ProPlanCard({
 					<li className="flex items-center">
 						<Mail className="mr-2 size-4" />
 						<span>
-							Unlimited Agent Inboxes &amp; emails · 5 GB mail storage
+							Unlimited Agent Inboxes · 10,000 sends/month · 20 GB mail storage
 						</span>
 					</li>
 					<li className="flex items-center">
 						<Server className="mr-2 size-4" />
 						<span>Space data limited only by your disk</span>
 					</li>
-					{/* The free base node ships with EVERY recurring plan (Pro, Max and
-					    Teams — `planIncludesBaseNode` in @ryu/auth/lib/base-node is the
-					    enforced predicate). This bullet and the entitlement must move
-					    together: advertising it without the gate 402s the buyer, and
-					    widening the gate without the bullet gives away compute nobody
-					    was told about. */}
+					{/* A qualifying hosted plan receives one plan- and region-specific
+					    managed node. The server is the authority for the exact shape. */}
 					<li className="flex items-center">
 						<Cloud className="mr-2 size-4" />
-						<span>Free managed cloud node (2 vCPU · 4 GB)</span>
+						<span>Managed cloud node (2 vCPU · 4 GB · 40 GB)</span>
 					</li>
 					<li className="flex items-center">
 						<Key className="mr-2 size-4" />
@@ -1005,19 +1088,22 @@ export function MaxPlanCard({
 					Max Plan
 					<PlanBadge plan="max" size="md" />
 				</CardTitle>
-				<CardDescription>We run AI for you, around the clock.</CardDescription>
+				<CardDescription>
+					More throughput for one person. Shared business work belongs in Teams.
+				</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
 				<PriceBlock isYearly={isYearly} monthly={MAX_MONTHLY_USD} />
+				<IncludedPlanBanner plan="Pro" />
 				<ul className="space-y-3">
 					<li className="flex items-center">
-						<ArrowLeft className="mr-2 size-4" />
-						<span>Everything in Pro, plus:</span>
+						<Users className="mr-2 size-4" />
+						<span>One person · personal workspace</span>
 					</li>
 					<li className="flex items-center">
 						<Server className="mr-2 size-4" />
 						<span>
-							<strong>Double the cloud node</strong> — 4 vCPU · 8 GB · 80 GB
+							<strong>Dedicated cloud node</strong> — 2 vCPU · 8 GB · 80 GB
 						</span>
 					</li>
 					<li className="flex items-center">
@@ -1028,7 +1114,7 @@ export function MaxPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Bot className="mr-2 size-4" />
-						<span>AI agents that keep working 24/7</span>
+						<span>Higher-throughput personal agents and workflows</span>
 					</li>
 					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
@@ -1041,7 +1127,9 @@ export function MaxPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Mail className="mr-2 size-4" />
-						<span>Unlimited Agent Inboxes · 10 GB storage</span>
+						<span>
+							Unlimited Agent Inboxes · 100,000 sends/month · 100 GB storage
+						</span>
 					</li>
 					<li className="flex items-center">
 						<Shield className="mr-2 size-4" />
@@ -1068,59 +1156,10 @@ export function MaxPlanCard({
 }
 
 /**
- * Shown once a volume tier is actually EARNED: the list price struck through,
- * and the percentage named.
- *
- * Separate from {@link VolumeDiscountNote}, which advertises the ladder to
- * someone who has not reached it yet. Both matter, and for opposite reasons —
- * one is a reason to add seats, the other is confirmation you got what you were
- * promised. A discount applied silently is indistinguishable from no discount.
- */
-function VolumeDiscountApplied({ seats }: { seats: number }) {
-	const percent = teamsVolumePercent(seats);
-	if (percent === 0) {
-		return null;
-	}
-	return (
-		<p className="mb-4 font-medium text-primary text-sm">
-			<span className="text-muted-foreground line-through">
-				${TEAMS_MONTHLY_PER_SEAT_USD}
-			</span>{" "}
-			{percent}% volume discount applied at {seats} seats
-		</p>
-	);
-}
-
-/**
- * The volume ladder, rendered as a plain line of breakpoints.
- *
- * It is on the card rather than in a footnote because it is the answer to the
- * objection the old pricing had none for: a growing company paid strictly more
- * per head as it grew, with no relief and no reason to consolidate. Showing the
- * next breakpoint to a buyer sitting at 8 seats is the point.
- */
-function VolumeDiscountNote() {
-	return (
-		<p className="mt-4 text-muted-foreground text-xs">
-			Volume pricing:{" "}
-			{TEAMS_VOLUME_TIERS.map((tier, i) => (
-				<span key={tier.minSeats}>
-					{i > 0 ? " · " : ""}
-					<strong>{tier.percent}% off</strong> from {tier.minSeats} seats
-				</span>
-			))}
-		</p>
-	);
-}
-
-/**
- * Teams plan card — per-seat org plan, with the optional Cloud panel.
- *
- * The card leads with the GOVERNANCE premium, not a price match. Teams used to
- * be priced at Pro and led with "at the same price per person", which read as
- * "nothing changes" — and the entitlements agreed, since the per-seat pool was
- * actually smaller than Pro's. A team seat costs more because it buys shared
- * billing, roles, more mail and a node per 10 seats.
+ * Compatibility Teams plan card with the optional Cloud panel. Public hosted
+ * pricing uses `HostedAgentPlanCard`; this card is still rendered by the
+ * desktop paywall and must therefore show the same five-seat floor and member
+ * seat price.
  */
 export function TeamsPlanCard({
 	isYearly = false,
@@ -1128,60 +1167,41 @@ export function TeamsPlanCard({
 	onCheckout = noop,
 	currentPlan = null,
 	cloudTiers = [],
-	seats = TEAMS_MIN_SEATS,
-	minSeats = TEAMS_MIN_SEATS,
-	onSeatsChange,
 }: SeatPlanCardProps) {
 	const isCurrent = currentPlan === "teams";
 	const isLoading =
 		loadingPlan === "teams-monthly" || loadingPlan === "teams-yearly";
-	const effectiveSeats = Math.max(seats, minSeats);
 	return (
 		<PricingCardBorder variant="teams">
 			<CardHeader>
 				<CardTitle className="flex items-center gap-2 text-xl">
-					Teams
+					For Teams
 					<PlanBadge plan="teams" size="md" />
 				</CardTitle>
-				<CardDescription>We run AI for your whole team.</CardDescription>
+				<CardDescription>
+					Start with five repeatable business processes, without adding
+					headcount.
+				</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
-				{/* The DISCOUNTED per-seat price, not the list — Polar bills the
-				    volume tier, so quoting list here would overstate the bill. */}
 				<PriceBlock
 					isYearly={isYearly}
-					monthly={teamsSeatPriceUsd(
-						TEAMS_MONTHLY_PER_SEAT_USD,
-						effectiveSeats
-					)}
+					monthly={TEAMS_MONTHLY_PER_SEAT_USD}
 					perSeat
-					seats={effectiveSeats}
+					seats={TEAMS_MIN_SEATS}
 				/>
-				<VolumeDiscountApplied seats={effectiveSeats} />
-				{onSeatsChange ? (
-					<SeatSelector
-						inputId="ryu-seats-teams"
-						minSeats={minSeats}
-						onSeatsChange={onSeatsChange}
-						seats={effectiveSeats}
-					/>
-				) : null}
 				<ul className="space-y-3">
 					<li className="flex items-center">
-						<ArrowLeft className="mr-2 size-4" />
-						<span>Everything in Pro, for the whole org:</span>
-					</li>
-					<li className="flex items-center">
-						<Users className="mr-2 size-4" />
-						<span>One bill, one shared wallet</span>
+						<Bot className="mr-2 size-4" />
+						<span>Five member seats in one shared workspace</span>
 					</li>
 					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
 						<span>
 							<span className="font-heading tabular-nums">
-								${TEAMS_INCLUDED_PER_SEAT_USD}
+								${TEAMS_INCLUDED_USD}
 							</span>
-							/seat/month of AI usage, pooled
+							/month of shared AI credits across the organization
 						</span>
 					</li>
 					<li className="flex items-center">
@@ -1190,20 +1210,19 @@ export function TeamsPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Wrench className="mr-2 size-4" />
-						<span>Manage seats &amp; spending</span>
+						<span>Guided setup around your existing processes</span>
 					</li>
 					<li className="flex items-center">
 						<Mail className="mr-2 size-4" />
-						<span>Unlimited Agent Inboxes · 20 GB storage</span>
+						<span>
+							Unlimited workflows · 100,000 sends/month · 20 GB storage
+						</span>
 					</li>
-					{/* Teams is the ONE plan whose compute grows with the org — by SIZE
-					    first, then count (`TEAMS_NODE_TIERS` in @ryu/auth/lib/base-node).
-					    Ten small boxes for a hundred people would be ten small boxes. */}
 					<li className="flex items-center">
 						<Server className="mr-2 size-4" />
 						<span>
-							<strong>A free cloud node that grows with your team</strong> — up
-							to 4 vCPU · 8 GB
+							Managed node for your organization · 2 vCPU · 4 GB; local
+							inference off by default
 						</span>
 					</li>
 					<li className="flex items-center">
@@ -1211,16 +1230,12 @@ export function TeamsPlanCard({
 						<span>12% deposit fee on top-ups</span>
 					</li>
 				</ul>
-				<VolumeDiscountNote />
 				<CloudUpgradePanel
 					loadingPlan={loadingPlan}
 					onCheckout={onCheckout}
 					planLabel="Teams"
 					tiers={cloudTiers}
 				/>
-				<p className="mt-4 text-muted-foreground text-xs">
-					Minimum {minSeats} seats
-				</p>
 			</CardContent>
 			<CardFooter>
 				<PlanCta
@@ -1237,14 +1252,189 @@ export function TeamsPlanCard({
 	);
 }
 
+/** Hosted business-automation plan card. Pro/Max remain compatibility cards. */
+export function HostedAgentPlanCard({
+	agentCount,
+	currentPlan = null,
+	isYearly = false,
+	isRecommended = false,
+	loadingPlan = null,
+	onCheckout = noop,
+	planId,
+}: {
+	agentCount: number;
+	currentPlan?: CurrentPricingPlan | null;
+	isYearly?: boolean;
+	isRecommended?: boolean;
+	loadingPlan?: PricingPlanSlug | null;
+	onCheckout?: (slug: PricingPlanSlug) => void;
+	planId: HostedAgentPricingPlanId;
+}) {
+	const isTeams = planId === "teams";
+	const isPro = planId === "pro";
+	const minAgents = isTeams
+		? TEAMS_AGENT_INCLUDED
+		: isPro
+			? PRO_AGENT_INCLUDED
+			: MAX_AGENT_INCLUDED;
+	const effectiveAgentCount = isTeams
+		? normalizeTeamsSeatCount(agentCount)
+		: normalizeHostedAgentCount(agentCount, minAgents);
+	const exceedsTeamsSelfServe =
+		isTeams && effectiveAgentCount > TEAMS_MAX_SEATS;
+	// Once the slider crosses the self-serve ceiling, keep the Teams card as a
+	// clear maximum anchor rather than showing a price for a quantity it cannot
+	// sell. Enterprise owns the selected 51+ quantity and the CTA below.
+	const displayAgentCount = exceedsTeamsSelfServe
+		? TEAMS_MAX_SEATS
+		: effectiveAgentCount;
+	const monthlyPrice = hostedAgentMonthlyPriceUsd(planId, effectiveAgentCount);
+	const slug =
+		`${planId}-${isYearly ? "yearly" : "monthly"}` as PricingPlanSlug;
+	const isCurrent = currentPlan === planId;
+	const isLoading = loadingPlan === slug;
+	const includedCredits = hostedAgentIncludedCreditUsd(
+		planId,
+		isTeams ? displayAgentCount : effectiveAgentCount
+	);
+	const firstAddOnPrice = isTeams
+		? TEAMS_MONTHLY_PER_SEAT_USD
+		: isPro
+			? PRO_AGENT_STANDARD_USD
+			: MAX_AGENT_STANDARD_USD;
+	const bulkAddOnPrice = isTeams
+		? TEAMS_AGENT_PACK_USD
+		: isPro
+			? PRO_AGENT_PACK_USD
+			: MAX_AGENT_PACK_USD;
+	const planName = isTeams ? "For Teams" : isPro ? "Pro Plan" : "Max Plan";
+	const planBadge: PlanTier = isTeams ? "teams" : isPro ? "pro" : "max";
+
+	return (
+		<PricingCardBorder
+			isRecommended={isRecommended}
+			variant={isTeams ? "teams" : isPro ? "pro" : "max"}
+		>
+			<CardHeader>
+				<CardTitle className="flex items-center gap-2 text-xl">
+					{planName}
+					<PlanBadge
+						label={isTeams ? "Teams" : isPro ? "Pro" : "Max"}
+						plan={planBadge as PlanTier}
+						size="md"
+					/>
+				</CardTitle>
+				<CardDescription>
+					{isTeams
+						? "Shared access for your team, with guided setup and one pooled wallet."
+						: isPro
+							? "Start with five repeatable processes, without adding headcount."
+							: "Scale business automation across your organization."}
+				</CardDescription>
+			</CardHeader>
+			<CardContent className="flex-1">
+				<PriceBlock
+					isYearly={isYearly}
+					monthly={isTeams ? TEAMS_MONTHLY_PER_SEAT_USD : monthlyPrice}
+					perSeat={isTeams}
+					seats={isTeams ? displayAgentCount : 1}
+				/>
+				<p className="-mt-4 mb-6 text-muted-foreground text-xs">
+					{isTeams
+						? `${displayAgentCount} member ${displayAgentCount === 1 ? "seat" : "seats"}`
+						: `For ${effectiveAgentCount} business-automation ${effectiveAgentCount === 1 ? "agent" : "agents"}`}
+				</p>
+				<ul className="space-y-3">
+					<li className="flex items-center">
+						<Bot className="mr-2 size-4" />
+						<span>
+							{isTeams
+								? `${displayAgentCount} people can share the workspace`
+								: `${effectiveAgentCount} ${effectiveAgentCount === 1 ? "agent" : "agents"} for a named business process`}
+						</span>
+					</li>
+					<li className="flex items-center">
+						<Coins className="mr-2 size-4" />
+						<span>
+							<span className="font-heading tabular-nums">
+								${includedCredits}
+							</span>
+							/month of shared AI credits across the organization
+						</span>
+					</li>
+					<li className="flex items-center">
+						<Server className="mr-2 size-4" />
+						<span>
+							{isTeams || isPro
+								? "Managed node for your organization · 2 vCPU · 4 GB; local inference off by default"
+								: "Dedicated managed node · 2 dedicated vCPU · 8 GB; local inference configurable"}
+						</span>
+					</li>
+					<li className="flex items-center">
+						<Shield className="mr-2 size-4" />
+						<span>Org-scoped access, spend controls, and audit history</span>
+					</li>
+					<li className="flex items-center">
+						<Wrench className="mr-2 size-4" />
+						<span>
+							{isTeams || isPro
+								? "Guided setup around your existing processes"
+								: "White-label delivery and named onboarding support"}
+						</span>
+					</li>
+				</ul>
+				{isTeams ? (
+					<p className="mt-4 text-muted-foreground text-xs">
+						Additional member seats are ${firstAddOnPrice}/month each. The
+						shared AI-credit pool adds $50 for every additional five billed
+						seats (10 seats includes $100/month); organizations above 50 seats
+						move to Enterprise.
+					</p>
+				) : isPro ? null : (
+					<p className="mt-4 text-muted-foreground text-xs">
+						Additional bundles: ${firstAddOnPrice * HOSTED_AGENT_BUNDLE_SIZE}{" "}
+						per 5 agents through the first band, then $
+						{bulkAddOnPrice * HOSTED_AGENT_BUNDLE_SIZE} per 5 agents at higher
+						volume.{" "}
+						{isTeams
+							? "Organizations above 50 people move to Enterprise for custom terms."
+							: "Max is the plan for larger organizations and custom commercial terms."}
+					</p>
+				)}
+			</CardContent>
+			<CardFooter>
+				{exceedsTeamsSelfServe ? (
+					<a
+						className={buttonVariants({ className: "w-full" })}
+						href="/contact"
+					>
+						Talk to Enterprise
+					</a>
+				) : (
+					<PlanCta
+						isCurrent={isCurrent}
+						isLoading={isLoading}
+						label={
+							isTeams
+								? "Start with Teams"
+								: isPro
+									? "Start with Pro"
+									: "Start with Max"
+						}
+						onClick={() => onCheckout(slug)}
+						variant={isTeams || isPro ? undefined : "outline"}
+					/>
+				)}
+			</CardFooter>
+		</PricingCardBorder>
+	);
+}
+
 /**
- * Enterprise plan — the "contact sales" tier, now a CARD beside Teams rather
- * than a full-width band below it.
+ * Enterprise plan — the conversation-led tier beside Teams.
  *
- * It was a band because the business shelf used to hold Teams AND Max, so a
- * third card would not fit. Max moved to the individual shelf when it became
- * single-seat, which left Teams alone on a two-column grid with a hole in it —
- * and a band under a lone card reads as a footnote rather than as a tier.
+ * The card is intentionally unpriced: procurement, security, onboarding, and
+ * deployment are not honest candidates for a public seat calculator.
  *
  * As a card it also does its OTHER job properly: an unpriced option beside a
  * priced one is the anchor that makes the priced one look definite. "Custom"
@@ -1253,16 +1443,21 @@ export function TeamsPlanCard({
  *
  * No self-serve checkout — the CTA goes to sales.
  */
-export function EnterprisePlanCard() {
+export function EnterprisePlanCard({
+	isRecommended = false,
+}: {
+	isRecommended?: boolean;
+}) {
 	return (
-		<PricingCardBorder variant="enterprise">
+		<PricingCardBorder isRecommended={isRecommended} variant="enterprise">
 			<CardHeader>
 				<CardTitle className="flex items-center gap-2 text-xl">
 					Enterprise
 					<PlanBadge label="Enterprise" plan="enterprise" size="md" />
 				</CardTitle>
 				<CardDescription>
-					We run AI across your whole organization.
+					We run AI across your whole organization. Best for teams that need
+					governance, custom deployment, and contracts.
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
@@ -1272,11 +1467,8 @@ export function EnterprisePlanCard() {
 				<p className="mb-6 text-muted-foreground text-xs">
 					Tailored to your org · annual contract
 				</p>
+				<IncludedPlanBanner plan="For Teams" />
 				<ul className="space-y-3">
-					<li className="flex items-center">
-						<ArrowLeft className="mr-2 size-4" />
-						<span>Everything in Teams, plus:</span>
-					</li>
 					<li className="flex items-center">
 						<Key className="mr-2 size-4" />
 						<span>SSO &amp; SCIM provisioning</span>
@@ -1353,7 +1545,9 @@ export function SelfHostedOssCard() {
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
-				<div className="mb-1 font-heading font-semibold text-4xl tabular-nums">$0</div>
+				<div className="mb-1 font-heading font-semibold text-4xl tabular-nums">
+					$0
+				</div>
 				<p className="mb-6 text-muted-foreground text-xs">
 					Free forever · self-supported
 				</p>
@@ -1364,7 +1558,7 @@ export function SelfHostedOssCard() {
 					</li>
 					<li className="flex items-center">
 						<Bot className="mr-2 size-4 shrink-0" />
-						<span>Agents, workflows, memory &amp; tools</span>
+						<span>Agents, workflows, memory &amp; tools · no Ryu plan cap</span>
 					</li>
 					<li className="flex items-center">
 						<Shield className="mr-2 size-4 shrink-0" />
@@ -1417,11 +1611,8 @@ export function SelfHostedLicensedCard() {
 				<p className="mb-6 text-muted-foreground text-xs">
 					Flat annual fee · no per-seat or per-token metering
 				</p>
+				<IncludedPlanBanner plan="open source" />
 				<ul className="space-y-3">
-					<li className="flex items-center">
-						<ArrowLeft className="mr-2 size-4 shrink-0" />
-						<span>Everything in open source, plus:</span>
-					</li>
 					<li className="flex items-center">
 						<Scale className="mr-2 size-4 shrink-0" />
 						<span>Commercial licence — no AGPL obligations</span>
@@ -1475,9 +1666,10 @@ export function SelfHostedPlanGrid() {
 
 /**
  * The pricing plans, presentational: the self-serve plans for one AUDIENCE in a
- * grid, with the Enterprise "contact sales" tier as a full-width band below on
- * the business shelf. Cloud hosting is NOT here — it lives in the org dashboard
- * (post-auth).
+ * grid. The public page uses the business shelf — one Teams card and one
+ * Enterprise conversation path. The individual shelf remains available to
+ * non-public callers and existing account surfaces. Cloud hosting is NOT here —
+ * it lives in the org dashboard (post-auth).
  *
  * The grid is two columns on both shelves, not four. Column count has to track
  * the card count: a `lg:grid-cols-4` holding two cards renders them at quarter
@@ -1486,19 +1678,22 @@ export function SelfHostedPlanGrid() {
  */
 export function PricingPlanGrid({
 	audience = "individual",
+	hostedAgentCount = HOSTED_AGENT_SLIDER_MIN,
 	isYearly = false,
 	loadingPlan = null,
 	onCheckout = noop,
+	onHostedAgentCountChange = noop,
 	currentPlan = null,
-	seats,
-	onSeatsChange,
 	maxSeats,
 	onMaxSeatsChange,
-	teamsMinSeats = TEAMS_MIN_SEATS,
 	maxMinSeats = MAX_MIN_SEATS,
+	onSeatsChange = noop,
+	seats,
 }: {
 	/** Which shelf to render — see {@link PRICING_AUDIENCE_PLANS}. */
 	audience?: PricingAudience;
+	/** Shared contracted automation-agent count for the hosted shelf. */
+	hostedAgentCount?: number;
 	isYearly?: boolean;
 	loadingPlan?: PricingPlanSlug | null;
 	/** Seat minimum for Max, from `PLANS.max.seatModel`. */
@@ -1510,6 +1705,7 @@ export function PricingPlanGrid({
 	 */
 	maxSeats?: number;
 	onCheckout?: (slug: PricingPlanSlug) => void;
+	onHostedAgentCountChange?: (agentCount: number) => void;
 	/** Supply to turn on Max's seat stepper. */
 	onMaxSeatsChange?: (seats: number) => void;
 	/** Supply to turn on the Teams seat stepper. */
@@ -1522,21 +1718,7 @@ export function PricingPlanGrid({
 }) {
 	if (audience === "individual") {
 		return (
-			// THREE cards, Lifetime -> Pro -> Max, ascending. Max moved here from the
-			// business shelf when it became single-seat: it is an individual power
-			// tier, and sitting it beside Teams was the visual half of the same
-			// mistake the catalog made — two plans presented as alternatives when one
-			// is bought per person and the other per org.
-			//
-			// Three is also the shape that reads best: the centre card carries the
-			// eye, the third sets the high anchor, and a fourth would flatten both.
-			<div className="mx-auto mb-12 grid max-w-6xl grid-cols-1 gap-8 md:grid-cols-3">
-				<LifetimePlanCard
-					currentPlan={currentPlan}
-					isYearly={isYearly}
-					loadingPlan={loadingPlan}
-					onCheckout={onCheckout}
-				/>
+			<div className="mx-auto mb-12 grid max-w-5xl grid-cols-1 gap-8 md:grid-cols-2">
 				<ProPlanCard
 					currentPlan={currentPlan}
 					isYearly={isYearly}
@@ -1555,23 +1737,26 @@ export function PricingPlanGrid({
 			</div>
 		);
 	}
+	const selectedSeats = normalizeTeamsSeatCount(seats ?? hostedAgentCount);
+	const setSelectedSeats = onSeatsChange ?? onHostedAgentCountChange;
 
 	return (
 		<>
-			{/* TWO cards: the self-serve org plan and the one you have to call about.
-			    Enterprise lives ONLY on this shelf — on the individual shelf it would
-			    advertise "contact sales" to someone buying one seat. */}
-			<div className="mx-auto mb-12 grid max-w-4xl grid-cols-1 gap-8 md:grid-cols-2">
-				<TeamsPlanCard
+			<HostedAgentEffortSlider
+				agentCount={selectedSeats}
+				onAgentCountChange={setSelectedSeats}
+			/>
+			<div className="mx-auto mb-12 grid max-w-5xl grid-cols-1 gap-8 md:grid-cols-2">
+				<HostedAgentPlanCard
+					agentCount={selectedSeats}
 					currentPlan={currentPlan}
+					isRecommended={selectedSeats <= TEAMS_MAX_SEATS}
 					isYearly={isYearly}
 					loadingPlan={loadingPlan}
-					minSeats={teamsMinSeats}
 					onCheckout={onCheckout}
-					onSeatsChange={onSeatsChange}
-					seats={seats ?? teamsMinSeats}
+					planId="teams"
 				/>
-				<EnterprisePlanCard />
+				<EnterprisePlanCard isRecommended={selectedSeats > TEAMS_MAX_SEATS} />
 			</div>
 		</>
 	);
@@ -1588,7 +1773,7 @@ export interface PricingCloudInstance {
 	readonly availableInLocation: boolean;
 	readonly cores: number;
 	readonly diskGb: number;
-	/** True for the free base node bundled with Max (shown as "Included"). */
+	/** True for the generic base candidate (shown as "Included"). */
 	readonly includedWithMax: boolean;
 	readonly memoryGb: number;
 	/** Customer-facing monthly USD (live × markup); 0 for the included base. */
@@ -1648,8 +1833,8 @@ export function PricingInstancePicker({
 					Ryu Cloud
 				</h2>
 				<p className="mt-1 text-muted-foreground">
-					We host your node: Core, Gateway, and 24/7 agents. Your Max plan
-					includes a free base node; add a bigger node whenever you need more
+					We host your node: Core, Gateway, and 24/7 agents. Your hosted plan
+					includes a base node; add a bigger node whenever you need more
 					performance.
 				</p>
 				<p className="mt-1 text-muted-foreground text-xs">
@@ -1723,7 +1908,9 @@ export function PricingInstancePicker({
 								{isIncluded ? (
 									<div className="mb-6 flex items-baseline">
 										<span className="font-semibold text-4xl">Included</span>
-										<span className="ml-2 text-muted-foreground">with Max</span>
+										<span className="ml-2 text-muted-foreground">
+											with your plan
+										</span>
 									</div>
 								) : (
 									<div className="mb-6 flex items-baseline">
@@ -1758,19 +1945,15 @@ export function PricingInstancePicker({
 								) : (
 									<Button
 										className="w-full"
-										disabled={isLoading || unavailable}
+										disabled={unavailable}
+										loading={isLoading}
 										onClick={() => onSelectInstance(instance.type)}
 									>
-										{isLoading ? (
-											<>
-												<Loader2 className="mr-2 size-4 animate-spin" />
-												Processing…
-											</>
-										) : unavailable ? (
-											"Not in this region"
-										) : (
-											"Deploy node"
-										)}
+										{isLoading
+											? "Processing…"
+											: unavailable
+												? "Not in this region"
+												: "Deploy node"}
 									</Button>
 								)}
 							</CardFooter>

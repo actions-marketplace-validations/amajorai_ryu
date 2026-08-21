@@ -22,8 +22,10 @@ function Spinner({
 	className,
 	size = "sm",
 	speed = "normal",
+	animated = true,
 	...props
 }: Omit<React.ComponentProps<"svg">, "strokeWidth"> & {
+	animated?: boolean;
 	size?: SpinnerSize;
 	speed?: SpinnerSpeed;
 }) {
@@ -34,7 +36,7 @@ function Spinner({
 			className={cn(
 				"inline-block",
 				sizeClasses[size],
-				speedClasses[speed],
+				animated ? speedClasses[speed] : "animate-none",
 				className
 			)}
 			role="status"

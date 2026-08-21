@@ -3,8 +3,7 @@ import { useEffect } from "react";
 import { fetchAgents } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
-	DEFAULT_AGENT_SELECTION_PREF_KEY,
-	getAgentSelection,
+	getLaneAgentSelection,
 	getPreference,
 } from "@/src/lib/api/preferences.ts";
 import { useActiveNode } from "./useActiveNode.ts";
@@ -77,7 +76,7 @@ interface ResolvedEditorAgent {
  * Resolve the node-wide default agent into a concrete {agentId, model}.
  *
  * This is the SAME inheritance every other unset agent/model setting follows
- * (`default-agent-selection`, edited in the Gateway dialog): a feature that was
+ * (the local lane, edited in the Gateway dialog): a feature that was
  * never configured runs as the node's default rather than not running. Returns a
  * blank model when the node genuinely has nothing usable, which is the only case
  * that should still surface "not configured".
@@ -85,10 +84,7 @@ interface ResolvedEditorAgent {
 async function resolveDefaultAgent(
 	target: ApiTarget
 ): Promise<ResolvedEditorAgent> {
-	const selection = await getAgentSelection(
-		target,
-		DEFAULT_AGENT_SELECTION_PREF_KEY
-	);
+	const selection = await getLaneAgentSelection(target, "local");
 	// A selection may name an agent, a bare model, or both. A named model wins —
 	// it is the more specific of the two and needs no lookup.
 	const agentId = selection.agent_id.trim() || undefined;
@@ -152,7 +148,10 @@ export function useRegisterEditorAi(): void {
 				}
 			}
 
-			const fallback = await resolveDefaultAgent(target).catch(() => ({
+			const fallback: ResolvedEditorAgent = await resolveDefaultAgent(
+				target
+			).catch(() => ({
+				agentId: undefined,
 				model: "",
 			}));
 			if (cancelled) {

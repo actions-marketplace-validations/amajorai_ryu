@@ -164,7 +164,8 @@ for f in apps/desktop/.env.production apps/webapp/.env.production; do
   log "  $f -> $NEW"
 done
 
-# 6c) fumadocs docs version — the docs site serves versioned URLs (/docs/<v>/...).
+# 6c) fumadocs docs version — the docs site labels the current URL space
+# with /docs/<v>/... while keeping only one live deployment.
 #
 # Three sites carry the literal train version and none of them is a manifest, so
 # nothing above catches them:

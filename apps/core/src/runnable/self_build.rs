@@ -56,7 +56,7 @@ use crate::plugin_manifest::{PluginManifest, PluginManifestLoader};
 use crate::sidecar::mcp::RegistryTool;
 
 /// Reserved server name for the self-build tool provider. Must not contain
-/// `__` (the tool-id separator). A user MCP config entry with this name
+/// `.` (the tool-id namespace separator). A user MCP config entry with this name
 /// would collide, so the registry treats it as reserved.
 pub const SERVER_NAME: &str = "ryu_self_build";
 
@@ -71,7 +71,7 @@ const ENV_STUB_GRANTS: &str = "RYU_STUB_SELF_BUILD_GRANTS";
 pub fn tools() -> Vec<RegistryTool> {
     vec![
         RegistryTool {
-            id: "ryu_self_build__scaffold_runnable".to_owned(),
+            id: "ryu_self_build.scaffold_runnable".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "scaffold_runnable".to_owned(),
             description: Some(
@@ -87,7 +87,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "ryu_self_build__install_app".to_owned(),
+            id: "ryu_self_build.install_app".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "install_app".to_owned(),
             description: Some(
@@ -101,7 +101,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "ryu_self_build__write_ryu_json".to_owned(),
+            id: "ryu_self_build.write_ryu_json".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "write_ryu_json".to_owned(),
             description: Some(
@@ -116,7 +116,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "ryu_self_build__write_tool".to_owned(),
+            id: "ryu_self_build.write_tool".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "write_tool".to_owned(),
             description: Some(
@@ -134,7 +134,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "ryu_self_build__verify_tool".to_owned(),
+            id: "ryu_self_build.verify_tool".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "verify_tool".to_owned(),
             description: Some(
@@ -152,7 +152,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "ryu_self_build__install_tool".to_owned(),
+            id: "ryu_self_build.install_tool".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "install_tool".to_owned(),
             description: Some(
@@ -916,7 +916,7 @@ mod tests {
         assert_eq!(ts.len(), 6);
         for t in &ts {
             assert_eq!(t.server, SERVER_NAME);
-            assert!(t.id.starts_with("ryu_self_build__"));
+            assert!(t.id.starts_with("ryu_self_build."));
         }
     }
 

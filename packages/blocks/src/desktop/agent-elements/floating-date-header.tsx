@@ -46,13 +46,14 @@ export const FloatingDateHeader = memo(function FloatingDateHeader({
 	/** The user message currently at the top of the transcript, if any. */
 	currentAnchorId?: string | null;
 }) {
-
 	// Nothing anchored yet (empty transcript, or a scroll position above the
 	// first anchor) — say nothing rather than guess a date.
-	if (!currentAnchorId) {
+	if (groups.length === 0) {
 		return null;
 	}
-	const turnIndex = turnIndexByAnchorId.get(currentAnchorId);
+	const turnIndex = currentAnchorId
+		? turnIndexByAnchorId.get(currentAnchorId)
+		: groups[0]?.startIndex;
 	if (turnIndex === undefined) {
 		return null;
 	}
@@ -66,17 +67,14 @@ export const FloatingDateHeader = memo(function FloatingDateHeader({
 	}
 
 	return (
-		// The chip sits BELOW the pinned-user-message bar, offset by that bar's
-		// measured height (`--chat-pin-bar-h`, published by message-list; `0px`
-		// when no bar is mounted, which is also the fallback here). It used to own
-		// the 36px lane ABOVE the bar, which put it in the topmost band of the
-		// transcript where it overlapped the tab bar and read as window chrome
-		// rather than as a marker inside the conversation.
+		// The chip owns the fixed lane ABOVE the pinned-user-message bar. Keeping
+		// this offset independent of the bar's measured height means toggling the
+		// pin preference cannot make the date header jump.
 		<div
 			// The in-flow separator already announces the date to assistive tech;
 			// this is the visual echo of it, so it is hidden from the a11y tree.
 			aria-hidden="true"
-			className="pointer-events-none absolute inset-x-0 top-[calc(var(--chat-pin-bar-h,0px)+0.375rem)] z-30 flex justify-center"
+			className="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-center"
 			data-slot="chat-floating-date"
 		>
 			{/* The ONE place the transcript still draws a pill, and the reason is

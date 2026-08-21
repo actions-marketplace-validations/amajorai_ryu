@@ -62,6 +62,22 @@ fn engine_maps_engine_direct_and_custom_ids() {
 }
 
 #[test]
+fn engine_maps_ryu_subscription_provider_ids() {
+    assert!(matches!(
+        engine_for_agent("openai-codex"),
+        Some(Engine::Codex)
+    ));
+    assert!(matches!(
+        engine_for_agent("claude-pro-max"),
+        Some(Engine::Claude)
+    ));
+    assert!(matches!(
+        engine_for_agent("github-copilot"),
+        Some(Engine::Copilot)
+    ));
+}
+
+#[test]
 fn engine_maps_every_curated_acp_id() {
     let cases = [
         ("acp:claude", Engine::Claude),

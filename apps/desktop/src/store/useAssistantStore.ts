@@ -73,7 +73,7 @@ export type AssistantBuilderKind = "agent" | "workflow" | (string & {});
 /**
  * A "builder takeover" registered by a builder page (agent edit, workflows) so
  * the ONE global assistant becomes that page's builder while the page is the
- * focused tab: it injects the builder preamble, drives the `*_builder__*` tools
+ * focused tab: it injects the builder preamble, drives the `*_builder.*` tools
  * with `persist: false`, and refreshes the page after each settled turn. The
  * page owns the wiring (resolve id, refresh callback); the panel owns the chat.
  *

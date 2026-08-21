@@ -7,7 +7,8 @@
 //
 // Migrated from the legacy src/tabs/chat.tsx: same SSE streaming via
 // src/core/chatStream.ts, agent picker (Ctrl+A), and slash commands
-// (/btw /goal /proof /check /model /team /sessions /new /newchat). /goal, /proof
+// (/btw /goal /proof /check /model /team /sessions /queue /theme /help /new
+// /newchat). /goal, /proof
 // and /check are Core server-side plugin turn-hooks: /goal and /proof pass through
 // as normal messages, /check arms the double-check hook via plugin_flags and its
 // output arrives as data-plugin_note frames. Keyboard is OWNED here
@@ -29,6 +30,8 @@ import { Card } from "@/components/ui/card.tsx";
 import { Markdown } from "@/components/ui/markdown.tsx";
 import { StatusMessage } from "@/components/ui/status-message.tsx";
 import { useTheme } from "@/components/ui/theme-provider.tsx";
+import { ChatQueueBar } from "../../components/ChatQueueBar.tsx";
+import { ChatQueueOverlay } from "../../components/ChatQueueOverlay.tsx";
 import { TranscriptParts } from "../../components/TranscriptParts.tsx";
 import {
 	type AcpPickerChoice,
@@ -58,8 +61,12 @@ import {
 	respondToChatQuestion,
 } from "../../core/chatQuestion.ts";
 import {
-	dequeueChatMessage,
-	enqueueChatMessage,
+	clearChatQueue,
+	dequeueChatTurn,
+	enqueueChatTurn,
+	moveQueuedChatTurn,
+	type QueuedChatTurn,
+	removeQueuedChatTurn,
 } from "../../core/chatQueue.ts";
 import {
 	type ChatStreamOptions,
@@ -75,6 +82,12 @@ import {
 	readTodos,
 	replaceTodoPart,
 } from "../../core/chatTranscript.ts";
+import {
+	type CommandAction,
+	commandHelpRows,
+	dispatchCommand,
+	renderCommandHelp,
+} from "../../core/commands.ts";
 import {
 	deleteConversation,
 	forkConversation,
@@ -98,11 +111,11 @@ import {
 	resetPromptNavigation,
 	savePromptHistory,
 } from "../../core/promptHistory.ts";
+import { RYU_THEME_PRESETS } from "../../core/themePreferences.ts";
+import { useTerminalTheme } from "../../ui/TerminalThemeProvider.tsx";
 import { useToast } from "../../ui/toast.tsx";
 import type { SurfaceModule, SurfaceProps } from "../../workspace/router.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
-
-const WHITESPACE = /\s+/;
 
 type Role = "user" | "assistant";
 
@@ -130,6 +143,9 @@ type Overlay =
 			text: string;
 	  }
 	| { kind: "delete"; conversationId: string }
+	| { kind: "help"; command?: string }
+	| { kind: "queue"; index: number }
+	| { kind: "theme"; argument?: string }
 	| { kind: "keymap" }
 	| { kind: "plugin_note"; notes: string[] };
 
@@ -138,6 +154,14 @@ let nextMessageId = 1;
 function ChatSurface({ active, paneId }: SurfaceProps) {
 	const { target } = useCore();
 	const theme = useTheme();
+	const {
+		availableModes,
+		availablePresets,
+		preference: themePreference,
+		reset: resetTheme,
+		setMode: setThemeMode,
+		setPreset: setThemePreset,
+	} = useTerminalTheme();
 	const { notify } = useToast();
 	const { focusedPaneId } = useWorkspace();
 	const setInputFocused = useSetInputFocused();
@@ -150,7 +174,7 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 	const [composer, setComposer] = useState("");
 	const [promptHistory, setPromptHistory] = useState(loadPromptHistory);
 	const [streaming, setStreaming] = useState(false);
-	const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
+	const [queuedMessages, setQueuedMessages] = useState<QueuedChatTurn[]>([]);
 	const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
 	const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
 	const [acpModel, setAcpModel] = useState<string | null>(null);
@@ -158,6 +182,8 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 	const [acpConfig, setAcpConfig] = useState<Record<string, string>>({});
 	const [doubleCheckOn, setDoubleCheckOn] = useState(false);
 	const [overlay, setOverlay] = useState<Overlay>({ kind: "none" });
+	const [queueFocused, setQueueFocused] = useState(false);
+	const [queueSelectedIndex, setQueueSelectedIndex] = useState(0);
 	const [autocomplete, setAutocomplete] = useState<AutocompleteState | null>(
 		null
 	);
@@ -170,6 +196,20 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 	messagesRef.current = messages;
 
 	const overlayOpen = overlay.kind !== "none";
+
+	useEffect(() => {
+		if (queuedMessages.length === 0) {
+			setQueueSelectedIndex(0);
+			setQueueFocused(false);
+			if (overlay.kind === "queue") {
+				setOverlay({ kind: "none" });
+			}
+			return;
+		}
+		setQueueSelectedIndex((index) =>
+			Math.min(index, Math.max(0, queuedMessages.length - 1))
+		);
+	}, [overlay.kind, queuedMessages.length]);
 
 	// Slash commands are local and immediate. Mention candidates come from the
 	// same Core agent catalog as Ctrl+A, but stale responses never replace newer
@@ -210,9 +250,9 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 
 	// Claim raw input while focused so shell plain-key globals stay quiet.
 	useEffect(() => {
-		setInputFocused(focused && !overlayOpen);
+		setInputFocused(focused && !overlayOpen && !queueFocused);
 		return () => setInputFocused(false);
-	}, [focused, overlayOpen, setInputFocused]);
+	}, [focused, overlayOpen, queueFocused, setInputFocused]);
 
 	const resetChat = useCallback(() => {
 		abortRef.current?.abort();
@@ -294,7 +334,7 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 	}, []);
 
 	const send = useCallback(
-		(text: string) => {
+		(text: string, optionsOverride?: ChatStreamOptions) => {
 			const trimmed = text.trim();
 			if (trimmed.length === 0) {
 				return;
@@ -326,7 +366,7 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 			streamChat(
 				target,
 				turns,
-				buildOptions(),
+				optionsOverride ?? buildOptions(),
 				{
 					onTextDelta: appendToLast,
 					onToolInput: (name, input, toolCallId) => {
@@ -417,12 +457,12 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 		if (streaming || queuedMessages.length === 0) {
 			return;
 		}
-		const { message, queue } = dequeueChatMessage(queuedMessages);
-		if (message === null) {
+		const { turn, queue } = dequeueChatTurn(queuedMessages);
+		if (turn === null) {
 			return;
 		}
 		setQueuedMessages(queue);
-		send(message);
+		send(turn.text, turn.options);
 	}, [queuedMessages, send, streaming]);
 
 	const openAgentPicker = useCallback(() => {
@@ -639,96 +679,233 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 		});
 	}, [notify]);
 
-	const handleCommand = useCallback(
-		(raw: string): boolean => {
-			const text = raw.trim();
-			if (!text.startsWith("/")) {
+	const clearQueuedMessages = useCallback(() => {
+		if (queuedMessages.length === 0) {
+			return;
+		}
+		setQueuedMessages(clearChatQueue(queuedMessages));
+		setOverlay({ kind: "none" });
+		setQueueFocused(false);
+		notify("Queue cleared", "info");
+	}, [notify, queuedMessages]);
+
+	const removeQueuedMessageAt = useCallback(
+		(index: number) => {
+			const turn = queuedMessages[index];
+			if (!turn) {
+				return;
+			}
+			setQueuedMessages(removeQueuedChatTurn(queuedMessages, turn.id));
+			notify("Removed queued prompt", "info");
+		},
+		[notify, queuedMessages]
+	);
+
+	const moveQueuedMessage = useCallback(
+		(id: string, direction: "up" | "down") => {
+			setQueuedMessages((current) =>
+				moveQueuedChatTurn(current, id, direction)
+			);
+		},
+		[]
+	);
+
+	const moveQueuedMessageAt = useCallback(
+		(index: number, direction: "up" | "down") => {
+			const turn = queuedMessages[index];
+			if (!turn) {
+				return;
+			}
+			const nextIndex =
+				direction === "up"
+					? Math.max(0, index - 1)
+					: Math.min(queuedMessages.length - 1, index + 1);
+			if (nextIndex === index) {
+				return;
+			}
+			setQueuedMessages((current) =>
+				moveQueuedChatTurn(current, turn.id, direction)
+			);
+			setQueueSelectedIndex(nextIndex);
+		},
+		[queuedMessages]
+	);
+
+	const openQueue = useCallback(
+		(index = queueSelectedIndex) => {
+			if (queuedMessages.length === 0) {
+				notify("The prompt queue is empty", "info");
+				return;
+			}
+			const nextIndex = Math.min(
+				Math.max(0, index),
+				Math.max(0, queuedMessages.length - 1)
+			);
+			setQueueSelectedIndex(nextIndex);
+			setQueueFocused(false);
+			setOverlay({ kind: "queue", index: nextIndex });
+		},
+		[notify, queueSelectedIndex, queuedMessages.length]
+	);
+
+	const openTheme = useCallback(
+		(argument = "") => setOverlay({ kind: "theme", argument }),
+		[]
+	);
+
+	const applyThemeArgument = useCallback(
+		(argument: string): boolean => {
+			const normalized = argument.trim().toLowerCase();
+			if (normalized.length === 0) {
 				return false;
 			}
-			const [cmd, ...rest] = text.slice(1).split(WHITESPACE);
-			const arg = rest.join(" ").trim();
-			// /goal, /proof and /receipt are owned by Core's server-side turn-hooks:
-			// let them through as normal chat messages (not handled here).
-			if (cmd === "goal" || cmd === "proof" || cmd === "receipt") {
+			if (availableModes.some((mode) => mode === normalized)) {
+				setThemeMode(normalized as "system" | "light" | "dark");
+				notify(`Theme mode: ${normalized}`, "info");
+				return true;
+			}
+			const preset = availablePresets.find(
+				(candidate) => candidate === normalized
+			);
+			if (preset) {
+				setThemePreset(preset);
+				notify(`Theme preset: ${RYU_THEME_PRESETS[preset].label}`, "info");
+				return true;
+			}
+			return false;
+		},
+		[availableModes, availablePresets, notify, setThemeMode, setThemePreset]
+	);
+
+	const applyCommandAction = useCallback(
+		(action: CommandAction): boolean => {
+			if (action.kind === "passthrough") {
 				return false;
 			}
-			switch (cmd) {
-				case "new":
-				case "newchat":
-					resetChat();
-					break;
-				case "btw":
-				case "b":
-					runBtw(arg);
-					break;
-				case "check":
-				case "double-check":
-					toggleDoubleCheck();
-					break;
-				case "model":
-					if (arg === "clear") {
-						setAcpModel(null);
-						notify("Model override cleared", "info");
-					} else if (arg.length > 0) {
-						setAcpModel(arg);
-						notify(`Model: ${arg}`, "info");
-					} else {
+			if (action.kind === "overlay") {
+				switch (action.overlay) {
+					case "agent-picker":
+						openAgentPicker();
+						return true;
+					case "acp-settings":
+						openAcpPicker();
+						return true;
+					case "btw":
+						runBtw(action.argument);
+						return true;
+					case "conversation-delete":
+						runDelete(action.argument);
+						return true;
+					case "help":
+						setOverlay({
+							kind: "help",
+							command: action.argument || undefined,
+						});
+						return true;
+					case "model-picker":
 						openModelPicker();
-					}
-					break;
-				case "team":
-					runTeam(arg);
-					break;
-				case "sessions":
-					runSessions();
-					break;
-				case "fork":
-					runFork(arg);
-					break;
-				case "pin":
-					runPin(arg !== "off" && arg !== "false");
-					break;
-				case "unpin":
-					runPin(false);
-					break;
-				case "resume":
-					runResume(arg);
-					break;
-				case "rename":
-					runRename(arg);
-					break;
-				case "delete":
-					runDelete(arg);
-					break;
-				case "agent":
-					openAgentPicker();
-					break;
-				case "config":
-				case "reasoning":
-					openAcpPicker();
-					break;
-				default:
-					notify(`Unknown command: /${cmd}`, "warning");
-					break;
+						return true;
+					case "queue":
+						openQueue();
+						return true;
+					case "session-list":
+						runSessions();
+						return true;
+					case "theme":
+						if (!applyThemeArgument(action.argument)) {
+							openTheme(action.argument);
+						}
+						return true;
+				}
 			}
-			return true;
+			if (action.kind !== "local") {
+				return true;
+			}
+			switch (action.action) {
+				case "new-chat":
+					resetChat();
+					return true;
+				case "toggle-double-check":
+					toggleDoubleCheck();
+					return true;
+				case "set-model":
+					setAcpModel(action.model);
+					notify(
+						action.model ? `Model: ${action.model}` : "Model override cleared",
+						"info"
+					);
+					return true;
+				case "set-team":
+					runTeam(action.team ?? "");
+					return true;
+				case "fork-conversation":
+					runFork(action.messageId ?? "");
+					return true;
+				case "resume-conversation":
+					runResume(action.conversationId);
+					return true;
+				case "rename-conversation":
+					runRename(action.title);
+					return true;
+				case "pin-conversation":
+					runPin(action.pinned);
+					return true;
+				case "clear-queue":
+					clearQueuedMessages();
+					return true;
+				case "remove-queue-item": {
+					const index = queuedMessages.findIndex(
+						(turn) => turn.id === action.itemId
+					);
+					if (index >= 0) {
+						removeQueuedMessageAt(index);
+					}
+					return true;
+				}
+				case "move-queue-item":
+					moveQueuedMessage(action.itemId, action.direction);
+					return true;
+			}
 		},
 		[
+			applyThemeArgument,
+			clearQueuedMessages,
+			moveQueuedMessage,
 			notify,
+			openAcpPicker,
+			openAgentPicker,
+			openModelPicker,
+			openQueue,
+			openTheme,
+			queuedMessages,
+			removeQueuedMessageAt,
 			resetChat,
 			runBtw,
-			runTeam,
-			runSessions,
+			runDelete,
 			runFork,
 			runPin,
-			runResume,
 			runRename,
-			runDelete,
-			openAgentPicker,
-			openAcpPicker,
-			openModelPicker,
+			runResume,
+			runSessions,
+			runTeam,
+			setThemeMode,
 			toggleDoubleCheck,
 		]
+	);
+
+	const handleCommand = useCallback(
+		(raw: string): boolean => {
+			const dispatch = dispatchCommand(raw);
+			if (!dispatch) {
+				return false;
+			}
+			if (dispatch.kind === "unknown" || dispatch.kind === "usage") {
+				notify(dispatch.message, "warning");
+				return true;
+			}
+			return applyCommandAction(dispatch.action);
+		},
+		[applyCommandAction, notify]
 	);
 
 	const submitComposer = useCallback(() => {
@@ -744,7 +921,7 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 			return;
 		}
 		if (streaming) {
-			const result = enqueueChatMessage(queuedMessages, text);
+			const result = enqueueChatTurn(queuedMessages, text, buildOptions());
 			if (result.accepted) {
 				setQueuedMessages(result.queue);
 				notify(`Queued prompt (${result.queue.length})`, "info");
@@ -757,7 +934,15 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 			return;
 		}
 		send(text);
-	}, [composer, handleCommand, queuedMessages, streaming, send, notify]);
+	}, [
+		composer,
+		handleCommand,
+		queuedMessages,
+		streaming,
+		send,
+		notify,
+		buildOptions,
+	]);
 
 	const applySelectedAutocomplete = useCallback(() => {
 		if (!autocomplete) {
@@ -1046,6 +1231,9 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 	}, [overlay, notify, resetChat, target]);
 
 	const handleComposeKey = (key: KeyEvent) => {
+		if (queueFocused) {
+			return;
+		}
 		if (autocomplete) {
 			if (key.name === "escape") {
 				setAutocomplete(null);
@@ -1088,7 +1276,10 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 				return;
 			}
 		}
-		if (key.ctrl && (key.name === "?" || key.name === "/")) {
+		if (key.ctrl && key.name === "q" && queuedMessages.length > 0) {
+			setQueueFocused(true);
+			setQueueSelectedIndex(0);
+		} else if (key.ctrl && (key.name === "?" || key.name === "/")) {
 			setOverlay({ kind: "keymap" });
 		} else if (key.ctrl && key.name === "a") {
 			openAgentPicker();
@@ -1119,6 +1310,9 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 	// Keyboard gated on being the focused pane's active tab.
 	useKeyboard((key) => {
 		if (!focused) {
+			return;
+		}
+		if (overlay.kind === "queue" || queueFocused) {
 			return;
 		}
 		if (overlay.kind === "agents") {
@@ -1158,6 +1352,15 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 			}
 			return;
 		}
+		if (overlay.kind === "help") {
+			if (key.name === "escape" || key.name === "return") {
+				setOverlay({ kind: "none" });
+			}
+			return;
+		}
+		if (overlay.kind === "theme") {
+			return;
+		}
 		if (overlay.kind !== "none") {
 			if (
 				key.name === "escape" ||
@@ -1171,7 +1374,7 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 		handleComposeKey(key);
 	});
 
-	const composerFocused = focused && !overlayOpen;
+	const composerFocused = focused && !overlayOpen && !queueFocused;
 
 	return (
 		<box flexDirection="column" flexGrow={1}>
@@ -1189,9 +1392,17 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 				team={selectedTeam}
 			/>
 			{queuedMessages.length > 0 ? (
-				<text fg={theme.colors.mutedForeground}>
-					{`⋯ queued: ${queuedMessages.length}`}
-				</text>
+				<ChatQueueBar
+					focused={queueFocused && !overlayOpen}
+					items={queuedMessages}
+					onCancel={() => setQueueFocused(false)}
+					onClear={clearQueuedMessages}
+					onFocus={() => openQueue(queueSelectedIndex)}
+					onMove={moveQueuedMessageAt}
+					onRemove={removeQueuedMessageAt}
+					onSelect={(index) => setQueueSelectedIndex(index)}
+					selectedIndex={queueSelectedIndex}
+				/>
 			) : null}
 			<WorkspaceBar
 				agent={selectedAgent}
@@ -1217,13 +1428,34 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 						setComposer(value);
 						setPromptHistory(resetPromptNavigation);
 					}}
-					placeholder="Message, or /resume /rename /delete /sessions /fork /new (Ctrl+A agent, Ctrl+R ACP)"
+					placeholder="Message, or /help /queue /theme /resume /rename /delete /sessions /fork /new (Ctrl+A agent, Ctrl+R ACP, Ctrl+Q queue)"
 					placeholderColor={theme.colors.mutedForeground}
 					textColor={theme.colors.foreground}
 					value={composer}
 				/>
 			</box>
-			{overlay.kind === "none" ? null : <OverlayView overlay={overlay} />}
+			{overlay.kind === "none" ? null : overlay.kind === "queue" ? (
+				<ChatQueueOverlay
+					focused
+					items={queuedMessages}
+					onCancel={() => setOverlay({ kind: "none" })}
+					onClear={clearQueuedMessages}
+					onMove={moveQueuedMessageAt}
+					onRemove={removeQueuedMessageAt}
+					onSelect={(index) => {
+						setQueueSelectedIndex(index);
+						setOverlay((state) =>
+							state.kind === "queue" ? { ...state, index } : state
+						);
+					}}
+					selectedIndex={queueSelectedIndex}
+				/>
+			) : (
+				<OverlayView
+					onClose={() => setOverlay({ kind: "none" })}
+					overlay={overlay}
+				/>
+			)}
 		</box>
 	);
 }
@@ -1250,8 +1482,8 @@ function EmptyStateHeader({
 				<b>{mode}</b>
 			</text>
 			<text fg={theme.colors.mutedForeground}>
-				Ctrl+A pick agent · slash commands /btw /goal /proof /check /model /team
-				/sessions /fork /new
+				Ctrl+A pick agent · Ctrl+Q queue · slash commands /help /queue /theme
+				/btw /goal /proof /check /model /team /sessions /fork /new
 			</text>
 		</box>
 	);
@@ -1413,7 +1645,133 @@ function AutocompleteView({ state }: { state: AutocompleteState }) {
 	);
 }
 
-function OverlayView({ overlay }: { overlay: Overlay }) {
+function ThemePickerOverlay({
+	argument,
+	onClose,
+}: {
+	argument?: string;
+	onClose: () => void;
+}) {
+	const theme = useTheme();
+	const { notify } = useToast();
+	const {
+		availableModes,
+		availablePresets,
+		preference,
+		reset,
+		setMode,
+		setPreset,
+	} = useTerminalTheme();
+	const options = [
+		...availableModes.map((mode) => ({
+			id: mode,
+			kind: "mode" as const,
+			label: mode === "system" ? "System (terminal)" : mode,
+		})),
+		...availablePresets.map((preset) => ({
+			id: preset,
+			kind: "preset" as const,
+			label: RYU_THEME_PRESETS[preset].label,
+		})),
+	];
+	const requested = argument?.trim().toLowerCase();
+	const initialIndex = Math.max(
+		0,
+		options.findIndex(
+			(option) =>
+				option.id === requested ||
+				(option.kind === "mode" && option.id === preference.mode) ||
+				(option.kind === "preset" && option.id === preference.preset)
+		)
+	);
+	const [index, setIndex] = useState(initialIndex);
+
+	useKeyboard((key) => {
+		if (key.name === "escape") {
+			onClose();
+			return;
+		}
+		if (key.name === "up" || key.name === "k") {
+			setIndex((current) => Math.max(0, current - 1));
+			return;
+		}
+		if (key.name === "down" || key.name === "j") {
+			setIndex((current) => Math.min(options.length - 1, current + 1));
+			return;
+		}
+		if (key.name === "r") {
+			reset();
+			notify("Terminal theme reset", "info");
+			return;
+		}
+		if (key.name !== "return") {
+			return;
+		}
+		const selected = options[index];
+		if (!selected) {
+			return;
+		}
+		if (selected.kind === "mode") {
+			setMode(selected.id);
+			notify(`Theme mode: ${selected.id}`, "info");
+		} else {
+			setPreset(selected.id);
+			notify(`Theme preset: ${selected.label}`, "info");
+		}
+		onClose();
+	});
+
+	return (
+		<box padding={1}>
+			<Card
+				subtitle="↑/↓ move · Enter apply · r reset · Esc cancel"
+				title="Terminal theme"
+			>
+				{options.map((option, optionIndex) => {
+					const selected = optionIndex === index;
+					const active =
+						(option.kind === "mode" && option.id === preference.mode) ||
+						(option.kind === "preset" && option.id === preference.preset);
+					return (
+						<box
+							backgroundColor={selected ? theme.colors.selection : undefined}
+							flexDirection="row"
+							gap={1}
+							key={`${option.kind}-${option.id}`}
+						>
+							<text
+								fg={
+									selected
+										? theme.colors.selectionForeground
+										: theme.colors.primary
+								}
+							>
+								{selected ? "›" : active ? "●" : " "}
+							</text>
+							<text
+								fg={
+									selected
+										? theme.colors.selectionForeground
+										: theme.colors.foreground
+								}
+							>
+								{option.label}
+							</text>
+						</box>
+					);
+				})}
+			</Card>
+		</box>
+	);
+}
+
+function OverlayView({
+	onClose,
+	overlay,
+}: {
+	onClose: () => void;
+	overlay: Overlay;
+}) {
 	const theme = useTheme();
 	if (overlay.kind === "agents") {
 		return (
@@ -1652,6 +2010,32 @@ function OverlayView({ overlay }: { overlay: Overlay }) {
 				</Card>
 			</box>
 		);
+	}
+	if (overlay.kind === "help") {
+		const command = overlay.command;
+		const matchingRows = command
+			? commandHelpRows().filter(
+					(row) => row.name === command || row.aliases.includes(command)
+				)
+			: [];
+		const lines =
+			matchingRows.length > 0
+				? matchingRows.map((row) => `${row.usage} — ${row.description}`)
+				: renderCommandHelp().split("\n");
+		return (
+			<box padding={1}>
+				<Card subtitle="Esc or Enter to close" title="Slash commands">
+					{lines.map((line) => (
+						<text fg={theme.colors.foreground} key={line}>
+							{line}
+						</text>
+					))}
+				</Card>
+			</box>
+		);
+	}
+	if (overlay.kind === "theme") {
+		return <ThemePickerOverlay argument={overlay.argument} onClose={onClose} />;
 	}
 	if (overlay.kind === "keymap") {
 		return (

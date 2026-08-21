@@ -31,14 +31,16 @@ test("every layer renders as a submenu trigger", async ({ page }) => {
 	for (const label of [
 		"Core",
 		"Island",
-		"Chat engine",
-		"Speech",
-		"Text-to-speech",
+		"Chat",
+		"Voice Recognition",
+		"Audio",
 	]) {
 		await expect(
 			page.getByRole("menuitem", { name: new RegExp(label) })
 		).toBeVisible();
 	}
+	await expect(page.getByText("Chat", { exact: true })).toBeVisible();
+	await expect(page.getByText("Chat engine", { exact: true })).toHaveCount(0);
 });
 
 test("a service submenu leads with Start/Stop and Update", async ({ page }) => {
@@ -55,7 +57,7 @@ test("a swap layer ticks exactly one option and lists installs below", async ({
 	page,
 }) => {
 	await openMenu(page);
-	await page.getByRole("menuitem", { name: /Chat engine/ }).click();
+	await page.getByRole("menuitem", { name: /^Chat/ }).click();
 	await expect(page.getByText("Installed", { exact: true })).toBeVisible();
 	await expect(page.getByText("Not installed", { exact: true })).toBeVisible();
 	// Swap-managed: no start/stop verb anywhere in this layer.
@@ -68,7 +70,7 @@ test("a swap layer ticks exactly one option and lists installs below", async ({
 
 test("acting on a row keeps the submenu open", async ({ page }) => {
 	await openMenu(page);
-	await page.getByRole("menuitem", { name: /Chat engine/ }).click();
+	await page.getByRole("menuitem", { name: /^Chat/ }).click();
 	const alternative = page.getByRole("menuitem", { name: /Ollama/ });
 	await alternative.click();
 	await expect(alternative).toBeVisible();
@@ -78,8 +80,10 @@ test("the nested voice picker is reachable three levels deep", async ({
 	page,
 }) => {
 	await openMenu(page);
-	await page.getByRole("menuitem", { name: /Text-to-speech/ }).click();
-	const voiceTrigger = page.getByRole("menuitem", { name: /Voice/ });
+	await page.getByRole("menuitem", { name: /Audio/ }).click();
+	const voiceTrigger = page.getByRole("menuitem", {
+		name: /^Voice af_heart/,
+	});
 	await expect(voiceTrigger).toBeVisible();
 	await voiceTrigger.click();
 	await expect(page.getByRole("menuitem", { name: /af_heart/ })).toBeVisible();

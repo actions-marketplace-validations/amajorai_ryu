@@ -359,7 +359,12 @@ pub async fn widget_call_tool(
         );
     };
     // 2. same-server: the tool must belong to the instance's origin server.
-    let tool_server = body.tool_id.split("__").next().unwrap_or_default();
+    let normalized_tool_id = state.mcp.canonical_tool_id_for_registry(&body.tool_id);
+    let tool_server = state
+        .mcp
+        .split_registered_tool_id(&normalized_tool_id)
+        .map(|(server, _)| server)
+        .unwrap_or_default();
     if tool_server != record.origin_server {
         return err_reply(
             StatusCode::FORBIDDEN,

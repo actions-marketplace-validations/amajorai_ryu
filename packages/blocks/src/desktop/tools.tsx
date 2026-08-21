@@ -56,6 +56,7 @@ import {
 } from "@ryu/ui/components/select";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { type ChangeEvent, useMemo, useState } from "react";
 
 const ALL_AGENTS = "__all__";
@@ -196,7 +197,7 @@ export function ToolsView({
 				</div>
 			</div>
 
-			<div className="scroll-fade-effect-y flex-1 overflow-auto p-4">
+			<div className="scroll-fade flex-1 overflow-auto p-4">
 				<section className="mb-6">
 					<h2 className="mb-2 flex items-center gap-2 font-medium text-sm">
 						<HugeiconsIcon
@@ -204,7 +205,9 @@ export function ToolsView({
 							icon={ServerStack01Icon}
 						/>
 						Servers
-						<Badge variant="secondary">{servers.length}</Badge>
+						<Badge variant="secondary">
+							{formatCount(servers.length) ?? "—"}
+						</Badge>
 					</h2>
 					{servers.length === 0 ? (
 						<Empty>
@@ -217,6 +220,9 @@ export function ToolsView({
 									Add an MCP server to expose tools to your agents.
 								</EmptyDescription>
 							</EmptyHeader>
+							<EmptyContent>
+								<AddServerDialog onCreateServer={onCreateServer} />
+							</EmptyContent>
 						</Empty>
 					) : (
 						<div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
@@ -253,7 +259,9 @@ export function ToolsView({
 					<h2 className="mb-2 flex items-center gap-2 font-medium text-sm">
 						<HugeiconsIcon className="size-4 opacity-70" icon={Wrench01Icon} />
 						Tools
-						<Badge variant="secondary">{tools.length}</Badge>
+						<Badge variant="secondary">
+							{formatCount(tools.length) ?? "—"}
+						</Badge>
 						{agentFilter ? (
 							<span className="text-muted-foreground text-xs">
 								filtered by allowlist
@@ -273,6 +281,19 @@ export function ToolsView({
 										: "No MCP tools are registered yet."}
 								</EmptyDescription>
 							</EmptyHeader>
+							<EmptyContent>
+								{agentFilter ? (
+									<Button
+										onClick={() => onAgentFilterChange?.(null)}
+										size="sm"
+										variant="ghost"
+									>
+										Clear agent filter
+									</Button>
+								) : (
+									<AddServerDialog onCreateServer={onCreateServer} />
+								)}
+							</EmptyContent>
 						</Empty>
 					) : (
 						<div className="flex flex-col gap-2">
@@ -324,7 +345,7 @@ function AddServerDialog({
 			return;
 		}
 		if (trimmedName.includes("__")) {
-			setFormError("Name must not contain '__' (reserved separator).");
+			setFormError("Name must not contain '__' (reserved legacy separator).");
 			return;
 		}
 		if (!trimmedCommand) {
@@ -457,8 +478,7 @@ function AddServerDialog({
 					>
 						Cancel
 					</Button>
-					<Button disabled={submitting} onClick={handleSubmit} type="button">
-						{submitting ? <Spinner className="size-4" /> : null}
+					<Button loading={submitting} onClick={handleSubmit} type="button">
 						Add server
 					</Button>
 				</DialogFooter>
@@ -620,8 +640,7 @@ function ToolRow({
 								<p className="text-destructive text-xs">{parseError}</p>
 							) : null}
 							<div>
-								<Button disabled={running} onClick={runCall} size="sm">
-									{running ? <Spinner className="size-4" /> : null}
+								<Button loading={running} onClick={runCall} size="sm">
 									Test call
 								</Button>
 							</div>

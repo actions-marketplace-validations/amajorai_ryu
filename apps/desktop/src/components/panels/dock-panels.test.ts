@@ -51,6 +51,7 @@ const BUILTIN_KINDS: BuiltinTabKind[] = [
 	"terminal",
 	"codereview",
 	"files",
+	"gitgraph",
 	"cowork",
 	"sources",
 	"subagents",
@@ -195,6 +196,7 @@ describe("isPinnableDockTabKind", () => {
 		expect(isPinnableDockTabKind("terminal")).toBe(true);
 		expect(isPinnableDockTabKind("files")).toBe(true);
 		expect(isPinnableDockTabKind("codereview")).toBe(true);
+		expect(isPinnableDockTabKind("gitgraph")).toBe(true);
 		expect(isPinnableDockTabKind("plugin:@ryu/browser:browser")).toBe(true);
 	});
 

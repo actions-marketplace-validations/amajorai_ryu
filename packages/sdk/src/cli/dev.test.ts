@@ -3,57 +3,27 @@
  * sample Runnable, asserting that text, tool-call, and tool-result events
  * stream to stdout correctly.
  *
- * The mock gateway is an in-process HTTP server (Bun.serve) that returns a
- * pre-canned SSE response so the test never needs a real gateway running.
+ * The mock gateway is an in-process request handler so the test never needs a
+ * real gateway or a listening socket.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { unlinkSync, writeFileSync } from "node:fs";
-import { serve } from "bun";
-import type { ChatMessage } from "../model/client.ts";
-import { ModelClient } from "../model/client.ts";
-import type { DevEvent, Runnable } from "./dev.ts";
+import type { ChatMessage, ModelClient } from "../model/client.ts";
+import type { DevEvent, GatewayFetch, Runnable } from "./dev.ts";
 import { loadRunnable, probeGateway, runTurn } from "./dev.ts";
 
 // ── Mock gateway ──────────────────────────────────────────────────────────────
 
-/** Pre-canned SSE body the mock gateway returns for any chat completions POST. */
-const MOCK_SSE_BODY = [
-	'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}',
-	'data: {"choices":[{"delta":{"content":", world"},"finish_reason":null}]}',
-	'data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}',
-	"data: [DONE]",
-].join("\n");
-
-let mockServer: ReturnType<typeof serve>;
-let mockBaseUrl: string;
-
-beforeAll(() => {
-	mockServer = serve({
-		port: 0, // OS-assigned port
-		fetch(req) {
-			const url = new URL(req.url);
-
-			if (url.pathname === "/health") {
-				return new Response("ok", { status: 200 });
-			}
-
-			if (url.pathname === "/v1/chat/completions") {
-				return new Response(MOCK_SSE_BODY, {
-					status: 200,
-					headers: { "Content-Type": "text/event-stream" },
-				});
-			}
-
-			return new Response("not found", { status: 404 });
-		},
-	});
-	mockBaseUrl = `http://127.0.0.1:${mockServer.port}`;
-});
-
-afterAll(() => {
-	mockServer.stop();
-});
+/** Stable gateway URL used by the injected health request handler. */
+const MOCK_GATEWAY_URL = "http://mock-gateway.test";
+const mockFetch: GatewayFetch = async (input) => {
+	const url = new URL(String(input));
+	if (url.pathname === "/health") {
+		return new Response("ok", { status: 200 });
+	}
+	return new Response("not found", { status: 404 });
+};
 
 // ── Sample Runnable ───────────────────────────────────────────────────────────
 
@@ -98,7 +68,7 @@ const sampleRunnable: Runnable = {
 
 describe("probeGateway", () => {
 	it("returns true when the gateway /health responds", async () => {
-		const reachable = await probeGateway(mockBaseUrl);
+		const reachable = await probeGateway(MOCK_GATEWAY_URL, mockFetch);
 		expect(reachable).toBe(true);
 	});
 
@@ -130,7 +100,16 @@ describe("loadRunnable", () => {
 
 describe("runTurn — full turn streams to stdout", () => {
 	it("collects text + tool events from a full turn", async () => {
-		const model = new ModelClient("test-model", { baseUrl: mockBaseUrl });
+		const model = {
+			async *stream(): AsyncGenerator<{
+				content: string;
+				finishReason: string | null;
+			}> {
+				for (const content of ["Hello", ", world", "!"]) {
+					yield { content, finishReason: null };
+				}
+			},
+		} as unknown as ModelClient;
 
 		const events: DevEvent[] = [];
 
@@ -158,7 +137,7 @@ describe("runTurn — full turn streams to stdout", () => {
 		const toolCallEvents = events.filter((e) => e.type === "tool_call");
 		const toolResultEvents = events.filter((e) => e.type === "tool_result");
 
-		// Three text chunks from the mock SSE body.
+		// Three text chunks from the mock model stream.
 		expect(textEvents).toHaveLength(3);
 		const fullText = textEvents
 			.map((e) => (e as { content: string }).content)

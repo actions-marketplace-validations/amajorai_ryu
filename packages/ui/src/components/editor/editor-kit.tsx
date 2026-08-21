@@ -99,7 +99,7 @@ export type MyEditor = TPlateEditor<Value, (typeof EditorKit)[number]>;
 export const useEditor = () => useEditorRef<MyEditor>();
 
 /** Awareness metadata published for the local user's caret in a collab room. */
-export interface CollabCursor {
+export interface CollabCursor extends Record<string, unknown> {
 	color: string;
 	name: string;
 }

@@ -1,7 +1,7 @@
 // apps/desktop/src/lib/api/events.ts
 //
 // Client for Core's app-events feed: built-in agent actions (e.g.
-// `notify__desktop`) publish desktop notifications in Core; this reads them so
+// `notify.desktop`) publish desktop notifications in Core; this reads them so
 // the desktop can render a native OS notification. Delivery now rides the shared
 // multiplexed event stream (`/api/events/all`, see eventStream.ts) so it no
 // longer holds its own HTTP connection.

@@ -77,8 +77,11 @@
 //!   through Google OAuth — exactly what this crate must never do (see above).
 //!   Deferred on cost, not on principle; the local path is the way in if it's
 //!   picked up.
-//! - **Droid / Qwen / CodeBuddy / Pi / ryu**: no readable subscription usage
-//!   window → `unsupported`, which makes the desktop bar hide rather than error.
+//! - **Droid / Qwen / CodeBuddy / Pi / Ryu's own portal**: no readable
+//!   subscription usage window → `unsupported`, which makes the desktop bar
+//!   hide rather than error. Ryu's ChatGPT / Claude / Copilot provider logins
+//!   are different: they reuse the provider's normal subscription endpoint
+//!   through the managed Pi credential store.
 //! - **Local spend tiles**: openusage/CodexBar also estimate Today / Yesterday /
 //!   Last-30-days *cost* by scanning each CLI's own session logs and pricing the
 //!   token counts locally. That is a separate concern from a rate-limit window
@@ -105,6 +108,13 @@ pub trait UsageHost: Send + Sync {
     /// gateway-passthrough path keeps its `auth.json`. The last candidate the
     /// Codex reader probes after the user's own `~/.codex` / `~/.config/codex`.
     fn ryu_codex_home(&self) -> PathBuf;
+
+    /// The managed Pi's isolated `auth.json`, where Ryu's subscription-login
+    /// providers store their OAuth credentials. Optional so extracted crate
+    /// tests and hosts that only need the Codex seam remain minimal.
+    fn ryu_pi_auth_path(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Process-global usage host, installed once at boot by `apps/core`.
@@ -414,6 +424,26 @@ pub async fn fetch_usage(agent_id: &str) -> UsageSnapshot {
         Engine::Copilot => copilot::fetch(agent_id).await,
         Engine::Grok => grok::fetch(agent_id).await,
         Engine::Glm => glm::fetch(agent_id).await,
+    }
+}
+
+/// Fetch usage for a provider that was logged in through Ryu's managed Pi.
+///
+/// Ryu's OAuth bridge stores credentials in its isolated Pi `auth.json`, not in
+/// the vendor CLI files the ACP readers normally scan. The HTTP contract and
+/// normalization stay identical; only the read-only credential source changes.
+pub async fn fetch_ryu_provider_usage(provider_id: &str) -> UsageSnapshot {
+    let Some(engine) = engine_for_agent(provider_id) else {
+        return UsageSnapshot::unavailable(provider_id, "", UsageUnavailable::Unsupported);
+    };
+    match engine {
+        Engine::Claude => claude::fetch_ryu(provider_id).await,
+        Engine::Codex => codex::fetch_ryu(provider_id).await,
+        Engine::Copilot => copilot::fetch_ryu(provider_id).await,
+        // Ryu currently exposes OAuth login providers for these three engines.
+        // Keep the fallback conservative if a future provider is routed here
+        // before it has a Pi-auth reader of its own.
+        Engine::Grok | Engine::Glm => fetch_usage(provider_id).await,
     }
 }
 

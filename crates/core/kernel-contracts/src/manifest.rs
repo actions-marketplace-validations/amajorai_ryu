@@ -79,6 +79,20 @@ pub fn validate_code_file_path(rel: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Normalize the two tool-id separators accepted by manifests to the
+/// dispatcher-facing dotted form. A canonical dot before a legacy separator
+/// means the latter is part of the tool name and must be preserved.
+fn canonical_provider_tool_id(id: &str) -> String {
+    let canonical = id.find('.');
+    let legacy = id.find("__");
+    if canonical.is_some_and(|dot| legacy.is_some_and(|separator| dot < separator)) {
+        return id.to_owned();
+    }
+    id.split_once("__")
+        .map(|(server, tool)| format!("{server}.{tool}"))
+        .unwrap_or_else(|| id.to_owned())
+}
+
 /// The ONE directory a manifest `pi_extensions[].file` may name, one segment deep.
 ///
 /// A sibling of [`CODE_FILE_DIRS`] rather than a member of it, because the two
@@ -873,6 +887,19 @@ pub struct PluginManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<serde_json::Value>,
 
+    /// Public source repository URL (Claude/Codex `repository`). This is listing
+    /// metadata only; install and signature resolution still use the catalog's
+    /// authoritative source fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+
+    /// Whether the provider operates outside the local Ryu runtime, for example a
+    /// hosted browser or remote MCP service. This is a presentation/provenance
+    /// flag, not a permission grant; the actual remote endpoint remains declared
+    /// under `mcp_servers` and is governed by the Gateway.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
+
     /// Free-text category (Claude `category`). The Store groups its Apps and
     /// Plugins tabs by this string, so two listings that mean the same shelf must
     /// spell it the same way — see the canonical set in `docs/`-adjacent
@@ -932,6 +959,14 @@ pub struct PluginManifest {
     /// Search keywords / tags (Claude `keywords`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
+
+    /// Curated store-filter tags (Ryu extension). Unlike `keywords`, which is
+    /// publisher search vocabulary, these stable labels are the values the
+    /// Marketplace filter exposes. Keeping both fields lets Claude/Codex
+    /// manifests round-trip their native `keywords` while Ryu authors opt into
+    /// a deliberately bounded taxonomy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 
     /// Privacy policy URL (contract key `privacyPolicyUrl`; Ryu extension).
     #[serde(
@@ -1374,6 +1409,10 @@ impl PluginManifest {
             contributes
                 .validate_output_styles()
                 .map_err(|e| format!("plugin '{}': {e}", self.id))?;
+            if let Some(templates) = &contributes.chat_widget_templates {
+                validate_chat_widget_templates(templates)
+                    .map_err(|e| format!("plugin '{}': {e}", self.id))?;
+            }
         }
         if let Some(permissions) = &self.permissions {
             permissions
@@ -1518,11 +1557,63 @@ impl PluginManifest {
         Ok(())
     }
 
+    /// Return the native tool ids this manifest actually registers. Alias
+    /// runnables deliberately do not contribute ownership: they re-expose a
+    /// tool owned by another registry entry and must not become a capability
+    /// provider escape hatch.
+    fn owned_native_tool_ids(&self) -> Result<BTreeSet<String>, String> {
+        let mut ids = BTreeSet::new();
+        for runnable in &self.runnables {
+            if runnable.kind != RunnableKind::Tool {
+                continue;
+            }
+            let Some(config) = runnable.config.as_ref() else {
+                continue;
+            };
+            let tool: schema::ToolConfig = serde_json::from_value(config.clone()).map_err(|e| {
+                format!(
+                    "plugin '{}': tool runnable '{}' has invalid config: {e}",
+                    self.id, runnable.id
+                )
+            })?;
+            let backend = tool.resolve_backend().map_err(|e| {
+                format!(
+                    "plugin '{}': tool runnable '{}' has invalid backend: {e}",
+                    self.id, runnable.id
+                )
+            })?;
+            if matches!(backend, schema::ToolBackend::Alias { .. }) {
+                continue;
+            }
+            let slug = canonical_provider_tool_id(&tool.slug);
+            if tool.slug.contains('.') || tool.slug.contains("__") {
+                ids.insert(slug);
+            } else {
+                ids.insert(format!("app.{slug}"));
+            }
+        }
+        Ok(ids)
+    }
+
+    fn owns_provider_tool(&self, target: &str, native_ids: &BTreeSet<String>) -> bool {
+        let target = canonical_provider_tool_id(target.trim());
+        if native_ids.contains(&target) {
+            return true;
+        }
+        self.mcp_servers.keys().any(|server| {
+            target
+                .strip_prefix(&format!("{server}."))
+                .is_some_and(|tool| !tool.is_empty())
+        })
+    }
+
     /// Cross-validate the capability edges (`requires.capabilities` + `provides`):
-    /// version floors/strings parse, and every provided capability's referenced
-    /// `sidecar`/`route` actually exists on this manifest — the same declare-by-id
-    /// integrity `contributes` enforces, so a typo fails at load, not at bind.
+    /// version floors/strings parse, every provided capability's referenced
+    /// `sidecar`/`route` exists on this manifest, and each bound tool belongs to
+    /// this provider. The last check is what prevents a declarative binding or
+    /// `callNamed` adapter from dispatching through another plugin's tool.
     fn validate_capabilities(&self) -> Result<(), String> {
+        let native_tool_ids = self.owned_native_tool_ids()?;
         for req in self.required_capabilities() {
             if req.capability.trim().is_empty() {
                 return Err(format!(
@@ -1551,6 +1642,24 @@ impl PluginManifest {
                     "plugin '{}': provided capability '{}' has invalid version '{}'",
                     self.id, prov.capability, prov.version
                 ));
+            }
+            for (verb, binding) in &prov.tools {
+                if !self.owns_provider_tool(&binding.tool, &native_tool_ids) {
+                    return Err(format!(
+                        "plugin '{}': capability '{}' verb '{}' targets tool '{}' that is not owned by this provider",
+                        self.id, prov.capability, verb, binding.tool
+                    ));
+                }
+                if let Some(adapter) = &binding.adapter {
+                    for target in &adapter.tools {
+                        if !self.owns_provider_tool(target, &native_tool_ids) {
+                            return Err(format!(
+                                "plugin '{}': capability '{}' verb '{}' adapter targets tool '{}' that is not owned by this provider",
+                                self.id, prov.capability, verb, target
+                            ));
+                        }
+                    }
+                }
             }
             match (&prov.sidecar, &prov.route) {
                 (Some(sc_name), route) => {
@@ -1612,8 +1721,8 @@ pub struct McpServerDecl {
     pub command: Option<String>,
 
     /// Transport: `stdio`, `http`, `streamable-http`, or `sse`. Absent ⇒ inferred
-    /// from whichever of `command`/`url` is present. `http`, `streamable-http`
-    /// and `sse` all select Core's HTTP transport.
+    /// from whichever of `command`/`url` is present. `http` and `streamable-http`
+    /// select Streamable HTTP; `sse` selects the legacy HTTP+SSE transport.
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
 
@@ -1736,7 +1845,7 @@ pub struct CompanionSurface {
 /// Most surfaces added since are **self-contained**: they carry their own payload
 /// and reference no runnable at all (`widgets`, `views`, `dock_panels`,
 /// `sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,
-/// `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,
+/// `chat_features`, `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,
 /// `message_actions`, `context_menu_items`, `agent_edit_panels`).
 ///
 /// # Extending
@@ -1884,6 +1993,14 @@ pub struct Contributes {
     #[serde(default)]
     pub composer_controls: Vec<serde_json::Value>,
 
+    /// Declarative chat feature descriptors. These are opaque, client-rendered
+    /// declarations used to feature-detect chat behaviors whose implementation
+    /// remains in the host (for example side chats or temporary chats). The
+    /// owning plugin id is stamped by Core when the contribution endpoint serves
+    /// them, so a disabled plugin removes both the descriptor and its UI affordance.
+    #[serde(default)]
+    pub chat_features: Vec<serde_json::Value>,
+
     /// Declarative settings tabs the plugin contributes (model pickers, text
     /// fields bound to preference keys). Served + rendered the same way.
     ///
@@ -1926,6 +2043,12 @@ pub struct Contributes {
     #[serde(default)]
     pub widgets: Vec<WidgetContribution>,
 
+    /// Metadata-only chat widget templates. Unlike [`Contributes::widgets`], this
+    /// catalog is safe to show before a turn runs: it names a host-owned prompt
+    /// affordance and a tool/view binding, never HTML, React, or capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_widget_templates: Option<Vec<ChatWidgetTemplateContribution>>,
+
     /// **Declarative views** the plugin contributes (the Raycast tier). Each entry
     /// is a [`ViewContribution`]: a typed envelope (`id`/`view`) around an **opaque**
     /// `spec` payload the host renderer interprets. The app returns DATA
@@ -1965,7 +2088,7 @@ pub struct Contributes {
     /// ([`Contributes::sidebar_sections`]) and "what nav rows exist"
     /// ([`Contributes::sidebar_buttons`]): **how the sidebar as a whole is
     /// arranged**. The shell ships three modes of its own (every section stacked;
-    /// every section as a tab; Agent mode, which is the pair Sessions ⇄ Agents), and
+    /// every section as a tab; Bot mode, which is the pair Sessions ⇄ Agents), and
     /// before this member an app could add a section to that list but could not
     /// propose an arrangement — so a plugin wanting the Grok/Hermes bot-mode posture
     /// had to ask for a shell change. See [`SidebarModeContribution`].
@@ -2890,7 +3013,7 @@ pub struct SidebarModeContribution {
 
     /// Which of `sections` the mode opens on. Absent (or naming a section not in
     /// `sections`) = the first one. This is the field that makes a mode an opinion
-    /// rather than a filter: the shell's own Agent mode lists Sessions first but
+    /// rather than a filter: the shell's own Bot mode lists Sessions first but
     /// opens on Agents, because the roster is what the mode is for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_section: Option<String>,
@@ -3036,6 +3159,119 @@ pub struct WidgetContribution {
     /// Default display mode (`inline` | `fullscreen` | `pip`).
     #[serde(default = "default_widget_display_mode")]
     pub default_display_mode: String,
+}
+
+/// A metadata-only entry the host may offer as a compact chat affordance.
+///
+/// `backing` selects exactly one existing tool or view by id. The host owns the
+/// eventual rendering and action dispatch; `safe_action_ids` are identifiers only
+/// and are never executable payloads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChatWidgetTemplateContribution {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub triggers: Vec<String>,
+    #[serde(default)]
+    pub examples: Vec<String>,
+    pub backing: ChatWidgetTemplateBacking,
+    /// Open vocabulary so newer shells can add display modes without breaking
+    /// older Core nodes; the desktop simply ignores modes it does not know.
+    pub display_mode: String,
+    #[serde(default)]
+    pub safe_action_ids: Vec<String>,
+    /// `available`, `coming-soon`, or `unavailable`; unknown values are forwarded
+    /// for forward compatibility and are not offered by older shells.
+    #[serde(default = "default_chat_widget_availability")]
+    pub availability: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ChatWidgetTemplateBacking {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
+}
+
+fn default_chat_widget_availability() -> String {
+    "available".to_owned()
+}
+
+fn valid_chat_widget_id(id: &str) -> bool {
+    id.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && id.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-' | ':')
+        })
+}
+
+fn valid_chat_widget_tool_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))
+}
+
+/// Validate the metadata catalog while keeping its display vocabulary open for
+/// newer hosts. A template is only executable-looking when it has exactly one
+/// safe, namespaced binding and a valid stable id.
+pub fn validate_chat_widget_templates(
+    templates: &[ChatWidgetTemplateContribution],
+) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for template in templates {
+        if !valid_chat_widget_id(&template.id) {
+            return Err(format!(
+                "chat widget template '{}' has invalid id",
+                template.id
+            ));
+        }
+        if !seen.insert(template.id.as_str()) {
+            return Err(format!(
+                "duplicate chat widget template id '{}'",
+                template.id
+            ));
+        }
+        if template.title.trim().is_empty() || template.display_mode.trim().is_empty() {
+            return Err(format!(
+                "chat widget template '{}' needs title and display_mode",
+                template.id
+            ));
+        }
+        for action_id in &template.safe_action_ids {
+            if !valid_chat_widget_id(action_id) {
+                return Err(format!(
+                    "chat widget template '{}' has invalid safe action id '{}'",
+                    template.id, action_id
+                ));
+            }
+        }
+        let has_tool = template
+            .backing
+            .tool_id
+            .as_deref()
+            .is_some_and(|id| valid_chat_widget_tool_id(id));
+        let has_view = template
+            .backing
+            .view_id
+            .as_deref()
+            .is_some_and(|id| valid_chat_widget_id(id));
+        if has_tool == has_view {
+            let unavailable_without_binding = template.availability != "available"
+                && template.backing.tool_id.is_none()
+                && template.backing.view_id.is_none();
+            if !unavailable_without_binding {
+                return Err(format!("chat widget template '{}' must declare exactly one valid backing tool_id or view_id", template.id));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn default_widget_mime() -> String {
@@ -3525,10 +3761,10 @@ fn default_settings_tab_title() -> String {
 /// One **tool filter**: a fully-qualified tool id a plugin wants withheld from the
 /// model's offered tool list.
 ///
-/// Tools are namespaced `<server>__<tool>` (e.g. `browser__navigate`), so `tool`
+/// Tools are namespaced `<server>.<tool>` (e.g. `browser.navigate`), so `tool`
 /// must carry the namespace — a bare `navigate` would be ambiguous across servers
 /// and is rejected at load. A **trailing** `*` is a prefix wildcard, which is how a
-/// plugin withholds a whole server (`shadow__*`); it is the only wildcard position
+/// plugin withholds a whole server (`shadow.*`); it is the only wildcard position
 /// allowed, because an interior or leading `*` invites a pattern that silently
 /// matches far more than the author pictured.
 ///
@@ -3540,7 +3776,7 @@ fn default_settings_tab_title() -> String {
 /// tool being advertised; enforcement stays with permissions and grants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolFilterContribution {
-    /// Fully-qualified tool id (`<server>__<tool>`), optionally ending in `*` to
+    /// Fully-qualified tool id (`<server>.<tool>`), optionally ending in `*` to
     /// hide every tool whose id starts with the preceding prefix.
     pub tool: String,
 
@@ -3581,7 +3817,7 @@ pub fn validate_tool_filter(filter: &ToolFilterContribution) -> Result<(), Strin
             "tool_filters pattern '{tool}' must not contain whitespace"
         ));
     }
-    // Only a TRAILING `*` is a wildcard. An interior one (`br*ser__nav`) would look
+    // Only a TRAILING `*` is a wildcard. An interior one (`br*ser.nav`) would look
     // like a glob and behave like a literal, which is the worst of both.
     let body = tool.strip_suffix('*').unwrap_or(tool);
     if body.contains('*') {
@@ -3593,9 +3829,12 @@ pub fn validate_tool_filter(filter: &ToolFilterContribution) -> Result<(), Strin
     // on the node from the model — a plugin that wants that is almost certainly a
     // mistake or hostile, and either way the user should not learn about it by
     // watching the agent lose its hands.
-    if !body.contains("__") {
+    let has_namespace = body.split_once('.').is_some_and(|(server, tool_name)| {
+        !server.is_empty() && (!tool_name.is_empty() || tool.ends_with('*'))
+    });
+    if !has_namespace {
         return Err(format!(
-            "tool_filters pattern '{tool}' must be a fully-qualified '<server>__<tool>' id (a bare name or '*' would match across every server)"
+            "tool_filters pattern '{tool}' must be a fully-qualified '<server>.<tool>' id (a bare name or '*' would match across every server)"
         ));
     }
     Ok(())
@@ -4921,7 +5160,7 @@ pub struct ProvidesEntry {
     /// model-visible tool surface stable across a swap.
     ///
     /// The key is a canonical verb from the host's capability verb table (e.g.
-    /// `"web__search"`); the value names the provider's own registered tool plus the
+    /// `"web.search"`); the value names the provider's own registered tool plus the
     /// argument/response mapping into the canonical shape. A provider that omits a
     /// verb simply does not serve it — the facade reports the verb unavailable
     /// rather than guessing.
@@ -4949,15 +5188,15 @@ pub enum ProviderTarget {
 
 /// How one capability **verb** maps onto a concrete provider tool.
 ///
-/// The facade tool (`web__search`, `browser__navigate`, …) is registered by the host
+/// The facade tool (`web.search`, `browser.navigate`, …) is registered by the host
 /// from its canonical verb table; at call time it resolves the capability's bound
 /// provider, reads this binding, renames the arguments, re-enters tool dispatch on
 /// [`Self::tool`], and maps the response back. Swapping the provider therefore
 /// changes neither the tool id nor its schema.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 pub struct CapabilityToolBinding {
-    /// The provider's own fully-qualified tool id (e.g. `"exa__search"`,
-    /// `"app__firecrawl_scrape"`) that implements this verb.
+    /// The provider's own fully-qualified tool id (e.g. `"exa.search"`,
+    /// `"app.firecrawl_scrape"`) that implements this verb.
     pub tool: String,
 
     /// Canonical argument name → this provider's argument name. A canonical argument
@@ -4992,7 +5231,7 @@ pub struct CapabilityToolBinding {
     /// **canonical** argument name (before any rename).
     ///
     /// Exists because canonical schemas describe what agents may ask for, while
-    /// providers differ in what they accept: `web__search.limit` allows up to 100,
+    /// providers differ in what they accept: `web.search.limit` allows up to 100,
     /// but Brave's `count` maxes at 20. Without this, selecting Brave turns a
     /// perfectly valid `limit: 50` into an upstream 4xx — the swap stops being
     /// transparent, which is the entire point of the facade. Clamping is the right
@@ -5822,6 +6061,85 @@ mod tests {
     use super::*;
     use crate::runnable::RunnableKind;
 
+    fn provider_manifest(
+        tool_slug: &str,
+        backend: &str,
+        bound_tool: &str,
+        adapter_tools: &[&str],
+        mcp_server: bool,
+    ) -> String {
+        let mut manifest = serde_json::json!({
+            "id": "com.example.provider",
+            "name": "Provider",
+            "version": "1.0.0",
+            "runnables": [],
+            "provides": [{
+                "capability": "search",
+                "version": "1.0.0",
+                "tools": {
+                    "search": {
+                        "tool": bound_tool,
+                        "adapter": {
+                            "code": "return input;",
+                            "tools": adapter_tools
+                        }
+                    }
+                }
+            }]
+        });
+        if !mcp_server {
+            manifest["runnables"] = serde_json::json!([{
+                "id": "provider-search",
+                "name": "Provider search",
+                "kind": "tool",
+                "config": {
+                    "slug": tool_slug,
+                    "backend": backend,
+                    "url": "https://provider.example/search"
+                }
+            }]);
+        } else {
+            manifest["mcp_servers"] = serde_json::json!({
+                "provider": { "command": "provider-mcp" }
+            });
+        }
+        serde_json::to_string(&manifest).expect("provider manifest serializes")
+    }
+
+    #[test]
+    fn capability_binding_must_target_a_provider_owned_native_tool() {
+        let raw = provider_manifest("provider.search", "http", "provider.search", &[], false);
+        assert!(PluginManifest::parse_and_validate(&raw).is_ok());
+
+        let alias = provider_manifest("provider.search", "alias", "provider.search", &[], false);
+        let error =
+            PluginManifest::parse_and_validate(&alias).expect_err("aliases do not own tools");
+        assert!(error.contains("not owned by this provider"), "{error}");
+
+        let cross_provider =
+            provider_manifest("provider.search", "http", "other.search", &[], false);
+        let error = PluginManifest::parse_and_validate(&cross_provider)
+            .expect_err("a provider cannot bind another plugin's tool");
+        assert!(error.contains("other.search"), "{error}");
+    }
+
+    #[test]
+    fn capability_binding_accepts_declared_mcp_tools_and_checks_adapter_targets() {
+        let mcp = provider_manifest("ignored", "alias", "provider.search", &[], true);
+        assert!(PluginManifest::parse_and_validate(&mcp).is_ok());
+
+        let cross_provider_adapter = provider_manifest(
+            "provider.search",
+            "http",
+            "provider.search",
+            &["other.lookup"],
+            false,
+        );
+        let error = PluginManifest::parse_and_validate(&cross_provider_adapter)
+            .expect_err("adapter callNamed targets must be provider-owned");
+        assert!(error.contains("other.lookup"), "{error}");
+    }
+
     // ── host version floors (engines) ──────────────────────────────────────────
 
     fn engines(ryu: &str) -> EnginesReq {
@@ -6189,6 +6507,60 @@ mod tests {
         assert!(contributes.validate_hook_events("com.acme.meet").is_err());
     }
 
+    #[test]
+    fn chat_widget_template_validation_requires_safe_single_backing() {
+        let valid = ChatWidgetTemplateContribution {
+            id: "meeting.summary".to_owned(),
+            title: "Meeting summary".to_owned(),
+            description: Some("Summarize the latest meeting".to_owned()),
+            triggers: vec!["meeting summary".to_owned()],
+            examples: vec!["Summarize my latest meeting".to_owned()],
+            backing: ChatWidgetTemplateBacking {
+                tool_id: Some("meetings.summarize".to_owned()),
+                view_id: None,
+            },
+            display_mode: "inline".to_owned(),
+            safe_action_ids: vec!["refresh".to_owned()],
+            availability: "available".to_owned(),
+        };
+        assert!(validate_chat_widget_templates(&[valid]).is_ok());
+
+        let mut invalid = ChatWidgetTemplateContribution {
+            id: "meeting/summary".to_owned(),
+            title: "Meeting summary".to_owned(),
+            description: None,
+            triggers: vec![],
+            examples: vec![],
+            backing: ChatWidgetTemplateBacking {
+                tool_id: Some("meetings.summarize".to_owned()),
+                view_id: Some("meeting-summary".to_owned()),
+            },
+            display_mode: "inline".to_owned(),
+            safe_action_ids: vec!["refresh/all".to_owned()],
+            availability: "available".to_owned(),
+        };
+        assert!(validate_chat_widget_templates(&[invalid.clone()]).is_err());
+        invalid.id = "meeting.summary".to_owned();
+        invalid.backing.view_id = None;
+        assert!(validate_chat_widget_templates(&[invalid]).is_err());
+    }
+
+    #[test]
+    fn unavailable_chat_widget_template_may_omit_binding_for_forward_compatibility() {
+        let template = ChatWidgetTemplateContribution {
+            id: "future.widget".to_owned(),
+            title: "Coming soon".to_owned(),
+            description: None,
+            triggers: vec!["future widget".to_owned()],
+            examples: vec![],
+            backing: ChatWidgetTemplateBacking::default(),
+            display_mode: "inline".to_owned(),
+            safe_action_ids: vec![],
+            availability: "coming-soon".to_owned(),
+        };
+        assert!(validate_chat_widget_templates(&[template]).is_ok());
+    }
+
     /// A consumer may subscribe to an event nothing declares — that is how a
     /// consumer gets installed before its provider, and it must not be a load error.
     #[test]
@@ -6353,7 +6725,16 @@ mod tests {
             "id": "com.example.hooks",
             "name": "Hooks",
             "version": "1.0.0",
-            "runnables": [],
+            "runnables": [{
+                "id": "x-search",
+                "name": "Search",
+                "kind": "tool",
+                "config": {
+                    "slug": "x.search",
+                    "backend": "http",
+                    "url": "https://provider.example/search"
+                }
+            }],
             "contributes": {
                 "turn_hooks": [
                     { "id": "h.one", "on": "post_assistant_turn", "code_file": "hooks/one.js" }
@@ -6364,9 +6745,9 @@ mod tests {
                     "capability": "web.search",
                     "version": "1.0.0",
                     "tools": {
-                        "web__search": {
-                            "tool": "x__search",
-                            "adapter": { "code_file": "adapters/web__search.js" }
+                        "web.search": {
+                            "tool": "x.search",
+                            "adapter": { "code_file": "adapters/web.search.js" }
                         }
                     }
                 }
@@ -6388,8 +6769,8 @@ mod tests {
             "code_file must be cleared so the hydrated manifest is indistinguishable from an \
              inline one and every read site keeps reading `code`"
         );
-        let adapter = m.provides[0].tools["web__search"].adapter.as_ref().unwrap();
-        assert_eq!(adapter.code, "// adapters/web__search.js\nreturn null;\n");
+        let adapter = m.provides[0].tools["web.search"].adapter.as_ref().unwrap();
+        assert_eq!(adapter.code, "// adapters/web.search.js\nreturn null;\n");
         assert!(adapter.code_file.is_none());
     }
 
@@ -6400,7 +6781,7 @@ mod tests {
             m.code_file_refs(),
             vec![
                 "hooks/one.js".to_string(),
-                "adapters/web__search.js".to_string()
+                "adapters/web.search.js".to_string()
             ]
         );
         m.hydrate_code_files(|_| Ok("return null;".to_string()))
@@ -6481,7 +6862,7 @@ mod tests {
     #[test]
     fn code_file_path_allowlist_rejects_traversal_and_stray_dirs() {
         assert!(validate_code_file_path("hooks/one.js").is_ok());
-        assert!(validate_code_file_path("adapters/web__search.mjs").is_ok());
+        assert!(validate_code_file_path("adapters/web.search.mjs").is_ok());
         for bad in [
             "",
             "one.js",              // no dir segment
@@ -7904,24 +8285,24 @@ mod tests {
     #[test]
     fn tool_filter_matches_exactly_or_by_trailing_wildcard() {
         let exact = ToolFilterContribution {
-            tool: "browser__navigate".to_owned(),
+            tool: "browser.navigate".to_owned(),
             reason: None,
         };
-        assert!(exact.matches("browser__navigate"));
-        assert!(!exact.matches("browser__navigate_back"));
+        assert!(exact.matches("browser.navigate"));
+        assert!(!exact.matches("browser.navigate_back"));
         assert!(validate_tool_filter(&exact).is_ok());
 
         let wildcard = ToolFilterContribution {
-            tool: "shadow__*".to_owned(),
+            tool: "shadow.*".to_owned(),
             reason: Some("replaced by this plugin's own search".to_owned()),
         };
-        assert!(wildcard.matches("shadow__search"));
-        assert!(!wildcard.matches("browser__search"));
+        assert!(wildcard.matches("shadow.search"));
+        assert!(!wildcard.matches("browser.search"));
         assert!(validate_tool_filter(&wildcard).is_ok());
 
         // `*` alone or an unqualified name would strip tools across every server;
         // an interior `*` looks like a glob and behaves like a literal.
-        for bad in ["", "*", "navigate", "br*ser__nav", "browser__nav "] {
+        for bad in ["", "*", "navigate", "br*ser.nav", "browser.nav "] {
             let filter = ToolFilterContribution {
                 tool: bad.to_owned(),
                 reason: None,

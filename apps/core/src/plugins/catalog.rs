@@ -191,6 +191,51 @@ pub struct CatalogEntry {
     /// to a lower-priority card for the same plugin.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+
+    /// Public source repository URL, projected from manifest metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+
+    /// SPDX license identifier, when declared by the publisher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+
+    /// Ordered screenshot gallery URLs for the detail view.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screenshots: Vec<String>,
+
+    /// Additional public listing metadata from the manifest contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_policy_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms_of_service_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub example_prompts: Vec<String>,
+
+    /// True when the provider operates outside the local Ryu runtime.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
+
+    /// Non-executable summary of the swappable capability layers this listing
+    /// participates in. The signed manifest remains the authority for bindings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<CatalogLayer>,
+}
+
+/// Safe public projection of a provider's capability-layer declaration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogLayer {
+    pub capability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub toolkit: bool,
+    #[serde(default)]
+    pub selectable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verbs: Vec<String>,
 }
 
 /// Top-level shape of the remote `registry.json`.

@@ -37,6 +37,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import { useMemo, useState } from "react";
 import {
@@ -89,7 +90,9 @@ const MAX_CHIPS = 4;
 function StatRow({ label, value }: { label: string; value: number }) {
 	return (
 		<div className="flex flex-col gap-0.5">
-			<span className="font-medium text-sm tabular-nums">{value}</span>
+			<span className="font-medium text-sm tabular-nums">
+				{formatCount(value)}
+			</span>
 			<span className="text-[10px] text-muted-foreground uppercase tracking-wide">
 				{label}
 			</span>
@@ -155,7 +158,7 @@ function FileRow({ touch }: { touch: MissionFileTouch }) {
 			</span>
 			{touch.count > 1 && (
 				<span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-					×{touch.count}
+					×{formatCount(touch.count) ?? "—"}
 				</span>
 			)}
 		</div>

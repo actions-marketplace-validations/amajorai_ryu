@@ -1,12 +1,14 @@
 use crate::win_process::NoWindow;
 use axum::{
-    extract::{Path, Query, State},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderValue, Method, Request, StatusCode},
     middleware,
     response::IntoResponse,
     routing::{delete, get, post, put},
-    Json, Router,
+    Extension, Json, Router,
 };
+use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::process::Command;
@@ -15,15 +17,18 @@ use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
 pub mod activity_api;
+pub mod agent_sync;
 pub mod approvals_api;
 pub mod auto_title;
 pub mod canvas_migrate;
+pub mod catalog_scan;
 pub mod chat_suggestions;
 pub mod conversations;
 pub mod data_admin;
 pub mod encryption;
 pub mod gifs;
 pub mod git;
+pub mod recommendations;
 // The device-registry + TRMNL display HTTP surface moved to the extracted
 // `ryu_hardware` crate (`ryu_hardware::api`); the public pairing ingress + the WS
 // link stay Core-side (kernel ingress that forwards to the crate).
@@ -45,6 +50,7 @@ pub mod learning;
 pub mod managed_bot_api;
 pub mod mcp_oauth_api;
 pub mod media;
+pub mod memory_dream;
 pub mod uploads;
 /// Re-export of the extracted [`ryu_memory`] crate under the historical
 /// `server::memory` path. The long-term memory store, scope model, and recall now
@@ -54,8 +60,11 @@ pub mod uploads;
 pub use ryu_memory as memory;
 pub mod app_notify;
 pub mod notifications_api;
+pub mod onboarding_profile;
 pub mod openapi;
 pub mod plugin_bridge_api;
+pub mod plugin_uninstall;
+pub mod portable_package_runtime;
 pub mod preferences;
 pub mod realtime_ws;
 pub mod rules;
@@ -82,7 +91,8 @@ use crate::agents::{AgentStore, AgentTemplate, CreateAgent, UpdateAgent};
 use crate::auth::AuthState;
 use crate::plugins::PluginStore;
 use crate::sidecar::adapters::{
-    route_chat_stream, run_reply_text, run_team_reply_text, AcpAgentRegistry, ChatStreamRequest,
+    route_chat_stream, run_proactive_opening_text, run_reply_text, run_team_reply_text,
+    AcpAgentRegistry, ChatStreamRequest,
 };
 use crate::sidecar::mcp::McpRegistry;
 use crate::sidecar::onboarding::SetupManager;
@@ -750,7 +760,14 @@ async fn attach_verified_caller(
     next: middleware::Next,
 ) -> axum::response::Response {
     let caller = verified_caller_from_headers(req.headers()).await;
+    let has_verified_caller = caller.is_some();
+    let user_jwt = header_str(req.headers(), USER_JWT_HEADER);
     req.extensions_mut().insert(caller);
+    // Keep the verified raw token available only to the server-owned ACP spawn
+    // path. It is never deserialized from the request body or returned to a
+    // client; an invalid token is discarded with the anonymous caller state.
+    req.extensions_mut()
+        .insert(user_jwt.filter(|_| has_verified_caller));
     next.run(req).await
 }
 
@@ -778,7 +795,7 @@ async fn attach_verified_caller(
 ///         custom-role grant resolved from the control plane. The role tier is
 ///         checked first (no network on the common path); a control-plane
 ///         resolution failure falls back to the role tier alone, never full access.
-async fn enforce_permission(
+pub(crate) async fn enforce_permission(
     state: &ServerState,
     caller: &Option<crate::identity_verify::VerifiedCaller>,
     perm: &str,
@@ -814,6 +831,600 @@ async fn enforce_permission(
                 }
             }
         },
+    }
+}
+
+/// The lifecycle permissions are deliberately separate from the general plugin
+/// route permission. Every package kind (apps, plugins, skills, agents,
+/// workflows, themes, profiles, bundles, and future kinds) resolves against the
+/// same node resource, so a grant cannot accidentally apply to only one catalog
+/// surface.
+const APP_LIFECYCLE_PERMISSIONS: &[&str] = &[
+    crate::identity_verify::permissions::APP_INSTALL,
+    crate::identity_verify::permissions::APP_UPDATE,
+    crate::identity_verify::permissions::APP_ENABLE,
+    crate::identity_verify::permissions::APP_DISABLE,
+    crate::identity_verify::permissions::APP_UNINSTALL,
+];
+
+/// Validate that a verified caller is eligible to resolve permissions on this
+/// registered node. This is intentionally separate from the ACL resolver: a
+/// node's org/team/personal boundary must be satisfied before an ACL overwrite
+/// can grant or deny anything.
+fn node_scope_denial_reason(
+    node: &crate::sidecar::control_plane::RegisteredNode,
+    caller: &crate::identity_verify::VerifiedCaller,
+) -> Option<&'static str> {
+    match node.scope {
+        crate::sidecar::control_plane::NodeScope::Personal => (node.owner_user_id.as_deref()
+            != Some(caller.user_id.as_str()))
+        .then_some("personal_node_owner_only"),
+        crate::sidecar::control_plane::NodeScope::Org => (caller.org_id.as_deref()
+            != Some(node.org.id.as_str()))
+        .then_some("organization_membership_required"),
+        crate::sidecar::control_plane::NodeScope::Team => {
+            if caller.org_id.as_deref() != Some(node.org.id.as_str()) {
+                return Some("organization_membership_required");
+            }
+            let in_team = node
+                .team_id
+                .as_deref()
+                .is_some_and(|team_id| caller.teams.iter().any(|team| team.id == team_id));
+            let org_admin = caller
+                .role
+                .satisfies(crate::identity_verify::OrgRole::Admin);
+            (!in_team && !org_admin).then_some("team_membership_required")
+        }
+    }
+}
+
+#[cfg(test)]
+mod node_scope_tests {
+    use super::node_scope_denial_reason;
+    use crate::identity_verify::{OrgRole, TeamMembership, VerifiedCaller};
+    use crate::sidecar::control_plane::{NodeScope, RegisteredNode, RegisteredOrg};
+
+    fn caller(
+        user_id: &str,
+        org_id: Option<&str>,
+        role: OrgRole,
+        teams: &[&str],
+    ) -> VerifiedCaller {
+        VerifiedCaller {
+            user_id: user_id.to_owned(),
+            email: None,
+            org_id: org_id.map(str::to_owned),
+            role,
+            teams: teams
+                .iter()
+                .map(|id| TeamMembership {
+                    id: (*id).to_owned(),
+                    org_id: "org-1".to_owned(),
+                    role: "member".to_owned(),
+                })
+                .collect(),
+        }
+    }
+
+    fn node(
+        scope: NodeScope,
+        team_id: Option<&str>,
+        owner_user_id: Option<&str>,
+    ) -> RegisteredNode {
+        RegisteredNode {
+            org: RegisteredOrg {
+                id: "org-1".to_owned(),
+                name: "Acme".to_owned(),
+                slug: None,
+            },
+            node_id: "node-1".to_owned(),
+            scope,
+            team_id: team_id.map(str::to_owned),
+            owner_user_id: owner_user_id.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn team_scope_requires_team_membership_but_allows_org_admin() {
+        let team_node = node(NodeScope::Team, Some("team-1"), None);
+        assert_eq!(
+            node_scope_denial_reason(
+                &team_node,
+                &caller("member", Some("org-1"), OrgRole::Member, &["team-1"])
+            ),
+            None
+        );
+        assert_eq!(
+            node_scope_denial_reason(
+                &team_node,
+                &caller("other", Some("org-1"), OrgRole::Member, &["team-2"])
+            ),
+            Some("team_membership_required")
+        );
+        assert_eq!(
+            node_scope_denial_reason(
+                &team_node,
+                &caller("admin", Some("org-1"), OrgRole::Admin, &[])
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn personal_scope_never_yields_to_org_administration() {
+        let personal_node = node(NodeScope::Personal, None, Some("owner"));
+        assert_eq!(
+            node_scope_denial_reason(&personal_node, &caller("owner", None, OrgRole::Viewer, &[])),
+            None
+        );
+        assert_eq!(
+            node_scope_denial_reason(
+                &personal_node,
+                &caller("admin", Some("org-1"), OrgRole::Admin, &[])
+            ),
+            Some("personal_node_owner_only")
+        );
+    }
+
+    #[test]
+    fn org_scope_rejects_non_members() {
+        let org_node = node(NodeScope::Org, None, None);
+        assert_eq!(
+            node_scope_denial_reason(
+                &org_node,
+                &caller("outsider", Some("org-2"), OrgRole::Member, &[])
+            ),
+            Some("organization_membership_required")
+        );
+    }
+}
+
+fn app_lifecycle_denied(
+    permission: &str,
+    node: Option<&crate::sidecar::control_plane::RegisteredNode>,
+    reason: &str,
+) -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(app_lifecycle_denied_value(permission, node, reason)),
+    )
+        .into_response()
+}
+
+fn app_lifecycle_denied_value(
+    permission: &str,
+    node: Option<&crate::sidecar::control_plane::RegisteredNode>,
+    reason: &str,
+) -> serde_json::Value {
+    let node_scope = node.map(|registered| match registered.scope {
+        crate::sidecar::control_plane::NodeScope::Org => "org",
+        crate::sidecar::control_plane::NodeScope::Team => "team",
+        crate::sidecar::control_plane::NodeScope::Personal => "personal",
+    });
+    json!({
+        "success": false,
+        "error": "app_lifecycle_permission_denied",
+        "required_permission": permission,
+        "node_scope": node_scope,
+        "node": node.map(|registered| json!({
+            "id": registered.node_id,
+            "scope": node_scope,
+            "orgId": registered.org.id,
+            "teamId": registered.team_id,
+            "ownerUserId": registered.owner_user_id,
+        })),
+        "reason": reason,
+    })
+}
+
+/// Enforce one app lifecycle operation at the exact managed-node boundary.
+///
+/// The node scope is checked before the ACL resolver so a valid org JWT cannot
+/// be reused against a team or personal node. The resolver remains authoritative
+/// after that boundary: explicit node denies win over role/default grants and
+/// explicit team/member/role allows can grant the otherwise-denied member/viewer
+/// lifecycle permissions.
+async fn enforce_app_lifecycle_permission(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    permission: &str,
+) -> Result<(), axum::response::Response> {
+    let node = crate::sidecar::control_plane::registered_node();
+    let Some(node) = node.as_ref() else {
+        // An unbound local node retains the existing node-token owner behavior.
+        return Ok(());
+    };
+
+    let Some(caller) = caller.as_ref() else {
+        return Err(app_lifecycle_denied(
+            permission,
+            Some(node),
+            "authentication_required",
+        ));
+    };
+
+    if let Some(reason) = node_scope_denial_reason(node, caller) {
+        return Err(app_lifecycle_denied(permission, Some(node), reason));
+    }
+
+    let is_personal_owner = node.scope == crate::sidecar::control_plane::NodeScope::Personal
+        && node.owner_user_id.as_deref() == Some(caller.user_id.as_str());
+
+    // Custom roles are resolved from the control plane and degrade to an empty
+    // set on lookup failure, which preserves the existing fail-closed contract.
+    let mut custom =
+        crate::sidecar::control_plane::resolve_permissions(&state.client, &caller.user_id).await;
+    // The personal owner has an implicit full lifecycle grant. Passing it through
+    // the normal resolver keeps explicit node denies authoritative.
+    if is_personal_owner {
+        custom.insert(permission.to_owned());
+    }
+
+    if crate::acl::decide_with_extra(
+        caller,
+        crate::acl::KIND_NODE,
+        &node.node_id,
+        permission,
+        &custom,
+    )
+    .is_allowed()
+    {
+        Ok(())
+    } else {
+        Err(app_lifecycle_denied(
+            permission,
+            Some(node),
+            "node_acl_denied",
+        ))
+    }
+}
+
+/// Tuple-shaped companion for catalog handlers that still expose the historic
+/// `(StatusCode, Json<Value>)` return type. It delegates the decision to the
+/// canonical response-producing guard, then preserves the same structured 403
+/// contract without making each catalog handler convert an Axum response.
+async fn enforce_app_lifecycle_permission_json(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    permission: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if enforce_app_lifecycle_permission(state, caller, permission)
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(app_lifecycle_denied_value(
+            permission,
+            crate::sidecar::control_plane::registered_node().as_ref(),
+            "node_scope_or_acl_denied",
+        )),
+    ))
+}
+
+/// Read-only capability projection for the desktop. The booleans are advisory
+/// UI state; every mutating handler calls `enforce_app_lifecycle_permission`
+/// again immediately before it can mutate anything.
+async fn app_lifecycle_capabilities(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::Response {
+    let node = crate::sidecar::control_plane::registered_node();
+    let mut permissions = serde_json::Map::new();
+    let mut reasons = serde_json::Map::new();
+    for permission in APP_LIFECYCLE_PERMISSIONS {
+        let allowed = enforce_app_lifecycle_permission(&state, &caller, permission)
+            .await
+            .is_ok();
+        permissions.insert((*permission).to_owned(), json!(allowed));
+        reasons.insert(
+            (*permission).to_owned(),
+            json!(if allowed {
+                "allowed"
+            } else {
+                "node ACL or node membership does not grant this operation"
+            }),
+        );
+    }
+    Json(json!({
+        "node": node.as_ref().map(|registered| json!({
+            "id": registered.node_id,
+            "scope": match registered.scope {
+                crate::sidecar::control_plane::NodeScope::Org => "org",
+                crate::sidecar::control_plane::NodeScope::Team => "team",
+                crate::sidecar::control_plane::NodeScope::Personal => "personal",
+            },
+            "orgId": registered.org.id,
+            "teamId": registered.team_id,
+            "ownerUserId": registered.owner_user_id,
+        })),
+        "permissions": permissions,
+        "reasons": reasons,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct PortableMarketplacePackageBody {
+    kind: String,
+    id: String,
+    /// Short-lived control-plane session redeemed from a private package code.
+    /// It is forwarded only to the first-party Marketplace resolver and is
+    /// never persisted in Core's installed-package record.
+    #[serde(default)]
+    install_session: Option<String>,
+}
+
+fn portable_package_identity(
+    body: &PortableMarketplacePackageBody,
+) -> Result<(String, String), axum::response::Response> {
+    let kind = body.kind.trim().to_ascii_lowercase();
+    let id = body.id.trim().to_owned();
+    if kind.is_empty() || id.is_empty() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "portable package `kind` and `id` are required".to_owned(),
+        ));
+    }
+    Ok((kind, id))
+}
+
+fn portable_package_install_session(
+    body: &PortableMarketplacePackageBody,
+) -> Result<Option<String>, axum::response::Response> {
+    let session = body
+        .install_session
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if session.as_ref().is_some_and(|value| value.len() > 2048) {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "portable package `install_session` is too long".to_owned(),
+        ));
+    }
+    Ok(session)
+}
+
+/// `GET /api/marketplace/packages/installed` — local package state only.
+///
+/// This endpoint deliberately does not consult the control plane. Once an
+/// archive has been installed, its local bytes and lifecycle state remain
+/// usable even if the buyer's paid entitlement later expires.
+async fn marketplace_packages_installed() -> axum::response::Response {
+    match crate::portable_packages::list() {
+        Ok(packages) => Json(json!({ "packages": packages })).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn install_portable_marketplace_package(
+    state: &ServerState,
+    headers: &axum::http::HeaderMap,
+    kind: &str,
+    id: &str,
+    install_session: Option<String>,
+    update: bool,
+) -> axum::response::Response {
+    let buyer_token = buyer_bearer_from_headers(headers);
+    let detail = match crate::catalog_source::with_install_session(
+        install_session.clone(),
+        crate::catalog_source::with_buyer_token(
+            buyer_token.clone(),
+            crate::catalog_source::sources::fetch_ryu_package_detail(
+                &state.client,
+                kind,
+                id,
+                update,
+            ),
+        ),
+    )
+    .await
+    {
+        Ok(detail) => detail,
+        Err(error) => return json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    };
+    if let Err(error) =
+        crate::catalog_source::sources::verify_ryu_package_signature(&state.client, id, &detail)
+            .await
+    {
+        return json_error(StatusCode::BAD_GATEWAY, error.to_string());
+    }
+    let descriptor = detail
+        .get("descriptor")
+        .and_then(serde_json::Value::as_object);
+    let expected_package_digest = descriptor
+        .and_then(|value| value.get("package_digest"))
+        .and_then(serde_json::Value::as_str);
+    let expected_archive_digest = descriptor
+        .and_then(|value| value.get("sha256"))
+        .and_then(serde_json::Value::as_str);
+    let expected_version = descriptor
+        .and_then(|value| value.get("version"))
+        .and_then(serde_json::Value::as_str);
+    let archive = match crate::catalog_source::with_install_session(
+        install_session,
+        crate::catalog_source::with_buyer_token(
+            buyer_token,
+            crate::catalog_source::sources::fetch_ryu_package_archive(
+                &state.client,
+                &detail,
+                update,
+            ),
+        ),
+    )
+    .await
+    {
+        Ok(archive) => archive,
+        Err(error) => return json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    };
+    let was_enabled = update
+        && crate::portable_packages::get(kind, id)
+            .ok()
+            .flatten()
+            .is_some_and(|package| package.enabled);
+    if was_enabled {
+        if let Err(error) = crate::server::portable_package_runtime::disable(state, kind, id).await
+        {
+            return json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string());
+        }
+    }
+    let installed = crate::portable_packages::install(
+        kind,
+        id,
+        &archive,
+        expected_package_digest,
+        expected_archive_digest,
+        expected_version,
+        update,
+    );
+    match installed {
+        Ok(_) if was_enabled => {
+            match crate::server::portable_package_runtime::enable(state, kind, id).await {
+                Ok(package) => Json(json!({ "success": true, "package": package })).into_response(),
+                Err(error) => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
+            }
+        }
+        Ok(package) => Json(json!({ "success": true, "package": package })).into_response(),
+        Err(error) => {
+            if was_enabled {
+                if let Err(restore_error) =
+                    crate::server::portable_package_runtime::enable(state, kind, id).await
+                {
+                    tracing::error!(
+                        package_kind = kind,
+                        package_id = id,
+                        %restore_error,
+                        "portable package update failed and the previous activation could not be restored"
+                    );
+                }
+            }
+            json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string())
+        }
+    }
+}
+
+/// `POST /api/marketplace/packages/install { kind, id }` — download and install
+/// an entitlement-gated GitHub Release package. The lifecycle gate runs before
+/// any control-plane request or filesystem work.
+async fn marketplace_package_install(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<PortableMarketplacePackageBody>,
+) -> axum::response::Response {
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
+    let (kind, id) = match portable_package_identity(&body) {
+        Ok(identity) => identity,
+        Err(response) => return response,
+    };
+    let install_session = match portable_package_install_session(&body) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    install_portable_marketplace_package(&state, &headers, &kind, &id, install_session, false).await
+}
+
+/// `POST /api/marketplace/packages/update { kind, id }` — entitlement is
+/// checked by the detail/download proxy before the old local package is
+/// replaced. A failed download or digest check leaves the old version intact.
+async fn marketplace_package_update(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<PortableMarketplacePackageBody>,
+) -> axum::response::Response {
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_UPDATE,
+    )
+    .await
+    {
+        return response;
+    }
+    let (kind, id) = match portable_package_identity(&body) {
+        Ok(identity) => identity,
+        Err(response) => return response,
+    };
+    let install_session = match portable_package_install_session(&body) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    install_portable_marketplace_package(&state, &headers, &kind, &id, install_session, true).await
+}
+
+async fn marketplace_package_enable(
+    State(state): State<ServerState>,
+    Path((kind, id)): Path<(String, String)>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::Response {
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_ENABLE,
+    )
+    .await
+    {
+        return response;
+    }
+    match crate::server::portable_package_runtime::enable(&state, &kind, &id).await {
+        Ok(package) => Json(json!({ "success": true, "package": package })).into_response(),
+        Err(error) => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
+    }
+}
+
+async fn marketplace_package_disable(
+    State(state): State<ServerState>,
+    Path((kind, id)): Path<(String, String)>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::Response {
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_DISABLE,
+    )
+    .await
+    {
+        return response;
+    }
+    match crate::server::portable_package_runtime::disable(&state, &kind, &id).await {
+        Ok(package) => Json(json!({ "success": true, "package": package })).into_response(),
+        Err(error) => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
+    }
+}
+
+async fn marketplace_package_uninstall(
+    State(state): State<ServerState>,
+    Path((kind, id)): Path<(String, String)>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::Response {
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_UNINSTALL,
+    )
+    .await
+    {
+        return response;
+    }
+    match crate::server::portable_package_runtime::uninstall(&state, &kind, &id).await {
+        Ok(()) => match crate::portable_packages::uninstall(&kind, &id) {
+            Ok(()) => Json(json!({ "success": true, "kind": kind, "id": id })).into_response(),
+            Err(error) => json_error(StatusCode::NOT_FOUND, error.to_string()),
+        },
+        Err(error) => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
     }
 }
 
@@ -856,6 +1467,24 @@ async fn enforce_permission(
 /// global, so the matrix stays a pure, unit-testable function.
 fn node_org_id() -> Option<String> {
     crate::sidecar::control_plane::registered_org().map(|o| o.id)
+}
+
+/// Shared → private is an organization-level visibility change. On a personal
+/// node there is no organization administrator to distinguish, so the local node
+/// boundary remains authoritative; on a bound node only verified owners/admins
+/// may make a shared resource private. The store repeats the transition check
+/// while holding its database lock to close a stale-read race between this gate
+/// and the final update.
+fn visibility_admin_authorized(caller: Option<&crate::identity_verify::VerifiedCaller>) -> bool {
+    let Some(node_org) = node_org_id() else {
+        return true;
+    };
+    caller.is_some_and(|caller| {
+        caller.org_id.as_deref() == Some(node_org.as_str())
+            && caller
+                .role
+                .satisfies(crate::identity_verify::OrgRole::Admin)
+    })
 }
 
 /// Resolve a caller's access to ONE resource from its tenancy quartet, mapping a
@@ -1264,6 +1893,24 @@ async fn require_conversation_write_if_owned(
     caller: &Option<crate::identity_verify::VerifiedCaller>,
     conversation_id: &str,
 ) -> Result<(), axum::response::Response> {
+    // Store-backed channel sessions are org-shared machine resources. The
+    // gateway's node credential is the writer for that resource; human desktop
+    // reads still pass through the normal org visibility ACL.
+    match state
+        .conversations
+        .is_channel_conversation(conversation_id)
+        .await
+    {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!("per-resource ACL: channel metadata lookup failed: {e:#}");
+            return Err(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "resource access lookup failed".to_owned(),
+            ));
+        }
+    }
     match state.conversations.get_access_meta(conversation_id).await {
         Ok(Some(tenancy)) if tenancy.owner_user_id.is_some() || tenancy.org_id.is_some() => {
             require_resource_write(
@@ -1313,16 +1960,20 @@ async fn require_parent_conversation(
 }
 
 /// The caller's tenancy tuple for a SQL-level read filter: `(user_id, org_id,
-/// node_bound)`. The single place handlers translate a [`VerifiedCaller`] into the
+/// team_ids_json, node_bound)`. The single place handlers translate a [`VerifiedCaller`] into the
 /// arguments of `ConversationStore::{list_conversations_visible, list_runs_visible,
 /// visible_conversation_ids}`, whose `WHERE` mirrors [`resource_access`].
 fn tenancy_filter_args(
     caller: &Option<crate::identity_verify::VerifiedCaller>,
-) -> (Option<String>, Option<String>, bool) {
+) -> (Option<String>, Option<String>, Option<String>, bool) {
     let node_bound = node_org_id().is_some();
     let user_id = caller.as_ref().map(|c| c.user_id.clone());
     let org_id = caller.as_ref().and_then(|c| c.org_id.clone());
-    (user_id, org_id, node_bound)
+    let team_ids_json = caller.as_ref().map(|c| {
+        let team_ids: Vec<&str> = c.teams.iter().map(|team| team.id.as_str()).collect();
+        serde_json::to_string(&team_ids).unwrap_or_else(|_| "[]".to_owned())
+    });
+    (user_id, org_id, team_ids_json, node_bound)
 }
 
 #[cfg(test)]
@@ -2242,9 +2893,8 @@ pub fn create_router(
         // The realtime device link: a device presents a PER-DEVICE Bearer token,
         // which `require_auth` (which only knows the global RYU_TOKEN) would
         // reject — so the WS handler authenticates the device token against the
-        // registry itself. Pairing is nonce-gated (the proof-of-possession is the
-        // device's QR/BLE nonce), so it is public too. Device management
-        // (list/patch/delete) is protected — see the protected router below.
+        // registry itself. Pairing mints a durable device credential, so it is
+        // protected below even though the device also proves its nonce.
         .route("/api/hardware/ws", get(hardware_ws::hardware_ws))
         // ── Realtime room gateway (Phase 1 multi-user epic) ──────────────────
         // Room-keyed fan-out for live chat / presence / (Phase 3) doc-sync. On
@@ -2259,7 +2909,6 @@ pub fn create_router(
         // Realtime voice mode (desktop/island). Public router, auth-in-handler
         // (browser WS can't set the bearer header) — mirrors the two routes above.
         .route("/api/voice/ws", get(voice_ws::voice_ws))
-        .route("/api/hardware/pair", post(hardware_public::pair_device))
         // TRMNL display surface: the device polls these with its OWN per-device
         // Bearer token (which `require_auth`/global-RYU_TOKEN can't gate), so the
         // handlers authenticate the device token against the registry themselves —
@@ -2350,6 +2999,9 @@ pub fn create_router(
         .route("/api/catalog", get(get_catalog))
         // ── Model catalog (HF browse + device-fit + install; logic in Core) ──
         .route("/api/models/catalog", get(models_catalog_list))
+        // Personalized Store recommendations adapt the existing safe catalog
+        // projections and never expose raw context or connection payloads.
+        .merge(recommendations::routes())
         .route("/api/models/catalog/detail", get(models_catalog_detail))
         .route("/api/models/catalog/install", post(models_catalog_install))
         .route(
@@ -2406,8 +3058,8 @@ pub fn create_router(
         // their configured key; gateway still executes — see composio_catalog) ──
         .route("/api/composio/status", get(composio_status))
         .route("/api/composio/toolkits", get(composio_toolkits))
-        // Merged Integrations directory (integrations.sh + Composio toolkits),
-        // deduped by brand slug.
+        // Merged Integrations directory (integrations.sh + Composio toolkits +
+        // Treg platforms), deduped by brand slug.
         .route("/api/integrations", get(integrations_list))
         .route("/api/integrations/:id", get(integrations_get))
         .route("/api/composio/actions", get(composio_actions))
@@ -2442,10 +3094,15 @@ pub fn create_router(
         // Static 3-segment routes registered before the parameterized
         // `/api/plugins/:id/*` routes so matchit never confuses them.
         .route("/api/plugins", get(list_apps))
+        .route("/api/plugins/doctor", get(plugin_doctor))
         .route("/api/plugins/contributions", get(plugin_contributions))
         .route("/api/plugins/catalog", get(list_apps_catalog))
         .route("/api/plugins/catalog/browse", get(plugin_catalog_browse))
         .route("/api/plugins/catalog/detail", get(plugin_catalog_detail))
+        .route(
+            "/api/catalog/scan",
+            post(catalog_scan::scan).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .route(
             "/api/plugins/catalog/version-detail",
             get(plugin_catalog_version_detail),
@@ -2478,6 +3135,38 @@ pub fn create_router(
             "/api/plugins/catalog/install",
             post(install_plugin_from_catalog),
         )
+        .route(
+            "/api/plugins/lifecycle-capabilities",
+            get(app_lifecycle_capabilities),
+        )
+        // GitHub-backed portable packages. The control plane resolves the
+        // signed descriptor and entitlement-gated proxy URL; Core verifies the
+        // archive and owns the on-node package lifecycle. These routes cover
+        // package kinds that are newer than the legacy CatalogKind adapters.
+        .route(
+            "/api/marketplace/packages/installed",
+            get(marketplace_packages_installed),
+        )
+        .route(
+            "/api/marketplace/packages/install",
+            post(marketplace_package_install),
+        )
+        .route(
+            "/api/marketplace/packages/update",
+            post(marketplace_package_update),
+        )
+        .route(
+            "/api/marketplace/packages/:kind/:id/enable",
+            post(marketplace_package_enable),
+        )
+        .route(
+            "/api/marketplace/packages/:kind/:id/disable",
+            post(marketplace_package_disable),
+        )
+        .route(
+            "/api/marketplace/packages/:kind/:id/uninstall",
+            post(marketplace_package_uninstall),
+        )
         // Isolation + trust report. Listed before `/:id/*` routes purely for
         // readability — axum matches the static segment regardless.
         .route("/api/plugins/isolation", get(plugins_isolation_handler))
@@ -2485,6 +3174,10 @@ pub fn create_router(
         .route("/api/plugins/:id/enable", post(enable_app_handler))
         .route("/api/plugins/:id/grants", post(set_app_grants_handler))
         .route("/api/plugins/:id/disable", post(disable_app_handler))
+        .route(
+            "/api/plugins/:id/uninstall-data",
+            get(plugin_uninstall::inventory_handler),
+        )
         .route("/api/plugins/:id/uninstall", post(uninstall_app_handler))
         .route("/api/plugins/:id/update", post(update_app_handler))
         .route("/api/plugins/:id/ui-bundle", get(plugin_ui_bundle))
@@ -2514,6 +3207,10 @@ pub fn create_router(
         .route("/api/apps", get(list_apps))
         .route("/api/apps/catalog", get(list_apps_catalog))
         .route("/api/apps/install", post(install_app_from_url))
+        .route(
+            "/api/apps/lifecycle-capabilities",
+            get(app_lifecycle_capabilities),
+        )
         .route("/api/apps/reload", post(reload_app_manifests))
         .route("/api/apps/:id/install", post(install_app_handler))
         .route("/api/apps/:id/enable", post(enable_app_handler))
@@ -2539,6 +3236,10 @@ pub fn create_router(
         // ACP routing/execution substrate that serves a chat turn (`agent_routing/`,
         // `sidecar/adapters/acp.rs`, `/api/chat/stream`) is kernel and is NOT here.
         .merge(agents_routes(&state.app_store))
+        // Shared, idempotent agent-root import/export ledger. The sync surface is
+        // separate from `/api/import/*` so automatic reconciliation and the
+        // Gateway tabs share one operation lineage and one duplicate-root guard.
+        .merge(agent_sync::routes())
         // ── Ryu-managed Pi config (isolated model/provider config) ──
         .route("/api/pi-config", get(get_pi_config).put(put_pi_config))
         .route("/api/pi-config/catalog", get(get_pi_config_catalog))
@@ -2586,6 +3287,10 @@ pub fn create_router(
         .route(
             "/api/mcp/servers",
             get(list_mcp_servers).post(create_mcp_server),
+        )
+        .route(
+            "/api/mcp/servers/:name",
+            put(update_mcp_server).delete(delete_mcp_server),
         )
         .route("/api/mcp/tools", get(list_mcp_tools))
         .route("/api/mcp/tools/call", post(call_mcp_tool))
@@ -2644,6 +3349,7 @@ pub fn create_router(
         .route("/api/pair/deny", post(pair_deny))
         .route("/api/pair/clients", get(pair_clients))
         .route("/api/pair/clients/:id", delete(pair_revoke))
+        .route("/api/hardware/pair", post(hardware_public::pair_device))
         .route("/api/node/token/rotate", post(node_token_rotate))
         // ── Webhook ingress seam (#479, P6a): public URL status + backend ─────
         .route("/api/webhook-ingress/status", get(webhook_ingress_status))
@@ -2654,6 +3360,13 @@ pub fn create_router(
         // Unified webhook registry (webhook-unify #3): list every inbound webhook
         // endpoint with its resolved public URL, secret presence + last delivery.
         .route("/api/webhooks", get(webhooks_list))
+        // Explicit secret-management surface. The registry never includes secret
+        // values; these routes are only reachable through the protected router and
+        // the Webhooks app's `webhooks:crud` host capability.
+        .route(
+            "/api/webhooks/:id/secret",
+            get(webhook_secret_get_authorized).post(webhook_secret_set_authorized),
+        )
         // ── MCP catalog (browse + install from the official MCP registry; #464) ──
         .route("/api/mcp/catalog", get(mcp_catalog_list))
         .route("/api/mcp/catalog/detail", get(mcp_catalog_detail))
@@ -2688,6 +3401,7 @@ pub fn create_router(
         // conversation + stable tool_call_id pair.
         .route("/api/chat/question", post(chat_question))
         .route("/api/chat/cancel", post(chat_cancel))
+        .route("/api/chat/control", post(chat_control))
         // Shared background-process surface. Producers publish snapshots and
         // poll the control queue; Core never kills an arbitrary PID itself.
         .route("/api/background/processes", get(list_background_processes))
@@ -2712,6 +3426,14 @@ pub fn create_router(
             "/api/chat/stream/resume/:conversation_id",
             get(chat_stream_resume),
         )
+        .route(
+            "/api/chat/client-tool-result",
+            post(chat_client_tool_result),
+        )
+        .route(
+            "/api/chat/browser-session-link",
+            post(chat_browser_session_link),
+        )
         // Next-prompt suggestions (ChatGPT-style follow-up chips) for a turn.
         .route(
             "/api/chat/suggestions",
@@ -2722,6 +3444,9 @@ pub fn create_router(
         // text message into an assembled reply, using the Core session/memory path
         // so bot turns share conversation history with the Core conversation store.
         .route("/api/channels/run", post(channel_run))
+        // One-time assistant-first opening used by desktop and authorized channel
+        // runtimes. This path persists only the assistant reply.
+        .route("/api/proactive/opening", post(proactive_opening))
         // The slash-command menu a channel bot publishes: the same union the
         // desktop composer offers (enabled plugins' commands + enabled skills), so
         // `/proof` in Telegram does what `/proof` in the app does.
@@ -2733,6 +3458,16 @@ pub fn create_router(
         // Long-term memory CRUD, gated on the (default-on) Memory app. See
         // `memory_routes`. The in-process chat auto-recall path is kernel and untouched.
         .merge(memory_routes(&state.app_store))
+        // Message reactions are a native desktop renderer plus Core persistence;
+        // the plugin owns whether that surface and its data path are available.
+        .merge(message_reaction_routes(&state.app_store))
+        // Side chats keep their in-process model bridge, but the plugin owns the
+        // `/btw` lifecycle and whether the persisted side-chat surface is live.
+        .merge(side_chat_routes(&state.app_store))
+        // Core-owned paid-plan profile bootstrap. The route remains on the
+        // protected chain so node auth and verified user identity are attached
+        // before its owner/admin + entitlement checks run.
+        .merge(onboarding_profile::routes())
         // ── Danger zone: irreversible bulk "delete all X" (settings) ─────────
         .route("/api/data/counts", get(data_admin::data_counts))
         .route("/api/data/clear", post(data_admin::data_clear))
@@ -2778,17 +3513,6 @@ pub fn create_router(
             "/api/conversations/:id/feedback",
             get(get_conversation_feedback_handler),
         )
-        // Emoji reactions on a message. Same shape as feedback above: ONE bulk read
-        // per conversation fetched alongside the transcript (never per message),
-        // plus per-message add/remove.
-        .route(
-            "/api/conversations/:id/reactions",
-            get(get_conversation_reactions_handler),
-        )
-        .route(
-            "/api/conversations/:id/messages/:message_id/reactions",
-            post(add_message_reaction_handler).delete(remove_message_reaction_handler),
-        )
         // What is filling this conversation's context window, by category. Read
         // model for the desktop Context panel; see `sidecar::adapters::context_breakdown`.
         .route(
@@ -2820,6 +3544,10 @@ pub fn create_router(
             "/api/conversations/:id/icon",
             post(set_conversation_icon_handler),
         )
+        .route(
+            "/api/conversations/:id/visibility",
+            post(set_conversation_visibility_handler),
+        )
         // Goal state is owned by the goal plugin's durable KV; these narrow
         // endpoints let clients inspect and control that state without sending
         // a chat turn.
@@ -2837,11 +3565,6 @@ pub fn create_router(
             "/api/conversations/:id/goal/resume",
             post(resume_goal_handler),
         )
-        // ── Side questions (`/btw`): answer over the conversation, persisted as
-        //    a listable "side chat" keyed to its parent conversation ──────────
-        .route("/api/btw", post(btw_handler))
-        .route("/api/btw/:id", axum::routing::delete(delete_btw_handler))
-        .route("/api/conversations/:id/btw", get(list_btw_handler))
         // ── Agent-UI saved templates (validated data, resource-scoped ACL) ──
         .route(
             "/api/agent-ui/templates",
@@ -2854,7 +3577,7 @@ pub fn create_router(
                 .delete(agent_ui_templates::delete),
         )
         // ── Advisor consult bridge ────────────────────────────────────────────
-        //    The loopback endpoint the declarative `advisor__consult` plugin tool
+        //    The loopback endpoint the declarative `advisor.consult` plugin tool
         //    (fixtures/advisor.manifest.json, an `http`-backend runnable) proxies to.
         //    Lives in Core because it resolves the `advisor-model` preference and
         //    routes a high-effort completion through the Gateway (`call_side_model`)
@@ -2917,6 +3640,7 @@ pub fn create_router(
             "/api/downloads/settings",
             get(downloads_settings).put(set_downloads_settings),
         )
+        .route("/api/downloads/browser-model", post(prepare_browser_model))
         .route("/api/downloads/stream", get(downloads_stream))
         .route("/api/downloads/:id/pause", post(download_pause))
         .route("/api/downloads/:id/resume", post(download_resume))
@@ -3027,6 +3751,14 @@ pub fn create_router(
         .route("/api/git/create-branch", post(git::git_create_branch))
         // ── Git commit + push (pinned-summary "commit & push" button) ───────
         .route("/api/git/commit-push", post(git::git_commit_push))
+        // ── Git remote actions (pinned-summary pull/sync buttons) ───────────
+        .route("/api/git/pull", post(git::git_pull_authorized))
+        .route("/api/git/sync", post(git::git_sync_authorized))
+        // ── Git pull-request creation (pinned-summary PR dialog) ────────────
+        .route(
+            "/api/git/pull-request",
+            post(git::git_pull_request_authorized),
+        )
         // ── Create a new project folder ("Start from scratch") ──────────────
         .route(
             "/api/workspace/new-folder",
@@ -3045,6 +3777,9 @@ pub fn create_router(
             get(gateway_get_config).put(gateway_put_config),
         )
         .route("/api/gateway/status", get(gateway_status))
+        // Structured Gateway doctor plus Core approval/agent-routing coverage.
+        .route("/api/gateway/doctor", get(gateway_doctor))
+        .route("/api/gateway/doctor/fix", post(gateway_doctor_fix))
         // ── Gateway evaluator catalog proxy (unified-evaluator system) ───────
         .route("/api/gateway/evaluators", get(gateway_get_evaluators))
         // ── Manual gateway restart (preflight/health page recovery action) ───
@@ -3163,10 +3898,10 @@ pub fn create_router(
         // Core reaches its hardware-ambient + activity + save-notes couplings over
         // loopback via `meetings_client`. See `@ryu/meetings`.
         // ── Hardware device registry (management; protected) ────────────────
-        // The realtime `/api/hardware/ws` + nonce-gated `/api/hardware/pair` +
-        // TRMNL `/api/hardware/display/*` are PUBLIC (registered on the public router
-        // above) and stay ungated so physical devices can connect/pair/poll regardless
-        // of the app's enabled bit. Only these PROTECTED device-registry CRUD routes
+        // The realtime `/api/hardware/ws` + TRMNL `/api/hardware/display/*` routes
+        // are PUBLIC (registered on the public router above). Pairing is protected
+        // because it mints a durable device credential. Only these PROTECTED
+        // device-registry CRUD routes
         // are gated on the Hardware App, in their own sub-router (see `hardware_routes`).
         .merge(hardware_routes(&state))
         // ── Sub-agent delegation (clean context, presets, caps) ─────────────
@@ -3389,7 +4124,9 @@ pub fn create_router(
 fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
         .route("/api/spaces", get(list_spaces).post(create_space))
+        .route("/api/spaces/search", get(search_space_documents))
         .route("/api/spaces/:id", axum::routing::delete(delete_space))
+        .route("/api/spaces/:id/name", post(rename_space))
         // Changing the retrieval mode (and rebuilding the entity graph so the change
         // takes effect) is a POST to a scoped sub-path, mirroring `:id/icon` above
         // rather than introducing a PATCH: the process CORS layer's `allow_methods`
@@ -3407,6 +4144,7 @@ fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
             post(cancel_retrieval_mode),
         )
         .route("/api/spaces/:id/icon", post(set_space_icon))
+        .route("/api/spaces/:id/visibility", post(set_space_visibility))
         .route(
             "/api/spaces/:id/documents",
             get(list_documents).post(ingest_document),
@@ -4128,11 +4866,54 @@ fn memory_routes(app_store: &PluginStore) -> Router<ServerState> {
             "/api/memory/:id",
             get(get_memory).put(update_memory).delete(delete_memory),
         )
+        .merge(memory_dream::routes())
         .route_layer(middleware::from_fn_with_state(
             AppGate::new(
                 app_store,
                 crate::plugins::builtins::MEMORY_PLUGIN_ID,
                 "Memory",
+            ),
+            require_app_enabled,
+        ))
+}
+
+/// The message-reactions persistence surface, gated on the **Message Reactions
+/// plugin**. The renderer remains native to the desktop, while the lifecycle bit
+/// controls whether its Core-backed data path is reachable.
+fn message_reaction_routes(app_store: &PluginStore) -> Router<ServerState> {
+    Router::new()
+        .route(
+            "/api/conversations/:id/reactions",
+            get(get_conversation_reactions_handler),
+        )
+        .route(
+            "/api/conversations/:id/messages/:message_id/reactions",
+            post(add_message_reaction_handler).delete(remove_message_reaction_handler),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            AppGate::new(
+                app_store,
+                crate::plugins::builtins::REACTIONS_PLUGIN_ID,
+                "Message Reactions",
+            ),
+            require_app_enabled,
+        ))
+}
+
+/// The `/api/btw` side-question and persisted side-chat surface, gated on the
+/// **Side Chats plugin**. The answer implementation intentionally stays in Core:
+/// it uses the shared side-model bridge and conversation store, while the plugin
+/// owns discoverability, route availability, and the desktop affordances.
+fn side_chat_routes(app_store: &PluginStore) -> Router<ServerState> {
+    Router::new()
+        .route("/api/btw", post(btw_handler))
+        .route("/api/btw/:id", axum::routing::delete(delete_btw_handler))
+        .route("/api/conversations/:id/btw", get(list_btw_handler))
+        .route_layer(middleware::from_fn_with_state(
+            AppGate::new(
+                app_store,
+                crate::plugins::builtins::SIDE_CHATS_PLUGIN_ID,
+                "Side Chats",
             ),
             require_app_enabled,
         ))
@@ -4479,11 +5260,13 @@ async fn get_preference(
     // preference through this one route, so a read-default reaches all of them
     // while still letting a cleared preference genuinely return to the default.
     let default_value = |key: &str| -> Option<String> {
-        (key == crate::agent_selection::GLOBAL_SELECTION_PREF)
-            .then(|| {
-                serde_json::to_string(&crate::agent_selection::builtin_default_selection()).ok()
-            })
-            .flatten()
+        matches!(
+            key,
+            crate::agent_selection::GLOBAL_SELECTION_PREF
+                | crate::agent_selection::LOCAL_SELECTION_PREF
+        )
+        .then(|| serde_json::to_string(&crate::agent_selection::builtin_default_selection()).ok())
+        .flatten()
     };
     match state.preferences.get(&key).await {
         Ok(Some(value)) if value.trim().is_empty() => {
@@ -4493,6 +5276,16 @@ async fn get_preference(
             (StatusCode::OK, Json(json!({ "key": key, "value": value }))).into_response()
         }
         Ok(Some(value)) => {
+            (StatusCode::OK, Json(json!({ "key": key, "value": value }))).into_response()
+        }
+        // An unset key is not an error for a KV store. The local lane is the one
+        // compatibility exception: when its new key is absent, read the former
+        // single default so old installations migrate without a write.
+        Ok(None) if key == crate::agent_selection::LOCAL_SELECTION_PREF => {
+            let value = crate::agent_selection::load_local(&state.preferences).await;
+            let value = serde_json::to_string(&value)
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null);
             (StatusCode::OK, Json(json!({ "key": key, "value": value }))).into_response()
         }
         // An unset key is not an error for a KV store: return 200 with a null
@@ -4532,6 +5325,37 @@ async fn set_preference(
 ) -> axum::response::Response {
     match state.preferences.set(&key, &body.value).await {
         Ok(()) => {
+            if key == crate::exec_approval::EXEC_APPROVAL_MODE_PREF_KEY {
+                crate::exec_approval::apply_from_pref(&body.value);
+            }
+            if key == conversations::ConversationStore::CHAT_MEMORY_ENABLED_PREF_KEY {
+                let enabled =
+                    conversations::ConversationStore::parse_chat_memory_enabled(Some(&body.value));
+                if let Err(error) = state.conversations.set_chat_memory_enabled(enabled).await {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": error.to_string() })),
+                    )
+                        .into_response();
+                }
+                if enabled {
+                    let conversations = state.conversations.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = conversations.reindex_message_embeddings().await {
+                            tracing::warn!(
+                                error = %error,
+                                "chat memory: reindex after enabling failed"
+                            );
+                        }
+                    });
+                } else if let Err(error) = state.conversations.clear_message_embeddings().await {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": error.to_string() })),
+                    )
+                        .into_response();
+                }
+            }
             // Keep the in-process Hugging Face token resolver in sync so gated
             // model search + downloads pick up the change without a restart.
             if key == crate::hf_auth::HF_TOKEN_PREF_KEY {
@@ -4627,7 +5451,7 @@ async fn set_preference(
                 });
             }
             // RTK exclude list: merge into rtk's config.toml so its hooks + the
-            // `rtk__run` tool skip these commands. No-op when rtk is not installed.
+            // `rtk.run` tool skip these commands. No-op when rtk is not installed.
             if key == crate::rtk_config::EXCLUDE_COMMANDS_PREF_KEY {
                 if let Err(e) = crate::rtk_config::set_exclude_commands(&body.value) {
                     tracing::warn!(error = %e, "rtk auto-wrap: writing exclude_commands failed");
@@ -4645,6 +5469,9 @@ async fn set_preference(
             // the flag is read on Core's (sync) scheduler tick path.
             if key == crate::entitlement::ENTITLEMENT_ACTIVE_PREF_KEY {
                 crate::entitlement::set_active(&body.value);
+            }
+            if key == crate::entitlement::MANAGED_INFERENCE_ENTITLED_PREF_KEY {
+                crate::entitlement::set_managed_inference_entitled(&body.value);
             }
             // Generic per-agent gateway routing: keep the in-process map in sync so
             // the next spawn of any toggled agent injects (or omits) OPENAI_BASE_URL.
@@ -4671,12 +5498,14 @@ async fn set_preference(
             if key == crate::agent_routing::AGENT_AUTO_ROUTING_PREF_KEY {
                 crate::agent_routing::set_auto_config_from_json(&body.value);
             }
-            // The node-wide default selection: keep the sync snapshot in step so
-            // agent-consuming paths pick up a new default without a restart.
-            // (Model-consuming paths read the preference directly and need no
-            // snapshot.)
-            if key == crate::agent_selection::GLOBAL_SELECTION_PREF {
-                crate::agent_selection::set_default_selection_from_json(&body.value);
+            // Keep both lane snapshots in step so interactive chat and plugin
+            // model resolution see preference writes without a restart.
+            if key == crate::agent_selection::GLOBAL_SELECTION_PREF
+                || key == crate::agent_selection::LOCAL_SELECTION_PREF
+            {
+                crate::agent_selection::set_local_selection_from_json(&body.value);
+            } else if key == crate::agent_selection::CLOUD_SELECTION_PREF {
+                crate::agent_selection::set_cloud_selection_from_json(&body.value);
             }
             (StatusCode::OK, Json(json!({ "ok": true, "key": key }))).into_response()
         }
@@ -5407,7 +6236,7 @@ async fn preferences_stream(
 }
 
 /// `GET /api/events/notifications/stream` — SSE: desktop notifications pushed by
-/// built-in agent actions (e.g. `notify__desktop`). The desktop subscribes and
+/// built-in agent actions (e.g. `notify.desktop`). The desktop subscribes and
 /// renders each as a native OS notification (#456).
 #[utoipa::path(
     get,
@@ -5658,6 +6487,116 @@ struct DownloadSettingsBody {
     /// Slot count; only applied in manual mode, and clamped to the allowed range.
     #[serde(default)]
     max_concurrent: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BrowserModelPreparationBody {
+    model_id: String,
+}
+
+fn is_valid_browser_model_id(model_id: &str) -> bool {
+    let mut parts = model_id.split('/');
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(name) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && !owner.is_empty()
+        && !name.is_empty()
+        && model_id.len() <= 160
+        && owner
+            .chars()
+            .chain(name.chars())
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+}
+
+#[cfg(test)]
+mod browser_model_preparation_tests {
+    use super::is_valid_browser_model_id;
+
+    #[test]
+    fn accepts_hub_ids_and_rejects_urls_or_revisions() {
+        assert!(is_valid_browser_model_id(
+            "onnx-community/SmolLM2-135M-ONNX"
+        ));
+        assert!(!is_valid_browser_model_id(
+            "https://huggingface.co/acme/model"
+        ));
+        assert!(!is_valid_browser_model_id("acme/model@main"));
+        assert!(!is_valid_browser_model_id("../acme/model"));
+        assert!(!is_valid_browser_model_id("acme/model/extra"));
+    }
+}
+
+/// Register a browser-model manifest preparation job with the shared
+/// DownloadCenter. The browser still performs inference itself; Core only
+/// validates the Hub snapshot and records preparation progress/history through
+/// the same center used by every other model artifact.
+#[utoipa::path(
+    post,
+    path = "/api/downloads/browser-model",
+    tag = "Downloads",
+    summary = "Prepare a browser model manifest",
+    request_body = serde_json::Value,
+    responses((status = 202, description = "Preparation queued", body = serde_json::Value))
+)]
+async fn prepare_browser_model(
+    State(state): State<ServerState>,
+    Json(body): Json<BrowserModelPreparationBody>,
+) -> axum::response::Response {
+    if !is_valid_browser_model_id(&body.model_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "invalid Hugging Face model id" })),
+        )
+            .into_response();
+    }
+
+    let model_id = body.model_id;
+    let response_model_id = model_id.clone();
+    let job_id = format!("browser-model:{}", model_id.replace('/', "__"));
+    let task_id = job_id.clone();
+    let downloads = state.downloads.clone();
+    tokio::spawn(async move {
+        let label_model_id = model_id.clone();
+        let result = downloads
+            .register_indeterminate_as(
+                task_id,
+                crate::downloads::DownloadKind::Model,
+                crate::downloads::DownloadRole::ChatModel,
+                format!("Browser model manifest: {label_model_id}"),
+                async move {
+                    let url = format!("https://huggingface.co/api/models/{model_id}");
+                    let response = reqwest::Client::new()
+                        .get(url)
+                        .send()
+                        .await?
+                        .error_for_status()?;
+                    let manifest: serde_json::Value = response.json().await?;
+                    let file_count = manifest
+                        .get("siblings")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, Vec::len);
+                    anyhow::ensure!(
+                        file_count > 0,
+                        "Hugging Face model has no downloadable files"
+                    );
+                    Ok::<_, anyhow::Error>(file_count)
+                },
+            )
+            .await;
+        if let Err(error) = result {
+            tracing::warn!(%error, "browser model manifest preparation failed");
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "ok": true, "job_id": job_id, "model_id": response_model_id })),
+    )
+        .into_response()
 }
 
 /// `PUT /api/downloads/settings` — pin the parallel-download count, or hand it
@@ -6117,12 +7056,14 @@ async fn chat_stream(
     // extension (the middleware inserts it on every protected route), so the
     // direct `Extension` extractor is safe here.
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::Extension(user_jwt): axum::Extension<Option<String>>,
     Json(mut req): Json<ChatStreamRequest>,
 ) -> axum::response::Response {
     // Stamp the verified author onto this turn unconditionally (None when
     // anonymous). `author_user_id` is `#[serde(skip)]`, so this server-side write
     // is the ONLY source — a client request body can neither set nor spoof it.
     req.author_user_id = caller.as_ref().map(|c| c.user_id.clone());
+    req.user_jwt = user_jwt;
     // Widget follow-ups carry only an opaque ticket on the wire. Validate it
     // here, but defer consumption until the final pre-dispatch point below so
     // RBAC and conversation ACL rejection do not burn a valid ticket. Core is
@@ -6490,6 +7431,7 @@ async fn route_single_turn_once(
             fts_enabled: resolve_fts_recall_enabled(state).await,
             read_levels,
             space_ids,
+            caller_user_id: req.author_user_id.clone(),
         })
     } else {
         None
@@ -6597,6 +7539,16 @@ impl crate::plugin_host::HookDispatch for GlobalHookDispatcher {
     > {
         Box::pin(async move { crate::plugin_host::dispatch_phase(&self.state, phase, &ctx).await })
     }
+
+    fn dispatch_tool_result<'a>(
+        &'a self,
+        ctx: crate::plugin_host::HookContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<serde_json::Value>> + Send + 'a>>
+    {
+        Box::pin(
+            async move { crate::plugin_host::dispatch_tool_result_phase(&self.state, &ctx).await },
+        )
+    }
 }
 
 /// Install the global hook dispatcher (idempotent). Called from `main` after the
@@ -6682,8 +7634,89 @@ async fn continue_turn_request(
 /// (e.g. double-check's review). The client renders it out-of-band; it never
 /// enters chat history.
 fn plugin_note_frame(text: &str) -> Vec<u8> {
-    let value = serde_json::json!({ "type": "data-plugin_note", "data": { "text": text } });
+    plugin_note_frame_with_question(text, None)
+}
+
+/// The optional question is the shared first-person intent bridge. Existing
+/// note consumers can keep reading `text`; approval-aware clients can render
+/// `question` above it without treating an observer note as an approval gate.
+fn plugin_note_frame_with_question(text: &str, question: Option<&str>) -> Vec<u8> {
+    let mut data = serde_json::json!({ "text": text });
+    if let Some(question) = question.map(str::trim).filter(|value| !value.is_empty()) {
+        data["question"] = serde_json::Value::String(question.to_owned());
+    }
+    let value = serde_json::json!({ "type": "data-plugin_note", "data": data });
     format!("data: {value}\n\n").into_bytes()
+}
+
+#[derive(Debug)]
+struct ActionSummaryNote {
+    question: Option<String>,
+    sequence: u64,
+    text: String,
+}
+
+const ACTION_SUMMARY_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn action_summary_frame(notes: &mut [ActionSummaryNote]) -> Vec<u8> {
+    notes.sort_by_key(|note| note.sequence);
+    let mut text = String::from("Action summary");
+    for note in notes.iter() {
+        text.push_str("\n\n");
+        text.push_str(&note.text);
+    }
+    let question = notes.iter().rev().find_map(|note| note.question.as_deref());
+    plugin_note_frame_with_question(&text, question)
+}
+
+/// Run action observers without putting their side-model latency on the primary
+/// stream. Each completed observer appends a cumulative note to the response,
+/// which keeps desktop/island's existing note surfaces from showing only the
+/// last action in a turn.
+fn spawn_action_hooks(
+    state: &ServerState,
+    hooks: &[crate::plugin_host::HookPlugin],
+    conversation_id: &str,
+    agent_id: Option<&str>,
+    flags: &std::collections::HashMap<String, bool>,
+    action: crate::plugin_host::HookAction,
+    notes: &tokio::sync::mpsc::UnboundedSender<ActionSummaryNote>,
+) {
+    let state = state.clone();
+    let hooks = hooks.to_vec();
+    let notes = notes.clone();
+    let ctx = crate::plugin_host::HookContext {
+        conversation_id: Some(conversation_id.to_owned()),
+        agent_id: agent_id.map(str::to_owned),
+        flags: flags.clone(),
+        action: Some(action.clone()),
+        ..Default::default()
+    };
+    tokio::spawn(async move {
+        let directives =
+            crate::plugin_host::run_hooks(&state, &ctx, &hooks, crate::plugin_host::ON_ACTION)
+                .await;
+        for directive in directives {
+            let (question, text) = match directive {
+                crate::plugin_host::HookDirective::Note { text } => (None, text),
+                crate::plugin_host::HookDirective::ToolApproval { question, summary } => {
+                    (Some(question), summary)
+                }
+                _ => continue,
+            };
+            let text = text.trim();
+            if !text.is_empty() {
+                let question = question
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty());
+                let _ = notes.send(ActionSummaryNote {
+                    question,
+                    sequence: action.sequence,
+                    text: text.to_owned(),
+                });
+            }
+        }
+    });
 }
 
 /// Wrap a chat turn with the plugin turn-hook runtime (M5). After the assistant
@@ -6724,6 +7757,7 @@ async fn run_chat_with_hooks(
     let has_session_start = hooks
         .iter()
         .any(|h| h.on == crate::plugin_host::ON_SESSION_START);
+    let has_action = hooks.iter().any(|h| h.on == crate::plugin_host::ON_ACTION);
 
     let stream = async_stream::stream! {
         let mut current = req;
@@ -6877,17 +7911,102 @@ async fn run_chat_with_hooks(
             // Stream one turn, forwarding every UI part except its terminal [DONE].
             let inner = route_single_turn(&state, current.clone()).await;
             let mut body = inner.into_body().into_data_stream();
-            while let Some(item) = body.next().await {
-                match item {
-                    Ok(bytes) => {
-                        if crate::sidecar::adapters::is_done_frame(&bytes) {
-                            continue;
+            let (notes_tx, mut notes_rx) =
+                tokio::sync::mpsc::unbounded_channel::<ActionSummaryNote>();
+            let mut notes_sender = if has_action { Some(notes_tx) } else { None };
+            let mut notes_open = has_action;
+            let mut body_done = false;
+            let mut action_notes: Vec<ActionSummaryNote> = Vec::new();
+            let mut action_probe = if has_action {
+                Some(crate::plugin_host::ActionFrameProbe::default())
+            } else {
+                None
+            };
+
+            while !body_done {
+                tokio::select! {
+                    item = body.next(), if !body_done => {
+                        match item {
+                            Some(Ok(bytes)) => {
+                                if crate::sidecar::adapters::is_done_frame(&bytes) {
+                                    continue;
+                                }
+                                let forwarded = bytes.to_vec();
+                                yield Ok::<_, std::convert::Infallible>(forwarded.clone());
+                                if let (Some(probe), Some(sender)) =
+                                    (action_probe.as_mut(), notes_sender.as_ref())
+                                {
+                                    for action in probe.feed(&forwarded) {
+                                        spawn_action_hooks(
+                                            &state,
+                                            &hooks,
+                                            &conversation_id,
+                                            agent_id.as_deref(),
+                                            &flags,
+                                            action,
+                                            sender,
+                                        );
+                                    }
+                                }
+                            }
+                            Some(Err(_)) | None => {
+                                body_done = true;
+                                if let (Some(probe), Some(sender)) =
+                                    (action_probe.as_mut(), notes_sender.as_ref())
+                                {
+                                    for action in probe.finish() {
+                                        spawn_action_hooks(
+                                            &state,
+                                            &hooks,
+                                            &conversation_id,
+                                            agent_id.as_deref(),
+                                            &flags,
+                                            action,
+                                            sender,
+                                        );
+                                    }
+                                }
+                                notes_sender.take();
+                            }
                         }
-                        yield Ok::<_, std::convert::Infallible>(bytes.to_vec());
                     }
-                    Err(_) => break,
+                    note = notes_rx.recv(), if notes_open => {
+                        match note {
+                            Some(note) => {
+                                action_notes.push(note);
+                                yield Ok::<_, std::convert::Infallible>(
+                                    action_summary_frame(&mut action_notes),
+                                );
+                            }
+                            None => notes_open = false,
+                        }
+                    }
                 }
             }
+
+            // Give detached side-model calls a short, absolute drain window after
+            // the primary stream ends. A slow or stuck side model must never hold
+            // the terminal [DONE] frame open indefinitely.
+            if notes_open {
+                let deadline = tokio::time::Instant::now() + ACTION_SUMMARY_DRAIN_TIMEOUT;
+                while notes_open {
+                    let remaining =
+                        deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    match tokio::time::timeout(remaining, notes_rx.recv()).await {
+                        Ok(Some(note)) => {
+                            action_notes.push(note);
+                            yield Ok::<_, std::convert::Infallible>(
+                                action_summary_frame(&mut action_notes),
+                            );
+                        }
+                        Ok(None) | Err(_) => notes_open = false,
+                    }
+                }
+            }
+            notes_open = false;
 
             // Post-turn hooks: build context from the persisted transcript.
             let ctx = build_hook_context(&state, &conversation_id, agent_id.as_deref(), &flags).await;
@@ -6908,6 +8027,10 @@ async fn run_chat_with_hooks(
                         if next_text.is_none() {
                             next_text = Some(text);
                         }
+                    }
+                    crate::plugin_host::HookDirective::ToolApproval { .. } => {
+                        // Tool intents belong to action-summary frames, not the
+                        // post-turn note channel.
                     }
                     // Pre-turn / context-phase / tool-phase directives are no-ops
                     // post-turn: there is no outgoing prompt or message array left
@@ -7715,8 +8838,18 @@ async fn npm_install_agent_package(
 )]
 async fn agent_update(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_UPDATE,
+    )
+    .await
+    {
+        return response;
+    }
     if agent_id == "ryu" {
         // Tracked like every other agent runtime fetch — this pulls the managed Pi
         // through npm and is otherwise silent to the Downloads surfaces.
@@ -8234,6 +9367,78 @@ async fn chat_cancel(
     Json(serde_json::json!({ "cancelled": cancelled })).into_response()
 }
 
+/// Body for `POST /api/chat/control`.
+#[derive(serde::Deserialize)]
+struct ChatControlRequest {
+    /// The conversation that owns the active turn. This is checked separately
+    /// from the opaque turn id so a stale control cannot cross conversations.
+    conversation_id: String,
+    /// Core-issued id for the live native provider turn.
+    turn_id: String,
+    /// Extensible action field; the first supported action is `answer_now`.
+    action: String,
+}
+
+/// `POST /api/chat/control` — request a supported native provider to leave its
+/// reasoning phase and continue with the final answer. This is intentionally a
+/// separate action from `/api/chat/cancel`: Stop ends the whole turn, while
+/// Answer now asks only the provider's reasoning loop to finish early.
+#[utoipa::path(
+    post,
+    path = "/api/chat/control",
+    tag = "Chat",
+    summary = "Control a supported in-flight chat turn",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Accepted", body = serde_json::Value))
+)]
+async fn chat_control(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<ChatControlRequest>,
+) -> axum::response::Response {
+    if body.action != "answer_now" {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "unsupported chat control action".to_owned(),
+        );
+    }
+    if let Err(resp) =
+        require_conversation_access_if_known(&state, &caller, &body.conversation_id, true).await
+    {
+        return resp;
+    }
+    match crate::sidecar::adapters::turn_control::request_answer_now(
+        &body.conversation_id,
+        &body.turn_id,
+    )
+    .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "accepted": true,
+            "action": body.action,
+            "strategy": "native",
+        }))
+        .into_response(),
+        Err(crate::sidecar::adapters::turn_control::AnswerNowError::NotFound) => json_error(
+            StatusCode::NOT_FOUND,
+            "no supported in-flight turn was found".to_owned(),
+        ),
+        Err(crate::sidecar::adapters::turn_control::AnswerNowError::NotReady) => json_error(
+            StatusCode::CONFLICT,
+            "the turn is not ready for Answer now".to_owned(),
+        ),
+        Err(crate::sidecar::adapters::turn_control::AnswerNowError::AlreadyRequested) => {
+            json_error(
+                StatusCode::CONFLICT,
+                "Answer now is already in progress".to_owned(),
+            )
+        }
+        Err(crate::sidecar::adapters::turn_control::AnswerNowError::Provider(error)) => {
+            json_error(StatusCode::BAD_GATEWAY, error)
+        }
+    }
+}
+
 /// `GET /api/chat/stream/resume/:conversation_id` — reconnect to an in-flight
 /// ACP turn's live UI frame stream. Returns the accumulated reply text as a
 /// synthetic replay, then forwards live frames until the turn completes.
@@ -8275,6 +9480,408 @@ async fn chat_stream_resume(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ClientToolResultBody {
+    conversation_id: String,
+    tool_call_id: String,
+    nonce: String,
+    result: serde_json::Value,
+    provenance: serde_json::Value,
+}
+
+/// Resolve one paused browser tool call. The nonce is single-use and short-lived;
+/// the conversation ACL and verified caller are checked before the waiter is
+/// released, so a different extension session cannot inject a result.
+#[utoipa::path(
+	post,
+	path = "/api/chat/client-tool-result",
+	tag = "Chat",
+	summary = "Resume a paused client browser tool call",
+	request_body = serde_json::Value,
+	responses((status = 200, description = "Accepted", body = serde_json::Value))
+)]
+async fn chat_client_tool_result(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<ClientToolResultBody>,
+) -> axum::response::Response {
+    if let Err(resp) =
+        require_conversation_access_if_known(&state, &caller, &body.conversation_id, true).await
+    {
+        return resp;
+    }
+    match crate::sidecar::adapters::resolve_client_tool_result(
+        &body.conversation_id,
+        &body.tool_call_id,
+        &body.nonce,
+        body.result,
+        &body.provenance,
+        caller.as_ref().map(|value| value.user_id.as_str()),
+    ) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))).into_response(),
+        Err(error) => json_error(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BrowserSessionLinkBody {
+    assistant_text: String,
+    browser_model: String,
+    browser_surface: String,
+    conversation_id: String,
+    page_title: String,
+    page_url: String,
+    #[serde(default)]
+    tool_summary: Vec<String>,
+    user_text: String,
+}
+
+/// Persist the browser-local transcript as a normal Core conversation while
+/// keeping page bodies, DOM indexes, screenshots, and raw tool results local.
+#[utoipa::path(
+    post,
+    path = "/api/chat/browser-session-link",
+    tag = "Chat",
+    summary = "Link a browser-local transcript",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Linked", body = serde_json::Value))
+)]
+async fn chat_browser_session_link(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<BrowserSessionLinkBody>,
+) -> axum::response::Response {
+    if !matches!(
+        body.browser_surface.as_str(),
+        "dashboard" | "new-tab" | "ask-ryu" | "in-page"
+    ) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid browser surface".to_owned(),
+        );
+    }
+    if body.conversation_id.len() > 160
+        || body.user_text.len() > 12_000
+        || body.assistant_text.len() > 12_000
+        || body.page_title.len() > 500
+        || body.page_url.len() > 2_000
+        || body.tool_summary.len() > 32
+        || body.tool_summary.iter().any(|value| value.len() > 240)
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "browser session link is too large".to_owned(),
+        );
+    }
+    if let Err(resp) =
+        require_conversation_access_if_known(&state, &caller, &body.conversation_id, true).await
+    {
+        return resp;
+    }
+
+    let metadata = format!(
+        "[Browser session] surface={} model={} page_title={} page_url={} tools={}",
+        body.browser_surface,
+        body.browser_model,
+        body.page_title,
+        body.page_url,
+        body.tool_summary.join(", ")
+    );
+    let tenancy = conversations::Tenancy::owned_by(
+        caller.as_ref().map(|value| value.user_id.as_str()),
+        caller.as_ref().and_then(|value| value.org_id.as_deref()),
+    );
+    if let Err(error) = state
+        .conversations
+        .append_message_as(
+            &body.conversation_id,
+            "user",
+            &format!("{metadata}\n\n{}", body.user_text),
+            None,
+            caller.as_ref().map(|value| value.user_id.as_str()),
+            None,
+            tenancy.clone(),
+        )
+        .await
+    {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+    if let Err(error) = state
+        .conversations
+        .append_message_as(
+            &body.conversation_id,
+            "assistant",
+            &body.assistant_text,
+            Some(body.browser_model.as_str()),
+            None,
+            None,
+            tenancy,
+        )
+        .await
+    {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+    (StatusCode::OK, Json(json!({ "linked": true }))).into_response()
+}
+
+// ── Assistant-first opening ──────────────────────────────────────────────────
+
+/// Request body for the one-time assistant-first opening used by desktop and
+/// authorized channel runtimes. The idempotency key is optional so a caller can
+/// use the stable `(agent, conversation)` pair as its default key.
+#[derive(serde::Deserialize)]
+struct ProactiveOpeningRequest {
+    conversation_id: String,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+}
+
+fn proactive_opening_retryable(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    [
+        "not ready",
+        "no model",
+        "model unavailable",
+        "engine unavailable",
+        "sidecar",
+        "gateway",
+        "timed out",
+        "timeout",
+        "no agent selected",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+async fn latest_assistant_reply(
+    state: &ServerState,
+    conversation_id: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(state
+        .conversations
+        .get_messages(conversation_id)
+        .await?
+        .into_iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .map(|message| message.content))
+}
+
+/// `POST /api/proactive/opening` — generate the first Ryu message without a
+/// synthetic user row. The same Core contract is used by desktop and gateway
+/// channel runtimes, so readiness, persistence, and idempotency are shared.
+#[utoipa::path(
+    post,
+    path = "/api/proactive/opening",
+    tag = "Chat",
+    summary = "Create the assistant's first proactive opening",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Opening completed", body = serde_json::Value))
+)]
+async fn proactive_opening(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(req): Json<ProactiveOpeningRequest>,
+) -> axum::response::Response {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_RUN,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: agent.run".to_owned(),
+        );
+    }
+    let conversation_id = req.conversation_id.trim().to_owned();
+    if conversation_id.is_empty() || conversation_id.len() > 200 {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "conversation_id must be between 1 and 200 characters".to_owned(),
+        );
+    }
+    if let Err(resp) = gate_and_claim_conversation(&state, &caller, &conversation_id).await {
+        return resp;
+    }
+
+    let agent_id = req
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .unwrap_or("ryu")
+        .to_owned();
+    let idempotency_key = req
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("ryu-opening:v1:{agent_id}:{conversation_id}"));
+    if idempotency_key.len() > 500 {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "idempotency_key is too long".to_owned(),
+        );
+    }
+
+    let claimed = match state
+        .conversations
+        .claim_proactive_opening(&idempotency_key, &conversation_id)
+        .await
+    {
+        Ok(claimed) => claimed,
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    if !claimed {
+        match state
+            .conversations
+            .proactive_opening_status(&idempotency_key)
+            .await
+        {
+            Ok(Some(status)) if status.conversation_id != conversation_id => {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "idempotency_key is already bound to another conversation".to_owned(),
+                );
+            }
+            Ok(Some(status)) if status.status == "completed" => {
+                match latest_assistant_reply(&state, &conversation_id).await {
+                    Ok(Some(reply)) => {
+                        return (
+                            StatusCode::OK,
+                            Json(json!({
+                                // A retry after a Gateway restart must not send the
+                                // same already-delivered welcome a second time. The
+                                // desktop still reloads the durable assistant row.
+                                "status": "already_completed",
+                                "conversation_id": conversation_id,
+                                "reply": reply,
+                            })),
+                        )
+                            .into_response();
+                    }
+                    Ok(None) => {
+                        return json_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "opening was marked complete without an assistant message".to_owned(),
+                        );
+                    }
+                    Err(error) => {
+                        return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+                    }
+                }
+            }
+            Ok(_) => {
+                return (
+                    StatusCode::ACCEPTED,
+                    Json(json!({
+                        "status": "pending",
+                        "conversation_id": conversation_id,
+                    })),
+                )
+                    .into_response();
+            }
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        }
+    }
+
+    let result = run_proactive_opening_text(
+        conversation_id.clone(),
+        Some(agent_id),
+        Arc::clone(&state.agents),
+        state.conversations.clone(),
+        state.agent_store.clone(),
+        Arc::clone(&state.manager),
+        state.memory.clone(),
+        Arc::clone(&state.worktree_diffs),
+        Arc::clone(&state.mcp),
+        state.skills.clone(),
+        state.traces.clone(),
+    )
+    .await;
+
+    match result {
+        Ok(reply) if !reply.trim().is_empty() => {
+            match latest_assistant_reply(&state, &conversation_id).await {
+                Ok(Some(durable_reply)) if durable_reply == reply => {
+                    if let Err(error) = state
+                        .conversations
+                        .complete_proactive_opening(&idempotency_key)
+                        .await
+                    {
+                        return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "status": "completed",
+                            "conversation_id": conversation_id,
+                            "reply": reply,
+                        })),
+                    )
+                        .into_response()
+                }
+                Ok(Some(_)) => {
+                    let _ = state
+                        .conversations
+                        .release_proactive_opening(&idempotency_key)
+                        .await;
+                    json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "the opening reply did not match the saved assistant message".to_owned(),
+                    )
+                }
+                Ok(None) => {
+                    let _ = state
+                        .conversations
+                        .release_proactive_opening(&idempotency_key)
+                        .await;
+                    json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "the opening reply was not saved".to_owned(),
+                    )
+                }
+                Err(error) => {
+                    let _ = state
+                        .conversations
+                        .release_proactive_opening(&idempotency_key)
+                        .await;
+                    json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+                }
+            }
+        }
+        Ok(_) => {
+            let _ = state
+                .conversations
+                .release_proactive_opening(&idempotency_key)
+                .await;
+            json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Ryu is not ready to send its opening yet".to_owned(),
+            )
+        }
+        Err(error) => {
+            let retryable = proactive_opening_retryable(&error);
+            let _ = state
+                .conversations
+                .release_proactive_opening(&idempotency_key)
+                .await;
+            let status = if retryable {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            json_error(status, error.to_string())
+        }
+    }
+}
+
 // ── Channel bot run endpoint (M11 / #226) ────────────────────────────────────
 
 /// Request body for `POST /api/channels/run`.
@@ -8286,6 +9893,10 @@ async fn chat_stream_resume(
 struct ChannelRunRequest {
     /// Stable per-chat identifier used as the Core conversation id.
     conversation_id: String,
+    /// Control-plane channel config id. When present, Core records the
+    /// conversation as a channel-backed shared session.
+    #[serde(default)]
+    channel_id: Option<String>,
     /// The agent to route the message to. Falls back to the default agent when absent.
     #[serde(default)]
     agent_id: Option<String>,
@@ -8305,6 +9916,37 @@ struct ChannelRunRequest {
     author_name: Option<String>,
 }
 
+/// Resolve a deleted single-agent binding without destroying the channel
+/// record. Existing non-active agents keep their normal lifecycle error; only a
+/// genuinely missing record is treated as an orphan and moved to the configured
+/// default agent.
+async fn resolve_channel_agent(
+    store: &AgentStore,
+    requested: Option<String>,
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    let Some(requested_id) = requested else {
+        return Ok((None, None));
+    };
+    if let Some(record) = store.get(&requested_id).await? {
+        if record.lifecycle_status == crate::agents::AgentLifecycleStatus::Active {
+            return Ok((Some(requested_id), None));
+        }
+        return Ok((Some(requested_id), None));
+    }
+
+    let default_id = crate::registry::ProviderRegistry::load().default_agent_id;
+    let fallback = match store.get(&default_id).await? {
+        Some(record) if record.lifecycle_status == crate::agents::AgentLifecycleStatus::Active => {
+            Some(default_id)
+        }
+        _ => None,
+    };
+    let warning = format!(
+        "This channel was reverted to the default agent because its original agent '{requested_id}' was deleted."
+    );
+    Ok((fallback, Some(warning)))
+}
+
 /// `POST /api/channels/run` — non-streaming channel bot entry point (M11 / #226).
 ///
 /// Channel bots (Telegram, Slack, WhatsApp, Discord) call this endpoint with a
@@ -8322,7 +9964,7 @@ struct ChannelRunRequest {
 async fn channel_run(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
-    Json(req): Json<ChannelRunRequest>,
+    Json(mut req): Json<ChannelRunRequest>,
 ) -> axum::response::Response {
     // Per-resource ACL (machine-ingress variant). `conversation_id` is caller-supplied
     // here too, so without this a node-token holder could pass a HUMAN's conversation
@@ -8335,10 +9977,41 @@ async fn channel_run(
     {
         return resp;
     }
+    let team_id = req.team_id.clone().filter(|value| !value.trim().is_empty());
+    let (effective_agent_id, fallback_warning) = if team_id.is_none() {
+        match resolve_channel_agent(&state.agent_store, req.agent_id.clone()).await {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+            }
+        }
+    } else {
+        (req.agent_id.clone(), None)
+    };
+    req.agent_id = effective_agent_id.clone();
+
+    if let Some(channel_id) = req.channel_id.as_deref() {
+        if let Err(error) = state
+            .conversations
+            .ensure_channel_conversation(
+                &req.conversation_id,
+                channel_id,
+                effective_agent_id.as_deref(),
+                node_org_id().as_deref(),
+            )
+            .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("could not create channel session: {error}") })),
+            )
+                .into_response();
+        }
+    }
+
     // A non-empty team_id targets a whole team (lead orchestrates members) and
     // takes precedence over agent_id; otherwise route to a single agent.
-    let team_id = req.team_id.as_deref().filter(|s| !s.trim().is_empty());
-    let result = if let Some(team_id) = team_id {
+    let result = if let Some(team_id) = team_id.as_deref() {
         match state.teams.get(team_id).await {
             Ok(Some(team)) => {
                 run_team_reply_text(
@@ -8381,7 +10054,12 @@ async fn channel_run(
     };
 
     match result {
-        Ok(reply) => Json(json!({ "reply": reply })).into_response(),
+        Ok(reply) => Json(json!({
+            "reply": reply,
+            "agentId": effective_agent_id,
+            "fallbackWarning": fallback_warning,
+        }))
+        .into_response(),
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -8515,33 +10193,57 @@ struct BackgroundProcessControlBody {
 }
 
 async fn list_background_processes(
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Query(query): Query<BackgroundProcessQuery>,
-) -> Json<serde_json::Value> {
-    let producer = query.producer.as_deref().map(str::trim).filter(|value| !value.is_empty());
+) -> axum::response::Response {
+    let owner = match crate::background_processes::owner_for_caller(caller.as_ref()) {
+        Ok(owner) => owner,
+        Err(error) => return json_error(StatusCode::FORBIDDEN, error),
+    };
+    let producer = query
+        .producer
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     Json(json!({
-        "processes": crate::background_processes::list(query.running_only.unwrap_or(true), producer),
-    }))
+        "processes": crate::background_processes::list(&owner, query.running_only.unwrap_or(true), producer),
+    })).into_response()
 }
 
 async fn sync_background_process(
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<BackgroundProcessSyncBody>,
 ) -> axum::response::Response {
-    match crate::background_processes::upsert(body.process) {
+    let owner = match crate::background_processes::owner_for_caller(caller.as_ref()) {
+        Ok(owner) => owner,
+        Err(error) => return json_error(StatusCode::FORBIDDEN, error),
+    };
+    match crate::background_processes::upsert(&owner, body.process) {
         Ok(process) => Json(json!({ "process": process })).into_response(),
         Err(error) => json_error(StatusCode::BAD_REQUEST, error),
     }
 }
 
 async fn release_background_process(
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<BackgroundProcessIdBody>,
-) -> Json<serde_json::Value> {
-    let released = crate::background_processes::release(body.process_id.trim());
-    Json(json!({ "ok": true, "released": released }))
+) -> axum::response::Response {
+    let owner = match crate::background_processes::owner_for_caller(caller.as_ref()) {
+        Ok(owner) => owner,
+        Err(error) => return json_error(StatusCode::FORBIDDEN, error),
+    };
+    let released = crate::background_processes::release(&owner, body.process_id.trim());
+    Json(json!({ "ok": true, "released": released })).into_response()
 }
 
 async fn control_background_processes(
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<BackgroundProcessControlBody>,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
+    let owner = match crate::background_processes::owner_for_caller(caller.as_ref()) {
+        Ok(owner) => owner,
+        Err(error) => return json_error(StatusCode::FORBIDDEN, error),
+    };
     let process_ids = body
         .process_ids
         .into_iter()
@@ -8549,15 +10251,22 @@ async fn control_background_processes(
         .filter(|process_id| !process_id.is_empty())
         .take(512)
         .collect::<Vec<_>>();
-    let stops = crate::background_processes::take_stop_requests(&process_ids)
+    let stops = crate::background_processes::take_stop_requests(&owner, &process_ids)
         .into_iter()
         .map(|stop| json!({ "process_id": stop.process_id, "reason": stop.reason }))
         .collect::<Vec<_>>();
-    Json(json!({ "stops": stops }))
+    Json(json!({ "stops": stops })).into_response()
 }
 
-async fn stop_background_process(Path(process_id): Path<String>) -> axum::response::Response {
-    match crate::background_processes::request_stop(&process_id) {
+async fn stop_background_process(
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(process_id): Path<String>,
+) -> axum::response::Response {
+    let owner = match crate::background_processes::owner_for_caller(caller.as_ref()) {
+        Ok(owner) => owner,
+        Err(error) => return json_error(StatusCode::FORBIDDEN, error),
+    };
+    match crate::background_processes::request_stop(&owner, &process_id) {
         Ok(()) => Json(json!({
             "ok": true,
             "requested": true,
@@ -9397,6 +11106,14 @@ async fn list_apps(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> Json<serde_json::Value> {
+    list_apps_projection(&state, surface_from_headers(&headers), false).await
+}
+
+async fn list_apps_projection(
+    state: &ServerState,
+    surface: Option<crate::plugin_manifest::Surface>,
+    include_blocked: bool,
+) -> Json<serde_json::Value> {
     // Attach lifecycle state to each manifest so the client knows install/enable
     // status without a separate round-trip.
     // RAW records. This is the management surface: while Safe Mode is active it
@@ -9415,13 +11132,11 @@ async fn list_apps(
     // An empty/absent `targets` means EVERY surface, and an unknown/absent
     // `x-ryu-surface` header means no filter at all, so every manifest that
     // predates this field keeps listing everywhere.
-    let surface = surface_from_headers(&headers);
-
     let manifests = state.app_manifests.read().await;
     let manifests_with_state: Vec<serde_json::Value> = manifests
         .iter()
         .filter(|m| surface.is_none_or(|s| m.supports_surface(s)))
-        .filter(|m| !crate::fleet::is_artifact_blocked(&m.id))
+        .filter(|m| include_blocked || !crate::fleet::is_artifact_blocked(&m.id))
         .map(|m| {
             let lc = lifecycle.iter().find(|r| r.id == m.id);
             let mut v = serde_json::to_value(m).unwrap_or_default();
@@ -9565,12 +11280,432 @@ async fn list_apps(
                             .unwrap_or(serde_json::Value::Array(vec![])),
                     );
                 }
+                let layers = manifest_layer_projection(m);
+                if !layers.is_empty() {
+                    obj.insert("layers".to_owned(), json!(layers));
+                }
+                if m.external {
+                    obj.insert("external".to_owned(), json!(true));
+                }
             }
             v
         })
         .collect();
 
     Json(json!({ "apps": manifests_with_state }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PluginDoctorQuery {
+    /// Limit the runtime audit to one installed app/plugin. Omitting it audits
+    /// every loaded artifact, which is useful in CI and before publishing a
+    /// release.
+    id: Option<String>,
+}
+
+fn plugin_doctor_finding(
+    plugin_id: &str,
+    check_id: &str,
+    category: &str,
+    severity: &str,
+    summary: &str,
+    detail: &str,
+    recommended_action: &str,
+    evidence: serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "checkId": check_id,
+        "category": category,
+        "severity": severity,
+        "pluginId": plugin_id,
+        "summary": summary,
+        "detail": detail,
+        "recommendedAction": recommended_action,
+        "canAutoFix": false,
+        "source": "core-plugin-loader",
+        "evidence": evidence,
+    })
+}
+
+/// `GET /api/plugins/doctor` — audit loaded plugin/app manifests through the
+/// same Core loader output used by the Store and lifecycle routes.
+///
+/// This is intentionally a read-only lint profile. It does not import arbitrary
+/// plugin code, start a sidecar, call a plugin endpoint, or mutate lifecycle
+/// state. Those are explicit deep/runtime probes for a future trusted local
+/// developer mode; a marketplace browse must never execute remote code in Core.
+#[utoipa::path(
+    get,
+    path = "/api/plugins/doctor",
+    tag = "Plugins",
+    params(("id" = Option<String>, Query, description = "Audit one installed app/plugin")),
+    summary = "Audit installed plugin and app manifests",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn plugin_doctor(
+    State(state): State<ServerState>,
+    Query(query): Query<PluginDoctorQuery>,
+) -> Json<serde_json::Value> {
+    // Audit the complete loaded inventory rather than the caller's surface-filtered
+    // view. A desktop plugin can depend on a Core/Gateway-only companion, and
+    // hiding that companion here would turn a valid dependency into a false error.
+    let Json(payload) = list_apps_projection(&state, None, true).await;
+    let all_apps = payload
+        .get("apps")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let requested_id = query
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let candidates: Vec<&serde_json::Value> = all_apps
+        .iter()
+        .filter(|app| {
+            requested_id.is_none_or(|id| {
+                app.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|candidate| candidate == id)
+            })
+        })
+        .collect();
+
+    let mut findings = Vec::new();
+    let mut inventory = Vec::new();
+    let mut installed_ids = std::collections::HashSet::new();
+    for app in &all_apps {
+        let installed = app
+            .get("installed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+            || app
+                .get("built_in")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+        if installed {
+            if let Some(id) = app.get("id").and_then(serde_json::Value::as_str) {
+                installed_ids.insert(id.to_owned());
+            }
+        }
+    }
+
+    if let Some(id) = requested_id {
+        if !candidates.iter().any(|app| {
+            app.get("installed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                || app
+                    .get("built_in")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+        }) {
+            findings.push(plugin_doctor_finding(
+                id,
+                "plugin.not-installed",
+                "lifecycle",
+                "error",
+                "Plugin or app is not installed",
+                "The requested artifact is not present in Core's loaded installed set.",
+                "Install the artifact first, then run the doctor again.",
+                json!({ "requestedId": id }),
+            ));
+        }
+    }
+
+    for app in candidates {
+        let plugin_id = app
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<unknown>");
+        let installed = app
+            .get("installed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+            || app
+                .get("built_in")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+        if !installed {
+            continue;
+        }
+        let finding_start = findings.len();
+        let name = app
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let version = app
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let installed_version = app
+            .get("installed_version")
+            .and_then(serde_json::Value::as_str);
+        let enabled = app
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        if plugin_id == "<unknown>" || plugin_id.trim().is_empty() {
+            findings.push(plugin_doctor_finding(
+                plugin_id,
+                "manifest.id",
+                "manifest",
+                "error",
+                "Manifest id is missing",
+                "Every loaded plugin/app needs a stable id for lifecycle, permissions, and routing.",
+                "Set a canonical reverse-domain or scoped id in the manifest.",
+                json!({ "id": plugin_id }),
+            ));
+        }
+        if name.trim().is_empty() {
+            findings.push(plugin_doctor_finding(
+                plugin_id,
+                "manifest.name",
+                "manifest",
+                "error",
+                "Manifest name is missing",
+                "The Store and lifecycle UI cannot identify this artifact to a user.",
+                "Add a non-empty human-readable name to the manifest.",
+                json!({ "name": name }),
+            ));
+        }
+        if version.trim().is_empty() {
+            findings.push(plugin_doctor_finding(
+                plugin_id,
+                "manifest.version",
+                "compatibility",
+                "error",
+                "Manifest version is missing",
+                "Core cannot compare upgrades or record a reproducible installed artifact without a version.",
+                "Publish a semver version in the manifest.",
+                json!({ "version": version }),
+            ));
+        }
+        if installed_version.is_none()
+            && !app
+                .get("built_in")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        {
+            findings.push(plugin_doctor_finding(
+                plugin_id,
+                "lifecycle.installed-version",
+                "lifecycle",
+                "error",
+                "Installed plugin has no recorded version",
+                "The lifecycle record and loaded manifest disagree about what is installed.",
+                "Reinstall or update the artifact so Core can restore a versioned lifecycle record.",
+                json!({ "manifestVersion": version, "installedVersion": installed_version }),
+            ));
+        }
+
+        let grants = app
+            .get("permission_grants")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let approved = app
+            .get("approved_grants")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if enabled {
+            for grant in &grants {
+                let is_approved = approved.iter().any(|candidate| candidate == grant);
+                if !is_approved {
+                    findings.push(plugin_doctor_finding(
+                        plugin_id,
+                        "permissions.approved-drift",
+                        "security",
+                        "error",
+                        "Enabled plugin has an unapproved declared grant",
+                        "The loaded manifest asks for a capability that is not present in the lifecycle approval record.",
+                        "Disable and re-enable the plugin through Core so the Gateway can validate its grants again.",
+                        json!({ "grant": grant, "approvedGrants": approved }),
+                    ));
+                }
+            }
+        }
+        for grant in &approved {
+            if !grants.iter().any(|candidate| candidate == grant) {
+                findings.push(plugin_doctor_finding(
+                    plugin_id,
+                    "permissions.stale-approval",
+                    "security",
+                    "warning",
+                    "Lifecycle record contains a stale grant",
+                    "A previously approved grant is no longer declared by the loaded manifest.",
+                    "Disable and re-enable the plugin to refresh its approved capability set.",
+                    json!({ "grant": grant, "declaredGrants": grants }),
+                ));
+            }
+        }
+
+        if app
+            .get("suppressed_by_safe_mode")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            findings.push(plugin_doctor_finding(
+                plugin_id,
+                "runtime.safe-mode-suppressed",
+                "runtime",
+                "warning",
+                "Plugin is suppressed by Safe Mode",
+                "The lifecycle record says enabled, but Core intentionally did not activate it in this boot.",
+                "Review the Safe Mode reason before enabling the plugin in a normal boot.",
+                json!({ "enabled": enabled, "suppressedBySafeMode": true }),
+            ));
+        }
+
+        let mut dependency_ids = std::collections::HashSet::new();
+        if let Some(dependencies) = app
+            .get("requires")
+            .and_then(|value| value.get("apps"))
+            .and_then(serde_json::Value::as_array)
+        {
+            for dependency in dependencies {
+                let dependency_id = dependency
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                if dependency_id.is_empty() || !dependency_ids.insert(dependency_id) {
+                    continue;
+                }
+                if !installed_ids.contains(dependency_id) {
+                    findings.push(plugin_doctor_finding(
+                        plugin_id,
+                        "dependencies.missing",
+                        "compatibility",
+                        "error",
+                        "Required plugin is not installed",
+                        "The manifest declares a plugin dependency that Core cannot resolve.",
+                        "Install the required dependency before enabling this artifact.",
+                        json!({ "dependencyId": dependency_id }),
+                    ));
+                    continue;
+                }
+                let dependency_enabled = all_apps
+                    .iter()
+                    .find(|candidate| {
+                        candidate
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|id| id == dependency_id)
+                    })
+                    .and_then(|candidate| candidate.get("enabled"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if !dependency_enabled {
+                    findings.push(plugin_doctor_finding(
+                        plugin_id,
+                        "dependencies.disabled",
+                        "compatibility",
+                        "warning",
+                        "Required plugin is disabled",
+                        "Core can see the dependency, but it is not active for this plugin's runtime contract.",
+                        "Enable the dependency or disable this artifact until the dependency is ready.",
+                        json!({ "dependencyId": dependency_id }),
+                    ));
+                }
+            }
+        }
+
+        let mut runnable_ids = std::collections::HashSet::new();
+        match app.get("runnables").and_then(serde_json::Value::as_array) {
+            Some(runnables) => {
+                for runnable in runnables {
+                    let runnable_id = runnable
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    let kind = runnable
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    if runnable_id.is_empty() || kind.is_empty() {
+                        findings.push(plugin_doctor_finding(
+                            plugin_id,
+                            "manifest.runnable-shape",
+                            "manifest",
+                            "error",
+                            "Runnable declaration is incomplete",
+                            "Every runnable needs a stable id and kind so Core can register it deterministically.",
+                            "Add id and kind to the runnable, then reload the manifest.",
+                            json!({ "runnable": runnable }),
+                        ));
+                    } else if !runnable_ids.insert(runnable_id) {
+                        findings.push(plugin_doctor_finding(
+                            plugin_id,
+                            "manifest.duplicate-runnable",
+                            "manifest",
+                            "error",
+                            "Manifest declares a duplicate runnable id",
+                            "Two contributions share one id and cannot be addressed deterministically.",
+                            "Give every runnable a unique id within the plugin.",
+                            json!({ "runnableId": runnable_id }),
+                        ));
+                    }
+                }
+            }
+            None => findings.push(plugin_doctor_finding(
+                plugin_id,
+                "manifest.runnables",
+                "manifest",
+                "error",
+                "Runnable list is unreadable",
+                "Core could not reconcile this plugin's declared contributions with the loaded manifest.",
+                "Regenerate the packed manifest and run the doctor again.",
+                json!({ "runnables": app.get("runnables") }),
+            )),
+        }
+
+        let plugin_findings = &findings[finding_start..];
+        let error_count = plugin_findings
+            .iter()
+            .filter(|finding| {
+                finding.get("severity").and_then(serde_json::Value::as_str) == Some("error")
+            })
+            .count();
+        let warning_count = plugin_findings.len() - error_count;
+        inventory.push(json!({
+            "id": plugin_id,
+            "name": name,
+            "version": version,
+            "installedVersion": installed_version,
+            "enabled": enabled,
+            "kind": if app.get("kinds").and_then(serde_json::Value::as_array).is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("companion"))) { "app" } else { "plugin" },
+            "status": if error_count > 0 { "error" } else if warning_count > 0 { "warning" } else { "healthy" },
+            "findingCount": plugin_findings.len(),
+        }));
+    }
+
+    let errors = findings
+        .iter()
+        .filter(|finding| {
+            finding.get("severity").and_then(serde_json::Value::as_str) == Some("error")
+        })
+        .count();
+    let warnings = findings.len() - errors;
+    let score = (100i64 - (errors as i64 * 20) - (warnings as i64 * 5)).max(0);
+    Json(json!({
+        "schemaVersion": "1",
+        "rulesetVersion": "plugin-runtime-1",
+        "generatedAt": chrono::Utc::now().to_rfc3339(),
+        "profile": "lint",
+        "scope": requested_id.unwrap_or("installed"),
+        "readOnly": true,
+        "score": score,
+        "counts": {
+            "errors": errors,
+            "warnings": warnings,
+            "info": 0,
+            "plugins": inventory.len(),
+        },
+        "plugins": inventory,
+        "findings": findings,
+    }))
 }
 
 // ── App catalog browse + install-from-URL + hot-reload (#427, #428) ───────────
@@ -9620,19 +11755,19 @@ async fn community_plugin_source(state: &ServerState) -> Option<crate::catalog_s
 
 /// The plugin catalog source ids that render as ONE "Ryu Marketplace" view.
 ///
-/// `ryu-catalog` is the open git catalog (browse + free installs); `ryu-marketplace`
-/// is the hosted Mongo server that owns commerce (Stripe checkout, entitlements,
-/// signed download grants). They are two BACKENDS of a single product surface, and
-/// splitting them across two picker rows made the store read as two competing
-/// marketplaces where a listing's presence depended on which row you happened to be
-/// on. Either id therefore resolves to [`merged_plugin_catalog_entries`], which
-/// folds both (plus the loaded built-ins and the legacy registry) into one deduped
-/// list. See [`PLUGIN_MERGED_VIEW_ID`] for the id the client selects.
-const PLUGIN_MERGED_SOURCE_IDS: [&str; 2] = ["ryu-catalog", "ryu-marketplace"];
+/// `ryu-marketplace` is the GitHub-backed hosted bridge (commerce, entitlements,
+/// signatures, and buyer downloads); `ryu-catalog` is the read-only compatibility
+/// reader for the pre-bridge central marketplace.json index. They are two BACKENDS
+/// of a single product surface, and splitting them across two picker rows made the
+/// store read as two competing marketplaces. Either id therefore resolves to
+/// [`merged_plugin_catalog_entries`], which folds both (plus loaded built-ins and the
+/// legacy registry) into one deduped list. See [`PLUGIN_MERGED_VIEW_ID`] for the id
+/// the client selects.
+const PLUGIN_MERGED_SOURCE_IDS: [&str; 2] = ["ryu-marketplace", "ryu-catalog"];
 
-/// The canonical id for the unified first-party view — the git catalog's id, which
-/// is `builtin_primary` for the Plugin kind, so an unset preference already lands
-/// here.
+/// The canonical id for the unified first-party view. The active source defaults to
+/// the hosted bridge; this stable compatibility id is retained so existing desktop
+/// preferences and catalog rows continue to address the same merged view.
 const PLUGIN_MERGED_VIEW_ID: &str = "ryu-catalog";
 
 /// True when `id` addresses the unified first-party marketplace view.
@@ -9872,9 +12007,9 @@ async fn merged_plugin_catalog_entries(state: &ServerState) -> Vec<serde_json::V
         }
     }
 
-    // 2b. First-party OPEN catalog: the git `amajorai/ryu-marketplace` repo, read
-    // via the `ryu-catalog` git MarketplaceSource (Phase 2). Best-effort — a fetch
-    // failure leaves this empty and never blanks the loaded built-ins.
+    // 2b. Read-only compatibility fallback: the old central `marketplace.json`
+    // repo, exposed as `ryu-catalog`. New GitHub-backed listings never depend on
+    // this path; a fetch failure leaves it empty and never blanks built-ins.
     let mut git_catalog_entries: Vec<serde_json::Value> = Vec::new();
     if let Some(source) = state
         .catalog_sources
@@ -9894,8 +12029,8 @@ async fn merged_plugin_catalog_entries(state: &ServerState) -> Vec<serde_json::V
         }
     }
 
-    // 3. Legacy remote registry (retained as a lower-priority fallback while the
-    // git catalog is the first-party source of record; retire in a later cleanup).
+    // 3. Legacy remote registry (retained as the lowest-priority compatibility
+    // fallback while GitHub-backed listings become the source of record).
     let catalog = state.catalog_client.fetch_catalog().await;
     let registry_entries: Vec<serde_json::Value> = serde_json::to_value(&catalog)
         .ok()
@@ -9903,7 +12038,8 @@ async fn merged_plugin_catalog_entries(state: &ServerState) -> Vec<serde_json::V
         .unwrap_or_default();
 
     // Dedup by id, first-writer-wins: loaded built-ins > compiled built-in apps >
-    // Mongo marketplace > git catalog > legacy registry. The compiled built-in-app
+    // GitHub-backed hosted marketplace > legacy central index > legacy registry.
+    // The compiled built-in-app
     // group sits above the remote sources so a default-off Core app is classified
     // from its authoritative fixture (companion `type:"app"`) instead of the open
     // catalog's bare plugin card.
@@ -10153,9 +12289,9 @@ async fn plugin_catalog_browse(
     }
 
     // The unified first-party view: the merged offline-safe catalog. Reached by
-    // EITHER first-party id (see `PLUGIN_MERGED_SOURCE_IDS`) so the open git
-    // catalog and the hosted commerce backend render as one marketplace instead of
-    // whichever one the active-source preference happened to name.
+    // EITHER first-party id (see `PLUGIN_MERGED_SOURCE_IDS`) so the hosted bridge
+    // and its read-only compatibility fallback render as one marketplace instead
+    // of whichever source preference happened to name.
     if is_merged_plugin_view(&active_id) {
         let needle = query.trim().to_ascii_lowercase();
         let entries: Vec<serde_json::Value> = merged_plugin_catalog_entries(&state)
@@ -10426,8 +12562,9 @@ async fn plugin_catalog_detail(
             list
         } else if is_merged_plugin_view(&source_id) {
             let mut list = Vec::new();
-            // Git catalog first: it carries every free/open listing, and it answers
-            // from a cached manifest rather than a network round-trip per item.
+            // Hosted bridge first: it is authoritative for GitHub-backed listings,
+            // offers, entitlements, and signed downloads. The legacy index follows
+            // only as a read-only compatibility source.
             for id in PLUGIN_MERGED_SOURCE_IDS {
                 if let Some(source) = plugin_source_by_id(&state, id).await {
                     list.push(source);
@@ -10690,6 +12827,8 @@ fn local_plugin_detail(id: &str) -> Option<serde_json::Value> {
     if crate::plugins::builtins::is_compiled_in_manifest(&m.id) {
         obj.insert("orgVerified".to_owned(), json!(true));
         obj.insert("orgVerifiedTier".to_owned(), json!("official"));
+        obj.insert("publisherTrust".to_owned(), json!("gold"));
+        obj.insert("publisherTrustSource".to_owned(), json!("ryu_staff"));
     }
     merge_plugin_contract_fields(&mut obj, m);
 
@@ -10780,6 +12919,25 @@ fn manifest_declares_destination(m: &crate::plugin_manifest::PluginManifest) -> 
 /// Map a loaded [`crate::plugin_manifest::PluginManifest`] to a Plugins-catalog
 /// `CatalogEntry`. Built-in system apps (Ghost/Shadow) are flagged so the desktop
 /// renders them as system cards.
+fn manifest_layer_projection(m: &crate::plugin_manifest::PluginManifest) -> Vec<serde_json::Value> {
+    m.provided_capabilities()
+        .into_iter()
+        .map(|provided| {
+            json!({
+                "capability": provided.capability,
+                "title": provided.title,
+                "toolkit": crate::plugins::binding::is_toolkit(
+                    std::slice::from_ref(m),
+                    &provided.capability,
+                ),
+                "selectable": provided.selectable,
+                "target": provided.target,
+                "verbs": provided.tools.keys().collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
 fn plugin_manifest_to_entry(m: &crate::plugin_manifest::PluginManifest) -> serde_json::Value {
     let kinds: Vec<&str> = {
         let mut s = std::collections::HashSet::new();
@@ -10811,9 +12969,10 @@ fn plugin_manifest_to_entry(m: &crate::plugin_manifest::PluginManifest) -> serde
         "source": "built-in",
         "kinds": kinds,
         "type": if is_app { "app" } else { "plugin" },
-        "tags": if m.keywords.is_empty() { Vec::<String>::new() } else { m.keywords.clone() },
+        "tags": if m.tags.is_empty() { m.keywords.clone() } else { m.tags.clone() },
         "permission_grants": m.permission_grants,
         "built_in": crate::plugins::builtins::find_system_plugin(&m.id).is_some(),
+        "layers": manifest_layer_projection(m),
     });
     // Rich marketplace-detail contract keys (Phase 1.5). Additive — emitted only
     // when the manifest carries the source data (capabilities/runnables are always
@@ -10901,7 +13060,7 @@ fn plugin_manifest_to_entry(m: &crate::plugin_manifest::PluginManifest) -> serde
         if crate::plugins::builtins::is_mandatory(&m.id) {
             obj.insert("mandatory".to_owned(), json!(true));
         }
-        // Publisher identity — the blue check beside the NAME. Server-DERIVED, never
+        // Publisher identity — the gold check beside the NAME. Server-DERIVED, never
         // a manifest claim, for the same reason `mandatory` above is: a listing that
         // could author its own verification would badge itself.
         //
@@ -10922,6 +13081,8 @@ fn plugin_manifest_to_entry(m: &crate::plugin_manifest::PluginManifest) -> serde
         if crate::plugins::builtins::is_compiled_in_manifest(&m.id) {
             obj.insert("org_verified".to_owned(), json!(true));
             obj.insert("org_verified_tier".to_owned(), json!("official"));
+            obj.insert("publisher_trust".to_owned(), json!("gold"));
+            obj.insert("publisher_trust_source".to_owned(), json!("ryu_staff"));
         }
     }
     entry
@@ -10971,6 +13132,9 @@ fn merge_plugin_contract_fields(
     if let Some(site) = &m.homepage {
         obj.insert("website".to_owned(), json!(site));
     }
+    if let Some(repository) = &m.repository {
+        obj.insert("repositoryUrl".to_owned(), json!(repository));
+    }
     if let Some(license) = &m.license {
         obj.insert("license".to_owned(), json!(license));
     }
@@ -10983,8 +13147,23 @@ fn merge_plugin_contract_fields(
     if !m.example_prompts.is_empty() {
         obj.insert("examplePrompts".to_owned(), json!(m.example_prompts));
     }
+    if !m.tags.is_empty() {
+        obj.insert("tags".to_owned(), json!(m.tags));
+    } else if !m.keywords.is_empty() {
+        obj.insert("tags".to_owned(), json!(m.keywords));
+    }
+    if !m.keywords.is_empty() {
+        obj.insert("keywords".to_owned(), json!(m.keywords));
+    }
     if let Some(setup) = &m.setup {
         obj.insert("setup".to_owned(), setup.clone());
+    }
+    if m.external {
+        obj.insert("external".to_owned(), json!(true));
+    }
+    let layers = manifest_layer_projection(m);
+    if !layers.is_empty() {
+        obj.insert("layers".to_owned(), json!(layers));
     }
     // The dependency + surface contract, mirrored onto the entry from the ONE
     // definition of each field on the manifest.
@@ -11082,6 +13261,9 @@ fn merge_plugin_contract_fields(
                     "command": decl.command,
                     "args": decl.args,
                     "command_env": decl.command_env,
+                    "transport": decl.transport,
+                    "url": decl.url,
+                    "auth": decl.auth,
                 })
             })
             .collect();
@@ -11130,12 +13312,26 @@ fn plugin_marketplace_item_to_entry(
     if it.get("has_companion").and_then(|v| v.as_bool()) == Some(true) {
         kinds.push("companion".to_owned());
     }
-    let mut tags: Vec<String> = Vec::new();
+    let mut tags: Vec<String> = it
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    if tags.is_empty() {
+        tags = Vec::new();
+    }
     if let Some(c) = &category {
         tags.push(c.clone());
     }
     if let Some(d) = &domain {
-        tags.push(d.clone());
+        if tags.is_empty() {
+            tags.push(d.clone());
+        }
     }
     // Browse-but-don't-install. The card may declare it itself (the GitHub-topic
     // source stamps `descriptor_only: true` on every unreviewed listing); the
@@ -11165,6 +13361,7 @@ fn plugin_marketplace_item_to_entry(
         "name": it.get("name").and_then(|v| v.as_str()).unwrap_or(id),
         "description": it.get("description").and_then(|v| v.as_str()).unwrap_or(""),
         "version": it.get("version").and_then(|v| v.as_str()).unwrap_or(""),
+        "category": category,
         "source": source_id,
         "kinds": kinds,
         "type": item_type,
@@ -11228,6 +13425,8 @@ fn plugin_marketplace_item_to_entry(
             "provenance",
             "repo_url",
             "license",
+            "repository_url",
+            "homepage",
             // The grouping stamp a community MARKETPLACE entry carries, naming the
             // marketplace its row belongs under ("Community Marketplaces" →
             // sub-heading). Only meaningful on the `github-topic` feed; the
@@ -11240,6 +13439,8 @@ fn plugin_marketplace_item_to_entry(
             // end to end for the same reason as `origin` above — a camelCase key
             // reads as undefined on the client and silently keeps the badge dark.
             "org_verified_tier",
+            "publisher_trust",
+            "publisher_trust_source",
         ] {
             if let Some(v) = it.get(key).and_then(|v| v.as_str()) {
                 obj.insert(key.to_owned(), json!(v));
@@ -11248,6 +13449,21 @@ fn plugin_marketplace_item_to_entry(
         // Non-string passthroughs (the loop above copies strings only).
         if let Some(reviewed) = it.get("reviewed").and_then(|v| v.as_bool()) {
             obj.insert("reviewed".to_owned(), json!(reviewed));
+        }
+        if let Some(external) = it.get("external").and_then(|v| v.as_bool()) {
+            obj.insert("external".to_owned(), json!(external));
+        }
+        for key in [
+            "layers",
+            "screenshots",
+            "tags",
+            "keywords",
+            "example_prompts",
+            "capabilities",
+        ] {
+            if let Some(value) = it.get(key).filter(|v| v.is_array()) {
+                obj.insert(key.to_owned(), value.clone());
+            }
         }
         // A theme listing's palette, when the source card carries one — the card
         // the store renders must show the theme's own swatch, not a dither avatar.
@@ -11445,8 +13661,19 @@ fn screen_guarded_hostname(host: &str) -> Result<(), String> {
 )]
 async fn install_app_from_url(
     State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<InstallFromUrlRequest>,
 ) -> axum::response::Response {
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
+
     let url = body.url.trim().to_string();
     if !url.starts_with("https://") {
         return json_error(
@@ -11692,8 +13919,19 @@ async fn install_app_from_url(
 )]
 async fn install_app_bundle(
     State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
+
     // Split the bundle: `ui_code` is carriage, the rest is the manifest.
     let ui_code = body
         .get("ui_code")
@@ -11791,8 +14029,17 @@ async fn install_app_bundle(
         }
     }
 
+    let app_name = manifest.name.clone();
+    let app_version = manifest.version.clone();
     match persist_installed_plugin(&state, manifest, ui_code, None).await {
-        Ok(body) => Json(body).into_response(),
+        Ok(body) => {
+            crate::events::publish_system_notification(
+                "App installed",
+                format!("{app_name} {app_version} is installed and ready to enable."),
+                "success",
+            );
+            Json(body).into_response()
+        }
         Err((status, msg)) => json_error(status, msg),
     }
 }
@@ -12232,8 +14479,19 @@ async fn write_plugin_manifest_to_disk(
 async fn install_plugin_from_catalog(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<PluginCatalogInstallBody>,
 ) -> axum::response::Response {
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
+
     let id = body.id.trim().to_string();
     if id.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "`id` must not be empty".to_owned());
@@ -12396,6 +14654,12 @@ async fn install_plugin_from_catalog(
     )
     .await;
 
+    let target_name = fetched
+        .iter()
+        .find(|manifest| manifest.id == id)
+        .map(|manifest| manifest.name.clone())
+        .unwrap_or_else(|| id.clone());
+
     match outcome {
         Ok(installed_plugins) => {
             let dependencies: Vec<&str> = installed_plugins
@@ -12437,6 +14701,11 @@ async fn install_plugin_from_catalog(
                 obj.insert("installed_dependencies".to_owned(), json!(dependencies));
                 obj.insert("channel".to_owned(), json!(pinned));
             }
+            crate::events::publish_system_notification(
+                "App installed",
+                format!("{target_name} is installed and ready to enable."),
+                "success",
+            );
             Json(body).into_response()
         }
         Err(failure) => {
@@ -12524,6 +14793,7 @@ pub async fn install_default_official_plugins(
         let response = install_plugin_from_catalog(
             axum::extract::State(state.clone()),
             axum::http::HeaderMap::new(),
+            axum::Extension(None),
             axum::Json(PluginCatalogInstallBody {
                 id: id.clone(),
                 channel: None,
@@ -13293,7 +15563,18 @@ async fn plugins_isolation_handler(State(state): State<ServerState>) -> axum::re
 async fn install_app_handler(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> axum::response::Response {
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
+
     let Some(manifest) = find_manifest(&state, &id).await else {
         return json_error(
             StatusCode::NOT_FOUND,
@@ -13336,6 +15617,11 @@ async fn install_app_handler(
                 "plugin.contributions.changed",
                 json!({"type": "contributions_changed"}),
             );
+            crate::events::publish_system_notification(
+                "App installed",
+                format!("{} is installed and ready to enable.", manifest.name),
+                "success",
+            );
             Json(json!({ "success": true, "app": record })).into_response()
         }
         Err(e) => {
@@ -13374,9 +15660,20 @@ async fn install_app_handler(
 async fn enable_app_handler(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> axum::response::Response {
     use crate::plugins::lifecycle::{enable_app, EnableError};
     use crate::sidecar::gateway::{gateway_token, gateway_url};
+
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_ENABLE,
+    )
+    .await
+    {
+        return response;
+    }
 
     if crate::fleet::is_artifact_blocked(&id) {
         return json_error(
@@ -13811,8 +16108,8 @@ fn build_runnable_registry(state: &ServerState) -> crate::runnable::RunnableRegi
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .ok_or_else(|| format!("tool '{}': missing or invalid config", entry.id))?;
 
-                    // A namespaced non-Alias tool keeps its NATIVE id (`exa__search`);
-                    // everything else stays `app__<slug>` (see `app_tool_registered_id`).
+                    // A namespaced non-Alias tool keeps its NATIVE id (`exa.search`);
+                    // everything else stays `app.<slug>` (see `app_tool_registered_id`).
                     // The registered `server` stays `"app"` and `name` stays the slug,
                     // so catalog classification + `allow:["app"]` grouping are unchanged.
                     let id = crate::sidecar::mcp::app_tool_registered_id(&cfg);
@@ -14356,6 +16653,37 @@ fn collect_plugin_output_styles(
     out
 }
 
+fn collect_plugin_chat_widget_templates(
+    manifests: &[crate::plugin_manifest::PluginManifest],
+    enabled_ids: &std::collections::HashSet<String>,
+    surface: Option<crate::plugin_manifest::Surface>,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for manifest in manifests {
+        if !enabled_ids.contains(&manifest.id)
+            || !surface.is_none_or(|s| manifest.supports_surface(s))
+        {
+            continue;
+        }
+        let Some(templates) = manifest
+            .contributes
+            .as_ref()
+            .and_then(|contributes| contributes.chat_widget_templates.as_ref())
+        else {
+            continue;
+        };
+        for template in templates {
+            if let Ok(mut value) = serde_json::to_value(template) {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("plugin".to_owned(), json!(manifest.id));
+                }
+                out.push(value);
+            }
+        }
+    }
+    out
+}
+
 /// `GET /api/plugins/contributions` — the declarative UI contributions (composer
 /// controls, settings tabs, slash commands) of every **enabled** plugin, each
 /// tagged with its owning `plugin` id. The desktop renders the known widget types
@@ -14396,6 +16724,7 @@ async fn plugin_contributions(
     let enabled_ids: std::collections::HashSet<String> = enabled_records.keys().cloned().collect();
     let mut store_tabs = Vec::new();
     let mut composer_controls = Vec::new();
+    let mut chat_features = Vec::new();
     let mut settings_tabs = Vec::new();
     let mut message_actions = Vec::new();
     let mut context_menu_items = Vec::new();
@@ -14411,6 +16740,7 @@ async fn plugin_contributions(
     let mut dock_panels = Vec::new();
     let mut live_activities = Vec::new();
     let mut output_styles = Vec::new();
+    let mut chat_widget_templates = Vec::new();
 
     // Surface filter (`targets`): a plugin that doesn't target the calling host
     // contributes nothing to it. Absent/unknown `x-ryu-surface` = no filter, and
@@ -14477,6 +16807,10 @@ async fn plugin_contributions(
             v
         };
         composer_controls.extend(c.composer_controls.iter().cloned().map(tag));
+        // Host-rendered chat feature descriptors. The payload stays opaque so a
+        // newer desktop can add a feature kind without requiring every Core build
+        // to understand it; the owning plugin id is the only server-added field.
+        chat_features.extend(c.chat_features.iter().cloned().map(tag));
         // Per-message toolbar actions and context-menu rows — the in-conversation
         // seams. Stored raw + tagged with the owning plugin id, exactly like the
         // sibling client-rendered families; the renderer owns the `kind`/`anchor`
@@ -14574,6 +16908,11 @@ async fn plugin_contributions(
                 .map(tag),
         );
     }
+    chat_widget_templates.extend(collect_plugin_chat_widget_templates(
+        &manifests,
+        &enabled_ids,
+        surface,
+    ));
     // Channel adapters contributed by enabled plugins (`RunnableKind::Channel`),
     // registered into the app-contrib registry by the enable handlers.
     let channels = state.app_contrib.channels();
@@ -14687,6 +17026,7 @@ async fn plugin_contributions(
 
     Json(json!({
         "composer_controls": composer_controls,
+        "chat_features": chat_features,
         "settings_tabs": settings_tabs,
         "message_actions": message_actions,
         "context_menu_items": context_menu_items,
@@ -14706,6 +17046,9 @@ async fn plugin_contributions(
         // plugin id so the dock can group and the contributed adapter can poll their
         // `source` through the host's authenticated Core seam.
         "live_activities": live_activities,
+        // Metadata-only widget catalog. It contains no HTML, React, capability,
+        // or executable action payload; the desktop owns the compact affordance.
+        "chat_widget_templates": chat_widget_templates,
         // Contributed output styles (design §4). The DECLARATION view — which
         // enabled plugin ships which style — next to `themes`, its closest sibling.
         // Which style is in FORCE is a different question with a different answer,
@@ -15752,8 +18095,19 @@ async fn disable_app_handler(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<DisableAppParams>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> axum::response::Response {
     use crate::plugins::lifecycle::{disable_app, DisableError};
+
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_DISABLE,
+    )
+    .await
+    {
+        return response;
+    }
 
     let all_manifests: Vec<crate::plugin_manifest::PluginManifest> =
         state.app_manifests.read().await.clone();
@@ -15981,7 +18335,8 @@ struct UninstallAppParams {
 
 /// `POST /api/plugins/:id/uninstall` — disable the plugin (and, with
 /// `?cascade=true`, its enabled dependents), tear down its runtime contributions,
-/// then remove its lifecycle record.
+/// then remove its lifecycle record. An optional body `{ "cleanup": [...] }`
+/// deletes only the app-data rows named by the user in the uninstall review.
 ///
 /// # Semantics
 ///
@@ -16010,6 +18365,7 @@ struct UninstallAppParams {
                         before removing it. Default false: an uninstall blocked by a \
                         dependent is refused with 409."),
     ),
+    request_body = serde_json::Value,
     responses(
         (status = 200, description = "OK", body = serde_json::Value),
         (status = 404, description = "Plugin is not installed"),
@@ -16020,9 +18376,34 @@ async fn uninstall_app_handler(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<UninstallAppParams>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    body: Bytes,
 ) -> axum::response::Response {
     use crate::plugins::lifecycle::{uninstall_app, UninstallError};
 
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_UNINSTALL,
+    )
+    .await
+    {
+        return response;
+    }
+
+    let cleanup = if body.is_empty() {
+        Vec::new()
+    } else {
+        match serde_json::from_slice::<plugin_uninstall::UninstallRequest>(&body) {
+            Ok(request) => request.cleanup,
+            Err(error) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid uninstall cleanup body: {error}"),
+                );
+            }
+        }
+    };
     let all_manifests: Vec<crate::plugin_manifest::PluginManifest> =
         state.app_manifests.read().await.clone();
 
@@ -16040,23 +18421,26 @@ async fn uninstall_app_handler(
                         policy_outcome.merge(deactivate_plugin(&state, manifest).await);
                 }
             }
-            // OAuth credentials are owned by the plugin lifecycle, not by its
-            // sidecar. Uninstall attempts provider revocation for every principal
-            // and profile, then always drops the local sealed bindings and pending
-            // browser flows. Disable deliberately does not take this path.
-            let oauth_revocation_unconfirmed = match crate::mcp_oauth::global()
-                .disconnect_plugin(&outcome.removed)
-                .await
-            {
-                Ok(bindings) => bindings,
-                Err(error) => {
-                    tracing::warn!(
-                        plugin = %outcome.removed,
-                        "uninstall: failed to complete MCP OAuth cleanup: {error}"
-                    );
-                    vec!["local_cleanup_failed".to_owned()]
-                }
-            };
+            // Optional app-data deletion happens only for the rows the user
+            // checked in the uninstall confirmation. Mandatory package/runtime
+            // teardown remains above; an optional cleanup failure is reported in
+            // the 200 response so the app is still fully uninstalled and the user
+            // can retry the specific cleanup later after reinstalling if needed.
+            let cleanup_errors =
+                if let Some(manifest) = all_manifests.iter().find(|m| m.id == outcome.removed) {
+                    plugin_uninstall::apply_cleanup(
+                        &state,
+                        manifest,
+                        &cleanup,
+                        caller_doc_filter(&caller),
+                    )
+                    .await
+                } else {
+                    vec![format!(
+                        "Optional cleanup skipped: manifest for '{}' was not found",
+                        outcome.removed
+                    )]
+                };
             // ONE plugin model: uninstalling a synth MCP-server record must also
             // remove its `~/.ryu/mcp.json` entry, else the server keeps running and
             // its tools stay listed/callable — a misleading Uninstall that removed
@@ -16128,7 +18512,8 @@ async fn uninstall_app_handler(
                 // `?cascade=true`, its dependents). Cascaded dependents stay
                 // installed-but-disabled; only the target's record is removed.
                 "disabled": disabled_ids,
-                "oauth_revocation_unconfirmed": oauth_revocation_unconfirmed,
+                "cleanup": cleanup,
+                "cleanup_errors": cleanup_errors,
             });
             attach_gateway_policy_notice(&mut body, policy_outcome);
             Json(body).into_response()
@@ -16178,13 +18563,14 @@ async fn uninstall_app_handler(
 ///
 /// Each kind enable registers is torn down here, so a disabled plugin's Runnables
 /// stop being listable/callable instead of lingering:
-///   - Tool     → unregister the `app__<slug>` MCP tool.
+///   - Tool     → unregister the canonical `<server>.<tool>` MCP tool id.
 ///   - Agent    → delete the `app__<id>` agent record.
 ///   - Workflow → delete the `app__<id>` workflow.
 ///   - Policy   → flip the gateway/sandbox policy flag OFF (`apply_policy`).
 ///
-/// Deletes are strictly namespaced on the `app__` prefix (the same prefix enable
-/// mints) so a user agent/workflow can never be removed.
+/// Tool teardown uses the same canonical-id helper as enable; the other
+/// contribution kinds retain their separate `app__` ownership namespace so a
+/// user agent/workflow can never be removed.
 async fn deactivate_plugin(
     state: &ServerState,
     manifest: &crate::plugin_manifest::PluginManifest,
@@ -16370,9 +18756,20 @@ async fn update_app_handler(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     body: Option<Json<UpdateAppBody>>,
 ) -> axum::response::Response {
     use crate::plugins::lifecycle::{plan_update, update_app, UpdateError, UpdatePlan};
+
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_UPDATE,
+    )
+    .await
+    {
+        return response;
+    }
 
     let body = body.map(|b| b.0).unwrap_or_default();
     let id = id.trim().to_string();
@@ -16819,6 +19216,7 @@ async fn list_engines(State(state): State<ServerState>) -> Json<serde_json::Valu
         engines.push(crate::sidecar::adapters::AgentInfo {
             id: e.id,
             name: e.name,
+            title: None,
             description: Some(format!("Plugin-contributed engine ({})", e.engine_type)),
             install_hint: None,
             installed: None,
@@ -16839,6 +19237,9 @@ async fn list_engines(State(state): State<ServerState>) -> Json<serde_json::Valu
             enabled: None,
             gateway_bypass: None,
             avatar_url: None,
+            avatar_glyph: None,
+            lifecycle_status: None,
+            safety_profile: None,
         });
     }
     Json(json!({ "engines": engines }))
@@ -16857,6 +19258,74 @@ async fn list_engines(State(state): State<ServerState>) -> Json<serde_json::Valu
 )]
 async fn engine_models() -> Json<serde_json::Value> {
     Json(json!({ "models": crate::sidecar::adapters::engine_model_catalog() }))
+}
+
+/// Convert the persona's first active source into the shared desktop glyph shape.
+/// The list endpoint carries this alongside the legacy avatar URL so compact
+/// clients can render every avatar kind without fetching the full record.
+fn persona_avatar_glyph(persona: Option<&crate::agents::PersonaSlot>) -> Option<serde_json::Value> {
+    let persona = persona?;
+    if let Some(url) = persona.avatar_url.as_ref() {
+        return Some(json!({ "kind": "avatar", "dataUrl": url }));
+    }
+    if let Some(expression) = persona
+        .expressive
+        .as_ref()
+        .and_then(|spec| spec.expression.as_ref())
+    {
+        let mut glyph = json!({ "kind": "expressive", "expression": expression });
+        if let Some(animation) = persona
+            .expressive
+            .as_ref()
+            .and_then(|spec| spec.animation.as_ref())
+        {
+            glyph["animation"] = json!(animation);
+        }
+        return Some(glyph);
+    }
+    if let Some(emoji) = persona.emoji.as_ref() {
+        let mut glyph = json!({ "kind": "emoji", "emoji": emoji });
+        if let Some(dither) = persona_dither_value(persona) {
+            glyph["dither"] = dither;
+        }
+        return Some(glyph);
+    }
+    if let Some(icon) = persona.icon.as_ref() {
+        let mut glyph = json!({ "kind": "icon", "id": icon });
+        if let Some(color) = persona.icon_color.as_ref() {
+            glyph["color"] = json!(color);
+        }
+        if let Some(dither) = persona_dither_value(persona) {
+            glyph["dither"] = dither;
+        }
+        return Some(glyph);
+    }
+    if let Some(dicebear) = persona.dicebear.as_ref() {
+        if let (Some(style), Some(seed)) = (dicebear.style.as_ref(), dicebear.seed.as_ref()) {
+            return Some(json!({
+                "kind": "dicebear",
+                "style": style,
+                "seed": seed,
+            }));
+        }
+    }
+    persona_dither_value(persona).map(|dither| json!({ "kind": "dither", "dither": dither }))
+}
+
+fn persona_dither_value(persona: &crate::agents::PersonaSlot) -> Option<serde_json::Value> {
+    let dither = persona.dither.as_ref()?;
+    let from = dither.from.as_ref()?;
+    let direction = match dither.direction.as_deref() {
+        Some("down") => "down",
+        Some("left") => "left",
+        Some("right") => "right",
+        _ => "up",
+    };
+    Some(json!({
+        "direction": direction,
+        "from": from,
+        "to": dither.to.as_ref(),
+    }))
 }
 
 /// List agents the user can actually pick: the flagship `ryu` plus any built-in
@@ -16910,17 +19379,35 @@ async fn list_agents(
             for record in records {
                 // Surface the persona's custom avatar (a data URL) on the summary
                 // so the chat picker / transcript can render it without a second
-                // fetch of the full record.
+                // fetch of the full record. `avatar_glyph` carries non-image
+                // sources as well.
                 let avatar_url = record.persona.as_ref().and_then(|p| p.avatar_url.clone());
+                let avatar_glyph = persona_avatar_glyph(record.persona.as_ref());
+                let title = (!record.title.trim().is_empty()).then_some(record.title.clone());
                 // Built-in agents are sourced from the in-code registry above (which
                 // has no persona data), so their DB row is otherwise skipped. But a
                 // user can still set a custom avatar on a built-in (e.g. Claude Code),
                 // and it's persisted on that row — merge it onto the registry entry so
                 // the sidebar/chat render the custom image instead of the engine logo.
                 if record.built_in {
+                    if let Some(existing) = agents.iter_mut().find(|a| a.id == record.id) {
+                        existing.lifecycle_status =
+                            Some(record.lifecycle_status.as_str().to_owned());
+                        existing.safety_profile = Some(record.safety_profile.as_str().to_owned());
+                    }
                     if let Some(url) = avatar_url {
                         if let Some(existing) = agents.iter_mut().find(|a| a.id == record.id) {
                             existing.avatar_url = Some(url);
+                        }
+                    }
+                    if let Some(glyph) = avatar_glyph {
+                        if let Some(existing) = agents.iter_mut().find(|a| a.id == record.id) {
+                            existing.avatar_glyph = Some(glyph);
+                        }
+                    }
+                    if let Some(title) = title {
+                        if let Some(existing) = agents.iter_mut().find(|a| a.id == record.id) {
+                            existing.title = Some(title);
                         }
                     }
                     continue;
@@ -16930,6 +19417,7 @@ async fn list_agents(
                 agents.push(crate::sidecar::adapters::AgentInfo {
                     id: record.id,
                     name: record.name,
+                    title,
                     description: record.description,
                     install_hint: None,
                     installed: None,
@@ -16948,6 +19436,9 @@ async fn list_agents(
                     // go through the normal OpenAI-compat path.
                     gateway_bypass: None,
                     avatar_url,
+                    avatar_glyph,
+                    lifecycle_status: Some(record.lifecycle_status.as_str().to_owned()),
+                    safety_profile: Some(record.safety_profile.as_str().to_owned()),
                 });
             }
         }
@@ -17066,10 +19557,13 @@ async fn list_agent_catalog(
                             Some(pkg) => resolve_npm_latest_for_agent(pkg).await,
                             None => None,
                         };
-                        let bridge_installed = match probe.bridge_npm_package.as_deref() {
-                            Some(pkg) => probe_npx_package_version(pkg).await,
-                            None => None,
-                        };
+                        // Catalog browsing must remain metadata-only. Probing a
+                        // registry bridge here invokes `npx -y`, which can install
+                        // and execute an unpinned package merely because a user
+                        // opened the catalog. The update-check path retains the
+                        // explicit probe for an installed agent; this browse path
+                        // reports only the registry metadata.
+                        let bridge_installed: Option<String> = None;
                         let bridge_latest = match probe.bridge_npm_package.as_deref() {
                             Some(pkg) => resolve_npm_latest_for_agent(pkg).await,
                             None => registry_bridge_version.clone(),
@@ -17419,8 +19913,18 @@ async fn install_agent_runtime(
 )]
 async fn install_agent_handler(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<AgentCatalogAction>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
     let Some(entry) = state
         .agents
         .entries
@@ -17461,8 +19965,18 @@ async fn install_agent_handler(
 )]
 async fn uninstall_agent_handler(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<AgentCatalogAction>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_UNINSTALL,
+    )
+    .await
+    {
+        return response;
+    }
     if !state.agents.entries.iter().any(|e| e.id == body.id) {
         return (
             StatusCode::NOT_FOUND,
@@ -17593,8 +20107,22 @@ async fn update_agent(
             Json(json!({ "error": "insufficient permissions: agent.edit" })),
         );
     }
+    let lifecycle_change = patch.lifecycle_status;
     match state.agent_store.update(&id, patch).await {
-        Ok(Some(record)) => (StatusCode::OK, Json(json!({ "agent": record }))),
+        Ok(Some(record)) => {
+            if !matches!(
+                lifecycle_change,
+                None | Some(crate::agents::AgentLifecycleStatus::Active)
+            ) {
+                if let Err(error) = disable_agent_schedules(&id) {
+                    tracing::warn!(
+                        "agent '{id}' entered {} but schedules could not be disabled: {error}",
+                        record.lifecycle_status.as_str()
+                    );
+                }
+            }
+            (StatusCode::OK, Json(json!({ "agent": record })))
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": format!("agent '{id}' not found") })),
@@ -17627,12 +20155,10 @@ async fn delete_agent(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // No `agent.delete` permission in the vocab; deletion is a mutation, gated at
-    // the `agent.edit` tier.
     if enforce_permission_on(
         &state,
         &caller,
-        crate::identity_verify::permissions::AGENT_EDIT,
+        crate::identity_verify::permissions::AGENT_DELETE,
         crate::acl::KIND_AGENT,
         &id,
     )
@@ -17641,11 +20167,24 @@ async fn delete_agent(
     {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({ "error": "insufficient permissions: agent.edit" })),
+            Json(json!({ "error": "insufficient permissions: agent.delete" })),
         );
     }
     match state.agent_store.delete(&id).await {
-        Ok(true) => (StatusCode::OK, Json(json!({ "success": true }))),
+        Ok(true) => match delete_agent_schedules(&id) {
+            Ok(()) => (StatusCode::OK, Json(json!({ "success": true }))),
+            Err(error) => {
+                tracing::warn!(
+                    "agent '{id}' was deleted but its schedules could not be removed: {error}"
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({ "success": false, "error": format!("agent deleted, but schedules could not be removed: {error}") }),
+                    ),
+                )
+            }
+        },
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": format!("agent '{id}' not found") })),
@@ -18106,7 +20645,8 @@ async fn export_agent(
 ) -> (StatusCode, Json<serde_json::Value>) {
     match state.agent_store.get(&id).await {
         Ok(Some(record)) => {
-            let template = record.to_template();
+            let mut template = record.to_template();
+            template.agent_config.schedules = agent_schedule_templates(&id);
             (StatusCode::OK, Json(json!({ "template": template })))
         }
         Ok(None) => (
@@ -18156,9 +20696,24 @@ async fn import_agent(
             Json(json!({ "error": "template name is required" })),
         );
     }
+    if let Err(error) = validate_agent_schedules(&template.agent_config.schedules) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": error })));
+    }
+    let schedules = template.agent_config.schedules.clone();
     let input = template.into_create_agent();
     match state.agent_store.create(input).await {
-        Ok(record) => (StatusCode::CREATED, Json(json!({ "agent": record }))),
+        Ok(record) => {
+            if let Err(error) = persist_agent_schedules(&record.id, &record.name, &schedules) {
+                let _ = state.agent_store.delete(&record.id).await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({ "error": format!("agent created, but schedules could not be saved: {error}") }),
+                    ),
+                );
+            }
+            (StatusCode::CREATED, Json(json!({ "agent": record })))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -18177,6 +20732,109 @@ async fn active_published_agent_source(
             &state.preferences,
         )
         .await
+}
+
+/// Convert the publish API's safe, human-facing agent descriptor into the
+/// portable template consumed by the existing agent installer.
+///
+/// Older marketplace listings store this descriptor at the root (`display_name`,
+/// `system_prompt`, …), while exports use `{ template: { agent_config: … } }`.
+/// Accepting both keeps old listings installable and makes the publish path use
+/// the same schedule materialization as local imports.
+fn published_agent_descriptor_to_template(
+    raw: &serde_json::Value,
+    fallback_id: &str,
+) -> Result<crate::agents::AgentTemplate, String> {
+    let source = raw
+        .get("descriptor")
+        .filter(|value| value.is_object())
+        .unwrap_or(raw);
+    let object = source
+        .as_object()
+        .ok_or_else(|| "published agent descriptor must be an object".to_owned())?;
+    let text = |key: &str| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let strings = |key: &str| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let model = object.get("model").and_then(|value| {
+        let model = value.as_object()?;
+        let engine = model
+            .get("engine")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let model_id = model
+            .get("model_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        (engine.is_some() || model_id.is_some())
+            .then_some(crate::agents::ModelSlot { engine, model_id })
+    });
+    let persona = object
+        .get("avatar")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    let schedules = object
+        .get("schedules")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let schedules = serde_json::from_value(schedules)
+        .map_err(|error| format!("invalid published agent schedules: {error}"))?;
+    let name = text("display_name")
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            raw.get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| fallback_id.to_owned());
+    let version = raw
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("1.0.0")
+        .to_owned();
+
+    Ok(crate::agents::AgentTemplate {
+        kind: "agent".to_owned(),
+        name,
+        version,
+        agent_config: crate::agents::AgentTemplateConfig {
+            title: String::new(),
+            description: None,
+            system_prompt: text("system_prompt"),
+            tools: strings("tools"),
+            required_plugins: Vec::new(),
+            composio_actions: strings("composio_actions"),
+            skills: strings("skills"),
+            identity_profile_ids: Vec::new(),
+            engine: model.as_ref().and_then(|slot| slot.engine.clone()),
+            model: model.as_ref().and_then(|slot| slot.model_id.clone()),
+            chat_model: model,
+            stt: None,
+            tts: None,
+            image_model: None,
+            video_model: None,
+            memory: None,
+            persona,
+            policy_ref: None,
+            schedules,
+        },
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -18217,6 +20875,15 @@ async fn published_agent_install(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<PublishedAgentInstallBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
     let id = body.id.trim().to_string();
     if id.is_empty() {
         return (
@@ -18304,17 +20971,21 @@ async fn published_agent_install(
         .get("template")
         .cloned()
         .unwrap_or(descriptor.raw);
-    let template: crate::agents::AgentTemplate = match serde_json::from_value(raw_template) {
+    let template: crate::agents::AgentTemplate = match serde_json::from_value(raw_template.clone())
+    {
         Ok(t) => t,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "success": false,
-                    "error": format!("published agent `{id}` has no valid template: {e}"),
-                })),
-            );
-        }
+        Err(template_error) => match published_agent_descriptor_to_template(&raw_template, &id) {
+            Ok(t) => t,
+            Err(descriptor_error) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "success": false,
+                        "error": format!("published agent `{id}` has no valid template: {template_error}; descriptor fallback failed: {descriptor_error}"),
+                    })),
+                );
+            }
+        },
     };
     if template.name.trim().is_empty() {
         return (
@@ -18327,6 +20998,16 @@ async fn published_agent_install(
     }
 
     let (template, requires) = template.sanitize_for_untrusted_install();
+    if let Err(error) = validate_agent_schedules(&template.agent_config.schedules) {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(
+                json!({ "success": false, "error": format!("published agent `{id}` has invalid schedules: {error}") }),
+            ),
+        );
+    }
+    let schedules = template.agent_config.schedules.clone();
+    let input = template.into_create_agent();
     match state
         .agent_store
         .create_published_idempotent(
@@ -18334,19 +21015,32 @@ async fn published_agent_install(
             idempotency_key,
             caller_user_id,
             caller_org_id,
-            template.into_create_agent(),
+            input,
             requires,
         )
         .await
     {
-        Ok((record, replayed, requires)) => (
-            if replayed {
-                StatusCode::OK
-            } else {
-                StatusCode::CREATED
-            },
-            Json(json!({ "success": true, "agent": record, "requires": requires })),
-        ),
+        Ok((record, replayed, requires)) => {
+            if !replayed {
+                if let Err(error) = persist_agent_schedules(&record.id, &record.name, &schedules) {
+                    let _ = state.agent_store.delete(&record.id).await;
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({ "success": false, "error": format!("agent created, but schedules could not be saved: {error}") }),
+                        ),
+                    );
+                }
+            }
+            (
+                if replayed {
+                    StatusCode::OK
+                } else {
+                    StatusCode::CREATED
+                },
+                Json(json!({ "success": true, "agent": record, "requires": requires })),
+            )
+        }
         Err(e) => (
             if e.to_string()
                 .starts_with("published-agent idempotency key already used")
@@ -18418,6 +21112,16 @@ struct ListConversationsQuery {
     preview: Option<String>,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct ConversationMessagesQuery {
+    /// Page size. Omitted keeps the existing full-detail response for API
+    /// callers that need the complete transcript.
+    limit: Option<usize>,
+    /// Message id at the top of the currently loaded page. The next page is
+    /// returned strictly before this message in active chronological order.
+    before: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/api/conversations",
@@ -18435,21 +21139,27 @@ async fn list_conversations(
     // handler: one `get_access_meta` per row, each taking the store mutex). The
     // store's predicate mirrors `resource_access` exactly, so the list gate and the
     // row gate cannot drift.
-    let (user_id, org_id, node_bound) = tenancy_filter_args(&caller);
+    let (user_id, org_id, team_ids_json, node_bound) = tenancy_filter_args(&caller);
     let want_preview = matches!(query.preview.as_deref(), Some("1" | "true"));
     let listed = if want_preview {
         state
             .conversations
-            .list_conversations_visible_with_preview(
+            .list_conversations_visible_with_preview_for_teams(
                 user_id.as_deref(),
                 org_id.as_deref(),
                 node_bound,
+                team_ids_json.as_deref(),
             )
             .await
     } else {
         state
             .conversations
-            .list_conversations_visible(user_id.as_deref(), org_id.as_deref(), node_bound)
+            .list_conversations_visible_for_teams(
+                user_id.as_deref(),
+                org_id.as_deref(),
+                node_bound,
+                team_ids_json.as_deref(),
+            )
             .await
     };
     match listed {
@@ -18464,21 +21174,24 @@ struct SearchConversationsQuery {
     q: String,
     /// Max number of hits (defaults to 20, clamped to 100).
     limit: Option<usize>,
+    /// `exact` uses the lexical index, `semantic` uses embeddings, and `all`
+    /// (the default) merges both sources with exact matches first.
+    mode: Option<String>,
 }
 
-/// `GET /api/conversations/search?q=…&limit=…` — semantic search over past chat
-/// messages, the human-facing surface of the `search_conversations` capability.
-/// Returns `{ hits, indexed }`. `indexed: false` means the message index isn't
-/// wired (e.g. the embedder sidecar never ran), so the UI can explain why there
-/// are no results rather than implying the chats are empty.
+/// `GET /api/conversations/search?q=…&limit=…&mode=…` — exact and semantic search
+/// over individual chat messages, the human-facing surface of the
+/// `search_conversations` capability. `all` (the default) merges lexical FTS hits
+/// with embedding hits and de-duplicates by message id. Returns `{ hits, indexed }`.
 #[utoipa::path(
     get,
     path = "/api/conversations/search",
     tag = "Conversations",
     summary = "Semantic search over past chat messages",
-    params(
-        ("q" = String, Query, description = "Natural-language search query"),
-        ("limit" = Option<usize>, Query, description = "Max hits (default 20, max 100)")
+	params(
+		("q" = String, Query, description = "Natural-language search query"),
+		("limit" = Option<usize>, Query, description = "Max hits (default 20, max 100)"),
+		("mode" = Option<String>, Query, description = "exact, semantic, or all (default)")
     ),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -18489,9 +21202,17 @@ async fn search_conversations_handler(
 ) -> axum::response::Response {
     let query = params.q.trim();
     if query.is_empty() {
-        return Json(json!({ "hits": [], "indexed": true })).into_response();
+        return Json(json!({
+            "hits": [],
+            "indexed": state.conversations.chat_memory_enabled()
+        }))
+        .into_response();
     }
     let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let mode = params.mode.as_deref().unwrap_or("all");
+    let chat_memory_enabled = state.conversations.chat_memory_enabled();
+    let semantic_enabled = mode != "exact" && chat_memory_enabled;
+    let exact_enabled = mode != "semantic" && chat_memory_enabled;
 
     // Per-resource ACL. This is a SEMANTIC SEARCH ACROSS EVERY MESSAGE ON THE NODE
     // and it was completely ungated — on a shared node any caller could type a
@@ -18500,39 +21221,72 @@ async fn search_conversations_handler(
     // `search_messages` already accepts. On an unbound node the id list is every
     // conversation (unchanged behaviour); on a bound node an anonymous caller gets
     // an empty set and therefore no hits, never a node-wide dump.
-    let (user_id, org_id, node_bound) = tenancy_filter_args(&caller);
+    let (user_id, org_id, team_ids_json, node_bound) = tenancy_filter_args(&caller);
     let visible = match state
         .conversations
-        .visible_conversation_ids(user_id.as_deref(), org_id.as_deref(), node_bound)
+        .visible_conversation_ids_for_teams(
+            user_id.as_deref(),
+            org_id.as_deref(),
+            node_bound,
+            team_ids_json.as_deref(),
+        )
         .await
     {
         Ok(ids) => ids,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
     if visible.is_empty() {
-        return Json(json!({ "hits": [], "indexed": true })).into_response();
+        return Json(json!({ "hits": [], "indexed": chat_memory_enabled })).into_response();
     }
 
-    match state
-        .conversations
-        .search_messages(query, limit, Some(&visible))
-        .await
-    {
-        Ok(Some(hits)) => {
-            // Belt and braces: post-filter against the same id set, so a stale vector
-            // row (e.g. one orphaned by a re-tenanted conversation) can never leak a
-            // snippet even if the index-side filter is bypassed.
-            let allowed: std::collections::HashSet<&str> =
-                visible.iter().map(String::as_str).collect();
-            let hits: Vec<_> = hits
-                .into_iter()
-                .filter(|h| allowed.contains(h.conversation_id.as_str()))
-                .collect();
-            Json(json!({ "hits": hits, "indexed": true })).into_response()
+    let exact_hits = if exact_enabled {
+        match state
+            .conversations
+            .fts_search_messages(query, limit, Some(&visible))
+            .await
+        {
+            Ok(hits) => hits,
+            Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         }
-        Ok(None) => Json(json!({ "hits": [], "indexed": false })).into_response(),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    } else {
+        None
+    };
+    let semantic_hits = if semantic_enabled {
+        match state
+            .conversations
+            .search_messages(query, limit, Some(&visible))
+            .await
+        {
+            Ok(hits) => hits,
+            Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        }
+    } else {
+        None
+    };
+    let exact_indexed = exact_hits.is_some();
+    let semantic_indexed = semantic_hits.is_some();
+
+    // Belt and braces: post-filter against the same id set, so a stale vector/FTS
+    // row (e.g. one orphaned by a re-tenanted conversation) can never leak a
+    // snippet even if the index-side filter is bypassed. Exact hits lead because a
+    // literal message match is the strongest answer to a literal query.
+    let allowed: std::collections::HashSet<&str> = visible.iter().map(String::as_str).collect();
+    let mut merged = Vec::with_capacity(limit.saturating_mul(2));
+    let mut seen = std::collections::HashSet::new();
+    for hit in exact_hits
+        .into_iter()
+        .flatten()
+        .chain(semantic_hits.into_iter().flatten())
+    {
+        if allowed.contains(hit.conversation_id.as_str()) && seen.insert(hit.message_id.clone()) {
+            merged.push(hit);
+            if merged.len() >= limit {
+                break;
+            }
+        }
     }
+    let indexed = exact_indexed || semantic_indexed;
+    Json(json!({ "hits": merged, "indexed": indexed })).into_response()
 }
 
 #[utoipa::path(
@@ -18540,13 +21294,18 @@ async fn search_conversations_handler(
     path = "/api/conversations/{id}",
     tag = "Conversations",
     summary = "Get a conversation with messages",
-    params(("id" = String, Path)),
+    params(
+        ("id" = String, Path),
+        ("limit" = Option<usize>, Query, description = "Return the newest message page; max 100"),
+        ("before" = Option<String>, Query, description = "Return messages before this message id")
+    ),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn get_conversation(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ConversationMessagesQuery>,
 ) -> axum::response::Response {
     // Per-resource ACL: a conversation carries its own tenancy, so holding the
     // node token is NOT enough to read someone else's chat. (There is no coarse
@@ -18558,7 +21317,16 @@ async fn get_conversation(
     ) {
         return resp;
     }
-    match state.conversations.get_conversation_detail(&id).await {
+    let detail = match query.limit {
+        Some(limit) => {
+            state
+                .conversations
+                .get_conversation_message_page(&id, query.before.as_deref(), limit.clamp(1, 100))
+                .await
+        }
+        None => state.conversations.get_conversation_detail(&id).await,
+    };
+    match detail {
         Ok(Some(detail)) => Json(detail).into_response(),
         Ok(None) => json_error(
             StatusCode::NOT_FOUND,
@@ -19347,6 +22115,67 @@ async fn set_conversation_icon_handler(
     }
 }
 
+/// `POST /api/conversations/:id/visibility` — share a conversation with the
+/// organization or return it to the owner-only private scope.
+#[utoipa::path(
+    post,
+    path = "/api/conversations/{id}/visibility",
+    tag = "Conversations",
+    summary = "Set a conversation's sharing visibility",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn set_conversation_visibility_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<SetVisibilityBody>,
+) -> axum::response::Response {
+    if let Err(resp) = require_resource_write(
+        state.conversations.get_access_meta(&id).await,
+        caller.as_ref(),
+        &format!("conversation '{id}' not found"),
+    ) {
+        return resp;
+    }
+    let (visibility, team_id) =
+        match validate_visibility(body.visibility.as_deref(), body.team_id.as_deref()) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, message),
+        };
+    match state
+        .conversations
+        .set_visibility(
+            &id,
+            visibility,
+            team_id,
+            visibility_admin_authorized(caller.as_ref()),
+        )
+        .await
+    {
+        Ok(true) => Json(json!({
+            "ok": true,
+            "visibility": visibility,
+            "team_id": team_id,
+        }))
+        .into_response(),
+        Ok(false) => json_error(
+            StatusCode::NOT_FOUND,
+            format!("conversation '{id}' not found"),
+        ),
+        Err(e) => {
+            let message = e.to_string();
+            let status = if message.contains("only organization admins") {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            json_error(status, message)
+        }
+    }
+}
+
 // ── Goal handlers (`/goal`) ───────────────────────────────────────────────────
 //
 // A goal is a persistent completion condition attached to a conversation. The
@@ -19910,9 +22739,9 @@ async fn resolve_context_window(
     )
 }
 
-/// Recent-message window a `/btw` side question sees when it loads the transcript
-/// from a stored conversation (clients that pass their own `messages` aren't
-/// bounded here). Matches the goal judge's window.
+/// Recent-message window a `/btw` side question sees. Both stored-conversation
+/// reads and client-supplied transcripts are bounded here so a plugin client
+/// cannot accidentally turn a side question into an unbounded context request.
 const BTW_TRANSCRIPT_LIMIT: usize = 30;
 
 /// Resolve a "side model" effort/thinking level from a preference key, falling
@@ -20010,7 +22839,7 @@ pub(crate) async fn call_side_model(
 // discards. This is the inverse of a sub-agent: full context, no tools.
 //
 // Like double-check it reuses [`call_side_model`] (one non-streaming gateway
-// call, persists nothing). The endpoint is top-level (`POST /api/btw`, not under
+// call). The endpoint is top-level (`POST /api/btw`, not under
 // `/conversations/:id`) because some clients hold the transcript themselves and
 // have no Core conversation id: the body carries either a `messages` array (CLI,
 // mobile — the client's own transcript) or a `conversation_id` (desktop — Core
@@ -20068,7 +22897,9 @@ struct BtwBody {
 }
 
 /// `POST /api/btw` — answer an ephemeral side question against the conversation
-/// context. Stateless: Core persists nothing. Returns `{ answer, model }`.
+/// context. The answer is persisted as a side-chat entry when a parent
+/// conversation id is supplied, but never added to the main message timeline.
+/// Returns `{ answer, model, id }`.
 #[utoipa::path(
     post,
     path = "/api/btw",
@@ -20101,11 +22932,14 @@ async fn btw_handler(
     // conversation. Either is fine — a `/btw` with no prior context still works
     // (it just has less to draw on).
     let transcript = match body.messages {
-        Some(msgs) if !msgs.is_empty() => msgs
-            .iter()
-            .map(|m| format!("[{}] {}", m.role, m.content))
-            .collect::<Vec<_>>()
-            .join("\n\n"),
+        Some(msgs) if !msgs.is_empty() => {
+            let start = msgs.len().saturating_sub(BTW_TRANSCRIPT_LIMIT);
+            msgs[start..]
+                .iter()
+                .map(|m| format!("[{}] {}", m.role, m.content))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        }
         _ => match body.conversation_id.as_deref().filter(|s| !s.is_empty()) {
             Some(cid) => state
                 .conversations
@@ -20179,7 +23013,7 @@ async fn btw_handler(
 
 /// Preference key holding the (stronger) advisor model. Shared with the
 /// `@ryu/advisor` turn-hook plugin's settings tab so one picker drives both
-/// the auto-review hook and the `advisor__consult` tool.
+/// the auto-review hook and the `advisor.consult` tool.
 const ADVISOR_MODEL_PREF: &str = "advisor-model";
 
 /// Resolve the advisor model, swappable and never hardcoded to a remote provider:
@@ -20211,7 +23045,7 @@ async fn resolve_advisor_model(state: &ServerState, explicit: Option<&str>) -> S
     crate::registry::DEFAULT_LOCAL_CHAT_MODEL_ID.to_string()
 }
 
-/// `POST /api/advisor/consult` request body — mirrors the `advisor__consult`
+/// `POST /api/advisor/consult` request body — mirrors the `advisor.consult`
 /// tool's `input_schema` (fixtures/advisor.manifest.json). The agent supplies the
 /// context it wants reviewed (the transcript is not reachable at tool dispatch).
 #[derive(serde::Deserialize)]
@@ -20224,7 +23058,7 @@ struct AdvisorConsultBody {
 }
 
 /// `POST /api/advisor/consult` — the loopback bridge behind the declarative
-/// `advisor__consult` plugin tool. Consult a stronger reviewer model for a second
+/// `advisor.consult` plugin tool. Consult a stronger reviewer model for a second
 /// opinion: resolve the swappable advisor model, build the review prompt from the
 /// agent-supplied `question`/`context`, and route ONE high-effort, non-streaming
 /// completion through the Gateway (`call_side_model`). Returns `{ ok, model,
@@ -20477,10 +23311,15 @@ async fn list_runs_handler(
 ) -> axum::response::Response {
     // Per-resource ACL, in SQL: a run IS a conversation, so listing every run on
     // the node handed out every user's run titles + working folders.
-    let (user_id, org_id, node_bound) = tenancy_filter_args(&caller);
+    let (user_id, org_id, team_ids_json, node_bound) = tenancy_filter_args(&caller);
     match state
         .conversations
-        .list_runs_visible(user_id.as_deref(), org_id.as_deref(), node_bound)
+        .list_runs_visible_for_teams(
+            user_id.as_deref(),
+            org_id.as_deref(),
+            node_bound,
+            team_ids_json.as_deref(),
+        )
         .await
     {
         Ok(items) => Json(json!({ "runs": items })).into_response(),
@@ -20529,10 +23368,15 @@ async fn runs_stream(
     let rx = conversations::subscribe_run_events();
     // Per-resource ACL on the opening snapshot: this used to fan out EVERY run on
     // the node to every subscriber.
-    let (user_id, org_id, node_bound) = tenancy_filter_args(&caller);
+    let (user_id, org_id, team_ids_json, node_bound) = tenancy_filter_args(&caller);
     let visible_runs = state
         .conversations
-        .list_runs_visible(user_id.as_deref(), org_id.as_deref(), node_bound)
+        .list_runs_visible_for_teams(
+            user_id.as_deref(),
+            org_id.as_deref(),
+            node_bound,
+            team_ids_json.as_deref(),
+        )
         .await
         .unwrap_or_default();
     let snapshot = RunStreamFrame::Snapshot { runs: visible_runs };
@@ -20759,25 +23603,40 @@ async fn list_sessions_for_conversation_handler(
     }
 }
 
-/// Resolve an agent id to its engine (the `AgentInfo.engine` value, e.g.
-/// `claude`/`codex`), so the native-history reader knows which on-disk store to
-/// read. Falls back to the id with any `acp:` prefix stripped when the agent is
-/// not in the registry (BYO agents), which is a no-op for unknown engines.
-fn resolve_agent_engine(state: &ServerState, agent_id: &str) -> Option<String> {
+/// Resolve a registered agent id to its engine (the `AgentInfo.engine` value,
+/// e.g. `claude`/`codex`), so the native-history reader knows which on-disk store
+/// to read. Native history is a privileged local capability: an arbitrary agent
+/// id must never become an arbitrary filesystem-backed engine selector.
+fn resolve_registered_agent_engine(state: &ServerState, agent_id: &str) -> Option<String> {
     state
         .agents
         .list_infos()
         .into_iter()
         .find(|i| i.id == agent_id)
         .and_then(|i| i.engine)
-        .or_else(|| {
-            Some(
-                agent_id
-                    .strip_prefix("acp:")
-                    .unwrap_or(agent_id)
-                    .to_string(),
-            )
-        })
+        .map(|engine| engine.strip_prefix("acp:").unwrap_or(&engine).to_string())
+}
+
+/// Native-history files belong to the node, so a registered/shared node must
+/// establish the caller's tenancy before Core touches the native transcript
+/// directory. This check intentionally runs before agent resolution and before
+/// `spawn_blocking`: the filesystem reader is not an authorization mechanism.
+fn native_history_access_denied(
+    caller: Option<&crate::identity_verify::VerifiedCaller>,
+) -> Option<axum::response::Response> {
+    let node = crate::sidecar::control_plane::registered_node()?;
+    let Some(caller) = caller else {
+        return Some(json_error(
+            StatusCode::FORBIDDEN,
+            "native history requires an authenticated caller".to_string(),
+        ));
+    };
+    node_scope_denial_reason(&node, caller).map(|reason| {
+        json_error(
+            StatusCode::FORBIDDEN,
+            format!("native history is outside this caller's node scope: {reason}"),
+        )
+    })
 }
 
 /// List the threads in an agent's own on-disk history store (Claude Code / Codex)
@@ -20797,10 +23656,14 @@ fn resolve_agent_engine(state: &ServerState, agent_id: &str) -> Option<String> {
 )]
 async fn list_agent_threads_handler(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
-    let engine = match resolve_agent_engine(&state, &agent_id) {
+    if let Some(response) = native_history_access_denied(caller.as_ref()) {
+        return response;
+    }
+    let engine = match resolve_registered_agent_engine(&state, &agent_id) {
         Some(e) => e,
         None => {
             return Json(json!({ "agent_id": agent_id, "threads": [] })).into_response();
@@ -20991,7 +23854,41 @@ async fn import_agent_thread_handler(
     axum::extract::Path(agent_id): axum::extract::Path<String>,
     Json(body): Json<ImportThreadBody>,
 ) -> axum::response::Response {
-    let engine = match resolve_agent_engine(&state, &agent_id) {
+    if let Some(response) = native_history_access_denied(caller.as_ref()) {
+        return response;
+    }
+    import_agent_thread_inner(&state, &caller, agent_id, body, None).await
+}
+
+/// Import a native thread from the in-process sync worker. This is deliberately
+/// separate from the HTTP handler: the worker has an explicit service context,
+/// while the HTTP path must continue to require a verified human caller on a
+/// registered node.
+pub(crate) async fn import_agent_thread_for_sync(
+    state: &ServerState,
+    agent_id: String,
+    thread_id: String,
+) -> axum::response::Response {
+    let tenancy = crate::sidecar::control_plane::registered_org()
+        .map(|org| conversations::Tenancy::shared_with_org(&org.id));
+    import_agent_thread_inner(
+        state,
+        &None,
+        agent_id,
+        ImportThreadBody { thread_id },
+        tenancy,
+    )
+    .await
+}
+
+async fn import_agent_thread_inner(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    agent_id: String,
+    body: ImportThreadBody,
+    tenancy_override: Option<conversations::Tenancy>,
+) -> axum::response::Response {
+    let engine = match resolve_registered_agent_engine(&state, &agent_id) {
         Some(e) => e,
         None => return json_error(StatusCode::BAD_REQUEST, "unknown agent".to_string()),
     };
@@ -21030,7 +23927,9 @@ async fn import_agent_thread_handler(
                 let missing_messages =
                     missing_imported_message_tail(&existing_messages, &imported.messages);
                 let messages_added = missing_messages.len();
-                let tenancy = caller_tenancy(&caller);
+                let tenancy = tenancy_override
+                    .clone()
+                    .unwrap_or_else(|| caller_tenancy(caller));
                 for msg in missing_messages {
                     if let Err(e) = state
                         .conversations
@@ -21048,6 +23947,26 @@ async fn import_agent_thread_handler(
                     {
                         return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
                     }
+                }
+                if messages_added > 0 {
+                    crate::events::publish_system_notification_for_user(
+                        "Thread import updated",
+                        format!(
+                            "{} synced {messages_added} new messages from {engine}.",
+                            imported.thread.title
+                        ),
+                        "success",
+                        caller.as_ref().map(|verified| verified.user_id.clone()),
+                    );
+                }
+                if let Some(native_id) = imported.thread.native_session_id.as_deref() {
+                    crate::server::agent_sync::remember_native_session(
+                        &existing,
+                        &agent_id,
+                        &engine,
+                        native_id,
+                        imported.thread.cwd.as_deref(),
+                    );
                 }
                 return Json(json!({
                     "conversation_id": existing,
@@ -21073,7 +23992,9 @@ async fn import_agent_thread_handler(
     // untenanted, which `resource_access` denies to EVERYONE on an org-bound node —
     // the importer would 403 out of the thread they just imported. No-op on a
     // personal node (see `caller_tenancy`).
-    let tenancy = caller_tenancy(&caller);
+    let tenancy = tenancy_override
+        .clone()
+        .unwrap_or_else(|| caller_tenancy(caller));
     if let Err(e) = state
         .conversations
         .ensure_conversation(
@@ -21085,6 +24006,15 @@ async fn import_agent_thread_handler(
         .await
     {
         return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    if let Some(native_id) = imported.thread.native_session_id.as_deref() {
+        crate::server::agent_sync::remember_native_session(
+            &conversation_id,
+            &agent_id,
+            &engine,
+            native_id,
+            imported.thread.cwd.as_deref(),
+        );
     }
     for msg in &imported.messages {
         if let Err(e) = state
@@ -21148,6 +24078,13 @@ async fn import_agent_thread_handler(
     {
         tracing::warn!("import: failed to set title for {conversation_id}: {e:#}");
     }
+
+    crate::events::publish_system_notification_for_user(
+        "Thread imported",
+        format!("{} is ready from {engine}.", imported.thread.title),
+        "success",
+        caller.as_ref().map(|verified| verified.user_id.clone()),
+    );
 
     Json(json!({
         "conversation_id": conversation_id,
@@ -21237,16 +24174,59 @@ async fn run_import_handler(
     if body.items.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "no items selected".to_string());
     }
-    let mut results = Vec::with_capacity(body.items.len());
-    for selection in body.items {
-        let outcome = import_setup_item(&state, &caller, &root, &selection).await;
-        results.push(outcome);
-    }
+    let results = apply_import_selections(&state, &caller, &root, body.items).await;
+    let imported = results
+        .iter()
+        .filter(|outcome| outcome.status == "imported")
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|outcome| outcome.status == "skipped")
+        .count();
+    let failed = results
+        .iter()
+        .filter(|outcome| outcome.status == "failed")
+        .count();
+    let source = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("agent setup");
+    let level = if failed > 0 {
+        "warning"
+    } else if imported > 0 {
+        "success"
+    } else {
+        "info"
+    };
+    crate::events::publish_system_notification_for_user(
+        "Import complete",
+        format!("{imported} imported, {skipped} already present, {failed} failed from {source}."),
+        level,
+        caller.as_ref().map(|verified| verified.user_id.clone()),
+    );
     Json(json!({
         "root": root.to_string_lossy(),
         "results": results,
     }))
     .into_response()
+}
+
+/// Apply a selected setup batch through the existing import store seams. The
+/// shared agent-sync worker uses this same function, which prevents the legacy
+/// `/api/import/run` path and automatic sync from creating divergent import
+/// semantics or duplicate schedulers.
+pub(crate) async fn apply_import_selections(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    root: &std::path::Path,
+    selections: Vec<crate::import::ImportSelection>,
+) -> Vec<crate::import::ImportOutcome> {
+    let mut results = Vec::with_capacity(selections.len());
+    for selection in selections {
+        results.push(import_setup_item(state, caller, root, &selection).await);
+    }
+    results
 }
 
 /// Dispatch one selected import item to its destination store. Falls back to a
@@ -21420,7 +24400,7 @@ async fn import_mcp_item(
             crate::import::kind::MCP_SERVER,
             &selection.id,
             &title,
-            "MCP server declares neither a command (stdio) nor a url (http), or both",
+            "MCP server declares neither a command (stdio) nor a url (remote), or both",
         );
     }
     if let Some(url) = &cfg.url {
@@ -21657,6 +24637,7 @@ async fn import_agent_item(
         name: sub.name,
         version: "1.0.0".to_owned(),
         agent_config: crate::agents::AgentTemplateConfig {
+            title: String::new(),
             description: sub.description,
             system_prompt: Some(sub.system_prompt),
             tools: sub.tools,
@@ -21674,6 +24655,7 @@ async fn import_agent_item(
             memory: None,
             persona: None,
             policy_ref: None,
+            schedules: Vec::new(),
         },
     };
     match state.agent_store.create(template.into_create_agent()).await {
@@ -21784,90 +24766,58 @@ async fn write_imported_mcp_entry(
     name: &str,
     mut cfg: crate::sidecar::mcp::McpServerConfig,
 ) -> Result<(), (StatusCode, String)> {
-    use crate::sidecar::mcp::McpServerConfig;
-
-    let cfg_path = crate::sidecar::mcp::McpRegistry::config_path();
     cfg.enabled = true;
-    // `name` is a borrowed `&str`; clone so the blocking closure can own it.
     let name = name.to_string();
-
-    let result = tokio::task::spawn_blocking(move || -> Result<(), (StatusCode, String)> {
-        if let Some(parent) = cfg_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("cannot create config dir: {e}"),
-                )
-            })?;
-        }
-        let mut file_map: std::collections::BTreeMap<String, McpServerConfig> = if cfg_path.exists()
-        {
-            let raw = std::fs::read_to_string(&cfg_path).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("cannot read mcp.json: {e}"),
-                )
-            })?;
-            let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("mcp.json is malformed (fix it before importing): {e}"),
-                )
-            })?;
-            val.get("mcpServers")
-                .and_then(|v| {
-                    serde_json::from_value::<std::collections::BTreeMap<String, McpServerConfig>>(
-                        v.clone(),
-                    )
-                    .ok()
-                })
-                .unwrap_or_default()
+    crate::sidecar::mcp::McpConfigStore::mutate(
+        crate::sidecar::mcp::McpRegistry::config_path(),
+        move |document| {
+            let servers = crate::sidecar::mcp::McpConfigStore::servers_mut(document)?;
+            if servers.contains_key(&name) {
+                return Err(format!(
+                    "conflict: MCP server '{name}' is already in mcp.json"
+                ));
+            }
+            crate::sidecar::mcp::McpConfigStore::replace_server(servers, name, &cfg)?;
+            Ok((true, ()))
+        },
+    )
+    .await
+    .map_err(|error| {
+        let status = if error.starts_with("conflict:") {
+            StatusCode::CONFLICT
+        } else if error.contains("malformed") {
+            StatusCode::BAD_REQUEST
         } else {
-            std::collections::BTreeMap::new()
+            StatusCode::INTERNAL_SERVER_ERROR
         };
-        if file_map.contains_key(&name) {
-            return Err((
-                StatusCode::CONFLICT,
-                format!("MCP server '{name}' is already in mcp.json"),
-            ));
-        }
-        file_map.insert(name.to_string(), cfg);
-        let out = serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": file_map }))
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to serialize mcp.json: {e}"),
-                )
-            })?;
-        let tmp = cfg_path.with_extension("json.tmp");
-        write_secret_file(&tmp, out.as_bytes()).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to write mcp.json: {e}"),
-            )
-        })?;
-        std::fs::rename(&tmp, &cfg_path).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to rename mcp.json.tmp: {e}"),
-            )
-        })?;
-        Ok(())
+        (
+            status,
+            error
+                .strip_prefix("conflict: ")
+                .unwrap_or(&error)
+                .to_owned(),
+        )
     })
-    .await;
-
-    match result {
-        Ok(inner) => inner,
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("write task panicked: {e}"),
-        )),
-    }
 }
 
-/// Real tools available for an agent. For ACP agents this is the set of tools
-/// the agent has actually invoked this run (they expose no static catalog);
-/// for OpenAI-compatible agents it is currently empty.
+/// Resolve the effective MCP tool scope for an agent. The operator environment
+/// override wins over the persisted agent card. When
+/// neither is configured, the card's empty legacy value and `*` marker both
+/// resolve to unrestricted access; an explicit no-capabilities marker resolves
+/// to an empty allowlist.
+async fn resolved_agent_tool_allowlist(state: &ServerState, agent_id: &str) -> Option<Vec<String>> {
+    if let Some(allowlist) = state.agents.allowlist_for(agent_id) {
+        return Some(allowlist);
+    }
+    state
+        .agent_store
+        .get(agent_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|record| record.mcp_tool_allowlist())
+}
+
 #[utoipa::path(
     get,
     path = "/api/agents/{id}/tools",
@@ -21882,10 +24832,10 @@ async fn list_tools(
 ) -> Json<serde_json::Value> {
     // Tools the ACP agent has actually invoked this run...
     let observed = state.agents.tools_for(&agent_id);
-    // ...plus the registered MCP tools this agent is allowed to use. Registered
-    // once in config, every agent can reach them (U13). The per-agent allowlist
-    // is resolved from the registry config when present.
-    let allowlist = state.agents.allowlist_for(&agent_id);
+    // ...plus the registered MCP tools this agent is allowed to use. The
+    // persisted agent card supplies the default scope and the registry config
+    // can provide an operator override.
+    let allowlist = resolved_agent_tool_allowlist(&state, &agent_id).await;
     let mcp = state.mcp.tools_for_agent(allowlist.as_deref()).await;
     Json(json!({ "tools": observed, "mcpTools": mcp }))
 }
@@ -21935,14 +24885,37 @@ struct CreateMcpServerBody {
     description: Option<String>,
 }
 
+/// MCP server definitions are node-wide configuration, not per-caller data.
+/// Every mutating route shares this gate so a caller cannot bypass the desktop
+/// settings UI by writing `mcp.json` through a different HTTP verb.
+async fn enforce_mcp_configuration(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+) -> Result<(), axum::response::Response> {
+    if enforce_permission(
+        state,
+        caller,
+        crate::identity_verify::permissions::GATEWAY_CONFIGURE,
+    )
+    .await
+    .is_err()
+    {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: gateway.configure".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// `POST /api/mcp/servers` — append a new user-defined MCP server to
 /// `~/.ryu/mcp.json` and reload the registry so tools are immediately
 /// discoverable without restarting Core.
 ///
 /// Validation:
-/// - `name` must be non-empty and must not contain `__` (the tool-id separator
+/// - `name` must be non-empty and must not contain `__` (the legacy tool-id separator
 ///   that `split_tool_id` uses to route calls).
-/// - `command` must be non-empty.
+/// - exactly one of `command` (stdio) or `url` (remote) must be non-empty.
 /// - `name` must not already be registered (built-ins included).
 ///
 /// Write strategy: read the current `mcp.json` user map (parse-fail → 400 to
@@ -21959,20 +24932,25 @@ struct CreateMcpServerBody {
 )]
 async fn create_mcp_server(
     State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<CreateMcpServerBody>,
 ) -> axum::response::Response {
     use crate::sidecar::mcp::McpServerConfig;
+
+    if let Err(response) = enforce_mcp_configuration(&state, &caller).await {
+        return response;
+    }
 
     let name = body.name.trim().to_string();
     if name.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "name is required".to_owned());
     }
-    // The `__` separator is used by `split_tool_id`; a server name containing it
-    // would make tool routing ambiguous.
+    // The legacy `__` separator is accepted only at the compatibility ingress;
+    // rejecting it keeps an mcp.json key unambiguous when old ids are read.
     if name.contains("__") {
         return json_error(
             StatusCode::BAD_REQUEST,
-            "name must not contain '__' (reserved tool-id separator)".to_owned(),
+            "name must not contain '__' (reserved legacy tool-id separator)".to_owned(),
         );
     }
 
@@ -21995,13 +24973,13 @@ async fn create_mcp_server(
         (None, None) => {
             return json_error(
                 StatusCode::BAD_REQUEST,
-                "either `command` (stdio) or `url` (http) is required".to_owned(),
+                "either `command` (stdio) or `url` (remote) is required".to_owned(),
             )
         }
         (Some(_), Some(_)) => {
             return json_error(
                 StatusCode::BAD_REQUEST,
-                "`command` and `url` are mutually exclusive — a server is either stdio or http"
+                "`command` and `url` are mutually exclusive — a server is either stdio or remote"
                     .to_owned(),
             )
         }
@@ -22028,144 +25006,294 @@ async fn create_mcp_server(
         );
     }
 
-    let cfg_path = crate::sidecar::mcp::McpRegistry::config_path();
-
-    // Read-modify-write the user's mcp.json. A malformed existing file is a
-    // 400 (not a 500) so the user can fix and retry; we must not clobber it.
-    let write_result = tokio::task::spawn_blocking({
-        let name = name.clone();
-        let cfg_path = cfg_path.clone();
-        let new_cfg = McpServerConfig {
-            command: command.clone(),
-            transport: body.transport.clone(),
-            url: url.clone(),
-            headers: body.headers.clone(),
-            auth: None,
-            owner_plugin_id: None,
-            owner_server_name: None,
-            args: body.args.clone(),
-            env: body.env.clone(),
-            description: body.description.clone(),
-            enabled: true,
-            // Manually-added server — no catalog provenance, so no update signal.
-            version: None,
-            catalog_id: None,
-        };
-        move || -> Result<(), (StatusCode, String)> {
-            // Ensure the parent directory exists.
-            if let Some(parent) = cfg_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("cannot create config dir: {e}"),
-                    )
-                })?;
-            }
-
-            // Parse existing user file, or start from an empty map.
-            let mut file_map: std::collections::BTreeMap<String, McpServerConfig> =
-                if cfg_path.exists() {
-                    let raw = std::fs::read_to_string(&cfg_path).map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("cannot read mcp.json: {e}"),
-                        )
-                    })?;
-                    // Parse as a raw JSON Value first so we can detect parse errors
-                    // and return a 400 without corrupting the file.
-                    let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            format!("mcp.json is malformed (fix it before adding): {e}"),
-                        )
-                    })?;
-                    // Extract only `mcpServers` — the key we own. Other unknown
-                    // top-level keys are preserved by round-tripping via raw Value.
-                    val.get("mcpServers")
-                        .and_then(|v| {
-                            serde_json::from_value::<
-                                std::collections::BTreeMap<String, McpServerConfig>,
-                            >(v.clone())
-                            .ok()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    std::collections::BTreeMap::new()
-                };
-
-            // Duplicate check in the file map (handles the rare race between the
-            // in-memory `contains_server` check above and the write).
-            if file_map.contains_key(&name) {
-                return Err((
-                    StatusCode::CONFLICT,
-                    format!("MCP server '{name}' is already in mcp.json"),
+    let new_cfg = McpServerConfig {
+        command,
+        transport: body.transport,
+        url,
+        headers: body.headers,
+        auth: None,
+        owner_plugin_id: None,
+        owner_server_name: None,
+        args: body.args,
+        env: body.env,
+        description: body.description,
+        enabled: true,
+        version: None,
+        catalog_id: None,
+    };
+    let config_name = name.clone();
+    let write_result = crate::sidecar::mcp::McpConfigStore::mutate(
+        crate::sidecar::mcp::McpRegistry::config_path(),
+        move |document| {
+            let servers = crate::sidecar::mcp::McpConfigStore::servers_mut(document)?;
+            if servers.contains_key(&config_name) {
+                return Err(format!(
+                    "conflict: MCP server '{config_name}' is already in mcp.json"
                 ));
             }
-
-            file_map.insert(name, new_cfg);
-
-            // Reconstruct the file. We only write `mcpServers`; any other keys
-            // the user had in the file are not preserved (they are rare), but
-            // we parse only `mcpServers` on load anyway so this is safe.
-            let out = serde_json::to_string_pretty(&serde_json::json!({
-                "mcpServers": file_map
-            }))
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to serialize mcp.json: {e}"),
-                )
-            })?;
-
-            // Atomic write via tmp + rename. write_secret_file sets 0o600 on Unix.
-            let tmp = cfg_path.with_extension("json.tmp");
-            write_secret_file(&tmp, out.as_bytes()).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to write mcp.json: {e}"),
-                )
-            })?;
-            std::fs::rename(&tmp, &cfg_path).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to rename mcp.json.tmp: {e}"),
-                )
-            })?;
-
-            Ok(())
-        }
-    })
+            crate::sidecar::mcp::McpConfigStore::replace_server(servers, config_name, &new_cfg)?;
+            Ok((true, ()))
+        },
+    )
     .await;
-
-    match write_result {
-        Ok(Ok(())) => {}
-        Ok(Err((status, msg))) => return json_error(status, msg),
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("write task panicked: {e}"),
-            )
-        }
+    if let Err(error) = write_result {
+        let status = if error.starts_with("conflict:") {
+            StatusCode::CONFLICT
+        } else if error.contains("malformed") {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        return json_error(
+            status,
+            error
+                .strip_prefix("conflict: ")
+                .unwrap_or(&error)
+                .to_owned(),
+        );
     }
 
     // Reload the in-memory registry so the new server appears in subsequent
     // GET /api/mcp/servers and GET /api/mcp/tools calls without a restart.
     state.mcp.reload();
+    let server = state
+        .mcp
+        .server_summaries()
+        .into_iter()
+        .find(|summary| summary.name == name);
 
     (
         StatusCode::CREATED,
         Json(json!({
             "ok": true,
-            "server": {
-                "name": name,
-                "command": command,
-                "args": body.args,
-                "description": body.description,
-                "enabled": true,
-            }
+            "server": server,
         })),
     )
         .into_response()
+}
+
+/// A partial update for a user-owned MCP server. Values from `env` and
+/// `headers` equal to `MCP_MASKED_SECRET` keep their existing secret; Core never
+/// returns those values to the desktop.
+#[derive(serde::Deserialize)]
+struct UpdateMcpServerBody {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default, rename = "type")]
+    transport: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    headers: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    env: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+const MCP_MASKED_SECRET: &str = "••••••";
+
+fn merge_mcp_secret_map(
+    current: &std::collections::BTreeMap<String, String>,
+    incoming: std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    incoming
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim().to_owned();
+            if key.is_empty() {
+                return None;
+            }
+            if value == MCP_MASKED_SECRET || value.trim().is_empty() {
+                current.get(&key).map(|old| (key, old.clone()))
+            } else {
+                Some((key, value))
+            }
+        })
+        .collect()
+}
+
+/// `PUT /api/mcp/servers/:name` — update a user-owned server in `mcp.json`.
+/// Plugin-declared, Fleet-managed, and built-in rows are not user-owned and are
+/// refused by the file-map ownership check.
+async fn update_mcp_server(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(name): Path<String>,
+    Json(body): Json<UpdateMcpServerBody>,
+) -> axum::response::Response {
+    use crate::sidecar::mcp::McpServerConfig;
+
+    if let Err(response) = enforce_mcp_configuration(&state, &caller).await {
+        return response;
+    }
+
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "name is required".to_owned());
+    }
+    if let Some(url) = body.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        if let Err(e) = screen_agent_egress_url(url).await {
+            return json_error(StatusCode::BAD_REQUEST, format!("{e}"));
+        }
+    }
+
+    let config_name = name.clone();
+    let write_result = crate::sidecar::mcp::McpConfigStore::mutate(
+        crate::sidecar::mcp::McpRegistry::config_path(),
+        move |document| {
+            let servers = crate::sidecar::mcp::McpConfigStore::servers_mut(document)?;
+            let current_value = servers
+                .get(&config_name)
+                .ok_or_else(|| {
+                    format!("not_found: MCP server '{config_name}' is not user-configured")
+                })?
+                .clone();
+            let mut current: McpServerConfig =
+                serde_json::from_value(current_value).map_err(|error| {
+                    format!("bad_request: mcp.json contains an invalid server entry: {error}")
+                })?;
+
+            let wants_remote = match body.transport.as_deref() {
+                Some("http" | "streamable-http" | "streamable_http" | "sse") => true,
+                Some("stdio") => false,
+                Some(other) => {
+                    return Err(format!("bad_request: unsupported MCP transport '{other}'"))
+                }
+                None if body.url.is_some() => true,
+                None if body.command.is_some() => false,
+                None => current.url.is_some(),
+            };
+
+            if wants_remote {
+                let url = body
+                    .url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|u| !u.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| current.url.clone())
+                    .ok_or_else(|| {
+                        "bad_request: endpoint URL is required for a remote MCP server".to_owned()
+                    })?;
+                current.command = None;
+                current.url = Some(url);
+                current.transport = Some(
+                    body.transport
+                        .clone()
+                        .unwrap_or_else(|| "streamable-http".to_owned()),
+                );
+            } else {
+                let command = body
+                    .command
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| current.command.clone())
+                    .ok_or_else(|| {
+                        "bad_request: command is required for a stdio MCP server".to_owned()
+                    })?;
+                current.command = Some(command);
+                current.url = None;
+                current.transport =
+                    Some(body.transport.clone().unwrap_or_else(|| "stdio".to_owned()));
+            }
+
+            if let Some(args) = &body.args {
+                current.args = args.clone();
+            }
+            if let Some(env) = body.env.clone() {
+                current.env = merge_mcp_secret_map(&current.env, env);
+            }
+            if let Some(headers) = body.headers.clone() {
+                current.headers = merge_mcp_secret_map(&current.headers, headers);
+            }
+            if let Some(description) = &body.description {
+                current.description = if description.trim().is_empty() {
+                    None
+                } else {
+                    Some(description.clone())
+                };
+            }
+            if let Some(enabled) = body.enabled {
+                current.enabled = enabled;
+            }
+            crate::sidecar::mcp::McpConfigStore::replace_server(servers, config_name, &current)?;
+            Ok((true, ()))
+        },
+    )
+    .await;
+    if let Err(error) = write_result {
+        let (status, message) = if let Some(message) = error.strip_prefix("not_found: ") {
+            (StatusCode::NOT_FOUND, message.to_owned())
+        } else if let Some(message) = error.strip_prefix("bad_request: ") {
+            (StatusCode::BAD_REQUEST, message.to_owned())
+        } else if error.contains("malformed") {
+            (StatusCode::BAD_REQUEST, error)
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, error)
+        };
+        return json_error(status, message);
+    }
+
+    state.mcp.reload();
+    let server = state
+        .mcp
+        .server_summaries()
+        .into_iter()
+        .find(|summary| summary.name == name);
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "server": server })),
+    )
+        .into_response()
+}
+
+/// `DELETE /api/mcp/servers/:name` — remove a user-owned server from mcp.json.
+async fn delete_mcp_server(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(name): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) = enforce_mcp_configuration(&state, &caller).await {
+        return response;
+    }
+
+    let name = name.trim().to_owned();
+    let write_result = crate::sidecar::mcp::McpConfigStore::mutate(
+        crate::sidecar::mcp::McpRegistry::config_path(),
+        move |document| {
+            let servers = crate::sidecar::mcp::McpConfigStore::servers_mut(document)?;
+            if servers.remove(&name).is_none() {
+                return Err(format!(
+                    "not_found: MCP server '{name}' is not user-configured"
+                ));
+            }
+            Ok((true, ()))
+        },
+    )
+    .await;
+    match write_result {
+        Ok(()) => {
+            state.mcp.reload();
+            (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
+        }
+        Err(error) => {
+            let (status, message) = if let Some(message) = error.strip_prefix("not_found: ") {
+                (StatusCode::NOT_FOUND, message.to_owned())
+            } else if error.contains("malformed") {
+                (StatusCode::BAD_REQUEST, error)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, error)
+            };
+            json_error(status, message)
+        }
+    }
 }
 
 /// The active Mcp catalog source (the official MCP registry by default, or a
@@ -22340,8 +25468,27 @@ async fn mcp_updates(State(_state): State<ServerState>) -> Json<serde_json::Valu
 async fn mcp_catalog_install(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<McpCatalogInstallBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(app_lifecycle_denied_value(
+                crate::identity_verify::permissions::APP_INSTALL,
+                crate::sidecar::control_plane::registered_node().as_ref(),
+                "node_scope_or_acl_denied",
+            )),
+        );
+    }
+
     let id = body.id.trim().to_string();
     if id.is_empty() {
         return (
@@ -22639,6 +25786,32 @@ fn slugify_domain(domain: &str) -> String {
     out.trim_matches('-').to_owned()
 }
 
+/// Validate an endpoint that an imported API tool will call later.
+///
+/// The spec document itself is guarded by [`guarded_get_bytes`], but its
+/// `servers`/host fields are attacker-controlled data and become future HTTP
+/// runnable URLs. Re-parse the derived URL, reject credentials and non-HTTP
+/// schemes, and resolve the host through the same private-address screen used by
+/// other Core egress paths. Import endpoints intentionally do not honor the
+/// agent egress allowlist: an imported API must be public by default.
+async fn validate_import_endpoint(raw: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(raw.trim()).map_err(|e| format!("invalid endpoint URL: {e}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("imported endpoints must use http:// or https://".to_owned());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("imported endpoints must not contain URL credentials".to_owned());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "imported endpoint URL has no host".to_owned())?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "imported endpoint URL has no known port".to_owned())?;
+    resolve_guarded_host(host, port).await?;
+    Ok(url)
+}
+
 /// Synthesize the plugin governance record for an imported REST API: one `http`
 /// tool runnable per operation + a single egress grant scoped to the API host.
 /// Slugs are de-duplicated so no two runnables collide on the `app__<slug>` id.
@@ -22756,6 +25929,49 @@ async fn import_openapi_tools(
         Err(e) => return bad(StatusCode::UNPROCESSABLE_ENTITY, e),
     };
 
+    let base_url = match validate_import_endpoint(&api.base_url).await {
+        Ok(url) => url,
+        Err(error) => {
+            return bad(
+                StatusCode::BAD_REQUEST,
+                format!("invalid imported API endpoint: {error}"),
+            )
+        }
+    };
+    let base_host = base_url.host_str().unwrap_or_default();
+    if !base_host.eq_ignore_ascii_case(&api.domain) {
+        return bad(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "OpenAPI base host '{}' does not match declared API domain '{}'",
+                base_host, api.domain
+            ),
+        );
+    }
+    for tool in &api.tools {
+        let tool_url = match validate_import_endpoint(&tool.url).await {
+            Ok(url) => url,
+            Err(error) => {
+                return bad(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid imported operation endpoint: {error}"),
+                )
+            }
+        };
+        if tool_url
+            .host_str()
+            .map_or(true, |host| !host.eq_ignore_ascii_case(&api.domain))
+        {
+            return bad(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "operation endpoint host must remain on imported API domain '{}'",
+                    api.domain
+                ),
+            );
+        }
+    }
+
     let plugin_id = format!("apiimport-{}", slugify_domain(&api.domain));
     if crate::plugin_manifest::validate_plugin_id(&plugin_id).is_err() {
         return bad(
@@ -22860,16 +26076,15 @@ async fn import_graphql_tool(
             "`url` must not be empty".to_owned(),
         );
     }
-    let Some(domain) = reqwest::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-        .filter(|h| !h.is_empty())
-    else {
-        return bad(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("could not parse a host from '{url}'"),
-        );
+    let endpoint = match validate_import_endpoint(url).await {
+        Ok(endpoint) => endpoint,
+        Err(error) => return bad(StatusCode::BAD_REQUEST, error),
     };
+    let domain = endpoint
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .filter(|h| !h.is_empty())
+        .expect("validated import endpoint has a host");
     let name = body
         .name
         .as_deref()
@@ -22989,6 +26204,19 @@ mod api_import_tests {
         assert_eq!(slugify_domain("api.x.example"), "api-x-example");
         assert_eq!(slugify_domain("A.B_C"), "a-b-c");
     }
+
+    #[tokio::test]
+    async fn imported_endpoints_reject_private_hosts_and_credentials() {
+        let private = validate_import_endpoint("http://127.0.0.1:7980/graphql")
+            .await
+            .expect_err("loopback import must be rejected");
+        assert!(private.contains("private/loopback"));
+
+        let credentials = validate_import_endpoint("https://user:pass@example.com/api")
+            .await
+            .expect_err("credential-bearing import must be rejected");
+        assert!(credentials.contains("credentials"));
+    }
 }
 
 /// Create the plugin lifecycle record + on-disk manifest for a freshly-installed
@@ -23010,7 +26238,7 @@ mod api_import_tests {
 ///
 /// Pure (no I/O) so the install sink and its tests share exactly one definition of
 /// the record's shape. The MCP server name is the plugin id: external servers
-/// self-namespace their tools as `server__tool`, so `id == server_name` lets the
+/// self-namespace their tools as `server.tool`, so `id == server_name` lets the
 /// plugin model resolve the owner of any such tool. Returns `None` when the server
 /// name is not a valid plugin id (the caller then skips the record, best-effort).
 ///
@@ -23096,95 +26324,49 @@ async fn write_mcp_entry(
     // refusing on a name collision — preserving its `enabled` + `env`.
     force: bool,
 ) -> Result<(), (StatusCode, String)> {
-    use crate::sidecar::mcp::McpServerConfig;
-
-    let cfg_path = crate::sidecar::mcp::McpRegistry::config_path();
     let name = name.to_string();
     // Installed disabled — never auto-launch on install, whatever the caller set.
     new_cfg.enabled = false;
-
-    let result = tokio::task::spawn_blocking(move || -> Result<(), (StatusCode, String)> {
-        if let Some(parent) = cfg_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("cannot create config dir: {e}"),
-                )
-            })?;
-        }
-
-        let mut file_map: std::collections::BTreeMap<String, McpServerConfig> = if cfg_path.exists()
-        {
-            let raw = std::fs::read_to_string(&cfg_path).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("cannot read mcp.json: {e}"),
-                )
-            })?;
-            let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("mcp.json is malformed (fix it before installing): {e}"),
-                )
-            })?;
-            val.get("mcpServers")
-                .and_then(|v| {
-                    serde_json::from_value::<std::collections::BTreeMap<String, McpServerConfig>>(
-                        v.clone(),
-                    )
-                    .ok()
-                })
-                .unwrap_or_default()
-        } else {
-            std::collections::BTreeMap::new()
-        };
-
-        if let Some(existing) = file_map.get(&name) {
-            if force {
-                // Updating: keep the user's enabled state + env; swap in the new
-                // command/args/version.
-                new_cfg.enabled = existing.enabled;
-                new_cfg.env = existing.env.clone();
-            } else {
-                return Err((
-                    StatusCode::CONFLICT,
-                    format!("MCP server '{name}' is already in mcp.json"),
-                ));
+    crate::sidecar::mcp::McpConfigStore::mutate(
+        crate::sidecar::mcp::McpRegistry::config_path(),
+        move |document| {
+            let servers = crate::sidecar::mcp::McpConfigStore::servers_mut(document)?;
+            if let Some(existing) = servers.get(&name) {
+                if force {
+                    let existing: crate::sidecar::mcp::McpServerConfig =
+                        serde_json::from_value(existing.clone()).map_err(|error| {
+                            format!("bad_request: invalid MCP server entry: {error}")
+                        })?;
+                    new_cfg.enabled = existing.enabled;
+                    new_cfg.env = existing.env;
+                } else {
+                    return Err(format!(
+                        "conflict: MCP server '{name}' is already in mcp.json"
+                    ));
+                }
             }
-        }
-        file_map.insert(name, new_cfg);
-
-        let out = serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": file_map }))
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to serialize mcp.json: {e}"),
-                )
-            })?;
-        let tmp = cfg_path.with_extension("json.tmp");
-        write_secret_file(&tmp, out.as_bytes()).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to write mcp.json: {e}"),
-            )
-        })?;
-        std::fs::rename(&tmp, &cfg_path).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to rename mcp.json.tmp: {e}"),
-            )
-        })?;
-        Ok(())
+            crate::sidecar::mcp::McpConfigStore::replace_server(servers, name, &new_cfg)?;
+            Ok((true, ()))
+        },
+    )
+    .await
+    .map_err(|error| {
+        let status = if error.starts_with("conflict:") {
+            StatusCode::CONFLICT
+        } else if error.starts_with("bad_request:") || error.contains("malformed") {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (
+            status,
+            error
+                .strip_prefix("conflict: ")
+                .or_else(|| error.strip_prefix("bad_request: "))
+                .unwrap_or(&error)
+                .to_owned(),
+        )
     })
-    .await;
-
-    match result {
-        Ok(inner) => inner,
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("write task panicked: {e}"),
-        )),
-    }
 }
 
 /// An in-place mutation of a single `~/.ryu/mcp.json` entry, used to keep the
@@ -23213,48 +26395,41 @@ async fn mutate_mcp_entry(
     name: &str,
     mutation: McpEntryMutation,
 ) -> Result<bool, String> {
-    use crate::sidecar::mcp::McpServerConfig;
-
     let name = name.to_string();
-    let result = tokio::task::spawn_blocking(move || -> Result<bool, String> {
-        if !cfg_path.exists() {
-            return Ok(false);
-        }
-        let raw =
-            std::fs::read_to_string(&cfg_path).map_err(|e| format!("cannot read mcp.json: {e}"))?;
-        let val: serde_json::Value =
-            serde_json::from_str(&raw).map_err(|e| format!("mcp.json is malformed: {e}"))?;
-        let mut file_map: std::collections::BTreeMap<String, McpServerConfig> = val
-            .get("mcpServers")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+    crate::sidecar::mcp::McpConfigStore::mutate(cfg_path, move |document| {
+        let servers = crate::sidecar::mcp::McpConfigStore::servers_mut(document)?;
 
+        if let McpEntryMutation::Remove = mutation {
+            let changed = servers.remove(&name).is_some();
+            return Ok((changed, changed));
+        }
+
+        let Some(entry) = servers.get_mut(&name) else {
+            return Ok((false, false));
+        };
         let changed = match mutation {
-            McpEntryMutation::SetEnabled(enabled) => match file_map.get_mut(&name) {
-                Some(cfg) if cfg.enabled != enabled => {
-                    cfg.enabled = enabled;
+            McpEntryMutation::SetEnabled(enabled) => {
+                let Some(object) = entry.as_object_mut() else {
+                    return Err(format!("MCP server '{name}' is not an object"));
+                };
+                let current = object
+                    .get("enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                if current == enabled {
+                    false
+                } else {
+                    object.insert("enabled".to_owned(), serde_json::json!(enabled));
                     true
                 }
-                _ => false,
-            },
-            McpEntryMutation::Remove => file_map.remove(&name).is_some(),
+            }
+            McpEntryMutation::Remove => {
+                unreachable!("remove is handled before borrowing the entry")
+            }
         };
-        if !changed {
-            return Ok(false);
-        }
-
-        let out = serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": file_map }))
-            .map_err(|e| format!("failed to serialize mcp.json: {e}"))?;
-        let tmp = cfg_path.with_extension("json.tmp");
-        write_secret_file(&tmp, out.as_bytes())
-            .map_err(|e| format!("failed to write mcp.json: {e}"))?;
-        std::fs::rename(&tmp, &cfg_path)
-            .map_err(|e| format!("failed to rename mcp.json.tmp: {e}"))?;
-        Ok(true)
+        Ok((changed, changed))
     })
     .await
-    .map_err(|e| format!("mcp.json write task panicked: {e}"))?;
-    result
 }
 
 /// Keep the `~/.ryu/mcp.json` spawn config in sync when a synth MCP-server plugin
@@ -23326,7 +26501,7 @@ async fn list_mcp_tools(
 ) -> Json<serde_json::Value> {
     let raw_tools = match params.get("agent") {
         Some(agent_id) => {
-            let allowlist = state.agents.allowlist_for(agent_id);
+            let allowlist = resolved_agent_tool_allowlist(&state, agent_id).await;
             state.mcp.tools_for_agent(allowlist.as_deref()).await
         }
         None => state.mcp.list_all_tools().await,
@@ -23365,7 +26540,7 @@ async fn list_mcp_tools(
 
 #[derive(serde::Deserialize)]
 struct CallToolBody {
-    /// Fully-qualified tool id: `<server>__<tool>`.
+    /// Fully-qualified tool id: `<server>.<tool>`.
     tool: String,
     #[serde(default)]
     arguments: serde_json::Value,
@@ -23385,6 +26560,15 @@ struct CallToolBody {
     /// unaffected: they resolve `Unrestricted` regardless).
     #[serde(default)]
     host_conversation_id: Option<String>,
+    /// Set by the Gateway's own OpenAI tool loop after it has recorded the
+    /// action. Core's direct ACP/MCP callers leave this false so Core can emit
+    /// the charge to the Gateway exactly once.
+    #[serde(default)]
+    budget_already_metered: bool,
+}
+
+fn is_billable_composio_tool(tool_id: &str) -> bool {
+    tool_id.starts_with("composio.") || tool_id.starts_with("composio__")
 }
 
 /// `POST /api/mcp/tools/call` — invoke a registered MCP tool. This is the path
@@ -23401,6 +26585,11 @@ async fn call_mcp_tool(
     State(state): State<ServerState>,
     Json(body): Json<CallToolBody>,
 ) -> axum::response::Response {
+    let should_record_tool_charge =
+        !body.budget_already_metered && is_billable_composio_tool(&body.tool);
+    let charge_agent_id = body.agent_id.clone();
+    let charge_user_id = body.user_id.clone();
+    let charge_session_id = body.host_conversation_id.clone();
     // The allowlist must be tied to a *known* agent. A `None` allowlist means
     // "allow every tool" (see `McpRegistry::call_tool`), so we must not let a
     // client reach that path by omitting or faking `agent_id` — that would be a
@@ -23413,7 +26602,7 @@ async fn call_mcp_tool(
         )
             .into_response();
     };
-    if state.agents.find_by_prefix(agent_id).is_none() {
+    if state.agents.find_exact(agent_id).is_none() {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "ok": false, "error": format!("unknown agent '{agent_id}'") })),
@@ -23423,7 +26612,7 @@ async fn call_mcp_tool(
     // Per-agent restriction comes from the agent's configured allowlist. (A
     // deny-by-default global policy for unconfigured agents is Gateway /
     // control-plane scope, U28/U30, out of scope here.)
-    let allowlist = state.agents.allowlist_for(agent_id);
+    let allowlist = resolved_agent_tool_allowlist(&state, agent_id).await;
     // Per-agent Identity Vault binding (epic #517): a tool call targeting a
     // NEEDS_AUTH bound domain elicits; an AUTHENTICATED one reads the credential
     // under the gateway grant. Resolved from the AgentStore record (empty when the
@@ -23456,7 +26645,7 @@ async fn call_mcp_tool(
             // on behalf of, forwarded by the Gateway exec plane (`POST /v1/exec/tool`
             // → `host_conversation_id`). It is lowered to a `ToolPrincipal` at
             // dispatch: present + org-bound ⇒ `Owned` (the conversation-reading tools
-            // `threads__*` / `search_conversations__*` resolve the owner instead of
+            // `threads.*` / `search_conversations.*` resolve the owner instead of
             // refusing); absent ⇒ fail-closed `Unresolved` on a bound node (e.g. a
             // direct/legacy caller). Unbound (personal) nodes resolve `Unrestricted`
             // regardless. This is NEVER `user_id` (client-supplied, spoofable).
@@ -23464,7 +26653,25 @@ async fn call_mcp_tool(
         )
         .await
     {
-        Ok(output) => Json(json!({ "ok": true, "output": output })).into_response(),
+        Ok(output) => {
+            if should_record_tool_charge && !output.get("__ryu_elicitation__").is_some() {
+                let client = state.client.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = crate::sidecar::gateway::record_tool_charge(
+                        &client,
+                        charge_agent_id.as_deref(),
+                        charge_user_id.as_deref(),
+                        charge_session_id.as_deref(),
+                        1,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %error, "Core MCP tool charge notification failed");
+                    }
+                });
+            }
+            Json(json!({ "ok": true, "output": output })).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "ok": false, "error": e.to_string() })),
@@ -23749,7 +26956,7 @@ async fn mcp_http_inner(
         return Json(refusal).into_response();
     }
 
-    let allowlist = state.agents.allowlist_for(&agent_id);
+    let allowlist = resolved_agent_tool_allowlist(&state, &agent_id).await;
     // Per-agent Identity Vault binding (epic #517), read off the SAME record the
     // admission check resolved — otherwise a tool call over this transport silently
     // loses the agent's credential bindings and fails in a way that looks like a
@@ -23773,6 +26980,33 @@ async fn mcp_http_inner(
     {
         Some(response) => Json(response).into_response(),
         None => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod mcp_config_mutation_tests {
+    use super::{merge_mcp_secret_map, MCP_MASKED_SECRET};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn masked_values_keep_existing_secrets_and_omitted_rows_are_removed() {
+        let current = BTreeMap::from([
+            ("API_KEY".to_owned(), "old-secret".to_owned()),
+            ("REMOVE_ME".to_owned(), "discard-me".to_owned()),
+        ]);
+        let incoming = BTreeMap::from([
+            ("API_KEY".to_owned(), MCP_MASKED_SECRET.to_owned()),
+            ("NEW_KEY".to_owned(), "new-secret".to_owned()),
+            ("BLANK".to_owned(), "   ".to_owned()),
+        ]);
+
+        assert_eq!(
+            merge_mcp_secret_map(&current, incoming),
+            BTreeMap::from([
+                ("API_KEY".to_owned(), "old-secret".to_owned()),
+                ("NEW_KEY".to_owned(), "new-secret".to_owned()),
+            ])
+        );
     }
 }
 
@@ -24226,7 +27460,7 @@ mod exec_scan_route_tests {
 /// empty allowlist as *every enabled skill*. So this fails **open** on every
 /// degraded path — no `?agent=`, an id no row matches, a store error — which is
 /// deliberate and matches the convention the `skills` provider already documents
-/// where it resolves the same field for `skills__load`
+/// where it resolves the same field for `skills.load`
 /// (`sidecar/mcp/mod.rs`). A skill is instruction text with no secrets; the list
 /// keeps an agent focused on its own skills rather than guarding a confidence.
 /// Failing closed would silently strip skills from the agent-less callers
@@ -24243,7 +27477,7 @@ async fn agent_skill_allowlist(store: &AgentStore, agent: Option<&str>) -> Vec<S
         .await
         .ok()
         .flatten()
-        .map(|rec| rec.skills)
+        .map(|rec| rec.skill_allowlist())
         .unwrap_or_default()
 }
 
@@ -24326,12 +27560,12 @@ mod tool_search_scope_tests {
 /// - the **skill** allowlist — `AgentRecord.skills`, threaded *into* the search so
 ///   [`crate::sidecar::mcp::McpRegistry::search_scoped`] merges only the skills
 ///   this agent may load. Same field, same store the `skills` provider reads when
-///   it serves `skills__load` (`sidecar/mcp/mod.rs`, the `skills_allowlist` block).
+///   it serves `skills.load` (`sidecar/mcp/mod.rs`, the `skills_allowlist` block).
 ///
 /// Before the skill half existed, an agent scoped to two skills got every enabled
 /// skill on the node back from `tool_search`: the tool allowlist does not gate
 /// individual skills (its `Skill` arm gates reaching the `skills` *server*) and on
-/// a stock node it was `None` anyway. `skills__load` still refused the bodies, so
+/// a stock node it was `None` anyway. `skills.load` still refused the bodies, so
 /// what leaked was the L1 row — id, name, description — for skills the agent was
 /// deliberately not given. That reached two planes, because the gateway's
 /// openai-compat tool loop calls this same route with `?agent=`
@@ -24348,7 +27582,7 @@ mod tool_search_scope_tests {
 ///
 /// Agent-less callers are unchanged: no `?agent=` ⇒ empty allowlist ⇒ every
 /// enabled skill, which is what `SkillRegistry::enabled_for` defines an empty list
-/// to mean and what `skills__search` has always done for workflows and monitors.
+/// to mean and what `skills.search` has always done for workflows and monitors.
 #[utoipa::path(
     get,
     path = "/api/tools/search",
@@ -24397,7 +27631,7 @@ async fn tools_search(
         .search_scoped(query, kind, fetch, &skills_allowlist)
         .await;
     if let Some(agent) = agent {
-        if let Some(allow) = state.agents.allowlist_for(agent) {
+        if let Some(allow) = resolved_agent_tool_allowlist(&state, agent).await {
             // Match the execution gate (id || name || server for MCP/built-ins,
             // id-only for Composio) so search doesn't hide tools the agent may
             // actually call (e.g. a server-level grant like `["spider"]`).
@@ -24416,7 +27650,7 @@ async fn tools_search(
     path = "/api/tools/describe",
     tag = "Tools",
     summary = "Describe a tool's argument schema",
-    params(("id" = String, Query, description = "Fully-qualified tool id (<server>__<tool>)")),
+    params(("id" = String, Query, description = "Fully-qualified tool id (<server>.<tool>)")),
     responses(
         (status = 200, description = "OK", body = serde_json::Value),
         (status = 400, description = "Missing `id` query parameter"),
@@ -24497,7 +27731,11 @@ async fn tools_exec(
 ) -> axum::response::Response {
     let allowlist =
         match crate::tool_exec::resolve_agent_allowlist(&state.agents, body.agent_id.as_deref()) {
-            Ok(list) => list,
+            Ok(Some(list)) => Some(list),
+            Ok(None) => {
+                let agent_id = body.agent_id.as_deref().unwrap_or_default();
+                resolved_agent_tool_allowlist(&state, agent_id).await
+            }
             Err(e) => {
                 return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
             }
@@ -24671,8 +27909,9 @@ async fn mesh_peers(State(state): State<ServerState>) -> Json<serde_json::Value>
 ///
 /// Security: enabling mesh makes this Core reachable over the tailnet, so the
 /// fail-closed token gate (`enforce_remote_auth`) requires a strong
-/// non-placeholder `RYU_TOKEN` at next start — a node with no usable token cannot
-/// restart with the mesh on (the failure is loud, at boot). Loopback-admin trust
+/// non-placeholder `RYU_TOKEN` before this handler persists or starts the mesh, and
+/// the same check runs again at startup. A node with no usable token cannot be
+/// enabled or restarted with the mesh on. Loopback-admin trust
 /// neutralization follows automatically: the gateway is (re)spawned with
 /// `RYU_MESH_ENABLED=1` once `is_enabled()` reads true.
 #[derive(serde::Deserialize)]
@@ -24692,6 +27931,14 @@ async fn mesh_config(
     State(state): State<ServerState>,
     Json(body): Json<MeshConfigBody>,
 ) -> axum::response::Response {
+    if body.enabled {
+        let resolved = crate::node_token::resolve_and_export();
+        let token = resolved.as_ref().map(|value| value.token.clone());
+        let source = resolved.as_ref().map(|value| value.source);
+        if let Err(error) = enforce_remote_auth(token, source, true, false) {
+            return json_error(StatusCode::FORBIDDEN, error);
+        }
+    }
     let value = if body.enabled { "true" } else { "false" };
     if let Err(e) = state
         .preferences
@@ -24953,6 +28200,224 @@ async fn webhooks_list(State(state): State<ServerState>) -> Json<serde_json::Val
     }))
 }
 
+#[derive(serde::Deserialize)]
+struct WebhookSecretBody {
+    /// When omitted or blank, Core mints a fresh high-entropy secret. A supplied
+    /// value is trimmed at the edges and kept verbatim otherwise.
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+const MIN_WEBHOOK_SECRET_LEN: usize = 16;
+const MAX_WEBHOOK_SECRET_LEN: usize = 512;
+
+fn mint_webhook_secret() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+fn normalize_webhook_secret(input: Option<String>) -> Result<String, String> {
+    let secret = input.unwrap_or_default().trim().to_owned();
+    if secret.is_empty() {
+        return Ok(mint_webhook_secret());
+    }
+    if secret.chars().count() < MIN_WEBHOOK_SECRET_LEN {
+        return Err(format!(
+            "webhook secret must be at least {MIN_WEBHOOK_SECRET_LEN} characters"
+        ));
+    }
+    if secret.chars().count() > MAX_WEBHOOK_SECRET_LEN {
+        return Err(format!(
+            "webhook secret must be at most {MAX_WEBHOOK_SECRET_LEN} characters"
+        ));
+    }
+    Ok(secret)
+}
+
+fn workflow_webhook_secret(id: &str) -> Result<Option<String>, String> {
+    let workflow = crate::workflow::store::load_workflow(id)
+        .map_err(|_| format!("workflow '{id}' not found"))?;
+    Ok(workflow.triggers.iter().find_map(|trigger| match trigger {
+        crate::workflow::WorkflowTrigger::Webhook { secret } => secret
+            .as_ref()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        _ => None,
+    }))
+}
+
+/// `GET /api/webhooks/:id/secret` — return one endpoint's secret only on an
+/// explicit protected request. The registry itself remains metadata-only, so a
+/// normal list refresh cannot leak signing material.
+#[utoipa::path(
+    get,
+    path = "/api/webhooks/{id}/secret",
+    tag = "Nodes",
+    summary = "Get one webhook signing secret",
+    params(("id" = String, Path, description = "`composio` or a workflow id")),
+    responses((status = 200, description = "The signing secret", body = serde_json::Value))
+)]
+async fn webhook_secret_get(Path(id): Path<String>) -> axum::response::Response {
+    let secret = if id == "composio" {
+        crate::composio_triggers::webhook_secret()
+    } else {
+        match workflow_webhook_secret(&id) {
+            Ok(secret) => secret,
+            Err(error) => return json_error(StatusCode::NOT_FOUND, error),
+        }
+    };
+
+    match secret {
+        Some(secret) => Json(json!({ "secret": secret })).into_response(),
+        None => json_error(
+            StatusCode::NOT_FOUND,
+            "webhook endpoint has no configured secret".to_owned(),
+        ),
+    }
+}
+
+async fn enforce_webhook_secret_access(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    id: &str,
+    permission: &str,
+) -> Result<(), axum::response::Response> {
+    let result = if id == "composio" {
+        enforce_permission(state, caller, permission).await
+    } else {
+        enforce_permission_on(
+            state,
+            caller,
+            permission,
+            crate::acl::KIND_WORKFLOW,
+            id,
+        )
+        .await
+    };
+    if result.is_err() {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            format!("insufficient permissions: {permission}"),
+        ));
+    }
+    Ok(())
+}
+
+async fn webhook_secret_get_authorized(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let permission = if id == "composio" {
+        crate::identity_verify::permissions::GATEWAY_CONFIGURE
+    } else {
+        crate::identity_verify::permissions::WORKFLOW_VIEW
+    };
+    if let Err(response) = enforce_webhook_secret_access(&state, &caller, &id, permission).await {
+        return response;
+    }
+    webhook_secret_get(Path(id)).await
+}
+
+async fn webhook_secret_set_authorized(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+    Json(body): Json<WebhookSecretBody>,
+) -> axum::response::Response {
+    let permission = if id == "composio" {
+        crate::identity_verify::permissions::GATEWAY_CONFIGURE
+    } else {
+        crate::identity_verify::permissions::WORKFLOW_EDIT
+    };
+    if let Err(response) = enforce_webhook_secret_access(&state, &caller, &id, permission).await {
+        return response;
+    }
+    webhook_secret_set(Path(id), Json(body)).await
+}
+
+/// `POST /api/webhooks/:id/secret` — set a supplied secret or mint a new one.
+/// The new value is returned once so an external provider can be configured;
+/// subsequent list responses expose only `has_secret`.
+#[utoipa::path(
+    post,
+    path = "/api/webhooks/{id}/secret",
+    tag = "Nodes",
+    summary = "Set or generate one webhook signing secret",
+    params(("id" = String, Path, description = "`composio` or a workflow id")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "The configured signing secret", body = serde_json::Value),
+        (status = 400, description = "Invalid secret"),
+        (status = 404, description = "Webhook endpoint not found"),
+        (status = 409, description = "Composio secret is controlled by the environment"),
+        (status = 503, description = "Encrypted secret store unavailable")
+    )
+)]
+async fn webhook_secret_set(
+    Path(id): Path<String>,
+    Json(body): Json<WebhookSecretBody>,
+) -> axum::response::Response {
+    let secret = match normalize_webhook_secret(body.secret) {
+        Ok(secret) => secret,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, error),
+    };
+
+    if id == "composio" {
+        if crate::composio_triggers::env_webhook_secret().is_some() {
+            return json_error(
+                StatusCode::CONFLICT,
+                "COMPOSIO_WEBHOOK_SECRET is set in the environment; clear it before using the Webhooks app"
+                    .to_owned(),
+            );
+        }
+        let Some(store) = crate::plugin_secrets::global() else {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "encrypted secret store unavailable".to_owned(),
+            );
+        };
+        if let Err(error) = store
+            .set(
+                crate::composio_triggers::WEBHOOK_SECRET_STORE_OWNER,
+                crate::composio_triggers::WEBHOOK_SECRET_STORE_KEY,
+                &secret,
+            )
+            .await
+        {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+        crate::composio_triggers::set_stored_webhook_secret(Some(secret.clone()));
+        return Json(json!({ "secret": secret })).into_response();
+    }
+
+    let mut workflow = match crate::workflow::store::load_workflow(&id) {
+        Ok(workflow) => workflow,
+        Err(_) => return json_error(StatusCode::NOT_FOUND, format!("workflow '{id}' not found")),
+    };
+    let mut found = false;
+    for trigger in &mut workflow.triggers {
+        if let crate::workflow::WorkflowTrigger::Webhook { secret: current } = trigger {
+            *current = Some(secret.clone());
+            found = true;
+        }
+    }
+    if !found {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "workflow has no webhook trigger".to_owned(),
+        );
+    }
+
+    if let Err(error) = crate::workflow::persist_workflow(workflow).await {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+    }
+    Json(json!({ "secret": secret })).into_response()
+}
+
 /// `GET /api/webhook-ingress/backend` — the configured backend selector + the
 /// full list of available backends (for a picker). The configured kind resolves
 /// from the env override → the `webhook.ingress.backend` pref → the default.
@@ -25147,6 +28612,14 @@ async fn sandbox_status() -> Json<serde_json::Value> {
 struct CreateSpaceBody {
     name: String,
     description: Option<String>,
+    /// `private` keeps the Space owner-only; `org` shares it with the node's
+    /// organization. The product's Team control maps to the `org` wire scope;
+    /// named-team rows remain an internal storage shape until list filtering can
+    /// carry every verified team membership.
+    #[serde(default)]
+    visibility: Option<String>,
+    #[serde(default)]
+    team_id: Option<String>,
     /// Which retrieval algorithm this Space uses: `"vector"` (default) or
     /// `"graph"`. Optional — omitting it keeps every existing client on exactly the
     /// behaviour it had, falling through to the node-wide `rag_strategy` default,
@@ -25160,6 +28633,32 @@ struct CreateSpaceBody {
     /// typed `"graphrag"` and report success.
     #[serde(default)]
     retrieval_mode: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct RenameSpaceBody {
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SetVisibilityBody {
+    #[serde(default)]
+    visibility: Option<String>,
+    #[serde(default)]
+    team_id: Option<String>,
+}
+
+fn validate_visibility<'a>(
+    visibility: Option<&'a str>,
+    team_id: Option<&'a str>,
+) -> Result<(&'a str, Option<&'a str>), String> {
+    let visibility = visibility.unwrap_or("private");
+    if !matches!(visibility, "private" | "org") {
+        return Err(format!(
+            "unknown visibility {visibility:?}: expected \"private\" or \"org\""
+        ));
+    }
+    Ok((visibility, None))
 }
 
 /// Resolve the [`spaces::RetrievalMode`] a new Space should be stamped with.
@@ -25369,20 +28868,83 @@ async fn create_space(
         Ok(mode) => mode,
         Err(message) => return json_error(StatusCode::BAD_REQUEST, message),
     };
+    let (visibility, team_id) =
+        match validate_visibility(body.visibility.as_deref(), body.team_id.as_deref()) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, message),
+        };
     match state
         .spaces
-        .create_space_with_mode(
+        .create_space_with_mode_and_visibility(
             body.name.trim(),
             body.description.as_deref(),
             mode,
             &spaces::owner_of(&caller_tenancy(&caller)),
+            visibility,
+            team_id,
         )
         .await
     {
         // Echo the resolved mode: the caller may have omitted the field and picked
         // up the node default, so "what did I actually get" must not require a
         // follow-up GET.
-        Ok(id) => Json(json!({ "id": id, "retrieval_mode": mode.as_str() })).into_response(),
+        Ok(id) => Json(json!({
+            "id": id,
+            "retrieval_mode": mode.as_str(),
+            "visibility": visibility,
+            "team_id": team_id,
+        }))
+        .into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `POST /api/spaces/:id/name` — rename a user-created Space. The retrieval index
+/// and every document remain unchanged; only the display name and timestamp move.
+#[utoipa::path(
+    post,
+    path = "/api/spaces/{id}/name",
+    tag = "Spaces",
+    summary = "Rename a space",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn rename_space(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<RenameSpaceBody>,
+) -> axum::response::Response {
+    if enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_WRITE,
+        crate::acl::KIND_SPACE,
+        &id,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: space.write".to_owned(),
+        );
+    }
+    if let Err(resp) = require_resource_write(
+        spaces::space_access_meta(&state.spaces, &id).await,
+        caller.as_ref(),
+        "space not found",
+    ) {
+        return resp;
+    }
+    let name = body.name.trim();
+    if name.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "name is required".to_owned());
+    }
+    match state.spaces.rename_space(&id, name).await {
+        Ok(true) => Json(json!({ "success": true, "name": name })).into_response(),
+        Ok(false) => json_error(StatusCode::NOT_FOUND, "space not found".to_owned()),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -25513,6 +29075,81 @@ async fn set_space_icon(
         Ok(true) => Json(json!({ "success": true })).into_response(),
         Ok(false) => json_error(StatusCode::NOT_FOUND, "space not found".to_owned()),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `POST /api/spaces/:id/visibility` — share a Space with the organization or
+/// return it to the owner-only private scope. Pages inherit this setting.
+#[utoipa::path(
+    post,
+    path = "/api/spaces/{id}/visibility",
+    tag = "Spaces",
+    summary = "Set a space's sharing visibility",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn set_space_visibility(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<SetVisibilityBody>,
+) -> axum::response::Response {
+    if enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_WRITE,
+        crate::acl::KIND_SPACE,
+        &id,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: space.write".to_owned(),
+        );
+    }
+    if let Err(resp) = require_resource_write(
+        spaces::space_access_meta(&state.spaces, &id).await,
+        caller.as_ref(),
+        "space not found",
+    ) {
+        return resp;
+    }
+    let (visibility, team_id) =
+        match validate_visibility(body.visibility.as_deref(), body.team_id.as_deref()) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, message),
+        };
+    match state
+        .spaces
+        .set_visibility(
+            &id,
+            visibility,
+            team_id,
+            visibility_admin_authorized(caller.as_ref()),
+        )
+        .await
+    {
+        Ok(true) => Json(json!({
+            "ok": true,
+            "visibility": visibility,
+            "team_id": team_id,
+        }))
+        .into_response(),
+        Ok(false) => json_error(StatusCode::NOT_FOUND, "space not found".to_owned()),
+        Err(e) => {
+            let message = e.to_string();
+            let status = if message.contains("system spaces") {
+                StatusCode::BAD_REQUEST
+            } else if message.contains("only organization admins") {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            json_error(status, message)
+        }
     }
 }
 
@@ -25839,6 +29476,60 @@ async fn list_documents(
             crate::space_file_index::attach_index_states(&mut rows).await;
             Json(json!({ "space_id": id, "documents": rows })).into_response()
         }
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SearchSpacesQuery {
+    q: String,
+    limit: Option<usize>,
+}
+
+/// `GET /api/spaces/search` — literal global search over visible Space metadata
+/// and document text. This is intentionally separate from per-Space RAG search:
+/// the palette needs fast, predictable lexical recall and must still work when no
+/// embedding model is available.
+#[utoipa::path(
+    get,
+    path = "/api/spaces/search",
+    tag = "Spaces",
+    summary = "Search visible spaces and pages lexically",
+    params(
+        ("q" = String, Query, description = "Text to find"),
+        ("limit" = Option<usize>, Query, description = "Maximum number of page hits")
+    ),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn search_space_documents(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Query(query): axum::extract::Query<SearchSpacesQuery>,
+) -> axum::response::Response {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_READ,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: space.read".to_owned(),
+        );
+    }
+    let text = query.q.trim();
+    if text.len() < 2 {
+        return Json(json!({ "hits": [], "indexed": true })).into_response();
+    }
+    let limit = query.limit.unwrap_or(8).clamp(1, 50);
+    match state
+        .spaces
+        .search_documents_lexical(text, limit, caller_doc_filter(&caller))
+        .await
+    {
+        Ok(hits) => Json(json!({ "hits": hits, "indexed": true })).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -27325,7 +31016,10 @@ async fn set_embedding_model(
         .map(str::trim)
         .filter(|provider| !provider.is_empty())
         .map(str::to_ascii_lowercase);
-    if provider.as_deref().is_some_and(|provider| provider != "gateway") {
+    if provider
+        .as_deref()
+        .is_some_and(|provider| provider != "gateway")
+    {
         return json_error(
             StatusCode::BAD_REQUEST,
             "provider must be 'gateway' when specified".to_owned(),
@@ -27646,13 +31340,16 @@ fn composio_toolkit_categories(value: &serde_json::Value) -> Vec<String> {
 }
 
 /// Build the merged Integrations directory: the integrations.sh directory folded
-/// with the user's Composio toolkits, deduped by brand slug. Unsorted and
-/// unfiltered — callers apply their own query/sort/pagination. Both the list
-/// endpoint and the by-id endpoint share this so they never diverge.
+/// with the user's Composio toolkits and Treg's public platform catalog, deduped
+/// by brand slug. Unsorted and unfiltered — callers apply their own
+/// query/sort/pagination. Both the list endpoint and the by-id endpoint share
+/// this so they never diverge.
 async fn build_merged_integrations(
     state: &ServerState,
 ) -> Vec<crate::catalog_source::IntegrationBrand> {
-    use crate::catalog_source::{integration_brand_slug, IntegrationBrand};
+    use crate::catalog_source::{
+        integration_brand_slug, mark_cheapest_options, IntegrationBrand, IntegrationOption,
+    };
 
     let mut order: Vec<String> = Vec::new();
     let mut by_slug: std::collections::HashMap<String, IntegrationBrand> =
@@ -27704,6 +31401,28 @@ async fn build_merged_integrations(
                     .get("categories")
                     .map(composio_toolkit_categories)
                     .unwrap_or_default();
+                let composio_option = IntegrationOption {
+                    id: format!("composio:{toolkit_slug}"),
+                    source: "composio".into(),
+                    kind: "composio-toolkit".into(),
+                    action: "connect".into(),
+                    connection_id: None,
+                    name: "Composio toolkit".into(),
+                    description: description.clone(),
+                    url: (!toolkit_slug.is_empty()).then(|| {
+                        format!(
+                            "https://composio.dev/toolkits/{}",
+                            urlencoding::encode(&toolkit_slug)
+                        )
+                    }),
+                    provider: Some("Composio".into()),
+                    capability: None,
+                    comparison_key: None,
+                    price: None,
+                    is_cheapest: false,
+                    available: None,
+                    availability_note: None,
+                };
 
                 match by_slug.get_mut(&slug) {
                     Some(existing) => {
@@ -27723,6 +31442,16 @@ async fn build_merged_integrations(
                         if existing.logo.is_none() {
                             existing.logo = logo;
                         }
+                        existing.composio_slug = (!toolkit_slug.is_empty())
+                            .then_some(toolkit_slug.clone())
+                            .or(existing.composio_slug.clone());
+                        if !existing
+                            .options
+                            .iter()
+                            .any(|option| option.id == composio_option.id)
+                        {
+                            existing.options.push(composio_option);
+                        }
                     }
                     None => {
                         order.push(slug.clone());
@@ -27730,7 +31459,11 @@ async fn build_merged_integrations(
                             slug.clone(),
                             IntegrationBrand {
                                 id: slug,
-                                name: if name.is_empty() { toolkit_slug } else { name },
+                                name: if name.is_empty() {
+                                    toolkit_slug.clone()
+                                } else {
+                                    name
+                                },
                                 description,
                                 logo,
                                 categories,
@@ -27740,6 +31473,9 @@ async fn build_merged_integrations(
                                 // connection story is the Composio auth flow, not an
                                 // integrations.sh entry.
                                 connections: Vec::new(),
+                                options: vec![composio_option],
+                                composio_slug: (!toolkit_slug.is_empty()).then_some(toolkit_slug),
+                                treg_slug: None,
                                 domain: None,
                                 popularity: None,
                             },
@@ -27750,20 +31486,128 @@ async fn build_merged_integrations(
         }
     }
 
-    order
+    // Treg's catalog is public, so its platforms remain discoverable even when
+    // no Composio key is configured. Only the platform index is fetched here;
+    // endpoint-level rows are loaded by `integrations_get` for the selected
+    // preview so the list does not fan out into one request per platform.
+    match crate::treg_catalog::platform_summaries().await {
+        Ok(platforms) => {
+            for platform in platforms {
+                let from_label = integration_brand_slug(&platform.label);
+                let slug = if from_label.is_empty() {
+                    integration_brand_slug(&platform.slug)
+                } else {
+                    from_label
+                };
+                if slug.is_empty() {
+                    continue;
+                }
+                let summary = match (
+                    platform.summary.clone(),
+                    platform.capabilities,
+                    platform.endpoints,
+                ) {
+                    (Some(summary), Some(capabilities), Some(endpoints)) => Some(format!(
+                        "{summary} · {capabilities} capabilities · {endpoints} endpoints"
+                    )),
+                    (Some(summary), _, _) => Some(summary),
+                    (None, Some(capabilities), Some(endpoints)) => Some(format!(
+                        "{capabilities} capabilities · {endpoints} endpoints"
+                    )),
+                    (None, _, _) => None,
+                };
+                let treg_option = IntegrationOption {
+                    id: format!("treg:{}", platform.slug),
+                    source: "treg".into(),
+                    kind: "treg-platform".into(),
+                    action: "chat-setup".into(),
+                    connection_id: None,
+                    name: "Treg catalog".into(),
+                    description: summary.clone(),
+                    url: Some(format!(
+                        "{}/catalog/platforms/{}",
+                        crate::treg_catalog::base_url(),
+                        urlencoding::encode(&platform.slug)
+                    )),
+                    provider: Some("Treg".into()),
+                    capability: None,
+                    comparison_key: None,
+                    price: platform.price.clone(),
+                    is_cheapest: false,
+                    available: Some(true),
+                    availability_note: None,
+                };
+                let category = platform.category.clone();
+
+                match by_slug.get_mut(&slug) {
+                    Some(existing) => {
+                        if !existing.sources.iter().any(|source| source == "treg") {
+                            existing.sources.push("treg".into());
+                        }
+                        if let Some(category) = category {
+                            if !existing.categories.contains(&category) {
+                                existing.categories.push(category);
+                            }
+                        }
+                        if existing.description.is_none() {
+                            existing.description = summary.clone();
+                        }
+                        existing.treg_slug = Some(platform.slug.clone());
+                        if !existing
+                            .options
+                            .iter()
+                            .any(|option| option.id == treg_option.id)
+                        {
+                            existing.options.push(treg_option);
+                        }
+                    }
+                    None => {
+                        order.push(slug.clone());
+                        by_slug.insert(
+                            slug.clone(),
+                            IntegrationBrand {
+                                id: slug,
+                                name: platform.label,
+                                description: summary,
+                                logo: None,
+                                categories: category.into_iter().collect(),
+                                sources: vec!["treg".into()],
+                                feeds: Vec::new(),
+                                connections: Vec::new(),
+                                options: vec![treg_option],
+                                composio_slug: None,
+                                treg_slug: Some(platform.slug),
+                                domain: None,
+                                popularity: None,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "Treg catalog unavailable; keeping integrations.sh and Composio results");
+        }
+    }
+
+    let mut merged: Vec<_> = order
         .into_iter()
         .filter_map(|slug| by_slug.remove(&slug))
-        .collect()
+        .collect();
+    for brand in &mut merged {
+        mark_cheapest_options(&mut brand.options);
+    }
+    merged
 }
 
 /// `GET /api/integrations?q=&cursor=&limit=` — the merged Integrations Store
-/// directory (integrations.sh + the user's Composio toolkits), deduped by brand
-/// slug, sorted by popularity then name, offset-cursor paginated.
+/// directory (integrations.sh + the user's Composio toolkits + Treg platforms),
+/// deduped by brand slug, sorted by popularity then name, offset-cursor paginated.
 #[utoipa::path(
     get,
     path = "/api/integrations",
     tag = "Composio",
-    summary = "Browse the merged Integrations directory (directory + Composio)",
+    summary = "Browse the merged Integrations directory (directory + Composio + Treg)",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn integrations_list(
@@ -27843,7 +31687,16 @@ async fn integrations_get(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let merged = build_merged_integrations(&state).await;
     match merged.into_iter().find(|brand| brand.id == id) {
-        Some(brand) => (StatusCode::OK, Json(json!(brand))),
+        Some(mut brand) => {
+            if let Some(treg_slug) = brand.treg_slug.clone() {
+                if let Ok(options) = crate::treg_catalog::platform_options(&treg_slug).await {
+                    brand.options.retain(|option| option.source != "treg");
+                    brand.options.extend(options);
+                }
+            }
+            crate::catalog_source::mark_cheapest_options(&mut brand.options);
+            (StatusCode::OK, Json(json!(brand)))
+        }
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))),
     }
 }
@@ -28526,9 +32379,20 @@ fn buyer_bearer_from_headers(headers: &axum::http::HeaderMap) -> Option<String> 
 async fn models_catalog_install(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<ModelInstallBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     use crate::catalog_source::CatalogKind;
+
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
 
     // Forward the caller's bearer to the marketplace install handoff (#491): a
     // PAID Ryu-Marketplace item is denied unless the buyer org holds a license.
@@ -28659,8 +32523,19 @@ struct ModelUninstallBody {
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn models_catalog_uninstall(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<ModelUninstallBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_UNINSTALL,
+    )
+    .await
+    {
+        return response;
+    }
     match crate::model_catalog::uninstall_file(&body.id, &body.file) {
         Ok(()) => (StatusCode::OK, Json(json!({ "success": true }))),
         Err(e) => (
@@ -29512,6 +33387,72 @@ pub(crate) async fn guarded_post_json(
     ))
 }
 
+/// SSRF-guarded HTTP GET that keeps the response body open for a streaming
+/// consumer. This is the egress seam for the legacy MCP HTTP+SSE transport:
+/// the initial GET carries an `endpoint` event and then remains open for the
+/// JSON-RPC responses sent after each POST.
+///
+/// Unlike [`guarded_get_with_headers`], this accepts the same `http` loopback
+/// development targets as [`guarded_post_json`] and deliberately has no client
+/// lifetime timeout. The MCP client applies a bounded timeout to each awaited
+/// JSON-RPC response, while dropping the response closes the stream during
+/// connection shutdown. The URL is still screened, pinned, and protected from
+/// redirects before any bytes leave Core.
+pub(crate) async fn guarded_get_stream_with_headers(
+    url: &str,
+    headers: &[(String, String)],
+) -> anyhow::Result<reqwest::Response> {
+    let (parsed, screened) = screen_egress_url_pinned(
+        url,
+        agent_egress_guard_enabled(),
+        std::env::var(ENV_AGENT_EGRESS_ALLOW_HOSTS).ok().as_deref(),
+    )
+    .await?;
+    let shown = redact_url_for_display(url);
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("URL has no host: {shown}"))?
+        .to_owned();
+
+    let mut builder = reqwest::Client::builder()
+        // The stream can legitimately stay open for the lifetime of an MCP
+        // session. Per-request RPC deadlines live in `sidecar::mcp::client`.
+        // Reqwest 0.12 exposes a duration rather than an `Option`; keep the
+        // transport body open well past Core's per-RPC deadline, which owns the
+        // actual lifetime of an MCP request and closes this response on timeout.
+        .timeout(std::time::Duration::from_secs(24 * 60 * 60))
+        .redirect(reqwest::redirect::Policy::none());
+    match screened {
+        ScreenedEgress::Pinned(addrs) => {
+            builder = builder.resolve_to_addrs(&host, &addrs);
+        }
+        ScreenedEgress::Exempt => {}
+    }
+    let client = builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
+
+    let mut request = client
+        .get(parsed.as_str())
+        .header("User-Agent", crate::skills_catalog::USER_AGENT);
+    for (name, value) in headers {
+        match (
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            (Ok(header_name), Ok(header_value)) => {
+                request = request.header(header_name, header_value);
+            }
+            _ => tracing::warn!("guarded MCP GET: skipping invalid header name '{name}'"),
+        }
+    }
+
+    request
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("requesting {shown}: {e}"))
+}
+
 /// SSRF-guarded HTTPS GET that optionally attaches an `Authorization: Bearer
 /// <token>` header. Shares the exact resolve/screen/pin/redirect-none/https-only
 /// guard with [`guarded_get`] so a BYOK credential (e.g. a Smithery registry API
@@ -29988,8 +33929,18 @@ struct KnowledgeCatalogInstallBody {
 async fn knowledge_catalog_install(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<KnowledgeCatalogInstallBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
     let id = body.id.trim().to_string();
     // Forward the caller's bearer to the marketplace install handoff (#491) so a
     // PAID Ryu-Marketplace bundle is denied unless the buyer org holds a license.
@@ -30294,10 +34245,7 @@ const SKILL_ALL_SOURCE_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// An explicit, registered `?source=` wins over the node-global preference;
 /// `?source=all` addresses the live federated view. Unknown/stale ids degrade
 /// to the persisted active source for compatibility with older clients.
-async fn resolve_skill_source_id(
-    state: &ServerState,
-    requested: Option<&str>,
-) -> String {
+async fn resolve_skill_source_id(state: &ServerState, requested: Option<&str>) -> String {
     if let Some(id) = requested.map(str::trim).filter(|id| !id.is_empty()) {
         if id == SKILL_ALL_SOURCES_ID
             || state
@@ -30319,9 +34267,7 @@ async fn resolve_skill_source_id(
 }
 
 /// The sources visited by the live all-marketplaces view, in picker order.
-fn all_skill_view_sources(
-    state: &ServerState,
-) -> Vec<crate::catalog_source::SourceMeta> {
+fn all_skill_view_sources(state: &ServerState) -> Vec<crate::catalog_source::SourceMeta> {
     state
         .catalog_sources
         .sources_for(crate::catalog_source::CatalogKind::Skill)
@@ -30496,10 +34442,7 @@ async fn all_skill_catalog_cards(
             }
             if let Some(object) = card.as_object_mut() {
                 object.insert("catalog_source_id".to_string(), json!(meta.id));
-                object.insert(
-                    "catalog_source_name".to_string(),
-                    json!(meta.display_name),
-                );
+                object.insert("catalog_source_name".to_string(), json!(meta.display_name));
             }
             out.push(card);
         }
@@ -30521,11 +34464,7 @@ async fn all_skill_catalog_detail(
         else {
             continue;
         };
-        match tokio::time::timeout(
-            SKILL_ALL_SOURCE_TIMEOUT,
-            source.detail(&state.client, id),
-        )
-        .await
+        match tokio::time::timeout(SKILL_ALL_SOURCE_TIMEOUT, source.detail(&state.client, id)).await
         {
             Ok(Ok(value)) => return Ok(normalize_skill_detail(&source, id, value)),
             Ok(Err(error)) => {
@@ -30536,7 +34475,9 @@ async fn all_skill_catalog_detail(
             }
         }
     }
-    Err(anyhow::anyhow!("skill `{id}` was not found in any registered source"))
+    Err(anyhow::anyhow!(
+        "skill `{id}` was not found in any registered source"
+    ))
 }
 
 #[cfg(test)]
@@ -30627,7 +34568,10 @@ async fn skills_catalog_list(
     match source.search(&state.client, &request).await {
         Ok(mut value) => {
             if installed_only {
-                if let Some(cards) = value.get_mut("skills").and_then(serde_json::Value::as_array_mut) {
+                if let Some(cards) = value
+                    .get_mut("skills")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
                     cards.retain(|card| {
                         card.get("installed").and_then(serde_json::Value::as_bool) == Some(true)
                     });
@@ -30732,8 +34676,27 @@ async fn skills_updates(State(state): State<ServerState>) -> Json<serde_json::Va
 async fn skills_catalog_install(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<SkillInstallBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(app_lifecycle_denied_value(
+                crate::identity_verify::permissions::APP_INSTALL,
+                crate::sidecar::control_plane::registered_node().as_ref(),
+                "node_scope_or_acl_denied",
+            )),
+        );
+    }
+
     let source_id = resolve_skill_source_id(&state, body.source.as_deref()).await;
     if source_id == SKILL_ALL_SOURCES_ID {
         return (
@@ -30819,8 +34782,27 @@ struct SkillInstallFromSourceBody {
 )]
 async fn skills_install_from_source(
     State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<SkillInstallFromSourceBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(app_lifecycle_denied_value(
+                crate::identity_verify::permissions::APP_INSTALL,
+                crate::sidecar::control_plane::registered_node().as_ref(),
+                "node_scope_or_acl_denied",
+            )),
+        );
+    }
+
     if body.source.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -30949,8 +34931,18 @@ struct PackInstallBody {
 )]
 async fn skills_packs_install(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<PackInstallBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
     let Some(pack) = crate::skills_catalog::packs::list_packs()
         .into_iter()
         .find(|p| p.id == body.id)
@@ -31047,9 +35039,19 @@ async fn skills_packs_add(
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn skills_packs_remove(
-    State(_state): State<ServerState>,
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<PackInstallBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_UNINSTALL,
+    )
+    .await
+    {
+        return response;
+    }
     match crate::skills_catalog::packs::remove_user_pack(&body.id) {
         Ok(true) => (StatusCode::OK, Json(json!({ "success": true }))),
         Ok(false) => (
@@ -32727,7 +36729,8 @@ struct GatewayRoutingPatch {
 }
 
 /// Subset of the gateway's `BudgetConfig` exposed for Core writes.
-/// Each entry maps an id (user or agent) to a token limit + action.
+/// Each entry maps an id (user or agent) to a charged-cost limit in micro-USD
+/// plus its action.
 #[derive(serde::Deserialize, serde::Serialize, Default)]
 struct GatewayBudgetPatch {
     /// Per-user budgets keyed by user id.
@@ -32743,22 +36746,37 @@ struct GatewayBudgetPatch {
     session: Option<GatewayBudgetRule>,
 }
 
-/// A single budget rule: lifetime token cap and the enforcement action.
+/// A single budget rule: lifetime charged-cost cap in micro-USD and the
+/// enforcement action.
 /// Mirrors `apps/gateway/src/config.rs::BudgetRule`.
 #[derive(serde::Deserialize, serde::Serialize)]
 struct GatewayBudgetRule {
-    /// Lifetime token cap (input + output). 0 = unlimited.
+    /// Lifetime charged-cost cap in micro-USD. 1_000_000 = $1; 0 = unlimited.
     limit: u64,
     /// "notify" | "downgrade" | "restrict" | "stop"
     #[serde(default = "default_budget_action")]
     action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     downgrade_to: Option<String>,
+    /// Notification fan-out tier, preserved through Core's typed write proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    alert: Option<String>,
     /// Cap applied to `max_tokens` when `action = restrict`. Preserved through
     /// the write path so a save never drops a hand-set value (the gateway
     /// defaults it to 256 when omitted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     restrict_max_tokens: Option<u64>,
+    /// Charged work categories included in this rule. Preserved through Core's
+    /// typed write proxy so a save cannot silently reset an agent's spend scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    include: Option<GatewayBudgetInclusion>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct GatewayBudgetInclusion {
+    model: bool,
+    media: bool,
+    tools: bool,
 }
 
 fn default_budget_action() -> String {
@@ -33110,9 +37128,30 @@ async fn gateway_config_write(
     summary = "Restart the Core-managed gateway sidecar",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn gateway_restart(State(state): State<ServerState>) -> Json<serde_json::Value> {
+async fn gateway_restart(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> Json<serde_json::Value> {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::GATEWAY_CONFIGURE,
+    )
+    .await
+    .is_err()
+    {
+        return Json(json!({
+            "success": false,
+            "error": "insufficient permissions: gateway.configure",
+        }));
+    }
+
     match state.gateway.refresh().await {
-        Ok(true) => Json(json!({ "success": true })),
+        Ok(true) => {
+            record_gateway_control(&state, "gateway.restart", "gateway_process", None, &caller)
+                .await;
+            Json(json!({ "success": true }))
+        }
         Ok(false) => Json(json!({
             "success": false,
             "externally_managed": true,
@@ -33207,6 +37246,68 @@ async fn gateway_status(State(state): State<ServerState>) -> Json<serde_json::Va
 // the bearer token server-side so the desktop never handles the master key. The
 // proxy relays the gateway's exact status code; when the gateway is unreachable
 // a structured 502 is returned, consistent with AC #3.
+
+fn with_forwarded_gateway_actor(
+    mut request: reqwest::RequestBuilder,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+) -> reqwest::RequestBuilder {
+    if let Some(caller) = caller {
+        request = request.header("x-ryu-control-actor-id", &caller.user_id);
+        if let Some(email) = caller.email.as_deref() {
+            request = request.header("x-ryu-control-actor-name", email);
+        }
+    }
+    request
+}
+
+/// Best-effort local gateway activity row for Core-owned mutations that do not
+/// pass through `PUT /v1/config` (provider-key writes and process restarts).
+/// The gateway admin boundary remains authoritative; a failed audit write is
+/// warned about without turning an already-completed local mutation into an API
+/// failure.
+async fn record_gateway_control(
+    state: &ServerState,
+    action: &str,
+    target: &str,
+    summary: Option<&str>,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+) {
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
+
+    let base = gateway_url();
+    let mut request = state
+        .client
+        .post(format!("{}/v1/audit/control", base.trim_end_matches('/')))
+        .timeout(std::time::Duration::from_millis(1500))
+        .json(&json!({
+            "action": action,
+            "target": target,
+            "summary": summary,
+            "actor_id": caller.as_ref().map(|value| value.user_id.as_str()),
+            "actor_name": caller
+                .as_ref()
+                .and_then(|value| value.email.as_deref()),
+        }));
+    if let Some(token) = gateway_admin_key() {
+        request = request.bearer_auth(token);
+    }
+
+    match request.send().await {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => tracing::warn!(
+            action,
+            target,
+            status = %response.status(),
+            "gateway control audit write returned a non-success status"
+        ),
+        Err(error) => tracing::warn!(
+            action,
+            target,
+            error = %error,
+            "gateway control audit write failed"
+        ),
+    }
+}
 
 /// `GET /api/engine/concurrency` — local-engine admission-queue depth for the
 /// desktop "N/M slots busy · K queued" surface (Layer 2 of the batching work).
@@ -33322,13 +37423,377 @@ async fn gateway_get_config(
         Ok(resp) => {
             let status =
                 StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let body = resp
+            let mut body = resp
                 .json::<serde_json::Value>()
                 .await
                 .unwrap_or_else(|_| json!({}));
+            if status.is_success() {
+                crate::acp_runtime::observe_gateway_config(&mut body);
+            }
             (status, Json(body))
         }
     }
+}
+
+/// `GET /api/gateway/doctor` — proxy the Gateway's read-only doctor and append
+/// Core-owned approval and agent-egress coverage findings. The browser never
+/// receives the Gateway admin token.
+#[utoipa::path(
+    get,
+    path = "/api/gateway/doctor",
+    tag = "Gateway",
+    summary = "Run the Gateway and Core doctor",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn gateway_doctor(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::GATEWAY_VIEW,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "insufficient permissions: gateway.view" })),
+        );
+    }
+    gateway_doctor_report(State(state)).await
+}
+
+async fn gateway_doctor_report(
+    State(state): State<ServerState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
+
+    let base = gateway_url();
+    let base = base.trim_end_matches('/');
+    let token = gateway_admin_key();
+    let mut req = state
+        .client
+        .get(format!("{base}/v1/doctor"))
+        .timeout(std::time::Duration::from_millis(3000));
+    if let Some(token) = token.as_deref() {
+        req = req.bearer_auth(token);
+    }
+
+    let response = match req.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "reachable": false,
+                    "error": error.to_string(),
+                })),
+            )
+        }
+    };
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut report = match response.json::<serde_json::Value>().await {
+        Ok(report) => report,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "reachable": false,
+                    "error": format!("Gateway doctor returned invalid JSON: {error}"),
+                })),
+            )
+        }
+    };
+    if !status.is_success() {
+        return (status, Json(report));
+    }
+
+    let Some(mut findings) = report
+        .get("findings")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+    else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "reachable": false,
+                "error": "Gateway doctor response did not contain findings",
+            })),
+        );
+    };
+
+    let add_finding = |findings: &mut Vec<serde_json::Value>,
+                       check_id: &str,
+                       category: &str,
+                       severity: &str,
+                       summary: &str,
+                       detail: &str,
+                       setting_path: &str,
+                       recommended_action: &str| {
+        findings.push(json!({
+            "checkId": check_id,
+            "category": category,
+            "severity": severity,
+            "summary": summary,
+            "detail": detail,
+            "settingPath": setting_path,
+            "recommendedAction": recommended_action,
+            "canAutoFix": false,
+        }));
+    };
+
+    let approval_mode = state
+        .preferences
+        .get(crate::approvals::policy::APPROVAL_MODE_PREF)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if approval_mode.trim().eq_ignore_ascii_case("off") {
+        add_finding(
+            &mut findings,
+            "core.approvals-disabled",
+            "security",
+            "warning",
+            "Human approval prompts are disabled",
+            "Core will not pause on globally risky tool actions. Per-agent policy layers may still add approvals.",
+            "approval-mode",
+            "Use Balanced or Guarded posture, or enable Smart approval mode in Core settings.",
+        );
+    }
+
+    let exec_scan_mode = state
+        .preferences
+        .get(crate::exec_approval::EXEC_APPROVAL_MODE_PREF_KEY)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if exec_scan_mode.trim().eq_ignore_ascii_case("off") {
+        add_finding(
+            &mut findings,
+            "core.command-scan-disabled",
+            "security",
+            "error",
+            "Native command scanning is disabled",
+            "Claude, Codex, and other ACP native commands can run without the Gateway command-scan gate.",
+            "exec-approval-mode",
+            "Re-arm command scanning unless this is an intentional break-glass exception.",
+        );
+    }
+
+    let claude_raw = state
+        .preferences
+        .get(crate::claude_config::CLAUDE_GATEWAY_ROUTING_PREF_KEY)
+        .await
+        .ok()
+        .flatten();
+    let codex_raw = state
+        .preferences
+        .get(crate::codex_config::CODEX_GATEWAY_ROUTING_PREF_KEY)
+        .await
+        .ok()
+        .flatten();
+    let route_enabled = |value: Option<String>, default: bool| {
+        value
+            .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "on" | "yes" => true,
+                "false" | "0" | "off" | "no" => false,
+                _ => default,
+            })
+            .unwrap_or(default)
+    };
+    let claude_routed = route_enabled(
+        claude_raw,
+        crate::claude_config::DEFAULT_CLAUDE_GATEWAY_ROUTING,
+    );
+    let codex_routed = route_enabled(
+        codex_raw,
+        crate::codex_config::DEFAULT_CODEX_GATEWAY_ROUTING,
+    );
+    let parse_generic_route = |value: &serde_json::Value| match value {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" | "yes" => Some(true),
+            "false" | "0" | "off" | "no" => Some(false),
+            _ => None,
+        },
+        serde_json::Value::Number(value) => value.as_i64().map(|value| value != 0),
+        _ => None,
+    };
+    let generic_routing = state
+        .preferences
+        .get(crate::agent_routing::AGENT_GATEWAY_ROUTING_PREF_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+        .and_then(|value| value.as_object().cloned())
+        .map(|entries| {
+            let mut has_valid_entry = false;
+            let mut any_enabled = false;
+            for value in entries.values() {
+                if let Some(enabled) = parse_generic_route(value) {
+                    has_valid_entry = true;
+                    any_enabled |= enabled;
+                }
+            }
+            if has_valid_entry {
+                any_enabled
+            } else {
+                crate::agent_routing::DEFAULT_AGENT_GATEWAY_ROUTING
+            }
+        });
+    let generic_routing =
+        generic_routing.unwrap_or(crate::agent_routing::DEFAULT_AGENT_GATEWAY_ROUTING);
+
+    if !(claude_routed || codex_routed || generic_routing) {
+        add_finding(
+            &mut findings,
+            "coverage.agent-egress-bypass",
+            "coverage",
+            "warning",
+            "Agent model traffic is not routed through Gateway",
+            "Claude, Codex, and generic agent egress are all explicitly opted out of Gateway governance. Native agent traffic may bypass Gateway firewall, budget, and audit controls.",
+            "agent-gateway-routing",
+            "Keep the governed default, or remove explicit direct-egress opt-outs for the agents that should be covered.",
+        );
+    }
+
+    if let Some(posture) = state
+        .preferences
+        .get("gateway-posture")
+        .await
+        .ok()
+        .flatten()
+        .filter(|value| !value.trim().is_empty())
+    {
+        report["posture"] = serde_json::Value::String(posture);
+    }
+
+    report["findings"] = serde_json::Value::Array(findings.clone());
+
+    if let Some(counts) = report.get_mut("counts") {
+        let mut errors = 0usize;
+        let mut warnings = 0usize;
+        let mut info = 0usize;
+        for finding in findings.iter() {
+            match finding.get("severity").and_then(serde_json::Value::as_str) {
+                Some("error") => errors += 1,
+                Some("warning") => warnings += 1,
+                _ => info += 1,
+            }
+        }
+        *counts = json!({ "errors": errors, "warnings": warnings, "info": info });
+    }
+
+    (StatusCode::OK, Json(report))
+}
+
+/// `POST /api/gateway/doctor/fix` — proxy the Gateway's explicit safe-fix
+/// operation. Core requires the same gateway.configure permission as other
+/// writes, keeps the admin key server-side, and refreshes the returned report
+/// with Core-owned findings before it reaches the client.
+#[utoipa::path(
+    post,
+    path = "/api/gateway/doctor/fix",
+    tag = "Gateway",
+    summary = "Preview or apply safe Gateway Doctor fixes",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn gateway_doctor_fix(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::GATEWAY_CONFIGURE,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "insufficient permissions: gateway.configure" })),
+        );
+    }
+
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
+
+    let base = gateway_url();
+    let base = base.trim_end_matches('/');
+    let token = gateway_admin_key();
+    let mut req = state
+        .client
+        .post(format!("{base}/v1/doctor/fix"))
+        .timeout(std::time::Duration::from_millis(3000))
+        .json(&body);
+    req = with_forwarded_gateway_actor(req, &caller);
+    if let Some(token) = token.as_deref() {
+        req = req.bearer_auth(token);
+    }
+
+    let response = match req.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "reachable": false,
+                    "error": error.to_string(),
+                })),
+            )
+        }
+    };
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut result = match response.json::<serde_json::Value>().await {
+        Ok(result) => result,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "reachable": false,
+                    "error": format!("Gateway Doctor fix returned invalid JSON: {error}"),
+                })),
+            )
+        }
+    };
+    if !status.is_success() {
+        return (status, Json(result));
+    }
+
+    // Reuse the existing combined report builder so the fix response includes
+    // Core approval and agent-routing findings just like a fresh audit. If a
+    // transient read fails after a successful fix, retain the Gateway-owned
+    // report rather than turning a completed mutation into a proxy error.
+    let (doctor_status, Json(report)) = gateway_doctor_report(State(state.clone())).await;
+    if doctor_status.is_success() {
+        result["report"] = report;
+    }
+
+    if result
+        .get("appliedFixes")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|fixes| !fixes.is_empty())
+    {
+        record_gateway_control(
+            &state,
+            "gateway.doctor.fix",
+            "gateway_doctor",
+            Some("protective fixes applied"),
+            &caller,
+        )
+        .await;
+    }
+
+    (status, Json(result))
 }
 
 #[utoipa::path(
@@ -33361,12 +37826,22 @@ async fn gateway_put_config(
     // Reuse the single config-push transport; the proxy relays the gateway's exact
     // status code, so a caller sees the same result whether it PUT here or the
     // policy path pushed the patch.
-    match crate::sidecar::gateway::push_config(&state.client, &patch).await {
+    match crate::sidecar::gateway::push_config_with_actor(
+        &state.client,
+        &patch,
+        caller.as_ref().map(|value| value.user_id.as_str()),
+        caller.as_ref().and_then(|value| value.email.as_deref()),
+    )
+    .await
+    {
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "reachable": false, "error": e.to_string() })),
         ),
         Ok((status, body)) => {
+            if status.is_success() {
+                crate::acp_runtime::observe_gateway_patch(&patch);
+            }
             let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             (status, Json(body))
         }
@@ -33454,8 +37929,23 @@ struct SetProviderBody {
 )]
 async fn gateway_set_provider(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<SetProviderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::GATEWAY_CONFIGURE,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "insufficient permissions: gateway.configure" })),
+        );
+    }
+
     let provider = body.provider.trim().to_ascii_lowercase();
     if !matches!(
         provider.as_str(),
@@ -33478,6 +37968,11 @@ async fn gateway_set_provider(
             );
         }
     }
+    let provider_action = if body.api_key.is_some() {
+        "set"
+    } else {
+        "clear"
+    };
 
     // Load, patch the providers table, write back atomically.
     let path = match gateway_config_path() {
@@ -33586,6 +38081,16 @@ async fn gateway_set_provider(
             ),
         );
     }
+
+    let summary = format!("provider={provider}; action={provider_action}");
+    record_gateway_control(
+        &state,
+        "gateway.provider.update",
+        "gateway_provider",
+        Some(&summary),
+        &caller,
+    )
+    .await;
 
     let mut gateway_restarted = true;
     if let Err(e) = state.gateway.refresh().await {
@@ -33722,6 +38227,10 @@ struct AuditQueryParams {
     #[serde(default)]
     errors_only: bool,
     limit: Option<u32>,
+    from: Option<String>,
+    until: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
 }
 
 #[utoipa::path(
@@ -33751,6 +38260,18 @@ async fn gateway_audit(
     }
     if let Some(limit) = params.limit {
         query_parts.push(format!("limit={limit}"));
+    }
+    if let Some(from) = &params.from {
+        query_parts.push(format!("from={}", urlencoding_simple(from)));
+    }
+    if let Some(until) = &params.until {
+        query_parts.push(format!("until={}", urlencoding_simple(until)));
+    }
+    if let Some(provider) = &params.provider {
+        query_parts.push(format!("provider={}", urlencoding_simple(provider)));
+    }
+    if let Some(model) = &params.model {
+        query_parts.push(format!("model={}", urlencoding_simple(model)));
     }
 
     let qs = if query_parts.is_empty() {
@@ -33882,7 +38403,7 @@ async fn gateway_traffic(State(state): State<ServerState>) -> axum::response::Re
 
 // ── Gateway budget-spend proxy (M2 control-layer UX) ────────────────────────
 //
-// The gateway tracks live per-user / per-agent / per-session token spend in
+// The gateway tracks live per-user / per-agent / per-session charged spend in
 // memory but gates the read surface (`GET /v1/budget/spend`) behind
 // `require_local_admin`, which the desktop cannot satisfy directly (it never
 // holds the master key). Core proxies it with its own gateway token so the
@@ -34123,8 +38644,19 @@ struct InstallTemplateBody {
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn install_workflow_template(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<InstallTemplateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
     match crate::workflow::templates::install(&body.template_id).await {
         Ok(workflow_id) => (StatusCode::OK, Json(json!({ "workflow_id": workflow_id }))),
         Err(e) => {
@@ -34677,6 +39209,19 @@ async fn delegate_stream(
 
         let terminal = match fanout.await {
             Ok(Ok(results)) => {
+                if !results.is_empty() {
+                    let completed = results.iter().filter(|result| result.error.is_none()).count();
+                    let failed = results.len() - completed;
+                    crate::events::publish_system_notification(
+                        if failed == 0 {
+                            "Other agents finished"
+                        } else {
+                            "Other agents finished with issues"
+                        },
+                        format!("{completed} of {} delegated tasks completed.", results.len()),
+                        if failed == 0 { "success" } else { "warning" },
+                    );
+                }
                 if let Some(parent_id) = parent_conversation_id.as_deref() {
                     persist_delegate_children(
                         &conversations,
@@ -34774,7 +39319,43 @@ fn default_enabled() -> bool {
     true
 }
 
-async fn create_job(Json(body): Json<CreateJobBody>) -> (StatusCode, Json<serde_json::Value>) {
+async fn create_job(
+    State(state): State<ServerState>,
+    Json(body): Json<CreateJobBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let crate::scheduler::store::JobTarget::Agent { agent_id, .. } = &body.target {
+        match state.agent_store.get(agent_id).await {
+            Ok(Some(agent))
+                if agent.lifecycle_status != crate::agents::AgentLifecycleStatus::Active =>
+            {
+                if body.enabled {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "success": false,
+                            "error": format!("agent '{}' is in {} mode and cannot have an enabled automation", agent.name, agent.lifecycle_status.as_str())
+                        })),
+                    );
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        json!({ "success": false, "error": format!("agent '{agent_id}' not found") }),
+                    ),
+                );
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "success": false, "error": error.to_string() })),
+                );
+            }
+        }
+    }
+
     // Validate the schedule up front so a broken cron is never persisted.
     if let crate::scheduler::store::Schedule::Cron { expr, tz } = &body.schedule {
         if let Err(e) = crate::scheduler::cron::CronSchedule::parse(expr) {
@@ -34865,6 +39446,171 @@ async fn delete_job(
             Json(json!({ "success": false, "error": e.to_string() })),
         ),
     }
+}
+
+/// Validate a portable agent schedule with the same rules as the public job
+/// endpoint. Templates must never be able to write a job that the scheduler
+/// would silently skip after import.
+fn validate_agent_schedule(schedule: &crate::scheduler::store::Schedule) -> Result<(), String> {
+    match schedule {
+        crate::scheduler::store::Schedule::Cron { expr, tz } => {
+            crate::scheduler::cron::CronSchedule::parse(expr).map_err(|error| error.to_string())?;
+            if let Some(name) = tz {
+                crate::scheduler::cron::parse_tz(name).map_err(|error| error.to_string())?;
+            }
+        }
+        crate::scheduler::store::Schedule::Every { interval } => {
+            humantime::parse_duration(interval)
+                .map_err(|_| format!("invalid interval '{interval}'"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_agent_schedules(
+    schedules: &[crate::agents::AgentScheduleTemplate],
+) -> Result<(), String> {
+    for (index, schedule) in schedules.iter().enumerate() {
+        validate_agent_schedule(&schedule.schedule)
+            .map_err(|error| format!("schedule {}: {error}", index + 1))?;
+        if schedule.instructions.trim().is_empty() {
+            return Err(format!(
+                "schedule {}: custom instructions are required",
+                index + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn build_agent_schedule_jobs(
+    agent_id: &str,
+    agent_name: &str,
+    schedules: &[crate::agents::AgentScheduleTemplate],
+) -> Result<Vec<crate::scheduler::store::ScheduledJob>, String> {
+    validate_agent_schedules(schedules)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    schedules
+        .iter()
+        .enumerate()
+        .map(|(index, schedule)| {
+            let name = if schedule.name.trim().is_empty() {
+                format!("{agent_name} schedule {}", index + 1)
+            } else {
+                schedule.name.trim().to_owned()
+            };
+            Ok(crate::scheduler::store::ScheduledJob {
+                id: format!("job_{}", uuid::Uuid::new_v4().simple()),
+                name,
+                schedule: schedule.schedule.clone(),
+                target: crate::scheduler::store::JobTarget::Agent {
+                    agent_id: agent_id.to_owned(),
+                    prompt: schedule.instructions.trim().to_owned(),
+                    model: None,
+                },
+                enabled: schedule.enabled,
+                require_approval: schedule.require_approval,
+                owner_app: None,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_run_at: None,
+                last_outcome: None,
+                history: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// Materialize portable schedules only after the agent exists. If one file
+/// cannot be written, remove the files written by this operation so a partial
+/// import cannot leave a misleading half-configured agent behind.
+fn persist_agent_schedules(
+    agent_id: &str,
+    agent_name: &str,
+    schedules: &[crate::agents::AgentScheduleTemplate],
+) -> Result<(), String> {
+    let jobs = build_agent_schedule_jobs(agent_id, agent_name, schedules)?;
+    let mut saved_ids: Vec<String> = Vec::new();
+    for job in jobs {
+        if let Err(error) = crate::scheduler::store::save_job(&job) {
+            for id in saved_ids {
+                let _ = crate::scheduler::store::delete_job(&id);
+            }
+            return Err(error.to_string());
+        }
+        saved_ids.push(job.id);
+    }
+    Ok(())
+}
+
+fn agent_schedule_templates(agent_id: &str) -> Vec<crate::agents::AgentScheduleTemplate> {
+    crate::scheduler::store::list_jobs()
+        .into_iter()
+        .filter_map(|job| {
+            let crate::scheduler::store::JobTarget::Agent {
+                agent_id: target_agent_id,
+                prompt,
+                ..
+            } = job.target
+            else {
+                return None;
+            };
+            if target_agent_id != agent_id {
+                return None;
+            }
+            Some(crate::agents::AgentScheduleTemplate {
+                name: job.name,
+                schedule: job.schedule,
+                instructions: prompt,
+                enabled: job.enabled,
+                require_approval: job.require_approval,
+            })
+        })
+        .collect()
+}
+
+fn delete_agent_schedules(agent_id: &str) -> std::io::Result<()> {
+    for job in crate::scheduler::store::list_jobs() {
+        let is_agent_job = matches!(
+            &job.target,
+            crate::scheduler::store::JobTarget::Agent { agent_id: target_id, .. }
+                if target_id == agent_id
+        );
+        if is_agent_job {
+            crate::scheduler::store::delete_job(&job.id)?;
+        }
+    }
+    Ok(())
+}
+
+/// Keep automation definitions so promotion can restore the operator's intent,
+/// but make every owned job inert as soon as an agent leaves `active`.
+fn disable_agent_schedules(agent_id: &str) -> std::io::Result<()> {
+    for mut job in crate::scheduler::store::list_jobs() {
+        let is_agent_job = matches!(
+            &job.target,
+            crate::scheduler::store::JobTarget::Agent { agent_id: target_id, .. }
+                if target_id == agent_id
+        );
+        let is_workflow_job = matches!(
+            &job.target,
+            crate::scheduler::store::JobTarget::Workflow { workflow_id, .. }
+                if crate::workflow::store::load_workflow(workflow_id)
+                    .ok()
+                    .map(|workflow| {
+                        crate::workflow::referenced_agent_ids(&workflow)
+                            .iter()
+                            .any(|referenced| referenced == agent_id)
+                    })
+                    .unwrap_or(false)
+        );
+        if (is_agent_job || is_workflow_job) && job.enabled {
+            job.enabled = false;
+            job.updated_at = chrono::Utc::now().to_rfc3339();
+            crate::scheduler::store::save_job(&job)?;
+        }
+    }
+    Ok(())
 }
 
 /// `POST /heartbeat/jobs/:id/run` — run a scheduled job now, off-schedule.
@@ -36418,6 +41164,8 @@ mod plugin_catalog_tests {
         let e = plugin_manifest_to_entry(m);
         assert_eq!(e["org_verified"], json!(true));
         assert_eq!(e["org_verified_tier"], json!("official"));
+        assert_eq!(e["publisher_trust"], json!("gold"));
+        assert_eq!(e["publisher_trust_source"], json!("ryu_staff"));
 
         // A manifest Core does NOT ship stays unbadged — the check is provenance,
         // never the `@ryu/` string, which anything writing to `~/.ryu/plugins` can
@@ -36439,10 +41187,14 @@ mod plugin_catalog_tests {
             "id": "acme/widget",
             "org_verified": true,
             "org_verified_tier": "partner",
+            "publisher_trust": "blue",
+            "publisher_trust_source": "stripe_connect",
         });
         let e = plugin_marketplace_item_to_entry(&verified, "ryu-marketplace").unwrap();
         assert_eq!(e["org_verified"], json!(true));
         assert_eq!(e["org_verified_tier"], json!("partner"));
+        assert_eq!(e["publisher_trust"], json!("blue"));
+        assert_eq!(e["publisher_trust_source"], json!("stripe_connect"));
 
         let revoked = json!({ "id": "acme/widget", "org_verified": false });
         let e = plugin_marketplace_item_to_entry(&revoked, "ryu-marketplace").unwrap();
@@ -36677,14 +41429,14 @@ mod app_tool_filter_tests {
     /// spends a round-trip discovering it is unavailable.
     #[test]
     fn enabled_plugin_hide_pattern_matches_exactly() {
-        let manifests = vec![make_hider("com.test.hider", &["shell__exec"])];
+        let manifests = vec![make_hider("com.test.hider", &["shell.exec"])];
         let lifecycle = vec![make_record("com.test.hider", true)];
 
         let filters = app_tool_hide_filters(&manifests, &lifecycle);
         assert_eq!(filters.len(), 1);
-        assert!(filters[0].matches("shell__exec"));
+        assert!(filters[0].matches("shell.exec"));
         assert!(
-            !filters[0].matches("shell__exec_many"),
+            !filters[0].matches("shell.exec_many"),
             "an exact pattern must not behave like a prefix"
         );
     }
@@ -36692,14 +41444,14 @@ mod app_tool_filter_tests {
     /// A trailing `*` hides a whole server namespace.
     #[test]
     fn trailing_wildcard_hides_the_namespace() {
-        let manifests = vec![make_hider("com.test.hider", &["shell__*"])];
+        let manifests = vec![make_hider("com.test.hider", &["shell.*"])];
         let lifecycle = vec![make_record("com.test.hider", true)];
 
         let filters = app_tool_hide_filters(&manifests, &lifecycle);
-        assert!(filters[0].matches("shell__exec"));
-        assert!(filters[0].matches("shell__write"));
+        assert!(filters[0].matches("shell.exec"));
+        assert!(filters[0].matches("shell.write"));
         assert!(
-            !filters[0].matches("browser__navigate"),
+            !filters[0].matches("browser.navigate"),
             "the wildcard must stay scoped to its server namespace"
         );
     }
@@ -36708,7 +41460,7 @@ mod app_tool_filter_tests {
     /// leave its policy silently in force — the user disabled it to stop it acting.
     #[test]
     fn disabled_plugin_contributes_no_hide_filters() {
-        let manifests = vec![make_hider("com.test.hider", &["shell__exec"])];
+        let manifests = vec![make_hider("com.test.hider", &["shell.exec"])];
         let lifecycle = vec![make_record("com.test.hider", false)];
 
         assert!(
@@ -37415,7 +42167,7 @@ mod mcp_plugin_governance_tests {
     fn synthesize_mcp_manifest_is_governance_only_and_grants_widget_render() {
         let m = synthesize_mcp_manifest(&stdio_plan("brave-search")).expect("valid id");
         assert_eq!(m.id, "brave-search");
-        // The plugin id == the server name (external tools are `server__tool`).
+        // The plugin id == the server name (external tools are `server.tool`).
         assert_eq!(m.version, "0.0.0", "absent/non-semver version falls back");
         assert!(
             m.runnables.is_empty(),
@@ -37957,6 +42709,22 @@ mod pure_helper_tests {
         assert_eq!(value["data"]["text"], "double-check: looks good");
     }
 
+    #[test]
+    fn plugin_note_frame_carries_the_first_person_tool_intent() {
+        let frame = plugin_note_frame_with_question(
+            "The test suite will verify the change.",
+            Some("Can I run Bash now?"),
+        );
+        let text = String::from_utf8(frame).expect("utf8");
+        let payload = text.trim_start_matches("data: ").trim_end_matches("\n\n");
+        let value: serde_json::Value = serde_json::from_str(payload).expect("frame carries JSON");
+        assert_eq!(value["data"]["question"], "Can I run Bash now?");
+        assert_eq!(
+            value["data"]["text"],
+            "The test suite will verify the change."
+        );
+    }
+
     // ── webhook freshness / dedup ────────────────────────────────────────────
     fn now_secs() -> i64 {
         std::time::SystemTime::now()
@@ -38471,16 +43239,18 @@ mod pure_helper_tests {
 
     #[test]
     fn tenancy_filter_args_extracts_ids_and_flags_unbound() {
-        // The caller's ids are always extracted; the bool is the node-bound flag,
-        // which is false in tests.
-        let (uid, org, bound) = tenancy_filter_args(&Some(caller("alice", Some("org1"))));
+        // The caller's ids and verified team set are extracted; the bool is the
+        // node-bound flag, which is false in tests.
+        let (uid, org, teams, bound) = tenancy_filter_args(&Some(caller("alice", Some("org1"))));
         assert_eq!(uid.as_deref(), Some("alice"));
         assert_eq!(org.as_deref(), Some("org1"));
+        assert_eq!(teams.as_deref(), Some("[]"));
         assert!(!bound);
 
-        let (uid, org, bound) = tenancy_filter_args(&None);
+        let (uid, org, teams, bound) = tenancy_filter_args(&None);
         assert_eq!(uid, None);
         assert_eq!(org, None);
+        assert_eq!(teams, None);
         assert!(!bound);
     }
 
@@ -38553,6 +43323,36 @@ mod pure_helper_tests {
             collect_plugin_slash_commands(&manifests, &enabled, None).len(),
             1
         );
+    }
+
+    #[test]
+    fn chat_widget_templates_are_enabled_and_surface_filtered_and_tagged() {
+        let manifests = vec![
+            manifest(json!({
+                "id": "proof", "name": "Proof", "version": "1.0.0", "runnables": [],
+                "targets": ["desktop"],
+                "contributes": { "chat_widget_templates": [{
+                    "id": "proof.chat", "title": "Proof widget", "triggers": ["proof"],
+                    "examples": ["Show proof"], "backing": { "view_id": "proof.view" },
+                    "display_mode": "inline", "safe_action_ids": []
+                }]}
+            })),
+            manifest(json!({
+                "id": "disabled", "name": "Disabled", "version": "1.0.0", "runnables": [],
+                "contributes": { "chat_widget_templates": [{
+                    "id": "disabled.chat", "title": "Disabled widget", "backing": {},
+                    "display_mode": "inline", "availability": "coming-soon"
+                }]}
+            })),
+        ];
+        let out = collect_plugin_chat_widget_templates(
+            &manifests,
+            &enabled_set(&["proof"]),
+            Some(crate::plugin_manifest::Surface::Desktop),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["plugin"], "proof");
+        assert_eq!(out[0]["backing"]["view_id"], "proof.view");
     }
 
     // ── Marketplace tabs (contributes.store_tabs) ────────────────────────────
@@ -38996,13 +43796,32 @@ async fn pair_revoke(Path(id): Path<String>) -> (StatusCode, Json<serde_json::Va
     }
 }
 
-/// `POST /api/node/token/rotate` — mint a new node auth token. PROTECTED.
+/// `POST /api/node/token/rotate` — mint a new node auth token. ROOT-ONLY.
 ///
 /// Writes the file only; the running process keeps authenticating the OLD token
 /// until it restarts (see `node_token::rotate`). The response says so explicitly
 /// so the caller can prompt for a restart rather than silently leaving the user
 /// with a token that does not work yet.
-async fn node_token_rotate() -> (StatusCode, Json<serde_json::Value>) {
+async fn node_token_rotate(
+    Extension(expected): Extension<Option<String>>,
+    headers: axum::http::HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // `require_auth` admits paired client bearers for ordinary protected routes,
+    // but rotating the node root credential must remain a root operation. Keep
+    // loopback/no-token development semantics unchanged; when a root token is
+    // configured, require that exact bearer here as a second, route-specific gate.
+    if let Some(expected) = expected.as_deref() {
+        let provided = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        if provided.is_none_or(|token| !ct_eq(token, expected)) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "root node token required" })),
+            );
+        }
+    }
     match crate::node_token::rotate() {
         Ok(token) => (
             StatusCode::OK,
@@ -39136,6 +43955,71 @@ pub(crate) async fn enforce_permission_on(
     }
 }
 
+/// Node ACLs use the normal `roles.manage` guard, with the documented implicit
+/// management authority for personal owners and org owners/admins. The id is
+/// pinned to the registered node so this endpoint cannot be used to edit an
+/// arbitrary node key.
+async fn enforce_node_acl_management(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    kind: &str,
+    resource_id: &str,
+) -> Result<(), axum::response::Response> {
+    if kind == crate::acl::KIND_NODE {
+        let Some(node) = crate::sidecar::control_plane::registered_node() else {
+            return Err(json_error(
+                StatusCode::NOT_FOUND,
+                "node ACLs are unavailable on an unbound node".to_owned(),
+            ));
+        };
+        if resource_id != node.node_id {
+            return Err(json_error(
+                StatusCode::NOT_FOUND,
+                "node ACL id does not match the registered node".to_owned(),
+            ));
+        }
+        let Some(caller) = caller.as_ref() else {
+            return Err(app_lifecycle_denied(
+                crate::identity_verify::permissions::ROLES_MANAGE,
+                Some(&node),
+                "authentication_required",
+            ));
+        };
+        if let Some(reason) = node_scope_denial_reason(&node, caller) {
+            return Err(app_lifecycle_denied(
+                crate::identity_verify::permissions::ROLES_MANAGE,
+                Some(&node),
+                reason,
+            ));
+        }
+        let personal_owner = node.scope == crate::sidecar::control_plane::NodeScope::Personal
+            && node.owner_user_id.as_deref() == Some(caller.user_id.as_str());
+        let org_admin = node.scope != crate::sidecar::control_plane::NodeScope::Personal
+            && caller.org_id.as_deref() == Some(node.org.id.as_str())
+            && caller
+                .role
+                .satisfies(crate::identity_verify::OrgRole::Admin);
+        if personal_owner || org_admin {
+            return Ok(());
+        }
+    }
+
+    enforce_permission_on(
+        state,
+        caller,
+        crate::identity_verify::permissions::ROLES_MANAGE,
+        kind,
+        resource_id,
+    )
+    .await
+    .map_err(|_| {
+        json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: roles.manage".to_owned(),
+        )
+    })
+}
+
 /// The space a document really belongs to, for authorization.
 ///
 /// `/api/spaces/:id/documents/:doc_id` lets a caller name ANY space next to a
@@ -39165,20 +44049,8 @@ async fn acl_get_resource(
     // as writing it, so a caller who may not change the rules may not enumerate
     // them either.
     let caller = verified_caller_from_headers(&headers).await;
-    if enforce_permission_on(
-        &state,
-        &caller,
-        crate::identity_verify::permissions::ROLES_MANAGE,
-        &kind,
-        &id,
-    )
-    .await
-    .is_err()
-    {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "insufficient permissions: roles.manage".to_owned(),
-        ));
+    if let Err(response) = enforce_node_acl_management(&state, &caller, &kind, &id).await {
+        return Err(response);
     }
     let rows = crate::acl::store::stored_for(&crate::acl::store::ResourceKey::new(&kind, &id));
     Ok(Json(json!({
@@ -39217,20 +44089,8 @@ async fn acl_put_resource(
     // Editing WHO may do what is itself a permission, and it is checked ON THIS
     // RESOURCE — otherwise anyone who could read a space could grant themselves
     // write on it.
-    if enforce_permission_on(
-        &state,
-        &caller,
-        crate::identity_verify::permissions::ROLES_MANAGE,
-        &kind,
-        &id,
-    )
-    .await
-    .is_err()
-    {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "insufficient permissions: roles.manage".to_owned(),
-        ));
+    if let Err(response) = enforce_node_acl_management(&state, &caller, &kind, &id).await {
+        return Err(response);
     }
 
     // Reject unknown permission ids at the EDGE rather than storing them and
@@ -39436,7 +44296,8 @@ mod per_resource_gate_tests {
             // the guard passed with the gate deleted. Verified by mutation after
             // the fix.
             let gated = body.contains("if enforce_permission(")
-                || body.contains("if enforce_permission_on(");
+                || body.contains("if enforce_permission_on(")
+                || body.contains("enforce_node_acl_management(");
             assert!(
                 gated,
                 "{handler} performs no permission check — it discloses tenant data to any \
@@ -39466,6 +44327,7 @@ mod per_resource_gate_tests {
         assert_eq!(crate::acl::KIND_CONVERSATION, "conversation");
         assert_eq!(crate::acl::KIND_AGENT, "agent");
         assert_eq!(crate::acl::KIND_WORKFLOW, "workflow");
+        assert_eq!(crate::acl::KIND_NODE, "node");
     }
 
     #[test]
@@ -39488,9 +44350,9 @@ mod per_resource_gate_tests {
                 continue;
             }
             let args = lines[i + 1..(i + 8).min(lines.len())].join("\n");
-            let kind_arg = args
-                .lines()
-                .find(|a| a.contains("crate::acl::KIND_") || a.trim() == "&kind,");
+            let kind_arg = args.lines().find(|a| {
+                a.contains("crate::acl::KIND_") || matches!(a.trim(), "&kind," | "kind,")
+            });
             assert!(
                 kind_arg.is_some(),
                 "enforce_permission_on at line {} names its kind by literal:\n{args}",

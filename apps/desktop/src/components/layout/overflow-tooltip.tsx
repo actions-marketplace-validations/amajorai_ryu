@@ -1,5 +1,6 @@
 "use client";
 
+import { useChatDisplayPrefs } from "@ryu/blocks/desktop/agent-elements/chat-display-prefs.tsx";
 import {
 	Tooltip,
 	TooltipContent,
@@ -15,6 +16,8 @@ import {
 	useState,
 } from "react";
 import { cn } from "@/lib/utils.ts";
+import { usePrefersReducedMotion } from "@/src/hooks/usePrefersReducedMotion.ts";
+import { AnimatedTitle } from "./animated-title.tsx";
 
 // Fades the trailing edge of an overflowing label into transparency instead of
 // cutting it with an ellipsis — the text dissolves into the background. Only
@@ -35,20 +38,13 @@ const CLIP_CLASS = "block min-w-0 overflow-hidden whitespace-nowrap";
 // The measured content box. An inline-block sizes to max-content, so its
 // scrollWidth is the FULL text width even when the clip box is narrower — which
 // is what makes an unbroken (space-free) string measure correctly. `align-bottom`
-// mirrors AutoScrollText so the line does not shift when the state changes.
+// keeps the line from shifting when the state changes.
 const INNER_CLASS = "inline-block max-w-none align-bottom";
 // Streaming/loading treatment (see agent-ui.css). It lives on the INNER span so
 // the clip box keeps its fade mask: `background-clip: text` and the mask compose
 // instead of fighting.
 const SHIMMER_CLASS =
 	"an-text-shimmer an-text-shimmer--active [animation-duration:2s]";
-// Keep the title's crawl at the same deliberately gentle pace as the Node
-// selector's overflowing labels. The small overrun lets the final glyph clear
-// the edge before it reverses.
-const SCROLL_MS_PER_PIXEL = 26;
-const MIN_SCROLL_TRAVEL_MS = 1600;
-const SCROLL_EDGE_PADDING_PX = 6;
-
 /** Adds the desktop tooltip treatment without adding a layout wrapper. */
 export function TitleTooltip({
 	children,
@@ -123,60 +119,24 @@ function useEdgeFade(text: string, track: boolean) {
  *
  * Use this directly where the row already has its own hover affordance (the
  * sidebar chat rows carry a HoverCard preview, so a second popup would fight it).
+ * It intentionally stays static; the shared package UI label is the only
+ * hover-scroll owner for controls.
  * Pass sizing/colour classes via `className`; the structural clip classes and
  * the mask are owned here.
  */
 export function FadeLabel({
-	autoScroll = false,
 	className,
 	shimmer = false,
 	text,
 }: {
-	/** Start a gentle ping-pong scroll while the caller's row is hovered. */
-	autoScroll?: boolean;
 	className?: string;
 	shimmer?: boolean;
 	text: string;
 }) {
 	const { clipRef, clipped, innerRef } = useEdgeFade(text, true);
-
-	useEffect(() => {
-		const clip = clipRef.current;
-		const inner = innerRef.current;
-		if (
-			!(
-				autoScroll &&
-				clipped &&
-				clip &&
-				inner &&
-				!window.matchMedia("(prefers-reduced-motion: reduce)").matches
-			)
-		) {
-			return;
-		}
-
-		const distance =
-			inner.scrollWidth - clip.clientWidth + SCROLL_EDGE_PADDING_PX;
-		const animation = inner.animate(
-			[
-				{ transform: "translateX(0)", offset: 0 },
-				{ transform: "translateX(0)", offset: 0.2 },
-				{ transform: `translateX(-${distance}px)`, offset: 0.8 },
-				{ transform: `translateX(-${distance}px)`, offset: 1 },
-			],
-			{
-				duration: Math.max(
-					MIN_SCROLL_TRAVEL_MS,
-					Math.round(distance * SCROLL_MS_PER_PIXEL)
-				),
-				iterations: Number.POSITIVE_INFINITY,
-				direction: "alternate",
-				easing: "ease-in-out",
-			}
-		);
-
-		return () => animation.cancel();
-	}, [autoScroll, clipped, clipRef, innerRef]);
+	const { animationsEnabled } = useChatDisplayPrefs();
+	const prefersReducedMotion = usePrefersReducedMotion();
+	const motionEnabled = animationsEnabled && !prefersReducedMotion;
 
 	return (
 		<span
@@ -185,10 +145,10 @@ export function FadeLabel({
 			style={clipped ? FADE_STYLE : undefined}
 		>
 			<span
-				className={cn(INNER_CLASS, shimmer && SHIMMER_CLASS)}
+				className={cn(INNER_CLASS, shimmer && motionEnabled && SHIMMER_CLASS)}
 				ref={innerRef}
 			>
-				{text}
+				<AnimatedTitle text={text} />
 			</span>
 		</span>
 	);
@@ -228,6 +188,9 @@ export function OverflowTooltip({
 	tooltip?: ReactNode;
 }) {
 	const { clipRef, clipped, innerRef, measureNow } = useEdgeFade(text, fade);
+	const { animationsEnabled } = useChatDisplayPrefs();
+	const prefersReducedMotion = usePrefersReducedMotion();
+	const motionEnabled = animationsEnabled && !prefersReducedMotion;
 	const [open, setOpen] = useState(false);
 
 	return (
@@ -249,10 +212,13 @@ export function OverflowTooltip({
 					>
 						{fade ? (
 							<span
-								className={cn(INNER_CLASS, shimmer && SHIMMER_CLASS)}
+								className={cn(
+									INNER_CLASS,
+									shimmer && motionEnabled && SHIMMER_CLASS
+								)}
 								ref={innerRef}
 							>
-								{text}
+								<AnimatedTitle text={text} />
 							</span>
 						) : (
 							text

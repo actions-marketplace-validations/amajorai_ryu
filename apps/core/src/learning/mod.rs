@@ -105,13 +105,44 @@ pub fn global_state() -> Option<ServerState> {
 /// state. Cheap (Arc-backed clones); the HTTP surface, scheduler, and feedback
 /// fan-out each build one on demand.
 pub fn learning_ctx(state: &ServerState) -> LearningCtx {
+    learning_ctx_with_visibility(state, None)
+}
+
+/// Build a caller-scoped learning context for a request on a registered node.
+/// The handler performs the exact node-scope authorization before calling this
+/// helper; the host still fails closed if it is ever constructed with no caller.
+pub fn learning_ctx_for_caller(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+) -> LearningCtx {
+    let visibility =
+        crate::sidecar::control_plane::registered_node().map(|node| LearningVisibility {
+            owner_user_id: caller.as_ref().map(|current| current.user_id.clone()),
+            org_id: Some(node.org.id),
+            node_bound: true,
+        });
+    learning_ctx_with_visibility(state, visibility)
+}
+
+fn learning_ctx_with_visibility(
+    state: &ServerState,
+    visibility: Option<LearningVisibility>,
+) -> LearningCtx {
     LearningCtx::new(
         state.experience.clone(),
         Arc::new(CoreLearningHost {
             state: state.clone(),
+            visibility,
         }),
         state.client.clone(),
     )
+}
+
+#[derive(Clone)]
+struct LearningVisibility {
+    owner_user_id: Option<String>,
+    org_id: Option<String>,
+    node_bound: bool,
 }
 
 /// The concrete [`LearningHost`] over [`ServerState`]. Holds a cheap `ServerState`
@@ -119,6 +150,7 @@ pub fn learning_ctx(state: &ServerState) -> LearningCtx {
 /// per call and dropped after, so it never forms a reference cycle with the state.
 struct CoreLearningHost {
     state: ServerState,
+    visibility: Option<LearningVisibility>,
 }
 
 #[async_trait]
@@ -132,7 +164,19 @@ impl LearningHost for CoreLearningHost {
     }
 
     async fn list_conversations(&self) -> anyhow::Result<Vec<ConvMeta>> {
-        let rows = self.state.conversations.list_conversations().await?;
+        let rows = match self.visibility.as_ref() {
+            Some(visibility) => {
+                self.state
+                    .conversations
+                    .list_conversations_visible(
+                        visibility.owner_user_id.as_deref(),
+                        visibility.org_id.as_deref(),
+                        visibility.node_bound,
+                    )
+                    .await?
+            }
+            None => self.state.conversations.list_conversations().await?,
+        };
         Ok(rows
             .into_iter()
             .map(|c| ConvMeta {
@@ -146,6 +190,20 @@ impl LearningHost for CoreLearningHost {
     }
 
     async fn get_messages(&self, conversation_id: &str) -> anyhow::Result<Vec<Msg>> {
+        if let Some(visibility) = self.visibility.as_ref() {
+            let visible = self
+                .state
+                .conversations
+                .visible_conversation_ids(
+                    visibility.owner_user_id.as_deref(),
+                    visibility.org_id.as_deref(),
+                    visibility.node_bound,
+                )
+                .await?;
+            if !visible.iter().any(|id| id == conversation_id) {
+                anyhow::bail!("conversation is not visible to this learning caller");
+            }
+        }
         let rows = self
             .state
             .conversations

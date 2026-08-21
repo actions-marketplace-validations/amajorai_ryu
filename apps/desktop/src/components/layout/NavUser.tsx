@@ -1,6 +1,17 @@
 import { settingsApi, useSubscription } from "@ryu/settings";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "@ryu/ui/components/alert-dialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
 import { NavBeamCta } from "@ryu/ui/components/border-beam";
+import { Button, ButtonLabel } from "@ryu/ui/components/button";
 import {
 	ContextMenu,
 	ContextMenuContent,
@@ -22,12 +33,9 @@ import {
 	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu";
-import { FadeOverflowText } from "@ryu/ui/components/fade-overflow-text";
-import { PlanBadge, type PlanTier } from "@ryu/ui/components/plan-badge";
 import { SidebarMenu, SidebarMenuItem } from "@ryu/ui/components/sidebar";
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
-import { useQuery } from "@tanstack/react-query";
 import {
 	ArrowUp,
 	ArrowUpRight,
@@ -35,6 +43,7 @@ import {
 	CreditCard,
 	Database,
 	EyeOff,
+	KeyRound,
 	Laptop,
 	LogOut,
 	Moon,
@@ -60,42 +69,86 @@ import {
 	switchAccount,
 	useSession,
 } from "@/lib/auth-client.ts";
-import { addAccountViaDeviceAuth } from "@/lib/oauth.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { APPROVALS_ALIAS } from "@/src/contributions/companion-alias.ts";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
-import { fetchEntitlementStatus } from "@/src/lib/api/billing.ts";
+import { useOrgBillingStatus } from "@/src/hooks/useOrgBillingStatus.ts";
 import { formatMicroUsd } from "@/src/lib/api/credits.ts";
+import type { NotificationLayout } from "@/src/lib/notification-layout.ts";
 import { formatDate as formatDateInZone } from "@/src/lib/timezone.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
+// Keep the shared desktop OAuth implementation on the extension build path;
+// the extension swaps only its auth-client module, not this device-flow API.
+import { addAccountViaDeviceAuth } from "../../../lib/oauth.ts";
 import { useAppStore } from "../../store/useAppStore.ts";
 import { DownloadCenter } from "../downloads/DownloadCenter.tsx";
 import { InboxCenter } from "../inbox/InboxCenter.tsx";
 import { SettingsDialog } from "../settings/SettingsDialog.tsx";
 import { CreateMenu } from "./CreateMenu.tsx";
 import { HelpSubmenu } from "./HelpSubmenu.tsx";
-import { InterfaceLevelSubmenu } from "./InterfaceLevelSubmenu.tsx";
+import { InterfaceLevelMenuItem } from "./InterfaceLevelMenuItem.tsx";
 
 const TRAILING_SLASH_RE = /\/$/;
 
 type FooterChromeKey = "inbox" | "user" | "downloads" | "settings";
 
-/**
- * The plan tier to badge from the entitlement verdict. During the free beta
- * `verdict.plan` is null while `proUnlocked` is true, so we fall back to "pro" —
- * every entitled user wears the Pro mark. A real paid subscription resolves the
- * actual tier (pro/max/teams) on `verdict.plan` instead.
- */
-function entitlementBadgeTier(
-	verdict: { plan: PlanTier | null; proUnlocked: boolean } | null
-): PlanTier | null {
-	if (verdict?.plan) {
-		return verdict.plan;
-	}
-	return verdict?.proUnlocked ? "pro" : null;
+interface DesktopWebAccountLinksProps {
+	onOpenWeb: (path: string) => void;
+	profilePath: string;
+}
+
+/** The account links that leave the desktop shell for the web account surface. */
+export function DesktopWebAccountLinks({
+	onOpenWeb,
+	profilePath,
+}: DesktopWebAccountLinksProps) {
+	return (
+		<>
+			<DropdownMenuItem onClick={() => onOpenWeb(profilePath)}>
+				<User className="mr-2 size-4" />
+				Profile
+			</DropdownMenuItem>
+			<DropdownMenuItem onClick={() => onOpenWeb("/settings")}>
+				<Settings className="mr-2 size-4" />
+				Account
+			</DropdownMenuItem>
+			<DropdownMenuItem onClick={() => onOpenWeb("/api-keys")}>
+				<KeyRound className="mr-2 size-4" />
+				API keys
+			</DropdownMenuItem>
+		</>
+	);
+}
+
+/** The desktop user-nav theme submenu, matching the website's icon treatment. */
+export function DesktopThemeSubmenu() {
+	const { setTheme } = useTheme();
+
+	return (
+		<DropdownMenuSub>
+			<DropdownMenuSubTrigger>
+				<Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+				<Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+				<span>Theme</span>
+			</DropdownMenuSubTrigger>
+			<DropdownMenuSubContent>
+				<DropdownMenuItem onClick={() => setTheme("light")}>
+					<Sun className="h-4 w-4" />
+					Light
+				</DropdownMenuItem>
+				<DropdownMenuItem onClick={() => setTheme("dark")}>
+					<Moon className="h-4 w-4" />
+					Dark
+				</DropdownMenuItem>
+				<DropdownMenuItem onClick={() => setTheme("system")}>
+					<Laptop className="h-4 w-4" />
+					System
+				</DropdownMenuItem>
+			</DropdownMenuSubContent>
+		</DropdownMenuSub>
+	);
 }
 
 const PLAN_LABELS: Record<string, string> = {
@@ -161,7 +214,18 @@ function formatDate(value: string | null | undefined): string {
 // name/email, a check on the active one), switches on click, adds another
 // account via the existing device-auth flow, and signs an account out. Tokens
 // stay local (the vault in auth-client); this only ever renders the safe fields.
-function AccountList() {
+export function AccountList({
+	activeUser,
+	onSignOutAll,
+}: {
+	activeUser: {
+		id?: string;
+		name?: string | null;
+		email?: string | null;
+		image?: string | null;
+	} | null;
+	onSignOutAll: () => void;
+}) {
 	const [accounts, setAccounts] = useState<StoredAccount[]>(() =>
 		listAccounts()
 	);
@@ -169,6 +233,18 @@ function AccountList() {
 		getActiveUserId()
 	);
 	const [adding, setAdding] = useState(false);
+	const [pendingSignOut, setPendingSignOut] = useState<StoredAccount | null>(
+		null
+	);
+	const [signingOut, setSigningOut] = useState(false);
+	const activeAccount = accounts.find((account) => account.userId === activeId);
+	const activeLabel =
+		(activeAccount?.isAnonymous ? "Guest" : null) ||
+		activeAccount?.name ||
+		activeAccount?.email ||
+		activeUser?.name ||
+		activeUser?.email ||
+		"Account";
 
 	const refresh = () => {
 		setAccounts(listAccounts());
@@ -183,19 +259,38 @@ function AccountList() {
 		window.location.reload();
 	};
 
-	const handleSignOutAccount = async (
+	const handleSignOutAccount = (
 		event: React.MouseEvent,
 		account: StoredAccount
 	) => {
 		event.preventDefault();
 		event.stopPropagation();
-		const wasActive = account.userId === activeId;
-		await signOutAccount(account.userId);
-		if (wasActive) {
-			window.location.reload();
+		setPendingSignOut(account);
+	};
+
+	const confirmSignOut = async () => {
+		if (!pendingSignOut || signingOut) {
 			return;
 		}
-		refresh();
+		setSigningOut(true);
+		try {
+			const wasActive = pendingSignOut.userId === activeId;
+			await signOutAccount(pendingSignOut.userId);
+			setPendingSignOut(null);
+			if (wasActive) {
+				window.location.reload();
+				return;
+			}
+			refresh();
+		} catch (error) {
+			toast.error({
+				title: "Couldn't sign out",
+				description:
+					error instanceof Error ? error.message : "Please try again.",
+			});
+		} finally {
+			setSigningOut(false);
+		}
 	};
 
 	const handleAddAccount = () => {
@@ -229,85 +324,180 @@ function AccountList() {
 	};
 
 	return (
-		<DropdownMenuGroup>
-			{accounts.map((account) => {
-				const isActive = account.userId === activeId;
-				const label = account.name || account.email || "Account";
-				return (
-					<DropdownMenuItem
-						className="group/item gap-2"
-						closeOnClick={false}
-						key={account.userId}
-						onClick={() => handleSwitch(account.userId)}
-					>
-						<Avatar className="size-6 shrink-0 rounded-full">
-							<AvatarImage
-								alt={account.name ?? account.email}
-								src={account.image ?? undefined}
+		<>
+			<DropdownMenuSub>
+				<DropdownMenuSubTrigger className="max-w-full gap-2">
+					<Avatar className="size-6 shrink-0 rounded-full">
+						<AvatarImage
+							alt={activeLabel}
+							src={activeAccount?.image ?? activeUser?.image ?? undefined}
+						/>
+						<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
+							<DitherAvatar
+								className="size-full"
+								name={ditherAvatarSeed({
+									id: activeId ?? activeUser?.id,
+									email: activeAccount?.email ?? activeUser?.email,
+									name: activeAccount?.name ?? activeUser?.name,
+								})}
 							/>
-							<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
-								<DitherAvatar
-									className="size-full"
-									name={ditherAvatarSeed({
-										id: account.userId,
-										email: account.email,
-										name: account.name,
-									})}
-								/>
-							</AvatarFallback>
-						</Avatar>
-						<span className="flex min-w-0 flex-1 flex-col">
-							<span className="truncate font-medium text-sm">{label}</span>
-							{account.email && account.email !== label ? (
-								<span className="truncate text-[11px] text-muted-foreground">
-									{account.email}
-								</span>
-							) : null}
-						</span>
-						<span className="relative ml-1 flex size-5 shrink-0 items-center justify-center">
-							{isActive ? (
-								<span className="absolute transition-all duration-150 group-hover/item:scale-50 group-hover/item:opacity-0">
-									<Check className="size-4 text-primary" />
-								</span>
-							) : null}
-							<button
-								aria-label={`Sign out ${label}`}
-								className="absolute flex size-5 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-all duration-150 hover:bg-accent hover:text-destructive group-hover/item:scale-100 group-hover/item:opacity-100"
-								onClick={(event) => handleSignOutAccount(event, account)}
-								type="button"
-							>
-								<LogOut className="h-3.5 w-3.5" />
-							</button>
-						</span>
+						</AvatarFallback>
+					</Avatar>
+					<span className="min-w-0 flex-1 truncate">{activeLabel}</span>
+				</DropdownMenuSubTrigger>
+				<DropdownMenuSubContent className="min-w-64">
+					<DropdownMenuGroup>
+						{accounts.map((account) => {
+							const isActive = account.userId === activeId;
+							const label = account.isAnonymous
+								? "Guest"
+								: account.name || account.email || "Account";
+							return (
+								<DropdownMenuItem
+									className="group/item gap-2"
+									closeOnClick={false}
+									key={account.userId}
+									onClick={() => handleSwitch(account.userId)}
+								>
+									<Avatar className="size-6 shrink-0 rounded-full">
+										<AvatarImage
+											alt={account.name ?? account.email}
+											src={account.image ?? undefined}
+										/>
+										<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
+											<DitherAvatar
+												className="size-full"
+												name={ditherAvatarSeed({
+													id: account.userId,
+													email: account.email,
+													name: account.name,
+												})}
+											/>
+										</AvatarFallback>
+									</Avatar>
+									<span className="flex min-w-0 flex-1 flex-col">
+										<span className="truncate font-medium text-sm">
+											{label}
+										</span>
+										{account.email && account.email !== label ? (
+											<span className="truncate text-[11px] text-muted-foreground">
+												{account.email}
+											</span>
+										) : null}
+									</span>
+									<span className="relative ml-1 flex size-5 shrink-0 items-center justify-center">
+										{isActive ? (
+											<span className="absolute transition-all duration-150 group-hover/item:scale-50 group-hover/item:opacity-0">
+												<Check className="size-4 text-primary" />
+											</span>
+										) : null}
+										<button
+											aria-label={`Sign out ${label}`}
+											className="absolute flex size-5 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-all duration-150 hover:bg-accent hover:text-destructive group-hover/item:scale-100 group-hover/item:opacity-100"
+											onClick={(event) => handleSignOutAccount(event, account)}
+											type="button"
+										>
+											<LogOut className="h-3.5 w-3.5" />
+										</button>
+									</span>
+								</DropdownMenuItem>
+							);
+						})}
+						<DropdownMenuItem
+							onClick={(event: React.MouseEvent) => {
+								event.preventDefault();
+								handleAddAccount();
+							}}
+						>
+							{adding ? (
+								<Spinner className="mr-2 size-4" />
+							) : (
+								<Plus className="mr-2 size-4" />
+							)}
+							Add account
+						</DropdownMenuItem>
+					</DropdownMenuGroup>
+					<DropdownMenuSeparator />
+					<DropdownMenuItem onClick={onSignOutAll} variant="destructive">
+						<LogOut className="mr-2 size-4" />
+						Log out of all accounts
 					</DropdownMenuItem>
-				);
-			})}
-			<DropdownMenuItem
-				onClick={(event: React.MouseEvent) => {
-					event.preventDefault();
-					handleAddAccount();
+				</DropdownMenuSubContent>
+			</DropdownMenuSub>
+			<AlertDialog
+				onOpenChange={(open) => {
+					if (!(open || signingOut)) {
+						setPendingSignOut(null);
+					}
 				}}
+				open={pendingSignOut !== null}
 			>
-				{adding ? (
-					<Spinner className="mr-2 size-4" />
-				) : (
-					<Plus className="mr-2 size-4" />
-				)}
-				Add account
-			</DropdownMenuItem>
-		</DropdownMenuGroup>
+				<AlertDialogContent className="max-w-md">
+					<AlertDialogHeader>
+						<AlertDialogTitle>Log out of this account?</AlertDialogTitle>
+						<AlertDialogDescription>
+							You&apos;ll need to sign in again to use this account on this
+							device.
+						</AlertDialogDescription>
+					</AlertDialogHeader>
+					{pendingSignOut ? (
+						<div className="flex items-center gap-3 rounded-xl border border-border/60 px-3 py-2.5">
+							<Avatar className="size-9 shrink-0 rounded-full">
+								<AvatarImage
+									alt={pendingSignOut.name ?? pendingSignOut.email}
+									src={pendingSignOut.image ?? undefined}
+								/>
+								<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
+									<DitherAvatar
+										className="size-full"
+										name={ditherAvatarSeed({
+											id: pendingSignOut.userId,
+											email: pendingSignOut.email,
+											name: pendingSignOut.name,
+										})}
+									/>
+								</AvatarFallback>
+							</Avatar>
+							<span className="flex min-w-0 flex-col">
+								<span className="truncate font-medium text-sm">
+									{pendingSignOut.isAnonymous
+										? "Guest"
+										: pendingSignOut.name || pendingSignOut.email || "Account"}
+								</span>
+								<span className="truncate text-muted-foreground text-xs">
+									{pendingSignOut.email}
+								</span>
+							</span>
+						</div>
+					) : null}
+					<AlertDialogFooter>
+						<AlertDialogCancel disabled={signingOut}>Cancel</AlertDialogCancel>
+						<AlertDialogAction
+							disabled={signingOut}
+							onClick={confirmSignOut}
+							variant="destructive"
+						>
+							{signingOut ? <Spinner className="size-4" /> : null}
+							Log out
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+		</>
 	);
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
 export function NavUser({
 	hiddenChrome,
+	notificationLayout,
 	onHideChrome,
 }: {
 	hiddenChrome: Set<string>;
+	notificationLayout: NotificationLayout;
 	onHideChrome: (key: FooterChromeKey) => void;
 }) {
-	const { setTheme, resolvedTheme } = useTheme();
+	const { resolvedTheme } = useTheme();
 	const beamTheme = resolvedTheme === "light" ? "light" : "dark";
 	const settingsOpen = useSettingsDialog((s) => s.open);
 	const settingsSection = useSettingsDialog((s) => s.section);
@@ -315,7 +505,6 @@ export function NavUser({
 	const openSettings = useSettingsDialog((s) => s.openSettings);
 	const { data: session, isPending } = useSession();
 	const { verdict } = useEntitlementContext();
-	const { openTab } = useTabsContext();
 	// Whether ANY enabled app answers to the Inbox path. The tray previews that app's
 	// data (pending approvals + quest check-off suggestions) and its every action ends
 	// at `/inbox`, so with no owner it is a button that can only ever say "App not
@@ -323,7 +512,6 @@ export function NavUser({
 	// `@ryu/approvals`, so this affordance and the route it opens resolve from one
 	// source. Approvals ships default-OFF, so on a fresh install this is null.
 	const inboxOwner = useCompanionAlias(APPROVALS_ALIAS);
-	const badgePlan = entitlementBadgeTier(verdict);
 	const { isLifetime } = useSubscription();
 	const {
 		wallet,
@@ -331,11 +519,12 @@ export function NavUser({
 		loading: creditsLoading,
 		error: creditsError,
 	} = useCreditsWallet();
-	const { data: billingStatus } = useQuery({
-		queryKey: ["billing-status-nav"],
-		queryFn: fetchEntitlementStatus,
-	});
-	useAuthContext();
+	const {
+		billing: orgBillingStatus,
+		organization,
+		plan: organizationPlan,
+	} = useOrgBillingStatus();
+	const { handleSignOut } = useAuthContext();
 	const isAuthenticated = useAppStore((s) => s.isAuthenticated);
 	const oidcUser = useAppStore((s) => s.oidcUser);
 	const sessionUser = session?.user;
@@ -349,6 +538,14 @@ export function NavUser({
 					image: oidcUser.picture ?? null,
 				}
 			: null);
+	const profileHandle =
+		(sessionUser as { username?: string | null } | undefined)?.username ||
+		user?.id ||
+		getActiveUserId() ||
+		null;
+	const profilePath = profileHandle
+		? `/u/${encodeURIComponent(profileHandle)}`
+		: "/settings";
 
 	if (isPending) {
 		return (
@@ -367,17 +564,22 @@ export function NavUser({
 	}
 
 	const showInbox = !hiddenChrome.has("inbox") && inboxOwner !== null;
+	const showAnnouncements = !hiddenChrome.has("announcements");
 	const showUser = !hiddenChrome.has("user");
 	const showDownloads = !hiddenChrome.has("downloads");
 	const showSettings = !hiddenChrome.has("settings");
-	if (!(showInbox || showUser || showDownloads || showSettings)) {
+	const showNotifications =
+		showInbox || (notificationLayout !== "split" && showAnnouncements);
+	if (!(showNotifications || showUser || showDownloads || showSettings)) {
 		return null;
 	}
 
-	const currentPlan = entitlement?.plan ?? verdict?.plan ?? billingStatus?.plan;
+	const currentPlan = organization
+		? organizationPlan
+		: (entitlement?.plan ?? verdict?.plan ?? null);
 	const currentPlanLabel = planLabel(
 		currentPlan,
-		Boolean(verdict?.proUnlocked)
+		!organization && Boolean(verdict?.proUnlocked)
 	);
 	const trialCountdown = showTrialCountdown(verdict)
 		? trialDaysLabel(verdict.daysLeftInTrial)
@@ -395,20 +597,20 @@ export function NavUser({
 		}
 		return "No workspace wallet";
 	})();
-	const resetDate = formatDate(billingStatus?.subscription?.currentPeriodEnd);
+	const resetDate = formatDate(
+		orgBillingStatus?.subscription?.currentPeriodEnd
+	);
 	// Usage-remaining (credits + reset date) is a subscription concept — only
 	// surface it for users who actually have a subscription.
-	const hasSubscription = Boolean(billingStatus?.subscription);
-	const openPricing = () => {
-		openExternal(
-			`${FRONTEND_URL.replace(TRAILING_SLASH_RE, "")}/pricing`
-		).catch(() => undefined);
-	};
-	const openLegal = (path: string) => {
+	const hasSubscription = Boolean(
+		organization && orgBillingStatus?.subscription
+	);
+	const openWeb = (path: string) => {
 		openExternal(`${FRONTEND_URL.replace(TRAILING_SLASH_RE, "")}${path}`).catch(
 			() => undefined
 		);
 	};
+	const openPricing = () => openWeb("/pricing");
 	const openLifetimeCheckout = async () => {
 		try {
 			const { url } = await settingsApi.billing.createLifetimeCheckout();
@@ -447,9 +649,10 @@ export function NavUser({
 									<DropdownMenu>
 										<DropdownMenuTrigger
 											render={
-												<button
-													className="flex w-full items-center gap-2 rounded-xl py-1.5 pr-2 pl-1 text-left text-sm transition-colors hover:bg-muted"
+												<Button
+													className="flex w-full items-center justify-start gap-2 rounded-xl py-1.5 pr-2 pl-1 text-left transition-colors hover:bg-muted"
 													type="button"
+													variant="ghost"
 												/>
 											}
 										>
@@ -469,68 +672,42 @@ export function NavUser({
 													/>
 												</AvatarFallback>
 											</Avatar>
-											<span className="min-w-0 flex-1">
-												<span className="flex min-w-0 items-center gap-1.5">
-													{/* Fades into the background rather than ending in an
-													    ellipsis, the same way an over-long chat title does
-													    in the sidebar above it. A name is not a sentence —
-													    "Jiawei Zhang-Alexande…" reads as a defect where the
-													    dissolve reads as "there is more of this". */}
-													<FadeOverflowText className="min-w-0 flex-1 font-medium text-sm">
-														{user?.name ?? "Account"}
-													</FadeOverflowText>
-													<PlanBadge className="shrink-0" plan={badgePlan} />
-												</span>
-											</span>
+											<ButtonLabel className="flex-1 font-medium text-sm">
+												{user?.name ?? "Account"}
+											</ButtonLabel>
 										</DropdownMenuTrigger>
 										<DropdownMenuContent
 											align="end"
-											className="min-w-56"
+											className="min-w-64"
 											side="bottom"
 											sideOffset={4}
 										>
-											<AccountList />
+											<InterfaceLevelMenuItem />
+											<DropdownMenuSeparator />
+											<AccountList
+												activeUser={user}
+												onSignOutAll={handleSignOut}
+											/>
 											<DropdownMenuSeparator />
 											<DropdownMenuGroup>
-												<DropdownMenuItem onClick={() => openTab("/profile")}>
-													<User className="mr-2 size-4" />
-													Profile
-												</DropdownMenuItem>
+												<DesktopWebAccountLinks
+													onOpenWeb={openWeb}
+													profilePath={profilePath}
+												/>
 												<DropdownMenuItem onClick={() => openSettings()}>
 													<Settings className="mr-2 size-4" />
 													Settings
 												</DropdownMenuItem>
 												<HelpSubmenu />
 											</DropdownMenuGroup>
-											{/* Sits with Theme, not under Settings: the audience the
-											    Simple level exists for is the audience that never opens
-											    the settings dialog. */}
-											<InterfaceLevelSubmenu />
-											<DropdownMenuSub>
-												<DropdownMenuSubTrigger>
-													<Sun className="mr-2 size-4" />
-													Theme
-												</DropdownMenuSubTrigger>
-												<DropdownMenuSubContent>
-													<DropdownMenuItem onClick={() => setTheme("light")}>
-														<Sun className="mr-2 size-4" />
-														Light
-													</DropdownMenuItem>
-													<DropdownMenuItem onClick={() => setTheme("dark")}>
-														<Moon className="mr-2 size-4" />
-														Dark
-													</DropdownMenuItem>
-													<DropdownMenuItem onClick={() => setTheme("system")}>
-														<Laptop className="mr-2 size-4" />
-														System
-													</DropdownMenuItem>
-												</DropdownMenuSubContent>
-											</DropdownMenuSub>
+											<DesktopThemeSubmenu />
 											<DropdownMenuSeparator />
 											<DropdownMenuGroup>
 												<DropdownMenuItem disabled>
 													<CreditCard className="mr-2 size-4" />
-													<span className="flex-1">Plan</span>
+													<span className="flex-1">
+														{organization ? "Organization plan" : "Plan"}
+													</span>
 													<span className="text-right text-muted-foreground">
 														{currentPlanLabel}
 														{trialCountdown ? (
@@ -550,7 +727,7 @@ export function NavUser({
 															<div className="space-y-3 px-3 py-2">
 																<div>
 																	<p className="text-muted-foreground text-xs">
-																		Credits left for workspace
+																		Credits left for organization
 																	</p>
 																	<p className="font-heading font-semibold text-sm tabular-nums">
 																		{creditsLeft}
@@ -592,19 +769,17 @@ export function NavUser({
 														More
 													</DropdownMenuSubTrigger>
 													<DropdownMenuSubContent className="min-w-52">
-														<DropdownMenuItem
-															onClick={() => openLegal("/terms")}
-														>
+														<DropdownMenuItem onClick={() => openWeb("/terms")}>
 															<ScrollText className="mr-2 size-4" />
 															Terms of Service
 														</DropdownMenuItem>
 														<DropdownMenuItem
-															onClick={() => openLegal("/privacy")}
+															onClick={() => openWeb("/privacy")}
 														>
 															<Shield className="mr-2 size-4" />
 															Privacy
 														</DropdownMenuItem>
-														<DropdownMenuItem onClick={() => openLegal("/dpa")}>
+														<DropdownMenuItem onClick={() => openWeb("/dpa")}>
 															<Database className="mr-2 size-4" />
 															Data Processing Agreement
 														</DropdownMenuItem>
@@ -626,16 +801,24 @@ export function NavUser({
 
 					<div className="ml-auto flex items-center gap-0.5">
 						<CreateMenu />
-						{showInbox && (
+						{showNotifications && (
 							<ContextMenu>
 								<ContextMenuTrigger>
-									<InboxCenter />
+									<InboxCenter
+										layout={notificationLayout}
+										showAnnouncements={
+											notificationLayout !== "split" && showAnnouncements
+										}
+										showInbox={showInbox}
+									/>
 								</ContextMenuTrigger>
 								<ContextMenuContent>
-									<ContextMenuItem onClick={() => onHideChrome("inbox")}>
-										<EyeOff className="mr-2 size-4" />
-										Hide inbox
-									</ContextMenuItem>
+									{showInbox && (
+										<ContextMenuItem onClick={() => onHideChrome("inbox")}>
+											<EyeOff className="mr-2 size-4" />
+											Hide inbox
+										</ContextMenuItem>
+									)}
 								</ContextMenuContent>
 							</ContextMenu>
 						)}

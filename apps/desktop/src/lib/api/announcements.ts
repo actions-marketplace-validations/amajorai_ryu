@@ -15,16 +15,31 @@ import { BACKEND_URL, TOKEN_KEY } from "@/lib/auth-client.ts";
 
 /** One announcement in the caller's feed (mirrors the server UserAnnouncementView). */
 export interface Announcement {
+	blobColors: string[];
 	body: string | null;
 	color: string | null;
 	createdAt: string | null;
 	icon: string | null;
+	iconUrl: string | null;
 	id: string;
 	linkLabel: string | null;
 	linkUrl: string | null;
 	/** True once this user has marked it read (or opened its link). */
 	read: boolean;
 	title: string;
+	type: "card" | "dialog";
+	visualCode: string | null;
+	visualIcon: string | null;
+	visualIconBackground: string | null;
+	visualIconDither: AnnouncementIconDither | null;
+	visualIconUrl: string | null;
+}
+
+/** App/plugin-compatible icon tile dither data returned by the control plane. */
+export interface AnnouncementIconDither {
+	direction?: string | null;
+	from?: string | number | null;
+	to?: string | number | null;
 }
 
 /** The Better-Auth session bearer token, or null when signed out / no storage. */

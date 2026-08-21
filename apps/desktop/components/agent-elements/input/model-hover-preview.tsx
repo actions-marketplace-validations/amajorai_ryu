@@ -1,17 +1,18 @@
 "use client";
 
 import {
-	AiBrain01Icon,
 	AudioWave01Icon,
 	DollarCircleIcon,
 	FlashIcon,
 	Image01Icon,
 	Pdf01Icon,
+	SparklesIcon,
 	TextFontIcon,
 	Video01Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { formatCount, formatCurrency } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ModelInsight } from "@/src/lib/api/model-insight.ts";
 
@@ -31,72 +32,72 @@ const KNOWN_MODALITIES = new Set<string>(Object.keys(MODALITY_META));
 const BAR_PIPS = [1, 2, 3, 4, 5] as const;
 
 function formatTokens(n: number): string {
-	if (n >= 1_000_000) {
-		const m = n / 1_000_000;
-		return `${Number.isInteger(m) ? m.toFixed(0) : m.toFixed(1)}M`;
-	}
-	if (n >= 1000) {
-		const k = n / 1000;
-		return `${Number.isInteger(k) ? k.toFixed(0) : k.toFixed(1)}K`;
-	}
-	return String(n);
+	return formatCount(n) ?? "—";
 }
 
 function formatUsdPer1m(n: number): string {
-	if (n < 0.01) {
-		return `$${n.toFixed(4)}`;
-	}
-	if (n < 1) {
-		return `$${n.toFixed(3)}`;
-	}
-	return `$${n.toFixed(2)}`;
+	const decimals = n < 0.01 ? 4 : n < 1 ? 3 : 2;
+	return formatCurrency(n, "USD", {
+		maximumFractionDigits: decimals,
+		minimumFractionDigits: decimals,
+	});
 }
 
-function barTone(score: number): string {
-	if (score >= 4) {
-		return "bg-success";
-	}
-	if (score >= 3) {
-		return "bg-foreground/55";
-	}
-	return "bg-warning";
+function formatScore(score: number): string {
+	return Number.isInteger(score) ? String(score) : score.toFixed(1);
 }
 
 function ScoreBar({
+	icon,
 	label,
 	score,
 	hint,
 }: {
+	icon?: IconSvgElement;
 	label: string;
 	score: number | null | undefined;
 	hint?: string | null;
 }) {
-	const value = typeof score === "number" && score >= 1 ? score : null;
+	const value =
+		typeof score === "number" && Number.isFinite(score) && score >= 1
+			? Math.min(score, 5)
+			: null;
+	const filledPips = value === null ? 0 : Math.round(value);
+	const scoreLabel =
+		value === null
+			? `${label}: unknown`
+			: `${label}: ${formatScore(value)} of 5${hint ? `, ${hint}` : ""}`;
 	return (
-		<div className="flex min-w-0 flex-col gap-1">
-			<div className="flex items-baseline justify-between gap-2">
-				<span className="text-[11px] text-muted-foreground">{label}</span>
-				{hint ? (
-					<span className="truncate text-[10px] text-muted-foreground/80">
-						{hint}
-					</span>
+		<div className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-3">
+			<span className="flex min-w-0 items-center gap-1 font-medium text-[11px] text-muted-foreground">
+				{icon ? (
+					<HugeiconsIcon
+						aria-hidden="true"
+						className="size-3 shrink-0 text-warning"
+						icon={icon}
+					/>
 				) : null}
-			</div>
+				{label}
+			</span>
 			<span
-				aria-label={
-					value === null ? `${label}: unknown` : `${label}: ${value} of 5`
-				}
-				className="flex items-center gap-0.5"
+				aria-label={scoreLabel}
+				className="flex min-w-0 flex-1 items-center gap-1.5"
+				data-filled-pips={filledPips}
+				data-score={value === null ? undefined : value}
+				data-slot="model-score-bar"
 				role="img"
 			>
 				{BAR_PIPS.map((level) => (
 					<span
+						aria-hidden="true"
 						className={cn(
-							"h-2 w-3 rounded-sm",
-							value !== null && level <= value
-								? barTone(value)
-								: "bg-muted-foreground/20"
+							"h-1.5 min-w-0 flex-1 rounded-full",
+							level <= filledPips
+								? "bg-foreground/85"
+								: "bg-muted-foreground/45"
 						)}
+						data-filled={level <= filledPips}
+						data-slot="model-score-pip"
 						key={level}
 					/>
 				))}
@@ -149,7 +150,7 @@ function ModalityRow({
 
 /**
  * Compact model insight card for the agent/model picker hover.
- * 2×2 score bars (speed / cost / intelligence / context) plus price,
+ * Stacked five-pip score bars (speed / intelligence / cost / context) plus price,
  * context tokens, and modality chips — filled from Core's insight cascade.
  */
 export function ModelHoverPreview({ insight }: { insight: ModelInsight }) {
@@ -183,8 +184,8 @@ export function ModelHoverPreview({ insight }: { insight: ModelInsight }) {
 			<div className="flex flex-col gap-0.5">
 				<div className="flex items-start gap-2">
 					<HugeiconsIcon
-						className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
-						icon={AiBrain01Icon}
+						className="mt-0.5 size-3.5 shrink-0 text-warning"
+						icon={SparklesIcon}
 					/>
 					<div className="min-w-0 flex-1">
 						<p className="truncate font-medium text-[13px] leading-tight">
@@ -199,13 +200,18 @@ export function ModelHoverPreview({ insight }: { insight: ModelInsight }) {
 				</div>
 			</div>
 
-			<div className="grid grid-cols-2 gap-x-3 gap-y-2.5">
+			<div className="flex flex-col gap-2.5 border-border/40 border-t pt-3">
 				<ScoreBar hint={speedHint} label="Speed" score={insight.scoreSpeed} />
-				<ScoreBar hint={costHint} label="Cost" score={insight.scoreCost} />
 				<ScoreBar
 					hint={intelHint}
 					label="Intelligence"
 					score={insight.scoreIntelligence}
+				/>
+				<ScoreBar
+					hint={costHint}
+					icon={DollarCircleIcon}
+					label="Cost"
+					score={insight.scoreCost}
 				/>
 				<ScoreBar
 					hint={contextHint}
@@ -259,7 +265,9 @@ export function ModelHoverPreview({ insight }: { insight: ModelInsight }) {
 			/>
 
 			<p className="text-[10px] text-muted-foreground/70">
-				via {insight.source}
+				{insight.source === "openrouter"
+					? "Current OpenRouter transaction price"
+					: `via ${insight.source}`}
 				{insight.aaMatchedName ? ` · AA: ${insight.aaMatchedName}` : null}
 			</p>
 		</div>

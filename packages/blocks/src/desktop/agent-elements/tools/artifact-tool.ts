@@ -1,8 +1,8 @@
 import type { HostArtifact } from "../artifact-host-context.tsx";
 
 /**
- * Pure helpers for the built-in artifact tool surface (`artifact__render` /
- * `artifact__create`). Kept free of the React component graph so the behavior is
+ * Pure helpers for the built-in artifact tool surface (`artifact.render` /
+ * `artifact.create`). Kept free of the React component graph so the behavior is
  * unit-testable without dragging in the whole tool row renderer.
  */
 
@@ -23,7 +23,7 @@ export function artifactFromInput(input: unknown): HostArtifact | null {
 	return null;
 }
 
-/** The `artifact__create` tool writes a file into a Space; its RESULT carries the
+/** The `artifact.create` tool writes a file into a Space; its RESULT carries the
  *  doc identity + blob URL but not the title (that lived in the input). Rebuild a
  *  display payload from the two, so the card keeps the file name. */
 export function artifactFromCreateResult(
@@ -66,9 +66,9 @@ export function isArtifactPart(
 	toolName: string | undefined
 ): boolean {
 	return (
-		partType === "tool-artifact__render" ||
-		partType === "tool-artifact__create" ||
+		partType === "tool-artifact.render" ||
+		partType === "tool-artifact.create" ||
 		(partType === "dynamic-tool" &&
-			(toolName === "artifact__render" || toolName === "artifact__create"))
+			(toolName === "artifact.render" || toolName === "artifact.create"))
 	);
 }

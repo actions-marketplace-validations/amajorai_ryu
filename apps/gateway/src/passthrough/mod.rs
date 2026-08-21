@@ -409,6 +409,8 @@ fn emit_audit(
         user_id,
         agent_id,
         feature,
+        managed_inference: false,
+        provider_cost_micro_usd: None,
         event_type: crate::audit::EventType::ModelCall,
         backend: None,
         command: None,

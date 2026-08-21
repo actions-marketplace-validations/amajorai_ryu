@@ -30,6 +30,7 @@ import {
 	ArrowDown01Icon,
 	ClipboardIcon,
 	ComputerTerminal01Icon,
+	Delete01Icon,
 	ServerStack01Icon,
 	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
@@ -46,6 +47,17 @@ import {
 	ListingSection,
 	ListingStatStrip,
 } from "@ryu/marketplace/catalog/detail/listing-detail-shell";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+	AlertDialogTrigger,
+} from "@ryu/ui/components/alert-dialog";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -84,7 +96,17 @@ import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@ryu/ui/components/toggle-group";
-import { type ChangeEvent, useMemo, useState } from "react";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
+import {
+	type ChangeEvent,
+	type Dispatch,
+	type SetStateAction,
+	useMemo,
+	useState,
+} from "react";
+import { OAuthServerCard } from "@/src/components/marketplace/ConnectionsTab.tsx";
+import { useApps } from "@/src/hooks/useApps.ts";
+import { useIdentities } from "@/src/hooks/useIdentities.ts";
 import { useMcp } from "@/src/hooks/useMcp.ts";
 import type {
 	CreateMcpServerInput,
@@ -92,7 +114,10 @@ import type {
 	McpCallResult,
 	McpServer,
 	McpTool,
+	McpTransport,
+	UpdateMcpServerInput,
 } from "@/src/lib/api/mcp.ts";
+import type { AppInfo } from "@/src/lib/api/plugins.ts";
 
 const ALL_AGENTS = "__all__";
 
@@ -127,8 +152,15 @@ export default function ToolsLibrary() {
 		error,
 		callTool,
 		createServer,
+		deleteServer,
 		reload,
+		updateServer,
 	} = useMcp();
+	const { apps } = useApps();
+	const identities = useIdentities();
+	const profileIds = Array.from(
+		new Set(["personal", ...identities.profileIds])
+	).sort();
 
 	const [query, setQuery] = useState("");
 	const [view, setView] = useState<ToolsView>("server");
@@ -260,6 +292,10 @@ export default function ToolsLibrary() {
 			detail={
 				selectedServer ? (
 					<ServerDetail
+						apps={apps}
+						deleteServer={deleteServer}
+						onUpdateServer={updateServer}
+						profileIds={profileIds}
 						server={selectedServer}
 						tools={tools.filter((t) => t.server === selectedServer.name)}
 					/>
@@ -362,7 +398,13 @@ export default function ToolsLibrary() {
 				) : effectiveView === "flat" ? (
 					<FlatToolList
 						agentFilter={agentFilter}
+						onClearFilters={() => {
+							setAgentFilter(null);
+							setQuery("");
+							setView("server");
+						}}
 						onSelect={setSelectedId}
+						searching={searching}
 						selectedId={selectedId}
 						tools={flatTools}
 					/>
@@ -439,7 +481,8 @@ function ServerToolGroup({
 					<span className="min-w-0 truncate font-medium text-sm">
 						{server.name}
 					</span>
-					<Badge variant="secondary">{tools.length}</Badge>
+					<Badge variant="secondary">{formatCount(tools.length) ?? "—"}</Badge>
+					<McpAuthBadge server={server} />
 					{server.enabled ? null : <Badge variant="outline">Disabled</Badge>}
 					{unavailable ? (
 						<Badge className="gap-1" variant="outline">
@@ -480,6 +523,26 @@ function ServerToolGroup({
 	);
 }
 
+function McpAuthBadge({ server }: { server: McpServer }) {
+	if (!server.authRequired) {
+		return <Badge variant="outline">No auth required</Badge>;
+	}
+	if (server.authType === "oauth") {
+		return (
+			<Badge variant="outline">
+				{server.authConfigured ? "Authenticated" : "Authentication required"}
+			</Badge>
+		);
+	}
+	return (
+		<Badge variant="outline">
+			{server.authConfigured
+				? "Credentials configured"
+				: "Authentication required"}
+		</Badge>
+	);
+}
+
 /** A titled group shell for tool cards that are not owned by a live server. */
 function ToolGroupShell({
 	label,
@@ -497,7 +560,7 @@ function ToolGroupShell({
 			<h3 className="mb-2 flex items-center gap-2 px-1 font-medium text-muted-foreground text-xs uppercase tracking-widest">
 				<HugeiconsIcon className="size-3.5" icon={Wrench01Icon} />
 				{label}
-				<Badge variant="secondary">{count}</Badge>
+				<Badge variant="secondary">{formatCount(count) ?? "—"}</Badge>
 			</h3>
 			{note ? (
 				<p className="mb-2 px-1 text-muted-foreground text-xs normal-case">
@@ -516,11 +579,15 @@ function FlatToolList({
 	selectedId,
 	onSelect,
 	agentFilter,
+	onClearFilters,
+	searching,
 }: {
 	tools: McpTool[];
 	selectedId: string | null;
 	onSelect: (id: string) => void;
 	agentFilter: string | null;
+	onClearFilters: () => void;
+	searching: boolean;
 }) {
 	if (tools.length === 0) {
 		return (
@@ -536,6 +603,15 @@ function FlatToolList({
 							: "Try a different search."}
 					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onClearFilters} size="sm" variant="ghost">
+						{agentFilter
+							? "Clear filters"
+							: searching
+								? "Clear search"
+								: "Show servers"}
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
@@ -557,12 +633,12 @@ function ToolCards({
 	onSelect: (id: string) => void;
 }) {
 	const displayToolName = (tool: McpTool) => {
-		const separator = tool.name.indexOf("__");
+		const separator = tool.id.indexOf(".");
 		if (separator === -1) {
 			return tool.name;
 		}
-		return tool.name
-			.slice(separator + 2)
+		return tool.id
+			.slice(separator + 1)
 			.replace(/[_-]+/g, " ")
 			.replace(/\b\w/g, (character) => character.toUpperCase());
 	};
@@ -604,9 +680,20 @@ function ToolCards({
 }
 
 function ServerDetail({
+	apps,
+	deleteServer,
+	onUpdateServer,
+	profileIds,
 	server,
 	tools,
 }: {
+	apps: AppInfo[];
+	deleteServer: (name: string) => Promise<{ error?: string; ok: boolean }>;
+	onUpdateServer: (
+		name: string,
+		input: UpdateMcpServerInput
+	) => Promise<{ error?: string; ok: boolean; server?: McpServer }>;
+	profileIds: string[];
 	server: McpServer;
 	tools: McpTool[];
 }) {
@@ -616,7 +703,11 @@ function ServerDetail({
 				<ListingAsideCard title="Information">
 					<ListingInfoGrid
 						rows={[
-							{ label: "Command", value: server.command },
+							{ label: "Transport", value: server.transport ?? "Built-in" },
+							{
+								label: server.url ? "Endpoint" : "Command",
+								value: server.url ?? server.command,
+							},
 							{
 								label: "State",
 								value: server.enabled ? "Enabled" : "Disabled",
@@ -667,9 +758,30 @@ function ServerDetail({
 				</p>
 			</ListingSection>
 
-			<ListingSection title="Command">
+			<ListingSection title="Authentication">
+				<McpAuthentication
+					apps={apps}
+					profileIds={profileIds}
+					server={server}
+				/>
+			</ListingSection>
+
+			{server.envKeys.length > 0 || server.headerNames.length > 0 ? (
+				<ListingSection title="Configuration">
+					<div className="flex flex-col gap-2 text-muted-foreground text-sm">
+						{server.envKeys.length > 0 ? (
+							<p>Environment variables: {server.envKeys.join(", ")}</p>
+						) : null}
+						{server.headerNames.length > 0 ? (
+							<p>Request headers: {server.headerNames.join(", ")}</p>
+						) : null}
+					</div>
+				</ListingSection>
+			) : null}
+
+			<ListingSection title={server.url ? "Endpoint" : "Command"}>
 				<code className="block overflow-x-auto whitespace-pre rounded bg-muted px-2 py-1 text-muted-foreground text-xs">
-					{[server.command, ...server.args].join(" ")}
+					{server.url ?? [server.command, ...server.args].join(" ")}
 				</code>
 			</ListingSection>
 
@@ -694,7 +806,466 @@ function ServerDetail({
 					</ul>
 				</ListingSection>
 			) : null}
+
+			{server.ownerPluginId === null && server.transport !== null ? (
+				<ListingSection title="Server settings">
+					<McpServerSettingsDialog
+						deleteServer={deleteServer}
+						onUpdateServer={onUpdateServer}
+						server={server}
+					/>
+				</ListingSection>
+			) : null}
 		</ListingDetailShell>
+	);
+}
+
+function McpAuthentication({
+	apps,
+	profileIds,
+	server,
+}: {
+	apps: AppInfo[];
+	profileIds: string[];
+	server: McpServer;
+}) {
+	if (!server.authRequired) {
+		return (
+			<p className="text-muted-foreground text-sm">
+				No authentication required.
+			</p>
+		);
+	}
+
+	if (server.authType === "oauth" && server.ownerPluginId) {
+		const app = apps.find((candidate) => candidate.id === server.ownerPluginId);
+		const declaration = app?.mcpOAuthServers.find(
+			(candidate) => candidate.name === (server.ownerServerName ?? server.name)
+		);
+		if (app && declaration) {
+			return (
+				<OAuthServerCard
+					app={app}
+					profileIds={profileIds}
+					server={declaration}
+				/>
+			);
+		}
+	}
+
+	return (
+		<div className="flex flex-col gap-1.5">
+			<Badge className="w-fit" variant="outline">
+				{server.authConfigured
+					? "Credentials configured"
+					: "Authentication required"}
+			</Badge>
+			<p className="text-muted-foreground text-xs">
+				{server.authType === "oauth"
+					? "Open Marketplace → Connections to connect the account for this server."
+					: server.authType === "env"
+						? "Configure the credential environment variable in Server settings. Values stay on the Core node."
+						: "Configure the credential header in Server settings. Values stay on the Core node."}
+			</p>
+		</div>
+	);
+}
+
+interface McpKeyValueRow {
+	key: string;
+	value: string;
+}
+
+function McpKeyValueRows({
+	label,
+	onChange,
+	onRemove,
+	rows,
+	secret,
+}: {
+	label: string;
+	onChange: (index: number, field: keyof McpKeyValueRow, value: string) => void;
+	onRemove: (index: number) => void;
+	rows: McpKeyValueRow[];
+	secret?: boolean;
+}) {
+	return (
+		<div className="flex flex-col gap-2">
+			<Label className="font-medium text-sm">{label}</Label>
+			{rows.map((row, index) => (
+				<div className="flex items-center gap-2" key={`${row.key}-${index}`}>
+					<Input
+						aria-label={`${label} key ${index + 1}`}
+						onChange={(event: ChangeEvent<HTMLInputElement>) =>
+							onChange(index, "key", event.target.value)
+						}
+						placeholder="Key"
+						value={row.key}
+					/>
+					<Input
+						aria-label={`${label} value ${index + 1}`}
+						onChange={(event: ChangeEvent<HTMLInputElement>) =>
+							onChange(index, "value", event.target.value)
+						}
+						placeholder={
+							secret && row.value === "••••••" ? "Leave unchanged" : "Value"
+						}
+						type={secret ? "password" : "text"}
+						value={row.value}
+					/>
+					<Button
+						aria-label={`Remove ${label.toLowerCase()} ${index + 1}`}
+						onClick={() => onRemove(index)}
+						size="icon-sm"
+						variant="ghost"
+					>
+						<HugeiconsIcon className="size-4" icon={Delete01Icon} />
+					</Button>
+				</div>
+			))}
+		</div>
+	);
+}
+
+function McpServerSettingsDialog({
+	deleteServer,
+	onUpdateServer,
+	server,
+}: {
+	deleteServer: (name: string) => Promise<{ error?: string; ok: boolean }>;
+	onUpdateServer: (
+		name: string,
+		input: UpdateMcpServerInput
+	) => Promise<{ error?: string; ok: boolean; server?: McpServer }>;
+	server: McpServer;
+}) {
+	const [open, setOpen] = useState(false);
+	const [deleteOpen, setDeleteOpen] = useState(false);
+	const [command, setCommand] = useState("");
+	const [url, setUrl] = useState("");
+	const [transport, setTransport] = useState<McpTransport>("stdio");
+	const [argsText, setArgsText] = useState("");
+	const [description, setDescription] = useState("");
+	const [enabled, setEnabled] = useState(true);
+	const [envRows, setEnvRows] = useState<McpKeyValueRow[]>([]);
+	const [headerRows, setHeaderRows] = useState<McpKeyValueRow[]>([]);
+	const [submitting, setSubmitting] = useState(false);
+	const [deleting, setDeleting] = useState(false);
+	const [formError, setFormError] = useState<string | null>(null);
+
+	const resetFromServer = () => {
+		const nextTransport =
+			server.transport === "sse"
+				? "sse"
+				: server.transport === "streamable-http" || server.url
+					? "streamable-http"
+					: "stdio";
+		setTransport(nextTransport);
+		setCommand(server.url ? "" : server.command);
+		setUrl(server.url ?? "");
+		setArgsText(server.args.join(" "));
+		setDescription(server.description ?? "");
+		setEnabled(server.enabled);
+		setEnvRows(server.envKeys.map((key) => ({ key, value: "••••••" })));
+		setHeaderRows(server.headerNames.map((key) => ({ key, value: "••••••" })));
+		setFormError(null);
+	};
+
+	const mapRows = (rows: McpKeyValueRow[]) =>
+		rows.reduce<Record<string, string>>((result, row) => {
+			const key = row.key.trim();
+			if (key) {
+				result[key] = row.value;
+			}
+			return result;
+		}, {});
+
+	const handleSubmit = async () => {
+		setFormError(null);
+		if (transport === "stdio" && !command.trim()) {
+			setFormError("Command is required for stdio servers.");
+			return;
+		}
+		if (transport !== "stdio") {
+			if (!url.trim()) {
+				setFormError("Endpoint URL is required for remote servers.");
+				return;
+			}
+			try {
+				const parsed = new URL(url.trim());
+				if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+					setFormError("Endpoint URL must use http:// or https://.");
+					return;
+				}
+			} catch {
+				setFormError("Endpoint URL is not valid.");
+				return;
+			}
+		}
+
+		setSubmitting(true);
+		try {
+			const result = await onUpdateServer(server.name, {
+				args: argsText
+					.split(/\s+/)
+					.map((value) => value.trim())
+					.filter(Boolean),
+				command: transport === "stdio" ? command.trim() : undefined,
+				description: description.trim(),
+				enabled,
+				env: mapRows(envRows),
+				headers: mapRows(headerRows),
+				transport,
+				url: transport === "stdio" ? undefined : url.trim(),
+			});
+			if (!result.ok) {
+				setFormError(result.error ?? "Failed to save server settings.");
+				return;
+			}
+			toast.success("MCP server settings saved");
+			setOpen(false);
+		} catch (error) {
+			setFormError(
+				error instanceof Error
+					? error.message
+					: "Failed to save server settings."
+			);
+		} finally {
+			setSubmitting(false);
+		}
+	};
+
+	const handleDelete = async () => {
+		setDeleting(true);
+		try {
+			const result = await deleteServer(server.name);
+			if (!result.ok) {
+				setFormError(result.error ?? "Failed to remove server.");
+				return;
+			}
+			toast.success("MCP server removed");
+			setDeleteOpen(false);
+			setOpen(false);
+		} catch (error) {
+			setFormError(
+				error instanceof Error ? error.message : "Failed to remove server."
+			);
+		} finally {
+			setDeleting(false);
+		}
+	};
+
+	const updateRow = (
+		setter: Dispatch<SetStateAction<McpKeyValueRow[]>>,
+		index: number,
+		field: keyof McpKeyValueRow,
+		value: string
+	) => {
+		setter((current) =>
+			current.map((row, rowIndex) =>
+				rowIndex === index ? { ...row, [field]: value } : row
+			)
+		);
+	};
+
+	return (
+		<Dialog
+			onOpenChange={(value) => {
+				setOpen(value);
+				if (value) {
+					resetFromServer();
+				}
+			}}
+			open={open}
+		>
+			<DialogTrigger render={<Button size="sm" variant="outline" />}>
+				Settings
+			</DialogTrigger>
+			<DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
+				<DialogHeader>
+					<DialogTitle>Configure {server.name}</DialogTitle>
+					<DialogDescription>
+						Values are stored on the Core node. Existing secret values are
+						masked; leave them unchanged to keep them.
+					</DialogDescription>
+				</DialogHeader>
+				<div className="flex flex-col gap-4 py-2">
+					<div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
+						<div>
+							<p className="font-medium text-sm">Server enabled</p>
+							<p className="text-muted-foreground text-xs">
+								Disabled servers do not advertise tools to agents.
+							</p>
+						</div>
+						<Button
+							onClick={() => setEnabled((value) => !value)}
+							size="sm"
+							variant={enabled ? "default" : "outline"}
+						>
+							{enabled ? "Enabled" : "Disabled"}
+						</Button>
+					</div>
+					<div className="flex flex-col gap-1.5">
+						<Label htmlFor="mcp-settings-transport">Transport</Label>
+						<Select
+							onValueChange={(value) => {
+								if (value) {
+									setTransport(value as McpTransport);
+								}
+							}}
+							value={transport}
+						>
+							<SelectTrigger id="mcp-settings-transport">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value="stdio">Local process (stdio)</SelectItem>
+								<SelectItem value="streamable-http">Streamable HTTP</SelectItem>
+								<SelectItem value="sse">Legacy HTTP + SSE</SelectItem>
+							</SelectContent>
+						</Select>
+					</div>
+					{transport === "stdio" ? (
+						<>
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="mcp-settings-command">Command</Label>
+								<Input
+									id="mcp-settings-command"
+									onChange={(event: ChangeEvent<HTMLInputElement>) =>
+										setCommand(event.target.value)
+									}
+									value={command}
+								/>
+							</div>
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="mcp-settings-args">Arguments</Label>
+								<Input
+									id="mcp-settings-args"
+									onChange={(event: ChangeEvent<HTMLInputElement>) =>
+										setArgsText(event.target.value)
+									}
+									value={argsText}
+								/>
+							</div>
+						</>
+					) : (
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="mcp-settings-url">Endpoint URL</Label>
+							<Input
+								id="mcp-settings-url"
+								onChange={(event: ChangeEvent<HTMLInputElement>) =>
+									setUrl(event.target.value)
+								}
+								value={url}
+							/>
+						</div>
+					)}
+					<McpKeyValueRows
+						label="Environment variables"
+						onChange={(index, field, value) =>
+							updateRow(setEnvRows, index, field, value)
+						}
+						onRemove={(index) =>
+							setEnvRows((rows) =>
+								rows.filter((_, rowIndex) => rowIndex !== index)
+							)
+						}
+						rows={envRows}
+						secret
+					/>
+					<Button
+						onClick={() =>
+							setEnvRows((rows) => [...rows, { key: "", value: "" }])
+						}
+						size="sm"
+						variant="outline"
+					>
+						<HugeiconsIcon className="size-4" icon={Add01Icon} />
+						Add environment variable
+					</Button>
+					{transport === "stdio" ? null : (
+						<>
+							<McpKeyValueRows
+								label="Request headers"
+								onChange={(index, field, value) =>
+									updateRow(setHeaderRows, index, field, value)
+								}
+								onRemove={(index) =>
+									setHeaderRows((rows) =>
+										rows.filter((_, rowIndex) => rowIndex !== index)
+									)
+								}
+								rows={headerRows}
+								secret
+							/>
+							<Button
+								onClick={() =>
+									setHeaderRows((rows) => [...rows, { key: "", value: "" }])
+								}
+								size="sm"
+								variant="outline"
+							>
+								<HugeiconsIcon className="size-4" icon={Add01Icon} />
+								Add request header
+							</Button>
+						</>
+					)}
+					<div className="flex flex-col gap-1.5">
+						<Label htmlFor="mcp-settings-description">Description</Label>
+						<Textarea
+							id="mcp-settings-description"
+							onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+								setDescription(event.target.value)
+							}
+							rows={2}
+							value={description}
+						/>
+					</div>
+					{formError ? (
+						<p className="text-destructive text-sm">{formError}</p>
+					) : null}
+				</div>
+				<DialogFooter className="justify-between sm:justify-between">
+					<AlertDialog onOpenChange={setDeleteOpen} open={deleteOpen}>
+						<AlertDialogTrigger
+							render={
+								<Button variant="destructive">
+									<HugeiconsIcon className="size-4" icon={Delete01Icon} />
+									Remove server
+								</Button>
+							}
+						/>
+						<AlertDialogContent>
+							<AlertDialogHeader>
+								<AlertDialogTitle>Remove {server.name}?</AlertDialogTitle>
+								<AlertDialogDescription>
+									This removes the server configuration from the Core node. It
+									does not delete an installed package.
+								</AlertDialogDescription>
+							</AlertDialogHeader>
+							<AlertDialogFooter>
+								<AlertDialogCancel>Cancel</AlertDialogCancel>
+								<AlertDialogAction
+									disabled={deleting}
+									onClick={handleDelete}
+									variant="destructive"
+								>
+									Remove server
+								</AlertDialogAction>
+							</AlertDialogFooter>
+						</AlertDialogContent>
+					</AlertDialog>
+					<div className="flex gap-2">
+						<Button onClick={() => setOpen(false)} variant="ghost">
+							Cancel
+						</Button>
+						<Button loading={submitting} onClick={handleSubmit}>
+							Save changes
+						</Button>
+					</div>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
 	);
 }
 
@@ -843,8 +1414,7 @@ function ToolDetail({
 							<p className="text-destructive text-xs">{parseError}</p>
 						) : null}
 						<div>
-							<Button disabled={running} onClick={runCall} size="sm">
-								{running ? <Spinner className="size-4" /> : null}
+							<Button loading={running} onClick={runCall} size="sm">
 								Test call
 							</Button>
 						</div>
@@ -875,18 +1445,38 @@ function AddServerDialog({
 }) {
 	const [open, setOpen] = useState(false);
 	const [name, setName] = useState("");
+	const [transport, setTransport] = useState<McpTransport>("stdio");
 	const [command, setCommand] = useState("");
+	const [url, setUrl] = useState("");
 	const [argsText, setArgsText] = useState("");
+	const [headersText, setHeadersText] = useState("");
+	const [envRows, setEnvRows] = useState<McpKeyValueRow[]>([]);
 	const [description, setDescription] = useState("");
 	const [submitting, setSubmitting] = useState(false);
 	const [formError, setFormError] = useState<string | null>(null);
 
 	const reset = () => {
 		setName("");
+		setTransport("stdio");
 		setCommand("");
+		setUrl("");
 		setArgsText("");
+		setHeadersText("");
+		setEnvRows([]);
 		setDescription("");
 		setFormError(null);
+	};
+
+	const updateRow = (
+		index: number,
+		field: keyof McpKeyValueRow,
+		value: string
+	) => {
+		setEnvRows((rows) =>
+			rows.map((row, rowIndex) =>
+				rowIndex === index ? { ...row, [field]: value } : row
+			)
+		);
 	};
 
 	const handleSubmit = async () => {
@@ -894,31 +1484,87 @@ function AddServerDialog({
 
 		const trimmedName = name.trim();
 		const trimmedCommand = command.trim();
+		const trimmedUrl = url.trim();
 
 		if (!trimmedName) {
 			setFormError("Name is required.");
 			return;
 		}
 		if (trimmedName.includes("__")) {
-			setFormError("Name must not contain '__' (reserved separator).");
+			setFormError("Name must not contain '__' (reserved legacy separator).");
 			return;
 		}
-		if (!trimmedCommand) {
-			setFormError("Command is required.");
-			return;
+		if (transport === "stdio") {
+			if (!trimmedCommand) {
+				setFormError("Command is required for stdio servers.");
+				return;
+			}
+		} else {
+			if (!trimmedUrl) {
+				setFormError("Endpoint URL is required for remote servers.");
+				return;
+			}
+			try {
+				const parsed = new URL(trimmedUrl);
+				if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+					setFormError("Endpoint URL must use http:// or https://.");
+					return;
+				}
+			} catch {
+				setFormError("Endpoint URL is not valid.");
+				return;
+			}
+		}
+
+		const headers: Record<string, string> = {};
+		if (transport !== "stdio" && headersText.trim()) {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(headersText);
+			} catch {
+				setFormError("Headers must be valid JSON.");
+				return;
+			}
+			if (
+				typeof parsed !== "object" ||
+				parsed === null ||
+				Array.isArray(parsed)
+			) {
+				setFormError("Headers must be a JSON object of string values.");
+				return;
+			}
+			const headerObject = parsed as Record<string, unknown>;
+			for (const key of Object.keys(headerObject)) {
+				const value = headerObject[key];
+				if (!key.trim() || typeof value !== "string") {
+					setFormError("Headers must be a JSON object of string values.");
+					return;
+				}
+				headers[key] = value;
+			}
 		}
 
 		const args = argsText
 			.split(/\s+/)
 			.map((s) => s.trim())
 			.filter(Boolean);
+		const env = envRows.reduce<Record<string, string>>((result, row) => {
+			const key = row.key.trim();
+			if (key) {
+				result[key] = row.value;
+			}
+			return result;
+		}, {});
 
 		setSubmitting(true);
 		try {
 			const result = await onCreateServer({
 				name: trimmedName,
-				command: trimmedCommand,
-				args,
+				transport,
+				...(transport === "stdio"
+					? { command: trimmedCommand, args }
+					: { url: trimmedUrl, headers }),
+				env,
 				description: description.trim() || undefined,
 			});
 			if (result.ok) {
@@ -972,33 +1618,118 @@ function AddServerDialog({
 					</div>
 
 					<div className="flex flex-col gap-1.5">
-						<Label htmlFor="mcp-command">Command</Label>
-						<Input
-							id="mcp-command"
-							onChange={(e: ChangeEvent<HTMLInputElement>) =>
-								setCommand(e.target.value)
-							}
-							placeholder="e.g. npx"
-							value={command}
-						/>
+						<Label htmlFor="mcp-transport">Transport</Label>
+						<Select
+							onValueChange={(value) => {
+								if (value) {
+									setTransport(value as McpTransport);
+								}
+							}}
+							value={transport}
+						>
+							<SelectTrigger id="mcp-transport">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value="stdio">Local process (stdio)</SelectItem>
+								<SelectItem value="streamable-http">Streamable HTTP</SelectItem>
+								<SelectItem value="sse">Legacy HTTP + SSE</SelectItem>
+							</SelectContent>
+						</Select>
+						<p className="text-muted-foreground text-xs">
+							{transport === "stdio"
+								? "Spawn a local MCP process."
+								: transport === "sse"
+									? "Connect to the legacy SSE endpoint and its announced POST route."
+									: "Connect to a current MCP Streamable HTTP endpoint."}
+						</p>
 					</div>
 
-					<div className="flex flex-col gap-1.5">
-						<Label htmlFor="mcp-args">
-							Arguments{" "}
-							<span className="text-muted-foreground text-xs">
-								(space-separated)
-							</span>
-						</Label>
-						<Input
-							id="mcp-args"
-							onChange={(e: ChangeEvent<HTMLInputElement>) =>
-								setArgsText(e.target.value)
-							}
-							placeholder="e.g. -y @modelcontextprotocol/server-filesystem /tmp"
-							value={argsText}
-						/>
-					</div>
+					{transport === "stdio" ? (
+						<>
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="mcp-command">Command</Label>
+								<Input
+									id="mcp-command"
+									onChange={(e: ChangeEvent<HTMLInputElement>) =>
+										setCommand(e.target.value)
+									}
+									placeholder="e.g. npx"
+									value={command}
+								/>
+							</div>
+
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="mcp-args">
+									Arguments{" "}
+									<span className="text-muted-foreground text-xs">
+										(space-separated)
+									</span>
+								</Label>
+								<Input
+									id="mcp-args"
+									onChange={(e: ChangeEvent<HTMLInputElement>) =>
+										setArgsText(e.target.value)
+									}
+									placeholder="e.g. -y @modelcontextprotocol/server-filesystem /tmp"
+									value={argsText}
+								/>
+							</div>
+						</>
+					) : (
+						<>
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="mcp-url">Endpoint URL</Label>
+								<Input
+									id="mcp-url"
+									onChange={(e: ChangeEvent<HTMLInputElement>) =>
+										setUrl(e.target.value)
+									}
+									placeholder="https://example.com/mcp"
+									value={url}
+								/>
+							</div>
+
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="mcp-headers">
+									Headers{" "}
+									<span className="text-muted-foreground text-xs">
+										(optional JSON)
+									</span>
+								</Label>
+								<Textarea
+									id="mcp-headers"
+									onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
+										setHeadersText(e.target.value)
+									}
+									placeholder={'{"Authorization":"Bearer …"}'}
+									rows={2}
+									value={headersText}
+								/>
+							</div>
+						</>
+					)}
+
+					<McpKeyValueRows
+						label="Environment variables"
+						onChange={(index, field, value) => updateRow(index, field, value)}
+						onRemove={(index) =>
+							setEnvRows((rows) =>
+								rows.filter((_, rowIndex) => rowIndex !== index)
+							)
+						}
+						rows={envRows}
+					/>
+					<Button
+						onClick={() =>
+							setEnvRows((rows) => [...rows, { key: "", value: "" }])
+						}
+						size="sm"
+						variant="outline"
+					>
+						<HugeiconsIcon className="size-4" icon={Add01Icon} />
+						Add environment variable
+					</Button>
 
 					<div className="flex flex-col gap-1.5">
 						<Label htmlFor="mcp-description">
@@ -1033,8 +1764,7 @@ function AddServerDialog({
 					>
 						Cancel
 					</Button>
-					<Button disabled={submitting} onClick={handleSubmit} type="button">
-						{submitting ? <Spinner className="size-4" /> : null}
+					<Button loading={submitting} onClick={handleSubmit} type="button">
 						Add server
 					</Button>
 				</DialogFooter>

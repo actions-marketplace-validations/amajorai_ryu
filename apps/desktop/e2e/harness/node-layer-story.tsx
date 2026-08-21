@@ -1,11 +1,12 @@
 // Standalone browser story for the REAL `NodeLayerMenu` — the submenu shell every
-// layer of the node selector renders through (services, chat engine, the
-// run-alongside engines, TTS + its nested voice picker, STT, sandbox backend).
+// layer of the node selector renders through (services, Chat, the
+// run-alongside engines, Audio + its nested voice picker, Voice Recognition,
+// sandbox backend).
 //
 // The component is purely prop-driven (it owns layout + pending state and nothing
 // else), so the whole matrix is reachable without Core, Tauri, or seed data. This
 // covers the three things static checks cannot: that a submenu opens at all, that
-// the TTS → Voice picker is usable THREE levels deep, and that a layer with no
+// the Audio → Voice picker is usable THREE levels deep, and that a layer with no
 // actions and no options (a read-only running service) still renders its header
 // instead of an empty popup.
 //
@@ -56,12 +57,12 @@ const CHAT_AVAILABLE: LayerOption[] = [
 	},
 ];
 
-const SPEECH_INSTALLED: LayerOption[] = [
+const VOICE_RECOGNITION_INSTALLED: LayerOption[] = [
 	{
-		name: "ryutts",
-		label: "Ryu TTS",
+		name: "whispercpp",
+		label: "whisper.cpp",
 		active: true,
-		detail: "1.2 GB · 4%",
+		detail: "142 MB",
 		select: noop,
 		uninstall: noop,
 	},
@@ -109,23 +110,23 @@ function Story() {
 					{/* Swap layer: no start/stop, tick on the active engine. */}
 					<NodeLayerMenu
 						available={CHAT_AVAILABLE}
-						caption="Resident chat engine · 2.1 GB"
+						caption="Resident Chat · 2.1 GB"
 						currentLabel="llama.cpp"
 						installed={CHAT_INSTALLED}
-						label="Chat engine"
+						label="Chat"
 						running={true}
 						version="b9670"
 					/>
 					{/* Toggle layer: independent engines, tick means running. */}
 					<NodeLayerMenu
 						caption="1 of 2 running"
-						currentLabel="Ryu TTS"
-						installed={SPEECH_INSTALLED}
-						label="Speech"
+						currentLabel="whisper.cpp"
+						installed={VOICE_RECOGNITION_INSTALLED}
+						label="Voice Recognition"
 						running={true}
 						selectionMode="toggle"
 					/>
-					{/* Nested second dimension: a Voice picker inside the TTS layer. */}
+					{/* Nested second dimension: a Voice picker inside the Audio layer. */}
 					<NodeLayerMenu
 						caption="Speaks as af_heart"
 						currentLabel="Kokoro"
@@ -138,7 +139,7 @@ function Story() {
 								select: noop,
 							},
 						]}
-						label="Text-to-speech"
+						label="Audio"
 						running={true}
 					>
 						<NodeLayerMenu

@@ -1,8 +1,25 @@
-import { UserGroupIcon, Wallet01Icon } from "@hugeicons/core-free-icons";
+import { Robot01Icon, Wallet01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Button } from "@ryu/ui/components/button";
-import { Input } from "@ryu/ui/components/input";
-import { Spinner } from "@ryu/ui/components/spinner";
+import {
+	hostedAgentIncludedCreditUsd,
+	TEAMS_AGENT_STANDARD_USD,
+	TEAMS_MAX_SEATS,
+	TEAMS_MIN_SEATS,
+} from "@ryu/blocks/web/pricing.tsx";
+import { BeforeAfterSummary } from "@ryu/ui/components/before-after-summary.tsx";
+import { Button } from "@ryu/ui/components/button.tsx";
+import {
+	Dialog,
+	DialogClose,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@ryu/ui/components/dialog.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { formatMicroUsd } from "@ryu/ui/lib/number-format.ts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { sileo } from "sileo";
@@ -13,13 +30,14 @@ import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
 import {
 	checkoutTeams,
 	fetchOrgRole,
-	fetchSeatStatus,
 	fetchSubscriptionStatus,
+	fetchTeamsSeatStatus,
 	fetchWallet,
+	type HostedAgentPlanId,
 	hasTeamsBillingAuth,
 	openBillingPortalUrl,
-	setSeats,
 	TeamsBillingError,
+	updateTeamsSeats,
 } from "@/src/lib/api/teams-billing.ts";
 import {
 	SettingsCard,
@@ -28,15 +46,6 @@ import {
 	SettingsSection,
 } from "./shared/settings-items.tsx";
 
-const MICRO_USD_PER_DOLLAR = 1_000_000;
-
-function formatMicroUsd(microUsd: number): string {
-	return (microUsd / MICRO_USD_PER_DOLLAR).toLocaleString(undefined, {
-		style: "currency",
-		currency: "USD",
-	});
-}
-
 /** Where a solo user goes to create or pick an organization. */
 const ORGANIZATIONS_URL = `${FRONTEND_URL.replace(/\/$/, "")}/organizations`;
 
@@ -44,8 +53,9 @@ const ORGANIZATIONS_URL = `${FRONTEND_URL.replace(/\/$/, "")}/organizations`;
 const PLAN_LABELS: Record<string, string> = {
 	free: "Free",
 	hobby: "Hobby",
-	pro: "Pro",
-	teams: "Ryu Teams",
+	max: "Max Plan",
+	pro: "Pro Plan",
+	teams: "For Teams",
 };
 
 function planLabel(plan: string | null | undefined): string {
@@ -55,18 +65,41 @@ function planLabel(plan: string | null | undefined): string {
 	return PLAN_LABELS[plan] ?? plan.charAt(0).toUpperCase() + plan.slice(1);
 }
 
+function normalizeTeamsSeatCount(
+	value: string,
+	minimum = TEAMS_MIN_SEATS
+): number {
+	const parsed = Number.parseInt(value, 10);
+	if (!Number.isFinite(parsed)) {
+		return minimum;
+	}
+	return Math.max(minimum, Math.floor(parsed));
+}
+
+function formatMonthlyUsd(value: number): string {
+	return `${formatMicroUsd(Math.round(value * 1_000_000))}/mo`;
+}
+
+function legacyPlanAmount(plan: string | null | undefined): string {
+	switch (plan) {
+		case "max":
+			return "$99/mo";
+		case "pro":
+			return "$39/mo";
+		case "teams":
+			return "$250/mo";
+		default:
+			return "$0/mo";
+	}
+}
+
 /**
- * Desktop mirror of the org-scoped Teams billing surface (epic #496, Unit D1).
+ * Desktop mirror of the organization Teams seat-billing surface.
  *
- * An owner/admin subscribes the org to Teams, sets the seat count (validated
- * server-side vs the live member count), and tops up / changes the plan via the
- * Polar portal. Every member SEES the pooled wallet + monthly pool; only
- * owner/admin can mutate. RBAC is enforced SERVER-SIDE — this tab only hides the
- * controls as a courtesy (it surfaces the server's 403 if reached anyway).
- *
- * Rendered per active org by {@link TeamsBillingTab}, which is why every route
- * below can resolve its org from the session and take no org argument: the id
- * arrives as a prop that cannot change under this component.
+ * The organization member count is the access boundary and Polar owns the
+ * billed quantity. The AI-credit pool is bundled by billed seat count and
+ * shared. Only
+ * owner/admin can mutate billing; the control-plane server is authoritative.
  */
 function TeamsBillingTabForOrg({
 	activeOrgId,
@@ -80,47 +113,27 @@ function TeamsBillingTabForOrg({
 		queryKey: ["teams-subscription-status", activeOrgId],
 		queryFn: fetchSubscriptionStatus,
 	});
-	const seatQuery = useQuery({
-		enabled: authed,
-		queryKey: ["teams-seat-status", activeOrgId],
-		queryFn: fetchSeatStatus,
-		retry: false,
-	});
 	const walletQuery = useQuery({
 		enabled: authed,
 		queryKey: ["teams-wallet", activeOrgId],
 		queryFn: fetchWallet,
-		// Same `retry: false` as the seat query above, for the same reason: the
-		// wallet is org-level, so a caller with no active org gets a 409 that three
-		// more attempts cannot turn into a wallet.
 		retry: false,
 	});
-	const organizationId = seatQuery.data?.organizationId;
+	const organizationId = subQuery.data?.organizationId ?? activeOrgId;
 	const roleQuery = useQuery({
 		enabled: authed && Boolean(organizationId),
 		queryKey: ["teams-org-role", organizationId],
 		queryFn: () => fetchOrgRole(organizationId as string),
 	});
+	const seatQuery = useQuery({
+		enabled: authed && Boolean(organizationId),
+		queryKey: ["teams-seat-status", organizationId],
+		queryFn: fetchTeamsSeatStatus,
+	});
 
-	// Live billing status: a Polar/Stripe webhook changing the plan or seat count
-	// pushes a fresh snapshot over SSE, which we write straight into the same
-	// query caches the tab renders from — so plan/seat changes made elsewhere (or
-	// by another admin) reflect here without a refetch. `seats` is null for a
-	// user-scope caller with no org, so only the subscription cache updates then.
-	//
-	// These keys MUST stay byte-identical to the `useQuery` keys above, org id
-	// included: a writer aimed at a key nothing reads fails silently — the tab
-	// simply stops receiving live updates, with no error to notice.
-	//
-	// `activeOrgId` is a PROP that is constant for this component's lifetime, and
-	// that is what makes the writer safe. `useBillingStatusStream` holds the last
-	// snapshot in `useState` behind a mount-once effect, so it still holds the
-	// PREVIOUS org's snapshot at the instant a switch changes the id: re-running
-	// this writer on that change alone would file org A's plan and seat count
-	// under org B's keys and paint them as org B's. The switch remounts this
-	// component instead (see the wrapper below), which clears that snapshot to
-	// null and reopens the stream, so every write here is same-org by
-	// construction rather than by a guard someone could drop.
+	// Live webhook snapshots update the same subscription cache as the initial
+	// request, so a plan or seat change made in another billing surface is
+	// reflected here without a refresh.
 	const queryClient = useQueryClient();
 	const liveBilling = useBillingStatusStream();
 	useEffect(() => {
@@ -131,45 +144,48 @@ function TeamsBillingTabForOrg({
 			["teams-subscription-status", activeOrgId],
 			liveBilling.subscription
 		);
-		if (liveBilling.seats) {
-			queryClient.setQueryData(
-				["teams-seat-status", activeOrgId],
-				liveBilling.seats
-			);
-		}
 	}, [liveBilling, queryClient, activeOrgId]);
 
-	const [seats, setSeatsInput] = useState("");
+	const [seatText, setSeatText] = useState(String(TEAMS_MIN_SEATS));
+	const [reviewOpen, setReviewOpen] = useState(false);
+	const [reviewPending, setReviewPending] = useState(false);
+	const [reviewError, setReviewError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
-	const [seatError, setSeatError] = useState<string | null>(null);
 
-	const billed = seatQuery.data?.billedSeats ?? null;
-	const minRequired = seatQuery.data?.minRequired ?? 2;
+	const seatStatus = seatQuery.data ?? null;
+	const isTeams = subQuery.data?.plan === "teams";
+	const seatMinimum = seatStatus?.minRequired ?? TEAMS_MIN_SEATS;
+	const previewSeatCount = normalizeTeamsSeatCount(seatText, seatMinimum);
+	const previewMonthlyPrice = TEAMS_AGENT_STANDARD_USD * previewSeatCount;
+	const previewCreditPool = hostedAgentIncludedCreditUsd(
+		"teams",
+		previewSeatCount
+	);
+
 	useEffect(() => {
-		setSeatsInput(String(billed ?? minRequired));
-	}, [billed, minRequired]);
+		const currentSeats = seatStatus?.billedSeats ?? seatStatus?.minRequired;
+		setSeatText(String(currentSeats ?? TEAMS_MIN_SEATS));
+	}, [seatStatus?.billedSeats, seatStatus?.minRequired]);
 
 	if (!authed) {
 		return (
-			<SettingsSection title="Teams">
+			<SettingsSection title="For Teams">
 				<p className="px-3 text-muted-foreground text-sm">
-					Sign in to manage your organization&apos;s Teams plan.
+					Sign in to manage your organization&apos;s Teams seats.
 				</p>
 			</SettingsSection>
 		);
 	}
 
-	const noOrg =
-		seatQuery.error instanceof TeamsBillingError &&
-		seatQuery.error.kind === "no_org";
+	const noOrg = !activeOrgId;
 	if (noOrg) {
 		return (
-			<SettingsSection title="Teams">
+			<SettingsSection title="For Teams">
 				<SettingsCard>
 					<div className="flex flex-col items-start gap-3">
 						<p className="text-muted-foreground text-sm">
-							Teams is an organization plan. Create or join an organization to
-							set up shared credits and seats.
+							For Teams is an organization plan. Create or join an organization
+							to set up shared credits and member seats.
 						</p>
 						<Button
 							onClick={() => {
@@ -189,22 +205,22 @@ function TeamsBillingTabForOrg({
 		subQuery.isError ||
 		walletQuery.isError ||
 		roleQuery.isError ||
-		(seatQuery.isError && !noOrg);
+		seatQuery.isError;
 	if (loadFailed) {
 		return (
-			<SettingsSection title="Teams">
+			<SettingsSection title="For Teams">
 				<SettingsCard>
 					<div className="flex flex-col items-start gap-3">
 						<p className="text-muted-foreground text-sm">
-							We couldn&apos;t load your Teams billing details. Check your
-							connection and try again.
+							We couldn&apos;t load your organization billing details. Check
+							your connection and try again.
 						</p>
 						<Button
 							onClick={() => {
 								subQuery.refetch().catch(() => undefined);
-								seatQuery.refetch().catch(() => undefined);
 								walletQuery.refetch().catch(() => undefined);
 								roleQuery.refetch().catch(() => undefined);
+								seatQuery.refetch().catch(() => undefined);
 							}}
 							size="sm"
 							variant="ghost"
@@ -219,25 +235,61 @@ function TeamsBillingTabForOrg({
 
 	const role = roleQuery.data ?? null;
 	const canManage = role === "owner" || role === "admin";
-	const isTeams = subQuery.data?.plan === "teams";
-	const pool = subQuery.data?.entitlement.monthlyCreditPoolMicroUsd ?? 0;
-	const memberCount = seatQuery.data?.memberCount ?? 0;
-	const overAllocated = Boolean(seatQuery.data?.overAllocated);
+	const loading =
+		subQuery.isLoading || walletQuery.isLoading || seatQuery.isLoading;
+	const currentPlanId = subQuery.data?.plan as HostedAgentPlanId | null;
+	const currentSeats =
+		seatStatus?.billedSeats ?? seatStatus?.minRequired ?? TEAMS_MIN_SEATS;
+	const currentAmount = isTeams
+		? formatMonthlyUsd(TEAMS_AGENT_STANDARD_USD * currentSeats)
+		: legacyPlanAmount(subQuery.data?.plan);
+	const currentDetail = isTeams
+		? `${currentSeats} billed seats${seatStatus?.bonusSeats ? ` + ${seatStatus.bonusSeats} negotiated` : ""} · ${seatStatus?.memberCount ?? 0} active members · shared workspace access`
+		: subQuery.data?.plan
+			? "Existing organization plan"
+			: "No active Teams plan";
 
-	const subscribe = async () => {
-		setBusy(true);
+	const startCheckout = async () => {
+		setReviewError(null);
+		setReviewPending(true);
 		try {
-			const parsed = Number.parseInt(seats, 10);
 			const { url } = await checkoutTeams(
-				Number.isFinite(parsed) ? parsed : minRequired
+				"monthly",
+				previewSeatCount,
+				organizationId
 			);
 			await openExternal(url);
-		} catch (err) {
+			setReviewOpen(false);
+		} catch (error) {
+			const message =
+				error instanceof TeamsBillingError
+					? error.message
+					: "Failed to start checkout.";
+			setReviewError(message);
+		} finally {
+			setReviewPending(false);
+		}
+	};
+
+	const saveSeats = async () => {
+		if (previewSeatCount > TEAMS_MAX_SEATS) {
+			sileo.error({
+				title: `Teams self-serve covers up to ${TEAMS_MAX_SEATS} seats`,
+				description: "Contact Enterprise for larger organizations.",
+			});
+			return;
+		}
+		setBusy(true);
+		try {
+			await updateTeamsSeats(previewSeatCount);
+			await seatQuery.refetch();
+			sileo.success({ title: "Teams seats updated" });
+		} catch (error) {
 			sileo.error({
 				title:
-					err instanceof TeamsBillingError
-						? err.message
-						: "Failed to start checkout.",
+					error instanceof TeamsBillingError
+						? error.message
+						: "Failed to update Teams seats",
 			});
 		} finally {
 			setBusy(false);
@@ -249,44 +301,17 @@ function TeamsBillingTabForOrg({
 		try {
 			const { url } = await openBillingPortalUrl();
 			await openExternal(url);
-		} catch (err) {
+		} catch (error) {
 			sileo.error({
 				title:
-					err instanceof TeamsBillingError
-						? err.message
+					error instanceof TeamsBillingError
+						? error.message
 						: "Failed to open billing portal.",
 			});
 		} finally {
 			setBusy(false);
 		}
 	};
-
-	const saveSeats = async () => {
-		const parsed = Number.parseInt(seats, 10);
-		if (!Number.isInteger(parsed) || parsed < minRequired) {
-			setSeatError(
-				`Enter a whole number of seats, at least ${minRequired} for this organization.`
-			);
-			return;
-		}
-		setBusy(true);
-		setSeatError(null);
-		try {
-			await setSeats(parsed);
-			await seatQuery.refetch();
-			await subQuery.refetch();
-			sileo.success({ title: "Seats updated." });
-		} catch (err) {
-			setSeatError(
-				err instanceof TeamsBillingError ? err.message : "Failed to set seats."
-			);
-		} finally {
-			setBusy(false);
-		}
-	};
-
-	const loading =
-		subQuery.isLoading || seatQuery.isLoading || walletQuery.isLoading;
 
 	return (
 		<div className="space-y-6">
@@ -301,33 +326,71 @@ function TeamsBillingTabForOrg({
 							actions={
 								canManage ? (
 									isTeams ? (
-										<Button
-											disabled={busy}
-											onClick={manage}
-											size="sm"
-											variant="ghost"
-										>
-											Change or cancel
-										</Button>
+										<div className="flex items-center gap-2">
+											<Input
+												aria-label="Teams seats"
+												className="w-24"
+												max={TEAMS_MAX_SEATS}
+												min={seatMinimum}
+												onChange={(event) => setSeatText(event.target.value)}
+												step={1}
+												type="number"
+												value={seatText}
+											/>
+											<Button
+												disabled={busy}
+												onClick={() => void saveSeats()}
+												size="sm"
+											>
+												Save seats
+											</Button>
+											<Button
+												disabled={busy}
+												onClick={() => void manage()}
+												size="sm"
+												variant="ghost"
+											>
+												Manage billing
+											</Button>
+										</div>
 									) : (
-										<Button disabled={busy} onClick={subscribe} size="sm">
-											Subscribe to Teams
-										</Button>
+										<div className="flex items-center gap-2">
+											<Input
+												aria-label="Teams seats"
+												className="w-24"
+												max={TEAMS_MAX_SEATS}
+												min={seatMinimum}
+												onChange={(event) => setSeatText(event.target.value)}
+												step={1}
+												type="number"
+												value={seatText}
+											/>
+											<Button
+												disabled={busy}
+												onClick={() => {
+													setReviewError(null);
+													setReviewOpen(true);
+												}}
+												size="sm"
+											>
+												Review For Teams
+											</Button>
+										</div>
 									)
 								) : undefined
 							}
 							description={
 								isTeams
-									? `Your organization is on the Teams plan (${subQuery.data?.seats} seats).`
-									: "Subscribe your organization to the Teams plan to share one pool of AI credits across your whole team, with a seat for each member."
+									? `Your organization is on For Teams (${seatStatus?.includedSeats ?? currentSeats} member capacity: ${currentSeats} billed${seatStatus?.bonusSeats ? ` + ${seatStatus.bonusSeats} negotiated` : ""} · ${seatStatus?.memberCount ?? 0} active members).`
+									: "Subscribe your organization to For Teams for shared managed inference and member seats."
 							}
 							title={
 								<span className="flex items-center gap-2">
 									<HugeiconsIcon
 										className="size-4 text-muted-foreground"
-										icon={UserGroupIcon}
+										icon={Robot01Icon}
 									/>
-									{isTeams ? "Ryu Teams" : planLabel(subQuery.data?.plan)}
+									{isTeams ? "For Teams" : planLabel(subQuery.data?.plan)}
 								</span>
 							}
 						/>
@@ -339,58 +402,9 @@ function TeamsBillingTabForOrg({
 				<SettingsSection title="Seats">
 					<SettingsGroup>
 						<SettingsItem
-							description={`${memberCount} member${
-								memberCount === 1 ? "" : "s"
-							} in this organization${
-								billed === null
-									? ""
-									: ` · ${billed} seat${billed === 1 ? "" : "s"} billed`
-							}. A seat is required for every member who uses shared AI credits.`}
-							title="Allocated seats"
+							description={`${seatStatus?.memberCount ?? 0} active members and ${seatStatus?.pendingSeatReservations ?? 0} in-flight invitation claims. Capacity is ${seatStatus?.includedSeats ?? "—"} (${currentSeats} billed${seatStatus?.bonusSeats ? ` + ${seatStatus.bonusSeats} negotiated` : ""}); the shared pool adds $50 per five billed seats.`}
+							title="Member seats"
 						/>
-						{overAllocated && (
-							<SettingsItem
-								description="You have more members than seats. Increase the seat count to cover everyone."
-								title={
-									<span className="font-medium text-destructive">
-										More members than seats
-									</span>
-								}
-							/>
-						)}
-						{canManage ? (
-							<SettingsItem
-								actions={
-									<div className="flex items-center gap-2">
-										<Input
-											className="w-20"
-											min={minRequired}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setSeatsInput(e.target.value)
-											}
-											type="number"
-											value={seats}
-										/>
-										<Button disabled={busy} onClick={saveSeats} size="sm">
-											{busy ? "Saving..." : "Update"}
-										</Button>
-									</div>
-								}
-								description={
-									seatError ? (
-										<span className="text-destructive">{seatError}</span>
-									) : (
-										`Minimum ${minRequired} seats for this organization.`
-									)
-								}
-								title="Set seat count"
-							/>
-						) : (
-							<SettingsItem
-								description="Only an organization owner or admin can change the seat count."
-								title="Seat management"
-							/>
-						)}
 					</SettingsGroup>
 				</SettingsSection>
 			)}
@@ -424,36 +438,87 @@ function TeamsBillingTabForOrg({
 						<SettingsItem
 							actions={
 								<span className="font-heading font-semibold text-sm tabular-nums">
-									{pool > 0 ? formatMicroUsd(pool) : "—"}
+									{(subQuery.data?.entitlement.monthlyCreditPoolMicroUsd ?? 0) >
+									0
+										? formatMicroUsd(
+												subQuery.data?.entitlement.monthlyCreditPoolMicroUsd ??
+													0
+											)
+										: "—"}
 								</span>
 							}
-							description="Refreshed each billing period while the subscription is active."
+							description="Refreshed each billing period while the plan is active."
 							title="Monthly included pool"
 						/>
 					</SettingsGroup>
 				)}
 			</SettingsSection>
+
+			<Dialog
+				onOpenChange={(open) => {
+					setReviewOpen(open);
+					if (!open) {
+						setReviewError(null);
+					}
+				}}
+				open={reviewOpen}
+			>
+				<DialogContent showCloseButton={!reviewPending}>
+					<DialogHeader>
+						<DialogTitle>Review plan change</DialogTitle>
+						<DialogDescription>
+							Review the organization plan and member-seat quantity before Ryu
+							opens the secure checkout.
+						</DialogDescription>
+					</DialogHeader>
+					<BeforeAfterSummary
+						current={{
+							amount: currentAmount,
+							detail: currentDetail,
+							eyebrow: "Current",
+							label: planLabel(currentPlanId),
+						}}
+						footer={{
+							detail: `Shared AI pool: ${formatMicroUsd(Math.round(previewCreditPool * 1_000_000))}/mo. It adds $50 per five billed seats. Each additional billed member seat is $${TEAMS_AGENT_STANDARD_USD}/mo.`,
+							label: "New allowance",
+							value: `${previewSeatCount} member seats`,
+						}}
+						next={{
+							amount: formatMonthlyUsd(previewMonthlyPrice),
+							detail: `${previewSeatCount} member seats · shared workspace · pooled wallet`,
+							eyebrow: "New",
+							label: "For Teams",
+						}}
+					/>
+					{reviewError ? (
+						<p className="text-destructive text-sm" role="alert">
+							{reviewError}
+						</p>
+					) : null}
+					<DialogFooter>
+						<DialogClose
+							disabled={reviewPending}
+							render={<Button disabled={reviewPending} variant="ghost" />}
+						>
+							Cancel
+						</DialogClose>
+						<Button
+							loading={reviewPending}
+							onClick={() => void startCheckout()}
+						>
+							Continue to checkout
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }
 
 /**
- * The tab itself: one instance of {@link TeamsBillingTabForOrg} PER WORKSPACE.
- *
- * CLEAR FIRST, THEN LOAD — as a remount, because this tab's staleness is not
- * only in the query cache. Its live SSE snapshot and its seat input are plain
- * component state; re-keying the queries underneath them would leave the plan,
- * the seat count and the number in the input box describing the workspace the
- * user just left. Keying on the active org drops all of it in one step: the
- * queries come back pending (a spinner, not another org's plan), the seat input
- * re-derives from the new org's billed seats, and the billing stream is torn
- * down and reopened — so the snapshot it was holding for the previous workspace
- * cannot be written into this one's cache keys.
- *
- * The `null` key is the pre-resolution state, not a workspace. On a cold cache
- * it costs one extra stream reconnect when the id lands — which is the point: a
- * stream opened before the id was known cannot be assumed to describe the org
- * the tab settles on.
+ * One instance per active workspace. Keying by the org clears the query,
+ * live-stream, and agent input state together when the workspace
+ * changes, so billing details never bleed between organizations.
  */
 export function TeamsBillingTab() {
 	const activeOrgId = useActiveOrgId();

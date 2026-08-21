@@ -7,19 +7,19 @@
 // Governing an ACP agent has four independent layers. Layer 1 — the model call
 // itself traversing the Ryu gateway, so the firewall/DLP, the spend budget and
 // the audit log see it — is NOT one setting. It is decided by four different
-// mechanisms with three different defaults, and until this module there was no
+// mechanisms with different defaults, and until this module there was no
 // place that showed the combined answer:
 //
 //   flagship `ryu`  → `apps/core/src/pi_config`   — gateway-routed unless the
 //                     active Pi provider is a BYOK one. Default ON (a fresh
 //                     node has no `x-ryu-routing` key and `is_gateway_routing()`
 //                     treats anything but `"direct"` as gateway).
-//   `acp:claude`    → `apps/core/src/claude_config` — `AtomicBool::new(false)`,
-//                     opt-in. OFF by default.
-//   `acp:codex`     → `apps/core/src/codex_config`  — `AtomicBool::new(false)`,
-//                     opt-in. OFF by default.
+//   `acp:claude`    → `apps/core/src/claude_config` — governed by default; an
+//                     explicit preference opts out to direct egress.
+//   `acp:codex`     → `apps/core/src/codex_config`  — governed by default; an
+//                     explicit preference opts out to direct egress.
 //   everything else → `apps/core/src/agent_routing` — a per-agent JSON map read
-//                     with `.unwrap_or(false)`. OFF by default.
+//                     with a governed default; explicit false opts out.
 //
 // An agent with layer 1 off sends its model calls straight to the provider:
 // unmetered, unfiltered, absent from the audit log. That is a legitimate choice
@@ -63,10 +63,10 @@
 // Layer 3 is here because until `agent_routing`'s split it was NOT separable:
 // ONE preference (`agent-gateway-routing`) gated both the base-URL swap and
 // whether `build_ryu_mcp_server` was injected into the ACP session. Their risk
-// profiles are opposite — egress moves a subscription credential and the billing
-// path (hence opt-in), while the bridge offers only the tool allowlist the user
-// already configured for that agent and re-checks it on every call (hence ON by
-// default). Conflated, declining the credential swap ALSO silently removed every
+// profiles are different — egress moves a subscription credential and the billing
+// path (hence a visible direct-egress opt-out), while the bridge offers only the tool allowlist
+// the user already configured for that agent and re-checks it on every call
+// (hence ON by default). Conflated, declining the credential swap ALSO removed every
 // Ryu tool, which is why a freshly installed ACP agent could not do anything.
 //
 // So the invariant this file is responsible for, in code and in copy: **no field,
@@ -85,6 +85,7 @@ import {
 import type { ApiTarget } from "./client.ts";
 import { fetchPiConfig } from "./pi-config.ts";
 import {
+	DEFAULT_AGENT_GATEWAY_ROUTING,
 	DEFAULT_AGENT_TOOL_BRIDGE,
 	getAgentGatewayRoutingMap,
 	getAgentToolBridgeMap,
@@ -476,11 +477,11 @@ export interface AgentEgress {
 
 /** The five preference reads this view is built from. */
 export interface EgressPrefs {
-	/** `agent-gateway-routing`: agent id → enabled. Missing ⇒ off. */
+	/** `agent-gateway-routing`: agent id → enabled. Missing ⇒ Gateway governance. */
 	agents: Record<string, boolean>;
-	/** `claude-gateway-routing`. Default off. */
+	/** `claude-gateway-routing`. Default Gateway governance. */
 	claude: boolean;
-	/** `codex-gateway-routing`. Default off. */
+	/** `codex-gateway-routing`. Default Gateway governance. */
 	codex: boolean;
 	/** `/api/pi-config` `routing`: `"gateway"` | `"direct"`. Default gateway. */
 	piRouting: string;
@@ -610,7 +611,7 @@ function classifyEgressLayer(
 		? engine.slice("acp-exec:".length).trim()
 		: "";
 	if (byoCommand !== "") {
-		const governed = prefs.agents[agent.id] === true;
+		const governed = prefs.agents[agent.id] ?? DEFAULT_AGENT_GATEWAY_ROUTING;
 		return {
 			...base,
 			mechanism: "openai-base-url",
@@ -670,7 +671,8 @@ function classifyEgressLayer(
 		};
 	}
 
-	// 5. Claude Code — its own Anthropic-format passthrough, opt-in.
+	// 5. Claude Code — its own Anthropic-format passthrough, governed by default;
+	// explicit false enables direct egress.
 	if (entry.id === CLAUDE_ID) {
 		return {
 			...base,
@@ -687,7 +689,8 @@ function classifyEgressLayer(
 		};
 	}
 
-	// 6. Codex — its own ChatGPT-login passthrough, opt-in.
+	// 6. Codex — its own ChatGPT-login passthrough, governed by default; explicit
+	// false enables direct egress.
 	if (entry.id === CODEX_ID) {
 		return {
 			...base,
@@ -738,7 +741,7 @@ function classifyEgressLayer(
 	}
 
 	// 9. Any remaining registry ACP agent: the generic base-URL swap applies.
-	const governed = prefs.agents[agent.id] === true;
+	const governed = prefs.agents[agent.id] ?? DEFAULT_AGENT_GATEWAY_ROUTING;
 	return {
 		...base,
 		mechanism: "openai-base-url",
@@ -1049,9 +1052,9 @@ export function setAgentToolsEnabled(
 // A one-click "configure every agent" that included egress would, on the very
 // first click, re-point Claude Code's Pro/Max sign-in at the local gateway and
 // move where that spend is counted — for every agent at once, from a button whose
-// label says "configure". Egress is opt-in in Core precisely because that is a
-// decision per agent and per credential; a bulk control cannot make it, because
-// it cannot know which subscription the user meant to keep outside Ryu.
+// label says "configure". Egress remains an explicit per-agent opt-out in Core
+// precisely because it is a decision per agent and per credential; a bulk control
+// should not overwrite a user's existing direct-egress choice.
 //
 // The tools half has no such property (the bridge offers only the allowlist the
 // agent already has, re-checked per call), so it is the half a bulk action may

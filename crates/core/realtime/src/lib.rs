@@ -95,6 +95,23 @@ pub enum RealtimeChannel {
     DocSync,
 }
 
+/// Build the registry key for an application-owned room.
+///
+/// Application rooms share the same in-process registry as conversations and
+/// documents, so their key must be namespaced by the authenticated owning app.
+/// The length prefix makes the pair unambiguous even when either component
+/// contains a colon or slash, and the `application/` prefix keeps it out of the
+/// legacy raw conversation/document keyspace.
+pub fn application_room_key(app_id: &str, room_id: &str) -> String {
+    format!(
+        "application/{}:{}:{}:{}",
+        app_id.len(),
+        app_id,
+        room_id.len(),
+        room_id
+    )
+}
+
 /// One fan-out frame. `Event`/`Presence` carry JSON; `DocSync` carries opaque
 /// bytes so binary CRDT updates pass through without interpretation. Clone is
 /// cheap-ish (Value/Vec share via the broadcast clone on each receiver).
@@ -114,6 +131,56 @@ impl Frame {
             Frame::DocSync(_) => RealtimeChannel::DocSync,
         }
     }
+}
+
+/// A named event sent by an application-room client or sidecar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationEvent {
+    pub name: String,
+    pub payload: Value,
+}
+
+/// Maximum serialized application event, including its control envelope. App
+/// sidecars own durable snapshots; Core only carries bounded fan-out payloads.
+pub const MAX_APPLICATION_EVENT_BYTES: usize = 256 * 1024;
+/// Maximum application event name length. Names are routing metadata, not an
+/// arbitrary string channel.
+pub const MAX_APPLICATION_EVENT_NAME_BYTES: usize = 128;
+
+/// Encode the application-room client publish control frame.
+pub fn encode_application_event(event: &ApplicationEvent) -> Value {
+    json!({
+        "type": "event",
+        "event": event.name,
+        "data": event.payload,
+    })
+}
+
+/// Decode an application-room client publish control frame. The gateway applies
+/// the size/name policy after decoding; this codec only describes the wire shape.
+pub fn decode_application_event(value: &Value) -> Option<ApplicationEvent> {
+    if value.get("type").and_then(Value::as_str) != Some("event") {
+        return None;
+    }
+    Some(ApplicationEvent {
+        name: value.get("event")?.as_str()?.to_owned(),
+        payload: value.get("data").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// Validate an application-room event before it enters shared fan-out. Core
+/// enforces only generic routing and size policy; the owning sidecar defines
+/// the event vocabulary.
+pub fn is_valid_application_event(event: &ApplicationEvent) -> bool {
+    let name = event.name.trim();
+    if name.is_empty()
+        || name.len() > MAX_APPLICATION_EVENT_NAME_BYTES
+        || name.chars().any(char::is_control)
+    {
+        return false;
+    }
+    serde_json::to_vec(&encode_application_event(event))
+        .is_ok_and(|bytes| bytes.len() <= MAX_APPLICATION_EVENT_BYTES)
 }
 
 // ── Typed named events (the Rivet-style event contract) ──────────────────────
@@ -357,6 +424,19 @@ impl RoomRegistry {
         if let Some(handle) = self.lock().get(room_id) {
             handle.broadcast_event(name, payload);
         }
+    }
+
+    /// Broadcast a named event to an application-owned room without requiring
+    /// callers to construct the registry's internal namespace key. This is the
+    /// safe publish seam used by authenticated app sidecars.
+    pub fn publish_application_event(
+        &self,
+        app_id: &str,
+        room_id: &str,
+        name: impl Into<String>,
+        payload: Value,
+    ) {
+        self.broadcast_event(&application_room_key(app_id, room_id), name, payload);
     }
 
     /// Deliver a typed named event to one connection in `room_id` (Rivet's
@@ -879,6 +959,26 @@ mod tests {
             presence_ttl: Duration::from_millis(100),
             sweep_interval: Duration::from_millis(20),
         }
+    }
+
+    #[test]
+    fn application_room_keys_are_namespaced_and_unambiguous() {
+        let a = application_room_key("app:a", "b:c");
+        let b = application_room_key("app", "a:b:c");
+        assert_ne!(a, b);
+        assert!(a.starts_with("application/"));
+        assert_ne!(a, "app:a");
+    }
+
+    #[test]
+    fn application_event_codec_round_trips() {
+        let event = ApplicationEvent {
+            name: "table.snapshot".to_owned(),
+            payload: json!({"version": 3, "players": []}),
+        };
+        let wire = encode_application_event(&event);
+        assert_eq!(decode_application_event(&wire), Some(event));
+        assert!(decode_application_event(&json!({"type": "presence"})).is_none());
     }
 
     #[tokio::test]

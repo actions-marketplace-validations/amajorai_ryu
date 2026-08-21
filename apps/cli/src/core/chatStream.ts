@@ -10,6 +10,8 @@
 //   tool-TodoWrite input  -> a typed todo snapshot
 //   error                 -> stream error
 //   finish / [DONE]       -> end of stream
+//   data-ryu-permission   -> an ACP permission request; .data is surfaced to
+//                            the existing permission handler
 //   data-plugin_note      -> out-of-band note from a Core server-side plugin
 //                            turn-hook (goal/proof/double-check); .data.text is
 //                            surfaced separately, NOT appended to the transcript
@@ -80,16 +82,85 @@ export interface ChatStreamHandlers {
 const TRAILING_CR = /\r$/;
 
 interface WireFrame {
-	data?: { text?: string; [key: string]: unknown };
-	delta?: string;
-	errorText?: string;
+	data?: unknown;
+	delta?: unknown;
+	error?: unknown;
+	errorText?: unknown;
 	input?: unknown;
-	output?: { status?: string };
-	reasoning?: string;
-	toolCallId?: string;
-	toolName?: string;
-	type?: string;
+	output?: unknown;
+	reasoning?: unknown;
+	status?: unknown;
+	toolCallId?: unknown;
+	toolName?: unknown;
+	type: string;
 }
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	value !== null && typeof value === "object" && !Array.isArray(value);
+
+const asString = (value: unknown): string | undefined =>
+	typeof value === "string" ? value : undefined;
+
+const asNonEmptyString = (value: unknown): string | undefined => {
+	const string = asString(value);
+	return string && string.length > 0 ? string : undefined;
+};
+
+const parseWireFrame = (payload: string): WireFrame | null => {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(payload);
+	} catch {
+		return null;
+	}
+	if (!isRecord(parsed) || typeof parsed.type !== "string") {
+		return null;
+	}
+	return parsed as unknown as WireFrame;
+};
+
+const normalizeQuestionInput = (
+	toolName: string,
+	input: unknown,
+	toolCallId: string | undefined
+): unknown => {
+	if (toolName !== "Question" || !toolCallId || !isRecord(input)) {
+		return input;
+	}
+	if (typeof input.toolCallId === "string") {
+		return input;
+	}
+	// Core normally includes this in the normalized Question input. Reattach the
+	// stable frame id when an agent sends a late/partial tool-input update so the
+	// existing ChatTab question parser can still answer the right waiter.
+	return { ...input, toolCallId };
+};
+
+const toolOutputPayload = (
+	frame: WireFrame
+): { body: unknown; status: string } => {
+	const rawOutput = frame.output;
+	const frameStatus = asNonEmptyString(frame.status);
+	if (frameStatus) {
+		return { body: rawOutput, status: frameStatus };
+	}
+
+	const outputRecord = isRecord(rawOutput) ? rawOutput : null;
+	const outputStatus = asNonEmptyString(outputRecord?.status);
+	if (outputRecord && outputStatus) {
+		return {
+			body: Object.hasOwn(outputRecord, "output")
+				? outputRecord.output
+				: rawOutput,
+			status: outputStatus,
+		};
+	}
+
+	return {
+		body: rawOutput,
+		status: outputRecord?.isError === true ? "error" : "completed",
+	};
+};
 
 const buildBody = (
 	turns: ChatTurn[],
@@ -132,52 +203,73 @@ const dispatchFrame = (
 ): boolean => {
 	switch (frame.type) {
 		case "text-delta": {
-			if (typeof frame.delta === "string") {
-				handlers.onTextDelta(frame.delta);
+			const delta = asString(frame.delta);
+			if (delta !== undefined) {
+				handlers.onTextDelta(delta);
 			}
 			return false;
 		}
 		case "tool-input-available": {
-			handlers.onToolInput?.(
-				frame.toolName ?? "tool",
-				frame.input,
-				frame.toolCallId
-			);
-			if (frame.toolName === "TodoWrite") {
-				handlers.onTodo?.(frame.input);
+			const toolName = asString(frame.toolName) || "tool";
+			const toolCallId = asString(frame.toolCallId);
+			const input = normalizeQuestionInput(toolName, frame.input, toolCallId);
+			handlers.onToolInput?.(toolName, input, toolCallId);
+			if (toolName === "TodoWrite" && input !== undefined) {
+				handlers.onTodo?.(input);
 			}
 			return false;
 		}
 		case "tool-output-available": {
-			const status = frame.output?.status;
-			if (status) {
-				handlers.onToolOutput?.(status, frame.output, frame.toolCallId);
-			}
+			const { body, status } = toolOutputPayload(frame);
+			handlers.onToolOutput?.(status, body, asString(frame.toolCallId));
 			return false;
 		}
 		case "reasoning-delta": {
-			if (typeof frame.delta === "string") {
-				handlers.onReasoningDelta?.(frame.delta);
+			const delta = asString(frame.delta) ?? asString(frame.reasoning);
+			if (delta !== undefined) {
+				handlers.onReasoningDelta?.(delta);
 			}
 			return false;
 		}
 		case "data-todo": {
-			handlers.onTodo?.(frame.data);
+			if (isRecord(frame.data)) {
+				handlers.onTodo?.(frame.data);
+			}
 			return false;
 		}
 		case "data-plugin_note": {
-			const text = frame.data?.text;
-			if (text) {
+			const data = isRecord(frame.data) ? frame.data : null;
+			const text = asNonEmptyString(data?.text) ?? asNonEmptyString(frame.data);
+			if (text !== undefined) {
 				handlers.onPluginNote?.(text);
 			}
 			return false;
 		}
 		case "data-ryu-permission": {
-			handlers.onPermission?.(frame.data);
+			if (isRecord(frame.data)) {
+				handlers.onPermission?.(frame.data);
+			}
+			return false;
+		}
+		case "data-ryu-question": {
+			const data = isRecord(frame.data) ? frame.data : null;
+			if (data && Array.isArray(data.questions)) {
+				const toolCallId =
+					asString(frame.toolCallId) ?? asString(data.toolCallId);
+				handlers.onToolInput?.(
+					"Question",
+					normalizeQuestionInput("Question", data, toolCallId),
+					toolCallId
+				);
+			}
 			return false;
 		}
 		case "error": {
-			handlers.onError(frame.errorText ?? "stream error");
+			handlers.onError(
+				asNonEmptyString(frame.errorText) ??
+					asNonEmptyString(frame.error) ??
+					"stream error"
+			);
 			return true;
 		}
 		case "finish": {
@@ -191,36 +283,51 @@ const dispatchFrame = (
 	}
 };
 
+const dispatchDataLine = (
+	line: string,
+	handlers: ChatStreamHandlers
+): boolean => {
+	if (!line.startsWith("data:")) {
+		return false;
+	}
+	const data = line.slice("data:".length).trim();
+	if (data.length === 0) {
+		return false;
+	}
+	if (data === "[DONE]") {
+		handlers.onDone();
+		return true;
+	}
+	const frame = parseWireFrame(data);
+	return frame ? dispatchFrame(frame, handlers) : false;
+};
+
 // Parse complete `\n`-terminated lines out of `buffer`, dispatching each data
 // frame. Returns { rest, done } where rest is the unconsumed tail.
 const drainBuffer = (
 	buffer: string,
-	handlers: ChatStreamHandlers
+	handlers: ChatStreamHandlers,
+	flush = false
 ): { rest: string; done: boolean } => {
 	let start = 0;
 	let newline = buffer.indexOf("\n", start);
 	while (newline !== -1) {
 		const line = buffer.slice(start, newline).replace(TRAILING_CR, "");
 		start = newline + 1;
-		const data = line.startsWith("data: ") ? line.slice(6) : null;
-		if (data && data.length > 0) {
-			if (data === "[DONE]") {
-				handlers.onDone();
-				return { rest: "", done: true };
-			}
-			let frame: WireFrame | null = null;
-			try {
-				frame = JSON.parse(data) as WireFrame;
-			} catch {
-				frame = null;
-			}
-			if (frame && dispatchFrame(frame, handlers)) {
-				return { rest: "", done: true };
-			}
+		if (dispatchDataLine(line, handlers)) {
+			return { rest: "", done: true };
 		}
 		newline = buffer.indexOf("\n", start);
 	}
-	return { rest: buffer.slice(start), done: false };
+
+	const rest = buffer.slice(start);
+	if (!flush || rest.length === 0) {
+		return { rest, done: false };
+	}
+	if (dispatchDataLine(rest.replace(TRAILING_CR, ""), handlers)) {
+		return { rest: "", done: true };
+	}
+	return { rest: "", done: false };
 };
 
 /** Stream one assistant turn. Resolves when the stream finishes (the handlers
@@ -241,6 +348,9 @@ export async function streamChat(
 			signal,
 		});
 	} catch (err) {
+		if (signal?.aborted) {
+			return;
+		}
 		handlers.onError(err instanceof Error ? err.message : String(err));
 		return;
 	}
@@ -270,6 +380,11 @@ export async function streamChat(
 			if (result.done) {
 				return;
 			}
+		}
+		buffer += decoder.decode();
+		const result = drainBuffer(buffer, handlers, true);
+		if (result.done) {
+			return;
 		}
 	} catch (err) {
 		if (signal?.aborted) {

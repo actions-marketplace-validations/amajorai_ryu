@@ -15,6 +15,7 @@ import {
 	ChartTooltip,
 	ChartTooltipContent,
 } from "@ryu/ui/components/chart.tsx";
+import { formatCount as formatSharedCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
@@ -32,12 +33,8 @@ const PALETTE = [
 	"oklch(0.63 0.19 149)", // green
 ];
 
-const compactFormatter = new Intl.NumberFormat("en-US", {
-	notation: "compact",
-	maximumFractionDigits: 1,
-});
-
-const formatCompact = (value: number): string => compactFormatter.format(value);
+const formatSharedCountValue = (value: number): string =>
+	formatSharedCount(value) ?? "—";
 
 function EmptyPanel({ text }: { text: string }) {
 	return (
@@ -69,7 +66,7 @@ const TRANSPORT_ORDER: Array<{ key: keyof TransportBreakdown; label: string }> =
  * so the number never gets clipped by the canvas.
  */
 export function TransportDonut({
-	formatCount = formatCompact,
+	formatCount = formatSharedCountValue,
 	transport,
 }: {
 	formatCount?: (value: number) => string;
@@ -127,7 +124,7 @@ export function TransportDonut({
 								strokeDashoffset={offset}
 								strokeWidth={stroke}
 							>
-								<title>{`${entry.name}: ${formatCount(entry.value)}`}</title>
+								<title>{`${entry.name}: ${formatSharedCount(entry.value)}`}</title>
 							</circle>
 						);
 					})}
@@ -194,7 +191,7 @@ export function FeatureMixBar({
 								backgroundColor: PALETTE[index % PALETTE.length],
 								height: `${height}px`,
 							}}
-							title={`${entry.name}: ${formatCompact(entry.value)}`}
+							title={`${entry.name}: ${formatSharedCount(entry.value)}`}
 						/>
 						<span className="text-muted-foreground text-xs">{entry.name}</span>
 					</div>
@@ -216,7 +213,7 @@ export interface ActivityPoint {
 export function ActivityArea({
 	data,
 	days = 30,
-	formatCount = formatCompact,
+	formatCount = formatSharedCountValue,
 }: {
 	data: ActivityPoint[];
 	days?: number;
@@ -297,7 +294,7 @@ export interface RankedItem {
  */
 export function RankedList({
 	empty,
-	formatCount = formatCompact,
+	formatCount = formatSharedCountValue,
 	icon,
 	items,
 	title,

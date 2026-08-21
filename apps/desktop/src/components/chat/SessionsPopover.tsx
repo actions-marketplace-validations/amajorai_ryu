@@ -19,6 +19,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
+import { formatMicroUsd } from "@ryu/ui/lib/number-format.ts";
 import { useCallback, useEffect, useState } from "react";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { type AuditEntry, fetchGatewayAudit } from "@/src/lib/api/gateway.ts";
@@ -55,16 +56,6 @@ function summarizeRun(entries: AuditEntry[]): RunCostSummary {
 		}
 	}
 	return { callCount, costMicroUsd, totalLatencyMs };
-}
-
-/** Format micro-USD as a short dollar string (e.g. 2500 -> "$0.0025"). */
-function formatCost(microUsd: number): string {
-	const usd = microUsd / 1_000_000;
-	if (usd === 0) {
-		return "$0";
-	}
-	// Show enough precision for sub-cent costs without trailing noise.
-	return usd < 0.01 ? `$${usd.toFixed(5)}` : `$${usd.toFixed(3)}`;
 }
 
 /** Format a millisecond latency compactly (e.g. 1234 -> "1.2s", 800 -> "800ms"). */
@@ -163,7 +154,7 @@ export function SessionsPopover({
 										<span className="font-heading">
 											{costSummary.costMicroUsd == null
 												? "—"
-												: formatCost(costSummary.costMicroUsd)}
+												: formatMicroUsd(costSummary.costMicroUsd)}
 										</span>
 									}
 								/>

@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { Member } from "@ryu/db/models/control-plane.model";
+import { User } from "@ryu/db/models/auth.model";
+import { Member, Organization } from "@ryu/db/models/control-plane.model";
+import { businessEmailDomainDecision } from "./organization-email-policy.ts";
+import {
+	organizationKindFromMetadata,
+	TEAMS_ORGANIZATION_KIND,
+} from "./organization-kind.ts";
 
 /**
  * The single organization-plugin endpoint this module needs. `auth.api` is
@@ -11,6 +17,7 @@ import { Member } from "@ryu/db/models/control-plane.model";
 export interface OrganizationApi {
 	createOrganization: (args: {
 		body: {
+			metadata?: Record<string, unknown>;
 			name: string;
 			slug: string;
 			userId: string;
@@ -19,8 +26,95 @@ export interface OrganizationApi {
 	}) => Promise<unknown>;
 }
 
+export interface OrganizationInvitationApi {
+	cancelInvitation: (args: {
+		body: { invitationId: string };
+		headers: Headers;
+	}) => Promise<unknown>;
+	listInvitations: (args: {
+		query: { organizationId: string };
+		headers: Headers;
+	}) => Promise<unknown>;
+}
+
+export type OrganizationInvitationCancelResult =
+	| { changed: boolean; status: "canceled" }
+	| { changed: false; status: "accepted" | "rejected" | "expired" }
+	| { changed: false; status: "not_found" };
+
 /**
- * Idempotently gives a user a personal organization. Returns `created: false`
+ * Cancel a sender-owned invitation through Better Auth's organization plugin.
+ *
+ * The list-before-cancel guard is important: Better Auth's mutation is the
+ * authoritative write, but its low-level endpoint will mark even a terminal
+ * invitation as canceled. We only invoke it for the live pending invitation
+ * in the requested organization. Repeating a canceled request is a safe
+ * no-op, and an accepted/rejected/expired request is never rewritten.
+ */
+export async function cancelOrganizationInvitation(
+	api: OrganizationInvitationApi,
+	args: {
+		headers: Headers;
+		invitationId: string;
+		organizationId: string;
+		now?: Date;
+	}
+): Promise<OrganizationInvitationCancelResult> {
+	const response = await api.listInvitations({
+		query: { organizationId: args.organizationId },
+		headers: args.headers,
+	});
+	const invitations = Array.isArray(response)
+		? response
+		: response && typeof response === "object" && "invitations" in response
+			? (response as { invitations?: unknown }).invitations
+			: null;
+	const invitation = Array.isArray(invitations)
+		? invitations.find(
+				(
+					value
+				): value is {
+					expiresAt?: string | Date;
+					id: string;
+					status: string;
+				} =>
+					typeof value === "object" &&
+					value !== null &&
+					typeof (value as { id?: unknown }).id === "string" &&
+					(value as { id: string }).id === args.invitationId
+			)
+		: undefined;
+
+	if (!invitation) {
+		return { changed: false, status: "not_found" };
+	}
+	if (invitation.status !== "pending") {
+		return {
+			changed: false,
+			status:
+				invitation.status === "canceled"
+					? "canceled"
+					: invitation.status === "accepted"
+						? "accepted"
+						: "rejected",
+		};
+	}
+	const expiresAt = invitation.expiresAt
+		? new Date(invitation.expiresAt).getTime()
+		: Number.POSITIVE_INFINITY;
+	if (expiresAt <= (args.now ?? new Date()).getTime()) {
+		return { changed: false, status: "expired" };
+	}
+
+	await api.cancelInvitation({
+		body: { invitationId: args.invitationId },
+		headers: args.headers,
+	});
+	return { changed: true, status: "canceled" };
+}
+
+/**
+ * Idempotently gives a user the default one-person organization. Returns `created: false`
  * without writing when the user already has any membership, so this is safe to
  * call from the sign-up hook (which may fire more than once) and to re-run from
  * the backfill script after a partial failure.
@@ -31,7 +125,10 @@ export interface OrganizationApi {
  * control plane's single source of truth for membership.
  *
  * Org naming is intentionally generic ("Personal") with a random, collision-free
- * slug so a freshly-signed-up user always lands in a valid org context.
+ * slug so a freshly-signed-up user always lands in a valid org context. The
+ * organization hook owns the final kind marker; a consumer-email account stays
+ * personal, while a company-domain account is provisioned into the Teams
+ * boundary and must verify before it can add members or check out.
  */
 export async function ensurePersonalOrganization(
 	userId: string,
@@ -43,11 +140,18 @@ export async function ensurePersonalOrganization(
 	}
 
 	const slug = `personal-${randomUUID()}`;
+	const user = await User.findById(userId)
+		.select("email")
+		.lean<{ email?: string | null }>();
+	const organizationKind = businessEmailDomainDecision(user?.email).allowed
+		? "teams"
+		: "personal";
 	await api.createOrganization({
 		body: {
 			name: "Personal",
 			slug,
 			userId,
+			metadata: { organizationKind },
 			// No session is involved on this server-side path, so don't try to mutate
 			// an active organization on a (non-existent) session.
 			keepCurrentActiveOrganization: true,
@@ -55,6 +159,30 @@ export async function ensurePersonalOrganization(
 	});
 
 	return { created: true };
+}
+
+/**
+ * Resolve the earliest membership, which is the codebase's definition of a
+ * user's personal organization, unless that same organization has completed a
+ * paid in-place conversion to Teams. The conversion keeps the organization id
+ * and all data, so every caller that needs personal-vs-shared semantics must
+ * honour the durable kind marker rather than treating the first membership as
+ * permanently personal.
+ */
+export async function resolvePersonalOrgId(
+	userId: string
+): Promise<string | null> {
+	const member = await Member.findOne({ userId }).sort({ createdAt: 1 });
+	if (!member) {
+		return null;
+	}
+	const organization = await Organization.findById(member.organizationId)
+		.select("metadata")
+		.lean<{ metadata?: unknown }>();
+	return organizationKindFromMetadata(organization?.metadata) ===
+		TEAMS_ORGANIZATION_KIND
+		? null
+		: String(member.organizationId);
 }
 
 /**
@@ -86,9 +214,9 @@ export async function ensurePersonalOrganization(
  * blocking login.
  */
 export async function resolveInitialActiveOrganization(deps: {
-	/** Create the user's personal organization if they have no membership. */
+	/** Create the user's default organization if they have no membership. */
 	ensureOrganization: (userId: string) => Promise<void>;
-	/** Earliest membership for the user — the personal org — or null. */
+	/** Earliest membership for the user — the default org — or null. */
 	findEarliestMembership: (userId: string) => Promise<string | null>;
 	userId: string;
 }): Promise<string | null> {

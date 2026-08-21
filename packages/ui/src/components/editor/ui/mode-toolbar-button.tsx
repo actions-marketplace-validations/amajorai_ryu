@@ -49,6 +49,7 @@ export function ModeToolbarButton(props: ComponentProps<typeof DropdownMenu>) {
 			label: "Viewing",
 		},
 	};
+	const activeItem = item[value] ?? item.editing!;
 
 	return (
 		<DropdownMenu modal={false} onOpenChange={setOpen} open={open} {...props}>
@@ -57,8 +58,8 @@ export function ModeToolbarButton(props: ComponentProps<typeof DropdownMenu>) {
 					<ToolbarButton isDropdown pressed={open} tooltip="Editing mode" />
 				}
 			>
-				{item[value].icon}
-				<span className="hidden lg:inline">{item[value].label}</span>
+				{activeItem.icon}
+				<span className="hidden lg:inline">{activeItem.label}</span>
 			</DropdownMenuTrigger>
 
 			<DropdownMenuContent align="start" className="min-w-[180px]">
@@ -90,24 +91,24 @@ export function ModeToolbarButton(props: ComponentProps<typeof DropdownMenu>) {
 						className="pl-2 *:[svg]:text-muted-foreground"
 						value="editing"
 					>
-						{item.editing.icon}
-						{item.editing.label}
+						{item.editing!.icon}
+						{item.editing!.label}
 					</DropdownMenuRadioItem>
 
 					<DropdownMenuRadioItem
 						className="pl-2 *:[svg]:text-muted-foreground"
 						value="viewing"
 					>
-						{item.viewing.icon}
-						{item.viewing.label}
+						{item.viewing!.icon}
+						{item.viewing!.label}
 					</DropdownMenuRadioItem>
 
 					<DropdownMenuRadioItem
 						className="pl-2 *:[svg]:text-muted-foreground"
 						value="suggestion"
 					>
-						{item.suggestion.icon}
-						{item.suggestion.label}
+						{item.suggestion!.icon}
+						{item.suggestion!.label}
 					</DropdownMenuRadioItem>
 				</DropdownMenuRadioGroup>
 			</DropdownMenuContent>

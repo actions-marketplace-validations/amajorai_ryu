@@ -1,4 +1,10 @@
 {
+  "tags": ["subagent","delegation","automation","agent"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/pi-subagent",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/pi-subagent",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/pi-subagent",
   "name": "Subagents",
   "version": "0.1.14",

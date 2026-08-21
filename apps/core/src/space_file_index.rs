@@ -20,7 +20,7 @@
 //! # The seam
 //!
 //! There are three `create_file` callers — `POST /api/uploads`, `POST
-//! /api/spaces/:id/files`, and the `artifact__create` MCP tool. They all route
+//! /api/spaces/:id/files`, and the `artifact.create` MCP tool. They all route
 //! through [`create_file_indexed`] rather than parsing in three places, because two
 //! wired and one not is the state a later reader cannot tell from "this file type
 //! just isn't extractable".
@@ -195,7 +195,7 @@ pub const REASON_EMPTY_DOCUMENT: &str = "empty_document";
 
 /// Reason code for a call site with no [`ServerState`] wired.
 ///
-/// The `artifact__create` MCP tool reaches this module through
+/// The `artifact.create` MCP tool reaches this module through
 /// [`crate::learning::global_state`], which is `None` in test and CLI contexts. That
 /// is "extraction was never attempted", NOT "extraction failed" — writing a `failed`
 /// row here would make a bare CLI look like a broken parser install.
@@ -635,7 +635,7 @@ impl FileIndexStore {
 /// The process-wide status store, opened lazily on first use.
 ///
 /// A global rather than a `ServerState` field because [`ServerState`] is built in
-/// `main.rs` and the `artifact__create` tool reaches this module with no `State` at
+/// `main.rs` and the `artifact.create` tool reaches this module with no `State` at
 /// all — the same shape, and the same reason, as
 /// [`crate::learning::global_state`]. `None` when the db cannot be opened, which
 /// degrades to "status is not recorded" and never to "the upload failed".
@@ -644,7 +644,7 @@ static INDEX_STORE: OnceLock<Option<FileIndexStore>> = OnceLock::new();
 /// The lazily-opened global store.
 ///
 /// **Hard-`None` under `cfg(test)`, and that is not a convenience.** This is reached
-/// transitively — `artifact__create`'s own test calls `dispatch` →
+/// transitively — `artifact.create`'s own test calls `dispatch` →
 /// [`create_file_indexed_detached`] → here — so without the gate a plain `cargo test`
 /// creates `~/.ryu/space-file-index.db` (plus its `-wal`/`-shm`) in the *active
 /// profile*, which is a real user's node. Tests that need a store construct
@@ -974,7 +974,7 @@ async fn mark_pending(store: Option<&FileIndexStore>, doc_id: &str) -> FileIndex
     pending
 }
 
-/// The `artifact__create` variant: same path, reached without a [`ServerState`].
+/// The `artifact.create` variant: same path, reached without a [`ServerState`].
 ///
 /// The MCP registry holds a [`SpaceStore`] but no `ServerState`, so it borrows the
 /// published handle ([`crate::learning::global_state`]) the way `mcp/mod.rs` already
@@ -1509,7 +1509,7 @@ mod tests {
     async fn binary_bytes_under_a_text_mime_are_recorded_as_failed_not_indexed_as_mojibake() {
         // End to end through the arm that could reach the decoder: an extensionless
         // TITLE plus a declared text mime, which is what `POST /api/spaces/:id/files`
-        // and `artifact__create` hand this module. The file is still stored; what it
+        // and `artifact.create` hand this module. The file is still stored; what it
         // must NOT do is chunk a page of replacement characters as its contents.
         let spaces = SpaceStore::open_in_memory().unwrap();
         let store = FileIndexStore::open_in_memory().unwrap();
@@ -1730,7 +1730,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_title_with_no_extension_is_read_by_the_floor_through_its_mime() {
-        // The `POST /api/spaces/:id/files` and `artifact__create` shape: a TITLE, not
+        // The `POST /api/spaces/:id/files` and `artifact.create` shape: a TITLE, not
         // a filename. Extension-keyed, `notes` is unreadable and went to a provider
         // that would answer `no_provider` — "install a document parser" — for a file
         // Core reads itself.
@@ -2166,7 +2166,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_global_store_is_unreachable_from_tests() {
-        // Regression guard for a real violation: `artifact__create`'s own test reaches
+        // Regression guard for a real violation: `artifact.create`'s own test reaches
         // `create_file_indexed_detached` → `index_store()`, and before the `cfg(test)`
         // gate a plain `cargo test` created `space-file-index.db` (+ `-wal`/`-shm`) in
         // the ACTIVE PROFILE — a real user's node. No test may write there.
@@ -2175,7 +2175,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_server_context_still_stores_the_file_and_says_so() {
-        // The `artifact__create` path in a test/CLI process. "Never attempted" must not
+        // The `artifact.create` path in a test/CLI process. "Never attempted" must not
         // be dressed up as a parser failure, and the artifact must still be saved.
         let spaces = SpaceStore::open_in_memory().unwrap();
         let space = spaces

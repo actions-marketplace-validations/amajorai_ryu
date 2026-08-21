@@ -2,7 +2,7 @@
 
 import { Button } from "@ryu/ui/components/button.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import { CheckCircle2, Download, Loader2 } from "lucide-react";
+import { CheckCircle2, Download } from "lucide-react";
 
 interface DownloadButtonProps {
 	className?: string;
@@ -24,10 +24,10 @@ export default function DownloadButton({
 			<Button
 				aria-disabled
 				className={cn("pointer-events-none w-40 rounded-xl", className)}
+				loading
 				progress={progress}
 				variant="progress"
 			>
-				<Loader2 className="h-4 w-4 animate-spin" />
 				{progress}%
 			</Button>
 		);

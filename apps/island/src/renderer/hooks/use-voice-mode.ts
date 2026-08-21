@@ -35,6 +35,8 @@ export interface VoiceMode {
 	error: string | null;
 	/** Manually interrupt the assistant (barge-in via a button). */
 	interrupt: () => void;
+	/** Rolling mic RMS history, oldest-to-newest, bounded to 24 samples. */
+	levels: number[];
 	/** Current turn phase. */
 	phase: VoiceModePhase;
 	/** Open the session + mic. */
@@ -45,12 +47,33 @@ export interface VoiceMode {
 	transcript: string;
 }
 
+const AUDIO_LEVEL_HISTORY_SIZE = 24;
+const SILENT_LEVELS = new Array<number>(AUDIO_LEVEL_HISTORY_SIZE).fill(0);
+
+function clampAudioLevel(level: number): number {
+	return Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
+}
+
 export function useVoiceMode(options: VoiceModeOptions = {}): VoiceMode {
 	const [active, setActive] = useState(false);
+	const [levels, setLevels] = useState<number[]>(() => SILENT_LEVELS.slice());
 	const [phase, setPhase] = useState<VoiceModePhase>("idle");
 	const [transcript, setTranscript] = useState("");
 	const [caption, setCaption] = useState("");
 	const [error, setError] = useState<string | null>(null);
+	const levelsRef = useRef<number[]>(SILENT_LEVELS.slice());
+
+	const resetLevels = useCallback(() => {
+		const silent = SILENT_LEVELS.slice();
+		levelsRef.current = silent;
+		setLevels(silent);
+	}, []);
+	const pushAudioLevel = useCallback((level: number) => {
+		const next = levelsRef.current.slice(-(AUDIO_LEVEL_HISTORY_SIZE - 1));
+		next.push(clampAudioLevel(level));
+		levelsRef.current = next;
+		setLevels(next);
+	}, []);
 
 	const connRef = useRef<VoiceSessionConnection | null>(null);
 	const optionsRef = useRef(options);
@@ -65,7 +88,8 @@ export function useVoiceMode(options: VoiceModeOptions = {}): VoiceMode {
 		connRef.current = null;
 		setActive(false);
 		setPhase("idle");
-	}, []);
+		resetLevels();
+	}, [resetLevels]);
 
 	const start = useCallback(() => {
 		if (connRef.current) {
@@ -75,6 +99,7 @@ export function useVoiceMode(options: VoiceModeOptions = {}): VoiceMode {
 		setError(null);
 		setTranscript("");
 		setCaption("");
+		resetLevels();
 		setPhase("connecting");
 		setActive(true);
 
@@ -89,6 +114,7 @@ export function useVoiceMode(options: VoiceModeOptions = {}): VoiceMode {
 				const conn = new VoiceSessionConnection(target, {
 					agentId: optionsRef.current.agentId,
 					handlers: {
+						onAudioLevel: pushAudioLevel,
 						onState: (s) => setPhase(s),
 						onSpeechStart: () => {
 							// A new user turn — clear the previous turn's text.
@@ -106,6 +132,7 @@ export function useVoiceMode(options: VoiceModeOptions = {}): VoiceMode {
 							connRef.current = null;
 							setActive(false);
 							setPhase("idle");
+							resetLevels();
 						},
 					},
 				});
@@ -120,7 +147,7 @@ export function useVoiceMode(options: VoiceModeOptions = {}): VoiceMode {
 				);
 				stop();
 			});
-	}, [stop]);
+	}, [pushAudioLevel, resetLevels, stop]);
 
 	const interrupt = useCallback(() => {
 		connRef.current?.abort();
@@ -134,6 +161,7 @@ export function useVoiceMode(options: VoiceModeOptions = {}): VoiceMode {
 		caption,
 		error,
 		interrupt,
+		levels,
 		phase,
 		start,
 		stop,

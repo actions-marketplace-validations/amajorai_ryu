@@ -5,7 +5,7 @@
  * that mounts the widget, it declares a `save` tool marked `accessible: true` — a
  * COMPANION the mounted widget may invoke over the capability-gated bridge:
  *
- *     await window.openai.callTool("__APP_NAME____save", { state })
+ *     await window.openai.callTool("__APP_NAME__.save", { state })
  *
  * The host routes that call through the Gateway (allowlist + audit) before it
  * reaches Core; the frame never holds a token. It also declares a full-page

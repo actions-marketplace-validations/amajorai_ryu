@@ -21,11 +21,7 @@ import {
 	PopoverTrigger,
 } from "@ryu/ui/components/popover";
 import { cn } from "@ryu/ui/lib/utils";
-import {
-	IconAlertTriangle,
-	IconHistory,
-	IconLoader2,
-} from "@tabler/icons-react";
+import { IconAlertTriangle, IconHistory } from "@tabler/icons-react";
 import { useCallback, useId, useState } from "react";
 import type { ComposerSendFile } from "@/src/components/assistant/useComposerSlot.tsx";
 import { toTarget } from "@/src/lib/api/client.ts";
@@ -156,18 +152,11 @@ export function AttachRecentActivityControl({
 
 				<Button
 					className="gap-1.5"
-					disabled={busy}
+					loading={busy}
 					onClick={handleSubmit}
 					type="button"
 				>
-					{busy ? (
-						<>
-							<IconLoader2 className="size-4 animate-spin" />
-							Gathering…
-						</>
-					) : (
-						"Attach recent activity"
-					)}
+					{busy ? "Gathering…" : "Attach recent activity"}
 				</Button>
 			</PopoverContent>
 		</Popover>

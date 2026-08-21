@@ -12,8 +12,36 @@ import { Input } from "@ryu/ui/components/input.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { ChevronDown, Search } from "lucide-react";
 import * as React from "react";
+import {
+	FadeOverflowText,
+	FadeOverflowTextChildren,
+} from "./fade-overflow-text.tsx";
 
-const Select = SelectPrimitive.Root;
+type SelectProps<Value extends string = string> = Omit<
+	SelectPrimitive.Root.Props<Value, false>,
+	"onValueChange"
+> & {
+	onValueChange?: (
+		value: Value,
+		eventDetails: SelectPrimitive.Root.ChangeEventDetails
+	) => void;
+};
+
+function Select<Value extends string = string>({
+	onValueChange,
+	...props
+}: SelectProps<Value>) {
+	return (
+		<SelectPrimitive.Root
+			{...props}
+			onValueChange={(value, eventDetails) => {
+				if (value !== null) {
+					onValueChange?.(value, eventDetails);
+				}
+			}}
+		/>
+	);
+}
 
 // The active filter query for a searchable SelectContent, lowercased + trimmed.
 // Default "" means "no filter", so every non-searchable Select is unaffected: an
@@ -32,17 +60,18 @@ function SelectGroup({ className, ...props }: SelectPrimitive.Group.Props) {
 
 function SelectValue({ className, ...props }: SelectPrimitive.Value.Props) {
 	return (
-		<SelectPrimitive.Value
-			className={cn("flex flex-1 text-left", className)}
+		<FadeOverflowText
+			className={cn("flex min-w-0 flex-1 text-left", className)}
 			data-slot="select-value"
-			{...props}
-		/>
+		>
+			<SelectPrimitive.Value {...props} />
+		</FadeOverflowText>
 	);
 }
 
 function SelectTrigger({
 	className,
-	variant = "default",
+	variant = "ghost",
 	size = "default",
 	children,
 	...props
@@ -63,7 +92,9 @@ function SelectTrigger({
 			data-slot="select-trigger"
 			{...props}
 		>
-			{children}
+			<FadeOverflowTextChildren className="flex-1">
+				{children}
+			</FadeOverflowTextChildren>
 			<SelectPrimitive.Icon
 				render={
 					<ChevronDown className="pointer-events-none size-4 text-muted-foreground" />
@@ -96,6 +127,10 @@ function SelectContent({
 	const [query, setQuery] = React.useState("");
 	return (
 		<SelectPrimitive.Portal>
+			<SelectPrimitive.Backdrop
+				className="ryu-popup-overlay"
+				data-slot="select-overlay"
+			/>
 			<SelectPrimitive.Positioner
 				align={align}
 				// A search box needs a plain scroll-from-top list, so trigger-alignment

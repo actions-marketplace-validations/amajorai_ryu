@@ -260,6 +260,9 @@ pub fn wav_delivery(platform: &str) -> VoiceDelivery {
         "slack" => VoiceDelivery::AudioFile,
         // WhatsApp Cloud API audio does not accept audio/wav at all.
         "whatsapp" => VoiceDelivery::Unsupported,
+        // OpenWA can convert Core's WAV through its optional ffmpeg endpoint and
+        // then send a real OGG/Opus voice note.
+        "whatsapp_personal" => VoiceDelivery::VoiceNote,
         _ => VoiceDelivery::Unsupported,
     }
 }
@@ -374,6 +377,7 @@ mod tests {
         assert_eq!(wav_delivery("telegram"), VoiceDelivery::AudioFile);
         // WhatsApp cannot carry WAV in any audio form.
         assert_eq!(wav_delivery("whatsapp"), VoiceDelivery::Unsupported);
+        assert_eq!(wav_delivery("whatsapp_personal"), VoiceDelivery::VoiceNote);
         assert_eq!(wav_delivery("unknown-platform"), VoiceDelivery::Unsupported);
     }
 }

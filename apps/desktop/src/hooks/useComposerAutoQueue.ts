@@ -49,7 +49,9 @@ export function useComposerAutoQueue(
 	context: ComposerDraftContext
 ): (text: string) => Promise<boolean> {
 	const node = useActiveNode();
-	const enabled = useAppShellPath(DRAFTS_PLUGIN_ID, DRAFTS_BUTTON_ID) !== null;
+	const enabled =
+		context.persist !== false &&
+		useAppShellPath(DRAFTS_PLUGIN_ID, DRAFTS_BUTTON_ID) !== null;
 
 	return useCallback(
 		async (text: string) => {

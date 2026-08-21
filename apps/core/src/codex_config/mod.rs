@@ -25,11 +25,12 @@
 //! (copied in) so the OAuth subscription credential is what reaches upstream. A
 //! BYOK key would flip Codex onto API-key billing.
 //!
-//! Off by default (opt-in): enabling it changes how the subscription credential
-//! flows, so the user must choose it explicitly. The flag is a process-global
-//! seeded from the `codex-gateway-routing` preference at startup and on change,
-//! read synchronously on the (sync) spawn path; the isolated `CODEX_HOME` is
-//! (re)written lazily when the flag is on.
+//! On by default for a newly installed ACP agent, matching the governed baseline
+//! for routable agents. Because this changes how the subscription credential
+//! flows, the UI keeps a clear direct-egress opt-out.
+//! The flag is a process-global seeded from the `codex-gateway-routing`
+//! preference at startup and on change, read synchronously on the (sync) spawn
+//! path; the isolated `CODEX_HOME` is (re)written lazily when the flag is on.
 //!
 //! **Known caveat (auth.json refresh divergence):** we copy the user's
 //! `~/.codex/auth.json` into the isolated home at spawn. OAuth access tokens
@@ -48,20 +49,26 @@ use anyhow::{Context, Result};
 /// Preferences key the desktop writes; Core loads it on startup and on change.
 pub const CODEX_GATEWAY_ROUTING_PREF_KEY: &str = "codex-gateway-routing";
 
+/// Shared default for ACP subscription egress: Gateway-governed traffic until
+/// the user explicitly opts this agent out.
+pub const DEFAULT_CODEX_GATEWAY_ROUTING: bool = crate::agent_routing::DEFAULT_GATEWAY_ROUTING;
+
 /// The custom provider id written into the isolated `config.toml`. Arbitrary, but
 /// stable so a re-write is idempotent.
 const PROVIDER_ID: &str = "ryu-gateway";
 
-/// In-process flag, populated from preferences. Defaults to `false` (opt-in).
-static GATEWAY_ROUTING: AtomicBool = AtomicBool::new(false);
+/// In-process flag, populated from preferences. Defaults to `true`; an explicit
+/// preference value of `false` is the user's direct-egress opt-out.
+static GATEWAY_ROUTING: AtomicBool = AtomicBool::new(DEFAULT_CODEX_GATEWAY_ROUTING);
 
 /// Set the in-process flag from a preferences value. Accepts the common truthy
 /// string forms the desktop may persist (`"true"`, `"1"`, `"on"`).
 pub fn set_enabled(value: &str) {
-    let on = matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "true" | "1" | "on" | "yes"
-    );
+    let on = match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" | "yes" => true,
+        "false" | "0" | "off" | "no" => false,
+        _ => DEFAULT_CODEX_GATEWAY_ROUTING,
+    };
     GATEWAY_ROUTING.store(on, Ordering::Relaxed);
 }
 
@@ -167,6 +174,14 @@ mod tests {
         assert!(is_gateway_routing());
         set_enabled("0");
         assert!(!is_gateway_routing());
+    }
+
+    #[test]
+    fn missing_or_unparseable_preference_keeps_governed_default() {
+        set_enabled("");
+        assert!(is_gateway_routing());
+        set_enabled("not-a-boolean");
+        assert!(is_gateway_routing());
     }
 
     #[test]

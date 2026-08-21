@@ -44,13 +44,12 @@
 //! Every model-consuming site resolves in this order, stopping at the first hit:
 //!
 //! 1. the feature's own preference (JSON selection, or a legacy bare model id);
-//! 2. the node-wide default ([`GLOBAL_SELECTION_PREF`]);
+//! 2. the local lane default ([`LOCAL_SELECTION_PREF`]);
 //! 3. the caller's existing last-resort fallback (the resident local engine, an
 //!    env var, the bundled default — unchanged, so behaviour with nothing
 //!    configured is exactly what it was).
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::server::preferences::PreferencesStore;
 
@@ -60,6 +59,27 @@ use crate::server::preferences::PreferencesStore;
 /// on purpose: it is the fallback every user and every plugin on this node
 /// inherits, not a per-desktop preference.
 pub const GLOBAL_SELECTION_PREF: &str = "default-agent-selection";
+
+/// The local lane default. The legacy global key is read only as a migration
+/// fallback, never as the cloud lane.
+pub const LOCAL_SELECTION_PREF: &str = "default-local-agent-selection";
+/// The normal-chat / profile lane default. Empty means "fall back to local".
+pub const CLOUD_SELECTION_PREF: &str = "default-cloud-agent-selection";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentLane {
+    Local,
+    Cloud,
+}
+
+impl AgentLane {
+    pub const fn preference_key(self) -> &'static str {
+        match self {
+            Self::Local => LOCAL_SELECTION_PREF,
+            Self::Cloud => CLOUD_SELECTION_PREF,
+        }
+    }
+}
 
 /// Pi provider id owning the bundled llama.cpp models. The gateway's built-in
 /// prefix rules route `gemma*` ids here (see `pi_config::default_gateway_model`),
@@ -94,11 +114,42 @@ pub fn builtin_default_selection() -> AgentSelection {
 /// The node-wide default selection: what is stored, else
 /// [`builtin_default_selection`].
 pub async fn load_global(prefs: &PreferencesStore) -> AgentSelection {
-    let stored = AgentSelection::load(prefs, GLOBAL_SELECTION_PREF).await;
+    load_local(prefs).await
+}
+
+/// Load the local lane, migrating the former one-default preference by read.
+/// An explicitly empty new key means the user chose the built-in local default
+/// and must not resurrect the legacy value.
+pub async fn load_local(prefs: &PreferencesStore) -> AgentSelection {
+    let stored = match prefs.get(LOCAL_SELECTION_PREF).await {
+        Ok(Some(raw)) => AgentSelection::parse(&raw),
+        Ok(None) | Err(_) => AgentSelection::load(prefs, GLOBAL_SELECTION_PREF).await,
+    };
     if stored.is_empty() {
         builtin_default_selection()
     } else {
         stored
+    }
+}
+
+/// Load the cloud lane. It is intentionally empty until onboarding or Settings
+/// writes a usable cloud/BYOK target.
+pub async fn load_cloud(prefs: &PreferencesStore) -> AgentSelection {
+    AgentSelection::load(prefs, CLOUD_SELECTION_PREF).await
+}
+
+/// Resolve the selected lane, with an unset cloud lane falling back to local.
+pub async fn load_lane(prefs: &PreferencesStore, lane: AgentLane) -> AgentSelection {
+    match lane {
+        AgentLane::Local => load_local(prefs).await,
+        AgentLane::Cloud => {
+            let cloud = load_cloud(prefs).await;
+            if cloud.is_empty() {
+                load_local(prefs).await
+            } else {
+                cloud
+            }
+        }
     }
 }
 
@@ -286,7 +337,7 @@ pub async fn resolve_side_model(
     let feature = AgentSelection::load(prefs, feature_key).await;
     let mut resolved = side_model_from(&feature);
     if resolved.is_none() {
-        resolved = side_model_from(&load_global(prefs).await);
+        resolved = side_model_from(&load_local(prefs).await);
     }
     let mut resolved = resolved?;
     if resolved.effort.is_empty() {
@@ -321,10 +372,26 @@ pub async fn resolve_agent(prefs: &PreferencesStore, feature_key: &str) -> Optio
 /// Some agent-consuming code runs on a hot, synchronous path with no
 /// preference-store handle (agent-auto routing keeps its config in exactly such
 /// a snapshot). Rather than thread a store through it, Core seeds this at
-/// startup and refreshes it whenever [`GLOBAL_SELECTION_PREF`] is written —
+/// startup and refreshes it whenever [`LOCAL_SELECTION_PREF`] or the legacy
+/// [`GLOBAL_SELECTION_PREF`] is written —
 /// the same shape `agent_routing::set_auto_config_from_json` already uses.
 fn default_agent_cell() -> &'static std::sync::RwLock<Option<String>> {
     static CELL: std::sync::OnceLock<std::sync::RwLock<Option<String>>> =
+        std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+/// Hot-path snapshots for the two lane values. Chat routing does not carry a
+/// PreferencesStore through every adapter call, so preference writes refresh
+/// these cells just as the historical default-agent snapshot did.
+fn local_selection_cell() -> &'static std::sync::RwLock<Option<AgentSelection>> {
+    static CELL: std::sync::OnceLock<std::sync::RwLock<Option<AgentSelection>>> =
+        std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+fn cloud_selection_cell() -> &'static std::sync::RwLock<Option<AgentSelection>> {
+    static CELL: std::sync::OnceLock<std::sync::RwLock<Option<AgentSelection>>> =
         std::sync::OnceLock::new();
     CELL.get_or_init(|| std::sync::RwLock::new(None))
 }
@@ -333,9 +400,27 @@ fn default_agent_cell() -> &'static std::sync::RwLock<Option<String>> {
 /// or a selection that names only a model, clears it — callers then keep their
 /// own default rather than inheriting a stale one.
 pub fn set_default_selection_from_json(value: &str) {
-    let agent = AgentSelection::parse(value).agent_id;
+    set_local_selection_from_json(value);
+}
+
+/// Refresh the local-lane snapshot from a raw preference value.
+pub fn set_local_selection_from_json(value: &str) {
+    let selection = AgentSelection::parse(value);
+    if let Ok(mut guard) = local_selection_cell().write() {
+        *guard = (!selection.is_empty()).then_some(selection.clone());
+    }
+    let agent = selection.agent_id;
     if let Ok(mut guard) = default_agent_cell().write() {
         *guard = Some(agent).filter(|a| !a.is_empty());
+    }
+}
+
+/// Refresh the cloud-lane snapshot from a raw preference value. Empty means
+/// unset, which is intentionally different from the local built-in default.
+pub fn set_cloud_selection_from_json(value: &str) {
+    let selection = AgentSelection::parse(value);
+    if let Ok(mut guard) = cloud_selection_cell().write() {
+        *guard = (!selection.is_empty()).then_some(selection);
     }
 }
 
@@ -344,9 +429,44 @@ pub fn default_agent_id() -> Option<String> {
     default_agent_cell().read().ok().and_then(|g| g.clone())
 }
 
+/// Snapshot used by ordinary interactive Ryu chats. A configured cloud lane
+/// wins; an unset cloud lane falls back to the local lane.
+pub fn chat_default_selection() -> AgentSelection {
+    cloud_selection_cell()
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .or_else(|| {
+            local_selection_cell()
+                .read()
+                .ok()
+                .and_then(|guard| guard.clone())
+        })
+        .unwrap_or_else(builtin_default_selection)
+}
+
+/// Snapshot used by programmatic and plugin work. These calls are deliberately
+/// local unless they provide an explicit target; unlike an interactive chat,
+/// they must never inherit a user's paid cloud lane by accident.
+pub fn local_default_selection() -> AgentSelection {
+    local_selection_cell()
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_else(builtin_default_selection)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn snapshot_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("snapshot lock")
+    }
 
     #[test]
     fn parses_legacy_bare_model_id() {
@@ -456,7 +576,60 @@ mod tests {
     }
 
     #[test]
+    fn lane_keys_keep_cloud_unset_and_legacy_local_only() {
+        assert_eq!(AgentLane::Local.preference_key(), LOCAL_SELECTION_PREF);
+        assert_eq!(AgentLane::Cloud.preference_key(), CLOUD_SELECTION_PREF);
+        assert_ne!(LOCAL_SELECTION_PREF, CLOUD_SELECTION_PREF);
+        assert_eq!(GLOBAL_SELECTION_PREF, "default-agent-selection");
+    }
+
+    #[test]
+    fn chat_lane_prefers_cloud_and_falls_back_to_local() {
+        let _guard = snapshot_lock();
+        set_local_selection_from_json(
+            r#"{"agent_id":"ryu","provider":"local","model":"gemma-local"}"#,
+        );
+        set_cloud_selection_from_json(
+            r#"{"agent_id":"ryu","provider":"managed-openrouter","model":"openrouter/auto","effort":"high"}"#,
+        );
+        assert_eq!(chat_default_selection().provider, "managed-openrouter");
+        assert_eq!(chat_default_selection().model, "openrouter/auto");
+        assert_eq!(chat_default_selection().effort, "high");
+
+        set_cloud_selection_from_json("");
+        assert_eq!(chat_default_selection().provider, "local");
+        assert_eq!(chat_default_selection().model, "gemma-local");
+        set_cloud_selection_from_json(
+            r#"{"agent_id":"ryu","provider":"managed-openrouter","model":"openrouter/auto"}"#,
+        );
+        assert_eq!(local_default_selection().provider, "local");
+        assert_eq!(local_default_selection().model, "gemma-local");
+        set_cloud_selection_from_json("");
+        set_local_selection_from_json("");
+    }
+
+    #[test]
+    fn ryu_and_external_acp_selections_keep_their_controls() {
+        let ryu = AgentSelection::parse(
+            r#"{"agent_id":"ryu","provider":"managed-openrouter","model":"openrouter/auto","effort":"medium"}"#,
+        );
+        assert_eq!(ryu.agent_id, "ryu");
+        assert_eq!(ryu.provider, "managed-openrouter");
+        assert_eq!(ryu.model, "openrouter/auto");
+        assert_eq!(ryu.effort, "medium");
+
+        let acp = AgentSelection::parse(
+            r#"{"agent_id":"acp:claude","model":"sonnet","effort":"high","access_mode":"plan"}"#,
+        );
+        assert_eq!(acp.agent_id, "acp:claude");
+        assert_eq!(acp.model, "sonnet");
+        assert_eq!(acp.effort, "high");
+        assert_eq!(acp.access_mode, "plan");
+    }
+
+    #[test]
     fn default_agent_snapshot_tracks_the_written_value() {
+        let _guard = snapshot_lock();
         set_default_selection_from_json(r#"{"agent_id":"claude"}"#);
         assert_eq!(default_agent_id().as_deref(), Some("claude"));
         // A model-only selection names no agent — callers keep their own default.

@@ -20,12 +20,15 @@ import {
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
+import { formatMinorCurrency } from "@ryu/ui/lib/number-format.ts";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 import { sileo } from "sileo";
 import { openExternal } from "@/lib/tauri-bridge.ts";
+import { OrgBillingContext } from "@/src/components/billing/OrgBillingContext.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
+import { useOrgBillingStatus } from "@/src/hooks/useOrgBillingStatus.ts";
 import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
 	type AutoTopupSettings,
@@ -334,7 +337,6 @@ function DesktopAccessSection() {
 					}
 					title={
 						<span className="flex items-center gap-2">
-							<PlanBadge plan={verdict.proUnlocked ? "pro" : null} />
 							<span className="font-normal text-muted-foreground text-xs">
 								{reasonLabel[verdict.reason]}
 							</span>
@@ -709,14 +711,12 @@ function SpendControlsSection() {
 							</p>
 						</div>
 						<Button
-							disabled={portalPending}
+							loading={portalPending}
 							onClick={handleManagePayment}
 							size="sm"
 							variant="ghost"
 						>
-							{portalPending ? (
-								<Spinner className="mr-2 size-3.5" />
-							) : (
+							{!portalPending && (
 								<HugeiconsIcon className="mr-2 size-3.5" icon={Share08Icon} />
 							)}
 							Manage
@@ -770,6 +770,7 @@ export function BillingTab() {
 		planInterval,
 		isLoading: subLoading,
 	} = useSubscription();
+	const { plan: organizationPlan } = useOrgBillingStatus();
 
 	const activeOrgId = useActiveOrgId();
 
@@ -786,13 +787,7 @@ export function BillingTab() {
 		queryFn: settingsApi.billing.getInvoices,
 	});
 
-	const plan: PlanTier | null = isLifetime
-		? "desktop-license"
-		: isTrialing
-			? "pro"
-			: hasProSubscription
-				? "pro"
-				: null;
+	const plan: PlanTier | null = organizationPlan;
 
 	const handleManageSubscription = async () => {
 		setPendingAction("manage");
@@ -824,6 +819,7 @@ export function BillingTab() {
 
 	return (
 		<div className="space-y-6">
+			<OrgBillingContext description="The plan and shared credits below belong to this organization." />
 			<DesktopAccessSection />
 			<SettingsSection title="Current plan">
 				{subLoading ? (
@@ -836,14 +832,12 @@ export function BillingTab() {
 							actions={
 								hasProSubscription && !isLifetime ? (
 									<Button
-										disabled={pendingAction === "manage"}
+										loading={pendingAction === "manage"}
 										onClick={handleManageSubscription}
 										size="sm"
 										variant="ghost"
 									>
-										{pendingAction === "manage" ? (
-											<Spinner className="mr-2 size-3.5" />
-										) : (
+										{pendingAction !== "manage" && (
 											<HugeiconsIcon
 												className="mr-2 size-3.5"
 												icon={Share08Icon}
@@ -897,14 +891,12 @@ export function BillingTab() {
 							actions={
 								<Button
 									className="shrink-0"
-									disabled={lifetimePending}
+									loading={lifetimePending}
 									onClick={handleLifetimeCheckout}
 									size="sm"
 									variant={isLifetime ? "outline" : "default"}
 								>
-									{lifetimePending ? (
-										<Spinner className="mr-2 size-3.5" />
-									) : (
+									{!lifetimePending && (
 										<HugeiconsIcon
 											className="mr-2 size-3.5"
 											icon={Share08Icon}
@@ -954,10 +946,7 @@ export function BillingTab() {
 							<SettingsItem
 								actions={
 									<span className="font-heading font-medium text-sm tabular-nums">
-										{(invoice.amount / 100).toLocaleString(undefined, {
-											style: "currency",
-											currency: invoice.currency.toUpperCase(),
-										})}
+										{formatMinorCurrency(invoice.amount, invoice.currency)}
 									</span>
 								}
 								description={

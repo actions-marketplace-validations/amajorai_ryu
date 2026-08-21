@@ -265,6 +265,7 @@ mod tests {
             id: id.to_owned(),
             kind: ApprovalKind::ScheduledRun,
             title: "t".to_owned(),
+            question: None,
             summary: "s".to_owned(),
             agent_id: None,
             conversation_id: None,

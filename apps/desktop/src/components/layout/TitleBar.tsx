@@ -7,28 +7,29 @@ import {
 	ArrowShrinkIcon,
 	ArrowTurnBackwardIcon,
 	AudioWave01Icon,
-	BubbleChatIcon,
 	Calendar04Icon,
 	Cancel01Icon,
+	Chat01Icon,
 	CheckmarkBadge02Icon,
 	Copy01Icon,
 	Delete02Icon,
 	DeliverySecure01Icon,
 	Download01Icon,
+	FingerPrintIcon,
 	Folder01Icon,
 	FullScreenIcon,
+	GitBranchIcon,
 	GridIcon,
 	InboxIcon,
-	Key01Icon,
 	LibraryIcon,
 	LinkSquare02Icon,
 	Message01Icon,
-	Mortarboard01Icon,
 	PackageIcon,
 	PencilEdit01Icon,
 	PieChartIcon,
 	PinIcon,
 	PinOffIcon,
+	PotionIcon,
 	Pulse01Icon,
 	RowDeleteIcon,
 	ServerStack01Icon,
@@ -38,6 +39,7 @@ import {
 	SidebarTopIcon,
 	Tag01Icon,
 	Target01Icon,
+	Tv01Icon,
 	UnfoldMoreIcon,
 	WorkflowCircle06Icon,
 	ZzzIcon,
@@ -83,6 +85,10 @@ import {
 	type WheelEvent,
 } from "react";
 import { openTabWindow } from "@/lib/tauri-bridge.ts";
+import { TabBarAppearanceMenuItems } from "@/src/components/layout/appearance-context-menu.tsx";
+import { MorphingTabSurface } from "@/src/components/layout/MorphingTabSurface.tsx";
+import { TabDropdown } from "@/src/components/layout/tab-dropdown.tsx";
+import { TabSearchDialog } from "@/src/components/layout/tab-search-dialog.tsx";
 import { isDockableRoutePath } from "@/src/components/panels/dock-panels.ts";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import type {
@@ -105,11 +111,15 @@ import {
 	subscribeTabIcons,
 } from "@/src/contributions/tab-icon-registry.ts";
 import { useAutoHideTitleBar } from "@/src/hooks/useAutoHideTitleBar.ts";
+import { useFloatingTabs } from "@/src/hooks/useFloatingTabs.ts";
+import { useMouseNavigationButtons } from "@/src/hooks/useMouseNavigationButtons.ts";
 import { useNodeTabOverride } from "@/src/hooks/useNodeDisplayMode.ts";
 import { useActiveSeason } from "@/src/hooks/useSeasonalEffects.ts";
 import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
 import { useTabCycleHotkeys } from "@/src/hooks/useTabCycleHotkeys.ts";
+import { useTabDropdown } from "@/src/hooks/useTabDropdown.ts";
 import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
+import { useTabSearchButton } from "@/src/hooks/useTabSearchButton.ts";
 import { setTabSizing, useTabSizing } from "@/src/hooks/useTabSizing.ts";
 import { setTitlebarHidden } from "@/src/lib/decorumTitlebar.ts";
 import { toggleFullscreen, useFullscreen } from "@/src/lib/fullscreen.ts";
@@ -140,7 +150,7 @@ function DropIndicator({ side }: { side: "left" | "right" }) {
 		<span
 			aria-hidden
 			className={cn(
-				"pointer-events-none absolute inset-y-1 z-20 w-0.5 rounded-full bg-primary",
+				"reorder-drop-indicator pointer-events-none absolute inset-y-1 z-20 w-0.5 bg-primary",
 				side === "left" ? "-left-1" : "-right-1"
 			)}
 		/>
@@ -241,16 +251,16 @@ const PATH_ICONS: Record<string, IconSvgElement> = {
 	// contribution via `usePluginContributionTabIcons` — which `resolveTabIcon`
 	// consults before this map. A path key here would go stale the moment the app
 	// moved itself.
-	"/chat": Message01Icon,
+	"/chat": Chat01Icon,
 	// Bare `/agents` is a Library route now (TabsContext's `LIBRARY_ALIAS_PATHS`),
 	// so this row is read only for the agent routes UNDER it: the explicit
 	// agent-edit branch in `pathIcon`, plus any other `/agents/*` deep link that
 	// lands on the leading-segment fallback.
 	"/agents": Target01Icon,
-	"/channels": BubbleChatIcon,
-	"/identities": Key01Icon,
-	"/identities/new": Key01Icon,
-	"/skills": Mortarboard01Icon,
+	"/channels": Tv01Icon,
+	"/identities": FingerPrintIcon,
+	"/identities/new": FingerPrintIcon,
+	"/skills": PotionIcon,
 	"/spaces": DeliverySecure01Icon,
 	"/meetings": AudioWave01Icon,
 	"/workflows": WorkflowCircle06Icon,
@@ -263,6 +273,7 @@ const PATH_ICONS: Record<string, IconSvgElement> = {
 	"/inbox": InboxIcon,
 	"/approvals": InboxIcon,
 	"/downloads": Download01Icon,
+	"/project": GitBranchIcon,
 	"/settings": Settings01Icon,
 };
 
@@ -730,6 +741,7 @@ async function moveTabToNewWindow(tab: Tab, closeTab: (id: string) => void) {
 function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 	const { activateTab, closeTab, togglePin, openTab, tabs, unloadTab } =
 		useTabsContext();
+	const [floatingTabs] = useFloatingTabs();
 	const { isDragging, showBefore, showAfter, dragHandlers } = useTabDragProps(
 		tab.id
 	);
@@ -743,8 +755,18 @@ function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 							render={
 								<button
 									className={cn(
-										"group/tab relative flex size-8 shrink-0 items-center justify-center rounded-full transition-colors",
-										isActive ? "bg-muted" : "hover:bg-muted/50",
+										"group/tab relative isolate flex size-8 shrink-0 items-center justify-center transition-colors",
+										floatingTabs
+											? cn(
+													"rounded-full",
+													isActive ? "bg-muted" : "hover:bg-muted/50"
+												)
+											: cn(
+													"rounded-t-[12px]",
+													isActive
+														? "text-foreground"
+														: "hover:bg-background/40"
+												),
 										tab.unloaded && "opacity-50",
 										isDragging && "opacity-40"
 									)}
@@ -759,13 +781,17 @@ function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 									type="button"
 									{...dragHandlers}
 								>
+									<MorphingTabSurface
+										floatingTabs={floatingTabs}
+										isActive={isActive}
+									/>
 									{showBefore && <DropIndicator side="left" />}
 									{showAfter && <DropIndicator side="right" />}
 									<TabGlyph
 										busy={busy}
 										busySpeed={tab.busySpeed}
 										className={cn(
-											"size-3.5",
+											"relative z-10 size-3.5",
 											isActive ? "text-foreground" : "text-muted-foreground"
 										)}
 										icon={tab.icon}
@@ -841,6 +867,7 @@ function RegularTab({
 		togglePin,
 		unloadTab,
 	} = useTabsContext();
+	const [floatingTabs] = useFloatingTabs();
 	const { isDragging, showBefore, showAfter, dragHandlers } = useTabDragProps(
 		tab.id
 	);
@@ -925,12 +952,18 @@ function RegularTab({
 				{/* biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: custom drag/resize interaction */}
 				<div
 					className={cn(
-						"group/tab relative flex h-8 w-full min-w-0 items-center rounded-full transition-colors",
-						isActive ? activeBg : "hover:bg-muted/50",
+						"group/tab relative flex h-8 w-full min-w-0 items-center transition-colors",
+						floatingTabs
+							? cn("rounded-full", isActive ? activeBg : "hover:bg-muted/50")
+							: cn(
+									"rounded-t-[12px]",
+									isActive ? "text-foreground" : "hover:bg-background/40"
+								),
 						tab.unloaded && "opacity-60",
 						isDragging && "opacity-40"
 					)}
 					data-active={isActive}
+					data-tab-appearance={floatingTabs ? "floating" : "morphing"}
 					onMouseDown={(e) => {
 						if (e.button === 1) {
 							e.preventDefault();
@@ -941,11 +974,12 @@ function RegularTab({
 				>
 					{showBefore && <DropIndicator side="left" />}
 					{showAfter && <DropIndicator side="right" />}
+					<MorphingTabSurface floatingTabs={floatingTabs} isActive={isActive} />
 					{/* Icon zone — page icon morphs to close X on tab hover */}
 					<button
 						aria-label={`Close ${tab.title}`}
 						className={cn(
-							"relative ml-2 flex size-4 shrink-0 items-center justify-center rounded-full",
+							"relative z-10 ml-2 flex size-4 shrink-0 items-center justify-center rounded-full",
 							isActive ? "text-foreground/60" : "text-muted-foreground/50"
 						)}
 						onClick={() => closeTab(tab.id)}
@@ -973,7 +1007,7 @@ function RegularTab({
 					{isEditing ? (
 						<div
 							className={cn(
-								"flex h-full min-w-0 flex-1 items-center overflow-hidden pr-3 pl-1.5",
+								"relative z-10 flex h-full min-w-0 flex-1 items-center overflow-hidden pr-3 pl-1.5",
 								isActive ? "text-foreground" : "text-muted-foreground"
 							)}
 						>
@@ -988,7 +1022,7 @@ function RegularTab({
 					) : (
 						<button
 							className={cn(
-								"flex h-full min-w-0 flex-1 items-center overflow-hidden pr-3 pl-1.5",
+								"relative z-10 flex h-full min-w-0 flex-1 items-center overflow-hidden pr-3 pl-1.5",
 								isActive ? "text-foreground" : "text-muted-foreground"
 							)}
 							onClick={() => activateTab(tab.id)}
@@ -1365,6 +1399,7 @@ export function TitleBar() {
 	}
 	const { actions } = useTitleBarContext();
 	const {
+		activateTab,
 		tabs,
 		groups,
 		activeTabId,
@@ -1383,6 +1418,10 @@ export function TitleBar() {
 	// strip is hidden and a drag-region spacer takes its place.
 	const tabLayout = useTabLayout();
 	const tabSizing = useTabSizing();
+	const [tabDropdownEnabled, setTabDropdownEnabled] = useTabDropdown();
+	const [floatingTabs, setFloatingTabs] = useFloatingTabs();
+	const [tabSearchButtonVisible, setTabSearchButtonVisible] =
+		useTabSearchButton();
 	const [sidebarVariant] = useSidebarVariant();
 	const floatingChromeOffset = sidebarVariant === "floating";
 	// Auto-hide slides the bar away until the cursor nears the top edge. Forced
@@ -1521,7 +1560,8 @@ export function TitleBar() {
 	// no-tab launchpad, and the store / marketplace family — all let their
 	// content sit UNDER a continuous glass bar; every other page gets a solid bar
 	// (see the blur/solid branch in the render below).
-	const activePath = tabs.find((t) => t.id === activeTabId)?.path ?? "";
+	const activeTab = tabs.find((t) => t.id === activeTabId);
+	const activePath = activeTab?.path ?? "";
 	const isChatActive =
 		tabs.length === 0 || pathScrollsUnderTitlebar(activePath);
 
@@ -1594,24 +1634,7 @@ export function TitleBar() {
 	useTabCycleHotkeys();
 	useHotkey("nav.back", goBack);
 	useHotkey("nav.forward", goForward);
-
-	// Mouse buttons 3 (back) and 4 (forward) aren't keyboard chords, so they stay
-	// a direct listener rather than going through the hotkey registry.
-	useEffect(() => {
-		const onMouseUp = (e: MouseEvent) => {
-			if (e.button === 3) {
-				e.preventDefault();
-				goBack();
-			} else if (e.button === 4) {
-				e.preventDefault();
-				goForward();
-			}
-		};
-		window.addEventListener("mouseup", onMouseUp);
-		return () => {
-			window.removeEventListener("mouseup", onMouseUp);
-		};
-	}, [goBack, goForward]);
+	useMouseNavigationButtons(goBack, goForward);
 
 	return (
 		<>
@@ -1645,6 +1668,7 @@ export function TitleBar() {
 					"absolute top-0 left-0 z-10 flex w-full items-center px-2",
 					floatingChromeOffset ? "h-14 pt-2" : "h-12"
 				)}
+				data-tab-appearance={floatingTabs ? "floating" : "morphing"}
 				data-tauri-drag-region
 				onMouseEnter={effectiveAutoHide ? showTitleBarPeek : undefined}
 				onMouseLeave={effectiveAutoHide ? scheduleTitleBarHide : undefined}
@@ -1750,7 +1774,6 @@ export function TitleBar() {
 									/>
 									{isFullscreen ? "Exit full screen" : "Enter full screen"}
 								</ContextMenuItem>
-								<ContextMenuSeparator />
 								<ContextMenuItem onClick={() => setTabLayout("horizontal")}>
 									<HugeiconsIcon className="size-4" icon={SidebarLeftIcon} />
 									Use horizontal tabs
@@ -1759,21 +1782,71 @@ export function TitleBar() {
 						</ContextMenu>
 					) : (
 						<ContextMenu onOpenChange={onTitleBarMenuOpenChange}>
-							<ContextMenuTrigger
-								className="flex min-w-0 flex-1 items-center"
-								data-tauri-drag-region
-							>
-								{/* Wrapper sizes to content but is capped at the available width
-								    (max-w 100%). So the + button follows the last tab while they
+							<div className="flex min-w-0 flex-1 items-center">
+								{tabDropdownEnabled ? (
+									<ContextMenuTrigger
+										className="flex min-w-0 flex-1 items-center"
+										data-tauri-drag-region
+									>
+										<div
+											className="flex min-w-0 flex-1 items-center gap-1"
+											data-tauri-drag-region
+										>
+											<TabDropdown
+												activateTab={activateTab}
+												activeIcon={
+													activeTab ? (
+														<TabGlyph
+															busy={activeTab.busy}
+															busySpeed={activeTab.busySpeed}
+															className="size-4"
+															icon={activeTab.icon}
+															logoSize="16px"
+															path={activeTab.path}
+															unloaded={activeTab.unloaded}
+														/>
+													) : undefined
+												}
+												activeTabId={activeTabId}
+												closeTab={closeTab}
+												tabs={tabs}
+											/>
+											<button
+												aria-label="New chat tab"
+												className={cn(
+													"ml-0.5 flex size-7 shrink-0 items-center justify-center text-muted-foreground/50 transition-colors hover:bg-background/50 hover:text-muted-foreground",
+													floatingTabs ? "rounded-full" : "rounded-t-[10px]"
+												)}
+												data-tauri-drag-region={false}
+												onClick={handleNewTab}
+												type="button"
+											>
+												<HugeiconsIcon className="size-3.5" icon={Add01Icon} />
+											</button>
+											<div
+												aria-hidden
+												className="min-w-0 flex-1"
+												data-tauri-drag-region
+											/>
+										</div>
+									</ContextMenuTrigger>
+								) : (
+									<>
+										<ContextMenuTrigger
+											className="flex min-w-0 flex-1 items-center"
+											data-tauri-drag-region
+										>
+											{/* Wrapper sizes to content but is capped at the available width
+											 (max-w 100%). So the + button follows the last tab while they
 								    fit, and once the tabs' total content would exceed the bar the
 								    wrapper caps at 100% — in "fit" mode the shrinkable tabs then
 								    trim to fit, in "fixed" mode they keep size and the strip
 								    scrolls. */}
-								<div
-									className="flex min-w-0 items-center"
-									style={{ flex: "0 1 max-content", maxWidth: "100%" }}
-								>
-									{/* Fixed h-8 clip wrapper: the inner strip is allowed to grow
+											<div
+												className="flex min-w-0 items-center"
+												style={{ flex: "0 1 max-content", maxWidth: "100%" }}
+											>
+												{/* Fixed h-8 clip wrapper: the inner strip is allowed to grow
 								    taller than h-8 (via pb-8) so the horizontal scrollbar renders
 								    in the bottom padding band, BELOW the 32px visible row, and is
 								    then clipped away by this overflow-hidden box. That keeps the
@@ -1786,93 +1859,113 @@ export function TitleBar() {
 								    and by the hover-revealed edge chevrons (`EdgeScrollChevrons`) —
 								    the same affordance the Store/Library section strips wear, which
 								    is why the group is named `edge-scroller` here too. */}
-									<div className="group/edge-scroller relative flex h-8 min-w-0 flex-1 items-start overflow-hidden">
-										<EdgeScrollChevrons scrollRef={scrollRef} />
-										<div
-											className="group/tabstrip flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto overflow-y-hidden pb-8 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-											data-tauri-drag-region={false}
-											onWheel={handleTabStripWheel}
-											ref={scrollRef}
-										>
-											{/* Pinned tabs lead, as compact icon-only chips */}
-											{pinnedTabs.map((tab) => (
-												<PinnedTab
-													isActive={tab.id === activeTabId}
-													key={tab.id}
-													tab={tab}
-												/>
-											))}
-
-											{/* Then ungrouped tabs, group brackets, and split brackets */}
-											{segments.map((seg) => {
-												if (seg.type === "tab") {
-													return (
-														<RegularTab
-															inGroup={false}
-															isActive={seg.tab.id === activeTabId}
-															key={seg.tab.id}
-															tab={seg.tab}
-														/>
-													);
-												}
-												if (seg.type === "split") {
-													return (
-														<div
-															className="flex shrink-0 items-center gap-1 rounded-2xl px-1 py-0.5 ring-1 ring-border/40"
-															key={seg.split.id}
-														>
-															<SplitBracketHeader
-																anyMemberId={seg.members[0]?.id ?? ""}
-																split={seg.split}
-															/>
-															{seg.members.map((tab) => (
-																<RegularTab
-																	inGroup
-																	isActive={tab.id === activeTabId}
-																	key={tab.id}
-																	tab={tab}
-																/>
-															))}
-														</div>
-													);
-												}
-												const colors = GROUP_COLOR_CLASSES[seg.group.color];
-												return (
+												<div className="group/edge-scroller relative flex h-8 min-w-0 flex-1 items-start overflow-hidden">
+													<EdgeScrollChevrons scrollRef={scrollRef} />
 													<div
-														className={cn(
-															"flex shrink-0 items-center gap-1 rounded-2xl px-1 py-0.5 ring-1",
-															colors.container
-														)}
-														key={seg.group.id}
+														className="group/tabstrip flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto overflow-y-hidden pb-8 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+														data-tauri-drag-region={false}
+														onWheel={handleTabStripWheel}
+														ref={scrollRef}
 													>
-														<GroupHeaderPill group={seg.group} />
-														{!seg.group.collapsed &&
-															seg.members.map((tab) => (
-																<RegularTab
-																	inGroup
-																	isActive={tab.id === activeTabId}
-																	key={tab.id}
-																	tab={tab}
-																/>
-															))}
-													</div>
-												);
-											})}
-										</div>
-									</div>
+														{/* Pinned tabs lead, as compact icon-only chips */}
+														{pinnedTabs.map((tab) => (
+															<PinnedTab
+																isActive={tab.id === activeTabId}
+																key={tab.id}
+																tab={tab}
+															/>
+														))}
 
-									{/* New tab button — outside the scroll container, always visible */}
-									<button
-										aria-label="New chat tab"
-										className="ml-0.5 flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground/50 transition-colors hover:bg-background/50 hover:text-muted-foreground"
-										data-tauri-drag-region={false}
-										onClick={handleNewTab}
-										type="button"
-									>
-										<HugeiconsIcon className="size-3.5" icon={Add01Icon} />
-									</button>
-								</div>
-							</ContextMenuTrigger>
+														{/* Then ungrouped tabs, group brackets, and split brackets */}
+														{segments.map((seg) => {
+															if (seg.type === "tab") {
+																return (
+																	<RegularTab
+																		inGroup={false}
+																		isActive={seg.tab.id === activeTabId}
+																		key={seg.tab.id}
+																		tab={seg.tab}
+																	/>
+																);
+															}
+															if (seg.type === "split") {
+																return (
+																	<div
+																		className="flex shrink-0 items-center gap-1 rounded-2xl px-1 py-0.5 ring-1 ring-border/40"
+																		key={seg.split.id}
+																	>
+																		<SplitBracketHeader
+																			anyMemberId={seg.members[0]?.id ?? ""}
+																			split={seg.split}
+																		/>
+																		{seg.members.map((tab) => (
+																			<RegularTab
+																				inGroup
+																				isActive={tab.id === activeTabId}
+																				key={tab.id}
+																				tab={tab}
+																			/>
+																		))}
+																	</div>
+																);
+															}
+															const colors =
+																GROUP_COLOR_CLASSES[seg.group.color];
+															return (
+																<div
+																	className={cn(
+																		"flex shrink-0 items-center gap-1 rounded-2xl px-1 py-0.5 ring-1",
+																		colors.container
+																	)}
+																	key={seg.group.id}
+																>
+																	<GroupHeaderPill group={seg.group} />
+																	{!seg.group.collapsed &&
+																		seg.members.map((tab) => (
+																			<RegularTab
+																				inGroup
+																				isActive={tab.id === activeTabId}
+																				key={tab.id}
+																				tab={tab}
+																			/>
+																		))}
+																</div>
+															);
+														})}
+													</div>
+												</div>
+
+												{/* New tab button — outside the scroll container, always visible */}
+												<button
+													aria-label="New chat tab"
+													className={cn(
+														"ml-0.5 flex size-7 shrink-0 items-center justify-center text-muted-foreground/50 transition-colors hover:bg-background/50 hover:text-muted-foreground",
+														floatingTabs ? "rounded-full" : "rounded-t-[10px]"
+													)}
+													data-tauri-drag-region={false}
+													onClick={handleNewTab}
+													type="button"
+												>
+													<HugeiconsIcon
+														className="size-3.5"
+														icon={Add01Icon}
+													/>
+												</button>
+											</div>
+										</ContextMenuTrigger>
+										{tabSearchButtonVisible && (
+											<TabSearchDialog
+												activateTab={activateTab}
+												activeTabId={activeTabId}
+												closeTab={closeTab}
+												floatingTabs={floatingTabs}
+												onHide={() => setTabSearchButtonVisible(false)}
+												tabs={tabs}
+											/>
+										)}
+									</>
+								)}
+							</div>
 							<ContextMenuContent>
 								<ContextMenuItem onClick={handleNewTab}>
 									<HugeiconsIcon className="size-4" icon={Add01Icon} />
@@ -1916,6 +2009,14 @@ export function TitleBar() {
 									<HugeiconsIcon className="size-4" icon={SidebarLeftIcon} />
 									Use vertical tabs
 								</ContextMenuItem>
+								<TabBarAppearanceMenuItems
+									floatingTabs={floatingTabs}
+									setFloatingTabs={setFloatingTabs}
+									setTabDropdownEnabled={setTabDropdownEnabled}
+									setTabSearchButtonVisible={setTabSearchButtonVisible}
+									tabDropdownEnabled={tabDropdownEnabled}
+									tabSearchButtonVisible={tabSearchButtonVisible}
+								/>
 								<ContextMenuCheckboxItem
 									checked={autoHideTitleBar}
 									onCheckedChange={setAutoHideTitleBar}

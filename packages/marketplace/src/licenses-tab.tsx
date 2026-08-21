@@ -27,12 +27,20 @@ import { NoOrgState, SignedOutState } from "./states.tsx";
 import { formatPrice, type OwnedLicense } from "./types.ts";
 
 export function LicensesTab() {
-	const { useLicenses } = useMarketplaceHost();
+	const { openMarketplace, openOrganization, openSignIn, useLicenses } =
+		useMarketplaceHost();
 	const { licenses, loading, error, authed, refresh } = useLicenses();
 
 	if (!authed) {
 		return (
 			<SignedOutState
+				action={
+					openSignIn ? (
+						<Button onClick={() => void openSignIn()} size="sm">
+							Sign in
+						</Button>
+					) : null
+				}
 				description="Your purchases are tied to your organization. Sign in to see the items you own."
 				title="Sign in to view your licenses"
 			/>
@@ -40,7 +48,17 @@ export function LicensesTab() {
 	}
 	if (error && error.kind === "no_org") {
 		return (
-			<NoOrgState message={error.message} title="No organization selected" />
+			<NoOrgState
+				action={
+					openOrganization ? (
+						<Button onClick={() => void openOrganization()} size="sm">
+							Choose an organization
+						</Button>
+					) : null
+				}
+				message={error.message}
+				title="No organization selected"
+			/>
 		);
 	}
 
@@ -59,8 +77,9 @@ export function LicensesTab() {
 			<LicensesBody
 				licenses={licenses}
 				loadFailed={loadFailed}
-				loading={loading}
-				onRetry={() => refresh()}
+			loading={loading}
+			onBrowse={openMarketplace}
+			onRetry={() => refresh()}
 			/>
 		</div>
 	);
@@ -104,11 +123,13 @@ function LicensesBody({
 	loadFailed,
 	loading,
 	licenses,
+	onBrowse,
 	onRetry,
 }: {
 	loadFailed: boolean;
 	loading: boolean;
 	licenses: OwnedLicense[];
+	onBrowse?: () => Promise<void> | void;
 	onRetry: () => void;
 }) {
 	if (loading && licenses.length === 0) {
@@ -149,6 +170,13 @@ function LicensesBody({
 						don't need a license.
 					</EmptyDescription>
 				</EmptyHeader>
+				{onBrowse ? (
+					<EmptyContent>
+						<Button onClick={() => void onBrowse()} size="sm">
+							Browse the marketplace
+						</Button>
+					</EmptyContent>
+				) : null}
 			</Empty>
 		);
 	}

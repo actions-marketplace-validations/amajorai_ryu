@@ -153,18 +153,20 @@ describe("parseGhostCursorEvent", () => {
 				x: 100,
 				y: 200,
 				tool: "click",
+				intent: "Click “Save”",
 				ts: 1234,
 			}),
 			"4321"
 		);
 		expect(event).toEqual({
-			seq: 7,
+			agent: "4321",
+			intent: "Click “Save”",
 			phase: "move",
-			x: 100,
-			y: 200,
+			seq: 7,
 			tool: "click",
 			ts: 1234,
-			agent: "4321",
+			x: 100,
+			y: 200,
 		});
 	});
 
@@ -174,14 +176,35 @@ describe("parseGhostCursorEvent", () => {
 			"0"
 		);
 		expect(event).toEqual({
-			seq: 0,
+			agent: "0",
+			intent: "Working",
 			phase: "down",
-			x: 1,
-			y: 2,
+			seq: 0,
 			tool: "",
 			ts: 0,
-			agent: "0",
+			x: 1,
+			y: 2,
 		});
+	});
+
+	it("falls back to a tool-aware intent and bounds untrusted labels", () => {
+		const fallback = parseGhostCursorEvent(
+			JSON.stringify({ phase: "down", x: 1, y: 2, tool: "ghost_click" }),
+			"0"
+		);
+		expect(fallback?.intent).toBe("Clicking");
+
+		const longIntent = parseGhostCursorEvent(
+			JSON.stringify({
+				phase: "down",
+				x: 1,
+				y: 2,
+				intent: "x".repeat(100),
+			}),
+			"0"
+		);
+		expect(longIntent?.intent).toHaveLength(72);
+		expect(longIntent?.intent.endsWith("…")).toBe(true);
 	});
 
 	it("accepts every known phase", () => {

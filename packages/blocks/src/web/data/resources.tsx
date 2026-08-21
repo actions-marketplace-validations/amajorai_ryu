@@ -1,6 +1,5 @@
 import {
 	BookOpen,
-	Cpu,
 	GitCommitHorizontal,
 	KeyRound,
 	LifeBuoy,
@@ -98,13 +97,6 @@ export const resources: Resource[] = [
 		description: "Plans for individuals, teams, and enterprises.",
 		href: "/pricing",
 		Icon: Tag,
-	},
-	{
-		category: "Explore",
-		label: "Engines",
-		description: "Every model runtime Ryu can run, local to cloud.",
-		href: "/engines",
-		Icon: Cpu,
 	},
 	{
 		category: "Explore",

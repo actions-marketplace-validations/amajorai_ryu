@@ -56,9 +56,9 @@ const ADAPTER_MANIFEST = {
 			capability: "web.search",
 			version: "1.0.0",
 			tools: {
-				web__search: {
-					tool: "provider__tool",
-					adapter: { code_file: "adapters/web__search.js" },
+				"web.search": {
+					tool: "provider.tool",
+					adapter: { code_file: "adapters/web.search.js" },
 				},
 			},
 		},
@@ -80,11 +80,11 @@ test("finds an inline_deno seat by slug", () => {
 test("finds an adapter seat by canonical verb", () => {
 	const { seat } = findManifestSeat(
 		pkg(ADAPTER_MANIFEST),
-		{ tool: "web__search" },
+		{ tool: "web.search" },
 		"adapter"
 	);
 	assert.equal(seat.type, "adapter");
-	assert.equal(seat.binding.adapter.code_file, "adapters/web__search.js");
+	assert.equal(seat.binding.adapter.code_file, "adapters/web.search.js");
 });
 
 test("finds a turn hook seat by hook id", () => {
@@ -161,29 +161,29 @@ test("an edited-but-unsealed body is reported as drift", () => {
 test("an adapter pointing at a different file than the cases test is reported", () => {
 	const { seat } = findManifestSeat(
 		pkg(ADAPTER_MANIFEST),
-		{ tool: "web__search" },
+		{ tool: "web.search" },
 		"adapter"
 	);
 	const problems = checkBodyDrift(
 		seat,
-		{ tool: "web__search", code_file: "adapters/other.js" },
+		{ tool: "web.search", code_file: "adapters/other.js" },
 		"return 1;"
 	);
 	assert.equal(problems.length, 1);
-	assert.match(problems[0], /points at adapters\/web__search\.js/);
+	assert.match(problems[0], /points at adapters\/web.search\.js/);
 });
 
 test("an adapter that inlines `code` is rejected even when the file matches", () => {
 	const manifest = structuredClone(ADAPTER_MANIFEST);
-	manifest.provides[0].tools.web__search.adapter.code = "return 1;";
+	manifest.provides[0].tools["web.search"].adapter.code = "return 1;";
 	const { seat } = findManifestSeat(
 		pkg(manifest),
-		{ tool: "web__search" },
+		{ tool: "web.search" },
 		"adapter"
 	);
 	const problems = checkBodyDrift(
 		seat,
-		{ tool: "web__search", code_file: "adapters/web__search.js" },
+		{ tool: "web.search", code_file: "adapters/web.search.js" },
 		"return 1;"
 	);
 	assert.equal(problems.length, 1);
@@ -249,7 +249,7 @@ test("an adapter code_file outside hooks|adapters is reported", () => {
 	// and only those two dirs. A nested or otherwise-rooted path fails at load.
 	const problems = contractFor(
 		ADAPTER_MANIFEST,
-		{ tool: "web__search", code_file: "tools/web__search.js" },
+		{ tool: "web.search", code_file: "tools/web.search.js" },
 		"adapter"
 	);
 	assert.equal(problems.length, 1);
@@ -259,7 +259,7 @@ test("an adapter code_file outside hooks|adapters is reported", () => {
 test("a nested adapter code_file is reported (the flat-layout rule)", () => {
 	const problems = contractFor(
 		ADAPTER_MANIFEST,
-		{ tool: "web__search", code_file: "adapters/nested/web__search.js" },
+		{ tool: "web.search", code_file: "adapters/nested/web.search.js" },
 		"adapter"
 	);
 	assert.equal(problems.length, 1);

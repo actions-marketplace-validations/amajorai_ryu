@@ -174,10 +174,7 @@ export function TimeGridView({
 			</div>
 
 			{/* Scrollable hour grid */}
-			<div
-				className="scroll-fade-effect-y min-h-0 flex-1 overflow-auto"
-				ref={scrollRef}
-			>
+			<div className="scroll-fade min-h-0 flex-1 overflow-auto" ref={scrollRef}>
 				<div className="flex">
 					{/* Hour gutter */}
 					<div className="w-14 shrink-0">

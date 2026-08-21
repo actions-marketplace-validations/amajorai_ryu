@@ -6,7 +6,7 @@
 // now lives in the sandboxed `@ryu/workflows` companion app
 // (`packages/workflows-app`, mounted at `/workflows/:id` via PluginCompanionPage).
 // The one piece that CANNOT move into the sandbox is the NL builder: it drives
-// Core's `workflow_builder__*` MCP tools through the shell's global Ask Ryu panel
+// Core's `workflow_builder.*` MCP tools through the shell's global Ask Ryu panel
 // (`useAssistantBuilder`), and `host.runAgent`'s fixed `PermissionPreset` never
 // exposes those tools to a sandboxed frame (Track E crux #1, `delegation.rs`). So
 // the builder stays shell-side, permanently, and this page is its home.
@@ -17,7 +17,7 @@
 // canvas are isolated, a builder edit here does NOT live-refresh an already-open
 // canvas tab — reopen the canvas ("Open in canvas" below) to see the new graph.
 
-import { WorkflowSquare01Icon } from "@hugeicons/core-free-icons";
+import { WorkflowCircle06Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -141,7 +141,7 @@ export default function WorkflowsPage({
 	const builderSnapshot = useMemo(() => workflowSnapshot(selected), [selected]);
 
 	// Hand the global Ask Ryu panel over to the workflow builder while this page is
-	// focused — it docks as a sidebar and drives the `workflow_builder__*` tools.
+	// focused — it docks as a sidebar and drives the `workflow_builder.*` tools.
 	useAssistantBuilder({
 		kind: "workflow",
 		onChanged: handleWorkflowChanged,
@@ -156,7 +156,7 @@ export default function WorkflowsPage({
 			<span className="flex min-w-0 items-center gap-2">
 				<HugeiconsIcon
 					className="size-4 shrink-0 opacity-70"
-					icon={WorkflowSquare01Icon}
+					icon={WorkflowCircle06Icon}
 				/>
 				<span className="truncate font-semibold">
 					{selected?.name?.trim() || "Build a workflow"}
@@ -180,7 +180,7 @@ export default function WorkflowsPage({
 			<Empty className="h-full">
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={WorkflowSquare01Icon} />
+						<HugeiconsIcon icon={WorkflowCircle06Icon} />
 					</EmptyMedia>
 					<EmptyTitle>Could not load your workflows</EmptyTitle>
 					<EmptyDescription>
@@ -204,7 +204,7 @@ export default function WorkflowsPage({
 				<div className="flex items-center gap-2 border-border border-b px-3 py-2.5">
 					<HugeiconsIcon
 						className="size-4 opacity-70"
-						icon={WorkflowSquare01Icon}
+						icon={WorkflowCircle06Icon}
 					/>
 					<span className="font-semibold text-sm">Build with AI</span>
 				</div>

@@ -1,8 +1,8 @@
 import {
 	ArrowDown01Icon,
-	BubbleChatIcon,
 	Cancel01Icon,
 	ChartLineData01Icon,
+	Chat01Icon,
 	DashboardSquare01Icon,
 	Delete02Icon,
 	FloppyDiskIcon,
@@ -48,6 +48,7 @@ import {
 } from "@ryu/ui/components/select";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Switch } from "@ryu/ui/components/switch";
+import { useBotTerminology } from "@ryu/ui/hooks/use-bot-terminology.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import { useTheme } from "next-themes";
 import type { CSSProperties } from "react";
@@ -62,6 +63,7 @@ import {
 	useAgentRowStylePref,
 } from "@/src/hooks/useAgentRowStyle.ts";
 import { useChatDateGrouping } from "@/src/hooks/useChatDateGrouping.ts";
+import { useChatPickerPlacement } from "@/src/hooks/useChatPickerPlacement.ts";
 import {
 	setChromeShadows,
 	useChromeShadows,
@@ -84,6 +86,7 @@ import {
 } from "@/src/hooks/useFileTreePrefs.ts";
 import { useFileTreeThemeStyles } from "@/src/hooks/useFileTreeThemeStyles.ts";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
+import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import {
 	setInvertedBackgrounds,
 	useInvertedBackgrounds,
@@ -94,6 +97,10 @@ import {
 	usePointerCursor,
 } from "@/src/hooks/usePointerCursor.ts";
 import {
+	setPopupOverlayBlur,
+	usePopupOverlayBlur,
+} from "@/src/hooks/usePopupOverlayBlur.ts";
+import {
 	previewSeasonalTheme,
 	type SeasonalThemeSetting,
 	setSeasonalThemeSetting,
@@ -101,6 +108,7 @@ import {
 	useSeasonalThemeSetting,
 } from "@/src/hooks/useSeasonalEffects.ts";
 import { usePendingSubpage } from "@/src/hooks/useSettingSubpage.ts";
+import { useSidebarChatPreview } from "@/src/hooks/useSidebarChatPreview.ts";
 import { useSidebarGroupedNav } from "@/src/hooks/useSidebarGroupedNav.ts";
 import {
 	type SidebarMode,
@@ -108,6 +116,7 @@ import {
 } from "@/src/hooks/useSidebarMode.ts";
 import { useSidebarModes } from "@/src/hooks/useSidebarModes.ts";
 import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
+import { useTabDropdown } from "@/src/hooks/useTabDropdown.ts";
 import {
 	applyCustomTokensLive,
 	CODE_FONTS,
@@ -148,6 +157,12 @@ import {
 	resetAppearanceSettings,
 } from "@/src/lib/appearance-settings.ts";
 import { LEVEL_RAMP_CLASS, levelFillColor } from "@/src/lib/level-ramp.ts";
+import {
+	NOTIFICATION_LAYOUT_STEPS,
+	notificationLayoutStepIndex,
+	setNotificationLayout,
+	useNotificationLayout,
+} from "@/src/lib/notification-layout.ts";
 import {
 	PIERRE_DARK_THEMES,
 	PIERRE_LIGHT_THEMES,
@@ -877,6 +892,55 @@ function ToolDetailSlider({
 	);
 }
 
+function NotificationLayoutSlider({
+	onStepChange,
+	step,
+}: {
+	onStepChange: (next: number) => void;
+	step: number;
+}) {
+	const activeLabel = NOTIFICATION_LAYOUT_STEPS[step]?.label ?? "Unified";
+
+	return (
+		<div className={cn("flex w-[220px] flex-col gap-1.5", LEVEL_RAMP_CLASS)}>
+			<div className="flex items-center justify-end">
+				<span className="truncate text-foreground text-xs">{activeLabel}</span>
+			</div>
+			<RangeSlider
+				aria-label="Notification layout"
+				className="h-8"
+				fillColor={levelFillColor(step, NOTIFICATION_LAYOUT_STEPS.length)}
+				formatValueText={(value) =>
+					NOTIFICATION_LAYOUT_STEPS[Math.round(value)]?.label ?? String(value)
+				}
+				max={NOTIFICATION_LAYOUT_STEPS.length - 1}
+				min={0}
+				onValueChange={onStepChange}
+				step={1}
+				value={step}
+			/>
+			<div className="flex items-center justify-between gap-1">
+				{NOTIFICATION_LAYOUT_STEPS.map((layout, index) => (
+					<span
+						className={cn(
+							"flex-1 truncate text-[10px] leading-none",
+							index === 0 && "text-left",
+							index === NOTIFICATION_LAYOUT_STEPS.length - 1 && "text-right",
+							index > 0 &&
+								index < NOTIFICATION_LAYOUT_STEPS.length - 1 &&
+								"text-center",
+							index === step ? "text-foreground" : "text-muted-foreground/70"
+						)}
+						key={layout.id}
+					>
+						{layout.label}
+					</span>
+				))}
+			</div>
+		</div>
+	);
+}
+
 // Diff viewer (`@pierre/diffs`) option lists for the Appearance selects.
 const DIFF_STYLE_OPTIONS = [
 	{ value: "split", label: "Split (side-by-side)" },
@@ -1083,14 +1147,25 @@ export function AppearanceTab() {
 	const pointerCursorEnabled = usePointerCursor();
 	const chromeShadowsEnabled = useChromeShadows();
 	const dialogOverlayBlurEnabled = useDialogOverlayBlur();
+	const popupOverlayBlurEnabled = usePopupOverlayBlur();
 	const invertedBackgroundsEnabled = useInvertedBackgrounds();
 	const [friendlyNames, setFriendlyNames] = useFriendlyMode();
+	const interfaceLevel = useInterfaceLevel();
+	const [botTerminology, setBotTerminologyEnabled] = useBotTerminology();
+	const botTerminologyForced = interfaceLevel === "simple";
 	const [groupChatsByDate, setGroupChatsByDate] = useChatDateGrouping();
 	const [sidebarGroupedNav, setSidebarGroupedNav] = useSidebarGroupedNav();
-	// The STORED choice, not the drawn one: Agent mode forces messaging rows, and a
+	// The STORED choice, not the drawn one: Bot mode forces messaging rows, and a
 	// switch that flipped itself on when the user picked a sidebar mode would have
 	// nothing left to restore when they left it.
 	const agentRowStyle = useAgentRowStylePref();
+	const [sidebarChatPreview, setSidebarChatPreview] = useSidebarChatPreview();
+	const [chatPickerPlacement, setChatPickerPlacement] =
+		useChatPickerPlacement();
+	const [markdownComposer, setMarkdownComposer] = usePersistedToggle(
+		APPEARANCE_KEYS.markdownComposer,
+		APPEARANCE_DEFAULTS.markdownComposer
+	);
 	// Only the contributed half: the three built-in modes have their own switches
 	// above, worded for what they actually do.
 	const contributedModes = useSidebarModes().modes.filter((m) =>
@@ -1103,6 +1178,21 @@ export function AppearanceTab() {
 			APPEARANCE_KEYS.sidebarOverflowPopover,
 			APPEARANCE_DEFAULTS.sidebarOverflowPopover
 		);
+	const [tabDropdown, setTabDropdown] = useTabDropdown();
+	const [tabSearchButtonVisible, setTabSearchButtonVisible] =
+		usePersistedToggle(
+			APPEARANCE_KEYS.tabSearchButton,
+			APPEARANCE_DEFAULTS.tabSearchButton
+		);
+	const notificationLayout = useNotificationLayout();
+	const notificationLayoutStep =
+		notificationLayoutStepIndex(notificationLayout);
+	const handleNotificationLayoutStep = useCallback((next: number) => {
+		const layout = NOTIFICATION_LAYOUT_STEPS[Math.round(next)]?.id;
+		if (layout) {
+			setNotificationLayout(layout);
+		}
+	}, []);
 	const [nodeSelectorDetail, setNodeSelectorDetail] = usePersistedToggle(
 		APPEARANCE_KEYS.nodeSelectorDetail,
 		APPEARANCE_DEFAULTS.nodeSelectorDetail
@@ -1867,6 +1957,18 @@ export function AppearanceTab() {
 					<SettingsItem
 						actions={
 							<Switch
+								checked={botTerminologyForced || botTerminology}
+								disabled={botTerminologyForced}
+								id="bot-terminology-toggle"
+								onCheckedChange={setBotTerminologyEnabled}
+							/>
+						}
+						description="Use the Bot vocabulary throughout visible interface copy. Ryu Work mode keeps this on; switch to Code to turn it off."
+						title="Use Bot terminology"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
 								checked={pointerCursorEnabled}
 								id="pointer-cursor-toggle"
 								onCheckedChange={setPointerCursor}
@@ -1896,6 +1998,17 @@ export function AppearanceTab() {
 						}
 						description="Dim and blur the app behind dialogs, action dialogs, sheets, and drawers. Off uses a flat transparent look with no backdrop or panel shadow."
 						title="Blur dialog backgrounds"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={popupOverlayBlurEnabled}
+								id="popup-overlay-blur-toggle"
+								onCheckedChange={setPopupOverlayBlur}
+							/>
+						}
+						description="Dim and blur the app behind dropdowns, selects, popovers, context menus, and navigation menus. Off by default for a lighter popup experience."
+						title="Blur popup backgrounds"
 					/>
 					<SettingsItem
 						actions={
@@ -1931,8 +2044,8 @@ export function AppearanceTab() {
 								}
 							/>
 						}
-						description="Narrow the sidebar to one toggle — Sessions ⇄ Agents — opening on the agent roster, with messaging-style agent rows on. Every other section stays reachable from Customize and the command palette. Turn off to go back to the full section list."
-						title="Agent mode"
+						description="Use the built-in Bot mode: one toggle — Sessions ⇄ Agents — opening on the Agents tab, with messaging-style rows on. Ryu Work selects it automatically; turn it off to return to the full section list."
+						title="Bot mode"
 					/>
 					{/* App-registered modes (`contributes.sidebar_modes`). Rendered from the
 					    same list the sidebar's own menu offers, so the two cannot disagree
@@ -2006,10 +2119,59 @@ export function AppearanceTab() {
 						}
 						description={
 							sidebarMode === "agent"
-								? "Draw each agent in the sidebar the way a messaging app does: a large round avatar spanning two lines, the agent's name and the time of its last message on the first, and a preview of that message below. Agent mode is drawing these rows regardless; this switch is what you return to when you leave it."
+								? "Draw each agent in the sidebar the way a messaging app does: a large round avatar spanning two lines, the agent's name and the time of its last message on the first, and a preview of that message below. Bot mode is drawing these rows regardless; this switch is what you return to when you leave it."
 								: "Draw each agent in the sidebar the way a messaging app does: a large round avatar spanning two lines, the agent's name and the time of its last message on the first, and a preview of that message below. Turn off for the compact single-line row."
 						}
 						title="Messaging-style agent rows"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={sidebarChatPreview}
+								id="sidebar-chat-preview-toggle"
+								onCheckedChange={setSidebarChatPreview}
+							/>
+						}
+						description="Show ordinary chat sessions as two-line rows with their latest message and current tool/run state. The text loop pauses when animations are disabled. Bot mode keeps its own two-line rows regardless of this setting."
+						title="Show latest message / tool state in sidebar"
+					/>
+					<SettingsItem
+						actions={
+							<Select
+								onValueChange={(value) => {
+									if (value === "composer" || value === "tab-bar") {
+										setChatPickerPlacement(value);
+									}
+								}}
+								value={chatPickerPlacement}
+							>
+								<SelectTrigger
+									className="h-8 w-56 text-sm"
+									id="chat-picker-placement-select"
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="composer">In composer</SelectItem>
+									<SelectItem value="tab-bar">
+										In tab bar actions tray
+									</SelectItem>
+								</SelectContent>
+							</Select>
+						}
+						description="Choose where the chat model and agent picker appears. The default keeps it in the composer; the tab bar option moves the same picker into the chat tab's actions tray."
+						title="Chat model & agent picker"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={markdownComposer}
+								id="markdown-composer-toggle"
+								onCheckedChange={setMarkdownComposer}
+							/>
+						}
+						description="Use the shared Plate Markdown editor in chat. Pasted Markdown links render as links, can be clicked to edit their URL or display text, and common Markdown blocks and marks render inline. Mentions keep their chat tokens; turn this off to return to the lightweight textarea."
+						title="Rich Markdown composer"
 					/>
 					<SettingsItem
 						actions={
@@ -2032,6 +2194,41 @@ export function AppearanceTab() {
 						}
 						description="When a section has more items than fit, open a searchable, infinite-scrolling popover to the right instead of expanding the list inline with Show more / Show less."
 						title="Search overflow in a popover"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={tabDropdown}
+								id="tab-dropdown-toggle"
+								onCheckedChange={setTabDropdown}
+							/>
+						}
+						description="Replace the full title-bar tab strip with one compact, searchable dropdown for every open tab. Its trigger stays borderless and transparent until you hover it. Turn off to show the full tab strip."
+						title="Show tabs as a dropdown"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={tabSearchButtonVisible}
+								disabled={tabDropdown}
+								id="tab-search-button-toggle"
+								onCheckedChange={setTabSearchButtonVisible}
+							/>
+						}
+						description="Show the chevron beside the + tab button when the full tab strip is enabled. It opens a searchable list of every open tab; if you hide it from its context menu, turn this back on here."
+						title="Show tab search button"
+					/>
+					<SettingsItem
+						actions={
+							<NotificationLayoutSlider
+								onStepChange={handleNotificationLayoutStep}
+								step={notificationLayoutStep}
+							/>
+						}
+						description={
+							NOTIFICATION_LAYOUT_STEPS[notificationLayoutStep]?.description
+						}
+						title="Notification layout"
 					/>
 				</SettingsGroup>
 			</SettingsSection>
@@ -2855,7 +3052,7 @@ export function AppearanceTab() {
 					id: "chat",
 					title: "Chat",
 					hint: "How much detail a conversation shows while it runs.",
-					icon: BubbleChatIcon,
+					icon: Chat01Icon,
 					tint: "teal",
 					content: chatPage,
 				},

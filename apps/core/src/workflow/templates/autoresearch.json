@@ -2,7 +2,7 @@
   "meta": {
     "id": "autoresearch",
     "name": "Autoresearch",
-    "description": "Requires the Research app (@ryu/research) to be enabled — it provides the research__* tools this loop drives, and they do not exist on a node where the app is off. A researcher agent iterates on an experiment via those tools, keeping only improvements — a git-versioned autoresearch loop.",
+    "description": "Requires the Research app (@ryu/research) to be enabled — it provides the research.* tools this loop drives, and they do not exist on a node where the app is off. A researcher agent iterates on an experiment via those tools, keeping only improvements — a git-versioned autoresearch loop.",
     "category": "research",
     "pattern": "git-ledger-loop",
     "icon": "FlaskConical",
@@ -60,7 +60,7 @@
             "id": "researcher",
             "type": "agent",
             "agent_id": "ryu",
-            "task": "You are an autonomous ML researcher. Minimize the experiment's `val_bpb` (lower is better) by looping with the research__* tools:\n1. research__init_workspace {\"experiment\":\"toy\"} to get a workspace_id, the mutable_files, and program_md (follow it).\n2. research__read_file the mutable train.py and study its hyperparameters.\n3. Form ONE small hypothesis, then research__write_file the edited train.py.\n4. research__run {workspace_id} — read back score, status, memory_gb.\n5. If status==ok AND score improved on the best so far: research__keep; else research__reset.\n6. research__ledger {workspace_id, commit, score, memory_gb, status, description} to log the attempt.\n7. Repeat with a new hypothesis. Change one thing at a time; never stop until told.\nIncoming goal: {{input}}"
+            "task": "You are an autonomous ML researcher. Minimize the experiment's `val_bpb` (lower is better) by looping with the research.* tools:\n1. research.init_workspace {\"experiment\":\"toy\"} to get a workspace_id, the mutable_files, and program_md (follow it).\n2. research.read_file the mutable train.py and study its hyperparameters.\n3. Form ONE small hypothesis, then research.write_file the edited train.py.\n4. research.run {workspace_id} — read back score, status, memory_gb.\n5. If status==ok AND score improved on the best so far: research.keep; else research.reset.\n6. research.ledger {workspace_id, commit, score, memory_gb, status, description} to log the attempt.\n7. Repeat with a new hypothesis. Change one thing at a time; never stop until told.\nIncoming goal: {{input}}"
           },
           {
             "id": "body_out",

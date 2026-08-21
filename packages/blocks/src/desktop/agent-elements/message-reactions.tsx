@@ -1,14 +1,17 @@
 import { BubbleReactions } from "@ryu/ui/components/bubble";
+import { EmojiPicker } from "@ryu/ui/components/emoji-picker";
 import {
 	Popover,
 	PopoverContent,
 	PopoverTrigger,
 } from "@ryu/ui/components/popover";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 
-export { isServerAssignedMessageId } from "./message-reaction-id.ts";
+import { IconMoodPlus, IconPlus } from "@tabler/icons-react";
+import { useState } from "react";
 
-import { IconMoodPlus } from "@tabler/icons-react";
+export { isServerAssignedMessageId } from "./message-reaction-id.ts";
 
 /**
  * Emoji reactions on one chat message: the chip row, and the picker that adds
@@ -35,9 +38,8 @@ export interface MessageReactionBucket {
 /**
  * The quick set, in the order every messaging client shows it.
  *
- * Fixed rather than a full emoji-mart picker: reactions are a one-tap
- * affordance, and mounting a searchable grid of 1800 glyphs on every message
- * hover is both slower and more UI than the gesture deserves.
+ * Fixed quick reactions keep the one-tap affordance compact; the full picker
+ * remains available from the add-reaction popover.
  */
 export const QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉", "😮", "😢"] as const;
 
@@ -76,7 +78,7 @@ export function MessageReactions({
 		>
 			{buckets.map((bucket) => (
 				<button
-					aria-label={`${bucket.emoji} ${bucket.count}`}
+					aria-label={`${bucket.emoji} ${formatNumber(bucket.count)}`}
 					aria-pressed={bucket.reactedByMe}
 					className={cn(
 						"flex items-center gap-1 rounded-full px-1.5 py-0.5 text-xs leading-none transition-colors",
@@ -92,7 +94,7 @@ export function MessageReactions({
 					type="button"
 				>
 					<span className="text-sm leading-none">{bucket.emoji}</span>
-					<span className="tabular-nums">{bucket.count}</span>
+					<span className="tabular-nums">{formatNumber(bucket.count)}</span>
 				</button>
 			))}
 			{canReact && <ReactionPicker onPick={onToggle} />}
@@ -101,8 +103,23 @@ export function MessageReactions({
 }
 
 function ReactionPicker({ onPick }: { onPick: (emoji: string) => void }) {
+	const [open, setOpen] = useState(false);
+	const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+
+	const handleOpenChange = (nextOpen: boolean) => {
+		setOpen(nextOpen);
+		if (!nextOpen) {
+			setShowEmojiPicker(false);
+		}
+	};
+
+	const handlePick = (emoji: string) => {
+		onPick(emoji);
+		handleOpenChange(false);
+	};
+
 	return (
-		<Popover>
+		<Popover onOpenChange={handleOpenChange} open={open}>
 			{/* Base UI triggers take a `render` prop; nesting a button as a CHILD of
 			    the trigger renders a button inside a button and throws. */}
 			<PopoverTrigger
@@ -120,16 +137,32 @@ function ReactionPicker({ onPick }: { onPick: (emoji: string) => void }) {
 				<div className="flex items-center gap-0.5">
 					{QUICK_REACTIONS.map((emoji) => (
 						<button
-							aria-label={emoji}
+							aria-label={`Add ${emoji} reaction`}
 							className="rounded-md p-1 text-base leading-none transition-colors hover:bg-foreground/8"
 							key={emoji}
-							onClick={() => onPick(emoji)}
+							onClick={() => handlePick(emoji)}
 							type="button"
 						>
 							{emoji}
 						</button>
 					))}
+					<button
+						aria-expanded={showEmojiPicker}
+						aria-label="More emoji"
+						className="flex items-center gap-0.5 rounded-md px-1.5 py-1 text-muted-foreground text-xs transition-colors hover:bg-foreground/8 hover:text-foreground"
+						onClick={() => setShowEmojiPicker(true)}
+						title="More emoji"
+						type="button"
+					>
+						<IconPlus aria-hidden="true" className="size-3.5" />
+						<span>More</span>
+					</button>
 				</div>
+				{showEmojiPicker && (
+					<div className="overflow-hidden rounded-lg border border-border [&_em-emoji-picker]:w-full!">
+						<EmojiPicker onEmojiSelect={(emoji) => handlePick(emoji.native)} />
+					</div>
+				)}
 			</PopoverContent>
 		</Popover>
 	);

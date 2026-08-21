@@ -18,13 +18,72 @@ use tracing::debug;
 
 use crate::config::CoreProviderConfig;
 
+/// Canonical prefix Core uses for Composio action ids.
+pub const COMPOSIO_TOOL_PREFIX: &str = "composio.";
+
+/// OpenAI-compatible function prefix for Composio action ids.
+///
+/// The catalog keeps the dotted id for search, allowlists, audit, and dispatch,
+/// but dots are not legal in a Chat Completions function name. The alias is
+/// reversible at the gateway boundary and is also accepted by Core's legacy
+/// double-underscore id normalizer.
+pub const COMPOSIO_FUNCTION_PREFIX: &str = "composio__";
+
+/// Prefix for reversible aliases of every other dotted catalog id. Hex keeps
+/// the alias within the provider-neutral function-name grammar without making
+/// `.`/`/`/`:` escaping ambiguous.
+pub const GENERIC_FUNCTION_PREFIX: &str = "ryu__";
+
+fn encode_function_id(id: &str) -> String {
+    id.as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn decode_function_id(value: &str) -> Option<String> {
+    let encoded = value.strip_prefix(GENERIC_FUNCTION_PREFIX)?;
+    if encoded.is_empty() || encoded.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|chunk| {
+            let text = std::str::from_utf8(chunk).ok()?;
+            u8::from_str_radix(text, 16).ok()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let decoded = String::from_utf8(bytes).ok()?;
+    decoded.contains('.').then_some(decoded)
+}
+
+/// Return the legal function name used for a canonical catalog id.
+pub fn model_tool_name(id: &str) -> String {
+    if let Some(slug) = id.strip_prefix(COMPOSIO_TOOL_PREFIX) {
+        return format!("{}{}", COMPOSIO_FUNCTION_PREFIX, slug);
+    }
+    if id.contains('.') {
+        return format!("{}{}", GENERIC_FUNCTION_PREFIX, encode_function_id(id));
+    }
+    id.to_owned()
+}
+
+/// Convert a model-facing Composio function alias back to Core's canonical id.
+pub fn canonical_tool_id(name: &str) -> String {
+    if let Some(slug) = name.strip_prefix(COMPOSIO_FUNCTION_PREFIX) {
+        return format!("{}{}", COMPOSIO_TOOL_PREFIX, slug);
+    }
+    decode_function_id(name).unwrap_or_else(|| name.to_owned())
+}
+
 /// Source plane of a catalog entry — mirror of Core's `ToolKind` (Contract 1). Wire
 /// values: `mcp|builtin|composio|app|core-api|command|skill`.
 ///
 /// The gateway now reads this field in exactly one place, and it is load-bearing:
 /// [`crate::tools::handle_search`] must not describe-and-inject a
 /// [`ToolKind::Skill`] row as an OpenAI function definition. A skill is instruction
-/// text the model loads with `skills__load`, not a function it calls; injecting one
+/// text the model loads with `skills.load`, not a function it calls; injecting one
 /// would hand the model a callable named after a skill, and Core would then have to
 /// refuse a call the gateway invited. The kind is also relayed to the model in the
 /// `tool_search` result so it can tell the two apart.
@@ -61,7 +120,7 @@ pub enum ToolKind {
     CoreApi,
     /// A declarative app tool that execs an allowlisted local CLI.
     Command,
-    /// An Agent Skill: instruction text, loaded with `skills__load`, never called.
+    /// An Agent Skill: instruction text, loaded with `skills.load`, never called.
     Skill,
     /// A tool derived from an app sidecar's OpenAPI document (one row per
     /// operation), as opposed to [`ToolKind::App`]'s hand-declared runnables.
@@ -193,14 +252,16 @@ impl DescribedTool {
         })
     }
 
-    /// The full OpenAI function-tool definition for this tool, keyed by its
-    /// fully-qualified id so the model emits a `tool_call` the loop can route
-    /// back to Core by exact id.
+    /// The full OpenAI function-tool definition for this tool.
+    ///
+    /// Catalog ids remain canonical internally. Composio's dotted id is exposed
+    /// as a legal reversible function alias so OpenAI-compatible providers accept
+    /// the definition; the tool loop maps the emitted alias back before routing.
     pub fn to_tool_def(&self) -> Value {
         json!({
             "type": "function",
             "function": {
-                "name": self.id,
+                "name": model_tool_name(&self.id),
                 "description": self.description,
                 "parameters": self.to_function_parameters(),
             }
@@ -360,6 +421,9 @@ impl CoreCatalog for ToolSearchClient {
             // Server-derived host conversation → Core's `ToolPrincipal`. Omitted-as-
             // null preserves the fail-closed default on a bound node.
             "host_conversation_id": host_conversation_id,
+            // The Gateway charges its own Composio tool loop after Core returns.
+            // Core must not emit a second charge for the same action.
+            "budget_already_metered": true,
         });
         let resp = self
             .with_auth(self.http.post(self.url("/api/mcp/tools/call")).json(&body))
@@ -494,7 +558,7 @@ mod tests {
     fn every_core_tool_kind_decodes_to_a_named_mirror_variant() {
         for kind in ryu_tool_registry::ToolKind::ALL.iter().copied() {
             let wire = kind.wire_name();
-            let parsed = descriptors_from_envelope(json!({ "data": [row("s__t", wire)] }))
+            let parsed = descriptors_from_envelope(json!({ "data": [row("s.t", wire)] }))
                 .unwrap_or_else(|e| panic!("kind '{wire}' failed to decode: {e}"));
             assert_eq!(parsed.len(), 1, "kind '{wire}' was dropped");
             assert_ne!(
@@ -510,7 +574,7 @@ mod tests {
             );
         }
         // The one variant that has no Core counterpart, spelled explicitly.
-        let unknown = descriptors_from_envelope(json!({ "data": [row("s__t", "teleportation")] }))
+        let unknown = descriptors_from_envelope(json!({ "data": [row("s.t", "teleportation")] }))
             .expect("an unmirrored kind still decodes");
         assert_eq!(unknown[0].kind, ToolKind::Unknown);
         assert_eq!(unknown[0].kind.wire_name(), "unknown");
@@ -524,10 +588,10 @@ mod tests {
         let parsed = descriptors_from_envelope(json!({
             "object": "list",
             "data": [
-                row("exa__search", "mcp"),
-                row("ryu__list_conversations", "core-api"),
-                row("some__tool", "teleportation"),
-                row("plugin__run", "command"),
+                row("exa.search", "mcp"),
+                row("ryu.list_conversations", "core-api"),
+                row("some.tool", "teleportation"),
+                row("plugin.run", "command"),
             ],
         }))
         .expect("a list of decodable rows must not be an Err");
@@ -535,10 +599,10 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "exa__search",
-                "ryu__list_conversations",
-                "some__tool",
-                "plugin__run"
+                "exa.search",
+                "ryu.list_conversations",
+                "some.tool",
+                "plugin.run"
             ]
         );
         // An unmirrored kind is carried, not dropped: it grants nothing (the
@@ -553,16 +617,16 @@ mod tests {
     fn malformed_rows_are_dropped_without_taking_their_neighbours() {
         let parsed = descriptors_from_envelope(json!({
             "data": [
-                row("good__one", "mcp"),
+                row("good.one", "mcp"),
                 json!({ "name": "no-id", "kind": "mcp" }),
-                json!({ "id": "bad__kind", "name": "n", "kind": 5 }),
+                json!({ "id": "bad.kind", "name": "n", "kind": 5 }),
                 Value::String("not even an object".to_string()),
-                row("good__two", "app"),
+                row("good.two", "app"),
             ],
         }))
         .expect("malformed rows must not fail the whole parse");
         let ids: Vec<&str> = parsed.iter().map(|d| d.id.as_str()).collect();
-        assert_eq!(ids, vec!["good__one", "good__two"]);
+        assert_eq!(ids, vec!["good.one", "good.two"]);
     }
 
     /// An all-garbage *list* yields an empty catalog, not an error — the model
@@ -590,8 +654,48 @@ mod tests {
     /// A bare top-level array (no `data` envelope) is still accepted.
     #[test]
     fn a_bare_array_body_decodes_without_the_data_envelope() {
-        let parsed = descriptors_from_envelope(json!([row("a__b", "builtin")]))
+        let parsed = descriptors_from_envelope(json!([row("a.b", "builtin")]))
             .expect("a bare array is a valid body");
         assert_eq!(parsed.len(), 1);
+    }
+
+    #[test]
+    fn composio_ids_use_legal_model_aliases_and_round_trip() {
+        let canonical = "composio.SLACK_SEND_MESSAGE";
+        let alias = model_tool_name(canonical);
+        assert_eq!(alias, "composio__SLACK_SEND_MESSAGE");
+        assert!(
+            alias
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+            "OpenAI function name contains an illegal character: {alias}"
+        );
+        assert_eq!(canonical_tool_id(&alias), canonical);
+        assert_eq!(canonical_tool_id(canonical), canonical);
+
+        for canonical in ["exa.search", "skills.load", "mcp.server.tool"] {
+            let alias = model_tool_name(canonical);
+            assert_ne!(alias, canonical);
+            assert!(
+                alias
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+                "OpenAI function name contains an illegal character: {alias}"
+            );
+            assert_eq!(canonical_tool_id(&alias), canonical);
+        }
+
+        let described = DescribedTool {
+            id: canonical.to_owned(),
+            name: "Send a Slack message".to_owned(),
+            description: "send".to_owned(),
+            args: Vec::new(),
+            shallow: true,
+            parameters: None,
+        };
+        assert_eq!(
+            described.to_tool_def()["function"]["name"],
+            "composio__SLACK_SEND_MESSAGE"
+        );
     }
 }

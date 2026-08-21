@@ -1,6 +1,6 @@
 // Standalone browser story for the REAL Store/Library page chrome:
 // `StoreSectionTabs` (the pill section strip, scrolled through the shared
-// `EdgeScroller`) and `StoreGlobalSearch` (the large muted search pill), both
+// `TabsList`) and `StoreGlobalSearch` (the large muted search pill), both
 // exported from `packages/blocks/src/desktop/store.tsx`.
 //
 // Both are prop-driven presentational components, so they mount without Core,
@@ -10,50 +10,224 @@
 // realm, not below them.
 
 import {
-	AppleIcon,
-	CpuIcon,
-	GridIcon,
+	BrainIcon,
+	Chat01Icon,
+	Clock01Icon,
+	ColorsIcon,
+	Cursor02Icon,
+	CursorMagicSelection04Icon,
+	Download01Icon,
+	FileExportIcon,
 	Home01Icon,
-	PuzzleIcon,
-	Rocket01Icon,
-	Settings01Icon,
-	SparklesIcon,
-	UserGroupIcon,
-	Wallet01Icon,
+	LayerIcon,
+	PlugSocketIcon,
+	StarIcon,
+	Target01Icon,
 } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	StoreGlobalSearch,
 	type StoreSectionTab,
 	StoreSectionTabs,
 } from "@ryu/blocks/desktop/store";
+import { REALM_ICONS } from "@ryu/marketplace/catalog/realm-icons";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
+import { SECTION_ICONS } from "../../src/components/layout/sidebar-sections.ts";
 import "../../src/index.css";
 
 const MANY: StoreSectionTab[] = [
 	{ group: "discover", icon: Home01Icon, label: "Home", value: "home" },
-	{ group: "discover", icon: GridIcon, label: "Apps", value: "apps" },
-	{ group: "discover", icon: PuzzleIcon, label: "Plugins", value: "plugins" },
-	{ group: "discover", icon: SparklesIcon, label: "Agents", value: "agents" },
 	{
+		count: 12,
+		group: "discover",
+		icon: SECTION_ICONS.companions,
+		label: "Apps",
+		value: "apps",
+	},
+	{
+		count: 48,
+		group: "discover",
+		icon: SECTION_ICONS.plugins,
+		label: "Plugins",
+		value: "plugins",
+	},
+	{
+		count: 7,
+		group: "discover",
+		icon: REALM_ICONS.agents,
+		label: "Agents",
+		value: "agents",
+	},
+	{
+		count: 4,
 		group: "build",
-		icon: Rocket01Icon,
+		icon: SECTION_ICONS.workflows,
 		label: "Workflows",
 		value: "workflows",
 	},
-	{ group: "build", icon: CpuIcon, label: "Models", value: "models" },
-	{ group: "build", icon: AppleIcon, label: "Engines", value: "engines" },
-	{ group: "manage", icon: UserGroupIcon, label: "Teams", value: "teams" },
 	{
+		count: 1_234_567,
+		group: "build",
+		icon: REALM_ICONS.models,
+		label: "Models",
+		value: "models",
+	},
+	{
+		count: 6,
+		group: "build",
+		icon: SECTION_ICONS.engines,
+		label: "Engines",
+		value: "engines",
+	},
+	{
+		count: 3,
 		group: "manage",
-		icon: Settings01Icon,
+		icon: SECTION_ICONS.teams,
+		label: "Teams",
+		value: "teams",
+	},
+	{
+		count: 9,
+		group: "manage",
+		icon: Download01Icon,
 		label: "Installed",
 		value: "installed",
 	},
-	{ group: "account", icon: Wallet01Icon, label: "Account", value: "account" },
+	{
+		count: 2,
+		group: "account",
+		icon: FileExportIcon,
+		label: "Output Styles",
+		value: "output-styles",
+	},
+	{
+		count: 8,
+		group: "manage",
+		icon: ColorsIcon,
+		label: "Themes",
+		value: "themes",
+	},
+	{
+		count: 2,
+		group: "account",
+		icon: PlugSocketIcon,
+		label: "Connections",
+		value: "connections",
+	},
 ];
 
 const FEW: StoreSectionTab[] = MANY.slice(0, 2);
+
+const LIBRARY: StoreSectionTab[] = [
+	{
+		count: 1234,
+		group: "library",
+		icon: Clock01Icon,
+		label: "Recents",
+		value: "recents",
+	},
+	{
+		count: 6,
+		group: "library",
+		icon: StarIcon,
+		label: "Favorites",
+		value: "favorites",
+	},
+	{
+		count: 24,
+		group: "library",
+		icon: SECTION_ICONS.chats,
+		label: "Chats",
+		value: "chat",
+	},
+	{
+		count: 7,
+		group: "library",
+		icon: SECTION_ICONS.agents,
+		label: "Agents",
+		value: "agent",
+	},
+	{
+		count: 3,
+		group: "library",
+		icon: SECTION_ICONS.channels,
+		label: "Channels",
+		value: "channel",
+	},
+	{
+		count: 4,
+		group: "library",
+		icon: SECTION_ICONS.companions,
+		label: "Apps",
+		value: "companions",
+	},
+	{
+		count: 11,
+		group: "library",
+		icon: SECTION_ICONS.engines,
+		label: "Engines",
+		value: "engines",
+	},
+	{
+		count: 14,
+		group: "apps",
+		icon: "workflow-circle-06",
+		label: "Meeting notes",
+		value: "plugin:com.ryu.meetings:notes",
+	},
+];
+
+const COUNT_FORMAT_PROOF: StoreSectionTab[] = [
+	{
+		count: 1234,
+		group: "social",
+		icon: Download01Icon,
+		label: "Downloads",
+		value: "downloads",
+	},
+	{
+		count: 4200,
+		group: "social",
+		icon: StarIcon,
+		label: "Likes",
+		value: "likes",
+	},
+	{
+		count: 1_234_567,
+		group: "owned",
+		icon: SECTION_ICONS.companions,
+		label: "Library",
+		value: "library",
+	},
+];
+
+const ICON_PROOF = [
+	{ icon: SECTION_ICONS.companions, label: "Apps", name: "Package01Icon" },
+	{ icon: SECTION_ICONS.plugins, label: "Plugins", name: "PlugSocketIcon" },
+	{ icon: SECTION_ICONS.skills, label: "Skills", name: "PotionIcon" },
+	{
+		icon: SECTION_ICONS.workflows,
+		label: "Workflows",
+		name: "WorkflowCircle06Icon",
+	},
+	{ icon: Chat01Icon, label: "Chats", name: "Chat01Icon" },
+	{ icon: SECTION_ICONS.teams, label: "Teams", name: "UserMultiple02Icon" },
+	{ icon: SECTION_ICONS.channels, label: "Channels", name: "Tv01Icon" },
+	{
+		icon: SECTION_ICONS.identities,
+		label: "Identities",
+		name: "FingerPrintIcon",
+	},
+	{ icon: StarIcon, label: "Favorites", name: "StarIcon" },
+	{ icon: LayerIcon, label: "Engines", name: "LayerIcon" },
+	{ icon: BrainIcon, label: "Models", name: "BrainIcon" },
+	{ icon: Download01Icon, label: "Installed", name: "Download01Icon" },
+	{ icon: FileExportIcon, label: "Output Styles", name: "FileExportIcon" },
+	{ icon: ColorsIcon, label: "Themes", name: "ColorsIcon" },
+	{ icon: Target01Icon, label: "Agents", name: "Target01Icon" },
+];
 
 /**
  * StorePage's shell in miniature: the global search over the section tabs over a
@@ -146,6 +320,76 @@ function Story() {
 			    and the input row overlap most. */}
 			<PageShell testid="page" width={640} />
 			<PageShell testid="cramped" width={360} />
+
+			<section data-testid="library-counts-panel" style={{ width: 900 }}>
+				<p className="pb-2 font-semibold text-lg">Library registry</p>
+				<StoreSectionTabs
+					active="recents"
+					className="pt-2 pb-1"
+					sections={LIBRARY}
+				/>
+				<p
+					className="pt-3 text-muted-foreground text-xs"
+					data-testid="library-registry-note"
+				>
+					Built-in sidebar collections and app-registered sections use the same
+					Library tab contract.
+				</p>
+			</section>
+
+			<section
+				className="rounded-xl border border-border bg-card p-4"
+				data-testid="count-format-proof"
+				style={{ maxWidth: 900 }}
+			>
+				<p className="pb-3 font-semibold text-lg">Count formatting</p>
+				<StoreSectionTabs active="downloads" sections={COUNT_FORMAT_PROOF} />
+				<p
+					className="pt-3 text-muted-foreground text-sm tabular-nums"
+					data-testid="line-count-proof"
+				>
+					+{formatCount(1_234_567) ?? "—"} lines · {formatCount(1234) ?? "—"}{" "}
+					files · {formatCount(4200) ?? "—"} likes ·{" "}
+					{formatCount(1_234_567) ?? "—"} library items
+				</p>
+			</section>
+
+			<section
+				className="rounded-xl border border-border bg-card p-4"
+				data-testid="icon-parity-proof"
+				style={{ maxWidth: 900 }}
+			>
+				<p className="pb-3 font-semibold text-lg">Icon parity</p>
+				<div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+					{ICON_PROOF.map(({ icon, label, name }) => (
+						<div
+							className="flex items-center gap-2 rounded-lg border border-border/70 bg-background px-3 py-2 text-sm"
+							data-icon-name={name}
+							key={name}
+						>
+							<HugeiconsIcon className="size-4 shrink-0" icon={icon} />
+							<span>{label}</span>
+						</div>
+					))}
+					<div
+						className="flex items-center gap-2 rounded-lg border border-border/70 bg-background px-3 py-2 text-sm"
+						data-icon-name="Cursor02Icon"
+					>
+						<HugeiconsIcon className="size-4 shrink-0" icon={Cursor02Icon} />
+						<span>Computer use</span>
+					</div>
+					<div
+						className="flex items-center gap-2 rounded-lg border border-border/70 bg-background px-3 py-2 text-sm"
+						data-icon-name="CursorMagicSelection04Icon"
+					>
+						<HugeiconsIcon
+							className="size-4 shrink-0"
+							icon={CursorMagicSelection04Icon}
+						/>
+						<span>Computer control</span>
+					</div>
+				</div>
+			</section>
 		</div>
 	);
 }

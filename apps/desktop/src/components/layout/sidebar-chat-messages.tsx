@@ -10,6 +10,7 @@ import {
 	HoverCardTrigger,
 } from "@ryu/ui/components/hover-card";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useEffect, useRef, useState } from "react";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { AgentAvatar, engineForAgent } from "@/src/lib/agent-logos.tsx";
@@ -126,9 +127,9 @@ export function SidebarChatMessages({
 						>
 							{agent ? (
 								<AgentAvatar
-									avatarUrl={agent.avatarUrl}
 									className="size-3 shrink-0 rounded-[2px] object-contain"
 									engine={engineForAgent(agent)}
+									glyph={agent.avatarGlyph}
 									size="12px"
 								/>
 							) : (
@@ -156,9 +157,9 @@ export function SidebarChatMessages({
 										<div className="flex items-start gap-2">
 											<span className="mt-0.5 flex size-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted">
 												<AgentAvatar
-													avatarUrl={agent.avatarUrl}
 													className="size-5 rounded-full object-cover"
 													engine={engineForAgent(agent)}
+													glyph={agent.avatarGlyph}
 													size="20px"
 												/>
 											</span>
@@ -230,7 +231,9 @@ export function ChatRowSubAccordion({
 				/>
 				<span className="font-medium">{label}</span>
 				{typeof count === "number" ? (
-					<span className="text-muted-foreground/70 tabular-nums">{count}</span>
+					<span className="text-muted-foreground/70 tabular-nums">
+						{formatCount(count) ?? "—"}
+					</span>
 				) : null}
 			</button>
 			{expanded ? children : null}

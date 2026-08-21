@@ -1,10 +1,10 @@
 // apps/desktop/src/lib/api/conversation-search.ts
 //
-// Typed client for Core's semantic chat-message search
+// Typed client for Core's exact + semantic chat-message search
 // (`GET /api/conversations/search`), the human-facing surface of the
-// `search_conversations` capability. Core embeds the query, runs a KNN over the
-// message index (lazily backfilling older chats), and re-decrypts each hit's
-// snippet — so results match by meaning, not substring.
+// `search_conversations` capability. Core merges lexical exact hits with a KNN
+// over the message index (lazily backfilling older chats), and re-decrypts each
+// hit's snippet.
 //
 // `indexed: false` means the message index isn't wired (e.g. the embedder
 // sidecar never ran), so the caller can explain the absence rather than implying
@@ -64,7 +64,11 @@ export async function searchConversations(
 		return { hits: [], indexed: true };
 	}
 	try {
-		const params = new URLSearchParams({ q, limit: String(limit) });
+		const params = new URLSearchParams({
+			limit: String(limit),
+			mode: "all",
+			q,
+		});
 		const raw = await request<RawResult>(
 			target,
 			`/api/conversations/search?${params}`,

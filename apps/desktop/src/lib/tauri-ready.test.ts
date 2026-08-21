@@ -27,7 +27,7 @@ interface FakeInternals {
 	unregisterCallback?: (id: number) => void;
 }
 
-const globalWithWindow = globalThis as typeof globalThis & {
+const globalWithWindow = globalThis as Omit<typeof globalThis, "window"> & {
 	window?: { __TAURI_INTERNALS__?: FakeInternals };
 };
 
@@ -88,7 +88,10 @@ describe("invokeWhenReady", () => {
 		);
 
 		// Issued with no bridge at all — this is the boot race the gate exists for.
-		const pending = invokeWhenReady<{ default: string }>("list_nodes");
+		const pending = invokeWhenReady<{
+			default: string;
+			nodes: unknown[];
+		}>("list_nodes");
 
 		// Tauri injects a beat later, exactly as a slow cold start does.
 		setTimeout(() => {
@@ -153,10 +156,10 @@ describe("withTauri", () => {
 	test("resolves null outside Tauri rather than throwing the raw TypeError", async () => {
 		const result = await withTauri(() => {
 			// What `getCurrentWebviewWindow()` does outside Tauri.
-			const internals = (
-				globalWithWindow.window as { __TAURI_INTERNALS__?: FakeInternals }
-			).__TAURI_INTERNALS__;
-			return (internals as unknown as { metadata: string }).metadata;
+			if (!globalWithWindow.window?.__TAURI_INTERNALS__) {
+				throw new TypeError("window.__TAURI_INTERNALS__ is unavailable");
+			}
+			return "unreachable";
 		});
 		expect(result).toBeNull();
 	});

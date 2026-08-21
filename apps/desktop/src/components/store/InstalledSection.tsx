@@ -46,7 +46,11 @@ import {
 } from "@ryu/marketplace/catalog/detail/listing-detail-shell";
 import { ListingDetailTabs } from "@ryu/marketplace/catalog/detail/listing-detail-tabs";
 import { iconCacheKey } from "@ryu/marketplace/catalog/icon-cache";
-import type { CatalogEntry } from "@ryu/marketplace/catalog/types";
+import { runScorecard } from "@ryu/marketplace/catalog/scorecard";
+import {
+	type CatalogEntry,
+	catalogLayerBadges,
+} from "@ryu/marketplace/catalog/types";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -71,6 +75,7 @@ import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { StatusBadge } from "@ryu/ui/components/status-badge";
 import { Switch } from "@ryu/ui/components/switch";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -80,12 +85,18 @@ import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
 import { usePluginSettingsTabs } from "@/src/hooks/usePluginSettingsTabs.ts";
+import { runCatalogScan } from "@/src/lib/api/catalog-scan.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
+	APP_LIFECYCLE_PERMISSIONS,
 	type AppInfo,
+	type AppLifecycleCapabilities,
+	fetchAppLifecycleCapabilities,
 	fetchPluginCatalogDetail,
+	fetchPluginDoctor,
 	fetchSidecarStatus,
 	installSidecar,
+	type PluginDoctorReport,
 	setPluginGrants,
 	startSidecar,
 	stopSidecar,
@@ -208,6 +219,77 @@ function appCategory(app: AppInfo): InstalledCategory {
 	return "plugins";
 }
 
+const LIFECYCLE_LABELS: Record<(typeof APP_LIFECYCLE_PERMISSIONS)[number], string> = {
+	"app.disable": "Disable",
+	"app.enable": "Enable",
+	"app.install": "Install",
+	"app.uninstall": "Uninstall",
+	"app.update": "Update",
+};
+
+function LifecycleAccessCard({
+	capabilities,
+	error,
+	loading,
+}: {
+	capabilities: AppLifecycleCapabilities | null;
+	error: Error | null;
+	loading: boolean;
+}) {
+	const node = capabilities?.node;
+	return (
+		<section
+			aria-label="App lifecycle access"
+			className="rounded-lg border bg-card/60 px-4 py-3"
+			data-testid="app-lifecycle-access"
+		>
+			<div className="flex items-start justify-between gap-3">
+				<div>
+					<p className="font-medium text-sm">Lifecycle access</p>
+					<p className="text-muted-foreground text-xs">
+						{loading
+							? "Checking this node’s ACL…"
+							: node
+								? `${node.scope} node · ${node.id}`
+								: "Local node · server ACL not bound"}
+					</p>
+				</div>
+				<Badge variant="outline">Server-authoritative</Badge>
+			</div>
+			{error ? (
+				<p className="mt-3 text-destructive text-xs">
+					Lifecycle access is unavailable; the server will still enforce every
+					action.
+				</p>
+			) : capabilities ? (
+				<div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-5">
+					{APP_LIFECYCLE_PERMISSIONS.map((permission) => {
+						const allowed = capabilities.permissions[permission] === true;
+						return (
+							<div className="min-w-0" key={permission}>
+								<p className="truncate text-xs">
+									{LIFECYCLE_LABELS[permission]}
+								</p>
+								<p
+									className={
+										allowed
+											? "text-emerald-600 text-xs"
+											: "text-muted-foreground text-xs"
+									}
+								>
+									{allowed
+										? "Allowed"
+										: (capabilities.reasons?.[permission] ?? "Not allowed")}
+								</p>
+							</div>
+						);
+					})}
+				</div>
+			) : null}
+		</section>
+	);
+}
+
 export default function InstalledSection() {
 	const navigate = useNavigate();
 	const {
@@ -227,6 +309,11 @@ export default function InstalledSection() {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
 	};
+	const lifecycleCapabilities = useQuery({
+		queryFn: () => fetchAppLifecycleCapabilities(target),
+		queryKey: ["plugins", "lifecycle-capabilities", activeNode.url],
+		staleTime: 30_000,
+	});
 	const { byPlugin: settingsByPlugin } = usePluginSettingsTabs();
 	// Where each row's settings live (Gateway dialog vs App Settings, at its own
 	// tab). Resolved once for the whole list and read per row below.
@@ -558,6 +645,11 @@ export default function InstalledSection() {
 			hasSelection={selectedApp != null}
 			list={
 				<div className="flex flex-col gap-4 pt-2">
+					<LifecycleAccessCard
+						capabilities={lifecycleCapabilities.data ?? null}
+						loading={lifecycleCapabilities.isLoading}
+						error={lifecycleCapabilities.error}
+					/>
 					{toggleError ? (
 						<div className="flex items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-sm">
 							<span>{toggleError}</span>
@@ -584,9 +676,10 @@ export default function InstalledSection() {
 										<StoreCatalogCard
 											action={renderAppAction(app)}
 											cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
-											contextMenu={appContextMenu(app)}
-											description={cardDescription(app)}
-											dither={app.iconDither}
+										contextMenu={appContextMenu(app)}
+										description={cardDescription(app)}
+										dither={app.iconDither}
+										external={app.external}
 											icon={
 												<HugeiconsIcon className="size-5" icon={ComputerIcon} />
 											}
@@ -594,6 +687,7 @@ export default function InstalledSection() {
 											iconId={app.icon}
 											iconUrl={app.iconUrl}
 											key={app.id}
+											layers={app.layers}
 											name={app.name}
 											onClick={() => setSelectedId(app.id)}
 											seedId={app.id}
@@ -619,6 +713,21 @@ export default function InstalledSection() {
 										: "Plugins, agents, and tools you install from the store show up here."}
 								</EmptyDescription>
 							</EmptyHeader>
+							<EmptyContent>
+								<Button
+									onClick={() => {
+										if (query.trim()) {
+											setQuery("");
+											return;
+										}
+										navigate("/store");
+									}
+								}
+								size="sm"
+							>
+								{query.trim() ? "Clear search" : "Browse the Store"}
+							</Button>
+							</EmptyContent>
 						</Empty>
 					)}
 				</div>
@@ -837,17 +946,127 @@ function InstalledAppTabs({
 		retry: false,
 		staleTime: 5 * 60 * 1000,
 	});
+	const scorecard = useMemo(
+		() => (detail ? runScorecard(entry, detail) : null),
+		[detail, entry]
+	);
+	const doctorQuery = useQuery({
+		enabled: false,
+		queryFn: () => fetchPluginDoctor(target, app.id),
+		queryKey: ["plugins", "doctor", app.id],
+	});
 	if (!detail) {
 		return (
-			<RequiredPluginsSection
-				apps={entry.requires?.apps ?? []}
-				subjectId={app.id}
-				subjectName={app.name}
-			/>
+			<div className="flex flex-col gap-4">
+				<RequiredPluginsSection
+					apps={entry.requires?.apps ?? []}
+					subjectId={app.id}
+					subjectName={app.name}
+				/>
+				<InstalledDoctorCard
+					onRun={() => {
+						void doctorQuery.refetch();
+					}}
+					report={doctorQuery.data ?? null}
+					running={doctorQuery.isFetching}
+				/>
+			</div>
 		);
 	}
 	return (
-		<ListingDetailTabs detail={detail} entry={entry} Markdown={Markdown} />
+		<ListingDetailTabs
+			agentScan={
+				scorecard
+					? () =>
+							runCatalogScan(target, {
+								description: detail.description ?? entry.description,
+								id: entry.id,
+								kind: "app",
+								metadata: {
+									source: detail.source,
+									url: detail.url,
+								},
+								name: entry.name,
+								scorecard,
+							})
+					: undefined
+			}
+			detail={detail}
+			developerDoctor={
+				<InstalledDoctorCard
+					onRun={() => {
+						void doctorQuery.refetch();
+					}}
+					report={doctorQuery.data ?? null}
+					running={doctorQuery.isFetching}
+				/>
+			}
+			entry={entry}
+			Markdown={Markdown}
+			scorecard={scorecard}
+		/>
+	);
+}
+
+function InstalledDoctorCard({
+	onRun,
+	report,
+	running,
+}: {
+	onRun: () => void;
+	report: PluginDoctorReport | null;
+	running: boolean;
+}) {
+	return (
+		<section
+			className="flex flex-col gap-3 rounded-lg border border-primary/25 bg-primary/5 p-4"
+			data-testid="plugin-runtime-doctor"
+		>
+			<div className="flex flex-wrap items-start justify-between gap-3">
+				<div>
+					<h3 className="font-medium text-sm">Run runtime doctor</h3>
+					<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
+						Checks the loaded manifest, lifecycle record, dependencies, grants,
+						and contribution shape. It is read-only and does not execute plugin
+						code or start a sidecar.
+					</p>
+				</div>
+				<Button loading={running} onClick={onRun} size="sm">
+					{running ? "Checking" : "Run doctor"}
+				</Button>
+			</div>
+			{report ? (
+				<div className="space-y-2 text-xs">
+					<div className="flex flex-wrap items-center gap-2">
+						<Badge variant="outline">{report.score}/100</Badge>
+						<span className="text-muted-foreground">
+							{formatCount(report.counts.errors) ?? "—"} errors · {formatCount(report.counts.warnings) ?? "—"} warnings
+						</span>
+					</div>
+					{report.findings.length > 0 ? (
+						<ul className="space-y-1.5">
+							{report.findings.slice(0, 5).map((finding) => (
+								<li
+									className="rounded-md bg-background px-3 py-2"
+									key={finding.checkId}
+								>
+									<p className="font-medium">
+										{finding.severity} · {finding.summary}
+									</p>
+									<p className="mt-0.5 text-muted-foreground">
+										{finding.detail}
+									</p>
+								</li>
+							))}
+						</ul>
+					) : (
+						<p className="text-emerald-600 dark:text-emerald-400">
+							Healthy — no runtime findings.
+						</p>
+					)}
+				</div>
+			) : null}
+		</section>
 	);
 }
 
@@ -882,13 +1101,12 @@ function InstalledAppDetail({
 					{isInstalled ? null : (
 						<Button
 							disabled={busy}
+							loading={busy}
 							onClick={() => onInstall(app)}
 							size="sm"
 							variant="ghost"
 						>
-							{busy ? (
-								<Spinner className="size-4" />
-							) : (
+							{busy ? null : (
 								<HugeiconsIcon className="size-4" icon={Download04Icon} />
 							)}
 							Add
@@ -949,10 +1167,13 @@ function InstalledAppDetail({
 											: "Disabled"
 										: "Not installed",
 								},
-								{ label: "Bundles", value: `${app.runnables.length}` },
+								{
+									label: "Bundles",
+									value: formatCount(app.runnables.length) ?? "—",
+								},
 								{
 									label: "Grants",
-									value: `${app.permissionGrants.length}`,
+									value: formatCount(app.permissionGrants.length) ?? "—",
 								},
 							]}
 						/>
@@ -972,9 +1193,10 @@ function InstalledAppDetail({
 								? "Enabled"
 								: "Disabled"
 							: "Not installed",
-						app.mandatory ? "Required" : null,
-						app.runnables.some((r) => r.kind === AGENT_KIND) ? "Agent" : null,
-					].filter((b): b is string => Boolean(b))}
+										app.mandatory ? "Required" : null,
+										app.runnables.some((r) => r.kind === AGENT_KIND) ? "Agent" : null,
+										...catalogLayerBadges(app.layers, app.external),
+									].filter((b): b is string => Boolean(b))}
 					cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
 					dither={app.iconDither}
 					// No `icon` node: an app with no art of its own gets the generative
@@ -1017,8 +1239,14 @@ function InstalledAppDetail({
 									: "Disabled"
 								: "Not installed",
 						},
-						{ label: "Bundles", value: `${app.runnables.length}` },
-						{ label: "Grants", value: `${app.permissionGrants.length}` },
+						{
+							label: "Bundles",
+							value: formatCount(app.runnables.length) ?? "—",
+						},
+						{
+							label: "Grants",
+							value: formatCount(app.permissionGrants.length) ?? "—",
+						},
 					]}
 				/>
 			}
@@ -1140,13 +1368,12 @@ function BuiltInAppDetail({
 					{isInstalled ? null : (
 						<Button
 							disabled={pending !== null || !isConfigured}
+							loading={pending === "install"}
 							onClick={() => run("install", installSidecar)}
 							size="sm"
 							variant="ghost"
 						>
-							{pending === "install" ? (
-								<Spinner className="size-4" />
-							) : (
+							{pending === "install" ? null : (
 								<HugeiconsIcon className="size-4" icon={Download01Icon} />
 							)}
 							Add
@@ -1155,13 +1382,12 @@ function BuiltInAppDetail({
 					{isInstalled && !isRunning ? (
 						<Button
 							disabled={pending !== null}
+							loading={pending === "start"}
 							onClick={() => run("start", startSidecar)}
 							size="sm"
 							variant="default"
 						>
-							{pending === "start" ? (
-								<Spinner className="size-4" />
-							) : (
+							{pending === "start" ? null : (
 								<HugeiconsIcon className="size-4" icon={Triangle01Icon} />
 							)}
 							Start
@@ -1170,13 +1396,12 @@ function BuiltInAppDetail({
 					{isInstalled && isRunning ? (
 						<Button
 							disabled={pending !== null}
+							loading={pending === "stop"}
 							onClick={() => run("stop", stopSidecar)}
 							size="sm"
 							variant="ghost"
 						>
-							{pending === "stop" ? (
-								<Spinner className="size-4" />
-							) : (
+							{pending === "stop" ? null : (
 								<HugeiconsIcon className="size-4" icon={Square01Icon} />
 							)}
 							Stop
@@ -1254,8 +1479,14 @@ function BuiltInAppDetail({
 									: "Stopped"
 								: "Not installed",
 						},
-						{ label: "Includes", value: `${app.runnables.length}` },
-						{ label: "Grants", value: `${app.permissionGrants.length}` },
+						{
+							label: "Includes",
+							value: formatCount(app.runnables.length) ?? "—",
+						},
+						{
+							label: "Grants",
+							value: formatCount(app.permissionGrants.length) ?? "—",
+						},
 					]}
 				/>
 			}

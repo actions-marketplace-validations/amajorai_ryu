@@ -1,4 +1,10 @@
 {
+  "tags": ["workflows","automation","dag","triggers"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-workflows",
+  "homepage": "https://github.com/amajorai/ryu-workflows",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/workflows",
   "name": "Workflows",
   "version": "0.1.14",
@@ -7,7 +13,7 @@
   "description": "Workflows: petgraph DAG automation with triggers, durable execution, and a natural-language workflow builder.",
   "tagline": "Automate anything as a durable DAG",
   "keywords": ["workflows", "automation", "dag", "triggers"],
-  "icon": "workflow-square-01",
+  "icon": "workflow-circle-06",
   "iconDither": {
     "from": 299,
     "to": "transparent",
@@ -87,14 +93,15 @@
   ],
   "companion": {
     "label": "Workflows",
-    "icon": "workflow-square-01"
+    "icon": "workflow-circle-06"
   },
   "contributes": {
+  "chat_widget_templates": [{"id":"workflows.chat","title":"Workflows widget","description":"Workflows chat widget metadata is coming soon; no render tool is available yet.","triggers":["workflows widget"],"examples":["Show me a workflows widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}],
     "create_actions": [
       {
         "id": "workflows.new",
         "label": "New workflow",
-        "icon": "workflow-square-01",
+        "icon": "workflow-circle-06",
         "target": "/workflows/new",
         "title": "New workflow",
         "order": 60
@@ -105,7 +112,7 @@
         "id": "workflows",
         "title": "Workflows",
         "subtitle": "Ready-made automation templates built on proven agent patterns.",
-        "icon": "workflow-square-01",
+        "icon": "workflow-circle-06",
         "group": "catalog",
         "order": 60,
         "spec": {

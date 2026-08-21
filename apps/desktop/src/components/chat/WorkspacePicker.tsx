@@ -30,7 +30,7 @@ import {
 	WorkflowCircle06Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Button } from "@ryu/ui/components/button.tsx";
+import { Button, ButtonLabel } from "@ryu/ui/components/button.tsx";
 import {
 	Dialog,
 	DialogClose,
@@ -57,6 +57,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { invoke } from "@tauri-apps/api/core";
 import type { ReactNode } from "react";
@@ -78,6 +79,10 @@ import {
 	fetchGitBranches,
 	type WorktreeStatus,
 } from "@/src/lib/api/git.ts";
+import {
+	findWorkspaceProject,
+	workspaceProjectName,
+} from "@/src/lib/workspace-projects.ts";
 import type {
 	ProjectEnvironment,
 	ProjectEnvironmentScripts,
@@ -93,6 +98,10 @@ interface WorkspacePickerProps {
 	 * its own menu, instead of one inline chip with submenus. For narrow columns
 	 * — the pinned summary panel — where the inline chip has nowhere to go.
 	 */
+	folderOverride?: string | null;
+	folderReadOnly?: boolean;
+	/** Hide insertion/deletion counts while retaining the branch and file summary. */
+	showLineStats?: boolean;
 	stacked?: boolean;
 	target: ApiTarget;
 }
@@ -116,15 +125,15 @@ export function DiffStat({ stat }: { stat: LineStat }) {
 		return null;
 	}
 	return (
-		<span className="flex shrink-0 items-center gap-1 font-medium text-[11px] tabular-nums">
+		<span className="flex shrink-0 items-center gap-1 font-heading font-medium text-[11px] tabular-nums">
 			{stat.insertions > 0 && (
 				<span className="text-emerald-600 dark:text-emerald-400/90">
-					+{stat.insertions}
+					+{formatCount(stat.insertions)}
 				</span>
 			)}
 			{stat.deletions > 0 && (
 				<span className="text-red-600/90 dark:text-red-400/90">
-					−{stat.deletions}
+					−{formatCount(stat.deletions)}
 				</span>
 			)}
 		</span>
@@ -149,10 +158,15 @@ function scriptForCurrentPlatform(scripts: ProjectEnvironmentScripts): string {
 export function WorkspacePicker({
 	target,
 	conversationId,
+	folderOverride,
+	folderReadOnly = false,
+	showLineStats = true,
 	stacked = false,
 }: WorkspacePickerProps) {
-	const folder = useWorkspaceStore((s) => s.folder);
+	const storeFolder = useWorkspaceStore((s) => s.folder);
+	const folder = folderOverride === undefined ? storeFolder : folderOverride;
 	const projectNames = useWorkspaceStore((s) => s.projectNames);
+	const projects = useWorkspaceStore((s) => s.projects);
 	const setFolder = useWorkspaceStore((s) => s.setFolder);
 	const worktreeMode = useWorkspaceStore((s) => s.worktreeMode);
 	const worktreeBranch = useWorkspaceStore((s) => s.worktreeBranch);
@@ -188,13 +202,16 @@ export function WorkspacePicker({
 
 	const handleSelectBrowsed = useCallback(
 		(selected: string) => {
+			if (folderReadOnly) {
+				return;
+			}
 			// Browsed paths come from Core's own listing; on a transient activation
 			// failure keep the current folder rather than clearing it.
 			setFolder(selected).catch(() => {
 				// no-op
 			});
 		},
-		[setFolder]
+		[folderReadOnly, setFolder]
 	);
 
 	// Branch state. Branch / dirty / line counts all come from the shared git
@@ -240,9 +257,14 @@ export function WorkspacePicker({
 
 	// A renamed project shows its name, not its path leaf — the same resolution
 	// the folder list itself uses, so the trigger and the row it selected agree.
-	const folderName = folder
-		? projectNames[folder]?.trim() || folder.split(PATH_SEP).at(-1) || null
-		: null;
+	const activeProject = folder
+		? findWorkspaceProject(projects, folder)
+		: undefined;
+	const folderName = activeProject
+		? workspaceProjectName(activeProject, projectNames)
+		: folder
+			? projectNames[folder]?.trim() || folder.split(PATH_SEP).at(-1) || null
+			: null;
 
 	const loadBranches = useCallback(async () => {
 		if (!folder) {
@@ -434,19 +456,27 @@ export function WorkspacePicker({
 		return (
 			<>
 				<div className="flex flex-col items-stretch gap-0.5">
-					<PickerRow
-						contentClassName="max-h-[60vh] overflow-y-auto"
-						fullWidth
-						icon={Folder03Icon}
-						id="folder"
-						label={folderName ?? "Project"}
-						onOpenChange={onPickerOpenChange}
-						open={pickerOpen === "folder"}
-						side="bottom"
-						title={folder ?? "Pick a project folder"}
-					>
-						{folderBody}
-					</PickerRow>
+					{folderReadOnly ? (
+						<ReadonlyPickerRow
+							fullWidth
+							label={folderName ?? "No project folder"}
+							title={folder ?? "No project folder selected"}
+						/>
+					) : (
+						<PickerRow
+							contentClassName="max-h-[60vh] overflow-y-auto"
+							fullWidth
+							icon={Folder03Icon}
+							id="folder"
+							label={folderName ?? "Project"}
+							onOpenChange={onPickerOpenChange}
+							open={pickerOpen === "folder"}
+							side="bottom"
+							title={folder ?? "Pick a project folder"}
+						>
+							{folderBody}
+						</PickerRow>
+					)}
 					{folder && isRepo && (
 						<PickerRow
 							fullWidth
@@ -458,7 +488,9 @@ export function WorkspacePicker({
 							side="bottom"
 							title="Choose where this chat works"
 							trailing={
-								worktreeStatus.active ? <DiffStat stat={worktreeStat} /> : null
+								showLineStats && worktreeStatus.active ? (
+									<DiffStat stat={worktreeStat} />
+								) : null
 							}
 						>
 							{runModeBody}
@@ -489,7 +521,7 @@ export function WorkspacePicker({
 							open={pickerOpen === "branch"}
 							side="bottom"
 							title={`Branch: ${branch}`}
-							trailing={<DiffStat stat={folderStat} />}
+							trailing={showLineStats ? <DiffStat stat={folderStat} /> : null}
 						>
 							{branchBody}
 						</PickerRow>
@@ -517,18 +549,25 @@ export function WorkspacePicker({
 	return (
 		<>
 			<div className="flex min-w-0 items-center gap-0.5">
-				<PickerRow
-					contentClassName="max-h-[60vh] overflow-y-auto"
-					icon={Folder03Icon}
-					id="folder"
-					label={folderName ?? "Project"}
-					onOpenChange={onPickerOpenChange}
-					open={pickerOpen === "folder"}
-					side="top"
-					title={folder ?? "Pick a project folder"}
-				>
-					{folderBody}
-				</PickerRow>
+				{folderReadOnly ? (
+					<ReadonlyPickerRow
+						label={folderName ?? "No project folder"}
+						title={folder ?? "No project folder selected"}
+					/>
+				) : (
+					<PickerRow
+						contentClassName="max-h-[60vh] overflow-y-auto"
+						icon={Folder03Icon}
+						id="folder"
+						label={folderName ?? "Project"}
+						onOpenChange={onPickerOpenChange}
+						open={pickerOpen === "folder"}
+						side="top"
+						title={folder ?? "Pick a project folder"}
+					>
+						{folderBody}
+					</PickerRow>
+				)}
 				{folder && isRepo && (
 					<PickerRow
 						icon={inWorktree ? FolderTreeIcon : LaptopIcon}
@@ -539,7 +578,9 @@ export function WorkspacePicker({
 						side="top"
 						title="Choose where this chat works"
 						trailing={
-							worktreeStatus.active ? <DiffStat stat={worktreeStat} /> : null
+							showLineStats && worktreeStatus.active ? (
+								<DiffStat stat={worktreeStat} />
+							) : null
 						}
 					>
 						{runModeBody}
@@ -568,7 +609,7 @@ export function WorkspacePicker({
 						open={pickerOpen === "branch"}
 						side="top"
 						title={`Branch: ${branch}`}
-						trailing={<DiffStat stat={folderStat} />}
+						trailing={showLineStats ? <DiffStat stat={folderStat} /> : null}
 					>
 						{branchBody}
 					</PickerRow>
@@ -578,6 +619,7 @@ export function WorkspacePicker({
 						className={WORKSPACE_SELECT_TRIGGER}
 						disabled={runningActionId !== null}
 						key={action.id}
+						loading={runningActionId === action.id}
 						onClick={() => {
 							runEnvironmentAction(activeEnvironment, action.id).catch(
 								() => undefined
@@ -588,12 +630,8 @@ export function WorkspacePicker({
 						type="button"
 						variant="ghost"
 					>
-						{runningActionId === action.id ? (
-							<Spinner className="size-3.5" />
-						) : (
-							<HugeiconsIcon className="size-3.5" icon={PlayIcon} />
-						)}
-						<span className="max-w-28 truncate">{action.name}</span>
+						<HugeiconsIcon className="size-3.5" icon={PlayIcon} />
+						<ButtonLabel className="max-w-28">{action.name}</ButtonLabel>
 					</Button>
 				))}
 			</div>
@@ -613,6 +651,32 @@ export function WorkspacePicker({
 				open={createBranchOpen}
 			/>
 		</>
+	);
+}
+
+function ReadonlyPickerRow({
+	fullWidth = false,
+	label,
+	title,
+}: {
+	fullWidth?: boolean;
+	label: string;
+	title: string;
+}) {
+	return (
+		<div
+			aria-label={`Project folder: ${label}`}
+			className={cn(
+				WORKSPACE_SELECT_TRIGGER,
+				"flex cursor-default items-center text-muted-foreground",
+				fullWidth && "w-full justify-start"
+			)}
+			data-testid="pinned-summary-folder"
+			title={title}
+		>
+			<HugeiconsIcon className="size-3.5 shrink-0" icon={Folder03Icon} />
+			<span className="min-w-0 flex-1 truncate text-left">{label}</span>
+		</div>
 	);
 }
 
@@ -704,7 +768,7 @@ function PickerRow({
 				}
 			>
 				<HugeiconsIcon className="size-3.5 shrink-0" icon={icon} />
-				<span className="min-w-0 flex-1 truncate text-left">{label}</span>
+				<ButtonLabel className="flex-1 text-left">{label}</ButtonLabel>
 				{trailing}
 			</DropdownMenuTrigger>
 			<DropdownMenuContent
@@ -839,7 +903,7 @@ function BranchList({
 								<span className="block truncate">{b}</span>
 								{isActive && changedFiles > 0 && (
 									<span className="block truncate font-normal text-muted-foreground text-xs">
-										Uncommitted: {changedFiles} file
+										Uncommitted: {formatCount(changedFiles)} file
 										{changedFiles === 1 ? "" : "s"}
 									</span>
 								)}
@@ -954,11 +1018,12 @@ function CreateBranchDialog({
 				<DialogFooter>
 					<DialogClose render={<Button variant="ghost" />}>Cancel</DialogClose>
 					<Button
-						disabled={creating || name.trim().length === 0}
+						disabled={name.trim().length === 0}
+						loading={creating}
 						onClick={handleCreate}
 						type="button"
 					>
-						{creating ? <Spinner className="size-4" /> : "Create branch"}
+						Create branch
 					</Button>
 				</DialogFooter>
 			</DialogContent>
@@ -993,7 +1058,7 @@ function RunModeContent({
 				</div>
 				<p className="px-1 text-[12px] text-muted-foreground">
 					{status.changed_files > 0
-						? `${status.changed_files} changed file${status.changed_files === 1 ? "" : "s"}. Review and apply from the diff panel.`
+						? `${formatCount(status.changed_files)} changed file${status.changed_files === 1 ? "" : "s"}. Review and apply from the diff panel.`
 						: "This chat runs in its own worktree. Changes are isolated until you apply them from the diff panel."}
 				</p>
 			</div>

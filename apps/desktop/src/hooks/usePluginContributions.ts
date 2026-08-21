@@ -37,6 +37,7 @@ import PluginViewPage from "@/src/pages/PluginViewPage.tsx";
 const EMPTY: PluginContributions = {
 	agent_edit_panels: [],
 	composer_controls: [],
+	chat_features: [],
 	settings_tabs: [],
 	message_actions: [],
 	output_styles: [],

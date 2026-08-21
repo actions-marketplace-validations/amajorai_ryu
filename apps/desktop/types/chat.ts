@@ -1,4 +1,5 @@
 import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
+import type { ResourceVisibility } from "@/src/lib/resource-visibility.ts";
 
 export interface Agent {
 	description: string;
@@ -67,11 +68,15 @@ export interface Conversation {
 	lastMessageAt?: number;
 	/** Role that wrote it, so a row can prefix "You: ". */
 	lastMessageRole?: string;
+	/** Authoritative message total returned by Core's conversation summary. */
+	messageCount?: number;
 	messages: Message[];
 	/** Agent ids participating in this conversation (council / multi-agent). */
 	participants?: string[];
 	/** Server-backed pin (shared with coordinator threads). */
 	pinned?: boolean;
+	/** Owner-only or shared visibility inherited from the Core conversation row. */
+	visibility?: ResourceVisibility;
 	/** Run lifecycle status: "running" | "completed" | "failed" | "interrupted" |
 	 * undefined. "interrupted" is stamped by Core's boot reconciliation on a run
 	 * the node died in the middle of; it is TERMINAL, so "is this live?" checks

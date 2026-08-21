@@ -1,19 +1,36 @@
 import { apiKey } from "@better-auth/api-key";
 import { expo } from "@better-auth/expo";
+import { mcp } from "@better-auth/mcp";
+import { passkey } from "@better-auth/passkey";
+import { scim } from "@better-auth/scim";
+import { sso } from "@better-auth/sso";
 import { checkout, polar, portal } from "@polar-sh/better-auth";
-import { client } from "@ryu/db";
+import { client, mongoClient } from "@ryu/db";
 import { User } from "@ryu/db/models/auth.model";
-import { Member, Team, TeamMember } from "@ryu/db/models/control-plane.model";
+import {
+	Member,
+	Organization,
+	Team,
+	TeamMember,
+} from "@ryu/db/models/control-plane.model";
+import { OrganizationInvitationPolicy } from "@ryu/db/models/organization-invitation-policy.model";
+import { isOrganizationNotificationEnabled } from "@ryu/db/models/organization-notification.model";
+import { OrganizationSeatReservation } from "@ryu/db/models/organization-seat-reservation.model";
 import {
 	AccountExistsEmail,
 	configureContactIdSaver,
 	configureRateLimiting,
+	EmailVerificationOTPEmail,
 	MagicLinkEmail,
-	OrganizationInvitationEmail,
+	OrganizationInvitationExistingAccountEmail,
+	OrganizationInvitationNewAccountEmail,
 	PasswordChangeEmail,
 	PasswordResetEmail,
+	PasswordResetOTPEmail,
 	type RateLimitResult,
 	SignInOTPEmail,
+	StaleAccountAdminEmail,
+	StaleAccountUserEmail,
 	sendEmail,
 	subscribeContact,
 	TwoFactorOTPEmail,
@@ -22,45 +39,74 @@ import {
 } from "@ryu/email";
 import { env } from "@ryu/env/server";
 import { betterAuth } from "better-auth";
-import { mongodbAdapter } from "better-auth/adapters/mongodb";
 import {
 	APIError,
 	createAuthEndpoint,
 	createAuthMiddleware,
 } from "better-auth/api";
 import {
+	anonymous,
 	bearer,
 	captcha,
 	deviceAuthorization,
 	emailOTP,
 	lastLoginMethod,
 	magicLink,
-	mcp,
 	multiSession,
+	oneTap,
+	oneTimeToken,
 	organization,
 	twoFactor,
 	username,
 } from "better-auth/plugins";
 import { admin } from "better-auth/plugins/admin";
 import { jwt } from "better-auth/plugins/jwt";
-import { oidcProvider } from "better-auth/plugins/oidc-provider";
 import { POLAR_PRODUCTS } from "./lib/constants.ts";
 import { TAURI_DESKTOP_ORIGINS } from "./lib/cors-origins.ts";
+import {
+	businessEmailDecision,
+	businessEmailDomainDecision,
+	businessEmailMessage,
+} from "./lib/organization-email-policy.ts";
+import {
+	normalizeInvitationEmail,
+	normalizeReferralTag,
+	ORGANIZATION_INVITATION_COOLDOWN_MS,
+} from "./lib/organization-invitation-policy.ts";
+import {
+	metadataWithOrganizationKind,
+	organizationKindFromMetadata,
+	PERSONAL_ORGANIZATION_KIND,
+	TEAMS_ORGANIZATION_KIND,
+} from "./lib/organization-kind.ts";
+import { activeTeamsSeatAllowance } from "./lib/organization-seat-entitlement.ts";
+import { decideSeatAdmission } from "./lib/organization-seat-gate.ts";
 import {
 	ensurePersonalOrganization,
 	type OrganizationApi,
 	resolveInitialActiveOrganization,
+	resolvePersonalOrgId,
 } from "./lib/organizations.ts";
 import {
 	ensurePolarCustomer,
 	polarClient,
 	syncPolarCustomer,
 } from "./lib/payments.ts";
+import { PLANS, resolveProductId } from "./lib/plans.ts";
 import { runRefereeGrantHook } from "./lib/referral-grant-hook.ts";
+import { providerIdFromSsoCallbackPath } from "./lib/sso-organization.ts";
+import { encryptedMongoAdapter } from "./lib/sso-provider-encryption.ts";
+import {
+	boundedLoginDetail,
+	daysSinceLastActive,
+	formatLoginTime,
+	isStaleAccountLogin,
+} from "./lib/stale-account.ts";
 import { stepUpGate } from "./lib/step-up-plugin.ts";
 import {
 	ADMIN_ROLE,
 	APPROVED_ROLE,
+	adminEmails,
 	generateReferralCode,
 	isAdminEmail,
 	isWaitlistBypassed,
@@ -69,7 +115,431 @@ import {
 	webOrigin,
 } from "./lib/waitlist.ts";
 import { waitlistPositionFor } from "./lib/waitlist-queue.ts";
+import {
+	ryuOrganizationAccessControl,
+	ryuOrganizationRoles,
+} from "./organization-access.ts";
 import { defaultPermissionsForRole, RYU_SUPPORTED_SCOPES } from "./scopes.ts";
+
+const DUPLICATE_KEY_ERROR_CODE = 11_000;
+
+interface PolarListPage<T> {
+	readonly items?: readonly T[];
+	readonly result?: { readonly items?: readonly T[] };
+}
+
+const polarPageItems = <T>(page: unknown): readonly T[] => {
+	if (Array.isArray(page)) {
+		return page as readonly T[];
+	}
+	if (!(page && typeof page === "object")) {
+		return [];
+	}
+	const value = page as PolarListPage<T>;
+	return value.result?.items ?? value.items ?? [];
+};
+
+const TEAMS_PRODUCT_IDS = (): Set<string> =>
+	new Set(
+		Object.values(PLANS.teams.bindings)
+			.filter((binding): binding is NonNullable<typeof binding> =>
+				Boolean(binding)
+			)
+			.map((binding) => resolveProductId(binding))
+			.filter((productId) => !productId.startsWith("polar_product_"))
+	);
+
+/** The same deterministic org billing identity used by the billing router. */
+async function organizationBillingEmail(
+	organizationId: string
+): Promise<string | null> {
+	const owner = await Member.findOne({
+		organizationId,
+		role: /owner/i,
+	}).sort({ createdAt: 1 });
+	const member =
+		owner ?? (await Member.findOne({ organizationId }).sort({ createdAt: 1 }));
+	if (!member) {
+		return null;
+	}
+	const user = await User.findById(member.userId);
+	return user?.email ?? null;
+}
+
+/**
+ * Resolve the live Teams seat quantity for an organization. A missing active
+ * Teams subscription returns null (free organizations remain inviteable); a
+ * Polar failure is a hard error because allowing a paid-org membership change
+ * while the meter is unknown would be an authorization decision made blind.
+ */
+async function activeTeamsSeatCount(
+	organizationId: string
+): Promise<number | null> {
+	const email = await organizationBillingEmail(organizationId);
+	if (!email) {
+		return null;
+	}
+
+	try {
+		const customers = await polarClient.customers.list({
+			email,
+			limit: 1,
+			organizationId: process.env.POLAR_ORGANIZATION_ID,
+		});
+		let customerId: string | null = null;
+		for await (const page of customers) {
+			const first = polarPageItems<{ id?: string | null }>(page)[0];
+			if (first?.id) {
+				customerId = first.id;
+				break;
+			}
+		}
+		if (!customerId) {
+			return null;
+		}
+
+		const subscriptions = await polarClient.subscriptions.list({
+			customerId,
+			// Keep invitation authorization aligned with the billing router's
+			// Teams subscription resolver; old records must not hide a live plan.
+			limit: 100,
+		});
+		const productIds = TEAMS_PRODUCT_IDS();
+		for await (const page of subscriptions) {
+			const active = polarPageItems<{
+				product?: { id?: string | null } | null;
+				productId?: string | null;
+				quantity?: number | null;
+				seats?: number | null;
+				status?: string | null;
+			}>(page).find((subscription) => {
+				const status = (subscription.status ?? "").toLowerCase();
+				const productId =
+					subscription.productId ?? subscription.product?.id ?? null;
+				return (
+					(status === "active" || status === "trialing") &&
+					Boolean(productId && productIds.has(productId))
+				);
+			});
+			if (active) {
+				const requested = Number(active.seats ?? active.quantity);
+				const minimum =
+					PLANS.teams.seatModel.kind === "per_seat"
+						? PLANS.teams.seatModel.minSeats
+						: 1;
+				const billedSeats = Number.isFinite(requested)
+					? Math.max(Math.floor(requested), minimum)
+					: minimum;
+				return (await activeTeamsSeatAllowance(organizationId, billedSeats))
+					.includedSeats;
+			}
+		}
+		return null;
+	} catch (error) {
+		console.error("Failed to verify Teams seat capacity:", error);
+		throw new APIError("INTERNAL_SERVER_ERROR", {
+			message: "We could not verify the organization’s Teams seats. Try again.",
+		});
+	}
+}
+
+const activeSeatReservations = async (
+	organizationId: string
+): Promise<number> =>
+	OrganizationSeatReservation.countDocuments({
+		organizationId,
+		expiresAt: { $gt: new Date() },
+	});
+
+/** Reject a new invite only when every paid seat is already occupied. */
+async function enforceInvitationSeatCapacity(
+	organizationId: string
+): Promise<void> {
+	const seatCapacity = await activeTeamsSeatCount(organizationId);
+	if (seatCapacity === null) {
+		return;
+	}
+	const [memberCount, reservedSeatCount] = await Promise.all([
+		Member.countDocuments({ organizationId }),
+		activeSeatReservations(organizationId),
+	]);
+	const decision = decideSeatAdmission({
+		billedSeats: seatCapacity,
+		memberCount,
+		reservedSeatCount,
+	});
+	if (!decision.allowed) {
+		throw new APIError("FORBIDDEN", { message: decision.reason });
+	}
+}
+
+/** Atomically reserve one free seat for an invitation acceptance. */
+async function reserveInvitationSeat(input: {
+	invitationId: string;
+	organizationId: string;
+	userId: string;
+}): Promise<void> {
+	if (
+		await Member.exists({
+			organizationId: input.organizationId,
+			userId: input.userId,
+		})
+	) {
+		return;
+	}
+
+	const seatCapacity = await activeTeamsSeatCount(input.organizationId);
+	if (seatCapacity === null) {
+		return;
+	}
+	const now = new Date();
+	const existing = await OrganizationSeatReservation.findOne({
+		organizationId: input.organizationId,
+		invitationId: input.invitationId,
+	});
+	if (existing && existing.expiresAt > now) {
+		// A billing admin may have reduced the subscription while this claim was
+		// in flight. A reservation outside the new quantity is not authorization
+		// to accept; release it and reallocate inside the live seat range.
+		if (existing.seatIndex < seatCapacity) {
+			return;
+		}
+		await OrganizationSeatReservation.deleteOne({ _id: existing._id });
+	}
+	if (existing) {
+		await OrganizationSeatReservation.deleteOne({ _id: existing._id });
+	}
+
+	const [memberCount, reservations] = await Promise.all([
+		Member.countDocuments({ organizationId: input.organizationId }),
+		OrganizationSeatReservation.find({
+			organizationId: input.organizationId,
+			expiresAt: { $gt: now },
+		})
+			.select("seatIndex")
+			.lean<Array<{ seatIndex: number }>>(),
+	]);
+	const decision = decideSeatAdmission({
+		billedSeats: seatCapacity,
+		memberCount,
+		reservedSeatCount: reservations.length,
+	});
+	if (!decision.allowed) {
+		throw new APIError("FORBIDDEN", { message: decision.reason });
+	}
+
+	const used = new Set(reservations.map((row) => row.seatIndex));
+	const expiresAt = new Date(now.getTime() + 2 * 60 * 1000);
+	// Existing members already occupy the first `memberCount` seats for the
+	// purpose of this transient allocation. Starting at zero would let two
+	// concurrent accepts reserve arbitrary unused indices even when only the
+	// final billed seat was available.
+	for (let seatIndex = memberCount; seatIndex < seatCapacity; seatIndex += 1) {
+		if (used.has(seatIndex)) {
+			continue;
+		}
+		try {
+			await OrganizationSeatReservation.create({
+				expiresAt,
+				invitationId: input.invitationId,
+				organizationId: input.organizationId,
+				seatIndex,
+			});
+			return;
+		} catch (error) {
+			if (!isDuplicateKeyError(error)) {
+				throw error;
+			}
+			// The unique invitation index can win this race too. Never create a
+			// second reservation for the same claim: if the original reservation is
+			// still inside the billed range, the acceptance is already authorized.
+			const claimed = await OrganizationSeatReservation.findOne({
+				expiresAt: { $gt: new Date() },
+				invitationId: input.invitationId,
+				organizationId: input.organizationId,
+			});
+			if (claimed) {
+				if (claimed.seatIndex < seatCapacity) {
+					return;
+				}
+				throw new APIError("FORBIDDEN", {
+					message:
+						"Teams seat capacity changed while this invitation was being accepted. Ask an organization owner or admin to add a seat and try again.",
+				});
+			}
+			// Mongo's TTL monitor is eventually consistent. An expired reservation
+			// can still hold the unique seat index for a short time, so remove the
+			// stale row and retry this same index instead of skipping a genuinely
+			// available seat.
+			const conflicting = await OrganizationSeatReservation.findOne({
+				organizationId: input.organizationId,
+				seatIndex,
+			});
+			if (conflicting && conflicting.expiresAt <= new Date()) {
+				await OrganizationSeatReservation.deleteOne({ _id: conflicting._id });
+				continue;
+			}
+			// Another acceptance won this index. Re-read the reservation set on the
+			// next iteration rather than trusting a stale client-side count.
+			used.add(seatIndex);
+		}
+	}
+	throw new APIError("FORBIDDEN", {
+		message:
+			"No unassigned Teams seat is available. Ask an organization owner or admin to add a seat first.",
+	});
+}
+
+// Better Auth's API-key plugin asks the organization access-control layer for
+// `apiKey` permissions when it manages organization-owned keys. Keep that
+// native management capability separate from Ryu's API-key scope vocabulary:
+// org membership may manage the key record, but it never grants the key any
+// Ryu capability by itself. The control-plane route still supplies the
+// role-clamped Ryu statements at creation time.
+function isDuplicateKeyError(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		(error as { code?: number }).code === DUPLICATE_KEY_ERROR_CODE
+	);
+}
+
+async function reserveOrganizationInvitationPolicy(input: {
+	email: string;
+	organizationId: string;
+	referralTag?: string;
+}): Promise<void> {
+	const now = new Date();
+	const cooldownUntil = new Date(
+		now.getTime() + ORGANIZATION_INVITATION_COOLDOWN_MS
+	);
+	try {
+		const reserved = await OrganizationInvitationPolicy.findOneAndUpdate(
+			{
+				organizationId: input.organizationId,
+				email: input.email,
+				$and: [
+					{
+						$or: [{ blockedAt: null }, { blockedAt: { $exists: false } }],
+					},
+					{
+						$or: [
+							{ cooldownUntil: null },
+							{ cooldownUntil: { $exists: false } },
+							{ cooldownUntil: { $lte: now } },
+						],
+					},
+				],
+			},
+			{
+				$set: {
+					cooldownUntil,
+					lastSentAt: now,
+					referralTag: input.referralTag,
+				},
+				$setOnInsert: {
+					email: input.email,
+					organizationId: input.organizationId,
+				},
+			},
+			{ new: true, upsert: true }
+		);
+		if (reserved) {
+			return;
+		}
+	} catch (error) {
+		if (!isDuplicateKeyError(error)) {
+			throw error;
+		}
+	}
+
+	const policy = await OrganizationInvitationPolicy.findOne({
+		organizationId: input.organizationId,
+		email: input.email,
+	});
+	if (policy?.blockedAt) {
+		throw new APIError("FORBIDDEN", {
+			message: "This recipient has blocked invitations from this organization.",
+		});
+	}
+	throw new APIError("TOO_MANY_REQUESTS", {
+		message:
+			"Please wait 24 hours before sending another invitation to this recipient.",
+	});
+}
+
+const PERSONAL_WORKSPACE_MESSAGE =
+	"Personal workspaces are for one person. Upgrade this workspace to For Teams to invite teammates and share access.";
+
+interface OrganizationPolicyUser {
+	email?: string | null;
+	emailVerified?: boolean | null;
+}
+
+function requireVerifiedBusinessEmail(
+	user: OrganizationPolicyUser,
+	context: "member" | "upgrade" = "member"
+): void {
+	const decision = businessEmailDecision({
+		email: user.email,
+		emailVerified: user.emailVerified,
+	});
+	if (!decision.allowed) {
+		throw new APIError("FORBIDDEN", {
+			message: businessEmailMessage(decision, context),
+		});
+	}
+}
+
+function requireBusinessEmailDomain(email: string): void {
+	const decision = businessEmailDomainDecision(email);
+	if (!decision.allowed) {
+		throw new APIError("BAD_REQUEST", {
+			message: businessEmailMessage(decision, "invitation"),
+		});
+	}
+}
+
+/** Resolve the durable personal/shared kind, with a legacy fallback. */
+async function isPersonalOrganization(
+	organizationId: string,
+	metadata?: unknown
+): Promise<boolean> {
+	const organization = metadata
+		? null
+		: await Organization.findById(organizationId)
+				.select("metadata")
+				.lean<{ metadata?: unknown }>();
+	const kind = organizationKindFromMetadata(metadata ?? organization?.metadata);
+	if (kind === PERSONAL_ORGANIZATION_KIND) {
+		return true;
+	}
+	if (kind === TEAMS_ORGANIZATION_KIND) {
+		return false;
+	}
+
+	const firstMember = await Member.findOne({ organizationId })
+		.sort({ createdAt: 1 })
+		.select("userId")
+		.lean<{ userId: unknown }>();
+	if (!firstMember) {
+		return false;
+	}
+	const personalOrgId = await resolvePersonalOrgId(String(firstMember.userId));
+	return personalOrgId === organizationId;
+}
+
+/** Keep the personal workspace genuinely personal; shared access needs an org. */
+async function rejectPersonalWorkspaceInvitation(
+	organizationId: string,
+	metadata?: unknown
+): Promise<void> {
+	if (await isPersonalOrganization(organizationId, metadata)) {
+		throw new APIError("BAD_REQUEST", {
+			message: PERSONAL_WORKSPACE_MESSAGE,
+		});
+	}
+}
 
 // Narrow an unknown caught error to its string `code` (e.g. better-auth's
 // RATE_LIMIT_EXCEEDED) without an `as any` cast.
@@ -92,6 +562,99 @@ interface RateLimitedError {
 }
 
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY ?? "";
+
+interface LoginSession {
+	createdAt?: Date;
+	ipAddress?: string | null;
+	userAgent?: string | null;
+	userId?: string;
+}
+
+/**
+ * Record the successful session and, only when the previous session was dormant,
+ * send the two stale-account notifications. The atomic read-before-update
+ * prevents concurrent logins from sending duplicate alerts.
+ */
+async function recordLoginAndNotifyStaleAccount(
+	session: LoginSession
+): Promise<void> {
+	if (!session.userId) {
+		return;
+	}
+
+	const now = new Date();
+	try {
+		const previous = await User.findOneAndUpdate(
+			{ _id: session.userId, isAnonymous: { $ne: true } },
+			{
+				$set: {
+					lastLoginAt: now,
+					lastLoginDevice: boundedLoginDetail(session.userAgent) ?? null,
+					lastLoginIp: boundedLoginDetail(session.ipAddress) ?? null,
+				},
+			},
+			{ new: false }
+		).lean<{
+			email?: string;
+			lastLoginAt?: Date;
+			name?: string;
+		}>();
+
+		const lastLoginAt = previous?.lastLoginAt;
+		if (!(previous?.email && lastLoginAt instanceof Date)) {
+			return;
+		}
+		if (!isStaleAccountLogin(lastLoginAt, now)) {
+			return;
+		}
+
+		const loginTime = formatLoginTime(session.createdAt ?? now);
+		const inactiveDays = daysSinceLastActive(lastLoginAt, now);
+		const loginDevice = boundedLoginDetail(session.userAgent);
+		const loginIp = boundedLoginDetail(session.ipAddress);
+		const securityUrl = `${webOrigin()}/settings?tab=account`;
+		const sends = [
+			sendEmail({
+				to: previous.email,
+				subject: "Your Ryu account was accessed",
+				react: StaleAccountUserEmail({
+					daysSinceLastActive: inactiveDays,
+					loginDevice,
+					loginIp,
+					loginTime,
+					securityUrl,
+					userEmail: previous.email,
+					userName: previous.name || "there",
+				}),
+			}),
+		];
+
+		for (const adminEmail of adminEmails()) {
+			sends.push(
+				sendEmail({
+					to: adminEmail,
+					subject: "Dormant Ryu account reactivated",
+					react: StaleAccountAdminEmail({
+						adminEmail,
+						daysSinceLastActive: inactiveDays,
+						loginDevice,
+						loginIp,
+						loginTime,
+						userEmail: previous.email,
+						userId: session.userId,
+						userName: previous.name || "there",
+					}),
+				})
+			);
+		}
+
+		await Promise.allSettled(sends);
+	} catch (error) {
+		// A security notification must never turn a successful login into a
+		// failed login. The account timestamp is still useful if mail is down.
+		console.error("Failed to record stale-account login notification:", error);
+	}
+}
 
 function retryAfterSeconds(error: unknown): number | undefined {
 	if (typeof error !== "object" || error === null || !("retryAfter" in error)) {
@@ -257,6 +820,24 @@ function frontendOrigin(): string | undefined {
 	}
 }
 
+function passkeyWebAuthnOptions(): { origin?: string; rpID?: string } {
+	const origin = frontendOrigin();
+	if (!origin) {
+		return {};
+	}
+
+	try {
+		return {
+			origin,
+			rpID: new URL(origin).hostname,
+		};
+	} catch {
+		return {};
+	}
+}
+
+const PASSKEY_WEBAUTHN_OPTIONS = passkeyWebAuthnOptions();
+
 /** Strip a leading `www.` so api.ryuhq.com + www.ryuhq.com share ryuhq.com. */
 function normalizeHostname(hostname: string): string {
 	return hostname.replace(/^www\./, "");
@@ -316,6 +897,7 @@ function mergeOrigins(
 
 function parseCorsOrigins(): string[] {
 	const corsOrigin = process.env.CORS_ORIGIN || "";
+	const webappOrigin = env.WEBAPP_URL || "https://app.ryuhq.com";
 	const defaultOrigins = mergeOrigins(
 		[
 			"http://localhost:3001",
@@ -329,7 +911,7 @@ function parseCorsOrigins(): string[] {
 			...TAURI_DESKTOP_ORIGINS,
 			EXTENSION_ORIGIN,
 		],
-		[frontendOrigin()]
+		[frontendOrigin(), webappOrigin]
 	);
 
 	if (!corsOrigin.trim()) {
@@ -341,7 +923,7 @@ function parseCorsOrigins(): string[] {
 			.split(",")
 			.map((origin) => origin.trim())
 			.filter(Boolean),
-		[frontendOrigin()]
+		[frontendOrigin(), webappOrigin]
 	);
 
 	// Always-trusted non-web origins (mobile schemes, desktop webview, extension)
@@ -353,6 +935,7 @@ function parseCorsOrigins(): string[] {
 		"ryu://",
 		...TAURI_DESKTOP_ORIGINS,
 		EXTENSION_ORIGIN,
+		webappOrigin,
 	];
 	for (const scheme of alwaysTrusted) {
 		if (!origins.includes(scheme)) {
@@ -361,6 +944,13 @@ function parseCorsOrigins(): string[] {
 	}
 
 	return origins;
+}
+
+function parseCsvEnv(value: string | undefined): string[] {
+	return (value ?? "")
+		.split(",")
+		.map((item) => item.trim())
+		.filter(Boolean);
 }
 
 /**
@@ -495,11 +1085,33 @@ async function reconcileAdminRole(userId: string): Promise<void> {
 }
 
 export const auth = betterAuth({
-	database: mongodbAdapter(client),
+	// SCIM creates/updates a user, account, and organization membership as one
+	// operation. Pass the native MongoClient so Better Auth enables interactive
+	// transactions; passing only the Db silently disables the transaction hook.
+	database: encryptedMongoAdapter(client, { client: mongoClient }),
 	trustedOrigins: parseCorsOrigins(),
 	appName: "Ryu",
+	// Better Auth reads BETTER_AUTH_SECRETS automatically when present. Keep the
+	// scalar secret for backwards compatibility with deployments and Ryu code
+	// that still reads BETTER_AUTH_SECRET directly; the versioned list takes
+	// precedence for Better Auth signing and verification.
 	secret: env.BETTER_AUTH_SECRET,
 	baseURL: env.BETTER_AUTH_URL,
+	rateLimit: {
+		enabled: true,
+		window: 60,
+		max: 100,
+		storage: "database",
+		customRules: {
+			"/oauth2/token": { window: 60, max: 30 },
+			"/oauth2/register": { window: 60, max: 10 },
+			"/device/code": { window: 60, max: 10 },
+			"/device/token": { window: 60, max: 10 },
+			"/device/approve": { window: 60, max: 10 },
+			"/device/deny": { window: 60, max: 10 },
+			"/scim/v2/*": { window: 60, max: 120 },
+		},
+	},
 	socialProviders: {
 		google: {
 			clientId: process.env.GOOGLE_CLIENT_ID as string,
@@ -698,7 +1310,17 @@ export const auth = betterAuth({
 	},
 	advanced: (() => {
 		const authCookieDomain = resolveAuthCookieDomain();
+		const ipAddressHeaders = parseCsvEnv(env.BETTER_AUTH_IP_ADDRESS_HEADERS);
+		const trustedProxies = parseCsvEnv(env.BETTER_AUTH_TRUSTED_PROXIES);
 		return {
+			ipAddress: {
+				// Better Auth only trusts a single forwarded value unless explicit
+				// proxy ranges are configured. This keeps spoofed forwarded chains from
+				// becoming distinct rate-limit buckets by accident.
+				ipAddressHeaders:
+					ipAddressHeaders.length > 0 ? ipAddressHeaders : ["x-forwarded-for"],
+				...(trustedProxies.length > 0 ? { trustedProxies } : {}),
+			},
 			// When the frontend and auth API live on different subdomains
 			// (ryuhq.com vs api.ryuhq.com), the session cookie must carry the shared
 			// parent domain (AUTH_COOKIE_DOMAIN="ryuhq.com") so the apex SSR portal gate
@@ -766,20 +1388,78 @@ export const auth = betterAuth({
 					}
 				}
 			}
+
+			const providerId = providerIdFromSsoCallbackPath(ctx.path);
+			const newSession = ctx.context.newSession;
+			const sessionToken = newSession?.session?.token;
+			const userId = newSession?.user?.id;
+			if (!(providerId && sessionToken && userId)) {
+				return;
+			}
+
+			try {
+				const provider = (await ctx.context.adapter.findOne({
+					model: "ssoProvider",
+					where: [{ field: "providerId", value: providerId }],
+				})) as { organizationId?: unknown } | null;
+				const organizationId =
+					provider && typeof provider.organizationId === "string"
+						? provider.organizationId
+						: null;
+				if (!organizationId) {
+					return;
+				}
+
+				const member = await Member.findOne({ organizationId, userId })
+					.select("_id")
+					.lean();
+				if (!member) {
+					return;
+				}
+
+				const activeOrganizationId = newSession.session.activeOrganizationId as
+					| string
+					| undefined;
+				if (activeOrganizationId === organizationId) {
+					return;
+				}
+
+				await ctx.context.internalAdapter.updateSession(sessionToken, {
+					activeOrganizationId: organizationId,
+					updatedAt: new Date(),
+				});
+			} catch (error) {
+				console.error("Failed to select the SSO organization:", error);
+			}
 		}),
 	},
 	databaseHooks: {
 		session: {
 			create: {
 				before: async (session: { userId: string }) => {
+					// Anonymous sessions are intentionally account-less. Do not create a
+					// personal organization or reconcile account roles for a guest: those
+					// hooks are for durable accounts and would turn every guest visit into
+					// a Polar customer, waitlist row, and organization.
+					try {
+						const user = await User.findById(session.userId)
+							.select("isAnonymous")
+							.lean<{ isAnonymous?: boolean }>();
+						if (user?.isAnonymous) {
+							return { data: session };
+						}
+					} catch {
+						// Preserve the existing fail-open session path if the auxiliary
+						// Mongoose read is unavailable.
+					}
 					// Make the stored role agree with the admin allowlist before the
 					// session exists, so the very first render of this session already
 					// shows an allowlisted admin their admin affordances.
 					await reconcileAdminRole(session.userId);
-					// Start every new session scoped to the user's personal org so
+					// Start every new session scoped to the user's default org so
 					// org-scoped reads (the control plane reads the `member` collection)
 					// resolve immediately on first login. Earliest membership = the
-					// personal org created at sign-up.
+					// default org created at sign-up.
 					//
 					// A user with NO membership is repaired here rather than left
 					// unscoped. That state is reachable two ways — an account created
@@ -823,12 +1503,17 @@ export const auth = betterAuth({
 						);
 					}
 				},
+				after: async (session) => {
+					void recordLoginAndNotifyStaleAccount(session);
+				},
 			},
 		},
 		user: {
 			create: {
-				// biome-ignore lint/suspicious/useAwait: Better Auth's before-hook type requires a Promise return.
 				before: async (user, context) => {
+					if ((user as { isAnonymous?: boolean }).isAnonymous) {
+						return { data: user };
+					}
 					// Stamp every new user with a referral code. Normalize any inbound
 					// referral code to the canonical upper-case form. (Role is set in the
 					// after hook so it reliably overrides the admin plugin's default.)
@@ -856,11 +1541,15 @@ export const auth = betterAuth({
 					id: string;
 					email: string;
 					name?: string;
+					isAnonymous?: boolean;
 					role?: string;
 					referralCode?: string;
 					referralCount?: number;
 					referredBy?: string;
 				}) => {
+					if (user.isAnonymous) {
+						return;
+					}
 					await ensurePolarCustomer({
 						id: user.id,
 						email: user.email,
@@ -937,7 +1626,7 @@ export const auth = betterAuth({
 							);
 						}
 					}
-					// Give every new user a personal organization so they always have a
+					// Give every new user a default organization so they always have a
 					// valid org context. Wrapped so a failure here never fails sign-up,
 					// exactly like the Polar provisioning above.
 					try {
@@ -947,12 +1636,12 @@ export const auth = betterAuth({
 						);
 					} catch (error) {
 						console.error(
-							"Failed to create personal organization for user:",
+							"Failed to create default organization for user:",
 							error
 						);
 					}
 					// The referee's sign-up credit, if they arrived on someone's link.
-					// STRICTLY AFTER the personal organization: the grant lands in an
+					// STRICTLY AFTER the default organization: the grant lands in an
 					// ORG wallet, so a referee with no membership yet has nowhere to put
 					// it and the money is simply never minted.
 					//
@@ -981,6 +1670,31 @@ export const auth = betterAuth({
 		captcha({
 			provider: "cloudflare-turnstile",
 			secretKey: TURNSTILE_SECRET_KEY,
+		}),
+		// Guests get a short-lived Better Auth account/session without email,
+		// password, or organization provisioning. Linking a real account later is
+		// handled by Better Auth's anonymous plugin; deleting the guest session is
+		// available through its matching client method.
+		anonymous({
+			generateName: () => "Guest",
+		}),
+		// Google One Tap is a browser sign-in convenience. It still goes through
+		// Better Auth's normal Google account-linking and user hooks, so waitlist,
+		// organization provisioning, and session scoping remain authoritative.
+		oneTap({
+			clientId: env.GOOGLE_CLIENT_ID,
+		}),
+		// OTTs are reserved for an explicitly initiated app handoff (for example,
+		// web -> extension/mobile). They are short-lived, hashed in MongoDB, and
+		// never set a browser cookie when redeemed by a non-browser client.
+		oneTimeToken({
+			disableSetSessionCookie: true,
+			expiresIn: 3,
+			storeToken: "hashed",
+		}),
+		passkey({
+			...PASSKEY_WEBAUTHN_OPTIONS,
+			rpName: "Ryu",
 		}),
 		twoFactor({
 			issuer: "Ryu",
@@ -1023,33 +1737,30 @@ export const auth = betterAuth({
 		emailOTP({
 			async sendVerificationOTP({ email, otp, type }) {
 				try {
-					if (type === "sign-in") {
-						let userName = "there";
-						try {
-							const user = await User.findOne({ email: email.toLowerCase() });
-							userName = user?.name || "there";
-						} catch {
-							// Use generic greeting if user not found
-						}
-
-						await sendEmail({
-							to: email,
-							subject: `Your sign-in code is ${otp}`,
-							react: SignInOTPEmail({
-								userName,
-								otpCode: otp,
-							}),
-						});
-					} else {
-						await sendEmail({
-							to: email,
-							subject: "Here's your sign-in code",
-							react: SignInOTPEmail({
-								userName: "there",
-								otpCode: otp,
-							}),
-						});
+					let userName = "there";
+					try {
+						const user = await User.findOne({ email: email.toLowerCase() })
+							.select("name")
+							.lean<{ name?: string }>();
+						userName = user?.name || "there";
+					} catch {
+						// Use a generic greeting if the account lookup is unavailable.
 					}
+
+					const react =
+						type === "sign-in"
+							? SignInOTPEmail({ userName, otpCode: otp })
+							: type === "email-verification"
+								? EmailVerificationOTPEmail({ userName, otpCode: otp })
+								: PasswordResetOTPEmail({ userName, otpCode: otp });
+					const subject =
+						type === "sign-in"
+							? `Your sign-in code is ${otp}`
+							: type === "email-verification"
+								? "Your email verification code"
+								: "Your password reset code";
+
+					await sendEmail({ to: email, subject, react });
 				} catch (error) {
 					console.error("Failed to send email OTP:", error);
 					if (
@@ -1059,8 +1770,8 @@ export const auth = betterAuth({
 						const retryAfter = retryAfterSeconds(error);
 						throw new Error(
 							retryAfter
-								? `Please wait ${retryAfter} seconds before requesting another sign-in code`
-								: "Please wait before requesting another sign-in code"
+								? `Please wait ${retryAfter} seconds before requesting another email code`
+								: "Please wait before requesting another email code"
 						);
 					}
 					throw error;
@@ -1242,96 +1953,107 @@ export const auth = betterAuth({
 				},
 			},
 		}),
-		// oidcProvider owns /oauth2/{authorize,token,register,userinfo} +
-		// /.well-known/openid-configuration (the auth-code flow the desktop and
-		// extension PKCE clients use). It ALSO declares POST /oauth2/consent (endpoint
-		// key "oAuthConsent"), but so does the mcp plugin below, which reuses an
-		// internal oidcProvider and re-exposes the very same handler. Two plugins
-		// registering the same path+method makes Better Auth log an "endpoint path
-		// conflicts" ERROR at boot and silently shadow one of them. We keep the mcp
-		// plugin's consent handler (it carries the full RYU scope config and is what
-		// third-party MCP consent flows reach) and strip the duplicate here so exactly
-		// one handler owns /oauth2/consent. Ryu's first-party clients set skipConsent,
-		// so they never hit this endpoint anyway; both handlers operate on the same
-		// shared oauth tables, so the surviving one serves /oauth2/* consent correctly.
-		(() => {
-			const provider = oidcProvider({
-				loginPage: `${process.env.FRONTEND_URL || "http://localhost:3001"}/login`,
-				consentPage: `${process.env.FRONTEND_URL || "http://localhost:3001"}/oauth/consent`,
-			});
-			// biome-ignore lint/performance/noDelete: remove endpoint key so Better Auth does not register this route
-			delete (provider.endpoints as Record<string, unknown>).oAuthConsent;
-			return provider;
-		})(),
 		// Scoped programmatic access tokens (PATs). Each key carries access-control
 		// statements from the shared Ryu scope vocabulary (see scopes.ts) that Core
 		// (the resource server) and the Gateway enforce. We deliberately do NOT set
 		// enableSessionForAPIKeys: a scoped token must never be silently as powerful
 		// as a full login session. Consumers verify + gate via
-		// auth.api.verifyApiKey({ body: { key, permissions } }). Keys are user-owned
-		// (the default `references: "user"`); org-owned keys are a follow-up.
-		apiKey({
-			enableMetadata: true,
-			permissions: {
-				defaultPermissions: async (referenceId) => {
-					try {
-						const user = await User.findById(referenceId).lean();
-						return defaultPermissionsForRole(user?.role);
-					} catch (error) {
-						console.error(
-							"[auth] apiKey defaultPermissions lookup failed:",
-							error
-						);
-						// Fail CLOSED. A scoped token defaulting its own ceiling must never
-						// widen on error: if we cannot read the role, mint a key with no
-						// permissions rather than the write-capable standard set (which is
-						// what an absent role resolves to). The caller can always pass
-						// explicit permissions, and a re-create succeeds once the DB is
-						// healthy.
-						return {};
-					}
+		// auth.api.verifyApiKey({ body: { key, permissions } }). Personal keys use
+		// `references: "user"`; organization keys use the native organization config.
+		apiKey([
+			{
+				// Keep the default config id stable so existing personal keys remain
+				// verifiable after the organization config is added.
+				configId: "default",
+				references: "user",
+				enableMetadata: true,
+				permissions: {
+					defaultPermissions: async (referenceId) => {
+						try {
+							const user = await User.findById(referenceId).lean();
+							return defaultPermissionsForRole(user?.role);
+						} catch (error) {
+							console.error(
+								"[auth] apiKey defaultPermissions lookup failed:",
+								error
+							);
+							// Fail CLOSED. A scoped token defaulting its own ceiling must never
+							// widen on error: if we cannot read the role, mint a key with no
+							// permissions rather than the write-capable standard set (which is
+							// what an absent role resolves to). The caller can always pass
+							// explicit permissions, and a re-create succeeds once the DB is
+							// healthy.
+							return {};
+						}
+					},
 				},
 			},
-		}),
-		// MCP OAuth: makes Better Auth the OAuth 2.1 provider MCP clients require.
-		// It reuses the OIDC provider machinery internally (id "mcp"), serving
-		// /.well-known/oauth-authorization-server + /.well-known/oauth-protected-resource
-		// and the /mcp/{authorize,token,register,get-session} endpoints. The
-		// standalone oidcProvider above keeps owning /oauth2/{authorize,token,register,
-		// userinfo} + /.well-known/openid-configuration (the auth-code flow the desktop
-		// and extension PKCE clients use).
-		//
-		// This plugin owns the surviving /oauth2/consent handler (endpoint key
-		// "oAuthConsent"). The standalone oidcProvider above declares the same route,
-		// so we strip its copy there to avoid Better Auth's boot-time "endpoint path
-		// conflicts" ERROR; this mcp handler carries the full RYU scope config. Ryu's
-		// first-party OAuth clients set skipConsent, so only consenting MCP/third-party
-		// clients hit it, and this handler serves them correctly (both plugins operate
-		// on the same shared oauth tables). Public MCP clients self-register (dynamic
-		// client registration) and are required to use PKCE.
+			{
+				// Organization keys are owned by the Better Auth organization
+				// reference itself. Ryu supplies an explicit, role-clamped permission
+				// map from the control-plane route; an empty fallback prevents a direct
+				// native call from receiving broader Ryu scopes.
+				configId: "organization",
+				references: "organization",
+				enableMetadata: true,
+				permissions: { defaultPermissions: {} },
+			},
+		]),
+		// MCP OAuth: Better Auth's MCP plugin is itself the OAuth 2.1/OIDC provider.
+		// It owns the /oauth2/* endpoints and protected-resource discovery, so a
+		// separate oauthProvider plugin would register duplicate routes. Tokens are
+		// bound to the canonical Ryu MCP resource and the shared Ryu scope vocabulary.
 		mcp({
 			loginPage: `${process.env.FRONTEND_URL || "http://localhost:3001"}/login`,
-			oidcConfig: {
-				loginPage: `${process.env.FRONTEND_URL || "http://localhost:3001"}/login`,
-				consentPage: `${process.env.FRONTEND_URL || "http://localhost:3001"}/oauth/consent`,
-				scopes: RYU_SUPPORTED_SCOPES,
-				defaultScope: "openid",
-				requirePKCE: true,
-				// requirePKCE alone is not enough: Better Auth defaults
-				// allowPlainCodeChallengeMethod to true, which accepts
-				// code_challenge_method=plain (challenge == verifier). For a public,
-				// self-registering MCP client that hands most of PKCE's protection back
-				// to anyone who observes the authorization request. Force S256 only, per
-				// OAuth 2.1 / the MCP auth spec.
-				allowPlainCodeChallengeMethod: false,
-				allowDynamicClientRegistration: true,
-				accessTokenExpiresIn: 3600,
+			consentPage: `${process.env.FRONTEND_URL || "http://localhost:3001"}/oauth/consent`,
+			resource: new URL("/mcp", env.BETTER_AUTH_URL).toString(),
+			scopes: RYU_SUPPORTED_SCOPES,
+			allowDynamicClientRegistration: true,
+			allowUnauthenticatedClientRegistration: true,
+			accessTokenExpiresIn: 3600,
+		}),
+		// Enterprise inbound identity. Provider registration and SCIM token
+		// management are exposed through the org-scoped API router, which applies
+		// Ryu's entitlement and membership policy before calling these Better Auth
+		// endpoints. The protocol endpoints themselves remain available for the
+		// hosted login/provisioning flows.
+		sso({
+			domainVerification: { enabled: true },
+			organizationProvisioning: {
+				defaultRole: "member",
+				getRole: async () => "member",
+			},
+			provisionUserOnEveryLogin: true,
+			saml: {
+				algorithms: { onDeprecated: "reject" },
+				allowIdpInitiated: true,
+				enableInResponseToValidation: true,
+				requireTimestamps: true,
+			},
+		}),
+		scim({
+			// Ryu provisions SCIM connections through the organization-scoped
+			// Enterprise router. Better Auth owns the managed connection catalog and
+			// stores only credential digests; no personal/static token path is exposed.
+			connections: [],
+			managedConnections: {
+				credentialHashSecret: env.BETTER_AUTH_SECRET,
+				maxActiveCredentials: 5,
 			},
 		}),
 		organization({
 			// The creator of an org becomes its owner. This is the single source of
 			// truth the control plane reads from (the `member` collection).
 			creatorRole: "owner",
+			// Enable Better Auth's organization-role lifecycle endpoints. These
+			// roles are additive to the Ryu control-plane RBAC below; they never
+			// widen a Ryu scope without an explicit server-side permission check.
+			ac: ryuOrganizationAccessControl,
+			roles: ryuOrganizationRoles,
+			dynamicAccessControl: {
+				enabled: true,
+				maximumRolesPerOrganization: 20,
+			},
 			teams: {
 				enabled: true,
 				maximumTeams: 50,
@@ -1375,21 +2097,228 @@ export const auth = betterAuth({
 						},
 					},
 				},
+				invitation: {
+					additionalFields: {
+						referralTag: {
+							type: "string",
+							input: true,
+							required: false,
+						},
+					},
+				},
+			},
+			organizationHooks: {
+				beforeCreateOrganization: async ({ organization, user }) => {
+					// The signup hook uses the reserved `personal-` slug when it
+					// mints the default one-person workspace. A consumer mailbox stays
+					// personal; a company-domain mailbox is stamped as the Teams boundary
+					// immediately, even while verification is pending. Shared membership
+					// and paid checkout still require the verified-business decision below.
+					const isPersonal = (organization.slug ?? "")
+						.trim()
+						.toLowerCase()
+						.startsWith("personal-");
+					if (isPersonal) {
+						const bootstrapKind = businessEmailDomainDecision(user.email)
+							.allowed
+							? TEAMS_ORGANIZATION_KIND
+							: PERSONAL_ORGANIZATION_KIND;
+						return {
+							data: {
+								...organization,
+								metadata: metadataWithOrganizationKind(
+									organization.metadata,
+									bootstrapKind
+								),
+							},
+						};
+					}
+					requireVerifiedBusinessEmail(user);
+					return {
+						data: {
+							...organization,
+							metadata: metadataWithOrganizationKind(
+								organization.metadata,
+								TEAMS_ORGANIZATION_KIND
+							),
+						},
+					};
+				},
+				beforeAddMember: async ({ member, user, organization }) => {
+					const personal = await isPersonalOrganization(
+						member.organizationId,
+						organization.metadata
+					);
+					const memberCount = await Member.countDocuments({
+						organizationId: member.organizationId,
+					});
+					if (personal) {
+						if (memberCount > 0) {
+							throw new APIError("BAD_REQUEST", {
+								message: PERSONAL_WORKSPACE_MESSAGE,
+							});
+						}
+						return;
+					}
+					// The signup bootstrap can stamp a company-domain account as a Teams
+					// org before its verification email is completed. Permit that one
+					// owner row so the account has a usable home; every later member and
+					// every paid checkout still requires the verified-business decision.
+					const bootstrapTeams =
+						memberCount === 0 &&
+						(organization.slug ?? "")
+							.trim()
+							.toLowerCase()
+							.startsWith("personal-") &&
+						businessEmailDomainDecision(user.email).allowed;
+					if (bootstrapTeams) {
+						return;
+					}
+					requireVerifiedBusinessEmail(user);
+				},
+				beforeCreateInvitation: async ({ invitation }) => {
+					await rejectPersonalWorkspaceInvitation(invitation.organizationId);
+					requireBusinessEmailDomain(invitation.email);
+					await enforceInvitationSeatCapacity(invitation.organizationId);
+					const email = normalizeInvitationEmail(invitation.email);
+					await reserveOrganizationInvitationPolicy({
+						email,
+						organizationId: invitation.organizationId,
+						referralTag: normalizeReferralTag(invitation.referralTag),
+					});
+					return {
+						data: {
+							...invitation,
+							email,
+							referralTag: normalizeReferralTag(invitation.referralTag),
+						},
+					};
+				},
+				afterCreateInvitation: async ({ invitation }) => {
+					const now = new Date();
+					await OrganizationInvitationPolicy.updateOne(
+						{
+							organizationId: invitation.organizationId,
+							email: normalizeInvitationEmail(invitation.email),
+						},
+						{
+							$set: {
+								lastInvitationId: invitation.id,
+								lastSentAt: now,
+								cooldownUntil: new Date(
+									now.getTime() + ORGANIZATION_INVITATION_COOLDOWN_MS
+								),
+								referralTag: normalizeReferralTag(invitation.referralTag),
+							},
+						}
+					);
+				},
+				afterAcceptInvitation: async ({ invitation }) => {
+					await OrganizationSeatReservation.deleteOne({
+						invitationId: invitation.id,
+						organizationId: invitation.organizationId,
+					});
+					await OrganizationInvitationPolicy.updateOne(
+						{
+							organizationId: invitation.organizationId,
+							email: normalizeInvitationEmail(invitation.email),
+						},
+						{ $set: { acceptedAt: new Date() } }
+					);
+				},
+				beforeAcceptInvitation: async ({ invitation, user }) => {
+					await rejectPersonalWorkspaceInvitation(invitation.organizationId);
+					requireVerifiedBusinessEmail(user);
+					await reserveInvitationSeat({
+						invitationId: invitation.id,
+						organizationId: invitation.organizationId,
+						userId: user.id,
+					});
+				},
+				afterRejectInvitation: async ({ invitation }) => {
+					await OrganizationSeatReservation.deleteOne({
+						invitationId: invitation.id,
+						organizationId: invitation.organizationId,
+					});
+					await OrganizationInvitationPolicy.updateOne(
+						{
+							organizationId: invitation.organizationId,
+							email: normalizeInvitationEmail(invitation.email),
+						},
+						{
+							$set: {
+								blockedAt: new Date(),
+								declinedAt: new Date(),
+								cooldownUntil: null,
+							},
+						},
+						{ upsert: true }
+					);
+				},
+				afterCancelInvitation: async ({ invitation }) => {
+					await OrganizationSeatReservation.deleteOne({
+						invitationId: invitation.id,
+						organizationId: invitation.organizationId,
+					});
+				},
 			},
 			// Providing this implementation enables member invitations. The invite
 			// link lands on the web org shell where the invitee accepts.
 			sendInvitationEmail: async (data) => {
 				const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3001";
-				const inviteUrl = `${frontendUrl}/organizations/accept-invitation/${data.id}`;
+				const invitationPath = `/organizations/accept-invitation/${encodeURIComponent(data.id)}`;
+				const inviteUrl = `${frontendUrl}${invitationPath}`;
+				const signUpUrl = `${frontendUrl}/login?view=signup&callback=${encodeURIComponent(invitationPath)}`;
+				const referralTag = normalizeReferralTag(
+					(data.invitation as { referralTag?: unknown } | undefined)
+						?.referralTag
+				);
+				if (
+					!(await isOrganizationNotificationEnabled(
+						data.organization.id,
+						"organization-invitation"
+					))
+				) {
+					return;
+				}
+				let hasRyuAccount = false;
+				try {
+					hasRyuAccount = Boolean(
+						await User.findOne(
+							{ email: data.email.trim().toLowerCase() },
+							"_id"
+						)
+					);
+				} catch (error) {
+					// A classification failure should not discard a valid invitation.
+					// The new-account flow is safe: signup returns to the invitation,
+					// and the accept page still requires a session.
+					console.error(
+						"Failed to classify organization invitation recipient:",
+						error
+					);
+				}
 				try {
 					await sendEmail({
 						to: data.email,
-						subject: `Come build with ${data.organization.name} on Ryu`,
-						react: OrganizationInvitationEmail({
-							invitedByName: data.inviter.user.name || data.inviter.user.email,
-							organizationName: data.organization.name,
-							inviteUrl,
-						}),
+						subject: hasRyuAccount
+							? `Come build with ${data.organization.name} on Ryu`
+							: `${data.inviter.user.name || data.inviter.user.email} invited you to ${data.organization.name} on Ryu`,
+						react: hasRyuAccount
+							? OrganizationInvitationExistingAccountEmail({
+									invitedByName:
+										data.inviter.user.name || data.inviter.user.email,
+									organizationName: data.organization.name,
+									inviteUrl,
+									referralTag,
+								})
+							: OrganizationInvitationNewAccountEmail({
+									invitedByName:
+										data.inviter.user.name || data.inviter.user.email,
+									organizationName: data.organization.name,
+									signUpUrl,
+									referralTag,
+								}),
 					});
 				} catch (error) {
 					console.error("Failed to send organization invitation email:", error);

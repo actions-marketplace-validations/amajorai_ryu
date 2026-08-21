@@ -347,6 +347,7 @@ mod tests {
             name: name.to_string(),
             org_id: None,
             team_id: None,
+            channel_id: None,
             project_id: None,
             requests_per_minute: rpm,
             tokens_per_minute: tpm,

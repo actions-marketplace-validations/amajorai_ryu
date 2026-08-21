@@ -193,7 +193,15 @@ async fn fetch_readme_at(owner: &str, repo: &str, git_ref: &str) -> Option<(Stri
 }
 
 /// Candidate manifest locations inside a listing's repo, most specific first.
-const REPO_MANIFEST_PATHS: [&str; 2] = ["manifest.json", "plugin.json"];
+const REPO_MANIFEST_PATHS: [&str; 7] = [
+    "manifest.json",
+    "plugin.json",
+    "ryu.json",
+    ".ryu-plugin/manifest.json",
+    ".ryu-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    ".claude-plugin/plugin.json",
+];
 
 /// The listing's manifest as it stood at `git_ref`.
 async fn fetch_manifest_at(owner: &str, repo: &str, git_ref: &str) -> Option<serde_json::Value> {
@@ -239,14 +247,13 @@ pub async fn version_detail(owner: &str, repo: &str, tag: &str) -> Option<serde_
         out.insert("readme".into(), serde_json::Value::String(text));
         out.insert("readmeUrl".into(), serde_json::Value::String(url));
     }
-    for key in [
-        "description",
-        "license",
-        "engines",
-        "surfaces",
-        "targets",
-        "permissions",
-    ] {
+    let display = super::github_topic::manifest_display_fields(&manifest);
+    for key in ["description", "license"] {
+        if let Some(v) = display.get(key) {
+            out.insert(key.to_string(), v.clone());
+        }
+    }
+    for key in ["engines", "surfaces", "targets", "permissions"] {
         if let Some(v) = manifest.get(key) {
             out.insert(key.to_string(), v.clone());
         }

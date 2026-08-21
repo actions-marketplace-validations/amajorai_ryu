@@ -7,6 +7,7 @@
 // lives here.
 
 import type { ModelFile } from "./api/models.ts";
+import { isModelGgufFile } from "./catalog/friendly.ts";
 
 // Worst → best is the reverse; lower rank = better fit for this device.
 const FIT_RANK: Record<ModelFile["fit"], number> = {
@@ -25,14 +26,15 @@ const FIT_RANK: Record<ModelFile["fit"], number> = {
  * installed quant is preferred so re-triggering a link is a no-op.
  */
 export function pickRecommendedQuant(files: ModelFile[]): ModelFile | null {
-	if (files.length === 0) {
+	const modelFiles = files.filter((file) => isModelGgufFile(file.filename));
+	if (modelFiles.length === 0) {
 		return null;
 	}
-	const alreadyInstalled = files.find((f) => f.installed);
+	const alreadyInstalled = modelFiles.find((f) => f.installed);
 	if (alreadyInstalled) {
 		return alreadyInstalled;
 	}
-	return files.reduce((best, f) => {
+	return modelFiles.reduce((best, f) => {
 		const byFit = FIT_RANK[f.fit] - FIT_RANK[best.fit];
 		if (byFit !== 0) {
 			return byFit < 0 ? f : best;

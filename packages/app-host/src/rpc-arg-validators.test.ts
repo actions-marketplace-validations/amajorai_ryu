@@ -441,7 +441,7 @@ describe("asMailSendArg validates the recipient array (the over-broad-send guard
 
 describe("asSuggestionFeedbackArg gates kind against the closed set", () => {
 	it("accepts each allowed kind with a suggestion_type", () => {
-		for (const kind of ["thumbs_up", "thumbs_down", "dismiss"]) {
+		for (const kind of ["thumbs_up", "thumbs_down", "dismiss"] as const) {
 			expect(
 				asSuggestionFeedbackArg({ kind, suggestion_type: "reminder" })
 			).toEqual({
@@ -697,7 +697,7 @@ describe("assistant bridge validators", () => {
 		}));
 		const out = asAssistantContextArg({ items: many });
 		expect(out?.items.length).toBe(8);
-		expect(out?.items[0].text.length).toBe(8000);
+		expect(out?.items[0]?.text.length).toBe(8000);
 	});
 
 	it("asAssistantSurfaceArg requires a label — an unattributed takeover is refused", () => {

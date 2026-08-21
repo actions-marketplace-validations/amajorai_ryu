@@ -11,6 +11,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -20,6 +21,7 @@ import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { usePluginSettingsTabs } from "@/src/hooks/usePluginSettingsTabs.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { PluginSettingsFields } from "./PluginSettingsFields.tsx";
 import { SettingsSection } from "./shared/settings-items.tsx";
 
@@ -27,6 +29,7 @@ export function PluginsSettings() {
 	const target = toTarget(useActiveNode());
 	const { byPlugin, loading, error, reload } = usePluginSettingsTabs();
 	const { apps } = useApps();
+	const { openTab } = useTabsContext();
 
 	const nameFor = (pluginId: string): string =>
 		apps.find((a) => a.id === pluginId)?.name ?? pluginId;
@@ -63,6 +66,11 @@ export function PluginsSettings() {
 						Install and enable a plugin from the store to configure it.
 					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={() => openTab("/apps", { title: "Apps" })} size="sm">
+						Browse Apps
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}

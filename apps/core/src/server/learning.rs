@@ -18,7 +18,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use crate::learning::learning_ctx;
+use crate::learning::learning_ctx_for_caller;
 
 use super::ServerState;
 
@@ -30,9 +30,15 @@ use super::ServerState;
     summary = "resolved, secret-free learning config.",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn config(State(state): State<ServerState>) -> impl IntoResponse {
-    let ctx = learning_ctx(&state);
-    Json(ryu_learning::resolve_config(&*ctx.host).await)
+pub async fn config(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> Response {
+    if let Err(resp) = require_learning_access(&caller) {
+        return resp;
+    }
+    let ctx = learning_ctx_for_caller(&state, &caller);
+    Json(ryu_learning::resolve_config(&*ctx.host).await).into_response()
 }
 
 /// `GET /api/experience/list` — most-recent captured turns (cap 200).
@@ -43,14 +49,31 @@ pub async fn config(State(state): State<ServerState>) -> impl IntoResponse {
     summary = "most-recent captured turns (cap 200).",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn list(State(state): State<ServerState>) -> Response {
-    match state.experience.list(200).await {
+pub async fn list(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> Response {
+    if let Err(resp) = require_learning_access(&caller) {
+        return resp;
+    }
+    let ctx = learning_ctx_for_caller(&state, &caller);
+    let visible_conversation_ids = match ctx.host.list_conversations().await {
+        Ok(conversations) => conversations
+            .into_iter()
+            .map(|conversation| conversation.id)
+            .collect::<std::collections::HashSet<_>>(),
+        Err(error) => return err(error),
+    };
+    match state
+        .experience
+        .list_visible(200, &visible_conversation_ids)
+        .await
+    {
         Ok(rows) => {
-            let ctx = learning_ctx(&state);
             let min_reward = ryu_learning::resolve_min_reward(&*ctx.host).await;
             let counts = state
                 .experience
-                .counts(min_reward)
+                .counts_visible(min_reward, &visible_conversation_ids)
                 .await
                 .unwrap_or((0, 0, 0));
             (
@@ -78,8 +101,14 @@ pub async fn list(State(state): State<ServerState>) -> Response {
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn sweep(State(state): State<ServerState>) -> Response {
-    match ryu_learning::sweep_into_buffer(&learning_ctx(&state)).await {
+pub async fn sweep(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> Response {
+    if let Err(resp) = require_learning_access(&caller) {
+        return resp;
+    }
+    match ryu_learning::sweep_into_buffer(&learning_ctx_for_caller(&state, &caller)).await {
         Ok(added) => Json(json!({ "captured": added })).into_response(),
         Err(e) => err(e),
     }
@@ -94,8 +123,14 @@ pub async fn sweep(State(state): State<ServerState>) -> Response {
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn score(State(state): State<ServerState>) -> Response {
-    match ryu_learning::score_buffer(&learning_ctx(&state), 256).await {
+pub async fn score(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> Response {
+    if let Err(resp) = require_learning_access(&caller) {
+        return resp;
+    }
+    match ryu_learning::score_buffer(&learning_ctx_for_caller(&state, &caller), 256).await {
         Ok(scored) => Json(json!({ "scored": scored })).into_response(),
         Err(e) => err(e),
     }
@@ -122,6 +157,9 @@ pub async fn synthesize(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<Value>,
 ) -> Response {
+    if let Err(resp) = require_learning_access(&caller) {
+        return resp;
+    }
     let Some(cid) = body.get("conversation_id").and_then(Value::as_str) else {
         return bad_request("missing `conversation_id`");
     };
@@ -138,7 +176,14 @@ pub async fn synthesize(
     // the approver sees who requested this node-global skill. `None` on an unbound
     // personal node (no identity layer).
     let requested_by = caller.as_ref().map(|c| c.user_id.as_str());
-    match ryu_learning::synthesize_skill(&learning_ctx(&state), cid, force, requested_by).await {
+    match ryu_learning::synthesize_skill(
+        &learning_ctx_for_caller(&state, &caller),
+        cid,
+        force,
+        requested_by,
+    )
+    .await
+    {
         Ok(outcome) => Json(outcome).into_response(),
         Err(e) => err(e),
     }
@@ -154,12 +199,19 @@ pub async fn synthesize(
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn cycle(State(state): State<ServerState>, Json(body): Json<Value>) -> Response {
+pub async fn cycle(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(resp) = require_learning_access(&caller) {
+        return resp;
+    }
     let execute = body
         .get("execute")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    match ryu_learning::run_cycle(&learning_ctx(&state), execute).await {
+    match ryu_learning::run_cycle(&learning_ctx_for_caller(&state, &caller), execute).await {
         Ok(plan) => Json(plan).into_response(),
         Err(e) => err(e),
     }
@@ -173,11 +225,19 @@ pub async fn cycle(State(state): State<ServerState>, Json(body): Json<Value>) ->
     path = "/api/learn/merge",
     tag = "Learning",
     summary = "merge a completed learning adapter into a registered model",
+    description = "Forwards a completed learning adapter into the fine-tuning merge path. Provide adapter_name or adapter_path. The response returns model_id without changing the active serving model.",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn merge(State(state): State<ServerState>, Json(body): Json<Value>) -> Response {
-    match ryu_learning::merge_cycle_output(&learning_ctx(&state), body).await {
+pub async fn merge(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(resp) = require_learning_access(&caller) {
+        return resp;
+    }
+    match ryu_learning::merge_cycle_output(&learning_ctx_for_caller(&state, &caller), body).await {
         Ok(outcome) => Json(outcome).into_response(),
         Err(e) => err(e),
     }
@@ -199,6 +259,9 @@ pub async fn exclude(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<Value>,
 ) -> Response {
+    if let Err(resp) = require_learning_access(&caller) {
+        return resp;
+    }
     let Some(cid) = body.get("conversation_id").and_then(Value::as_str) else {
         return bad_request("missing `conversation_id`");
     };
@@ -241,6 +304,9 @@ pub async fn exclusion(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(conversation_id): Path<String>,
 ) -> Response {
+    if let Err(resp) = require_learning_access(&caller) {
+        return resp;
+    }
     if let Err(resp) =
         super::require_conversation_read_by_id(&state, &caller, &conversation_id).await
     {
@@ -275,6 +341,35 @@ fn bad_request(msg: &str) -> Response {
     (
         axum::http::StatusCode::BAD_REQUEST,
         Json(json!({ "error": msg })),
+    )
+        .into_response()
+}
+
+/// All learning endpoints can read or transform conversation-derived text. A
+/// registered node therefore requires a verified caller inside the node's
+/// personal/org/team boundary before any batch or by-id operation runs.
+fn require_learning_access(
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+) -> Result<(), Response> {
+    let Some(node) = crate::sidecar::control_plane::registered_node() else {
+        return Ok(());
+    };
+    let Some(caller) = caller.as_ref() else {
+        return Err(learning_access_denied("authentication_required"));
+    };
+    if let Some(reason) = super::node_scope_denial_reason(&node, caller) {
+        return Err(learning_access_denied(reason));
+    }
+    Ok(())
+}
+
+fn learning_access_denied(reason: &str) -> Response {
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "learning access denied",
+            "reason": reason,
+        })),
     )
         .into_response()
 }

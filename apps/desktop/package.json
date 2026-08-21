@@ -1,7 +1,7 @@
 {
   "name": "desktop",
   "private": true,
-  "version": "0.1.15",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
@@ -17,6 +17,8 @@
     "test:e2e:live": "RYU_E2E_LIVE=1 playwright test available-updates-story.live",
     "test:wiring": "bun test e2e/wiring/",
     "build:harness": "vite build --config e2e/harness/vite.harness.config.ts",
+    "build:harness:welcome": "vite build --config e2e/harness/vite.welcome.config.ts",
+    "test:e2e:welcome": "playwright test --config e2e/welcome-step-story.playwright.config.ts",
     "clean": "rm -rf src-tauri/target dist build",
     "brand:dev": "node ../../scripts/release/channel-brand.mjs --channel dev --config apps/desktop/src-tauri/tauri.dev.conf.json"
   },
@@ -62,7 +64,7 @@
     "@xyflow/react": "^12.10.2",
     "agentation": "^3.0.2",
     "ai": "catalog:",
-    "better-auth": "^1.5.5",
+    "better-auth": "^1.7.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",

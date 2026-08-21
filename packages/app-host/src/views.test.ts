@@ -4,17 +4,23 @@ import {
 	helloListDetail,
 	helloListDetailContribution,
 	isCoreApiPath,
+	isKnownLibraryViewKind,
 	isKnownViewKind,
+	LIBRARY_VIEW_KINDS,
+	LIBRARY_VIEW_REGISTRY,
+	libraryViewDefinition,
 	renderActionHttp,
 	renderTemplate,
 	type StoreCatalogItem,
 	type StoreDetailGraphSpec,
 	type StoreTabSpec,
 	sourceItemsFromResponse,
+	sourceTotalFromResponse,
 	storeDetailObject,
 	storeGraphFromResponse,
 	storeItemHaystack,
 	storeItemsFromResponse,
+	storeTotalFromResponse,
 	VIEW_KINDS,
 	type ViewSource,
 	type ViewSpec,
@@ -109,6 +115,35 @@ describe("declarative view vocabulary", () => {
 		});
 		expect(result.ok).toBe(true);
 		expect(result.errors).toEqual([]);
+	});
+});
+
+describe("library view registry", () => {
+	it("keeps the forward-compatible wire vocabulary and aliases pure", () => {
+		expect([...LIBRARY_VIEW_KINDS]).toEqual([
+			"board",
+			"kanban",
+			"data-table",
+			"database",
+			"calendar",
+			"map",
+			"feed",
+			"timeline",
+			"list",
+			"gallery",
+			"table",
+			"card",
+			"custom",
+		]);
+		for (const kind of LIBRARY_VIEW_KINDS) {
+			expect(isKnownLibraryViewKind(kind)).toBe(true);
+			expect(libraryViewDefinition(kind)?.kind).toBe(kind);
+		}
+		expect(libraryViewDefinition("kanban")?.renderer).toBe("board");
+		expect(libraryViewDefinition("database")?.renderer).toBe("table");
+		expect(isKnownLibraryViewKind("future-layout")).toBe(false);
+		expect(libraryViewDefinition("future-layout")).toBeUndefined();
+		expect(LIBRARY_VIEW_REGISTRY).toHaveLength(LIBRARY_VIEW_KINDS.length);
 	});
 });
 
@@ -312,6 +347,64 @@ describe("source-fetched items", () => {
 				runs
 			).map((entry) => entry.item.id)
 		).toEqual(["r-2"]);
+	});
+
+	it("uses an authoritative total instead of a paginated row length", () => {
+		const paged = {
+			items: [{ id: "q-1", title: "One" }],
+			total_count: 27,
+			next_cursor: "next",
+		};
+		const sourceWithLimit: ViewSource = {
+			http: { path: "/api/quests" },
+			items: "items",
+			limit: 1,
+		};
+		expect(sourceTotalFromResponse(sourceWithLimit, paged)).toBe(27);
+		expect(
+			sourceTotalFromResponse(
+				{ ...sourceWithLimit, total: "grand_total" },
+				{ ...paged, grand_total: 42 }
+			)
+		).toBe(42);
+		expect(
+			sourceTotalFromResponse(sourceWithLimit, {
+				items: paged.items,
+				next_cursor: "next",
+			})
+		).toBe(null);
+		expect(
+			sourceTotalFromResponse(
+				{ http: { path: "/api/quests" }, items: "items" },
+				{ items: [{ id: "q-1", title: "One" }] }
+			)
+		).toBe(1);
+	});
+
+	it("shares the same total rule with contributed Store tabs", () => {
+		const spec: StoreTabSpec = {
+			source: {
+				http: { path: "/api/templates" },
+				items: "items",
+				limit: 20,
+			},
+		};
+		expect(
+			storeTotalFromResponse(spec, {
+				items: [{ id: "t-1", name: "One" }],
+				next_cursor: "next",
+				total: 86,
+			})
+		).toBe(86);
+		expect(
+			storeTotalFromResponse(spec, {
+				items: Array.from({ length: 20 }, (_, index) => ({
+					id: `t-${index}`,
+					name: `Template ${index}`,
+				})),
+				next_cursor: "next",
+			})
+		).toBe(null);
 	});
 
 	it("transforms a subtitle to its basename and falls back for a missing title", () => {

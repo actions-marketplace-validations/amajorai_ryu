@@ -315,22 +315,33 @@ export interface ModelMapping {
  */
 export type RouteStrategy = "llm" | "embedding" | "keyword";
 
+/** Top-level Gateway model-router algorithms inspired by NeMo Switchyard. */
+export type ModelRouterType =
+	| "llm_classifier"
+	| "passthrough"
+	| "random"
+	| "stage_router"
+	| "escalation";
+
+export type StagePicker = "capable_first" | "efficient_first";
+
 /** A single smart-routing rule: a plain-language condition + target model. */
 export interface SmartRule {
 	/** Natural-language condition, e.g. "writing or refactoring code". */
 	description: string;
 	/** Model to route matching requests to (resolved via the router). */
 	model: string;
+	/** Relative traffic weight for the `random` router; defaults to 1. */
+	weight?: number;
 }
 
 /**
- * Classifier-driven model routing ("custom routing instructions"). When enabled,
- * a cheap `classifier_model` reads each request's latest message, picks the
- * best-matching rule, and the request is re-routed to that rule's target model
- * before the normal model→provider routing runs. Fails open: any error keeps the
- * originally requested model. Takes effect after the gateway restarts.
+ * Gateway Plane A model routing ("custom routing instructions"). When enabled,
+ * the selected `router_type` picks or preserves a target model before normal
+ * model→provider routing runs. Fails open: any error keeps the originally
+ * requested model. Takes effect after the gateway restarts.
  *
- * All nine fields are always on the wire: `RoutingView.smart_routing`
+ * All served fields are always on the wire: `RoutingView.smart_routing`
  * (`apps/gateway/src/api/config.rs`) is a plain `SmartRoutingConfig` struct, not
  * an `Option`, and every field on it is `#[serde(default)]`-filled rather than
  * skipped. `strategy` / `embedding_model` / `similarity_threshold` were missing
@@ -352,10 +363,36 @@ export interface SmartRoutingConfig {
 	embedding_model: string;
 	/** Master switch. Off by default (the classifier adds a per-request call). */
 	enabled: boolean;
+	/** Consecutive judge escalations required to latch a session. */
+	escalation_confirmations?: number;
+	/** Judge model used by the escalation router. */
+	escalation_judge_model?: string;
+	/** Per-message character cap in the escalation judge prompt. */
+	escalation_message_chars?: number;
+	/** Recent message window shown to the escalation judge. */
+	escalation_recent_message_window?: number;
+	/** Strong tier used by the escalation router. */
+	escalation_strong_model?: string;
+	/** Weak tier used by the escalation router. */
+	escalation_weak_model?: string;
+	/** Optional reproducible seed for weighted random routing. */
+	random_seed?: number | null;
+	/** Top-level model-router algorithm. Older gateways omit this field. */
+	router_type?: ModelRouterType;
 	/** Ordered natural-language rules. */
 	rules: SmartRule[];
 	/** Min cosine for the `embedding` strategy to accept a rule. Default 0.35. */
 	similarity_threshold: number;
+	/** Capable tier used by the stage router. */
+	stage_capable_model?: string;
+	/** Minimum confidence before stage signals override the picker default. */
+	stage_confidence_threshold?: number;
+	/** Efficient tier used by the stage router. */
+	stage_efficient_model?: string;
+	/** Default tier when stage signals are ambiguous. */
+	stage_picker?: StagePicker;
+	/** Recent request-message window inspected by the stage scorer. */
+	stage_recent_message_window?: number;
 	/** How the matching rule is chosen. Default `llm`. */
 	strategy: RouteStrategy;
 	/** Per-classification timeout in ms. Default 4000. */
@@ -374,7 +411,7 @@ export interface GatewayRoutingConfig {
 	fallback_chain: ProviderKind[];
 	/** Static model-to-provider mappings (exact or prefix match). */
 	model_map: Record<string, ModelMapping>;
-	/** Classifier-driven routing (custom routing instructions). Optional. */
+	/** Gateway Plane A model routing (custom routing instructions). Optional. */
 	smart_routing?: SmartRoutingConfig;
 }
 
@@ -400,28 +437,44 @@ export interface GatewayFirewallConfig {
  */
 export type BudgetAction = "notify" | "downgrade" | "restrict" | "stop";
 
+/** Charged work categories that a budget rule includes. */
+export interface BudgetChargeInclusion {
+	media: boolean;
+	model: boolean;
+	tools: boolean;
+}
+
+/** Notification fan-out tier emitted by the gateway budget contract. */
+export type GatewayAlertTier = "silent" | "warn" | "fanout" | "email";
+
 /**
  * A single per-agent or per-user budget rule.
  * Field names are snake_case — the gateway config API passes these through
  * without camelCase normalization (unlike the status proxy).
  */
 export interface BudgetRule {
-	/** Action taken once limit is reached. */
+	/** Action taken once the charged-cost limit is reached. */
 	action: BudgetAction;
+	/** Notification fan-out tier when this rule matches. */
+	alert?: GatewayAlertTier;
 	/** Model to route to when action = downgrade. */
 	downgrade_to?: string | null;
-	/** Lifetime token cap (input + output combined). 0 = unlimited. */
+	/** Which charged work categories contribute to this cap. */
+	include?: BudgetChargeInclusion;
+	/** Lifetime charged-cost cap in micro-USD (1_000_000 = $1). 0 = unlimited. */
 	limit: number;
 	/** Max tokens cap when action = restrict. Defaults to 256 on the gateway. */
 	restrict_max_tokens?: number;
 }
 
 /**
- * Per-user and per-agent token budgets (mirrors gateway BudgetConfig).
+ * Per-user and per-agent charged-cost budgets (mirrors gateway BudgetConfig).
  * Keys are user/agent ids; values are budget rules.
  */
 export interface GatewayBudgetConfig {
 	agents: Record<string, BudgetRule>;
+	/** One charged-cost rule applied independently to each conversation session. */
+	session: BudgetRule;
 	users: Record<string, BudgetRule>;
 }
 
@@ -479,10 +532,23 @@ export interface GatewayConfigPatch {
  */
 export const DEFAULT_SMART_ROUTING: SmartRoutingConfig = {
 	enabled: false,
+	router_type: "llm_classifier",
 	strategy: "llm",
 	classifier_model: "",
 	embedding_model: "",
 	similarity_threshold: 0.35,
+	random_seed: null,
+	stage_capable_model: "",
+	stage_efficient_model: "",
+	stage_picker: "capable_first",
+	stage_confidence_threshold: 0.5,
+	stage_recent_message_window: 3,
+	escalation_weak_model: "",
+	escalation_strong_model: "",
+	escalation_judge_model: "",
+	escalation_confirmations: 2,
+	escalation_recent_message_window: 28,
+	escalation_message_chars: 500,
 	rules: [],
 	default_model: null,
 	cache_by_session: true,

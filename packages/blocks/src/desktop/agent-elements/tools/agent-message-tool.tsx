@@ -11,17 +11,14 @@ import {
 import { cn } from "@ryu/ui/lib/utils";
 import { IconMessages } from "@tabler/icons-react";
 import { memo } from "react";
-import type {
-	AgentMessageContext,
-	AgentMessageIdentity,
-} from "../types.ts";
+import type { AgentMessageContext, AgentMessageIdentity } from "../types.ts";
 import { getToolStatus } from "../utils/format-tool.ts";
-import { GenericTool } from "./generic-tool.tsx";
 import {
+	type AgentMessageToolPart,
 	readAgentMessageOutput,
 	readAgentMessagePayload,
-	type AgentMessageToolPart,
 } from "./agent-message-tool-logic.ts";
+import { GenericTool } from "./generic-tool.tsx";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
@@ -112,21 +109,36 @@ export const AgentMessageTool = memo(function AgentMessageTool({
 			<GenericTool
 				isError={isError || isInterrupted}
 				isPending={isPending}
-				title={isPending ? "Sending message" : "Message an Agent"}
+				title={
+					isPending
+						? "Sending message"
+						: part.toolName === "agents.ask"
+							? "Ask an Agent"
+							: "Message an Agent"
+				}
 			/>
 		);
 	}
 
-	const sender = identityFor(payload.from ?? context?.current?.id ?? "agent", context);
+	const sender = identityFor(
+		payload.from ?? context?.current?.id ?? "agent",
+		context
+	);
 	const recipient = identityFor(payload.to, context);
 	const output = readAgentMessageOutput(part);
 	const deliveryFailed = isRecord(output) && output.ok === false;
 	const failed = isError || isInterrupted || deliveryFailed;
 	const activityVerb = failed
-		? "couldn't send a message to"
+		? payload.kind === "ask"
+			? "couldn't ask"
+			: "couldn't send a message to"
 		: isPending
-			? "is sending a message to"
-			: "sent a message to";
+			? payload.kind === "ask"
+				? "is asking"
+				: "is sending a message to"
+			: payload.kind === "ask"
+				? "asked"
+				: "sent a message to";
 
 	return (
 		<div
@@ -171,6 +183,34 @@ export const AgentMessageTool = memo(function AgentMessageTool({
 					</Bubble>
 				</MessageContent>
 			</Message>
+			{payload.reply ? (
+				<Message
+					align="start"
+					className="items-start"
+					data-testid="agent-message-reply"
+				>
+					<MessageAvatar className="size-8 self-start bg-transparent">
+						<IdentityAvatar className="size-8" identity={recipient} />
+					</MessageAvatar>
+					<MessageContent className="gap-1.5">
+						<MessageHeader className="gap-2 px-0">
+							<span>{recipient.name}</span>
+							<span className="font-normal text-muted-foreground/70">
+								to {sender.name}
+							</span>
+						</MessageHeader>
+						<Bubble
+							align="start"
+							className="max-w-[min(80%,42rem)]"
+							variant="outline"
+						>
+							<BubbleContent className="whitespace-pre-wrap text-[14px] leading-relaxed">
+								{payload.reply}
+							</BubbleContent>
+						</Bubble>
+					</MessageContent>
+				</Message>
+			) : null}
 		</div>
 	);
 });

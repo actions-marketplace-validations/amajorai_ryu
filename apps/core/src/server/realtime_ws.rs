@@ -2,8 +2,8 @@
 //!
 //! This is stage 2 of Phase 1 of the multi-user collaboration epic: the WS
 //! transport that drives the transport-agnostic [`ryu_realtime`] registry. A
-//! client upgrades, sends a `join` control frame naming a room (`conversation` or
-//! `document`), and — if access is granted — is bridged onto that room's
+//! client upgrades, sends a `join` control frame naming a room (`conversation`,
+//! `document`, or generic `application`), and — if access is granted — is bridged onto that room's
 //! broadcast: room frames are forwarded to the socket, and the client's presence
 //! / (Phase 3) doc-sync frames are published back into the room.
 //!
@@ -119,6 +119,7 @@ pub struct RealtimeQuery {
 enum RoomKind {
     Conversation,
     Document,
+    Application,
 }
 
 /// The first control frame: names the room to join and its kind.
@@ -126,6 +127,11 @@ enum RoomKind {
 struct JoinFrame {
     room_id: String,
     kind: RoomKind,
+    /// Required only for `kind: "application"`; Core canonicalizes it and uses
+    /// it as the room namespace. The client never gets to choose another app's
+    /// id through the companion host bridge.
+    #[serde(default)]
+    app_id: Option<String>,
 }
 
 /// `GET /api/realtime/ws` — upgrade to the room gateway. Node admittance + the
@@ -347,15 +353,78 @@ async fn handle_socket(
     }
     // Only `document` rooms drive the authoritative CRDT engine; a `conversation`
     // room keeps the pure event/presence relay (a stray binary frame on it must NOT
-    // mint a spurious Y.Doc keyed by a conversation id). `RoomKind` is `Copy`.
+    // mint a spurious Y.Doc keyed by a conversation id). Application rooms use the
+    // same relay but are namespaced by their authenticated owning app.
     let is_document = matches!(join.kind, RoomKind::Document);
+    let application_app_id = if matches!(join.kind, RoomKind::Application) {
+        let Some(app_id) = join
+            .app_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            let _ = ws_tx
+                .send(close(
+                    CLOSE_UNSUPPORTED,
+                    "application rooms require app_id".into(),
+                ))
+                .await;
+            return;
+        };
+        let app_id = crate::plugin_manifest::canonical_plugin_id(app_id).to_owned();
+        match state.app_store.get(&app_id).await {
+            Ok(Some(record)) if record.enabled => {
+                if !record
+                    .approved_grants
+                    .iter()
+                    .any(|grant| grant == "app:realtime")
+                {
+                    let _ = ws_tx
+                        .send(close(
+                            CLOSE_POLICY,
+                            "application-realtime-not-granted".into(),
+                        ))
+                        .await;
+                    return;
+                }
+            }
+            Ok(_) => {
+                let _ = ws_tx
+                    .send(close(CLOSE_POLICY, "application-not-enabled".into()))
+                    .await;
+                return;
+            }
+            Err(_) => {
+                let _ = ws_tx
+                    .send(close(CLOSE_POLICY, "application-lookup-failed".into()))
+                    .await;
+                return;
+            }
+        }
+        Some(app_id)
+    } else {
+        None
+    };
+    let room_key = application_app_id
+        .as_deref()
+        .map(|app_id| ryu_realtime::application_room_key(app_id, &room_id))
+        .unwrap_or_else(|| room_id.clone());
 
     // ── Access decision ──────────────────────────────────────────────────────
-    let meta = match join.kind {
-        RoomKind::Conversation => state.conversations.get_access_meta(&room_id).await,
-        RoomKind::Document => super::spaces::doc_access_meta(&state.spaces, &room_id).await,
+    let access = match join.kind {
+        RoomKind::Application => AccessOutcome::Grant(Access::Write),
+        RoomKind::Conversation => decide_access(
+            state.conversations.get_access_meta(&room_id).await,
+            caller.as_ref(),
+            peer_is_loopback,
+        ),
+        RoomKind::Document => decide_access(
+            super::spaces::doc_access_meta(&state.spaces, &room_id).await,
+            caller.as_ref(),
+            peer_is_loopback,
+        ),
     };
-    let access = match decide_access(meta, caller.as_ref(), peer_is_loopback) {
+    let access = match access {
         AccessOutcome::Grant(access) => access,
         AccessOutcome::Deny(reason) => {
             // A denial on a scoped resource is an access-control signal (e.g. a
@@ -389,8 +458,9 @@ async fn handle_socket(
     // ── Join the room ────────────────────────────────────────────────────────
     // Race-safe join: get-or-create + member increment happen under the registry
     // lock, so a concurrent idle eviction can never orphan this membership.
-    let membership = state.realtime.join(&room_id, member_id.clone());
+    let membership = state.realtime.join(&room_key, member_id.clone());
     let mut room_rx = membership.subscribe();
+    let application_room = application_app_id.is_some();
 
     // Ack the join with the resolved access level — stage-2's client reads this to
     // know whether it may edit (write) or is a read-only viewer.
@@ -427,7 +497,11 @@ async fn handle_socket(
         loop {
             match room_rx.recv().await {
                 Ok(frame) => {
-                    if forward_tx.send(frame_to_message(frame)).await.is_err() {
+                    if forward_tx
+                        .send(frame_to_message(frame, application_room))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -543,6 +617,17 @@ async fn handle_socket(
                     }
                     Some("pong") => {
                         last_pong = Instant::now();
+                    }
+                    Some("event") if application_room && can_write => {
+                        let Some(event) = ryu_realtime::decode_application_event(&value) else {
+                            continue;
+                        };
+                        if !ryu_realtime::is_valid_application_event(&event) {
+                            continue;
+                        }
+                        membership
+                            .handle()
+                            .broadcast_event(event.name, event.payload);
                     }
                     Some("leave") => break,
                     // Unknown control frames are ignored (forward-compatible).
@@ -717,9 +802,16 @@ async fn materialize_to_spaces(
 /// shape (`{"channel":"events","data":<payload>}`). A non-envelope `Frame::Event`
 /// (any surviving raw `publish_event`) decodes to `None` and passes through
 /// unchanged. Presence/DocSync are never typed events and are untouched.
-fn frame_to_message(frame: Frame) -> Message {
+fn frame_to_message(frame: Frame, include_event_name: bool) -> Message {
     if let Some(event) = ryu_realtime::Event::decode(&frame) {
-        return Message::Text(json!({"channel": "events", "data": event.payload}).to_string());
+        return if include_event_name {
+            Message::Text(
+                json!({"channel": "events", "event": event.name, "data": event.payload})
+                    .to_string(),
+            )
+        } else {
+            Message::Text(json!({"channel": "events", "data": event.payload}).to_string())
+        };
     }
     match frame {
         Frame::Event(value) => {
@@ -890,7 +982,7 @@ mod tests {
         });
 
         // Legacy: raw `publish_event(payload)` -> `Frame::Event(payload)`.
-        let legacy = frame_to_message(Frame::Event(payload.clone()));
+        let legacy = frame_to_message(Frame::Event(payload.clone()), false);
 
         // Typed: `broadcast_event("conversation.message", payload)` rides
         // `Frame::Event` as a `{__ryu_event, data}` envelope. Reproduce that envelope
@@ -899,7 +991,7 @@ mod tests {
             "__ryu_event": "conversation.message",
             "data": payload,
         }));
-        let typed = frame_to_message(enveloped);
+        let typed = frame_to_message(enveloped, false);
 
         match (legacy, typed) {
             (Message::Text(a), Message::Text(b)) => assert_eq!(
@@ -915,7 +1007,7 @@ mod tests {
     #[test]
     fn raw_event_frame_passes_through_unchanged() {
         let value = json!({"legacy": true, "id": 7});
-        match frame_to_message(Frame::Event(value.clone())) {
+        match frame_to_message(Frame::Event(value.clone()), false) {
             Message::Text(text) => {
                 assert_eq!(
                     text,
@@ -926,12 +1018,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn application_event_keeps_name_on_application_wire_only() {
+        let event = ryu_realtime::ApplicationEvent {
+            name: "table.snapshot".to_owned(),
+            payload: json!({"version": 4}),
+        };
+        let frame = Frame::Event(json!({
+            "__ryu_event": event.name,
+            "data": event.payload,
+        }));
+        match frame_to_message(frame, true) {
+            Message::Text(text) => assert_eq!(
+                text,
+                json!({
+                    "channel": "events",
+                    "event": "table.snapshot",
+                    "data": {"version": 4}
+                })
+                .to_string()
+            ),
+            _ => panic!("expected application event text"),
+        }
+    }
+
+    #[test]
+    fn application_event_validation_is_bounded_and_rejects_control_names() {
+        assert!(ryu_realtime::is_valid_application_event(
+            &ryu_realtime::ApplicationEvent {
+                name: "table.snapshot".to_owned(),
+                payload: json!({"ok": true}),
+            }
+        ));
+        assert!(!ryu_realtime::is_valid_application_event(
+            &ryu_realtime::ApplicationEvent {
+                name: "table\n.snapshot".to_owned(),
+                payload: json!({}),
+            }
+        ));
+        assert!(!ryu_realtime::is_valid_application_event(
+            &ryu_realtime::ApplicationEvent {
+                name: "x".to_owned(),
+                payload: serde_json::Value::String(
+                    "x".repeat(ryu_realtime::MAX_APPLICATION_EVENT_BYTES),
+                ),
+            }
+        ));
+    }
+
     /// A presence frame is tagged onto the `presence` channel (distinct from
     /// `events`) so the client routes awareness updates separately.
     #[test]
     fn presence_frame_is_tagged_presence_channel() {
         let value = json!({"member": "mem_1", "cursor": 3});
-        match frame_to_message(Frame::Presence(value.clone())) {
+        match frame_to_message(Frame::Presence(value.clone()), false) {
             Message::Text(text) => assert_eq!(
                 text,
                 json!({"channel": "presence", "data": value}).to_string()
@@ -968,7 +1108,7 @@ mod tests {
     #[test]
     fn docsync_frame_is_opaque_binary() {
         let bytes = vec![0u8, 1, 2, 255, 128];
-        match frame_to_message(Frame::DocSync(bytes.clone())) {
+        match frame_to_message(Frame::DocSync(bytes.clone()), false) {
             Message::Binary(out) => assert_eq!(out, bytes),
             _ => panic!("expected a binary frame"),
         }

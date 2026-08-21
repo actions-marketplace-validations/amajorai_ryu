@@ -90,7 +90,7 @@ export const DEFAULT_PASS_FORMAT_ID: PassFormatId = "landscape";
 export const passFormat = (id: PassFormatId): PassFormat =>
 	PASS_FORMATS.find((format) => format.id === id) ??
 	PASS_FORMATS.find((format) => format.id === DEFAULT_PASS_FORMAT_ID) ??
-	PASS_FORMATS[0];
+	PASS_FORMATS[0]!;
 
 /**
  * The loop's period, in seconds. One unbroken revolution per cycle, so the

@@ -97,6 +97,7 @@ pub async fn run_workflow(
     input: HashMap<String, String>,
     run_id: String,
 ) -> Result<WorkflowRun, String> {
+    crate::workflow::ensure_agents_active(workflow).await?;
     crate::plugin_host::fire_workflow_run_event(
         crate::plugin_host::ON_WORKFLOW_RUN_STARTED,
         serde_json::json!({
@@ -279,6 +280,12 @@ fn run_workflow_inner(
                 "sub-workflow nesting exceeded max depth of {MAX_SUBWORKFLOW_DEPTH}"
             ));
         }
+
+        // Nested SubWorkflow/While bodies do not pass through the public
+        // `run_workflow` wrapper, so repeat the Core lifecycle preflight at this
+        // execution boundary. This also catches agents added to a persisted
+        // child workflow after the parent was saved.
+        crate::workflow::ensure_agents_active(workflow).await?;
 
         let graph = WorkflowGraph::build(workflow).map_err(|e| e.to_string())?;
 
@@ -950,12 +957,12 @@ async fn execute_node(
             run_tool(name, &resolved_args, input, &idem_key).await
         }
         NodeKind::Mcp { server, tool, args } => {
-            // The explicit two-field form of a Tool node: join `<server>__<tool>`
+            // The explicit two-field form of a Tool node: join `<server>.<tool>`
             // into the id the MCP registry expects, then reuse the Tool path so
             // idempotency-key + `input` folding behave identically.
             let resolved_args = resolve_json_strings(args, &ctx);
             let idem_key = idempotency_key(&run.run_id, &node.id);
-            let tool_id = format!("{server}__{tool}");
+            let tool_id = format!("{server}.{tool}");
             run_tool(&tool_id, &resolved_args, input, &idem_key).await
         }
         NodeKind::Recipe { recipe, params } => {
@@ -1461,7 +1468,7 @@ async fn run_skill(
 /// and a workflow is the worst place for it: the run continues and downstream nodes
 /// consume output produced without the instructions the author picked the node for.
 ///
-/// The five model-facing surfaces (`skills__search`, `skills__load`, the merged tool
+/// The five model-facing surfaces (`skills.search`, `skills.load`, the merged tool
 /// catalog, and the two injected blocks) apply the same predicate as a *filter*.
 /// This one is not a discovery surface — a human wrote the id into the node, nothing
 /// offered it — so it diagnoses instead of hiding. And `is_loadable` is checked after
@@ -1675,7 +1682,7 @@ async fn run_guardrails(checks: &[String], input: &str) -> Result<String, String
 
 /// Post the input value to an external URL.
 /// Execute a `Tool` node by invoking the MCP registry. The node `name` is the
-/// fully-qualified tool id (`<server>__<tool>`). The node's `args` are merged
+/// fully-qualified tool id (`<server>.<tool>`). The node's `args` are merged
 /// with the upstream `input` (exposed under an `input` key when `args` is a JSON
 /// object), so a tool can receive both its static config and the live pipeline
 /// value. Returns the tool result serialized as JSON text.
@@ -1728,7 +1735,7 @@ async fn run_recipe(recipe: &str, params: &serde_json::Value) -> Result<String, 
     // params object's string leaves were already template-resolved by the caller,
     // so `{{input}}`/`{{nodes.*}}` slots are filled before substitution.
     //
-    // Structural twin of `run_ghost_action` below: `ghost__ghost_run` is a Core
+    // Structural twin of `run_ghost_action` below: `ghost.ghost_run` is a Core
     // BUILT-IN MCP tool, so the node drives the shared registry directly rather
     // than linking the out-of-process `@ryu/recipes` app. The app's own
     // `/api/recipes/:name/run` still reaches this same engine through the generic
@@ -1790,16 +1797,16 @@ fn ghost_action_call(
     let app = tstr("app");
 
     let (tool, mut call): (&str, serde_json::Value) = match action {
-        "click" => ("ghost__ghost_click", json!({ "query": query })),
-        "double_click" => ("ghost__ghost_click", json!({ "query": query, "count": 2 })),
-        "hover" => ("ghost__ghost_hover", json!({ "query": query })),
-        "long_press" => ("ghost__ghost_long_press", json!({ "query": query })),
+        "click" => ("ghost.ghost_click", json!({ "query": query })),
+        "double_click" => ("ghost.ghost_click", json!({ "query": query, "count": 2 })),
+        "hover" => ("ghost.ghost_hover", json!({ "query": query })),
+        "long_press" => ("ghost.ghost_long_press", json!({ "query": query })),
         "type" => (
-            "ghost__ghost_type",
+            "ghost.ghost_type",
             json!({ "text": pstr("text").unwrap_or(""), "into": query }),
         ),
         "press" => (
-            "ghost__ghost_press",
+            "ghost.ghost_press",
             json!({ "key": pstr("key").unwrap_or("return") }),
         ),
         "hotkey" | "keyboard_shortcut" => {
@@ -1808,28 +1815,28 @@ fn ghost_action_call(
                 .split('+')
                 .map(|s| s.trim().to_string())
                 .collect();
-            ("ghost__ghost_hotkey", json!({ "keys": keys }))
+            ("ghost.ghost_hotkey", json!({ "keys": keys }))
         }
         "scroll" => (
-            "ghost__ghost_scroll",
+            "ghost.ghost_scroll",
             json!({
                 "direction": pstr("direction").unwrap_or("down"),
                 "amount": pnum("amount").map(|n| n as i64).unwrap_or(3),
             }),
         ),
         "focus" => (
-            "ghost__ghost_focus",
+            "ghost.ghost_focus",
             json!({ "app": app.or_else(|| pstr("app")).unwrap_or("") }),
         ),
-        "drag" => ("ghost__ghost_drag", json!({})),
+        "drag" => ("ghost.ghost_drag", json!({})),
         "window" => (
-            "ghost__ghost_window",
+            "ghost.ghost_window",
             json!({
                 "action": pstr("action").unwrap_or("focus"),
                 "app": app.or_else(|| pstr("app")).unwrap_or(""),
             }),
         ),
-        "screenshot" => ("ghost__ghost_screenshot", json!({})),
+        "screenshot" => ("ghost.ghost_screenshot", json!({})),
         unknown => {
             return Err(format!(
                 "unknown ghost action '{unknown}' — install the ghost sidecar and record a supported step"
@@ -2190,7 +2197,7 @@ mod tests {
                     timeout_ms: None,
                     // Always errors (no/empty MCP registry, or unknown tool).
                     kind: NodeKind::Tool {
-                        name: "nope__nope".into(),
+                        name: "nope.nope".into(),
                         args: serde_json::json!({}),
                     },
                 },
@@ -2249,7 +2256,7 @@ mod tests {
                     retry: None,
                     timeout_ms: None,
                     kind: NodeKind::Tool {
-                        name: "nope__nope".into(),
+                        name: "nope.nope".into(),
                         args: serde_json::json!({}),
                     },
                 },
@@ -2703,7 +2710,7 @@ mod tests {
                     }),
                     timeout_ms: None,
                     kind: NodeKind::Tool {
-                        name: "nope__nope".into(),
+                        name: "nope.nope".into(),
                         args: serde_json::json!({}),
                     },
                 },
@@ -2748,7 +2755,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(tool, "ghost__ghost_click");
+        assert_eq!(tool, "ghost.ghost_click");
         assert_eq!(call["query"], json!("Compose"));
         assert_eq!(call["app"], json!("Gmail"));
         assert_eq!(call["dom_id"], json!("c1"));
@@ -2761,7 +2768,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(tool, "ghost__ghost_type");
+        assert_eq!(tool, "ghost.ghost_type");
         assert_eq!(call["into"], json!("Recipient"));
         assert_eq!(call["text"], json!("a@b.com"));
 
@@ -2769,14 +2776,14 @@ mod tests {
         let (tool, call) = ghost_action_call("hotkey", &json!({}), &json!({ "keys": "ctrl + c" }))
             .unwrap()
             .unwrap();
-        assert_eq!(tool, "ghost__ghost_hotkey");
+        assert_eq!(tool, "ghost.ghost_hotkey");
         assert_eq!(call["keys"], json!(["ctrl", "c"]));
 
         // scroll → direction + numeric amount default.
         let (tool, call) = ghost_action_call("scroll", &json!({}), &json!({ "direction": "up" }))
             .unwrap()
             .unwrap();
-        assert_eq!(tool, "ghost__ghost_scroll");
+        assert_eq!(tool, "ghost.ghost_scroll");
         assert_eq!(call["direction"], json!("up"));
         assert_eq!(call["amount"], json!(3));
 
@@ -2784,7 +2791,7 @@ mod tests {
         let (tool, call) = ghost_action_call("focus", &json!({ "app": "Calculator" }), &json!({}))
             .unwrap()
             .unwrap();
-        assert_eq!(tool, "ghost__ghost_focus");
+        assert_eq!(tool, "ghost.ghost_focus");
         assert_eq!(call["app"], json!("Calculator"));
 
         // wait → no tool (pure sleep).

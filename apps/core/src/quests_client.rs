@@ -237,9 +237,9 @@ impl QuestsClient {
         let mut parts: Vec<String> = Vec::new();
         if let Ok(recent) = registry
             .call_tool(
-                "shadow__recent_context",
+                "shadow.recent_context",
                 // `q` is Shadow's minute-window query param (the declarative
-                // `shadow__recent_context` http tool forwards args verbatim as
+                // `shadow.recent_context` http tool forwards args verbatim as
                 // query params through the `/api/shadow/*` proxy).
                 json!({ "q": CONTEXT_MINUTES }),
                 None,
@@ -253,7 +253,7 @@ impl QuestsClient {
         if !condition.is_empty() {
             if let Ok(semantic) = registry
                 .call_tool(
-                    "shadow__semantic_search",
+                    "shadow.semantic_search",
                     // `q` is Shadow's search query param (see above).
                     json!({ "q": condition, "limit": 5 }),
                     None,

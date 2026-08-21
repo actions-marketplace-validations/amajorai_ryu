@@ -61,12 +61,18 @@ export function AudioDevicesSettings() {
 		refresh().catch(() => undefined);
 	}, [refresh]);
 
-	const handleMic = (value: string) => {
+	const handleMic = (value: string | null) => {
+		if (value === null) {
+			return;
+		}
 		setMicId(value);
 		setDefaultMicId(value === SYSTEM_DEFAULT ? null : value);
 	};
 
-	const handleSpeaker = (value: string) => {
+	const handleSpeaker = (value: string | null) => {
+		if (value === null) {
+			return;
+		}
 		setSpeakerId(value);
 		setDefaultSpeakerId(value === SYSTEM_DEFAULT ? null : value);
 	};

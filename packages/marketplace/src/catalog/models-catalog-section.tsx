@@ -1,5 +1,6 @@
 import {
 	AiBrain01Icon,
+	BrainIcon,
 	CheckmarkCircle02Icon,
 	CpuIcon,
 	Delete01Icon,
@@ -8,7 +9,6 @@ import {
 	FavouriteIcon,
 	FlashIcon,
 	HardDriveIcon,
-	Package01Icon,
 	SlidersHorizontalIcon,
 	SquareLock01Icon,
 	TextWrapIcon,
@@ -27,6 +27,7 @@ import {
 } from "@ryu/ui/components/dropdown-menu.tsx";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -47,6 +48,10 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
+import {
+	formatCurrency,
+	formatCount as formatSharedCount,
+} from "@ryu/ui/lib/number-format.ts";
 import {
 	type ComponentType,
 	type ReactNode,
@@ -80,6 +85,7 @@ import {
 	friendlyQuant,
 	type GgufRole,
 	ggufFileRole,
+	isModelGgufFile,
 	parseModelSize,
 	parsePipelineModalities,
 	QUANT_QUALITY_MAX,
@@ -106,6 +112,11 @@ type FitStyle = (fit: string) => { className: string; dot: string };
 
 /** Token id → friendly label, for building active-filter chip text. */
 const TOKEN_LABEL = new Map(CATALOG_TOKENS.map((t) => [t.id, t.label]));
+
+/** Deep-link the selected base model into the fine-tune Companion. */
+export function fineTuneHrefForModel(modelId: string): string {
+	return `/plugin/@ryu/finetune?base_model_id=${encodeURIComponent(modelId)}`;
+}
 
 /** Refine loaded models to those carrying every active token-badge filter. */
 export function filterModelsByTokens(
@@ -180,8 +191,8 @@ const CATEGORY_OPTIONS: { value: ModelCategory; label: string }[] = [
 	{ value: "vision", label: "Vision" },
 	{ value: "embedding", label: "Embedding" },
 	{ value: "reranker", label: "Reranker" },
-	{ value: "stt", label: "Speech-to-text" },
-	{ value: "tts", label: "Text-to-speech" },
+	{ value: "stt", label: "Voice Recognition" },
+	{ value: "tts", label: "Audio" },
 ];
 
 /** Largest-first calendar units for relative-time formatting (ms per unit). */
@@ -236,31 +247,18 @@ export function formatDate(iso: string | null): string | null {
 	});
 }
 
-/** Format a large count as a friendly short string (1234567 → "1.2M"). */
+/** Shared count policy, exported for the catalog helper tests. */
 export function formatCount(n: number): string {
-	if (n >= 1_000_000) {
-		return `${(n / 1_000_000).toFixed(1)}M`;
-	}
-	if (n >= 1000) {
-		return `${(n / 1000).toFixed(1)}k`;
-	}
-	return String(n);
+	return formatSharedCount(n) ?? "—";
 }
 
-/** Friendly context-window string (32768 → "32K", 1048576 → "1M"). `null` when
+/** Friendly context-window string (32768 → "32,768", 1048576 → "1m"). `null` when
  *  the Hub didn't report a context length, so callers can omit the chip. */
 export function formatContext(tokens: number | null): string | null {
 	if (!tokens || tokens <= 0) {
 		return null;
 	}
-	if (tokens >= 1_000_000) {
-		const m = tokens / 1_048_576;
-		return `${m % 1 === 0 ? m : m.toFixed(1)}M`;
-	}
-	if (tokens >= 1024) {
-		return `${Math.round(tokens / 1024)}K`;
-	}
-	return String(tokens);
+	return formatSharedCount(tokens);
 }
 
 /** Friendly parameter-count string (999885952 → "1.0B", 8e9 → "8.0B"). `null`
@@ -493,6 +491,16 @@ export default function ModelsCatalogSection({
 								loading={loading}
 								loadingMore={loadingMore}
 								models={filteredModels}
+								onClearFilters={() => {
+									setQuery("");
+									setCategory("all");
+									setFormat("gguf");
+									setInstalledOnly(false);
+									setOrg("");
+									setSort("trending");
+									setActiveTokens(new Set());
+								}}
+								onRetry={fetchNextPage}
 								onSelect={select}
 								selectedId={selectedId}
 								showTags={showTags}
@@ -541,7 +549,7 @@ function TagFilterDropdown({
 								className="ml-1 h-4 px-1.5 text-[10px]"
 								variant="secondary"
 							>
-								{count}
+								{formatCount(count)}
 							</Badge>
 						)}
 					</Button>
@@ -769,6 +777,8 @@ function ModelList({
 	friendly,
 	showTags,
 	installedOnly,
+	onClearFilters,
+	onRetry,
 }: {
 	models: ModelCard[];
 	loading: boolean;
@@ -781,6 +791,8 @@ function ModelList({
 	friendly: boolean;
 	showTags: boolean;
 	installedOnly: boolean;
+	onClearFilters: () => void;
+	onRetry: () => void;
 }) {
 	// The IntersectionObserver root is this scrollable nav, not the viewport.
 	const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
@@ -794,9 +806,20 @@ function ModelList({
 	}
 	if (error) {
 		return (
-			<div className="p-4 text-destructive text-sm">
-				Couldn't load models: {error}
-			</div>
+			<Empty className="h-full p-6">
+				<EmptyHeader>
+					<EmptyMedia variant="icon">
+						<HugeiconsIcon icon={BrainIcon} />
+					</EmptyMedia>
+					<EmptyTitle>Couldn&apos;t load models</EmptyTitle>
+					<EmptyDescription>{error}</EmptyDescription>
+				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onRetry} size="sm" variant="ghost">
+						Try again
+					</Button>
+				</EmptyContent>
+			</Empty>
 		);
 	}
 	if (models.length === 0) {
@@ -804,7 +827,7 @@ function ModelList({
 			<Empty className="h-full p-6">
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={Package01Icon} />
+						<HugeiconsIcon icon={BrainIcon} />
 					</EmptyMedia>
 					<EmptyTitle>
 						{installedOnly ? "No models added yet" : "No models found"}
@@ -815,15 +838,17 @@ function ModelList({
 							: "Try a different search."}
 					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onClearFilters} size="sm" variant="ghost">
+						Clear filters
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
 
 	return (
-		<nav
-			className="scroll-fade-effect-y h-full overflow-auto p-2"
-			ref={setScrollEl}
-		>
+		<nav className="scroll-fade h-full overflow-auto p-2" ref={setScrollEl}>
 			<ul className="flex flex-col gap-1">
 				{models.map((m) => {
 					const isSelected = m.id === selectedId;
@@ -1214,7 +1239,15 @@ function ModelOverviewGrid({
  * only on an install-capable surface (it needs a Core node); its node identity,
  * estimate call, and sidecar install all cross the host seam.
  */
-function LlmfitEstimateBlock({ repo }: { repo: string }) {
+function LlmfitEstimateBlock({
+	context,
+	quant,
+	repo,
+}: {
+	context: number | null;
+	quant: string | null;
+	repo: string;
+}) {
 	const host = useCatalogHost();
 	const node = host.useActiveNode();
 	const [busy, setBusy] = useState<"idle" | "loading" | "installing">("idle");
@@ -1226,7 +1259,12 @@ function LlmfitEstimateBlock({ repo }: { repo: string }) {
 		setBusy("loading");
 		setError(null);
 		try {
-			setResult(await host.estimateLlmfit(target, repo));
+			setResult(
+				await host.estimateLlmfit(target, repo, {
+					context: context ?? undefined,
+					quant: quant ?? undefined,
+				})
+			);
 		} catch (e) {
 			setError(e instanceof Error ? e.message : "Estimate failed");
 		} finally {
@@ -1265,12 +1303,12 @@ function LlmfitEstimateBlock({ repo }: { repo: string }) {
 		body = (
 			<div className="flex flex-wrap items-center gap-3">
 				<Button
-					disabled={busy !== "idle"}
+					disabled={busy === "installing"}
+					loading={busy === "loading"}
 					onClick={onRun}
 					size="sm"
 					variant="ghost"
 				>
-					{busy === "loading" ? <Spinner className="size-4" /> : null}
 					{busy === "loading"
 						? "Estimating… (~15s)"
 						: "Estimate speed on your device"}
@@ -1283,8 +1321,7 @@ function LlmfitEstimateBlock({ repo }: { repo: string }) {
 	} else if (!result.installed) {
 		body = (
 			<div className="flex flex-wrap items-center gap-3">
-				<Button disabled={busy !== "idle"} onClick={onInstall} size="sm">
-					{busy === "installing" ? <Spinner className="size-4" /> : null}
+				<Button loading={busy === "installing"} onClick={onInstall} size="sm">
 					Enable speed estimates
 				</Button>
 				<span className="text-muted-foreground text-xs">
@@ -1297,7 +1334,9 @@ function LlmfitEstimateBlock({ repo }: { repo: string }) {
 		body = (
 			<div className="flex flex-wrap items-center gap-2">
 				{result.tps != null && (
-					<Badge variant="secondary">≈{Math.round(result.tps)} words/sec</Badge>
+					<Badge variant="secondary">
+						≈{Math.round(result.tps)} tokens/sec
+					</Badge>
 				)}
 				{result.fit_level && (
 					<Badge variant="outline">{result.fit_level}</Badge>
@@ -1418,7 +1457,7 @@ function ModelDetailPanel({
 			<Empty className="h-full">
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={Package01Icon} />
+						<HugeiconsIcon icon={BrainIcon} />
 					</EmptyMedia>
 					<EmptyTitle>No model selected</EmptyTitle>
 					<EmptyDescription>
@@ -1459,6 +1498,10 @@ function ModelDetailPanel({
 		repoSizeBytes,
 		repoFitLabel,
 	} = detail;
+	const modelFiles = files.filter((file) => isModelGgufFile(file.filename));
+	const recommendedLlmfitFile =
+		pickRecommendedFile(modelFiles.filter((file) => !file.installed)) ??
+		pickRecommendedFile(modelFiles);
 
 	return (
 		<div className="flex flex-col gap-6 p-4">
@@ -1485,7 +1528,13 @@ function ModelDetailPanel({
 			<ModelSpecsRow card={card} />
 			<ModelOverviewGrid card={card} device={device} />
 
-			{installLayer && <LlmfitEstimateBlock repo={card.id} />}
+			{installLayer && (
+				<LlmfitEstimateBlock
+					context={card.contextLength}
+					quant={recommendedLlmfitFile?.quant ?? null}
+					repo={card.id}
+				/>
+			)}
 
 			{/* Stats from Artificial Analysis */}
 			<StatsBlock present={statsApiKeyPresent} stats={stats} />
@@ -1540,7 +1589,7 @@ function ModelDetailPanel({
 						</p>
 					</div>
 					<Button
-						onClick={() => host.navigate?.("/plugin/@ryu/finetune")}
+						onClick={() => host.navigate?.(fineTuneHrefForModel(card.id))}
 						size="sm"
 						variant="ghost"
 					>
@@ -1664,7 +1713,10 @@ function StatsBlock({
 			value:
 				stats.priceUsdPer1m === null
 					? null
-					: `$${stats.priceUsdPer1m.toFixed(2)}`,
+					: formatCurrency(stats.priceUsdPer1m, "USD", {
+							maximumFractionDigits: 2,
+							minimumFractionDigits: 2,
+						}),
 			money: true,
 		},
 	];
@@ -1722,7 +1774,7 @@ function InstalledButton({
 	return (
 		<Button
 			className="shrink-0 gap-1"
-			disabled={busy}
+			loading={busy}
 			onBlur={() => setArmed(false)}
 			onClick={onUninstall}
 			onFocus={() => setArmed(true)}
@@ -1731,7 +1783,6 @@ function InstalledButton({
 			size="sm"
 			variant={armed ? "destructive" : "secondary"}
 		>
-			{busy && <Spinner className="size-4" />}
 			{!busy && (
 				<HugeiconsIcon
 					className={armed ? "size-3.5" : "size-3.5 text-success"}
@@ -1863,18 +1914,20 @@ function recommendedBadgeText(os: string): string {
  * the picker only ever lists not-installed downloads.
  */
 function pickRecommendedFile(files: ModelFile[]): ModelFile | null {
-	return files.reduce<ModelFile | null>((best, f) => {
-		if (!best) {
-			return f;
-		}
-		const fitDelta = (FIT_RANK[f.fit] ?? 9) - (FIT_RANK[best.fit] ?? 9);
-		if (fitDelta !== 0) {
-			return fitDelta < 0 ? f : best;
-		}
-		const fSize = f.sizeBytes ?? Number.POSITIVE_INFINITY;
-		const bestSize = best.sizeBytes ?? Number.POSITIVE_INFINITY;
-		return fSize < bestSize ? f : best;
-	}, null);
+	return files
+		.filter((file) => isModelGgufFile(file.filename))
+		.reduce<ModelFile | null>((best, f) => {
+			if (!best) {
+				return f;
+			}
+			const fitDelta = (FIT_RANK[f.fit] ?? 9) - (FIT_RANK[best.fit] ?? 9);
+			if (fitDelta !== 0) {
+				return fitDelta < 0 ? f : best;
+			}
+			const fSize = f.sizeBytes ?? Number.POSITIVE_INFINITY;
+			const bestSize = best.sizeBytes ?? Number.POSITIVE_INFINITY;
+			return fSize < bestSize ? f : best;
+		}, null);
 }
 
 /**
@@ -2073,7 +2126,12 @@ function FileSections({
 	InstallButton,
 	fitStyle,
 }: FileSectionsProps) {
-	if (files.length === 0) {
+	const visibleFiles = files.filter(
+		(file) =>
+			isModelGgufFile(file.filename) || ggufFileRole(file.filename) !== null
+	);
+
+	if (visibleFiles.length === 0) {
 		return (
 			<section className="flex flex-col gap-2">
 				<h3 className="font-medium text-sm">Download options</h3>
@@ -2103,11 +2161,9 @@ function FileSections({
 		);
 	};
 
-	const installed = files.filter((f) => f.installed);
-	const notInstalled = files.filter((f) => !f.installed);
-	const downloads = notInstalled.filter(
-		(f) => ggufFileRole(f.filename) === null
-	);
+	const installed = visibleFiles.filter((f) => f.installed);
+	const notInstalled = visibleFiles.filter((f) => !f.installed);
+	const downloads = notInstalled.filter((f) => isModelGgufFile(f.filename));
 	const addons = notInstalled.filter((f) => ggufFileRole(f.filename) !== null);
 
 	return (

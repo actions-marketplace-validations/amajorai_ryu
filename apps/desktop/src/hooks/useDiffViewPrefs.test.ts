@@ -99,7 +99,7 @@ describe("diffViewPrefsToOptions", () => {
 			collapsed: true,
 			overflow: "wrap",
 		});
-		expect(opts.collapsed).toBe(true);
+		expect(opts).toMatchObject({ collapsed: true });
 		// `extra` is spread last, so it wins over the computed overflow.
 		expect(opts.overflow).toBe("wrap");
 	});

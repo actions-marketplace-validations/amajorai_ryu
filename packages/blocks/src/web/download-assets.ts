@@ -32,6 +32,45 @@ export const RELEASES_API = `https://api.github.com/repos/${GITHUB_RELEASES_REPO
 export const LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_RELEASES_REPO}/releases/latest`;
 export const GITHUB_REPO = `https://github.com/${GITHUB_RELEASES_REPO}`;
 
+/** Detect the visitor's desktop platform without making module evaluation browser-only. */
+export function detectDownloadOS(): DownloadOS {
+	if (typeof window === "undefined") {
+		return "macos";
+	}
+	const userAgent = window.navigator.userAgent.toLowerCase();
+	const platform = window.navigator.platform.toLowerCase();
+	if (
+		userAgent.includes("mac") ||
+		userAgent.includes("iphone") ||
+		userAgent.includes("ipad") ||
+		platform.includes("mac")
+	) {
+		return "macos";
+	}
+	if (userAgent.includes("win") || platform.includes("win")) {
+		return "windows";
+	}
+	if (
+		userAgent.includes("linux") ||
+		platform.includes("linux") ||
+		userAgent.includes("x11")
+	) {
+		return "linux";
+	}
+	return "macos";
+}
+
+/** Detect the visitor's processor architecture, defaulting to Intel-compatible builds. */
+export function detectDownloadArch(): DownloadArch {
+	if (typeof window === "undefined") {
+		return "intel";
+	}
+	const userAgent = window.navigator.userAgent.toLowerCase();
+	return userAgent.includes("arm") || userAgent.includes("aarch64")
+		? "arm"
+		: "intel";
+}
+
 /**
  * Filenames of the desktop installer, per platform and architecture.
  *
@@ -56,6 +95,72 @@ export const PLATFORM_ASSET_PATTERNS: Record<
 		intel: [/amd64\.AppImage$/i, /amd64\.deb$/i, /x86_64\.rpm$/i],
 	},
 };
+
+/**
+ * Filenames for the standalone headless Core binary. These are deliberately
+ * separate from the desktop installer matcher: the same GitHub release carries
+ * both products, and a browser download must never hand someone the desktop
+ * app when they asked for the local runtime only.
+ */
+export const CORE_ASSET_PATTERNS: Record<
+	DownloadOS,
+	Record<DownloadArch, RegExp[]>
+> = {
+	macos: {
+		arm: [/^ryu-core-macos-aarch64(?:\.exe)?$/i],
+		intel: [/^ryu-core-macos-x86_64(?:\.exe)?$/i],
+	},
+	windows: {
+		arm: [/^ryu-core-windows-aarch64\.exe$/i],
+		intel: [/^ryu-core-windows-x86_64\.exe$/i],
+	},
+	linux: {
+		arm: [/^ryu-core-linux-aarch64$/i],
+		intel: [/^ryu-core-linux-x86_64$/i],
+	},
+};
+
+export function findCoreReleaseAsset(
+	release: Release,
+	platformId: string,
+	arch: DownloadArch
+): ReleaseAsset | null {
+	if (!release.assets?.length) {
+		return null;
+	}
+	const patterns =
+		CORE_ASSET_PATTERNS[platformId as DownloadOS]?.[arch] ?? null;
+	if (!patterns) {
+		return null;
+	}
+	for (const pattern of patterns) {
+		const asset = release.assets.find((candidate) =>
+			pattern.test(candidate.name)
+		);
+		if (asset) {
+			return asset;
+		}
+	}
+	return null;
+}
+
+/** Newest non-draft release that actually carries a Core binary. */
+export function findCoreReleaseWithAsset(
+	releases: Release[],
+	platformId: string,
+	arch: DownloadArch
+): { release: Release; asset: ReleaseAsset } | null {
+	for (const release of releases) {
+		if (release.draft) {
+			continue;
+		}
+		const asset = findCoreReleaseAsset(release, platformId, arch);
+		if (asset) {
+			return { release, asset };
+		}
+	}
+	return null;
+}
 
 /**
  * Assets in the release that are NOT the desktop app.

@@ -1,4 +1,10 @@
 {
+  "tags": ["developer","hooks","example","reference"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/hook-observers",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/hook-observers",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/hook-observers",
   "name": "Hook Observers",
   "version": "0.1.14",

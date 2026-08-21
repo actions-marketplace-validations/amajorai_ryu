@@ -1,13 +1,14 @@
 /**
- * TEAMS VOLUME PRICING — the per-seat price falls as an organisation grows.
+ * TEAMS SEAT PRICING — a simple, auditable member-seat meter.
  *
  * The complaint this answers, stated plainly: a twenty-person company paid
  * twenty times the per-seat price, received exactly ONE free node (the same as a
  * solo user), and the only "upgrade" on offer was a tier that cost more than
  * simply buying the credits it bundled. Growing cost more and bought nothing.
- * Every comparable product solves this with a volume discount rather than a tier
- * jump — GitHub Copilot applies 5% / 10% / 15% at 10 / 25 / 50 seats — and this
- * is that ladder.
+ * Teams starts at five seats ($250/mo) and adds seats at $50/mo. Larger
+ * organizations move to Enterprise, where procurement, security and committed
+ * volume terms can be negotiated without making the self-serve price curve
+ * impossible to explain.
  *
  * ENFORCED BY POLAR, NOT BY US. A Polar seat-based price carries native
  * `seat_tiers` of type `volume`, so these rows become the product's tier array
@@ -40,10 +41,7 @@ export interface SeatTier {
  * curve: it reads as standard rather than as something to negotiate.
  */
 export const TEAMS_SEAT_TIERS: readonly SeatTier[] = [
-	{ minSeats: 2, discountBps: 0 },
-	{ minSeats: 10, discountBps: 500 },
-	{ minSeats: 25, discountBps: 1000 },
-	{ minSeats: 50, discountBps: 1500 },
+	{ minSeats: 5, discountBps: 0 },
 ];
 
 /** The discount (bps) that applies at `seats` — the highest tier reached. */
@@ -75,22 +73,20 @@ export const seatTotalUsd = (listUsd: number, seats: number): number =>
  * WHERE SELF-SERVE STOPS. Above this, Teams checkout refuses and the buyer is
  * routed to sales.
  *
- * 100 is the same line `docs/enterprise-pricing-framework.md` draws: above it a
- * buyer almost always needs something self-serve cannot do anyway — SSO,
+ * 50 is the self-serve line: above it a
+ * buyer usually needs something self-serve cannot do anyway — SSO,
  * invoicing against a PO, a security review, custom terms — so a card-form
  * purchase at that size is one procurement would have blocked after we had
  * already taken the money.
  *
- * It also protects the price. The enterprise floor is $300/seat/yr against
- * $416.50 at the public 50+ tier, so an uncapped slider let the largest buyers
- * self-serve a WORSE deal than we would have quoted them — which is exactly the
- * customer who later discovers that and asks why.
+ * It also protects the price and creates a clean handoff to Enterprise for
+ * procurement, security review, regional capacity, and negotiated volume terms.
  *
  * ENFORCED SERVER-SIDE, not just in the picker. A cap that lives only in a React
  * component is a suggestion: the checkout route takes a seat count from the
  * request body, and `Math.max(requested, minSeats)` is a floor with no ceiling.
  */
-export const SELF_SERVE_MAX_SEATS = 100;
+export const SELF_SERVE_MAX_SEATS = 50;
 
 /** Whether `seats` is beyond self-serve and belongs to sales. */
 export const exceedsSelfServe = (seats: number): boolean =>

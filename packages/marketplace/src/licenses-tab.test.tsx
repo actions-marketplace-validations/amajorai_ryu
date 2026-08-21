@@ -30,6 +30,12 @@ function makeLicense(over: Partial<OwnedLicense> = {}): OwnedLicense {
 		status: "active",
 		stripePaymentIntentId: "pi_1",
 		...over,
+		entitlementUntil:
+			over.entitlementUntil === undefined ? null : over.entitlementUntil,
+		stripeSubscriptionId:
+			over.stripeSubscriptionId === undefined
+				? null
+				: over.stripeSubscriptionId,
 	};
 }
 

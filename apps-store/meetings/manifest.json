@@ -1,4 +1,10 @@
 {
+  "tags": ["meetings","transcription","notes","recording"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-meetings",
+  "homepage": "https://github.com/amajorai/ryu-meetings",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/meetings",
   "name": "Meetings",
   "version": "0.1.14",
@@ -107,6 +113,7 @@
     "icon": "mic-01"
   },
   "contributes": {
+  "chat_widget_templates": [{"id":"meetings.chat","title":"Meetings widget","description":"Open Meetings data in a host-rendered chat widget.","triggers":["meetings widget"],"examples":["Show me a meetings widget"],"backing":{"view_id":"surface:meetings"},"display_mode":"inline","safe_action_ids":[],"availability":"available"}],
     "data_categories": [
       {
         "id": "meetings",

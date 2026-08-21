@@ -6,6 +6,7 @@ import { toggleVariants } from "@ryu/ui/components/toggle.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { VariantProps } from "class-variance-authority";
 import { type CSSProperties, createContext, useContext } from "react";
+import { FadeOverflowTextChildren } from "./fade-overflow-text.tsx";
 
 const ToggleGroupContext = createContext<
 	VariantProps<typeof toggleVariants> & {
@@ -80,7 +81,7 @@ function ToggleGroupItem({
 			data-variant={context.variant || variant}
 			{...props}
 		>
-			{children}
+			<FadeOverflowTextChildren>{children}</FadeOverflowTextChildren>
 		</TogglePrimitive>
 	);
 }

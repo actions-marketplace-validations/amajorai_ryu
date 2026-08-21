@@ -147,7 +147,8 @@ export function OTPInput({
 			return 0;
 		}
 		for (let i = 0; i < els.length; i++) {
-			if (clientX < els[i].getBoundingClientRect().right) {
+			const element = els[i];
+			if (element && clientX < element.getBoundingClientRect().right) {
 				return i;
 			}
 		}

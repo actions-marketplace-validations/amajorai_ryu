@@ -15,10 +15,9 @@
 import {
 	Alert01Icon,
 	CircleArrowUp01Icon,
-	CpuIcon,
 	Delete01Icon,
 	Download01Icon,
-	Loading01Icon,
+	LayerIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { InstallProgressButton } from "@ryu/blocks/desktop/install-button";
@@ -34,6 +33,7 @@ import {
 } from "@ryu/ui/components/card";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -140,7 +140,10 @@ export function EngineCardShell({
 	if (view === "list") {
 		return (
 			<div className="flex items-center gap-3 rounded-lg border bg-card px-3 py-2">
-				<HugeiconsIcon className="size-4 shrink-0 opacity-70" icon={CpuIcon} />
+				<HugeiconsIcon
+					className="size-4 shrink-0 opacity-70"
+					icon={LayerIcon}
+				/>
 				<div className="flex min-w-0 flex-1 flex-col gap-0.5">
 					<div className="flex items-center gap-2">
 						<span className="truncate font-medium text-sm">{displayName}</span>
@@ -164,7 +167,7 @@ export function EngineCardShell({
 			<CardHeader>
 				<CardTitle className="flex items-center justify-between gap-2">
 					<span className="flex items-center gap-2">
-						<HugeiconsIcon className="size-4 opacity-70" icon={CpuIcon} />
+						<HugeiconsIcon className="size-4 opacity-70" icon={LayerIcon} />
 						{displayName}
 					</span>
 					{toggle}
@@ -217,16 +220,12 @@ export function EngineInstallButton({
 					<Button
 						className="text-primary hover:text-primary"
 						disabled={busy}
+						loading={pending === "install"}
 						onClick={onInstall}
 						size="sm"
 						variant="ghost"
 					>
-						{pending === "install" ? (
-							<HugeiconsIcon
-								className="size-4 animate-spin"
-								icon={Loading01Icon}
-							/>
-						) : (
+						{pending !== "install" && (
 							<HugeiconsIcon className="size-4" icon={CircleArrowUp01Icon} />
 						)}
 						Update
@@ -234,16 +233,12 @@ export function EngineInstallButton({
 				) : null}
 				<Button
 					disabled={busy || disabledUninstall}
+					loading={pending === "uninstall"}
 					onClick={onUninstall}
 					size="sm"
 					variant="ghost"
 				>
-					{pending === "uninstall" ? (
-						<HugeiconsIcon
-							className="size-4 animate-spin"
-							icon={Loading01Icon}
-						/>
-					) : (
+					{pending !== "uninstall" && (
 						<HugeiconsIcon className="size-4" icon={Delete01Icon} />
 					)}
 					Remove
@@ -289,16 +284,29 @@ export function EngineFootnote({
 }
 
 /** Outer error state when the whole engines section fails to load. */
-export function EnginesErrorState({ message }: { message: string }) {
+export function EnginesErrorState({
+	message,
+	onRetry,
+}: {
+	message: string;
+	onRetry?: () => void;
+}) {
 	return (
 		<Empty className="h-full">
 			<EmptyHeader>
 				<EmptyMedia variant="icon">
-					<HugeiconsIcon icon={CpuIcon} />
+					<HugeiconsIcon icon={LayerIcon} />
 				</EmptyMedia>
 				<EmptyTitle>Could not load engines</EmptyTitle>
 				<EmptyDescription>{message}</EmptyDescription>
 			</EmptyHeader>
+			{onRetry ? (
+				<EmptyContent>
+					<Button onClick={onRetry} size="sm" variant="ghost">
+						Try again
+					</Button>
+				</EmptyContent>
+			) : null}
 		</Empty>
 	);
 }
@@ -346,7 +354,7 @@ export function EnginesScreenFrame({
 	toolbar?: ReactNode;
 }) {
 	return (
-		<div className="scroll-fade-effect-y h-full overflow-auto p-4">
+		<div className="scroll-fade h-full overflow-auto p-4">
 			<div className="flex flex-col gap-6">
 				{toolbar ? (
 					<div className="flex items-center justify-end">{toolbar}</div>

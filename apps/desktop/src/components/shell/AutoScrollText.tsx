@@ -15,19 +15,10 @@ interface AutoScrollTextProps {
 	title: string;
 }
 
-// Roughly px-per-second of scroll travel; higher = slower, easier to read.
-const MS_PER_PIXEL = 26;
-const MIN_TRAVEL_MS = 1600;
-// A hair of extra travel so the last glyph clears the edge before reversing.
-const EDGE_PADDING_PX = 6;
-
 /**
- * A single line of text that gently ping-pong auto-scrolls when it overflows its
- * container — so an over-long engine name or username stays fully readable — and
- * surfaces the whole value as a hover tooltip. When the text fits it renders as a
- * plain static line: no motion, no tooltip. Honors `prefers-reduced-motion` by
- * falling back to a static ellipsis (the tooltip still exposes the full value).
- * Scrolling pauses while hovered so the reader (and the tooltip) can catch up.
+ * A legacy single-line label for values that can include inline accents. It
+ * stays static so shared `FadeOverflowText` is the only hover-scroll owner in
+ * controls; clipped values still expose the full value in a tooltip.
  */
 export function AutoScrollText({
 	title,
@@ -36,7 +27,6 @@ export function AutoScrollText({
 }: AutoScrollTextProps) {
 	const textRef = useRef<HTMLSpanElement>(null);
 	const [overflowing, setOverflowing] = useState(false);
-	const [animating, setAnimating] = useState(false);
 
 	useEffect(() => {
 		const inner = textRef.current;
@@ -45,43 +35,8 @@ export function AutoScrollText({
 			return;
 		}
 
-		let animation: Animation | undefined;
-
 		const measure = () => {
-			const overflow = inner.scrollWidth - clip.clientWidth;
-			const isOverflowing = overflow > 1;
-
-			animation?.cancel();
-			animation = undefined;
-
-			const reduceMotion = window.matchMedia(
-				"(prefers-reduced-motion: reduce)"
-			).matches;
-
-			if (isOverflowing && !reduceMotion) {
-				const distance = overflow + EDGE_PADDING_PX;
-				const duration = Math.max(
-					MIN_TRAVEL_MS,
-					Math.round(distance * MS_PER_PIXEL)
-				);
-				animation = inner.animate(
-					[
-						{ transform: "translateX(0)", offset: 0 },
-						{ transform: "translateX(0)", offset: 0.2 },
-						{ transform: `translateX(-${distance}px)`, offset: 0.8 },
-						{ transform: `translateX(-${distance}px)`, offset: 1 },
-					],
-					{
-						duration,
-						iterations: Number.POSITIVE_INFINITY,
-						direction: "alternate",
-						easing: "ease-in-out",
-					}
-				);
-			}
-
-			setOverflowing(isOverflowing);
-			setAnimating(Boolean(animation));
+			setOverflowing(inner.scrollWidth - clip.clientWidth > 1);
 		};
 
 		measure();
@@ -90,21 +45,10 @@ export function AutoScrollText({
 		observer.observe(inner);
 		return () => {
 			observer.disconnect();
-			animation?.cancel();
 		};
-		// `title` is the content: a new string re-measures the marquee. The
+		// `title` is the content: a new string re-measures the label. The
 		// ResizeObserver alone misses a text swap that keeps the same box width.
 	}, [title]);
-
-	const setPaused = (paused: boolean) => {
-		for (const anim of textRef.current?.getAnimations() ?? []) {
-			if (paused) {
-				anim.pause();
-			} else {
-				anim.play();
-			}
-		}
-	};
 
 	const line = (
 		<span
@@ -114,13 +58,7 @@ export function AutoScrollText({
 			)}
 		>
 			<span
-				className={cn(
-					"inline-block align-bottom will-change-transform",
-					// Static ellipsis only when we're NOT scrolling (fits / reduced motion).
-					animating ? "" : "max-w-full truncate"
-				)}
-				onPointerEnter={() => setPaused(true)}
-				onPointerLeave={() => setPaused(false)}
+				className="inline-block max-w-full truncate align-bottom"
 				ref={textRef}
 			>
 				{children}

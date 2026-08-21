@@ -4,6 +4,7 @@
 // (renders a fractional average with half-star support) and an interactive
 // `StarRatingInput` for the write-review form. Shared by desktop + web.
 
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { Star, StarHalf } from "lucide-react";
 import { useState } from "react";
@@ -65,7 +66,7 @@ export function StarRating({
 	const label =
 		count === undefined
 			? `Rated ${rounded} out of ${MAX_RATING}`
-			: `Rated ${rounded} out of ${MAX_RATING} from ${count} reviews`;
+			: `Rated ${rounded} out of ${MAX_RATING} from ${formatNumber(count)} reviews`;
 	return (
 		<span
 			aria-label={label}
@@ -86,7 +87,7 @@ export function StarRating({
 			</span>
 			{count === undefined ? null : (
 				<span className="text-muted-foreground text-xs tabular-nums">
-					({count})
+					({formatNumber(count)})
 				</span>
 			)}
 		</span>

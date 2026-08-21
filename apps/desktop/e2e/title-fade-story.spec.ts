@@ -70,6 +70,60 @@ test.describe("clipped title edge fade — real components in isolation", () => 
 		expect(mask).toBe("none");
 	});
 
+	test("the legacy sidebar fade stays static", async ({ page }) => {
+		const label = clip(page, "fade-unbroken");
+		await label.hover();
+		await expect
+			.poll(() =>
+				label.locator("> span").evaluate((el) => el.getAnimations().length)
+			)
+			.toBe(0);
+	});
+
+	test("the legacy accented label stays static", async ({ page }) => {
+		const line = page.getByTestId("auto-scroll-text").locator("> span").first();
+		await line.hover();
+		await expect
+			.poll(() =>
+				line.locator("> span").evaluate((el) => el.getAnimations().length)
+			)
+			.toBe(0);
+	});
+
+	test("a rename overlaps per-character enter and left-to-right exit layers", async ({
+		page,
+	}, testInfo) => {
+		const title = page.getByTestId("animated-title");
+		await expect(title.locator("[data-animated-title]")).toHaveAttribute(
+			"data-animated-title-state",
+			"settled"
+		);
+
+		await page.getByTestId("rename-title").click();
+		const animated = title.locator("[data-animated-title]");
+		await expect(animated).toHaveAttribute(
+			"data-animated-title-state",
+			"transitioning"
+		);
+		await page.waitForTimeout(160);
+		await page.screenshot({
+			path: testInfo.outputPath("title-rename-overlap-proof.png"),
+		});
+		await expect(animated.locator("span.absolute")).toHaveCount(2);
+		await expect(
+			animated.locator("span.absolute").first().locator("span.inline-block")
+		).toHaveCount(9);
+		await expect(
+			animated.locator("span.absolute").last().locator("span.inline-block")
+		).toHaveCount(9);
+
+		await expect(animated).toHaveAttribute(
+			"data-animated-title-state",
+			"settled",
+			{ timeout: 2000 }
+		);
+	});
+
 	test("the tab-title tooltip variant fades busy and resting alike", async ({
 		page,
 	}) => {

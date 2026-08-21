@@ -18,6 +18,7 @@ import { Button } from "@ryu/ui/components/button.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { useCallback } from "react";
 import { sileo } from "sileo";
+import VerifiedBadge from "./catalog/chrome/verified-badge.tsx";
 import { useMarketplaceHost } from "./host.tsx";
 import { SellerReportsPanel } from "./seller-reports.tsx";
 import { NoOrgState, SignedOutState } from "./states.tsx";
@@ -45,7 +46,8 @@ export function payoutButtonLabel(
 }
 
 export function SellTab() {
-	const { useSellerStatus, openExternal } = useMarketplaceHost();
+	const { openExternal, openOrganization, openSignIn, useSellerStatus } =
+		useMarketplaceHost();
 	const { status, loading, error, authed, onboard, onboarding, refresh } =
 		useSellerStatus();
 
@@ -68,6 +70,13 @@ export function SellTab() {
 	if (!authed) {
 		return (
 			<SignedOutState
+				action={
+					openSignIn ? (
+						<Button onClick={() => void openSignIn()} size="sm">
+							Sign in
+						</Button>
+					) : null
+				}
 				description="Selling paid items is tied to your organization. Sign in to set up payouts."
 				title="Sign in to become a seller"
 			/>
@@ -75,18 +84,29 @@ export function SellTab() {
 	}
 	if (error && error.kind === "no_org") {
 		return (
-			<NoOrgState message={error.message} title="No organization selected" />
+			<NoOrgState
+				action={
+					openOrganization ? (
+						<Button onClick={() => void openOrganization()} size="sm">
+							Choose an organization
+						</Button>
+					) : null
+				}
+				message={error.message}
+				title="No organization selected"
+			/>
 		);
 	}
 
 	const onboardingStatus = status?.onboardingStatus ?? "none";
 	const payoutsEnabled = status?.payoutsEnabled ?? false;
+	const stripeIdentityStatus = status?.stripeIdentityStatus ?? "none";
 	const stripeUnavailable = error && error.kind === "stripe";
 
 	return (
 		<div className="mx-auto max-w-2xl px-6 py-8">
 			<div className="mb-6 flex items-center justify-between">
-				<h2 className="font-semibold text-lg">Become a seller</h2>
+				<h2 className="font-semibold text-lg">Marketplace & payouts</h2>
 				<Button onClick={() => refresh()} size="sm" variant="ghost">
 					<HugeiconsIcon className="mr-2 size-3.5" icon={Refresh01Icon} />
 					Refresh
@@ -119,14 +139,26 @@ export function SellTab() {
 								) : null}
 							</div>
 						)}
+						{stripeIdentityStatus === "verified" ? (
+							<div className="mt-3 flex items-center gap-2 text-muted-foreground text-xs">
+								<VerifiedBadge publisherTrust="blue" />
+								<span>Identity verified via Stripe Connect</span>
+							</div>
+						) : stripeIdentityStatus === "restricted" ? (
+							<p className="mt-3 text-destructive text-xs">
+								Stripe identity verification needs attention before the blue
+								publisher mark can be shown.
+							</p>
+						) : null}
 					</div>
 				</div>
 
 				<p className="mt-4 text-muted-foreground text-sm">
-					Sell skills, plugins, and tools on the Ryu Marketplace. Payouts run
-					through Stripe Connect — Stripe handles identity, bank, and tax
-					verification, and Ryu never sees your details. A platform commission
-					is deducted per sale.
+					Publish organization-owned skills, plugins, and tools on the Ryu
+					Marketplace. Free listings do not require Connect. Paid listings use
+					organization payouts through Stripe Connect — Stripe handles identity,
+					bank, and tax verification, and Ryu never sees your details. A
+					platform commission is deducted per sale.
 				</p>
 
 				{stripeUnavailable ? (
@@ -136,10 +168,8 @@ export function SellTab() {
 					</p>
 				) : (
 					<div className="mt-5">
-						<Button disabled={onboarding} onClick={handleOnboard}>
-							{onboarding ? (
-								<Spinner className="mr-2 size-4" />
-							) : (
+						<Button loading={onboarding} onClick={handleOnboard}>
+							{!onboarding && (
 								<HugeiconsIcon className="mr-2 size-4" icon={Download01Icon} />
 							)}
 							{payoutButtonLabel(payoutsEnabled, onboardingStatus)}

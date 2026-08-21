@@ -128,7 +128,7 @@ test("Reflect shows dashboard cards and changes period", async ({ page }) => {
 	await page.goto(`${STORY_URL}?view=reflect`);
 	await expect(page.getByRole("heading", { name: "Reflect" })).toBeVisible();
 	await expect(page.getByText("Conversations")).toBeVisible();
-	await expect(page.getByText("Writing")).toBeVisible();
+	await expect(page.getByText("Writing", { exact: true })).toBeVisible();
 	await expect(page.getByText("A focused week")).toBeVisible();
 	await page.getByRole("combobox", { name: "Reflect period" }).click();
 	await page.getByRole("option", { name: "Last 30 days" }).click();

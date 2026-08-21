@@ -2,7 +2,7 @@
   "id": "@ryu/memory",
   "name": "Memory",
   "version": "1.0.0",
-  "description": "Long-term memory CRUD: the multi-level (user/node/project/org) memory store surfaced in the Memory Library. Governance shell over the in-crate memory module — the in-process chat auto-recall path is KERNEL: it always reads the built-in store directly and never routes through this HTTP surface, so no provider selection can swap it. What IS swappable is the model-facing `memory` layer — the stable `memory__search` / `memory__store` / `memory__forget` verbs. Those resolve to exactly ONE provider at a time and default to this built-in store, so an external memory provider AUGMENTS the built-in store (which the kernel keeps recalling from regardless) rather than replacing it. The verbs are backed by declarative HTTP tools that loop back through Core's own authenticated `/api/memory` CRUD surface and its memory-only retrieval search.",
+  "description": "Long-term memory CRUD: the multi-level (user/node/project/org) memory store surfaced in the Memory Library. Governance shell over the in-crate memory module — the in-process chat auto-recall path is KERNEL: it always reads the built-in store directly and never routes through this HTTP surface, so no provider selection can swap it. What IS swappable is the model-facing `memory` layer — the stable `memory.search` / `memory.store` / `memory.forget` verbs. Those resolve to exactly ONE provider at a time and default to this built-in store, so an external memory provider AUGMENTS the built-in store (which the kernel keeps recalling from regardless) rather than replacing it. The verbs are backed by declarative HTTP tools that loop back through Core's own authenticated `/api/memory` CRUD surface and its memory-only retrieval search.",
   "tagline": "Durable facts the agent can recall, store, and forget",
   "keywords": ["memory", "recall", "facts"],
   "category": "Knowledge & Memory",
@@ -15,7 +15,7 @@
       "name": "Memory Recall",
       "kind": "tool",
       "config": {
-        "slug": "memorystore__recall",
+        "slug": "memorystore.recall",
         "backend": "http",
         "method": "POST",
         "url": "core:/api/retrieval/search",
@@ -29,7 +29,7 @@
           "include_memory": true,
           "top_k": 5
         },
-        "description": "Semantically recall durable facts from the built-in long-term memory store, ranked by embedding similarity with an importance boost. Searches MEMORY ONLY — the empty Space filter matches no Space, so every document chunk is excluded. Reaches `user`- and `node`-scope facts ONLY: this route pins no active project and passes no read levels, so `project`- and `org`-scope facts are never returned. To reach those, or to filter by scope or category instead of by meaning, use `memorystore__list`. NOTE: on a node bound to an organization this tool returns {available:false} on every call — semantic recall requires a verified user and this tool authenticates as the node. Use memorystore__list there, which is scope-filtered and does not require one.",
+        "description": "Semantically recall durable facts from the built-in long-term memory store, ranked by embedding similarity with an importance boost. Searches MEMORY ONLY — the empty Space filter matches no Space, so every document chunk is excluded. Reaches `user`- and `node`-scope facts ONLY: this route pins no active project and passes no read levels, so `project`- and `org`-scope facts are never returned. To reach those, or to filter by scope or category instead of by meaning, use `memorystore.list`. NOTE: on a node bound to an organization this tool returns {available:false} on every call — semantic recall requires a verified user and this tool authenticates as the node. Use memorystore.list there, which is scope-filtered and does not require one.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -57,7 +57,7 @@
       "name": "Memory Save",
       "kind": "tool",
       "config": {
-        "slug": "memorystore__save",
+        "slug": "memorystore.save",
         "backend": "http",
         "method": "POST",
         "url": "core:/api/memory",
@@ -126,7 +126,7 @@
       "name": "Memory Delete",
       "kind": "tool",
       "config": {
-        "slug": "memorystore__delete",
+        "slug": "memorystore.delete",
         "backend": "http",
         "method": "DELETE",
         "url": "core:/api/memory/{id}",
@@ -141,7 +141,7 @@
           "properties": {
             "id": {
               "type": "string",
-              "description": "Id of the memory entry to delete, as returned by `memorystore__list` or `memorystore__recall`."
+              "description": "Id of the memory entry to delete, as returned by `memorystore.list` or `memorystore.recall`."
             }
           },
           "required": ["id"]
@@ -153,7 +153,7 @@
       "name": "Memory List",
       "kind": "tool",
       "config": {
-        "slug": "memorystore__list",
+        "slug": "memorystore.list",
         "backend": "http",
         "method": "GET",
         "url": "core:/api/memory",
@@ -162,7 +162,7 @@
         },
         "fail_open": true,
         "unwrap_body": true,
-        "description": "Browse remembered facts by scope and category rather than by meaning. This is the scope-filtered counterpart to `memorystore__recall`, which cannot filter by level — and the only route that reaches project-scope facts.",
+        "description": "Browse remembered facts by scope and category rather than by meaning. This is the scope-filtered counterpart to `memorystore.recall`, which cannot filter by level — and the only route that reaches project-scope facts.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -210,8 +210,8 @@
       "selectable": true,
       "default": true,
       "tools": {
-        "memory__search": {
-          "tool": "memorystore__recall",
+        "memory.search": {
+          "tool": "memorystore.recall",
           "args": {
             "limit": "top_k",
             "scope": ""
@@ -225,11 +225,11 @@
             }
           }
         },
-        "memory__store": {
-          "tool": "memorystore__save"
+        "memory.store": {
+          "tool": "memorystore.save"
         },
-        "memory__forget": {
-          "tool": "memorystore__delete"
+        "memory.forget": {
+          "tool": "memorystore.delete"
         }
       }
     }

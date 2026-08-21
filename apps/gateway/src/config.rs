@@ -12,7 +12,7 @@ pub use ryu_gw_budget::{BudgetAction, BudgetConfig, ExecBudgetAction, ExecBudget
 // stable `crate::config::{BudgetRule,SessionBudgetConfig}` path and are
 // referenced by the config tests via `super::`. Kept for API-path stability.
 #[allow(unused_imports)]
-pub use ryu_gw_budget::{BudgetRule, SessionBudgetConfig};
+pub use ryu_gw_budget::{BudgetChargeInclusion, BudgetRule, SessionBudgetConfig};
 pub use ryu_gw_contracts::AlertTier;
 
 // The evals config value-type moved to the extracted `ryu-gw-evals` stage crate.
@@ -144,8 +144,27 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub concurrency: ConcurrencyConfig,
 
+    /// Lifecycle and resource bounds for Core-owned ACP subprocesses. The Gateway
+    /// persists this section because it is the node-level control surface, while
+    /// Core enforces it where ACP processes actually run.
+    #[serde(default)]
+    pub acp: AcpConfig,
+
+    /// Node-wide computer-use policy. The Gateway owns this persisted permission;
+    /// the local Ghost/provider boundary applies platform support and safety checks
+    /// before it uses a locked session.
+    #[serde(default)]
+    pub computer_use: ComputerUseConfig,
+
     #[serde(default)]
     pub skills: SkillsConfig,
+
+    /// Gateway-owned kill switch and refresh cadence for personalized Marketplace
+    /// recommendations. Core reads this section before fetching catalog data or
+    /// invoking the recommendation adapter, so disabling it is authoritative for
+    /// the whole node.
+    #[serde(default)]
+    pub marketplace_recommendations: MarketplaceRecommendationsConfig,
 
     #[serde(default)]
     pub audit: AuditConfig,
@@ -508,10 +527,11 @@ pub struct CreditsConfig {
 
     /// Per-call cost in micro-USD for a successful image generation — THE
     /// FALLBACK the flat path charges when the provider reported no compute time.
-    /// Cloud media providers (Replicate/Fal/OpenRouter) do not report a
-    /// usage.cost the way chat does, so a call the metered path cannot price is
-    /// debited at this flat rate through the same at-cost + markup path as
-    /// tokens. Default: [`default_cost_per_image_micro_usd`]
+    /// Cloud media providers (Replicate/Fal/OpenRouter) may report a
+    /// `usage.cost`; when present, that provider-reported USD amount wins. A
+    /// call with no reported cost is debited at this flat fallback rate through
+    /// the same at-cost + markup path as tokens. Default:
+    /// [`default_cost_per_image_micro_usd`]
     /// (`GATEWAY_CREDITS_COST_PER_IMAGE_MICRO_USD`).
     ///
     /// These four defaulted to 0, which is what a fallback must never be: the
@@ -526,12 +546,12 @@ pub struct CreditsConfig {
     /// [`default_cost_per_video_micro_usd`].
     #[serde(default = "default_cost_per_video_micro_usd")]
     pub cost_per_video_micro_usd: u64,
-    /// Per-call fallback cost in micro-USD for a successful TTS synthesis.
+    /// Per-call fallback cost in micro-USD for a successful Audio synthesis.
     /// `GATEWAY_CREDITS_COST_PER_TTS_MICRO_USD`. Default:
     /// [`default_cost_per_tts_micro_usd`].
     #[serde(default = "default_cost_per_tts_micro_usd")]
     pub cost_per_tts_micro_usd: u64,
-    /// Per-call fallback cost in micro-USD for a successful STT transcription.
+    /// Per-call fallback cost in micro-USD for a successful Voice Recognition transcription.
     /// `GATEWAY_CREDITS_COST_PER_STT_MICRO_USD`. Default:
     /// [`default_cost_per_stt_micro_usd`].
     #[serde(default = "default_cost_per_stt_micro_usd")]
@@ -541,7 +561,7 @@ pub struct CreditsConfig {
     #[serde(default)]
     pub wallet_empty_action: WalletEmptyAction,
     /// Model to downgrade to when `wallet_empty_action = downgrade`. When unset, a
-    /// downgrade safely degrades to a restrict (mirrors the token-budget rule).
+    /// downgrade safely degrades to a restrict (mirrors the spend-budget rule).
     #[serde(default)]
     pub wallet_empty_downgrade_to: Option<String>,
     /// Notification fan-out tier when the org wallet-empty rule matches
@@ -942,8 +962,8 @@ GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give videos away on purpose."
     /// of `modality`. Chat is never metered here (it uses real token/usage.cost);
     /// returns 0 for Chat and for any modality whose per-call rate is unset. Pass
     /// through [`Self::debit_amount`] to apply the platform markup, like tokens.
-    /// Cost for one media call, priced from the provider's REPORTED compute time
-    /// when the response carries it, else the configured flat rate.
+    /// Cost for one media call, preferring provider-reported `usage.cost`, then
+    /// reported compute time, and finally the configured flat rate.
     ///
     /// Returns the amount and whether it was ESTIMATED. The flag is not
     /// decoration: a flat-rate fallback is a guess, and recording which ledger
@@ -955,6 +975,24 @@ GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give videos away on purpose."
         modality: &Modality,
         response: &serde_json::Value,
     ) -> (u64, bool) {
+        // OpenRouter's image adapter preserves the original chat response under
+        // `raw`, while other providers commonly leave `usage` at the top level.
+        // Prefer either provider-reported cost before using a local estimate.
+        let reported_cost_usd = response
+            .get("usage")
+            .and_then(|usage| usage.get("cost"))
+            .or_else(|| {
+                response
+                    .get("raw")
+                    .and_then(|raw| raw.get("usage"))
+                    .and_then(|usage| usage.get("cost"))
+            })
+            .and_then(serde_json::Value::as_f64)
+            .filter(|cost| cost.is_finite() && *cost >= 0.0);
+        if let Some(cost_usd) = reported_cost_usd {
+            return (((cost_usd * 1_000_000.0).round()).max(0.0) as u64, false);
+        }
+
         let seconds = response
             .get("usage")
             .and_then(|u| u.get("compute_seconds"))
@@ -969,9 +1007,10 @@ GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give videos away on purpose."
                 return (micro.max(0.0) as u64, false);
             }
         }
-        // TTS and STT have no provider compute-time path, so their configured
-        // per-call rate is the actual price rather than an estimate. Image and
-        // video are the modalities where this flat amount is a fallback.
+        // Audio and Voice Recognition have no provider-reported cost or compute-
+        // time path, so their configured per-call rate is the actual price rather
+        // than an estimate. Image and video are the modalities where this flat
+        // amount is a fallback.
         (
             self.media_cost_micro_usd(modality),
             matches!(modality, Modality::Image | Modality::Video),
@@ -979,8 +1018,9 @@ GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give videos away on purpose."
     }
 
     /// The flat configured rate for a modality. For image/video it is THE
-    /// FALLBACK, never the primary price; TTS/STT have no metered path, so this
-    /// configured per-call amount is their actual price.
+    /// FALLBACK, never the primary price; Audio/Voice Recognition have no
+    /// provider-reported cost path, so this configured per-call amount is their
+    /// actual price.
     ///
     /// PRIVATE ON PURPOSE. Call {@link media_cost_from_response} instead, which
     /// prefers the provider's reported compute time and returns a flag saying
@@ -1378,7 +1418,7 @@ impl Default for ControlPlaneConfig {
 }
 
 fn default_bind() -> String {
-    // Profile-aware (release `0.0.0.0:7981`, dev `0.0.0.0:8981`, …) so a
+    // Profile-aware (release `127.0.0.1:7981`, dev `127.0.0.1:8981`, …) so a
     // standalone dev gateway never collides with a release one. Core-spawned
     // gateways get an explicit `--bind` that is already profile-offset.
     crate::profile::default_bind()
@@ -2010,10 +2050,9 @@ pub struct RoutingConfig {
     #[serde(default)]
     pub modality_map: HashMap<Modality, ModalityMapping>,
 
-    /// Smart (classifier-driven) routing. When enabled, a cheap "router" model
-    /// classifies each chat request against a set of natural-language rules and
-    /// the request is re-routed to the matching rule's target model BEFORE the
-    /// normal model→provider routing runs. Off by default; fully swappable.
+    /// Smart model routing. When enabled, the selected model-router algorithm
+    /// picks or preserves a target before normal model→provider routing runs.
+    /// Off by default; fully swappable.
     #[serde(default)]
     pub smart_routing: SmartRoutingConfig,
 }
@@ -2039,18 +2078,43 @@ pub enum RouteStrategy {
     Keyword,
 }
 
-/// Classifier-driven model routing ("custom routing instructions").
+/// Top-level model-router algorithm used by Gateway Plane A.
 ///
-/// The user writes plain-language rules — e.g. *"coding or debugging questions →
-/// claude-sonnet-4-5"*, *"simple chit-chat → a local model"* — and picks how the
-/// sorting happens via [`RouteStrategy`]: a cheap `classifier_model` (`Llm`), an
-/// embedding nearest-match (`Embedding`/RAG, reusing the semantic-cache
-/// embedder), or a keyword match (`Keyword`). On each chat request the gateway
-/// asks the chosen strategy which rule (if any) matches the user's latest
-/// message, then rewrites the request's model to that rule's target. The
-/// rewritten model then flows through the ordinary [`crate::router::ModelRouter`]
-/// so the target's provider is resolved exactly as a hand-picked model would be —
-/// nothing about providers is hardcoded here.
+/// `passthrough` keeps the requested model, while `llm_classifier` is the
+/// existing rule-based router whose `strategy` field selects whether rules are
+/// matched by an LLM, embeddings, or keywords. The other variants mirror the
+/// useful runtime families in NeMo Switchyard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRouterType {
+    #[default]
+    LlmClassifier,
+    Passthrough,
+    Random,
+    StageRouter,
+    Escalation,
+}
+
+/// Default tier when stage signals are too weak to clear the confidence gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StagePicker {
+    #[default]
+    CapableFirst,
+    EfficientFirst,
+}
+
+/// Model routing ("custom routing instructions") for Gateway Plane A.
+///
+/// The default `llm_classifier` router uses plain-language rules — e.g.
+/// *"coding or debugging questions → claude-sonnet-4-5"* — and picks how the
+/// sorting happens via [`RouteStrategy`]. `random` uses the same rules as a
+/// weighted target list, `stage_router` chooses capable/efficient tiers from
+/// recent request signals, and `escalation` asks a judge before a weak/strong
+/// tier decision. `passthrough` is an explicit no-op. Every selected model then
+/// flows through the ordinary [`crate::router::ModelRouter`] so the target's
+/// provider is resolved exactly as a hand-picked model would — nothing about
+/// providers is hardcoded here.
 ///
 /// Everything fails open: an empty classifier/embedder, no rules, a classifier
 /// error, or a timeout all leave the originally requested model untouched, so a
@@ -2058,6 +2122,11 @@ pub enum RouteStrategy {
 /// *what is allowed / where a call goes*), not Core.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SmartRoutingConfig {
+    /// The top-level model router algorithm. Defaults to the existing
+    /// `llm_classifier` behavior for backward-compatible configs.
+    #[serde(default)]
+    pub router_type: ModelRouterType,
+
     /// How the matching rule is chosen. Default `Llm` preserves the original
     /// classifier behaviour; `Embedding` and `Keyword` are opt-in and swappable.
     #[serde(default)]
@@ -2075,6 +2144,47 @@ pub struct SmartRoutingConfig {
     /// its original model). Default 0.35. Ignored by other strategies.
     #[serde(default = "default_route_similarity_threshold")]
     pub similarity_threshold: f32,
+
+    /// Optional seed for reproducible weighted-random sequences. Omit for a
+    /// process-local seed. Used only by the `random` router.
+    #[serde(default)]
+    pub random_seed: Option<u64>,
+
+    /// Capable tier used by the `stage_router` algorithm.
+    #[serde(default)]
+    pub stage_capable_model: String,
+    /// Efficient tier used by the `stage_router` algorithm.
+    #[serde(default)]
+    pub stage_efficient_model: String,
+    /// Default tier when stage signals are ambiguous.
+    #[serde(default)]
+    pub stage_picker: StagePicker,
+    /// Minimum stage-signal confidence before the signal can override the picker.
+    #[serde(default = "default_stage_confidence_threshold")]
+    pub stage_confidence_threshold: f32,
+    /// Number of recent request messages inspected by the stage scorer.
+    #[serde(default = "default_stage_recent_message_window")]
+    pub stage_recent_message_window: usize,
+
+    /// Weak tier used by the `escalation` algorithm.
+    #[serde(default)]
+    pub escalation_weak_model: String,
+    /// Strong tier used after the escalation streak is confirmed.
+    #[serde(default)]
+    pub escalation_strong_model: String,
+    /// Judge model used to inspect the current trajectory before routing.
+    #[serde(default)]
+    pub escalation_judge_model: String,
+    /// Consecutive escalation verdicts required to latch a session to strong.
+    #[serde(default = "default_escalation_confirmations")]
+    pub escalation_confirmations: u32,
+    /// Number of recent messages included in the escalation judge prompt.
+    #[serde(default = "default_escalation_recent_message_window")]
+    pub escalation_recent_message_window: usize,
+    /// Per-message character cap in the escalation judge prompt.
+    #[serde(default = "default_escalation_message_chars")]
+    pub escalation_message_chars: usize,
+
     /// Master switch. Default: false (the classifier call adds a round-trip to
     /// every request, so it is strictly opt-in).
     #[serde(default)]
@@ -2168,12 +2278,45 @@ fn default_route_similarity_threshold() -> f32 {
     0.35
 }
 
+fn default_stage_confidence_threshold() -> f32 {
+    0.5
+}
+
+fn default_stage_recent_message_window() -> usize {
+    3
+}
+
+fn default_escalation_confirmations() -> u32 {
+    2
+}
+
+fn default_escalation_recent_message_window() -> usize {
+    28
+}
+
+fn default_escalation_message_chars() -> usize {
+    500
+}
+
 impl Default for SmartRoutingConfig {
     fn default() -> Self {
         Self {
+            router_type: ModelRouterType::default(),
             strategy: RouteStrategy::default(),
             embedding_model: String::new(),
             similarity_threshold: default_route_similarity_threshold(),
+            random_seed: None,
+            stage_capable_model: String::new(),
+            stage_efficient_model: String::new(),
+            stage_picker: StagePicker::default(),
+            stage_confidence_threshold: default_stage_confidence_threshold(),
+            stage_recent_message_window: default_stage_recent_message_window(),
+            escalation_weak_model: String::new(),
+            escalation_strong_model: String::new(),
+            escalation_judge_model: String::new(),
+            escalation_confirmations: default_escalation_confirmations(),
+            escalation_recent_message_window: default_escalation_recent_message_window(),
+            escalation_message_chars: default_escalation_message_chars(),
             enabled: false,
             classifier_model: default_classifier_model(),
             rules: Vec::new(),
@@ -2197,12 +2340,40 @@ impl SmartRoutingConfig {
     ///   cache's), validated at call time; here we only require rules.
     /// - `Keyword` needs nothing beyond rules.
     pub fn is_active(&self) -> bool {
-        if !self.enabled || self.rules.is_empty() {
+        if !self.enabled {
             return false;
         }
-        match self.strategy {
-            RouteStrategy::Llm => !self.classifier_model.trim().is_empty(),
-            RouteStrategy::Embedding | RouteStrategy::Keyword => true,
+        match self.router_type {
+            ModelRouterType::Passthrough => true,
+            ModelRouterType::LlmClassifier => {
+                if self.rules.is_empty() {
+                    return false;
+                }
+                match self.strategy {
+                    RouteStrategy::Llm => !self.classifier_model.trim().is_empty(),
+                    RouteStrategy::Embedding | RouteStrategy::Keyword => true,
+                }
+            }
+            ModelRouterType::Random => {
+                self.rules
+                    .iter()
+                    .filter(|rule| {
+                        !rule.model.trim().is_empty()
+                            && rule.weight.is_finite()
+                            && rule.weight > 0.0
+                    })
+                    .count()
+                    >= 2
+            }
+            ModelRouterType::StageRouter => {
+                !self.stage_capable_model.trim().is_empty()
+                    && !self.stage_efficient_model.trim().is_empty()
+            }
+            ModelRouterType::Escalation => {
+                !self.escalation_weak_model.trim().is_empty()
+                    && !self.escalation_strong_model.trim().is_empty()
+                    && !self.escalation_judge_model.trim().is_empty()
+            }
         }
     }
 }
@@ -2216,6 +2387,13 @@ pub struct SmartRule {
     /// Target model id for matching requests, resolved via the model router
     /// (e.g. `"claude-sonnet-4-5"`, `"gpt-4o-mini"`, `"openrouter/google/gemini-2.5-flash"`).
     pub model: String,
+    /// Relative traffic weight for the `random` router. Other router types ignore it.
+    #[serde(default = "default_smart_rule_weight")]
+    pub weight: f32,
+}
+
+fn default_smart_rule_weight() -> f32 {
+    1.0
 }
 
 /// A single modality-to-provider mapping entry. The `provider` field names
@@ -2877,6 +3055,16 @@ fn env_keys(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn non_empty_provider_key<'a>(
+    keys: &'a HashMap<String, String>,
+    provider: &str,
+) -> Option<&'a str> {
+    keys.get(provider)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RateLimitConfig {
     #[serde(default = "default_true")]
@@ -2942,6 +3130,10 @@ pub struct ApiKeyConfig {
     pub org_id: Option<String>,
     #[serde(default)]
     pub team_id: Option<String>,
+    /// Internal control-plane id used only to namespace Core channel sessions.
+    /// It is never written to gateway.toml; env-backed configs leave it empty.
+    #[serde(skip)]
+    pub channel_id: Option<String>,
     #[serde(default)]
     pub project_id: Option<String>,
     /// Override the global requests_per_minute limit for this key.
@@ -3036,6 +3228,361 @@ impl Default for WidgetConfig {
 }
 
 impl GatewayConfig {
+    /// Overlay shared fleet provider keys fetched from the control-plane vault.
+    ///
+    /// The overlay wins over env/file credentials and clears multi-account or
+    /// org-key material from the active config so a hosted gateway has exactly
+    /// one backend-owned source of truth. Base URLs and non-secret provider
+    /// options remain deployment configuration.
+    pub fn apply_provider_vault_keys(&mut self, keys: &HashMap<String, String>) -> Vec<String> {
+        let mut applied = Vec::new();
+
+        if let Some(key) = non_empty_provider_key(keys, "openai") {
+            let mut provider = self
+                .providers
+                .openai
+                .take()
+                .unwrap_or(OpenAiProviderConfig {
+                    api_key: String::new(),
+                    api_keys: Vec::new(),
+                    base_url: openai_base_url(),
+                });
+            provider.api_key = key.to_owned();
+            provider.api_keys.clear();
+            self.providers.openai = Some(provider);
+            applied.push("openai".to_string());
+        }
+
+        if let Some(key) = non_empty_provider_key(keys, "anthropic") {
+            let mut provider = self
+                .providers
+                .anthropic
+                .take()
+                .unwrap_or(AnthropicProviderConfig {
+                    api_key: String::new(),
+                    api_keys: Vec::new(),
+                    base_url: anthropic_base_url(),
+                });
+            provider.api_key = key.to_owned();
+            provider.api_keys.clear();
+            self.providers.anthropic = Some(provider);
+            applied.push("anthropic".to_string());
+        }
+
+        if let Some(key) = non_empty_provider_key(keys, "openrouter") {
+            let mut provider =
+                self.providers
+                    .openrouter
+                    .take()
+                    .unwrap_or(OpenRouterProviderConfig {
+                        api_key: String::new(),
+                        api_keys: Vec::new(),
+                        base_url: openrouter_base_url(),
+                        site_url: openrouter_site_url(),
+                        site_name: openrouter_site_name(),
+                        data_collection: openrouter_data_collection(),
+                        zdr: false,
+                        sort: String::new(),
+                        response_healing: false,
+                        usage_accounting: true,
+                        org_api_keys: HashMap::new(),
+                    });
+            provider.api_key = key.to_owned();
+            provider.api_keys.clear();
+            provider.org_api_keys.clear();
+            self.providers.openrouter = Some(provider);
+            applied.push("openrouter".to_string());
+        }
+
+        if let Some(key) = non_empty_provider_key(keys, "replicate") {
+            let mut provider = self
+                .providers
+                .replicate
+                .take()
+                .unwrap_or(ReplicateProviderConfig {
+                    api_key: String::new(),
+                    base_url: replicate_base_url(),
+                    poll_interval_ms: default_media_poll_interval_ms(),
+                    poll_timeout_secs: default_media_poll_timeout_secs(),
+                });
+            provider.api_key = key.to_owned();
+            self.providers.replicate = Some(provider);
+            applied.push("replicate".to_string());
+        }
+
+        if let Some(key) = non_empty_provider_key(keys, "fal") {
+            let mut provider = self.providers.fal.take().unwrap_or(FalProviderConfig {
+                api_key: String::new(),
+                base_url: fal_base_url(),
+                poll_interval_ms: default_media_poll_interval_ms(),
+                poll_timeout_secs: default_media_poll_timeout_secs(),
+            });
+            provider.api_key = key.to_owned();
+            self.providers.fal = Some(provider);
+            applied.push("fal".to_string());
+        }
+
+        if let Some(key) = non_empty_provider_key(keys, "cloudflare") {
+            let base_url = self
+                .providers
+                .cloudflare
+                .as_ref()
+                .map(|provider| provider.base_url.clone())
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("CLOUDFLARE_BASE_URL")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                })
+                .or_else(|| {
+                    std::env::var("CLOUDFLARE_ACCOUNT_ID")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|account_id| {
+                            format!(
+                                "https://api.cloudflare.com/client/v4/accounts/{}/ai/v1",
+                                account_id.trim()
+                            )
+                        })
+                });
+            if let Some(base_url) = base_url {
+                let mut provider =
+                    self.providers
+                        .cloudflare
+                        .take()
+                        .unwrap_or(CloudflareProviderConfig {
+                            api_key: String::new(),
+                            api_keys: Vec::new(),
+                            base_url,
+                        });
+                provider.api_key = key.to_owned();
+                provider.api_keys.clear();
+                self.providers.cloudflare = Some(provider);
+                applied.push("cloudflare".to_string());
+            } else {
+                tracing::warn!(
+                    "provider vault contains a Cloudflare key but CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_BASE_URL is missing; Cloudflare remains disabled"
+                );
+            }
+        }
+
+        if let Some(key) = non_empty_provider_key(keys, "bedrock") {
+            let base_url = self
+                .providers
+                .bedrock
+                .as_ref()
+                .map(|provider| provider.base_url.clone())
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("BEDROCK_BASE_URL")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                })
+                .or_else(|| {
+                    std::env::var("AWS_REGION")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|region| {
+                            format!("https://bedrock-mantle.{}.api.aws/anthropic", region.trim())
+                        })
+                });
+            if let Some(base_url) = base_url {
+                let mut provider = self
+                    .providers
+                    .bedrock
+                    .take()
+                    .unwrap_or(BedrockProviderConfig {
+                        api_key: String::new(),
+                        api_keys: Vec::new(),
+                        base_url,
+                    });
+                provider.api_key = key.to_owned();
+                provider.api_keys.clear();
+                self.providers.bedrock = Some(provider);
+                applied.push("bedrock".to_string());
+            } else {
+                tracing::warn!(
+                    "provider vault contains a Bedrock key but AWS_REGION or BEDROCK_BASE_URL is missing; Bedrock remains disabled"
+                );
+            }
+        }
+
+        if let Some(key) = non_empty_provider_key(keys, "vertex") {
+            let base_url = self
+                .providers
+                .vertex
+                .as_ref()
+                .map(|provider| provider.base_url.clone())
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("VERTEX_BASE_URL")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                })
+                .or_else(|| {
+                    let project = std::env::var("VERTEX_PROJECT_ID").ok()?;
+                    let location = std::env::var("VERTEX_LOCATION").ok()?;
+                    if project.trim().is_empty() || location.trim().is_empty() {
+                        return None;
+                    }
+                    Some(format!(
+                        "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}/endpoints/openapi",
+                        location.trim(),
+                        project.trim(),
+                        location.trim()
+                    ))
+                });
+            if let Some(base_url) = base_url {
+                let mut provider = self
+                    .providers
+                    .vertex
+                    .take()
+                    .unwrap_or(VertexProviderConfig {
+                        api_key: String::new(),
+                        api_keys: Vec::new(),
+                        base_url,
+                    });
+                provider.api_key = key.to_owned();
+                provider.api_keys.clear();
+                self.providers.vertex = Some(provider);
+                applied.push("vertex".to_string());
+            } else {
+                tracing::warn!(
+                    "provider vault contains a Vertex key but Vertex project/location or VERTEX_BASE_URL is missing; Vertex remains disabled"
+                );
+            }
+        }
+
+        if let Some(key) = non_empty_provider_key(keys, "openai_credits") {
+            let mut provider =
+                self.providers
+                    .openai_credits
+                    .take()
+                    .unwrap_or(OpenAiProviderConfig {
+                        api_key: String::new(),
+                        api_keys: Vec::new(),
+                        base_url: openai_base_url(),
+                    });
+            provider.api_key = key.to_owned();
+            provider.api_keys.clear();
+            self.providers.openai_credits = Some(provider);
+            applied.push("openai_credits".to_string());
+        }
+
+        if let Some(key) = non_empty_provider_key(keys, "composio") {
+            self.composio.api_key = Some(key.to_owned());
+            self.composio.enabled = true;
+            applied.push("composio".to_string());
+        }
+
+        if let Some(key) = non_empty_provider_key(keys, "modal") {
+            let base_url = self
+                .providers
+                .modal
+                .as_ref()
+                .map(|provider| provider.base_url.clone())
+                .or_else(|| {
+                    std::env::var("MODAL_BASE_URL")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                });
+            if let Some(base_url) = base_url {
+                self.providers.modal = Some(ModalProviderConfig {
+                    api_key: key.to_owned(),
+                    base_url,
+                });
+                applied.push("modal".to_string());
+            } else {
+                tracing::warn!(
+                    "provider vault contains a Modal key but MODAL_BASE_URL is missing; Modal remains disabled"
+                );
+            }
+        }
+
+        applied
+    }
+
+    /// Replace every supported provider credential with the successful fleet
+    /// vault response. Required hosted mode uses this instead of a partial
+    /// overlay so a stale gateway.toml/env key cannot survive merely because
+    /// its provider was omitted from MongoDB.
+    pub fn replace_provider_vault_keys(&mut self, keys: &HashMap<String, String>) -> Vec<String> {
+        if let Some(provider) = self.providers.openai.as_mut() {
+            provider.api_key.clear();
+            provider.api_keys.clear();
+        }
+        if let Some(provider) = self.providers.anthropic.as_mut() {
+            provider.api_key.clear();
+            provider.api_keys.clear();
+        }
+        if let Some(provider) = self.providers.openrouter.as_mut() {
+            provider.api_key.clear();
+            provider.api_keys.clear();
+            provider.org_api_keys.clear();
+        }
+        if let Some(provider) = self.providers.replicate.as_mut() {
+            provider.api_key.clear();
+        }
+        if let Some(provider) = self.providers.fal.as_mut() {
+            provider.api_key.clear();
+        }
+        if let Some(provider) = self.providers.modal.as_mut() {
+            provider.api_key.clear();
+        }
+        if let Some(provider) = self.providers.cloudflare.as_mut() {
+            provider.api_key.clear();
+            provider.api_keys.clear();
+        }
+        if let Some(provider) = self.providers.bedrock.as_mut() {
+            provider.api_key.clear();
+            provider.api_keys.clear();
+        }
+        if let Some(provider) = self.providers.vertex.as_mut() {
+            provider.api_key.clear();
+            provider.api_keys.clear();
+        }
+        if let Some(provider) = self.providers.openai_credits.as_mut() {
+            provider.api_key.clear();
+            provider.api_keys.clear();
+        }
+        self.composio.api_key = None;
+        self.composio.enabled = false;
+        let applied = self.apply_provider_vault_keys(keys);
+
+        if non_empty_provider_key(keys, "openai").is_none() {
+            self.providers.openai = None;
+        }
+        if non_empty_provider_key(keys, "anthropic").is_none() {
+            self.providers.anthropic = None;
+        }
+        if non_empty_provider_key(keys, "openrouter").is_none() {
+            self.providers.openrouter = None;
+        }
+        if non_empty_provider_key(keys, "replicate").is_none() {
+            self.providers.replicate = None;
+        }
+        if non_empty_provider_key(keys, "fal").is_none() {
+            self.providers.fal = None;
+        }
+        if non_empty_provider_key(keys, "modal").is_none() {
+            self.providers.modal = None;
+        }
+        if non_empty_provider_key(keys, "cloudflare").is_none() {
+            self.providers.cloudflare = None;
+        }
+        if non_empty_provider_key(keys, "bedrock").is_none() {
+            self.providers.bedrock = None;
+        }
+        if non_empty_provider_key(keys, "vertex").is_none() {
+            self.providers.vertex = None;
+        }
+        if non_empty_provider_key(keys, "openai_credits").is_none() {
+            self.providers.openai_credits = None;
+        }
+
+        applied
+    }
+
     /// Resolve the gateway.toml path using the same logic as `load()`:
     /// `GATEWAY_CONFIG` env var first, then `$config_dir/ryu/gateway.toml`.
     pub fn config_path() -> Option<std::path::PathBuf> {
@@ -3588,6 +4135,10 @@ impl GatewayConfig {
                         "TELEGRAM",
                         existing.as_ref().map(|c| &c.common),
                     ),
+                    options: existing
+                        .as_ref()
+                        .map(|c| c.options.clone())
+                        .unwrap_or_default(),
                 });
             }
         }
@@ -3614,6 +4165,10 @@ impl GatewayConfig {
                     app_token,
                     bot_token,
                     common: common_channel_from_env("SLACK", existing.as_ref().map(|c| &c.common)),
+                    options: existing
+                        .as_ref()
+                        .map(|c| c.options.clone())
+                        .unwrap_or_default(),
                 });
             }
         }
@@ -3628,10 +4183,44 @@ impl GatewayConfig {
                 let thread_replies = channel_env_bool("DISCORD", "THREAD_REPLIES")
                     .or_else(|| existing.as_ref().map(|c| c.thread_replies))
                     .unwrap_or(false);
+                let history_backfill = channel_env_bool("DISCORD", "HISTORY_BACKFILL")
+                    .or_else(|| existing.as_ref().map(|c| c.history_backfill))
+                    .unwrap_or(false);
                 config.channels.discord = Some(DiscordChannelConfig {
                     token,
                     channel_ids,
                     thread_replies,
+                    history_backfill,
+                    free_response_channels: existing
+                        .as_ref()
+                        .map(|c| c.free_response_channels.clone())
+                        .unwrap_or_default(),
+                    allowed_channels: existing
+                        .as_ref()
+                        .map(|c| c.allowed_channels.clone())
+                        .unwrap_or_default(),
+                    allowed_roles: existing
+                        .as_ref()
+                        .map(|c| c.allowed_roles.clone())
+                        .unwrap_or_default(),
+                    thread_require_mention: existing
+                        .as_ref()
+                        .map(|c| c.thread_require_mention)
+                        .unwrap_or(false),
+                    mention_patterns: existing
+                        .as_ref()
+                        .map(|c| c.mention_patterns.clone())
+                        .unwrap_or_default(),
+                    ignored_channels: existing
+                        .as_ref()
+                        .map(|c| c.ignored_channels.clone())
+                        .unwrap_or_default(),
+                    no_thread_channels: existing
+                        .as_ref()
+                        .map(|c| c.no_thread_channels.clone())
+                        .unwrap_or_default(),
+                    allow_bots: existing.as_ref().map(|c| c.allow_bots).unwrap_or(false),
+                    home_channel: existing.as_ref().and_then(|c| c.home_channel.clone()),
                     common: common_channel_from_env(
                         "DISCORD",
                         existing.as_ref().map(|c| &c.common),
@@ -3717,6 +4306,11 @@ impl GatewayConfig {
                     webhook_path,
                     private_api,
                     send_read_receipts,
+                    mention_patterns: existing
+                        .as_ref()
+                        .map(|c| c.mention_patterns.clone())
+                        .unwrap_or_default(),
+                    home_channel: existing.as_ref().and_then(|c| c.home_channel.clone()),
                     common: common_channel_from_env(
                         "BLUEBUBBLES",
                         existing.as_ref().map(|c| &c.common),
@@ -3765,9 +4359,9 @@ impl GatewayConfig {
             }
         }
 
-        // Smart (classifier-driven) routing. `gateway.toml [routing.smart_routing]`
-        // is the primary config (rules live there); these env knobs only toggle
-        // the master switch and the classifier model so the local stack can flip
+        // Smart model routing. `gateway.toml [routing.smart_routing]` is the
+        // primary config (rules live there); these env knobs only toggle the
+        // master switch and the classifier model so the local stack can flip
         // it on without a config file. Rules are config-file-only.
         if let Ok(raw) = std::env::var("GATEWAY_SMART_ROUTING_ENABLED") {
             if let Some(enabled) = parse_bool_env(&raw) {
@@ -3780,9 +4374,10 @@ impl GatewayConfig {
             }
         }
 
-        // Per-session token budget (#510). Config-file (`[budgets.session]`) is
-        // primary; these envs override for a quick per-deployment cap with no
-        // gateway.toml edit. `GATEWAY_SESSION_BUDGET_LIMIT=0` disables it.
+        // Per-session charged-cost budget (#510). Config-file (`[budgets.session]`)
+        // is primary; these envs override for a quick per-deployment cap with no
+        // gateway.toml edit. The value is micro-USD (`1_000_000 = $1`), and
+        // `GATEWAY_SESSION_BUDGET_LIMIT=0` disables it.
         if let Ok(raw) = std::env::var("GATEWAY_SESSION_BUDGET_LIMIT") {
             if let Ok(limit) = raw.trim().parse::<u64>() {
                 config.budgets.session.limit = limit;
@@ -4072,6 +4667,10 @@ pub struct CommonChannelFileConfig {
     /// `/api/channels/run`.
     #[serde(default)]
     pub team_id: Option<String>,
+    /// Store-backed channel config id used to namespace platform chats in Core.
+    /// Environment-only channel configs leave this unset and keep legacy ids.
+    #[serde(skip)]
+    pub channel_id: Option<String>,
     /// When the bot replies inside a group chat (DMs always reply). Mirrors the
     /// control-plane `groupReplyMode`; defaults to mentions-only.
     #[serde(default)]
@@ -4106,6 +4705,11 @@ pub struct CommonChannelFileConfig {
     /// replaces whatever the legacy env allowlist supplied.
     #[serde(default)]
     pub group_allowlist: Vec<String>,
+    /// Sender ids admitted inside groups. This is useful for Telegram, Slack and
+    /// BlueBubbles where a platform can expose a stable author id even when the
+    /// room itself is discovered dynamically.
+    #[serde(default)]
+    pub group_user_allowlist: Vec<String>,
 
     // ── Presentation ────────────────────────────────────────────────────────
     /// Show a platform typing indicator (and mark inbound read) while the agent
@@ -4124,9 +4728,19 @@ pub struct CommonChannelFileConfig {
     /// edits.
     #[serde(default)]
     pub streaming: bool,
+    /// Add 👀/✅/❌ lifecycle reactions where the platform supports them.
+    #[serde(default = "default_true")]
+    pub lifecycle_reactions: bool,
     /// When to answer with synthesized speech alongside the text reply.
     #[serde(default)]
     pub voice_reply: VoiceReplyMode,
+    /// Send Ryu's first welcome without waiting for a user message. Requires an
+    /// explicitly admitted `proactive_target`; it never broadcasts.
+    #[serde(default)]
+    pub proactive_opening: bool,
+    /// Direct-chat id where the first welcome should appear.
+    #[serde(default)]
+    pub proactive_target: Option<String>,
 
     // ── Bot profile ─────────────────────────────────────────────────────────
     //
@@ -4152,17 +4766,22 @@ impl Default for CommonChannelFileConfig {
             system_prompt: None,
             agent_id: None,
             team_id: None,
+            channel_id: None,
             group_reply_mode: GroupReplyMode::default(),
             core_url: default_core_url(),
             dm_policy: None,
             group_policy: None,
             dm_allowlist: Vec::new(),
             group_allowlist: Vec::new(),
+            group_user_allowlist: Vec::new(),
             typing_indicator: true,
             publish_commands: true,
             rich_text: true,
             streaming: false,
+            lifecycle_reactions: true,
             voice_reply: VoiceReplyMode::default(),
+            proactive_opening: false,
+            proactive_target: None,
             profile_name: None,
             profile_short_bio: None,
             profile_description: None,
@@ -4178,6 +4797,68 @@ pub struct TelegramChannelConfig {
     /// these keys sit directly under `[channels.telegram]`.
     #[serde(flatten)]
     pub common: CommonChannelFileConfig,
+    /// Telegram Bot API transport and group-addressing options.
+    #[serde(default)]
+    pub options: TelegramChannelOptionsFileConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TelegramChannelOptionsFileConfig {
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    #[serde(default = "default_telegram_webhook_bind")]
+    pub webhook_bind: String,
+    #[serde(default = "default_telegram_webhook_path")]
+    pub webhook_path: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub base_file_url: Option<String>,
+    #[serde(default)]
+    pub local_mode: bool,
+    #[serde(default)]
+    pub mention_patterns: Vec<String>,
+    #[serde(default)]
+    pub ignored_threads: Vec<String>,
+    #[serde(default)]
+    pub exclusive_bot_mentions: bool,
+    #[serde(default = "default_true")]
+    pub guest_mode: bool,
+    #[serde(default = "default_telegram_command_menu_max")]
+    pub command_menu_max: usize,
+}
+
+impl Default for TelegramChannelOptionsFileConfig {
+    fn default() -> Self {
+        Self {
+            webhook_url: None,
+            webhook_secret: None,
+            webhook_bind: default_telegram_webhook_bind(),
+            webhook_path: default_telegram_webhook_path(),
+            base_url: None,
+            base_file_url: None,
+            local_mode: false,
+            mention_patterns: Vec::new(),
+            ignored_threads: Vec::new(),
+            exclusive_bot_mentions: false,
+            guest_mode: true,
+            command_menu_max: default_telegram_command_menu_max(),
+        }
+    }
+}
+
+pub(crate) fn default_telegram_webhook_bind() -> String {
+    "0.0.0.0:8443".to_string()
+}
+
+pub(crate) fn default_telegram_webhook_path() -> String {
+    "/webhooks/telegram".to_string()
+}
+
+pub(crate) fn default_telegram_command_menu_max() -> usize {
+    60
 }
 
 pub(crate) fn default_core_url() -> String {
@@ -4202,6 +4883,58 @@ pub struct SlackChannelConfig {
     /// these keys sit directly under `[channels.slack]`.
     #[serde(flatten)]
     pub common: CommonChannelFileConfig,
+    #[serde(default)]
+    pub options: SlackChannelOptionsFileConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SlackChannelOptionsFileConfig {
+    #[serde(default = "default_true")]
+    pub reply_in_thread: bool,
+    #[serde(default)]
+    pub reply_broadcast: bool,
+    #[serde(default)]
+    pub strict_mention: bool,
+    #[serde(default)]
+    pub thread_require_mention: bool,
+    #[serde(default)]
+    pub free_response_channels: Vec<String>,
+    #[serde(default)]
+    pub require_mention_channels: Vec<String>,
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
+    #[serde(default)]
+    pub ignored_channels: Vec<String>,
+    #[serde(default)]
+    pub allow_bots: bool,
+    #[serde(default)]
+    pub reply_prefix: Option<String>,
+    #[serde(default)]
+    pub mention_patterns: Vec<String>,
+    #[serde(default)]
+    pub rich_blocks: bool,
+    #[serde(default)]
+    pub feedback_buttons: bool,
+}
+
+impl Default for SlackChannelOptionsFileConfig {
+    fn default() -> Self {
+        Self {
+            reply_in_thread: true,
+            reply_broadcast: false,
+            strict_mention: false,
+            thread_require_mention: false,
+            free_response_channels: Vec::new(),
+            require_mention_channels: Vec::new(),
+            allowed_channels: Vec::new(),
+            ignored_channels: Vec::new(),
+            allow_bots: false,
+            reply_prefix: None,
+            mention_patterns: Vec::new(),
+            rich_blocks: false,
+            feedback_buttons: false,
+        }
+    }
 }
 
 pub(crate) fn default_channel_model() -> String {
@@ -4318,6 +5051,7 @@ fn common_channel_from_env(
         system_prompt: channel_env(platform, "SYSTEM_PROMPT").or(base.system_prompt),
         agent_id: channel_env(platform, "AGENT_ID").or(base.agent_id),
         team_id: channel_env(platform, "TEAM_ID").or(base.team_id),
+        channel_id: base.channel_id,
         group_reply_mode: group_reply_mode_from_env(platform).unwrap_or(base.group_reply_mode),
         core_url: std::env::var("RYU_CORE_URL")
             .ok()
@@ -4328,13 +5062,20 @@ fn common_channel_from_env(
         dm_allowlist: channel_env_list(platform, "DM_ALLOWLIST").unwrap_or(base.dm_allowlist),
         group_allowlist: channel_env_list(platform, "GROUP_ALLOWLIST")
             .unwrap_or(base.group_allowlist),
+        group_user_allowlist: channel_env_list(platform, "GROUP_USER_ALLOWLIST")
+            .unwrap_or(base.group_user_allowlist),
         typing_indicator: channel_env_bool(platform, "TYPING_INDICATOR")
             .unwrap_or(base.typing_indicator),
         publish_commands: channel_env_bool(platform, "PUBLISH_COMMANDS")
             .unwrap_or(base.publish_commands),
         rich_text: channel_env_bool(platform, "RICH_TEXT").unwrap_or(base.rich_text),
         streaming: channel_env_bool(platform, "STREAMING").unwrap_or(base.streaming),
+        lifecycle_reactions: channel_env_bool(platform, "LIFECYCLE_REACTIONS")
+            .unwrap_or(base.lifecycle_reactions),
         voice_reply: voice_reply_from_env(platform).unwrap_or(base.voice_reply),
+        proactive_opening: channel_env_bool(platform, "PROACTIVE_OPENING")
+            .unwrap_or(base.proactive_opening),
+        proactive_target: channel_env(platform, "PROACTIVE_TARGET").or(base.proactive_target),
         profile_name: channel_env(platform, "BOT_NAME").or(base.profile_name),
         profile_short_bio: channel_env(platform, "BOT_SHORT_BIO").or(base.profile_short_bio),
         profile_description: channel_env(platform, "BOT_DESCRIPTION").or(base.profile_description),
@@ -4345,7 +5086,9 @@ fn common_channel_from_env(
 pub struct DiscordChannelConfig {
     /// Bot token issued in the Discord developer portal (without the `Bot ` prefix).
     pub token: String,
-    /// Channel IDs the bot watches for inbound messages. At least one required.
+    /// Optional legacy channel IDs the bot watches for inbound messages. An
+    /// empty list keeps Discord DMs working; platform options can further scope
+    /// guild channels.
     #[serde(default)]
     pub channel_ids: Vec<String>,
     /// Answer inside a thread opened on the triggering message instead of in the
@@ -4353,6 +5096,26 @@ pub struct DiscordChannelConfig {
     /// existing deployment's replies stay where its users expect them.
     #[serde(default)]
     pub thread_replies: bool,
+    #[serde(default)]
+    pub history_backfill: bool,
+    #[serde(default)]
+    pub free_response_channels: Vec<String>,
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
+    #[serde(default)]
+    pub allowed_roles: Vec<String>,
+    #[serde(default)]
+    pub thread_require_mention: bool,
+    #[serde(default)]
+    pub mention_patterns: Vec<String>,
+    #[serde(default)]
+    pub ignored_channels: Vec<String>,
+    #[serde(default)]
+    pub no_thread_channels: Vec<String>,
+    #[serde(default)]
+    pub allow_bots: bool,
+    #[serde(default)]
+    pub home_channel: Option<String>,
     /// Model, agent binding, access policy and presentation knobs. Flattened, so
     /// these keys sit directly under `[channels.discord]`.
     #[serde(flatten)]
@@ -4405,6 +5168,17 @@ pub(crate) fn default_whatsapp_graph_version() -> String {
     "v21.0".to_string()
 }
 
+/// Default listener for a channel-level WhatsApp Personal/OpenWA webhook.
+/// Kept separate from the Cloud API port so both adapters can be enabled in one
+/// gateway without an accidental bind collision.
+pub(crate) fn default_whatsapp_personal_bind() -> String {
+    "0.0.0.0:8444".to_string()
+}
+
+pub(crate) fn default_whatsapp_personal_path() -> String {
+    "/webhooks/whatsapp-personal".to_string()
+}
+
 /// BlueBubbles (iMessage) channel config.
 ///
 /// BlueBubbles is a bridge the operator runs on a Mac: it talks to Messages.app
@@ -4434,6 +5208,10 @@ pub struct BlueBubblesChannelConfig {
     /// Mark chats read when the bot picks a message up. Requires `private_api`.
     #[serde(default)]
     pub send_read_receipts: bool,
+    #[serde(default)]
+    pub mention_patterns: Vec<String>,
+    #[serde(default)]
+    pub home_channel: Option<String>,
     /// Model, agent binding, access policy and presentation knobs. Flattened, so
     /// these keys sit directly under `[channels.bluebubbles]`.
     #[serde(flatten)]
@@ -4575,10 +5353,124 @@ fn default_local_max_queued() -> u32 {
     64
 }
 
+/// Node-level lifecycle and resource controls for ACP subprocess sessions.
+///
+/// `max_parallel_agents = None` is the safe default: Core derives a conservative
+/// limit from the node's CPU and RAM instead of making every machine use the same
+/// arbitrary number. The setting is intentionally Gateway-owned so it applies to
+/// every ACP agent on the node, including agents that do not expose plugins.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AcpConfig {
+    /// Tear down a pooled ACP subprocess after this many inactive minutes. The
+    /// next message lazily starts a fresh subprocess and may take longer.
+    #[serde(default = "default_acp_idle_timeout_minutes")]
+    pub idle_timeout_minutes: u32,
+    /// Maximum number of ACP subprocesses that may be running at once. `None`
+    /// delegates to Core's conservative hardware-based calculation.
+    #[serde(default)]
+    pub max_parallel_agents: Option<u32>,
+    /// Keep the local computer awake while at least one ACP agent is active.
+    #[serde(default = "default_true")]
+    pub keep_computer_awake: bool,
+}
+
+impl Default for AcpConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout_minutes: default_acp_idle_timeout_minutes(),
+            max_parallel_agents: None,
+            keep_computer_awake: true,
+        }
+    }
+}
+
+impl AcpConfig {
+    /// Validate values at the write boundary so a malformed persisted setting can
+    /// never become an unbounded or effectively-disabled process policy.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(ACP_IDLE_TIMEOUT_MIN_MINUTES..=ACP_IDLE_TIMEOUT_MAX_MINUTES)
+            .contains(&self.idle_timeout_minutes)
+        {
+            return Err(format!(
+                "acp.idle_timeout_minutes must be between {ACP_IDLE_TIMEOUT_MIN_MINUTES} and {ACP_IDLE_TIMEOUT_MAX_MINUTES}"
+            ));
+        }
+        if let Some(max) = self.max_parallel_agents {
+            if !(ACP_MAX_PARALLEL_MIN..=ACP_MAX_PARALLEL_MAX).contains(&max) {
+                return Err(format!(
+                    "acp.max_parallel_agents must be between {ACP_MAX_PARALLEL_MIN} and {ACP_MAX_PARALLEL_MAX}, or null for Auto"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub const ACP_IDLE_TIMEOUT_MIN_MINUTES: u32 = 1;
+pub const ACP_IDLE_TIMEOUT_MAX_MINUTES: u32 = 24 * 60;
+pub const ACP_MAX_PARALLEL_MIN: u32 = 1;
+pub const ACP_MAX_PARALLEL_MAX: u32 = 32;
+
+fn default_acp_idle_timeout_minutes() -> u32 {
+    10
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SkillsConfig {
     #[serde(default)]
     pub skills: Vec<crate::skills::Skill>,
+}
+
+/// Node-level policy for the personalized Marketplace "For you" feed.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MarketplaceRecommendationsConfig {
+    /// Whether Core may fetch catalog references or invoke the model adapter.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// How often an automatically refreshed recommendation cache may regenerate.
+    #[serde(default)]
+    pub cadence: MarketplaceRecommendationsCadence,
+}
+
+/// Permission policy for computer-use providers attached to this node.
+///
+/// `locked_use` is deliberately opt-in. A true value grants the node's
+/// computer-use provider permission to request a locked-session execution path;
+/// it does not itself unlock the operating system or bypass its safety prompts.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ComputerUseConfig {
+    #[serde(default)]
+    pub locked_use: bool,
+}
+
+impl Default for ComputerUseConfig {
+    fn default() -> Self {
+        Self { locked_use: false }
+    }
+}
+
+impl Default for MarketplaceRecommendationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cadence: MarketplaceRecommendationsCadence::default(),
+        }
+    }
+}
+
+/// The intentionally closed refresh cadence accepted by Gateway config.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MarketplaceRecommendationsCadence {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl Default for MarketplaceRecommendationsCadence {
+    fn default() -> Self {
+        Self::Weekly
+    }
 }
 
 impl Default for GatewayConfig {
@@ -4603,7 +5495,10 @@ impl Default for GatewayConfig {
             cache: CacheConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
             concurrency: ConcurrencyConfig::default(),
+            acp: AcpConfig::default(),
+            computer_use: ComputerUseConfig::default(),
             skills: SkillsConfig::default(),
+            marketplace_recommendations: MarketplaceRecommendationsConfig::default(),
             audit: AuditConfig::default(),
             evals: EvalsConfig::default(),
             composio: ComposioConfig::default(),
@@ -4692,6 +5587,65 @@ pub(crate) mod test_config_path {
             }
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+}
+
+#[cfg(test)]
+mod marketplace_recommendations_config_tests {
+    use super::{GatewayConfig, MarketplaceRecommendationsCadence};
+
+    #[test]
+    fn defaults_and_toml_round_trip_preserve_weekly_policy() {
+        let mut config = GatewayConfig::default();
+        assert!(config.marketplace_recommendations.enabled);
+        assert_eq!(
+            config.marketplace_recommendations.cadence,
+            MarketplaceRecommendationsCadence::Weekly
+        );
+
+        config.marketplace_recommendations.cadence = MarketplaceRecommendationsCadence::Monthly;
+        let encoded = toml::to_string(&config).expect("serialize gateway config");
+        let decoded: GatewayConfig = toml::from_str(&encoded).expect("deserialize gateway config");
+        assert_eq!(
+            decoded.marketplace_recommendations,
+            config.marketplace_recommendations
+        );
+    }
+
+    #[test]
+    fn cadence_accepts_only_daily_weekly_or_monthly() {
+        for cadence in ["daily", "weekly", "monthly"] {
+            let value = format!("cadence = \"{cadence}\"");
+            toml::from_str::<super::MarketplaceRecommendationsConfig>(&value)
+                .expect("supported cadence");
+        }
+        assert!(
+            toml::from_str::<super::MarketplaceRecommendationsConfig>("cadence = \"hourly\"")
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod computer_use_config_tests {
+    use super::{ComputerUseConfig, GatewayConfig};
+
+    #[test]
+    fn locked_use_defaults_off_and_round_trips() {
+        let mut config = GatewayConfig::default();
+        assert!(!config.computer_use.locked_use);
+
+        config.computer_use = ComputerUseConfig { locked_use: true };
+        let encoded = toml::to_string(&config).expect("serialize gateway config");
+        let decoded: GatewayConfig = toml::from_str(&encoded).expect("deserialize gateway config");
+        assert!(decoded.computer_use.locked_use);
+    }
+
+    #[test]
+    fn missing_computer_use_section_keeps_locked_use_disabled() {
+        let decoded: GatewayConfig = toml::from_str("[auth]\nrequire_auth = false\n")
+            .expect("partial gateway config parses");
+        assert!(!decoded.computer_use.locked_use);
     }
 }
 
@@ -5277,6 +6231,22 @@ enabled = true
     }
 
     #[test]
+    fn media_prefers_provider_reported_cost_including_openrouter_raw_payload() {
+        let c = CreditsConfig {
+            cost_per_gpu_second_micro_usd: 1000,
+            cost_per_image_micro_usd: 40_000,
+            ..Default::default()
+        };
+        let response = serde_json::json!({
+            "data": [{ "url": "data:image/png;base64,AAA" }],
+            "raw": { "usage": { "cost": 0.012345 }, "choices": [] }
+        });
+        let (cost, estimated) = c.media_cost_from_response(&Modality::Image, &response);
+        assert_eq!(cost, 12_345);
+        assert!(!estimated);
+    }
+
+    #[test]
     fn a_partial_gpu_second_rounds_up_rather_than_leaking() {
         let c = CreditsConfig {
             cost_per_gpu_second_micro_usd: 1000,
@@ -5505,8 +6475,8 @@ mod alert_tier_backcompat_tests {
 #[cfg(test)]
 mod pure_helper_tests {
     use super::{
-        parse_bool_env, FirewallPolicy, Modality, ProviderId, ProviderKind, RouteStrategy,
-        SmartRoutingConfig, SmartRule,
+        parse_bool_env, FirewallPolicy, Modality, ModelRouterType, ProviderId, ProviderKind,
+        RouteStrategy, SmartRoutingConfig, SmartRule, StagePicker,
     };
     use std::str::FromStr;
 
@@ -5570,6 +6540,7 @@ mod pure_helper_tests {
         let rule = SmartRule {
             description: "code".to_string(),
             model: "claude".to_string(),
+            weight: 1.0,
         };
 
         // Disabled ⇒ inert regardless of rules.
@@ -5600,6 +6571,68 @@ mod pure_helper_tests {
         assert!(cfg.is_active());
         cfg.strategy = RouteStrategy::Embedding;
         assert!(cfg.is_active());
+    }
+
+    #[test]
+    fn switchyard_router_types_are_active_only_with_their_required_targets() {
+        let mut cfg = SmartRoutingConfig {
+            enabled: true,
+            router_type: ModelRouterType::Random,
+            rules: vec![
+                SmartRule {
+                    description: String::new(),
+                    model: "strong".into(),
+                    weight: 1.0,
+                },
+                SmartRule {
+                    description: String::new(),
+                    model: "weak".into(),
+                    weight: 3.0,
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(cfg.is_active());
+
+        cfg.rules.pop();
+        assert!(!cfg.is_active());
+        cfg.rules.push(SmartRule {
+            description: String::new(),
+            model: "weak".into(),
+            weight: 3.0,
+        });
+        assert!(cfg.is_active());
+
+        cfg.router_type = ModelRouterType::Passthrough;
+        assert!(cfg.is_active());
+
+        cfg.router_type = ModelRouterType::StageRouter;
+        cfg.stage_capable_model = "strong".into();
+        cfg.stage_efficient_model = "weak".into();
+        cfg.stage_picker = StagePicker::EfficientFirst;
+        assert!(cfg.is_active());
+
+        cfg.router_type = ModelRouterType::Escalation;
+        cfg.escalation_weak_model = "weak".into();
+        cfg.escalation_strong_model = "strong".into();
+        cfg.escalation_judge_model = "judge".into();
+        assert!(cfg.is_active());
+
+        cfg.escalation_judge_model.clear();
+        assert!(!cfg.is_active());
+    }
+
+    #[test]
+    fn old_smart_routing_json_defaults_to_llm_classifier_and_unit_weights() {
+        let cfg: SmartRoutingConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "strategy": "keyword",
+            "rules": [{"description": "code", "model": "strong"}]
+        }))
+        .expect("legacy smart routing JSON must parse");
+        assert_eq!(cfg.router_type, ModelRouterType::LlmClassifier);
+        assert_eq!(cfg.rules[0].weight, 1.0);
+        assert_eq!(cfg.stage_picker, StagePicker::CapableFirst);
     }
 
     /// REGRESSION: a per-agent smart-routing override saved with the classifier
@@ -5825,6 +6858,7 @@ mod channel_config_tests {
                 profile_name: Some("Ryu".to_string()),
                 ..CommonChannelFileConfig::default()
             },
+            options: TelegramChannelOptionsFileConfig::default(),
         });
         cfg.channels.bluebubbles = Some(BlueBubblesChannelConfig {
             server_url: "http://mac:1234".to_string(),
@@ -5833,6 +6867,8 @@ mod channel_config_tests {
             webhook_path: default_bluebubbles_path(),
             private_api: true,
             send_read_receipts: true,
+            mention_patterns: Vec::new(),
+            home_channel: None,
             common: CommonChannelFileConfig::default(),
         });
 
@@ -5866,6 +6902,8 @@ mod channel_config_tests {
             "TESTCHAN_DM_ALLOWLIST",
             "TESTCHAN_BOT_NAME",
             "TESTCHAN_MODEL",
+            "TESTCHAN_PROACTIVE_OPENING",
+            "TESTCHAN_PROACTIVE_TARGET",
         ] {
             std::env::remove_var(key);
         }
@@ -5884,6 +6922,8 @@ mod channel_config_tests {
         std::env::set_var("TESTCHAN_STREAMING", "1");
         std::env::set_var("TESTCHAN_DM_ALLOWLIST", "u1, u2 ,");
         std::env::set_var("TESTCHAN_BOT_NAME", "Ryu");
+        std::env::set_var("TESTCHAN_PROACTIVE_OPENING", "true");
+        std::env::set_var("TESTCHAN_PROACTIVE_TARGET", "chat-1");
         // Blank is treated as unset, not as an empty model.
         std::env::set_var("TESTCHAN_MODEL", "   ");
 
@@ -5899,6 +6939,8 @@ mod channel_config_tests {
         );
         assert_eq!(loaded.profile_name.as_deref(), Some("Ryu"));
         assert_eq!(loaded.model, default_channel_model());
+        assert!(loaded.proactive_opening);
+        assert_eq!(loaded.proactive_target.as_deref(), Some("chat-1"));
 
         // An unrecognised value is ignored rather than guessed at, so the
         // config-file value keeps winning.
@@ -5919,6 +6961,8 @@ mod channel_config_tests {
             "TESTCHAN_DM_ALLOWLIST",
             "TESTCHAN_BOT_NAME",
             "TESTCHAN_MODEL",
+            "TESTCHAN_PROACTIVE_OPENING",
+            "TESTCHAN_PROACTIVE_TARGET",
         ] {
             std::env::remove_var(key);
         }

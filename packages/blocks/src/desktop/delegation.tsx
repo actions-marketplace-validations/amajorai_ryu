@@ -2,7 +2,7 @@
 
 // Presentational layer for a sub-agent delegation fan-out (delegate rows, caps,
 // streamed progress). The standalone desktop Delegation page was removed —
-// delegation is now an agent-native tool (`delegate__fanout`, Core
+// delegation is now an agent-native tool (`delegate.fanout`, Core
 // `sidecar/mcp/delegate.rs`) the model calls itself, not a screen a human drives.
 // This view is retained for the storyboard (which catalogs the historical screen
 // with mock data) and as a reusable building block for any future delegation UI.
@@ -126,7 +126,7 @@ export function DelegationView({
 
 	return (
 		<div className="flex h-full flex-col overflow-hidden">
-			<div className="scroll-fade-effect-y flex-1 overflow-auto p-6">
+			<div className="scroll-fade flex-1 overflow-auto p-6">
 				<div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
 					<div className="flex flex-col gap-4">
 						<Card>
@@ -262,8 +262,12 @@ export function DelegationView({
 						</Card>
 
 						<div className="flex gap-2">
-							<Button disabled={!canSubmit} onClick={onSubmit} type="button">
-								{running ? <Spinner /> : null}
+							<Button
+								disabled={!canSubmit}
+								loading={running}
+								onClick={onSubmit}
+								type="button"
+							>
 								{running ? "Delegating..." : "Run delegation"}
 							</Button>
 							{running ? (

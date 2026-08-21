@@ -23,6 +23,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "@ryu/ui/components/table";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -213,7 +214,7 @@ export function RecordTable({
 				<div className="text-muted-foreground text-xs">
 					{loading && records.length === 0
 						? "Loading…"
-						: `${total.toLocaleString()} ${
+						: `${formatNumber(total)} ${
 								total === 1 ? subject.object.singular : subject.object.plural
 							}`}
 				</div>
@@ -427,7 +428,8 @@ export function RecordTable({
 						Previous
 					</Button>
 					<span className="text-muted-foreground">
-						{offset + 1}–{offset + records.length} of {total.toLocaleString()}
+						{formatNumber(offset + 1)}–{formatNumber(offset + records.length)}{" "}
+						of {formatNumber(total)}
 					</span>
 					<Button
 						disabled={!hasMore}

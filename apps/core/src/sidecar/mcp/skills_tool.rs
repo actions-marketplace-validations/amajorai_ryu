@@ -10,14 +10,14 @@
 //!
 //! This server is the L2 loader. It exposes three tools:
 //!
-//! - `skills__search { query }` — find skills by task (id, name, description).
-//! - `skills__load { id }` — return a skill's full instruction body. The returned
+//! - `skills.search { query }` — find skills by task (id, name, description).
+//! - `skills.load { id }` — return a skill's full instruction body. The returned
 //!   text *is* the injection: the model reads it as the tool result and follows it
 //!   for the rest of the turn (the same mechanism as Claude Code's Skill tool).
-//! - `skills__author { name, purpose, procedure, failure_modes, verification, .. }`
+//! - `skills.author { name, purpose, procedure, failure_modes, verification, .. }`
 //!   — write a structured, reusable `SKILL.md` into the same `~/.claude/skills`
 //!   layout the installer targets, then reload + activate it so it is immediately
-//!   discoverable by `skills__search` / `skills__load`. Calling it again with the
+//!   discoverable by `skills.search` / `skills.load`. Calling it again with the
 //!   same slug refines (overwrites) the skill in place — the self-authoring loop:
 //!   an agent captures what it learned solving a complex task, and sharpens it on
 //!   reuse.
@@ -25,15 +25,15 @@
 //! ## One search door: what is and is not shared with the tool catalog
 //!
 //! A model used to face **two** discovery doors and had to guess which — `tool_search`
-//! for tools, `skills__search` for skills. It now faces one: `McpRegistry::search_scoped`
+//! for tools, `skills.search` for skills. It now faces one: `McpRegistry::search_scoped`
 //! merges skill descriptors ([`ToolKind::Skill`]) alongside tools, so a single query
-//! ranks both and each row says which it got. `skills__search` survives as the
+//! ranks both and each row says which it got. `skills.search` survives as the
 //! **kind-filtered, skill-allowlist-scoped view** of that same catalog, so an agent
 //! that already knows it wants a skill does not have to filter.
 //!
 //! What is shared and what is not, exactly, because the halves fail differently:
 //!
-//! - **Shared: ranking.** `skills__search` ranks through
+//! - **Shared: ranking.** `skills.search` ranks through
 //!   [`ryu_tool_registry::run_search`] — the same BM25 default, the same Semantic
 //!   embedder seam, and the same `tools.active_ranker` pref that
 //!   `McpRegistry::search_scoped` (`tool_search`) obeys. Flip the pref and skill search
@@ -41,30 +41,30 @@
 //!   [`ToolDescriptor`] by [`descriptor_for`] — the same mapping the merged catalog
 //!   uses, so the two doors cannot describe the same skill differently.
 //! - **Shared: the catalog.** Enabled, loadable skills now appear in
-//!   `tool_search` as `skills__<slug>` rows of kind `skill`. They are still NOT in
+//!   `tool_search` as `skills.<slug>` rows of kind `skill`. They are still NOT in
 //!   `McpRegistry::list_all_tools()` — they are merged at *search* time only, the
 //!   same way Core's self-API descriptors are — so nothing offers a skill as a
 //!   callable function def.
 //! - **Not shared: execution.** A skill is instruction text you load; a tool is a
-//!   function you call. `skills__<slug>` is a discovery id, not a call target:
+//!   function you call. `skills.<slug>` is a discovery id, not a call target:
 //!   calling it lands in this module's [`dispatch`] fallthrough and is refused with
-//!   a message naming `skills__load`. See "Discovery is unified, execution is not"
+//!   a message naming `skills.load`. See "Discovery is unified, execution is not"
 //!   below.
 //! - **Not shared: the zero-score cut.** `McpRegistry::search_scoped` returns every
-//!   ranked row; `skills__search` drops zero-scored rows **only when the scores
+//!   ranked row; `skills.search` drops zero-scored rows **only when the scores
 //!   are lexical** (BM25, including the Semantic→BM25 fallback) to keep its
 //!   "no match → empty results" contract. Under a live Semantic embedder it drops
 //!   nothing, because there `0.0` means a failed per-item embedding rather than
 //!   "no term matched" — see [`rank_skills`] for the full reasoning. So the one
 //!   place the two searches disagree on *ranking* is BM25-only, and it is deliberate.
-//! - **Shared, now: the scope.** `skills__search` narrows to
+//! - **Shared, now: the scope.** `skills.search` narrows to
 //!   `SkillRegistry::enabled_for(<the calling agent's skill allowlist>)`, and
 //!   `tool_search` narrows to the same list wherever the caller's agent id reaches
 //!   `McpRegistry::search_scoped` — which is every plane that has one: the ACP
 //!   bridge, and `GET /api/tools/search?agent=` (which is also how the
 //!   openai-compat chat plane arrives). A caller with no agent id — a workflow, a
 //!   monitor, the approval engine — passes the empty list, and `enabled_for`
-//!   defines that as every enabled skill, which is the same answer `skills__search`
+//!   defines that as every enabled skill, which is the same answer `skills.search`
 //!   gives those callers. So the two doors agree on scope on every plane.
 //! - **Not shared: the injected index.** The always-on L1 index in the system
 //!   prompt is built by `SkillRegistry::progressive_block`, which is neither
@@ -80,12 +80,12 @@
 //!    absent from `list_all_tools()`, so neither the ACP bridge's `list_tools` nor
 //!    the gateway's always-on set ever contains one. The gateway additionally skips
 //!    `kind == "skill"` rows when it describes-and-injects the top hits.
-//! 2. **`describe` points at the loader.** `McpRegistry::describe("skills__<slug>")`
+//! 2. **`describe` points at the loader.** `McpRegistry::describe("skills.<slug>")`
 //!    returns a `DescribedTool` of kind `skill` with no arguments whose description
-//!    is the literal `skills__load` call to make.
-//! 3. **The call path refuses.** `skills__<slug>` routes to the `skills` provider
-//!    like any `skills__*` id, reaches [`dispatch`]'s fallthrough arm, and returns an
-//!    error naming `skills__load`. This is the real backstop, not a belt-and-braces
+//!    is the literal `skills.load` call to make.
+//! 3. **The call path refuses.** `skills.<slug>` routes to the `skills` provider
+//!    like any `skills.*` id, reaches [`dispatch`]'s fallthrough arm, and returns an
+//!    error naming `skills.load`. This is the real backstop, not a belt-and-braces
 //!    one: a request whose tool policy resolved to the `"*"` wildcard passes the
 //!    gateway's `is_allowed` gate, so Core is the only thing left to say no.
 //!
@@ -234,9 +234,9 @@ use ryu_tool_registry::{ToolDescriptor, ToolEmbedder, ToolKind, ToolRanker, RANK
 pub const SERVER_NAME: &str = "skills";
 
 /// Fully-qualified ids of the tools this provider exposes.
-pub const SEARCH_TOOL_ID: &str = "skills__search";
-pub const LOAD_TOOL_ID: &str = "skills__load";
-pub const AUTHOR_TOOL_ID: &str = "skills__author";
+pub const SEARCH_TOOL_ID: &str = "skills.search";
+pub const LOAD_TOOL_ID: &str = "skills.load";
+pub const AUTHOR_TOOL_ID: &str = "skills.author";
 
 /// Default / max search results.
 const SEARCH_DEFAULT_LIMIT: usize = 10;
@@ -250,12 +250,12 @@ const SEARCH_MAX_LIMIT: usize = 25;
 /// **taken** so an agent cannot pre-claim an `app__<id>` a plugin has not registered
 /// yet — see the `taken` computation there for why the registry snapshot alone
 /// cannot see that case.
-const APP_SKILL_PREFIX: &str = "app.";
+const APP_SKILL_PREFIX: &str = "app__";
 
 /// Env flag that opts a node into autonomous skill self-authoring.
 ///
 /// **Default OFF.** Unlike `search`/`load` (which only return instruction text),
-/// `skills__author` has side effects — it writes a SKILL.md into the shared
+/// `skills.author` has side effects — it writes a SKILL.md into the shared
 /// `~/.claude/skills` directory and flips the global activation set. So it stays
 /// gated behind an explicit opt-in and is neither listed nor callable until this is
 /// set, mirroring this module's existing `RYU_SKILLS_*` env idiom
@@ -281,17 +281,17 @@ fn author_enabled() -> bool {
 /// Lives here rather than as an inline literal in `McpRegistry::list_servers` (where
 /// every other built-in server's text does) for one reason: it has to agree with
 /// [`author_enabled`], and the previous inline literal did not — it advertised
-/// `skills__author` unconditionally while [`tools`] only offers it when the opt-in is
+/// `skills.author` unconditionally while [`tools`] only offers it when the opt-in is
 /// set, so on a stock node the listing named a tool that was not there. Keeping the
 /// string next to the gate is what makes the two impossible to drift apart.
 pub(crate) fn server_description() -> String {
     let mut text = "Built-in skills: discover and load Agent Skills on demand \
-                    (skills__search / skills__load) instead of injecting every skill body \
+                    (skills.search / skills.load) instead of injecting every skill body \
                     up front — progressive disclosure for low-context models."
         .to_owned();
     if author_enabled() {
         text.push_str(
-            " skills__author writes a structured, reusable SKILL.md — creating a new slug, \
+            " skills.author writes a structured, reusable SKILL.md — creating a new slug, \
              or refining one the calling agent is allowed to load.",
         );
     }
@@ -321,7 +321,7 @@ fn load_schema() -> Value {
         "properties": {
             "id": {
                 "type": "string",
-                "description": "The skill id to load (as shown in the available-skills list or returned by skills__search)."
+                "description": "The skill id to load (as shown in the available-skills list or returned by skills.search)."
             }
         },
         "required": ["id"]
@@ -383,7 +383,7 @@ pub fn tools() -> Vec<RegistryTool> {
             name: "search".to_owned(),
             description: Some(
                 "Search available Agent Skills by task. Returns a ranked list of \
-                 { id, name, description }. Call skills__load with an id to read a \
+                 { id, name, description }. Call skills.load with an id to read a \
                  skill's full instructions before acting on it."
                     .to_owned(),
             ),
@@ -419,7 +419,7 @@ pub fn tools() -> Vec<RegistryTool> {
                  (replaces) it, which is allowed only for skills in your \
                  available-skills list — if it is refused, author under a different \
                  slug instead of retrying. A created skill is activated (so \
-                 skills__search / skills__load see it immediately) unless it fell \
+                 skills.search / skills.load see it immediately) unless it fell \
                  outside your available skills, in which case it is saved for the \
                  user to activate. Returns { ok, id, path, refined, active }."
                     .to_owned(),
@@ -460,11 +460,11 @@ pub async fn dispatch(
         "search" => do_search(arguments, registry, skills_allowlist).await,
         "load" => do_load(arguments, registry, skills_allowlist),
         "author" => do_author(arguments, registry, skills_allowlist),
-        // Everything else under the `skills` server — including a `skills__<slug>`
+        // Everything else under the `skills` server — including a `skills.<slug>`
         // id the model found in `tool_search` and mistook for a callable tool.
         //
         // This is where "a skill must not become callable" is actually enforced.
-        // Merging skills into the one catalog put `skills__<slug>` ids in front of
+        // Merging skills into the one catalog put `skills.<slug>` ids in front of
         // models, and a request whose tool policy resolved to the `"*"` wildcard
         // sails through the gateway's `is_allowed` gate, so this arm is the backstop
         // rather than a second opinion. It refuses with an `Err` (a malformed call,
@@ -473,10 +473,10 @@ pub async fn dispatch(
         // The message is deliberately **independent of whether `{other}` names a
         // real skill**: a reply that confirmed existence would hand an agent the
         // enumeration oracle the rest of this module spends its scoping avoiding.
-        // Pointing every caller at `skills__load` costs nothing — `load` re-checks
+        // Pointing every caller at `skills.load` costs nothing — `load` re-checks
         // the allowlist and answers identically for "absent" and "not yours".
         other => Err(anyhow::anyhow!(
-            "'{SERVER_NAME}__{other}' is not a callable tool. The {SERVER_NAME} server \
+            "'{SERVER_NAME}.{other}' is not a callable tool. The {SERVER_NAME} server \
              exposes {SEARCH_TOOL_ID} / {LOAD_TOOL_ID} / {AUTHOR_TOOL_ID}. If '{other}' is \
              an Agent Skill id, skills are instruction text you load, not functions you \
              call: use {LOAD_TOOL_ID} with {{\"id\": \"{other}\"}} and follow the \
@@ -501,24 +501,24 @@ async fn resolve_ranker() -> ToolRanker {
     ToolRanker::from_pref(pref.as_deref())
 }
 
-/// The catalog id a skill appears under: `skills__<slug>`.
+/// The catalog id a skill appears under: `skills.<slug>`.
 ///
-/// Skills share the `skills` server segment with the `skills__*` tools that serve
+/// Skills share the `skills` server segment with the `skills.*` tools that serve
 /// them, and that is load-bearing in three places, not cosmetic:
 ///
 /// - `ToolDescriptor::matches_allowlist` resolves a skill row's reachability from
 ///   the server segment, so an agent granted `skills` sees skill rows with no
 ///   Core-specific special case in the (Core-independent) registry crate;
-/// - `McpRegistry::call_tool` routes `skills__<slug>` to this provider, which is
+/// - `McpRegistry::call_tool` routes `skills.<slug>` to this provider, which is
 ///   what gives [`dispatch`] the chance to refuse explicitly. A bare-slug id would
 ///   die in `split_tool_id` as "malformed tool id" — an accidental refusal with an
 ///   unhelpful message, in a module this one cannot reach;
-/// - the id is self-describing to a model that has just read `skills__search`.
+/// - the id is self-describing to a model that has just read `skills.search`.
 pub fn catalog_id(slug: &str) -> String {
     format!("{SERVER_NAME}{}{slug}", super::TOOL_ID_SEP)
 }
 
-/// Inverse of [`catalog_id`]: the bare skill slug inside a `skills__<slug>` catalog
+/// Inverse of [`catalog_id`]: the bare skill slug inside a `skills.<slug>` catalog
 /// id, or `None` for an id outside that namespace.
 pub fn slug_from_catalog_id(id: &str) -> Option<&str> {
     id.strip_prefix(SERVER_NAME)
@@ -542,18 +542,18 @@ pub fn slug_from_catalog_id(id: &str) -> Option<&str> {
 ///
 /// The reason the rule had to move: this module only governs the doors it owns.
 /// A body-less record answered `ok:true` with an empty `instructions` string from
-/// `skills__load` — a status that reports healthy for a thing that is not there — and
+/// `skills.load` — a status that reports healthy for a thing that is not there — and
 /// filtering the two search doors fixed those two. It did **not** fix the injected
 /// surfaces, which live in the Core-independent crate and could not call this
 /// function: `SkillRegistry::progressive_block` kept listing the same records in the
-/// L1 index under an instruction to `skills__load` them, and `skill_block` kept
+/// L1 index under an instruction to `skills.load` them, and `skill_block` kept
 /// injecting an empty `## Skill:` section for an `always_on` one. Those now apply
 /// [`SkillRecord::is_loadable`] via `loadable_for`, so all five surfaces agree:
 ///
 /// - progressive-disclosure L1 index (`progressive_block`);
 /// - always-on / full-body injection (`progressive_block`, `skill_block`);
-/// - `skills__search` — [`do_search`];
-/// - `skills__load` — [`do_load`], the one door that still *sees* the record so it can
+/// - `skills.search` — [`do_search`];
+/// - `skills.load` — [`do_load`], the one door that still *sees* the record so it can
 ///   refuse it by name instead of by the enumeration-proof generic message;
 /// - the merged tool catalog — `catalog.rs`, list and resolve.
 pub fn is_loadable(s: &SkillRecord) -> bool {
@@ -567,13 +567,13 @@ pub fn is_loadable(s: &SkillRecord) -> bool {
 /// length-normalises, so folding a multi-KB body into the document would let one
 /// verbose skill dominate the term statistics of a set whose other documents are
 /// one line long. L1 metadata is what the skill author writes to be *found* by;
-/// the body is what you get after `skills__load`.
+/// the body is what you get after `skills.load`.
 ///
 /// `meta` stays `None`. Its documented contract is "the tool's `_meta`, verbatim
 /// (widget keys)", and it sits beside `widget_accessible` / `output_template`;
 /// putting the bare slug there would invent a widget-shaped signal. The slug is
 /// mechanically recoverable with [`slug_from_catalog_id`], and `describe` states the
-/// exact `skills__load` call.
+/// exact `skills.load` call.
 pub fn descriptor_for(s: &SkillRecord) -> ToolDescriptor {
     ToolDescriptor {
         id: catalog_id(&s.id),
@@ -622,7 +622,7 @@ async fn rank_skills(
     .await;
 
     // Whether a `0.0` score means "irrelevant" is ranker-dependent, so the cut has
-    // to be too. This is the one place `skills__search` diverges from
+    // to be too. This is the one place `skills.search` diverges from
     // `McpRegistry::search_scoped`, which never drops a ranked row.
     //
     // - **Lexical (BM25, and the Semantic→BM25 fallback): drop zeros.** A `0.0`
@@ -639,7 +639,7 @@ async fn rank_skills(
     //   it exists for, while `0.0` there means something else entirely:
     //   `semantic_score` assigns `0.0` to an item whose own `embed` call failed
     //   (documented at `tool-registry/src/lib.rs`). Filtering would make that skill
-    //   **invisible** to `skills__search` while the same failure only costs a tool
+    //   **invisible** to `skills.search` while the same failure only costs a tool
     //   its rank in `tool_search`. A flaky embedder must cost a skill position,
     //   never visibility; relevance under Semantic is expressed by the ordering.
     //
@@ -652,11 +652,11 @@ async fn rank_skills(
         // Filtering *after* truncation loses nothing: the kept set is the descending
         // top-`limit`, so anything dropped here sorted at or below every survivor.
         .filter(|d| !scores_are_lexical || d.score.unwrap_or(0.0) > 0.0)
-        // Map back to skill rows by id, un-qualifying `skills__<slug>` first. The
+        // Map back to skill rows by id, un-qualifying `skills.<slug>` first. The
         // registry is the source of truth for the returned `name`/`description`, and
         // this door keeps returning the **bare** slug: that is what the injected L1
-        // index shows, what `skills__load` has always taken, and what any existing
-        // caller parses. (`skills__load` accepts the qualified form too, so a model
+        // index shows, what `skills.load` has always taken, and what any existing
+        // caller parses. (`skills.load` accepts the qualified form too, so a model
         // that found the skill through `tool_search` is not stranded.)
         .filter_map(|d| {
             let slug = slug_from_catalog_id(&d.id)?;
@@ -733,10 +733,10 @@ fn do_load(
     let permitted = registry.enabled_for(skills_allowlist);
 
     // Accept both id forms. The bare slug is what the injected L1 index and
-    // `skills__search` show; `skills__<slug>` is what the merged tool catalog shows,
+    // `skills.search` show; `skills.<slug>` is what the merged tool catalog shows,
     // and a model that discovered the skill through `tool_search` will hand back the
     // id it was given. Exact match is tried FIRST so a skill genuinely named
-    // `skills__foo` (nothing forbids the slug — `sanitize_slug` keeps `_`) still
+    // `skills.foo` (nothing forbids the slug — `sanitize_slug` keeps `_`) still
     // wins over the un-qualified reading of its own id.
     let found = permitted.iter().find(|s| s.id == id).or_else(|| {
         slug_from_catalog_id(id).and_then(|slug| permitted.iter().find(|s| s.id == slug))
@@ -770,7 +770,7 @@ fn do_load(
         None => Ok(json!({
             "ok": false,
             "id": id,
-            "error": format!("no enabled skill with id '{id}'. Use skills__search to find one."),
+            "error": format!("no enabled skill with id '{id}'. Use skills.search to find one."),
         })),
     }
 }
@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     /// The `GET /api/mcp/servers` row must not promise a tool `tools()` withholds.
-    /// The inline literal this replaced advertised `skills__author` unconditionally, so
+    /// The inline literal this replaced advertised `skills.author` unconditionally, so
     /// on a stock (opt-in off) node the listing named a tool that was not there.
     #[test]
     fn server_description_advertises_author_only_when_it_is_offered() {
@@ -1216,13 +1216,13 @@ mod tests {
         std::env::remove_var(AUTHOR_FLAG_ENV);
         let without_author = server_description();
 
-        assert!(with_author.contains("skills__author"));
-        assert!(with_author.contains("skills__search"));
+        assert!(with_author.contains("skills.author"));
+        assert!(with_author.contains("skills.search"));
         assert!(
-            !without_author.contains("skills__author"),
+            !without_author.contains("skills.author"),
             "default-off node must not advertise a tool it does not offer: {without_author}"
         );
-        assert!(without_author.contains("skills__search"));
+        assert!(without_author.contains("skills.search"));
     }
 
     #[tokio::test]
@@ -1440,7 +1440,7 @@ mod tests {
 
     /// The zero-score cut is lexical-only. Under a live embedder a skill whose own
     /// `embed` call fails scores `0.0`, and dropping it would make that skill
-    /// invisible to `skills__search` while the identical failure only costs a tool
+    /// invisible to `skills.search` while the identical failure only costs a tool
     /// its rank in `tool_search`.
     #[tokio::test]
     async fn semantic_ranker_keeps_a_zero_scored_skill_visible() {
@@ -1511,7 +1511,7 @@ mod tests {
         assert_eq!(keys, vec!["description", "id", "name"]);
     }
 
-    // ── skills__author ────────────────────────────────────────────────────────
+    // ── skills.author ────────────────────────────────────────────────────────
 
     /// Point the skills dir + activation file at fresh tempdirs and hold the env
     /// lock for the life of the returned guard, so author tests can round-trip real
@@ -2110,7 +2110,7 @@ mod tests {
 
     // ── One search door: skill rows, the loader, and the refusal ──────────────
 
-    /// `skills__search` keeps returning **bare** ids — that is what the injected L1
+    /// `skills.search` keeps returning **bare** ids — that is what the injected L1
     /// index shows and what every existing caller parses — even though it now ranks
     /// through the `kind = Skill` filtered view of the one catalog.
     #[tokio::test]
@@ -2133,13 +2133,13 @@ mod tests {
     /// A body-less plugin skill (`register_app_skill` before the skill is
     /// materialised on disk) is offered by **none** of the four model-facing doors:
     /// the progressive-disclosure L1 index, the always-on/full-body injection,
-    /// `skills__search`, and `skills__load` — which alone still sees it, so it can
+    /// `skills.search`, and `skills.load` — which alone still sees it, so it can
     /// say why instead of answering `ok:true` with an empty instruction string.
     ///
     /// The four are asserted together on purpose. The search doors and the injected
     /// blocks live on opposite sides of the `apps/core` ↔ `ryu-skills` boundary, and
     /// the first cut of this rule only reached the two doors this module owns — so
-    /// the loudest surface, the index that tells the model to call `skills__load`
+    /// the loudest surface, the index that tells the model to call `skills.load`
     /// with the id, kept advertising exactly what `load` had started refusing. This
     /// test fails if the two sides drift apart again.
     #[tokio::test]
@@ -2162,7 +2162,7 @@ mod tests {
             "full-body injection must not emit a bodyless `## Skill:` section"
         );
 
-        // Door 3 — `skills__search`.
+        // Door 3 — `skills.search`.
         let searched = dispatch("search", json!({ "query": "summarize" }), &reg, &[])
             .await
             .expect("search ok");
@@ -2171,7 +2171,7 @@ mod tests {
             "a skill with nothing to load must not be offered: {searched}"
         );
 
-        // Door 4 — `skills__load`, the one that still resolves the record so the
+        // Door 4 — `skills.load`, the one that still resolves the record so the
         // refusal can name the actual reason.
         let loaded = dispatch("load", json!({ "id": "app__summarize" }), &reg, &[])
             .await
@@ -2227,12 +2227,12 @@ mod tests {
 
     /// A model that found the skill through `tool_search` hands back the catalog id
     /// it was given. `load` accepts both forms; the exact match wins so a skill
-    /// genuinely named `skills__x` is still reachable by its own id.
+    /// genuinely named `skills.x` is still reachable by its own id.
     #[tokio::test]
     async fn load_accepts_both_the_bare_and_the_catalog_id_form() {
         let reg = registry_with(vec![
             skill("pdf", "PDF", "d", "bare-body", true),
-            skill("skills__pdf", "Shadow", "d", "literal-body", true),
+            skill("skills.pdf", "Shadow", "d", "literal-body", true),
         ]);
 
         let bare = dispatch("load", json!({ "id": "pdf" }), &reg, &[])
@@ -2240,16 +2240,16 @@ mod tests {
             .expect("load ok");
         assert_eq!(bare["instructions"], json!("bare-body"));
 
-        // Exact match first: `skills__pdf` is a real skill id here, so it wins over
+        // Exact match first: `skills.pdf` is a real skill id here, so it wins over
         // reading the same string as a catalog id for `pdf`.
-        let literal = dispatch("load", json!({ "id": "skills__pdf" }), &reg, &[])
+        let literal = dispatch("load", json!({ "id": "skills.pdf" }), &reg, &[])
             .await
             .expect("load ok");
         assert_eq!(literal["instructions"], json!("literal-body"));
 
         // With no literal collision, the catalog form resolves to the bare skill.
         let plain = registry_with(vec![skill("pdf", "PDF", "d", "bare-body", true)]);
-        let via_catalog = dispatch("load", json!({ "id": "skills__pdf" }), &plain, &[])
+        let via_catalog = dispatch("load", json!({ "id": "skills.pdf" }), &plain, &[])
             .await
             .expect("load ok");
         assert_eq!(via_catalog["ok"], json!(true), "{via_catalog}");
@@ -2262,7 +2262,7 @@ mod tests {
     async fn the_catalog_id_form_does_not_bypass_the_skill_allowlist() {
         let reg = registry_with(vec![skill("theirs", "Theirs", "d", "secret", true)]);
         let allow = ["mine".to_string()];
-        for id in ["theirs", "skills__theirs"] {
+        for id in ["theirs", "skills.theirs"] {
             let out = dispatch("load", json!({ "id": id }), &reg, &allow)
                 .await
                 .expect("load ok");
@@ -2277,10 +2277,10 @@ mod tests {
         }
     }
 
-    /// **The execution boundary.** A model that mistakes a `skills__<slug>` catalog
+    /// **The execution boundary.** A model that mistakes a `skills.<slug>` catalog
     /// row for a callable tool routes here — this is the backstop, since a request
     /// carrying the `"*"` tool-policy wildcard passes the gateway's `is_allowed`
-    /// gate. It must refuse, and name `skills__load`.
+    /// gate. It must refuse, and name `skills.load`.
     #[tokio::test]
     async fn calling_a_skill_id_as_a_tool_is_refused_and_names_the_loader() {
         let reg = registry_with(vec![skill("pdf", "PDF", "d", "body", true)]);
@@ -2310,13 +2310,13 @@ mod tests {
     /// namespace (which is what keeps `describe`/`load` from mis-reading a tool id).
     #[test]
     fn catalog_id_round_trips_and_rejects_foreign_ids() {
-        assert_eq!(catalog_id("pdf"), "skills__pdf");
-        assert_eq!(slug_from_catalog_id("skills__pdf"), Some("pdf"));
+        assert_eq!(catalog_id("pdf"), "skills.pdf");
+        assert_eq!(slug_from_catalog_id("skills.pdf"), Some("pdf"));
         assert_eq!(slug_from_catalog_id(&catalog_id("app__x")), Some("app__x"));
-        assert_eq!(slug_from_catalog_id("exa__search"), None);
+        assert_eq!(slug_from_catalog_id("exa.search"), None);
         assert_eq!(slug_from_catalog_id("skills"), None);
         // An empty slug is not a skill id.
-        assert_eq!(slug_from_catalog_id("skills__"), None);
+        assert_eq!(slug_from_catalog_id("skills."), None);
     }
 
     /// Carried-over finding: before a plugin is enabled its `app__<id>` skills are

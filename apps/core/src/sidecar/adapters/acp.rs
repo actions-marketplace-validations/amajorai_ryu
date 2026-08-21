@@ -6,20 +6,21 @@ use std::time::Duration;
 use agent_client_protocol::schema::{
     AuthMethodId, AuthenticateRequest, AvailableCommandInput, CancelNotification,
     ClientCapabilities, CloseSessionRequest, ContentBlock, CreateTerminalRequest,
-    CreateTerminalResponse, EmbeddedResourceResource, FileSystemCapabilities, ImageContent,
-    InitializeRequest, InitializeResponse, KillTerminalRequest, KillTerminalResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LogoutRequest,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion,
-    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigOptionValue, SessionConfigSelectOption, SessionId, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    SetSessionModeRequest, SetSessionModelRequest, TerminalId, TerminalOutputRequest,
-    TerminalOutputResponse, ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus,
-    ToolCallUpdate, ToolKind, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
-    WriteTextFileRequest, WriteTextFileResponse,
+    CreateTerminalResponse, EmbeddedResourceResource, ImageContent, InitializeRequest,
+    InitializeResponse, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, LogoutRequest, NewSessionRequest, NewSessionResponse,
+    PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
+    SessionConfigSelectOption, SessionId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModelRequest, TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCall,
+    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolKind,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
+use agent_client_protocol::schema::{ResumeSessionRequest, ResumeSessionResponse};
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{Agent, Client, ConnectionTo, SessionMessage};
 use agent_client_protocol_tokio::AcpAgent;
@@ -345,7 +346,7 @@ impl AcpUsageSnapshot {
 pub struct ToolWidgetEvent {
     /// The tool-call row this widget attaches to (best-effort correlation).
     pub tool_call_id: String,
-    /// Fully-qualified tool id (`<server>__<tool>`).
+    /// Fully-qualified tool id (`<server>.<tool>`).
     pub tool_name: String,
     /// Minted `WidgetInstanceStore` id (round-trip identity).
     pub instance_id: String,
@@ -396,6 +397,11 @@ pub struct AcpTurnConfig {
     pub config_options: Vec<(String, String)>,
     /// `ModelId` to select (unstable ACP capability; ignored if unsupported).
     pub model_id: Option<String>,
+    /// Agent-requested reasoning effort. Unlike a client-selected config option,
+    /// this remains available when Simple mode intentionally strips all model
+    /// controls from the request. ACP does not have one stable effort id, so the
+    /// turn path tries the conventional ids until the agent accepts one.
+    pub agent_effort: Option<String>,
     /// When `true` (desktop streaming), a tool-permission request is surfaced to
     /// the user as a `PermissionRequest` event and the handler awaits their
     /// choice (cancel on timeout). When `false` (headless/bots/CLI/legacy), the
@@ -491,9 +497,9 @@ fn read_agent_caps(init: &InitializeResponse) -> AcpCaps {
         // `_meta`, so the protocol says "supported" by sending the key at all.
         //
         // Only these three are read because only these three COMPILE under
-        // Core's feature set (`unstable_session_resume` + `unstable_session_close`
-        // are on; `unstable_session_fork` and
-        // `unstable_session_additional_directories` are off). Agents also send a
+        // Core's feature set (`unstable_session_resume`, `unstable_session_close`, and
+        // `unstable_session_additional_directories` are on; `unstable_session_fork` is
+        // off). Agents also send a
         // `delete` key, which the pinned schema has no field for at all — it is
         // dropped by serde and must not be confused with `close`.
         session_list: caps.session_capabilities.list.is_some(),
@@ -584,7 +590,7 @@ fn append_capped(
 async fn terminal_create(
     registry: &TerminalRegistry,
     req: &CreateTerminalRequest,
-    session_cwd: &std::path::Path,
+    session_roots: &[std::path::PathBuf],
     scan_agent: &str,
 ) -> anyhow::Result<String> {
     use std::process::Stdio;
@@ -608,12 +614,21 @@ async fn terminal_create(
         }
     }
 
+    let terminal_cwd = req
+        .cwd
+        .as_deref()
+        .map(|path| {
+            scoped_path(session_roots, path)
+                .ok_or_else(|| anyhow::anyhow!("terminal cwd is outside the session workspaces"))
+        })
+        .transpose()?
+        .unwrap_or_else(|| session_roots[0].clone());
     let mut cmd = tokio::process::Command::new(&req.command);
     cmd.args(&req.args);
     for env in &req.env {
         cmd.env(&env.name, &env.value);
     }
-    cmd.current_dir(req.cwd.clone().unwrap_or_else(|| session_cwd.to_path_buf()));
+    cmd.current_dir(terminal_cwd);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -833,16 +848,32 @@ fn path_within_root(root: &std::path::Path, path: &std::path::Path) -> bool {
 /// `""` (the ACP response carries only `content`; degrading to empty matches how
 /// a missing file behaves, and never feeds out-of-workspace secrets to the
 /// model). Returns `""` on any read error likewise.
-fn read_text_file_scoped(req: &ReadTextFileRequest, root: &std::path::Path) -> String {
-    if !path_within_root(root, &req.path) {
+fn scoped_path(roots: &[std::path::PathBuf], path: &std::path::Path) -> Option<std::path::PathBuf> {
+    roots.iter().find_map(|root| {
+        if path_within_root(root, path) {
+            Some(if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                root.join(path)
+            })
+        } else {
+            None
+        }
+    })
+}
+
+fn read_text_file_scoped_in_roots(
+    req: &ReadTextFileRequest,
+    roots: &[std::path::PathBuf],
+) -> String {
+    let Some(path) = scoped_path(roots, &req.path) else {
         tracing::warn!(
             path = %req.path.display(),
-            root = %root.display(),
-            "fs/read_text_file refused: path escapes the session workspace"
+            "fs/read_text_file refused: path is outside the session workspaces"
         );
         return String::new();
-    }
-    let Ok(content) = std::fs::read_to_string(&req.path) else {
+    };
+    let Ok(content) = std::fs::read_to_string(path) else {
         return String::new();
     };
     if req.line.is_none() && req.limit.is_none() {
@@ -863,22 +894,20 @@ fn read_text_file_scoped(req: &ReadTextFileRequest, root: &std::path::Path) -> S
 /// Serve `fs/write_text_file`, creating parent directories as needed. Confined
 /// to the session workspace root — an out-of-root path is refused (no directory
 /// is created, nothing is written).
-fn write_text_file_scoped(
+fn write_text_file_scoped_in_roots(
     req: &WriteTextFileRequest,
-    root: &std::path::Path,
+    roots: &[std::path::PathBuf],
 ) -> anyhow::Result<()> {
-    if !path_within_root(root, &req.path) {
+    let Some(path) = scoped_path(roots, &req.path) else {
         return Err(anyhow::anyhow!(
-            "refusing write outside the session workspace: {} (root {})",
-            req.path.display(),
-            root.display()
+            "refusing write outside the session workspaces: {}",
+            req.path.display()
         ));
-    }
-    if let Some(parent) = req.path.parent() {
+    };
+    if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(&req.path, &req.content)
-        .with_context_msg(|| format!("write {}", req.path.display()))
+    std::fs::write(&path, &req.content).with_context_msg(|| format!("write {}", path.display()))
 }
 
 /// Await a client-hosted terminal's exit, returning `(exit_code, signal)`.
@@ -1615,12 +1644,13 @@ pub async fn logout_acp(spawn_cmd: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resume an ACP agent's own prior session (ACP `session/load`) — warm-reconnect
-/// to a session the agent still retains so its context is restored without
-/// replaying the transcript as a fresh prompt. Gated on the agent advertising the
-/// `loadSession` capability (returned as `{ supported: false }` otherwise, not an
-/// error). On success returns the resumed session's advertised state
-/// (`{ modes, models, configOptions }`) so the desktop can reflect it.
+/// Resume an ACP agent's own prior session — prefer `session/resume` when the
+/// agent advertises that capability, otherwise use `session/load`. `resume`
+/// reconnects without replaying the native history; `load` asks the agent to
+/// replay its retained history. If neither capability is advertised this
+/// returns `{ supported: false }` rather than pretending native persistence is
+/// available. On success the response includes the mode plus the resumed
+/// session's advertised state (`{ modes, models, configOptions }`).
 ///
 /// `session_id` is the agent-native session id (e.g. a Claude Code / Codex
 /// session id, as persisted on import); `cwd` is the workspace the session ran in.
@@ -1648,9 +1678,27 @@ pub async fn load_acp_session(
                         .send_request(ryu_initialize_request())
                         .block_task()
                         .await?;
+                    let caps = read_agent_caps(&init);
+                    if caps.session_resume {
+                        let resp: ResumeSessionResponse = cx
+                            .send_request(ResumeSessionRequest::new(
+                                SessionId::new(session_id.as_str()),
+                                cwd.clone(),
+                            ))
+                            .block_task()
+                            .await?;
+                        return Ok(serde_json::json!({
+                            "supported": true,
+                            "mode": "resume",
+                            "sessionId": session_id,
+                            "modes": resp.modes,
+                            "models": resp.models,
+                            "configOptions": with_plan_mode_option(&plan_cmd, resp.config_options),
+                        }));
+                    }
                     // Only attempt load when the agent advertises the capability;
                     // calling it on an agent that lacks it would just error.
-                    if !read_agent_caps(&init).load_session {
+                    if !caps.load_session {
                         return Ok(serde_json::json!({ "supported": false }));
                     }
                     let resp = cx
@@ -1663,6 +1711,7 @@ pub async fn load_acp_session(
                     let resp: agent_client_protocol::schema::LoadSessionResponse = resp;
                     Ok(serde_json::json!({
                         "supported": true,
+                        "mode": "load",
                         "sessionId": session_id,
                         "modes": resp.modes,
                         "models": resp.models,
@@ -1672,8 +1721,8 @@ pub async fn load_acp_session(
             }),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("ACP session/load timed out"))?
-    .map_err(|e| anyhow::anyhow!("ACP session/load: {e}"))?;
+    .map_err(|_| anyhow::anyhow!("ACP session resume/load timed out"))?
+    .map_err(|e| anyhow::anyhow!("ACP session resume/load: {e}"))?;
     Ok(value)
 }
 
@@ -1802,6 +1851,15 @@ fn take_startup_banner(pending: &Mutex<Option<String>>, text: &str) -> bool {
 /// that predate the (unstable) `session/set_model` capability — pi-acp among
 /// them — expose the model as a `select` config option under this id instead.
 const MODEL_CONFIG_OPTION_ID: &str = "model";
+
+/// Conventional ACP ids used by agents for reasoning effort. The protocol does
+/// not standardize this option yet, so agent-level control may need to probe the
+/// known ids when the client deliberately omitted its config map.
+const EFFORT_CONFIG_OPTION_IDS: &[&str] = &["effort", "thought_level", "reasoning_effort"];
+
+fn is_effort_config_id(config_id: &str) -> bool {
+    EFFORT_CONFIG_OPTION_IDS.contains(&config_id)
+}
 
 /// Order config-option writes so the model is applied FIRST, keeping every other
 /// option in the order it was given.
@@ -1939,43 +1997,94 @@ async fn apply_turn_config(
             )
             .block_task()
             .await;
-        let Err(e) = set_model_result else {
-            return;
-        };
-        // Already sent as an explicit config option above? Then the fallback
-        // would just repeat it — log and stop.
-        let already_via_config = turn
+        if let Err(e) = set_model_result {
+            // Already sent as an explicit config option above? Then the fallback
+            // would just repeat it — log and stop.
+            let already_via_config = turn
+                .config_options
+                .iter()
+                .any(|(id, _)| id == MODEL_CONFIG_OPTION_ID);
+            if already_via_config {
+                tracing::warn!("ACP set_model '{model}' failed: {e}");
+            } else {
+                tracing::info!(
+                    "ACP set_model '{model}' failed ({e}); retrying as config option '{MODEL_CONFIG_OPTION_ID}'"
+                );
+                match connection
+                    .send_request_to(
+                        Agent,
+                        SetSessionConfigOptionRequest::new(
+                            session_id.clone(),
+                            MODEL_CONFIG_OPTION_ID.to_owned(),
+                            config_option_value(&model),
+                        ),
+                    )
+                    .block_task()
+                    .await
+                {
+                    Ok(_) => tracing::info!("ACP applied model '{model}' via config option"),
+                    Err(e2) => {
+                        tracing::warn!(
+                            "ACP set_model '{model}' failed: {e}; config-option fallback failed: {e2}"
+                        );
+                        let _ = events.send(AcpEvent::ConfigWarning {
+                            field: MODEL_CONFIG_OPTION_ID.to_owned(),
+                            requested: model.clone(),
+                            message: format!("agent did not accept the model selection: {e2}"),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if let Some(effort) = turn
+        .agent_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+    {
+        let has_explicit_effort_option = turn
             .config_options
             .iter()
-            .any(|(id, _)| id == MODEL_CONFIG_OPTION_ID);
-        if already_via_config {
-            tracing::warn!("ACP set_model '{model}' failed: {e}");
-            return;
-        }
-        tracing::info!(
-            "ACP set_model '{model}' failed ({e}); retrying as config option '{MODEL_CONFIG_OPTION_ID}'"
-        );
-        match connection
-            .send_request_to(
-                Agent,
-                SetSessionConfigOptionRequest::new(
-                    session_id.clone(),
-                    MODEL_CONFIG_OPTION_ID.to_owned(),
-                    config_option_value(&model),
-                ),
-            )
-            .block_task()
-            .await
-        {
-            Ok(_) => tracing::info!("ACP applied model '{model}' via config option"),
-            Err(e2) => {
-                tracing::warn!(
-                    "ACP set_model '{model}' failed: {e}; config-option fallback failed: {e2}"
-                );
+            .any(|(id, _)| is_effort_config_id(id));
+        if !has_explicit_effort_option {
+            let mut applied = false;
+            for config_id in EFFORT_CONFIG_OPTION_IDS {
+                let result: Result<SetSessionConfigOptionResponse, _> = connection
+                    .send_request_to(
+                        Agent,
+                        SetSessionConfigOptionRequest::new(
+                            session_id.clone(),
+                            (*config_id).to_owned(),
+                            config_option_value(effort),
+                        ),
+                    )
+                    .block_task()
+                    .await;
+                match result {
+                    Ok(refreshed) => {
+                        tracing::info!(
+                            "ACP applied agent-requested effort '{effort}' via config option '{config_id}'"
+                        );
+                        if let Ok(json) = serde_json::to_value(&refreshed.config_options) {
+                            let _ = events.send(AcpEvent::ConfigOptions(json));
+                        }
+                        applied = true;
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            "ACP agent-requested effort option '{config_id}'='{effort}' was rejected: {error}"
+                        );
+                    }
+                }
+            }
+            if !applied {
                 let _ = events.send(AcpEvent::ConfigWarning {
-                    field: MODEL_CONFIG_OPTION_ID.to_owned(),
-                    requested: model.clone(),
-                    message: format!("agent did not accept the model selection: {e2}"),
+                    field: "effort".to_owned(),
+                    requested: effort.to_owned(),
+                    message: "agent did not advertise a supported reasoning-effort option"
+                        .to_owned(),
                 });
             }
         }
@@ -2007,6 +2116,7 @@ pub fn spawn_acp_task(
     fresh_session: bool,
     images: Vec<ImagePart>,
     cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
     environment: Vec<(String, String)>,
     mcp: Option<Arc<McpRegistry>>,
     allowlist: Option<Vec<String>>,
@@ -2025,6 +2135,7 @@ pub fn spawn_acp_task(
     permission_scope_id: Option<String>,
 ) -> mpsc::UnboundedReceiver<AcpEvent> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
+    crate::acp_runtime::refresh_from_local_file();
     // Resolved concrete agent id for this turn (== the effective/bridge agent id).
     // Folded into the pool key below so the session is keyed by (conversation,
     // agent, spawn_cmd, cwd): switching agents mid-conversation — including the
@@ -2033,6 +2144,18 @@ pub fn spawn_acp_task(
     // Keying on the agent id (not just spawn_cmd) is what separates two agent
     // records that happen to share a binary/spawn command but differ in config.
     let agent_key = agent_id.clone();
+    // A pooled ACP session retains the first turn's MCP server and bridge
+    // credentials. Include every security-sensitive input in the pool key so a
+    // later request with a narrower allowlist, different Composio actions, or a
+    // different Identity Vault binding cannot inherit the first turn's tools.
+    let security_key = acp_security_key(
+        &mcp,
+        &allowlist,
+        &composio_actions,
+        &agent_id,
+        &identity_profile_ids,
+        &permission_scope_id,
+    );
     let acp_turn = AcpTurn {
         prompt,
         delta_prompt,
@@ -2058,14 +2181,24 @@ pub fn spawn_acp_task(
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join("\u{2}");
+    let workspace_key = additional_directories
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join("\u{2}");
     if !should_reuse_acp_session(&conversation, fresh_session) {
         // A fresh context turn must not leave the old pooled sender eligible for
         // a later request: drop it before spawning the unpooled instance. The
         // in-flight task retains its own permission scope and drains naturally.
         if fresh_session && !conversation.is_empty() {
-            let key = format!(
-                "{conversation}\u{1}{agent_key}\u{1}{spawn_cmd}\u{1}{}\u{1}{environment_key}",
-                cwd.display(),
+            let key = acp_pool_key(
+                &conversation,
+                &agent_key,
+                &spawn_cmd,
+                &cwd,
+                &workspace_key,
+                &environment_key,
+                &security_key,
             );
             if let Ok(mut pool) = acp_pool().lock() {
                 pool.remove(&key);
@@ -2074,16 +2207,31 @@ pub fn spawn_acp_task(
         let (turns_tx, turns_rx) = mpsc::unbounded_channel();
         let _ = turns_tx.send(acp_turn); // drop tx → instance ends after this turn
         tokio::spawn(async move {
-            if let Err(e) = run_acp_instance(spawn_cmd, cwd, environment, turns_rx).await {
+            crate::acp_runtime::refresh_from_gateway(&reqwest::Client::new()).await;
+            let _permit = crate::acp_runtime::acquire().await;
+            if let Err(e) = run_acp_instance(
+                spawn_cmd,
+                cwd,
+                additional_directories,
+                environment,
+                turns_rx,
+            )
+            .await
+            {
                 tracing::error!("ACP instance error: {e}");
             }
         });
         return events_rx;
     }
 
-    let key = format!(
-        "{conversation}\u{1}{agent_key}\u{1}{spawn_cmd}\u{1}{}\u{1}{environment_key}",
-        cwd.display()
+    let key = acp_pool_key(
+        &conversation,
+        &agent_key,
+        &spawn_cmd,
+        &cwd,
+        &workspace_key,
+        &environment_key,
+        &security_key,
     );
     let mut pool = acp_pool().lock().expect("acp pool mutex poisoned");
     // Drop dead instances (idle-TTL expired or crashed) so the map can't grow.
@@ -2113,8 +2261,19 @@ pub fn spawn_acp_task(
     let _ = turns_tx.send(pending.expect("turn present"));
     let spawn_cmd_task = spawn_cmd.clone();
     let cwd_task = cwd.clone();
+    let additional_directories_task = additional_directories.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_acp_instance(spawn_cmd_task, cwd_task, environment, turns_rx).await {
+        crate::acp_runtime::refresh_from_gateway(&reqwest::Client::new()).await;
+        let _permit = crate::acp_runtime::acquire().await;
+        if let Err(e) = run_acp_instance(
+            spawn_cmd_task,
+            cwd_task,
+            additional_directories_task,
+            environment,
+            turns_rx,
+        )
+        .await
+        {
             tracing::error!("ACP instance error: {e}");
         }
     });
@@ -2127,6 +2286,51 @@ pub fn spawn_acp_task(
 /// stay scoped to the same chat while the model receives no prior ACP session.
 fn should_reuse_acp_session(conversation: &str, fresh_session: bool) -> bool {
     !conversation.is_empty() && !fresh_session
+}
+
+/// Stable, explicit fingerprint for the security context captured by a pooled
+/// ACP session. `None` and `Some([])` remain distinct because the former means
+/// "use the default allowlist" while the latter means "offer no tools".
+fn acp_security_key(
+    mcp: &Option<Arc<McpRegistry>>,
+    allowlist: &Option<Vec<String>>,
+    composio_actions: &[String],
+    agent_id: &str,
+    identity_profile_ids: &[String],
+    permission_scope_id: &Option<String>,
+) -> String {
+    let mut allowlist = allowlist.clone();
+    if let Some(values) = allowlist.as_mut() {
+        values.sort();
+    }
+    let mut composio_actions = composio_actions.to_vec();
+    composio_actions.sort();
+    let mut identity_profile_ids = identity_profile_ids.to_vec();
+    identity_profile_ids.sort();
+    serde_json::json!({
+        "mcp": mcp.as_ref().map(|registry| format!("{:p}", Arc::as_ptr(registry))),
+        "allowlist": allowlist,
+        "composioActions": composio_actions,
+        "agentId": agent_id,
+        "identityProfileIds": identity_profile_ids,
+        "permissionScopeId": permission_scope_id,
+    })
+    .to_string()
+}
+
+fn acp_pool_key(
+    conversation: &str,
+    agent_key: &str,
+    spawn_cmd: &str,
+    cwd: &PathBuf,
+    workspace_key: &str,
+    environment_key: &str,
+    security_key: &str,
+) -> String {
+    format!(
+		"{conversation}\u{1}{agent_key}\u{1}{spawn_cmd}\u{1}{}\u{1}{workspace_key}\u{1}{environment_key}\u{1}{security_key}",
+		cwd.display(),
+	)
 }
 
 /// Per-chat pool of live ACP instances: conversation id -> that chat's turn queue.
@@ -2176,6 +2380,7 @@ impl AgentAdapter for AcpAdapter {
                 false,
                 vec![],
                 cwd,
+                vec![],
                 vec![],
                 None,
                 None,
@@ -2274,6 +2479,7 @@ impl AgentAdapter for AcpAdapter {
                 id: format!("acp:{name}"),
                 engine: Some(name.clone()),
                 name,
+                title: None,
                 description: None,
                 install_hint: None,
                 installed: None,
@@ -2289,6 +2495,9 @@ impl AgentAdapter for AcpAdapter {
                 enabled: None,
                 gateway_bypass: None,
                 avatar_url: None,
+                avatar_glyph: None,
+                lifecycle_status: None,
+                safety_profile: None,
             }])
         })
     }
@@ -2298,6 +2507,7 @@ impl AgentAdapter for AcpAdapter {
             Ok(AgentInfo {
                 id: config.name.clone(),
                 name: config.name,
+                title: None,
                 description: None,
                 install_hint: None,
                 installed: None,
@@ -2314,6 +2524,9 @@ impl AgentAdapter for AcpAdapter {
                 enabled: None,
                 gateway_bypass: None,
                 avatar_url: None,
+                avatar_glyph: None,
+                lifecycle_status: None,
+                safety_profile: None,
             })
         })
     }
@@ -2379,10 +2592,6 @@ struct AcpTurn {
     permission_scope_id: Option<String>,
     events: mpsc::UnboundedSender<AcpEvent>,
 }
-
-/// Idle TTL for a pooled per-chat ACP instance: after this long with no new turn,
-/// the subprocess is torn down; the chat's next message lazily respawns it.
-const ACP_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Whether this ACP transport can be handed an MCP server at all.
 ///
@@ -2543,7 +2752,7 @@ fn acp_tool_bridge_enabled(spawn_cmd: &str, agent_id: &str) -> bool {
 
 /// Run one chat's ACP instance: spawn the subprocess ONCE, `initialize` ONCE,
 /// build the Ryu MCP bridge ONCE and the ACP session ONCE, then serve every queued
-/// turn on that same session until the chat goes idle (`ACP_IDLE_TTL`) or the pool
+/// turn on that same session until the chat goes idle (the Gateway ACP idle timeout) or the pool
 /// drops the queue. Because the live session retains the conversation, the FIRST
 /// turn sends the full prompt (with history) and every subsequent turn sends only
 /// its delta message — re-sending the full prompt would double-count the transcript.
@@ -2552,6 +2761,7 @@ fn acp_tool_bridge_enabled(spawn_cmd: &str, agent_id: &str) -> bool {
 pub async fn run_acp_instance(
     spawn_cmd: String,
     cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
     environment: Vec<(String, String)>,
     turns_rx: mpsc::UnboundedReceiver<AcpTurn>,
 ) -> anyhow::Result<()> {
@@ -2667,7 +2877,11 @@ pub async fn run_acp_instance(
                 // Peek the FIRST turn (it carries the params the bridge + session
                 // are built from). If none arrives within the idle TTL, this chat
                 // never sent anything — tear the instance down.
-                let first_turn = match tokio::time::timeout(ACP_IDLE_TTL, turns_rx.recv()).await
+                let first_turn = match tokio::time::timeout(
+                    crate::acp_runtime::settings().idle_timeout,
+                    turns_rx.recv(),
+                )
+                .await
                 {
                     Ok(Some(t)) => t,
                     _ => return Ok(()),
@@ -2769,14 +2983,18 @@ pub async fn run_acp_instance(
                 let _instance_tx_keepalive = instance_tx;
 
                 let session_cwd = cwd.clone();
-                tracing::info!(cwd = %session_cwd.display(), "ACP build_session");
+                let mut session_roots = vec![session_cwd.clone()];
+                session_roots.extend(additional_directories.clone());
+                tracing::info!(
+                    cwd = %session_cwd.display(),
+                    additional_roots = session_roots.len().saturating_sub(1),
+                    "ACP build_session"
+                );
 
                 // Per-instance client-hosted terminal registry (serves the agent's
                 // `terminal/*` requests) + the default cwd for spawned commands.
                 let terminals: TerminalRegistry =
                     Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
-                let terminal_cwd = cwd.clone();
-
                 // Build the ACP session ONCE for the whole chat, injecting Ryu's
                 // registered tools via the SDK's `with_mcp_server` mechanism. The
                 // bridge registers an in-process MCP server so the agent's own MCP
@@ -2789,7 +3007,8 @@ pub async fn run_acp_instance(
                 // `ryu_server` is `None` for pi-acp and for agents the user has
                 // explicitly opted out of the bridge, so those sessions are created
                 // without it.
-                let mut new_session = NewSessionRequest::new(session_cwd);
+                let mut new_session = NewSessionRequest::new(session_cwd)
+                    .additional_directories(additional_directories.clone());
                 if is_claude_code {
                     // See `is_claude_code` above: constrain the Claude Agent SDK's
                     // settingSources to "user" so it does not enumerate the folder's
@@ -2813,6 +3032,34 @@ pub async fn run_acp_instance(
                 } else {
                     session_builder.start_session().await?
                 };
+
+                // `session/new` is the first authoritative native-session id. Persist
+                // it immediately for conversation-bound ACP resume/load; later
+                // `session_info_update` notifications enrich the same binding with
+                // agent-provided title/activity metadata on the Gateway path.
+                if let (Some(conversation_id), Some(store)) = (
+                    first_turn.permission_scope_id.as_deref(),
+                    crate::server::agent_sync::global_store(),
+                ) {
+                    let agent_id = first_turn.agent_id.as_str();
+                    let engine = agent_id.strip_prefix("acp:").unwrap_or(agent_id);
+                    let native_session_id = session.session_id().to_string();
+                    if let Err(error) = store
+                        .record_acp_binding_async(
+                            conversation_id,
+                            agent_id,
+                            engine,
+                            &native_session_id,
+                            Some(&cwd),
+                            &agent_caps_json(&agent_caps),
+                        )
+                        .await
+                    {
+                        tracing::debug!(
+                            "agent sync: initial ACP binding ledger update skipped: {error:#}"
+                        );
+                    }
+                }
 
                 // The banner this session announced it was about to emit (pi-acp's
                 // startup skills/commands listing and/or update notice). Held for
@@ -2853,9 +3100,21 @@ pub async fn run_acp_instance(
                         ..
                     } = match pending_first.take() {
                         Some(t) => t,
-                        None => match tokio::time::timeout(ACP_IDLE_TTL, turns_rx.recv()).await {
+                        None => match tokio::time::timeout(
+                            crate::acp_runtime::settings().idle_timeout,
+                            turns_rx.recv(),
+                        )
+                        .await
+                        {
                             Ok(Some(t)) => t,
-                            _ => break,
+                            _ => {
+                                tracing::info!(
+                                    idle_timeout_minutes = crate::acp_runtime::settings()
+                                        .idle_timeout_minutes,
+                                    "ACP session idle timeout reached; subprocess will be reaped"
+                                );
+                                break;
+                            }
                         },
                     };
 
@@ -3036,13 +3295,17 @@ pub async fn run_acp_instance(
                             let terms_wait = Arc::clone(&terminals);
                             let terms_kill = Arc::clone(&terminals);
                             let terms_release = Arc::clone(&terminals);
-                            let term_cwd = terminal_cwd.clone();
+                            let term_roots = session_roots.clone();
                             // Workspace roots for the confined fs handlers + the
                             // terminal exec-scan's agent attribution.
-                            let fs_cwd_read = terminal_cwd.clone();
-                            let fs_cwd_write = terminal_cwd.clone();
+                            let fs_roots_read = session_roots.clone();
+                            let fs_roots_write = session_roots.clone();
                             let term_scan_agent = scan_agent.clone();
                             let question_conversation = perm_conversation.clone();
+                            // The notification callback is `move`; capture only the
+                            // immutable ACP id so the live session remains available
+                            // to the outer read loop.
+                            let session_identifier = session.session_id().clone();
                             // Per-message handle on the session's undelivered startup
                             // banner (the notification closure below is `move`).
                             let banner_slot = Arc::clone(&startup_banner);
@@ -3319,7 +3582,22 @@ pub async fn run_acp_instance(
                                             // Session metadata is a real ACP update, not
                                             // agent text. Preserve the partial-update shape
                                             // (including explicit nulls) for the desktop.
-                                            if let Ok(json) = serde_json::to_value(&u) {
+                                            if let Ok(mut json) = serde_json::to_value(&u) {
+                                                if let Some(object) = json.as_object_mut() {
+                                                    // The protocol update does not carry the
+                                                    // session id, but the binding ledger needs
+                                                    // the id returned by session/new. Enrich the
+                                                    // event at the transport boundary rather
+                                                    // than fabricating a native history file.
+                                                    object.insert(
+                                                        "sessionId".to_owned(),
+                                                        serde_json::json!(session_identifier),
+                                                    );
+                                                    object.insert(
+                                                        "capabilities".to_owned(),
+                                                        agent_caps_json(&agent_caps),
+                                                    );
+                                                }
                                                 let _ = tx_chunk.send(AcpEvent::SessionInfo(json));
                                             }
                                         }
@@ -3476,7 +3754,8 @@ pub async fn run_acp_instance(
                                 .await
                                 // ── fs/read_text_file ──────────────────────────
                                 .if_request(async move |req: ReadTextFileRequest, responder| {
-                                    let text = read_text_file_scoped(&req, &fs_cwd_read);
+                                    let text =
+                                        read_text_file_scoped_in_roots(&req, &fs_roots_read);
                                     responder.respond(ReadTextFileResponse::new(text))?;
                                     Ok(())
                                 })
@@ -3486,7 +3765,9 @@ pub async fn run_acp_instance(
                                     // A refused (out-of-workspace) or failed write is
                                     // logged; the ACP response shape carries no error
                                     // channel, so the agent sees the write as a no-op.
-                                    if let Err(e) = write_text_file_scoped(&req, &fs_cwd_write) {
+                                    if let Err(e) =
+                                        write_text_file_scoped_in_roots(&req, &fs_roots_write)
+                                    {
                                         tracing::warn!("fs/write_text_file: {e}");
                                     }
                                     responder.respond(WriteTextFileResponse::new())?;
@@ -3498,7 +3779,7 @@ pub async fn run_acp_instance(
                                     match terminal_create(
                                         &terms_read,
                                         &req,
-                                        &term_cwd,
+                                        &term_roots,
                                         &term_scan_agent,
                                     )
                                     .await
@@ -4311,7 +4592,16 @@ pub async fn update_managed_pi() -> anyhow::Result<()> {
 /// user has selected a direct provider ([`crate::pi_config::is_gateway_routing`]
 /// is false) the injection is skipped so Pi talks straight to that provider — a
 /// deliberate, user-chosen egress bypass.
-pub fn ryu_pi_acp_cmd() -> Option<String> {
+pub fn ryu_pi_acp_cmd(user_jwt: Option<&str>) -> Option<String> {
+    ryu_pi_acp_cmd_for_agent(user_jwt, None)
+}
+
+/// Build the managed Pi command with an agent-scoped OpenAI base URL.
+///
+/// ACP agents own their HTTP client, so the agent id is carried in the
+/// Gateway path and bound to `x-ryu-agent-id` at ingress. `None` preserves the
+/// legacy unscoped endpoint for callers without an agent identity.
+pub fn ryu_pi_acp_cmd_for_agent(user_jwt: Option<&str>, agent_id: Option<&str>) -> Option<String> {
     let bin = managed_pi_binary();
     if !bin.exists() {
         return None;
@@ -4330,8 +4620,7 @@ pub fn ryu_pi_acp_cmd() -> Option<String> {
     if let Err(e) = crate::pi_config::ensure_managed_defaults() {
         tracing::warn!(error = %e, "ryu_pi_acp_cmd: could not write managed Pi defaults");
     }
-    let gateway_base = crate::sidecar::gateway::gateway_url();
-    let gateway_v1 = format!("{}/v1", gateway_base.trim_end_matches('/'));
+    let gateway_v1 = openai_gateway_v1(agent_id);
     // Fail closed on a remote data plane (WS1): a hosted multi-tenant gateway must
     // reject the shared "ryu-local" literal, so refuse to route Pi rather than
     // present it. Only needed when gateway routing is on — otherwise the token is
@@ -4382,7 +4671,7 @@ pub fn ryu_pi_acp_cmd() -> Option<String> {
         } else {
             String::new()
         };
-        let mcp_env = pi_mcp_extension_env(true);
+        let mcp_env = pi_mcp_extension_env(true, user_jwt);
         Some(format!(
             "cmd /c {gateway_env}{mcp_env}set PI_CODING_AGENT_DIR={config_dir}&& set PI_ACP_PI_COMMAND={pi_path}&& npx -y pi-acp"
         ))
@@ -4394,7 +4683,7 @@ pub fn ryu_pi_acp_cmd() -> Option<String> {
         } else {
             String::new()
         };
-        let mcp_env = pi_mcp_extension_env(false);
+        let mcp_env = pi_mcp_extension_env(false, user_jwt);
         Some(format!(
             "{gateway_env}{mcp_env}PI_CODING_AGENT_DIR={config_dir} PI_ACP_PI_COMMAND={pi_path} npx -y pi-acp"
         ))
@@ -4425,8 +4714,12 @@ pub fn ryu_pi_acp_cmd() -> Option<String> {
 /// out of scope here. See `docs/routing-planes.md` (chat-egress coverage matrix).
 #[cfg(target_os = "windows")]
 fn codex_acp_cmd() -> String {
-    let gateway_base = crate::sidecar::gateway::gateway_url();
-    let gateway_v1 = format!("{}/v1", gateway_base.trim_end_matches('/'));
+    codex_acp_cmd_for_agent(None)
+}
+
+#[cfg(target_os = "windows")]
+fn codex_acp_cmd_for_agent(agent_id: Option<&str>) -> String {
+    let gateway_v1 = openai_gateway_v1(agent_id);
     // On a remote data plane (WS1) the shared "ryu-local" literal is rejected by
     // the hosted multi-tenant gateway; log + degrade here (this is the rarely-used
     // Codex API-key path, and the call site is a registry-entry builder that cannot
@@ -4444,8 +4737,12 @@ fn codex_acp_cmd() -> String {
 
 #[cfg(not(target_os = "windows"))]
 fn codex_acp_cmd() -> String {
-    let gateway_base = crate::sidecar::gateway::gateway_url();
-    let gateway_v1 = format!("{}/v1", gateway_base.trim_end_matches('/'));
+    codex_acp_cmd_for_agent(None)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn codex_acp_cmd_for_agent(agent_id: Option<&str>) -> String {
+    let gateway_v1 = openai_gateway_v1(agent_id);
     // On a remote data plane (WS1) the shared "ryu-local" literal is rejected by
     // the hosted multi-tenant gateway; log + degrade here (this is the rarely-used
     // Codex API-key path, and the call site is a registry-entry builder that cannot
@@ -4482,7 +4779,7 @@ fn codex_acp_cmd() -> String {
 /// Keeping the rendering here, rather than the values, is deliberate: a caller that
 /// re-derives `core_url` itself is free to derive it differently, which is how the
 /// drift happened. Both callers now emit the same bytes or neither does.
-pub(crate) fn pi_mcp_extension_env(windows: bool) -> String {
+pub(crate) fn pi_mcp_extension_env(windows: bool, user_jwt: Option<&str>) -> String {
     let core_url = crate::sidecar::gateway::core_self_url();
     let mcp_agent_id = crate::registry::DEFAULT_AGENT_ID;
     let core_token = std::env::var("RYU_TOKEN")
@@ -4499,6 +4796,13 @@ pub(crate) fn pi_mcp_extension_env(windows: bool) -> String {
             env.push_str(&format!("set RYU_MCP_CORE_TOKEN={t}&& "));
         } else {
             env.push_str(&format!("RYU_MCP_CORE_TOKEN={t} "));
+        }
+    }
+    if let Some(jwt) = user_jwt.map(str::trim).filter(|value| !value.is_empty()) {
+        if windows {
+            env.push_str(&format!("set RYU_MCP_USER_JWT={jwt}&& "));
+        } else {
+            env.push_str(&format!("RYU_MCP_USER_JWT={jwt} "));
         }
     }
     env
@@ -4522,7 +4826,8 @@ fn anthropic_passthrough_url() -> String {
 /// over the user's Pro/Max subscription OAuth and would flip Claude Code onto
 /// API-key billing. The gateway forwards the caller's own bearer upstream.
 ///
-/// Applied only when [`crate::claude_config::is_gateway_routing`] is on (opt-in);
+/// Applied only when [`crate::claude_config::is_gateway_routing`] is on (the default
+/// for new/routable ACP agents; explicit direct-egress opt-out);
 /// see [`crate::claude_config`].
 pub fn claude_gateway_cmd(spawn_cmd: &str) -> String {
     let base_url = anthropic_passthrough_url();
@@ -4563,8 +4868,15 @@ pub fn claude_gateway_cmd(spawn_cmd: &str) -> String {
 /// command inside a single `cmd /c set VAR=val&& …` (stripping a leading `cmd /c`
 /// so it isn't doubled); on POSIX it prefixes inline `VAR=val` assignments.
 pub fn openai_gateway_cmd(spawn_cmd: &str) -> anyhow::Result<String> {
-    let gateway_base = crate::sidecar::gateway::gateway_url();
-    let gateway_v1 = format!("{}/v1", gateway_base.trim_end_matches('/'));
+    openai_gateway_cmd_for_agent(spawn_cmd, None)
+}
+
+/// Wrap an OpenAI-compatible ACP command with an agent-scoped Gateway URL.
+pub fn openai_gateway_cmd_for_agent(
+    spawn_cmd: &str,
+    agent_id: Option<&str>,
+) -> anyhow::Result<String> {
+    let gateway_v1 = openai_gateway_v1(agent_id);
     // Fail closed on a remote data plane (WS1): refuse to point a BYO/registry ACP
     // agent at a hosted multi-tenant gateway with the shared "ryu-local" bearer.
     // On the normal local path this still yields the local gateway's dev bearer.
@@ -4584,6 +4896,30 @@ pub fn openai_gateway_cmd(spawn_cmd: &str) -> anyhow::Result<String> {
     }
 }
 
+/// Return the OpenAI-compatible Gateway base URL, optionally scoped to an
+/// agent. OpenAI clients append `/chat/completions` to this value. Remote
+/// managed gateways also receive Core's bearer-bound proof so the fleet can
+/// safely accept the agent identity for a dynamic `rgw_` credential.
+pub fn openai_gateway_v1(agent_id: Option<&str>) -> String {
+    let gateway_base = crate::sidecar::gateway::gateway_url();
+    let agent_suffix = agent_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| {
+            let proof_suffix = if crate::sidecar::gateway::remote_data_plane() {
+                crate::sidecar::gateway::gateway_agent_proof(id)
+                    .ok()
+                    .map(|proof| format!("/{proof}"))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            format!("/agents/{}{proof_suffix}", urlencoding::encode(id))
+        })
+        .unwrap_or_default();
+    format!("{}/v1{agent_suffix}", gateway_base.trim_end_matches('/'))
+}
+
 /// Build Codex's ACP spawn command for **subscription-preserving** gateway
 /// routing. Unlike `codex_acp_cmd()` (which injects `OPENAI_BASE_URL` +
 /// `OPENAI_API_KEY` to govern the *API-key* path), this points Codex at an
@@ -4597,7 +4933,8 @@ pub fn openai_gateway_cmd(spawn_cmd: &str) -> anyhow::Result<String> {
 /// OAuth subscription credential), copied in by
 /// [`crate::codex_config::ensure_gateway_home`].
 ///
-/// Applied only when [`crate::codex_config::is_gateway_routing`] is on (opt-in).
+/// Applied only when [`crate::codex_config::is_gateway_routing`] is on (the default
+/// for new/routable ACP agents; explicit direct-egress opt-out).
 pub fn codex_acp_gateway_cmd() -> String {
     // (Re)write the isolated CODEX_HOME (provider config + refreshed auth) and
     // resolve its path. On any IO failure fall back to the user's default home so
@@ -5223,6 +5560,13 @@ impl AcpAgentRegistry {
             .find(|e| agent_id == e.id || agent_id.starts_with(&e.id))
     }
 
+    /// Resolve an agent principal for authorization. Prefix matching is useful
+    /// for display/legacy routing, but it must never turn `ryu-forged` into the
+    /// registered `ryu` record and inherit its posture.
+    pub fn find_exact(&self, agent_id: &str) -> Option<&AcpAgentEntry> {
+        self.entries.iter().find(|entry| entry.id == agent_id)
+    }
+
     /// Return the fallback provider chain for the default/"ryu" agent. Called by
     /// `route_chat_stream` when the primary route fails with a transport/provider
     /// error so the stream can recover instead of surfacing a raw error.
@@ -5309,6 +5653,7 @@ impl AcpAgentRegistry {
                 AgentInfo {
                     id: e.id.clone(),
                     name: e.name.clone(),
+                    title: None,
                     description: Some(e.description.clone()),
                     install_hint: if e.install_hint.is_empty() {
                         None
@@ -5329,6 +5674,9 @@ impl AcpAgentRegistry {
                     enabled,
                     gateway_bypass,
                     avatar_url: None,
+                    avatar_glyph: None,
+                    lifecycle_status: None,
+                    safety_profile: None,
                 }
             })
             .collect()
@@ -5736,7 +6084,7 @@ mod tests {
     // output }` on its tool result; pi-acp preserves it as ACP `rawOutput`. These
     // cover the NEW extraction/gating (`pi_widget_binding`) and the end-to-end
     // synthesis into a `ToolWidgetEvent` via the SHARED `build_widget_event`, using
-    // a real in-process app (`checklist__render`) so the binding + HTML resolve.
+    // a real in-process app (`checklist.render`) so the binding + HTML resolve.
     use crate::sidecar::mcp::McpRegistry;
 
     fn ryu_widget_raw_output(tool: &str, structured: serde_json::Value) -> serde_json::Value {
@@ -5754,12 +6102,12 @@ mod tests {
 
     #[test]
     fn pi_widget_binding_extracts_only_on_completed_with_marker() {
-        let raw = ryu_widget_raw_output("checklist__render", serde_json::json!({ "items": [] }));
+        let raw = ryu_widget_raw_output("checklist.render", serde_json::json!({ "items": [] }));
 
         // Completed + marker → extracted (tool, args, mcp result).
         let got = pi_widget_binding(Some(&ToolCallStatus::Completed), Some(&raw));
         let (tool, args, result) = got.expect("completed + marker extracts a binding");
-        assert_eq!(tool, "checklist__render");
+        assert_eq!(tool, "checklist.render");
         assert_eq!(args["title"], serde_json::json!("Groceries"));
         assert_eq!(result["structuredContent"]["items"], serde_json::json!([]));
 
@@ -5819,7 +6167,7 @@ mod tests {
         let plain = serde_json::json!({ "content": [{ "type": "text", "text": "hi" }] });
         assert!(pi_subagent_steps(Some(&plain)).is_none());
         // The widget marker is a different seam; it must not be mistaken for steps.
-        let widget = ryu_widget_raw_output("checklist__render", serde_json::json!({}));
+        let widget = ryu_widget_raw_output("checklist.render", serde_json::json!({}));
         assert!(pi_subagent_steps(Some(&widget)).is_none());
         // Marker present but not an array → none (never mint a child from a scalar).
         let scalar = serde_json::json!({ "details": { "ryuSteps": "oops" } });
@@ -5868,7 +6216,7 @@ mod tests {
         assert!(pi_config_updates(Some(&ToolCallStatus::Completed), Some(&plain)).is_none());
         // The sibling markers are different seams and must not be mistaken for this
         // one (mirrors `pi_subagent_steps_none_without_marker_or_wrong_shape`).
-        let widget = ryu_widget_raw_output("checklist__render", serde_json::json!({}));
+        let widget = ryu_widget_raw_output("checklist.render", serde_json::json!({}));
         assert!(pi_config_updates(Some(&ToolCallStatus::Completed), Some(&widget)).is_none());
         let steps = ryu_steps_raw_output("done", serde_json::json!([]));
         assert!(pi_config_updates(Some(&ToolCallStatus::Completed), Some(&steps)).is_none());
@@ -6247,6 +6595,7 @@ mod tests {
                 (MODEL_CONFIG_OPTION_ID.to_owned(), "gpt-5".to_owned()),
             ],
             model_id: Some("gpt-5".to_owned()),
+            agent_effort: None,
             interactive: true,
         };
         assert!(
@@ -6269,7 +6618,7 @@ mod tests {
     async fn pi_widget_synthesis_builds_tool_widget_event() {
         // End-to-end (minus the live Pi subprocess): the exact two-step the ACP
         // `ToolCallUpdate` handler runs — extract the binding, then feed it to the
-        // SHARED `build_widget_event`. `checklist__render` used to be an in-process
+        // SHARED `build_widget_event`. `checklist.render` used to be an in-process
         // app whose binding + HTML resolved without a live MCP server; the eight
         // inline-chat widget-apps were retired in 1af518d8, so the fixture is now
         // seeded directly. It stands in for the producer that IS still live — an
@@ -6278,7 +6627,7 @@ mod tests {
         let mcp = McpRegistry::empty();
         mcp.seed_widget_tool_for_test("checklist", "render", "ui://widget/checklist.html");
         let raw = ryu_widget_raw_output(
-            "checklist__render",
+            "checklist.render",
             serde_json::json!({ "title": "Groceries", "items": [{ "text": "milk" }] }),
         );
 
@@ -6298,7 +6647,7 @@ mod tests {
 
         // The widget correlates to the REAL ACP tool-call id (not the synthetic one).
         assert_eq!(event.tool_call_id, "acp_call_42");
-        assert_eq!(event.tool_name, "checklist__render");
+        assert_eq!(event.tool_name, "checklist.render");
         assert_eq!(event.template_uri, "ui://widget/checklist.html");
         // `structuredContent` → `toolOutput`, delivered RAW to the widget.
         assert_eq!(event.tool_output["title"], serde_json::json!("Groceries"));
@@ -6315,7 +6664,7 @@ mod tests {
         mcp.seed_widget_tool_for_test("checklist", "render", "ui://widget/checklist.html");
         let raw = serde_json::json!({
             "details": { "ryuWidget": {
-                "tool": "checklist__render",
+                "tool": "checklist.render",
                 "arguments": {},
                 "output": { "isError": true, "content": [{ "type": "text", "text": "boom" }] },
             }}
@@ -6371,21 +6720,75 @@ mod tests {
 
         // Full read.
         let full = req(serde_json::json!({ "path": path }));
-        assert_eq!(read_text_file_scoped(&full, &dir), "l1\nl2\nl3\nl4\nl5");
+        assert_eq!(
+            read_text_file_scoped_in_roots(&full, std::slice::from_ref(&dir)),
+            "l1\nl2\nl3\nl4\nl5"
+        );
 
         // 1-based line offset + limit window.
         let windowed = req(serde_json::json!({ "path": path, "line": 2, "limit": 2 }));
-        assert_eq!(read_text_file_scoped(&windowed, &dir), "l2\nl3");
+        assert_eq!(
+            read_text_file_scoped_in_roots(&windowed, std::slice::from_ref(&dir)),
+            "l2\nl3"
+        );
 
         // Missing file → empty, never panics.
         let missing = req(serde_json::json!({ "path": dir.join("nope.txt") }));
-        assert_eq!(read_text_file_scoped(&missing, &dir), "");
+        assert_eq!(
+            read_text_file_scoped_in_roots(&missing, std::slice::from_ref(&dir)),
+            ""
+        );
 
         // Out-of-root read → empty (workspace confinement), even when the file
         // exists.
         let outside = req(serde_json::json!({ "path": path }));
-        assert_eq!(read_text_file_scoped(&outside, &dir.join("sub")), "");
+        let sibling_root = dir.join("sub");
+        assert_eq!(
+            read_text_file_scoped_in_roots(&outside, std::slice::from_ref(&sibling_root)),
+            ""
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_handlers_allow_every_session_workspace_root() {
+        let base = std::env::temp_dir().join(format!("ryu-acp-multi-root-{}", std::process::id()));
+        let primary = base.join("web");
+        let secondary = base.join("api");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&secondary).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secondary_file = secondary.join("src/lib.rs");
+        std::fs::create_dir_all(secondary_file.parent().unwrap()).unwrap();
+        std::fs::write(&secondary_file, "secondary").unwrap();
+
+        let roots = vec![primary.clone(), secondary.clone()];
+        let read_request: ReadTextFileRequest =
+            serde_json::from_value(serde_json::json!({ "sessionId": "s", "path": secondary_file }))
+                .expect("valid secondary-root read request");
+        assert_eq!(
+            read_text_file_scoped_in_roots(&read_request, &roots),
+            "secondary"
+        );
+
+        let write_target = secondary.join("generated.txt");
+        let write_request: WriteTextFileRequest = serde_json::from_value(serde_json::json!({
+            "sessionId": "s",
+            "path": write_target,
+            "content": "written"
+        }))
+        .expect("valid secondary-root write request");
+        write_text_file_scoped_in_roots(&write_request, &roots).expect("secondary-root write");
+        assert_eq!(std::fs::read_to_string(&write_target).unwrap(), "written");
+
+        let outside_request: ReadTextFileRequest = serde_json::from_value(
+            serde_json::json!({ "sessionId": "s", "path": outside.join("secret.txt") }),
+        )
+        .expect("valid outside-root read request");
+        assert_eq!(read_text_file_scoped_in_roots(&outside_request, &roots), "");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -6425,11 +6828,13 @@ mod tests {
         }))
         .expect("valid WriteTextFileRequest");
         // Root is a SIBLING dir, so the write must be refused and nothing created.
-        let err = write_text_file_scoped(&req, &dir.join("inner")).unwrap_err();
-        assert!(err.to_string().contains("outside the session workspace"));
+        let inner_root = dir.join("inner");
+        let err =
+            write_text_file_scoped_in_roots(&req, std::slice::from_ref(&inner_root)).unwrap_err();
+        assert!(err.to_string().contains("outside the session workspaces"));
         assert!(!target.exists());
         // Same request against the real root succeeds.
-        write_text_file_scoped(&req, &dir).expect("in-root write");
+        write_text_file_scoped_in_roots(&req, std::slice::from_ref(&dir)).expect("in-root write");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "nope");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6506,6 +6911,18 @@ mod tests {
         assert!(
             cmd.contains(&expected_v1),
             "codex spawn cmd should contain the gateway /v1 URL, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_scoped_gateway_url_encodes_the_agent_segment() {
+        let _env_guard = crate::sidecar::gateway::lock_gateway_env();
+        let base = crate::sidecar::gateway::gateway_url();
+        let expected = format!("{}/v1/agents/agent%2Fone", base.trim_end_matches('/'));
+        assert_eq!(openai_gateway_v1(Some("agent/one")), expected);
+        assert_eq!(
+            openai_gateway_v1(None),
+            format!("{}/v1", base.trim_end_matches('/'))
         );
     }
 
@@ -7429,5 +7846,28 @@ mod tests {
         assert!(!should_reuse_acp_session("conv-1", true));
         assert!(!should_reuse_acp_session("", false));
         assert!(!should_reuse_acp_session("", true));
+    }
+
+    #[test]
+    fn acp_pool_key_separates_security_contexts() {
+        let no_tools = acp_security_key(&None, &None, &[], "agent", &[], &Some("conv".into()));
+        let explicit_no_tools = acp_security_key(
+            &None,
+            &Some(Vec::new()),
+            &[],
+            "agent",
+            &[],
+            &Some("conv".into()),
+        );
+        let different_action = acp_security_key(
+            &None,
+            &Some(vec!["tool:read".into()]),
+            &["composio:write".into()],
+            "agent",
+            &["vault-profile".into()],
+            &Some("conv".into()),
+        );
+        assert_ne!(no_tools, explicit_no_tools);
+        assert_ne!(explicit_no_tools, different_action);
     }
 }

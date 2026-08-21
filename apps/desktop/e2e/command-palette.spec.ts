@@ -53,6 +53,34 @@ test.describe("shared command palette — real component in isolation", () => {
 		await expect(page.getByRole("option", { name: "Dark Mode" })).toBeVisible();
 	});
 
+	test("result tabs filter built-ins and app-contributed sections", async ({
+		page,
+	}) => {
+		await openPalette(page);
+		const tabList = page.getByRole("tablist", {
+			name: "Search result types",
+		});
+		await expect(tabList).toHaveAttribute("data-variant", "muted-pills");
+		await expect(page.getByRole("tab", { name: "Spaces" })).toBeVisible();
+		await expect(page.getByRole("tab", { name: "Canvas" })).toBeVisible();
+
+		await page.getByRole("tab", { name: "Spaces" }).click();
+		await expect(
+			page.getByRole("option", { name: "Product Roadmap" })
+		).toBeVisible();
+		await expect(
+			page.getByRole("option", { name: "New Chat" })
+		).not.toBeVisible();
+
+		await page.getByRole("tab", { name: "Canvas" }).click();
+		await expect(
+			page.getByRole("option", { name: "Launch Canvas" })
+		).toBeVisible();
+		await expect(
+			page.getByRole("option", { name: "Product Roadmap" })
+		).not.toBeVisible();
+	});
+
 	test("typing filters the rows via cmdk", async ({ page }) => {
 		await openPalette(page);
 		await page

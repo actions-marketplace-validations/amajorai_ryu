@@ -20,7 +20,14 @@ import type {
 	ViewSpec,
 } from "@ryu/app-host/views";
 import { isCoreApiPath, renderActionHttp } from "@ryu/app-host/views";
-import { Empty, EmptyHeader, EmptyTitle } from "@ryu/ui/components/empty";
+import { Button } from "@ryu/ui/components/button";
+import {
+	Empty,
+	EmptyContent,
+	EmptyDescription,
+	EmptyHeader,
+	EmptyTitle,
+} from "@ryu/ui/components/empty";
 import { toast } from "@ryu/ui/components/sileo";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
@@ -28,6 +35,7 @@ import {
 	DeclarativeView,
 	type ViewSourceFetcher,
 } from "@/src/components/views/DeclarativeView.tsx";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
@@ -41,6 +49,7 @@ export default function PluginViewPage({
 	viewId: string;
 }) {
 	const { views } = usePluginContributions();
+	const { openTab } = useTabsContext();
 	const node = useActiveNode();
 	const queryClient = useQueryClient();
 	const [reloadToken, setReloadToken] = useState(0);
@@ -124,7 +133,15 @@ export default function PluginViewPage({
 			<Empty>
 				<EmptyHeader>
 					<EmptyTitle>View unavailable</EmptyTitle>
+					<EmptyDescription>
+						The app that provides this view is unavailable or disabled.
+					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={() => openTab("/apps", { title: "Apps" })} size="sm">
+						Open Apps
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}

@@ -28,8 +28,8 @@ import {
 	PencilEdit01Icon,
 	Search01Icon,
 	Store01Icon,
-	UserGroupIcon,
-	WorkflowSquare01Icon,
+	UserMultiple02Icon,
+	WorkflowCircle06Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Avatar, AvatarFallback } from "@ryu/ui/components/avatar";
@@ -252,7 +252,7 @@ export function DesktopShell({
 						</SidebarMenu>
 					</SidebarHeader>
 
-					<SidebarContent className="scroll-fade-effect-y pt-2">
+					<SidebarContent className="scroll-fade pt-2">
 						<Section label="Agents">
 							{AGENTS.map((name) => (
 								<LogoRow key={name} name={name} />
@@ -260,7 +260,7 @@ export function DesktopShell({
 						</Section>
 						<Section label="Teams">
 							{TEAMS.map((name) => (
-								<IconRow icon={UserGroupIcon} key={name} name={name} />
+								<IconRow icon={UserMultiple02Icon} key={name} name={name} />
 							))}
 						</Section>
 						<Section label="Spaces">
@@ -279,7 +279,7 @@ export function DesktopShell({
 						</Section>
 						<Section label="Workflows">
 							{WORKFLOWS.map((name) => (
-								<IconRow icon={WorkflowSquare01Icon} key={name} name={name} />
+								<IconRow icon={WorkflowCircle06Icon} key={name} name={name} />
 							))}
 						</Section>
 						{showChats ? (

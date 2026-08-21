@@ -129,7 +129,7 @@ function ReorderableRow({
 		>
 			{isDragOver && (
 				<div
-					className={`pointer-events-none absolute inset-x-1 z-10 h-0.5 rounded-full bg-primary ${dropBelow ? "bottom-0" : "top-0"}`}
+					className={`reorder-drop-indicator pointer-events-none absolute inset-x-1 z-10 h-0.5 bg-primary ${dropBelow ? "bottom-0" : "top-0"}`}
 				/>
 			)}
 			<button

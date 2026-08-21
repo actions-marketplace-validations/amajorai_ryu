@@ -4,6 +4,7 @@ export interface AppRequestInput {
 	body?: unknown;
 	method?: "DELETE" | "GET" | "PATCH" | "POST" | "PUT";
 	path: string;
+	signal?: AbortSignal;
 }
 
 const METHODS = new Set(["DELETE", "GET", "PATCH", "POST", "PUT"]);
@@ -48,5 +49,9 @@ export async function ownAppRequest(
 	if (!METHODS.has(method)) {
 		throw new Error(`Refusing app request method ${method}.`);
 	}
-	return await request<unknown>(target, path, { method, body: input.body });
+	return await request<unknown>(target, path, {
+		body: input.body,
+		method,
+		signal: input.signal,
+	});
 }

@@ -16,7 +16,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::MethodRouter,
-    Json,
+    Extension, Json,
 };
 use serde_json::json;
 
@@ -433,11 +433,22 @@ pub async fn upload_file(
 pub async fn serve_upload(
     State(state): State<ServerState>,
     Path(doc_id): Path<String>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> Response {
-    // No per-doc ACL here — matching `/api/media/:file`. The unguessable doc id is
-    // the capability, so an image embedded in a shared page still renders for every
-    // node member who can load the page. We still require the doc to live in the
-    // Uploads system space so this is not a backdoor into Artifacts/other Spaces.
+    // Uploads are Spaces content, so the coarse Spaces read permission is required
+    // before any metadata or blob lookup. The per-document check below is still
+    // necessary because a node member may be allowed to use Spaces without being
+    // allowed to read this particular private upload.
+    if super::enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_READ,
+    )
+    .await
+    .is_err()
+    {
+        return (StatusCode::FORBIDDEN, "forbidden").into_response();
+    }
 
     let Some(meta) = (match state.spaces.get_file_meta(&doc_id).await {
         Ok(m) => m,
@@ -466,6 +477,14 @@ pub async fn serve_upload(
     };
     if meta.space_id != uploads_id {
         return (StatusCode::NOT_FOUND, "upload not found").into_response();
+    }
+
+    if let Err(response) = super::require_resource_read(
+        spaces::doc_access_meta(&state.spaces, &doc_id).await,
+        caller.as_ref(),
+        "upload not found",
+    ) {
+        return response;
     }
 
     let Some((mime, bytes)) = (match state.spaces.read_file_blob(&doc_id).await {

@@ -18,13 +18,16 @@ import {
 	CommandSeparator,
 	CommandShortcut,
 } from "@ryu/ui/components/command";
+import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs";
 import { Fragment, type ReactNode } from "react";
 import { actionSearchValue, groupActions } from "./registry.ts";
-import type { CommandAction } from "./types.ts";
+import type { CommandAction, CommandPaletteTab } from "./types.ts";
 
 export interface CommandPaletteProps {
 	/** Flat action list; grouped by `group` in first-seen order. */
 	actions: CommandAction[];
+	/** Controlled result-type filter id. Defaults to the first tab. */
+	activeTab?: string;
 	/** Focus the input on mount. */
 	autoFocus?: boolean;
 	/** How to frame the palette. `dialog` (default) = centered Cmd+K modal. */
@@ -41,6 +44,8 @@ export interface CommandPaletteProps {
 	onOpenChange?: (open: boolean) => void;
 	/** Forwarded to cmdk: search-change handler. */
 	onSearchChange?: (value: string) => void;
+	/** Called when a result-type filter is selected. */
+	onTabChange?: (tabId: string) => void;
 	/** Dialog open state (used by `chrome="dialog"`). */
 	open?: boolean;
 	/** Search input placeholder. */
@@ -49,6 +54,8 @@ export interface CommandPaletteProps {
 	search?: string;
 	/** Forwarded to cmdk: when false, cmdk's built-in fuzzy filter is bypassed. */
 	shouldFilter?: boolean;
+	/** Result-type filters rendered between the input and the result list. */
+	tabs?: CommandPaletteTab[];
 }
 
 function ActionRow({ action }: { action: CommandAction }) {
@@ -86,8 +93,16 @@ function PaletteBody({
 	search,
 	onSearchChange,
 	onInputKeyDown,
+	tabs,
+	activeTab,
+	onTabChange,
 }: Omit<CommandPaletteProps, "chrome" | "open" | "onOpenChange">) {
-	const groups = groupActions(actions);
+	const selectedTab = activeTab ?? tabs?.[0]?.id;
+	const visibleActions =
+		selectedTab && selectedTab !== "all"
+			? actions.filter((action) => action.resultType === selectedTab)
+			: actions;
+	const groups = groupActions(visibleActions);
 	return (
 		<Command className={className} shouldFilter={shouldFilter}>
 			<CommandInput
@@ -97,6 +112,27 @@ function PaletteBody({
 				placeholder={placeholder ?? "Search or run a command..."}
 				value={search}
 			/>
+			{tabs && tabs.length > 0 ? (
+				<Tabs
+					className="min-w-0 px-3 pb-2"
+					onValueChange={(value) => onTabChange?.(String(value))}
+					value={selectedTab}
+				>
+					<TabsList
+						aria-label="Search result types"
+						className="w-full flex-nowrap"
+						persistLayout={false}
+						variant="muted-pills"
+					>
+						{tabs.map((tab) => (
+							<TabsTrigger className="shrink-0" key={tab.id} value={tab.id}>
+								{tab.icon ? <HugeiconsIcon icon={tab.icon} /> : null}
+								{tab.label}
+							</TabsTrigger>
+						))}
+					</TabsList>
+				</Tabs>
+			) : null}
 			<CommandList>
 				<CommandEmpty>{emptyLabel ?? "No results."}</CommandEmpty>
 				{groups.map((group, index) => (

@@ -4,8 +4,8 @@
 // (Claude Code / Codex) into Ryu conversations, the way VS Code auto-surfaces an
 // agent's past threads. When ON, `useAutoThreadImport` periodically scans the
 // history-supporting agents' native transcript stores and imports any thread not
-// already imported, filing each under the workspace folder it ran in. Off by
-// default — importing stays a manual action unless the user opts in. Backed by
+// already imported, filing each under the workspace folder it ran in. Fresh
+// onboarding defaults this to ON, while an explicit opt-out is respected. Backed by
 // localStorage and broadcast through a tiny external store so the setting and the
 // background poller stay in sync the instant either flips it.
 
@@ -17,8 +17,9 @@ const listeners = new Set<() => void>();
 
 function read(): boolean {
 	try {
-		// Default OFF: only an explicit "true" enables background auto-import.
-		return localStorage.getItem(STORAGE_KEY) === "true";
+		// Fresh onboarding defaults ON. An explicit stored "false" is respected so
+		// returning users who opted out are never silently opted back in.
+		return localStorage.getItem(STORAGE_KEY) !== "false";
 	} catch {
 		return false;
 	}
@@ -40,7 +41,7 @@ function subscribe(cb: () => void): () => void {
 }
 
 /**
- * `[autoImport, setAutoImport]`. Persisted, default `false`, shared across
+ * `[autoImport, setAutoImport]`. Persisted, default `true`, shared across
  * windows. Read the value non-reactively with `readAutoImportThreads()`.
  */
 export function useAutoImportThreads(): [boolean, (v: boolean) => void] {

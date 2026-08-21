@@ -3,6 +3,7 @@
 // localStorage and `island-agents.voiceAgent` for routing.
 
 import type { StreamedAcpConfig } from "@ryu/blocks/composer/composer-acp-sections";
+import { createComposerDirectory } from "@ryu/blocks/composer/composer-directory";
 import {
 	ComposerSettingsMenu,
 	type ComposerSettingsSection,
@@ -12,6 +13,11 @@ import {
 	type ModeOption,
 } from "@ryu/blocks/composer/mode-menu-content";
 import type { ModelOption } from "@ryu/blocks/composer/types";
+import type {
+	ComposerMenuGroup,
+	ComposerMenuItem,
+} from "@ryu/blocks/desktop/agent-elements/input/composer-menu";
+import type { MentionItem } from "@ryu/blocks/desktop/agent-elements/types";
 import {
 	type ReactNode,
 	useCallback,
@@ -41,6 +47,7 @@ export interface IslandComposerState {
 	applyStreamedAcpConfig: (config: Record<string, string>, key: string) => void;
 	/** Adopt an agent-initiated permission-mode switch (`data-ryu-acp-mode`). */
 	applyStreamedAcpMode: (modeId: string) => void;
+	composerMenuGroups: ComposerMenuGroup[];
 	/** Values for `CoreChatStreamRequest` ACP fields. */
 	getAcpPayload: () => {
 		acp_config?: Record<string, string>;
@@ -48,6 +55,8 @@ export interface IslandComposerState {
 		acp_model?: string;
 	};
 	leftActions: ReactNode;
+	mentionItems: MentionItem[];
+	onComposerMenuSelect: (item: ComposerMenuItem) => void;
 	sections: ComposerSettingsSection[];
 }
 
@@ -233,6 +242,10 @@ export function useIslandComposer(): IslandComposerState {
 			side="top"
 		/>
 	);
+	const composerDirectory = useMemo(
+		() => createComposerDirectory(sections),
+		[sections]
+	);
 
 	const getAcpPayload = useCallback(() => {
 		const payload: {
@@ -258,6 +271,9 @@ export function useIslandComposer(): IslandComposerState {
 		applyStreamedAcpMode,
 		getAcpPayload,
 		leftActions,
+		composerMenuGroups: composerDirectory.groups,
+		mentionItems: composerDirectory.mentionItems,
+		onComposerMenuSelect: composerDirectory.onSelect,
 		sections,
 	};
 }

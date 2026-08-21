@@ -12,6 +12,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import {
 	IconArrowUp,
@@ -339,7 +340,6 @@ export function QueueBar({
 	onSendAll,
 	onClear,
 	onReorder,
-	onTurnOffQueueing,
 	onQueueModeChange,
 	queueMode = "auto",
 	roundTop = true,
@@ -363,7 +363,7 @@ export function QueueBar({
 			<div className="flex h-7 items-center justify-between border-border border-b px-3 text-muted-foreground text-xs">
 				<div className="inline-flex items-center gap-1.5">
 					Queued
-					<span className="tabular-nums">· {count}</span>
+					<span className="tabular-nums">· {formatNumber(count)}</span>
 				</div>
 				<div className="inline-flex items-center gap-1">
 					{count > 1 && (

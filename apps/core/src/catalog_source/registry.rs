@@ -581,15 +581,16 @@ fn builtin_sources() -> HashMap<CatalogKind, Vec<Source>> {
     map.insert(
         CatalogKind::Plugin,
         vec![
-            // Primary (default active): the ONE universal GitHub source (unified
-            // 2026-07-19). The first-party OPEN catalog git repo (`amajorai/ryu-
-            // marketplace`, override via `RYU_MARKETPLACE_REPO`), read via the
-            // generalized git `MarketplaceSource`. It is `primary()` (first in the vec),
-            // so the store opens on it and the confusing "Ryu Marketplace" vs "Ryu
-            // Catalog" two-source split is gone — GitHub is the single browse catalog.
+            // Primary (default active): the hosted GitHub-backed bridge. It owns
+            // repository/package bindings, Stripe offers, entitlements, signatures,
+            // and the buyer download proxy; GitHub owns the package and release.
+            Source::RyuMarketplace(RyuMarketplaceSource::builtin(CatalogKind::Plugin)),
+            // Read-only compatibility fallback for pre-bridge rows in the old
+            // central marketplace.json repository. New listings never write here,
+            // and the merged view gives hosted bridge rows precedence.
             Source::Marketplace(MarketplaceSource::new(
                 "ryu-catalog",
-                "Ryu Marketplace",
+                "Legacy Ryu Marketplace index",
                 std::env::var("RYU_MARKETPLACE_REPO")
                     .ok()
                     .map(|s| s.trim().to_string())
@@ -597,14 +598,6 @@ fn builtin_sources() -> HashMap<CatalogKind, Vec<Source>> {
                     .unwrap_or_else(|| "amajorai/ryu-marketplace".to_string()),
                 CatalogKind::Plugin,
             )),
-            // DEMOTED, not removed: the hosted (Mongo, api.ryuhq.com) source stays wired
-            // as the COMMERCE + signing backend. A static GitHub repo cannot process
-            // payments or issue per-user signed download grants, so PAID items still need
-            // this server for Stripe checkout + entitlement + `verify_manifest_signature`
-            // at install (see `sources.rs` paid gate + `packages/marketplace`
-            // `startPurchase`/`useLicenses`). It is no longer the primary browse source;
-            // `merged_plugin_catalog_entries` still folds its paid listings into the list.
-            Source::RyuMarketplace(RyuMarketplaceSource::builtin(CatalogKind::Plugin)),
             // Browse every publicly documented integration surface
             // (MCP/OpenAPI/GraphQL/CLI) as descriptor-only marketplace entries.
             Source::IntegrationsSh(IntegrationsShSource::builtin()),
@@ -722,8 +715,8 @@ mod tests {
         );
         assert_eq!(
             plugins.first().map(super::Source::id),
-            Some("ryu-catalog"),
-            "the first-party catalog must stay the default active plugin source"
+            Some("ryu-marketplace"),
+            "the hosted GitHub bridge must stay the default active plugin source"
         );
     }
 
@@ -1029,15 +1022,9 @@ mod tests {
         reg.remove_custom(CatalogKind::Skill, "second").unwrap();
         assert_eq!(custom_ids(&reg), ["first"]);
 
-        assert!(reg
-            .remove_custom(CatalogKind::Skill, "skills-sh")
-            .is_err());
-        assert!(reg
-            .move_custom(CatalogKind::Skill, "skills-sh", 1)
-            .is_err());
-        assert!(reg
-            .remove_custom(CatalogKind::Skill, "missing")
-            .is_err());
+        assert!(reg.remove_custom(CatalogKind::Skill, "skills-sh").is_err());
+        assert!(reg.move_custom(CatalogKind::Skill, "skills-sh", 1).is_err());
+        assert!(reg.remove_custom(CatalogKind::Skill, "missing").is_err());
     }
 
     #[tokio::test]

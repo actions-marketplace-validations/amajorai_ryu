@@ -2,15 +2,18 @@ import { describe, expect, it } from "bun:test";
 import {
 	baseNodeCountForPlan,
 	baseNodeTypeForPlan,
+	baseNodeTypeForPlanAtLocation,
 	TEAMS_NODE_TIERS,
 } from "./base-node.ts";
 import {
 	CURRENT_PLAN_VERSION,
+	currentPlanVersionFor,
 	DEPOSIT_FEE_BPS,
 	DEPOSIT_FEE_BPS_BY_PLAN,
 	DEPOSIT_FEE_FIXED_MICRO_USD,
 	depositFee,
 	INCLUDED_CREDIT_FRACTION_MAX,
+	monthlyCreditPoolMicroUsdForSeats,
 	PLAN_IDS,
 	PLAN_VERSIONS,
 	PLANS,
@@ -48,7 +51,9 @@ const POLAR_RATE_ONE_TIME = 0.04;
 const POLAR_RATE_SUBSCRIPTION = 0.045;
 const POLAR_FIXED_USD = 0.4;
 /**
- * Live Hetzner monthly USD by server type (EUR net × 1.08 fx).
+ * Conservative USD planning reserves by server type. These use the current
+ * German gross price + one IPv4, the 2026-08-19 ECB EUR/USD reference rate,
+ * a 25% infrastructure buffer, and a final round-up for ordinary drift.
  *
  * NOT one number any more. The free node is sized by PLAN, and for Teams by SEAT
  * COUNT — Max runs a `cx33`, and Teams climbs `cx23` → `cx33` → `cpx32` → 2 ×
@@ -61,9 +66,10 @@ const POLAR_FIXED_USD = 0.4;
  * the ladder without this guard re-pricing it.
  */
 const NODE_USD_PER_MONTH: Readonly<Record<string, number>> = {
-	cx23: 5.93,
-	cx33: 9.17,
-	cpx32: 38.33,
+	cx23: 12,
+	cx33: 16,
+	cpx32: 63,
+	ccx13: 80,
 };
 /** Annual terms bill 10 months and serve 12 ("two months free"). */
 const YEARLY_MONTHS_BILLED = 10;
@@ -85,11 +91,23 @@ describe("included credit pool", () => {
 	for (const id of RECURRING) {
 		it(`${id} grants no more than ${INCLUDED_CREDIT_FRACTION_MAX * 100}% of its price`, () => {
 			const plan = PLANS[id];
+			const billedSeats =
+				plan.seatModel.kind === "per_seat" ? plan.seatModel.minSeats : 1;
 			const fraction =
-				plan.monthlyCreditPoolMicroUsd / plan.monthlyPriceMicroUsd;
+				plan.monthlyCreditPoolMicroUsd /
+				(plan.monthlyPriceMicroUsd * billedSeats);
 			expect(fraction).toBeLessThanOrEqual(INCLUDED_CREDIT_FRACTION_MAX);
 		});
 	}
+});
+
+describe("regional included node profiles", () => {
+	it("keeps the EU defaults while selecting Singapore's available shapes", () => {
+		expect(baseNodeTypeForPlanAtLocation("pro", "nbg1")).toBe("cx23");
+		expect(baseNodeTypeForPlanAtLocation("pro", "sin")).toBe("cpx22");
+		expect(baseNodeTypeForPlanAtLocation("max", "sin")).toBe("ccx13");
+		expect(baseNodeTypeForPlanAtLocation("teams", "sin", 20)).toBe("cpx22");
+	});
 });
 
 /**
@@ -127,11 +145,18 @@ function periodMarginUsd(id: PlanId, yearly: boolean, seats: number): number {
 	const monthsBilled = yearly ? YEARLY_MONTHS_BILLED : 1;
 	const monthsServed = yearly ? YEARLY_MONTHS_SERVED : 1;
 
-	const revenue = usd(plan.monthlyPriceMicroUsd) * monthsBilled * seats;
+	const billedSeats = plan.seatModel.kind === "per_seat" ? seats : 1;
+	const revenue = usd(plan.monthlyPriceMicroUsd) * monthsBilled * billedSeats;
+	const currentVersion = planVersionFor(id, currentPlanVersionFor(id));
 	const credits =
-		usd(plan.monthlyCreditPoolMicroUsd) *
+		usd(
+			monthlyCreditPoolMicroUsdForSeats({
+				plan,
+				seats: billedSeats,
+				version: currentVersion,
+			})
+		) *
 		monthsServed *
-		seats *
 		(1 + OPENROUTER_CREDIT_FEE);
 	const node = nodeUsdPerMonth(id, seats) * monthsServed;
 	const fee = revenue * POLAR_RATE_SUBSCRIPTION + POLAR_FIXED_USD;
@@ -344,17 +369,17 @@ describe("the ladder is coherent", () => {
 		expect(premium).toBeGreaterThan(creditsViaTopup);
 	});
 
-	it("a team seat costs more than an individual seat", () => {
-		// Priced AT Pro, Teams was invisible: same price, smaller pool, and forced
-		// on any org with 2+ members. A team seat buys governance and must cost
-		// more, which is also what the market does.
-		expect(PLANS.teams.monthlyPriceMicroUsd).toBeGreaterThan(
-			PLANS.pro.monthlyPriceMicroUsd
-		);
+	it("keeps Teams as the active organization seat catalog", () => {
+		expect(PLANS.teams.seatModel).toEqual({ kind: "per_seat", minSeats: 5 });
+		expect(PLANS.teams.creditPoolModel).toBe("per_bundle");
+		expect(PLANS.teams.creditPoolBundleSize).toBe(5);
+		expect(PLANS.pro.seatModel.kind).toBe("single");
+		expect(PLANS.max.seatModel.kind).toBe("single");
 	});
 
-	it("Max is single-seat so it cannot compete with Teams", () => {
-		expect(PLANS.max.seatModel.kind).toBe("single");
+	it("Pro and Max keep fixed credit pools as agent capacity scales", () => {
+		expect(PLANS.pro.monthlyCreditPoolMicroUsd).toBe(usdToMicro(15));
+		expect(PLANS.max.monthlyCreditPoolMicroUsd).toBe(usdToMicro(30));
 	});
 });
 
@@ -365,8 +390,9 @@ describe("the ladder is coherent", () => {
  * Charging every version the current node is deliberate and conservative. Node
  * type is not versioned (`BASE_NODE_TYPE_BY_PLAN` is keyed by plan), so
  * upgrading a plan's machine upgrades it for grandfathered subscribers too. That
- * is a benefit we choose to give away, and modelling it this way can only ever
- * understate a version's margin, never overstate it.
+ * is a benefit we choose to give away. The old $99 Max v1 is the one known
+ * exception: a current dedicated node can make that historical contract a
+ * bounded subsidy, which this suite names instead of hiding.
  */
 function versionMarginUsd(
 	id: PlanId,
@@ -378,11 +404,17 @@ function versionMarginUsd(
 	const monthsBilled = yearly ? YEARLY_MONTHS_BILLED : 1;
 	const monthsServed = yearly ? YEARLY_MONTHS_SERVED : 1;
 
-	const revenue = usd(row.monthlyPriceMicroUsd) * monthsBilled * seats;
+	const billedSeats = PLANS[id].seatModel.kind === "per_seat" ? seats : 1;
+	const revenue = usd(row.monthlyPriceMicroUsd) * monthsBilled * billedSeats;
 	const credits =
-		usd(row.monthlyCreditPoolMicroUsd) *
+		usd(
+			monthlyCreditPoolMicroUsdForSeats({
+				plan: PLANS[id],
+				seats: billedSeats,
+				version: row,
+			})
+		) *
 		monthsServed *
-		seats *
 		(1 + OPENROUTER_CREDIT_FEE);
 	// Today's node, at the seat count being modelled — so a grandfathered Teams
 	// org is charged the same ladder a new one is. Node type and COUNT are not
@@ -428,8 +460,13 @@ describe("grandfathering", () => {
 			});
 
 			it(`${id} v${row.version} respects the pool cap`, () => {
+				const billedSeats =
+					PLANS[id].seatModel.kind === "per_seat"
+						? PLANS[id].seatModel.minSeats
+						: 1;
 				expect(
-					row.monthlyCreditPoolMicroUsd / row.monthlyPriceMicroUsd
+					row.monthlyCreditPoolMicroUsd /
+						(row.monthlyPriceMicroUsd * billedSeats)
 				).toBeLessThanOrEqual(INCLUDED_CREDIT_FRACTION_MAX);
 			});
 		}

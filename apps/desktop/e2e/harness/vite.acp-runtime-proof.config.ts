@@ -1,0 +1,35 @@
+import path from "node:path";
+import tailwindcss from "@tailwindcss/postcss";
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+const harnessDir = path.resolve(import.meta.dirname);
+const desktopRoot = path.resolve(harnessDir, "../..");
+
+/** Isolated build for the ACP runtime proof; unrelated stories stay out of its graph. */
+export default defineConfig({
+	plugins: [react()],
+	css: {
+		postcss: {
+			plugins: [tailwindcss()],
+		},
+	},
+	root: harnessDir,
+	clearScreen: false,
+	resolve: {
+		alias: {
+			"@": desktopRoot,
+		},
+	},
+	build: {
+		outDir: path.resolve(harnessDir, "dist-acp-runtime-proof"),
+		emptyOutDir: true,
+		rollupOptions: {
+			input: path.resolve(harnessDir, "acp-runtime-settings-proof.html"),
+		},
+	},
+	preview: {
+		port: 5178,
+		strictPort: true,
+	},
+});

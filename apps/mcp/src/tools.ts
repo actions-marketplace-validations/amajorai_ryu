@@ -139,7 +139,7 @@ export const registerRyuTools = (
 		{
 			title: "Ryu Get Active Model",
 			description:
-				"Read which installed model the local chat engine is currently serving.",
+				"Read which installed model local Chat is currently serving.",
 			inputSchema: {},
 		},
 		() => run(() => getActiveModel(target))
@@ -265,18 +265,18 @@ export const registerRyuTools = (
 		{
 			title: "Ryu Call MCP Tool",
 			description:
-				"Bridge: invoke a tool on ANY MCP server Ryu has registered. tool is the fully-qualified id (server__tool); if you pass a bare tool name, also pass server and they are combined. agentId is required - Core ties the per-agent tool allowlist to a registered agent (empty/unknown agent is denied).",
+				"Bridge: invoke a tool on ANY MCP server Ryu has registered. tool is the fully-qualified id (server.tool); if you pass a bare tool name, also pass server and they are combined. agentId is required - Core ties the per-agent tool allowlist to a registered agent (empty/unknown agent is denied).",
 			inputSchema: {
 				tool: z
 					.string()
 					.describe(
-						"Fully-qualified tool id (server__tool), or a bare tool name when server is also given."
+						"Fully-qualified tool id (server.tool), or a bare tool name when server is also given."
 					),
 				server: z
 					.string()
 					.optional()
 					.describe(
-						"Server name, combined with a bare tool name as server__tool."
+						"Server name, combined with a bare tool name as server.tool."
 					),
 				agentId: z
 					.string()
@@ -291,7 +291,9 @@ export const registerRyuTools = (
 		},
 		({ tool, server: mcpServer, agentId, args }) => {
 			const toolId =
-				mcpServer && !tool.includes("__") ? `${mcpServer}__${tool}` : tool;
+				mcpServer && !tool.includes(".") && !tool.includes("__")
+					? `${mcpServer}.${tool}`
+					: tool;
 			return run(() =>
 				callMcpTool(target, {
 					tool: toolId,

@@ -135,6 +135,15 @@ describe("evaluateCompatibility", () => {
 		).toBe(false);
 	});
 
+	test("compares patch components in a release triple", () => {
+		expect(
+			evaluateCompatibility({ ryu: ">=1.2.3" }, { core: "1.2.2" }).compatible
+		).toBe(false);
+		expect(
+			evaluateCompatibility({ ryu: ">=1.2.3" }, { core: "1.2.3" }).compatible
+		).toBe(true);
+	});
+
 	/** The client is a display refinement, not the authority. A range grammar it
 	 *  cannot parse must fall through to whatever Core said — never a made-up
 	 *  refusal, and never a made-up pass. */

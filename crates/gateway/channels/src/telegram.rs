@@ -43,8 +43,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::post,
+    Router,
+};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::commands::{self, ChannelCommand};
@@ -85,6 +94,7 @@ pub struct TelegramChannel {
     /// `https://api.telegram.org/file/bot<TOKEN>` — the download root that
     /// `getFile`'s `file_path` is resolved against.
     file_base: String,
+    options: crate::TelegramChannelOptions,
     /// Core route, access policy, pairing store, command cache.
     runtime: ChannelRuntime,
 }
@@ -119,9 +129,21 @@ impl TelegramChannel {
         if cfg.token.trim().is_empty() {
             anyhow::bail!("telegram channel token is empty");
         }
+        let options = cfg.options;
+        if options.webhook_url.is_some()
+            && options
+                .webhook_secret
+                .as_deref()
+                .is_none_or(|secret| secret.trim().is_empty())
+        {
+            anyhow::bail!("telegram webhook mode requires a non-empty webhook_secret");
+        }
+        let api_base_url = api_base(options.base_url.as_deref(), &cfg.token, false);
+        let file_base = api_base(options.base_file_url.as_deref(), &cfg.token, true);
         Ok(Self {
-            api_base: format!("https://api.telegram.org/bot{}", cfg.token),
-            file_base: format!("https://api.telegram.org/file/bot{}", cfg.token),
+            api_base: api_base_url,
+            file_base,
+            options,
             runtime: ChannelRuntime::new(http, cfg.common, pairing, status),
         })
     }
@@ -259,10 +281,20 @@ impl TelegramChannel {
                 warn!("telegram getFile returned no file_path; attachment skipped");
                 continue;
             };
-            let url = format!("{}/{path}", self.file_base);
-            match media::download(&self.runtime.http, &url, &[]).await {
-                Ok(bytes) => out.push((index, bytes)),
-                Err(err) => warn!(%err, "telegram attachment download failed"),
+            if self.options.local_mode {
+                match tokio::fs::read(&path).await {
+                    Ok(bytes) if bytes.len() <= media::MAX_ATTACHMENT_BYTES => {
+                        out.push((index, bytes));
+                    }
+                    Ok(_) => warn!("telegram local attachment exceeds the size cap"),
+                    Err(err) => warn!(%err, "telegram local attachment read failed"),
+                }
+            } else {
+                let url = format!("{}/{path}", self.file_base);
+                match media::download(&self.runtime.http, &url, &[]).await {
+                    Ok(bytes) => out.push((index, bytes)),
+                    Err(err) => warn!(%err, "telegram attachment download failed"),
+                }
             }
         }
         out
@@ -313,6 +345,136 @@ impl TelegramChannel {
             handle_turn(channel, host, message).await;
         });
     }
+
+    /// Normalize and dispatch one update. Keeping this separate means webhook
+    /// delivery and long polling share exactly the same mention, topic, guest,
+    /// media and access behavior.
+    fn dispatch_update(
+        self: &Arc<Self>,
+        host: Arc<dyn ChannelHost>,
+        update: Update,
+        me: &BotIdentity,
+    ) {
+        if let Some(guest) = update.guest_message {
+            if self.options.guest_mode {
+                if let Some(inbound) = guest_inbound(&guest) {
+                    self.spawn_turn(host, inbound, None);
+                } else {
+                    warn!("telegram guest_message had no guest_query_id; dropped");
+                }
+            }
+            return;
+        }
+
+        let Some(message) = update.message else {
+            return;
+        };
+        let raw_text = message
+            .text
+            .clone()
+            .or_else(|| message.caption.clone())
+            .unwrap_or_default();
+        let attachments = attachments_from(&message);
+        if raw_text.trim().is_empty() && attachments.is_empty() {
+            return;
+        }
+        let Some(routed_text) = decide_reply_with_options(
+            &message,
+            &raw_text,
+            me,
+            self.runtime.cfg.group_reply_mode,
+            &self.options,
+        ) else {
+            return;
+        };
+        let thread = thread_of(&message);
+        if self.options.ignored_threads.iter().any(|ignored| {
+            let ignored = ignored.trim();
+            thread.as_deref() == Some(ignored)
+                || thread
+                    .as_deref()
+                    .and_then(|value| value.get(1..))
+                    .is_some_and(|value| value == ignored)
+        }) {
+            return;
+        }
+        let chat_id = pack_thread(&message.chat.id.to_string(), thread.as_deref());
+        let is_private = message.chat.chat_type == "private";
+        let draft = (self.runtime.cfg.streaming && is_private && message.message_id != 0)
+            .then_some(message.message_id);
+        let inbound = InboundMessage {
+            chat_id,
+            access_chat_id: is_group_chat(&message.chat.chat_type)
+                .then(|| message.chat.id.to_string()),
+            text: routed_text,
+            author_name: message
+                .from
+                .as_ref()
+                .map(|from| from.first_name.clone())
+                .filter(|name| !name.is_empty()),
+            sender_id: message.from.as_ref().map(|from| from.id.to_string()),
+            message_id: (message.message_id != 0).then(|| message.message_id.to_string()),
+            is_group: is_group_chat(&message.chat.chat_type),
+            attachments,
+        };
+        self.spawn_turn(host, inbound, draft);
+    }
+
+    async fn run_webhook(
+        self: Arc<Self>,
+        host: Arc<dyn ChannelHost>,
+        me: BotIdentity,
+    ) -> anyhow::Result<()> {
+        let public_url = self
+            .options
+            .webhook_url
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("telegram webhook URL is missing"))?;
+        let secret = self
+            .options
+            .webhook_secret
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("telegram webhook secret is missing"))?;
+        self.call(
+            "setWebhook",
+            json!({
+                "url": public_url,
+                "secret_token": secret,
+                "allowed_updates": ["message", "guest_message"],
+                "drop_pending_updates": false,
+            }),
+        )
+        .await?;
+
+        let bind = self.options.webhook_bind.clone();
+        let path = normalize_webhook_path(&self.options.webhook_path);
+        let listener = TcpListener::bind(&bind).await?;
+        let (tx, mut rx) = mpsc::channel::<Update>(128);
+        let app = Router::new()
+            .route(&path, post(telegram_webhook))
+            .with_state(TelegramWebhookState {
+                tx,
+                secret: secret.to_string(),
+            });
+        tokio::spawn(async move {
+            if let Err(err) = axum::serve(listener, app).await {
+                warn!(%err, "telegram webhook listener stopped");
+            }
+        });
+        info!(bind = %bind, path = %path, "telegram webhook listener started");
+        if let Some(reporter) = &self.runtime.status {
+            reporter.online().await;
+        }
+
+        while let Some(update) = rx.recv().await {
+            self.dispatch_update(Arc::clone(&host), update, &me);
+            if let Some(reporter) = &self.runtime.status {
+                reporter.online().await;
+            }
+        }
+        anyhow::bail!("telegram webhook receiver closed")
+    }
 }
 
 #[async_trait]
@@ -348,10 +510,9 @@ impl Channel for TelegramChannel {
     /// Plain-text reply. A guest key is answered through `answerGuestQuery`
     /// instead — that is a different outbound path, not a different chat.
     ///
-    /// Note: `sendMessage` caps `text` at 4096 characters and a long agent reply
-    /// can exceed that, in which case Telegram rejects the call and the turn is
-    /// logged as undelivered. Splitting long replies is a separate change; it is
-    /// called out here so the failure mode is not mistaken for a transport bug.
+    /// Telegram caps `sendMessage` at 4096 characters. Split on line boundaries
+    /// first, then hard-split a single oversized line so a long agent answer is
+    /// delivered instead of being rejected as one oversized request.
     async fn send_message(&self, chat_id: &str, text: &str) -> anyhow::Result<()> {
         if let Some(query_id) = guest_query_of(chat_id) {
             self.call("answerGuestQuery", guest_reply_payload(query_id, text))
@@ -359,8 +520,10 @@ impl Channel for TelegramChannel {
             return Ok(());
         }
         let (chat, thread) = target(chat_id)?;
-        self.call("sendMessage", message_payload(chat, thread, text))
-            .await?;
+        for chunk in split_message(text, 4096) {
+            self.call("sendMessage", message_payload(chat, thread, &chunk))
+                .await?;
+        }
         Ok(())
     }
 
@@ -376,16 +539,19 @@ impl Channel for TelegramChannel {
             return self.send_message(chat_id, markdown).await;
         }
         let (chat, thread) = target(chat_id)?;
-        match self
-            .call("sendRichMessage", rich_payload(chat, thread, markdown))
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                warn!(%err, "telegram sendRichMessage failed; falling back to plain text");
-                self.send_message(chat_id, markdown).await
+        for chunk in split_message(markdown, 4096) {
+            match self
+                .call("sendRichMessage", rich_payload(chat, thread, &chunk))
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => {
+                    warn!(%err, "telegram sendRichMessage failed; falling back to plain text");
+                    return self.send_message(chat_id, markdown).await;
+                }
             }
         }
+        Ok(())
     }
 
     /// Push an ephemeral draft into a PRIVATE chat.
@@ -536,7 +702,12 @@ impl Channel for TelegramChannel {
             debug!("telegram command registry empty; leaving the published menu as it is");
             return Ok(());
         }
-        self.call("setMyCommands", commands_payload(cmds)).await?;
+        let max = self.options.command_menu_max.clamp(1, 100);
+        self.call(
+            "setMyCommands",
+            commands_payload(&cmds[..cmds.len().min(max)]),
+        )
+        .await?;
         Ok(())
     }
 
@@ -626,6 +797,10 @@ impl Channel for TelegramChannel {
             }
         }
 
+        if self.options.webhook_url.is_some() {
+            return self.run_webhook(Arc::clone(&host), me).await;
+        }
+
         // Telegram acknowledges processed updates by advancing the offset to
         // (last update_id + 1); anything below the offset is never re-delivered.
         let mut offset: i64 = 0;
@@ -639,74 +814,7 @@ impl Channel for TelegramChannel {
                     }
                     for update in updates {
                         offset = offset.max(update.update_id + 1);
-
-                        // Guest queries first: they are a Message too, but the
-                        // reply path and the conversation key are both different.
-                        if let Some(guest) = update.guest_message {
-                            if let Some(inbound) = guest_inbound(&guest) {
-                                self.spawn_turn(Arc::clone(&host), inbound, None);
-                            } else {
-                                warn!("telegram guest_message had no guest_query_id; dropped");
-                            }
-                            continue;
-                        }
-
-                        let Some(message) = update.message else {
-                            continue;
-                        };
-
-                        let raw_text = message
-                            .text
-                            .clone()
-                            .or_else(|| message.caption.clone())
-                            .unwrap_or_default();
-                        let attachments = attachments_from(&message);
-                        if raw_text.trim().is_empty() && attachments.is_empty() {
-                            continue;
-                        }
-
-                        // Auto-detect group vs private and decide whether to
-                        // reply. Returns the (mention-stripped, speaker-prefixed)
-                        // text to route, or None to ignore this message.
-                        let Some(routed_text) = decide_reply(
-                            &message,
-                            &raw_text,
-                            &me,
-                            self.runtime.cfg.group_reply_mode,
-                        ) else {
-                            continue;
-                        };
-
-                        // Pack the topic into the conversation key so each forum
-                        // topic keeps its own Core history.
-                        let chat_id = pack_thread(
-                            &message.chat.id.to_string(),
-                            thread_of(&message).as_deref(),
-                        );
-                        let is_private = message.chat.chat_type == "private";
-                        // Telegram's own message_id is already a stable non-zero
-                        // per-turn integer, which is exactly what a draft id must
-                        // be — no need to invent one.
-                        let draft =
-                            (self.runtime.cfg.streaming && is_private && message.message_id != 0)
-                                .then_some(message.message_id);
-
-                        let inbound = InboundMessage {
-                            chat_id,
-                            text: routed_text,
-                            author_name: message
-                                .from
-                                .as_ref()
-                                .map(|from| from.first_name.clone())
-                                .filter(|name| !name.is_empty()),
-                            sender_id: message.from.as_ref().map(|from| from.id.to_string()),
-                            message_id: (message.message_id != 0)
-                                .then(|| message.message_id.to_string()),
-                            is_group: is_group_chat(&message.chat.chat_type),
-                            attachments,
-                        };
-
-                        self.spawn_turn(Arc::clone(&host), inbound, draft);
+                        self.dispatch_update(Arc::clone(&host), update, &me);
                     }
                 }
                 // A rejected token is terminal for THIS adapter: the token is
@@ -738,6 +846,98 @@ impl Channel for TelegramChannel {
 // Everything below takes primitives and returns values, so the wire shapes are
 // unit-testable without a Telegram to talk to. That is the whole reason the
 // `send_*` methods are thin.
+
+#[derive(Clone)]
+struct TelegramWebhookState {
+    tx: mpsc::Sender<Update>,
+    secret: String,
+}
+
+async fn telegram_webhook(
+    State(state): State<TelegramWebhookState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    let presented = headers
+        .get("x-telegram-bot-api-secret-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if presented != state.secret {
+        return StatusCode::UNAUTHORIZED;
+    }
+    if body.len() > 1024 * 1024 {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
+    let Ok(update) = serde_json::from_slice::<Update>(&body) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    state
+        .tx
+        .send(update)
+        .await
+        .map_or(StatusCode::SERVICE_UNAVAILABLE, |_| StatusCode::OK)
+}
+
+/// Build a Telegram Bot API base from either the public endpoint or a custom
+/// local endpoint. A full `/bot<TOKEN>` URL is also accepted for deployments
+/// that already template the token into their endpoint.
+fn api_base(custom: Option<&str>, token: &str, file: bool) -> String {
+    let default = if file {
+        format!("https://api.telegram.org/file/bot{token}")
+    } else {
+        format!("https://api.telegram.org/bot{token}")
+    };
+    let Some(custom) = custom.map(str::trim).filter(|value| !value.is_empty()) else {
+        return default;
+    };
+    let custom = custom.trim_end_matches('/');
+    if custom.contains("/bot") {
+        return custom.to_string();
+    }
+    let prefix = if file { "/file" } else { "" };
+    format!("{custom}{prefix}/bot{token}")
+}
+
+fn normalize_webhook_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        "/webhooks/telegram".to_string()
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
+/// Split Telegram text at line boundaries and hard-split only when a single
+/// line itself exceeds the Bot API ceiling.
+fn split_message(text: &str, max: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for line in text.split_inclusive('\n') {
+        if line.chars().count() <= max && current.chars().count() + line.chars().count() <= max {
+            current.push_str(line);
+            continue;
+        }
+        if !current.trim().is_empty() {
+            chunks.push(std::mem::take(&mut current));
+        }
+        if line.chars().count() > max {
+            let mut hard = String::new();
+            for ch in line.chars() {
+                hard.push(ch);
+                if hard.chars().count() == max {
+                    chunks.push(std::mem::take(&mut hard));
+                }
+            }
+            current = hard;
+        } else {
+            current.push_str(line);
+        }
+    }
+    if !current.trim().is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
 
 /// Does this `getUpdates` outcome mean "your token is not valid any more"?
 ///
@@ -920,6 +1120,7 @@ fn guest_inbound(message: &Message) -> Option<InboundMessage> {
         .unwrap_or_default();
     Some(InboundMessage {
         chat_id: key,
+        access_chat_id: None,
         text,
         author_name: message
             .from
@@ -1018,11 +1219,28 @@ struct BotIdentity {
 /// message and would otherwise lose attribution entirely.
 ///
 /// Returns the text to route, or `None` to ignore the message.
+#[cfg(test)]
 fn decide_reply(
     message: &Message,
     raw_text: &str,
     me: &BotIdentity,
     mode: GroupReplyMode,
+) -> Option<String> {
+    decide_reply_with_options(
+        message,
+        raw_text,
+        me,
+        mode,
+        &crate::TelegramChannelOptions::default(),
+    )
+}
+
+fn decide_reply_with_options(
+    message: &Message,
+    raw_text: &str,
+    me: &BotIdentity,
+    mode: GroupReplyMode,
+    options: &crate::TelegramChannelOptions,
 ) -> Option<String> {
     if !is_group_chat(&message.chat.chat_type) {
         // Private chat (or channel post): always answer with the raw text. Empty
@@ -1045,7 +1263,16 @@ fn decide_reply(
     // lone `/` are classified the same way everywhere in the codebase.
     let is_command = commands::parse_command(raw_text).is_some();
 
-    if mode == GroupReplyMode::Mentions && !(mentions_bot || replies_to_bot || is_command) {
+    let pattern_match = options.mention_patterns.iter().any(|pattern| {
+        let pattern = pattern.trim().to_ascii_lowercase();
+        !pattern.is_empty() && raw_text.to_ascii_lowercase().contains(&pattern)
+    });
+    let addressed = if options.exclusive_bot_mentions {
+        mentions_bot || replies_to_bot || is_command
+    } else {
+        mentions_bot || replies_to_bot || is_command || pattern_match
+    };
+    if mode == GroupReplyMode::Mentions && !addressed {
         return None;
     }
 
@@ -1213,6 +1440,7 @@ mod tests {
                 model: "gpt-4o".to_string(),
                 ..Default::default()
             },
+            options: crate::TelegramChannelOptions::default(),
         }
     }
 

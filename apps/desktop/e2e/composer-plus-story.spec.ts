@@ -51,6 +51,39 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		await expect(page.getByTestId("attach-count")).toHaveText("1");
 	});
 
+	test("an attachment-only turn uses Send instead of live voice mode", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		const mount = page.getByTestId("attachment-only");
+
+		await expect(
+			mount.getByRole("button", { name: "Start voice call", exact: true })
+		).toBeVisible();
+		await mount.getByRole("button", { name: "Add", exact: true }).click();
+		await page.getByRole("option", { name: /Files and images/ }).click();
+		await mount.getByRole("textbox").click();
+
+		await expect(mount.getByTestId("attachment-stage")).toHaveText("attached");
+		await expect(mount.getByRole("img", { name: "brief.png" })).toBeVisible();
+		await expect(
+			mount.getByRole("button", { name: "Start voice call", exact: true })
+		).toHaveCount(0);
+		const send = mount.getByRole("button", { name: "Send", exact: true });
+		await expect(send).toBeEnabled();
+		await page.screenshot({
+			path: "test-results/attachment-only-send-proof.png",
+			fullPage: true,
+		});
+
+		await send.click();
+		await expect(mount.getByTestId("attachment-sent")).toHaveText(
+			"sent-attachment-only"
+		);
+		await expect(mount.getByTestId("attachment-stage")).toHaveText("empty");
+		await expect(mount.getByTestId("voice-mode-started")).toHaveText("idle");
+	});
+
 	test("the shared menu searches apps from the textarea and inserts a tag", async ({
 		page,
 	}) => {
@@ -65,6 +98,45 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		await page.getByRole("option", { name: /Calendar/ }).click();
 
 		await expect(mount.locator("textarea")).toHaveValue("@Calendar ");
+	});
+
+	test("pins apps and skills into a persistent Pinned section", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		await page.evaluate(() => localStorage.removeItem("ryu:composer-pins"));
+		const mount = page.getByTestId("minimal");
+
+		await plusIn(page, "minimal").click();
+		await page.getByRole("button", { name: "Pin Calendar" }).click();
+		await expect(page.getByText("Pinned", { exact: true })).toBeVisible();
+		await expect(
+			page.getByRole("option", { name: "Calendar", exact: true })
+		).toHaveCount(1);
+		await expect(
+			page.getByRole("button", { name: "Unpin Calendar" })
+		).toBeVisible();
+
+		// A row from another directory group uses the same affordance and joins the
+		// same section, proving the pin surface is not app-specific.
+		await page.getByRole("button", { name: "Pin Review checklist" }).click();
+		await expect(
+			page.getByRole("option", { name: "Review checklist", exact: true })
+		).toHaveCount(1);
+
+		await page.reload();
+		await plusIn(page, "minimal").click();
+		await expect(page.getByText("Pinned", { exact: true })).toBeVisible();
+		await expect(
+			page.getByRole("button", { name: "Unpin Calendar" })
+		).toBeVisible();
+		await expect(
+			page.getByRole("button", { name: "Unpin Review checklist" })
+		).toBeVisible();
+		await page.screenshot({
+			path: "test-results/composer-pinned-section-proof.png",
+			fullPage: true,
+		});
 	});
 
 	test("the richer surface opens the SAME menu, with its extra rows", async ({
@@ -84,6 +156,55 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		await expect(
 			page.getByRole("option", { name: "Double-check" })
 		).toBeVisible();
+	});
+
+	test("the expanded-composer plugin expands the composer in place", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		const mount = page.getByTestId("expanded");
+		const textarea = mount.locator("textarea");
+		await textarea.fill("Draft a launch plan with clear milestones");
+
+		const inlineSurface = mount.locator(".composer-container");
+		const inlineBox = await inlineSurface.boundingBox();
+		if (!inlineBox) {
+			throw new Error("expanded composer surface did not lay out");
+		}
+
+		await mount.getByRole("button", { name: "Expand composer" }).click();
+		await expect(
+			mount.getByRole("button", { name: "Collapse composer" })
+		).toBeVisible();
+		await expect(
+			mount.getByRole("button", { name: "Expand composer" })
+		).toHaveCount(0);
+		await expect(page.getByRole("dialog")).toHaveCount(0);
+		await expect(mount.locator("textarea")).toHaveValue(
+			"Draft a launch plan with clear milestones"
+		);
+
+		const expandedBox = await inlineSurface.boundingBox();
+		if (!expandedBox) {
+			throw new Error("expanded composer did not lay out");
+		}
+		// The same surface is intentionally wider and taller in its expanded state.
+		expect(expandedBox.width).toBeGreaterThan(inlineBox.width);
+		expect(expandedBox.height).toBeGreaterThan(inlineBox.height);
+
+		await page.screenshot({
+			path: "test-results/expanded-composer-proof.png",
+		});
+		await page.keyboard.press("Escape");
+		await expect(
+			mount.getByRole("button", { name: "Collapse composer" })
+		).toHaveCount(0);
+		await expect(
+			mount.getByRole("button", { name: "Expand composer" })
+		).toBeVisible();
+		await expect(mount.locator("textarea")).toHaveValue(
+			"Draft a launch plan with clear milestones"
+		);
 	});
 
 	// The compact composer's TOPOLOGY, not its "+" menu. `compact` used to select a
@@ -138,20 +259,36 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(plusBox.y);
 	});
 
-	test("shows current-turn plan and file details above the composer", async ({
+	test("shows current-turn progress as separate side-by-side chips", async ({
 		page,
 	}) => {
 		await page.goto(STORY_URL);
-		await expect(
-			page.getByRole("button", { name: "Step 2 / 3" })
-		).toBeVisible();
+		const stepsButton = page.getByRole("button", { name: "Step 2 of 3" });
+		await expect(stepsButton).toBeVisible();
 		const filesButton = page.getByRole("button", { name: /2 files changed/ });
 		await expect(filesButton).toBeVisible();
 		await expect(filesButton).toContainText("+18");
 		await expect(filesButton).toContainText("-3");
+		const [stepsBox, filesBox] = await Promise.all([
+			stepsButton.boundingBox(),
+			filesButton.boundingBox(),
+		]);
+		if (!(stepsBox && filesBox)) {
+			throw new Error("turn progress chips did not lay out");
+		}
+		expect(Math.abs(stepsBox.y - filesBox.y)).toBeLessThan(4);
+		expect(filesBox.x).toBeGreaterThan(stepsBox.x);
+		await page.screenshot({
+			path: "test-results/composer-turn-progress-chips-proof.png",
+			fullPage: true,
+		});
 
-		await page.getByRole("button", { name: "Step 2 / 3" }).click();
+		await page.getByRole("button", { name: "Step 2 of 3" }).click();
 		await expect(page.getByText("Verify", { exact: true })).toBeVisible();
+		await page.screenshot({
+			path: "test-results/composer-todo-list-proof.png",
+			fullPage: true,
+		});
 		await page.keyboard.press("Escape");
 		await page.getByRole("button", { name: /2 files changed/ }).click();
 		await expect(page.getByText("src/composer.tsx")).toBeVisible();
@@ -167,20 +304,23 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		await page.goto(STORY_URL);
 		const textarea = page.getByTestId("minimal").locator("textarea");
 		await expect(textarea).toBeVisible();
-		// The block is the textarea's own padded wrapper.
-		const block = textarea.locator("xpath=..");
+		// The textarea sits inside a relative overlay layer; measure that content
+		// layer against the padded block so its line-box remainder is not counted as
+		// visible vertical imbalance.
+		const content = textarea.locator("xpath=..");
+		const block = content.locator("xpath=..");
 
-		const [textareaBox, blockBox] = await Promise.all([
-			textarea.boundingBox(),
+		const [contentBox, blockBox] = await Promise.all([
+			content.boundingBox(),
 			block.boundingBox(),
 		]);
-		if (!(textareaBox && blockBox)) {
+		if (!(contentBox && blockBox)) {
 			throw new Error("composer textarea did not lay out");
 		}
 
-		const above = textareaBox.y - blockBox.y;
+		const above = contentBox.y - blockBox.y;
 		const below =
-			blockBox.y + blockBox.height - (textareaBox.y + textareaBox.height);
+			blockBox.y + blockBox.height - (contentBox.y + contentBox.height);
 		// Symmetric within a pixel of rounding; the old fixed pad was ~10px out.
 		expect(Math.abs(above - below)).toBeLessThanOrEqual(2);
 		// And the block still keeps its roomy floor.

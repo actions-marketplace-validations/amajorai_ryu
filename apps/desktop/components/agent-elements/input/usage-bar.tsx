@@ -5,6 +5,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
+import { formatCount, formatCurrency } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { memo } from "react";
 import { useAgentUsage } from "@/src/hooks/useAgentUsage.ts";
@@ -358,15 +359,22 @@ function paceDotClass(usageWindow: UsageWindow): string {
 	return "bg-muted-foreground/40";
 }
 
+function formatDollars(value: number): string {
+	return formatCurrency(value, "USD", {
+		maximumFractionDigits: 2,
+		minimumFractionDigits: 2,
+	});
+}
+
 /** "$32.84" / "821 credits" / "42%" — one figure, formatted for its kind. */
 function formatValue(value: UsageValue): string {
 	if (value.kind === "dollars") {
-		return `$${value.number.toFixed(2)}`;
+		return formatDollars(value.number);
 	}
 	if (value.kind === "percent") {
 		return `${Math.round(value.number)}%`;
 	}
-	const count = value.number.toLocaleString();
+	const count = formatCount(value.number) ?? "—";
 	return value.unit ? `${count} ${value.unit}` : count;
 }
 
@@ -383,12 +391,12 @@ function formatMeter(meter: UsageMeter): string {
 	if (second && second.kind === first.kind) {
 		const cap =
 			second.kind === "dollars"
-				? `$${second.number.toFixed(2)}`
-				: second.number.toLocaleString();
+				? formatDollars(second.number)
+				: (formatCount(second.number) ?? "—");
 		const used =
 			first.kind === "dollars"
-				? `$${first.number.toFixed(2)}`
-				: first.number.toLocaleString();
+				? formatDollars(first.number)
+				: (formatCount(first.number) ?? "—");
 		return `${used}/${cap}`;
 	}
 	return formatValue(first);
@@ -852,6 +860,21 @@ export const AgentUsageBadge = memo(function AgentUsageBadge({
 			</TooltipContent>
 		</Tooltip>
 	);
+});
+
+/**
+ * The equivalent picker badge for a Ryu provider logged in through the managed
+ * Pi. It deliberately shares the ACP implementation so both surfaces expose
+ * the same percent, color, and tooltip breakdown.
+ */
+export const ProviderUsageBadge = memo(function ProviderUsageBadge({
+	className,
+	providerId,
+}: {
+	className?: string;
+	providerId: string;
+}) {
+	return <AgentUsageBadge agentId={providerId} className={className} />;
 });
 
 /**

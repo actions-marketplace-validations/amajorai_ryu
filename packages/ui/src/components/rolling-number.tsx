@@ -1,5 +1,6 @@
 "use client";
 
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useMotionValue, useSpring } from "motion/react";
 import { useEffect, useRef } from "react";
 
@@ -37,7 +38,7 @@ export function RollingNumber({
 		() =>
 			springValue.on("change", (latest: number) => {
 				if (ref.current) {
-					ref.current.textContent = `${prefix}${Math.round(latest).toLocaleString()}${suffix}`;
+					ref.current.textContent = `${prefix}${formatCount(Math.round(latest)) ?? "—"}${suffix}`;
 				}
 			}),
 		[springValue, prefix, suffix]
@@ -47,7 +48,7 @@ export function RollingNumber({
 	return (
 		<span className={className} ref={ref}>
 			{prefix}
-			{value.toLocaleString()}
+			{formatCount(value) ?? "—"}
 			{suffix}
 		</span>
 	);

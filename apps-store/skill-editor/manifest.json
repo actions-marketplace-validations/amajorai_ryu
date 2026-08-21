@@ -1,4 +1,10 @@
 {
+  "tags": ["skills","authoring","editor","developer"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-skill-editor",
+  "homepage": "https://github.com/amajorai/ryu-skill-editor",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/skill-editor",
   "name": "Skill Editor",
   "version": "0.1.14",
@@ -45,5 +51,9 @@
   "companion": {
     "label": "Skill Editor",
     "icon": "sparkles"
+  }
+,
+  "contributes": {
+ "chat_widget_templates": [{"id":"skill-editor.chat","title":"Skill Editor widget","description":"Skill Editor chat widget metadata is coming soon; no render tool is available yet.","triggers":["skill editor widget"],"examples":["Show me a skill editor widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}]
   }
 }

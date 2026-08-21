@@ -323,10 +323,15 @@ pub async fn get_review(
         }
     };
 
-    let (user_id, org_id, node_bound) = super::tenancy_filter_args(&caller);
+    let (user_id, org_id, team_ids_json, node_bound) = super::tenancy_filter_args(&caller);
     let summaries = match state
         .conversations
-        .list_conversations_visible(user_id.as_deref(), org_id.as_deref(), node_bound)
+        .list_conversations_visible_for_teams(
+            user_id.as_deref(),
+            org_id.as_deref(),
+            node_bound,
+            team_ids_json.as_deref(),
+        )
         .await
     {
         Ok(summaries) => summaries,

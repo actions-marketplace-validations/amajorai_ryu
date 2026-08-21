@@ -343,8 +343,8 @@ pub trait Sandbox: Send + Sync {
 /// `microsandbox`, `opensandbox`, `daytona`. The variant used to exist and
 /// `build_command_backend` always returned "not implemented yet" for it, so
 /// `RYU_SANDBOX_BACKEND=subprocess` silently disabled every sandboxed exec on the
-/// node. `"subprocess"` now parses to [`SandboxBackend::Custom`] and hits the one
-/// honest `unknown sandbox backend` error, like any other unrecognised name.
+/// node. `"subprocess"` is not in the vocabulary and is rejected as an honest
+/// `unknown sandbox backend` error, like any other unrecognised name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SandboxBackend {
     /// wasmtime backend: run a WASM/WASI module with strict capability limits.
@@ -352,6 +352,24 @@ pub enum SandboxBackend {
     Wasmtime,
     /// Docker/OCI backend: run a container image. Opt-in; requires Docker daemon.
     Docker,
+    /// Host-local generic backend vocabulary. It is intentionally not an
+    /// implementation: running directly on the host is not an isolation
+    /// boundary and must never become an implicit fallback.
+    Local,
+    /// SSH-backed remote provider vocabulary. Provider wiring is external.
+    Ssh,
+    /// Modal remote provider vocabulary. Provider wiring is external.
+    Modal,
+    /// Vercel Sandbox remote provider vocabulary. Provider wiring is external.
+    VercelSandbox,
+    /// Singularity/Apptainer local provider vocabulary. Provider wiring is external.
+    Singularity,
+    /// Daytona remote sandbox backend.
+    Daytona,
+    /// microVM backend.
+    Microsandbox,
+    /// OpenSandbox backend.
+    Opensandbox,
     /// Custom backend identified by name.
     Custom(String),
 }
@@ -362,8 +380,16 @@ impl SandboxBackend {
         match name {
             "wasmtime" => Ok(Self::Wasmtime),
             "docker" => Ok(Self::Docker),
+            "local" => Ok(Self::Local),
+            "ssh" => Ok(Self::Ssh),
+            "modal" => Ok(Self::Modal),
+            "vercel_sandbox" => Ok(Self::VercelSandbox),
+            "singularity" => Ok(Self::Singularity),
+            "daytona" => Ok(Self::Daytona),
+            "microsandbox" => Ok(Self::Microsandbox),
+            "opensandbox" => Ok(Self::Opensandbox),
             "" => Err(anyhow!("sandbox backend name must not be empty")),
-            other => Ok(Self::Custom(other.to_owned())),
+            other => Err(anyhow!("unknown sandbox backend '{other}'")),
         }
     }
 
@@ -372,6 +398,14 @@ impl SandboxBackend {
         match self {
             Self::Wasmtime => "wasmtime",
             Self::Docker => "docker",
+            Self::Local => "local",
+            Self::Ssh => "ssh",
+            Self::Modal => "modal",
+            Self::VercelSandbox => "vercel_sandbox",
+            Self::Singularity => "singularity",
+            Self::Daytona => "daytona",
+            Self::Microsandbox => "microsandbox",
+            Self::Opensandbox => "opensandbox",
             Self::Custom(name) => name.as_str(),
         }
     }
@@ -379,9 +413,8 @@ impl SandboxBackend {
 
 /// Select the most suitable available backend, given a preferred name.
 ///
-/// - If `preferred` is `Some`, parse and return it. An unrecognised name becomes
-///   a [`SandboxBackend::Custom`], which the caller then rejects when it tries to
-///   build it — so a typo surfaces as a real error, never as a silent swap.
+/// - If `preferred` is `Some`, parse and return it. An unrecognised name is an
+///   error, so a typo surfaces immediately and never becomes a silent swap.
 /// - If `preferred` is `None`, return the platform default ([`default_backend`]).
 ///
 /// This function never silently falls back from a *named* backend to another.
@@ -441,16 +474,140 @@ pub fn configured_backend() -> SandboxBackend {
 pub const KNOWN_BACKENDS: &[&str] = &[
     "wasmtime",
     "docker",
+    "local",
+    "ssh",
+    "modal",
+    "vercel_sandbox",
+    "singularity",
     "microsandbox",
     "opensandbox",
     "daytona",
 ];
+
+/// Stable conformance vocabulary shared by Core, tools, and provider discovery.
+/// `implemented` is a product/runtime contract, while `available` is filled by
+/// [`discover_backends`] and is always a live node fact. No entry is a fallback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SandboxBackendDescriptor {
+    pub name: String,
+    pub implemented: bool,
+    pub available: bool,
+    pub remote: bool,
+    pub persistence: String,
+    pub isolation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+}
+
+fn backend_conformance(name: &str) -> Option<(bool, bool, &'static str, &'static str)> {
+    Some(match name {
+        "wasmtime" => (
+            true,
+            false,
+            "ephemeral; no persistent workspace",
+            "WASI capability sandbox",
+        ),
+        "docker" => (
+            true,
+            false,
+            "ephemeral by default; workspace lifecycle supported",
+            "OCI container boundary",
+        ),
+        "local" => (
+            false,
+            false,
+            "not available",
+            "none; host execution is not isolation",
+        ),
+        "ssh" => (
+            false,
+            true,
+            "provider-defined remote persistence",
+            "provider-defined remote isolation",
+        ),
+        "modal" => (
+            false,
+            true,
+            "provider-defined remote persistence",
+            "provider-defined remote isolation",
+        ),
+        "vercel_sandbox" => (
+            false,
+            true,
+            "provider-defined remote persistence",
+            "provider-defined remote isolation",
+        ),
+        "singularity" => (
+            false,
+            false,
+            "provider-defined local persistence",
+            "provider-defined container isolation",
+        ),
+        "daytona" => (
+            true,
+            true,
+            "persistent workspaces; explicit destroy required",
+            "remote provider sandbox",
+        ),
+        "microsandbox" => (
+            true,
+            false,
+            "ephemeral by default; workspace lifecycle supported",
+            "microVM boundary",
+        ),
+        "opensandbox" => (
+            true,
+            false,
+            "ephemeral by default; workspace lifecycle supported",
+            "gVisor/Kata/Firecracker boundary",
+        ),
+        _ => return None,
+    })
+}
+
+/// Return the static descriptor for a known backend. This is the generic seam
+/// plugin providers can project into later; Core does not branch on providers.
+pub fn backend_descriptor(name: &str) -> Option<SandboxBackendDescriptor> {
+    let (implemented, remote, persistence, isolation) = backend_conformance(name)?;
+    Some(SandboxBackendDescriptor {
+        name: name.to_owned(),
+        implemented,
+        available: false,
+        remote,
+        persistence: persistence.to_owned(),
+        isolation: isolation.to_owned(),
+        diagnostic: None,
+    })
+}
+
+/// Discover all known backends in stable vocabulary order. Detection is
+/// observational only: it never installs, provisions, or falls back.
+pub async fn discover_backends() -> Vec<SandboxBackendDescriptor> {
+    let mut discovered = Vec::with_capacity(KNOWN_BACKENDS.len());
+    for name in KNOWN_BACKENDS {
+        let mut descriptor = backend_descriptor(name).expect("KNOWN_BACKENDS has descriptors");
+        descriptor.available = descriptor.implemented && detect_backend(name).await;
+        if !descriptor.implemented {
+            descriptor.diagnostic =
+                Some("recognized but not implemented; no provider SDK is wired".to_owned());
+        } else if !descriptor.available {
+            descriptor.diagnostic = Some(format!("{name} is not available on this node"));
+        }
+        discovered.push(descriptor);
+    }
+    discovered
+}
 
 /// Human-facing label for a known backend (`name` for anything unknown).
 pub fn backend_display_name(name: &str) -> &str {
     match name {
         "wasmtime" => "Wasmtime (WASM · built-in)",
         "docker" => "Docker",
+        "local" => "Local host (unavailable)",
+        "ssh" => "SSH (provider)",
+        "modal" => "Modal (provider)",
+        "vercel_sandbox" => "Vercel Sandbox (provider)",
+        "singularity" => "Singularity (provider)",
         "microsandbox" => "microsandbox",
         "opensandbox" => "OpenSandbox",
         "daytona" => "Daytona (remote)",
@@ -536,19 +693,16 @@ impl SandboxBackendStore {
 pub fn build_command_backend(backend: &SandboxBackend) -> Result<Box<dyn Sandbox>> {
     match backend {
         SandboxBackend::Docker => Ok(Box::new(docker::DockerSandbox::new())),
-        SandboxBackend::Custom(name) if name == "microsandbox" => {
-            Ok(Box::new(microsandbox::MicrosandboxSandbox::new()))
-        }
-        SandboxBackend::Custom(name) if name == "opensandbox" => {
-            Ok(Box::new(opensandbox::OpenSandboxSandbox::new()))
-        }
-        SandboxBackend::Custom(name) if name == "daytona" => {
-            Ok(Box::new(daytona::DaytonaSandbox::new()))
-        }
+        SandboxBackend::Microsandbox => Ok(Box::new(microsandbox::MicrosandboxSandbox::new())),
+        SandboxBackend::Opensandbox => Ok(Box::new(opensandbox::OpenSandboxSandbox::new())),
+        SandboxBackend::Daytona => Ok(Box::new(daytona::DaytonaSandbox::new())),
         SandboxBackend::Wasmtime => Err(anyhow!(
             "wasmtime is not a command backend — pass a WASM module via `wasm_b64`"
         )),
-        SandboxBackend::Custom(other) => Err(anyhow!("unknown sandbox backend '{other}'")),
+        other => Err(anyhow!(
+            "sandbox backend '{}' is recognized but not implemented",
+            other.as_str()
+        )),
     }
 }
 
@@ -758,19 +912,15 @@ mod tests {
     }
 
     #[test]
-    fn subprocess_is_not_a_backend() {
+    fn unknown_backend_is_rejected() {
         // "subprocess" was a selectable variant whose builder ALWAYS errored with
         // "not implemented yet", so `RYU_SANDBOX_BACKEND=subprocess` silently
         // disabled every sandboxed exec on the node. It is not a backend: it now
         // parses as an unrecognised custom name and fails loudly at build time,
         // with the same honest message any other typo gets.
-        let parsed = SandboxBackend::from_name("subprocess").unwrap();
-        assert_eq!(parsed, SandboxBackend::Custom("subprocess".to_owned()));
-        // `Box<dyn Sandbox>` is not `Debug`, so unwrap the error side by hand.
-        let err = match build_command_backend(&parsed) {
-            Ok(_) => panic!("subprocess must not build a backend"),
-            Err(e) => e.to_string(),
-        };
+        let err = SandboxBackend::from_name("subprocess")
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("unknown sandbox backend"),
             "expected the honest unknown-backend error, got: {err}"
@@ -780,10 +930,13 @@ mod tests {
     }
 
     #[test]
-    fn backend_custom_name() {
-        let b = SandboxBackend::from_name("my-custom-backend").unwrap();
-        assert_eq!(b, SandboxBackend::Custom("my-custom-backend".to_owned()));
-        assert_eq!(b.as_str(), "my-custom-backend");
+    fn backend_provider_names_can_be_discovered_without_core_branches() {
+        let b = backend_descriptor("modal").unwrap();
+        assert_eq!(b.name, "modal");
+        assert!(!b.implemented);
+        assert!(b.remote);
+        assert!(!b.available);
+        assert!(b.diagnostic.is_none());
     }
 
     #[test]
@@ -822,9 +975,9 @@ mod tests {
     }
 
     #[test]
-    fn select_backend_custom_name_accepted() {
-        let b = select_backend(Some("nsjail")).unwrap();
-        assert_eq!(b, SandboxBackend::Custom("nsjail".to_owned()));
+    fn select_backend_unknown_name_rejected() {
+        let err = select_backend(Some("nsjail")).unwrap_err();
+        assert!(err.to_string().contains("unknown sandbox backend 'nsjail'"));
     }
 
     #[test]
@@ -871,7 +1024,7 @@ mod tests {
     #[test]
     fn build_command_backend_rejects_wasmtime_and_unknown() {
         assert!(build_command_backend(&SandboxBackend::Wasmtime).is_err());
-        assert!(build_command_backend(&SandboxBackend::from_name("nope").unwrap()).is_err());
+        assert!(SandboxBackend::from_name("nope").is_err());
     }
 
     // ── configured_backend ────────────────────────────────────────────────────
@@ -905,13 +1058,34 @@ mod tests {
     fn known_backends_have_display_names_and_build() {
         for name in KNOWN_BACKENDS {
             assert_ne!(backend_display_name(name), "");
-            // Every known backend except wasmtime is a buildable command backend.
-            if *name != "wasmtime" {
+            // Only implemented command backends are buildable. Recognized
+            // provider vocabulary remains honest and explicitly unavailable.
+            if backend_descriptor(name).unwrap().implemented && *name != "wasmtime" {
                 assert!(
                     build_command_backend(&SandboxBackend::from_name(name).unwrap()).is_ok(),
                     "{name} must build as a command backend"
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn discovery_is_stable_and_reports_conformance() {
+        let discovered = discover_backends().await;
+        let names: Vec<&str> = discovered.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, KNOWN_BACKENDS);
+        let daytona = discovered.iter().find(|b| b.name == "daytona").unwrap();
+        assert!(daytona.implemented);
+        assert!(daytona.remote);
+        assert!(daytona.persistence.contains("persistent"));
+        assert!(!daytona.isolation.is_empty());
+        let modal = discovered.iter().find(|b| b.name == "modal").unwrap();
+        assert!(!modal.implemented);
+        assert!(!modal.available);
+        assert!(modal
+            .diagnostic
+            .as_deref()
+            .unwrap()
+            .contains("not implemented"));
     }
 }

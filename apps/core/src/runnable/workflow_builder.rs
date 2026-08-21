@@ -39,7 +39,7 @@ use crate::sidecar::mcp::RegistryTool;
 use crate::workflow::{Workflow, WorkflowEdge, WorkflowNode, WorkflowTrigger};
 
 /// Reserved server name for the workflow-builder tool provider. Must not contain
-/// `__` (the tool-id separator).
+/// `.` (the tool-id namespace separator).
 pub const SERVER_NAME: &str = "workflow_builder";
 
 /// Compact reference for the node `type` discriminants and their fields, folded
@@ -53,7 +53,7 @@ Node object shape: { \"id\": \"unique_id\", \"type\": \"<kind>\", ...fields }. K
 - prompt { prompt: string, agent_id?: string }  (the \"Agent\" node — runs an LLM/agent; agent_id null = default LLM)\n\
 - condition { expr: string }  (branches; outgoing edges use branch \"true\"/\"false\")\n\
 - transform { op: string, template?: string }  (op = uppercase|lowercase|trim|json_parse|template|identity; template used when op=template)\n\
-- tool { name: string, args?: object }  (calls a Core tool, name = \"<server>__<tool>\" e.g. \"spider__crawl\")\n\
+- tool { name: string, args?: object }  (calls a Core tool, name = \"<server>.<tool>\" e.g. \"spider.crawl\")\n\
 - webhook { url: string, method?: string }  (POST/PUT/PATCH/GET the incoming value)\n\
 - set_state { key: string, value: string }  (writes state[key]=value template, passes input through; read later as {{state.key}})\n\
 - delay { ms: number }  (durable pause)\n\
@@ -94,7 +94,7 @@ A workflow must be an acyclic graph (DAG): no cycles, every edge endpoint must n
 pub fn tools() -> Vec<RegistryTool> {
     vec![
         RegistryTool {
-            id: "workflow_builder__get_workflow".to_owned(),
+            id: "workflow_builder.get_workflow".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "get_workflow".to_owned(),
             description: Some(
@@ -107,7 +107,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "workflow_builder__create_workflow".to_owned(),
+            id: "workflow_builder.create_workflow".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "create_workflow".to_owned(),
             description: Some(format!(
@@ -120,7 +120,7 @@ pub fn tools() -> Vec<RegistryTool> {
             ..Default::default()
         },
         RegistryTool {
-            id: "workflow_builder__configure_workflow".to_owned(),
+            id: "workflow_builder.configure_workflow".to_owned(),
             server: SERVER_NAME.to_owned(),
             name: "configure_workflow".to_owned(),
             description: Some(format!(
@@ -468,13 +468,13 @@ mod tests {
         assert_eq!(tools.len(), 3);
         for t in &tools {
             assert_eq!(t.server, SERVER_NAME);
-            assert!(t.id.starts_with("workflow_builder__"));
-            assert!(!t.name.contains("__"));
+            assert!(t.id.starts_with("workflow_builder."));
+            assert!(!t.name.contains('.'));
         }
         let ids: Vec<&str> = tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(ids.contains(&"workflow_builder__get_workflow"));
-        assert!(ids.contains(&"workflow_builder__create_workflow"));
-        assert!(ids.contains(&"workflow_builder__configure_workflow"));
+        assert!(ids.contains(&"workflow_builder.get_workflow"));
+        assert!(ids.contains(&"workflow_builder.create_workflow"));
+        assert!(ids.contains(&"workflow_builder.configure_workflow"));
     }
 
     #[test]

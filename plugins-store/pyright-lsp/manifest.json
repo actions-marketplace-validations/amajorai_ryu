@@ -1,4 +1,10 @@
 {
+  "tags": ["python","pyright","type-checking","language-server","developer"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/pyright-lsp",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/pyright-lsp",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/pyright-lsp",
   "name": "Python LSP",
   "version": "0.1.14",
@@ -49,6 +55,7 @@
     "ryu": ">=0.1.0"
   },
   "runnables": [],
+  "permission_grants": ["pi:extension"],
   "activation_events": [
     "*"
   ],

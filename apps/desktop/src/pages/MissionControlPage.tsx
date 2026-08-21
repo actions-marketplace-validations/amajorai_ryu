@@ -42,6 +42,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
@@ -109,7 +110,7 @@ function Stat({
 					tone === "danger" && value > 0 && "text-destructive"
 				)}
 			>
-				{value.toLocaleString()}
+				{formatCount(value)}
 			</div>
 			<div className="text-[11px] text-muted-foreground">{label}</div>
 			{hint && (
@@ -150,9 +151,9 @@ function ActivityStrip({ days }: { days: MissionDayBucket[] }) {
 							</span>
 						</TooltipTrigger>
 						<TooltipContent className="text-xs">
-							{day.date} · {day.conversations} chats, {day.turns} turns,{" "}
-							{day.writes} files
-							{day.failures > 0 ? `, ${day.failures} errors` : ""}
+							{day.date} · {formatCount(day.conversations)} chats,{" "}
+							{formatCount(day.turns)} turns, {formatCount(day.writes)} files
+							{day.failures > 0 ? `, ${formatCount(day.failures)} errors` : ""}
 						</TooltipContent>
 					</Tooltip>
 				))}
@@ -166,7 +167,7 @@ function OpenWorkSection({ items }: { items: MissionOpenItem[] }) {
 		<section>
 			<h2 className="mb-2 flex items-center gap-2 font-medium text-sm">
 				Still to do
-				<Badge variant="secondary">{items.length}</Badge>
+				<Badge variant="secondary">{formatCount(items.length) ?? "—"}</Badge>
 			</h2>
 			{items.length === 0 ? (
 				<p className="rounded-lg border bg-card/40 p-3 text-muted-foreground text-xs">
@@ -228,8 +229,8 @@ function HotFilesSection({ files }: { files: MissionHotFile[] }) {
 						</Tooltip>
 						<span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
 							{file.conversations > 1
-								? `${file.conversations} chats`
-								: `${file.touches}×`}
+								? `${formatCount(file.conversations)} chats`
+								: `${formatCount(file.touches)}×`}
 						</span>
 					</li>
 				))}
@@ -268,9 +269,12 @@ function SessionRow({
 						</span>
 					</div>
 					<div className="text-[11px] text-muted-foreground">
-						{digest.headline ?? "No work recorded"} · {digest.totals.turns}{" "}
-						turns · {digest.totals.writes} files
-						{digest.open_count > 0 ? ` · ${digest.open_count} open` : ""}
+						{digest.headline ?? "No work recorded"} ·{" "}
+						{formatCount(digest.totals.turns)} turns ·{" "}
+						{formatCount(digest.totals.writes)} files
+						{digest.open_count > 0
+							? ` · ${formatCount(digest.open_count)} open`
+							: ""}
 					</div>
 					{digest.summary ? (
 						<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
@@ -279,14 +283,12 @@ function SessionRow({
 					) : (
 						<Button
 							className="mt-1 h-6 px-2 text-[11px]"
-							disabled={summarizing}
+							loading={summarizing}
 							onClick={() => onSummarize(digest.conversation_id)}
 							size="sm"
 							variant="ghost"
 						>
-							{summarizing ? (
-								<Spinner className="size-3" />
-							) : (
+							{!summarizing && (
 								<HugeiconsIcon className="size-3" icon={SparklesIcon} />
 							)}
 							Summarise this session
@@ -499,14 +501,12 @@ export default function MissionControlPage() {
 						</SelectContent>
 					</Select>
 					<Button
-						disabled={sync.isFetching}
+						loading={sync.isFetching}
 						onClick={refresh}
 						size="sm"
 						variant="ghost"
 					>
-						{sync.isFetching ? (
-							<Spinner className="size-3.5" />
-						) : (
+						{!sync.isFetching && (
 							<HugeiconsIcon className="size-3.5" icon={RefreshIcon} />
 						)}
 						Refresh

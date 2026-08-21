@@ -25,6 +25,7 @@
 // sheet both apps/desktop and apps/web import — alongside every other
 // Transitions.dev animation in the design system. See the block comment there.
 
+import { formatCount as formatSharedCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useItemLike } from "./likes-provider.tsx";
@@ -37,17 +38,9 @@ const PARTICLE_KEYS = Array.from(
 	(_, i) => `like-particle-${i}`
 );
 
-/** Compact display for a count. 1200 -> "1.2k"; a card has no room for four
- *  digits beside a 14px heart. */
+/** Shared display policy for a count beside the like control. */
 export function formatLikeCount(count: number): string {
-	if (count < 1000) {
-		return String(count);
-	}
-	if (count < 1_000_000) {
-		const thousands = count / 1000;
-		return `${thousands >= 10 ? Math.round(thousands) : thousands.toFixed(1)}k`;
-	}
-	return `${(count / 1_000_000).toFixed(1)}m`;
+	return formatSharedCount(count) ?? "—";
 }
 
 /**
@@ -122,7 +115,9 @@ export default function ItemLikeButton({
 		return null;
 	}
 
-	const label = like.liked ? `Unlike (${like.count})` : `Like (${like.count})`;
+	const label = like.liked
+		? `Unlike (${formatLikeCount(like.count)})`
+		: `Like (${formatLikeCount(like.count)})`;
 
 	return (
 		<button

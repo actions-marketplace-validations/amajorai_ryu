@@ -40,11 +40,13 @@ pub mod bluebubbles;
 pub mod commands;
 pub mod discord;
 pub mod media;
+pub mod openwa;
 pub mod pairing;
 pub mod slack;
 pub mod status;
 pub mod telegram;
 pub mod whatsapp;
+pub mod whatsapp_format;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -94,6 +96,9 @@ pub struct CommonChannelConfig {
     pub system_prompt: Option<String>,
     pub agent_id: Option<String>,
     pub team_id: Option<String>,
+    /// Control-plane channel config id. Store-backed bots use it to namespace
+    /// platform chat ids so two bot records never share a Core transcript.
+    pub channel_id: Option<String>,
     pub group_reply_mode: GroupReplyMode,
     pub core_url: String,
     /// DM/group access rules. Defaults to pairing for DMs and allowlist for
@@ -116,6 +121,16 @@ pub struct CommonChannelConfig {
     pub rich_text: bool,
     /// Stream partial output where the platform supports drafts.
     pub streaming: bool,
+    /// Add a lightweight lifecycle reaction while a turn is running and when it
+    /// completes. Platforms that cannot react simply ignore the capability.
+    pub lifecycle_reactions: bool,
+    /// Send Ryu's first plain-language welcome without waiting for a user message.
+    /// This is intentionally opt-in: a target is required and the shared access
+    /// policy must already admit it before anything leaves the gateway.
+    pub proactive_opening: bool,
+    /// Direct-chat id to receive the first welcome. This is never inferred from
+    /// a token or broadcast to a channel-wide audience.
+    pub proactive_target: Option<String>,
     /// Bot profile the adapter pushes at startup (name / short bio / description).
     pub profile: BotProfile,
 }
@@ -127,6 +142,7 @@ impl Default for CommonChannelConfig {
             system_prompt: None,
             agent_id: None,
             team_id: None,
+            channel_id: None,
             group_reply_mode: GroupReplyMode::default(),
             core_url: "http://127.0.0.1:7980".to_string(),
             access: AccessPolicy::default(),
@@ -136,6 +152,9 @@ impl Default for CommonChannelConfig {
             publish_commands: true,
             rich_text: true,
             streaming: false,
+            lifecycle_reactions: true,
+            proactive_opening: false,
+            proactive_target: None,
             profile: BotProfile::default(),
         }
     }
@@ -181,6 +200,55 @@ impl BotProfile {
 pub struct TelegramChannelConfig {
     pub token: String,
     pub common: CommonChannelConfig,
+    pub options: TelegramChannelOptions,
+}
+
+/// Telegram transport and group-behaviour options.
+#[derive(Debug, Clone)]
+pub struct TelegramChannelOptions {
+    /// Public webhook URL. When set, polling is replaced by webhook delivery.
+    pub webhook_url: Option<String>,
+    /// Secret token Telegram sends in `X-Telegram-Bot-Api-Secret-Token`.
+    pub webhook_secret: Option<String>,
+    /// Local listener for webhook delivery.
+    pub webhook_bind: String,
+    /// Literal webhook route.
+    pub webhook_path: String,
+    /// Custom Bot API endpoint (for a local Bot API server or a proxy).
+    pub base_url: Option<String>,
+    /// Custom file endpoint paired with `base_url`.
+    pub base_file_url: Option<String>,
+    /// Read `getFile.file_path` from the local filesystem.
+    pub local_mode: bool,
+    /// Additional case-insensitive address strings for group messages.
+    pub mention_patterns: Vec<String>,
+    /// Topic ids that must never be answered.
+    pub ignored_threads: Vec<String>,
+    /// Require the bot's own mention even when a generic pattern matches.
+    pub exclusive_bot_mentions: bool,
+    /// Accept Telegram guest-query updates.
+    pub guest_mode: bool,
+    /// Maximum commands sent to Telegram's native menu.
+    pub command_menu_max: usize,
+}
+
+impl Default for TelegramChannelOptions {
+    fn default() -> Self {
+        Self {
+            webhook_url: None,
+            webhook_secret: None,
+            webhook_bind: "0.0.0.0:8443".to_string(),
+            webhook_path: "/webhooks/telegram".to_string(),
+            base_url: None,
+            base_file_url: None,
+            local_mode: false,
+            mention_patterns: Vec::new(),
+            ignored_threads: Vec::new(),
+            exclusive_bot_mentions: false,
+            guest_mode: true,
+            command_menu_max: 60,
+        }
+    }
 }
 
 /// Slack bot adapter configuration (Socket Mode).
@@ -189,6 +257,45 @@ pub struct SlackChannelConfig {
     pub app_token: String,
     pub bot_token: String,
     pub common: CommonChannelConfig,
+    pub options: SlackChannelOptions,
+}
+
+/// Slack Socket Mode reply and mention policy.
+#[derive(Debug, Clone)]
+pub struct SlackChannelOptions {
+    pub reply_in_thread: bool,
+    pub reply_broadcast: bool,
+    pub strict_mention: bool,
+    pub thread_require_mention: bool,
+    pub free_response_channels: Vec<String>,
+    pub require_mention_channels: Vec<String>,
+    pub allowed_channels: Vec<String>,
+    pub ignored_channels: Vec<String>,
+    pub allow_bots: bool,
+    pub reply_prefix: Option<String>,
+    pub mention_patterns: Vec<String>,
+    pub rich_blocks: bool,
+    pub feedback_buttons: bool,
+}
+
+impl Default for SlackChannelOptions {
+    fn default() -> Self {
+        Self {
+            reply_in_thread: true,
+            reply_broadcast: false,
+            strict_mention: false,
+            thread_require_mention: false,
+            free_response_channels: Vec::new(),
+            require_mention_channels: Vec::new(),
+            allowed_channels: Vec::new(),
+            ignored_channels: Vec::new(),
+            allow_bots: false,
+            reply_prefix: None,
+            mention_patterns: Vec::new(),
+            rich_blocks: false,
+            feedback_buttons: false,
+        }
+    }
 }
 
 /// Discord bot adapter configuration.
@@ -200,6 +307,24 @@ pub struct DiscordChannelConfig {
     /// channel readable. Mirrors OpenClaw's `threadBindings`.
     pub thread_replies: bool,
     pub common: CommonChannelConfig,
+    pub options: DiscordChannelOptions,
+}
+
+/// Discord Gateway and channel policy options.
+#[derive(Debug, Clone, Default)]
+pub struct DiscordChannelOptions {
+    /// Replay messages received while the gateway was disconnected.
+    pub history_backfill: bool,
+    pub free_response_channels: Vec<String>,
+    pub allowed_channels: Vec<String>,
+    /// Discord role ids allowed to trigger the bot in guild channels.
+    pub allowed_roles: Vec<String>,
+    pub thread_require_mention: bool,
+    pub mention_patterns: Vec<String>,
+    pub ignored_channels: Vec<String>,
+    pub no_thread_channels: Vec<String>,
+    pub allow_bots: bool,
+    pub home_channel: Option<String>,
 }
 
 /// WhatsApp Business (Meta Cloud API) adapter configuration.
@@ -212,6 +337,24 @@ pub struct WhatsAppChannelConfig {
     pub webhook_bind: String,
     pub webhook_path: String,
     pub graph_version: String,
+    pub common: CommonChannelConfig,
+}
+
+/// WhatsApp Personal adapter configuration backed by an OpenWA session.
+///
+/// OpenWA is an unofficial, self-hosted WhatsApp Web bridge. The API key and
+/// webhook secret are credentials; the remaining fields identify the OpenWA
+/// instance/session and the per-channel listener endpoint.
+#[derive(Debug, Clone)]
+pub struct OpenWaChannelConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub session_id: String,
+    pub webhook_url: String,
+    pub webhook_secret: String,
+    pub webhook_bind: String,
+    pub webhook_path: String,
+    pub self_chat_only: bool,
     pub common: CommonChannelConfig,
 }
 
@@ -229,6 +372,11 @@ pub struct BlueBubblesChannelConfig {
     /// Use the Private API helper for typing indicators, read receipts and
     /// tapbacks. Requires the operator to have installed it on the Mac.
     pub private_api: bool,
+    /// Additional group-addressing patterns. BlueBubbles does not expose native
+    /// mentions, so these are the safe, explicit equivalent.
+    pub mention_patterns: Vec<String>,
+    /// Optional home chat used by operator-triggered outbound sends.
+    pub home_channel: Option<String>,
     pub common: CommonChannelConfig,
 }
 
@@ -264,6 +412,10 @@ pub struct InboundMessage {
     /// `conversation_id`. Threaded platforms pack the thread into it — see
     /// [`pack_thread`] — so each thread keeps its own history.
     pub chat_id: String,
+    /// Stable room id used for group authorization when `chat_id` contains a
+    /// provider-specific thread/conversation key. Reply verbs continue to use
+    /// `chat_id`.
+    pub access_chat_id: Option<String>,
     /// The user's message text (a transcript, for a voice note).
     pub text: String,
     /// Display name of the speaker, for multi-party chats. Connector-supplied and
@@ -296,6 +448,11 @@ impl InboundMessage {
     /// otherwise the chat id.
     pub fn identity(&self) -> &str {
         self.sender_id.as_deref().unwrap_or(&self.chat_id)
+    }
+
+    /// Return the room id the shared access gate should evaluate.
+    pub fn access_chat(&self) -> &str {
+        self.access_chat_id.as_deref().unwrap_or(&self.chat_id)
     }
 
     /// Did the user speak rather than type?
@@ -339,10 +496,22 @@ impl ChannelRuntime {
         }
     }
 
-    /// True when this bot routes through Core's session seam (a single agent or a
-    /// team) rather than the legacy gateway-pipeline path.
+    /// True when this bot routes through Core's session seam. Store-backed
+    /// channel records use Core even when they target the default agent so the
+    /// same transcript is visible in the desktop chat history.
     pub fn routes_via_core(&self) -> bool {
-        self.cfg.agent_id.is_some() || self.cfg.team_id.is_some()
+        self.cfg.agent_id.is_some() || self.cfg.team_id.is_some() || self.cfg.channel_id.is_some()
+    }
+
+    /// Map the platform's reply target to the stable Core session id for this
+    /// bot. The raw target remains the value passed to platform send/typing
+    /// verbs; only the Core key is namespaced.
+    pub fn core_conversation_id(&self, platform_target: &str) -> String {
+        self.cfg
+            .channel_id
+            .as_deref()
+            .map(|channel_id| format!("channel:{channel_id}:{platform_target}"))
+            .unwrap_or_else(|| platform_target.to_owned())
     }
 
     /// Route one turn through Core's session seam and return the reply.
@@ -369,6 +538,7 @@ impl ChannelRuntime {
             .post(&url)
             .json(&json!({
                 "conversation_id": conversation_id,
+                "channel_id": self.cfg.channel_id,
                 "agent_id": self.cfg.agent_id,
                 "team_id": self.cfg.team_id,
                 "text": text,
@@ -378,6 +548,13 @@ impl ChannelRuntime {
             .await?
             .error_for_status()?;
         let body: Value = resp.json().await?;
+        if let Some(warning) = body["fallbackWarning"].as_str() {
+            warn!(
+                channel_id = ?self.cfg.channel_id,
+                warning,
+                "channel session agent binding was resolved to the default agent"
+            );
+        }
         Ok(body["reply"].as_str().unwrap_or("").to_owned())
     }
 
@@ -417,7 +594,9 @@ impl ChannelRuntime {
     pub async fn already_admitted(&self, platform: &str, message: &InboundMessage) -> bool {
         if message.is_group {
             return matches!(
-                self.cfg.access.decide_group(&message.chat_id),
+                self.cfg
+                    .access
+                    .decide_group_for_sender(message.access_chat(), message.sender_id.as_deref(),),
                 Decision::Allow
             );
         }
@@ -726,6 +905,7 @@ pub fn policy_from(allowlist: Option<Vec<String>>, allow_all: bool) -> AccessPol
             group: GroupPolicy::Allowlist,
             dm_allowlist: list.clone(),
             group_allowlist: list,
+            group_sender_allowlist: Vec::new(),
         },
         (None, true) => AccessPolicy {
             dm: DmPolicy::Open,
@@ -784,6 +964,123 @@ pub fn keep_typing<C: Channel + 'static>(channel: Arc<C>, chat_id: String) -> Ty
     TypingGuard { handle }
 }
 
+const PROACTIVE_OPENING_RETRY: Duration = Duration::from_secs(5);
+
+/// Ask Core for the first Ryu welcome and deliver it through the same platform
+/// verb used for every other outbound message.
+///
+/// The loop is deliberately owned by the shared channel layer rather than by
+/// Telegram, WhatsApp, or a desktop-only path. A local model may still be
+/// starting when the gateway comes up; Core answers `202`/`503` until it can
+/// produce the message, so the gateway keeps trying without creating duplicate
+/// assistant messages. Core's idempotency key is stable across adapter restarts.
+async fn run_proactive_opening<C: Channel + 'static>(channel: Arc<C>) {
+    let runtime = channel.runtime();
+    if !runtime.cfg.proactive_opening {
+        return;
+    }
+    let Some(target) = runtime
+        .cfg
+        .proactive_target
+        .clone()
+        .filter(|target| !target.trim().is_empty())
+    else {
+        warn!(
+            channel = channel.name(),
+            "proactive opening enabled without a target"
+        );
+        return;
+    };
+
+    // Never use an outbound opening to enrol a new sender. The target must be
+    // open, allowlisted, or already paired exactly like an inbound DM.
+    let admission = InboundMessage {
+        chat_id: target.clone(),
+        sender_id: Some(target.clone()),
+        ..Default::default()
+    };
+    if !runtime.already_admitted(channel.name(), &admission).await {
+        warn!(
+            channel = channel.name(),
+            target = %target,
+            "proactive opening target is not admitted; no message sent"
+        );
+        return;
+    }
+
+    let url = format!(
+        "{}/api/proactive/opening",
+        runtime.cfg.core_url.trim_end_matches('/')
+    );
+    let agent_id = runtime
+        .cfg
+        .agent_id
+        .clone()
+        .unwrap_or_else(|| "ryu".to_string());
+    let idempotency_key = format!("ryu-opening:v1:{}:{}", channel.name(), target);
+
+    loop {
+        let result = runtime
+            .http
+            .post(&url)
+            .json(&json!({
+                "conversation_id": target.clone(),
+                "agent_id": agent_id.clone(),
+                "idempotency_key": idempotency_key.clone(),
+            }))
+            .send()
+            .await;
+
+        let response = match result {
+            Ok(response) => response,
+            Err(err) => {
+                warn!(channel = channel.name(), %err, "proactive opening could not reach Core; retrying");
+                tokio::time::sleep(PROACTIVE_OPENING_RETRY).await;
+                continue;
+            }
+        };
+
+        let status = response.status();
+        let body = response.json::<Value>().await.unwrap_or_default();
+        if status == reqwest::StatusCode::ACCEPTED
+            || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        {
+            info!(channel = channel.name(), %status, "proactive opening is waiting for the model");
+            tokio::time::sleep(PROACTIVE_OPENING_RETRY).await;
+            continue;
+        }
+        if !status.is_success() {
+            warn!(channel = channel.name(), %status, "proactive opening was refused; no message sent");
+            return;
+        }
+        if body["status"].as_str() != Some("completed") {
+            info!(
+                channel = channel.name(),
+                target = %target,
+                "proactive opening was already delivered; no duplicate sent"
+            );
+            return;
+        }
+
+        let Some(reply) = body["reply"]
+            .as_str()
+            .filter(|reply| !reply.trim().is_empty())
+        else {
+            warn!(
+                channel = channel.name(),
+                "proactive opening completed without a reply"
+            );
+            return;
+        };
+        if let Err(err) = channel.send_message(&target, reply).await {
+            warn!(channel = channel.name(), %err, "proactive opening was generated but could not be delivered");
+        } else {
+            info!(channel = channel.name(), target = %target, "proactive opening delivered");
+        }
+        return;
+    }
+}
+
 // ─── The shared inbound path ────────────────────────────────────────────────
 
 /// Handle one inbound message end to end: gate it, ingest its media, run it, and
@@ -802,7 +1099,10 @@ pub async fn handle_turn<C: Channel + 'static>(
     // 1. Access gate. Groups are static; DMs may issue a pairing challenge, which
     //    is the one "denied" case that still sends a reply.
     let decision = if message.is_group {
-        runtime.cfg.access.decide_group(&message.chat_id)
+        runtime
+            .cfg
+            .access
+            .decide_group_for_sender(message.access_chat(), message.sender_id.as_deref())
     } else {
         runtime
             .cfg
@@ -846,6 +1146,14 @@ pub async fn handle_turn<C: Channel + 'static>(
         }
     }
 
+    // A reaction is an acknowledgement, not a second conversation turn. Keep it
+    // best-effort so a missing reactions scope never blocks the actual answer.
+    if runtime.cfg.lifecycle_reactions && channel.caps().reactions {
+        if let Some(message_id) = message.message_id.as_deref() {
+            let _ = channel.react(&message.chat_id, message_id, "👀").await;
+        }
+    }
+
     // 3. Fold attachments into the turn text (voice → transcript, others → note).
     if !message.attachments.is_empty() {
         message.text = media::annotate(&message.text, &message.attachments);
@@ -860,16 +1168,17 @@ pub async fn handle_turn<C: Channel + 'static>(
 
     // 4. Thread the reply where the platform supports it, and key the Core
     //    conversation to the thread so each one keeps its own history.
-    let conversation_id = if channel.caps().threads {
+    let platform_target = if channel.caps().threads {
         channel.open_thread(&message.chat_id, &message).await
     } else {
         message.chat_id.clone()
     };
+    let conversation_id = runtime.core_conversation_id(&platform_target);
 
     // 5. Typing indicator for the duration of the agent call. The guard aborts on
     //    drop, so every early return below stops it too.
     let _typing = if runtime.cfg.typing_indicator && channel.caps().typing {
-        Some(keep_typing(Arc::clone(&channel), conversation_id.clone()))
+        Some(keep_typing(Arc::clone(&channel), platform_target.clone()))
     } else {
         None
     };
@@ -883,6 +1192,7 @@ pub async fn handle_turn<C: Channel + 'static>(
 
     // 6. Run the turn: Core's session seam when an agent/team is bound (history
     //    persists, governance stays on path), else the legacy gateway pipeline.
+    let mut run_succeeded = true;
     let reply = if runtime.routes_via_core() {
         match runtime
             .run_via_core(
@@ -895,6 +1205,7 @@ pub async fn handle_turn<C: Channel + 'static>(
             Ok(reply) if !reply.is_empty() => reply,
             Ok(_) => "(no response)".to_string(),
             Err(err) => {
+                run_succeeded = false;
                 warn!(channel = platform, %err, "channel Core session run failed");
                 format!("Sorry, something went wrong: {err}")
             }
@@ -904,6 +1215,7 @@ pub async fn handle_turn<C: Channel + 'static>(
         match host.run_pipeline(platform, body).await {
             Ok(response) => extract_reply(&response).unwrap_or_else(|| "(no response)".to_string()),
             Err(err) => {
+                run_succeeded = false;
                 warn!(channel = platform, %err, "channel pipeline run failed");
                 format!("Sorry, something went wrong: {err}")
             }
@@ -912,9 +1224,9 @@ pub async fn handle_turn<C: Channel + 'static>(
 
     // 7. Deliver. Rich text when the platform and the operator both want it.
     let sent = if runtime.cfg.rich_text && channel.caps().rich_text {
-        channel.send_rich(&conversation_id, &reply).await
+        channel.send_rich(&platform_target, &reply).await
     } else {
-        channel.send_message(&conversation_id, &reply).await
+        channel.send_message(&platform_target, &reply).await
     };
     if let Err(err) = sent {
         warn!(
@@ -924,6 +1236,13 @@ pub async fn handle_turn<C: Channel + 'static>(
             "failed to deliver channel reply"
         );
         return;
+    }
+
+    if runtime.cfg.lifecycle_reactions && channel.caps().reactions {
+        if let Some(message_id) = message.message_id.as_deref() {
+            let emoji = if run_succeeded { "✅" } else { "❌" };
+            let _ = channel.react(&message.chat_id, message_id, emoji).await;
+        }
     }
 
     // 8. Optional spoken reply, alongside (never instead of) the text — a voice
@@ -938,7 +1257,7 @@ pub async fn handle_turn<C: Channel + 'static>(
         } else {
             match media::speak(&runtime.http, &runtime.cfg.core_url, &reply).await {
                 Ok(wav) => {
-                    if let Err(err) = channel.send_voice(&conversation_id, wav, delivery).await {
+                    if let Err(err) = channel.send_voice(&platform_target, wav, delivery).await {
                         warn!(channel = platform, %err, "failed to deliver spoken reply");
                     }
                 }
@@ -1042,7 +1361,9 @@ pub async fn run_channel<C: Channel + 'static>(
         DmPolicy::Allowlist | DmPolicy::Disabled => {}
     }
     info!(channel = name, "registering channel");
+    let opening = tokio::spawn(run_proactive_opening(Arc::clone(&channel)));
     let result = Arc::clone(&channel).run(Arc::clone(host)).await;
+    opening.abort();
     if let Err(err) = &result {
         warn!(channel = name, error = %err, "channel loop exited with error");
     }
@@ -1255,6 +1576,32 @@ mod tests {
         assert_eq!(clipped.short_bio.unwrap().chars().count(), 120);
         assert_eq!(clipped.description.unwrap().chars().count(), 512);
         assert!(BotProfile::default().is_empty());
+    }
+
+    #[test]
+    fn store_backed_channel_sessions_are_namespaced_per_bot() {
+        let runtime = ChannelRuntime::new(
+            reqwest::Client::new(),
+            CommonChannelConfig {
+                channel_id: Some("bot-a".to_owned()),
+                ..Default::default()
+            },
+            PairingStore::ephemeral(),
+            None,
+        );
+        assert_eq!(
+            runtime.core_conversation_id("discord:guild-1:channel-1"),
+            "channel:bot-a:discord:guild-1:channel-1"
+        );
+        assert!(runtime.routes_via_core());
+
+        let legacy = ChannelRuntime::new(
+            reqwest::Client::new(),
+            CommonChannelConfig::default(),
+            PairingStore::ephemeral(),
+            None,
+        );
+        assert_eq!(legacy.core_conversation_id("chat-1"), "chat-1");
     }
 
     /// Channel allowlist env reading. Run as ONE sequential test because it

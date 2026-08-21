@@ -69,16 +69,6 @@ pub const CORE_BASE_PORT: u16 = 7980;
 /// The base island loopback control port (release).
 pub const ISLAND_CONTROL_BASE_PORT: u16 = 7989;
 
-/// The base loopback port for the Developer-Mode MCP bridge (release).
-///
-/// Deliberately NOT the ecosystem default 9223: that port is what every Tauri
-/// MCP client (and anything else fishing for one) probes first, and it collides
-/// with any other Tauri app the user is debugging. 8400 also sits clear of the
-/// 7979-8099 band the rest of the stack already occupies, so the plugin's
-/// scan-the-next-100-ports fallback cannot wander onto a Core sidecar's port
-/// while that sidecar is still starting.
-pub const MCP_BRIDGE_BASE_PORT: u16 = 8400;
-
 /// The release channels whose builds activate a profile of the same name — i.e.
 /// the channels that get their OWN data root, ports and keychain slot.
 ///
@@ -200,18 +190,6 @@ pub fn island_control_port() -> u16 {
         }
     }
     port(ISLAND_CONTROL_BASE_PORT)
-}
-
-/// The MCP bridge loopback port for this profile: 8400 release, 9400 dev. An
-/// explicit `RYU_MCP_BRIDGE_PORT` wins, mirroring `island_control_port`, so a
-/// second checkout can be debugged without colliding with the packaged app.
-pub fn mcp_bridge_port() -> u16 {
-    if let Ok(raw) = std::env::var("RYU_MCP_BRIDGE_PORT") {
-        if let Ok(parsed) = raw.trim().parse::<u16>() {
-            return parsed;
-        }
-    }
-    port(MCP_BRIDGE_BASE_PORT)
 }
 
 /// Data-dir suffix for an arbitrary profile name: `""` for release

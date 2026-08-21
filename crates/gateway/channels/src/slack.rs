@@ -58,7 +58,7 @@ use crate::{
     pairing::PairingStore,
     status::{StatusReporter, HEARTBEAT_INTERVAL},
     unpack_thread, Channel, ChannelCaps, ChannelHost, ChannelRuntime, GroupReplyMode,
-    InboundMessage, SlackChannelConfig,
+    InboundMessage, SlackChannelConfig, SlackChannelOptions,
 };
 
 /// Slack Web API base. Socket Mode is opened from here; replies post here too.
@@ -90,7 +90,12 @@ const THINKING_STATUS: &str = "is thinking…";
 /// carrying an attachment `file_share`. Listing what is allowed (rather than
 /// what is denied) keeps the original conservatism — an unrecognised system
 /// subtype is still ignored — while letting media through.
-const ALLOWED_SUBTYPES: &[&str] = &["file_share", "me_message", "thread_broadcast"];
+const ALLOWED_SUBTYPES: &[&str] = &[
+    "bot_message",
+    "file_share",
+    "me_message",
+    "thread_broadcast",
+];
 
 pub struct SlackChannel {
     /// Core route, access policy, pairing store, command cache — everything the
@@ -105,6 +110,7 @@ pub struct SlackChannel {
     /// Threads the bot is already answering in, so a follow-up in the same thread
     /// does not need to re-@mention it. Keyed by the packed conversation key.
     active_threads: Mutex<HashSet<String>>,
+    options: SlackChannelOptions,
 }
 
 impl SlackChannel {
@@ -132,12 +138,24 @@ impl SlackChannel {
         if cfg.bot_token.trim().is_empty() {
             anyhow::bail!("slack channel bot_token is empty");
         }
+        let mut common = cfg.common;
+        for channel_id in &cfg.options.allowed_channels {
+            if !common
+                .access
+                .group_allowlist
+                .iter()
+                .any(|id| id == channel_id)
+            {
+                common.access.group_allowlist.push(channel_id.clone());
+            }
+        }
         Ok(Self {
-            runtime: ChannelRuntime::new(http, cfg.common, pairing, status),
+            runtime: ChannelRuntime::new(http, common, pairing, status),
             app_token: cfg.app_token,
             bot_token: cfg.bot_token,
             bot_user_id: OnceLock::new(),
             active_threads: Mutex::new(HashSet::new()),
+            options: cfg.options,
         })
     }
 
@@ -203,13 +221,48 @@ impl SlackChannel {
         let (channel, thread_ts) = unpack_thread(chat_id);
         let url = format!("{SLACK_API_BASE}/chat.postMessage");
 
+        let text = match self.options.reply_prefix.as_deref() {
+            Some(prefix) if !prefix.is_empty() => format!("{prefix}{text}"),
+            _ => text.to_string(),
+        };
         let mut payload = json!({
             "channel": channel,
             "text": text,
         });
+        if (self.options.rich_blocks || self.options.feedback_buttons)
+            && text.chars().count() <= 3000
+        {
+            let mut blocks = vec![json!({
+                "type": "section",
+                "text": { "type": "mrkdwn", "text": text },
+            })];
+            if self.options.feedback_buttons {
+                blocks.push(json!({
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": { "type": "plain_text", "text": "Helpful" },
+                            "action_id": "ryu_feedback_helpful",
+                            "value": "helpful",
+                        },
+                        {
+                            "type": "button",
+                            "text": { "type": "plain_text", "text": "Needs work" },
+                            "action_id": "ryu_feedback_needs_work",
+                            "value": "needs_work",
+                        },
+                    ],
+                }));
+            }
+            payload["blocks"] = Value::Array(blocks);
+        }
         // Reply in-thread so multi-turn conversations stay grouped.
-        if let Some(ts) = thread_ts {
-            payload["thread_ts"] = json!(ts);
+        if self.options.reply_in_thread {
+            if let Some(ts) = thread_ts {
+                payload["thread_ts"] = json!(ts);
+                payload["reply_broadcast"] = json!(self.options.reply_broadcast);
+            }
         }
 
         let body: ApiAck = self
@@ -367,6 +420,69 @@ impl SlackChannel {
         }
         Err(anyhow::anyhow!(message))
     }
+
+    /// Clear the assistant status after the final reply. Slack's status API is
+    /// best-effort for ordinary bot tokens, just like `send_typing`.
+    async fn clear_typing(&self, chat_id: &str) {
+        let (channel, Some(thread_ts)) = unpack_thread(chat_id) else {
+            return;
+        };
+        let result = self
+            .http()
+            .post(format!("{SLACK_API_BASE}/assistant.threads.setStatus"))
+            .bearer_auth(&self.bot_token)
+            .json(&json!({
+                "channel_id": channel,
+                "thread_ts": thread_ts,
+                "status": "",
+            }))
+            .send()
+            .await;
+        if let Err(err) = result {
+            debug!(%err, "slack assistant status clear failed");
+        }
+    }
+
+    /// Acknowledge feedback buttons rendered in rich replies. Socket Mode
+    /// delivers interactive payloads on the same WebSocket as messages; the
+    /// envelope is acknowledged by the caller, while the reaction gives the
+    /// person a visible confirmation without starting another agent turn.
+    async fn handle_interactive(&self, raw: &str) -> bool {
+        let value: Value = match serde_json::from_str(raw) {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        if value["type"].as_str() != Some("interactive") {
+            return false;
+        }
+
+        let payload = &value["payload"];
+        if payload["type"].as_str() != Some("block_actions") {
+            return true;
+        }
+        let action_id = payload["actions"]
+            .as_array()
+            .and_then(|actions| actions.first())
+            .and_then(|action| action["action_id"].as_str());
+        let emoji = match action_id {
+            Some("ryu_feedback_helpful") => "white_check_mark",
+            Some("ryu_feedback_needs_work") => "x",
+            _ => return true,
+        };
+        if !self.options.feedback_buttons {
+            return true;
+        }
+        let channel = payload["container"]["channel_id"]
+            .as_str()
+            .or_else(|| payload["channel"]["id"].as_str());
+        let message_ts = payload["container"]["message_ts"]
+            .as_str()
+            .or_else(|| payload["message"]["ts"].as_str());
+        if let (Some(channel), Some(message_ts)) = (channel, message_ts) {
+            let _ = self.react(channel, message_ts, emoji).await;
+        }
+        true
+    }
 }
 
 #[async_trait]
@@ -413,14 +529,18 @@ impl Channel for SlackChannel {
     }
 
     async fn send_message(&self, chat_id: &str, text: &str) -> anyhow::Result<()> {
-        self.post_text(chat_id, text).await
+        for chunk in split_slack_text(text, 4000) {
+            self.post_text(chat_id, &chunk).await?;
+        }
+        self.clear_typing(chat_id).await;
+        Ok(())
     }
 
     /// Post the reply as mrkdwn. Without the conversion Slack renders the agent's
     /// CommonMark literally: `**bold**` shows its asterisks and `[a](b)` shows its
     /// brackets.
     async fn send_rich(&self, chat_id: &str, markdown: &str) -> anyhow::Result<()> {
-        self.post_text(chat_id, &to_mrkdwn(markdown)).await
+        self.send_message(chat_id, &to_mrkdwn(markdown)).await
     }
 
     /// Show that the agent is working.
@@ -436,9 +556,6 @@ impl Channel for SlackChannel {
     /// exactly one wasted call per turn instead of one every interval. The error
     /// never reaches the message loop.
     ///
-    /// The status is not cleared explicitly when the turn ends: the shared path
-    /// drops the typing guard after the reply is sent and offers no post-send
-    /// hook, so the last status set is the last one asserted.
     async fn send_typing(&self, chat_id: &str) -> anyhow::Result<()> {
         // Slack scopes the status to a thread; with no thread there is nothing to
         // set, which is not a failure.
@@ -527,6 +644,9 @@ impl Channel for SlackChannel {
     /// what keeps a busy channel readable. No API call is needed; on Slack a
     /// thread comes into existence when the first reply carries `thread_ts`.
     async fn open_thread(&self, chat_id: &str, message: &InboundMessage) -> String {
+        if !self.options.reply_in_thread {
+            return chat_id.to_string();
+        }
         conversation_key(chat_id, message.message_id.as_deref())
     }
 
@@ -628,9 +748,36 @@ impl Channel for SlackChannel {
                             let _ = ws.send(WsMessage::Text(ack)).await;
                         }
 
-                        let Some(parsed) = parse_inbound(&payload) else {
+                        if self.handle_interactive(&payload).await {
+                            continue;
+                        }
+
+                        let Some(parsed) =
+                            parse_inbound(&payload).or_else(|| parse_slash_command(&payload))
+                        else {
                             continue;
                         };
+
+                        if self
+                            .options
+                            .ignored_channels
+                            .iter()
+                            .any(|channel| channel == &parsed.channel)
+                        {
+                            debug!(channel = %parsed.channel, "slack: channel is ignored");
+                            continue;
+                        }
+                        if !parsed.is_dm
+                            && !self.options.allowed_channels.is_empty()
+                            && !self
+                                .options
+                                .allowed_channels
+                                .iter()
+                                .any(|channel| channel == &parsed.channel)
+                        {
+                            debug!(channel = %parsed.channel, "slack: channel is not allowed");
+                            continue;
+                        }
 
                         // Second loop guard, on the bot's own USER id rather than
                         // on `bot_id`. It matters now that the adapter uploads
@@ -648,7 +795,7 @@ impl Channel for SlackChannel {
                         // two cannot drift) because the active-thread memory is
                         // keyed by it.
                         let conversation =
-                            conversation_key(&parsed.channel, Some(&parsed.message_id));
+                            conversation_key(&parsed.channel, parsed.message_id.as_deref());
 
                         // Honour the admin's group-reply choice. A channel message
                         // that doesn't address the bot is dropped here, before any
@@ -657,11 +804,12 @@ impl Channel for SlackChannel {
                             .active_threads
                             .lock()
                             .is_ok_and(|threads| threads.contains(&conversation));
-                        let Some(text) = decide_reply(
+                        let Some(text) = decide_reply_with_options(
                             &parsed,
                             self.runtime.cfg.group_reply_mode,
                             self.bot_user_id(),
                             in_active_thread,
+                            &self.options,
                         ) else {
                             debug!(
                                 channel = %parsed.channel,
@@ -671,7 +819,7 @@ impl Channel for SlackChannel {
                         };
                         // The bot now owns this thread: follow-ups in it continue
                         // without a re-@mention (matches the hosted connector).
-                        if !parsed.is_dm {
+                        if !parsed.is_dm && self.options.reply_in_thread {
                             if let Ok(mut threads) = self.active_threads.lock() {
                                 threads.insert(conversation);
                             }
@@ -681,6 +829,7 @@ impl Channel for SlackChannel {
                             // The BARE channel id: the group allowlist is written
                             // in channel ids, and `open_thread` adds the thread.
                             chat_id: parsed.channel,
+                            access_chat_id: None,
                             text,
                             // Slack events carry a user id, not a display name;
                             // resolving it needs `users:read` and a call per
@@ -688,7 +837,7 @@ impl Channel for SlackChannel {
                             // no name is claimed.
                             author_name: None,
                             sender_id: parsed.sender_id,
-                            message_id: Some(parsed.message_id),
+                            message_id: parsed.message_id,
                             is_group: !parsed.is_dm,
                             attachments: parsed.attachments,
                         };
@@ -809,10 +958,15 @@ struct SlackInbound {
     /// the rare event that omits it; the gate then falls back to the channel.
     sender_id: Option<String>,
     /// The triggering `ts`, packed with its parent thread anchor when there is
-    /// one. See [`pack_message_id`].
-    message_id: String,
+    /// one. Slash-command frames have no message timestamp and therefore keep
+    /// this empty so they do not manufacture an invalid Slack `thread_ts`.
+    message_id: Option<String>,
     /// Files shared with the message.
     attachments: Vec<Attachment>,
+    /// Slash-command frames are already addressed, even when they target a
+    /// channel whose ordinary messages are mention-gated.
+    force_reply: bool,
+    is_bot: bool,
 }
 
 impl SlackInbound {
@@ -845,11 +999,6 @@ fn parse_inbound(raw: &str) -> Option<SlackInbound> {
             return None;
         }
     }
-    // Ignore anything posted by a bot, including our own replies (loop guard).
-    if event.get("bot_id").and_then(Value::as_str).is_some() {
-        return None;
-    }
-
     let channel = event["channel"].as_str()?;
     let text = event["text"].as_str().unwrap_or_default().trim();
     let attachments = parse_files(event);
@@ -874,8 +1023,38 @@ fn parse_inbound(raw: &str) -> Option<SlackInbound> {
             .and_then(Value::as_str)
             .filter(|u| !u.is_empty())
             .map(str::to_string),
-        message_id: pack_message_id(ts, thread_ts),
+        message_id: Some(pack_message_id(ts, thread_ts)),
         attachments,
+        force_reply: false,
+        is_bot: event.get("bot_id").and_then(Value::as_str).is_some(),
+    })
+}
+
+fn parse_slash_command(raw: &str) -> Option<SlackInbound> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    if value["type"].as_str() != Some("slash_commands") {
+        return None;
+    }
+    let payload = &value["payload"];
+    let command = payload["command"].as_str()?.trim();
+    let text = payload["text"].as_str().unwrap_or_default().trim();
+    let mut routed = command.to_string();
+    if !text.is_empty() {
+        routed.push(' ');
+        routed.push_str(text);
+    }
+    let channel = payload["channel_id"].as_str()?.to_string();
+    Some(SlackInbound {
+        channel,
+        text: routed,
+        is_dm: payload["channel_name"].as_str() == Some("directmessage"),
+        sender_id: payload["user_id"].as_str().map(str::to_string),
+        // A slash command is addressed, but Slack's trigger/command ids are
+        // not message timestamps and cannot be used as a thread anchor.
+        message_id: None,
+        attachments: Vec::new(),
+        force_reply: true,
+        is_bot: false,
     })
 }
 
@@ -973,15 +1152,35 @@ fn strip_mentions(text: &str) -> String {
 /// Returns the text to route, or `None` to ignore the message. An EMPTY string is
 /// a legitimate answer when media was attached — [`handle_turn`] turns the
 /// attachment into the prompt (a transcript, or a bracketed note).
+#[cfg(test)]
 fn decide_reply(
     inbound: &SlackInbound,
     mode: GroupReplyMode,
     bot_user_id: &str,
     in_active_thread: bool,
 ) -> Option<String> {
+    decide_reply_with_options(
+        inbound,
+        mode,
+        bot_user_id,
+        in_active_thread,
+        &SlackChannelOptions::default(),
+    )
+}
+
+fn decide_reply_with_options(
+    inbound: &SlackInbound,
+    mode: GroupReplyMode,
+    bot_user_id: &str,
+    in_active_thread: bool,
+    options: &SlackChannelOptions,
+) -> Option<String> {
+    if inbound.is_bot && !options.allow_bots {
+        return None;
+    }
     let stripped = strip_mentions(&inbound.text);
 
-    if inbound.is_dm {
+    if inbound.is_dm || inbound.force_reply {
         if !stripped.is_empty() {
             return Some(stripped);
         }
@@ -992,8 +1191,26 @@ fn decide_reply(
     }
 
     let gate_evaluable = !bot_user_id.is_empty();
-    let addressed = mentions_bot(&inbound.text, bot_user_id) || in_active_thread;
-    if mode == GroupReplyMode::Mentions && gate_evaluable && !addressed {
+    let pattern_match = options.mention_patterns.iter().any(|pattern| {
+        let pattern = pattern.trim().to_ascii_lowercase();
+        !pattern.is_empty() && inbound.text.to_ascii_lowercase().contains(&pattern)
+    });
+    let mention_required = !options.require_mention_channels.is_empty()
+        && options
+            .require_mention_channels
+            .iter()
+            .any(|channel| channel == &inbound.channel);
+    let free_response = options
+        .free_response_channels
+        .iter()
+        .any(|channel| channel == &inbound.channel);
+    let addressed = mentions_bot(&inbound.text, bot_user_id) || pattern_match;
+    let active_thread = in_active_thread
+        && !options.strict_mention
+        && !options.thread_require_mention
+        && !mention_required;
+    let mention_gate = mode == GroupReplyMode::Mentions || mention_required;
+    if mention_gate && gate_evaluable && !addressed && !active_thread && !free_response {
         return None;
     }
 
@@ -1006,6 +1223,35 @@ fn decide_reply(
 }
 
 // ─── CommonMark → Slack mrkdwn ─────────────────────────────────────────────────
+
+/// Split a Slack message without breaking UTF-8 or exceeding the Web API cap.
+fn split_slack_text(input: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 {
+        return vec![input.to_string()];
+    }
+    let chars: Vec<char> = input.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    let mut parts = Vec::new();
+    let mut start = 0;
+    while chars.len() - start > max_chars {
+        let mut end = start + max_chars;
+        for index in (start + 1..=end).rev() {
+            if chars[index - 1] == '\n' {
+                end = index;
+                break;
+            }
+        }
+        parts.push(chars[start..end].iter().collect());
+        start = end;
+        while chars.get(start) == Some(&'\n') {
+            start += 1;
+        }
+    }
+    parts.push(chars[start..].iter().collect());
+    parts
+}
 
 /// How deeply emphasis may nest before the converter stops interpreting it.
 /// Pathological input ("`*`" a thousand times) should degrade to literal text,
@@ -1345,6 +1591,7 @@ mod tests {
                 model: "gpt-4o".to_string(),
                 ..Default::default()
             },
+            options: SlackChannelOptions::default(),
         }
     }
 
@@ -1462,7 +1709,7 @@ mod tests {
             "envelope_id": "e1",
             "payload": {
                 "event": {
-                    "type": "message",
+                "type": "message",
                     "channel": "C999",
                     "user": "U1",
                     "text": "hello bot",
@@ -1478,7 +1725,7 @@ mod tests {
         assert_eq!(inbound.channel, "C999");
         assert_eq!(inbound.sender_id.as_deref(), Some("U1"));
         assert_eq!(
-            conversation_key(&inbound.channel, Some(&inbound.message_id)),
+            conversation_key(&inbound.channel, inbound.message_id.as_deref()),
             "C999:111.222"
         );
     }
@@ -1490,6 +1737,7 @@ mod tests {
             "payload": {
                 "event": {
                     "type": "message",
+                    "subtype": "bot_message",
                     "channel": "C999",
                     "text": "in a thread",
                     "ts": "333.444",
@@ -1500,7 +1748,7 @@ mod tests {
         .to_string();
         let inbound = parse_inbound(&raw).unwrap();
         assert_eq!(
-            conversation_key(&inbound.channel, Some(&inbound.message_id)),
+            conversation_key(&inbound.channel, inbound.message_id.as_deref()),
             "C999:111.222"
         );
     }
@@ -1520,7 +1768,16 @@ mod tests {
             }
         })
         .to_string();
-        assert!(parse_inbound(&raw).is_none());
+        let inbound = parse_inbound(&raw).expect("bot messages remain available for allow_bots");
+        assert!(inbound.is_bot);
+        assert!(decide_reply_with_options(
+            &inbound,
+            GroupReplyMode::All,
+            "U999",
+            false,
+            &SlackChannelOptions::default(),
+        )
+        .is_none());
     }
 
     #[test]
@@ -1547,6 +1804,33 @@ mod tests {
         assert!(parse_inbound(&hello).is_none());
     }
 
+    #[test]
+    fn slash_commands_are_addressed_without_a_message_thread_anchor() {
+        let raw = json!({
+            "type": "slash_commands",
+            "payload": {
+                "command": "/hermes",
+                "text": "status",
+                "channel_id": "C999",
+                "channel_name": "general",
+                "user_id": "U1",
+                "trigger_id": "123.456.789"
+            }
+        })
+        .to_string();
+        let inbound = parse_slash_command(&raw).unwrap();
+        assert!(inbound.force_reply);
+        assert_eq!(inbound.message_id, None);
+        assert_eq!(
+            conversation_key(&inbound.channel, inbound.message_id.as_deref()),
+            "C999"
+        );
+        assert_eq!(
+            decide_reply(&inbound, GroupReplyMode::Mentions, "UBOT", false).as_deref(),
+            Some("/hermes status")
+        );
+    }
+
     /// Verify that the conversation key derived from `parse_inbound` is stable per
     /// channel/thread — the same raw frame always yields the same conversation_id
     /// so multi-turn context is preserved across messages in the same thread.
@@ -1569,7 +1853,7 @@ mod tests {
         .to_string();
         let key = |raw: &str| {
             let parsed = parse_inbound(raw).unwrap();
-            conversation_key(&parsed.channel, Some(&parsed.message_id))
+            conversation_key(&parsed.channel, parsed.message_id.as_deref())
         };
         // conversation_id must be deterministic for the same channel+thread…
         assert_eq!(key(&frame), key(&frame));
@@ -1599,7 +1883,7 @@ mod tests {
         };
         let key = |raw: String| {
             let parsed = parse_inbound(&raw).unwrap();
-            conversation_key(&parsed.channel, Some(&parsed.message_id))
+            conversation_key(&parsed.channel, parsed.message_id.as_deref())
         };
         assert_ne!(key(frame("1.1", "1.0")), key(frame("2.1", "2.0")));
     }
@@ -1701,8 +1985,10 @@ mod tests {
             text: text.to_string(),
             is_dm,
             sender_id: Some("U1".to_string()),
-            message_id: "1.0".to_string(),
+            message_id: Some("1.0".to_string()),
             attachments: Vec::new(),
+            force_reply: false,
+            is_bot: false,
         }
     }
 

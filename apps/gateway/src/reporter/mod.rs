@@ -6,13 +6,14 @@
 //! across every user and machine on that budget.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use tracing::{debug, warn};
 
 use crate::{
-    audit::{AuditEntry, AuditQuery},
+    audit::{AuditEntry, AuditQuery, AuditSummary},
     config::ControlPlaneConfig,
     state::SharedState,
 };
@@ -54,6 +55,19 @@ fn cost_micro_usd(state: &SharedState, input: u64, output: u64) -> u64 {
     (input + output).saturating_mul(per_1k) / 1000
 }
 
+/// Use provider-reported transaction costs wherever the managed provider gave
+/// one (notably OpenRouter's discounted `usage.cost`), and estimate only the
+/// managed rows that had no provider cost to report.
+fn summary_cost_micro_usd(state: &SharedState, summary: &AuditSummary) -> u64 {
+    summary
+        .reported_cost_micro_usd
+        .saturating_add(cost_micro_usd(
+            state,
+            summary.unpriced_input_tokens,
+            summary.unpriced_output_tokens,
+        ))
+}
+
 /// Length of the leading `YYYY-MM-DD` slice of a SQLite `datetime('now')`
 /// timestamp (always UTC), used as the per-day rollup key.
 const DAY_KEY_LEN: usize = 10;
@@ -84,9 +98,8 @@ struct UserDailyBucket {
     /// Per-transport request counts. Gateway-observed rows are exact; ACP rows can
     /// be added later by Core/app-observed usage events.
     by_transport: HashMap<String, u64>,
-    /// Real per-model spend for the day (#9): summed per-row using the
-    /// control-plane price table (falls back to the flat rate when a model isn't
-    /// priced), rather than one flat estimate over the aggregated token totals.
+    /// Managed per-model spend for the day: use the provider-reported transaction
+    /// price when available, and the control-plane price table only as fallback.
     cost_micro: u64,
 }
 
@@ -99,11 +112,13 @@ impl UserDailyBucket {
             self.request_count = self.request_count.saturating_add(1);
             *self.by_model.entry(entry.model.clone()).or_insert(0) += 1;
             *self.by_transport.entry("gateway".to_string()).or_insert(0) += 1;
-            self.cost_micro = self.cost_micro.saturating_add(cp.cost_for(
-                &entry.model,
-                entry.input_tokens,
-                entry.output_tokens,
-            ));
+            if entry.managed_inference {
+                self.cost_micro =
+                    self.cost_micro
+                        .saturating_add(entry.provider_cost_micro_usd.unwrap_or_else(|| {
+                            cp.cost_for(&entry.model, entry.input_tokens, entry.output_tokens)
+                        }));
+            }
         }
         if let Some(skill_ids) = &entry.skill_ids {
             for skill in skill_ids
@@ -181,7 +196,8 @@ fn build_user_daily(state: &SharedState, entries: &[AuditEntry]) -> Vec<Value> {
                 "requestCount": bucket.request_count,
                 "sessionCount": bucket.sessions.len() as u64,
                 "agentSeconds": bucket.agent_ms / MS_PER_SEC,
-                // Real per-model spend (#9), summed per row via the price table.
+                // Managed spend, summed per row from provider transaction costs
+                // with the control-plane price table as the explicit fallback.
                 "costMicroUsd": bucket.cost_micro,
                 "byFeature": bucket.by_feature_json(),
                 "byModel": bucket.by_model,
@@ -205,7 +221,7 @@ struct AgentDailyBucket {
     agent_ms: u64,
     /// Per-model request counts.
     by_model: HashMap<String, u64>,
-    /// Real per-model spend for the day (#9). See [`UserDailyBucket::cost_micro`].
+    /// Managed per-model spend for the day. See [`UserDailyBucket::cost_micro`].
     cost_micro: u64,
 }
 
@@ -218,11 +234,13 @@ impl AgentDailyBucket {
         if entry.event_type == "model_call" {
             self.request_count = self.request_count.saturating_add(1);
             *self.by_model.entry(entry.model.clone()).or_insert(0) += 1;
-            self.cost_micro = self.cost_micro.saturating_add(cp.cost_for(
-                &entry.model,
-                entry.input_tokens,
-                entry.output_tokens,
-            ));
+            if entry.managed_inference {
+                self.cost_micro =
+                    self.cost_micro
+                        .saturating_add(entry.provider_cost_micro_usd.unwrap_or_else(|| {
+                            cp.cost_for(&entry.model, entry.input_tokens, entry.output_tokens)
+                        }));
+            }
         }
         if let Some(session) = &entry.session_id {
             self.sessions.insert(session.clone());
@@ -285,13 +303,17 @@ async fn push_report(state: &SharedState) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing gateway key"))?;
 
     let summary = state.audit.summary()?;
-    let cost = cost_micro_usd(state, summary.input_tokens, summary.output_tokens);
+    let cost = summary_cost_micro_usd(state, &summary);
     let eval_scores = state.evals.all_provider_scores();
 
+    let cursor = state.report_cursor.load(Ordering::Acquire);
     let entries = state.audit.query(&AuditQuery {
+        id_after: Some(cursor),
         limit: Some(cfg.audit_limit),
         ..Default::default()
     })?;
+    let next_cursor = entries.last().map(|entry| entry.id).unwrap_or(cursor);
+    let report_key = format!("audit:{cursor}-{next_cursor}");
     let audit: Vec<Value> = entries
         .iter()
         .map(|e| {
@@ -299,14 +321,20 @@ async fn push_report(state: &SharedState) -> anyhow::Result<()> {
                 "id": e.id,
                 "timestamp": e.timestamp,
                 "requestId": e.request_id,
+                "eventType": e.event_type,
                 "apiKey": e.api_key,
                 "userName": e.user_name,
+                "backend": e.backend,
+                "command": e.command,
+                "actorId": e.user_id,
                 "teamId": e.team_id,
                 "projectId": e.project_id,
                 "provider": e.provider,
                 "model": e.model,
                 "inputTokens": e.input_tokens,
                 "outputTokens": e.output_tokens,
+                "managedInference": e.managed_inference,
+                "providerCostMicroUsd": e.provider_cost_micro_usd,
                 "latencyMs": e.latency_ms,
                 "evalScore": e.eval_score,
                 "error": e.error,
@@ -328,6 +356,7 @@ async fn push_report(state: &SharedState) -> anyhow::Result<()> {
         "report": {
             "windowStart": now_ms().saturating_sub(cfg.report_interval_secs * 1000),
             "windowEnd": now_ms(),
+            "reportKey": report_key,
             "inputTokens": summary.input_tokens,
             "outputTokens": summary.output_tokens,
             "costMicroUsd": cost,
@@ -363,6 +392,8 @@ async fn push_report(state: &SharedState) -> anyhow::Result<()> {
         anyhow::bail!("ingest returned {status}: {body}");
     }
 
+    state.report_cursor.store(next_cursor, Ordering::Release);
+
     debug!(
         requests = summary.request_count,
         cost_micro_usd = cost,
@@ -387,7 +418,7 @@ async fn reconcile_budget(state: &SharedState) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing gateway key"))?;
 
     let summary = state.audit.summary()?;
-    let consumed = cost_micro_usd(state, summary.input_tokens, summary.output_tokens);
+    let consumed = summary_cost_micro_usd(state, &summary);
 
     let url = format!(
         "{}/aggregation/budgets/{}/reserve",
@@ -462,6 +493,8 @@ mod tests {
             user_id: None,
             agent_id: None,
             feature: None,
+            managed_inference: true,
+            provider_cost_micro_usd: None,
             widget_instance_id: None,
         }
     }
@@ -472,6 +505,32 @@ mod tests {
         // Default control-plane rate is 2000 micro-USD / 1k combined tokens.
         assert_eq!(cost_micro_usd(&state, 500, 500), 2000);
         assert_eq!(cost_micro_usd(&state, 0, 0), 0);
+    }
+
+    #[test]
+    fn summary_cost_prefers_provider_transaction_cost_and_estimates_only_missing_rows() {
+        let state = test_state();
+        let summary = AuditSummary {
+            input_tokens: 1_000,
+            output_tokens: 1_000,
+            reported_cost_micro_usd: 125,
+            unpriced_input_tokens: 500,
+            unpriced_output_tokens: 500,
+            ..Default::default()
+        };
+        // 125 reported + 1000 tokens * 2000/1k = 2125 micro-USD.
+        assert_eq!(summary_cost_micro_usd(&state, &summary), 2_125);
+    }
+
+    #[test]
+    fn daily_rollup_uses_the_provider_transaction_cost() {
+        let state = test_state();
+        let mut entry = base_entry();
+        entry.user_id = Some("u1".to_string());
+        entry.input_tokens = 1_000;
+        entry.provider_cost_micro_usd = Some(125);
+        let rows = build_user_daily(&state, &[entry]);
+        assert_eq!(rows[0]["costMicroUsd"], 125);
     }
 
     #[test]

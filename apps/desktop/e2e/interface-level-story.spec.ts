@@ -1,118 +1,120 @@
-// Real-browser spec for the interface-level story (`e2e/harness/
+// Real-browser spec for the interface-mode story (`e2e/harness/
 // interface-level-story.{html,tsx}`), which mounts the REAL
-// `InterfaceLevelSubmenu` inside a REAL account-shaped dropdown.
+// `InterfaceLevelMenuItem` inside a REAL account-shaped dropdown.
 //
 // The contract under test:
-//   • four detents, one per level (Simple · Standard · Advanced · Expert), with
-//     Simple as the default an untouched install lands on;
-//   • the fill uses the SHARED level ramp — green at the bottom, purple at the
-//     top. The ramp's top stop is a CSS variable declared by `LEVEL_RAMP_CLASS`,
-//     so a missing class does not dull the fill, it deletes it;
-//   • Arrow keys move the VALUE, not the menu's row highlight, and the menu
-//     stays open — a slider inside a menu has to trap keys and not be an item;
-//   • moving the ladder WRITES the prefs it implies (Detail level "None" at
-//     Simple, run stats only at Expert) rather than shadowing them.
+//   • one binary switch between Ryu Work and Code, with Ryu Work as the default
+//     an untouched install lands on;
+//   • Code uses the Google gradient animation shared with decosmicweb;
+//   • clicking the switch keeps the account menu open and writes the prefs it implies
+//     (hidden compact detail at Ryu Work, full detail and run stats in Code).
 
 import { expect, type Page, test } from "@playwright/test";
 
-// Cold Vite compiles the dropdown + motion module graph on first navigation.
+// Cold Vite compiles the dropdown + shared UI module graph on first navigation.
 test.describe.configure({ timeout: 90_000 });
 
 const STORY_URL = "/interface-level-story.html";
 
-async function openLadder(page: Page) {
+async function openModePicker(page: Page) {
 	await page.goto(STORY_URL);
 	const trigger = page.getByRole("button", { name: "Account" });
 	await expect(trigger).toBeVisible();
 	await trigger.click();
-	// The ladder lives one level down, behind its own sub-trigger.
-	await page.getByText("Interface level").click();
 	await expect(
-		page.getByRole("slider", { name: "Interface level" })
+		page.getByRole("switch", { name: "Interface mode" })
 	).toBeVisible();
+	await expect(page.getByRole("menu")).toHaveCount(1);
 }
 
-test("the ladder has one detent per level and starts on Simple", async ({
+test("the control is a binary switch and starts in Ryu Work", async ({
 	page,
 }) => {
-	await openLadder(page);
-	const slider = page.getByRole("slider", { name: "Interface level" });
-	await expect(slider).toHaveAttribute("aria-valuemax", "3");
-	await expect(slider).toHaveAttribute("aria-valuenow", "0");
-	await expect(slider).toHaveAttribute("aria-valuetext", "Simple");
+	await openModePicker(page);
+	const toggle = page.getByRole("switch", { name: "Interface mode" });
+	const firstMenuItem = page.getByRole("menuitem").first();
+	await expect(firstMenuItem).toContainText("Ryu Work");
+	await expect(firstMenuItem.locator("svg")).toHaveCount(0);
+	await expect(page.getByRole("slider")).toHaveCount(0);
+	await expect(toggle).toHaveAttribute("aria-checked", "false");
+	await expect(
+		page.getByText("Ryu Work", { exact: true }).first()
+	).toBeVisible();
+	await expect(page.getByText("Code", { exact: true }).first()).toBeVisible();
 });
 
-test("arrow keys move the value and the menu stays open", async ({ page }) => {
-	await openLadder(page);
-	const slider = page.getByRole("slider", { name: "Interface level" });
-	await slider.focus();
-	await page.keyboard.press("ArrowRight");
-	await expect(slider).toHaveAttribute("aria-valuetext", "Standard");
-	await page.keyboard.press("End");
-	await expect(slider).toHaveAttribute("aria-valuetext", "Expert");
-	// Still open — a nudge must not dismiss the menu it lives in.
-	await expect(slider).toBeVisible();
+test("clicking the switch moves between Ryu Work and Code", async ({
+	page,
+}) => {
+	await openModePicker(page);
+	const toggle = page.getByRole("switch", { name: "Interface mode" });
+	await toggle.click();
+	await expect(toggle).toHaveAttribute("aria-checked", "true");
+	await expect(page.getByTestId("ryu:interface-level")).toHaveText("expert");
+	await expect(toggle).toBeVisible();
+
+	await toggle.click();
+	await expect(toggle).toHaveAttribute("aria-checked", "false");
+	await expect(page.getByTestId("ryu:interface-level")).toHaveText("simple");
 });
 
-test("moving the ladder writes the prefs it implies", async ({ page }) => {
-	await openLadder(page);
-	const slider = page.getByRole("slider", { name: "Interface level" });
-	await slider.focus();
+test("the inline switch is keyboard-operable without closing the account menu", async ({
+	page,
+}) => {
+	await openModePicker(page);
+	const toggle = page.getByRole("switch", { name: "Interface mode" });
 
-	// Expert: the full transcript, commands expanded, run stats on.
-	await page.keyboard.press("End");
+	await toggle.focus();
+	await page.keyboard.press("Space");
+	await expect(toggle).toHaveAttribute("aria-checked", "true");
+	await expect(page.getByRole("menu")).toHaveCount(1);
+
+	await page.keyboard.press("Space");
+	await expect(toggle).toHaveAttribute("aria-checked", "false");
+});
+
+test("switching modes writes the prefs each mode implies", async ({ page }) => {
+	await openModePicker(page);
+	const toggle = page.getByRole("switch", { name: "Interface mode" });
+	await page.evaluate(() =>
+		localStorage.setItem("ryu:sidebar-mode", "sections")
+	);
+
+	// Code: the full transcript, commands expanded, run stats on.
+	await toggle.click();
 	await expect(page.getByTestId("ryu:interface-level")).toHaveText("expert");
 	await expect(page.getByTestId("ryu:hide-tool-detail")).toHaveText("false");
 	await expect(page.getByTestId("ryu:expand-commands")).toHaveText("true");
 	await expect(page.getByTestId("ryu:inference-stats")).toHaveText("true");
+	await expect(page.getByTestId("ryu:sidebar-mode")).toHaveText("sections");
 
-	// Back to Simple: nothing expanded, no tool detail at all, stats back off.
-	await page.keyboard.press("Home");
+	// Back to Ryu Work: nothing expanded, no tool detail at all, stats back off.
+	await toggle.click();
 	await expect(page.getByTestId("ryu:interface-level")).toHaveText("simple");
 	await expect(page.getByTestId("ryu:hide-tool-detail")).toHaveText("true");
 	await expect(page.getByTestId("ryu:expand-commands")).toHaveText("false");
 	await expect(page.getByTestId("ryu:inference-stats")).toHaveText("false");
+	await expect(page.getByTestId("ryu:sidebar-mode")).toHaveText("agent");
 });
 
-/**
- * The fill's own computed colour, read back after the cross-fade settles. It is
- * built from `color-mix` over theme vars, and an invalid mix does not fall back
- * to something duller — the declaration is dropped and the fill goes colourless.
- */
-async function fillColor(page: Page): Promise<string> {
-	await page.waitForTimeout(500);
-	return await page
-		.locator("[data-slot='slider'] > div")
-		.first()
-		.evaluate((el) => getComputedStyle(el).backgroundColor);
-}
+test("Code uses the animated Google gradient", async ({ page }) => {
+	await openModePicker(page);
+	const toggle = page.getByRole("switch", { name: "Interface mode" });
+	await toggle.click();
 
-/** oklab components of a computed colour, or null when it is not painted. */
-function oklab(color: string): { a: number; alpha: number; b: number } | null {
-	const m = color.match(
-		/^oklab\(\s*[\d.]+\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\/\s*([\d.]+)\s*\)$/
-	);
-	return m ? { a: Number(m[1]), b: Number(m[2]), alpha: Number(m[3]) } : null;
-}
-
-test("the fill uses the shared ramp: green low, purple at Expert", async ({
-	page,
-}) => {
-	await openLadder(page);
-	const slider = page.getByRole("slider", { name: "Interface level" });
-	await slider.focus();
-
-	// Standard — the first level that paints. Negative a is the green side.
-	await page.keyboard.press("ArrowRight");
-	const low = oklab(await fillColor(page));
-	expect(low?.alpha).toBeGreaterThan(0);
-	expect(low?.a).toBeLessThan(0);
-
-	// Expert — purple: b crosses to the blue side, which no other stop does. This
-	// is the assertion a missing `LEVEL_RAMP_CLASS` fails, since the top stop's
-	// variable would resolve to nothing and drop the whole colour.
-	await page.keyboard.press("End");
-	const top = oklab(await fillColor(page));
-	expect(top?.alpha).toBeGreaterThan(0);
-	expect(top?.b).toBeLessThan(0);
+	const styles = await toggle.evaluate((element) => {
+		const computed = getComputedStyle(element);
+		return {
+			animationDuration: computed.animationDuration,
+			animationName: computed.animationName,
+			backgroundImage: computed.backgroundImage,
+			backgroundSize: computed.backgroundSize,
+		};
+	});
+	await expect(styles.backgroundImage).toContain("linear-gradient");
+	await expect(styles.backgroundImage).toMatch(/#db4437|rgb\(219, 68, 55\)/i);
+	await expect(styles.backgroundImage).toMatch(/#4285f4|rgb\(66, 133, 244\)/i);
+	await expect(styles.backgroundSize).toBe("300% 100%");
+	await expect(styles.animationName).toBe("ryu-interface-mode-gradient");
+	await expect(styles.animationDuration).toBe("3s");
 });

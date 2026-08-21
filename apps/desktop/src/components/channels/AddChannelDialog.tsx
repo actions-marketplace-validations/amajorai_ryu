@@ -11,6 +11,7 @@ import {
 	REQUIRED_SECRETS,
 	SECRET_LABELS,
 } from "@ryu/blocks/desktop/channels";
+import { Alert, AlertDescription } from "@ryu/ui/components/alert";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Dialog,
@@ -25,10 +26,9 @@ import {
 	NativeSelect,
 	NativeSelectOption,
 } from "@ryu/ui/components/native-select";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
 import { Textarea } from "@ryu/ui/components/textarea";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { TelegramManagedBotPanel } from "@/src/components/channels/TelegramManagedBotPanel.tsx";
 import { ScrollFadeEffect } from "@/src/components/ui/scroll-fade-effect.tsx";
 
@@ -53,6 +53,8 @@ interface FormState {
 	groupReplyMode: GroupReplyMode;
 	model: string;
 	name: string;
+	proactiveOpening: boolean;
+	proactiveTarget: string;
 	secrets: Record<string, string>;
 	systemPrompt: string;
 }
@@ -83,6 +85,8 @@ function emptyForm(): FormState {
 		model: "",
 		systemPrompt: "",
 		groupReplyMode: DEFAULT_GROUP_REPLY_MODE,
+		proactiveOpening: false,
+		proactiveTarget: "",
 		enabled: false,
 		secrets: {},
 	};
@@ -95,11 +99,18 @@ export function AddChannelDialog({
 	teams = [],
 	onCreate,
 	onNodeCreated,
+	initialAgentId,
+	initialAgentName,
+	initialChannelType,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	agents: AgentOption[];
 	teams?: AgentOption[];
+	/** Non-secret values supplied by the new-agent flow. */
+	initialAgentId?: string;
+	initialAgentName?: string;
+	initialChannelType?: ChannelType;
 	/**
 	 * The NODE created the config itself. The managed-bot path writes it server-side
 	 * (the pairing's claim secret has to be sealed into the row and must not pass
@@ -116,6 +127,8 @@ export function AddChannelDialog({
 		teamId: string | null;
 		groupReplyMode: GroupReplyMode;
 		model: string | null;
+		proactiveOpening: boolean;
+		proactiveTarget: string | null;
 		systemPrompt: string | null;
 		enabled: boolean;
 	}) => Promise<boolean>;
@@ -127,6 +140,23 @@ export function AddChannelDialog({
 	/** Set when the node reports managed bots are unavailable, so the forced switch
 	 *  to the manual fields comes with a reason instead of silently happening. */
 	const [managedNotice, setManagedNotice] = useState<string | null>(null);
+
+	useEffect(() => {
+		if (!open) {
+			return;
+		}
+		setForm((current) => ({
+			...current,
+			...(initialAgentId ? { agentId: initialAgentId } : {}),
+			...(initialAgentName ? { name: initialAgentName } : {}),
+			...(initialChannelType
+				? { channelType: initialChannelType, secrets: {} }
+				: {}),
+		}));
+		if (initialChannelType) {
+			setConnectMode(initialChannelType === "telegram" ? "managed" : "manual");
+		}
+	}, [open, initialAgentId, initialAgentName, initialChannelType]);
 
 	const requiredKeys = REQUIRED_SECRETS[form.channelType];
 	const setup = CHANNEL_SETUP[form.channelType];
@@ -147,6 +177,12 @@ export function AddChannelDialog({
 			setFormError(null);
 			if (!form.name.trim()) {
 				setFormError("Name is required.");
+				return false;
+			}
+			if (form.proactiveOpening && !form.proactiveTarget.trim()) {
+				setFormError(
+					"Choose the approved chat that should receive Ryu's welcome."
+				);
 				return false;
 			}
 
@@ -182,6 +218,8 @@ export function AddChannelDialog({
 					teamId,
 					groupReplyMode: form.groupReplyMode,
 					model: form.model.trim() || null,
+					proactiveOpening: form.proactiveOpening,
+					proactiveTarget: form.proactiveTarget.trim() || null,
 					systemPrompt: form.systemPrompt.trim() || null,
 					enabled: form.enabled,
 				});
@@ -212,6 +250,8 @@ export function AddChannelDialog({
 			enabled: form.enabled,
 			group_reply_mode: form.groupReplyMode,
 			model: form.model.trim() || null,
+			proactive_opening: form.proactiveOpening,
+			proactive_target: form.proactiveTarget.trim() || null,
 			system_prompt: form.systemPrompt.trim() || null,
 			team_id: teamId,
 		};
@@ -220,6 +260,8 @@ export function AddChannelDialog({
 		form.enabled,
 		form.groupReplyMode,
 		form.model,
+		form.proactiveOpening,
+		form.proactiveTarget,
 		form.systemPrompt,
 	]);
 
@@ -376,14 +418,19 @@ export function AddChannelDialog({
 											}
 											autoComplete="off"
 											id={`dialog-secret-${key}`}
+											name={`dialog-secret-${key}`}
 											onChange={(e) =>
 												setForm((f) => ({
 													...f,
 													secrets: { ...f.secrets, [key]: e.target.value },
 												}))
 											}
-											placeholder="Paste value"
-											type="password"
+											placeholder="Paste value…"
+											type={
+												key === "openwa_url" || key === "webhook_url"
+													? "url"
+													: "password"
+											}
 											value={form.secrets[key] ?? ""}
 										/>
 										{help ? (
@@ -401,6 +448,11 @@ export function AddChannelDialog({
 								Values are stored encrypted and never shown again.
 							</p>
 						</div>
+						{setup.warning ? (
+							<Alert>
+								<AlertDescription>{setup.warning}</AlertDescription>
+							</Alert>
+						) : null}
 
 						<div className="space-y-1.5">
 							<Label htmlFor="channel-agent">Routes to</Label>
@@ -487,6 +539,43 @@ export function AddChannelDialog({
 							</NativeSelect>
 						</div>
 
+						<div className="space-y-3 rounded-lg border bg-card p-4">
+							<div className="flex items-center justify-between gap-4">
+								<div>
+									<p className="font-medium text-sm">Say hello first</p>
+									<p className="text-muted-foreground text-xs">
+										When this bot starts, Ryu sends one welcome message while it
+										waits for you to write first.
+									</p>
+								</div>
+								<Switch
+									aria-label="Let Ryu say hello first"
+									checked={form.proactiveOpening}
+									onCheckedChange={(v) =>
+										setForm((f) => ({ ...f, proactiveOpening: v }))
+									}
+								/>
+							</div>
+							<div className="space-y-1.5">
+								<Label htmlFor="channel-proactive-target">
+									Where should Ryu say hello?
+								</Label>
+								<Input
+									disabled={!form.proactiveOpening}
+									id="channel-proactive-target"
+									onChange={(e) =>
+										setForm((f) => ({ ...f, proactiveTarget: e.target.value }))
+									}
+									placeholder="The approved chat or phone number"
+									value={form.proactiveTarget}
+								/>
+								<p className="text-muted-foreground text-xs">
+									Enter one approved chat. Ryu never sends a welcome to
+									everyone.
+								</p>
+							</div>
+						</div>
+
 						<div className="flex items-center justify-between rounded-lg border bg-card p-4">
 							<div>
 								<p className="font-medium text-sm">Enabled</p>
@@ -516,12 +605,11 @@ export function AddChannelDialog({
 					    bot_token guard. The panel owns the action in that mode. */}
 					{usingManaged ? null : (
 						<Button
-							disabled={saving}
+							loading={saving}
 							onClick={() => {
 								handleSave().catch(() => undefined);
 							}}
 						>
-							{saving ? <Spinner className="size-4" /> : null}
 							Create bot
 						</Button>
 					)}

@@ -24,17 +24,18 @@ fn bin_path() -> PathBuf {
     variant::server_path()
 }
 
-// b9670 is the first bundled build to include MTP (multi-token prediction)
-// speculative decoding — `--spec-type draft-mtp` (PR #22673) plus Gemma-4 E2B/E4B
-// MTP assist support (PR #24282). NOTE: b9xxx removed `--draft-max`/`--draft-min`
-// in favour of `--spec-draft-n-max`/`--spec-draft-n-min` (see `inference::LaunchConfig`).
+// b10218 includes llama.cpp's request-armed reasoning control, which lets Core
+// ask a running local completion to leave its reasoning block early. It also
+// retains the MTP speculative-decoding flags used by the inference controls.
+// NOTE: b9xxx removed `--draft-max`/`--draft-min` in favour of
+// `--spec-draft-n-max`/`--spec-draft-n-min` (see `inference::LaunchConfig`).
 /// The release tag this build installs. Pinned at compile time: `archive_url()`
 /// is derived from it, so this is the ONLY version `ensure_installed` can
 /// deliver — upstream's newer tags are unreachable without a code change.
 /// `catalog::registry::installer_pin` reads it so the catalog advertises the
 /// deliverable version instead of GitHub's latest (which produced a permanent
 /// "update available" row whose Update button could never do anything).
-pub const TARGET_VERSION: &str = "b9670";
+pub const TARGET_VERSION: &str = "b10218";
 
 /// Release-archive URL for `variant` on this platform. Every variant resolves
 /// through [`LlamaVariant::asset_slug`], so the URL and the "can this node run

@@ -66,11 +66,7 @@ export const FIRST_PURCHASE_VOUCHER_NAME = "10% off your first month";
  * exclusions cannot be bypassed by a client, a stale deploy, or a checkout route
  * that forgets to check.
  */
-export const FIRST_PURCHASE_VOUCHER_SLUGS: readonly string[] = [
-	"pro-monthly",
-	"max-monthly",
-	"teams-monthly",
-];
+export const FIRST_PURCHASE_VOUCHER_SLUGS: readonly string[] = ["pro-monthly"];
 
 /**
  * The slugs deliberately left out, and why. Kept as data (not a comment) so the
@@ -106,12 +102,14 @@ export const FIRST_PURCHASE_VOUCHER_EXCLUSIONS: Readonly<
 		"`once` covers the whole first year, but the offer promises a first MONTH",
 	"max-yearly":
 		"`once` covers the whole first year, but the offer promises a first MONTH",
-	// The desktop licence already carries the server-applied LAUNCH29 discount
-	// ($40 off a $69 product = the advertised $29). Polar allows one discount per
-	// checkout, so stacking is impossible either way; what a voucher WOULD do
-	// here is offer a strictly worse deal ($62.10) than the price we advertise.
+	"max-monthly": "Max is an internal scale tier, not a public campaign offer",
+	"teams-monthly": "Teams is retired for new sales",
+	// The desktop licence already carries the server-applied LIFETIME129 discount
+	// ($71 off a $200 product = the advertised $129). Polar allows one discount
+	// per checkout, so stacking is impossible either way; a voucher would only
+	// create a second, conflicting lifetime offer.
 	lifetime:
-		"already discounted by LAUNCH29 to $29; 10% off list ($62.10) is worse for the customer",
+		"already discounted by LIFETIME129 to $129; a second percentage offer would conflict with the launch price",
 	// Credit top-ups are not a plan. Their entire margin IS the deposit fee, and
 	// that fee only just covers OpenRouter's 5.5% plus Polar's cut — so a 10%
 	// discount does not trim the margin, it inverts it.

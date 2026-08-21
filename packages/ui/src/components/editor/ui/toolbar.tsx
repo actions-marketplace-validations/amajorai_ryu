@@ -190,20 +190,25 @@ export const ToolbarButton = withTooltip(function ToolbarButton({
 });
 
 export function ToolbarSplitButton({
+	children,
 	className,
+	pressed,
 	...props
-}: ComponentPropsWithoutRef<typeof ToolbarButton>) {
+}: ComponentPropsWithoutRef<"div"> & { pressed?: boolean }) {
 	return (
-		<ToolbarButton
+		<div
 			className={cn("group flex gap-0 px-0 hover:bg-transparent", className)}
+			data-pressed={pressed}
 			{...props}
-		/>
+		>
+			{children}
+		</div>
 	);
 }
 
 type ToolbarSplitButtonPrimaryProps = Omit<
-	ComponentPropsWithoutRef<typeof ToolbarToggleItem>,
-	"value"
+	ComponentPropsWithoutRef<"button">,
+	"type"
 > &
 	VariantProps<typeof toolbarButtonVariants>;
 
@@ -215,7 +220,7 @@ export function ToolbarSplitButtonPrimary({
 	...props
 }: ToolbarSplitButtonPrimaryProps) {
 	return (
-		<span
+		<button
 			className={cn(
 				toolbarButtonVariants({
 					size,
@@ -226,21 +231,24 @@ export function ToolbarSplitButtonPrimary({
 				className
 			)}
 			{...props}
+			type="button"
 		>
 			{children}
-		</span>
+		</button>
 	);
 }
 
 export function ToolbarSplitButtonSecondary({
 	className,
+	onClick,
 	size,
 	variant,
 	...props
-}: ComponentPropsWithoutRef<"span"> &
+}: ComponentPropsWithoutRef<"button"> &
 	VariantProps<typeof dropdownArrowVariants>) {
 	return (
-		<span
+		<button
+			aria-label="Open options"
 			className={cn(
 				dropdownArrowVariants({
 					size,
@@ -249,12 +257,15 @@ export function ToolbarSplitButtonSecondary({
 				"group-data-[pressed=true]:bg-accent group-data-[pressed=true]:text-accent-foreground",
 				className
 			)}
-			onClick={(e) => e.stopPropagation()}
-			role="button"
+			onClick={(event) => {
+				event.stopPropagation();
+				onClick?.(event);
+			}}
 			{...props}
+			type="button"
 		>
 			<ChevronDown className="size-3.5 text-muted-foreground" data-icon />
-		</span>
+		</button>
 	);
 }
 

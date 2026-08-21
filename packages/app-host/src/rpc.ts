@@ -113,9 +113,14 @@ export interface WidgetGlobalsPatch {
  *  rejected by default-deny (proven by the `unknown_method_blocked` +
  *  `secret_reach_blocked` adversarial tests). */
 export type Capability =
+	| "host.capabilities"
+	| "native.haptics"
+	| "native.notifications"
+	| "native.liveActivities"
 	| "core.listAgents"
 	| "ui.render"
 	| "app.http"
+	| "app.realtime"
 	// Widget host capabilities (Ryu Apps). `tool.call`/`ui.sendMessage` are
 	// Gateway-sourced (they map from approved grants below); `widget.state` and
 	// `ui.displayMode` are LOCAL host caps always granted to a mounted widget and
@@ -137,6 +142,7 @@ export type Capability =
 	| "model.complete"
 	| "agent.run"
 	| "storage.kv"
+	| "crypto.seal"
 	// Spaces documents (grant `spaces:docs`) — an app owns Space documents of kind
 	// `app:<plugin_id>`: persisted, search-embedded, backlinked, versioned,
 	// Space-routed. This is the integration that lets a feature (e.g. whiteboard) be
@@ -184,11 +190,12 @@ export type Capability =
 	// Core's `/api/recipes/*`. Split from `workflows.*` so a workflow app that does not
 	// use ghost capture need not hold it (least privilege).
 	| "ghost.record"
-	// Inbound webhook registry (grant `webhooks:crud`) — the `@ryu/webhooks` app
-	// renders Core's `/api/webhooks` + `/api/webhook-ingress/status` reads from its
-	// sandboxed companion frame. Host-direct (the monitors pattern): the host holds the
-	// node token and calls the existing read-only registry endpoints. One capability
-	// gates the whole (read-only) `webhooks.*` family.
+	// Inbound webhook registry and protected secret management (grant
+	// `webhooks:crud`) — the `@ryu/webhooks` app renders Core's registry and
+	// explicit secret routes from its sandboxed companion frame. The host holds the
+	// node token; secret values cross this bridge only through explicit get/set calls,
+	// never through the metadata registry response. One capability gates the whole
+	// `webhooks.*` family.
 	| "webhooks.crud"
 	// Quests (grant `quests:crud`) — the `@ryu/quests` app drives Core's
 	// `/api/quests/*` auto-detecting-todo orchestration (list/create/update/delete +
@@ -210,6 +217,7 @@ export type Capability =
 	// that opens the chat tab for an item's session id.
 	| "activity.read"
 	| "background.control"
+	| "warmup.crud"
 	// Timeline (grant `timeline:read`) — the `@ryu/timeline` app renders the
 	// CapCut-style activity replay scrubber (Shadow's captured lanes + keyframe
 	// preview + Dayflow work journal) from its sandboxed companion frame. Host-direct
@@ -420,20 +428,20 @@ export interface ActivityRecord {
 /** A Core-visible background process. The process owner handles the stop request;
  * the host never receives or signals an operating-system PID directly. */
 export interface BackgroundProcess {
-	process_id: string;
-	shell_id?: string | null;
-	producer: string;
-	kind: string;
-	label?: string | null;
-	description?: string | null;
 	command: string;
 	cwd: string;
-	pid?: number | null;
-	started_at: number;
+	description?: string | null;
 	elapsed_ms: number;
-	running: boolean;
 	exit_code?: number | null;
 	exit_signal?: string | null;
+	kind: string;
+	label?: string | null;
+	pid?: number | null;
+	process_id: string;
+	producer: string;
+	running: boolean;
+	shell_id?: string | null;
+	started_at: number;
 }
 
 /** One Shadow timeline event as the device-local `/timeline` returns it (grant
@@ -673,6 +681,35 @@ export interface AppRequestPayload {
 	path: string;
 }
 
+/** Wire payload for opening an owning application's generic realtime room. */
+export interface RealtimeConnectPayload {
+	room_id: string;
+}
+
+/** The host-safe join result; it contains no node token or websocket URL. */
+export interface RealtimeConnectionInfo {
+	access: "read" | "write";
+	member_id: string;
+	presence: unknown[];
+	room_id: string;
+}
+
+/** Reference to a connection held by the trusted host. */
+export interface RealtimeConnectionPayload {
+	connection_id: string;
+}
+
+/** Named event sent through an application-room connection. */
+export interface RealtimePublishPayload extends RealtimeConnectionPayload {
+	data: unknown;
+	event: string;
+}
+
+/** Presence sent through an application-room connection. */
+export interface RealtimePresencePayload extends RealtimeConnectionPayload {
+	data: unknown;
+}
+
 /** One forwarded call onto the `ryu-reasoning` sidecar's `/api/reasoning` public
  *  mount. Same contract as {@link SocialRequestPayload} — `path` is relative to the
  *  mount and validated by the same resolver — with `PUT` in place of `PATCH`, because
@@ -776,6 +813,223 @@ export interface UploadFileResult {
 	url: string;
 }
 
+/** Sanitized, read-only feature inventory exposed to sandboxed plugins. Values
+ * are deliberately booleans or small public metadata; tokens, permission
+ * objects, native module instances, and device identifiers never cross this
+ * boundary. */
+export interface HostCapabilityDescriptor {
+	androidOngoingNotifications: boolean;
+	browserNotifications: boolean;
+	dynamicIsland: boolean;
+	haptics: boolean;
+	hardwareBleRelay: boolean;
+	liveActivities: boolean;
+	localNotifications: boolean;
+	platform: "android" | "browser" | "ios" | "unknown";
+	pushRegistration: boolean;
+	quickActions: boolean;
+	sounds: boolean;
+}
+
+export type NativeHapticStyle = "light" | "success" | "warning" | "error";
+
+export interface NativeHapticsInput {
+	style: NativeHapticStyle;
+}
+
+export interface NativeNotificationInput {
+	body: string;
+	title: string;
+}
+
+export interface NativeLiveActivityUpdateInput {
+	conversationId: string;
+	detail: string;
+	status: "running" | "waiting" | "review" | "done" | "error";
+	title: string;
+}
+
+export interface NativeHapticsResult {
+	signaled: true;
+}
+
+export interface NativeNotificationResult {
+	id: string;
+	scheduled: true;
+}
+
+export interface NativeLiveActivityResult {
+	updated: true;
+}
+
+/** Limits applied before any native implementation sees plugin input. */
+export const NATIVE_ACTION_LIMITS = {
+	conversationIdChars: 200,
+	detailChars: 500,
+	notificationBodyChars: 2000,
+	notificationTitleChars: 120,
+	titleChars: 120,
+} as const;
+
+function boundedNativeText(raw: unknown, maxChars: number): string | undefined {
+	if (typeof raw !== "string") {
+		return undefined;
+	}
+	const value = raw.trim();
+	return value.length > 0 && value.length <= maxChars ? value : undefined;
+}
+
+export function asNativeHapticsInput(
+	raw: unknown
+): NativeHapticsInput | undefined {
+	if (!raw || typeof raw !== "object") {
+		return undefined;
+	}
+	const style = (raw as Record<string, unknown>).style;
+	return style === "light" ||
+		style === "success" ||
+		style === "warning" ||
+		style === "error"
+		? { style }
+		: undefined;
+}
+
+export function asNativeNotificationInput(
+	raw: unknown
+): NativeNotificationInput | undefined {
+	if (!raw || typeof raw !== "object") {
+		return undefined;
+	}
+	const input = raw as Record<string, unknown>;
+	const title = boundedNativeText(
+		input.title,
+		NATIVE_ACTION_LIMITS.notificationTitleChars
+	);
+	const body = boundedNativeText(
+		input.body,
+		NATIVE_ACTION_LIMITS.notificationBodyChars
+	);
+	return title && body ? { body, title } : undefined;
+}
+
+export function asNativeLiveActivityUpdateInput(
+	raw: unknown
+): NativeLiveActivityUpdateInput | undefined {
+	if (!raw || typeof raw !== "object") {
+		return undefined;
+	}
+	const input = raw as Record<string, unknown>;
+	const conversationId = boundedNativeText(
+		input.conversationId,
+		NATIVE_ACTION_LIMITS.conversationIdChars
+	);
+	const title = boundedNativeText(input.title, NATIVE_ACTION_LIMITS.titleChars);
+	const detail = boundedNativeText(
+		input.detail,
+		NATIVE_ACTION_LIMITS.detailChars
+	);
+	const status = input.status;
+	if (
+		!(conversationId && title && detail) ||
+		(status !== "running" &&
+			status !== "waiting" &&
+			status !== "review" &&
+			status !== "done" &&
+			status !== "error")
+	) {
+		return undefined;
+	}
+	return { conversationId, detail, status, title };
+}
+
+function browserPlatform(): HostCapabilityDescriptor["platform"] {
+	return typeof navigator === "undefined" ? "unknown" : "browser";
+}
+
+/** Detect browser-only host features without requesting permission or returning
+ * browser objects. Native hosts replace this with their platform detector. */
+export function detectBrowserHostCapabilities(): HostCapabilityDescriptor {
+	const browser = browserPlatform() === "browser";
+	const notification = browser && typeof Notification !== "undefined";
+	const audio =
+		browser &&
+		(typeof AudioContext !== "undefined" || typeof Audio !== "undefined");
+	return {
+		androidOngoingNotifications: false,
+		browserNotifications: notification,
+		dynamicIsland: false,
+		hardwareBleRelay:
+			browser && typeof navigator !== "undefined" && "bluetooth" in navigator,
+		haptics:
+			browser &&
+			typeof navigator !== "undefined" &&
+			typeof navigator.vibrate === "function",
+		localNotifications: notification,
+		liveActivities: false,
+		platform: browserPlatform(),
+		pushRegistration:
+			browser &&
+			typeof PushManager !== "undefined" &&
+			typeof ServiceWorkerContainer !== "undefined",
+		quickActions: false,
+		sounds: audio,
+	};
+}
+
+/** Browser-compatible implementation for the two native actions that have a
+ *  standards-based fallback. It deliberately requires permission already to be
+ *  granted: a sandboxed plugin must never trigger an OS/browser permission
+ *  prompt on its own. Mobile hosts inject their platform implementations.
+ */
+function browserNativeHaptics(input: NativeHapticsInput): NativeHapticsResult {
+	const vibrate = globalThis.navigator?.vibrate;
+	if (typeof vibrate !== "function") {
+		throw new CodedRpcError(
+			"server_error",
+			"native.haptics is unavailable on this host"
+		);
+	}
+	const duration =
+		input.style === "light"
+			? 12
+			: input.style === "success"
+				? [12, 32, 12]
+				: input.style === "warning"
+					? [24, 32, 24]
+					: [36, 40, 36];
+	if (!vibrate(duration)) {
+		throw new CodedRpcError(
+			"server_error",
+			"native.haptics was rejected by this host"
+		);
+	}
+	return { signaled: true };
+}
+
+async function browserNativeNotification(
+	input: NativeNotificationInput
+): Promise<NativeNotificationResult> {
+	const NotificationConstructor = globalThis.Notification;
+	if (
+		typeof NotificationConstructor !== "function" ||
+		NotificationConstructor.permission !== "granted"
+	) {
+		throw new CodedRpcError(
+			"server_error",
+			"native.notifications.create requires notification permission granted by the host"
+		);
+	}
+	const notification = new NotificationConstructor(input.title, {
+		body: input.body,
+	});
+	const id =
+		typeof globalThis.crypto?.randomUUID === "function"
+			? globalThis.crypto.randomUUID()
+			: `browser-notification-${Date.now()}`;
+	notification.onclick = () => notification.close();
+	return { id, scheduled: true };
+}
+
 /** The privileged service callbacks the trusted host injects. The plugin can only
  *  reach these indirectly, through {@link dispatchRpc}, and only for methods whose
  *  capability it was granted.
@@ -784,7 +1038,23 @@ export interface UploadFileResult {
  *  network egress. `listAgents` returns only a `{id,name}` projection; a future
  *  capability MUST keep that rule (every reply is readable by the sandboxed
  *  frame by construction). */
+// HostServices stays grouped by surface so its comments mirror the contribution
+// docs; it is intentionally not alphabetized across those semantic sections.
+// biome-ignore assist/source/useSortedInterfaceMembers: preserve host-surface grouping
 export interface HostServices {
+	/** Mobile-only native actions. Desktop, web, and extension hosts deliberately
+	 * leave these callbacks undefined, so a granted call fails closed as
+	 * unavailable instead of falling back to browser or raw native APIs. */
+	nativeHaptics?(
+		input: NativeHapticsInput
+	): Promise<NativeHapticsResult> | NativeHapticsResult;
+	nativeLiveActivitiesUpdate?(
+		input: NativeLiveActivityUpdateInput
+	): Promise<NativeLiveActivityResult>;
+	nativeNotificationsCreate?(
+		input: NativeNotificationInput
+	): Promise<NativeNotificationResult>;
+
 	// --- Activity feed (grant `activity:read`). The `@ryu/activity` app renders
 	// Core's read-only unified feed. Host-direct (the monitors pattern): the host holds
 	// the node token and calls the existing `GET /api/activity` read, forwarding Core's
@@ -808,6 +1078,22 @@ export interface HostServices {
 	}): Promise<{ ok: boolean; requested: boolean; process_id: string }>;
 	/** Forward a call to `/api/ext/<owning-plugin-id><path>`. */
 	appRequest?(input: AppRequestPayload): Promise<unknown>;
+	/** Open a host-owned application-room realtime connection. */
+	realtimeConnect?(
+		input: RealtimeConnectPayload
+	): Promise<RealtimeConnectionInfo>;
+	/** Publish a named event through a host-owned application-room connection. */
+	realtimePublish?(input: RealtimePublishPayload): Promise<void>;
+	/** Publish presence through a host-owned application-room connection. */
+	realtimePresence?(input: RealtimePresencePayload): Promise<void>;
+	/** Subscribe to events from a host-owned application-room connection. */
+	realtimeSubscribe?(
+		input: RealtimeConnectionPayload,
+		emit: (delta: string) => void,
+		signal: AbortSignal
+	): Promise<void>;
+	/** Close a host-owned application-room connection. */
+	realtimeClose?(input: RealtimeConnectionPayload): Promise<void>;
 	/** Approve a pending request (`POST /api/approvals/:id/approve`). */
 	approvalsApprove?(input: ApprovalDecidePayload): Promise<ApprovalRecord>;
 
@@ -948,6 +1234,11 @@ export interface HostServices {
 	/** Stop recording; returns the captured AX action sequence + recipe draft
 	 *  (`POST /api/recipes/record/stop`). */
 	ghostRecordStop?(): Promise<unknown>;
+	/** Return a sanitized host feature inventory. This is a local capability and
+	 * does not require a plugin grant. */
+	hostCapabilities?():
+		| Promise<HostCapabilityDescriptor>
+		| HostCapabilityDescriptor;
 
 	// --- Learning (grant `learning:crud`). The `@ryu/learning` app renders the
 	// read-only continual-learning surface. Host-direct (the monitors pattern): the
@@ -1108,7 +1399,9 @@ export interface HostServices {
 	/** List the signed-in user's inbox rows (`GET /api/notifications`; the host
 	 *  resolves the user id). `archived: true` returns the archive instead of the
 	 *  live inbox. */
-	notificationsList?(input?: { archived?: boolean }): Promise<NotificationRecord[]>;
+	notificationsList?(input?: {
+		archived?: boolean;
+	}): Promise<NotificationRecord[]>;
 	/** Mark a notification read (`POST /api/notifications/:id/read`). */
 	notificationsMarkRead?(input: { id: string }): Promise<void>;
 	/** Restore an archived notification (`POST /api/notifications/:id/unarchive`). */
@@ -1537,19 +1830,20 @@ export interface HostServices {
 	 *  rejects with Core's message when the job itself failed. */
 	warmupRunNow?(input: WarmupRunNowPayload): Promise<void>;
 
-	// --- Inbound webhook registry (grant `webhooks:crud`). The `@ryu/webhooks` app
-	// renders Core's read-only webhook endpoint registry from its sandboxed companion.
-	// Host-direct (the monitors pattern): the host holds the node token and calls the
-	// existing `/api/webhooks` + `/api/webhook-ingress/status` reads, already ungated on
-	// the main router. Both return the camelCase-normalized shape the desktop client
-	// produces (`fetchWebhooks`/`fetchWebhookIngressStatus`), forwarded verbatim (kept
-	// `unknown` so rpc.ts carries no webhook schema — the app owns the typed copies).
-	// All optional so a non-webhooks host is unaffected. ---
+	// --- Inbound webhook registry + protected secret management
+	// (grant `webhooks:crud`). The `@ryu/webhooks` app renders Core's registry from
+	// its sandboxed companion. Host-direct (the monitors pattern): the host holds
+	// the node token; secret values use explicit get/set calls and never ride the
+	// metadata registry response. All optional so a non-webhooks host is unaffected. ---
 
 	/** The resolved ingress backend + public URL (`GET /api/webhook-ingress/status`). */
 	webhooksIngressStatus?(): Promise<unknown>;
 	/** The unified webhook endpoint registry (`GET /api/webhooks`). */
 	webhooksList?(): Promise<unknown>;
+	/** Read one secret through the explicit protected route (`GET /api/webhooks/:id/secret`). */
+	webhooksSecretGet?(input: { id: string }): Promise<unknown>;
+	/** Set or generate one secret (`POST /api/webhooks/:id/secret`). */
+	webhooksSecretSet?(input: { id: string; secret?: string }): Promise<unknown>;
 	/** Node-config picker: agents on the node (`GET /api/agents`). */
 	workflowsAgents?(): Promise<unknown>;
 	/** Node-config picker: installed apps + their runnables (`GET /api/plugins`). */
@@ -1718,12 +2012,19 @@ export const STREAMING_METHODS: ReadonlySet<string> = streamingMethods;
  *  gates on, one vocabulary across the desktop gate and the server gate. */
 export const GRANT_CAPABILITY: Record<string, Capability> = grantCapability;
 
+/** Local host capabilities are intentionally available only through their
+ * explicit contract rows; they are never inferred from plugin grants. */
+const LOCAL_HOST_CAPABILITIES: ReadonlySet<Capability> = new Set([
+	"host.capabilities",
+]);
+
 /** Capabilities whose ungranted call throws a STRUCTURED {@link CodedRpcError}
  *  (`denied`) instead of the legacy plain-string {@link CapabilityError}. Only the
  *  greenfield app host-bridge methods opt in; the legacy paths keep string errors so
  *  their existing readers are unaffected. */
 const CODED_ERROR_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 	"app.http",
+	"app.realtime",
 	"model.complete",
 	"agent.run",
 	"storage.kv",
@@ -1911,7 +2212,7 @@ export function assertGranted(
 	if (!capability) {
 		throw new CapabilityError(`Unknown method: ${method}`);
 	}
-	if (!granted.has(capability)) {
+	if (!(granted.has(capability) || LOCAL_HOST_CAPABILITIES.has(capability))) {
 		if (CODED_ERROR_CAPABILITIES.has(capability)) {
 			throw new CodedRpcError(
 				"denied",
@@ -1934,7 +2235,7 @@ export async function dispatchRpc(
 	if (!capability) {
 		throw new CapabilityError(`Unknown method: ${method}`);
 	}
-	if (!granted.has(capability)) {
+	if (!(granted.has(capability) || LOCAL_HOST_CAPABILITIES.has(capability))) {
 		// The app host-bridge methods are greenfield (no legacy string-error reader),
 		// so a denied call gets a structured `denied` code the app can surface as a
 		// real permission message. The legacy paths keep the plain-string CapabilityError.
@@ -1949,6 +2250,52 @@ export async function dispatchRpc(
 		);
 	}
 	switch (method) {
+		case "host.capabilities":
+			if (args.length !== 0) {
+				throw new CapabilityError("host.capabilities takes no arguments");
+			}
+			return await (services.hostCapabilities?.() ??
+				detectBrowserHostCapabilities());
+		case "native.haptics": {
+			const input = asNativeHapticsInput(args[0]);
+			if (!input || args.length !== 1) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"native.haptics requires { style: 'light'|'success'|'warning'|'error' }"
+				);
+			}
+			return services.nativeHaptics
+				? await services.nativeHaptics(input)
+				: browserNativeHaptics(input);
+		}
+		case "native.notifications.create": {
+			const input = asNativeNotificationInput(args[0]);
+			if (!input || args.length !== 1) {
+				throw new CodedRpcError(
+					"invalid_args",
+					`native.notifications.create requires bounded title (${NATIVE_ACTION_LIMITS.notificationTitleChars} chars max) and body (${NATIVE_ACTION_LIMITS.notificationBodyChars} chars max)`
+				);
+			}
+			return services.nativeNotificationsCreate
+				? await services.nativeNotificationsCreate(input)
+				: await browserNativeNotification(input);
+		}
+		case "native.liveActivities.update": {
+			const input = asNativeLiveActivityUpdateInput(args[0]);
+			if (!input || args.length !== 1) {
+				throw new CodedRpcError(
+					"invalid_args",
+					`native.liveActivities.update requires bounded conversationId, title (${NATIVE_ACTION_LIMITS.titleChars} chars max), detail (${NATIVE_ACTION_LIMITS.detailChars} chars max), and a known status`
+				);
+			}
+			if (!services.nativeLiveActivitiesUpdate) {
+				throw new CodedRpcError(
+					"server_error",
+					"native.liveActivities.update is unavailable on this host"
+				);
+			}
+			return await services.nativeLiveActivitiesUpdate(input);
+		}
 		case "core.listAgents":
 			// `args` is part of the envelope for methods that need it; listAgents
 			// takes none. Asserting it lets the gate stay arity-agnostic per method.
@@ -3019,6 +3366,38 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.webhooksIngressStatus();
+		case "webhooks.secretGet": {
+			const input = asWebhookSecretIdArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"webhooks.secretGet requires a { id: string }"
+				);
+			}
+			if (!services.webhooksSecretGet) {
+				throw new CodedRpcError(
+					"server_error",
+					"webhooks.secretGet is not available"
+				);
+			}
+			return await services.webhooksSecretGet(input);
+		}
+		case "webhooks.secretSet": {
+			const input = asWebhookSecretSetArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"webhooks.secretSet requires a { id: string, secret?: string }"
+				);
+			}
+			if (!services.webhooksSecretSet) {
+				throw new CodedRpcError(
+					"server_error",
+					"webhooks.secretSet is not available"
+				);
+			}
+			return await services.webhooksSecretSet(input);
+		}
 		case "quests.list":
 			if (!services.questsList) {
 				throw new CodedRpcError("server_error", "quests.list is not available");
@@ -3604,7 +3983,9 @@ export async function dispatchRpc(
 					"notifications.list is not available"
 				);
 			}
-			return await services.notificationsList(args[0] as { archived?: boolean });
+			return await services.notificationsList(
+				args[0] as { archived?: boolean }
+			);
 		case "notifications.markRead": {
 			const input = asQuestIdArg(args[0]);
 			if (!input) {
@@ -3907,6 +4288,73 @@ export async function dispatchRpc(
 			}
 			return await services.appRequest(input);
 		}
+		case "realtime.connect": {
+			const input = asRealtimeConnectArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"realtime.connect requires a { room_id: string }"
+				);
+			}
+			if (!services.realtimeConnect) {
+				throw new CodedRpcError(
+					"server_error",
+					"realtime.connect is not available"
+				);
+			}
+			return await services.realtimeConnect(input);
+		}
+		case "realtime.publish": {
+			const input = asRealtimePublishArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"realtime.publish requires { connection_id, event, data? }"
+				);
+			}
+			if (!services.realtimePublish) {
+				throw new CodedRpcError(
+					"server_error",
+					"realtime.publish is not available"
+				);
+			}
+			await services.realtimePublish(input);
+			return null;
+		}
+		case "realtime.presence": {
+			const input = asRealtimePresenceArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"realtime.presence requires { connection_id, data? }"
+				);
+			}
+			if (!services.realtimePresence) {
+				throw new CodedRpcError(
+					"server_error",
+					"realtime.presence is not available"
+				);
+			}
+			await services.realtimePresence(input);
+			return null;
+		}
+		case "realtime.close": {
+			const input = asRealtimeConnectionArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"realtime.close requires { connection_id: string }"
+				);
+			}
+			if (!services.realtimeClose) {
+				throw new CodedRpcError(
+					"server_error",
+					"realtime.close is not available"
+				);
+			}
+			await services.realtimeClose(input);
+			return null;
+		}
 		case "social.open": {
 			const input = asSocialOpenArg(args[0]);
 			if (!services.socialOpen) {
@@ -3985,7 +4433,10 @@ export async function dispatchRpc(
 				);
 			}
 			if (!services.newsRequest) {
-				throw new CodedRpcError("server_error", "news.request is not available");
+				throw new CodedRpcError(
+					"server_error",
+					"news.request is not available"
+				);
 			}
 			return await services.newsRequest(input);
 		}
@@ -4584,13 +5035,13 @@ export function asStorageKeysArg(data: unknown): { namespace?: string } {
  *  Carries no key material — only which custody rung is live. `key_beside_data`
  *  is the one an app should actually branch on: true means the key sits in a file
  *  next to the data it protects, so sealing buys much less than it looks like. */
-export type CryptoStatus = {
-	source: string;
-	keychain_service?: string | null;
-	keychain_account?: string | null;
-	key_file?: string | null;
+export interface CryptoStatus {
 	key_beside_data: boolean;
-};
+	key_file?: string | null;
+	keychain_account?: string | null;
+	keychain_service?: string | null;
+	source: string;
+}
 
 /** Narrow to `{ value: string }` (crypto.seal / crypto.open). Both take a single
  *  string: seal takes plaintext, open takes a value produced by seal. */
@@ -5340,6 +5791,68 @@ export function asAppRequestArg(data: unknown): AppRequestPayload | null {
 	};
 }
 
+function nonEmptyString(value: unknown, maxLength = 512): value is string {
+	return (
+		typeof value === "string" &&
+		value.trim().length > 0 &&
+		value.length <= maxLength
+	);
+}
+
+/** Narrow a generic application-room connect payload. */
+export function asRealtimeConnectArg(
+	data: unknown
+): RealtimeConnectPayload | null {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		return null;
+	}
+	const value = data as Record<string, unknown>;
+	return nonEmptyString(value.room_id)
+		? { room_id: value.room_id.trim() }
+		: null;
+}
+
+/** Narrow a host-owned connection reference. */
+export function asRealtimeConnectionArg(
+	data: unknown
+): RealtimeConnectionPayload | null {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		return null;
+	}
+	const value = data as Record<string, unknown>;
+	return nonEmptyString(value.connection_id, 128)
+		? { connection_id: value.connection_id }
+		: null;
+}
+
+/** Narrow a named event publish payload. */
+export function asRealtimePublishArg(
+	data: unknown
+): RealtimePublishPayload | null {
+	const connection = asRealtimeConnectionArg(data);
+	if (!connection || typeof data !== "object" || data === null) {
+		return null;
+	}
+	const value = data as Record<string, unknown>;
+	return nonEmptyString(value.event, 128)
+		? { ...connection, event: value.event.trim(), data: value.data }
+		: null;
+}
+
+/** Narrow a presence payload while preserving its opaque app-owned data. */
+export function asRealtimePresenceArg(
+	data: unknown
+): RealtimePresencePayload | null {
+	const connection = asRealtimeConnectionArg(data);
+	if (!connection || typeof data !== "object" || data === null) {
+		return null;
+	}
+	return {
+		...connection,
+		data: (data as Record<string, unknown>).data,
+	};
+}
+
 /**
  * Narrow an RPC argument to a `social.request` payload, or null.
  *
@@ -5520,7 +6033,9 @@ const NEWS_MOUNT = "/api/news";
  * collapse into dot segments after the check runs), and a re-implementation is exactly
  * where that lesson gets lost a second time.
  */
-export function asTuitionRequestArg(data: unknown): TuitionRequestPayload | null {
+export function asTuitionRequestArg(
+	data: unknown
+): TuitionRequestPayload | null {
 	return asMountedCrudArg(data, TUITION_MOUNT) as TuitionRequestPayload | null;
 }
 
@@ -6073,6 +6588,33 @@ export function asWorkflowIdArg(data: unknown): { id: string } | null {
 		return null;
 	}
 	return { id: o.id };
+}
+
+/** Narrow an explicit Webhooks secret read to `{ id: string }`. */
+export function asWebhookSecretIdArg(data: unknown): { id: string } | null {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	if (typeof o.id !== "string" || o.id.trim().length === 0) {
+		return null;
+	}
+	return { id: o.id };
+}
+
+/** Narrow a Webhooks secret write to `{ id: string, secret?: string }`. */
+export function asWebhookSecretSetArg(
+	data: unknown
+): { id: string; secret?: string } | null {
+	const id = asWebhookSecretIdArg(data);
+	if (!id) {
+		return null;
+	}
+	const secret = optionalString(data as Record<string, unknown>, "secret");
+	if (secret === null) {
+		return null;
+	}
+	return secret === undefined ? id : { ...id, secret };
 }
 
 /** Narrow an arg to `{ id: string, versionId: string }` (workflows versionGet/

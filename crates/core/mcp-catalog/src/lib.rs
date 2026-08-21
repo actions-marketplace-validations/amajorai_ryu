@@ -693,7 +693,7 @@ fn stdio_entry_for_package(pkg: &PackageJson) -> Result<McpEntryPlan> {
 }
 
 /// Sanitize a registry server name into a safe mcp.json key. The name is the map
-/// key (not executed), but it must not contain the `__` tool-id separator or
+/// key (not executed), but it must not contain the `__` legacy tool-id separator or
 /// whitespace, and must be non-empty.
 fn sanitize_server_name(name: &str) -> Result<String> {
     let trimmed = name.trim();
@@ -946,6 +946,7 @@ mod tests {
         assert!(validate_version("1.2.3; rm").is_err());
 
         assert!(sanitize_server_name("io.github.acme/files").is_ok());
+        assert!(sanitize_server_name("bad.name").is_ok());
         assert!(sanitize_server_name("bad__name").is_err());
         assert!(sanitize_server_name("has space").is_err());
         assert!(sanitize_server_name("   ").is_err());

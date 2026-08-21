@@ -6,10 +6,29 @@ import { createElement, useMemo } from "react";
 import type { MentionGroup, MentionItem } from "@/src/lib/mentions/types.ts";
 
 interface MentionMenuProps {
-	anchorRef: React.RefObject<HTMLTextAreaElement | null>;
+	anchorRef: React.RefObject<HTMLElement | null>;
 	groups: MentionGroup[];
 	onDismiss: () => void;
 	onSelect: (item: MentionItem) => void;
+}
+
+function mentionBadge(kind: MentionItem["kind"]): string | undefined {
+	switch (kind) {
+		case "app":
+			return "App";
+		case "app-item":
+			return "App item";
+		case "integration":
+			return "Integration";
+		case "output-style":
+			return "Style";
+		case "page":
+			return "Page";
+		case "plugin":
+			return "Plugin";
+		default:
+			return undefined;
+	}
 }
 
 /** The @ trigger expressed through the same list surface as + and /. */
@@ -37,15 +56,12 @@ export function MentionMenu({
 					id: `${item.kind}:${item.id}`,
 					label: item.label,
 					description: item.description,
-					badge:
-						item.kind === "plugin"
-							? "Plugin"
-							: item.kind === "app"
-								? "App"
-								: undefined,
-					icon: item.icon
-						? createElement(item.icon, { className: "size-4" })
-						: undefined,
+					badge: mentionBadge(item.kind),
+					icon:
+						item.visualIcon ??
+						(item.icon
+							? createElement(item.icon, { className: "size-4" })
+							: undefined),
 				})),
 			})),
 		[groups]

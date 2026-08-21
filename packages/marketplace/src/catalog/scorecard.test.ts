@@ -4,8 +4,13 @@
 // meaningful, and an impersonating community listing must fail hard.
 
 import { describe, expect, test } from "bun:test";
-import { runScorecard } from "./scorecard.ts";
-import type { CatalogEntry, PluginCatalogDetail } from "./types.ts";
+import { runScorecard, runSkillScorecard } from "./scorecard.ts";
+import type {
+	CatalogEntry,
+	PluginCatalogDetail,
+	SkillCard,
+	SkillDetail,
+} from "./types.ts";
 
 /** A fixed clock so the maintenance checks are deterministic. */
 const NOW = Date.parse("2026-07-24T00:00:00Z");
@@ -50,6 +55,53 @@ function healthyDetail(
 			{ publishedAt: daysAgo(10), version: "1.4.2" },
 			{ publishedAt: daysAgo(120), version: "1.4.1" },
 		],
+		...overrides,
+	};
+}
+
+function skillCard(overrides: Partial<SkillCard> = {}): SkillCard {
+	return {
+		id: "example/skills/review",
+		installed: false,
+		installs: 120,
+		name: "Review skill",
+		slug: "review",
+		source: "github",
+		trustLevel: "trusted",
+		...overrides,
+	};
+}
+
+function healthySkillDetail(overrides: Partial<SkillDetail> = {}): SkillDetail {
+	return {
+		card: skillCard(),
+		description: "A reusable review workflow with a clear, bounded purpose.",
+		files: [
+			{
+				contents: "# Review skill\n\n".concat(
+					"Documented instructions. ".repeat(30)
+				),
+				path: "SKILL.md",
+			},
+		],
+		metadata: {
+			firstSeen: daysAgo(20),
+			githubCreatedAt: daysAgo(300),
+			githubPushedAt: daysAgo(10),
+			githubStars: "40",
+			githubUpdatedAt: daysAgo(10),
+			installs: "120",
+			repositoryUrl: "https://github.com/example/review-skill",
+			securityAudits: [
+				{
+					name: "Registry audit",
+					status: "pass",
+					url: "https://example.com/audit",
+				},
+			],
+		},
+		readme: "# Review skill\n\n".concat("Real documentation. ".repeat(40)),
+		url: "https://github.com/example/review-skill",
 		...overrides,
 	};
 }
@@ -289,5 +341,17 @@ describe("runScorecard", () => {
 	test("the summary is clean when every check passes", () => {
 		const card = runScorecard(entry(), healthyDetail(), NOW);
 		expect(card.summary).toBe("Passes every automated check.");
+	});
+
+	test("skills use their own ruleset without plugin permission checks", () => {
+		const card = runSkillScorecard(skillCard(), healthySkillDetail(), NOW);
+		expect(card.rulesetVersion).toBe("marketplace-skill-1");
+		expect(card.grade).toBe("A");
+		expect(card.checks.some((check) => check.id === "permission-breadth")).toBe(
+			false
+		);
+		expect(
+			card.checks.find((check) => check.id === "security-audits")?.status
+		).toBe("pass");
 	});
 });

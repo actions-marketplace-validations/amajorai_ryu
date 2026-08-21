@@ -1,4 +1,10 @@
 {
+  "tags": ["memory","learning","mistakes","rules","quality"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/no-more-mistakes",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/no-more-mistakes",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/no-more-mistakes",
   "name": "No More Mistakes",
   "version": "0.1.14",

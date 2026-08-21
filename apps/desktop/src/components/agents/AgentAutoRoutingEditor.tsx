@@ -44,9 +44,9 @@ import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
 	CLASSIFY_MODEL_ID,
 	CLASSIFY_TIER_COPY,
+	type ClassifyTierState,
 	classifyTierCannotServeModel,
 	classifyTierServable,
-	type ClassifyTierState,
 	deriveClassifyTierState,
 	fetchClassifyWeightsPresent,
 	type RouteStrategy,
@@ -181,6 +181,10 @@ export function AgentAutoRoutingEditor() {
 	const setOpen = useAgentAutoDialog((s) => s.setOpen);
 	const node = useActiveNode();
 	const { agents } = useAgents();
+	const routableAgents = useMemo(
+		() => agents.filter((agent) => agent.lifecycleStatus === "active"),
+		[agents]
+	);
 	// The app-wide "Friendly names" toggle picks which of the two vocabularies this
 	// picker speaks. Read per-surface rather than threaded through props: all three
 	// places that render this control now share one copy table, so each just asks.
@@ -285,7 +289,7 @@ export function AgentAutoRoutingEditor() {
 			{
 				id: crypto.randomUUID(),
 				description: "",
-				agentId: agents[0]?.id ?? "",
+				agentId: routableAgents[0]?.id ?? "",
 			},
 		]);
 	};
@@ -485,7 +489,7 @@ export function AgentAutoRoutingEditor() {
 													value={rule.description}
 												/>
 												<Select
-													items={agents.map((a) => ({
+													items={routableAgents.map((a) => ({
 														value: a.id,
 														label: a.name,
 													}))}
@@ -498,7 +502,7 @@ export function AgentAutoRoutingEditor() {
 														<SelectValue placeholder="Route to agent" />
 													</SelectTrigger>
 													<SelectContent>
-														{agents.map((a) => (
+														{routableAgents.map((a) => (
 															<SelectItem key={a.id} value={a.id}>
 																<span className="font-medium">{a.name}</span>
 																<span className="ml-1 text-muted-foreground text-xs">
@@ -531,7 +535,10 @@ export function AgentAutoRoutingEditor() {
 								Default agent when no rule matches
 							</Label>
 							<Select
-								items={agents.map((a) => ({ value: a.id, label: a.name }))}
+								items={routableAgents.map((a) => ({
+									value: a.id,
+									label: a.name,
+								}))}
 								onValueChange={(v) => v && patch({ default_agent_id: v })}
 								value={draft.default_agent_id}
 							>
@@ -539,7 +546,7 @@ export function AgentAutoRoutingEditor() {
 									<SelectValue placeholder="Select an agent" />
 								</SelectTrigger>
 								<SelectContent>
-									{agents.map((a) => (
+									{routableAgents.map((a) => (
 										<SelectItem key={a.id} value={a.id}>
 											<span className="font-medium">{a.name}</span>
 											<span className="ml-1 text-muted-foreground text-xs">
@@ -582,8 +589,11 @@ export function AgentAutoRoutingEditor() {
 					<Button onClick={() => setOpen(false)} variant="ghost">
 						Cancel
 					</Button>
-					<Button disabled={!loaded || saving} onClick={() => handleSave()}>
-						{saving ? <Spinner className="size-4" /> : null}
+					<Button
+						disabled={!loaded}
+						loading={saving}
+						onClick={() => handleSave()}
+					>
 						Save
 					</Button>
 				</DialogFooter>

@@ -10,6 +10,7 @@ import {
 	friendlyModelName,
 	friendlyQuant,
 	ggufFileRole,
+	isModelGgufFile,
 	parseModelSize,
 	parsePipelineModalities,
 	quantVariantRank,
@@ -186,6 +187,12 @@ describe("ggufFileRole", () => {
 
 	test("ordinary quant file has no auxiliary role", () => {
 		expect(ggufFileRole("model-Q4_K_M.gguf")).toBeNull();
+	});
+
+	test("excludes non-model GGUF artifacts from quant selection", () => {
+		expect(isModelGgufFile("imatrix_unsloth.gguf")).toBe(false);
+		expect(isModelGgufFile("model-mmproj-f16.gguf")).toBe(false);
+		expect(isModelGgufFile("model-Q4_K_M.gguf")).toBe(true);
 	});
 });
 

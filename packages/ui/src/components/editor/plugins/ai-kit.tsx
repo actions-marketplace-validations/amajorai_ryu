@@ -1,3 +1,5 @@
+/// <reference path="../../../types/lodash-subpaths.d.ts" />
+
 "use client";
 
 import { BaseAIPlugin, withAIBatch } from "@platejs/ai";
@@ -67,13 +69,17 @@ export const aiChatPlugin = AIChatPlugin.extend({
 					});
 
 					editor.tf.withoutSaving(() => {
+						const selectionPath = editor.selection?.focus.path;
+						if (!selectionPath) {
+							return;
+						}
 						editor.tf.insertNodes(
 							{
 								children: [{ text: "" }],
 								type: getPluginType(editor, KEYS.aiChat),
 							},
 							{
-								at: PathApi.next(editor.selection?.focus.path.slice(0, 1)),
+								at: PathApi.next(selectionPath.slice(0, 1)),
 							}
 						);
 					});

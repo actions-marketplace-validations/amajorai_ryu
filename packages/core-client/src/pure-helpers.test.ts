@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { type AcpConfigOption, flattenConfigOptions } from "./acp.ts";
 import { bumpPatchVersion } from "./agents.ts";
 import {
+	answerNowChat,
 	cancelChat,
 	chatHeaders,
 	chatStreamResumeUrl,
@@ -22,6 +23,7 @@ import { generateGatewayKey } from "./gateway.ts";
 import { isLocalEngine } from "./inference.ts";
 import { normalizeMeshStatus } from "./mesh.ts";
 import { type DependencyError, describeDependencyError } from "./plugins.ts";
+import { updateCheckFailed } from "./updates.ts";
 import { voiceWsUrl } from "./voice-session.ts";
 
 const target = (over?: Partial<ApiTarget>): ApiTarget => ({
@@ -41,6 +43,26 @@ describe("bumpPatchVersion", () => {
 		expect(bumpPatchVersion("abc")).toBe("abc");
 		expect(bumpPatchVersion("1.0.x")).toBe("1.0.x");
 		expect(bumpPatchVersion("")).toBe("");
+	});
+});
+
+describe("updateCheckFailed", () => {
+	test("keeps a transport error distinct from a clean no-update verdict", () => {
+		const base = {
+			asset: null,
+			channel: "stable",
+			current: "0.1.15",
+			html_url: null,
+			latest: "0.1.15",
+			notes: null,
+			update_available: false,
+		};
+
+		expect(updateCheckFailed(base)).toBe(false);
+		expect(updateCheckFailed({ ...base, error: "Core unavailable" })).toBe(
+			true
+		);
+		expect(updateCheckFailed({ ...base, latest: "" })).toBe(true);
 	});
 });
 
@@ -284,6 +306,27 @@ describe("chat URL + headers", () => {
 		try {
 			expect(await cancelChat(target(), "c1")).toBe(true);
 			expect(body).toBe(JSON.stringify({ conversation_id: "c1" }));
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test("answerNowChat posts the native turn control request", async () => {
+		const originalFetch = globalThis.fetch;
+		let body = "";
+		globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+			body = String(init?.body ?? "");
+			return Promise.resolve(Response.json({ accepted: true }));
+		}) as unknown as typeof fetch;
+		try {
+			expect(await answerNowChat(target(), "c1", "turn_1")).toBe(true);
+			expect(body).toBe(
+				JSON.stringify({
+					action: "answer_now",
+					conversation_id: "c1",
+					turn_id: "turn_1",
+				})
+			);
 		} finally {
 			globalThis.fetch = originalFetch;
 		}

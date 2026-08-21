@@ -22,6 +22,10 @@ import {
 	TransportDonut,
 } from "@ryu/ui/components/profile-charts";
 import { Spinner } from "@ryu/ui/components/spinner";
+import {
+	formatCurrency,
+	formatNumber as formatSharedNumber,
+} from "@ryu/ui/lib/number-format.ts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format, subDays } from "date-fns";
 import {
@@ -61,18 +65,15 @@ const SECONDS_PER_HOUR = 3600;
 const HEATMAP_DAYS = 364;
 const DATE_FORMAT = "yyyy-MM-dd";
 
-const numberFormatter = new Intl.NumberFormat("en-US");
-const formatNumber = (value: number): string => numberFormatter.format(value);
+const formatNumber = (value: number): string => formatSharedNumber(value);
 const formatCost = (microUsd: number): string => {
 	const dollars = microUsd / 1_000_000;
 	if (dollars > 0 && dollars < 0.01) {
 		return "<$0.01";
 	}
-	return new Intl.NumberFormat("en-US", {
-		style: "currency",
-		currency: "USD",
+	return formatCurrency(dollars, "USD", {
 		maximumFractionDigits: dollars >= 10 ? 0 : 2,
-	}).format(dollars);
+	});
 };
 
 const WHITESPACE = /\s+/;

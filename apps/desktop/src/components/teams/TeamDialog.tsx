@@ -9,6 +9,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@ryu/ui/components/dialog";
+import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import {
@@ -18,9 +19,8 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@ryu/ui/components/select";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { type FormEvent, useEffect, useState } from "react";
-import { AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
+import { AgentAvatar, engineForAgent } from "@/src/lib/agent-logos.tsx";
 import {
 	COORDINATION_OPTIONS,
 	type Coordination,
@@ -38,6 +38,7 @@ export interface TeamDraft {
 
 /** The fields the dialog needs to list and brand a selectable agent. */
 export interface TeamAgentOption {
+	avatarGlyph?: GlyphValue;
 	builtIn?: boolean | null;
 	engine?: string | null;
 	id: string;
@@ -181,9 +182,13 @@ export function TeamDialog({
 											className="flex h-8 items-center gap-2 rounded-md bg-muted/40 px-2"
 											key={memberId}
 										>
-											<AgentLogo
+											<AgentAvatar
 												className="size-4 shrink-0 object-contain"
 												engine={agentEngine(memberId)}
+												glyph={
+													agents.find((agent) => agent.id === memberId)
+														?.avatarGlyph
+												}
 												size="16px"
 											/>
 											<span className="min-w-0 flex-1 truncate text-sm">
@@ -215,9 +220,10 @@ export function TeamDialog({
 													onClick={() => addMember(agent.id)}
 													type="button"
 												>
-													<AgentLogo
+													<AgentAvatar
 														className="size-4 shrink-0 object-contain"
 														engine={engineForAgent(agent)}
+														glyph={agent.avatarGlyph}
 														size="16px"
 													/>
 													<span className="min-w-0 flex-1 truncate text-sm">
@@ -299,8 +305,7 @@ export function TeamDialog({
 						<Button onClick={onClose} type="button" variant="ghost">
 							Cancel
 						</Button>
-						<Button disabled={busy || !name.trim()} type="submit">
-							{busy ? <Spinner className="size-4" /> : null}
+						<Button disabled={!name.trim()} loading={busy} type="submit">
 							{isEdit ? "Save" : "Create"}
 						</Button>
 					</DialogFooter>

@@ -16,17 +16,18 @@
 import {
 	Comment01Icon,
 	FlashIcon,
-	Robot01Icon,
 	ServerStack01Icon,
 	Settings01Icon,
 	ShareKnowledgeIcon,
 	SourceCodeIcon,
-	WorkflowSquare01Icon,
+	Target01Icon,
+	WorkflowCircle06Icon,
 	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import type { ReactNode } from "react";
 import type {
 	CatalogApiSurface,
@@ -79,7 +80,9 @@ function Section({
 					{title}
 				</h3>
 				{typeof count === "number" ? (
-					<span className="text-muted-foreground text-xs">{count}</span>
+					<span className="text-muted-foreground text-xs">
+						{formatNumber(count)}
+					</span>
 				) : null}
 			</div>
 			{description ? (
@@ -248,7 +251,7 @@ export function ApiReferencePanel({ surface }: { surface: CatalogApiSurface }) {
 			{surface.agents?.length ? (
 				<Section
 					count={surface.agents.length}
-					icon={Robot01Icon}
+					icon={Target01Icon}
 					title="Agents"
 				>
 					<ContributionList items={surface.agents} />
@@ -258,7 +261,7 @@ export function ApiReferencePanel({ surface }: { surface: CatalogApiSurface }) {
 			{surface.workflows?.length ? (
 				<Section
 					count={surface.workflows.length}
-					icon={WorkflowSquare01Icon}
+					icon={WorkflowCircle06Icon}
 					title="Workflows"
 				>
 					<ContributionList items={surface.workflows} />

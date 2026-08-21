@@ -1,4 +1,10 @@
 {
+  "tags": ["capture","memory"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/shadow",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/shadow",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/shadow",
   "name": "Shadow",
   "version": "0.1.14",
@@ -27,7 +33,7 @@
       "name": "Shadow Search",
       "kind": "tool",
       "config": {
-        "slug": "shadow__search",
+        "slug": "shadow.search",
         "backend": "http",
         "method": "GET",
         "url": "core:/api/shadow/search",
@@ -59,7 +65,7 @@
       "name": "Shadow Semantic Search",
       "kind": "tool",
       "config": {
-        "slug": "shadow__semantic_search",
+        "slug": "shadow.semantic_search",
         "backend": "http",
         "method": "GET",
         "url": "core:/api/shadow/search/semantic",
@@ -91,7 +97,7 @@
       "name": "Shadow Timeline",
       "kind": "tool",
       "config": {
-        "slug": "shadow__timeline",
+        "slug": "shadow.timeline",
         "backend": "http",
         "method": "GET",
         "url": "core:/api/shadow/timeline",
@@ -122,7 +128,7 @@
       "name": "Shadow Recent Context",
       "kind": "tool",
       "config": {
-        "slug": "shadow__recent_context",
+        "slug": "shadow.recent_context",
         "backend": "http",
         "method": "GET",
         "url": "core:/api/shadow/context/recent",

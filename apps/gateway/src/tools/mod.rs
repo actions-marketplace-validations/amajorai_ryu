@@ -24,17 +24,15 @@ use tracing::{debug, info, warn};
 use crate::error::GatewayError;
 use crate::providers::Provider;
 
-pub use catalog_client::{CoreCatalog, ToolSearchClient};
+pub use catalog_client::{CoreCatalog, ToolSearchClient, COMPOSIO_TOOL_PREFIX};
 
 /// The `tool_search` meta-tool name. Always permitted; never allowlist-gated
 /// (Contract 3: search ≠ grant).
 pub const TOOL_SEARCH_NAME: &str = "tool_search";
 
-/// FQ-id prefix of Composio tools (Core mints them as `composio__<slug>`). These
-/// are the only tool executions the managed plan bills for — Composio charges per
-/// action execution, whereas builtin/MCP/app tools are free. The tool loop counts
-/// dispatched calls with this prefix so the pipeline can debit them at cost.
-pub const COMPOSIO_TOOL_PREFIX: &str = "composio__";
+// Canonical fully-qualified prefix of Composio tools. These are the only tool
+// executions the managed plan bills for; model-facing function aliases are
+// converted back to this prefix before billing and dispatch.
 
 /// FQ id of Core's Agent-Skill loader. Mirrors `skills_tool::LOAD_TOOL_ID`
 /// (`apps/core/src/sidecar/mcp/skills_tool.rs`) the same way
@@ -45,7 +43,7 @@ pub const COMPOSIO_TOOL_PREFIX: &str = "composio__";
 /// Core ever renames the tool, `describe` returns `Err` and the injection is skipped
 /// with a `warn`, rather than silently leaving the model unable to act on the skill
 /// rows the same response advertised.
-pub const SKILLS_LOAD_TOOL_ID: &str = "skills__load";
+pub const SKILLS_LOAD_TOOL_ID: &str = "skills.load";
 
 /// Whether the mesh is enabled (B-9). When userspace networking is on, mesh
 /// peers appear as `127.0.0.1`, so loopback-trust gates fail open; the exec gate
@@ -81,7 +79,7 @@ pub fn tool_search_def() -> Value {
         "type": "function",
         "function": {
             "name": TOOL_SEARCH_NAME,
-            "description": "Search the available catalog for tools AND Agent Skills that can accomplish a task. Returns a ranked list of descriptors (id, name, description, kind). Call this FIRST when you need a capability not already provided as a tool. A row whose kind is 'skill' is instruction text, not a function: do NOT call its id — pass the part after the 'skills__' prefix to skills__load and follow what it returns. Every other kind is called directly by its exact id (or describe it first for its argument schema).",
+            "description": "Search the available catalog for tools AND Agent Skills that can accomplish a task. Returns a ranked list of descriptors (id, name, description, kind). Call this FIRST when you need a capability not already provided as a tool. A row whose kind is 'skill' is instruction text, not a function: do NOT call its id — pass the part after the 'skills.' prefix to skills.load and follow what it returns. Every other kind is called directly by its exact id (or describe it first for its argument schema).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -113,19 +111,22 @@ impl ToolLoopContext {
     /// selected) permits any catalog tool; every other tool must appear in the
     /// allowlist by its exact fully-qualified id (`e == tool.id` only). Bare-name
     /// and bare-server matches are deliberately rejected — they would let an
-    /// allowlist entry like `search` authorize `exa__search`/`composio__search`
+    /// allowlist entry like `search` authorize `exa.search`/`composio.search`
     /// across planes (spec §3 security fix #1; lines 218/961/966). Server-scoped
-    /// grants, when desired, are expressed as the explicit `<server>__*` id form
+    /// grants, when desired, are expressed as the explicit `<server>.*` id form
     /// upstream, never as a bare-server equality here. Absent `"*"`, the exact
     /// deny-by-default gate is unchanged.
     pub fn is_allowed(&self, tool_id: &str) -> bool {
-        if tool_id == TOOL_SEARCH_NAME {
+        let canonical_id = catalog_client::canonical_tool_id(tool_id);
+        if canonical_id == TOOL_SEARCH_NAME {
             return true;
         }
         if self.allowed.iter().any(|a| a == "*") {
             return true;
         }
-        self.allowed.iter().any(|a| a == tool_id)
+        self.allowed
+            .iter()
+            .any(|a| catalog_client::canonical_tool_id(a) == canonical_id)
     }
 }
 
@@ -184,7 +185,7 @@ pub fn inject_search_tool(body: &mut Value, always_on: &[Value]) {
 ///
 /// Returns the final assistant turn plus the number of billable (Composio) tool
 /// executions dispatched across all rounds, so the caller can debit them (#496
-/// managed-plan tool-call cost). Only `composio__*` ids that pass the allowlist
+/// managed-plan tool-call cost). Only `composio.*` ids that pass the allowlist
 /// gate and reach Core are counted; `tool_search`, denied calls, and free
 /// builtin/MCP/app tools never increment it.
 ///
@@ -225,7 +226,8 @@ pub async fn run_tool_loop(
         }
 
         for tc in &tool_calls {
-            let name = tc["function"]["name"].as_str().unwrap_or("");
+            let raw_name = tc["function"]["name"].as_str().unwrap_or("");
+            let name = catalog_client::canonical_tool_id(raw_name);
             let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
             let tool_call_id = tc["id"].as_str().unwrap_or("");
             let input: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
@@ -238,7 +240,7 @@ pub async fn run_tool_loop(
             let mut is_external_result = false;
             let result: Value = if name == TOOL_SEARCH_NAME {
                 handle_search(body, catalog, ctx, input, describe_top_n).await
-            } else if ctx.is_allowed(name) {
+            } else if ctx.is_allowed(&name) {
                 // Bill Composio executions at dispatch (Composio charges per
                 // action). Counted whether the call succeeds or errors, since
                 // both reach Core; free builtin/MCP/app tools are not counted.
@@ -256,7 +258,7 @@ pub async fn run_tool_loop(
                     // stays fail-closed on a bound node — unchanged. The exec plane
                     // (`/v1/exec/tool`) is where the host conversation is threaded.
                     .call_tool(
-                        name,
+                        &name,
                         input,
                         ctx.agent_id.as_deref(),
                         ctx.user_id.as_deref(),
@@ -322,14 +324,14 @@ pub async fn run_tool_loop(
 /// ## Agent Skills are listed but never injected
 ///
 /// Core's catalog now returns Agent Skills alongside tools so the model has one
-/// search door. A skill is instruction text loaded with `skills__load`, not a
+/// search door. A skill is instruction text loaded with `skills.load`, not a
 /// function — so `kind == "skill"` rows are **filtered out before** the
 /// `describe_top_n` budget is applied, not skipped inside the loop. Skipping inside
 /// would let a skill-heavy top-N consume the injection budget and leave the model
 /// with no tool definitions at all.
 ///
 /// They stay in the returned list, carrying their `kind`, which is how the model
-/// learns they exist and (via the `tool_search` description) that `skills__load` is
+/// learns they exist and (via the `tool_search` description) that `skills.load` is
 /// the way to reach them — and when any skill row is surfaced, that loader is
 /// injected alongside, because on this plane the model does not otherwise have it.
 async fn handle_search(
@@ -379,12 +381,13 @@ async fn handle_search(
         .filter(|d| d.kind != catalog_client::ToolKind::Skill)
         .take(describe_top_n)
     {
-        if existing.contains(&d.id) {
+        let model_name = catalog_client::model_tool_name(&d.id);
+        if existing.contains(&model_name) {
             continue;
         }
         match catalog.describe(&d.id).await {
             Ok(described) => {
-                existing.insert(d.id.clone());
+                existing.insert(catalog_client::model_tool_name(&described.id));
                 to_inject.push(described.to_tool_def());
             }
             Err(e) => {
@@ -393,10 +396,10 @@ async fn handle_search(
         }
     }
 
-    // The loader companion. Telling the model to reach a skill with `skills__load`
+    // The loader companion. Telling the model to reach a skill with `skills.load`
     // is worthless if it has no such function: on this plane the only tools a model
     // holds are `tool_search`, the caller's own, the `always_on` set, and whatever
-    // previous searches injected — `skills__load` is in none of those by default.
+    // previous searches injected — `skills.load` is in none of those by default.
     // So the moment a search surfaces a skill, inject the loader in the same round.
     //
     // Outside the `describe_top_n` budget on purpose: it is the *access path* for
@@ -404,7 +407,7 @@ async fn handle_search(
     // Deduped through `existing`, so repeated searches inject it once.
     //
     // Injection is not a grant — `ToolLoopContext::is_allowed` still gates the call,
-    // and a request without `skills__load` in its allowlist gets the usual denial
+    // and a request without `skills.load` in its allowlist gets the usual denial
     // result. That is the correct governance outcome; what this fixes is the model
     // being told to call something it could not even emit.
     let surfaced_a_skill = descriptors
@@ -643,7 +646,7 @@ mod tests {
     }
 
     /// A `kind: skill` row — what Core returns for an Agent Skill in the merged
-    /// catalog. Ids are namespaced `skills__<slug>`.
+    /// catalog. Ids are namespaced `skills.<slug>`.
     fn skill_descriptor(id: &str, name: &str) -> catalog_client::ToolDescriptor {
         catalog_client::ToolDescriptor {
             kind: catalog_client::ToolKind::Skill,
@@ -702,20 +705,17 @@ mod tests {
     async fn skill_rows_are_listed_with_their_kind_but_never_injected() {
         let catalog = MockCatalog {
             search_results: vec![
-                skill_descriptor("skills__merge-conflicts", "Resolve merge conflicts"),
-                descriptor("exa__search", "search"),
+                skill_descriptor("skills.merge-conflicts", "Resolve merge conflicts"),
+                descriptor("exa.search", "search"),
             ],
             // Both are describable, so an injected skill WOULD be visible in `tools`
             // — the assertion below is about the skip, not about a describe failure.
             described: std::collections::HashMap::from([
                 (
-                    "skills__merge-conflicts".to_string(),
-                    described("skills__merge-conflicts", "Resolve merge conflicts"),
+                    "skills.merge-conflicts".to_string(),
+                    described("skills.merge-conflicts", "Resolve merge conflicts"),
                 ),
-                (
-                    "exa__search".to_string(),
-                    described("exa__search", "search"),
-                ),
+                ("exa.search".to_string(), described("exa.search", "search")),
             ]),
             ..Default::default()
         };
@@ -736,12 +736,12 @@ mod tests {
         let rows = result["data"].as_array().expect("data array");
         let skill_row = rows
             .iter()
-            .find(|r| r["id"] == json!("skills__merge-conflicts"))
+            .find(|r| r["id"] == json!("skills.merge-conflicts"))
             .unwrap_or_else(|| panic!("skill row missing: {result}"));
         assert_eq!(skill_row["kind"], json!("skill"), "{skill_row}");
         let tool_row = rows
             .iter()
-            .find(|r| r["id"] == json!("exa__search"))
+            .find(|r| r["id"] == json!("exa.search"))
             .unwrap_or_else(|| panic!("tool row missing: {result}"));
         assert_eq!(tool_row["kind"], json!("builtin"), "{tool_row}");
 
@@ -752,22 +752,22 @@ mod tests {
             .iter()
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
-        assert!(names.contains(&"exa__search"), "{names:?}");
+        assert!(names.contains(&"exa.search"), "{names:?}");
         assert!(
-            !names.contains(&"skills__merge-conflicts"),
+            !names.contains(&"skills.merge-conflicts"),
             "a skill must never be offered as a callable function: {names:?}"
         );
     }
 
-    /// Telling the model to use `skills__load` is only actionable if it HAS
-    /// `skills__load`. On this plane it does not: the injected set is `tool_search`
+    /// Telling the model to use `skills.load` is only actionable if it HAS
+    /// `skills.load`. On this plane it does not: the injected set is `tool_search`
     /// plus whatever previous searches added. So a search that surfaces any skill
     /// must inject the loader in the same round — including when every hit is a
     /// skill and nothing else was injected at all.
     #[tokio::test]
     async fn surfacing_a_skill_injects_the_loader_the_model_needs() {
         let catalog = MockCatalog {
-            search_results: vec![skill_descriptor("skills__merge-conflicts", "Conflicts")],
+            search_results: vec![skill_descriptor("skills.merge-conflicts", "Conflicts")],
             described: std::collections::HashMap::from([(
                 SKILLS_LOAD_TOOL_ID.to_string(),
                 described(SKILLS_LOAD_TOOL_ID, "load"),
@@ -796,7 +796,7 @@ mod tests {
             "an all-skills result must still leave the model able to load: {names:?}"
         );
         // The skill itself is still not a function.
-        assert!(!names.contains(&"skills__merge-conflicts"), "{names:?}");
+        assert!(!names.contains(&"skills.merge-conflicts"), "{names:?}");
 
         // Idempotent: a second search does not inject a duplicate definition.
         handle_search(&mut body, &catalog, &ctx, json!({ "query": "x" }), 5).await;
@@ -814,12 +814,9 @@ mod tests {
     #[tokio::test]
     async fn a_result_without_skills_does_not_inject_the_loader() {
         let catalog = MockCatalog {
-            search_results: vec![descriptor("exa__search", "search")],
+            search_results: vec![descriptor("exa.search", "search")],
             described: std::collections::HashMap::from([
-                (
-                    "exa__search".to_string(),
-                    described("exa__search", "search"),
-                ),
+                ("exa.search".to_string(), described("exa.search", "search")),
                 (
                     SKILLS_LOAD_TOOL_ID.to_string(),
                     described(SKILLS_LOAD_TOOL_ID, "load"),
@@ -838,7 +835,7 @@ mod tests {
             .iter()
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
-        assert_eq!(names, vec!["exa__search"], "{names:?}");
+        assert_eq!(names, vec!["exa.search"], "{names:?}");
     }
 
     /// The skip happens **before** `describe_top_n` is applied. With a budget of 1
@@ -848,13 +845,13 @@ mod tests {
     async fn skills_do_not_consume_the_describe_budget() {
         let catalog = MockCatalog {
             search_results: vec![
-                skill_descriptor("skills__a", "A skill"),
-                skill_descriptor("skills__b", "Another skill"),
-                descriptor("exa__search", "search"),
+                skill_descriptor("skills.a", "A skill"),
+                skill_descriptor("skills.b", "Another skill"),
+                descriptor("exa.search", "search"),
             ],
             described: std::collections::HashMap::from([(
-                "exa__search".to_string(),
-                described("exa__search", "search"),
+                "exa.search".to_string(),
+                described("exa.search", "search"),
             )]),
             ..Default::default()
         };
@@ -871,7 +868,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["exa__search"],
+            vec!["exa.search"],
             "the one injection slot must go to the one callable hit"
         );
     }
@@ -880,22 +877,22 @@ mod tests {
     async fn search_injects_described_defs_then_executes() {
         let catalog = {
             let mut c = MockCatalog::default();
-            c.search_results = vec![descriptor("exa__search", "search")];
+            c.search_results = vec![descriptor("exa.search", "search")];
             c.described
-                .insert("exa__search".into(), described("exa__search", "search"));
+                .insert("exa.search".into(), described("exa.search", "search"));
             c
         };
-        // Round 1: model calls tool_search. Round 2: model calls exa__search.
+        // Round 1: model calls tool_search. Round 2: model calls exa.search.
         // Round 3: model returns final text.
         let provider = ScriptedProvider::new(vec![
             tool_call("c1", TOOL_SEARCH_NAME, r#"{"query":"web search"}"#),
-            tool_call("c2", "exa__search", r#"{"query":"rust"}"#),
+            tool_call("c2", "exa.search", r#"{"query":"rust"}"#),
             final_text("done"),
         ]);
         let ctx = ToolLoopContext {
             agent_id: Some("agent1".into()),
             user_id: None,
-            allowed: vec!["exa__search".into()],
+            allowed: vec!["exa.search".into()],
         };
         let mut body = json!({ "messages": [{ "role": "user", "content": "hi" }] });
         inject_search_tool(&mut body, &[]);
@@ -904,10 +901,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["choices"][0]["message"]["content"], "done");
-        // exa__search is not a Composio tool ⇒ not billable.
+        // exa.search is not a Composio tool ⇒ not billable.
         assert_eq!(billable, 0);
 
-        // The body's tools must now include the described exa__search def.
+        // The body's tools must now include the described exa.search def.
         let names: Vec<&str> = body["tools"]
             .as_array()
             .unwrap()
@@ -915,33 +912,72 @@ mod tests {
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
         assert!(names.contains(&TOOL_SEARCH_NAME));
-        assert!(names.contains(&"exa__search"));
+        assert!(names.contains(&"exa.search"));
         // The allowed tool was executed.
-        assert_eq!(
-            catalog.executed.lock().unwrap().as_slice(),
-            &["exa__search"]
+        assert_eq!(catalog.executed.lock().unwrap().as_slice(), &["exa.search"]);
+    }
+
+    #[tokio::test]
+    async fn composio_search_uses_legal_alias_and_dispatches_canonical_id() {
+        let canonical = "composio.SLACK_SEND_MESSAGE";
+        let mut catalog = MockCatalog::default();
+        let mut row = descriptor(canonical, "Send a Slack message");
+        row.kind = catalog_client::ToolKind::Composio;
+        catalog.search_results = vec![row];
+        catalog.described.insert(
+            canonical.to_owned(),
+            described(canonical, "Send a Slack message"),
         );
+
+        let provider = ScriptedProvider::new(vec![
+            tool_call("c1", TOOL_SEARCH_NAME, r#"{"query":"slack"}"#),
+            tool_call("c2", "composio__SLACK_SEND_MESSAGE", "{}"),
+            final_text("done"),
+        ]);
+        let ctx = ToolLoopContext {
+            agent_id: None,
+            user_id: None,
+            allowed: vec![canonical.to_owned()],
+        };
+        let mut body = json!({ "messages": [{ "role": "user", "content": "hi" }] });
+        inject_search_tool(&mut body, &[]);
+
+        let (out, billable) = run_tool_loop(&mut body, &provider, "m", &catalog, &ctx, 6, 5)
+            .await
+            .unwrap();
+
+        assert_eq!(out["choices"][0]["message"]["content"], "done");
+        assert_eq!(billable, 1);
+        assert_eq!(catalog.executed.lock().unwrap().as_slice(), &[canonical]);
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect();
+        assert!(names.contains(&"composio__SLACK_SEND_MESSAGE"));
+        assert!(!names.contains(&canonical));
     }
 
     #[tokio::test]
     async fn counts_only_billable_composio_executions() {
-        // #496: the loop bills only executed `composio__*` calls. Three rounds
+        // #496: the loop bills only executed `composio.*` calls. Three rounds
         // each execute one allowed tool — two Composio actions and one free
         // builtin — so the billable count is 2, not 3.
         let catalog = MockCatalog::default();
         let provider = ScriptedProvider::new(vec![
             tool_call("c1", "composio__SLACK_SEND_MESSAGE", "{}"),
             tool_call("c2", "composio__GITHUB_CREATE_ISSUE", "{}"),
-            tool_call("c3", "exa__search", r#"{"query":"x"}"#),
+            tool_call("c3", "exa.search", r#"{"query":"x"}"#),
             final_text("done"),
         ]);
         let ctx = ToolLoopContext {
             agent_id: None,
             user_id: None,
             allowed: vec![
-                "composio__SLACK_SEND_MESSAGE".into(),
-                "composio__GITHUB_CREATE_ISSUE".into(),
-                "exa__search".into(),
+                "composio.SLACK_SEND_MESSAGE".into(),
+                "composio.GITHUB_CREATE_ISSUE".into(),
+                "exa.search".into(),
             ],
         };
         let mut body = json!({ "messages": [{ "role": "user", "content": "hi" }] });
@@ -956,7 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn denied_composio_call_is_not_billed() {
-        // A `composio__*` call that fails the allowlist gate never reaches Core,
+        // A `composio.*` call that fails the allowlist gate never reaches Core,
         // so it is not counted (no execution = no Composio charge).
         let catalog = MockCatalog::default();
         let provider = ScriptedProvider::new(vec![
@@ -980,7 +1016,7 @@ mod tests {
     async fn allowlist_denial_returns_error_not_execution() {
         let catalog = MockCatalog::default();
         let provider = ScriptedProvider::new(vec![
-            tool_call("c1", "exa__search", r#"{"query":"x"}"#),
+            tool_call("c1", "exa.search", r#"{"query":"x"}"#),
             final_text("ok"),
         ]);
         let ctx = ToolLoopContext {
@@ -1007,7 +1043,7 @@ mod tests {
 
     #[tokio::test]
     async fn external_result_wrapped_tool_search_not() {
-        // Injection defense: the external `exa__search` RESULT re-entering the
+        // Injection defense: the external `exa.search` RESULT re-entering the
         // model is wrapped in untrusted-content boundary markers, while the
         // `tool_search` discovery envelope is returned verbatim (excluded).
         let _guard = crate::untrusted::FLAG_TEST_LOCK
@@ -1016,20 +1052,20 @@ mod tests {
         crate::untrusted::set_enabled(true);
         let catalog = {
             let mut c = MockCatalog::default();
-            c.search_results = vec![descriptor("exa__search", "search")];
+            c.search_results = vec![descriptor("exa.search", "search")];
             c.described
-                .insert("exa__search".into(), described("exa__search", "search"));
+                .insert("exa.search".into(), described("exa.search", "search"));
             c
         };
         let provider = ScriptedProvider::new(vec![
             tool_call("c1", TOOL_SEARCH_NAME, r#"{"query":"web search"}"#),
-            tool_call("c2", "exa__search", r#"{"query":"rust"}"#),
+            tool_call("c2", "exa.search", r#"{"query":"rust"}"#),
             final_text("done"),
         ]);
         let ctx = ToolLoopContext {
             agent_id: Some("agent1".into()),
             user_id: None,
-            allowed: vec!["exa__search".into()],
+            allowed: vec!["exa.search".into()],
         };
         let mut body = json!({ "messages": [{ "role": "user", "content": "hi" }] });
         inject_search_tool(&mut body, &[]);
@@ -1044,16 +1080,16 @@ mod tests {
             .filter(|m| m["role"] == "tool")
             .filter_map(|m| m["content"].as_str())
             .collect();
-        // Two tool results: the tool_search descriptor list and the exa__search
+        // Two tool results: the tool_search descriptor list and the exa.search
         // execution result.
         let search_content = tool_msgs
             .iter()
-            .find(|c| c.contains("exa__search") && !c.contains("ran"))
+            .find(|c| c.contains("exa.search") && !c.contains("ran"))
             .expect("tool_search descriptor result");
         let exec_content = tool_msgs
             .iter()
             .find(|c| c.contains("ran"))
-            .expect("exa__search execution result");
+            .expect("exa.search execution result");
         // The external execution result is boundary-wrapped.
         assert!(
             exec_content.starts_with(crate::untrusted::UNTRUSTED_OPEN),
@@ -1070,13 +1106,13 @@ mod tests {
         crate::untrusted::set_enabled(false);
         let catalog2 = MockCatalog::default();
         let provider2 = ScriptedProvider::new(vec![
-            tool_call("d1", "exa__search", r#"{"query":"x"}"#),
+            tool_call("d1", "exa.search", r#"{"query":"x"}"#),
             final_text("done"),
         ]);
         let ctx2 = ToolLoopContext {
             agent_id: None,
             user_id: None,
-            allowed: vec!["exa__search".into()],
+            allowed: vec!["exa.search".into()],
         };
         let mut body2 = json!({ "messages": [{ "role": "user", "content": "hi" }] });
         let _ = run_tool_loop(&mut body2, &provider2, "m", &catalog2, &ctx2, 6, 5)
@@ -1162,7 +1198,7 @@ mod tests {
     #[test]
     fn shallow_described_tool_synthesizes_permissive_schema() {
         let dt = catalog_client::DescribedTool {
-            id: "composio__SLACK".into(),
+            id: "composio.SLACK".into(),
             name: "SLACK".into(),
             description: "".into(),
             args: vec![],
@@ -1211,19 +1247,25 @@ mod tests {
             allowed: vec!["spider".into(), "crawl".into()],
         };
         assert!(
-            !bare.is_allowed("spider__crawl"),
+            !bare.is_allowed("spider.crawl"),
             "bare server/name must not grant a fully-qualified tool"
         );
         // The exact FQ id authorizes.
         let exact = ToolLoopContext {
             agent_id: None,
             user_id: None,
-            allowed: vec!["spider__crawl".into()],
+            allowed: vec!["spider.crawl".into()],
         };
-        assert!(exact.is_allowed("spider__crawl"));
+        assert!(exact.is_allowed("spider.crawl"));
+        assert!(ToolLoopContext {
+            agent_id: None,
+            user_id: None,
+            allowed: vec!["composio.SLACK_SEND_MESSAGE".into()],
+        }
+        .is_allowed("composio__SLACK_SEND_MESSAGE"));
         // tool_search is always allowed; an unrelated id is not.
         assert!(exact.is_allowed(TOOL_SEARCH_NAME));
-        assert!(!exact.is_allowed("exa__search"));
+        assert!(!exact.is_allowed("exa.search"));
     }
 
     #[test]
@@ -1235,16 +1277,16 @@ mod tests {
             user_id: None,
             allowed: vec!["*".into()],
         };
-        assert!(full.is_allowed("spider__crawl"));
-        assert!(full.is_allowed("exa__search"));
+        assert!(full.is_allowed("spider.crawl"));
+        assert!(full.is_allowed("exa.search"));
         assert!(full.is_allowed(TOOL_SEARCH_NAME));
         // Without "*", a non-listed id is still denied (deny-by-default intact).
         let scoped = ToolLoopContext {
             agent_id: None,
             user_id: None,
-            allowed: vec!["spider__crawl".into()],
+            allowed: vec!["spider.crawl".into()],
         };
-        assert!(!scoped.is_allowed("exa__search"));
+        assert!(!scoped.is_allowed("exa.search"));
     }
 
     /// The `kind` filter advertised to the model must be exactly the set Core's

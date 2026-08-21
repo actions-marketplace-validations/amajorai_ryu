@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./rpc": "./src/rpc.ts",
+    "./realtime": "./src/realtime.ts",
     "./views": "./src/views.ts",
     "./live-activity": "./src/live-activity.ts",
     "./ExtensionHost": "./src/ExtensionHost.tsx",

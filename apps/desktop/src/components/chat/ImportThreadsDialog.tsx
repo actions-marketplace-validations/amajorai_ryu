@@ -30,7 +30,7 @@ import {
 } from "@ryu/ui/components/select";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useCallback, useEffect, useState } from "react";
-import { AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
+import { AgentAvatar, engineForAgent } from "@/src/lib/agent-logos.tsx";
 import {
 	importAgentThread,
 	listAgentThreads,
@@ -186,9 +186,10 @@ export function ImportThreadsDialog({
 								}
 								return (
 									<>
-										<AgentLogo
+										<AgentAvatar
 											className="size-4 shrink-0 object-contain"
 											engine={engineForAgent(selected)}
+											glyph={selected.avatarGlyph}
 											size="16px"
 										/>
 										<span className="truncate">{selected.name}</span>
@@ -201,9 +202,10 @@ export function ImportThreadsDialog({
 						{agents.map((agent) => (
 							<SelectItem key={agent.id} value={agent.id}>
 								<span className="flex items-center gap-2">
-									<AgentLogo
+									<AgentAvatar
 										className="size-4 shrink-0 object-contain"
 										engine={engineForAgent(agent)}
+										glyph={agent.avatarGlyph}
 										size="16px"
 									/>
 									{agent.name}
@@ -307,10 +309,10 @@ export function ImportThreadsDialog({
 						Cancel
 					</Button>
 					<Button
-						disabled={selected.size === 0 || importing}
+						disabled={selected.size === 0}
+						loading={importing}
 						onClick={handleImportSelected}
 					>
-						{importing && <Spinner className="size-3" />}
 						{selected.size > 0 ? `Import ${selected.size}` : "Import"}
 					</Button>
 				</DialogFooter>

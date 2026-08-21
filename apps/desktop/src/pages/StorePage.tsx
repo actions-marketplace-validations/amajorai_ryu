@@ -1,23 +1,20 @@
 import {
-	CpuIcon,
 	Download01Icon,
-	GridIcon,
-	Home01Icon,
-	Link01Icon,
+	Key01Icon,
+	Package01Icon,
 	SlidersHorizontalIcon,
-	Wallet01Icon,
 } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { StoreComingSoon } from "@ryu/blocks/desktop/store";
 import {
-	StoreComingSoon,
-	StoreGlobalSearch,
-	type StoreSectionTab,
-	StoreSectionTabs,
-} from "@ryu/blocks/desktop/store";
+	MARKETPLACE_SECTION_TABS,
+	MARKETPLACE_SECTION_VALUES,
+	type MarketplaceSection,
+} from "@ryu/marketplace/catalog/chrome/marketplace-sections";
+import type { StoreSectionTab } from "@ryu/marketplace/catalog/chrome/marketplace-surface";
+import MarketplaceSurface from "@ryu/marketplace/catalog/chrome/marketplace-surface";
 import { InstalledOnlyProvider } from "@ryu/marketplace/catalog/installed-filter";
-import { REALM_ICONS } from "@ryu/marketplace/catalog/realm-icons";
 import { Button } from "@ryu/ui/components/button";
-import { Logo } from "@ryu/ui/components/logo";
 import {
 	Popover,
 	PopoverContent,
@@ -28,22 +25,21 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
-import { cn } from "@ryu/ui/lib/utils";
-import {
-	type ReactNode,
-	useCallback,
-	useEffect,
-	useMemo,
-	useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import ConnectionsTab from "@/src/components/marketplace/ConnectionsTab.tsx";
 import { DesktopMarketplaceHost } from "@/src/components/marketplace/host.tsx";
-import AccountSection from "@/src/components/store/AccountSection.tsx";
+import LicensesTab from "@/src/components/marketplace/LicensesTab.tsx";
+import PrivatePackageInstallDialog from "@/src/components/marketplace/PrivatePackageInstallDialog.tsx";
+import PrivatePackageShareDialog from "@/src/components/marketplace/PrivatePackageShareDialog.tsx";
+import SellTab from "@/src/components/marketplace/SellTab.tsx";
 import AgentsCatalogSection from "@/src/components/store/AgentsCatalogSection.tsx";
 import AppsCatalogSection from "@/src/components/store/AppsCatalogSection.tsx";
 import ContributedStoreSection from "@/src/components/store/ContributedStoreSection.tsx";
 import { DesktopCatalogHost } from "@/src/components/store/catalog-host.tsx";
 import EnginesCatalogSection from "@/src/components/store/EnginesCatalogSection.tsx";
 import IntegrationsCatalogSection from "@/src/components/store/IntegrationsCatalogSection.tsx";
+import MarketplaceBrowseSection from "@/src/components/store/MarketplaceBrowseSection.tsx";
+import MarketplacesCatalogSection from "@/src/components/store/MarketplacesCatalogSection.tsx";
 import McpCatalogSection from "@/src/components/store/McpCatalogSection.tsx";
 import ModelsCatalogSection from "@/src/components/store/ModelsCatalogSection.tsx";
 import SkillsCatalogSection from "@/src/components/store/SkillsCatalogSection.tsx";
@@ -53,10 +49,10 @@ import {
 	type StoreToolbarConfig,
 	StoreToolbarProvider,
 } from "@/src/components/store/storeToolbar.tsx";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import {
 	contributedTabForSection,
 	resolveStoreSection,
-	STORE_GROUP_ORDER,
 	storeTabGroup,
 	storeTabSectionValue,
 	useContributedStoreTabs,
@@ -66,116 +62,25 @@ import {
 	type StoreSearchRealm,
 	useStoreSearch,
 } from "@/src/hooks/useStoreSearch.ts";
+import { useStoreSectionCounts } from "@/src/hooks/useStoreSectionCounts.ts";
 import type { PluginStoreTab } from "@/src/lib/api/plugins.ts";
 
-/** The sections the shell itself owns. Everything else in the bar is an
- *  app-registered `contributes.store_tabs[]` entry — see
- *  {@link useContributedStoreTabs}. */
-type BuiltinStoreSection =
-	| "home"
-	| "integrations"
-	| "apps"
-	| "plugins"
-	| "models"
-	| "skills"
-	| "mcp"
-	| "agents"
-	| "engines"
-	| "account";
+/** The built-in section values are shared with the web Marketplace. Everything
+ * else in the bar is an app-registered `contributes.store_tabs[]` entry. */
+type BuiltinStoreSection = MarketplaceSection;
 
 /** An active section value: a {@link BuiltinStoreSection}, or a contributed tab's
  *  `plugin:<pluginId>:<tabId>` key. Deliberately open — the Store's section list is
  *  no longer a closed union the shell can enumerate at compile time. */
 type StoreSection = string;
 
-const SECTIONS: {
-	value: BuiltinStoreSection;
-	label: string;
-	icon: IconSvgElement;
-	/** Optional rendered mark shown instead of `icon` — see StoreSectionTab. */
-	iconNode?: ReactNode;
-	group: string;
-}[] = [
-	// Home: the app-store landing — featured rail + a row per realm, so
-	// "everything" has one front door before the per-realm sections. The
-	// store-wide search lives in the nav rail, above the section list.
-	{ value: "home", label: "Home", icon: Home01Icon, group: "discover" },
-	// Integrations: the brand-first front door — one card per service (Notion,
-	// Slack, …) merged from the integrations.sh directory and Composio's toolkit
-	// catalog. Opening a brand surfaces every related Skill/MCP/Plugin in one
-	// place. Sits first in the browse cluster, so the group divider falls between
-	// Home and it — one separator, then Integrations atop the per-realm catalogs.
-	{
-		value: "integrations",
-		label: "Integrations",
-		icon: Link01Icon,
-		group: "catalog",
-	},
-	// Browse — the per-realm catalogs (Core catalogs + inline paid Marketplace
-	// items). Apps = plugins that ship a Companion UI surface; Plugins = the
-	// rest (tools/agents/channels/policies + integration descriptors).
-	{ value: "apps", label: "Apps", icon: REALM_ICONS.apps, group: "catalog" },
-	{
-		value: "plugins",
-		label: "Plugins",
-		icon: REALM_ICONS.plugins,
-		group: "catalog",
-	},
-	{
-		value: "models",
-		label: "Models",
-		icon: REALM_ICONS.models,
-		group: "catalog",
-	},
-	{
-		value: "skills",
-		label: "Skills",
-		icon: REALM_ICONS.skills,
-		group: "catalog",
-	},
-	// MCP servers from the official registry (and registries behind the seam).
-	{ value: "mcp", label: "MCP", icon: REALM_ICONS.mcp, group: "catalog" },
-	// Agents wears the Ryu mark itself, not a glyph: an agent IS a Ryu employee
-	// (the catalog's cards are its employee badges), and the target glyph every
-	// other realm-style icon sat beside said nothing about that. `icon` stays as
-	// the path fallback for any surface that can only render an IconSvgElement.
-	{
-		value: "agents",
-		label: "Agents",
-		icon: REALM_ICONS.agents,
-		iconNode: <Logo size="16px" variant="outline" />,
-		group: "catalog",
-	},
-	// Workflow Templates used to sit here as a hardcoded row. It is now registered by
-	// the Workflows app itself (`apps-store/workflows/manifest.json` →
-	// `contributes.store_tabs`) and arrives through `useContributedStoreTabs`, in the
-	// same `catalog` group — the first tab to go through the bridge that lets any app
-	// own a marketplace section.
-	// Engines = all local inference runtimes, grouped inside by modality
-	// (Text · Image · Speech · Embeddings). Voice lives here now, not its own tab.
-	{ value: "engines", label: "Engines", icon: CpuIcon, group: "catalog" },
-	// Community listings — the third-party apps + plugins discovered from the public
-	// GitHub topics `ryu-app` / `ryu-plugin` — have NO tab of their own. Provenance
-	// is not a category: a community web-scraper plugin answers the same question as
-	// a first-party one, and a separate tab meant a user who searched Plugins and
-	// found nothing never learned the community feed had it. They now render as a
-	// trailing, separately-headed shelf inside Apps and Plugins, carrying the same
-	// "not reviewed by Ryu" notice they carried here (see `CommunityShelf`).
-	//
-	// "Added" is NOT a tab either, for the same reason and by the same fix: it was a
-	// thirteenth pill that was not a category, and reaching an installed model
-	// through it meant leaving the Models tab and every affordance that makes Models
-	// usable. It is the chrome's "Installed only" switch now
-	// ({@link InstalledOnlyProvider}), which narrows whichever section you are
-	// already on. Tools is deliberately not here either: the MCP servers registered
-	// on this node live in the Library (`/tools`); browse the catalog under "MCP".
-	//
-	// Cross-node health + per-node sidecar controls live in the node selector.
-	// Account — Marketplace money layer: licenses, selling, connections.
-	{ value: "account", label: "Account", icon: Wallet01Icon, group: "account" },
-];
+const BUILTIN_SECTION_VALUES = MARKETPLACE_SECTION_VALUES;
 
-const BUILTIN_SECTION_VALUES = SECTIONS.map((s) => s.value);
+/** Preserve old `/store/account` deep links while the visible nav uses the same
+ * individual money tabs as the web surface. */
+function canonicalStoreSection(value: string): string {
+	return value === "account" ? "connections" : value;
+}
 
 function isBuiltinSection(value: string): value is BuiltinStoreSection {
 	return (BUILTIN_SECTION_VALUES as string[]).includes(value);
@@ -212,6 +117,7 @@ export default function StorePage({
 	 *  integrations.sh → MCP-catalog hand-off pre-filters by server name). */
 	initialQuery?: string;
 }) {
+	const { openTab } = useTabsContext();
 	// App-registered sections. These arrive asynchronously (Core's contributions
 	// endpoint), so `initialSection` is resolved against them in an effect below
 	// rather than once at mount — a deep link to `/store/workflows` must land on the
@@ -220,13 +126,15 @@ export default function StorePage({
 	// Warm every tab's opening view in the background, so switching tabs reads
 	// from cache instead of spinning once per tab per session.
 	useStorePrefetch();
+	const sectionCounts = useStoreSectionCounts(contributedTabs);
+	const initialCanonicalSection = canonicalStoreSection(initialSection);
 	const [section, setSection] = useState<StoreSection>(() =>
-		isBuiltinSection(initialSection) ? initialSection : "home"
+		isBuiltinSection(initialCanonicalSection) ? initialCanonicalSection : "home"
 	);
 	// The requested section, held until it can be resolved. Cleared once honoured so
 	// a later manual pick is never overridden by a stale deep link.
 	const [pendingSection, setPendingSection] = useState<string | null>(() =>
-		isBuiltinSection(initialSection) ? null : initialSection
+		isBuiltinSection(initialCanonicalSection) ? null : initialCanonicalSection
 	);
 
 	useEffect(() => {
@@ -234,7 +142,7 @@ export default function StorePage({
 			return;
 		}
 		const resolved = resolveStoreSection(
-			pendingSection,
+			canonicalStoreSection(pendingSection),
 			BUILTIN_SECTION_VALUES,
 			contributedTabs
 		);
@@ -245,32 +153,36 @@ export default function StorePage({
 	}, [pendingSection, contributedTabs]);
 
 	const activeContributedTab = useMemo(
-		() => contributedTabForSection(section, contributedTabs),
+		() =>
+			contributedTabForSection(section, contributedTabs) ??
+			(section === "workflows"
+				? (contributedTabs.find((tab) => tab.id === "workflows") ?? null)
+				: null),
 		[section, contributedTabs]
 	);
 
-	// The nav bar's full section list: the shell's own sections with each app's
-	// registered tabs spliced into the group it declared, so the divider logic
-	// (adjacent same-group pills cluster) keeps working unchanged.
+	// The built-in list is the shared web/desktop contract. Contributed tabs are
+	// appended only when their id is not already represented by that contract, so
+	// a Workflows contribution can own the body without creating a second pill.
 	const navSections = useMemo(() => {
-		const out: StoreSectionTab[] = [];
-		for (const group of STORE_GROUP_ORDER) {
-			for (const s of SECTIONS.filter((b) => b.group === group)) {
-				out.push(s);
-			}
-			for (const tab of contributedTabs.filter(
-				(t) => storeTabGroup(t) === group
-			)) {
-				out.push({
-					group,
-					icon: tab.icon ?? "grid",
-					label: tab.title,
-					value: storeTabSectionValue(tab),
-				});
-			}
-		}
-		return out;
-	}, [contributedTabs]);
+		const builtIn = MARKETPLACE_SECTION_TABS.map((tab) => ({
+			...tab,
+			count: sectionCounts[tab.value],
+		}));
+		const contributed = contributedTabs
+			.filter(
+				(tab) =>
+					!(MARKETPLACE_SECTION_VALUES as readonly string[]).includes(tab.id)
+			)
+			.map<StoreSectionTab>((tab) => ({
+				group: storeTabGroup(tab),
+				icon: tab.icon ?? "package-01",
+				label: tab.title,
+				count: sectionCounts[storeTabSectionValue(tab)],
+				value: storeTabSectionValue(tab),
+			}));
+		return [...builtIn, ...contributed];
+	}, [contributedTabs, sectionCounts]);
 
 	// Store-wide search, live from any section via the nav rail. A non-empty
 	// query takes over the content pane with aggregated results.
@@ -301,6 +213,8 @@ export default function StorePage({
 	// switching tabs: that is the whole point (browse Models installed, then
 	// Plugins installed, without re-arming it each time).
 	const [installedOnly, setInstalledOnly] = useState(initialInstalledOnly);
+	const [privateInstallOpen, setPrivateInstallOpen] = useState(false);
+	const [privateShareOpen, setPrivateShareOpen] = useState(false);
 
 	const openRealm = (
 		realm: StoreSearchRealm,
@@ -313,10 +227,29 @@ export default function StorePage({
 		setSection(realm);
 	};
 
+	const openConnections = () => {
+		setSectionInitialQuery(undefined);
+		setSectionInitialSelectedId(undefined);
+		setSearchQuery("");
+		setSection("connections");
+	};
+
+	const openInstallChat = useCallback(
+		(prompt: string) => {
+			openTab("/chat", {
+				forceNew: true,
+				title: "Integration setup",
+				initialPrompt: prompt,
+				initialSubmit: true,
+			});
+		},
+		[openTab]
+	);
+
 	const selectSection = useCallback(
 		(value: string) => {
 			const resolved = resolveStoreSection(
-				value,
+				canonicalStoreSection(value),
 				BUILTIN_SECTION_VALUES,
 				contributedTabs
 			);
@@ -353,108 +286,137 @@ export default function StorePage({
 			<DesktopCatalogHost>
 				<StoreToolbarProvider value={setToolbar}>
 					<InstalledOnlyProvider value={installedOnly}>
-						<div className="relative flex h-full flex-col overflow-hidden pt-12">
-							{/* Page chrome, inline and in the order it works: the global
-							    search (with the active section's filters and the
-							    installed-only switch beside it), then the section tabs.
-							    Aligned to the same column the section below uses — centered
-							    for the carded sections, edge-to-edge for the full-bleed
-							    Models pane.
-
-							    There is no section TITLE any more. It restated the pill that
-							    was already active directly beneath it, and it pushed the one
-							    control that searches everything to the bottom of the page,
-							    below the tabs that scope a search to one realm. */}
-							<div
-								className={cn(
-									"mx-auto w-full shrink-0 px-4 pt-4",
-									fullBleed ? "max-w-none" : "max-w-4xl"
-								)}
-							>
-								<StoreGlobalSearch
-									onChange={setSearchQuery}
-									placeholder="Search the whole marketplace…"
-									trailing={
-										<>
-											{sectionFilters?.panel ? (
-												<Popover>
-													<PopoverTrigger
-														render={
-															<Button className="gap-1.5" variant="ghost">
-																<HugeiconsIcon
-																	className="size-4"
-																	icon={
-																		sectionFilters.panelIcon ??
-																		SlidersHorizontalIcon
-																	}
-																/>
-																{sectionFilters.panelLabel ?? "Filters"}
-															</Button>
-														}
-													/>
-													<PopoverContent
-														align="end"
-														className="w-[min(30rem,90vw)] p-0"
+						<MarketplaceSurface
+							active={section}
+							className="h-full overflow-hidden pt-12"
+							contentClassName="min-h-0 min-w-0 flex-1 overflow-hidden"
+							fullBleed={fullBleed}
+							onSearch={setSearchQuery}
+							onSelect={selectSection}
+							query={searchQuery}
+							sections={navSections}
+							trailing={
+								<>
+									{sectionFilters?.panel ? (
+										<Popover>
+											<PopoverTrigger
+												render={
+													<Button className="gap-1.5" variant="ghost">
+														<HugeiconsIcon
+															className="size-4"
+															icon={
+																sectionFilters.panelIcon ??
+																SlidersHorizontalIcon
+															}
+														/>
+														{sectionFilters.panelLabel ?? "Filters"}
+													</Button>
+												}
+											/>
+											<PopoverContent
+												align="end"
+												className="w-[min(30rem,90vw)] p-0"
+											>
+												{sectionFilters.panel}
+											</PopoverContent>
+										</Popover>
+									) : null}
+									{section === "marketplaces" ? null : (
+										<Tooltip>
+											<TooltipTrigger
+												render={
+													<Button
+														aria-pressed={installedOnly}
+														className="gap-1.5"
+														onClick={() => setInstalledOnly((on) => !on)}
+														variant={installedOnly ? "secondary" : "ghost"}
 													>
-														{sectionFilters.panel}
-													</PopoverContent>
-												</Popover>
-											) : null}
-											<Tooltip>
-												<TooltipTrigger
-													render={
-														<Button
-															aria-pressed={installedOnly}
-															className="gap-1.5"
-															onClick={() => setInstalledOnly((on) => !on)}
-															variant={installedOnly ? "secondary" : "ghost"}
-														>
-															<HugeiconsIcon
-																className="size-4"
-																icon={Download01Icon}
-															/>
-															Installed
-														</Button>
-													}
-												/>
-												<TooltipContent>
-													{installedOnly
-														? "Showing only what you have installed"
-														: "Show only what you have installed"}
-												</TooltipContent>
-											</Tooltip>
-										</>
-									}
-									value={searchQuery}
+														<HugeiconsIcon
+															className="size-4"
+															icon={Download01Icon}
+														/>
+														Installed
+													</Button>
+												}
+											/>
+											<TooltipContent>
+												{installedOnly
+													? "Showing only what you have installed"
+													: "Show only what you have installed"}
+											</TooltipContent>
+										</Tooltip>
+									)}
+									<Tooltip>
+										<TooltipTrigger
+											render={
+												<Button
+													className="gap-1.5"
+													onClick={() => setPrivateInstallOpen(true)}
+													variant="ghost"
+												>
+													<HugeiconsIcon
+														className="size-4"
+														icon={Package01Icon}
+													/>
+													Install from code
+												</Button>
+											}
+										/>
+										<TooltipContent>
+											Install a private package with a publisher code
+										</TooltipContent>
+									</Tooltip>
+									<Tooltip>
+										<TooltipTrigger
+											render={
+												<Button
+													className="gap-1.5"
+													onClick={() => setPrivateShareOpen(true)}
+													variant="ghost"
+												>
+													<HugeiconsIcon className="size-4" icon={Key01Icon} />
+													Share package
+												</Button>
+											}
+										/>
+										<TooltipContent>
+											Create a time-limited private package code
+										</TooltipContent>
+									</Tooltip>
+								</>
+							}
+						>
+							{searching ? (
+								<StoreSearchResults
+									groups={search.groups}
+									isEmpty={search.isEmpty}
+									loading={search.loading || searchPending}
+									onClearSearch={() => setSearchQuery("")}
+									onOpenRealm={(realm) => openRealm(realm, searchQuery)}
 								/>
-								<StoreSectionTabs
-									active={section}
-									className="pt-2 pb-1"
-									onSelect={selectSection}
-									sections={navSections}
+							) : (
+								<StoreContent
+									contributedTab={activeContributedTab}
+									initialQuery={sectionInitialQuery}
+									initialSelectedId={sectionInitialSelectedId}
+									onBrowseHome={() => setSection("home")}
+									onOpenConnections={openConnections}
+									onOpenInstallChat={openInstallChat}
+									onOpenRealm={openRealm}
+									section={section}
 								/>
-							</div>
-							<div className="min-h-0 min-w-0 flex-1 overflow-hidden">
-								{searching ? (
-									<StoreSearchResults
-										groups={search.groups}
-										isEmpty={search.isEmpty}
-										loading={search.loading || searchPending}
-										onOpenRealm={(realm) => openRealm(realm, searchQuery)}
-									/>
-								) : (
-									<StoreContent
-										contributedTab={activeContributedTab}
-										initialQuery={sectionInitialQuery}
-										initialSelectedId={sectionInitialSelectedId}
-										onOpenRealm={openRealm}
-										section={section}
-									/>
-								)}
-							</div>
-						</div>
+							)}
+						</MarketplaceSurface>
 					</InstalledOnlyProvider>
 				</StoreToolbarProvider>
+				<PrivatePackageInstallDialog
+					onClose={() => setPrivateInstallOpen(false)}
+					open={privateInstallOpen}
+				/>
+				<PrivatePackageShareDialog
+					onClose={() => setPrivateShareOpen(false)}
+					open={privateShareOpen}
+				/>
 			</DesktopCatalogHost>
 		</DesktopMarketplaceHost>
 	);
@@ -465,6 +427,9 @@ function StoreContent({
 	initialQuery,
 	initialSelectedId,
 	onOpenRealm,
+	onOpenConnections,
+	onOpenInstallChat,
+	onBrowseHome,
 	contributedTab,
 }: {
 	/** The app-registered tab this section belongs to, if it is not a built-in. */
@@ -481,6 +446,9 @@ function StoreContent({
 		query: string,
 		itemId?: string
 	) => void;
+	onOpenConnections: () => void;
+	onOpenInstallChat: (prompt: string) => void;
+	onBrowseHome: () => void;
 }) {
 	if (section === "home") {
 		return <StoreHome onOpenRealm={onOpenRealm} />;
@@ -489,6 +457,8 @@ function StoreContent({
 		return (
 			<IntegrationsCatalogSection
 				initialQuery={initialQuery}
+				onOpenConnections={onOpenConnections}
+				onOpenInstallChat={onOpenInstallChat}
 				onOpenRealm={onOpenRealm}
 			/>
 		);
@@ -546,8 +516,34 @@ function StoreContent({
 	if (section === "engines") {
 		return <EnginesCatalogSection />;
 	}
-	if (section === "account") {
-		return <AccountSection />;
+	if (section === "workflows") {
+		if (contributedTab) {
+			return (
+				<ContributedStoreSection
+					initialQuery={initialQuery}
+					tab={contributedTab}
+				/>
+			);
+		}
+		return <MarketplaceBrowseSection onlyKind="workflow" />;
+	}
+	if (section === "themes") {
+		return <MarketplaceBrowseSection onlyKind="theme" />;
+	}
+	if (section === "marketplaces") {
+		return <MarketplacesCatalogSection />;
+	}
+	if (section === "browse") {
+		return <MarketplaceBrowseSection />;
+	}
+	if (section === "connections") {
+		return <ConnectionsTab />;
+	}
+	if (section === "licenses") {
+		return <LicensesTab />;
+	}
+	if (section === "sell") {
+		return <SellTab />;
 	}
 	// App-registered tab. EVERY one renders from its declarative spec — there is no
 	// per-plugin component table any more. The Workflows tab was the last holder of
@@ -563,11 +559,12 @@ function StoreContent({
 			/>
 		);
 	}
-	const meta = SECTIONS.find((s) => s.value === section);
+	const meta = MARKETPLACE_SECTION_TABS.find((s) => s.value === section);
 	return (
 		<StoreComingSoon
-			icon={meta?.icon ?? GridIcon}
+			icon={meta?.icon ?? Package01Icon}
 			label={meta?.label ?? "This"}
+			onBrowse={onBrowseHome}
 		/>
 	);
 }

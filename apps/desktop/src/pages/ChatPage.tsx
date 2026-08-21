@@ -4,8 +4,11 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import type {
 	AcpConfigOption,
 	StreamedAcpConfig,
+	StreamedAcpControl,
 } from "@ryu/blocks/composer/composer-acp-sections.ts";
+import { createComposerDirectory } from "@ryu/blocks/composer/composer-directory.ts";
 import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts.ts";
+import { answerNowDelayMs } from "@ryu/blocks/desktop/agent-elements/answer-now.ts";
 import {
 	ArtifactHostContext,
 	type ArtifactHostValue,
@@ -16,11 +19,17 @@ import type {
 	ComposerMenuGroup,
 	ComposerMenuItem,
 } from "@ryu/blocks/desktop/agent-elements/input/composer-menu.tsx";
+import { isMessageReactionAction } from "@ryu/blocks/desktop/agent-elements/message-action-types.ts";
 import { mergeResumedReplyMessage } from "@ryu/blocks/desktop/agent-elements/resume-merge.ts";
 import type {
+	MentionItem as AgentElementMentionItem,
 	AgentMessageContext,
 	AgentMessageIdentity,
+	ContributedMessageAction,
+	MessageActionContext,
+	MessageActionRuntimeState,
 } from "@ryu/blocks/desktop/agent-elements/types.ts";
+import { useDeferredComposerPrompt } from "@ryu/blocks/desktop/agent-elements/use-deferred-question.ts";
 import {
 	WidgetHostContext,
 	type WidgetHostServices,
@@ -33,6 +42,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import {
 	clearGoal,
 	type GoalState,
@@ -81,6 +91,10 @@ import {
 	type BtwState,
 } from "@/src/components/chat/BtwOverlay.tsx";
 import { DiffReviewPane } from "@/src/components/chat/DiffReviewPane.tsx";
+import {
+	type ForkDestination,
+	ForkDialog,
+} from "@/src/components/chat/ForkDialog.tsx";
 import { InlineArtifact } from "@/src/components/chat/InlineArtifact.tsx";
 import { MentionMenu } from "@/src/components/chat/MentionMenu.tsx";
 import { MergedThreadPicker } from "@/src/components/chat/MergedThreadPicker.tsx";
@@ -93,6 +107,7 @@ import {
 	SlashCommandAutocomplete,
 } from "@/src/components/chat/SlashCommandAutocomplete.tsx";
 import { WorkspaceBar } from "@/src/components/chat/WorkspaceBar.tsx";
+import { WorkspaceRequiredDialog } from "@/src/components/chat/WorkspaceRequiredDialog.tsx";
 import { PluginComposerBarControls } from "@/src/components/composer/PluginComposerBarControls.tsx";
 import {
 	composerPluginSectionKey,
@@ -115,6 +130,7 @@ import {
 import { VoiceModeOverlay } from "@/src/components/voice/VoiceModeOverlay.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
+import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useSystemStatusContext } from "@/src/contexts/SystemStatusContext.tsx";
 import {
 	useCurrentTabId,
@@ -126,14 +142,23 @@ import { AppWidget } from "@/src/contributions/host/AppWidget.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
+import { useChatPickerPlacement } from "@/src/hooks/useChatPickerPlacement.ts";
 import { useComposerAutoQueue } from "@/src/hooks/useComposerAutoQueue.ts";
-import { useComposerDraftAutosave } from "@/src/hooks/useComposerDraftAutosave.ts";
+import {
+	useComposerDraftAutosave,
+	useComposerDraftRestore,
+} from "@/src/hooks/useComposerDraftAutosave.ts";
 import {
 	composerSelectionToastDescription,
 	shouldShowComposerSelectionToast,
 	useComposerSelectionApplyMode,
 } from "@/src/hooks/useComposerSelectionApplyMode.ts";
 import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
+import {
+	useComposioConnections,
+	useComposioStatus,
+	useComposioToolkits,
+} from "@/src/hooks/useComposioCatalog.ts";
 import { useEngineModels } from "@/src/hooks/useEngineModels.ts";
 import {
 	invalidateGitStatus,
@@ -141,7 +166,9 @@ import {
 	invalidateWorktreeStatus,
 	useWorktreeDiff,
 } from "@/src/hooks/useGitStatus.ts";
+import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { useMcp } from "@/src/hooks/useMcp.ts";
+import { useMentionableResources } from "@/src/hooks/useMentionableResources.ts";
 import {
 	isMergedHistoryId,
 	useMergedAgentThreads,
@@ -149,21 +176,20 @@ import {
 import { useMessageQueue } from "@/src/hooks/useMessageQueue.ts";
 import { useMessageReactions } from "@/src/hooks/useMessageReactions.ts";
 import { useNodeDefaultAgentId } from "@/src/hooks/useNodeDefaultAgent.ts";
-import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
+import {
+	pluginCompanionPath,
+	usePluginContributions,
+	usePluginContributionsQuery,
+} from "@/src/hooks/usePluginContributions.ts";
 import {
 	setQueueDrainMode,
 	useQueueDrainMode,
 } from "@/src/hooks/useQueueDrainMode.ts";
 import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
-import { useSpaces } from "@/src/hooks/useSpaces.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useVoiceMode } from "@/src/hooks/useVoiceMode.ts";
 import { useWorkflows } from "@/src/hooks/useWorkflows.ts";
-import {
-	AgentAvatar,
-	AgentLogo,
-	engineForAgent,
-} from "@/src/lib/agent-logos.tsx";
+import { AgentAvatar, engineForAgent } from "@/src/lib/agent-logos.tsx";
 import {
 	authenticateAgent,
 	fetchAcpConfig,
@@ -174,14 +200,16 @@ import type {
 	ConversationParticipant,
 } from "@/src/lib/api/agents.ts";
 import { fetchAgent, fetchParticipants } from "@/src/lib/api/agents.ts";
-import type { BtwEntry } from "@/src/lib/api/btw.ts";
+import type { BtwEntry, BtwMessage } from "@/src/lib/api/btw.ts";
 import { askBtw } from "@/src/lib/api/btw.ts";
 import {
+	answerNowChat,
 	cancelChat,
 	chatHeaders,
 	chatStreamResumeUrl,
 	chatStreamUrl,
 	fetchNextPromptSuggestions,
+	startProactiveOpening,
 } from "@/src/lib/api/chat.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { apiUrl, makeHeaders } from "@/src/lib/api/client.ts";
@@ -195,11 +223,20 @@ import {
 	getConversationFeedback,
 	setMessageFeedback,
 } from "@/src/lib/api/message-feedback.ts";
-import { pluginHostInvoke } from "@/src/lib/api/plugins.ts";
+import {
+	pluginHostInvoke,
+	type PluginChatWidgetTemplate,
+} from "@/src/lib/api/plugins.ts";
 import {
 	getDesktopTtsPrefs,
 	getVoiceModeReadbackPrefs,
 } from "@/src/lib/api/preferences.ts";
+import {
+	fetchDocument,
+	fetchDocuments,
+	ingestDocument,
+	updateDocument,
+} from "@/src/lib/api/spaces.ts";
 import type { Team } from "@/src/lib/api/teams.ts";
 import { stageImageUpload } from "@/src/lib/api/uploads.ts";
 import { generateVideo } from "@/src/lib/api/video.ts";
@@ -213,6 +250,9 @@ import type { Workflow } from "@/src/lib/api/workflows.ts";
 import type { Artifact } from "@/src/lib/artifacts.ts";
 import { artifactFromPayload } from "@/src/lib/artifacts.ts";
 import { hydrateHistoryMessage } from "@/src/lib/chat-history-hydrate.ts";
+import { modelRoutingFieldsForInterface } from "@/src/lib/chat-routing.ts";
+import { getChatTabBusySpeed } from "@/src/lib/chat-tab-busy-speed.ts";
+import { textToDataUrl } from "@/src/lib/composer/attachments.ts";
 import {
 	conversationTargetDecision,
 	readLastUsedAgentId,
@@ -226,10 +266,17 @@ import {
 	type TranscriptMessage,
 } from "@/src/lib/copy-chat-transcript.ts";
 import { instrumentedFetch } from "@/src/lib/dev-metrics.ts";
+import {
+	browserProviderHost,
+	useBrowserProviderSnapshot,
+} from "@/src/lib/extension-host.ts";
 import { basename, readProjectFile } from "@/src/lib/files.ts";
+import { appMentionVisual } from "@/src/lib/mentions/app-visuals.tsx";
 import {
 	applyMention,
+	buildComposioMentionSources,
 	buildMentionGroups,
+	resolveFirstNamedMentionId,
 	resolveReferencedChatIds,
 } from "@/src/lib/mentions/candidates.ts";
 import type { MentionItem, MentionSources } from "@/src/lib/mentions/types.ts";
@@ -238,10 +285,28 @@ import {
 	modelsForAgent,
 	setAgentModel,
 } from "@/src/lib/models.ts";
+import {
+	extractPlans,
+	type PlanSnapshot,
+	planArtifact,
+	planDocumentTitle,
+} from "@/src/lib/plan-artifacts.ts";
+import {
+	buildSideChatContext,
+	EXPANDED_COMPOSER_FEATURE_KIND,
+	EXPANDED_COMPOSER_PLUGIN_ID,
+	GHOST_CHAT_FEATURE_KIND,
+	GHOST_CHATS_PLUGIN_ID,
+	hasPluginChatFeature,
+	SIDE_CHAT_FEATURE_KIND,
+	SIDE_CHATS_PLUGIN_ID,
+} from "@/src/lib/plugin-chat-features.ts";
 import { getRealtimeJwt, getRealtimeUserId } from "@/src/lib/realtime/jwt.ts";
 import { useRealtimeRoom } from "@/src/lib/realtime/use-realtime-room.ts";
 import { deriveTurnComposerProgress } from "@/src/lib/turn-composer-progress.ts";
+import { messageNeedsWorkspace } from "@/src/lib/workspace-intent.ts";
 import { resolveWorkspaceFilePath } from "@/src/lib/workspace-links.ts";
+import { findWorkspaceProject } from "@/src/lib/workspace-projects.ts";
 import { useAppStore } from "@/src/store/useAppStore.ts";
 import { useArtifactStore } from "@/src/store/useArtifactStore.ts";
 import { useChatHotkeyTargets } from "@/src/store/useChatHotkeyTargets.ts";
@@ -273,6 +338,21 @@ const TYPING_IDLE_MS = 2500;
 // object rebuilds the ENTIRE transcript (markdown, tool rows, citations) on
 // every render of this page.
 const EMPTY_TOOL_RENDERERS: Record<string, never> = {};
+
+interface StreamedTurnControl {
+	effort?: string;
+	phase: "answering" | "reasoning";
+	startedAtMs: number;
+	strategy: "native";
+	turnId: string;
+}
+
+const ARTIFACTS_SPACE_NAME = "Artifacts";
+
+interface SavedPlanDocument {
+	documentId: string;
+	spaceId: string;
+}
 
 /** Returns true when the selected agent uses ACP transport (never touches the gateway). */
 function isAcpAgent(
@@ -394,8 +474,6 @@ function friendlyError(raw: string): { message: string; detail: string } {
 
 const MENTION_QUERY_RE = /(?:^|\s)@(\w*)$/;
 const SLASH_QUERY_RE = /^\/(\w*)$/;
-const FIRST_MENTION_RE = /@(\w+)/;
-const FIRST_TEAM_MENTION_RE = /@([\w-]+)/;
 
 /**
  * Parse the last "@word" being typed in a string.
@@ -411,15 +489,9 @@ function parseMentionQuery(value: string): string | null {
 }
 
 /** Ryu's own composer commands, always offered alongside agent-advertised ones.
- *  These are intercepted client-side (`/btw`) or by a Core turn-hook plugin
- *  (`/goal`) at submit time; the popover just makes them discoverable. */
+ *  Plugin-owned commands are supplied by `pluginContributions.slash_commands` so
+ *  disabling a plugin removes both its discoverability and its handler. */
 const LOCAL_SLASH_COMMANDS: SlashCommand[] = [
-	{
-		name: "btw",
-		description: "Ask a quick side question without derailing the chat",
-		hint: "your side question",
-		source: "local",
-	},
 	{
 		name: "goal",
 		description: "Set a goal the agent works toward each turn",
@@ -444,26 +516,14 @@ function resolveFirstMention(
 	text: string,
 	agents: AgentSummary[]
 ): string | null {
-	const match = FIRST_MENTION_RE.exec(text);
-	if (!match) {
-		return null;
-	}
-	const mentionName = match[1].toLowerCase();
-	const found = agents.find((a) => a.name.toLowerCase() === mentionName);
-	return found?.id ?? null;
+	return resolveFirstNamedMentionId(text, agents);
 }
 
 /** Scan message text for the first "@Name" that matches a team, returning its id.
  *  Teams take precedence over agents when a name collides, since a team mention
  *  is the more specific "call all of them" intent. */
 function resolveFirstTeamMention(text: string, teams: Team[]): string | null {
-	const match = FIRST_TEAM_MENTION_RE.exec(text);
-	if (!match) {
-		return null;
-	}
-	const mentionName = match[1].toLowerCase();
-	const found = teams.find((t) => t.name.toLowerCase() === mentionName);
-	return found?.id ?? null;
+	return resolveFirstNamedMentionId(text, teams);
 }
 
 /** Scan message text for the first "@Name" that matches a chat-triggerable
@@ -521,13 +581,18 @@ interface CouncilInputBarProps extends InputBarProps {
 	allWorkflows: Workflow[];
 	/** Slash commands offered in the "/" popover (agent-advertised + local). */
 	availableCommands: SlashCommand[];
+	/** Host-owned metadata affordances for available app widgets. */
+	chatWidgetTemplates: PluginChatWidgetTemplate[];
 	composerSections: ComposerSettingsSection[];
 	/** Sources for the grouped "@" mention menu (agents/teams/workflows/spaces/
 	 *  skills/mcp/folders/plugins). Agents/teams/workflows also drive the target. */
 	mentionSources: MentionSources;
 	/** Supplies the resolved chat mentions to the request body for this turn. */
 	onReferencedChats: (conversationIds: string[]) => void;
-	onRespondPermission?: (optionId: string | null) => void;
+	onRespondPermission?: (
+		permission: ActivePermission,
+		optionId: string | null
+	) => void;
 	onTargetAgentChange: (agentId: string | null) => void;
 	onTeamChange: (teamId: string | null) => void;
 	/** Fired on each composer keystroke so the surface can broadcast a debounced
@@ -563,6 +628,7 @@ function CouncilInputBar({
 	allTeams,
 	allWorkflows,
 	availableCommands,
+	chatWidgetTemplates,
 	composerSections,
 	mentionSources,
 	onReferencedChats,
@@ -580,6 +646,7 @@ function CouncilInputBar({
 }: CouncilInputBarProps) {
 	const isActiveTab = useIsActiveTab();
 	const composerShortcuts = useComposerShortcutBindings();
+	const showTechnicalPermissionDetails = useInterfaceLevel() !== "simple";
 	// Band-2 gate (free-tier plan): council (multi-agent) chat is a Pro feature.
 	// A team @mention is the entry into council, so gate the two paths that set a
 	// team target — the mention-menu pick and the send-time team resolution — and
@@ -588,8 +655,13 @@ function CouncilInputBar({
 	const { canUse, requestUpgrade } = useEntitlementContext();
 	const [mentionQuery, setMentionQuery] = useState<string | null>(null);
 	const [slashQuery, setSlashQuery] = useState<string | null>(null);
-	const textareaWrapRef = useRef<HTMLTextAreaElement | null>(null);
+	const textareaWrapRef = useRef<HTMLDivElement | null>(null);
 	const referencedChatIdsRef = useRef<Set<string>>(new Set());
+	const {
+		markComposerActivity: markPermissionActivity,
+		markComposerIdle: markPermissionIdle,
+		visiblePrompt: visiblePermission,
+	} = useDeferredComposerPrompt(permission);
 	const insertChatReference = useCallback(
 		(chat: DraggedChatReference) => {
 			referencedChatIdsRef.current.add(chat.id);
@@ -640,12 +712,22 @@ function CouncilInputBar({
 					badge:
 						item.kind === "app"
 							? "App"
-							: item.kind === "plugin"
-								? "Plugin"
-								: undefined,
-					icon: item.icon
-						? createElement(item.icon, { className: "size-4" })
-						: undefined,
+							: item.kind === "app-item"
+								? "App item"
+								: item.kind === "plugin"
+									? "Plugin"
+									: item.kind === "integration"
+										? "Integration"
+										: item.kind === "page"
+											? "Page"
+											: item.kind === "output-style"
+												? "Style"
+												: undefined,
+					icon:
+						item.visualIcon ??
+						(item.icon
+							? createElement(item.icon, { className: "size-4" })
+							: undefined),
 				})),
 			})),
 		[directoryMentionGroups]
@@ -655,11 +737,13 @@ function CouncilInputBar({
 			directoryMentionGroups
 				.flatMap((group) => group.items)
 				.map((item) => ({
+					accentColor: item.accentColor,
 					icon: item.icon
 						? createElement(item.icon, { className: "size-3.5" })
 						: undefined,
 					kind: item.kind,
 					label: item.label,
+					visualIcon: item.visualIcon,
 				})),
 		[directoryMentionGroups]
 	);
@@ -668,6 +752,11 @@ function CouncilInputBar({
 		(next: string) => {
 			onChange?.(next);
 			onTyping?.();
+			if (next.length > 0) {
+				markPermissionActivity();
+			} else {
+				markPermissionIdle();
+			}
 			const query = parseMentionQuery(next);
 			setMentionQuery(query);
 			if (query === null) {
@@ -677,7 +766,15 @@ function CouncilInputBar({
 			}
 			setSlashQuery(parseSlashQuery(next));
 		},
-		[onChange, onTyping, onTargetAgentChange, onTeamChange, onWorkflowChange]
+		[
+			markPermissionActivity,
+			markPermissionIdle,
+			onChange,
+			onTyping,
+			onTargetAgentChange,
+			onTeamChange,
+			onWorkflowChange,
+		]
 	);
 
 	const handleSelectSlash = useCallback(
@@ -855,7 +952,27 @@ function CouncilInputBar({
 				event.stopPropagation();
 				insertChatReference(chat);
 			}}
+			ref={textareaWrapRef}
 		>
+			{chatWidgetTemplates.length > 0 && (
+				<div className="mb-2 flex flex-wrap items-center gap-1.5 px-1">
+					<span className="text-[11px] text-muted-foreground">Available widgets</span>
+					{chatWidgetTemplates.map((template) => {
+						const prompt = template.examples[0] ?? template.triggers[0];
+						if (!prompt) return null;
+						return (
+							<button
+								className="rounded-full border border-border/70 bg-background px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+								key={`${template.plugin ?? "widget"}:${template.id}`}
+								onClick={() => onChange?.(prompt)}
+								type="button"
+							>
+								{template.title}
+							</button>
+						);
+					})}
+				</div>
+			)}
 			{mentionQuery !== null && mentionGroups.length > 0 && (
 				<MentionMenu
 					anchorRef={textareaWrapRef}
@@ -873,15 +990,26 @@ function CouncilInputBar({
 					query={slashQuery}
 				/>
 			)}
-			{permission && onRespondPermission && (
-				<PermissionPrompt
-					onRespond={onRespondPermission}
-					permission={permission}
-				/>
-			)}
 			<InputBar
 				{...rest}
 				composerMenuGroups={composerMenuGroups}
+				composerPrompt={
+					visiblePermission && onRespondPermission
+						? {
+								content: (
+									<PermissionPrompt
+										embedded
+										onRespond={(optionId) =>
+											onRespondPermission(visiblePermission, optionId)
+												}
+												permission={visiblePermission}
+												showTechnicalDetails={showTechnicalPermissionDetails}
+											/>
+								),
+								id: `permission:${visiblePermission.requestId}`,
+							}
+						: undefined
+				}
 				mentionItems={composerMentionItems}
 				onChange={handleChange}
 				onComposerMenuSelect={handleDirectorySelect}
@@ -928,12 +1056,14 @@ async function fetchArtifactContent(
 export default function ChatPage({
 	tabConversationId,
 	initialPrompt,
+	initialProactiveOpening,
 	initialSubmit,
 	initialImages,
 	initialAgent,
 	initialGhost,
 	initialProject,
 	mergedAgentId,
+	tabWorktreeMode,
 }: {
 	tabConversationId?: string;
 	/**
@@ -948,6 +1078,8 @@ export default function ChatPage({
 	 * pre-fills the composer (NEVER auto-sent — it is attacker-controllable);
 	 * agent/project pre-select. Consumed once on mount. */
 	initialPrompt?: string;
+	/** Ask Core to create an assistant-only opening after model readiness. */
+	initialProactiveOpening?: boolean;
 	/** When set (launchpad composer only — a user-initiated send), the seeded
 	 * `initialPrompt`/`initialImages` is SENT automatically once chat is ready,
 	 * instead of just pre-filling. Never set for the deep-link/Inbox paths, whose
@@ -962,7 +1094,9 @@ export default function ChatPage({
 	 * click on this page's own row. Consumed once on mount. */
 	initialGhost?: boolean;
 	initialProject?: string;
-} = {}) {
+	/** Per-tab isolation requested by the fork destination dialog. */
+	tabWorktreeMode?: boolean;
+}) {
 	// Read gateway/core reachability from the shared provider so this page and
 	// the shell banner always agree on the same poll tick.
 	const {
@@ -970,6 +1104,40 @@ export default function ChatPage({
 		gatewayReachable,
 		loading: statusLoading,
 	} = useSystemStatusContext();
+	const browserSnapshot = useBrowserProviderSnapshot();
+	const browserLocalAbortRef = useRef<AbortController | null>(null);
+	const forceCoreNextRef = useRef(false);
+	const handleSendRef = useRef<
+		(message: {
+			attachments?: AttachedImage[];
+			content: string;
+			role: "user";
+		}) => void
+	>(() => undefined);
+	const interfaceLevel = useInterfaceLevel();
+	const [chatPickerPlacement] = useChatPickerPlacement();
+	const pluginContributions = usePluginContributions();
+	const {
+		isError: pluginContributionsFailed,
+		isSuccess: pluginContributionsLoaded,
+	} = usePluginContributionsQuery();
+	const pluginContributionsSettled =
+		pluginContributionsLoaded || pluginContributionsFailed;
+	const sideChatsPluginEnabled = hasPluginChatFeature(
+		pluginContributions.chat_features,
+		SIDE_CHATS_PLUGIN_ID,
+		SIDE_CHAT_FEATURE_KIND
+	);
+	const ghostChatsPluginEnabled = hasPluginChatFeature(
+		pluginContributions.chat_features,
+		GHOST_CHATS_PLUGIN_ID,
+		GHOST_CHAT_FEATURE_KIND
+	);
+	const expandedComposerPluginEnabled = hasPluginChatFeature(
+		pluginContributions.chat_features,
+		EXPANDED_COMPOSER_PLUGIN_ID,
+		EXPANDED_COMPOSER_FEATURE_KIND
+	);
 
 	const { folder, setFolder } = useWorkspaceStore();
 	// THIS TAB's composer target. Every chat tab stays mounted at once (Layout),
@@ -1022,6 +1190,11 @@ export default function ChatPage({
 	// with the right panel (both can be open at once); WorkspacePanels
 	// auto-demotes it to a floating overlay when the chat gets too narrow.
 	const [pinnedSummaryOpen, setPinnedSummaryOpen] = useState(true);
+	const [pendingWorkspaceMessage, setPendingWorkspaceMessage] = useState<{
+		attachments?: AttachedImage[];
+		content: string;
+		role: "user";
+	} | null>(null);
 	// Only the floating (auto-demoted) overlay overlaps the message column, so
 	// only it dismisses on a press-away (the titlebar toggle brings it back).
 	// Stable so the panel's outside-press listener isn't re-bound each render.
@@ -1044,6 +1217,9 @@ export default function ChatPage({
 	const [selectedModel, setSelectedModel] = useState<string | null>(() =>
 		getAgentModel(agentId)
 	);
+	// A streamed control can explicitly clear the model. Keep that distinction
+	// from an unset picker value so the fallback model is not reintroduced.
+	const [modelSelectionCleared, setModelSelectionCleared] = useState(false);
 	const selectedModelRef = useRef(selectedModel);
 
 	// Image attachments — managed here so handleSend can include them in the
@@ -1071,6 +1247,15 @@ export default function ChatPage({
 	const [isDragOver, setIsDragOver] = useState(false);
 	const attachmentRef = useRef({ attachedImages, isDragOver });
 	attachmentRef.current = { attachedImages, isDragOver };
+	const handleAttachTextFile = useCallback((attachment: AttachedImage) => {
+		setAttachedImages((previous) => [
+			...previous,
+			{ ...attachment, mimeType: attachment.mimeType ?? "text/plain" },
+		]);
+		toast.success("CI failure report attached", {
+			description: "It will be included with your next message in this chat.",
+		});
+	}, []);
 
 	// #415: target_agent_id for council @mentions — written by CouncilInputBar on
 	// each send and consumed by the transport body closure below.
@@ -1106,6 +1291,21 @@ export default function ChatPage({
 	// Load agents to inspect the selected agent's transport type.
 	const { agents } = useAgents();
 	const { apps: registeredApps } = useApps();
+	const pullRequestsEnabled = registeredApps.some(
+		(app) => app.id === "@ryu/pull-requests" && app.enabled
+	);
+	// Composio connections are mentionable only when Core reports a configured
+	// credential. That same redacted status covers a local BYOK key and a
+	// provisioned managed/proxy credential; never infer access from the catalog.
+	const composioStatus = useComposioStatus();
+	const composioConfigured = composioStatus.data?.configured ?? false;
+	const { data: composioConnections = [] } = useComposioConnections(
+		"",
+		composioConfigured
+	);
+	const { data: composioToolkits = [] } = useComposioToolkits(
+		composioConfigured && composioConnections.length > 0
+	);
 	// Load teams so @team mentions resolve in the composer autocomplete.
 	const { teams } = useTeams();
 	// Load workflows so @workflow mentions resolve in the composer autocomplete.
@@ -1116,10 +1316,23 @@ export default function ChatPage({
 		(runId: string, payload: string) => resumeWorkflow(runId, payload),
 		[resumeWorkflow]
 	);
-	// Extra "@" mention sources: spaces, installed skills, MCP servers, and
-	// recent project folders. Composer plugins (goal/proof/double-check) come
+	// Extra "@" mention sources: spaces, installed skills, MCP servers, connected
+	// integrations, and recent project folders. Composer plugins (goal/proof/double-check) come
 	// from the client-side registry. See docs/rfc-mention-composer.md.
-	const { spaces } = useSpaces();
+	const {
+		error: spacesError,
+		loading: spacesLoading,
+		spaces,
+	} = useSpacesContext();
+	const contributedSections = useMemo(
+		() =>
+			[...pluginContributions.sidebar_sections].sort(
+				(a, b) =>
+					(a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title)
+			),
+		[pluginContributions.sidebar_sections]
+	);
+	const mentionableResources = useMentionableResources(contributedSections);
 	const { installedSkills } = useSkillsCatalog();
 	const { servers: mcpServers } = useMcp();
 	const recentFolders = useWorkspaceStore((s) => s.recentFolders);
@@ -1168,12 +1381,13 @@ export default function ChatPage({
 		() => modelsForAgent(agentId, agents, engineModels),
 		[agentId, agents, engineModels]
 	);
-	const effectiveModel =
-		[selectedModel, getAgentModel(agentId)].find(
-			(id) => id && modelOptions.some((m) => m.id === id)
-		) ??
-		modelOptions[0]?.id ??
-		null;
+	const effectiveModel = modelSelectionCleared
+		? null
+		: [selectedModel, getAgentModel(agentId)].find(
+				(id) => id && modelOptions.some((m) => m.id === id)
+			) ??
+			modelOptions[0]?.id ??
+			null;
 	selectedModelRef.current = effectiveModel;
 
 	// The empty-state logo reflects the active target: a team fans out its
@@ -1190,6 +1404,9 @@ export default function ChatPage({
 			}
 		}
 		const agent = agents.find((a) => a.id === agentId);
+		if (agent?.avatarGlyph) {
+			return { kind: "glyph", glyph: agent.avatarGlyph };
+		}
 		if (agent?.avatarUrl) {
 			return { kind: "image", url: agent.avatarUrl };
 		}
@@ -1202,6 +1419,7 @@ export default function ChatPage({
 	const assistantIdentity = useMemo<{
 		avatar?: React.ReactNode;
 		name?: string;
+		title?: string;
 	}>(() => {
 		if (teamId) {
 			const team = teams.find((t) => t.id === teamId);
@@ -1213,22 +1431,18 @@ export default function ChatPage({
 		}
 		return {
 			name: agent.name,
+			title: agent.title,
 			avatar: (
 				<Avatar
 					className="flex items-center justify-center after:hidden"
 					size="sm"
 				>
-					{agent.avatarUrl ? (
-						// biome-ignore lint/performance/noImgElement: Tauri/Vite app, no next/image; avatar is an inline data URL
-						// biome-ignore lint/correctness/useImageSize: sized via the `size-full` class
-						<img
-							alt={agent.name}
-							className="size-full rounded-full object-cover"
-							src={agent.avatarUrl}
-						/>
-					) : (
-						<AgentLogo engine={engineForAgent(agent)} size="16px" />
-					)}
+					<AgentAvatar
+						className="size-full rounded-full object-contain"
+						engine={engineForAgent(agent)}
+						glyph={agent.avatarGlyph}
+						size="16px"
+					/>
 				</Avatar>
 			),
 		};
@@ -1243,9 +1457,9 @@ export default function ChatPage({
 		): AgentMessageIdentity => ({
 			avatar: (
 				<AgentAvatar
-					avatarUrl={agent.avatarUrl}
 					className="size-full rounded-full object-contain"
 					engine={engineForAgent(agent)}
+					glyph={agent.avatarGlyph}
 					size="16px"
 				/>
 			),
@@ -1287,11 +1501,12 @@ export default function ChatPage({
 		// the same shape the sidebar's ChatRow draws its agent mark with.
 		const mark = (agent: (typeof agents)[number]) => (
 			<AgentAvatar
-				avatarUrl={agent.avatarUrl}
 				className="size-4 shrink-0 rounded-[3px] object-contain"
 				engine={engineForAgent(agent)}
+				glyph={agent.avatarGlyph}
 				key={agent.id}
 				size="16px"
+				thinking
 			/>
 		);
 		if (teamId) {
@@ -1333,6 +1548,7 @@ export default function ChatPage({
 
 	const handleModelChange = useCallback(
 		(modelId: string) => {
+			setModelSelectionCleared(false);
 			setSelectedModel(modelId);
 			if (agentId) {
 				setAgentModel(agentId, modelId);
@@ -1361,6 +1577,10 @@ export default function ChatPage({
 	// emission `key` rides along so both sides dedupe on the PART, not the value.
 	const [streamedAcpConfig, setStreamedAcpConfig] =
 		useState<StreamedAcpConfig | null>(null);
+	// Accepted agent-level model/effort controls are conversation-scoped. They
+	// feed the shared ACP picker state without mutating the agent's saved defaults.
+	const [streamedAcpControl, setStreamedAcpControl] =
+		useState<StreamedAcpControl | null>(null);
 	// The agent's config option DEFINITIONS as re-published against the LIVE
 	// session (Core's `data-ryu-acp-config-options` part) — the answer to
 	// `session/set_config_option`, which by protocol returns the whole refreshed
@@ -1394,9 +1614,11 @@ export default function ChatPage({
 		engineModel: effectiveModel,
 		onEngineModelChange: handleModelChange,
 		onSelectionApplied: handleAcpSelectionApplied,
+		preferSimpleApprovalDefaults: interfaceLevel === "simple",
 		streamedMode: streamedAcpMode,
 		streamedConfig: streamedAcpConfig,
 		streamedConfigOptions: streamedAcpConfigOptions,
+		streamedControl: streamedAcpControl,
 	});
 
 	// Effective ACP selections for the request body, held in refs so the send path
@@ -1408,6 +1630,8 @@ export default function ChatPage({
 	acpModelRef.current = acp.acpModel;
 	const acpOptionValuesRef = useRef(acp.acpOptionValues);
 	acpOptionValuesRef.current = acp.acpOptionValues;
+	const simpleApprovalDefaultsRef = useRef(acp.simpleApprovalDefaults);
+	simpleApprovalDefaultsRef.current = acp.simpleApprovalDefaults;
 
 	// Fetch tool names for the selected agent so we can render tool chips below
 	// the composer. Uses the lightweight full-record fetch (tools[] is not on the
@@ -1446,7 +1670,7 @@ export default function ChatPage({
 		createConversation,
 		getConversation,
 		loadMessages,
-		loadMessagesResult,
+		loadMessagesPageResult,
 		forkConversation,
 		editMessage,
 		regenerateMessage,
@@ -1482,6 +1706,21 @@ export default function ChatPage({
 	const [convId, setConvId] = useState<string | null>(
 		tabConversationId ?? null
 	);
+	// Agent-level controls are scoped to the conversation that emitted them. Do
+	// not carry a model/effort override into a different thread that happens to
+	// use the same agent.
+	useEffect(() => {
+		setModelSelectionCleared(false);
+		setStreamedAcpControl(null);
+	}, [convId]);
+	// Existing conversations own their folder. New chats may still use the
+	// optional global selection, but a loaded chat must never be retargeted when
+	// another tab changes that selection.
+	const chatFolder = convId
+		? (getConversation(convId)?.folderPath ?? null)
+		: folder;
+	const chatFolderRef = useRef<string | null>(chatFolder);
+	chatFolderRef.current = chatFolder;
 
 	// Restore state for THIS tab's thread. Seeded `true` whenever the tab is
 	// restored onto an existing conversation: the first paint happens before the
@@ -1498,6 +1737,14 @@ export default function ChatPage({
 	// Reload nonce: bumping it re-runs the hydration effect for the Try-again
 	// button without touching the auto-refresh paths.
 	const [historyReloadKey, setHistoryReloadKey] = useState(0);
+	// History opens on the newest page. The cursor is kept in a ref so scrolling
+	// can request another page without making the transcript callback churn.
+	const [hasOlderMessages, setHasOlderMessages] = useState(false);
+	const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+	const olderMessagesCursorRef = useRef<string | null>(null);
+	const hasOlderMessagesRef = useRef(false);
+	const olderMessagesRequestRef = useRef(false);
+	hasOlderMessagesRef.current = hasOlderMessages;
 
 	// ── Merged agent view ────────────────────────────────────────────────────
 	// Older threads with this agent, rendered read-only above the live one. The
@@ -1711,49 +1958,6 @@ export default function ChatPage({
 		};
 	}, [chatTarget, convId]);
 
-	const handleGoalSubmit = useCallback(
-		(text: string) => {
-			if (!convId) {
-				setGoalDraftOpen(false);
-				return;
-			}
-			void setGoal(chatTarget, convId, text)
-				.then((next) => {
-					setGoalState(next);
-					setGoalDraftOpen(false);
-				})
-				.catch(() => undefined);
-		},
-		[chatTarget, convId]
-	);
-	const handleGoalClear = useCallback(() => {
-		if (!convId) {
-			setGoalState(null);
-			setGoalDraftOpen(false);
-			return;
-		}
-		void clearGoal(chatTarget, convId).then(() => {
-			setGoalState(null);
-			setGoalDraftOpen(false);
-		});
-	}, [chatTarget, convId]);
-	const handleGoalPause = useCallback(() => {
-		if (!convId) {
-			return;
-		}
-		void pauseGoal(chatTarget, convId)
-			.then(setGoalState)
-			.catch(() => undefined);
-	}, [chatTarget, convId]);
-	const handleGoalResume = useCallback(() => {
-		if (!convId) {
-			return;
-		}
-		void resumeGoal(chatTarget, convId)
-			.then(setGoalState)
-			.catch(() => undefined);
-	}, [chatTarget, convId]);
-
 	// Generic plugin composer toggles (`composer_controls`): a flag→on map keyed by
 	// each control's `flag`. Held in state (drives the toggle's rendered `enabled`)
 	// plus a ref the once-created transport body closure reads when merging the
@@ -1784,8 +1988,20 @@ export default function ChatPage({
 	// existed, so the very first turn is already unsaved (flipping it after mount
 	// would be too late — the turn would have persisted).
 	const [ghostMode, setGhostMode] = useState(Boolean(initialGhost));
+	// A launchpad-seeded ghost chat may render before the contribution fetch lands.
+	// Keep that initial privacy behavior until the feed settles, then require the
+	// plugin declaration for every subsequent temporary-chat turn.
+	const ghostChatActive =
+		ghostMode &&
+		(ghostChatsPluginEnabled ||
+			(Boolean(initialGhost) && !pluginContributionsSettled));
 	const ghostModeRef = useRef(false);
-	ghostModeRef.current = ghostMode;
+	ghostModeRef.current = ghostChatActive;
+	useEffect(() => {
+		if (pluginContributionsSettled && !ghostChatsPluginEnabled && ghostMode) {
+			setGhostMode(false);
+		}
+	}, [ghostChatsPluginEnabled, ghostMode, pluginContributionsSettled]);
 
 	// Write this tab's thread back onto its Tab record. A tab opened blank ("New
 	// chat") only learns its conversation id on the first send, and nothing used
@@ -1806,7 +2022,9 @@ export default function ChatPage({
 	// The binding carries the id only, never a title: the tab label already has a
 	// single writer (`useTitleBar` → `updateTabTitle`, below), and a second one
 	// here would race it for ghost threads ("Temporary chat" vs the default).
-	const boundConversationId = ghostMode ? undefined : (convId ?? undefined);
+	const boundConversationId = ghostChatActive
+		? undefined
+		: (convId ?? undefined);
 	useEffect(() => {
 		if (!currentTabId) {
 			return;
@@ -1848,7 +2066,12 @@ export default function ChatPage({
 			},
 			body: () => {
 				const ws = useWorkspaceStore.getState();
-				const cwd = ws.folder ?? undefined;
+				const selectedFolder = chatFolderRef.current;
+				const project = selectedFolder
+					? findWorkspaceProject(ws.projects, selectedFolder)
+					: undefined;
+				const cwd = project?.folders[0] ?? selectedFolder ?? undefined;
+				const sourceFolders = project?.folders ?? (cwd ? [cwd] : []);
 				const environmentId = cwd
 					? ws.activeProjectEnvironments[cwd]
 					: undefined;
@@ -1873,7 +2096,15 @@ export default function ChatPage({
 				// mode (not auto-on per folder). When enabled, Core creates an
 				// isolated worktree on the first message and reuses it across turns,
 				// capturing the aggregate diff (fetched by DiffReviewPane).
-				const useWorktree = Boolean(cwd) && ws.worktreeMode;
+				const useWorktree =
+					tabWorktreeMode ?? (Boolean(cwd) && ws.worktreeMode);
+				const routingFields = modelRoutingFieldsForInterface(interfaceLevel, {
+					model: selectedModelRef.current,
+					acpMode: acpModeRef.current,
+					acpConfig: acpOptionValuesRef.current,
+					acpModel: acpModelRef.current,
+					simpleApprovalDefaults: simpleApprovalDefaultsRef.current,
+				});
 				return {
 					agent_id: agentId,
 					conversation_id: convIdRef.current ?? draftConvId.current,
@@ -1888,6 +2119,8 @@ export default function ChatPage({
 						? false
 						: longTermMemoryRef.current,
 					cwd,
+					workspace_folders:
+						sourceFolders.length > 1 ? sourceFolders : undefined,
 					worktree_isolation: useWorktree,
 					// Desired branch for the worktree Core creates on the first turn
 					// (sanitized server-side; ignored when reusing an existing one).
@@ -1917,18 +2150,9 @@ export default function ChatPage({
 					// target is the most specific intent, so it is sent alongside
 					// (Core's `workflow_id` branch ignores agent/team).
 					workflow_id: workflowIdRef.current ?? undefined,
-					// Composer model picker selection (per-agent). Core routes honour it
-					// where the transport supports a model override; otherwise ignored.
-					model: selectedModelRef.current ?? undefined,
-					// ACP session controls (agent-reported). Re-applied to this turn's
-					// ACP session by Core; ignored by non-ACP routes.
-					acp_mode: acpModeRef.current ?? undefined,
-					acp_config:
-						acpOptionValuesRef.current &&
-						Object.keys(acpOptionValuesRef.current).length > 0
-							? acpOptionValuesRef.current
-							: undefined,
-					acp_model: acpModelRef.current ?? undefined,
+					// Ryu Work keeps the chosen agent visible but lets Core own model
+					// routing. Code sends the user's explicit model/ACP controls.
+					...routingFields,
 					// Per-request plugin flags (every plugin-contributed composer toggle,
 					// double-check included). The plugin turn-hook runtime passes these to
 					// each hook; a plugin acts only when its flag is set.
@@ -1948,6 +2172,83 @@ export default function ChatPage({
 			},
 		}),
 	});
+
+	// Side chats receive the transcript currently visible in this tab, rather than
+	// relying only on Core's persisted copy. That keeps a `/btw` asked during an
+	// in-flight reply aware of the latest assistant text as well as older turns.
+	const sideChatMessages = useMemo<BtwMessage[]>(
+		() => buildSideChatContext(messages),
+		[messages]
+	);
+
+	// Goal-setting is a UI action rather than a model turn, but it still belongs in
+	// the transcript as a user-authored message. Metadata keeps the annotation out
+	// of the text sent to the agent while the shared UserMessage renders it beside
+	// the normal copy toolbar.
+	const goalMessageSequenceRef = useRef(0);
+	const appendGoalMessage = useCallback(
+		(text: string) => {
+			const id = `goal-${Date.now()}-${goalMessageSequenceRef.current}`;
+			goalMessageSequenceRef.current += 1;
+			setMessages((prev) => [
+				...prev,
+				{
+					id,
+					metadata: { goal: true },
+					parts: [{ text, type: "text" as const }],
+					role: "user" as const,
+				} as (typeof prev)[number],
+			]);
+		},
+		[setMessages]
+	);
+	const handleGoalSubmit = useCallback(
+		(text: string) => {
+			const targetConversationId = convId;
+			if (!targetConversationId) {
+				setGoalDraftOpen(false);
+				return;
+			}
+			void setGoal(chatTarget, targetConversationId, text)
+				.then((next) => {
+					if (convIdRef.current !== targetConversationId) {
+						return;
+					}
+					setGoalState(next);
+					setGoalDraftOpen(false);
+					appendGoalMessage(text);
+				})
+				.catch(() => undefined);
+		},
+		[appendGoalMessage, chatTarget, convId]
+	);
+	const handleGoalClear = useCallback(() => {
+		if (!convId) {
+			setGoalState(null);
+			setGoalDraftOpen(false);
+			return;
+		}
+		void clearGoal(chatTarget, convId).then(() => {
+			setGoalState(null);
+			setGoalDraftOpen(false);
+		});
+	}, [chatTarget, convId]);
+	const handleGoalPause = useCallback(() => {
+		if (!convId) {
+			return;
+		}
+		void pauseGoal(chatTarget, convId)
+			.then(setGoalState)
+			.catch(() => undefined);
+	}, [chatTarget, convId]);
+	const handleGoalResume = useCallback(() => {
+		if (!convId) {
+			return;
+		}
+		void resumeGoal(chatTarget, convId)
+			.then(setGoalState)
+			.catch(() => undefined);
+	}, [chatTarget, convId]);
 
 	// Ryu Apps widget host (U7). The desktop is the TRUSTED side: it holds the Core
 	// token and performs the Gateway-governed round-trips on a widget's behalf. The
@@ -2199,7 +2500,7 @@ export default function ChatPage({
 	);
 
 	// Speak an assistant reply aloud via Core's /api/voice/speak, honouring the
-	// Voice-tab TTS engine/voice (localStorage). Playback uses a plain
+	// Voice-tab Audio engine/voice (localStorage). Playback uses a plain
 	// HTMLAudioElement; the URL is revoked on end to free the blob.
 	const speakingAudioRef = useRef<HTMLAudioElement | null>(null);
 	// The text of the turn currently playing, so a second click on the SAME turn
@@ -2254,7 +2555,7 @@ export default function ChatPage({
 
 	// Interactive ACP tool-permission prompts. When an agent in a gating mode
 	// asks to run a tool, Core streams a `data-ryu-permission` part; we surface
-	// the latest unresolved one above the composer and POST the user's choice
+	// the latest unresolved one in the shared composer surface and POST the user's choice
 	// back (`/api/chat/permission`) to unblock the awaiting turn. Resolved request
 	// ids are tracked so the prompt clears once answered.
 	const [resolvedPermissions, setResolvedPermissions] = useState<Set<string>>(
@@ -2280,10 +2581,9 @@ export default function ChatPage({
 		return null;
 	}, [messages, resolvedPermissions]);
 
-	// Deliver a decision for one permission request. Split out of
-	// `handleRespondPermission` (which only ever knows about the composer's
-	// latest prompt) so the inline approval on a tool row can answer the exact
-	// request that gates *that* call.
+	// Deliver a decision for one permission request. Keeping the request id in
+	// this callback makes the composer card answer the exact gate that is on
+	// screen, even if another stream update arrives while it is open.
 	const respondToPermission = useCallback(
 		(requestId: string, optionId: string | null) => {
 			setResolvedPermissions((prev) => {
@@ -2304,79 +2604,16 @@ export default function ChatPage({
 		[]
 	);
 
-	// Every unresolved permission request, keyed by the tool call it gates. The
-	// `toolCall` payload is the ACP `ToolCallUpdate` Core forwarded verbatim, so
-	// its `toolCallId` is the SAME id the tool part was opened under — that is
-	// what lets the approval render on the tool row instead of floating free.
-	const permissionsByToolCall = useMemo(() => {
-		const out = new Map<string, ActivePermission>();
-		for (const m of messages) {
-			if (m.role !== "assistant" || !m.parts) {
-				continue;
-			}
-			for (const part of m.parts) {
-				const p = part as { type?: string; data?: unknown };
-				if (p.type !== "data-ryu-permission") {
-					continue;
-				}
-				const data = p.data as ActivePermission | undefined;
-				if (!data?.requestId || resolvedPermissions.has(data.requestId)) {
-					continue;
-				}
-				const tc = data.toolCall as
-					| { toolCallId?: unknown; tool_call_id?: unknown }
-					| null
-					| undefined;
-				const toolCallId =
-					typeof tc?.toolCallId === "string"
-						? tc.toolCallId
-						: typeof tc?.tool_call_id === "string"
-							? tc.tool_call_id
-							: null;
-				if (toolCallId) {
-					out.set(toolCallId, data);
-				}
-			}
-		}
-		return out;
-	}, [messages, resolvedPermissions]);
-
-	// The inline approval on the tool row is the primary surface. The composer
-	// prompt stays as the fallback for a request whose tool call has no row in
-	// the thread — otherwise the same question is asked twice, in two places.
-	const composerPermission = useMemo<ActivePermission | null>(() => {
-		if (!activePermission) {
-			return null;
-		}
-		for (const m of messages) {
-			if (m.role !== "assistant" || !m.parts) {
-				continue;
-			}
-			for (const part of m.parts) {
-				const p = part as { type?: string; toolCallId?: string };
-				const isTool =
-					p.type === "dynamic-tool" ||
-					(typeof p.type === "string" && p.type.startsWith("tool-"));
-				if (!(isTool && p.toolCallId)) {
-					continue;
-				}
-				if (
-					permissionsByToolCall.get(p.toolCallId)?.requestId ===
-					activePermission.requestId
-				) {
-					return null;
-				}
-			}
-		}
-		return activePermission;
-	}, [activePermission, messages, permissionsByToolCall]);
+	// Every unresolved permission is presented in the same composer surface as
+	// structured questions. The transcript keeps the tool row as history, while
+	// this active card owns the one decision that can unblock the turn.
+	const composerPermission = activePermission;
 
 	// Slash commands contributed by enabled Core plugins (e.g. `/proof` from the
 	// proof-of-work turn-hook plugin). Core tags each with its owning `plugin` id
 	// and returns the full `command` text (leading "/"); the popover works off the
 	// bare name, so strip it. These are plain messages at submit time — Core's
 	// turn-hook interprets them — so nothing client-side handles them here.
-	const pluginContributions = usePluginContributions();
 	const handleOpenFileLink = useCallback(
 		(mentionedPath: string) => {
 			const path = resolveWorkspaceFilePath(folder, mentionedPath);
@@ -2402,6 +2639,87 @@ export default function ChatPage({
 			await openExternal(href).catch(() => undefined);
 		},
 		[chatTarget, pluginContributions.dock_panels]
+	);
+	const handleOpenMention = useCallback(
+		(item: AgentElementMentionItem) => {
+			if (item.target) {
+				openTab(item.target.path, {
+					...item.target.options,
+					title: item.label,
+				});
+				return;
+			}
+			if (!item.id) {
+				openTab("/store", { title: item.label });
+				return;
+			}
+			switch (item.kind) {
+				case "agent":
+					openTab(`/agents/${encodeURIComponent(item.id)}/edit`, {
+						title: item.label,
+					});
+					break;
+				case "app": {
+					const companion = pluginContributions.companions.find(
+						(entry) => entry.pluginId === item.id
+					);
+					openTab(companion ? pluginCompanionPath(companion.id) : "/apps", {
+						title: item.label,
+					});
+					break;
+				}
+				case "chat":
+					openTab("/chat", {
+						conversationId: item.id,
+						title: item.label,
+					});
+					break;
+				case "folder":
+					openTab(`/project/files/${encodeURIComponent(item.id)}`, {
+						title: basename(item.id),
+					});
+					break;
+				case "integration":
+					openTab("/store/integrations", { title: item.label });
+					break;
+				case "mcp":
+					openTab(`/store/mcp/q/${encodeURIComponent(item.id)}`, {
+						title: item.label,
+					});
+					break;
+				case "plugin":
+					openTab("/extensions", { title: item.label });
+					break;
+				case "skill":
+					openTab("/skills", { title: item.label });
+					break;
+				case "space":
+					openTab(`/spaces/${encodeURIComponent(item.id)}`, {
+						title: item.label,
+					});
+					break;
+				case "page":
+					openTab("/spaces", { title: item.label });
+					break;
+				case "app-item":
+					openTab("/apps", { title: item.label });
+					break;
+				case "output-style":
+					openTab("/settings", { title: item.label });
+					break;
+				case "team":
+					openTab("/library/team", { title: item.label });
+					break;
+				case "workflow":
+					openTab(`/workflows/${encodeURIComponent(item.id)}`, {
+						title: item.label,
+					});
+					break;
+				default:
+					openTab("/store", { title: item.label });
+			}
+		},
+		[openTab, pluginContributions.companions]
 	);
 	const linkPreviewResolvers = useMemo(
 		() => ({
@@ -2453,10 +2771,11 @@ export default function ChatPage({
 	}, [pluginContributions.slash_commands]);
 
 	// Contributed per-message toolbar actions (`contributes.message_actions`),
-	// passed into blocks presentationally. The shell dispatches each through the
-	// owning plugin's granted host seam when fired.
+	// passed into blocks presentationally. The shell dispatches each through its
+	// renderer or the owning plugin's granted host seam when fired.
 	const contributedMessageActions = useMemo(() => {
 		return pluginContributions.message_actions.map((a) => ({
+			args: a.args,
 			id: a.id,
 			label: a.label,
 			icon: a.icon,
@@ -2464,36 +2783,10 @@ export default function ChatPage({
 			target: a.target,
 			states: a.states,
 			capability: a.capability,
+			order: a.order,
 			plugin: a.plugin,
 		}));
 	}, [pluginContributions.message_actions]);
-
-	const handleContributedMessageAction = useCallback(
-		(
-			action: {
-				capability?: string;
-				icon?: string;
-				id: string;
-				kind: string;
-				label: string;
-				plugin: string;
-				states?: {
-					active_icon?: string;
-					icon?: string;
-					label: string;
-					value: string;
-				}[];
-				target: string;
-			},
-			_value?: string
-		) => {
-			if (!(action.plugin && action.capability)) {
-				return;
-			}
-			void pluginHostInvoke(chatTarget, action.plugin, action.capability, {});
-		},
-		[chatTarget]
-	);
 
 	// Slash commands the active agent advertised over ACP. Core streams the full
 	// list (each update replaces the last) as a `data-ryu-acp-commands` part; we
@@ -2704,6 +2997,162 @@ export default function ChatPage({
 		return null;
 	}, [messages]);
 
+	// Agent-level target changes are Core-owned, one-turn decisions. The event is
+	// deliberately separate from ACP config write-backs: it can move the active
+	// conversation agent, but it must not mutate an agent card or a global model
+	// preference. The effective target is adopted by this tab so the next user
+	// message follows the handoff instead of sending the old agent id again.
+	const latestAgentControl = useMemo<{
+		data: {
+			effective_agent_id?: unknown;
+			effective_effort?: unknown;
+			effective_model?: unknown;
+			effort_cleared?: unknown;
+			model_cleared?: unknown;
+			requested_effort?: unknown;
+			requested_model?: unknown;
+		};
+		key: string;
+	} | null>(() => {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role !== "assistant" || !message.parts) {
+				continue;
+			}
+			for (let j = message.parts.length - 1; j >= 0; j--) {
+				const part = message.parts[j] as { data?: unknown; type?: string };
+				if (part.type !== "data-ryu-agent-control") {
+					continue;
+				}
+				const data = part.data as
+					| {
+							effective_agent_id?: unknown;
+							effective_effort?: unknown;
+							effective_model?: unknown;
+							effort_cleared?: unknown;
+							model_cleared?: unknown;
+							requested_effort?: unknown;
+							requested_model?: unknown;
+					  }
+					| undefined;
+				return { data: data ?? {}, key: `${message.id}:${j}` };
+			}
+		}
+		return null;
+	}, [messages]);
+	const lastAgentControlRef = useRef<string | null>(null);
+	useEffect(() => {
+		if (
+			!latestAgentControl ||
+			latestAgentControl.key === lastAgentControlRef.current
+		) {
+			return;
+		}
+		lastAgentControlRef.current = latestAgentControl.key;
+		const targetAgentId =
+			typeof latestAgentControl.data.effective_agent_id === "string"
+				? latestAgentControl.data.effective_agent_id.trim()
+				: "";
+		const modelWasControlled =
+			latestAgentControl.data.model_cleared === true ||
+			typeof latestAgentControl.data.requested_model === "string";
+		const effortWasControlled =
+			latestAgentControl.data.effort_cleared === true ||
+			typeof latestAgentControl.data.requested_effort === "string";
+		const streamedControl: StreamedAcpControl = {
+			agentId: targetAgentId || null,
+			key: latestAgentControl.key,
+		};
+		if (modelWasControlled) {
+			streamedControl.model =
+				latestAgentControl.data.model_cleared === true
+					? null
+					: typeof latestAgentControl.data.effective_model === "string"
+						? latestAgentControl.data.effective_model.trim() || null
+						: null;
+		}
+		if (effortWasControlled) {
+			streamedControl.effort =
+				latestAgentControl.data.effort_cleared === true
+					? null
+					: typeof latestAgentControl.data.effective_effort === "string"
+						? latestAgentControl.data.effective_effort.trim() || null
+						: null;
+		}
+		if (!targetAgentId) {
+			// A null effective target means Core resumed automatic routing. Clear
+			// this tab's stale manual target so the next request cannot re-pin the
+			// agent that just asked to be cleared.
+			setTeamId(null);
+			setAgentId(null);
+			setSelectedModel(null);
+			setModelSelectionCleared(true);
+			setStreamedAcpControl(
+				modelWasControlled || effortWasControlled ? streamedControl : null
+			);
+			return;
+		}
+		if (targetAgentId !== agentIdRef.current) {
+			setTeamId(null);
+			setAgentId(targetAgentId);
+			setSelectedModel(getAgentModel(targetAgentId));
+			setModelSelectionCleared(false);
+		}
+		if (modelWasControlled && !isAcpAgent(targetAgentId, agents)) {
+			setSelectedModel(streamedControl.model ?? null);
+			setModelSelectionCleared(streamedControl.model === null);
+		}
+		setStreamedAcpControl(
+			modelWasControlled || effortWasControlled ? streamedControl : null
+		);
+	}, [agents, latestAgentControl]);
+
+	// A native provider publishes this part only for the active user turn. Stop
+	// at the newest user message so a completed prior turn can never re-arm the
+	// affordance when the next request starts before its first data part arrives.
+	const latestTurnControl = useMemo<StreamedTurnControl | null>(() => {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role === "user") {
+				return null;
+			}
+			if (message.role !== "assistant" || !message.parts) {
+				continue;
+			}
+			for (let j = message.parts.length - 1; j >= 0; j--) {
+				const part = message.parts[j] as { data?: unknown; type?: string };
+				if (part.type !== "data-ryu-turn-control") {
+					continue;
+				}
+				const data = part.data as
+					| {
+							effort?: unknown;
+							phase?: unknown;
+							startedAtMs?: unknown;
+							strategy?: unknown;
+							turnId?: unknown;
+					  }
+					| undefined;
+				if (
+					typeof data?.turnId !== "string" ||
+					typeof data.startedAtMs !== "number" ||
+					(data.phase !== "reasoning" && data.phase !== "answering") ||
+					data.strategy !== "native"
+				) {
+					continue;
+				}
+				return {
+					effort: typeof data.effort === "string" ? data.effort : undefined,
+					phase: data.phase,
+					startedAtMs: data.startedAtMs,
+					strategy: "native",
+					turnId: data.turnId,
+				};
+			}
+		}
+		return null;
+	}, [messages]);
+
 	// ACP session metadata and Core context compaction are transcript-level
 	// events. Show the newest one as a compact marker after the conversation;
 	// neither is assistant prose and neither should be copied into the reply.
@@ -2719,6 +3168,37 @@ export default function ChatPage({
 			}
 			for (let j = message.parts.length - 1; j >= 0; j--) {
 				const part = message.parts[j] as { data?: unknown; type?: string };
+				if (part.type === "data-ryu-agent-control") {
+					const data = part.data as
+						| {
+								effective_agent_id?: unknown;
+								effective_effort?: unknown;
+								effective_model?: unknown;
+						  }
+						| undefined;
+					const effectiveAgent =
+						typeof data?.effective_agent_id === "string"
+							? data.effective_agent_id.trim()
+							: "";
+					const effectiveModel =
+						typeof data?.effective_model === "string"
+							? data.effective_model.trim()
+							: "";
+					const effectiveEffort =
+						typeof data?.effective_effort === "string"
+							? data.effective_effort.trim()
+							: "";
+					const details = [
+						effectiveAgent ? `agent: ${effectiveAgent}` : null,
+						effectiveModel ? `model: ${effectiveModel}` : null,
+						effectiveEffort ? `effort: ${effectiveEffort}` : null,
+					].filter((detail): detail is string => detail !== null);
+					return {
+						description: details.length > 0 ? details.join(" · ") : undefined,
+						id: `${message.id}:${j}`,
+						title: "Agent control applied",
+					};
+				}
 				if (part.type === "data-ryu-acp-compaction") {
 					const data = part.data as { summary?: unknown } | undefined;
 					return {
@@ -2860,7 +3340,11 @@ export default function ChatPage({
 	// `data-plugin_note` part and not yet dismissed. Surfaced in a dismissible
 	// banner above the composer; it never enters chat history.
 	// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
-	const activePluginNote = useMemo<{ id: string; text: string } | null>(() => {
+	const activePluginNote = useMemo<{
+		id: string;
+		question: string | null;
+		text: string;
+	} | null>(() => {
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const m = messages[i];
 			if (m.role !== "assistant" || !m.parts) {
@@ -2871,7 +3355,9 @@ export default function ChatPage({
 				if (part?.type !== "data-plugin_note") {
 					continue;
 				}
-				const data = part.data as { text?: string } | undefined;
+				const data = part.data as
+					| { question?: string; text?: string }
+					| undefined;
 				const text = data?.text?.trim();
 				if (!text) {
 					continue;
@@ -2880,26 +3366,26 @@ export default function ChatPage({
 				if (dismissedPluginNotes.has(id)) {
 					return null;
 				}
-				return { id, text };
+				return {
+					id,
+					question: data?.question?.trim() || null,
+					text,
+				};
 			}
 		}
 		return null;
 	}, [messages, dismissedPluginNotes]);
 
 	const handleRespondPermission = useCallback(
-		(optionId: string | null) => {
-			const requestId = activePermission?.requestId;
-			if (!requestId) {
-				return;
-			}
-			respondToPermission(requestId, optionId);
+		(permission: ActivePermission, optionId: string | null) => {
+			respondToPermission(permission.requestId, optionId);
 		},
-		[activePermission, respondToPermission]
+		[respondToPermission]
 	);
 
 	const permissionRef = useRef<{
 		permission: ActivePermission | null;
-		onRespond: (optionId: string | null) => void;
+		onRespond: (permission: ActivePermission, optionId: string | null) => void;
 	}>({ permission: null, onRespond: handleRespondPermission });
 	permissionRef.current = {
 		permission: composerPermission,
@@ -2910,6 +3396,13 @@ export default function ChatPage({
 	// (same pattern as permission/agents above — avoids textarea focus loss).
 	const commandsRef = useRef<SlashCommand[]>(composerCommands);
 	commandsRef.current = composerCommands;
+	const chatWidgetTemplatesRef = useRef<PluginChatWidgetTemplate[]>([]);
+	chatWidgetTemplatesRef.current = (pluginContributions.chat_widget_templates ?? []).filter(
+		(template) =>
+			template.availability === "available" &&
+			Boolean(template.backing.tool_id ?? template.backing.view_id) &&
+			(template.examples.length > 0 || template.triggers.length > 0)
+	);
 
 	// Whether anything is on screen right now, read inside the async hydration
 	// without making it a dependency: the point is what is true when the fetch
@@ -2917,8 +3410,60 @@ export default function ChatPage({
 	const hasMessagesRef = useRef(false);
 	hasMessagesRef.current = messages.length > 0;
 
+	const loadOlderMessages = useCallback(async () => {
+		const conversationId = convIdRef.current;
+		const before = olderMessagesCursorRef.current;
+		if (
+			!(conversationId && before && hasOlderMessagesRef.current) ||
+			olderMessagesRequestRef.current
+		) {
+			return;
+		}
+		olderMessagesRequestRef.current = true;
+		setLoadingOlderMessages(true);
+		try {
+			const result = await loadMessagesPageResult(conversationId, before);
+			if (convIdRef.current !== conversationId || result.status === "error") {
+				return;
+			}
+			const now = Date.now();
+			for (const message of result.messages) {
+				if (typeof message.timestamp === "number") {
+					messageSentAtRef.current.set(message.id, message.timestamp);
+				}
+			}
+			setVersions((current) => ({
+				...current,
+				...buildVersions(result.messages),
+			}));
+			setMessages((current) => {
+				const existingIds = new Set(current.map((message) => message.id));
+				const older = result.messages.filter(
+					(message) => !existingIds.has(message.id)
+				);
+				if (older.length === 0) {
+					return current;
+				}
+				return [
+					...older.map((message) => hydrateHistoryMessage(message, now)),
+					...current,
+				] as unknown as UIMessage[];
+			});
+			const nextCursor = result.olderMessagesCursor ?? null;
+			olderMessagesCursorRef.current = nextCursor;
+			setHasOlderMessages(
+				result.hasOlderMessages === true && nextCursor !== null
+			);
+		} finally {
+			olderMessagesRequestRef.current = false;
+			setLoadingOlderMessages(false);
+		}
+	}, [loadMessagesPageResult, setMessages]);
+
 	const retryHistoryLoad = useCallback(() => {
 		setHistoryFailed(false);
+		olderMessagesCursorRef.current = null;
+		setHasOlderMessages(false);
 		setHistoryReloadKey((n) => n + 1);
 	}, []);
 
@@ -2935,6 +3480,9 @@ export default function ChatPage({
 	// reply, so we must leave useChat's own state untouched when there is no
 	// server-side history.
 	useEffect(() => {
+		olderMessagesCursorRef.current = null;
+		setHasOlderMessages(false);
+		setLoadingOlderMessages(false);
 		if (!convId) {
 			// A brand-new chat has nothing to wait for — the greeting is correct here.
 			setHistoryLoading(false);
@@ -2948,47 +3496,59 @@ export default function ChatPage({
 		if (!hasMessagesRef.current) {
 			setHistoryLoading(true);
 		}
-		loadMessagesResult(convId).then(({ status, messages: history }) => {
-			if (cancelled) {
-				return;
-			}
-			setHistoryLoading(false);
-			// A transport/HTTP failure is NOT an empty conversation. Leaving
-			// useChat's state alone and flagging the failure is what keeps a chat
-			// opened while Core is still booting from rendering as a new chat.
-			if (status === "error") {
-				setHistoryFailed(true);
-				return;
-			}
-			setHistoryFailed(false);
-			if (history.length === 0) {
-				return;
-			}
-			// The user typed while the fetch was in flight (first send adopting this
-			// id). Their message and its live reply outrank stale server history.
-			if (hasMessagesRef.current) {
-				return;
-			}
-			const now = Date.now();
-			// Seed the send-time map with each persisted message's server timestamp so
-			// the toolbar can render "when it was sent" on reload. Live turns fall back
-			// to a client stamp in `processedMessages`.
-			for (const h of history) {
-				if (typeof h.timestamp === "number") {
-					messageSentAtRef.current.set(h.id, h.timestamp);
+		loadMessagesPageResult(convId).then(
+			({
+				status,
+				messages: history,
+				hasOlderMessages: pageHasOlderMessages,
+				olderMessagesCursor,
+			}) => {
+				if (cancelled) {
+					return;
 				}
+				setHistoryLoading(false);
+				// A transport/HTTP failure is NOT an empty conversation. Leaving
+				// useChat's state alone and flagging the failure is what keeps a chat
+				// opened while Core is still booting from rendering as a new chat.
+				if (status === "error") {
+					setHistoryFailed(true);
+					return;
+				}
+				setHistoryFailed(false);
+				const nextCursor = olderMessagesCursor ?? null;
+				olderMessagesCursorRef.current = nextCursor;
+				setHasOlderMessages(
+					pageHasOlderMessages === true && nextCursor !== null
+				);
+				if (history.length === 0) {
+					return;
+				}
+				// The user typed while the fetch was in flight (first send adopting this
+				// id). Their message and its live reply outrank stale server history.
+				if (hasMessagesRef.current) {
+					return;
+				}
+				const now = Date.now();
+				// Seed the send-time map with each persisted message's server timestamp so
+				// the toolbar can render "when it was sent" on reload. Live turns fall back
+				// to a client stamp in `processedMessages`.
+				for (const h of history) {
+					if (typeof h.timestamp === "number") {
+						messageSentAtRef.current.set(h.id, h.timestamp);
+					}
+				}
+				setVersions(buildVersions(history));
+				setMessages(
+					history.map((m) =>
+						hydrateHistoryMessage(m, now)
+					) as unknown as UIMessage[]
+				);
 			}
-			setVersions(buildVersions(history));
-			setMessages(
-				history.map((m) =>
-					hydrateHistoryMessage(m, now)
-				) as unknown as UIMessage[]
-			);
-		});
+		);
 		return () => {
 			cancelled = true;
 		};
-	}, [convId, loadMessagesResult, setMessages, historyReloadKey]);
+	}, [convId, loadMessagesPageResult, setMessages, historyReloadKey]);
 
 	// Re-hydrate messages when the user switches back to this tab. If the ACP
 	// agent is still running, reconnect to Core's live stream resume endpoint so
@@ -3078,11 +3638,21 @@ export default function ChatPage({
 			const hydrate = options?.hydrate ?? false;
 			let attached = false;
 			try {
-				let history: Awaited<ReturnType<typeof loadMessages>> = [];
+				let history: Awaited<
+					ReturnType<typeof loadMessagesPageResult>
+				>["messages"] = [];
 				if (mode === "restore") {
-					history = await loadMessages(conv);
+					const page = await loadMessagesPageResult(conv);
+					history = page.messages;
 					if (controller.signal.aborted) {
 						return;
+					}
+					if (page.status === "ok" && hydrate) {
+						const nextCursor = page.olderMessagesCursor ?? null;
+						olderMessagesCursorRef.current = nextCursor;
+						setHasOlderMessages(
+							page.hasOlderMessages === true && nextCursor !== null
+						);
 					}
 					if (history.length > 0 && hydrate) {
 						setVersions(buildVersions(history));
@@ -3120,7 +3690,8 @@ export default function ChatPage({
 				if (mode === "probe") {
 					// Only now is the history worth fetching: a bare probe must not cost
 					// a conversation read on every tick.
-					history = await loadMessages(conv);
+					const page = await loadMessagesPageResult(conv);
+					history = page.messages;
 					if (controller.signal.aborted) {
 						return;
 					}
@@ -3200,11 +3771,16 @@ export default function ChatPage({
 				}
 				// Stream ended — re-fetch the final persisted state.
 				if (!controller.signal.aborted) {
-					const final_ = await loadMessages(conv);
-					if (final_.length > 0) {
+					const finalPage = await loadMessagesPageResult(conv);
+					if (finalPage.status === "ok" && finalPage.messages.length > 0) {
+						const nextCursor = finalPage.olderMessagesCursor ?? null;
+						olderMessagesCursorRef.current = nextCursor;
+						setHasOlderMessages(
+							finalPage.hasOlderMessages === true && nextCursor !== null
+						);
 						const now = Date.now();
 						setMessages(
-							final_.map((m) =>
+							finalPage.messages.map((m) =>
 								hydrateHistoryMessage(m, now)
 							) as unknown as UIMessage[]
 						);
@@ -3226,7 +3802,7 @@ export default function ChatPage({
 				}
 			}
 		},
-		[loadMessages, setMessages, refresh, clearError]
+		[loadMessagesPageResult, setMessages, refresh, clearError]
 	);
 
 	// Arm 1 — tab activation (and mount). The original, and the only one that
@@ -3263,7 +3839,78 @@ export default function ChatPage({
 	// `status` stays the raw useChat value for the stream plumbing itself.
 	const effectiveStatus: typeof status =
 		resumeStreaming && status === "ready" ? "streaming" : status;
+	const [answerNowClock, setAnswerNowClock] = useState(() => Date.now());
+	const [answerNowPendingTurnId, setAnswerNowPendingTurnId] = useState<
+		string | null
+	>(null);
+	const turnIsBusy =
+		effectiveStatus === "streaming" || effectiveStatus === "submitted";
 
+	// Keep the effort-aware grace period ticking only while the native provider is
+	// still in its reasoning phase. Unsupported routes never publish this part,
+	// so they pay no timer or render cost.
+	useEffect(() => {
+		if (!(turnIsBusy && latestTurnControl?.phase === "reasoning")) {
+			return;
+		}
+		setAnswerNowClock(Date.now());
+		const timer = window.setInterval(() => setAnswerNowClock(Date.now()), 250);
+		return () => window.clearInterval(timer);
+	}, [latestTurnControl?.phase, latestTurnControl?.turnId, turnIsBusy]);
+
+	useEffect(() => {
+		if (
+			answerNowPendingTurnId &&
+			(answerNowPendingTurnId !== latestTurnControl?.turnId || !turnIsBusy)
+		) {
+			setAnswerNowPendingTurnId(null);
+		}
+	}, [answerNowPendingTurnId, latestTurnControl?.turnId, turnIsBusy]);
+
+	const handleAnswerNow = useCallback(async () => {
+		const control = latestTurnControl;
+		const conversationId = convIdRef.current ?? draftConvId.current;
+		if (!(control && conversationId && turnIsBusy)) {
+			return;
+		}
+		setAnswerNowPendingTurnId(control.turnId);
+		try {
+			const accepted = await answerNowChat(
+				chatTargetRef.current,
+				conversationId,
+				control.turnId
+			);
+			if (!accepted) {
+				throw new Error("Core did not accept the request");
+			}
+		} catch {
+			setAnswerNowPendingTurnId(null);
+			toast.error("Could not ask this turn to answer now.");
+		}
+	}, [latestTurnControl, turnIsBusy]);
+
+	const answerNowControl = useMemo(() => {
+		if (
+			!(
+				turnIsBusy &&
+				latestTurnControl?.phase === "reasoning" &&
+				answerNowClock - latestTurnControl.startedAtMs >=
+					answerNowDelayMs(latestTurnControl.effort)
+			)
+		) {
+			return undefined;
+		}
+		return {
+			onClick: handleAnswerNow,
+			pending: answerNowPendingTurnId === latestTurnControl.turnId,
+		};
+	}, [
+		answerNowClock,
+		answerNowPendingTurnId,
+		handleAnswerNow,
+		latestTurnControl,
+		turnIsBusy,
+	]);
 	// Arm 2 — a stream of OURS just ended or errored. This is the case that made
 	// a runaway turn unstoppable: a local SSE that drops mid-turn puts useChat
 	// back at "ready"/"error" while Core keeps the turn running, and the one-shot
@@ -3341,6 +3988,11 @@ export default function ChatPage({
 	// presence echo so we never show ourselves as "typing".
 	const myMemberIdRef = useRef<string | null>(null);
 
+	const reactionsPluginEnabled = useMemo(
+		() => contributedMessageActions.some(isMessageReactionAction),
+		[contributedMessageActions]
+	);
+
 	// Emoji reactions for this conversation. A ghost chat is never persisted, so
 	// there is nothing to react TO and no room to fan reactions out over — the
 	// null conversation id disables the query the same way it skips presence.
@@ -3348,7 +4000,38 @@ export default function ChatPage({
 		byMessage: reactionsByMessage,
 		applyRealtimeFrame: applyReactionFrame,
 		toggle: toggleReaction,
-	} = useMessageReactions(ghostMode ? null : convId);
+	} = useMessageReactions(
+		ghostChatActive || !reactionsPluginEnabled ? null : convId
+	);
+
+	const messageActionStates = useMemo(() => {
+		const states = new Map<string, MessageActionRuntimeState>();
+		for (const [messageId, buckets] of reactionsByMessage) {
+			states.set(messageId, { reactionBuckets: buckets });
+		}
+		return states;
+	}, [reactionsByMessage]);
+
+	const handleContributedMessageAction = useCallback(
+		(action: ContributedMessageAction, context: MessageActionContext) => {
+			if (isMessageReactionAction(action)) {
+				if (context.value) {
+					toggleReaction(context.messageId, context.value);
+				}
+				return;
+			}
+			if (!(action.plugin && action.capability)) {
+				return;
+			}
+			const args = {
+				...(action.args ?? {}),
+				message_id: context.messageId,
+				...(context.value === undefined ? {} : { value: context.value }),
+			};
+			void pluginHostInvoke(chatTarget, action.plugin, action.capability, args);
+		},
+		[chatTarget, toggleReaction]
+	);
 
 	// Remote members' latest presence (name + typing), keyed by member id. Our own
 	// member is excluded. Reset when the conversation changes.
@@ -3497,7 +4180,7 @@ export default function ChatPage({
 	// persisted (so Core fans out nothing), and we also skip presence so a
 	// temporary thread stays fully private. `null` room id = no join.
 	const { publishPresence: publishRoomPresence } = useRealtimeRoom(
-		ghostMode ? null : convId,
+		ghostChatActive ? null : convId,
 		"conversation",
 		{
 			onEvent: handleRealtimeEvent,
@@ -3584,7 +4267,7 @@ export default function ChatPage({
 			updateTabBusy(
 				currentTabId,
 				busy,
-				status === "submitted" ? "slow" : "normal"
+				getChatTabBusySpeed(status, acp.acpMode, acp.acpOptionValues)
 			);
 		}
 		// A new turn is in flight — drop stale chips and cancel any pending fetch.
@@ -3657,6 +4340,8 @@ export default function ChatPage({
 		activeConversationId,
 		messages,
 		currentTabId,
+		acp.acpMode,
+		acp.acpOptionValues,
 		updateTabBusy,
 	]);
 
@@ -3698,15 +4383,6 @@ export default function ChatPage({
 
 	/** Keep very large pastes out of the prompt body and make them inspectable files. */
 	const LONG_PASTE_THRESHOLD = 10_000;
-
-	function textToDataUrl(text: string): string {
-		const bytes = new TextEncoder().encode(text);
-		let binary = "";
-		for (const byte of bytes) {
-			binary += String.fromCharCode(byte);
-		}
-		return `data:text/plain;base64,${btoa(binary)}`;
-	}
 
 	const addImages = useCallback(
 		(files: File[]) => {
@@ -3846,17 +4522,142 @@ export default function ChatPage({
 				]);
 				return;
 			}
+			if (!chatFolderRef.current && messageNeedsWorkspace(message.content)) {
+				// Keep the submitted message intact while a non-technical user chooses a
+				// project. This avoids the old upfront folder gate without allowing a local
+				// edit request to run in Core's arbitrary process directory.
+				setPendingWorkspaceMessage((current) => current ?? message);
+				return;
+			}
+			const browserModelId =
+				browserSnapshot?.currentModelBySurface.dashboard ??
+				browserProviderHost.getModelSelection(agentId, "dashboard");
+			const browserModel = browserSnapshot?.models.find(
+				(model) => model.id === browserModelId
+			);
+			const browserLocalActive =
+				!forceCoreNextRef.current &&
+				browserSnapshot?.activeSurface === "dashboard" &&
+				browserSnapshot.activeAgentId === agentId &&
+				browserModel?.capabilities.chatSupport === true &&
+				(message.attachments?.length ?? 0) === 0;
+			if (browserLocalActive) {
+				forceCoreNextRef.current = false;
+				const localConversationId = convIdRef.current ?? draftConvId.current;
+				if (!ghostChatActive) {
+					setConvId(localConversationId);
+					setActiveConversationId(localConversationId);
+				}
+				const localUserId = `browser-user-${Date.now()}`;
+				const localMessages = [
+					...messages.map((item) => ({
+						content: item.parts
+							.filter(
+								(part): part is { text: string; type: "text" } =>
+									part.type === "text"
+							)
+							.map((part) => part.text)
+							.join("\n"),
+						role: item.role,
+					})),
+					{ content: message.content, role: "user" as const },
+				];
+				setMessages((previous) => [
+					...previous,
+					{
+						id: localUserId,
+						parts: [{ text: message.content, type: "text" }],
+						role: "user",
+					},
+				]);
+				const controller = new AbortController();
+				browserLocalAbortRef.current = controller;
+				void browserProviderHost
+					.runLocalTurn({
+						conversationId: localConversationId,
+						ghostMode: ghostChatActive,
+						messages: localMessages,
+						modelId: browserModelId,
+						requestId: localUserId,
+						signal: controller.signal,
+						surface: "dashboard",
+					})
+					.then((result) => {
+						browserLocalAbortRef.current = null;
+						if (!result) {
+							setMessages((previous) =>
+								previous.filter((item) => item.id !== localUserId)
+							);
+							forceCoreNextRef.current = true;
+							handleSendRef.current(message);
+							return;
+						}
+						if (result.text) {
+							setMessages((previous) => [
+								...previous,
+								{
+									id: `browser-assistant-${Date.now()}`,
+									parts: [{ text: result.text, type: "text" }],
+									role: "assistant",
+								},
+							]);
+						}
+						if (result.pendingApprovals.length > 0) {
+							setMessages((previous) => [
+								...previous,
+								{
+									id: `browser-approval-${Date.now()}`,
+									parts: [
+										{
+											text: result.pendingApprovals
+												.map(
+													(approval) =>
+														`Safe approval needed: ${approval.reason}`
+												)
+												.join("\n"),
+											type: "text",
+										},
+									],
+									role: "assistant",
+								},
+							]);
+						}
+					})
+					.catch((error: unknown) => {
+						if (controller.signal.aborted) {
+							return;
+						}
+						browserLocalAbortRef.current = null;
+						setMessages((previous) => [
+							...previous.filter((item) => item.id !== localUserId),
+							{
+								id: `browser-fallback-${Date.now()}`,
+								parts: [
+									{
+										text: `Browser engine failed — switching to Core. Retry or choose Browser in Settings. ${error instanceof Error ? error.message : String(error)}`,
+										type: "text",
+									},
+								],
+								role: "assistant",
+							},
+						]);
+						forceCoreNextRef.current = true;
+						handleSendRef.current(message);
+					});
+				return;
+			}
+			forceCoreNextRef.current = false;
 			// The folder this turn is about to run in — read from the store, exactly
 			// as the transport body does a moment later, so the row the sidebar shows
 			// and the `cwd` Core stamps onto the conversation are the same value.
-			const sendFolder = useWorkspaceStore.getState().folder ?? undefined;
+			const sendFolder = chatFolderRef.current ?? undefined;
 			if (!convId) {
 				const newId = draftConvId.current;
 				// A ghost (temporary) chat is never registered in the sidebar history:
 				// skip `createConversation` so it leaves no trace in the thread list.
 				// The turn still streams (useChat keys off the local id) and Core
 				// persists nothing because the transport sends `persist: false`.
-				if (!ghostMode) {
+				if (!ghostChatActive) {
 					createConversation(newId, {
 						agentId: agentId ?? undefined,
 						folderPath: sendFolder,
@@ -3871,7 +4672,7 @@ export default function ChatPage({
 			// same folder from this turn's `cwd`; recording it locally is what keeps
 			// the row from sitting in the loose "Chats" bucket in the meantime — and
 			// it also catches a draft opened before the user switched folders.
-			if (!ghostMode) {
+			if (!ghostChatActive) {
 				const folderTargetId = convIdRef.current ?? draftConvId.current;
 				if (folderTargetId) {
 					setConversationFolder(folderTargetId, sendFolder);
@@ -3884,7 +4685,7 @@ export default function ChatPage({
 			// (the list is only re-fetched once the turn completes). The chat-title
 			// plugin replaces it with a model-written name after that reply lands.
 			// Ghost chats are absent from the list, so the seed is a no-op for them.
-			if (!ghostMode) {
+			if (!ghostChatActive) {
 				const titleTargetId = convIdRef.current ?? draftConvId.current;
 				if (titleTargetId) {
 					seedTitleFromFirstMessage(titleTargetId, message.content);
@@ -3938,15 +4739,43 @@ export default function ChatPage({
 			agents,
 			participants,
 			messages,
-			ghostMode,
+			ghostChatActive,
 			createConversation,
 			setConversationFolder,
 			seedTitleFromFirstMessage,
 			setActiveConversationId,
 			sendMessage,
 			stopTyping,
+			browserSnapshot,
+			setMessages,
 		]
 	);
+	handleSendRef.current = handleSend;
+
+	const handleWorkspaceFolderSelected = useCallback(
+		(selectedFolder: string) => {
+			if (ghostChatActive) {
+				return;
+			}
+			const conversationId = convIdRef.current;
+			if (conversationId) {
+				setConversationFolder(conversationId, selectedFolder);
+			}
+		},
+		[ghostChatActive, setConversationFolder]
+	);
+
+	// A folder selection made from the lightweight prompt resumes the exact turn
+	// that was waiting. The ref avoids replaying a stale callback after the store
+	// updates, and clearing the pending value first makes the hand-off idempotent.
+	useEffect(() => {
+		if (!(pendingWorkspaceMessage && chatFolder)) {
+			return;
+		}
+		const pending = pendingWorkspaceMessage;
+		setPendingWorkspaceMessage(null);
+		handleSendRef.current(pending);
+	}, [chatFolder, pendingWorkspaceMessage]);
 
 	// Start a brand-new empty thread in THIS tab: rotate the draft id, clear the
 	// active conversation and the on-screen messages. Used when the ghost toggle
@@ -3964,9 +4793,12 @@ export default function ChatPage({
 	}, [setActiveConversationId, setMessages]);
 
 	const toggleGhostMode = useCallback(() => {
+		if (!ghostChatsPluginEnabled) {
+			return;
+		}
 		startFreshThread();
 		setGhostMode((on) => !on);
-	}, [startFreshThread]);
+	}, [ghostChatsPluginEnabled, startFreshThread]);
 
 	// `/btw` side question: an ephemeral question about the current conversation
 	// shown in a dismissible overlay and never added to the chat history (modeled
@@ -4150,9 +4982,14 @@ export default function ChatPage({
 		clearHotkeyTargets,
 	]);
 
-	// Branch ("fork into new chat"): copy this conversation's
-	// history up to the chosen message into a fresh conversation and open it in a
-	// new tab. Core persists the copy, so the new tab hydrates from the server.
+	// Branch ("fork into new chat"): ask where the copy should run before calling
+	// Core. The request keeps the source conversation id with the message so a tab
+	// switch while the dialog is open cannot fork the wrong thread.
+	const [forkRequest, setForkRequest] = useState<{
+		conversationId: string;
+		messageId: string;
+	} | null>(null);
+
 	const handleBranch = useCallback(
 		(messageId: string) => {
 			// Prepended history from another thread in the merged agent view: every
@@ -4164,13 +5001,38 @@ export default function ChatPage({
 			if (!activeConversationId) {
 				return;
 			}
-			forkConversation(activeConversationId, messageId).then((newId) => {
-				if (newId) {
-					openTab("/chat", { conversationId: newId, forceNew: true });
-				}
+			setForkRequest({
+				conversationId: activeConversationId,
+				messageId,
 			});
 		},
-		[activeConversationId, forkConversation, openTab]
+		[activeConversationId]
+	);
+
+	const handleForkDestination = useCallback(
+		(destination: ForkDestination) => {
+			if (!forkRequest) {
+				return;
+			}
+			const request = forkRequest;
+			setForkRequest(null);
+			void forkConversation(request.conversationId, request.messageId)
+				.then((newId) => {
+					if (!newId) {
+						toast.error("Could not fork this chat.");
+						return;
+					}
+					openTab("/chat", {
+						conversationId: newId,
+						forceNew: true,
+						worktreeMode: destination === "worktree",
+					});
+				})
+				.catch(() => {
+					toast.error("Could not fork this chat.");
+				});
+		},
+		[forkConversation, forkRequest, openTab]
 	);
 
 	// Load the persisted thumbs state when the active conversation changes, so a
@@ -4417,7 +5279,12 @@ export default function ChatPage({
 	const maybeHandleBtwCommand = useCallback(
 		(raw: string) => {
 			const text = raw.trim();
-			if (!(text === "/btw" || text.startsWith("/btw "))) {
+			if (
+				!(
+					sideChatsPluginEnabled &&
+					(text === "/btw" || text.startsWith("/btw "))
+				)
+			) {
 				return false;
 			}
 			const question = text.slice("/btw".length).trim();
@@ -4446,7 +5313,7 @@ export default function ChatPage({
 				model: null,
 				error: null,
 			});
-			askBtw(chatTargetRef.current, convId, question)
+			askBtw(chatTargetRef.current, convId, question, sideChatMessages)
 				.then((result) => {
 					// Ignore a stale answer if the user asked another side question.
 					if (btwRequestRef.current !== requestId) {
@@ -4476,7 +5343,7 @@ export default function ChatPage({
 				});
 			return true;
 		},
-		[activeConversationId]
+		[activeConversationId, sideChatMessages, sideChatsPluginEnabled]
 	);
 
 	// Route composer submits: when busy, enqueue; when idle, send straight
@@ -4501,12 +5368,17 @@ export default function ChatPage({
 			conversationId: convId ?? undefined,
 			agentId: agentId ?? undefined,
 			model: effectiveModel ?? undefined,
-			folderPath: folder ?? undefined,
+			folderPath: chatFolder ?? undefined,
+			persist: !ghostChatActive,
 		}),
-		[convId, agentId, effectiveModel, folder]
+		[convId, agentId, effectiveModel, chatFolder, ghostChatActive]
 	);
 	const autosaveDraft = useComposerDraftAutosave(draftContext);
+	const restoredDraft = useComposerDraftRestore(draftContext);
 	const maybeAutoQueue = useComposerAutoQueue(draftContext);
+	const composerSeed = initialSubmit
+		? undefined
+		: (initialPrompt ?? restoredDraft);
 
 	const submitNow = useCallback(
 		(message: { role: "user"; content: string }) => {
@@ -4637,6 +5509,113 @@ export default function ChatPage({
 		submitNow({ role: "user", content });
 	}, [initialSubmit, initialPrompt, initialImages, submitNow]);
 
+	// The first Ryu conversation is opened by Core as an assistant-only turn. No
+	// synthetic user message is handed to useChat, and a not-ready local model is
+	// retried until the same durable idempotency key completes.
+	const proactiveOpeningStartedRef = useRef(false);
+	const proactiveOpeningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+		null
+	);
+	useEffect(() => {
+		return () => {
+			if (proactiveOpeningTimerRef.current) {
+				clearTimeout(proactiveOpeningTimerRef.current);
+			}
+		};
+	}, []);
+	useEffect(() => {
+		if (
+			!initialProactiveOpening ||
+			proactiveOpeningStartedRef.current ||
+			agentId !== "ryu"
+		) {
+			return;
+		}
+		proactiveOpeningStartedRef.current = true;
+		const conversationId = convIdRef.current ?? draftConvId.current;
+		if (!convIdRef.current) {
+			createConversation(conversationId, { agentId: "ryu" });
+			setConvId(conversationId);
+			setActiveConversationId(conversationId);
+		}
+		const idempotencyKey = `desktop:ryu-opening:v1:${conversationId}`;
+		let cancelled = false;
+		let attempt: () => Promise<void>;
+		const scheduleRetry = () => {
+			if (!cancelled) {
+				proactiveOpeningTimerRef.current = setTimeout(attempt, 5000);
+			}
+		};
+		attempt = async () => {
+			if (cancelled) {
+				return;
+			}
+			try {
+				const result = await startProactiveOpening(
+					chatTarget,
+					conversationId,
+					"ryu",
+					idempotencyKey
+				);
+				if (cancelled) {
+					return;
+				}
+				if (
+					result.status !== "completed" &&
+					result.status !== "already_completed"
+				) {
+					scheduleRetry();
+					return;
+				}
+				const page = await loadMessagesPageResult(conversationId);
+				if (cancelled) {
+					return;
+				}
+				const now = Date.now();
+				if (page.status === "ok" && page.messages.length > 0) {
+					setMessages(
+						page.messages.map((message) =>
+							hydrateHistoryMessage(message, now)
+						) as unknown as UIMessage[]
+					);
+				} else if (result.reply) {
+					setMessages([
+						{
+							id: `proactive-opening-${conversationId}`,
+							role: "assistant",
+							parts: [{ type: "text", text: result.reply }],
+						} as unknown as UIMessage,
+					]);
+				}
+				seedTitleFromFirstMessage(conversationId, "Getting started with Ryu");
+			} catch (error) {
+				if (cancelled) {
+					return;
+				}
+				const message = error instanceof Error ? error.message : String(error);
+				if (!/failed: (400|401|403|404)$/.test(message)) {
+					scheduleRetry();
+				}
+			}
+		};
+		void attempt();
+		return () => {
+			cancelled = true;
+			if (proactiveOpeningTimerRef.current) {
+				clearTimeout(proactiveOpeningTimerRef.current);
+			}
+		};
+	}, [
+		agentId,
+		chatTarget,
+		createConversation,
+		initialProactiveOpening,
+		loadMessagesPageResult,
+		seedTitleFromFirstMessage,
+		setActiveConversationId,
+		setMessages,
+	]);
+
 	// Adopt the composer target from the conversation THIS TAB is on — once per
 	// conversation. Keyed on the tab-local `convId`, never on the shared
 	// focused-tab `activeConversationId`: every chat tab stays mounted, so the
@@ -4663,6 +5642,7 @@ export default function ChatPage({
 		setTeamId(null);
 		if (pinnedAgentId !== agentIdRef.current) {
 			setAgentId(pinnedAgentId);
+			setModelSelectionCleared(false);
 			// Keep the model picker in sync when the conversation pins its agent
 			// back (each thread owns its agent; the model follows the agent).
 			setSelectedModel(getAgentModel(pinnedAgentId));
@@ -4679,29 +5659,24 @@ export default function ChatPage({
 	useEffect(() => {
 		if (shouldAdoptNodeDefault(agentIdRef.current, nodeDefaultAgentId)) {
 			setAgentId(nodeDefaultAgentId);
+			setModelSelectionCleared(false);
 			setSelectedModel(getAgentModel(nodeDefaultAgentId));
 		}
 	}, [nodeDefaultAgentId]);
 
-	// Attach the approval footer to the tool row an agent is actually BLOCKED on.
-	// The gate is a real `data-ryu-permission` request from Core (the ACP
+	// Active permission requests are rendered by the shared composer surface. The
+	// gate is a real `data-ryu-permission` request from Core (the ACP
 	// `session/request_permission` seam), never the part's own stream state.
 	//
-	// It used to key off `state === "input-available"`, which is wrong twice
-	// over. Core opens every ACP tool call with a `tool-input-available` frame the
-	// moment the call arrives, and the ACP wire sends that first frame with
-	// `rawInput: {}` — arguments stream in afterwards and correct the part in
-	// place. So the footer appeared the instant a tool started, before the agent
-	// had generated the command or diff it was asking permission for. And the
-	// decision never left the client: "Approve" only hid the buttons, "Skip"
-	// aborted the whole turn. Nothing was ever waiting on either answer, because
-	// the request that does block is resolved over `/api/chat/permission`.
+	// The tool row remains transcript history; only the active decision card is
+	// allowed to replace the composer, so an approval cannot appear twice.
+	// The request that blocks the turn is resolved over `/api/chat/permission`.
 	//
 	// #403: Also patch in friendly error cards for failed assistant turns.
 	const errorString =
 		error instanceof Error ? error.message : error ? String(error) : null;
 
-	const messagesWithApproval = useMemo(() => {
+	const messagesWithErrors = useMemo(() => {
 		return messages.map((m) => {
 			if (m.role !== "assistant" || !m.parts) {
 				return m;
@@ -4723,49 +5698,15 @@ export default function ChatPage({
 					],
 				};
 			}
-
-			let changed = false;
-			const parts = m.parts.map((part) => {
-				const p = part as {
-					type?: string;
-					state?: string;
-					toolCallId?: string;
-					input?: Record<string, unknown>;
-				};
-				const isTool =
-					p.type === "dynamic-tool" ||
-					(typeof p.type === "string" && p.type.startsWith("tool-"));
-				if (!(isTool && p.toolCallId)) {
-					return part;
-				}
-				const pending = permissionsByToolCall.get(p.toolCallId);
-				if (!pending) {
-					return part;
-				}
-				changed = true;
-				// The approval object is consumed by the tool renderers; it isn't
-				// part of the AI SDK part schema, so reattach the original part type.
-				return {
-					...p,
-					input: {
-						...(p.input ?? {}),
-						approval: {
-							options: pending.options,
-							onSelect: (optionId: string | null) =>
-								respondToPermission(pending.requestId, optionId),
-						},
-					},
-				} as typeof part;
-			});
-			return changed ? { ...m, parts } : m;
+			return m;
 		});
-	}, [messages, permissionsByToolCall, respondToPermission, errorString]);
+	}, [messages, errorString]);
 
 	// #403: Synthesise blocked-message entries as visible user messages so they
 	// appear in the thread even when not sent. Append them after the real messages.
 	const visibleMessages = useMemo(() => {
 		if (blockedMessages.length === 0) {
-			return messagesWithApproval;
+			return messagesWithErrors;
 		}
 		const blocked = blockedMessages.map((bm) => ({
 			id: bm.id,
@@ -4773,8 +5714,8 @@ export default function ChatPage({
 			parts: [{ type: "text" as const, text: bm.content }],
 			_blocked: true,
 		}));
-		return [...messagesWithApproval, ...blocked];
-	}, [messagesWithApproval, blockedMessages]);
+		return [...messagesWithErrors, ...blocked];
+	}, [messagesWithErrors, blockedMessages]);
 
 	// #403: Custom text renderer that intercepts the __error__ sentinel and renders
 	// an ErrorCard instead of raw JSON. The AgentChat component passes text parts
@@ -4887,6 +5828,13 @@ export default function ChatPage({
 	// refs above). buildMentionGroups filters this per keystroke.
 	const mentionSources = useMemo<MentionSources>(() => {
 		const enabled = registeredApps.filter((app) => app.enabled);
+		const enabledById = new Map(enabled.map((app) => [app.id, app]));
+		const toAppMentionSource = (app: (typeof enabled)[number]) => ({
+			...appMentionVisual(app),
+			description: app.tagline ?? app.description ?? undefined,
+			id: app.id,
+			name: app.name,
+		});
 		return {
 			agents: agents.map((a) => ({ id: a.id, name: a.name })),
 			chats: conversations
@@ -4898,11 +5846,16 @@ export default function ChatPage({
 				})),
 			apps: enabled
 				.filter((app) => app.companion !== null)
-				.map((app) => ({
-					id: app.id,
-					name: app.name,
-					description: app.tagline ?? app.description ?? undefined,
-				})),
+				.map(toAppMentionSource),
+			appItems: mentionableResources.appItems.map((item) => ({
+				...item,
+				...appMentionVisual(enabledById.get(item.ownerId ?? "")),
+			})),
+			integrations: buildComposioMentionSources(
+				composioConfigured,
+				composioConnections,
+				composioToolkits
+			),
 			teams: teams.map((t) => ({ id: t.id, name: t.name })),
 			// Only chat-triggerable workflows (a root Input node, per Core) are
 			// offered — a workflow that never reads the typed message would
@@ -4911,16 +5864,14 @@ export default function ChatPage({
 				.filter((w) => w.chatInput)
 				.map((w) => ({ id: w.id, name: w.name, description: w.description })),
 			spaces: spaces.map((s) => ({ id: s.id, name: s.name })),
+			pages: mentionableResources.pages,
+			outputStyles: mentionableResources.outputStyles,
 			skills: installedSkills.map((s) => ({ id: s.id, name: s.name })),
 			mcp: mcpServers.map((m) => ({ id: m.name, name: m.name })),
 			folders: recentFolders,
 			plugins: enabled
 				.filter((app) => app.companion === null)
-				.map((app) => ({
-					id: app.id,
-					name: app.name,
-					description: app.tagline ?? app.description ?? undefined,
-				})),
+				.map(toAppMentionSource),
 		};
 	}, [
 		agents,
@@ -4931,8 +5882,12 @@ export default function ChatPage({
 		spaces,
 		installedSkills,
 		mcpServers,
+		composioConfigured,
+		composioConnections,
+		composioToolkits,
 		recentFolders,
 		registeredApps,
+		mentionableResources,
 	]);
 	const mentionSourcesRef = useRef(mentionSources);
 	mentionSourcesRef.current = mentionSources;
@@ -4941,12 +5896,15 @@ export default function ChatPage({
 			buildMentionGroups(mentionSources, "")
 				.flatMap((group) => group.items)
 				.map((item) => ({
+					accentColor: item.accentColor,
 					icon: item.icon
 						? createElement(item.icon, { className: "size-3.5" })
 						: undefined,
 					id: item.id,
 					kind: item.kind,
 					label: item.label,
+					target: item.target,
+					visualIcon: item.visualIcon,
 				})),
 		[mentionSources]
 	);
@@ -5103,6 +6061,7 @@ export default function ChatPage({
 	const {
 		infoBar: composerInfoBar,
 		leftActions: composerLeft,
+		picker: composerPicker,
 		refreshRoutingAdvice,
 		rightActions: composerRight,
 		sections: composerSections,
@@ -5110,6 +6069,7 @@ export default function ChatPage({
 		renderBody: composerRenderBody,
 	} = useComposerAgentControls({
 		compact: composerCompact,
+		placement: chatPickerPlacement,
 		agents,
 		// An empty thread is a conversation start, which is the only point an
 		// agent-swapping fallback rule may move the whole agent. Mirrors the turn
@@ -5135,6 +6095,7 @@ export default function ChatPage({
 			// next brand-new chat; it must never reach back into another tab, which
 			// is why nothing reads this key except a fresh composer's initializer.
 			rememberLastUsedAgent(id);
+			setModelSelectionCleared(false);
 			setSelectedModel(getAgentModel(id));
 			const selectedAgent = agents.find((candidate) => candidate.id === id);
 			announceComposerSelection("Agent", selectedAgent?.name ?? id);
@@ -5145,6 +6106,10 @@ export default function ChatPage({
 		modelSection: acp.modelSection,
 		extraSections: composerExtraSections,
 	});
+	const sideChatComposerDirectory = useMemo(
+		() => createComposerDirectory(composerSections),
+		[composerSections]
+	);
 
 	// Bar-placed controls (chips, actions, inline selects), rendered into the
 	// composer toolbar's right slot below.
@@ -5265,13 +6230,16 @@ export default function ChatPage({
 	// stable; WorkspaceBar itself reads the workspace store reactively. The
 	// conversation id is the worktree store key, so the draft id is used until a
 	// conversation is created.
-	// Once a conversation has a thread the project ▸ branch ▸ worktree strip moves
+	// Ryu Work mode starts with no project picker; an explicit local-project request
+	// opens the contextual chooser instead. Once a conversation has a thread, the
+	// project ▸ branch ▸ worktree strip moves
 	// out of the composer and into the floating Pinned summary card (top-right), so
-	// the composer footer stays clean during a chat. On a fresh draft (no thread)
-	// the strip stays in the composer — the natural place to pick a project first.
+	// the composer footer stays clean during a chat. In Code, a
+	// fresh draft keeps the strip in the composer — the natural place to pick a
+	// project first.
 	const workspaceBarRef = useRef<ReactNode>(null);
 	workspaceBarRef.current =
-		processedMessages.length > 0 ? null : (
+		interfaceLevel === "simple" || processedMessages.length > 0 ? null : (
 			<WorkspaceBar
 				conversationId={activeConversationId ?? draftConvId.current}
 				target={chatTarget}
@@ -5328,6 +6296,8 @@ export default function ChatPage({
 	);
 	const pluginComposerControlsRef = useRef<PluginComposerControlRow[]>([]);
 	pluginComposerControlsRef.current = pluginComposerControls;
+	const expandedComposerPluginEnabledRef = useRef(false);
+	expandedComposerPluginEnabledRef.current = expandedComposerPluginEnabled;
 
 	// Ghost (temporary) chat toggle, now a row in the composer "+" dropdown rather
 	// than a standalone toolbar button. Held in a ref (assigned every render) so
@@ -5337,8 +6307,9 @@ export default function ChatPage({
 	// can see and exit the temporary state. `undefined` hides the row entirely.
 	const ghostControlsRef = useRef<GhostControls | undefined>(undefined);
 	ghostControlsRef.current =
-		processedMessages.length === 0 || ghostMode
-			? { active: ghostMode, onToggle: toggleGhostMode }
+		ghostChatsPluginEnabled &&
+		(processedMessages.length === 0 || ghostChatActive)
+			? { active: ghostChatActive, onToggle: toggleGhostMode }
 			: undefined;
 
 	const councilInputBar = useMemo(() => {
@@ -5350,16 +6321,18 @@ export default function ChatPage({
 					allTeams={teamsStableRef.current}
 					allWorkflows={workflowsStableRef.current}
 					availableCommands={commandsRef.current}
+					chatWidgetTemplates={chatWidgetTemplatesRef.current}
 					// Single-row compact composer once the chat has history (read from a
 					// ref so the memoized slot flips without rebuilding — same pattern as
 					// workspaceBar). Pairs with the right-aligned controls above.
 					compact={composerCompactRef.current}
 					composerSections={composerSectionsRef.current}
 					enableQueue
+					expandComposer={expandedComposerPluginEnabledRef.current}
 					// Dashed violet composer treatment while a ghost (temporary) chat is
 					// active. `ghostMode` is a dep of this memo, so the closure value is
 					// always current (no ref needed).
-					ghost={ghostMode}
+					ghost={ghostChatActive}
 					// The "+" dropdown's Temporary-chat toggle row (read fresh from the
 					// ref so gating on rendered messages stays current).
 					ghostControls={ghostControlsRef.current}
@@ -5407,7 +6380,7 @@ export default function ChatPage({
 		// Rebuild the composer slot when ghost mode flips so the violet ring
 		// reflects it immediately (a toggle already starts a fresh thread, so the
 		// brief remount costs nothing — the textarea is cleared and unfocused).
-		ghostMode,
+		ghostChatActive,
 		handleTypingActivity,
 	]);
 
@@ -5423,11 +6396,212 @@ export default function ChatPage({
 		() => extractSubagents(messages),
 		[messages]
 	);
+	const planSnapshots = useMemo(() => extractPlans(messages), [messages]);
+	const artifactsSpace = useMemo(
+		() =>
+			spaces.find(
+				(space) =>
+					space.name.toLowerCase() === ARTIFACTS_SPACE_NAME.toLowerCase()
+			) ?? null,
+		[spaces]
+	);
+	const [savedPlanDocuments, setSavedPlanDocuments] = useState<
+		Record<string, SavedPlanDocument>
+	>({});
+	const [planSaveErrors, setPlanSaveErrors] = useState<Record<string, string>>(
+		{}
+	);
+	const planPersistenceRef = useRef<{
+		contents: Map<string, string>;
+		documents: Map<string, SavedPlanDocument>;
+		targetKey: string;
+	}>({
+		contents: new Map(),
+		documents: new Map(),
+		targetKey: "",
+	});
+	const planSyncQueueRef = useRef<Promise<void>>(Promise.resolve());
+	const planTargetKey = `${chatTarget.url}|${chatTarget.token ?? ""}`;
+
+	useEffect(() => {
+		const cache = planPersistenceRef.current;
+		if (cache.targetKey === planTargetKey) {
+			return;
+		}
+		cache.contents.clear();
+		cache.documents.clear();
+		cache.targetKey = planTargetKey;
+		setSavedPlanDocuments({});
+		setPlanSaveErrors({});
+	}, [planTargetKey]);
+
+	// Persist every completed ACP/Pi plan snapshot as a markdown page in the
+	// node's seeded Artifacts Space. Stable document titles make this idempotent
+	// across reloads and let another tab reuse a page that already exists.
+	useEffect(() => {
+		if (planSnapshots.length === 0) {
+			return;
+		}
+		if (!(spacesLoading || artifactsSpace)) {
+			const message =
+				spacesError ?? "The Artifacts Space is unavailable on this node.";
+			setPlanSaveErrors((previous) => {
+				const next = { ...previous };
+				for (const plan of planSnapshots) {
+					next[plan.key] = message;
+				}
+				return next;
+			});
+			return;
+		}
+		if (!artifactsSpace) {
+			return;
+		}
+		const cache = planPersistenceRef.current;
+		if (cache.targetKey !== planTargetKey) {
+			return;
+		}
+		const pendingPlans: PlanSnapshot[] = planSnapshots.filter((plan) => {
+			const cacheKey = `${artifactsSpace.id}:${plan.key}`;
+			return cache.contents.get(cacheKey) !== plan.markdown;
+		});
+		if (pendingPlans.length === 0) {
+			return;
+		}
+
+		let cancelled = false;
+		const persist = async () => {
+			let existingByTitle = new Map<string, { id: string }>();
+			try {
+				const documents = await fetchDocuments(chatTarget, artifactsSpace.id);
+				existingByTitle = new Map(
+					documents.map((document) => [document.title, { id: document.id }])
+				);
+			} catch (error) {
+				const message =
+					error instanceof Error
+						? error.message
+						: "Could not read the Artifacts Space.";
+				if (cancelled) {
+					return;
+				}
+				setPlanSaveErrors((previous) => {
+					const next = { ...previous };
+					for (const plan of pendingPlans) {
+						next[plan.key] = message;
+					}
+					return next;
+				});
+				return;
+			}
+
+			for (const plan of pendingPlans) {
+				if (cancelled) {
+					return;
+				}
+				const cacheKey = `${artifactsSpace.id}:${plan.key}`;
+				if (cache.contents.get(cacheKey) === plan.markdown) {
+					continue;
+				}
+				try {
+					let documentId = cache.documents.get(cacheKey)?.documentId;
+					if (!documentId) {
+						documentId = existingByTitle.get(planDocumentTitle(plan))?.id;
+					}
+					if (documentId) {
+						const current = await fetchDocument(
+							chatTarget,
+							artifactsSpace.id,
+							documentId
+						);
+						if (current.source !== plan.markdown) {
+							await updateDocument(
+								chatTarget,
+								artifactsSpace.id,
+								documentId,
+								planDocumentTitle(plan),
+								plan.markdown
+							);
+						}
+					} else {
+						documentId = await ingestDocument(
+							chatTarget,
+							artifactsSpace.id,
+							planDocumentTitle(plan),
+							plan.markdown
+						);
+					}
+					if (cancelled) {
+						return;
+					}
+					const saved = {
+						documentId,
+						spaceId: artifactsSpace.id,
+					};
+					cache.documents.set(cacheKey, saved);
+					cache.contents.set(cacheKey, plan.markdown);
+					setSavedPlanDocuments((previous) => ({
+						...previous,
+						[plan.key]: saved,
+					}));
+					setPlanSaveErrors((previous) => {
+						if (!(plan.key in previous)) {
+							return previous;
+						}
+						const next = { ...previous };
+						delete next[plan.key];
+						return next;
+					});
+				} catch (error) {
+					if (cancelled) {
+						return;
+					}
+					const message =
+						error instanceof Error
+							? error.message
+							: "Could not save this plan.";
+					setPlanSaveErrors((previous) => ({
+						...previous,
+						[plan.key]: message,
+					}));
+				}
+			}
+		};
+
+		planSyncQueueRef.current = planSyncQueueRef.current
+			.catch(() => undefined)
+			.then(persist);
+		return () => {
+			cancelled = true;
+		};
+	}, [
+		artifactsSpace,
+		chatTarget,
+		planSnapshots,
+		planTargetKey,
+		spacesError,
+		spacesLoading,
+	]);
+
+	const planArtifacts = useMemo(
+		() =>
+			planSnapshots.map((plan) =>
+				planArtifact(
+					plan,
+					savedPlanDocuments[plan.key],
+					planSaveErrors[plan.key]
+				)
+			),
+		[planSaveErrors, planSnapshots, savedPlanDocuments]
+	);
 
 	// The Pinned summary sidebar shows only on a history page. It stacks with
 	// the right panel (both docked columns can be open at once) — visibility is
 	// just the user's titlebar toggle (`pinnedSummaryOpen`).
 	const pinnedSummaryVisible = hasMessages && pinnedSummaryOpen;
+	const pinnedSummaryFolder = convId
+		? (getConversation(convId)?.folderPath ?? null)
+		: null;
 
 	// The Cowork context (Progress / Artifacts / Changes / Sources / Side chats),
 	// shared by the right panel's Context tab and the floating Pinned summary card.
@@ -5436,12 +6610,14 @@ export default function ChatPage({
 		runId: convId,
 		target: chatTarget,
 		chatStatus: status,
+		planArtifacts,
 		onOpenArtifact: handleOpenArtifact,
 		onOpenSideChat: handleOpenSideChat,
 		onOpenSubagent: handleOpenSubagent,
 		onOpenSources: handleOpenSources,
 		onOpenSubagents: handleOpenSubagents,
 		sideChatsRefreshKey,
+		sideChatsEnabled: sideChatsPluginEnabled,
 	};
 
 	// The desktop half of the artifact host: `@ryu/blocks` renders an inline
@@ -5491,7 +6667,7 @@ export default function ChatPage({
 	const persistedTitle = activeConversationId
 		? getConversation(activeConversationId)?.title
 		: undefined;
-	const conversationTitle = ghostMode
+	const conversationTitle = ghostChatActive
 		? "Temporary chat"
 		: (persistedTitle ?? "New chat");
 
@@ -5507,7 +6683,8 @@ export default function ChatPage({
 					<TooltipTrigger
 						render={
 							<span className="hidden truncate px-2 text-muted-foreground text-xs lg:inline">
-								{agentTools.length} tool{agentTools.length === 1 ? "" : "s"}
+								{formatCount(agentTools.length) ?? "—"} tool
+								{agentTools.length === 1 ? "" : "s"}
 							</span>
 						}
 					/>
@@ -5544,8 +6721,19 @@ export default function ChatPage({
 			</Tooltip>
 		) : null;
 
+		const pickerAction =
+			chatPickerPlacement === "tab-bar" ? (
+				<span
+					className="flex min-w-0 items-center"
+					data-testid="chat-model-agent-picker-tab-bar"
+				>
+					{composerPicker}
+				</span>
+			) : null;
+
 		return (
 			<>
+				{pickerAction}
 				{threadActions}
 				{copyTranscriptAction}
 				<PanelToggleButtons
@@ -5566,6 +6754,8 @@ export default function ChatPage({
 		hasMessages,
 		agentTools,
 		processedMessages,
+		composerPicker,
+		chatPickerPlacement,
 		bottomPanelOpen,
 		rightPanelOpen,
 		folder,
@@ -5576,6 +6766,24 @@ export default function ChatPage({
 
 	return (
 		<ArtifactHostContext.Provider value={artifactHostValue}>
+			<ForkDialog
+				onOpenChange={(open) => {
+					if (!open) {
+						setForkRequest(null);
+					}
+				}}
+				onSelect={handleForkDestination}
+				open={forkRequest !== null}
+			/>
+			<WorkspaceRequiredDialog
+				onFolderSelected={handleWorkspaceFolderSelected}
+				onOpenChange={(open) => {
+					if (!open) {
+						setPendingWorkspaceMessage(null);
+					}
+				}}
+				open={pendingWorkspaceMessage !== null}
+			/>
 			<WorkspacePanels
 				artifactRequest={artifactReq}
 				bottomOpen={bottomPanelOpen}
@@ -5594,10 +6802,13 @@ export default function ChatPage({
 					pinnedSummaryVisible
 						? ({ floating }) => (
 								<PinnedSummaryPanel
-									conversationId={activeConversationId ?? draftConvId.current}
+									conversationId={convId ?? draftConvId.current}
 									cowork={coworkData}
-									folder={folder}
+									folder={pinnedSummaryFolder}
+									onAttachTextFile={handleAttachTextFile}
 									onDismiss={floating ? dismissPinnedSummary : undefined}
+									pullRequestsEnabled={pullRequestsEnabled}
+									showLineStats={interfaceLevel !== "simple"}
 									target={chatTarget}
 								/>
 							)
@@ -5622,9 +6833,11 @@ export default function ChatPage({
 						<WidgetHostContext.Provider value={widgetHostValue}>
 							<AgentChat
 								agentMessageContext={agentMessageContext}
+								answerNow={answerNowControl}
 								assistantAvatar={assistantIdentity.avatar}
 								assistantName={assistantIdentity.name}
 								assistantPlanningAvatars={assistantPlanningAvatars}
+								assistantTitle={assistantIdentity.title}
 								attachments={{
 									images: attachedImages,
 									onAttach: handleAttach,
@@ -5663,7 +6876,9 @@ export default function ChatPage({
 										// Ghost (temporary) chat: the empty-state greeting whispers
 										// "secretly" so it's obvious this thread won't be saved.
 										title={
-											ghostMode ? "What are we secretly doing?" : undefined
+											ghostChatActive
+												? "What are we secretly doing?"
+												: undefined
 										}
 									/>
 								}
@@ -5685,6 +6900,7 @@ export default function ChatPage({
 										});
 									},
 								}}
+								hasOlderMessages={hasOlderMessages}
 								// A restored tab must say "loading this conversation", never
 								// paint the new-chat greeting — that is what reads as "all my
 								// chats are gone" at boot. Both flags are false for a genuinely
@@ -5703,7 +6919,9 @@ export default function ChatPage({
 								historyLoading={historyLoading}
 								historyNotice={latestAcpTranscriptNotice ?? undefined}
 								key={`${activeNode.url}-${chatId}`}
+								loadingOlderMessages={loadingOlderMessages}
 								mentionItems={resolvedMentionItems}
+								messageActionStates={messageActionStates}
 								messageActions={contributedMessageActions}
 								messages={renderedMessages}
 								onAgentUiSubmit={handleAgentUiSubmit}
@@ -5719,9 +6937,11 @@ export default function ChatPage({
 									activeConversationId ? handleEditMessage : undefined
 								}
 								onFeedback={activeConversationId ? handleFeedback : undefined}
+								onLoadOlderMessages={loadOlderMessages}
 								onOpenContext={handleOpenContext}
 								onOpenFile={handleOpenFileLink}
 								onOpenLink={handleOpenWebsiteLink}
+								onOpenMention={handleOpenMention}
 								onQuote={setQuote}
 								onRegenerateMessage={
 									activeConversationId ? handleRegenerateMessage : undefined
@@ -5735,18 +6955,10 @@ export default function ChatPage({
 								onSend={handleComposerSubmit}
 								onSpeak={handleSpeak}
 								onStop={handleStop}
-								// Reactions need a persisted conversation to attach to and a
-								// realtime room to fan out over; a ghost chat has neither.
-								onToggleReaction={
-									activeConversationId && !ghostMode
-										? toggleReaction
-										: undefined
-								}
 								onWorkflowResume={handleWorkflowResume}
 								previewResolvers={linkPreviewResolvers}
 								quote={quote}
-								reactionsByMessage={reactionsByMessage}
-								seedDraft={initialSubmit ? undefined : initialPrompt}
+								seedDraft={composerSeed}
 								showCopyToolbar
 								slots={{ InputBar: councilInputBar }}
 								status={effectiveStatus}
@@ -5775,12 +6987,22 @@ export default function ChatPage({
 						</div>
 					)}
 				</div>
-				<BtwOverlay onClose={() => setBtwState(null)} state={btwState} />
+				{sideChatsPluginEnabled && (
+					<BtwOverlay
+						composerMenuGroups={sideChatComposerDirectory.groups}
+						mentionItems={resolvedMentionItems}
+						onAsk={(question) => {
+							maybeHandleBtwCommand(`/btw ${question}`);
+						}}
+						onClose={() => setBtwState(null)}
+						state={btwState}
+					/>
+				)}
 				{activePluginNote && (
 					<div className="fixed bottom-28 left-1/2 z-50 w-[min(40rem,90vw)] -translate-x-1/2 rounded-lg bg-popover p-3 text-popover-foreground text-sm shadow-lg">
 						<div className="mb-1 flex items-center justify-between">
 							<span className="font-medium text-muted-foreground text-xs">
-								Double-check
+								{activePluginNote.question ? "Action summary" : "Double-check"}
 							</span>
 							<button
 								className="text-muted-foreground text-xs hover:text-foreground"
@@ -5796,6 +7018,9 @@ export default function ChatPage({
 								Dismiss
 							</button>
 						</div>
+						{activePluginNote.question && (
+							<p className="mb-1 font-medium">{activePluginNote.question}</p>
+						)}
 						<p className="whitespace-pre-wrap">{activePluginNote.text}</p>
 					</div>
 				)}

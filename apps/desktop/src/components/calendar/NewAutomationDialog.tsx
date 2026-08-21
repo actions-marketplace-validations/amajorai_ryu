@@ -14,7 +14,7 @@ import {
 	NativeSelectOption,
 } from "@ryu/ui/components/native-select";
 import { Switch } from "@ryu/ui/components/switch";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
@@ -57,6 +57,10 @@ export function NewAutomationDialog({
 }) {
 	const activeNode = useActiveNode();
 	const { agents } = useAgents();
+	const activeAgents = useMemo(
+		() => agents.filter((agent) => agent.lifecycleStatus === "active"),
+		[agents]
+	);
 
 	const [agentId, setAgentId] = useState(defaultAgentId ?? "");
 	const [phrase, setPhrase] = useState<SchedulePhrase>("daily");
@@ -69,10 +73,12 @@ export function NewAutomationDialog({
 	const [error, setError] = useState<string | null>(null);
 
 	// Default the agent picker to the first agent once the list loads.
-	const selectedAgentId = agentId || agents[0]?.id || "";
+	const selectedAgentId = activeAgents.some((agent) => agent.id === agentId)
+		? agentId
+		: (activeAgents[0]?.id ?? "");
 
 	const handleCreate = async () => {
-		const agent = agents.find((a) => a.id === selectedAgentId);
+		const agent = activeAgents.find((a) => a.id === selectedAgentId);
 		if (!agent) {
 			setError("Pick an agent to schedule.");
 			return;
@@ -132,12 +138,12 @@ export function NewAutomationDialog({
 							onChange={(e) => setAgentId(e.target.value)}
 							value={selectedAgentId}
 						>
-							{agents.length === 0 ? (
+							{activeAgents.length === 0 ? (
 								<NativeSelectOption disabled value="">
 									No agents available
 								</NativeSelectOption>
 							) : (
-								agents.map((a) => (
+								activeAgents.map((a) => (
 									<NativeSelectOption key={a.id} value={a.id}>
 										{a.name}
 									</NativeSelectOption>
@@ -218,11 +224,11 @@ export function NewAutomationDialog({
 					<div className="flex items-start justify-between gap-3 rounded-lg border p-3">
 						<div className="flex flex-col gap-0.5">
 							<Label htmlFor="automation-require-approval">
-								Require my approval
+								Ask before each run
 							</Label>
 							<p className="text-muted-foreground text-xs">
-								Each run waits in your Approvals inbox until you allow it,
-								instead of running on its own.
+								The run waits in your Inbox until you approve it. It will not
+								open a blocking dialog when the schedule fires.
 							</p>
 						</div>
 						<Switch

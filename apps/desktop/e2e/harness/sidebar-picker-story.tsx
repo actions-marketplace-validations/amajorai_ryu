@@ -147,6 +147,7 @@ function doc(
 		icon: null,
 		chunkCount: 1,
 		createdAt: Date.now() - daysAgo * DAY_MS,
+		updatedAt: Date.now() - daysAgo * DAY_MS,
 		byteSize: null,
 		mime: null,
 		indexState: null,

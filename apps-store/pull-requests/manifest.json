@@ -1,12 +1,18 @@
 {
+  "tags": ["github", "git", "pull requests", "issues", "code review", "ci"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
+  "repository": "https://github.com/amajorai/ryu-pull-requests",
+  "homepage": "https://github.com/amajorai/ryu-pull-requests",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/pull-requests",
   "name": "Pull Requests",
   "version": "0.1.14",
   "stability": "experimental",
   "category": "Developer Tools",
-  "description": "A focused pull-request inbox for Ryu. Browse review requests and authored work across repositories, inspect summaries, changed files, checks and discussion, then comment, review or merge through the locally authenticated GitHub CLI.",
-  "tagline": "Review and merge GitHub pull requests without leaving Ryu",
-  "keywords": ["github", "git", "pull requests", "code review", "ci"],
+  "description": "A focused GitHub work inbox for Ryu. Browse pull requests and issues across repositories, inspect summaries and discussion, then review, manage stacked pull requests, merge changes, or close and comment on issues through the locally authenticated GitHub CLI.",
+  "tagline": "Review GitHub pull requests and issues without leaving Ryu",
+  "keywords": ["github", "git", "pull requests", "issues", "code review", "ci"],
   "icon": "git-pull-request",
   "iconDither": { "from": 221, "to": "transparent", "direction": "down" },
   "surfaces": {
@@ -52,12 +58,22 @@
           { "path": "/auth/device" },
           { "path": "/status" },
           { "path": "/pulls" },
+          { "path": "/pulls/branch" },
           { "path": "/pulls/:owner/:repo/:number" },
           { "path": "/pulls/:owner/:repo/:number/diff" },
+          { "path": "/pulls/:owner/:repo/:number/stack" },
+          { "path": "/pulls/:owner/:repo/:number/stack/add" },
+          { "path": "/pulls/:owner/:repo/:number/stack/unstack" },
           { "path": "/pulls/:owner/:repo/:number/comment" },
           { "path": "/pulls/:owner/:repo/:number/review" },
           { "path": "/pulls/:owner/:repo/:number/merge" },
-          { "path": "/pulls/:owner/:repo/:number/ready" }
+          { "path": "/pulls/:owner/:repo/:number/merge-async" },
+          { "path": "/pulls/:owner/:repo/:number/merge-async/status" },
+          { "path": "/pulls/:owner/:repo/:number/ready" },
+          { "path": "/issues" },
+          { "path": "/issues/:owner/:repo/:number" },
+          { "path": "/issues/:owner/:repo/:number/comment" },
+          { "path": "/issues/:owner/:repo/:number/state" }
         ]
       }
     }
@@ -67,17 +83,32 @@
     {
       "id": "pull-requests.view",
       "label": "Can view",
-      "description": "Use your local GitHub CLI login to list pull requests and read their code, checks and discussion."
+      "description": "Use your local GitHub CLI login to list pull requests and issues and read their summaries and discussion."
     },
     {
       "id": "pull-requests.review",
       "label": "Can review",
-      "description": "Post comments and reviews, mark drafts ready, and merge pull requests using your local GitHub CLI credentials.",
+      "description": "Post comments and reviews, mark drafts ready, manage stacked pull requests, merge pull requests, and comment on or close issues using your local GitHub CLI credentials.",
       "implies": ["pull-requests.view"]
     }
   ],
   "companion": {
     "label": "Pull Requests",
     "icon": "git-pull-request"
+  },
+  "contributes": {
+    "chat_widget_templates": [
+      {
+        "id": "pull-requests.chat",
+        "title": "Pull Requests widget",
+        "description": "Pull Requests chat widget metadata is coming soon; no render tool is available yet.",
+        "triggers": ["pull requests widget"],
+        "examples": ["Show me a pull requests widget"],
+        "backing": {},
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "coming-soon"
+      }
+    ]
   }
 }

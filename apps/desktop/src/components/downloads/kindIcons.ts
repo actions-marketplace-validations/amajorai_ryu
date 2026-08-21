@@ -7,31 +7,29 @@
 // fallback for anything unmapped.
 
 import {
-	AiBrain01Icon,
 	AudioWave01Icon,
-	CpuIcon,
+	BrainIcon,
 	Image02Icon,
+	LayerIcon,
 	Package01Icon,
 	PlugSocketIcon,
-	PuzzleIcon,
-	Robot01Icon,
-	Rocket01Icon,
-	SparklesIcon,
+	PotionIcon,
+	Target01Icon,
 	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 
 export const KIND_ICON: Record<string, IconSvgElement> = {
-	agent: Robot01Icon,
-	app: Rocket01Icon,
-	embedding: AiBrain01Icon,
-	engine: CpuIcon,
+	agent: Target01Icon,
+	app: Package01Icon,
+	embedding: BrainIcon,
+	engine: LayerIcon,
 	mcp: PlugSocketIcon,
 	media: Image02Icon,
-	model: SparklesIcon,
+	model: BrainIcon,
 	other: Package01Icon,
-	plugin: PuzzleIcon,
-	skill: PuzzleIcon,
+	plugin: PlugSocketIcon,
+	skill: PotionIcon,
 	tool: Wrench01Icon,
 	voice: AudioWave01Icon,
 };

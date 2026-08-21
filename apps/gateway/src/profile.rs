@@ -7,8 +7,8 @@
 //! `RYU_PROFILE=dev`) land on the same offset port and its own config file, so a
 //! dev gateway never collides with or reads a release gateway's state.
 //!
-//! `RYU_PROFILE` defaults to `"release"` — byte-identical to today: offset 0, the
-//! original `0.0.0.0:7981` bind, and `<config>/ryu/gateway.toml`.
+//! `RYU_PROFILE` defaults to `"release"` — offset 0, the loopback-safe
+//! `127.0.0.1:7981` bind, and `<config>/ryu/gateway.toml`.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -96,9 +96,9 @@ pub fn suffix() -> String {
 }
 
 /// The profile-aware default bind used by `config.rs::default_bind` for a
-/// standalone gateway (release `0.0.0.0:7981`, dev `0.0.0.0:8981`, …).
+/// standalone gateway (release `127.0.0.1:7981`, dev `127.0.0.1:8981`, …).
 pub fn default_bind() -> String {
-    format!("0.0.0.0:{}", port(7981))
+    format!("127.0.0.1:{}", port(7981))
 }
 
 /// The profile-aware fallback config path (`<config>/ryu{suffix}/gateway.toml`)
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn default_bind_targets_the_offset_gateway_port() {
-        assert_eq!(default_bind(), format!("0.0.0.0:{}", port(7981)));
+        assert_eq!(default_bind(), format!("127.0.0.1:{}", port(7981)));
     }
 
     #[test]

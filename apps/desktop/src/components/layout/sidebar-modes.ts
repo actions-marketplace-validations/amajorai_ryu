@@ -16,7 +16,7 @@
 // as descriptors in the SAME shape rather than special-cased in the renderer, for
 // the reason `StoreTabContribution` gives about its retired `view` field: the
 // flagship example of "an app can own this" must not be the one entry no app can
-// reproduce. `agent` below is an ordinary descriptor; anything it can do, a
+// reproduce. `agent` below is an ordinary built-in Bot mode descriptor; anything it can do, a
 // contributed mode can do.
 //
 // What a mode deliberately CANNOT do: draw anything. It names sections, and each
@@ -63,14 +63,15 @@ export interface SidebarModeDescriptor {
 	title: string;
 }
 
-/** The two sections Agent mode's toggle switches between: the chat list
- *  ("Sessions") and the agent roster ("Agents"). */
-export const AGENT_MODE_SECTIONS: SectionKey[] = ["chats", "agents"];
+/** The two sections Bot mode's toggle switches between: the agent roster
+ *  ("Agents") and the chat list ("Sessions"), in that display order. */
+export const AGENT_MODE_SECTIONS: SectionKey[] = ["agents", "chats"];
 
 /**
  * The shell's own modes, in the order they are offered.
  *
- * `agent` is opinionated on purpose — two tabs, opening on the roster — and that
+ * `agent` is opinionated on purpose — Agents is the primary tab, Sessions is the
+ * secondary tab, and the mode opens on the roster — and that
  * opinion is expressed with the same two fields a contributed mode gets
  * (`sections`, `defaultSection`), not with a branch in the renderer.
  */
@@ -88,18 +89,44 @@ export const BUILTIN_SIDEBAR_MODES: SidebarModeDescriptor[] = [
 		sections: null,
 	},
 	{
+		// Keep the key stable for existing localStorage values and older builds.
 		key: "agent",
-		title: "Agent mode",
-		description: "One toggle: Sessions ⇄ Agents, opening on the roster.",
+		title: "Bot mode",
+		description: "One toggle: Agents ⇄ Sessions, opening on the Agents tab.",
 		layout: "strip",
 		sections: AGENT_MODE_SECTIONS,
 		defaultSection: "agents",
 	},
 ];
 
-/** The default arrangement — every section stacked. */
+/** The default arrangement — the built-in Bot mode. */
 export const DEFAULT_SIDEBAR_MODE_DESCRIPTOR =
-	BUILTIN_SIDEBAR_MODES[0] as SidebarModeDescriptor;
+	BUILTIN_SIDEBAR_MODES.find((mode) => mode.key === "agent") ??
+	(BUILTIN_SIDEBAR_MODES[0] as SidebarModeDescriptor);
+
+/**
+ * Resolve the display order for a mode's named tabs.
+ *
+ * Bot mode keeps its declared Agents → Sessions order even when the user has
+ * customized the global sidebar order. Other modes continue to follow that
+ * global order, preserving the existing customization behavior.
+ */
+export function orderedSidebarModeSections(
+	mode: Pick<SidebarModeDescriptor, "key" | "sections">,
+	effectiveOrder: readonly SectionKey[]
+): SectionKey[] {
+	if (!mode.sections || mode.key === "agent") {
+		return [...(mode.sections ?? effectiveOrder)];
+	}
+	return [...mode.sections].sort((a, b) => {
+		const ai = effectiveOrder.indexOf(a);
+		const bi = effectiveOrder.indexOf(b);
+		return (
+			(ai === -1 ? Number.MAX_SAFE_INTEGER : ai) -
+			(bi === -1 ? Number.MAX_SAFE_INTEGER : bi)
+		);
+	});
+}
 
 const BUILTIN_SECTION_KEYS = new Set<string>(DEFAULT_SECTION_ORDER);
 
@@ -160,12 +187,12 @@ export function contributedSidebarModes(
  * - **The feed has not answered yet** (`contributionsSettled === false`): a
  *   contributed mode is merely unknown, not gone. Falling back would flash the
  *   full section list on every cold start, and rendering its strip with no tabs
- *   would leave the sidebar blank — so this returns the stacked default, the safe
- *   superset in which nothing is missing, and swaps to the real mode the moment
- *   the feed lands.
+ *   would leave the sidebar blank — so this returns the built-in Bot mode and
+ *   swaps to the real mode the moment the feed lands.
  * - **The feed answered and the mode is not in it** (the app was disabled or
- *   uninstalled): the mode is gone. Same fallback, but the caller can act on
- *   `stale` to clear the stored key so this stops being re-evaluated every render.
+ *   uninstalled): the mode is gone. The same built-in Bot mode fallback applies,
+ *   but the caller can act on `stale` to clear the stored key so this stops being
+ *   re-evaluated every render.
  */
 export function resolveSidebarMode(
 	stored: string,

@@ -14,9 +14,34 @@
 // We therefore keep two mappers. Built-in detection on the list is derived from
 // the presence of `transport` (only registry built-ins serialize it).
 
+import type { ExpressiveExpressionSelection } from "@ryu/ui/components/expressive.ts";
+import type { ExpressiveAnimationSelection } from "@ryu/ui/components/expressive-animation.ts";
+import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { track } from "@/src/lib/analytics.ts";
 import { type ApiTarget, buyerTokenHeader, request } from "./client.ts";
 import type { SamplingConfig } from "./inference.ts";
+
+export type AgentLifecycleStatus = "draft" | "trial" | "active";
+export type AgentSafetyProfile =
+	| "read_only"
+	| "approval_required"
+	| "autonomous";
+
+function lifecycleStatus(
+	value: string | null | undefined
+): AgentLifecycleStatus {
+	return value === "draft" || value === "trial" || value === "active"
+		? value
+		: "active";
+}
+
+function safetyProfile(value: string | null | undefined): AgentSafetyProfile {
+	return value === "read_only" ||
+		value === "approval_required" ||
+		value === "autonomous"
+		? value
+		: "autonomous";
+}
 
 /**
  * An agent as it appears in the list. Built-ins carry `transport`/`engine` from
@@ -25,6 +50,8 @@ import type { SamplingConfig } from "./inference.ts";
  * fetch the single record via {@link fetchAgent}.
  */
 export interface AgentSummary {
+	/** Complete custom glyph, including expressive, icon, emoji, DiceBear, and dither sources. */
+	avatarGlyph: GlyphValue;
 	/** Custom avatar image (data URL) from the agent's persona, when set. Only
 	 * custom agents carry it; built-ins are null and fall back to the engine logo. */
 	avatarUrl: string | null;
@@ -41,6 +68,7 @@ export interface AgentSummary {
 	/** Hint shown to users on how to install/run this agent (e.g. "via npx"). */
 	installHint: string | null;
 	latestVersion: string | null;
+	lifecycleStatus: AgentLifecycleStatus;
 	/** When true, the agent is locked and cannot be edited via the API. */
 	locked: boolean;
 	model: string | null;
@@ -50,7 +78,10 @@ export interface AgentSummary {
 	 * local model even though its transport is `"acp"`). False for every other
 	 * agent. */
 	recommended: boolean;
+	safetyProfile: AgentSafetyProfile;
 	systemPrompt: string | null;
+	/** Optional role/title badge shown beside the agent name. */
+	title: string;
 	/** Transport backing the agent as Core reports it: `"acp"` (subprocess) or
 	 * `"openai_compat"` (gateway-routed local server). Null for custom store rows
 	 * that don't serialize it. Lets clients decide gateway-need without re-deriving
@@ -61,11 +92,18 @@ export interface AgentSummary {
 	versionStatus: "current" | "behind_latest" | "unknown" | null;
 }
 
+/** The model slot saved with an agent's instructions and runtime. */
+export interface AgentChatModelSlot {
+	engine: string | null;
+	modelId: string | null;
+}
+
 /** The full persisted agent record returned by GET/POST/PUT `/api/agents/:id`. */
 export interface Agent {
 	builtIn: boolean;
 	/** Agent-creation capability. `null` = default (off). */
 	canCreateAgents: boolean | null;
+	chatModel: AgentChatModelSlot | null;
 	/** Composio action names this agent may call (gateway-route only). */
 	composioActions: string[];
 	createdAt: string | null;
@@ -76,6 +114,7 @@ export interface Agent {
 	identityProfileIds: string[];
 	/** Per-agent sampling defaults (advanced inference settings). */
 	inference: SamplingConfig | null;
+	lifecycleStatus: AgentLifecycleStatus;
 	/** When true, the agent is locked and cannot be edited via the API. */
 	locked: boolean;
 	/** Memory / Spaces slot: readable Spaces, recallable memory levels, and
@@ -87,9 +126,15 @@ export interface Agent {
 	orchestrator: boolean | null;
 	/** Persona (display name + tone) as stored on the record. `null` = none saved. */
 	persona: AgentPersona | null;
-	/** Skill id allowlist. Empty = all enabled skills; non-empty = only these. */
+	safetyProfile: AgentSafetyProfile;
+	/** Skill id allowlist. Empty = all enabled skills; non-empty = only these.
+	 * The private `__ryu_none__` marker represents an explicit all-off choice. */
 	skills: string[];
 	systemPrompt: string | null;
+	/** Optional role/title badge shown beside the agent name. */
+	title: string;
+	/** MCP tool/server allowlist. `*` means all current and future registered
+	 * tools; the private `__ryu_none__` marker means explicitly none. */
 	tools: string[];
 	updatedAt: string | null;
 	/** Semver version string (e.g. "1.0.0"). */
@@ -99,6 +144,7 @@ export interface Agent {
 /** A portable agent template for export/import via `GET/POST /api/agents/:id/export` and `POST /api/agents/import`. */
 export interface AgentTemplate {
 	agent_config: {
+		title?: string;
 		description: string | null;
 		system_prompt: string | null;
 		tools: string[];
@@ -160,6 +206,11 @@ export interface AgentPersona {
 	dither?: DitherSpec | null;
 	/** Native emoji used as the avatar glyph. Null = none. */
 	emoji?: string | null;
+	/** Ryu ghost avatar with a named mood or the cycling `random` selection. */
+	expressive?: {
+		expression?: ExpressiveExpressionSelection | null;
+		animation?: ExpressiveAnimationSelection | null;
+	} | null;
 	/** Custom icon id (Iconify / icons0 / Hugeicons), an alternative avatar
 	 * source to an uploaded image or a dither gradient. Null = none. */
 	icon?: string | null;
@@ -173,6 +224,8 @@ export interface AgentPersona {
 export interface AgentInput {
 	/** Toggle agent-creation. Omit to leave unchanged. */
 	canCreateAgents?: boolean | null;
+	/** Authoritative per-agent model/runtime slot on current Core nodes. */
+	chatModel?: AgentChatModelSlot | null;
 	/** Composio action names to bind to this agent (gateway-route only). */
 	composioActions?: string[];
 	description: string | null;
@@ -183,14 +236,23 @@ export interface AgentInput {
 	inference?: SamplingConfig;
 	/** Memory / Spaces slot. Omit to leave unchanged. */
 	memory?: MemorySlot;
+	/** Legacy model id, sent alongside `chatModel` for older Core nodes. */
+	model?: string | null;
 	name: string;
 	/** Toggle delegation/discovery. Omit to leave unchanged. */
 	orchestrator?: boolean | null;
 	/** Optional persona bundle. Serialised into the PUT body; Core ignores unknown fields gracefully. */
 	persona?: AgentPersona;
-	/** Skill id allowlist to bind to this agent. Empty/omitted = all enabled skills. */
+	/** Saved safety posture. Trial still forces read-only at Core. */
+	safetyProfile?: AgentSafetyProfile;
+	/** Skill id allowlist to bind to this agent. Empty/omitted = all enabled
+	 * skills; the private `__ryu_none__` marker means none. */
 	skills?: string[];
 	systemPrompt: string | null;
+	/** Optional role/title badge shown beside the agent name. */
+	title?: string;
+	/** MCP tool/server allowlist. New agents default to `*` (all current and
+	 * future registered tools). */
 	tools: string[];
 	/** Semver version string to store on save. When omitted on create, Core defaults to "1.0.0". */
 	version?: string;
@@ -214,7 +276,9 @@ export function bumpPatchVersion(version: string): string {
 }
 
 interface AgentSummaryWire {
+	avatar_glyph?: GlyphValue | null;
 	avatar_url?: string | null;
+	chat_model?: AgentChatModelSlotWire | null;
 	created_at?: string | null;
 	description?: string | null;
 	engine?: string | null;
@@ -222,11 +286,14 @@ interface AgentSummaryWire {
 	install_hint?: string | null;
 	installed?: boolean | null;
 	latest_version?: string | null;
+	lifecycle_status?: string | null;
 	locked?: boolean | null;
 	model?: string | null;
 	name: string;
 	recommended?: boolean | null;
+	safety_profile?: string | null;
 	system_prompt?: string | null;
+	title?: string | null;
 	transport?: string | null;
 	version?: string | null;
 	version_status?: "current" | "behind_latest" | "unknown" | null;
@@ -243,6 +310,7 @@ interface MemorySlotWire {
 interface AgentRecordWire {
 	built_in?: boolean;
 	can_create_agents?: boolean | null;
+	chat_model?: AgentChatModelSlotWire | null;
 	composio_actions?: string[];
 	created_at?: string | null;
 	description?: string | null;
@@ -250,34 +318,50 @@ interface AgentRecordWire {
 	id: string;
 	identity_profile_ids?: string[];
 	inference?: SamplingConfig | null;
+	lifecycle_status?: string | null;
 	locked?: boolean;
 	memory?: MemorySlotWire | null;
 	model?: string | null;
 	name: string;
 	orchestrator?: boolean | null;
 	persona?: AgentPersona | null;
+	safety_profile?: string | null;
 	skills?: string[];
 	system_prompt?: string | null;
+	title?: string | null;
 	tools?: string[];
 	updated_at?: string | null;
 	version?: string;
 }
 
+interface AgentChatModelSlotWire {
+	engine?: string | null;
+	model_id?: string | null;
+}
+
 function toSummary(a: AgentSummaryWire): AgentSummary {
+	const engine = a.engine ?? null;
+	const model = a.model ?? a.chat_model?.model_id ?? null;
 	return {
 		id: a.id,
 		name: a.name,
 		avatarUrl: a.avatar_url ?? null,
+		avatarGlyph:
+			a.avatar_glyph ??
+			(a.avatar_url ? { kind: "avatar", dataUrl: a.avatar_url } : null),
 		description: a.description ?? null,
 		systemPrompt: a.system_prompt ?? null,
-		engine: a.engine ?? null,
-		model: a.model ?? null,
+		engine,
+		model,
+		title: a.title ?? "",
 		installed: a.installed ?? null,
+		lifecycleStatus: lifecycleStatus(a.lifecycle_status),
 		installHint: a.install_hint ?? null,
 		// Only registry built-ins serialize `transport`; custom store rows omit it.
 		builtIn: a.transport != null,
 		transport: a.transport ?? null,
 		recommended: a.recommended ?? false,
+		safetyProfile: safetyProfile(a.safety_profile),
 		createdAt: a.created_at ?? null,
 		version: a.version ?? null,
 		latestVersion: a.latest_version ?? null,
@@ -287,17 +371,32 @@ function toSummary(a: AgentSummaryWire): AgentSummary {
 }
 
 function toAgent(a: AgentRecordWire): Agent {
+	const engine = a.engine ?? null;
+	const model = a.model ?? a.chat_model?.model_id ?? null;
 	return {
 		id: a.id,
 		name: a.name,
+		title: a.title ?? "",
 		description: a.description ?? null,
 		systemPrompt: a.system_prompt ?? null,
-		engine: a.engine ?? null,
-		model: a.model ?? null,
+		engine,
+		model,
+		chatModel: a.chat_model
+			? {
+					engine: a.chat_model.engine ?? null,
+					modelId: a.chat_model.model_id ?? null,
+				}
+			: engine || model
+				? {
+						engine,
+						modelId: model,
+					}
+				: null,
 		tools: a.tools ?? [],
 		composioActions: a.composio_actions ?? [],
 		skills: a.skills ?? [],
 		identityProfileIds: a.identity_profile_ids ?? [],
+		lifecycleStatus: lifecycleStatus(a.lifecycle_status),
 		inference: a.inference ?? null,
 		memory: {
 			space_ids: a.memory?.space_ids ?? [],
@@ -312,10 +411,11 @@ function toAgent(a: AgentRecordWire): Agent {
 		orchestrator: a.orchestrator ?? null,
 		canCreateAgents: a.can_create_agents ?? null,
 		persona: a.persona ?? null,
+		safetyProfile: safetyProfile(a.safety_profile),
 	};
 }
 
-function toAgentBody(input: AgentInput): Record<string, unknown> {
+export function toAgentBody(input: AgentInput): Record<string, unknown> {
 	const body: Record<string, unknown> = {
 		name: input.name,
 		description: input.description,
@@ -323,6 +423,20 @@ function toAgentBody(input: AgentInput): Record<string, unknown> {
 		engine: input.engine,
 		tools: input.tools,
 	};
+	if (input.title !== undefined) {
+		body.title = input.title;
+	}
+	if (input.model !== undefined) {
+		body.model = input.model;
+	}
+	if (input.chatModel !== undefined) {
+		body.chat_model = input.chatModel
+			? {
+					engine: input.chatModel.engine,
+					model_id: input.chatModel.modelId,
+				}
+			: null;
+	}
 	if (input.version !== undefined) {
 		body.version = input.version;
 	}
@@ -343,6 +457,9 @@ function toAgentBody(input: AgentInput): Record<string, unknown> {
 	}
 	if (input.memory !== undefined) {
 		body.memory = input.memory;
+	}
+	if (input.safetyProfile !== undefined) {
+		body.safety_profile = input.safetyProfile;
 	}
 	return body;
 }
@@ -498,7 +615,7 @@ export async function uninstallAgent(
  * every one is optional here.
  */
 export interface AgentInstallDisclosure {
-	/** Composio actions the template requested. Removed: their `composio__*` ids
+	/** Composio actions the template requested. Removed: their `composio.*` ids
 	 *  widen the effective tool allowlist against the installer's own accounts. */
 	composioActions: string[];
 	/** Identity Vault profiles the template named. Removed: a bound profile reads
@@ -569,7 +686,7 @@ export async function installPublishedAgent(
 		// A published agent may be PAID. Core forwards this control-plane bearer to
 		// the marketplace install handoff so the entitlement check can resolve the
 		// buyer org; without it a bought listing is denied as if unowned.
-		headers: buyerTokenHeader(),
+		headers: buyerTokenHeader(target),
 	});
 	const wire = json.requires ?? {};
 	track({ event: "agent_installed", agent_id: id });
@@ -725,6 +842,35 @@ export async function updateAgent(
 		{
 			method: "PUT",
 			body: toAgentBody(input),
+		}
+	);
+	return toAgent(json.agent);
+}
+
+/** Update only the lifecycle/safety controls without overwriting the editor's
+ * other slots. Core validates lifecycle transitions and disables owned jobs on
+ * demotion. */
+export async function updateAgentPosture(
+	target: ApiTarget,
+	id: string,
+	posture: {
+		lifecycleStatus?: AgentLifecycleStatus;
+		safetyProfile?: AgentSafetyProfile;
+	}
+): Promise<Agent> {
+	const json = await request<{ agent: AgentRecordWire }>(
+		target,
+		`/api/agents/${id}`,
+		{
+			method: "PUT",
+			body: {
+				...(posture.lifecycleStatus === undefined
+					? {}
+					: { lifecycle_status: posture.lifecycleStatus }),
+				...(posture.safetyProfile === undefined
+					? {}
+					: { safety_profile: posture.safetyProfile }),
+			},
 		}
 	);
 	return toAgent(json.agent);

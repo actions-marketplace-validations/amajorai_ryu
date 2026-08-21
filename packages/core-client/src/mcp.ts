@@ -22,7 +22,7 @@ export interface McpServer {
 /** A tool advertised by a registered MCP server. */
 export interface McpTool {
 	description: string | null;
-	/** Fully-qualified id `<server>__<tool>`, unique across servers. */
+	/** Fully-qualified id `<server>.<tool>`, unique across servers. */
 	id: string;
 	inputSchema: unknown | null;
 	name: string;
@@ -462,7 +462,7 @@ function ghostActionToCall(
 				return null;
 			}
 			return {
-				tool: "ghost__ghost_focus",
+				tool: "ghost.ghost_focus",
 				arguments: { app: input.target },
 			};
 		}
@@ -471,13 +471,13 @@ function ghostActionToCall(
 				return null;
 			}
 			return {
-				tool: "ghost__ghost_click",
+				tool: "ghost.ghost_click",
 				arguments: { query: input.target },
 			};
 		}
 		case "screenshot": {
 			return {
-				tool: "ghost__ghost_screenshot",
+				tool: "ghost.ghost_screenshot",
 				arguments: {},
 			};
 		}

@@ -1,17 +1,17 @@
-//! Built-in delegation tool (`delegate__*`) — Claude-Code-Task-style ephemeral
+//! Built-in delegation tool (`delegate.*`) — Claude-Code-Task-style ephemeral
 //! sub-agents an agent spins up *itself*, mid-task.
 //!
 //! This is the agent-native counterpart to the durable coordinator-threads
 //! provider ([`super::threads`]). The distinction is deliberate and the two tool
 //! descriptions keep it sharp so the model picks the right one:
 //!
-//!   - **`delegate__fanout`** (this module) — *ephemeral, parallel, clean-context*
+//!   - **`delegate.fanout`** (this module) — *ephemeral, parallel, clean-context*
 //!     subtasks. Each delegate runs once with only its task prompt (never the
 //!     parent's history), in parallel, and the combined results come back in one
 //!     call. Nothing is persisted as a conversation. Use it to split a task into
 //!     independent pieces and gather the answers. (≈ Claude Code's Task tool /
 //!     Hermes & OpenClaw subagents.)
-//!   - **`threads__*`** — *durable background workers.* Each worker is a real
+//!   - **`threads.*`** — *durable background workers.* Each worker is a real
 //!     conversation the coordinator polls over time. Use it to manage long-running
 //!     work you check back on.
 //!
@@ -22,7 +22,7 @@
 //! sub-agent calls are shared, not re-implemented.
 //!
 //! Registered as a reserved registry server (`delegate`) like spider/exa/threads,
-//! so the `<server>__<tool>` id scheme, per-agent allowlist, catalog search, and
+//! so the `<server>.<tool>` id scheme, per-agent allowlist, catalog search, and
 //! the single `call_tool` entry all work for free. With the default (empty/`None`)
 //! agent allowlist the tool is offered directly, so an agent can delegate with **no
 //! configuration** — the "automatic by default" behavior.
@@ -114,7 +114,7 @@ fn fanout_schema() -> Value {
 /// The delegation tools exposed through the registry.
 pub fn tools() -> Vec<RegistryTool> {
     vec![RegistryTool {
-        id: format!("{SERVER_NAME}__fanout"),
+        id: format!("{SERVER_NAME}.fanout"),
         server: SERVER_NAME.to_owned(),
         name: "fanout".to_owned(),
         description: Some(
@@ -122,7 +122,7 @@ pub fn tools() -> Vec<RegistryTool> {
              each in a clean context (no access to this conversation's history), and return \
              all of their results in one call. Use this to split work into pieces and gather \
              the answers. For durable, long-running workers you check back on over time, use \
-             the threads__* tools instead."
+             the threads.* tools instead."
                 .to_owned(),
         ),
         input_schema: Some(fanout_schema()),
@@ -261,7 +261,7 @@ mod tests {
     fn tools_lists_fanout() {
         let t = tools();
         assert_eq!(t.len(), 1);
-        assert_eq!(t[0].id, "delegate__fanout");
+        assert_eq!(t[0].id, "delegate.fanout");
         assert_eq!(t[0].server, SERVER_NAME);
         assert!(t[0].input_schema.is_some());
     }

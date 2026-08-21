@@ -2,7 +2,12 @@
 
 import { Copy01Icon, MessageQuestionIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { TextShimmer } from "@ryu/blocks/desktop/agent-elements/text-shimmer";
+import { AgentChat } from "@ryu/blocks/desktop/agent-elements/agent-chat";
+import type {
+	ComposerMenuGroup,
+	ComposerMenuItem,
+} from "@ryu/blocks/desktop/agent-elements/input/composer-menu";
+import type { MentionItem } from "@ryu/blocks/desktop/agent-elements/types";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Dialog,
@@ -12,8 +17,9 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@ryu/ui/components/dialog";
+import type { UIMessage } from "ai";
+import { useCallback, useMemo } from "react";
 import { sileo } from "sileo";
-import { Markdown } from "@/components/agent-elements/markdown.tsx";
 
 /** Ephemeral state of a `/btw` side question shown in the overlay. */
 export interface BtwState {
@@ -30,8 +36,14 @@ export interface BtwState {
 }
 
 export interface BtwOverlayProps {
+	/** Main-chat directory data, projected into the same `+` / `@` primitives. */
+	composerMenuGroups?: ComposerMenuGroup[];
+	mentionItems?: MentionItem[];
+	/** Ask another ephemeral side question from the shared composer. */
+	onAsk?: (question: string) => void;
 	/** Dismiss the overlay (the answer is discarded — never enters history). */
 	onClose: () => void;
+	onComposerMenuSelect?: (item: ComposerMenuItem) => void;
 	/** The current side question, or null when the overlay is closed. */
 	state: BtwState | null;
 }
@@ -43,8 +55,39 @@ export interface BtwOverlayProps {
  * model sees the conversation context but has no tools, so this is a quick aside
  * that doesn't derail the main chat.
  */
-export function BtwOverlay({ state, onClose }: BtwOverlayProps) {
+export function BtwOverlay({
+	state,
+	onClose,
+	onAsk,
+	composerMenuGroups,
+	mentionItems,
+	onComposerMenuSelect,
+}: BtwOverlayProps) {
 	const open = state !== null;
+	const messages = useMemo<UIMessage[]>(() => {
+		if (!state?.question) {
+			return [];
+		}
+		const next: UIMessage[] = [
+			{
+				id: "btw-question",
+				parts: [{ text: state.question, type: "text" }],
+				role: "user",
+			},
+		];
+		if (state.answer) {
+			next.push({
+				id: "btw-answer",
+				parts: [{ text: state.answer, type: "text" }],
+				role: "assistant",
+			});
+		}
+		return next;
+	}, [state]);
+	const handleSend = useCallback(
+		(message: { role: "user"; content: string }) => onAsk?.(message.content),
+		[onAsk]
+	);
 
 	const copyAnswer = () => {
 		if (!state?.answer) {
@@ -52,8 +95,8 @@ export function BtwOverlay({ state, onClose }: BtwOverlayProps) {
 		}
 		navigator.clipboard
 			.writeText(state.answer)
-			.then(() => sileo.success("Answer copied"))
-			.catch(() => sileo.error("Could not copy answer"));
+			.then(() => sileo.success({ title: "Answer copied" }))
+			.catch(() => sileo.error({ title: "Could not copy answer" }));
 	};
 
 	return (
@@ -68,22 +111,24 @@ export function BtwOverlay({ state, onClose }: BtwOverlayProps) {
 						Side question
 					</DialogTitle>
 					<DialogDescription className="text-left">
-						{state?.question}
+						The answer stays out of the main transcript and this side chat has
+						no tools.
 					</DialogDescription>
 				</DialogHeader>
 
-				<div className="scroll-fade max-h-[50vh] overflow-y-auto">
-					{state?.loading && (
-						<TextShimmer className="text-muted-foreground text-sm">
-							Thinking…
-						</TextShimmer>
-					)}
-					{state?.error && (
-						<p className="text-destructive text-sm">{state.error}</p>
-					)}
-					{state?.answer && (
-						<Markdown className="text-sm" content={state.answer} />
-					)}
+				<div className="h-[min(55vh,34rem)] min-h-[12rem]">
+					<AgentChat
+						composerDisabled={!onAsk}
+						composerMenuGroups={composerMenuGroups}
+						density="compact"
+						error={state?.error ? new Error(state.error) : undefined}
+						mentionItems={mentionItems}
+						messages={messages}
+						onComposerMenuSelect={onComposerMenuSelect}
+						onSend={handleSend}
+						onStop={() => undefined}
+						status={state?.loading ? "streaming" : "ready"}
+					/>
 				</div>
 
 				<DialogFooter className="items-center justify-between gap-2 sm:justify-between">

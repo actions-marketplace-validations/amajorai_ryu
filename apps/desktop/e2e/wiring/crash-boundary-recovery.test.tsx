@@ -18,17 +18,9 @@
 // into the pure unit tests. Run with `bun test e2e/wiring/`.
 
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { Root } from "react-dom/client";
 
-// happy-dom registers globals process-wide and throws if a second file registers
-// on top. `bun test e2e/wiring/` runs these files in ONE process in an unspecified
-// order, so claim the DOM only if nobody else has, and hand it back afterwards —
-// otherwise whichever wiring file loses the coin toss dies on an unhandled error.
-const OWNS_DOM = !GlobalRegistrator.isRegistered;
-if (OWNS_DOM) {
-	GlobalRegistrator.register();
-}
+import "./setup-dom.ts";
 
 // --- Sentry capture spy ------------------------------------------------------
 // crash.ts is a no-op without VITE_SENTRY_DSN, so the real module could never show
@@ -165,9 +157,6 @@ beforeEach(() => {
 
 afterAll(async () => {
 	console.error = realConsoleError;
-	if (OWNS_DOM) {
-		await GlobalRegistrator.unregister();
-	}
 });
 
 async function unmount(): Promise<void> {

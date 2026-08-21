@@ -58,6 +58,7 @@ import {
 	AUTO_RECALL_MAX_TOP_K,
 	AUTO_RECALL_MIN_TOP_K,
 	AUTO_RECALL_TOP_K_PREF_KEY,
+	agentLanePreferenceKey,
 	CONTEXT_AUTO_COMPACT_PREF_KEY,
 	CONTEXT_COMPACT_EFFORT_PREF_KEY,
 	CONTEXT_COMPACT_MODEL_PREF_KEY,
@@ -73,7 +74,17 @@ import {
 	contextHistoryBudget,
 	DEFAULT_AGENT_GATEWAY_ROUTING,
 	DEFAULT_AGENT_TOOL_BRIDGE,
+	DEFAULT_CLAUDE_GATEWAY_ROUTING,
+	DEFAULT_CLOUD_AGENT_SELECTION_PREF_KEY,
+	DEFAULT_CODEX_GATEWAY_ROUTING,
+	DEFAULT_GATEWAY_ROUTING,
+	DEFAULT_LOCAL_AGENT_SELECTION_PREF_KEY,
+	defaultCloudAgentSelection,
+	defaultLocalAgentSelection,
+	EMPTY_AGENT_SELECTION,
 	formatContextBudget,
+	MANAGED_RYU_MODEL_ID,
+	MANAGED_RYU_PROVIDER_ID,
 	MAX_ISLAND_EDGE_OFFSET,
 	MIN_ISLAND_EDGE_OFFSET,
 	NODE_ROUTING_PREF_KEY,
@@ -301,14 +312,15 @@ describe("preference keys mirror Core", () => {
 	// ── The two per-agent gates that used to be one ──────────────────────────
 	//
 	// `agent_routing` owns BOTH keys, and the whole point of the split is that
-	// they are different keys with OPPOSITE defaults. Two ways this could break
+	// they are different keys with shared ON defaults and independent opt-outs.
+	// Two ways this could break
 	// silently, one guarded by each test below:
 	//
 	//   1. a rename on either side leaves the desktop writing a key Core never
 	//      reads — a switch that persists happily and changes nothing;
-	//   2. the defaults drift together again, at which case an agent with no
-	//      stored entry is reported wrongly, which is the state EVERY agent is in
-	//      until someone opens the panel.
+	//   2. either default drifts from Core, at which case an agent with no stored
+	//      entry is reported wrongly, which is the state EVERY agent is in until
+	//      someone opens the panel.
 
 	it("uses Core's two per-agent keys, which must not be the same key", () => {
 		expect(AGENT_GATEWAY_ROUTING_PREF_KEY).toBe(
@@ -331,20 +343,23 @@ describe("preference keys mirror Core", () => {
 		expect(AGENT_TOOL_BRIDGE_PREF_KEY).not.toBe(AGENT_GATEWAY_ROUTING_PREF_KEY);
 	});
 
-	it("mirrors Core's OPPOSITE defaults for the two gates", () => {
-		// Core: `is_gateway_routing` ends `.unwrap_or(false)` and
-		// `is_tool_bridge_enabled` ends `.unwrap_or(true)`. Anchored on the literal
+	it("mirrors Core's independent defaults for the two gates", () => {
+		// Core: both independent gates share the broad ON baseline; explicit false
+		// entries remain separate direct-egress/tool-bridge opt-outs.
+		// Anchored on the literal
 		// text rather than restated, so a flip in Rust fails here.
 		const gatewayFn = rustFnBody(agentRoutingRs, "is_gateway_routing");
 		const bridgeFn = rustFnBody(agentRoutingRs, "is_tool_bridge_enabled");
-		expect(gatewayFn).toContain("unwrap_or(false)");
-		expect(bridgeFn).toContain("unwrap_or(true)");
-		expect(DEFAULT_AGENT_GATEWAY_ROUTING).toBe(false);
-		expect(DEFAULT_AGENT_TOOL_BRIDGE).toBe(true);
-		// The desktop reports a MISSING tool-bridge entry as ON. That is only true
-		// because Core's default is ON; welding the two assertions together is what
-		// stops the UI claiming tools an agent does not have.
-		expect(DEFAULT_AGENT_TOOL_BRIDGE).toBe(!DEFAULT_AGENT_GATEWAY_ROUTING);
+		expect(gatewayFn).toContain("unwrap_or(DEFAULT_AGENT_GATEWAY_ROUTING)");
+		expect(bridgeFn).toContain("unwrap_or(DEFAULT_AGENT_TOOL_BRIDGE)");
+		expect(DEFAULT_GATEWAY_ROUTING).toBe(true);
+		expect(DEFAULT_AGENT_GATEWAY_ROUTING).toBe(DEFAULT_GATEWAY_ROUTING);
+		expect(DEFAULT_AGENT_TOOL_BRIDGE).toBe(DEFAULT_GATEWAY_ROUTING);
+		expect(DEFAULT_CLAUDE_GATEWAY_ROUTING).toBe(DEFAULT_GATEWAY_ROUTING);
+		expect(DEFAULT_CODEX_GATEWAY_ROUTING).toBe(DEFAULT_GATEWAY_ROUTING);
+		// The maps stay separate even though they share a default: explicit opt-outs
+		// must never make an egress choice remove the agent's tools.
+		expect(DEFAULT_AGENT_TOOL_BRIDGE).toBe(DEFAULT_AGENT_GATEWAY_ROUTING);
 	});
 
 	it("writes the exact literal Core's ranker parser matches", () => {
@@ -360,6 +375,39 @@ describe("preference keys mirror Core", () => {
 			)
 		).toBe(ANCHOR_PRESENT);
 		expect(coerceToolRanker("semantic")).toBe("semantic");
+	});
+});
+
+describe("local and cloud agent lanes", () => {
+	it("keeps the legacy default local-only", () => {
+		expect(agentLanePreferenceKey("local")).toBe(
+			DEFAULT_LOCAL_AGENT_SELECTION_PREF_KEY
+		);
+		expect(agentLanePreferenceKey("cloud")).toBe(
+			DEFAULT_CLOUD_AGENT_SELECTION_PREF_KEY
+		);
+		expect(DEFAULT_LOCAL_AGENT_SELECTION_PREF_KEY).not.toBe(
+			DEFAULT_CLOUD_AGENT_SELECTION_PREF_KEY
+		);
+	});
+
+	it("uses Ryu on the installed local model for the local lane", () => {
+		expect(defaultLocalAgentSelection()).toEqual({
+			...EMPTY_AGENT_SELECTION,
+			agent_id: "ryu",
+			provider: "local",
+			model: "gemma-4-E2B-it-Q4_K_M",
+		});
+	});
+
+	it("only sets managed Ryu for paid cloud defaults", () => {
+		expect(defaultCloudAgentSelection(false)).toEqual(EMPTY_AGENT_SELECTION);
+		expect(defaultCloudAgentSelection(true)).toEqual({
+			...EMPTY_AGENT_SELECTION,
+			agent_id: "ryu",
+			provider: MANAGED_RYU_PROVIDER_ID,
+			model: MANAGED_RYU_MODEL_ID,
+		});
 	});
 });
 

@@ -1,8 +1,7 @@
 // packages/marketplace/src/catalog/chrome/verified-badge.tsx
 //
-// The publisher blue check: "we know who published this listing". One component,
-// every surface, so the card and the detail hero can never disagree about what a
-// verified organization looks like.
+// The shared publisher check: one component and one Lucide mark on every surface,
+// so the card and detail hero cannot disagree about publisher trust.
 //
 // THREE AXES, ONE CARD — the distinction this file exists to protect. A listing
 // carries three independent trust facts and they are routinely confused:
@@ -30,9 +29,9 @@
 //
 // That is also why this badge is deliberately UNLIKE the community notice: the
 // notice is a full-width amber alert placed in the reading path before any
-// install control, this is a small inline blue chip beside the name. Different
-// shape, different colour, different placement — they can sit on the same card
-// without reading as a contradiction.
+// install control, this is a small inline publisher-trust chip beside the name.
+// Different shape, different colour, different placement — they can sit on the
+// same card without reading as a contradiction.
 //
 // THREE THINGS IN THIS REPO ARE ALSO CALLED "VERIFIED", which is why every
 // string here leads with the word *organization* rather than saying "Verified":
@@ -41,14 +40,6 @@
 // bare "Verified" here would be the third one and the user could not tell which
 // claim it makes.
 
-// `CheckmarkBadge03Icon`, deliberately: the free icon set ships no `Verified*`
-// glyph, and the two neighbouring badge glyphs are already spoken for —
-// `CheckmarkBadge01Icon` is the reviews panel's "Verified purchase" chip (same
-// detail screen) and `CheckmarkBadge04Icon` is the licences surface. A third
-// distinct seal keeps the three from reading as one repeated mark; the LABEL is
-// what actually carries the distinction, which is why it is never abbreviated.
-import { CheckmarkBadge03Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	Tooltip,
 	TooltipContent,
@@ -56,6 +47,12 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
+import {
+	type PublisherTrustLevel,
+	publisherTrustLabel,
+	publisherTrustTooltip,
+} from "@ryuhq/protocol/publisher-trust";
+import { Badge, Check } from "lucide-react";
 
 /** Chip geometry, matching `BASE_CHIP` in catalog-badges.tsx so the check lines
  *  up with the token/size badges it sits beside. */
@@ -93,8 +90,12 @@ export function verifiedLabel(tier?: string | null): string {
 	return known ? `Verified organization — ${known}` : "Verified organization";
 }
 
+export function trustLabel(level: PublisherTrustLevel): string {
+	return publisherTrustLabel(level);
+}
+
 /**
- * The publisher blue check, rendered beside a listing's NAME (never on its icon —
+ * The publisher check, rendered beside a listing's NAME (never on its icon —
  * the icon is the app's identity, this is the publisher's).
  *
  * Renders nothing unless the caller passes `orgVerified`. The gate is the FLAG,
@@ -104,6 +105,7 @@ export function verifiedLabel(tier?: string | null): string {
  */
 export default function VerifiedBadge({
 	orgVerified,
+	publisherTrust,
 	tier,
 	tone = "card",
 	className,
@@ -114,6 +116,9 @@ export default function VerifiedBadge({
 	 *  `verified` here would read as the manifest-signature flag the web
 	 *  marketplace card carries under that exact word. */
 	orgVerified?: boolean;
+	/** The complete publisher identity mark. When present, dotted is intentional
+	 * and renders for an allowed-but-not-verified community publisher. */
+	publisherTrust?: PublisherTrustLevel | null;
 	/** The org's verification tier, when known. Only a qualifier — see
 	 *  {@link verifiedLabel}; an unrecognized value still renders the check. */
 	tier?: string | null;
@@ -122,14 +127,31 @@ export default function VerifiedBadge({
 	 *  `"card"` sits on the page's own background and gets the themed info tint.
 	 *  `"hero"` sits on the detail hero's author-supplied dither wash under a
 	 *  black scrim, where every foreground is fixed white — a themed
-	 *  blue-on-tint chip is illegible there, so it gets the hero's own
+	 *  themed-on-tint chip is illegible there, so it gets the hero's own
 	 *  translucent chip treatment instead (the same one the hero badges use). */
 	tone?: "card" | "hero";
 }) {
-	if (!orgVerified) {
+	// New catalog payloads carry the complete publisher mark. Older Core-facing
+	// payloads only carry the org flag and tier, so retain their established
+	// semantics: an explicit true renders the tier-qualified organization badge;
+	// false/absent renders nothing. In particular, do not infer a visible dotted
+	// mark from a legacy false — dotted is meaningful only when the wire explicitly
+	// says that this publisher trust level was resolved.
+	const hasExplicitPublisherTrust =
+		publisherTrust !== null && publisherTrust !== undefined;
+	if (!(hasExplicitPublisherTrust || orgVerified)) {
 		return null;
 	}
-	const label = verifiedLabel(tier);
+	const level = publisherTrust ?? "blue";
+	if (!level) {
+		return null;
+	}
+	const label = hasExplicitPublisherTrust
+		? trustLabel(level)
+		: verifiedLabel(tier);
+	const tooltip = hasExplicitPublisherTrust
+		? publisherTrustTooltip(level)
+		: label;
 	return (
 		// Self-contained Provider rather than assuming an ancestor: this badge
 		// renders on both hosts, and web mounts no global TooltipProvider (desktop
@@ -150,18 +172,57 @@ export default function VerifiedBadge({
 							aria-label={label}
 							className={cn(
 								BASE_CHIP,
-								tone === "hero"
-									? "bg-white/15 text-white/90 backdrop-blur-sm"
-									: "bg-info/12 text-info",
+								level === "gold"
+									? tone === "hero"
+										? "relative overflow-hidden bg-[linear-gradient(135deg,rgba(255,240,133,0.38),rgba(250,200,0,0.28),rgba(237,178,0,0.32))] text-yellow-50 backdrop-blur-sm"
+										: "relative overflow-hidden bg-[linear-gradient(135deg,#fff085_0%,#fac800_52%,#edb200_100%)] text-yellow-700 shadow-[0_0_8px_rgba(250,200,0,0.28)] dark:text-yellow-300"
+									: level === "blue"
+										? tone === "hero"
+											? "bg-sky-200/20 text-sky-100 backdrop-blur-sm"
+											: "bg-info/12 text-info"
+										: "border border-muted-foreground/40 border-dashed bg-muted/20 text-muted-foreground/70 opacity-50 transition-opacity focus-within:opacity-100 hover:opacity-100",
 								className
 							)}
 							role="img"
 						>
-							<HugeiconsIcon className="size-3" icon={CheckmarkBadge03Icon} />
+							{level === "gold" ? (
+								<>
+									<span
+										aria-hidden="true"
+										className="t-plan-badge-sheen pointer-events-none"
+									/>
+									<span
+										aria-hidden="true"
+										className="t-plan-badge-border pointer-events-none"
+									/>
+								</>
+							) : null}
+							<span
+								className={cn(
+									"relative z-10 inline-flex size-3 items-center justify-center",
+									level === "gold" &&
+										"drop-shadow-[0_0_3px_rgba(250,200,0,0.7)]"
+								)}
+							>
+								<Badge
+									aria-hidden="true"
+									className={cn(
+										"absolute inset-0 size-3",
+										level === "gold" && "text-yellow-700 dark:text-yellow-300"
+									)}
+									fill="currentColor"
+									strokeWidth={1.5}
+								/>
+								<Check
+									aria-hidden="true"
+									className="relative size-2 text-background"
+									strokeWidth={3}
+								/>
+							</span>
 						</span>
 					}
 				/>
-				<TooltipContent>{label}</TooltipContent>
+				<TooltipContent>{tooltip}</TooltipContent>
 			</Tooltip>
 		</TooltipProvider>
 	);

@@ -163,7 +163,7 @@ describe("runAgentLoop", () => {
 			agentId: "agent-expense",
 			userId: "user-1",
 			tools: {
-				gmailSearch: ryuTool("composio__GMAIL_SEARCH_EMAILS", {
+				gmailSearch: ryuTool("composio.GMAIL_SEARCH_EMAILS", {
 					description: "Search Gmail",
 					parameters: {
 						type: "object",
@@ -176,7 +176,7 @@ describe("runAgentLoop", () => {
 
 		const events = await collect(agent.stream("find expenses"));
 		expect(captured.body).not.toBeNull();
-		expect(captured.body?.tool).toBe("composio__GMAIL_SEARCH_EMAILS");
+		expect(captured.body?.tool).toBe("composio.GMAIL_SEARCH_EMAILS");
 		expect(captured.body?.agent_id).toBe("agent-expense");
 		expect(captured.body?.user_id).toBe("user-1");
 		const result = events.find((e) => e.type === "result");
@@ -208,7 +208,7 @@ describe("runAgentLoop", () => {
 			node: { baseUrl: NODE },
 			agentId: "agent-expense",
 			tools: {
-				gmailSearch: ryuTool("composio__GMAIL_SEARCH_EMAILS", {
+				gmailSearch: ryuTool("composio.GMAIL_SEARCH_EMAILS", {
 					parameters: { type: "object", properties: {} },
 				}),
 			},
@@ -242,7 +242,7 @@ describe("runAgentLoop", () => {
 describe("executeTool", () => {
 	it("throws when a remote tool is used without an agentId", async () => {
 		const tools = {
-			gmailSearch: ryuTool("composio__GMAIL_SEARCH_EMAILS"),
+			gmailSearch: ryuTool("composio.GMAIL_SEARCH_EMAILS"),
 		};
 		await expect(
 			executeTool("gmailSearch", "{}", tools, {

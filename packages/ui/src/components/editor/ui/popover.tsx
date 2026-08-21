@@ -25,6 +25,30 @@ const PopoverAnchorContext = createContext<{
 	setAnchor: (anchor: AnchorValue) => void;
 } | null>(null);
 
+interface LegacyFocusEvent {
+	preventDefault: () => void;
+}
+type LegacyFocusHandler = (event: LegacyFocusEvent) => void;
+type PopupKeyDownEvent = Parameters<
+	NonNullable<PopoverPrimitive.Popup.Props["onKeyDown"]>
+>[0];
+
+function toFocusTarget(handler?: LegacyFocusHandler) {
+	if (!handler) {
+		return undefined;
+	}
+
+	return () => {
+		let prevented = false;
+		handler({
+			preventDefault: () => {
+				prevented = true;
+			},
+		});
+		return !prevented;
+	};
+}
+
 function Popover({ ...props }: PopoverPrimitive.Root.Props) {
 	const [anchor, setAnchor] = useState<AnchorValue>(null);
 	const value = useMemo(() => ({ anchor, setAnchor }), [anchor]);
@@ -83,15 +107,34 @@ function PopoverContent({
 	alignOffset = 0,
 	side = "bottom",
 	sideOffset = 4,
+	initialFocus,
+	finalFocus,
+	onKeyDown,
+	onOpenAutoFocus,
+	onCloseAutoFocus,
+	onEscapeKeyDown,
 	...props
-}: PopoverPrimitive.Popup.Props &
-	Pick<
+}: PopoverPrimitive.Popup.Props & {
+	onOpenAutoFocus?: LegacyFocusHandler;
+	onCloseAutoFocus?: LegacyFocusHandler;
+	onEscapeKeyDown?: (event: PopupKeyDownEvent) => void;
+} & Pick<
 		PopoverPrimitive.Positioner.Props,
 		"align" | "alignOffset" | "side" | "sideOffset"
 	>) {
 	const ctx = useContext(PopoverAnchorContext);
+	const handleKeyDown = onEscapeKeyDown
+		? (event: PopupKeyDownEvent) => {
+				onEscapeKeyDown(event);
+				onKeyDown?.(event);
+			}
+		: onKeyDown;
 	return (
 		<PopoverPrimitive.Portal>
+			<PopoverPrimitive.Backdrop
+				className="ryu-popup-overlay"
+				data-slot="popover-overlay"
+			/>
 			<PopoverPrimitive.Positioner
 				align={align}
 				alignOffset={alignOffset}
@@ -106,6 +149,9 @@ function PopoverContent({
 						className
 					)}
 					data-slot="popover-content"
+					finalFocus={finalFocus ?? toFocusTarget(onCloseAutoFocus)}
+					initialFocus={initialFocus ?? toFocusTarget(onOpenAutoFocus)}
+					onKeyDown={handleKeyDown}
 					{...props}
 				/>
 			</PopoverPrimitive.Positioner>

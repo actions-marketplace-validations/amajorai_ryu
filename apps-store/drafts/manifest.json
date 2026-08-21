@@ -1,4 +1,10 @@
 {
+  "tags": ["drafts","queue","outbox","composer","scheduling","usage-limits","concurrency"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-drafts",
+  "homepage": "https://github.com/amajorai/ryu-drafts",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/drafts",
   "name": "Drafts",
   "version": "0.1.14",
@@ -46,16 +52,16 @@
         "mount": "/api/drafts",
         "public_mount": "/api/drafts",
         "routes": [
-          { "path": "/list" },
-          { "path": "/queue" },
-          { "path": "/drafts" },
-          { "path": "/drafts/:id" },
-          { "path": "/drafts/:id/arm" },
-          { "path": "/drafts/:id/disarm" },
-          { "path": "/drafts/:id/claim" },
-          { "path": "/drafts/:id/sent" },
-          { "path": "/drafts/:id/failed" },
-          { "path": "/settings" }
+          { "path": "/list", "permission": "drafts.view" },
+          { "path": "/queue", "permission": "drafts.view" },
+          { "path": "/drafts", "permission": "drafts.view" },
+          { "path": "/drafts/:id", "permission": "drafts.view" },
+          { "path": "/drafts/:id/arm", "permission": "drafts.edit" },
+          { "path": "/drafts/:id/disarm", "permission": "drafts.edit" },
+          { "path": "/drafts/:id/claim", "permission": "drafts.edit" },
+          { "path": "/drafts/:id/sent", "permission": "drafts.edit" },
+          { "path": "/drafts/:id/failed", "permission": "drafts.edit" },
+          { "path": "/settings", "permission": "drafts.view" }
         ]
       },
       "host_api": {
@@ -85,6 +91,7 @@
     }
   ],
   "contributes": {
+  "chat_widget_templates": [{"id":"drafts.chat","title":"Drafts widget","description":"Drafts chat widget metadata is coming soon; no render tool is available yet.","triggers":["drafts widget"],"examples":["Show me a drafts widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}],
     "data_categories": [
       {
         "id": "drafts",

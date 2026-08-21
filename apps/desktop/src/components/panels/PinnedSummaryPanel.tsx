@@ -3,13 +3,13 @@
 // The "Pinned summary" panel: a connected accordion rail shown once a
 // conversation has a thread. The rail owns one rounded surface and uses subtle
 // dividers between its sections instead of stacking unrelated cards. The first row is
-// "Environment" (project ▸ branch ▸ worktree + live git +added/−removed line
-// counts + a commit/push chooser); the rest (Progress / Artifacts /
+// "Environment" (read-only project ▸ branch ▸ worktree context + live git
+// counts + pull/sync/commit/push actions); the rest (Progress / Artifacts /
 // Changes / Sources / Side chats) come from the shared CoworkContextPanel and
 // only appear when they have something to show.
 //
 // The Environment row is ALWAYS present — including with no project folder open,
-// where it collapses to the project picker plus a one-line hint. It used to be
+// where it collapses to a read-only project row plus a one-line hint. It used to be
 // gated on `folder`, which left a folderless chat with zero accordion items: the
 // panel then rendered nothing while its docked column still reserved its width,
 // so the sidebar read as a blank strip.
@@ -20,48 +20,68 @@
 
 import {
 	ArrowUpRight01Icon,
-	CloudUploadIcon,
 	ComputerTerminal01Icon,
-	FolderLibraryIcon,
-	GitCommitIcon,
-	Loading01Icon,
 	SentIcon,
+	Share08Icon,
 	StopIcon,
 	Tick02Icon,
 	WorkflowCircle06Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Button } from "@ryu/ui/components/button.tsx";
-import { Checkbox } from "@ryu/ui/components/checkbox.tsx";
-import {
-	Dialog,
-	DialogContent,
-	DialogDescription,
-	DialogHeader,
-	DialogTitle,
-} from "@ryu/ui/components/dialog.tsx";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import type { AttachedImage } from "@/components/agent-elements/input-bar.tsx";
+import { openExternal } from "@/lib/tauri-bridge.ts";
 import {
 	DiffStat,
 	WorkspacePicker,
 } from "@/src/components/chat/WorkspacePicker.tsx";
 import type { CoworkContextPanelProps } from "@/src/components/panels/CoworkContextPanel.tsx";
 import { CoworkContextPanel } from "@/src/components/panels/CoworkContextPanel.tsx";
+import {
+	GitActionDialog,
+	type GitProgressPhase,
+	GitProgressStatus,
+	GitRemoteActions,
+	type PullRequestAction,
+	PullRequestDialog,
+} from "@/src/components/panels/GitActionDialogs.tsx";
+import { GitPullRequestSummary } from "@/src/components/panels/GitPullRequestSummary.tsx";
 import type { BouncyAccordionItem } from "@/src/components/ui/bouncy-accordion.tsx";
+import {
+	invalidateGitPullRequest,
+	useGitPullRequest,
+} from "@/src/hooks/useGitPullRequest.ts";
 import { invalidateGitStatus, useGitStatus } from "@/src/hooks/useGitStatus.ts";
 import {
+	type BackgroundProcess,
 	listBackgroundProcesses,
 	requestStopBackgroundProcess,
-	type BackgroundProcess,
 } from "@/src/lib/api/background-processes.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
+	checkoutBranch,
 	commitPush,
+	createBranch,
+	createPullRequest,
+	fetchGitBranches,
 	type GitCommitAction,
 	type GitStatus,
+	isPullRequestBranch,
+	pullGit,
+	syncGit,
 } from "@/src/lib/api/git.ts";
+import {
+	buildPullRequestCheckReport,
+	buildPullRequestMergeConflictReport,
+	type GitPullRequest,
+	gitPullRequestStatus,
+	normalizeGitPullRequest,
+	pullRequestHasMergeConflicts,
+} from "@/src/lib/api/pull-requests.ts";
+import { textToDataUrl } from "@/src/lib/composer/attachments.ts";
 
 interface PinnedSummaryPanelProps {
 	conversationId?: string | null;
@@ -72,19 +92,24 @@ interface PinnedSummaryPanelProps {
 	 */
 	cowork: CoworkContextPanelProps;
 	folder: string | null;
+	/** Stage a generated CI report in the current chat composer. */
+	onAttachTextFile?: (attachment: AttachedImage) => void;
 	/**
 	 * Called when the panel should hide itself because the user pressed away
 	 * from it. Only passed in floating-overlay mode (where the panel overlaps
 	 * the message column); the docked column never self-dismisses.
 	 */
 	onDismiss?: () => void;
+	/** True when the app-owned GitHub provider can answer PR/check lookups. */
+	pullRequestsEnabled?: boolean;
+	showLineStats?: boolean;
 	target: ApiTarget;
 }
 
-type CommitState =
+type GitOperationState =
 	| { status: "idle" }
-	| { status: "loading" }
-	| { status: "done"; label: string }
+	| { phase: GitProgressPhase; status: "loading" }
+	| { label: string; status: "done"; url?: string }
 	| { status: "error"; message: string };
 
 function formatBackgroundElapsed(elapsedMs: number): string {
@@ -125,14 +150,14 @@ function BackgroundProcessRow({
 			</span>
 			<button
 				aria-label={`Stop ${label}`}
-				className="grid size-6 shrink-0 place-items-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 disabled:cursor-wait disabled:opacity-100"
+				className="grid size-6 shrink-0 place-items-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-100 group-hover:opacity-100"
 				disabled={stopping}
 				onClick={(event) => {
 					event.stopPropagation();
 					onStop(process.process_id);
 				}}
-			title={stopping ? "Stopping…" : "Stop process"}
-			type="button"
+				title={stopping ? "Stopping…" : "Stop process"}
+				type="button"
 			>
 				<HugeiconsIcon
 					aria-hidden
@@ -144,41 +169,80 @@ function BackgroundProcessRow({
 	);
 }
 
-/** The Environment row body: pickers + git line-stats + commit/push dialog. */
+/** The Environment row body: pickers + git line-stats + remote/local git actions. */
 function EnvironmentDescription({
 	conversationId,
 	target,
 	folder,
 	git,
+	remote,
 	commit,
+	existingPullRequest,
+	githubAppEnabled,
 	hasWork,
 	onOpenCommit,
+	onOpenPullRequest,
+	onPull,
+	onSync,
+	onFixCi,
+	onFixMergeConflicts,
+	onStop,
+	pullRequest,
+	pullRequestLoading,
+	canCreatePullRequest,
+	showLineStats,
 }: {
-	commit: CommitState;
+	canCreatePullRequest: boolean;
+	commit: GitOperationState;
 	conversationId?: string | null;
+	existingPullRequest: GitPullRequest | null;
 	folder: string | null;
 	git: GitStatus | null;
+	githubAppEnabled: boolean;
 	hasWork: boolean;
+	onFixCi?: () => void;
+	onFixMergeConflicts?: () => void;
 	onOpenCommit: () => void;
+	onOpenPullRequest: () => void;
+	onPull: () => void;
+	onSync: () => void;
+	onStop: () => void;
+	pullRequest: GitOperationState;
+	pullRequestLoading: boolean;
+	remote: GitOperationState;
+	showLineStats: boolean;
 	target: ApiTarget;
 }) {
 	const insertions = git?.insertions ?? 0;
 	const deletions = git?.deletions ?? 0;
 	const ahead = git?.ahead ?? 0;
-	const clean = insertions === 0 && deletions === 0;
+	const changedFiles = git?.changed_files_count ?? 0;
+	const clean = changedFiles === 0 && insertions === 0 && deletions === 0;
+	const progress =
+		remote.status === "loading"
+			? remote.phase
+			: commit.status === "loading"
+				? commit.phase
+				: pullRequest.status === "loading"
+					? pullRequest.phase
+					: undefined;
 
 	// No folder: the branch and run-mode rows and every git affordance render
-	// nothing, so the row shows just the folder picker and says why it is bare.
+	// nothing, so the row shows just the read-only folder state and says why it is bare.
 	if (!folder) {
 		return (
 			<div className="flex flex-col gap-2">
 				<WorkspacePicker
 					conversationId={conversationId}
+					folderOverride={folder}
+					folderReadOnly
+					showLineStats={showLineStats}
 					stacked
 					target={target}
 				/>
 				<p className="text-muted-foreground text-xs">
-					No project folder. Pick one to see branch, changes and commit.
+					No project folder is attached to this chat yet. A local-file request
+					will ask you to choose one.
 				</p>
 			</div>
 		);
@@ -193,6 +257,9 @@ function EnvironmentDescription({
 			    two families drifted; it now owns no picker markup of its own. */}
 			<WorkspacePicker
 				conversationId={conversationId}
+				folderOverride={folder}
+				folderReadOnly
+				showLineStats={showLineStats}
 				stacked
 				target={target}
 			/>
@@ -200,12 +267,16 @@ function EnvironmentDescription({
 			{!git && (
 				<p className="text-muted-foreground text-xs">Not a git repository.</p>
 			)}
-			{/* The +added/−removed counts already live in the accordion header, so the
-			    body only carries what the header can't: the clean-tree state and any
-			    unpushed-commit count. When the tree is dirty with nothing ahead, the
-			    header alone says it all and this line is dropped. */}
-			{git && (clean || ahead > 0) && (
+			{/* Summary headers stay quiet: the line stats live in the body so the
+			    header is only the section name, while the useful numbers remain
+			    available when Environment is expanded. */}
+			{git && (
 				<div className="flex items-center gap-2 text-muted-foreground text-xs">
+					{showLineStats && <DiffStat stat={{ insertions, deletions }} />}
+					<span className="shrink-0 tabular-nums">
+						{formatCount(changedFiles) ?? changedFiles} file
+						{changedFiles === 1 ? "" : "s"} changed
+					</span>
 					<HugeiconsIcon
 						aria-hidden
 						className="size-3.5 shrink-0"
@@ -229,23 +300,56 @@ function EnvironmentDescription({
 				</div>
 			)}
 
-			{git && (
-				<button
-					className="flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-2 py-1.5 font-medium text-primary-foreground text-xs transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-					disabled={commit.status === "loading" || !hasWork}
-					onClick={onOpenCommit}
-					type="button"
-				>
-					<HugeiconsIcon
-						aria-hidden
-						className={cn(
-							"size-3.5",
-							commit.status === "loading" && "animate-spin"
-						)}
-						icon={commit.status === "loading" ? Loading01Icon : SentIcon}
+			{git &&
+				(progress ? (
+					<GitProgressStatus
+						onStop={remote.status === "loading" ? undefined : onStop}
+						phase={progress}
 					/>
-					{commit.status === "loading" ? "Working…" : "Commit or push"}
-				</button>
+				) : (
+					<>
+						<GitRemoteActions onPull={onPull} onSync={onSync} />
+						<button
+							className="flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-2 py-1.5 font-medium text-primary-foreground text-xs transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+							disabled={!hasWork}
+							onClick={onOpenCommit}
+							type="button"
+						>
+							<HugeiconsIcon aria-hidden className="size-3.5" icon={SentIcon} />
+							Commit or push
+						</button>
+						{canCreatePullRequest && (
+							<button
+								className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border/70 px-2 py-1.5 font-medium text-muted-foreground text-xs transition hover:bg-muted/60 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+								disabled={!hasWork || (githubAppEnabled && pullRequestLoading)}
+								onClick={onOpenPullRequest}
+								type="button"
+							>
+								<HugeiconsIcon
+									aria-hidden
+									className="size-3.5"
+									icon={Share08Icon}
+								/>
+								Create pull request
+							</button>
+						)}
+					</>
+				))}
+
+			{githubAppEnabled &&
+				!existingPullRequest &&
+				pullRequestLoading &&
+				pullRequest.status !== "loading" && (
+					<p className="text-muted-foreground text-xs">Checking GitHub…</p>
+				)}
+
+			{existingPullRequest && (
+				<GitPullRequestSummary
+					compact
+					onFix={onFixCi}
+					onFixMergeConflicts={onFixMergeConflicts}
+					pullRequest={existingPullRequest}
+				/>
 			)}
 
 			{commit.status === "done" && (
@@ -257,35 +361,40 @@ function EnvironmentDescription({
 			{commit.status === "error" && (
 				<p className="break-words text-destructive text-xs">{commit.message}</p>
 			)}
+			{remote.status === "done" && (
+				<p className="flex items-center gap-1 text-emerald-600 text-xs dark:text-emerald-400">
+					<HugeiconsIcon aria-hidden className="size-3.5" icon={Tick02Icon} />
+					{remote.label}
+				</p>
+			)}
+			{remote.status === "error" && (
+				<p className="break-words text-destructive text-xs">{remote.message}</p>
+			)}
+			{pullRequest.status === "done" && !existingPullRequest && (
+				<p className="flex items-center gap-1 text-emerald-600 text-xs dark:text-emerald-400">
+					<HugeiconsIcon aria-hidden className="size-3.5" icon={Tick02Icon} />
+					{pullRequest.url ? (
+						<a
+							className="truncate underline underline-offset-2"
+							href={pullRequest.url}
+							rel="noopener noreferrer"
+							target="_blank"
+						>
+							{pullRequest.label}
+						</a>
+					) : (
+						pullRequest.label
+					)}
+				</p>
+			)}
+			{pullRequest.status === "error" && (
+				<p className="break-words text-destructive text-xs">
+					{pullRequest.message}
+				</p>
+			)}
 		</div>
 	);
 }
-
-const COMMIT_ACTIONS: {
-	action: GitCommitAction;
-	description: string;
-	icon: typeof GitCommitIcon;
-	label: string;
-}[] = [
-	{
-		action: "commit",
-		label: "Commit",
-		description: "Save changes locally",
-		icon: GitCommitIcon,
-	},
-	{
-		action: "commit-push",
-		label: "Commit and push",
-		description: "Save changes and update the remote",
-		icon: CloudUploadIcon,
-	},
-	{
-		action: "push",
-		label: "Push",
-		description: "Send existing commits to the remote",
-		icon: SentIcon,
-	},
-];
 
 export function PinnedSummaryPanel({
 	conversationId,
@@ -293,11 +402,31 @@ export function PinnedSummaryPanel({
 	target,
 	cowork,
 	onDismiss,
+	onAttachTextFile,
+	pullRequestsEnabled = false,
+	showLineStats = true,
 }: PinnedSummaryPanelProps) {
-	const [commit, setCommit] = useState<CommitState>({ status: "idle" });
+	const [commit, setCommit] = useState<GitOperationState>({ status: "idle" });
+	const [pullRequest, setPullRequest] = useState<GitOperationState>({
+		status: "idle",
+	});
+	const [remote, setRemote] = useState<GitOperationState>({ status: "idle" });
 	const [commitDialogOpen, setCommitDialogOpen] = useState(false);
 	const [commitMessage, setCommitMessage] = useState("");
 	const [includeUnstaged, setIncludeUnstaged] = useState(true);
+	const [pullRequestDialogOpen, setPullRequestDialogOpen] = useState(false);
+	const [pullRequestTitle, setPullRequestTitle] = useState("");
+	const [pullRequestDescription, setPullRequestDescription] = useState("");
+	const [pullRequestIncludeUnstaged, setPullRequestIncludeUnstaged] =
+		useState(true);
+	const [branches, setBranches] = useState<string[]>([]);
+	const [branchesLoading, setBranchesLoading] = useState(false);
+	const [branchError, setBranchError] = useState<string | null>(null);
+	const [branchSwitching, setBranchSwitching] = useState<string | null>(null);
+	const [branchCreating, setBranchCreating] = useState(false);
+	const [createdPullRequest, setCreatedPullRequest] =
+		useState<GitPullRequest | null>(null);
+	const activeGitOperationRef = useRef<AbortController | null>(null);
 
 	// In floating-overlay mode (onDismiss set) the panel overlaps the message
 	// column, so it behaves like a dismissible popover: a pointer press anywhere
@@ -373,6 +502,30 @@ export function PinnedSummaryPanel({
 	// disagree with the branch pill above it.
 	const { status: gitStatus } = useGitStatus(target, folder);
 	const git = gitStatus.is_repo ? gitStatus : null;
+	const branch = git?.branch ?? "Repository";
+	const { data: queriedPullRequest, isLoading: pullRequestLoading } =
+		useGitPullRequest(
+			target,
+			folder,
+			git?.branch ?? null,
+			pullRequestsEnabled,
+			"all"
+		);
+	const localPullRequest =
+		createdPullRequest && createdPullRequest.branch === git?.branch
+			? createdPullRequest
+			: null;
+	const existingPullRequest = queriedPullRequest ?? localPullRequest;
+	const canCreatePullRequest =
+		git !== null &&
+		isPullRequestBranch(branch) &&
+		(!existingPullRequest ||
+			["closed", "merged"].includes(gitPullRequestStatus(existingPullRequest)));
+	const baseBranch = branches.includes("main")
+		? "main"
+		: branches.includes("master")
+			? "master"
+			: "main";
 
 	// An agent run mutates the tree, so re-read the moment it goes idle instead
 	// of waiting out the poll interval.
@@ -383,20 +536,206 @@ export function PinnedSummaryPanel({
 		}
 	}, [chatStatus, folder]);
 
-	const handleCommitPush = async (action: GitCommitAction) => {
-		if (!folder || commit.status === "loading") {
+	const loadBranches = async () => {
+		if (!folder) {
 			return;
 		}
-		setCommit({ status: "loading" });
-		const result = await commitPush(
-			targetRef.current,
-			folder,
-			commitMessage.trim() || undefined,
-			undefined,
-			action,
-			includeUnstaged
-		);
+		setBranchesLoading(true);
+		setBranchError(null);
+		try {
+			const result = await fetchGitBranches(targetRef.current, folder);
+			setBranches(result.branches);
+		} finally {
+			setBranchesLoading(false);
+		}
+	};
+
+	const handleBranchMenuOpenChange = (open: boolean) => {
+		if (open) {
+			void loadBranches();
+		}
+	};
+
+	const openCommitDialog = () => {
+		setCommitDialogOpen(true);
+		void loadBranches();
+	};
+
+	const openPullRequestDialog = () => {
+		setPullRequestDialogOpen(true);
+		void loadBranches();
+	};
+
+	const handleRemoteGit = async (action: "pull" | "sync") => {
+		if (
+			!folder ||
+			commit.status === "loading" ||
+			pullRequest.status === "loading" ||
+			remote.status === "loading"
+		) {
+			return;
+		}
+		const controller = new AbortController();
+		activeGitOperationRef.current = controller;
+		setRemote({
+			status: "loading",
+			phase: action === "pull" ? "pulling" : "syncing",
+		});
+		try {
+			const result =
+				action === "pull"
+					? await pullGit(targetRef.current, folder, controller.signal)
+					: await syncGit(targetRef.current, folder, controller.signal);
+			if (controller.signal.aborted) {
+				return;
+			}
+			if (!result.success) {
+				setRemote({
+					status: "error",
+					message: result.error ?? `git ${action} failed`,
+				});
+				return;
+			}
+			setRemote({
+				status: "done",
+				label:
+					action === "pull" ? "Pulled latest changes" : "Synced with remote",
+			});
+			invalidateGitStatus(folder);
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return;
+			}
+			setRemote({
+				status: "error",
+				message:
+					error instanceof Error ? error.message : `git ${action} failed`,
+			});
+		} finally {
+			if (activeGitOperationRef.current === controller) {
+				activeGitOperationRef.current = null;
+			}
+		}
+	};
+
+	const handleSelectBranch = async (nextBranch: string) => {
+		if (!folder || nextBranch === branch || branchSwitching) {
+			return;
+		}
+		setBranchSwitching(nextBranch);
+		setBranchError(null);
+		const result = await checkoutBranch(targetRef.current, folder, nextBranch);
+		setBranchSwitching(null);
 		if (result.success) {
+			setCreatedPullRequest(null);
+			invalidateGitStatus(folder);
+			invalidateGitPullRequest(folder, nextBranch);
+		} else {
+			setBranchError(result.error ?? "Failed to switch branch");
+		}
+	};
+
+	const handleCreateBranch = async (name: string): Promise<string | null> => {
+		if (!folder || branchCreating) {
+			return "No project folder is selected.";
+		}
+		setBranchCreating(true);
+		const result = await createBranch(targetRef.current, folder, name);
+		setBranchCreating(false);
+		if (!result.success) {
+			return result.error ?? "Failed to create branch";
+		}
+		invalidateGitStatus(folder);
+		void loadBranches();
+		return null;
+	};
+
+	const stopGitOperation = () => {
+		activeGitOperationRef.current?.abort();
+		activeGitOperationRef.current = null;
+		setCommit({ status: "idle" });
+		setPullRequest({ status: "idle" });
+		setRemote({ status: "idle" });
+		setCommitDialogOpen(false);
+		setPullRequestDialogOpen(false);
+	};
+
+	const handleCommitPush = async (action: GitCommitAction) => {
+		if (
+			!folder ||
+			commit.status === "loading" ||
+			pullRequest.status === "loading" ||
+			remote.status === "loading"
+		) {
+			return;
+		}
+		const controller = new AbortController();
+		activeGitOperationRef.current = controller;
+		const message = commitMessage.trim() || undefined;
+		try {
+			if (!message && action !== "push") {
+				setCommit({ status: "loading", phase: "generating" });
+				await new Promise((resolve) => setTimeout(resolve, 120));
+			}
+			if (controller.signal.aborted) {
+				return;
+			}
+
+			let result: Awaited<ReturnType<typeof commitPush>>;
+			if (action === "commit-push") {
+				setCommit({ status: "loading", phase: "committing" });
+				const committed = await commitPush(
+					targetRef.current,
+					folder,
+					message,
+					controller.signal,
+					"commit",
+					includeUnstaged
+				);
+				if (committed.success) {
+					setCommit({ status: "loading", phase: "pushing" });
+					const pushed = await commitPush(
+						targetRef.current,
+						folder,
+						undefined,
+						controller.signal,
+						"push",
+						false
+					);
+					result = {
+						...pushed,
+						commit: committed.commit,
+						committed: committed.committed,
+					};
+				} else {
+					result = committed;
+				}
+			} else {
+				setCommit({
+					status: "loading",
+					phase: action === "push" ? "pushing" : "committing",
+				});
+				result = await commitPush(
+					targetRef.current,
+					folder,
+					message,
+					controller.signal,
+					action,
+					includeUnstaged
+				);
+			}
+
+			if (controller.signal.aborted) {
+				return;
+			}
+			if (!result.success) {
+				setCommit({
+					status: "error",
+					message: result.error ?? "commit/push failed",
+				});
+				return;
+			}
+
 			const label =
 				action === "commit"
 					? `Committed ${result.commit ?? "changes"}`
@@ -408,12 +747,138 @@ export function PinnedSummaryPanel({
 			setCommitMessage("");
 			// Everything on screen just changed, not only this panel.
 			invalidateGitStatus(folder);
-		} else {
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return;
+			}
 			setCommit({
 				status: "error",
-				message: result.error ?? "commit/push failed",
+				message: error instanceof Error ? error.message : "commit/push failed",
 			});
+		} finally {
+			if (activeGitOperationRef.current === controller) {
+				activeGitOperationRef.current = null;
+			}
 		}
+	};
+
+	const handlePullRequest = async (action: PullRequestAction) => {
+		if (
+			!(folder && canCreatePullRequest) ||
+			commit.status === "loading" ||
+			pullRequest.status === "loading" ||
+			remote.status === "loading"
+		) {
+			return;
+		}
+		const controller = new AbortController();
+		activeGitOperationRef.current = controller;
+		setPullRequest({
+			status: "loading",
+			phase: pullRequestIncludeUnstaged ? "committing" : "pushing",
+		});
+		try {
+			const result = await createPullRequest(
+				targetRef.current,
+				folder,
+				{
+					base: baseBranch,
+					body: pullRequestDescription.trim() || undefined,
+					draft: action === "draft",
+					includeUnstaged: pullRequestIncludeUnstaged,
+					title: pullRequestTitle.trim() || undefined,
+				},
+				controller.signal
+			);
+			if (controller.signal.aborted) {
+				return;
+			}
+			if (!result.success) {
+				setPullRequest({
+					status: "error",
+					message: result.error ?? "Could not create pull request",
+				});
+				return;
+			}
+			const label = result.already_exists
+				? "Using existing PR"
+				: action === "draft"
+					? "Draft PR created"
+					: "PR created";
+			const nextPullRequest = normalizeGitPullRequest({
+				base: baseBranch,
+				branch,
+				comments_count: result.comments_count,
+				is_draft: action === "draft",
+				number: result.number,
+				pr_url: result.pr_url,
+				repository: result.repository,
+				title: result.title ?? (pullRequestTitle.trim() || `Update ${branch}`),
+			});
+			if (nextPullRequest) {
+				setCreatedPullRequest(nextPullRequest);
+			}
+			setPullRequest({
+				status: "done",
+				label,
+				url: result.pr_url ?? undefined,
+			});
+			setPullRequestDialogOpen(false);
+			invalidateGitStatus(folder);
+			invalidateGitPullRequest(folder, branch);
+			if (action === "open" && result.pr_url) {
+				await openExternal(result.pr_url).catch(() => undefined);
+			}
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return;
+			}
+			setPullRequest({
+				status: "error",
+				message:
+					error instanceof Error
+						? error.message
+						: "Could not create pull request",
+			});
+		} finally {
+			if (activeGitOperationRef.current === controller) {
+				activeGitOperationRef.current = null;
+			}
+		}
+	};
+
+	const handleFixCi = () => {
+		if (!(existingPullRequest && onAttachTextFile)) {
+			return;
+		}
+		const report = buildPullRequestCheckReport(existingPullRequest);
+		onAttachTextFile({
+			filename: `ci-failures-pr-${existingPullRequest.number}.txt`,
+			id: `ci-failures-${existingPullRequest.number}-${Date.now()}`,
+			mimeType: "text/plain",
+			size: new TextEncoder().encode(report).byteLength,
+			url: textToDataUrl(report),
+		});
+	};
+
+	const handleFixMergeConflicts = () => {
+		if (
+			!(
+				existingPullRequest &&
+				onAttachTextFile &&
+				pullRequestHasMergeConflicts(existingPullRequest)
+			)
+		) {
+			return;
+		}
+		const report = buildPullRequestMergeConflictReport(existingPullRequest);
+		onAttachTextFile({
+			filename: `merge-conflicts-pr-${existingPullRequest.number}.txt`,
+			id: `merge-conflicts-${existingPullRequest.number}-${Date.now()}`,
+			mimeType: "text/plain",
+			size: new TextEncoder().encode(report).byteLength,
+			url: textToDataUrl(report),
+		});
 	};
 
 	const changedCount = git?.changed_files_count ?? 0;
@@ -428,21 +893,10 @@ export function PinnedSummaryPanel({
 			? null
 			: {
 					id: "background-processes",
-					icon: (
-						<HugeiconsIcon
-							aria-hidden
-							className="size-4"
-							icon={ComputerTerminal01Icon}
-						/>
-					),
+					icon: undefined,
 					title: (
-						<span className="flex items-center gap-2">
-							<span className="font-medium text-foreground text-xs">
-								Background processes
-							</span>
-							<span className="rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground tabular-nums">
-								{backgroundProcesses.length}
-							</span>
+						<span className="font-medium text-foreground text-xs">
+							Background processes
 						</span>
 					),
 					description: (
@@ -458,7 +912,7 @@ export function PinnedSummaryPanel({
 								/>
 							))}
 							{backgroundError && (
-								<p className="px-1.5 text-destructive text-[10px]">
+								<p className="px-1.5 text-[10px] text-destructive">
 									{backgroundError}
 								</p>
 							)}
@@ -466,28 +920,42 @@ export function PinnedSummaryPanel({
 					),
 				};
 
-	// The Environment row: pickers + git line-stats + commit & push. Always
-	// present — with no folder it degrades to the project picker + a hint, which
+	// The Environment row: read-only project context + git stats + remote/local git actions.
+	// Always present — with no folder it degrades to the project row + a hint, which
 	// keeps the panel from collapsing to nothing (see the file header).
 	const environmentItem: BouncyAccordionItem = {
 		id: "environment",
-		icon: (
-			<HugeiconsIcon aria-hidden className="size-4" icon={FolderLibraryIcon} />
-		),
+		icon: undefined,
 		title: (
-			<span className="flex items-center gap-2">
-				<span className="font-medium text-foreground text-xs">Environment</span>
-				{git && <DiffStat stat={{ insertions, deletions }} />}
-			</span>
+			<span className="font-medium text-foreground text-xs">Environment</span>
 		),
 		description: (
 			<EnvironmentDescription
+				canCreatePullRequest={canCreatePullRequest}
 				commit={commit}
 				conversationId={conversationId}
+				existingPullRequest={existingPullRequest}
 				folder={folder}
 				git={git}
+				githubAppEnabled={pullRequestsEnabled}
 				hasWork={hasWork}
-				onOpenCommit={() => setCommitDialogOpen(true)}
+				onFixCi={onAttachTextFile ? handleFixCi : undefined}
+				onFixMergeConflicts={
+					onAttachTextFile ? handleFixMergeConflicts : undefined
+				}
+				onOpenCommit={openCommitDialog}
+				onOpenPullRequest={openPullRequestDialog}
+				onPull={() => {
+					void handleRemoteGit("pull");
+				}}
+				onStop={stopGitOperation}
+				onSync={() => {
+					void handleRemoteGit("sync");
+				}}
+				pullRequest={pullRequest}
+				pullRequestLoading={pullRequestLoading}
+				remote={remote}
+				showLineStats={showLineStats}
 				target={target}
 			/>
 		),
@@ -512,78 +980,50 @@ export function PinnedSummaryPanel({
 				maxItemsPerSection={5}
 				variant="summary"
 			/>
-			<Dialog onOpenChange={setCommitDialogOpen} open={commitDialogOpen}>
-				<DialogContent
-					className="gap-0 overflow-hidden border border-border/70 bg-popover/95 p-0 shadow-2xl sm:max-w-xl"
-					showCloseButton={false}
-				>
-					<DialogHeader className="border-border/60 border-b px-6 pt-5 pb-4">
-						<DialogTitle className="flex items-center gap-2 text-lg">
-							<HugeiconsIcon className="size-5" icon={WorkflowCircle06Icon} />
-							{git?.branch ?? "Repository"}
-						</DialogTitle>
-						<DialogDescription>
-							Choose what to do with the current changes.
-						</DialogDescription>
-					</DialogHeader>
-					<div className="flex flex-col gap-4 px-6 py-5">
-						<label className="flex flex-col gap-2">
-							<span className="font-medium text-xs">Commit message</span>
-							<textarea
-								className="min-h-24 w-full resize-none rounded-xl border border-input bg-background/60 px-3 py-2.5 text-sm outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/20"
-								disabled={commit.status === "loading"}
-								onChange={(event) => setCommitMessage(event.target.value)}
-								placeholder="Leave blank to generate a commit message…"
-								value={commitMessage}
-							/>
-						</label>
-						<label className="flex cursor-pointer items-center gap-3 rounded-lg px-1 py-1 text-sm">
-							<Checkbox
-								checked={includeUnstaged}
-								disabled={commit.status === "loading"}
-								onCheckedChange={(checked) =>
-									setIncludeUnstaged(checked === true)
-								}
-							/>
-							<span className="min-w-0 flex-1">Include unstaged changes</span>
-							<DiffStat stat={{ insertions, deletions }} />
-						</label>
-						{commit.status === "error" && (
-							<p className="rounded-lg bg-destructive/10 px-3 py-2 text-destructive text-xs">
-								{commit.message}
-							</p>
-						)}
-					</div>
-					<div className="border-border/60 border-t p-2">
-						{COMMIT_ACTIONS.map((item) => (
-							<Button
-								className="h-auto w-full justify-start gap-3 rounded-xl px-3 py-2.5 text-left hover:bg-muted/60"
-								disabled={commit.status === "loading"}
-								key={item.action}
-								onClick={() => handleCommitPush(item.action)}
-								type="button"
-								variant="ghost"
-							>
-								<span className="grid size-8 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground">
-									<HugeiconsIcon
-										className={cn(
-											"size-4",
-											commit.status === "loading" && "animate-pulse"
-										)}
-										icon={item.icon}
-									/>
-								</span>
-								<span className="flex min-w-0 flex-col">
-									<span className="font-medium text-sm">{item.label}</span>
-									<span className="font-normal text-muted-foreground text-xs">
-										{item.description}
-									</span>
-								</span>
-							</Button>
-						))}
-					</div>
-				</DialogContent>
-			</Dialog>
+			<GitActionDialog
+				branch={branch}
+				branches={branches}
+				branchesLoading={branchesLoading}
+				commitMessage={commitMessage}
+				deletions={deletions}
+				error={commit.status === "error" ? commit.message : branchError}
+				includeUnstaged={includeUnstaged}
+				insertions={insertions}
+				onBranchMenuOpenChange={handleBranchMenuOpenChange}
+				onCommitMessageChange={setCommitMessage}
+				onCreateBranch={folder ? handleCreateBranch : undefined}
+				onIncludeUnstagedChange={setIncludeUnstaged}
+				onOpenChange={setCommitDialogOpen}
+				onSelectBranch={(nextBranch) => {
+					void handleSelectBranch(nextBranch);
+				}}
+				onSubmit={(action) => {
+					void handleCommitPush(action);
+				}}
+				open={commitDialogOpen}
+				progress={commit.status === "loading" ? commit.phase : undefined}
+			/>
+			<PullRequestDialog
+				baseBranch={baseBranch}
+				branch={branch}
+				deletions={deletions}
+				description={pullRequestDescription}
+				error={pullRequest.status === "error" ? pullRequest.message : null}
+				includeUnstaged={pullRequestIncludeUnstaged}
+				insertions={insertions}
+				onDescriptionChange={setPullRequestDescription}
+				onIncludeUnstagedChange={setPullRequestIncludeUnstaged}
+				onOpenChange={setPullRequestDialogOpen}
+				onSubmit={(action) => {
+					void handlePullRequest(action);
+				}}
+				onTitleChange={setPullRequestTitle}
+				open={pullRequestDialogOpen}
+				progress={
+					pullRequest.status === "loading" ? pullRequest.phase : undefined
+				}
+				title={pullRequestTitle}
+			/>
 		</div>
 	);
 }

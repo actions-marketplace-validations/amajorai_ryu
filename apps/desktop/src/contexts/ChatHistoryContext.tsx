@@ -9,11 +9,17 @@ import {
 	useState,
 } from "react";
 import { useMessagingRows } from "@/src/hooks/useAgentRowStyle.ts";
+import { useSidebarChatPreview } from "@/src/hooks/useSidebarChatPreview.ts";
 import {
 	setConversationIcon,
 	setConversationTitle,
+	setConversationVisibility as setConversationVisibilityApi,
 } from "@/src/lib/api/conversation-flags.ts";
 import { useCoreRefresh } from "@/src/lib/core-refresh.ts";
+import {
+	type ResourceVisibility,
+	toResourceVisibility,
+} from "@/src/lib/resource-visibility.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import type { Conversation, Message } from "@/types/chat.ts";
 
@@ -22,7 +28,9 @@ import type { Conversation, Message } from "@/types/chat.ts";
  * between "this chat is new" and "this chat has not loaded" — see
  * `loadMessagesResult`. */
 interface LoadMessagesResult {
+	hasOlderMessages?: boolean;
 	messages: Message[];
+	olderMessagesCursor?: string;
 	status: "error" | "ok";
 }
 
@@ -61,6 +69,13 @@ interface ChatHistoryContextValue {
 	 * failed fetch as well as an empty thread — use `loadMessagesResult` when the
 	 * caller has to tell those apart. */
 	loadMessages: (id: string) => Promise<Message[]>;
+	/** Fetch the newest message page, or the page immediately before `before`.
+	 * The cursor is an opaque Core message id and is only advanced after the
+	 * page has been merged into the visible transcript. */
+	loadMessagesPageResult: (
+		id: string,
+		before?: string
+	) => Promise<LoadMessagesResult>;
 	/** `loadMessages` with the transport outcome kept: `status: "error"` means the
 	 * node could not be reached (or answered non-2xx), NOT that the conversation
 	 * is empty. The chat surface needs the distinction to show "still loading /
@@ -94,6 +109,11 @@ interface ChatHistoryContextValue {
 	setConversationFolder: (id: string, folderPath?: string) => void;
 	/** Set or clear a conversation glyph (optimistic + Core write-through). */
 	setConversationGlyph: (id: string, icon: GlyphValue) => void;
+	/** Set a conversation's private or team visibility (optimistic + Core write-through). */
+	setConversationVisibility: (
+		id: string,
+		visibility: ResourceVisibility
+	) => Promise<boolean>;
 }
 
 /** The fields a caller may seed on an optimistic draft conversation. */
@@ -135,6 +155,7 @@ interface CoreConversationSummary {
 	run_status: string | null;
 	title: string | null;
 	updated_at: number;
+	visibility?: string;
 	worktree_path: string | null;
 }
 
@@ -162,6 +183,39 @@ interface CoreMessage {
 	sibling_index?: number;
 	source?: string | null;
 	widget_instance_id?: string | null;
+}
+
+interface CoreConversationPage {
+	has_older_messages?: boolean;
+	messages?: CoreMessage[];
+	older_messages_cursor?: string | null;
+}
+
+const CHAT_HISTORY_PAGE_SIZE = 40;
+
+function mapCoreMessages(messages: CoreMessage[] | undefined): Message[] {
+	return (messages ?? []).map((m) => ({
+		id: m.id,
+		role: m.role === "assistant" ? "assistant" : "user",
+		content: m.content,
+		originServer:
+			typeof m.origin_server === "string" ? m.origin_server : undefined,
+		source: m.source ?? undefined,
+		// Carry through the structured parts when Core has them, so the
+		// chat page can rehydrate tool rows + cowork context instead of
+		// only flat text (see ChatPage's hydration).
+		parts: Array.isArray(m.parts) && m.parts.length > 0 ? m.parts : undefined,
+		interrupted: m.interrupted === true,
+		siblingIndex: m.sibling_index,
+		siblingCount: m.sibling_count,
+		siblingIds: m.sibling_ids,
+		parentMessageId: m.parent_message_id,
+		timestamp: m.created_at,
+		widgetInstanceId:
+			typeof m.widget_instance_id === "string"
+				? m.widget_instance_id
+				: undefined,
+	}));
 }
 
 function authHeaders(token: string | null): Record<string, string> {
@@ -217,6 +271,8 @@ function summaryToConversation(summary: CoreConversationSummary): Conversation {
 		lastMessage: summary.last_message,
 		lastMessageRole: summary.last_message_role,
 		lastMessageAt: summary.last_message_at,
+		messageCount: summary.message_count,
+		visibility: toResourceVisibility(summary.visibility),
 	};
 }
 
@@ -235,7 +291,8 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 	// They cost Core a subquery + a decrypt per conversation, so the list is only
 	// asked for them while that row style is switched on — flipping the pref
 	// re-runs this effect and the previews arrive (or stop) on the next tick.
-	const wantPreview = useMessagingRows();
+	const [sidebarChatPreview] = useSidebarChatPreview();
+	const wantPreview = useMessagingRows() || sidebarChatPreview;
 
 	const refresh = useCallback(() => {
 		const { url, token } = activeNode;
@@ -303,6 +360,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 				// showing up as a loose chat until Core's row (which carries the same
 				// folder, stamped from the turn's cwd) replaces the draft.
 				folderPath: init?.folderPath,
+				messageCount: 0,
 				messages: [],
 				createdAt: now,
 				updatedAt: now,
@@ -399,6 +457,31 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 		[activeNode]
 	);
 
+	const setConversationVisibility = useCallback(
+		async (id: string, visibility: ResourceVisibility) => {
+			setConversations((prev) =>
+				prev.map((conversation) =>
+					conversation.id === id
+						? { ...conversation, visibility }
+						: conversation
+				)
+			);
+			const { url, token } = activeNode;
+			const success = await setConversationVisibilityApi(
+				{ url, token },
+				id,
+				visibility
+			);
+			if (!success) {
+				// A refresh restores the server value; keeping this best-effort mirrors
+				// the existing pin/archive/icon controls.
+				refresh();
+			}
+			return success;
+		},
+		[activeNode, refresh]
+	);
+
 	const listConversations = useCallback(
 		() => [...conversations].sort((a, b) => b.updatedAt - a.updatedAt),
 		[conversations]
@@ -427,34 +510,53 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 				const data: { messages?: CoreMessage[] } = await res.json();
 				return {
 					status: "ok",
-					messages: (data.messages ?? []).map((m) => ({
-						id: m.id,
-						role: m.role === "assistant" ? "assistant" : "user",
-						content: m.content,
-						originServer:
-							typeof m.origin_server === "string" ? m.origin_server : undefined,
-						source: m.source ?? undefined,
-						// Carry through the structured parts when Core has them, so the
-						// chat page can rehydrate tool rows + cowork context instead of
-						// only flat text (see ChatPage's hydration).
-						parts:
-							Array.isArray(m.parts) && m.parts.length > 0
-								? m.parts
-								: undefined,
-						interrupted: m.interrupted === true,
-						siblingIndex: m.sibling_index,
-						siblingCount: m.sibling_count,
-						siblingIds: m.sibling_ids,
-						parentMessageId: m.parent_message_id,
-						timestamp: m.created_at,
-						widgetInstanceId:
-							typeof m.widget_instance_id === "string"
-								? m.widget_instance_id
-								: undefined,
-					})),
+					messages: mapCoreMessages(data.messages),
 				};
 			} catch {
 				return { status: "error", messages: [] };
+			}
+		},
+		[activeNode]
+	);
+
+	const loadMessagesPageResult = useCallback(
+		async (id: string, before?: string): Promise<LoadMessagesResult> => {
+			const { url, token } = activeNode;
+			const query = new URLSearchParams({
+				limit: String(CHAT_HISTORY_PAGE_SIZE),
+			});
+			if (before) {
+				query.set("before", before);
+			}
+			try {
+				const res = await fetch(
+					`${url}/api/conversations/${encodeURIComponent(id)}?${query.toString()}`,
+					{
+						headers: authHeaders(token),
+					}
+				);
+				if (res.status === 404) {
+					return {
+						hasOlderMessages: false,
+						messages: [],
+						status: "ok",
+					};
+				}
+				if (!res.ok) {
+					return { messages: [], status: "error" };
+				}
+				const data: CoreConversationPage = await res.json();
+				return {
+					hasOlderMessages: data.has_older_messages === true,
+					messages: mapCoreMessages(data.messages),
+					olderMessagesCursor:
+						typeof data.older_messages_cursor === "string"
+							? data.older_messages_cursor
+							: undefined,
+					status: "ok",
+				};
+			} catch {
+				return { messages: [], status: "error" };
 			}
 		},
 		[activeNode]
@@ -583,10 +685,12 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			renameConversation,
 			setConversationFolder,
 			setConversationGlyph,
+			setConversationVisibility,
 			setActiveConversationId,
 			listConversations,
 			loadMessages,
 			loadMessagesResult,
+			loadMessagesPageResult,
 			forkConversation,
 			editMessage,
 			regenerateMessage,
@@ -604,9 +708,11 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			renameConversation,
 			setConversationFolder,
 			setConversationGlyph,
+			setConversationVisibility,
 			listConversations,
 			loadMessages,
 			loadMessagesResult,
+			loadMessagesPageResult,
 			forkConversation,
 			editMessage,
 			regenerateMessage,

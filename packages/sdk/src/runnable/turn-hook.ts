@@ -173,6 +173,7 @@ export function definePlugin(options: DefinePluginOptions): PluginManifest {
 		turn_hooks: options.turnHooks ?? [],
 		hook_events: options.hookEvents ?? [],
 		composer_controls: options.composerControls ?? [],
+		chat_features: [],
 		settings_tabs: options.settingsTabs ?? [],
 		slash_commands: options.slashCommands ?? [],
 		lsp_servers: options.lspServers ?? {},
@@ -188,6 +189,7 @@ export function definePlugin(options: DefinePluginOptions): PluginManifest {
 		data_categories: [],
 		pi_extensions: [],
 		output_styles: [],
+		message_actions: [],
 	};
 	// Ship each inline tool as a `kind:"tool"` runnable (Core's `inline_deno`
 	// backend). Shipping tools requires the `tool:execute` grant; add it once.

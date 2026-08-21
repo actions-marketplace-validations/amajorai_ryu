@@ -23,7 +23,6 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@ryu/ui/components/select";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
 import { type ChangeEvent, type FormEvent, useMemo, useState } from "react";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
@@ -334,8 +333,7 @@ export function MemoryEditor({
 						<Button onClick={onClose} type="button" variant="ghost">
 							Cancel
 						</Button>
-						<Button disabled={busy || !content.trim()} type="submit">
-							{busy ? <Spinner className="size-4" /> : null}
+						<Button disabled={!content.trim()} loading={busy} type="submit">
 							{isEditing ? "Save changes" : "Create memory"}
 						</Button>
 					</DialogFooter>

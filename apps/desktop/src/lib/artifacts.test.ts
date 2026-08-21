@@ -218,14 +218,14 @@ describe("extractArtifacts — defensive shapes", () => {
 });
 
 describe("extractArtifacts — tool-minted artifacts (render/create)", () => {
-	it("includes an artifact__render payload carried in a tool part input", () => {
+	it("includes an artifact.render payload carried in a tool part input", () => {
 		const arts = extractArtifacts([
 			{
 				id: "m1",
 				role: "assistant",
 				parts: [
 					{
-						type: "tool-artifact__render",
+						type: "tool-artifact.render",
 						toolCallId: "call_9",
 						input: {
 							artifact: {
@@ -245,14 +245,14 @@ describe("extractArtifacts — tool-minted artifacts (render/create)", () => {
 		expect(arts[0]?.sourceMessageId).toBe("m1");
 	});
 
-	it("includes an artifact__create result (url/mime/ids, title from input)", () => {
+	it("includes an artifact.create result (url/mime/ids, title from input)", () => {
 		const arts = extractArtifacts([
 			{
 				id: "m2",
 				role: "assistant",
 				parts: [
 					{
-						type: "tool-artifact__create",
+						type: "tool-artifact.create",
 						toolCallId: "call_10",
 						input: { title: "notes.csv", mime: "text/csv" },
 						output: {
@@ -296,7 +296,7 @@ describe("extractArtifacts — tool-minted artifacts (render/create)", () => {
 			{
 				id: "m4",
 				role: "assistant",
-				parts: [{ type: "tool-artifact__create", toolCallId: "c", input: {} }],
+				parts: [{ type: "tool-artifact.create", toolCallId: "c", input: {} }],
 			},
 		]);
 		expect(arts).toHaveLength(0);

@@ -283,6 +283,55 @@ async fn count_category(state: &ServerState, category: DataCategory) -> u64 {
     }
 }
 
+/// Count one app-declared data category for the uninstall inventory. A category
+/// is only resolvable when both halves exist: the manifest declares it and Core
+/// has a concrete implementation for its id.
+pub(crate) async fn app_category_count(
+    state: &ServerState,
+    manifest: &crate::plugin_manifest::PluginManifest,
+    category_id: &str,
+) -> Option<u64> {
+    let declared = manifest.contributes.as_ref().is_some_and(|contributes| {
+        contributes
+            .data_categories
+            .iter()
+            .any(|category| category.id == category_id)
+    });
+    if !declared {
+        return None;
+    }
+    let category = DataCategory::from_id(category_id)?;
+    Some(count_category(state, category).await)
+}
+
+/// Clear one app-declared data category through the same per-item side effects
+/// as the danger-zone endpoint. Unknown declarations fail closed instead of
+/// silently reporting success to uninstall.
+pub(crate) async fn clear_app_category(
+    state: &ServerState,
+    manifest: &crate::plugin_manifest::PluginManifest,
+    category_id: &str,
+) -> anyhow::Result<u64> {
+    let declared = manifest.contributes.as_ref().is_some_and(|contributes| {
+        contributes
+            .data_categories
+            .iter()
+            .any(|category| category.id == category_id)
+    });
+    if !declared {
+        anyhow::bail!("data category '{category_id}' is not declared by this app");
+    }
+    match DataCategory::from_id(category_id) {
+        Some(DataCategory::Monitors) => clear_all_monitors(state).await.map_err(anyhow::Error::msg),
+        Some(DataCategory::Meetings) => clear_all_meetings(state).await.map_err(anyhow::Error::msg),
+        Some(category) => anyhow::bail!(
+            "data category '{}' is Core-owned and cannot be cleared as app data",
+            category.id()
+        ),
+        None => anyhow::bail!("Core has no clear implementation for '{category_id}'"),
+    }
+}
+
 /// `POST /api/data/clear`  body: `{ "category": "chats" }`
 ///
 /// Irreversibly delete every item in one category. Returns `{ removed: N }` with

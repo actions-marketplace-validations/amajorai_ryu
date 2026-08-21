@@ -32,6 +32,12 @@ export interface CliIO {
 export interface GlobalFlags {
 	/** `--cascade` — opt into disabling/uninstalling the dependent chain too. */
 	cascade: boolean;
+	/** `--dry-run` — preview a mutating command without applying changes. */
+	dryRun: boolean;
+	/** `--fix` — apply the safe fixes owned by the command, when supported. */
+	fix: boolean;
+	/** `--include-secrets` — include an encrypted local secret envelope. */
+	includeSecrets: boolean;
 	/** `--force` — override a refused update (downgrade). */
 	force: boolean;
 	/** `-h`/`--help`. */

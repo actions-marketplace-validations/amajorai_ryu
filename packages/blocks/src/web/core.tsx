@@ -2,6 +2,7 @@
 
 import { SquareLock01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
@@ -180,7 +181,7 @@ function CostViz() {
 			</div>
 			<p className="text-foreground/60 text-sm tabular-nums">
 				<span className="font-medium text-foreground">
-					{tokens.toLocaleString()}
+					{formatCount(tokens)}
 				</span>{" "}
 				tokens used
 			</p>
@@ -429,7 +430,7 @@ const cards: {
 		viz: <MediaViz />,
 		title: "Voice & Image",
 		description:
-			"Image generation, text-to-speech, and speech-to-text built in. Every modality first-class, all swappable, all local.",
+			"Image generation, audio, and voice recognition built in. Every modality first-class, all swappable, all local.",
 		span: "md:col-span-2",
 	},
 ];

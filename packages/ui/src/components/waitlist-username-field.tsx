@@ -6,7 +6,6 @@ import { useId, useState } from "react";
 import { cn } from "../lib/utils.ts";
 import { Button } from "./button.tsx";
 import { METAL_EDGE_TILE_RING_PX, MetalEdge } from "./metal-edge.tsx";
-import { Spinner } from "./spinner.tsx";
 
 /**
  * "Reserve your handle" field for the waitlist screens. Presentational only —
@@ -118,17 +117,14 @@ export function WaitlistUsernameField({
 				{onUnreserve ? (
 					<Button
 						className="flex-1"
-						disabled={pending}
+						loading={pending}
 						onClick={onUnreserve}
 						size="lg"
 						type="button"
 						variant="destructive"
 					>
 						{pending ? (
-							<span className="flex items-center gap-2">
-								<Spinner className="size-3.5" />
-								Releasing
-							</span>
+							"Releasing"
 						) : (
 							<>
 								<HugeiconsIcon icon={SeatSelectorIcon} size={18} />
@@ -216,15 +212,13 @@ export function WaitlistUsernameField({
 					    left the pair a notch out of alignment. */}
 				<Button
 					className="h-16 w-full"
-					disabled={pending || !valid}
+					disabled={!valid}
+					loading={pending}
 					size="lg"
 					type="submit"
 				>
 					{pending ? (
-						<span className="flex items-center gap-2">
-							<Spinner className="size-3.5" />
-							Reserving
-						</span>
+						"Reserving"
 					) : (
 						<>
 							<HugeiconsIcon icon={SeatSelectorIcon} size={18} />

@@ -11,9 +11,9 @@ import {
 	DialogTitle,
 	DialogTrigger,
 } from "@ryu/ui/components/dialog";
-import { IconSwap } from "@ryu/ui/components/icon-swap";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
+import { MorphIconSwap } from "@ryu/ui/components/morph-icon";
 import { OTPInput, type OTPStatus } from "@ryu/ui/components/motion/otp-input";
 import { ExpandableQRCode } from "@ryu/ui/components/qr-code";
 import { Separator } from "@ryu/ui/components/separator";
@@ -92,7 +92,10 @@ export function TwoFactorDialog({
 			if (result.error) {
 				throw new Error(result.error.message);
 			}
-			setTotpUri(result.data?.totpURI ?? "");
+			if (result.data?.method !== "totp") {
+				throw new Error("Two-factor setup did not return a TOTP secret.");
+			}
+			setTotpUri(result.data.totpURI);
 			setStep("qr");
 		} catch (error) {
 			sileo.error({
@@ -448,13 +451,9 @@ export function TwoFactorDialog({
 											onClick={copyAllBackupCodes}
 											variant="ghost"
 										>
-											<IconSwap
-												a={
-													<HugeiconsIcon className="size-4" icon={Copy01Icon} />
-												}
-												b={
-													<HugeiconsIcon className="size-4" icon={Tick01Icon} />
-												}
+											<MorphIconSwap
+												a={Copy01Icon}
+												b={Tick01Icon}
 												className="mr-2 size-4"
 												state={copiedAll ? "b" : "a"}
 											/>

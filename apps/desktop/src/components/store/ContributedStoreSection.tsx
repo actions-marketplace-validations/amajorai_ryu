@@ -26,8 +26,8 @@ import {
 	Alert01Icon,
 	CheckmarkCircle02Icon,
 	Download01Icon,
-	GridIcon,
 	Link01Icon,
+	Package01Icon,
 	Settings01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -41,7 +41,6 @@ import {
 	storeDetailObject,
 	storeGraphFromResponse,
 	storeItemHaystack,
-	storeItemsFromResponse,
 	type ViewAction,
 } from "@ryu/app-host/views";
 import { InstallProgressButton } from "@ryu/blocks/desktop/install-button";
@@ -64,6 +63,7 @@ import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -78,6 +78,7 @@ import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useDebouncedValue } from "@/src/hooks/use-debounced-value.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
+import { useContributedStoreCatalog } from "@/src/hooks/useContributedStoreCatalog.ts";
 import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
 import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
 import type { PluginStoreTab } from "@/src/lib/api/plugins.ts";
@@ -86,7 +87,7 @@ import StoreDetailGraph from "./StoreDetailGraph.tsx";
 const SEARCH_DEBOUNCE_MS = 200;
 
 /** Fallback glyph when neither the tab nor the row declares one. */
-const FALLBACK_ICON = GridIcon;
+const FALLBACK_ICON = Package01Icon;
 
 function TabIcon({ icon, className }: { className?: string; icon?: string }) {
 	if (icon) {
@@ -430,42 +431,6 @@ function CardAction({
 	);
 }
 
-/**
- * Read a contributed tab's catalog through the host's authenticated Core seam. The
- * spec only ever names a Core-relative `/api/` path ({@link isCoreApiPath}), so it
- * can never point the node's credentials somewhere else — the same guard the
- * declarative views apply.
- */
-function useContributedCatalog(tab: PluginStoreTab, enabled: boolean) {
-	const node = useActiveNode();
-	const source = tab.spec?.source;
-	return useQuery({
-		queryKey: ["store-tab-catalog", tab.plugin, tab.id, node.url],
-		enabled: enabled && Boolean(source),
-		queryFn: async () => {
-			if (!source) {
-				return [];
-			}
-			const path = source.http.path;
-			if (!isCoreApiPath(path)) {
-				throw new Error(`store tab source path must start with /api/: ${path}`);
-			}
-			const target = toTarget(node);
-			const resp = await fetch(apiUrl(target, path), {
-				method: source.http.method ?? "GET",
-				headers: makeHeaders(target.token),
-			});
-			if (!resp.ok) {
-				throw new Error(`${path} failed: ${resp.status}`);
-			}
-			return storeItemsFromResponse(
-				tab.spec as StoreTabSpec,
-				await resp.json()
-			);
-		},
-	});
-}
-
 /** Flatten an install response into `{{result.<key>}}` template values. Only scalar
  *  leaves are exposed — a nested object in a route template would stringify to JSON
  *  and produce a broken path. */
@@ -504,14 +469,14 @@ export default function ContributedStoreSection({
 	const queryClient = useQueryClient();
 	const { openTab } = useTabsContext();
 	const spec = tab.spec;
-	const catalog = useContributedCatalog(tab, tab.app_enabled);
+	const catalog = useContributedStoreCatalog(tab, tab.app_enabled);
 
 	const groups = useMemo(() => {
 		if (!spec) {
 			return [];
 		}
 		const q = debouncedQuery.trim().toLowerCase();
-		const rows = (catalog.data ?? []).filter(
+		const rows = (catalog.data?.items ?? []).filter(
 			(item) => !q || storeItemHaystack(spec, item).includes(q)
 		);
 		return groupStoreItems(spec, rows);
@@ -656,6 +621,15 @@ export default function ContributedStoreSection({
 						This tab declares no catalog to browse.
 					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button
+						onClick={() => openTab("/store", { title: "Store" })}
+						size="sm"
+						variant="ghost"
+					>
+						Browse other Store tabs
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
@@ -693,7 +667,11 @@ export default function ContributedStoreSection({
 					groups={groups}
 					isInstalled={isInstalled}
 					loading={catalog.isLoading}
+					onClearSearch={() => setQuery("")}
 					onInstall={handleInstall}
+					onRetry={() => {
+						void catalog.refetch();
+					}}
 					onSelect={setSelectedId}
 					pendingId={pendingId}
 					selectedId={selectedId}
@@ -724,13 +702,17 @@ function CatalogList({
 	isInstalled,
 	onSelect,
 	onInstall,
+	onClearSearch,
+	onRetry,
 }: {
 	error: string | null;
 	groups: { items: StoreCatalogItem[]; label: string; value: string }[];
 	isInstalled: (item: StoreCatalogItem) => boolean;
 	loading: boolean;
 	onInstall: (item: StoreCatalogItem) => void;
+	onClearSearch: () => void;
 	onSelect: (id: string) => void;
+	onRetry: () => void;
 	pendingId: string | null;
 	selectedId: string | null;
 	spec: StoreTabSpec;
@@ -746,9 +728,20 @@ function CatalogList({
 	}
 	if (error && total === 0) {
 		return (
-			<div className="p-4 text-destructive text-sm">
-				Couldn't load {tab.title}: {error}
-			</div>
+			<Empty className="h-full p-6">
+				<EmptyHeader>
+					<EmptyMedia variant="icon">
+						<TabIcon icon={tab.icon} />
+					</EmptyMedia>
+					<EmptyTitle>Couldn&apos;t load {tab.title}</EmptyTitle>
+					<EmptyDescription>{error}</EmptyDescription>
+				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onRetry} size="sm" variant="ghost">
+						Try again
+					</Button>
+				</EmptyContent>
+			</Empty>
 		);
 	}
 	if (total === 0) {
@@ -763,6 +756,11 @@ function CatalogList({
 						{spec.empty?.description ?? "Try a different search."}
 					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onClearSearch} size="sm" variant="ghost">
+						Clear search
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}

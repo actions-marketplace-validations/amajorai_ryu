@@ -289,7 +289,7 @@ function scaffold(flags) {
 	}
 	if (!/^[a-z0-9][a-z0-9_.-]*$/.test(slug)) {
 		die(
-			`--tool '${slug}' must match [a-z0-9][a-z0-9_.-]* (it becomes the callable id app__${slug})`
+			`--tool '${slug}' must match [a-z0-9][a-z0-9_.-]* (it becomes the callable id app.${slug})`
 		);
 	}
 
@@ -367,7 +367,7 @@ function toolSeat(slug, kind, codeFile) {
 					selectable: true,
 					tools: {
 						[slug]: {
-							tool: "provider__tool",
+							tool: "provider.tool",
 							adapter: { code_file: codeFile },
 						},
 					},

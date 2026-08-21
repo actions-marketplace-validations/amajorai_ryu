@@ -23,8 +23,9 @@ describe("Dream and Reflect memory clients", () => {
 	});
 
 	it("maps Dream proposals into the UI diff shape", async () => {
-		globalThis.fetch = (async () =>
-			jsonResponse({
+		globalThis.fetch = Object.assign(
+			async () =>
+				jsonResponse({
 				proposals: [
 					{
 						created_at: 1,
@@ -39,7 +40,9 @@ describe("Dream and Reflect memory clients", () => {
 						source: "chat",
 					},
 				],
-			})) as typeof globalThis.fetch;
+				}),
+			{ preconnect: nativeFetch.preconnect }
+		);
 
 		const review = await getDreamReview(target);
 		expect(review.proposals[0]).toMatchObject({
@@ -56,14 +59,20 @@ describe("Dream and Reflect memory clients", () => {
 
 	it("uses the expected Dream mutation routes and request bodies", async () => {
 		const calls: Array<{ body: string; method: string; url: string }> = [];
-		globalThis.fetch = (async (input, init) => {
+		globalThis.fetch = Object.assign(
+			async (
+				input: Parameters<typeof fetch>[0],
+				init?: Parameters<typeof fetch>[1]
+			) => {
 			calls.push({
 				body: String(init?.body ?? ""),
 				method: init?.method ?? "GET",
 				url: String(input),
 			});
 			return jsonResponse({ memory: { content: "saved", id: "memory-1" } });
-		}) as typeof globalThis.fetch;
+			},
+			{ preconnect: nativeFetch.preconnect }
+		);
 
 		await runDreamReview(target, "manual");
 		await acceptMemoryProposal(target, "proposal/1");
@@ -78,8 +87,9 @@ describe("Dream and Reflect memory clients", () => {
 	});
 
 	it("maps Reflect activity, topics, and insights", async () => {
-		globalThis.fetch = (async () =>
-			jsonResponse({
+		globalThis.fetch = Object.assign(
+			async () =>
+				jsonResponse({
 				activity: [{ count: 12, label: "Conversations", trend: 25 }],
 				insights: [
 					{
@@ -91,7 +101,9 @@ describe("Dream and Reflect memory clients", () => {
 				],
 				period: "30d",
 				topics: [{ count: 4, name: "Writing", summary: "Drafts and edits" }],
-			})) as typeof globalThis.fetch;
+				}),
+			{ preconnect: nativeFetch.preconnect }
+		);
 
 		const dashboard = await getReflectDashboard(target, "7d");
 		expect(dashboard.period).toBe("30d");
@@ -105,7 +117,8 @@ describe("Dream and Reflect memory clients", () => {
 	});
 
 	it("falls back to the privacy-gated usage review route on older nodes", async () => {
-		globalThis.fetch = (async (input) => {
+		globalThis.fetch = Object.assign(
+			async (input: Parameters<typeof fetch>[0]) => {
 			const url = String(input);
 			if (url.includes("/api/memory/reflect?")) {
 				return new Response(JSON.stringify({ error: "not_found" }), {
@@ -119,7 +132,9 @@ describe("Dream and Reflect memory clients", () => {
 					{ conversation_count: 2, label: "Planning", message_count: 8 },
 				],
 			});
-		}) as typeof globalThis.fetch;
+			},
+			{ preconnect: nativeFetch.preconnect }
+		);
 
 		const dashboard = await getReflectDashboard(target, "7d");
 		expect(dashboard.activity.map((item) => item.label)).toEqual([

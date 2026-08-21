@@ -34,6 +34,8 @@ export interface SpaceDocument {
 	id: string;
 	spaceId: string;
 	title: string;
+	/** Unix milliseconds. */
+	updatedAt: number;
 }
 
 /** A single ranked chunk returned from a Space search. */
@@ -76,6 +78,7 @@ interface DocumentWire {
 	id: string;
 	space_id: string;
 	title: string;
+	updated_at?: number;
 }
 
 interface MatchWire {
@@ -103,6 +106,7 @@ function toDocument(d: DocumentWire): SpaceDocument {
 		spaceId: d.space_id,
 		title: d.title,
 		createdAt: d.created_at,
+		updatedAt: d.updated_at ?? d.created_at,
 		chunkCount: d.chunk_count,
 		icon: d.icon ?? null,
 	};

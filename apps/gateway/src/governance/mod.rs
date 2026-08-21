@@ -162,10 +162,17 @@ fn reserved_namespaces() -> Vec<String> {
         // reason; `pi` was omitted, which made the "operator-only" claim in
         // pi_config/app_extensions.rs false until now.
         "pi",
+        // The warmup bridge is a Core-owned host capability. Keep the namespace
+        // reserved so an app such as `com.evil.warmup` cannot self-approve it.
+        "warmup",
         // Turn-hook phases, host-shell integration, the app KV store, the
         // follow-up-message verb, sandboxed widget promotion, media engines,
         // native-desktop capture/replay, and Core's own listing verbs.
         "hook",
+        // Native effects are a host primitive rather than an app-owned
+        // namespace. The exact actions are reviewed below; reserving the
+        // namespace prevents an app named `native` from self-approving them.
+        "native",
         "shell",
         "storage",
         "chat",
@@ -235,7 +242,7 @@ fn default_grant_allowlist() -> Vec<String> {
         "tools.invoke",
         // Per-server MCP tool grants that the seeded system MCP-tool plugins
         // declare in their `permission_grants` (`spider`, `agentbrowser`,
-        // `scrapling`, `ghost`, `shadow`). `mcp` is a RESERVED namespace (the MCP tool plane
+        // `ghost`, `shadow`). `mcp` is a RESERVED namespace (the MCP tool plane
         // is a host primitive, and `mcp:<name>` names someone else's server), so
         // the owner-scoped rule never covers these even for a plugin whose id IS
         // the server name — each needs its own exact entry here. Without them a
@@ -246,7 +253,6 @@ fn default_grant_allowlist() -> Vec<String> {
         // `mcp:web_search`/`mcp:file_read` are intentionally NOT here.)
         "mcp:spider",
         "mcp:agentbrowser",
-        "mcp:scrapling",
         // `@ryu/news` and `@ryu/tuition` are apps rather than plugins, but they hit
         // the same rule for the same reason: each declares its OWN server in
         // `mcp_servers` (`news`, `tuition`) and grants itself `mcp:<that server>`.
@@ -300,7 +306,7 @@ fn default_grant_allowlist() -> Vec<String> {
         // OpenAPI, covering both `/v3/memories/search/` and `/v1/memories/{id}/`).
         "tool:http-egress:api.mem0.ai",
         // `honcho` is the same shape again, and the first `memory` provider that
-        // serves `memory__context`. One host covers both its tools: the `servers`
+        // serves `memory.context`. One host covers both its tools: the `servers`
         // entry in Honcho's own OpenAPI is `https://api.honcho.dev` (Production SaaS
         // Platform), carrying `/v3/workspaces/{ws}/peers/{peer}/chat` and
         // `/v3/workspaces/{ws}/peers/{peer}/search`.
@@ -329,7 +335,7 @@ fn default_grant_allowlist() -> Vec<String> {
         "tool:http-egress:127.0.0.1",
         "mcp:ghost",
         "mcp:shadow",
-        // The Blueprint app's own MCP server (`blueprint__plan_publish` /
+        // The Blueprint app's own MCP server (`blueprint.plan_publish` /
         // `plan_status` / `plan_get` / `step_update`), declared in
         // `apps-store/blueprint/manifest.json`. This is NOT the per-app-string
         // anti-pattern the doc above warns about, and the distinction is the reserved
@@ -376,6 +382,14 @@ fn default_grant_allowlist() -> Vec<String> {
         "identity.read",
         // Cross-plugin host capabilities used by seeded UX and usage bridges.
         "app:http",
+        // Companion apps use these generic host bridges to reach their own
+        // transport surfaces. `app` is reserved, so the owner-scoped rule cannot
+        // approve either grant even when the manifest id is `@ryu/<app>`.
+        "app:realtime",
+        // Warmup is a Core-owned host bridge rather than an app-owned namespace.
+        // Keep its explicit grant reviewed so the reserved `warmup` namespace
+        // cannot be self-approved by a lookalike app.
+        "warmup:crud",
         "preferences:write",
         "usage:read",
         // Widget-render consent: a plugin (built-in Ryu App or third-party MCP
@@ -397,6 +411,22 @@ fn default_grant_allowlist() -> Vec<String> {
         "core:list_agents",
         "media:generate",
         "media:transcribe",
+        // Native host effects. These are narrow, bounded actions: haptics,
+        // user-visible notifications, and Live Activity / ongoing-status
+        // updates. The app-host RPC still checks the per-call input bounds and
+        // the receiving surface may report the action as unavailable.
+        "native:haptics",
+        "native:notifications",
+        "native:live_activities",
+        // Turn hooks use this grant for the Core-owned in-app/desktop
+        // notification feed. It is separate from the native effects above so
+        // a plugin can be allowed to notify in-app without receiving phone or
+        // browser notification authority.
+        "notifications:send",
+        // ReelFarm can hand captions to the Outpost social sidecar through the
+        // cross-app host bridge. `social` is reserved, so this safe capability
+        // needs an exact reviewed entry rather than an owner-scoped match.
+        "social:crud",
         // The two host primitives the seeded `chat-title` plugin needs to do its
         // one job: rename the conversation it just summarised, and read the
         // preferences that say whether (and how often) it should. They gate
@@ -433,14 +463,8 @@ fn default_grant_allowlist() -> Vec<String> {
         "chat.sendFollowUp",
         "hook:run-agent",
         "hook:side-model",
-        // `host.runHook` — a plugin re-running one of its OWN declared turn hooks on
-        // demand (`GRANT_RUN_SELF_HOOK`, `apps/core/src/plugin_host/bridge.rs`).
-        // Declared by the seeded `@ryu/chat-title` plugin, which renames a
-        // conversation from a message action rather than only on the turn boundary.
-        // `hook` is RESERVED, so owning the hook does not owner-scope the grant — the
-        // exact string has to be here or a disable→re-enable is denied with
-        // GrantsDenied.
-        "hook:run-self",
+        // `host.runHook` is restricted to the seeded `@ryu/chat-title` plugin;
+        // it is intentionally not part of the marketplace-wide allowlist.
         // Ghost record→replay: the `@ryu/workflows` RecordToWorkflow flow captures
         // a native-desktop action sequence into a recipe. Cross-namespace (the
         // `ghost` capture plane is a host primitive, not the Workflows app's own
@@ -554,6 +578,36 @@ fn reserved_namespace_list() -> &'static Vec<String> {
     RESERVED.get_or_init(reserved_namespaces)
 }
 
+/// First-party app ids whose capability namespaces are protected from
+/// same-segment squatting. Keep both the current scoped ids and the legacy ids
+/// accepted by the marketplace alias map so either spelling remains an exact
+/// owner, while `com.evil.<name>` is not.
+fn protected_owner_id_list() -> &'static Vec<String> {
+    static PROTECTED: OnceLock<Vec<String>> = OnceLock::new();
+    PROTECTED.get_or_init(|| {
+        [
+            "monitors",
+            "mail",
+            "finetune",
+            "activity",
+            "timeline",
+            "calendar",
+            "learning",
+            "approvals",
+            "meetings",
+            "simulator",
+            "webhooks",
+            "drafts",
+            "social",
+            "crm",
+            "workflows",
+        ]
+        .into_iter()
+        .flat_map(|name| [format!("@ryu/{name}"), format!("com.ryu.{name}")])
+        .collect()
+    })
+}
+
 /// Whether the owner-scoped self-grant rule is active (default `true`; see
 /// [`ENV_OWNER_SCOPED_GRANTS`]). Cached for the process lifetime.
 fn owner_scoped_grants_enabled() -> bool {
@@ -584,6 +638,7 @@ fn grant_policy() -> GrantPolicy<'static> {
         allowlist: grant_allowlist(),
         reserved_namespaces: reserved_namespace_list(),
         owner_scoped: owner_scoped_grants_enabled(),
+        protected_owner_ids: protected_owner_id_list(),
     }
 }
 
@@ -596,6 +651,20 @@ fn grant_policy() -> GrantPolicy<'static> {
 /// `app_id` is `None` when the caller did not identify itself, which disables
 /// owner-scoping for the request — fail-closed to the pre-grammar behavior.
 pub fn validate_grants_for(app_id: Option<&str>, grants: &[String]) -> GrantDecision {
+    if app_id.is_some_and(|id| {
+        id.trim().eq_ignore_ascii_case("@ryu/chat-title")
+            || id.trim().eq_ignore_ascii_case("com.ryu.chat-title")
+    }) {
+        let mut allowlist = grant_allowlist().clone();
+        allowlist.push("hook:run-self".to_string());
+        let policy = GrantPolicy {
+            allowlist: &allowlist,
+            reserved_namespaces: reserved_namespace_list(),
+            owner_scoped: owner_scoped_grants_enabled(),
+            protected_owner_ids: protected_owner_id_list(),
+        };
+        return ryu_gw_governance::validate_grants_for(app_id, grants, &policy);
+    }
     ryu_gw_governance::validate_grants_for(app_id, grants, &grant_policy())
 }
 
@@ -785,6 +854,23 @@ mod tests {
     }
 
     #[test]
+    fn native_host_grants_are_reviewed_and_approved() {
+        let d = validate_grants_for(
+            Some("@ryu/tokenmaxxing"),
+            &scopes(&[
+                "native:haptics",
+                "native:notifications",
+                "native:live_activities",
+                "notifications:send",
+                "storage:kv",
+            ]),
+        );
+        assert!(d.all_approved());
+        assert_eq!(d.approved.len(), 5);
+        assert!(d.denied.is_empty());
+    }
+
+    #[test]
     fn unknown_grant_is_denied_and_blocks() {
         // Neither allowlisted nor owner-scoped (`filesystem` ≠ `canvas`).
         let d = validate_grants_for(
@@ -800,6 +886,25 @@ mod tests {
     fn empty_grants_approve() {
         let d = validate_grants_for(Some("@ryu/monitors"), &[]);
         assert!(d.all_approved());
+    }
+
+    #[test]
+    fn protected_first_party_namespace_rejects_owner_squat() {
+        let owned = validate_grants_for(Some("@ryu/monitors"), &scopes(&["monitors:crud"]));
+        assert!(owned.all_approved(), "denied: {:?}", owned.denied);
+
+        let impostor = validate_grants_for(Some("com.evil.monitors"), &scopes(&["monitors:crud"]));
+        assert_eq!(impostor.denied, vec!["monitors:crud".to_string()]);
+    }
+
+    #[test]
+    fn manual_hook_grant_is_restricted_to_seeded_chat_title() {
+        let seeded = validate_grants_for(Some("@ryu/chat-title"), &scopes(&["hook:run-self"]));
+        assert!(seeded.all_approved());
+
+        let third_party =
+            validate_grants_for(Some("com.acme/chat-title"), &scopes(&["hook:run-self"]));
+        assert_eq!(third_party.denied, vec!["hook:run-self".to_string()]);
     }
 
     #[test]
@@ -892,7 +997,6 @@ mod tests {
             // per-server MCP tool grants from the seeded system MCP-tool plugins
             ("spider", "mcp:spider"),
             ("agentbrowser", "mcp:agentbrowser"),
-            ("scrapling", "mcp:scrapling"),
             ("ghost", "mcp:ghost"),
             ("shadow", "mcp:shadow"),
             // declarative `http` / `command` tool plugins
@@ -1106,6 +1210,7 @@ mod tests {
             allowlist: &parsed,
             reserved_namespaces: &reserved,
             owner_scoped: true,
+            protected_owner_ids: &[],
         };
         let d = ryu_gw_governance::validate_grants_for(
             Some("@ryu/browser"),
@@ -1140,6 +1245,7 @@ mod tests {
             allowlist: &allow,
             reserved_namespaces: &reserved,
             owner_scoped: false,
+            protected_owner_ids: &[],
         };
         let d = ryu_gw_governance::validate_grants_for(
             Some("@ryu/monitors"),
@@ -1287,6 +1393,21 @@ mod tests {
                 .collect();
             let decision = validate_grants_for(Some(app_id), &declared);
             for denied in decision.denied {
+                // Community managed-sidecar, MCP-server, Scrapling, and Pi-extension
+                // packages intentionally declare operator-only grants. They must
+                // stay absent from the default allowlist; the dedicated
+                // reserved-namespace tests below pin that fail-closed policy.
+                // This fixture audit covers the safe host vocabulary, not operator
+                // opt-ins. Core-tier packages may still use the host gate directly.
+                if matches!(
+                    denied.as_str(),
+                    "sidecar:process"
+                        | "mcp:server"
+                        | "mcp:scrapling"
+                        | "pi:extension"
+                ) {
+                    continue;
+                }
                 failures.push(format!("{name} ({app_id}): '{denied}'"));
             }
             checked_grants += declared.len();

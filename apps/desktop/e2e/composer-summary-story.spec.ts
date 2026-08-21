@@ -91,6 +91,41 @@ test("a mode value with no style keeps its text (opencode's `build`)", async ({
 	expect(text).toContain("Build");
 });
 
+test("a full-access-equivalent ACP mode requires confirmation", async ({
+	page,
+}) => {
+	await page.goto(STORY_URL);
+	const bar = trigger(page, "ryu");
+	await bar.click();
+	await page.getByRole("menuitem", { name: "Approval" }).click();
+	await page.getByRole("menuitem", { name: "Bypass permissions" }).click();
+
+	const dialog = page.getByRole("alertdialog");
+	await expect(dialog).toBeVisible();
+	await expect(
+		dialog.getByRole("heading", { name: "Turn on Full Access?" })
+	).toBeVisible();
+	await expect(
+		dialog.getByText("Files and folders", { exact: true })
+	).toBeVisible();
+	await expect(
+		dialog.getByText(/without your permission/, { exact: false })
+	).toBeVisible();
+	await page.screenshot({
+		path: "e2e/harness/full-access-warning-proof.png",
+		fullPage: false,
+	});
+
+	await dialog.getByRole("button", { name: "Cancel" }).click();
+	await expect(dialog).toBeHidden();
+	await bar.click();
+	await page.getByRole("menuitem", { name: "Approval" }).click();
+	await page.getByRole("menuitem", { name: "Bypass permissions" }).click();
+	await page.getByRole("button", { name: "Confirm" }).click();
+	await expect(page.getByRole("alertdialog")).toBeHidden();
+	await expect(bar).toHaveAttribute("aria-label", /Bypass permissions/);
+});
+
 test("the picker adapts to its composer container", async ({ page }) => {
 	await page.goto(STORY_URL);
 

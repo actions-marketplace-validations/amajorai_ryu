@@ -1,4 +1,4 @@
-//! Built-in "send to channel" action (`channel__send`).
+//! Built-in "send to channel" action (`channel.send`).
 //!
 //! An agent-callable tool that posts a message to a Slack/Discord **incoming
 //! webhook** URL passed directly in the args. v1 takes the webhook URL inline so
@@ -38,7 +38,7 @@ fn send_schema() -> Value {
 /// The channel tools exposed through the registry.
 pub fn tools() -> Vec<RegistryTool> {
     vec![RegistryTool {
-        id: format!("{SERVER_NAME}__send"),
+        id: format!("{SERVER_NAME}.send"),
         server: SERVER_NAME.to_owned(),
         name: "send".to_owned(),
         description: Some(
@@ -132,7 +132,7 @@ mod tests {
     fn lists_send_tool_with_qualified_id() {
         let tools = tools();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].id, "channel__send");
+        assert_eq!(tools[0].id, "channel.send");
         assert_eq!(tools[0].server, SERVER_NAME);
     }
 

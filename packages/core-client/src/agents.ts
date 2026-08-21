@@ -46,6 +46,8 @@ export interface AgentSummary {
 	model: string | null;
 	name: string;
 	systemPrompt: string | null;
+	/** Optional role/title badge shown beside the agent name. */
+	title: string;
 	/** Transport backing the agent as Core reports it: `"acp"` (subprocess) or
 	 * `"openai_compat"` (gateway-routed local server). Null for custom store rows
 	 * that don't serialize it. Lets clients decide gateway-need without re-deriving
@@ -83,6 +85,8 @@ export interface Agent {
 	/** Skill id allowlist. Empty = all enabled skills; non-empty = only these. */
 	skills: string[];
 	systemPrompt: string | null;
+	/** Optional role/title badge shown beside the agent name. */
+	title: string;
 	tools: string[];
 	updatedAt: string | null;
 	/** Semver version string (e.g. "1.0.0"). */
@@ -129,6 +133,8 @@ export interface AgentInput {
 	/** Skill id allowlist to bind to this agent. Empty/omitted = all enabled skills. */
 	skills?: string[];
 	systemPrompt: string | null;
+	/** Optional role/title badge shown beside the agent name. */
+	title?: string | null;
 	tools: string[];
 	/** Semver version string to store on save. When omitted on create, Core defaults to "1.0.0". */
 	version?: string;
@@ -163,6 +169,7 @@ interface AgentSummaryWire {
 	model?: string | null;
 	name: string;
 	system_prompt?: string | null;
+	title?: string | null;
 	transport?: string | null;
 	version?: string | null;
 }
@@ -182,6 +189,7 @@ interface AgentRecordWire {
 	orchestrator?: boolean | null;
 	skills?: string[];
 	system_prompt?: string | null;
+	title?: string | null;
 	tools?: string[];
 	updated_at?: string | null;
 	version?: string;
@@ -195,6 +203,7 @@ function toSummary(a: AgentSummaryWire): AgentSummary {
 		systemPrompt: a.system_prompt ?? null,
 		engine: a.engine ?? null,
 		model: a.model ?? null,
+		title: a.title ?? "",
 		installed: a.installed ?? null,
 		installHint: a.install_hint ?? null,
 		// Only registry built-ins serialize `transport`; custom store rows omit it.
@@ -217,6 +226,7 @@ function toAgent(a: AgentRecordWire): Agent {
 		systemPrompt: a.system_prompt ?? null,
 		engine: a.engine ?? null,
 		model: a.model ?? null,
+		title: a.title ?? "",
 		tools: a.tools ?? [],
 		composioActions: a.composio_actions ?? [],
 		skills: a.skills ?? [],
@@ -236,6 +246,7 @@ function toAgent(a: AgentRecordWire): Agent {
 function toAgentBody(input: AgentInput): Record<string, unknown> {
 	const body: Record<string, unknown> = {
 		name: input.name,
+		title: input.title,
 		description: input.description,
 		system_prompt: input.systemPrompt,
 		engine: input.engine,

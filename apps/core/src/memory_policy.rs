@@ -46,7 +46,7 @@ pub const PROVIDER_CONTEXT_KEY: &str = "memory.provider-context";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecallMode {
     /// Nothing is recalled automatically and nothing is injected. The model can
-    /// still deliberately call `memory__search`, which is the point of keeping this
+    /// still deliberately call `memory.search`, which is the point of keeping this
     /// distinct from disabling the memory layer outright.
     Off,
     /// No automatic injection, but the memory tools stay available — recall becomes

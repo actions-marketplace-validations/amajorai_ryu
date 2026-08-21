@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta content="width=device-width, initial-scale=1" name="viewport">
+		<title>Ryu provider usage proof</title>
+	</head>
+	<body>
+		<div id="root"></div>
+		<script>
+		"use strict";
+		localStorage.setItem(
+			"ryu:usage-bar-prefs",
+			JSON.stringify({
+				barStyle: "ring",
+				mode: "remaining",
+				showBar: true,
+				showPercent: false,
+				sidebar: true,
+				visible: true,
+			})
+		);
+		</script>
+		<script src="./ryu-provider-usage-proof.tsx" type="module"></script>
+	</body>
+</html>

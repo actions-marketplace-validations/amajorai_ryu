@@ -28,4 +28,8 @@ describe("formatPrice", () => {
 		expect(formatPrice(1234, "USD")).toContain("12.34");
 		expect(formatPrice(1234, "usd")).toContain("12.34");
 	});
+
+	test("uses lowercase m for million-dollar prices", () => {
+		expect(formatPrice(100_000_000)).toBe("$1m");
+	});
 });

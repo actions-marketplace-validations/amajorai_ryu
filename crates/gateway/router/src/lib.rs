@@ -48,7 +48,8 @@ pub fn builtin_prefixes() -> Vec<(String, String)> {
         ("text-davinci", "openai"),
         // openrouter/ prefix: any model in the form "openrouter/<name>" is
         // dispatched to OpenRouter so the upstream provider's own routing
-        // (e.g. openrouter/auto) takes over AFTER Ryu's guardrails run.
+        // (e.g. openrouter/auto or openrouter/pareto-code) takes over AFTER
+        // Ryu's guardrails run.
         ("openrouter/", "openrouter"),
         // modal/ prefix: any model in the form "modal/<name>" is dispatched
         // to the Ryu Cloud GPU node's Modal inference app (serverless GPU),
@@ -533,6 +534,140 @@ pub fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
+/// Pick an index from relative non-negative weights using a reproducible ticket.
+///
+/// The caller owns the random source; keeping this function pure makes weighted
+/// routing testable without an RNG dependency and lets the Gateway provide either
+/// a configured seed or a process-local seed. Invalid weights are treated as zero,
+/// and `None` is returned when no usable weight remains.
+pub fn weighted_index(weights: &[f32], ticket: u64) -> Option<usize> {
+    let total: f64 = weights
+        .iter()
+        .copied()
+        .filter(|weight| weight.is_finite() && *weight > 0.0)
+        .map(f64::from)
+        .sum();
+    if total <= 0.0 {
+        return None;
+    }
+
+    let unit = ticket as f64 / u64::MAX as f64;
+    let mut cursor = unit * total;
+    let mut last_positive = None;
+    for (index, weight) in weights.iter().copied().enumerate() {
+        if !weight.is_finite() || weight <= 0.0 {
+            continue;
+        }
+        last_positive = Some(index);
+        let weight = f64::from(weight);
+        if cursor < weight {
+            return Some(index);
+        }
+        cursor -= weight;
+    }
+    // Protect the upper-bound ticket (`u64::MAX`) from floating-point rounding.
+    last_positive
+}
+
+/// The model tier selected by the signal-driven stage router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageTarget {
+    Capable,
+    Efficient,
+}
+
+/// Choose a stage-router tier from recent tool/result history.
+///
+/// This is intentionally a small, provider-neutral heuristic. It treats errors,
+/// recovery, and exploration as evidence for the capable tier, while recent writes
+/// and successful tests are evidence for the efficient tier. An ambiguous or empty
+/// history returns the configured default. The confidence gate prevents one weak
+/// token hit from flipping a quality-first route.
+pub fn stage_target(
+    messages: &Value,
+    recent_message_window: usize,
+    confidence_threshold: f32,
+    capable_first: bool,
+) -> StageTarget {
+    let default_target = if capable_first {
+        StageTarget::Capable
+    } else {
+        StageTarget::Efficient
+    };
+    let Some(history) = messages.as_array() else {
+        return default_target;
+    };
+    if history.is_empty() || recent_message_window == 0 {
+        return default_target;
+    }
+
+    let start = history
+        .len()
+        .saturating_sub(recent_message_window.saturating_mul(4).max(1));
+    let mut text = String::new();
+    for message in &history[start..] {
+        if let Ok(serialized) = serde_json::to_string(message) {
+            text.push_str(&serialized.to_ascii_lowercase());
+            text.push('\n');
+        }
+    }
+
+    let errors = count_signal_hits(
+        &text,
+        &[
+            "error",
+            "failed",
+            "failure",
+            "panic",
+            "traceback",
+            "timed out",
+            "timeout",
+            "invalid",
+        ],
+    );
+    let exploration = count_signal_hits(
+        &text,
+        &["read", "search", "grep", "find", "list", "inspect", "explore"],
+    );
+    let production = count_signal_hits(
+        &text,
+        &[
+            "apply_patch",
+            "write",
+            "wrote",
+            "edit",
+            "edited",
+            "created",
+            "test passed",
+            "tests passed",
+            "success",
+        ],
+    );
+
+    let signed_score = errors.saturating_mul(3) as i32 + exploration as i32
+        - production.saturating_mul(2) as i32;
+    if signed_score == 0 {
+        return default_target;
+    }
+
+    let confidence = (signed_score.unsigned_abs() as f32 / 3.0).tanh();
+    if confidence < confidence_threshold.clamp(0.0, 1.0) {
+        return default_target;
+    }
+    if signed_score > 0 {
+        StageTarget::Capable
+    } else {
+        StageTarget::Efficient
+    }
+}
+
+fn count_signal_hits(text: &str, signals: &[&str]) -> usize {
+    signals
+        .iter()
+        .map(|signal| text.match_indices(signal).count())
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +804,12 @@ mod tests {
             "openrouter"
         );
         assert_eq!(t.route("gemini-2.5-pro").0, "genai");
+    }
+
+    #[test]
+    fn openrouter_pareto_code_routes_to_openrouter() {
+        let t = bare("openai");
+        assert_eq!(t.route("openrouter/pareto-code").0, "openrouter");
     }
 
     #[test]
@@ -1128,5 +1269,42 @@ mod tests {
             ]}
         ]);
         assert_eq!(last_user_message(&msgs).as_deref(), Some("describe this"));
+    }
+
+    #[test]
+    fn weighted_index_respects_relative_weights_and_ignores_invalid_values() {
+        assert_eq!(weighted_index(&[1.0, 0.0, f32::NAN, -1.0], 0), Some(0));
+        assert_eq!(weighted_index(&[1.0, 3.0], 0), Some(0));
+        assert_eq!(weighted_index(&[1.0, 3.0], u64::MAX), Some(1));
+        assert_eq!(weighted_index(&[0.0, f32::INFINITY], 42), None);
+    }
+
+    #[test]
+    fn stage_target_uses_errors_and_progress_with_a_default_for_ambiguous_history() {
+        let error_history = json!([
+            {"role": "tool", "content": "command failed with error"}
+        ]);
+        assert_eq!(
+            stage_target(&error_history, 3, 0.5, false),
+            StageTarget::Capable
+        );
+
+        let progress_history = json!([
+            {"role": "assistant", "content": "applied patch; tests passed"}
+        ]);
+        assert_eq!(
+            stage_target(&progress_history, 3, 0.5, true),
+            StageTarget::Efficient
+        );
+
+        let ambiguous = json!([{"role": "user", "content": "hello"}]);
+        assert_eq!(
+            stage_target(&ambiguous, 3, 0.5, true),
+            StageTarget::Capable
+        );
+        assert_eq!(
+            stage_target(&ambiguous, 3, 0.5, false),
+            StageTarget::Efficient
+        );
     }
 }

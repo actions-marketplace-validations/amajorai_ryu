@@ -19,8 +19,10 @@
 //!
 //! ## Engine sharing
 //!
-//! `Engine::default()` initialises the Cranelift JIT compiler once; reusing
-//! the same engine across calls avoids re-initialisation cost (~10–30 ms).
+//! A single engine initialises the Cranelift JIT compiler once; reusing the
+//! same engine across calls avoids re-initialisation cost (~10–30 ms). Epoch
+//! interruption is enabled on that engine so every execution can enforce its
+//! requested wall-clock timeout even when guest code never yields.
 //! `WasmtimeSandbox` holds the engine via `Arc` so clones share it.
 //!
 //! ## Feature gate
@@ -31,6 +33,8 @@
 
 #[cfg(feature = "sandbox-wasmtime")]
 use std::sync::Arc;
+#[cfg(feature = "sandbox-wasmtime")]
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 
@@ -50,6 +54,9 @@ pub struct WasmtimeSandbox {
     engine: Arc<wasmtime::Engine>,
 }
 
+#[cfg(feature = "sandbox-wasmtime")]
+const EPOCH_TICK: Duration = Duration::from_millis(10);
+
 impl WasmtimeSandbox {
     /// Construct the sandbox, initialising the Cranelift JIT engine.
     ///
@@ -58,7 +65,19 @@ impl WasmtimeSandbox {
     pub fn new() -> Result<Self> {
         #[cfg(feature = "sandbox-wasmtime")]
         {
-            let engine = wasmtime::Engine::default();
+            let mut config = wasmtime::Config::new();
+            config.epoch_interruption(true);
+            let engine = wasmtime::Engine::new(&config)?;
+            let weak = engine.weak();
+            std::thread::Builder::new()
+                .name("ryu-wasmtime-epoch".to_owned())
+                .spawn(move || {
+                    while let Some(engine) = weak.upgrade() {
+                        std::thread::sleep(EPOCH_TICK);
+                        engine.increment_epoch();
+                    }
+                })
+                .map_err(|error| anyhow!("failed to start wasmtime epoch ticker: {error}"))?;
             Ok(Self {
                 engine: Arc::new(engine),
             })
@@ -81,7 +100,15 @@ impl Sandbox for WasmtimeSandbox {
         #[cfg(feature = "sandbox-wasmtime")]
         {
             let engine = Arc::clone(&self.engine);
-            Box::pin(async move { exec_wasm(&engine, spec) })
+            // wasmtime-wasi's synchronous WASI shims may drive their own Tokio
+            // runtime. Keep the synchronous guest call off the caller's async
+            // runtime so it cannot try to block the runtime worker that is
+            // currently polling this future.
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || exec_wasm(&engine, spec))
+                    .await
+                    .map_err(|error| anyhow!("wasmtime worker failed: {error}"))?
+            })
         }
         #[cfg(not(feature = "sandbox-wasmtime"))]
         {
@@ -189,8 +216,22 @@ fn exec_wasm(engine: &wasmtime::Engine, spec: ExecSpec) -> Result<ExecOutput> {
 
     let wasi = builder.build_p1();
 
-    // Instantiate and run the module.
+    // Instantiate and run the module. Epoch interruption is driven by the
+    // engine ticker started in `new`; the store deadline is set per execution
+    // so one request cannot influence another request's timeout.
     let mut store = Store::new(engine, wasi);
+    let timeout_secs = spec.timeout_secs;
+    let deadline_ticks = timeout_secs
+        .map(|secs| {
+            secs.saturating_mul(1000)
+                .saturating_add(EPOCH_TICK.as_millis() as u64 - 1)
+                / EPOCH_TICK.as_millis() as u64
+        })
+        // Wasmtime adds this delta to the current engine epoch; keep headroom
+        // for that addition on the explicit no-timeout path.
+        .unwrap_or(u64::MAX / 2)
+        .max(1);
+    store.set_epoch_deadline(deadline_ticks);
     linker.module(&mut store, "", &module)?;
     let func = linker
         .get_default(&mut store, "")
@@ -198,7 +239,9 @@ fn exec_wasm(engine: &wasmtime::Engine, spec: ExecSpec) -> Result<ExecOutput> {
         .typed::<(), ()>(&store)?;
 
     // `proc_exit(0)` surfaces as a trap wrapping `I32Exit(0)` — normal WASI.
+    let started = Instant::now();
     let run_result = func.call(&mut store, ());
+    let elapsed = started.elapsed();
     drop(store); // flush memory pipe buffers
 
     let stdout = stdout_pipe.contents().to_vec();
@@ -207,6 +250,13 @@ fn exec_wasm(engine: &wasmtime::Engine, spec: ExecSpec) -> Result<ExecOutput> {
     let exit_code = match run_result {
         Ok(()) => 0,
         Err(trap) => {
+            let epoch_timeout = trap.to_string().contains("epoch deadline");
+            if timeout_secs
+                .is_some_and(|secs| epoch_timeout || elapsed >= Duration::from_secs(secs))
+            {
+                let secs = timeout_secs.expect("timeout checked above");
+                return Err(anyhow!("wasmtime execution timed out after {secs}s"));
+            }
             if let Some(exit) = trap.downcast_ref::<wasmtime_wasi::I32Exit>() {
                 exit.0
             } else {
@@ -244,7 +294,9 @@ mod tests {
             stdin: None, // no WASM bytes
             timeout_secs: None,
         };
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
             .build()
             .unwrap();
         let result = rt.block_on(sandbox.exec(spec));
@@ -303,7 +355,7 @@ mod tests {
         #[cfg(feature = "sandbox-wasmtime")]
         {
             // Convert WAT to WASM bytes using wasmtime's built-in wat feature.
-            let wasm_bytes = wasmtime::wat::parse_str(wat).expect("WAT parse");
+            let wasm_bytes = wat::parse_str(wat).expect("WAT parse");
 
             let spec = ExecSpec {
                 command: "deny-all-probe".to_owned(),
@@ -313,7 +365,9 @@ mod tests {
                 timeout_secs: None,
             };
 
-            let rt = tokio::runtime::Builder::new_current_thread()
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
                 .build()
                 .unwrap();
             let result = rt.block_on(sandbox.exec(spec)).expect("exec must succeed");
@@ -331,6 +385,40 @@ mod tests {
         {
             // Feature is absent — sandbox init succeeds but exec fails gracefully.
             let _ = wat;
+        }
+    }
+
+    #[test]
+    fn execution_timeout_interrupts_non_yielding_guest() {
+        #[cfg(feature = "sandbox-wasmtime")]
+        {
+            let sandbox = WasmtimeSandbox::new().expect("sandbox init");
+            let wasm_bytes = wat::parse_str(
+                r#"
+                (module
+                  (func (export "_start")
+                    (loop br 0)))
+                "#,
+            )
+            .expect("WAT parse");
+            let spec = ExecSpec {
+                command: "timeout-probe".to_owned(),
+                args: Vec::new(),
+                capabilities: SandboxCapabilities::default(),
+                stdin: Some(wasm_bytes),
+                timeout_secs: Some(1),
+            };
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let started = Instant::now();
+            let error = rt
+                .block_on(sandbox.exec(spec))
+                .expect_err("non-yielding guest must time out");
+            assert!(error.to_string().contains("timed out"));
+            assert!(started.elapsed() < Duration::from_secs(3));
         }
     }
 }

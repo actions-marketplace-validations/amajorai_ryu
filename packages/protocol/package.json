@@ -1,11 +1,13 @@
 {
   "name": "@ryuhq/protocol",
-  "version": "0.1.15",
+  "version": "0.2.0",
   "type": "module",
   "exports": {
     "./agent-rules": "./src/agent-rules.ts",
     "./deep-link": "./src/deep-link.ts",
     "./hardware": "./src/hardware.ts",
+    "./publisher-trust": "./src/publisher-trust.ts",
+    "./quest-events": "./src/quest-events.ts",
     "./sse": "./src/sse-client.ts",
     "./voice": "./src/voice.ts"
   },

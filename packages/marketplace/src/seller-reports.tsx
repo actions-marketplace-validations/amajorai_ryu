@@ -85,7 +85,7 @@ export function SellerReportsPanel() {
 					</p>
 				</div>
 				<Button
-					disabled={loading}
+					loading={loading}
 					onClick={() => void refresh()}
 					size="sm"
 					type="button"

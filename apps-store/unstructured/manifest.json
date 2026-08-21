@@ -1,4 +1,10 @@
 {
+  "tags": ["document","parse","pdf","docx","ocr","extraction"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-unstructured",
+  "homepage": "https://github.com/amajorai/ryu-unstructured",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/unstructured",
   "name": "Unstructured",
   "version": "0.1.14",
@@ -72,4 +78,8 @@
       }
     }
   ]
+,
+  "contributes": {
+ "chat_widget_templates": [{"id":"unstructured.chat","title":"Unstructured widget","description":"Unstructured chat widget metadata is coming soon; no render tool is available yet.","triggers":["unstructured widget"],"examples":["Show me a unstructured widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}]
+  }
 }

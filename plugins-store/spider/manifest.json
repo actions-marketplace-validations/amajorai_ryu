@@ -1,4 +1,10 @@
 {
+  "tags": ["web","scraping"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/spider",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/spider",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/spider",
   "name": "Spider",
   "version": "0.1.14",
@@ -28,7 +34,7 @@
       "name": "Spider Crawl",
       "kind": "tool",
       "config": {
-        "slug": "spider__crawl",
+        "slug": "spider.crawl",
         "backend": "command",
         "bin": "spider",
         "command_args": [
@@ -81,8 +87,8 @@
       "selectable": true,
       "default": true,
       "tools": {
-        "web__extract": {
-          "tool": "spider__crawl",
+        "web.extract": {
+          "tool": "spider.crawl",
           "args": {
             "format": ""
           },
@@ -100,8 +106,8 @@
       "selectable": true,
       "default": true,
       "tools": {
-        "web__crawl": {
-          "tool": "spider__crawl"
+        "web.crawl": {
+          "tool": "spider.crawl"
         }
       }
     }

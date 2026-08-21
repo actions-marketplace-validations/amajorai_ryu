@@ -56,6 +56,59 @@ describe("AgentUI", () => {
 		expect(html).toContain("bg-card");
 	});
 
+	test("renders an A2UI v0.9 surface through the native catalog", () => {
+		const html = renderToStaticMarkup(
+			<AgentUI
+				format="a2ui"
+				spec={[
+					{
+						version: "v0.9",
+						createSurface: {
+							surfaceId: "status",
+							catalogId:
+								"https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+						},
+					},
+					{
+						version: "v0.9",
+						updateComponents: {
+							surfaceId: "status",
+							components: [
+								{
+									id: "root",
+									component: "Column",
+									children: ["title", "message"],
+								},
+								{
+									id: "title",
+									component: "Text",
+									text: "A2UI status",
+									variant: "h2",
+								},
+								{
+									id: "message",
+									component: "Text",
+									text: { path: "/message" },
+								},
+							],
+						},
+					},
+					{
+						version: "v0.9",
+						updateDataModel: {
+							surfaceId: "status",
+							path: "/message",
+							value: "Ready",
+						},
+					},
+				]}
+			/>
+		);
+
+		expect(html).toContain("A2UI status");
+		expect(html).toContain("Ready");
+	});
+
 	test("renders an optional title above the UI", () => {
 		const html = renderToStaticMarkup(
 			<AgentUI spec={sampleSpec} title="Status" />

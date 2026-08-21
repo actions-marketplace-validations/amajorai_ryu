@@ -3,15 +3,24 @@
  * (agents, project folders, spaces, pages, meetings, …).
  *
  * The canonical kinds are `avatar` | `icon` | `emoji` | `dicebear`. Agents also
- * allow the legacy `dither` gradient. Hosts pick an allowlist via
+ * allow the `expressive` ghost avatar and legacy `dither` gradient. Hosts pick
+ * an allowlist via
  * {@link GLYPH_PRESETS} so every surface offers the same options consistently.
  */
 
 import type { GradientDirection } from "@ryu/ui/components/dither-kit/gradient.tsx";
 import type { DitherColor } from "@ryu/ui/components/dither-kit/palette.ts";
+import type { ExpressiveExpressionSelection } from "@ryu/ui/components/expressive.ts";
+import type { ExpressiveAnimationSelection } from "@ryu/ui/components/expressive-animation.ts";
 
 /** Every glyph kind the primitive understands. */
-export type GlyphKind = "avatar" | "icon" | "emoji" | "dicebear" | "dither";
+export type GlyphKind =
+	| "avatar"
+	| "icon"
+	| "emoji"
+	| "dicebear"
+	| "expressive"
+	| "dither";
 
 /** Dither-gradient payload (agent-only / legacy). */
 export interface GlyphDitherValue {
@@ -32,6 +41,11 @@ export type GlyphValue =
 	| { kind: "icon"; id: string; color?: string; dither?: GlyphDitherValue }
 	| { kind: "emoji"; emoji: string; dither?: GlyphDitherValue }
 	| { kind: "dicebear"; style: string; seed: string }
+	| {
+			animation?: ExpressiveAnimationSelection;
+			expression: ExpressiveExpressionSelection;
+			kind: "expressive";
+	  }
 	| { kind: "dither"; dither: GlyphDitherValue }
 	| null;
 
@@ -62,14 +76,15 @@ export const GLYPH_PRESETS = {
 		"dicebear",
 	] as const satisfies readonly GlyphKind[],
 	/**
-	 * Agent persona avatars — same four plus the legacy dither gradient so
-	 * existing agent personas keep rendering and remain editable.
+	 * Agent persona avatars — the shared four plus expressive ghost faces and
+	 * the legacy dither gradient so existing agent personas remain editable.
 	 */
 	agent: [
 		"avatar",
 		"icon",
 		"emoji",
 		"dicebear",
+		"expressive",
 		"dither",
 	] as const satisfies readonly GlyphKind[],
 } as const;
@@ -266,6 +281,7 @@ const GLYPH_KINDS = new Set<GlyphKind>([
 	"icon",
 	"emoji",
 	"dicebear",
+	"expressive",
 	"dither",
 ]);
 

@@ -63,9 +63,21 @@ describe("makeHeaders", () => {
 
 describe("buyerTokenHeader", () => {
 	test("returns the header only when a control-plane token is present", () => {
-		expect(buyerTokenHeader()).toEqual({});
+		expect(buyerTokenHeader(target())).toEqual({});
 		setBuyerTokenProvider(() => "sess");
-		expect(buyerTokenHeader()).toEqual({ "X-Ryu-Buyer-Token": "sess" });
+		expect(buyerTokenHeader(target())).toEqual({ "X-Ryu-Buyer-Token": "sess" });
+		expect(
+			buyerTokenHeader(target({ url: "https://core.example.test" }))
+		).toEqual({});
+		expect(
+			buyerTokenHeader(target({ url: "http://127.0.0.1.evil.test:7980" }))
+		).toEqual({});
+		expect(buyerTokenHeader(target({ url: "http://[::1]:7980" }))).toEqual({
+			"X-Ryu-Buyer-Token": "sess",
+		});
+		expect(buyerTokenHeader(target({ url: "http://127.0.0.2:7980" }))).toEqual({
+			"X-Ryu-Buyer-Token": "sess",
+		});
 	});
 });
 

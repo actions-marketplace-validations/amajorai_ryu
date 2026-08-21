@@ -596,6 +596,7 @@ fn effective_replay_tenancy(payload: &SyncPayload, ctx: &Tenancy) -> Tenancy {
         Tenancy::Owned { org_id, .. } => {
             Tenancy::owned_by(payload.owner_user_id.as_deref(), org_id.as_deref())
         }
+        Tenancy::SharedOrg { org_id } => Tenancy::shared_with_org(org_id),
     }
 }
 

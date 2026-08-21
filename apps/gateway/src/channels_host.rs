@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -29,6 +29,7 @@ use ryu_gw_channels::{
     discord::DiscordChannel,
     is_token_rejected,
     media::VoiceReplyMode as ChannelVoiceReplyMode,
+    openwa::OpenWaChannel,
     pairing::{AccessPolicy, PairingStore},
     policy_from_env, run_channel,
     slack::SlackChannel,
@@ -98,6 +99,9 @@ fn to_access_policy(platform: &str, c: &CommonChannelFileConfig) -> AccessPolicy
     if !c.group_allowlist.is_empty() {
         policy.group_allowlist = c.group_allowlist.clone();
     }
+    if !c.group_user_allowlist.is_empty() {
+        policy.group_sender_allowlist = c.group_user_allowlist.clone();
+    }
     policy
 }
 
@@ -115,6 +119,7 @@ fn to_common(platform: &str, c: CommonChannelFileConfig) -> CommonChannelConfig 
         system_prompt: c.system_prompt,
         agent_id: c.agent_id,
         team_id: c.team_id,
+        channel_id: c.channel_id,
         group_reply_mode: c.group_reply_mode,
         core_url: c.core_url,
         access,
@@ -123,6 +128,9 @@ fn to_common(platform: &str, c: CommonChannelFileConfig) -> CommonChannelConfig 
         publish_commands: c.publish_commands,
         rich_text: c.rich_text,
         streaming: c.streaming,
+        lifecycle_reactions: c.lifecycle_reactions,
+        proactive_opening: c.proactive_opening,
+        proactive_target: c.proactive_target,
         profile: BotProfile {
             name: c.profile_name,
             short_bio: c.profile_short_bio,
@@ -139,6 +147,20 @@ fn to_channel_telegram(c: TelegramChannelConfig) -> ryu_gw_channels::TelegramCha
     ryu_gw_channels::TelegramChannelConfig {
         token: c.token,
         common: to_common("telegram", c.common),
+        options: ryu_gw_channels::TelegramChannelOptions {
+            webhook_url: c.options.webhook_url,
+            webhook_secret: c.options.webhook_secret,
+            webhook_bind: c.options.webhook_bind,
+            webhook_path: c.options.webhook_path,
+            base_url: c.options.base_url,
+            base_file_url: c.options.base_file_url,
+            local_mode: c.options.local_mode,
+            mention_patterns: c.options.mention_patterns,
+            ignored_threads: c.options.ignored_threads,
+            exclusive_bot_mentions: c.options.exclusive_bot_mentions,
+            guest_mode: c.options.guest_mode,
+            command_menu_max: c.options.command_menu_max,
+        },
     }
 }
 
@@ -147,15 +169,46 @@ fn to_channel_slack(c: SlackChannelConfig) -> ryu_gw_channels::SlackChannelConfi
         app_token: c.app_token,
         bot_token: c.bot_token,
         common: to_common("slack", c.common),
+        options: ryu_gw_channels::SlackChannelOptions {
+            reply_in_thread: c.options.reply_in_thread,
+            reply_broadcast: c.options.reply_broadcast,
+            strict_mention: c.options.strict_mention,
+            thread_require_mention: c.options.thread_require_mention,
+            free_response_channels: c.options.free_response_channels,
+            require_mention_channels: c.options.require_mention_channels,
+            allowed_channels: c.options.allowed_channels,
+            ignored_channels: c.options.ignored_channels,
+            allow_bots: c.options.allow_bots,
+            reply_prefix: c.options.reply_prefix,
+            mention_patterns: c.options.mention_patterns,
+            rich_blocks: c.options.rich_blocks,
+            feedback_buttons: c.options.feedback_buttons,
+        },
     }
 }
 
 fn to_channel_discord(c: DiscordChannelConfig) -> ryu_gw_channels::DiscordChannelConfig {
+    let mut common = to_common("discord", c.common);
+    if common.proactive_target.is_none() {
+        common.proactive_target = c.home_channel.clone();
+    }
     ryu_gw_channels::DiscordChannelConfig {
         token: c.token,
         channel_ids: c.channel_ids,
         thread_replies: c.thread_replies,
-        common: to_common("discord", c.common),
+        common,
+        options: ryu_gw_channels::DiscordChannelOptions {
+            history_backfill: c.history_backfill,
+            free_response_channels: c.free_response_channels,
+            allowed_channels: c.allowed_channels,
+            allowed_roles: c.allowed_roles,
+            thread_require_mention: c.thread_require_mention,
+            mention_patterns: c.mention_patterns,
+            ignored_channels: c.ignored_channels,
+            no_thread_channels: c.no_thread_channels,
+            allow_bots: c.allow_bots,
+            home_channel: c.home_channel,
+        },
     }
 }
 
@@ -174,10 +227,19 @@ fn to_channel_whatsapp(c: WhatsAppChannelConfig) -> ryu_gw_channels::WhatsAppCha
     }
 }
 
+fn to_channel_openwa(
+    c: ryu_gw_channels::OpenWaChannelConfig,
+) -> ryu_gw_channels::OpenWaChannelConfig {
+    c
+}
+
 fn to_channel_bluebubbles(
     c: BlueBubblesChannelConfig,
 ) -> ryu_gw_channels::BlueBubblesChannelConfig {
     let mut common = to_common("bluebubbles", c.common);
+    if common.proactive_target.is_none() {
+        common.proactive_target = c.home_channel.clone();
+    }
     // Read receipts on iMessage are a Private-API-only verb, so asking for them
     // without the helper installed would just emit failing calls every turn.
     common.send_read_receipts = c.private_api && c.send_read_receipts;
@@ -187,6 +249,8 @@ fn to_channel_bluebubbles(
         webhook_bind: c.webhook_bind,
         webhook_path: c.webhook_path,
         private_api: c.private_api,
+        mention_patterns: c.mention_patterns,
+        home_channel: c.home_channel,
         common,
     }
 }
@@ -324,6 +388,8 @@ struct StoredBotConfig {
     channel_type: String,
     name: String,
     secrets: HashMap<String, String>,
+    #[serde(default)]
+    platform_options: Value,
     agent_id: Option<String>,
     #[serde(default)]
     team_id: Option<String>,
@@ -345,6 +411,8 @@ struct StoredBotConfig {
     dm_allowlist: Vec<String>,
     #[serde(default)]
     group_allowlist: Vec<String>,
+    #[serde(default)]
+    group_user_allowlist: Vec<String>,
     #[serde(default = "default_true")]
     typing_indicator: bool,
     #[serde(default = "default_true")]
@@ -353,8 +421,16 @@ struct StoredBotConfig {
     rich_text: bool,
     #[serde(default)]
     streaming: bool,
+    #[serde(default = "default_true")]
+    lifecycle_reactions: bool,
     #[serde(default)]
     voice_reply: VoiceReplyMode,
+    /// Send the first Ryu welcome after the channel is ready. Older control
+    /// planes omit this, so store-sourced bots remain quiet until configured.
+    #[serde(default)]
+    proactive_opening: bool,
+    #[serde(default)]
+    proactive_target: Option<String>,
     /// Discord only: answer inside a thread opened on the triggering message.
     #[serde(default)]
     thread_replies: bool,
@@ -377,6 +453,13 @@ fn default_true() -> bool {
 }
 
 impl StoredBotConfig {
+    fn platform_options<T>(&self) -> T
+    where
+        T: DeserializeOwned + Default,
+    {
+        serde_json::from_value(self.platform_options.clone()).unwrap_or_default()
+    }
+
     /// The shared knobs, in the config-FILE shape so store-sourced and
     /// env-sourced bots go through exactly one mapping path ([`to_common`]).
     fn common(&self) -> CommonChannelFileConfig {
@@ -388,6 +471,7 @@ impl StoredBotConfig {
             system_prompt: self.system_prompt.clone(),
             agent_id: self.agent_id.clone(),
             team_id: self.team_id.clone(),
+            channel_id: Some(self.id.clone()),
             group_reply_mode: self.group_reply_mode,
             // Profile-aware, so a dev-profile gateway's store bots call the dev
             // Core rather than the release one.
@@ -396,11 +480,15 @@ impl StoredBotConfig {
             group_policy: self.group_policy,
             dm_allowlist: self.dm_allowlist.clone(),
             group_allowlist: self.group_allowlist.clone(),
+            group_user_allowlist: self.group_user_allowlist.clone(),
             typing_indicator: self.typing_indicator,
             publish_commands: self.publish_commands,
             rich_text: self.rich_text,
             streaming: self.streaming,
+            lifecycle_reactions: self.lifecycle_reactions,
             voice_reply: self.voice_reply,
+            proactive_opening: self.proactive_opening,
+            proactive_target: self.proactive_target.clone(),
             profile_name: self.profile_name.clone(),
             profile_short_bio: self.profile_short_bio.clone(),
             profile_description: self.profile_description.clone(),
@@ -469,9 +557,12 @@ async fn fetch_store_configs(state: &SharedState) -> Vec<StoredBotConfig> {
 /// Build a [`TelegramChannelConfig`] from a store bot config.
 fn telegram_cfg_from_store(bot: &StoredBotConfig) -> Option<TelegramChannelConfig> {
     let token = bot.secrets.get("bot_token")?.to_string();
+    let mut options: crate::config::TelegramChannelOptionsFileConfig = bot.platform_options();
+    options.webhook_secret = bot.secrets.get("webhook_secret").cloned();
     Some(TelegramChannelConfig {
         token,
         common: bot.common(),
+        options,
     })
 }
 
@@ -483,6 +574,7 @@ fn slack_cfg_from_store(bot: &StoredBotConfig) -> Option<SlackChannelConfig> {
         app_token,
         bot_token,
         common: bot.common(),
+        options: bot.platform_options(),
     })
 }
 
@@ -500,10 +592,44 @@ fn discord_cfg_from_store(bot: &StoredBotConfig) -> Option<DiscordChannelConfig>
                 .collect()
         })
         .unwrap_or_default();
+    let options: Value = bot.platform_options();
+    let option_bool = |key: &str, fallback| {
+        options
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(fallback)
+    };
+    let option_list = |key: &str| {
+        options
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let home_channel = options
+        .get("home_channel")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     Some(DiscordChannelConfig {
         token,
         channel_ids,
         thread_replies: bot.thread_replies,
+        history_backfill: option_bool("history_backfill", false),
+        free_response_channels: option_list("free_response_channels"),
+        allowed_channels: option_list("allowed_channels"),
+        allowed_roles: option_list("allowed_roles"),
+        thread_require_mention: option_bool("thread_require_mention", false),
+        mention_patterns: option_list("mention_patterns"),
+        ignored_channels: option_list("ignored_channels"),
+        no_thread_channels: option_list("no_thread_channels"),
+        allow_bots: option_bool("allow_bots", false),
+        home_channel,
         common: bot.common(),
     })
 }
@@ -523,15 +649,68 @@ fn whatsapp_cfg_from_store(bot: &StoredBotConfig) -> Option<WhatsAppChannelConfi
         phone_number_id,
         verify_token,
         app_secret,
-        // The webhook receiver's bind/path are node-local plumbing, not per-bot
-        // settings, so the store does not carry them; they stay at the same
-        // defaults `gateway.toml` documents.
-        webhook_bind: crate::config::default_whatsapp_bind(),
-        webhook_path: crate::config::default_whatsapp_path(),
-        graph_version: crate::config::default_whatsapp_graph_version(),
+        // These are optional per-channel overrides. The defaults preserve the
+        // legacy single-Cloud-bot configuration, while separate bind/path values
+        // let multiple channel records coexist on one gateway.
+        webhook_bind: secret_or(bot, "webhook_bind", crate::config::default_whatsapp_bind()),
+        webhook_path: secret_or(bot, "webhook_path", crate::config::default_whatsapp_path()),
+        graph_version: secret_or(
+            bot,
+            "graph_version",
+            crate::config::default_whatsapp_graph_version(),
+        ),
         send_read_receipts: bot.send_read_receipts,
         common: bot.common(),
     })
+}
+
+/// Build a WhatsApp Personal/OpenWA transport config from one channel record.
+fn openwa_cfg_from_store(bot: &StoredBotConfig) -> Option<ryu_gw_channels::OpenWaChannelConfig> {
+    let base_url = bot.secrets.get("openwa_url")?.to_string();
+    let api_key = bot.secrets.get("openwa_api_key")?.to_string();
+    let session_id = bot.secrets.get("openwa_session_id")?.to_string();
+    let webhook_url = bot.secrets.get("webhook_url")?.to_string();
+    let webhook_secret = bot.secrets.get("webhook_secret")?.to_string();
+    Some(ryu_gw_channels::OpenWaChannelConfig {
+        base_url,
+        api_key,
+        session_id,
+        webhook_url,
+        webhook_secret,
+        webhook_bind: secret_or(
+            bot,
+            "webhook_bind",
+            crate::config::default_whatsapp_personal_bind(),
+        ),
+        webhook_path: secret_or(
+            bot,
+            "webhook_path",
+            crate::config::default_whatsapp_personal_path(),
+        ),
+        self_chat_only: secret_bool(bot, "self_chat_only"),
+        common: to_common("openwa", bot.common()),
+    })
+}
+
+fn secret_or(bot: &StoredBotConfig, key: &str, fallback: String) -> String {
+    bot.secrets
+        .get(key)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or(fallback)
+}
+
+fn secret_bool(bot: &StoredBotConfig, key: &str) -> bool {
+    bot.secrets
+        .get(key)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Build a [`BlueBubblesChannelConfig`] from a store bot config.
@@ -541,18 +720,48 @@ fn whatsapp_cfg_from_store(bot: &StoredBotConfig) -> Option<WhatsAppChannelConfi
 fn bluebubbles_cfg_from_store(bot: &StoredBotConfig) -> Option<BlueBubblesChannelConfig> {
     let server_url = bot.secrets.get("server_url")?.to_string();
     let password = bot.secrets.get("password")?.to_string();
+    let options: Value = bot.platform_options();
+    let option_string = |key: &str, fallback: String| {
+        options
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or(fallback)
+    };
+    let option_list = |key: &str| {
+        options
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let private_api = options
+        .get("private_api")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| bluebubbles_private_api(bot));
     Some(BlueBubblesChannelConfig {
         server_url,
         password,
-        webhook_bind: crate::config::default_bluebubbles_bind(),
-        webhook_path: crate::config::default_bluebubbles_path(),
+        webhook_bind: option_string("webhook_bind", crate::config::default_bluebubbles_bind()),
+        webhook_path: option_string("webhook_path", crate::config::default_bluebubbles_path()),
         // The Private API helper is an extra install on the operator's Mac, so it
         // rides in `secrets` (the same opaque map Discord's `channel_ids` uses for
         // non-secret per-bot plumbing) and stays OFF unless it was declared —
         // turning it on blind would just emit failing calls. Read receipts are one
         // of the verbs it provides, hence the `&&`.
-        private_api: bluebubbles_private_api(bot),
-        send_read_receipts: bluebubbles_private_api(bot) && bot.send_read_receipts,
+        private_api,
+        send_read_receipts: private_api && bot.send_read_receipts,
+        mention_patterns: option_list("mention_patterns"),
+        home_channel: options
+            .get("home_channel")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         common: bot.common(),
     })
 }
@@ -1025,6 +1234,22 @@ pub async fn spawn_registered(state: SharedState) {
                     warn!(name = %bot.name, "whatsapp store config missing required secrets; skipping");
                 }
             }
+            "whatsapp_personal" => {
+                if let Some(cfg) = openwa_cfg_from_store(bot) {
+                    info!(name = %bot.name, "registering whatsapp personal bot from store");
+                    spawn_channel(
+                        &host,
+                        OpenWaChannel::new_with_status(
+                            to_channel_openwa(cfg),
+                            state.http.clone(),
+                            pairing.clone(),
+                            reporter,
+                        ),
+                    );
+                } else {
+                    warn!(name = %bot.name, "whatsapp personal store config missing required secrets; skipping");
+                }
+            }
             "bluebubbles" => {
                 if let Some(cfg) = bluebubbles_cfg_from_store(bot) {
                     info!(name = %bot.name, "registering bluebubbles bot from store");
@@ -1192,6 +1417,9 @@ mod tests {
         assert!(bot.rich_text);
         assert!(!bot.streaming);
         assert!(!bot.thread_replies);
+        assert!(bot.lifecycle_reactions);
+        assert!(!bot.proactive_opening);
+        assert!(bot.proactive_target.is_none());
         assert!(bot.send_read_receipts);
         assert_eq!(bot.voice_reply, VoiceReplyMode::Never);
         // No policy at all ⇒ the legacy env allowlist stays in charge.
@@ -1217,16 +1445,26 @@ mod tests {
                     "groupPolicy": "disabled",
                     "dmAllowlist": ["u1"],
                     "groupAllowlist": ["g1"],
+                    "groupUserAllowlist": ["u2"],
                     "typingIndicator": false,
                     "publishCommands": false,
                     "richText": false,
                     "streaming": true,
+                    "lifecycleReactions": false,
+                    "proactiveOpening": true,
+                    "proactiveTarget": "c-home",
                     "voiceReply": "mirror",
                     "threadReplies": true,
                     "sendReadReceipts": false,
                     "profileName": "Ryu",
                     "profileShortBio": "short",
-                    "profileDescription": "long"
+                    "profileDescription": "long",
+                    "platformOptions": {
+                        "history_backfill": true,
+                        "allowed_channels": ["c3"],
+                        "allowed_roles": ["role-1"],
+                        "mention_patterns": ["hey ryu"]
+                    }
                 }
             ]
         });
@@ -1236,6 +1474,10 @@ mod tests {
         let cfg = discord_cfg_from_store(bot).expect("secrets are complete");
         assert_eq!(cfg.channel_ids, vec!["c1".to_string(), "c2".to_string()]);
         assert!(cfg.thread_replies);
+        assert!(cfg.history_backfill);
+        assert_eq!(cfg.allowed_channels, vec!["c3".to_string()]);
+        assert_eq!(cfg.allowed_roles, vec!["role-1".to_string()]);
+        assert_eq!(cfg.mention_patterns, vec!["hey ryu".to_string()]);
 
         let mapped = to_channel_discord(cfg);
         assert_eq!(mapped.common.model, "claude-sonnet");
@@ -1244,6 +1486,9 @@ mod tests {
         assert!(!mapped.common.publish_commands);
         assert!(!mapped.common.rich_text);
         assert!(mapped.common.streaming);
+        assert!(!mapped.common.lifecycle_reactions);
+        assert!(mapped.common.proactive_opening);
+        assert_eq!(mapped.common.proactive_target.as_deref(), Some("c-home"));
         assert_eq!(mapped.common.voice_reply, ChannelVoiceReplyMode::Mirror);
         assert_eq!(mapped.common.access.dm, crate::config::DmPolicy::Open);
         assert_eq!(
@@ -1252,6 +1497,10 @@ mod tests {
         );
         assert_eq!(mapped.common.access.dm_allowlist, vec!["u1".to_string()]);
         assert_eq!(mapped.common.access.group_allowlist, vec!["g1".to_string()]);
+        assert_eq!(
+            mapped.common.access.group_sender_allowlist,
+            vec!["u2".to_string()]
+        );
         assert_eq!(mapped.common.profile.name.as_deref(), Some("Ryu"));
         assert_eq!(mapped.common.profile.short_bio.as_deref(), Some("short"));
         assert_eq!(mapped.common.profile.description.as_deref(), Some("long"));

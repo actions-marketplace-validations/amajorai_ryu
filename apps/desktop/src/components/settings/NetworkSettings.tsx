@@ -16,6 +16,7 @@ import { Input } from "@ryu/ui/components/input.tsx";
 import { Switch } from "@ryu/ui/components/switch.tsx";
 import { useEffect, useState } from "react";
 import { sileo } from "sileo";
+import { OrgBillingContext } from "@/src/components/billing/OrgBillingContext.tsx";
 import { useFeatureFlag } from "@/src/hooks/useFeatureFlag.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
@@ -298,7 +299,7 @@ export function ManagedInferenceSettings() {
 				: "Failed to save",
 			description: ok
 				? trimmedUrl
-					? "The Ryu (managed) provider now runs on the hosted fleet and bills your plan credits. Your own API keys keep using this node's gateway."
+					? "The Ryu (managed) provider now runs on the hosted fleet and bills the organization tied to this node's token. Your own API keys keep using this node's gateway."
 					: "The managed provider falls back to this node's local gateway."
 				: "Core did not accept the change.",
 		});
@@ -322,9 +323,27 @@ export function ManagedInferenceSettings() {
 
 	return (
 		<SettingsSection
-			caption="Use the Ryu (managed) provider, included with your plan, on this self-hosted node. Requests for it go to the hosted gateway fleet and are billed to your organization's credits; every provider you supply your own key for keeps using this node's gateway."
+			caption="Use the Ryu (managed) provider on this self-hosted node. Requests go to the hosted gateway fleet and are billed to the organization tied to the saved token; providers with your own key keep using this node's gateway."
 			title="Managed inference"
 		>
+			<div className="space-y-2 px-3.5">
+				<OrgBillingContext
+					compact
+					description="Managed requests use the shared Ryu credits for this selected organization."
+					label="Selected organization"
+				/>
+				<p className="text-muted-foreground text-xs leading-snug">
+					<span className="font-medium text-foreground">
+						Node billing owner:
+					</span>{" "}
+					The organization that issued the saved token.
+					<br />
+					The saved <code>rgw_</code> token stays bound to the organization that
+					issued it. Switching the active organization in Ryu does not retarget
+					this node. To move its billing, replace the token with one from the
+					other organization&apos;s Gateway keys page.
+				</p>
+			</div>
 			<SettingsGroup>
 				<SettingsItem title="Fleet URL">
 					<Input

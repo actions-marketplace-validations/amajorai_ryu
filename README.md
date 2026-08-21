@@ -167,6 +167,25 @@ Or start the node yourself and point clients at it:
 ryu-core     # restart Core; it brings up the Gateway + local defaults
 ```
 
+## GitHub Actions
+
+Use the bundled Ryu action from any workflow to validate a self-hosted or managed
+node, run an agent/team/workflow, or call an allowlisted tool:
+
+```yaml
+- uses: amajorai/ryu@v1
+  with:
+    target: managed
+    managed-node-url: ${{ secrets.RYU_MANAGED_NODE_URL }}
+    managed-node-token: ${{ secrets.RYU_MANAGED_NODE_TOKEN }}
+    operation: run
+    agent: review-agent
+    prompt: Review the current release candidate.
+```
+
+See the [GitHub Actions documentation](https://docs.ryuhq.com/docs/ci/github-actions)
+for setup, tool calls, outputs, and security behavior.
+
 <sub>Prebuilt targets: Linux x86_64, macOS Apple Silicon, Windows x86_64. On Intel
 Macs or ARM Linux, build from source below. Override the install dir with
 `RYU_INSTALL_DIR` or pin a release with `RYU_VERSION=v0.0.4`.</sub>

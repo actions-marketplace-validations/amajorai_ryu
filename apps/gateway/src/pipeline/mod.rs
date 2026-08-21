@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Body;
+use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
+use sha2::Sha256;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -65,7 +67,7 @@ use stages::PipelineStage;
 
 use crate::{
     audit::AuditRecord,
-    budget::{BudgetDecision, CreditReservation},
+    budget::{BudgetChargeKind, BudgetDecision, CreditReservation},
     cache::Cache,
     config::{AlertTier, ApiKeyConfig, BudgetAction, FirewallPolicy, Modality, ProviderId},
     error::GatewayError,
@@ -96,6 +98,36 @@ fn ct_eq(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Verify the Core-minted proof on an agent-scoped Gateway route.
+///
+/// Dynamic `rgw_` credentials are tenant credentials, not trusted-forwarder
+/// credentials. The proof makes the agent identity an assertion from Core,
+/// bound to the exact bearer that authenticated this request, instead of a
+/// caller-controlled header that could move spend between agents.
+fn verify_agent_route_proof(raw_api_key: Option<&str>, agent_id: &str, proof: &str) -> bool {
+    type AgentRouteMac = Hmac<Sha256>;
+
+    let Some(raw_api_key) = raw_api_key else {
+        return false;
+    };
+    let key = raw_api_key
+        .strip_prefix("Bearer ")
+        .unwrap_or(raw_api_key)
+        .trim();
+    if key.is_empty() || proof.trim().is_empty() {
+        return false;
+    }
+    let Ok(mut mac) = AgentRouteMac::new_from_slice(key.as_bytes()) else {
+        return false;
+    };
+    mac.update(b"ryu-agent-route-v1\0");
+    mac.update(agent_id.as_bytes());
+    let Ok(expected) = hex::decode(proof.trim()) else {
+        return false;
+    };
+    mac.verify_slice(&expected).is_ok()
 }
 
 fn firewall_policy_alert(
@@ -288,6 +320,25 @@ pub struct PipelineOutput {
     pub cache_write_tokens: u64,
 }
 
+/// Provider operation for the non-chat, token-metered data-plane endpoints.
+/// Embeddings and reranking deliberately enter this pipeline instead of calling
+/// a provider directly so auth, rate limits, budgets, reservations, fallback,
+/// accounting, and audit records share one governed seam.
+#[derive(Clone, Copy)]
+pub enum EmbeddingOperation {
+    Embed,
+    Rerank,
+}
+
+impl EmbeddingOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Embed => "embedding",
+            Self::Rerank => "rerank",
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub struct PipelineStreamOutput {
     pub body: Body,
@@ -323,6 +374,10 @@ pub struct AuthInputs<'a> {
     pub user_id: Option<String>,
     /// Selected agent for per-agent budgets (U21), from `x-ryu-agent-id`.
     pub agent_id: Option<String>,
+    /// Core's HMAC proof for an agent-scoped Gateway ingress. Only dynamic
+    /// `rgw_` credentials use this; static trusted-forwarder/master paths keep
+    /// their existing identity rules.
+    pub agent_proof: Option<String>,
     /// Active skill ids (M3 / #145 AC3), from `x-ryu-skill-ids`.
     pub skill_ids: Option<String>,
     /// Per-agent egress tool allowlist (#475 C7), from `x-ryu-tools` (legacy
@@ -386,6 +441,7 @@ pub async fn authenticate(
         raw_api_key,
         user_id,
         agent_id,
+        agent_proof,
         skill_ids,
         tool_actions,
         tools_header_present,
@@ -605,6 +661,19 @@ pub async fn authenticate(
                     // A resolved `rgw_` token: bill/attribute to its org. Do NOT
                     // store the raw bearer in `api_key` (it is written verbatim
                     // into every audit row) — use a redacted org-scoped label.
+                    let dynamic_agent_id = match (agent_id.as_deref(), agent_proof.as_deref()) {
+                        (Some(agent_id), Some(proof))
+                            if verify_agent_route_proof(raw_api_key, agent_id, proof) =>
+                        {
+                            Some(agent_id.to_owned())
+                        }
+                        (Some(_), Some(_)) | (None, Some(_)) => {
+                            return Err(GatewayError::Unauthorized(
+                                "invalid agent route proof".to_owned(),
+                            ));
+                        }
+                        (Some(_), None) | (None, None) => None,
+                    };
                     let api_key_label = format!("rgw_org:{}", resolved.org_id);
                     Ok(build_ctx(
                         false,
@@ -612,9 +681,15 @@ pub async fn authenticate(
                         Some(resolved.org_id.clone()),
                         None,
                         None,
+                        // `rgw_` bearer tokens are resolved by the control plane,
+                        // but the forwarded identity headers are still caller
+                        // input. Dynamic credentials have no trusted-forwarder
+                        // configuration, so bind the user/audit identity to the
+                        // resolved tenant. The agent identity is accepted only
+                        // when Core supplied the HMAC proof above.
                         Some(format!("org:{}", resolved.org_id)),
-                        user_id.clone(),
-                        agent_id.clone(),
+                        None,
+                        dynamic_agent_id,
                         None,
                         resolved.managed_inference,
                         resolved.remaining_budget_micro_usd,
@@ -634,16 +709,16 @@ pub async fn authenticate(
     }
 }
 
-// ─── Smart (classifier-driven) routing ────────────────────────────────────────
+// ─── Smart model routing ─────────────────────────────────────────────────────
 
 /// Run smart routing for a chat request, rewriting `body["model"]` in place when
-/// the classifier picks a different target. Returns `true` if the model was
-/// rewritten (so the caller can tell `pre_process` to skip eval/A-B routing and
-/// honor the smart choice).
+/// the configured router picks a different target. Returns `true` if the model
+/// was rewritten (so the caller can tell `pre_process` to skip eval/A-B routing
+/// and honor the smart choice).
 ///
 /// No-ops (returns `false`) when smart routing is inactive, when a per-agent
-/// chat slot override is present (explicit pinning wins over classification), or
-/// when the classifier keeps the original model. It fails open in every error
+/// chat slot override is present (explicit pinning wins over routing), or when
+/// the router keeps the original model. It fails open in every error
 /// case — see [`crate::router::smart`].
 async fn apply_smart_routing(state: &AppState, ctx: &RequestContext, body: &mut Value) -> bool {
     // A pinned per-agent chat slot is an explicit user choice — never override it.
@@ -659,7 +734,7 @@ async fn apply_smart_routing(state: &AppState, ctx: &RequestContext, body: &mut 
     // The private field is always stripped before the body reaches the provider.
     let per_agent = per_request_smart_router(state, body);
     // Clone the global smart router Arc out of the hot-swap lock so it survives the
-    // classifier `.await` below (PUT /v1/config can swap it concurrently); a per-agent
+    // router `.await` below (PUT /v1/config can swap it concurrently); a per-agent
     // override still wins over the global default.
     let global = state.smart_router();
     let router: &dyn crate::router::smart::SmartRouterBackend = match per_agent.as_deref() {
@@ -672,7 +747,7 @@ async fn apply_smart_routing(state: &AppState, ctx: &RequestContext, body: &mut 
     }
 
     // Clone the active model-routing backend out of its swap lock so it survives
-    // the classifier `.await` too (W6c: `state.router` is now a registry).
+    // the router `.await` too (W6c: `state.router` is now a registry).
     let model_router = state.router.active();
     let chosen = router
         .resolve(
@@ -698,7 +773,7 @@ async fn apply_smart_routing(state: &AppState, ctx: &RequestContext, body: &mut 
         request_id = %ctx.request_id,
         from = current,
         to = %model,
-        "smart routing: re-routed request to classifier-selected model"
+        "smart routing: re-routed request to selected model"
     );
     body["model"] = Value::String(model);
     true
@@ -778,6 +853,32 @@ fn strip_anthropic_beta_for(body: &mut Value, provider: &str) {
     }
     if let Some(obj) = body.as_object_mut() {
         obj.remove(ANTHROPIC_BETA_FIELD);
+    }
+}
+
+/// Give OpenRouter's own generation and analytics surfaces a stable, opaque Ryu
+/// identity for Gateway-routed ACP traffic. The Gateway still enforces the cap
+/// from the inline `usage.cost`; this field exists so an operator can reconcile
+/// the same generation later through OpenRouter's `/generation` endpoint.
+///
+/// Agent identity wins because the per-agent budget is the product surface being
+/// measured. A user-only request still gets a stable user tag. Native Claude or
+/// Codex subscription passthrough never reaches this helper and therefore is
+/// intentionally not represented as OpenRouter spend.
+fn stamp_openrouter_identity(body: &mut Value, provider: &str, ctx: &RequestContext) {
+    if provider != "openrouter" {
+        return;
+    }
+    let identity = ctx
+        .agent_id
+        .as_deref()
+        .map(|id| format!("ryu-agent:{id}"))
+        .or_else(|| ctx.user_id.as_deref().map(|id| format!("ryu-user:{id}")));
+    let Some(identity) = identity else {
+        return;
+    };
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("user".to_string(), Value::String(identity));
     }
 }
 
@@ -1046,6 +1147,8 @@ async fn pre_process(
                             user_id: ctx.user_id.clone(),
                             agent_id: ctx.agent_id.clone(),
                             feature: ctx.feature.clone(),
+                            managed_inference: ctx.managed_inference,
+                            provider_cost_micro_usd: None,
                             event_type: crate::audit::EventType::ModelCall,
                             backend: Some("companion".to_string()),
                             command: None,
@@ -1380,6 +1483,8 @@ fn audit_inline_evaluator(
         user_id: ctx.user_id.clone(),
         agent_id: ctx.agent_id.clone(),
         feature: ctx.feature.clone(),
+        managed_inference: ctx.managed_inference,
+        provider_cost_micro_usd: None,
         event_type: crate::audit::EventType::ModelCall,
         backend: Some("inline-evaluator".to_string()),
         command: None,
@@ -1820,7 +1925,8 @@ pub async fn run(
         }
     }
 
-    // 6c. Per-user / per-agent budgets with local counters (U21). Stop aborts;
+    // 6c. Per-user / per-agent charged-spend budgets with local counters (U21).
+    // Stop aborts;
     // downgrade/restrict mutate the body+route in place; notify is observable.
     let BudgetOutcome {
         decision: budget,
@@ -1836,7 +1942,14 @@ pub async fn run(
         // loop; if no debit fires (credits inactive, no org) the permit stays
         // here and drops on return, which is correct.
         reservation: mut credit_reservation,
-    } = enforce_budget(&state, &ctx, &mut body, &mut decision, OutputCeiling::Clamp)?;
+    } = enforce_budget(
+        &state,
+        &ctx,
+        &mut body,
+        &mut decision,
+        BudgetChargeKind::Model,
+        OutputCeiling::Clamp,
+    )?;
     // One response, one header: firewall (Ok-path) alert first so it wins a tie
     // against a same-tier budget alert (deterministic).
     let policy_alert = merge_alert(pre_alert, budget_alert);
@@ -1899,6 +2012,7 @@ pub async fn run(
         // else the private field is an unknown top-level key that would 400 a
         // strict endpoint. Per attempt, because fallback swaps the provider.
         strip_anthropic_beta_for(&mut body, provider.name());
+        stamp_openrouter_identity(&mut body, provider.name(), &ctx);
 
         // 7b. Admission: gate concurrent access to the resident local engine so
         // interactive chat is served ahead of background fan-out (the engine has
@@ -1908,7 +2022,7 @@ pub async fn run(
         // on the engine's internal FIFO.
         //
         // IMPORTANT — re-entrancy: the unified tool loop runs while we'd hold the
-        // permit, and a tool (e.g. `delegate__fanout`) can route a child request
+        // permit, and a tool (e.g. `delegate.fanout`) can route a child request
         // back to this same local provider. Gating those would deadlock (parent
         // holds the slot while the engine idles, waiting on the child). So we gate
         // only NON-tool-loop completions — exactly the plain-chat traffic where
@@ -2127,17 +2241,26 @@ pub async fn run(
                     sc.insert(ctx.org_id.clone(), emb, response.clone());
                 }
 
-                // 13. Update audit token totals (per key) and budget counters
-                // (per user / per agent — U21 local counters).
+                // OpenRouter reports the final transaction price in USD. Keep
+                // that value on the audit row as well as using it for the wallet
+                // debit, so trace, reporting, and reconciliation all see the
+                // same discounted amount.
+                let reported_cost = response["usage"]["cost"].as_f64();
+                let provider_cost_micro_usd = reported_cost.and_then(cost_usd_to_micro);
+
+                // 13. Update audit token totals (per key) and charged-spend budget
+                // counters (per user / per agent / per session — U21 local
+                // counters). The budget amount follows the same provider cost
+                // or configured model-price fallback as the wallet debit.
+                let budget_cost_micro_usd = charged_budget_cost_micro_usd(
+                    &state,
+                    reported_cost,
+                    input_tokens,
+                    output_tokens,
+                    &decision.model,
+                );
                 state.audit.add_tokens(&ctx.api_key, total_tokens);
-                state.with_budget(|b| {
-                    b.record(
-                        ctx.user_id.as_deref(),
-                        ctx.agent_id.as_deref(),
-                        total_tokens,
-                    );
-                    b.record_session(ctx.session_id.as_deref(), total_tokens);
-                });
+                record_charged_budget(&state, &ctx, budget_cost_micro_usd);
 
                 // 14. Audit log (SQLite)
                 state.log_audit(AuditRecord {
@@ -2160,6 +2283,8 @@ pub async fn run(
                     user_id: ctx.user_id.clone(),
                     agent_id: ctx.agent_id.clone(),
                     feature: ctx.feature.clone(),
+                    managed_inference: ctx.managed_inference,
+                    provider_cost_micro_usd,
                     event_type: crate::audit::EventType::ModelCall,
                     backend: None,
                     command: None,
@@ -2202,12 +2327,12 @@ pub async fn run(
                 // active and the request carries an org.
                 if let Some(org_id) = ctx.org_id.clone().filter(|s| !s.is_empty()) {
                     if state.config.credits.is_active() {
-                        let reported_cost = response["usage"]["cost"].as_f64();
                         let cost = response_cost_micro_usd(
                             &state,
                             reported_cost,
                             input_tokens,
                             output_tokens,
+                            &decision.model,
                         );
                         let state2 = Arc::clone(&state);
                         let request_id = ctx.request_id.clone();
@@ -2268,13 +2393,7 @@ pub async fn run(
 
                 // Tool-call (Composio) debit (#496): separate ledger row, fires
                 // only when this request executed billable Composio tools.
-                spawn_tool_call_debit(
-                    &state,
-                    ctx.org_id.as_deref(),
-                    &ctx.request_id,
-                    billable_tool_calls,
-                    ctx.managed_inference,
-                );
+                spawn_tool_call_debit(&state, &ctx, billable_tool_calls);
 
                 return Ok(PipelineOutput {
                     response,
@@ -2372,6 +2491,8 @@ fn audit_cache_hit(
         user_id: ctx.user_id.clone(),
         agent_id: ctx.agent_id.clone(),
         feature: ctx.feature.clone(),
+        managed_inference: ctx.managed_inference,
+        provider_cost_micro_usd: None,
         event_type: crate::audit::EventType::ModelCall,
         backend: None,
         command: None,
@@ -2415,6 +2536,8 @@ fn audit_failure(
         user_id: ctx.user_id.clone(),
         agent_id: ctx.agent_id.clone(),
         feature: ctx.feature.clone(),
+        managed_inference: ctx.managed_inference,
+        provider_cost_micro_usd: None,
         event_type: crate::audit::EventType::ModelCall,
         backend: None,
         command: None,
@@ -2459,6 +2582,8 @@ fn audit_inspector_block(
         user_id: ctx.user_id.clone(),
         agent_id: ctx.agent_id.clone(),
         feature: ctx.feature.clone(),
+        managed_inference: ctx.managed_inference,
+        provider_cost_micro_usd: None,
         event_type: crate::audit::EventType::ModelCall,
         backend: Some("inspector".to_string()),
         command: None,
@@ -2509,7 +2634,14 @@ pub async fn run_stream(
         // `StreamObserverState` below and released when the stream ends by ANY
         // means, including a client that hangs up mid-answer.
         reservation: credit_reservation,
-    } = enforce_budget(&state, &ctx, &mut body, &mut decision, OutputCeiling::Clamp)?;
+    } = enforce_budget(
+        &state,
+        &ctx,
+        &mut body,
+        &mut decision,
+        BudgetChargeKind::Model,
+        OutputCeiling::Clamp,
+    )?;
     // Firewall (Ok-path) alert first so it wins a same-tier tie deterministically.
     let policy_alert = merge_alert(pre_alert, budget_alert);
 
@@ -2595,6 +2727,7 @@ pub async fn run_stream(
 
         // Anthropic betas: same per-attempt strip as the non-streaming path.
         strip_anthropic_beta_for(&mut body, provider.name());
+        stamp_openrouter_identity(&mut body, provider.name(), &ctx);
 
         // Admission gate (streaming): same priority queue as the non-stream path.
         // The permit must outlive `run_stream` — a generation occupies an engine
@@ -2647,13 +2780,7 @@ pub async fn run_stream(
                     // stream end — the synthesized SSE carries only the final
                     // turn and would drop the count (#496). The token debit still
                     // fires at stream end on the real usage frame.
-                    spawn_tool_call_debit(
-                        &state,
-                        ctx.org_id.as_deref(),
-                        &ctx.request_id,
-                        billable_tool_calls,
-                        ctx.managed_inference,
-                    );
+                    spawn_tool_call_debit(&state, &ctx, billable_tool_calls);
                     Ok(crate::tools::value_to_sse_stream(&buffered))
                 }
                 Err(e) => Err(e),
@@ -2676,17 +2803,6 @@ pub async fn run_stream(
                 } else {
                     None
                 };
-
-                // Advance per-user/per-agent/per-session counters now the stream
-                // is live.
-                state.with_budget(|b| {
-                    b.record(
-                        ctx.user_id.as_deref(),
-                        ctx.agent_id.as_deref(),
-                        estimated_tokens,
-                    );
-                    b.record_session(ctx.session_id.as_deref(), estimated_tokens);
-                });
 
                 info!(
                     request_id = %ctx.request_id,
@@ -2937,6 +3053,7 @@ pub async fn run_multimodal(
         &ctx,
         &mut body,
         &mut decision,
+        budget_charge_kind_for_modality(&modality),
         OutputCeiling::Untouched,
     )
     .map_err(|e| {
@@ -2969,6 +3086,8 @@ pub async fn run_multimodal(
         };
 
         state.metrics.inc_provider_request(provider.name());
+
+        stamp_openrouter_identity(&mut body, provider.name(), &ctx);
 
         let result = match modality {
             Modality::Image => provider
@@ -3005,6 +3124,20 @@ pub async fn run_multimodal(
                 } else {
                     None
                 };
+                let provider_cost_micro_usd =
+                    response_reported_cost_usd(&response).and_then(cost_usd_to_micro);
+                let has_output = modality != Modality::Image
+                    || response["data"].as_array().is_some_and(|a| !a.is_empty());
+                let (media_cost_micro_usd, estimated_media_cost) =
+                    media_cost_from_response(&state, &modality, &response);
+                if has_output {
+                    record_charged_budget_kind(
+                        &state,
+                        &ctx,
+                        BudgetChargeKind::Media,
+                        state.config.credits.debit_amount(media_cost_micro_usd),
+                    );
+                }
 
                 state.log_audit(AuditRecord {
                     request_id: ctx.request_id.clone(),
@@ -3026,6 +3159,8 @@ pub async fn run_multimodal(
                     user_id: ctx.user_id.clone(),
                     agent_id: ctx.agent_id.clone(),
                     feature: ctx.feature.clone(),
+                    managed_inference: ctx.managed_inference,
+                    provider_cost_micro_usd,
                     event_type: crate::audit::EventType::ModelCall,
                     backend: None,
                     command: None,
@@ -3073,28 +3208,22 @@ pub async fn run_multimodal(
                     // records which of the two paid for this row so a later
                     // reconciliation against the provider invoice can tell them
                     // apart.
-                    let (cost, estimated) = state
-                        .config
-                        .credits
-                        .media_cost_from_response(&modality, &response);
-                    let has_output = modality != Modality::Image
-                        || response["data"].as_array().is_some_and(|a| !a.is_empty());
                     // OUTSIDE the `cost > 0` guard, deliberately. A fallback that
                     // prices to zero is the exact combination that shipped unbilled
                     // media twice, and inside the guard it is the one case that
                     // cannot warn — no debit, no log, no invoice line to reconcile
                     // against. This is the smallest change that would have surfaced
                     // both on their first production call.
-                    if estimated && has_output {
+                    if estimated_media_cost && has_output {
                         warn!(
                             modality = modality.as_str(),
-                            cost,
-                            billed = cost > 0,
+                            cost = media_cost_micro_usd,
+                            billed = media_cost_micro_usd > 0,
                             "credits: media billed at the FLAT fallback rate — the \
                              provider reported no compute time"
                         );
                     }
-                    if cost > 0 && has_output {
+                    if media_cost_micro_usd > 0 && has_output {
                         let fail_closed_sticky =
                             state.config.credits.fail_closed && ctx.managed_inference;
                         // The credit permit rides INTO the task so it outlives
@@ -3117,8 +3246,8 @@ pub async fn run_multimodal(
                                 .filter(|s| *s > 0.0)
                                 .map(|s| (s * 1000.0).round() as u64),
                             user_id: ctx.user_id.clone(),
-                            task_label: Some(media_task_label(&modality, estimated)),
-                            estimated: Some(estimated),
+                            task_label: Some(media_task_label(&modality, estimated_media_cost)),
+                            estimated: Some(estimated_media_cost),
                             ..Default::default()
                         };
                         tokio::spawn(async move {
@@ -3127,10 +3256,10 @@ pub async fn run_multimodal(
                                 org_id,
                                 ref_id,
                                 "media",
-                                cost,
+                                media_cost_micro_usd,
                                 fail_closed_sticky,
                                 // Media debits carry no budget-cap tier (item 4
-                                // is scoped to token budgets).
+                                // is scoped to charged-cost budgets).
                                 None,
                                 pool,
                                 // No token counts: media has none.
@@ -3198,6 +3327,265 @@ pub async fn run_multimodal(
     Err(err)
 }
 
+/// Run embeddings or reranking through the same governance used by chat and
+/// multimodal calls. These endpoints still consume provider tokens and wallet
+/// credits even though their response shape is not a chat completion.
+pub async fn run_embedding(
+    state: Arc<AppState>,
+    ctx: RequestContext,
+    mut body: Value,
+    operation: EmbeddingOperation,
+) -> Result<PipelineOutput, GatewayError> {
+    let start = Instant::now();
+    state.metrics.inc_requests();
+    let requested_model = body["model"].as_str().unwrap_or("unknown").to_string();
+
+    if !state
+        .rate_limiter
+        .check_request_for_key(&ctx.api_key, ctx.key_config.as_ref())
+    {
+        state.metrics.inc_rate_limited();
+        let error = GatewayError::RateLimited;
+        audit_failure(&state, &ctx, &requested_model, &error, start);
+        return Err(error);
+    }
+    if !state.rate_limiter.check_burst(&ctx.api_key) {
+        state.metrics.inc_rate_limited();
+        let error = GatewayError::RateLimited;
+        audit_failure(&state, &ctx, &requested_model, &error, start);
+        return Err(error);
+    }
+
+    let mut decision = state.router.route(&requested_model);
+    let BudgetOutcome {
+        decision: budget,
+        alert: policy_alert,
+        reservation: mut credit_reservation,
+    } = enforce_budget(
+        &state,
+        &ctx,
+        &mut body,
+        &mut decision,
+        BudgetChargeKind::Model,
+        OutputCeiling::Untouched,
+    )
+    .map_err(|error| {
+        state.metrics.inc_errors();
+        audit_failure(&state, &ctx, &requested_model, &error, start);
+        error
+    })?;
+
+    let fallback_chain = clamped_fallback_chain(&state, &ctx, &decision);
+    let primary_provider = fallback_chain.first().cloned();
+    let mut primary_skipped = false;
+    let mut last_error: Option<GatewayError> = None;
+
+    for provider_kind in &fallback_chain {
+        if state.circuit_breaker.is_open(provider_kind.as_str()) {
+            last_error = Some(GatewayError::CircuitOpen(
+                provider_kind.as_str().to_string(),
+            ));
+            if Some(provider_kind) == primary_provider.as_ref() {
+                primary_skipped = true;
+            }
+            continue;
+        }
+
+        let Some(provider) = state.providers.get(provider_kind.as_str()) else {
+            if Some(provider_kind) == primary_provider.as_ref() {
+                primary_skipped = true;
+            }
+            continue;
+        };
+        state.metrics.inc_provider_request(provider.name());
+
+        let result = match operation {
+            EmbeddingOperation::Embed => provider
+                .embed(&decision.model, &body)
+                .await
+                .map_err(GatewayError::from),
+            EmbeddingOperation::Rerank => provider
+                .rerank(&decision.model, &body)
+                .await
+                .map_err(GatewayError::from),
+        };
+
+        match result {
+            Ok(response) => {
+                state.circuit_breaker.record_success(provider.name());
+                let input_tokens = response["usage"]["prompt_tokens"]
+                    .as_u64()
+                    .or_else(|| response["usage"]["input_tokens"].as_u64())
+                    .or_else(|| response["usage"]["total_tokens"].as_u64())
+                    .unwrap_or(0);
+                let output_tokens = response["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+                let total_tokens = input_tokens.saturating_add(output_tokens);
+                state.metrics.add_tokens(input_tokens, output_tokens);
+
+                if total_tokens > 0
+                    && !state.rate_limiter.check_tokens_for_key(
+                        &ctx.api_key,
+                        total_tokens,
+                        ctx.key_config.as_ref(),
+                    )
+                {
+                    state.metrics.inc_rate_limited();
+                    state.metrics.inc_errors();
+                    let error = GatewayError::RateLimited;
+                    audit_failure(&state, &ctx, &decision.model, &error, start);
+                    return Err(error);
+                }
+
+                let reported_cost = response["usage"]["cost"]
+                    .as_f64()
+                    .and_then(cost_usd_to_micro);
+                let budget_cost_micro_usd = charged_budget_cost_micro_usd(
+                    &state,
+                    response["usage"]["cost"].as_f64(),
+                    input_tokens,
+                    output_tokens,
+                    &decision.model,
+                );
+                state.audit.add_tokens(&ctx.api_key, total_tokens);
+                record_charged_budget(&state, &ctx, budget_cost_micro_usd);
+
+                let latency_ms = start.elapsed().as_millis() as u64;
+                let provider_cost_micro_usd = reported_cost;
+                state.log_audit(AuditRecord {
+                    request_id: ctx.request_id.clone(),
+                    api_key: ctx.api_key.clone(),
+                    user_name: ctx.user_name.clone(),
+                    org_id: ctx.org_id.clone(),
+                    team_id: ctx.team_id.clone(),
+                    project_id: ctx.project_id.clone(),
+                    provider: format!("{}:{}", provider.name(), operation.as_str()),
+                    model: decision.model.clone(),
+                    input_tokens,
+                    output_tokens,
+                    cache_hit: false,
+                    latency_ms,
+                    eval_score: None,
+                    error: None,
+                    skill_ids: ctx.skill_ids.clone(),
+                    session_id: ctx.session_id.clone(),
+                    user_id: ctx.user_id.clone(),
+                    agent_id: ctx.agent_id.clone(),
+                    feature: ctx.feature.clone(),
+                    managed_inference: ctx.managed_inference,
+                    provider_cost_micro_usd,
+                    event_type: crate::audit::EventType::ModelCall,
+                    backend: None,
+                    command: None,
+                    duration_ms: None,
+                    exit_code: None,
+                    widget_instance_id: None,
+                });
+
+                if let Some(org_id) = ctx.org_id.clone().filter(|value| !value.is_empty()) {
+                    if state.config.credits.is_active() {
+                        let cost = response_cost_micro_usd(
+                            &state,
+                            response["usage"]["cost"].as_f64(),
+                            input_tokens,
+                            output_tokens,
+                            &decision.model,
+                        );
+                        let fail_closed_sticky =
+                            state.config.credits.fail_closed && ctx.managed_inference;
+                        let budget_alert_tier = budget
+                            .as_ref()
+                            .filter(|value| value.limit > 0 && value.alert >= AlertTier::Warn)
+                            .map(|value| value.alert);
+                        let credit_permit = credit_reservation.take();
+                        let state_debit = Arc::clone(&state);
+                        let request_id = ctx.request_id.clone();
+                        let pool = crate::credit_pools::pool_for_gateway_provider(provider.name());
+                        let attribution = DebitAttribution {
+                            provider: Some(provider.name().to_string()),
+                            model: Some(decision.model.clone()),
+                            input_tokens: Some(input_tokens),
+                            output_tokens: Some(output_tokens),
+                            duration_ms: Some(latency_ms),
+                            user_id: ctx.user_id.clone(),
+                            ..Default::default()
+                        };
+                        tokio::spawn(async move {
+                            debit_wallet_for_request(
+                                state_debit,
+                                org_id,
+                                request_id,
+                                operation.as_str(),
+                                cost,
+                                fail_closed_sticky,
+                                budget_alert_tier,
+                                pool,
+                                attribution,
+                            )
+                            .await;
+                            drop(credit_permit);
+                        });
+                    }
+                }
+
+                let degraded = if primary_skipped {
+                    state.metrics.inc_degraded_fallback();
+                    Some(DegradedMode::Fallback(provider.name().to_string()))
+                } else {
+                    None
+                };
+                return Ok(PipelineOutput {
+                    response,
+                    context: ctx,
+                    provider_used: provider.name(),
+                    model_used: decision.model,
+                    cache_hit: false,
+                    budget,
+                    eval_score: None,
+                    degraded,
+                    policy_alert,
+                    prompt_cache: ryu_gw_providers::PromptCacheOutcome::Disabled,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                });
+            }
+            Err(error) => {
+                if !matches!(error, GatewayError::ProviderRateLimited { .. }) {
+                    state.circuit_breaker.record_failure(provider.name());
+                }
+                state.metrics.inc_provider_error(provider.name());
+                last_error = Some(error);
+                if Some(provider_kind) == primary_provider.as_ref() {
+                    primary_skipped = true;
+                }
+            }
+        }
+    }
+
+    state.metrics.inc_errors();
+    state.metrics.inc_degraded_exhausted();
+    let error = last_error.map_or_else(
+        || {
+            GatewayError::AllProvidersUnavailable(format!(
+                "All providers unavailable for {} model '{}'",
+                operation.as_str(),
+                decision.model
+            ))
+        },
+        |previous| match previous {
+            GatewayError::CircuitOpen(_) | GatewayError::ProviderError(_) => {
+                GatewayError::AllProvidersUnavailable(format!(
+                    "All providers unavailable for {} model '{}': {previous}",
+                    operation.as_str(),
+                    decision.model
+                ))
+            }
+            other => other,
+        },
+    );
+    audit_failure(&state, &ctx, &decision.model, &error, start);
+    Err(error)
+}
+
 // ─── Video generation (job-based) ─────────────────────────────────────────────
 
 /// Submit a video-generation job. Runs the SAME governance as `run_multimodal`
@@ -3262,17 +3650,19 @@ pub async fn submit_video_job(
         ctx.slot_model.as_deref(),
     );
     let mut decision = decision;
-    // Video is job-based; the budget decision (and any alert) is not surfaced on
-    // the submit response, so the outcome is discarded wholesale — INCLUDING the
-    // reservation, which is correct here and nowhere else: submit returns a job
-    // id and the render happens out of band, so there is no request lifetime for
-    // a permit to track. Video spend is bounded by `cost_per_video_micro_usd` on
-    // the post-render debit instead.
-    let _budget = enforce_budget(
+    // Video is job-based, so its reservation must move into the durable in-memory
+    // job record and live until the provider reaches a terminal state. Dropping it
+    // at the end of submit reopens the exact headroom that concurrent video jobs
+    // are meant to claim.
+    let BudgetOutcome {
+        reservation: credit_reservation,
+        ..
+    } = enforce_budget(
         &state,
         &ctx,
         &mut body,
         &mut decision,
+        BudgetChargeKind::Media,
         OutputCeiling::Untouched,
     )
     .map_err(|e| {
@@ -3319,13 +3709,19 @@ pub async fn submit_video_job(
         output: job.output,
         error: job.error,
         created_ms: crate::jobs::now_ms(),
+        last_activity_ms: crate::jobs::now_ms(),
         org_id: ctx.org_id.clone(),
+        user_id: ctx.user_id.clone(),
+        agent_id: ctx.agent_id.clone(),
+        session_id: ctx.session_id.clone(),
         api_key: ctx.api_key.clone(),
+        reservation: credit_reservation.map(Arc::new),
     };
     // If the provider completed the job synchronously at submit, bill here — no
     // later poll will observe a Queued→Succeeded transition. Idempotent via the
     // `{id}:video` ref so it never double-charges against the poll debit.
     let terminal_success = media_job.status == crate::jobs::JobStatus::Succeeded;
+    let terminal = media_job.status.is_terminal();
     let has_output = media_job
         .output
         .as_ref()
@@ -3333,6 +3729,9 @@ pub async fn submit_video_job(
         .is_some_and(|a| !a.is_empty());
     let job_id = media_job.id.clone();
     let job_org = media_job.org_id.clone();
+    let job_user_id = media_job.user_id.clone();
+    let job_agent_id = media_job.agent_id.clone();
+    let job_session_id = media_job.session_id.clone();
     let response = media_job.to_response();
     state.jobs.insert(media_job);
 
@@ -3355,6 +3754,14 @@ pub async fn submit_video_job(
                 .config
                 .credits
                 .media_cost_from_response(&Modality::Video, &response);
+            record_charged_budget_for_ids(
+                &state,
+                job_user_id.as_deref(),
+                job_agent_id.as_deref(),
+                job_session_id.as_deref(),
+                BudgetChargeKind::Media,
+                state.config.credits.debit_amount(cost),
+            );
             // Outside the `cost > 0` guard — see the sync media path above. A
             // fallback priced at zero is precisely the case that must not be silent.
             if estimated {
@@ -3367,33 +3774,53 @@ pub async fn submit_video_job(
             }
             if cost > 0 {
                 let fail_closed_sticky = state.config.credits.fail_closed && ctx.managed_inference;
-                tokio::spawn(debit_wallet_for_request(
-                    state.clone(),
-                    org_id,
-                    format!("{job_id}:video"),
-                    "media",
-                    cost,
-                    fail_closed_sticky,
-                    None,
-                    crate::credit_pools::pool_for_gateway_provider(provider.name()),
-                    DebitAttribution {
-                        provider: Some(provider.name().to_string()),
-                        model: Some(decision.model.clone()),
-                        // Present exactly when the provider reported compute
-                        // time; absent means this row was priced at the flat
-                        // fallback rate. (submit)
-                        duration_ms: response["usage"]["compute_seconds"]
-                            .as_f64()
-                            .filter(|s| *s > 0.0)
-                            .map(|s| (s * 1000.0).round() as u64),
-                        user_id: ctx.user_id.clone(),
-                        task_label: Some(media_task_label(&Modality::Video, estimated)),
-                        estimated: Some(estimated),
-                        ..Default::default()
-                    },
-                ));
+                let credit_reservation = state.jobs.take_reservation(&job_id);
+                let provider_name = provider.name().to_owned();
+                let pool = crate::credit_pools::pool_for_gateway_provider(provider.name());
+                let model = decision.model.clone();
+                let duration_ms = response["usage"]["compute_seconds"]
+                    .as_f64()
+                    .filter(|seconds| *seconds > 0.0)
+                    .map(|seconds| (seconds * 1000.0).round() as u64);
+                let user_id = ctx.user_id.clone();
+                let task_label = media_task_label(&Modality::Video, estimated);
+                let debit_ref = format!("{job_id}:video");
+                let state_debit = state.clone();
+                tokio::spawn(async move {
+                    debit_wallet_for_request(
+                        state_debit,
+                        org_id,
+                        debit_ref,
+                        "media",
+                        cost,
+                        fail_closed_sticky,
+                        None,
+                        pool,
+                        DebitAttribution {
+                            provider: Some(provider_name),
+                            model: Some(model),
+                            // Present exactly when the provider reported compute
+                            // time; absent means this row was priced at the flat
+                            // fallback rate. (submit)
+                            duration_ms,
+                            user_id,
+                            task_label: Some(task_label),
+                            estimated: Some(estimated),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                    drop(credit_reservation);
+                });
             }
         }
+    }
+
+    // A synchronous failure, an empty/zero-cost success, or a non-managed job
+    // has no debit task to own the claim. Release any remaining job-held permit;
+    // a successful paid job already moved it into the debit task above.
+    if terminal {
+        drop(state.jobs.take_reservation(&job_id));
     }
 
     info!(
@@ -3426,6 +3853,7 @@ pub async fn poll_video_job(
             "video job belongs to a different key".to_string(),
         ));
     }
+    state.jobs.touch(&job_id);
     if job.status.is_terminal() {
         return Ok(job.to_response());
     }
@@ -3438,13 +3866,13 @@ pub async fn poll_video_job(
     };
 
     let poll = provider.poll_video(&job.provider_ref).await?;
-    let newly_succeeded =
-        poll.status == crate::jobs::JobStatus::Succeeded && !job.status.is_terminal();
-    state.jobs.update(&job_id, |j| {
-        j.status = poll.status;
-        j.output = poll.output.clone();
-        j.error = poll.error.clone();
-    });
+    let transition = state.jobs.apply_poll(
+        &job_id,
+        poll.status,
+        poll.output.clone(),
+        poll.error.clone(),
+    );
+    let newly_succeeded = transition.became_succeeded;
 
     let poll_has_output = poll
         .output
@@ -3464,6 +3892,14 @@ pub async fn poll_video_job(
                 .config
                 .credits
                 .media_cost_from_response(&Modality::Video, &poll_payload);
+            record_charged_budget_for_ids(
+                &state,
+                job.user_id.as_deref(),
+                job.agent_id.as_deref(),
+                job.session_id.as_deref(),
+                BudgetChargeKind::Media,
+                state.config.credits.debit_amount(cost),
+            );
             // Outside the `cost > 0` guard — see the sync media path above.
             if estimated {
                 warn!(
@@ -3475,35 +3911,54 @@ pub async fn poll_video_job(
             }
             if cost > 0 {
                 let fail_closed_sticky = state.config.credits.fail_closed && ctx.managed_inference;
-                tokio::spawn(debit_wallet_for_request(
-                    state.clone(),
-                    org_id,
-                    format!("{job_id}:video"),
-                    "media",
-                    cost,
-                    fail_closed_sticky,
-                    None,
-                    crate::credit_pools::pool_for_gateway_provider(provider.name()),
-                    DebitAttribution {
-                        provider: Some(provider.name().to_string()),
-                        // The JOB's own model, not a request decision: a poll
-                        // arrives on a later request that never made one.
-                        model: Some(job.model.clone()),
-                        // Present exactly when the provider reported compute
-                        // time; absent means this row was priced at the flat
-                        // fallback rate. (poll)
-                        duration_ms: poll_payload["usage"]["compute_seconds"]
-                            .as_f64()
-                            .filter(|s| *s > 0.0)
-                            .map(|s| (s * 1000.0).round() as u64),
-                        user_id: ctx.user_id.clone(),
-                        task_label: Some(media_task_label(&Modality::Video, estimated)),
-                        estimated: Some(estimated),
-                        ..Default::default()
-                    },
-                ));
+                let credit_reservation = state.jobs.take_reservation(&job_id);
+                let provider_name = provider.name().to_owned();
+                let pool = crate::credit_pools::pool_for_gateway_provider(provider.name());
+                let model = job.model.clone();
+                let duration_ms = poll_payload["usage"]["compute_seconds"]
+                    .as_f64()
+                    .filter(|seconds| *seconds > 0.0)
+                    .map(|seconds| (seconds * 1000.0).round() as u64);
+                let user_id = job.user_id.clone();
+                let task_label = media_task_label(&Modality::Video, estimated);
+                let debit_ref = format!("{job_id}:video");
+                let state_debit = state.clone();
+                tokio::spawn(async move {
+                    debit_wallet_for_request(
+                        state_debit,
+                        org_id,
+                        debit_ref,
+                        "media",
+                        cost,
+                        fail_closed_sticky,
+                        None,
+                        pool,
+                        DebitAttribution {
+                            provider: Some(provider_name),
+                            // The JOB's own model, not a request decision: a poll
+                            // arrives on a later request that never made one.
+                            model: Some(model),
+                            // Present exactly when the provider reported compute
+                            // time; absent means this row was priced at the flat
+                            // fallback rate. (poll)
+                            duration_ms,
+                            user_id,
+                            task_label: Some(task_label),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                    drop(credit_reservation);
+                });
             }
         }
+    }
+
+    // A failed/cancelled terminal result, a successful job with no output, or a
+    // zero-cost/non-managed success has no debit task to own the claim. A paid
+    // success already moved it into the debit task above.
+    if transition.became_terminal {
+        drop(state.jobs.take_reservation(&job_id));
     }
 
     let updated = state.jobs.get(&job_id).unwrap_or(job);
@@ -3661,6 +4116,15 @@ fn multimodal_input_text(body: &Value, modality: &Modality) -> String {
     }
 }
 
+fn budget_charge_kind_for_modality(modality: &Modality) -> BudgetChargeKind {
+    match modality {
+        Modality::Chat => BudgetChargeKind::Model,
+        Modality::Image | Modality::Tts | Modality::Stt | Modality::Video => {
+            BudgetChargeKind::Media
+        }
+    }
+}
+
 // ─── Budget enforcement (U21) ─────────────────────────────────────────────────
 
 /// Check the request against per-user and per-agent budgets and apply the
@@ -3680,6 +4144,7 @@ fn enforce_budget(
     ctx: &RequestContext,
     body: &mut Value,
     decision: &mut RouteDecision,
+    kind: BudgetChargeKind,
     ceiling: OutputCeiling,
 ) -> Result<BudgetOutcome, GatewayError> {
     if ctx.is_master_key {
@@ -3759,17 +4224,18 @@ fn enforce_budget(
         err
     })?;
 
-    // Token-budget decision (U21) and the credit-wallet-empty decision (#486)
+    // Charged-cost budget decision (U21) and the credit-wallet-empty decision (#486)
     // are both expressed as a `BudgetDecision`; pick the more severe so a single
     // `match` applies one action. The wallet decision reuses the existing budget
     // machinery — no new denial path (spec §4).
-    let token_decision =
-        state.with_budget(|b| b.evaluate(ctx.user_id.as_deref(), ctx.agent_id.as_deref()));
+    let token_decision = state
+        .with_budget(|b| b.evaluate_charge(ctx.user_id.as_deref(), ctx.agent_id.as_deref(), kind));
     let wallet_decision = wallet_empty_decision(state, ctx);
     // Per-session running cap (#510): one global rule, counter keyed by
     // x-ryu-session-id. Folded into the same most-severe chain so a session
     // decision flows through the existing Notify/Downgrade/Restrict/Stop arms.
-    let session_decision = state.with_budget(|b| b.evaluate_session(ctx.session_id.as_deref()));
+    let session_decision =
+        state.with_budget(|b| b.evaluate_session_charge(ctx.session_id.as_deref(), kind));
 
     // The propagated alert tier is the MAX across every matched decision (not
     // just the most-severe-enforcement one), so a low-enforcement rule with a
@@ -3815,8 +4281,8 @@ fn enforce_budget(
             warn!(
                 scope = budget.scope.as_str(),
                 key = %budget.key,
-                used = budget.used,
-                limit = budget.limit,
+                used_micro_usd = budget.used,
+                limit_micro_usd = budget.limit,
                 "budget reached (notify)"
             );
         }
@@ -3855,8 +4321,8 @@ fn enforce_budget(
             warn!(
                 scope = budget.scope.as_str(),
                 key = %budget.key,
-                used = budget.used,
-                limit = budget.limit,
+                used_micro_usd = budget.used,
+                limit_micro_usd = budget.limit,
                 "budget exceeded (stop)"
             );
             return Err(GatewayError::BudgetExceeded(alert));
@@ -4223,7 +4689,7 @@ fn wallet_empty_decision(state: &AppState, ctx: &RequestContext) -> Option<Budge
     }
 
     // Map the configured wallet-empty action onto the budget action. A downgrade
-    // with no target model degrades to a restrict (mirrors the token-budget rule)
+    // with no target model degrades to a restrict (mirrors the spend-budget rule)
     // so the caller is never silently let through on an unhonourable downgrade.
     let action = match credits.wallet_empty_action {
         crate::config::WalletEmptyAction::Downgrade
@@ -4252,7 +4718,7 @@ fn wallet_empty_decision(state: &AppState, ctx: &RequestContext) -> Option<Budge
 
 /// Pick the more restrictive of two optional budget decisions. Severity order
 /// (most restrictive first): `Stop` > `Restrict`/`Downgrade` > `Notify`. Ties
-/// keep the first (token) decision. Mirrors `budget::severity` (private there).
+/// keep the first budget decision. Mirrors `budget::severity` (private there).
 fn most_severe(a: Option<BudgetDecision>, b: Option<BudgetDecision>) -> Option<BudgetDecision> {
     fn rank(action: BudgetAction) -> u8 {
         match action {
@@ -4274,18 +4740,7 @@ fn most_severe(a: Option<BudgetDecision>, b: Option<BudgetDecision>) -> Option<B
     }
 }
 
-/// Flat estimated spend in micro-USD for the given token totals, using the same
-/// per-1k-token rate (`control_plane.cost_per_1k_micro_usd`) the control-plane
-/// reporter, shared-budget reconciliation, and audit-trace cost-view all use, so
-/// those flat-basis systems stay consistent with each other.
-///
-/// NOTE: this is the FALLBACK basis. For OpenRouter traffic the wallet debit now
-/// uses the provider's real `usage.cost` via [`response_cost_micro_usd`], so the
-/// authoritative wallet ledger intentionally diverges from the flat-rate
-/// reporter/analytics for those requests. The flat systems are approximate
-/// spend attribution + an independent shared-budget guardrail; they do not read
-/// the wallet ledger. (Follow-up to fully unify: thread real cost onto the audit
-/// record so the reporter sums it too.)
+/// Flat estimated spend in micro-USD for reservation-only paths.
 fn request_cost_micro_usd(state: &AppState, input_tokens: u64, output_tokens: u64) -> u64 {
     let per_1k = state.config.control_plane.cost_per_1k_micro_usd;
     input_tokens
@@ -4294,28 +4749,122 @@ fn request_cost_micro_usd(state: &AppState, input_tokens: u64, output_tokens: u6
         / 1000
 }
 
-/// Debit cost in micro-USD, preferring the provider's *reported actual* spend
-/// over the flat per-1k estimate. OpenRouter returns `usage.cost` (in USD) when
-/// the request enables usage accounting; using it means the wallet is debited
-/// the true cost of whichever model actually ran — essential for mixed-price
-/// traffic and the `openrouter/auto` router, where one slug spans a 10x+ price
-/// range. Providers that report no cost (OpenAI/Anthropic direct) fall back to
-/// the estimate, so behaviour is unchanged for them.
+/// Raw provider cost in micro-USD, preferring the provider's *reported actual*
+/// spend over the configured per-model price table. OpenRouter returns
+/// `usage.cost` (in USD) when usage accounting is enabled; direct providers
+/// fall back to the model catalog and then the flat rate.
 fn response_cost_micro_usd(
     state: &AppState,
     reported_cost_usd: Option<f64>,
     input_tokens: u64,
     output_tokens: u64,
+    model: &str,
 ) -> u64 {
     reported_cost_usd
         .and_then(cost_usd_to_micro)
-        .unwrap_or_else(|| request_cost_micro_usd(state, input_tokens, output_tokens))
+        .unwrap_or_else(|| {
+            state
+                .config
+                .control_plane
+                .cost_for(model, input_tokens, output_tokens)
+        })
 }
 
-/// Convert a provider-reported USD cost to micro-USD, rejecting non-positive or
-/// non-finite values (so the caller falls back to the token estimate).
+/// Charged budget amount in micro-USD. Budget counters use the same amount the
+/// wallet would debit, including the configured platform markup, while remaining
+/// useful on self-hosted nodes where the markup is zero and no wallet is active.
+fn charged_budget_cost_micro_usd(
+    state: &AppState,
+    reported_cost_usd: Option<f64>,
+    input_tokens: u64,
+    output_tokens: u64,
+    model: &str,
+) -> u64 {
+    state.config.credits.debit_amount(response_cost_micro_usd(
+        state,
+        reported_cost_usd,
+        input_tokens,
+        output_tokens,
+        model,
+    ))
+}
+
+/// Add one successful charged model call to the local user/agent/session
+/// counters. The budget engine owns the identity filtering and zero-cost no-op;
+/// keeping this seam here makes every completion family use the same units.
+fn record_charged_budget(state: &AppState, ctx: &RequestContext, cost_micro_usd: u64) {
+    record_charged_budget_kind(state, ctx, BudgetChargeKind::Model, cost_micro_usd);
+}
+
+/// Add one successful charged amount to the local user/agent/session counters,
+/// honoring each matching rule's category inclusion settings.
+fn record_charged_budget_kind(
+    state: &AppState,
+    ctx: &RequestContext,
+    kind: BudgetChargeKind,
+    cost_micro_usd: u64,
+) {
+    state.with_budget(|budgets| {
+        budgets.record_charge(
+            ctx.user_id.as_deref(),
+            ctx.agent_id.as_deref(),
+            kind,
+            cost_micro_usd,
+        );
+        budgets.record_session_charge(ctx.session_id.as_deref(), kind, cost_micro_usd);
+    });
+}
+
+/// Record charged spend when the completion is represented by stored identity
+/// fields, as with an asynchronous video job that settles during polling.
+fn record_charged_budget_for_ids(
+    state: &AppState,
+    user_id: Option<&str>,
+    agent_id: Option<&str>,
+    session_id: Option<&str>,
+    kind: BudgetChargeKind,
+    cost_micro_usd: u64,
+) {
+    state.with_budget(|budgets| {
+        budgets.record_charge(user_id, agent_id, kind, cost_micro_usd);
+        budgets.record_session_charge(session_id, kind, cost_micro_usd);
+    });
+}
+
+/// Read the configured/provider-reported raw media price. Callers pass the raw
+/// amount to the wallet helper and apply `debit_amount` once for budget counters.
+fn media_cost_from_response(
+    state: &AppState,
+    modality: &Modality,
+    response: &Value,
+) -> (u64, bool) {
+    state
+        .config
+        .credits
+        .media_cost_from_response(modality, response)
+}
+
+/// Read a provider-reported USD cost from either the normal response envelope
+/// or a preserved raw payload (OpenRouter image output uses `raw`).
+fn response_reported_cost_usd(response: &Value) -> Option<f64> {
+    response
+        .get("usage")
+        .and_then(|usage| usage.get("cost"))
+        .or_else(|| {
+            response
+                .get("raw")
+                .and_then(|raw| raw.get("usage"))
+                .and_then(|usage| usage.get("cost"))
+        })
+        .and_then(Value::as_f64)
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+}
+
+/// Convert a provider-reported USD cost to micro-USD. Zero is meaningful: a
+/// provider promotion can make a managed request free, so only negative and
+/// non-finite values fall back to the token estimate.
 fn cost_usd_to_micro(cost_usd: f64) -> Option<u64> {
-    if cost_usd.is_finite() && cost_usd > 0.0 {
+    if cost_usd.is_finite() && cost_usd >= 0.0 {
         Some((cost_usd * 1_000_000.0).round() as u64)
     } else {
         None
@@ -4339,7 +4888,7 @@ fn sse_parse_cost(raw: &str) -> Option<f64> {
             continue;
         };
         if let Some(cost) = json["usage"]["cost"].as_f64() {
-            if cost.is_finite() && cost > 0.0 {
+            if cost.is_finite() && cost >= 0.0 {
                 best = Some(cost);
             }
         }
@@ -4636,32 +5185,63 @@ async fn debit_wallet_for_request(
 
 /// Best-effort per-request debit for billable (Composio) tool calls (#496).
 /// Composio charges per action execution, so on the managed plan each executed
-/// `composio__*` tool call costs the org `cost_per_tool_call_micro_usd`. This
+/// `composio.*` tool call costs the org `cost_per_tool_call_micro_usd`. This
 /// fires ONE debit for the whole request (`count × per-call cost`, at cost via
 /// `debit_amount`) under `reason="composio"` and a distinct
 /// `refId="{request_id}:composio"` so it is not deduped against the token debit.
-/// A no-op when credits are inactive, the org is absent, the count is zero, or
-/// the per-call cost is unset (0) — so it costs nothing until a deployment
-/// provisions a rate. Spawned by the caller so it never adds client latency.
-fn spawn_tool_call_debit(
+/// The local budget counter is updated even when the wallet is inactive or the
+/// node has no org id; the wallet debit is separately a no-op in those cases.
+/// Spawned by the caller so it never adds client latency.
+fn spawn_tool_call_debit(state: &Arc<AppState>, ctx: &RequestContext, billable_tool_calls: u64) {
+    spawn_tool_call_debit_for_ids(
+        state,
+        ctx.user_id.as_deref(),
+        ctx.agent_id.as_deref(),
+        ctx.session_id.as_deref(),
+        ctx.org_id.as_deref(),
+        &ctx.request_id,
+        ctx.managed_inference,
+        billable_tool_calls,
+    );
+}
+
+/// Best-effort tool charge entry point for Core's ACP/MCP bridge. The bridge
+/// executes the action in Core, while the Gateway owns the per-agent counter
+/// and optional wallet debit. `raw_cost` is deliberately passed to the wallet
+/// helper: that helper applies platform markup exactly once. The local budget
+/// counter receives the marked-up amount so its cap matches the wallet.
+pub(crate) fn spawn_tool_call_debit_for_ids(
     state: &Arc<AppState>,
+    user_id: Option<&str>,
+    agent_id: Option<&str>,
+    session_id: Option<&str>,
     org_id: Option<&str>,
     request_id: &str,
-    billable_tool_calls: u64,
     managed_inference: bool,
+    billable_tool_calls: u64,
 ) {
     if billable_tool_calls == 0 {
         return;
     }
+    let credits = &state.config.credits;
+    let raw_cost = credits.tool_call_cost_micro_usd(billable_tool_calls);
+    if raw_cost == 0 {
+        return;
+    }
+    let charged_cost = credits.debit_amount(raw_cost);
+    record_charged_budget_for_ids(
+        state,
+        user_id,
+        agent_id,
+        session_id,
+        BudgetChargeKind::Tools,
+        charged_cost,
+    );
+
     let Some(org_id) = org_id.filter(|s| !s.is_empty()) else {
         return;
     };
-    let credits = &state.config.credits;
     if !credits.is_active() {
-        return;
-    }
-    let cost = credits.tool_call_cost_micro_usd(billable_tool_calls);
-    if cost == 0 {
         return;
     }
     let ref_id = format!("{request_id}:composio");
@@ -4671,7 +5251,7 @@ fn spawn_tool_call_debit(
         org_id.to_string(),
         ref_id,
         "composio",
-        cost,
+        raw_cost,
         fail_closed_sticky,
         None,
         // No pool, and this is an invariant rather than a stub: a Composio tool
@@ -4687,6 +5267,7 @@ fn spawn_tool_call_debit(
         // one with the least to say for itself.
         DebitAttribution {
             provider: Some("composio".to_string()),
+            user_id: user_id.map(str::to_owned),
             task_label: Some(format!("{billable_tool_calls} tool calls")),
             ..Default::default()
         },
@@ -4723,6 +5304,8 @@ fn audit_debit_failure(state: &AppState, org_id: &str, request_id: &str, error: 
         user_id: None,
         agent_id: None,
         feature: None,
+        managed_inference: false,
+        provider_cost_micro_usd: None,
         event_type: crate::audit::EventType::ModelCall,
         backend: Some("credits".to_string()),
         command: None,
@@ -4992,7 +5575,7 @@ fn attach_stream_observer(
                     let total_tokens = input_tokens + output_tokens;
                     let latency_ms = s.start.elapsed().as_millis() as u64;
 
-                    // Update audit token totals (in-memory, for budget enforcement).
+                    // Update audit token totals (in-memory, for rate/reporting).
                     s.state.audit.add_tokens(&s.ctx.api_key, total_tokens);
                     s.state.metrics.add_tokens(input_tokens, output_tokens);
                     // Settle the TPM bucket with the stream's real usage. The
@@ -5039,6 +5622,16 @@ fn attach_stream_observer(
                     } else {
                         None
                     };
+                    let reported_cost = sse_parse_cost(&s.accumulated);
+                    let provider_cost_micro_usd = reported_cost.and_then(cost_usd_to_micro);
+                    let budget_cost_micro_usd = charged_budget_cost_micro_usd(
+                        &s.state,
+                        reported_cost,
+                        input_tokens,
+                        output_tokens,
+                        &s.model,
+                    );
+                    record_charged_budget(&s.state, &s.ctx, budget_cost_micro_usd);
 
                     info!(
                         request_id = %s.ctx.request_id,
@@ -5073,6 +5666,8 @@ fn attach_stream_observer(
                         user_id: s.ctx.user_id.clone(),
                         agent_id: s.ctx.agent_id.clone(),
                         feature: s.ctx.feature.clone(),
+                        managed_inference: s.ctx.managed_inference,
+                        provider_cost_micro_usd,
                         event_type: crate::audit::EventType::ModelCall,
                         backend: None,
                         command: None,
@@ -5099,12 +5694,12 @@ fn attach_stream_observer(
                     // Best-effort + org-gated, mirroring the non-streaming path.
                     if let Some(org_id) = s.ctx.org_id.clone().filter(|o| !o.is_empty()) {
                         if s.state.config.credits.is_active() {
-                            let reported_cost = sse_parse_cost(&s.accumulated);
                             let cost = response_cost_micro_usd(
                                 &s.state,
                                 reported_cost,
                                 input_tokens,
                                 output_tokens,
+                                &s.model,
                             );
                             let fail_closed_sticky =
                                 s.state.config.credits.fail_closed && s.ctx.managed_inference;
@@ -6243,10 +6838,10 @@ mod tests {
         // Legacy-only context: x-ryu-composio-actions folded into tool_actions,
         // but the new header was not present → must NOT trigger the unified loop
         // (the bare Composio agent keeps its fast stream + legacy loop).
-        let legacy = signal_ctx(Some("composio__SLACK"), false, false);
+        let legacy = signal_ctx(Some("composio.SLACK"), false, false);
         assert!(!tool_signal_active(&legacy, &cfg));
         // New header present → triggers.
-        let new_header = signal_ctx(Some("spider__crawl"), true, false);
+        let new_header = signal_ctx(Some("spider.crawl"), true, false);
         assert!(tool_signal_active(&new_header, &cfg));
         // x-ryu-tool-search: on → triggers even without an allowlist header.
         let search = signal_ctx(None, false, true);
@@ -6272,7 +6867,7 @@ mod tests {
         let cfg = crate::config::ToolsConfig::default();
 
         // A request that WOULD hit the unified loop (catalog wired + signal)...
-        let signaled = signal_ctx(Some("composio__GMAIL_SEARCH_EMAILS"), true, false);
+        let signaled = signal_ctx(Some("composio.GMAIL_SEARCH_EMAILS"), true, false);
         assert_eq!(
             select_tool_loop(&signaled, true, true, &cfg),
             ToolLoopKind::Unified
@@ -6394,21 +6989,21 @@ mod tests {
     fn allowlist_no_profile_is_unchanged_default_behavior() {
         // Default-safety guard: with no profile selected the resolved list is
         // exactly the x-ryu-tools CSV followed by the always_on names, in order.
-        let cfg = cfg_with_always_on("search__web");
-        let ctx = profile_ctx(Some("spider__crawl, exa__find"), None);
+        let cfg = cfg_with_always_on("search.web");
+        let ctx = profile_ctx(Some("spider.crawl, exa.find"), None);
         assert_eq!(
             effective_tool_allowlist(&ctx, &cfg),
             vec![
-                "spider__crawl".to_string(),
-                "exa__find".to_string(),
-                "search__web".to_string(),
+                "spider.crawl".to_string(),
+                "exa.find".to_string(),
+                "search.web".to_string(),
             ]
         );
         // No header and no profile ⇒ just always_on (the pre-profile behavior).
         let bare = profile_ctx(None, None);
         assert_eq!(
             effective_tool_allowlist(&bare, &cfg),
-            vec!["search__web".to_string()]
+            vec!["search.web".to_string()]
         );
     }
 
@@ -6426,9 +7021,9 @@ mod tests {
         );
 
         // `*` mixed with a real id keeps the real id and drops the wildcard.
-        let mixed = profile_ctx(Some("spider__crawl, *"), None);
+        let mixed = profile_ctx(Some("spider.crawl, *"), None);
         let out = effective_tool_allowlist(&mixed, &cfg);
-        assert!(out.contains(&"spider__crawl".to_string()));
+        assert!(out.contains(&"spider.crawl".to_string()));
         assert!(
             !out.contains(&"*".to_string()),
             "client wildcard survived alongside an explicit tool id"
@@ -6439,13 +7034,13 @@ mod tests {
         scoped_cfg.profiles.insert(
             "messaging".to_string(),
             ToolProfile {
-                allow: vec!["slack__send".to_string()],
+                allow: vec!["slack.send".to_string()],
                 ..ToolProfile::default()
             },
         );
         let escalate = profile_ctx(Some("*"), Some("messaging"));
         let scoped = effective_tool_allowlist(&escalate, &scoped_cfg);
-        assert!(scoped.contains(&"slack__send".to_string()));
+        assert!(scoped.contains(&"slack.send".to_string()));
         assert!(
             !scoped.contains(&"*".to_string()),
             "client wildcard escalated a scoped profile to unrestricted"
@@ -6454,11 +7049,11 @@ mod tests {
 
     #[test]
     fn allowlist_messaging_profile_resolves_to_allow_plus_always_on() {
-        let mut cfg = cfg_with_always_on("search__web");
+        let mut cfg = cfg_with_always_on("search.web");
         cfg.profiles.insert(
             "messaging".to_string(),
             ToolProfile {
-                allow: vec!["slack__send".to_string(), "gmail__send".to_string()],
+                allow: vec!["slack.send".to_string(), "gmail.send".to_string()],
                 ..ToolProfile::default()
             },
         );
@@ -6467,9 +7062,9 @@ mod tests {
         assert_eq!(
             effective_tool_allowlist(&ctx, &cfg),
             vec![
-                "slack__send".to_string(),
-                "gmail__send".to_string(),
-                "search__web".to_string(),
+                "slack.send".to_string(),
+                "gmail.send".to_string(),
+                "search.web".to_string(),
             ]
         );
     }
@@ -6480,16 +7075,16 @@ mod tests {
         cfg.profiles.insert(
             "messaging".to_string(),
             ToolProfile {
-                allow: vec!["slack__send".to_string()],
+                allow: vec!["slack.send".to_string()],
                 ..ToolProfile::default()
             },
         );
         // Explicit x-ryu-tools augments the profile (union; explicit entry appears
         // even though it is not in the profile).
-        let ctx = profile_ctx(Some("github__pr"), Some("messaging"));
+        let ctx = profile_ctx(Some("github.pr"), Some("messaging"));
         let out = effective_tool_allowlist(&ctx, &cfg);
-        assert!(out.contains(&"slack__send".to_string()));
-        assert!(out.contains(&"github__pr".to_string()));
+        assert!(out.contains(&"slack.send".to_string()));
+        assert!(out.contains(&"github.pr".to_string()));
     }
 
     #[test]
@@ -6498,36 +7093,36 @@ mod tests {
         cfg.profiles.insert(
             "messaging".to_string(),
             ToolProfile {
-                allow: vec!["slack__send".to_string(), "slack__admin".to_string()],
-                deny: vec!["slack__admin".to_string(), "github__pr".to_string()],
+                allow: vec!["slack.send".to_string(), "slack.admin".to_string()],
+                deny: vec!["slack.admin".to_string(), "github.pr".to_string()],
                 ..ToolProfile::default()
             },
         );
         // deny strips both a profile-allowed id and an explicitly-granted id.
-        let ctx = profile_ctx(Some("github__pr"), Some("messaging"));
+        let ctx = profile_ctx(Some("github.pr"), Some("messaging"));
         let out = effective_tool_allowlist(&ctx, &cfg);
-        assert!(out.contains(&"slack__send".to_string()));
-        assert!(!out.contains(&"slack__admin".to_string()));
-        assert!(!out.contains(&"github__pr".to_string()));
+        assert!(out.contains(&"slack.send".to_string()));
+        assert!(!out.contains(&"slack.admin".to_string()));
+        assert!(!out.contains(&"github.pr".to_string()));
     }
 
     #[test]
     fn allowlist_deny_does_not_strip_always_on() {
         // Invariant: always_on tools are never deny-stripped, even if a profile
         // lists one in its deny set.
-        let mut cfg = cfg_with_always_on("search__web");
+        let mut cfg = cfg_with_always_on("search.web");
         cfg.profiles.insert(
             "messaging".to_string(),
             ToolProfile {
-                allow: vec!["slack__send".to_string()],
-                deny: vec!["search__web".to_string()],
+                allow: vec!["slack.send".to_string()],
+                deny: vec!["search.web".to_string()],
                 ..ToolProfile::default()
             },
         );
         let ctx = profile_ctx(None, Some("messaging"));
         let out = effective_tool_allowlist(&ctx, &cfg);
         assert!(
-            out.contains(&"search__web".to_string()),
+            out.contains(&"search.web".to_string()),
             "always_on must survive a profile deny entry"
         );
     }
@@ -6536,17 +7131,17 @@ mod tests {
     fn allowlist_unknown_profile_falls_back_to_default() {
         // A stale / typo'd profile name must NOT deny-all — it behaves exactly as
         // if no profile were selected.
-        let cfg = cfg_with_always_on("search__web");
-        let ctx = profile_ctx(Some("spider__crawl"), Some("does-not-exist"));
+        let cfg = cfg_with_always_on("search.web");
+        let ctx = profile_ctx(Some("spider.crawl"), Some("does-not-exist"));
         assert_eq!(
             effective_tool_allowlist(&ctx, &cfg),
-            vec!["spider__crawl".to_string(), "search__web".to_string()]
+            vec!["spider.crawl".to_string(), "search.web".to_string()]
         );
     }
 
     #[test]
     fn allowlist_unrestricted_profile_resolves_to_wildcard() {
-        let mut cfg = cfg_with_always_on("search__web");
+        let mut cfg = cfg_with_always_on("search.web");
         cfg.profiles.insert(
             "full".to_string(),
             ToolProfile {
@@ -6560,7 +7155,7 @@ mod tests {
             out.contains(&"*".to_string()),
             "full profile seeds wildcard"
         );
-        assert!(out.contains(&"search__web".to_string()));
+        assert!(out.contains(&"search.web".to_string()));
     }
 
     #[test]
@@ -7313,13 +7908,71 @@ mod tests {
 
     /// cost_usd_to_micro converts dollars to micro-USD and rejects junk values.
     #[test]
-    fn cost_usd_to_micro_converts_and_rejects_nonpositive() {
+    fn cost_usd_to_micro_converts_and_rejects_negative_or_nonfinite() {
         assert_eq!(cost_usd_to_micro(0.0023), Some(2300));
         assert_eq!(cost_usd_to_micro(1.0), Some(1_000_000));
-        assert_eq!(cost_usd_to_micro(0.0), None);
+        assert_eq!(cost_usd_to_micro(0.0), Some(0));
         assert_eq!(cost_usd_to_micro(-1.0), None);
         assert_eq!(cost_usd_to_micro(f64::NAN), None);
         assert_eq!(cost_usd_to_micro(f64::INFINITY), None);
+    }
+
+    #[test]
+    fn sse_parse_cost_preserves_a_free_provider_transaction() {
+        let raw = "data: {\"usage\":{\"cost\":0}}\n\n";
+        assert_eq!(sse_parse_cost(raw), Some(0.0));
+        assert_eq!(cost_usd_to_micro(sse_parse_cost(raw).unwrap()), Some(0));
+    }
+
+    #[test]
+    fn openrouter_identity_prefers_agent_and_ignores_other_providers() {
+        let mut ctx = crate::pipeline::test_support::plain_request_context();
+        ctx.user_id = Some("user-7".to_owned());
+        ctx.agent_id = Some("agent-7".to_owned());
+
+        let mut openrouter = json!({ "model": "openrouter/model" });
+        stamp_openrouter_identity(&mut openrouter, "openrouter", &ctx);
+        assert_eq!(openrouter["user"], json!("ryu-agent:agent-7"));
+
+        let mut openai = json!({ "model": "gpt-4o" });
+        stamp_openrouter_identity(&mut openai, "openai", &ctx);
+        assert!(openai.get("user").is_none());
+    }
+
+    #[test]
+    fn openrouter_identity_falls_back_to_user() {
+        let mut ctx = crate::pipeline::test_support::plain_request_context();
+        ctx.user_id = Some("user-7".to_owned());
+        let mut body = json!({ "model": "openrouter/model" });
+        stamp_openrouter_identity(&mut body, "openrouter", &ctx);
+        assert_eq!(body["user"], json!("ryu-user:user-7"));
+    }
+
+    #[test]
+    fn agent_route_proof_binds_the_bearer_and_agent() {
+        type AgentRouteMac = Hmac<Sha256>;
+
+        let bearer = "rgw_test-bearer";
+        let mut mac = AgentRouteMac::new_from_slice(bearer.as_bytes()).unwrap();
+        mac.update(b"ryu-agent-route-v1\0");
+        mac.update(b"agent-7");
+        let proof = hex::encode(mac.finalize().into_bytes());
+
+        assert!(verify_agent_route_proof(
+            Some("Bearer rgw_test-bearer"),
+            "agent-7",
+            &proof
+        ));
+        assert!(!verify_agent_route_proof(
+            Some("Bearer rgw_test-bearer"),
+            "agent-8",
+            &proof
+        ));
+        assert!(!verify_agent_route_proof(
+            Some("Bearer rgw_other-bearer"),
+            "agent-7",
+            &proof
+        ));
     }
 
     /// attach_stream_observer writes a non-zero audit row at stream end when the
@@ -7970,6 +8623,7 @@ mod authenticate_tests {
             name: name.to_string(),
             org_id: Some("org-acme".to_string()),
             team_id: Some("team-1".to_string()),
+            channel_id: None,
             project_id: Some("proj-1".to_string()),
             requests_per_minute: None,
             tokens_per_minute: None,
@@ -9066,6 +9720,7 @@ mod fallback_tests {
             rules: vec![SmartRule {
                 description: "ping".to_string(),
                 model: "claude-rewritten".to_string(),
+                weight: 1.0,
             }],
             ..Default::default()
         };
@@ -9240,17 +9895,61 @@ mod fallback_tests {
         ctx
     }
 
+    /// Build a state whose per-agent budget for `agent-a` is `rule`, with a
+    /// healthy `primary` provider registered. Returns `(state, primary_call_counter)`.
+    fn agent_budget_state(rule: crate::config::BudgetRule) -> (Arc<AppState>, Arc<AtomicUsize>) {
+        use std::collections::HashMap;
+        let mut agents = HashMap::new();
+        agents.insert("agent-a".to_string(), rule);
+        let config = GatewayConfig {
+            routing: RoutingConfig {
+                default_provider: ProviderId::from("primary"),
+                fallback_chain: vec![ProviderId::from("primary")],
+                ..RoutingConfig::default()
+            },
+            firewall: FirewallConfig {
+                enabled: false,
+                ..FirewallConfig::default()
+            },
+            budgets: crate::config::BudgetConfig {
+                agents,
+                ..Default::default()
+            },
+            ..GatewayConfig::default()
+        };
+        let audit = AuditLogger::new(&AuditConfig {
+            enabled: false,
+            db_path: String::new(),
+        })
+        .expect("disabled audit logger");
+        let evals = crate::evals::EvalsRunner::new(EvalsConfig::default());
+        let mut state = AppState::new_for_test(config, audit, evals);
+        let (primary, calls) = StubProvider::new("primary", Mode::Ok);
+        state.providers.register(primary as Arc<dyn Provider>);
+        let state = Arc::new(state);
+        // Seed usage above the rule's limit so the very next request trips it.
+        state.with_budget(|b| b.record(None, Some("agent-a"), 1_000_000));
+        (state, calls)
+    }
+
+    fn agent_a_ctx() -> RequestContext {
+        let mut ctx = plain_ctx();
+        ctx.agent_id = Some("agent-a".to_string());
+        ctx
+    }
+
     /// A `Stop` budget rule at/over its limit rejects the request with a hard
     /// `BudgetExceeded` before the provider is reached.
     #[tokio::test]
     async fn budget_stop_rejects_over_limit_before_dispatch() {
         use crate::config::{BudgetAction, BudgetRule};
         let (state, calls) = budget_state(BudgetRule {
-            limit: 1,
+            limit: 1_000_000,
             action: BudgetAction::Stop,
             downgrade_to: None,
             restrict_max_tokens: 256,
             alert: crate::config::AlertTier::Silent,
+            include: crate::config::BudgetChargeInclusion::default(),
         });
         let err = match run(Arc::clone(&state), u1_ctx(), ping_body()).await {
             Err(e) => e,
@@ -9267,17 +9966,46 @@ mod fallback_tests {
         );
     }
 
+    /// An agent-specific `Stop` budget rejects the matching agent before the
+    /// provider is reached.
+    #[tokio::test]
+    async fn agent_budget_stop_rejects_over_limit_before_dispatch() {
+        use crate::config::{BudgetAction, BudgetRule};
+        let (state, calls) = agent_budget_state(BudgetRule {
+            limit: 1_000_000,
+            action: BudgetAction::Stop,
+            downgrade_to: None,
+            restrict_max_tokens: 256,
+            alert: crate::config::AlertTier::Silent,
+            include: crate::config::BudgetChargeInclusion::default(),
+        });
+        let err = match run(Arc::clone(&state), agent_a_ctx(), ping_body()).await {
+            Err(e) => e,
+            Ok(_) => panic!("an over-limit agent Stop budget must reject"),
+        };
+        assert!(
+            matches!(err, GatewayError::BudgetExceeded(_)),
+            "expected BudgetExceeded, got {err:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a hard agent budget stop must not reach the provider"
+        );
+    }
+
     /// A `Downgrade` rule rewrites the request's model to the cheaper target and
     /// still serves the turn.
     #[tokio::test]
     async fn budget_downgrade_rewrites_model_and_serves() {
         use crate::config::{BudgetAction, BudgetRule};
         let (state, calls) = budget_state(BudgetRule {
-            limit: 1,
+            limit: 1_000_000,
             action: BudgetAction::Downgrade,
             downgrade_to: Some("cheap-model".to_string()),
             restrict_max_tokens: 256,
             alert: crate::config::AlertTier::Silent,
+            include: crate::config::BudgetChargeInclusion::default(),
         });
         let out = run(Arc::clone(&state), u1_ctx(), ping_body())
             .await
@@ -9293,11 +10021,12 @@ mod fallback_tests {
     async fn budget_restrict_serves_with_a_restrict_decision() {
         use crate::config::{BudgetAction, BudgetRule};
         let (state, _calls) = budget_state(BudgetRule {
-            limit: 1,
+            limit: 1_000_000,
             action: BudgetAction::Restrict,
             downgrade_to: None,
             restrict_max_tokens: 128,
             alert: crate::config::AlertTier::Silent,
+            include: crate::config::BudgetChargeInclusion::default(),
         });
         let out = run(Arc::clone(&state), u1_ctx(), ping_body())
             .await
@@ -9312,11 +10041,12 @@ mod fallback_tests {
     async fn budget_notify_is_non_blocking() {
         use crate::config::{BudgetAction, BudgetRule};
         let (state, calls) = budget_state(BudgetRule {
-            limit: 1,
+            limit: 1_000_000,
             action: BudgetAction::Notify,
             downgrade_to: None,
             restrict_max_tokens: 256,
             alert: crate::config::AlertTier::Silent,
+            include: crate::config::BudgetChargeInclusion::default(),
         });
         let out = run(Arc::clone(&state), u1_ctx(), ping_body())
             .await

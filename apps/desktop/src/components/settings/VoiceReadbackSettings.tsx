@@ -44,7 +44,7 @@ export function VoiceReadbackSettings() {
 
 	return (
 		<SettingsSection
-			caption="Applies to desktop chat. Read-back is automatically disabled while a meeting is recording, even when this toggle is on. Engine and voice come from the Text-to-speech section below."
+			caption="Applies to desktop chat. Read-back is automatically disabled while a meeting is recording, even when this toggle is on. Engine and voice come from the Audio section below."
 			title="Read back responses"
 		>
 			<SettingsGroup>

@@ -97,7 +97,7 @@ export default function ResizableMasterDetail({
 				{/* Floating, rounded detail surface — mirrors the left app sidebar's
 				    floating variant and the chat workspace's right panel. */}
 				<div className="h-full p-2 pl-0">
-					<div className="scroll-fade-effect-y flex size-full flex-col overflow-auto rounded-3xl border border-border/60 bg-sidebar shadow-sm dark:bg-sidebar/50">
+					<div className="scroll-fade flex size-full flex-col overflow-auto rounded-3xl border border-border/60 bg-sidebar shadow-sm dark:bg-sidebar/50">
 						{detail}
 					</div>
 				</div>

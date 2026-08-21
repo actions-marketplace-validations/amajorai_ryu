@@ -13,6 +13,7 @@ import {
 } from "@ryu/ui/components/contributions-graph";
 import { EmployeeBadge } from "@ryu/ui/components/employee-badge";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { useQuery } from "@tanstack/react-query";
 import { format, subDays } from "date-fns";
 import { useTheme } from "next-themes";
@@ -26,9 +27,6 @@ import { SettingsCard, SettingsSection } from "./shared/settings-items.tsx";
 const SECONDS_PER_HOUR = 3600;
 const HEATMAP_DAYS = 364;
 const DATE_FORMAT = "yyyy-MM-dd";
-
-const numberFormatter = new Intl.NumberFormat("en-US");
-const formatNumber = (value: number): string => numberFormatter.format(value);
 
 interface AgentProfileProps {
 	agentId: string;

@@ -4,8 +4,9 @@
 // tells you an agent is filtered/budgeted/logged when it is not.
 //
 //  1. MIRROR tests. The four defaults this view reports live in Rust, in this
-//     repo, in four different modules — and they are NOT the same default
-//     (Pi ON, Claude OFF, Codex OFF, generic OFF). A stale copy here is silent:
+//     repo, in four different modules — Pi, Claude, Codex, and routable generic
+//     ACP agents are governed by default. A
+//     stale copy here is silent:
 //     the page would print "Direct" over a governed Pi, or "Governed" over a
 //     Claude Code that is shipping tokens straight to Anthropic. So these tests
 //     PARSE the Rust and compare, in the same doctrine as `preferences.test.ts`
@@ -40,6 +41,7 @@ import {
 	type EgressPrefs,
 	planEnableToolsForAll,
 	summarizeAgentEgress,
+	type ToolBridgePlan,
 } from "./agent-egress.ts";
 import type { AgentCatalogEntry } from "./agents.ts";
 
@@ -91,32 +93,32 @@ function anchor(file: string, expression: string): string {
 }
 
 describe("the four per-family defaults this view reports", () => {
-	// The whole point of the surface: these are three different defaults, and a
-	// view that assumed one uniform default would be wrong for two families.
+	// The whole point of the surface: each family has a separate control, even
+	// though each family keeps its own explicit default and control.
 
-	it("Claude Code is opt-in — Core's flag is constructed false", () => {
+	it("Claude Code is governed by default — it shares Core's default", () => {
 		expect(
 			anchor(
 				"apps/core/src/claude_config/mod.rs",
-				"static GATEWAY_ROUTING: AtomicBool = AtomicBool::new(false);"
+				"static GATEWAY_ROUTING: AtomicBool = AtomicBool::new(DEFAULT_CLAUDE_GATEWAY_ROUTING);"
 			)
 		).toBe(PRESENT);
 	});
 
-	it("Codex is opt-in — Core's flag is constructed false", () => {
+	it("Codex is governed by default — it shares Core's default", () => {
 		expect(
 			anchor(
 				"apps/core/src/codex_config/mod.rs",
-				"static GATEWAY_ROUTING: AtomicBool = AtomicBool::new(false);"
+				"static GATEWAY_ROUTING: AtomicBool = AtomicBool::new(DEFAULT_CODEX_GATEWAY_ROUTING);"
 			)
 		).toBe(PRESENT);
 	});
 
-	it("generic per-agent routing defaults OFF — a missing map entry is false", () => {
+	it("generic per-agent routing defaults ON — a missing map entry is governed", () => {
 		expect(
 			anchor(
 				"apps/core/src/agent_routing/mod.rs",
-				".and_then(|m| m.get(agent_id).copied()) .unwrap_or(false)"
+				".and_then(|m| m.get(agent_id).copied()) .unwrap_or(DEFAULT_AGENT_GATEWAY_ROUTING)"
 			)
 		).toBe(PRESENT);
 	});
@@ -234,8 +236,8 @@ describe("mechanism anchors — the redirect each family actually uses", () => {
 
 const prefs = (over: Partial<EgressPrefs>): EgressPrefs => ({
 	agents: {},
-	claude: false,
-	codex: false,
+	claude: true,
+	codex: true,
 	piRouting: "gateway",
 	// Empty, i.e. no agent has an explicit tool-bridge entry — which is the state
 	// every agent on a real node is in until someone touches the panel, and the
@@ -318,10 +320,10 @@ describe("classifyAgentEgress mirrors Core's agent_route order", () => {
 		expect(row.detail).toContain("Ryu agent's model settings");
 	});
 
-	it("Claude Code is off by default and toggleable, with the credential note", () => {
+	it("Claude Code is governed by default and toggleable, with the credential note", () => {
 		const row = classify({ id: "acp:claude", engine: "acp:claude" });
 		expect(row.mechanism).toBe("anthropic-passthrough");
-		expect(row.governed).toBe(false);
+		expect(row.governed).toBe(true);
 		expect(row.control).toEqual({ kind: "claude" });
 		// Enabling changes how a subscription credential flows; the row must say so.
 		expect(row.credentialNote).toContain("subscription");
@@ -332,7 +334,7 @@ describe("classifyAgentEgress mirrors Core's agent_route order", () => {
 		// (`is_special`); a stale entry there must not flip this row.
 		const row = classify(
 			{ id: "acp:claude", engine: "acp:claude" },
-			{ agents: { "acp:claude": true } }
+			{ agents: { "acp:claude": true }, claude: false }
 		);
 		expect(row.governed).toBe(false);
 		expect(
@@ -341,16 +343,16 @@ describe("classifyAgentEgress mirrors Core's agent_route order", () => {
 		).toBe(true);
 	});
 
-	it("Codex is off by default and toggleable, with the credential note", () => {
+	it("Codex is governed by default and toggleable, with the credential note", () => {
 		const row = classify({ id: "acp:codex", engine: "acp:codex" });
 		expect(row.mechanism).toBe("codex-passthrough");
-		expect(row.governed).toBe(false);
+		expect(row.governed).toBe(true);
 		expect(row.control).toEqual({ kind: "codex" });
 		expect(row.credentialNote).toContain("subscription");
 		expect(
-			classify({ id: "acp:codex", engine: "acp:codex" }, { codex: true })
+			classify({ id: "acp:codex", engine: "acp:codex" }, { codex: false })
 				.governed
-		).toBe(true);
+		).toBe(false);
 	});
 
 	it("a BYO acp-exec agent uses the generic map keyed on the AGENT id", () => {
@@ -426,7 +428,7 @@ describe("summarizeAgentEgress keeps best-effort out of the governed count", () 
 	it("counts governed, best-effort and direct separately", () => {
 		const rows = [
 			classify({ id: "ryu", engine: "ryu", flagship: true }),
-			classify({ id: "acp:claude", engine: "acp:claude" }),
+			classify({ id: "acp:claude", engine: "acp:claude" }, { claude: false }),
 			classify(
 				{ id: "agt_byo", engine: "acp-exec:x" },
 				{ agents: { agt_byo: true } }
@@ -434,9 +436,9 @@ describe("summarizeAgentEgress keeps best-effort out of the governed count", () 
 			classify({ id: "agt_local", engine: "ollama" }),
 		];
 		const view = summarizeAgentEgress(rows);
-		expect(view.governedCount).toBe(1); // ryu only
+		expect(view.governedCount).toBe(1); // ryu; Claude explicitly opted out
 		expect(view.bestEffortCount).toBe(1); // the BYO redirect
-		expect(view.directCount).toBe(1); // Claude Code
+		expect(view.directCount).toBe(1); // the explicit direct-egress Claude row
 		expect(view.otherCount).toBe(1); // the local-engine row
 		expect(view.rows).toHaveLength(4);
 	});
@@ -529,7 +531,7 @@ describe("the spawn-time premise the timing caveat rests on", () => {
 		expect(
 			anchor(
 				"apps/core/src/sidecar/adapters/acp.rs",
-				'"{conversation}\\u{1}{agent_key}\\u{1}{spawn_cmd}\\u{1}{}"'
+				'"{conversation}\\u{1}{agent_key}\\u{1}{spawn_cmd}\\u{1}{}\\u{1}{workspace_key}\\u{1}{environment_key}\\u{1}{security_key}"'
 			)
 		).toBe(PRESENT);
 	});
@@ -624,13 +626,13 @@ describe("the two caveats on one row stay two caveats", () => {
 });
 
 describe("describeEgressBadge will not call a saved value in force", () => {
-	it("reads the settled states exactly as before when nothing was written", () => {
+	it("reads governed subscription defaults without a saved preference", () => {
 		const settled = (row: AgentEgress) => describeEgressBadge(row).label;
 		expect(
 			settled(classify({ id: "ryu", engine: "ryu", flagship: true }))
 		).toBe("Through gateway");
 		expect(settled(classify({ id: "acp:codex", engine: "acp:codex" }))).toBe(
-			"Straight to provider"
+			"Through gateway"
 		);
 		expect(
 			settled(
@@ -736,7 +738,9 @@ describe("the tool bridge's two terms, mirrored from Core", () => {
 		expect(anchor(AGENT_ROUTING_RS, "pub fn is_tool_bridge_enabled")).toBe(
 			PRESENT
 		);
-		expect(anchor(AGENT_ROUTING_RS, ".unwrap_or(true)")).toBe(PRESENT);
+		expect(
+			anchor(AGENT_ROUTING_RS, ".unwrap_or(DEFAULT_AGENT_TOOL_BRIDGE)")
+		).toBe(PRESENT);
 		const row = classify({ id: "acp:gemini", engine: "acp:gemini" });
 		expect(row.tools.enabled).toBe(true);
 	});
@@ -805,7 +809,7 @@ describe("the tool bridge's two terms, mirrored from Core", () => {
 		expect(
 			anchor(
 				ACP_RS,
-				"const ACP_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(600);"
+				"tokio::time::timeout(std::time::Duration::from_secs(600), rx)"
 			)
 		).toBe(PRESENT);
 		expect(anchor(ACP_RS, "pool.retain(|_, turns| !turns.is_closed());")).toBe(
@@ -953,7 +957,7 @@ describe("who has a tool control, which is NOT who has an egress control", () =>
 describe("the tool counters partition the rows too", () => {
 	const rows = () => [
 		classify({ id: "ryu", engine: "ryu", flagship: true }),
-		classify({ id: "acp:claude", engine: "acp:claude" }),
+		classify({ id: "acp:claude", engine: "acp:claude" }, { claude: false }),
 		classify({ id: "acp:gemini", engine: "acp:gemini" }),
 		classify({ id: "acp:pi", engine: "acp:pi" }),
 		classify({ id: "zeroclaw", engine: "zeroclaw" }),
@@ -976,8 +980,8 @@ describe("the tool counters partition the rows too", () => {
 		// the other — the exact conflation this split removed.
 		const view = summarizeAgentEgress(rows());
 		expect(view.toolsOnCount).not.toBe(view.governedCount);
-		// ryu (extension) + claude + gemini = 3 with tools; pi + the opt-out = 2
-		// without; zeroclaw + the local engine = 2 not applicable.
+		// ryu (extension) + direct-egress claude + gemini = 3 with tools; pi + the
+		// opt-out = 2 without; zeroclaw + the local engine = 2 not applicable.
 		expect(view.toolsOnCount).toBe(3);
 		expect(view.toolsOffCount).toBe(2);
 		expect(view.toolsOtherCount).toBe(2);
@@ -1132,7 +1136,11 @@ describe("the bulk action shows its work and never touches egress", () => {
 	it("an empty plan writes nothing and still succeeds", async () => {
 		// No fetch is stubbed here on purpose: if the short-circuit regressed, this
 		// test would attempt a real request and fail rather than pass silently.
-		const empty = { changes: [], skipped: [], egressUntouched: true } as const;
+		const empty: ToolBridgePlan = {
+			changes: [],
+			egressUntouched: true,
+			skipped: [],
+		};
 		expect(
 			await applyToolBridgePlan(
 				{ url: "http://127.0.0.1:1/", token: null },

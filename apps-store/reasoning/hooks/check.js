@@ -14,12 +14,12 @@
 // supported way out is `host.runAgent`, which is also what `@ryu/proof` uses. The
 // sub-agent is not asked to JUDGE the answer (a second opinion is a different
 // product, and `@ryu/double-check` already is it); it is asked only to CALL
-// `reasoning__check` and report what the solver returned. The proof comes from the
+// `reasoning.check` and report what the solver returned. The proof comes from the
 // decision procedure; the agent is transport.
 //
 // That transport is CONDITIONAL, which is the whole reason for the marker protocol
 // below. `delegation::call_sub_agent` only runs the real chat path — the sub-agent's
-// own engine, tools and MCP servers, so `reasoning__check` exists — when an
+// own engine, tools and MCP servers, so `reasoning.check` exists — when an
 // `agent_id` is given AND a live agent runner is present. With no runner it falls
 // back to a single clean-context completion whose "tools" are a sentence in a system
 // prompt, so the sub-agent has NOTHING to call and can only answer from its own
@@ -60,14 +60,14 @@ const task = [
 	"answer yourself and do not use your own knowledge of the subject — your opinion is not",
 	"what is wanted here. Call the tool and report exactly what it returns.",
 	"",
-	`1. Call the \`reasoning__check\` tool with policy_id ${JSON.stringify(String(policyId).trim())},`,
+	`1. Call the \`reasoning.check\` tool with policy_id ${JSON.stringify(String(policyId).trim())},`,
 	"   the question, and the answer, both quoted verbatim below.",
 	"2. For every finding whose verdict is `invalid`, write one line naming the claim, the",
 	"   rules listed in its `responsible` array, and its `suggestions` text.",
 	"3. End your reply with a final line, exactly:  SOLVER: <the tool's top-level `result`>",
 	"   Copy that value verbatim from the tool output — valid, invalid, satisfiable,",
 	"   impossible, no_translations, translation_ambiguous or too_complex.",
-	"4. If you have no `reasoning__check` tool available, or the call errors, do NOT write a",
+	"4. If you have no `reasoning.check` tool available, or the call errors, do NOT write a",
 	"   SOLVER line and do NOT guess a verdict. Reply with one line saying what went wrong.",
 	"",
 	"<question>",

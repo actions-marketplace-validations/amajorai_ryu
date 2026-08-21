@@ -241,8 +241,7 @@ function RoleFormDialog({
 					>
 						Cancel
 					</Button>
-					<Button disabled={saving} onClick={() => handleSubmit()}>
-						{saving ? <Spinner className="size-4" /> : null}
+					<Button loading={saving} onClick={() => handleSubmit()}>
 						{mode === "create" ? "Create role" : "Save"}
 					</Button>
 				</DialogFooter>

@@ -12,7 +12,6 @@
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { toast } from "@ryu/ui/components/sileo";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { useAgentUpdate } from "@/src/hooks/useAgentUpdate.ts";
 
 export function AgentUpdateControl({ agentId }: { agentId: string }) {
@@ -67,7 +66,7 @@ export function AgentUpdateControl({ agentId }: { agentId: string }) {
 				</Badge>
 				<Button
 					className="h-6 px-2 text-xs"
-					disabled={updating}
+					loading={updating}
 					onClick={(e) => {
 						e.stopPropagation();
 						handleUpdate().catch(() => undefined);
@@ -75,7 +74,6 @@ export function AgentUpdateControl({ agentId }: { agentId: string }) {
 					size="sm"
 					variant="ghost"
 				>
-					{updating ? <Spinner className="size-3" /> : null}
 					{updating ? "Updating…" : "Update"}
 				</Button>
 			</div>

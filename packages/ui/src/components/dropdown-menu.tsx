@@ -3,8 +3,10 @@
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";
 import { ArrowRight01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { renderMorphingDropdownPopup } from "@ryu/ui/components/dropdown-menu-motion.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
+import { FadeOverflowTextChildren } from "./fade-overflow-text.tsx";
 
 function DropdownMenu({ ...props }: MenuPrimitive.Root.Props) {
 	return <MenuPrimitive.Root data-slot="dropdown-menu" {...props} />;
@@ -14,8 +16,17 @@ function DropdownMenuPortal({ ...props }: MenuPrimitive.Portal.Props) {
 	return <MenuPrimitive.Portal data-slot="dropdown-menu-portal" {...props} />;
 }
 
-function DropdownMenuTrigger({ ...props }: MenuPrimitive.Trigger.Props) {
-	return <MenuPrimitive.Trigger data-slot="dropdown-menu-trigger" {...props} />;
+function DropdownMenuTrigger({
+	children,
+	...props
+}: MenuPrimitive.Trigger.Props) {
+	return (
+		<MenuPrimitive.Trigger data-slot="dropdown-menu-trigger" {...props}>
+			<FadeOverflowTextChildren className="flex-1">
+				{children}
+			</FadeOverflowTextChildren>
+		</MenuPrimitive.Trigger>
+	);
 }
 
 function DropdownMenuContent({
@@ -24,14 +35,24 @@ function DropdownMenuContent({
 	side = "bottom",
 	sideOffset = 4,
 	className,
+	withBackdrop = true,
 	...props
 }: MenuPrimitive.Popup.Props &
 	Pick<
 		MenuPrimitive.Positioner.Props,
 		"align" | "alignOffset" | "side" | "sideOffset"
-	>) {
+	> & {
+		/** Render the shared full-window backdrop for a top-level menu. */
+		withBackdrop?: boolean;
+	}) {
 	return (
 		<MenuPrimitive.Portal>
+			{withBackdrop && (
+				<MenuPrimitive.Backdrop
+					className="ryu-popup-overlay"
+					data-slot="dropdown-menu-overlay"
+				/>
+			)}
 			<MenuPrimitive.Positioner
 				align={align}
 				alignOffset={alignOffset}
@@ -41,11 +62,12 @@ function DropdownMenuContent({
 			>
 				<MenuPrimitive.Popup
 					className={cn(
-						"data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 relative z-50 max-h-[var(--available-height)] w-[var(--anchor-width)] min-w-48 origin-[var(--transform-origin)] animate-none! overflow-y-auto overflow-x-hidden rounded-3xl border border-border/50 bg-muted/90 text-popover-foreground outline-none backdrop-blur-2xl backdrop-saturate-150 duration-100 before:pointer-events-none before:absolute before:inset-0 before:-z-1 before:rounded-[inherit] data-closed:animate-out data-open:animate-in data-closed:overflow-hidden **:data-[slot$=-item]:data-highlighted:bg-foreground/10 **:data-[slot$=-separator]:bg-foreground/5 **:data-[variant=destructive]:**:text-accent-foreground! **:data-[variant=destructive]:text-accent-foreground! **:data-[slot$=-trigger]:aria-expanded:bg-foreground/10! **:data-[slot$=-item]:focus:bg-foreground/10 **:data-[slot$=-trigger]:focus:bg-foreground/10 **:data-[variant=destructive]:focus:bg-foreground/10!",
+						"relative z-50 max-h-[var(--available-height)] w-[var(--anchor-width)] min-w-48 max-w-[calc(100vw-1rem)] overflow-y-auto overflow-x-hidden rounded-3xl border border-border/50 bg-muted/90 text-popover-foreground outline-none backdrop-blur-2xl backdrop-saturate-150 before:pointer-events-none before:absolute before:inset-0 before:-z-1 before:rounded-[inherit] data-closed:overflow-hidden **:data-[slot$=-item]:data-highlighted:bg-foreground/10 **:data-[slot$=-separator]:bg-foreground/5 **:data-[variant=destructive]:**:text-accent-foreground! **:data-[variant=destructive]:text-accent-foreground! **:data-[slot$=-trigger]:aria-expanded:bg-foreground/10! **:data-[slot$=-item]:focus:bg-foreground/10 **:data-[slot$=-trigger]:focus:bg-foreground/10 **:data-[variant=destructive]:focus:bg-foreground/10!",
 						className
 					)}
 					data-slot="dropdown-menu-content"
 					{...props}
+					render={renderMorphingDropdownPopup}
 				/>
 			</MenuPrimitive.Positioner>
 		</MenuPrimitive.Portal>
@@ -121,7 +143,9 @@ function DropdownMenuSubTrigger({
 			data-slot="dropdown-menu-sub-trigger"
 			{...props}
 		>
-			{children}
+			<FadeOverflowTextChildren className="flex-1">
+				{children}
+			</FadeOverflowTextChildren>
 			<HugeiconsIcon
 				className="ml-auto"
 				icon={ArrowRight01Icon}
@@ -144,13 +168,14 @@ function DropdownMenuSubContent({
 			align={align}
 			alignOffset={alignOffset}
 			className={cn(
-				"data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 relative w-auto min-w-36 animate-none! rounded-3xl border border-border/50 bg-muted/90 text-popover-foreground backdrop-blur-2xl backdrop-saturate-150 duration-100 before:pointer-events-none before:absolute before:inset-0 before:-z-1 before:rounded-[inherit] data-closed:animate-out data-open:animate-in **:data-[slot$=-item]:data-highlighted:bg-foreground/10 **:data-[slot$=-separator]:bg-foreground/5 **:data-[variant=destructive]:**:text-accent-foreground! **:data-[variant=destructive]:text-accent-foreground! **:data-[slot$=-trigger]:aria-expanded:bg-foreground/10! **:data-[slot$=-item]:focus:bg-foreground/10 **:data-[slot$=-trigger]:focus:bg-foreground/10 **:data-[variant=destructive]:focus:bg-foreground/10!",
+				"relative w-auto min-w-36 rounded-3xl border border-border/50 bg-muted/90 text-popover-foreground backdrop-blur-2xl backdrop-saturate-150 before:pointer-events-none before:absolute before:inset-0 before:-z-1 before:rounded-[inherit] **:data-[slot$=-item]:data-highlighted:bg-foreground/10 **:data-[slot$=-separator]:bg-foreground/5 **:data-[variant=destructive]:**:text-accent-foreground! **:data-[variant=destructive]:text-accent-foreground! **:data-[slot$=-trigger]:aria-expanded:bg-foreground/10! **:data-[slot$=-item]:focus:bg-foreground/10 **:data-[slot$=-trigger]:focus:bg-foreground/10 **:data-[variant=destructive]:focus:bg-foreground/10!",
 				className
 			)}
 			data-slot="dropdown-menu-sub-content"
 			side={side}
 			sideOffset={sideOffset}
 			{...props}
+			withBackdrop={false}
 		/>
 	);
 }

@@ -17,11 +17,12 @@
 // key list come from `fetchGatewayConfig`; traffic from the SSE stream.
 
 import { Copy01Icon, Tick01Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
+import { MorphIconSwap } from "@ryu/ui/components/morph-icon.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { useEffect, useRef, useState } from "react";
 import {
 	SettingsGroup,
@@ -73,9 +74,11 @@ function CopyRow({
 					size="sm"
 					variant="ghost"
 				>
-					<HugeiconsIcon
+					<MorphIconSwap
+						a={Copy01Icon}
+						b={Tick01Icon}
 						className="size-4"
-						icon={copied ? Tick01Icon : Copy01Icon}
+						state={copied ? "b" : "a"}
 					/>
 					{copied ? "Copied" : "Copy"}
 				</Button>
@@ -267,9 +270,11 @@ function KeyManagement({
 							size="sm"
 							variant="ghost"
 						>
-							<HugeiconsIcon
+							<MorphIconSwap
+								a={Copy01Icon}
+								b={Tick01Icon}
 								className="size-4"
-								icon={copied ? Tick01Icon : Copy01Icon}
+								state={copied ? "b" : "a"}
 							/>
 							{copied ? "Copied" : "Copy"}
 						</Button>
@@ -436,9 +441,9 @@ function LiveTraffic({
 		>
 			<div className="flex flex-col gap-3 px-3">
 				<section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-					<Tile label="Requests" value={String(total)} />
+					<Tile label="Requests" value={formatNumber(total)} />
 					<Tile label="Tokens" value={formatTokens(tokens)} />
-					<Tile label="Errors" value={String(errors)} />
+					<Tile label="Errors" value={formatNumber(errors)} />
 					<Tile
 						label="Error rate"
 						value={requests === 0 ? "—" : formatPercent(errors / requests)}
@@ -483,7 +488,8 @@ function LiveTraffic({
 										</td>
 										<td className="px-3 py-2 text-xs">{e.provider}</td>
 										<td className="px-3 py-2 font-mono text-xs tabular-nums">
-											{e.input_tokens ?? 0} / {e.output_tokens ?? 0}
+											{formatNumber(e.input_tokens ?? 0)} /{" "}
+											{formatNumber(e.output_tokens ?? 0)}
 										</td>
 										<td className="px-3 py-2 font-mono text-xs tabular-nums">
 											{e.latency_ms ?? 0}ms
@@ -520,13 +526,7 @@ function Tile({ label, value }: { label: string; value: string }) {
 }
 
 function formatTokens(n: number): string {
-	if (n >= 1_000_000) {
-		return `${(n / 1_000_000).toFixed(1)}M`;
-	}
-	if (n >= 1000) {
-		return `${(n / 1000).toFixed(1)}k`;
-	}
-	return String(n);
+	return formatNumber(n);
 }
 
 function formatPercent(ratio: number): string {

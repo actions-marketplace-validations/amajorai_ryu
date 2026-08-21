@@ -439,6 +439,32 @@ export interface EvalRoutingConfig {
  */
 export type RouteStrategy = "llm" | "embedding" | "keyword";
 
+/** Top-level Gateway model-router algorithms inspired by NeMo Switchyard. */
+export type ModelRouterType =
+	| "llm_classifier"
+	| "passthrough"
+	| "random"
+	| "stage_router"
+	| "escalation";
+
+export type StagePicker = "capable_first" | "efficient_first";
+
+export const MODEL_ROUTER_TYPE_LABELS: Record<ModelRouterType, string> = {
+	llm_classifier: "LLM classifier",
+	passthrough: "Passthrough",
+	random: "Weighted random",
+	stage_router: "Stage router",
+	escalation: "Escalation",
+};
+
+export const MODEL_ROUTER_TYPE_DESCRIPTIONS: Record<ModelRouterType, string> = {
+	llm_classifier: "match request rules by model, meaning, or words",
+	passthrough: "keep the model requested by the caller",
+	random: "split traffic across target models for experiments",
+	stage_router: "use recent tool and progress signals per turn",
+	escalation: "judge the trajectory and latch hard sessions upward",
+};
+
 /**
  * The ONE naming of the three smart-routing strategies, in both vocabularies.
  *
@@ -517,14 +543,15 @@ export interface SmartRule {
 	description: string;
 	/** Model to route matching requests to (resolved via the router). */
 	model: string;
+	/** Relative traffic weight for the `random` router; defaults to 1. */
+	weight?: number;
 }
 
 /**
- * Classifier-driven model routing ("custom routing instructions"). When enabled,
- * a cheap `classifier_model` reads each request's latest message, picks the
- * best-matching rule, and the request is re-routed to that rule's target model
- * before the normal model→provider routing runs. Fails open: any error keeps the
- * originally requested model. Takes effect after the gateway restarts.
+ * Gateway Plane A model routing ("custom routing instructions"). When enabled,
+ * the selected `router_type` picks or preserves a target model before normal
+ * model→provider routing runs. Fails open: any error keeps the originally
+ * requested model. Takes effect after the gateway restarts.
  */
 export interface SmartRoutingConfig {
 	/** Classify once per conversation and reuse the decision. Default true. */
@@ -537,10 +564,36 @@ export interface SmartRoutingConfig {
 	embedding_model: string;
 	/** Master switch. Off by default (the classifier adds a per-request call). */
 	enabled: boolean;
+	/** Consecutive judge escalations required to latch a session. */
+	escalation_confirmations?: number;
+	/** Judge model used by the escalation router. */
+	escalation_judge_model?: string;
+	/** Per-message character cap in the escalation judge prompt. */
+	escalation_message_chars?: number;
+	/** Recent message window shown to the escalation judge. */
+	escalation_recent_message_window?: number;
+	/** Strong tier used by the escalation router. */
+	escalation_strong_model?: string;
+	/** Weak tier used by the escalation router. */
+	escalation_weak_model?: string;
+	/** Optional reproducible seed for weighted random routing. */
+	random_seed?: number | null;
+	/** Top-level model-router algorithm. Older gateways omit this field. */
+	router_type?: ModelRouterType;
 	/** Ordered natural-language rules. */
 	rules: SmartRule[];
 	/** Min cosine for the `embedding` strategy to accept a rule. Default 0.35. */
 	similarity_threshold: number;
+	/** Capable tier used by the stage router. */
+	stage_capable_model?: string;
+	/** Minimum confidence before stage signals override the picker default. */
+	stage_confidence_threshold?: number;
+	/** Efficient tier used by the stage router. */
+	stage_efficient_model?: string;
+	/** Default tier when stage signals are ambiguous. */
+	stage_picker?: StagePicker;
+	/** Recent request-message window inspected by the stage scorer. */
+	stage_recent_message_window?: number;
 	/** How the matching rule is chosen. Default `llm`. */
 	strategy: RouteStrategy;
 	/** Per-classification timeout in ms. Default 4000. */
@@ -588,7 +641,7 @@ export interface GatewayRoutingConfig {
 	 * field (treat `undefined` as `{}`).
 	 */
 	provider_tiers?: Record<string, number>;
-	/** Classifier-driven routing (custom routing instructions). Optional. */
+	/** Gateway Plane A model routing (custom routing instructions). Optional. */
 	smart_routing?: SmartRoutingConfig;
 }
 
@@ -675,7 +728,7 @@ export type InspectorMode = "injection" | "dlp" | "both";
 //
 // Core runs a lazy `llama.cpp` sidecar dedicated to classification-shaped work
 // (guardrail inspection, smart-routing rule picking, LLM-judge evaluators) so
-// those cheap per-turn calls never contend with the chat engine or burn a paid
+// those cheap per-turn calls never contend with Chat or burn a paid
 // provider's tokens. The gateway exposes it as the `classify` provider, and the
 // router's builtin prefix table maps the `gemma-3-270m` model prefix onto it.
 //
@@ -1297,13 +1350,26 @@ export interface GatewayFirewallOverlay {
  */
 export type BudgetAction = "notify" | "downgrade" | "restrict" | "stop";
 
+/** Charged work categories that a budget rule includes. */
+export interface BudgetChargeInclusion {
+	media: boolean;
+	model: boolean;
+	tools: boolean;
+}
+
+export const DEFAULT_BUDGET_INCLUSION: BudgetChargeInclusion = {
+	model: true,
+	media: true,
+	tools: true,
+};
+
 /**
  * A single per-agent or per-user budget rule.
  * Field names are snake_case — the gateway config API passes these through
  * without camelCase normalization (unlike the status proxy).
  */
 export interface BudgetRule {
-	/** Action taken once limit is reached. */
+	/** Action taken once the charged-cost cap is reached. */
 	action: BudgetAction;
 	/**
 	 * Notification fan-out tier when this rule matches — orthogonal to `action`.
@@ -1315,7 +1381,9 @@ export interface BudgetRule {
 	alert?: GatewayAlertTier;
 	/** Model to route to when action = downgrade. */
 	downgrade_to?: string | null;
-	/** Lifetime token cap (input + output combined). 0 = unlimited. */
+	/** Which charged work categories contribute to this cap. */
+	include?: BudgetChargeInclusion;
+	/** Lifetime charged-cost cap in micro-USD (1_000_000 = $1). 0 = unlimited. */
 	limit: number;
 	/** Max tokens cap when action = restrict. Defaults to 256 on the gateway. */
 	restrict_max_tokens?: number;
@@ -1328,6 +1396,8 @@ export interface BudgetRuleInput {
 	alert?: GatewayAlertTier;
 	/** Raw model id; trimmed, and only kept when `action === "downgrade"`. */
 	downgradeTo?: string | null;
+	/** Charged work categories to include. */
+	include?: BudgetChargeInclusion;
 	limit: number;
 	/**
 	 * Raw cap, as typed. Only kept when `action === "restrict"` AND it parses to a
@@ -1353,7 +1423,8 @@ export interface BudgetRuleInput {
  *
  * Pure and total — no throwing. Bad numbers are dropped rather than rejected,
  * mirroring what the dialogs already did (the dialogs validate `limit`
- * themselves; this only refuses to put junk on the wire).
+ * themselves; this only refuses to put junk on the wire). `limit` is charged
+ * micro-USD (1_000_000 = $1), not a token count.
  */
 export function buildBudgetRule(input: BudgetRuleInput): BudgetRule {
 	const rule: BudgetRule = {
@@ -1361,6 +1432,13 @@ export function buildBudgetRule(input: BudgetRuleInput): BudgetRule {
 		action: input.action,
 		alert: input.alert ?? "silent",
 	};
+	if (input.include) {
+		rule.include = {
+			model: input.include.model,
+			media: input.include.media,
+			tools: input.include.tools,
+		};
+	}
 	const downgradeTo = (input.downgradeTo ?? "").trim();
 	if (input.action === "downgrade" && downgradeTo !== "") {
 		rule.downgrade_to = downgradeTo;
@@ -1381,16 +1459,40 @@ export function buildBudgetRule(input: BudgetRuleInput): BudgetRule {
 }
 
 /**
- * Per-user and per-agent token budgets (mirrors gateway BudgetConfig).
+ * Read-modify-write helper for one agent rule. Gateway budget updates replace
+ * the complete budget object, so callers must preserve users, other agents,
+ * and the global session rule when saving or removing a single agent cap.
+ */
+export function withAgentBudget(
+	budgets: GatewayBudgetConfig,
+	agentId: string,
+	rule: BudgetRule | null
+): GatewayBudgetConfig {
+	const agents = { ...budgets.agents };
+	if (rule) {
+		agents[agentId] = rule;
+	} else {
+		delete agents[agentId];
+	}
+	return {
+		users: { ...budgets.users },
+		agents,
+		session: budgets.session ?? DEFAULT_SESSION_BUDGET,
+	};
+}
+
+/**
+ * Per-user and per-agent charged-cost budgets (mirrors gateway BudgetConfig).
  * Keys are user/agent ids; values are budget rules.
  */
 export interface GatewayBudgetConfig {
 	agents: Record<string, BudgetRule>;
 	/**
-	 * A single GLOBAL per-session token cap (#510). Unlike `users`/`agents`,
+	 * A single GLOBAL per-session charged-cost cap (#510). Unlike `users`/`agents`,
 	 * this is not a map: session ids are ephemeral (Core mints a fresh
 	 * conversation id per chat), so one rule applies to every session. The
-	 * shape is identical to a per-user/per-agent rule. `limit: 0` = off.
+	 * shape is identical to a per-user/per-agent rule. `limit: 0` = off; values
+	 * are charged micro-USD.
 	 */
 	session: BudgetRule;
 	users: Record<string, BudgetRule>;
@@ -1404,6 +1506,7 @@ export interface GatewayBudgetConfig {
  * — so this fallback cannot claim a tier the gateway would not have.
  */
 export const DEFAULT_SESSION_BUDGET: BudgetRule = {
+	include: { ...DEFAULT_BUDGET_INCLUSION },
 	limit: 0,
 	action: "notify",
 	alert: "silent",
@@ -1413,8 +1516,13 @@ export const DEFAULT_SESSION_BUDGET: BudgetRule = {
 
 /** Full redacted config returned by GET /v1/config (via Core proxy). */
 export interface GatewayConfig {
+	acp: GatewayAcpConfig;
 	auth: GatewayAuthConfig;
 	budgets: GatewayBudgetConfig;
+	/** Node-wide computer-use policy. */
+	computer_use: GatewayComputerUseConfig;
+	/** Static policy drift projection retained for older Gateway clients. */
+	drift?: GatewayDriftWarning[];
 	firewall: GatewayFirewallConfig;
 	/**
 	 * Gateway-local standalone-desktop per-agent firewall overlay store (the leaf
@@ -1429,10 +1537,120 @@ export interface GatewayConfig {
 	 * `firewall_agent_overlays`.
 	 */
 	firewall_org_overlays: Record<string, GatewayFirewallOverlay>;
+	marketplace_recommendations?: {
+		cadence: "daily" | "weekly" | "monthly";
+		enabled: boolean;
+	};
 	/** Resolved pipeline stages currently running in the gateway process. */
 	pipeline_stages?: string[];
 	providers: GatewayProvidersConfig;
 	routing: GatewayRoutingConfig;
+	/** Redacted tool-loop config returned by newer Gateways. */
+	tools?: GatewayToolsConfig;
+}
+
+/** Persisted policy for computer-use providers attached to one node. */
+export interface GatewayComputerUseConfig {
+	/** Whether Ghost may request the platform's locked-session path. */
+	locked_use: boolean;
+}
+
+export const DEFAULT_GATEWAY_COMPUTER_USE: GatewayComputerUseConfig = {
+	locked_use: false,
+};
+
+/** Persisted ACP lifecycle controls plus Core's runtime-only status projection. */
+export interface GatewayAcpConfig {
+	/** Number of ACP processes currently admitted by Core. */
+	active_agents?: number;
+	/** Core's hardware-derived limit before a manual override. */
+	auto_max_parallel_agents?: number;
+	/** Core's chosen limit after applying Auto or the manual override. */
+	effective_max_parallel_agents?: number;
+	hardware?: {
+		cpu_cores: number;
+		physical_cores: number;
+		total_ram_bytes: number;
+	};
+	/** Kill an inactive pooled ACP process after this many minutes. */
+	idle_timeout_minutes: number;
+	/** Keep the local computer awake while Core reports active ACP agents. */
+	keep_computer_awake: boolean;
+	/** `null` means Core calculates a conservative limit from CPU and RAM. */
+	max_parallel_agents: number | null;
+}
+
+/** Only the persisted fields are writable; runtime status stays Core-owned. */
+export type GatewayAcpSettings = Pick<
+	GatewayAcpConfig,
+	"idle_timeout_minutes" | "max_parallel_agents" | "keep_computer_awake"
+>;
+
+export const DEFAULT_GATEWAY_ACP: GatewayAcpConfig = {
+	idle_timeout_minutes: 10,
+	max_parallel_agents: null,
+	keep_computer_awake: true,
+};
+
+export interface GatewayDriftWarning {
+	code: string;
+	message: string;
+	severity: "high" | "medium" | string;
+}
+
+export type GatewayDoctorCategory =
+	| "configuration"
+	| "security"
+	| "performance"
+	| "connectivity"
+	| "coverage";
+
+export type GatewayDoctorSeverity = "info" | "warning" | "error";
+
+export interface GatewayDoctorFinding {
+	canAutoFix: boolean;
+	category: GatewayDoctorCategory | string;
+	checkId: string;
+	detail: string;
+	recommendedAction?: string;
+	settingPath?: string;
+	severity: GatewayDoctorSeverity;
+	summary: string;
+}
+
+export interface GatewayDoctorReport {
+	counts: { errors: number; warnings: number; info: number };
+	error?: string;
+	findings: GatewayDoctorFinding[];
+	generatedAt?: number;
+	posture?: string;
+	profile?: string;
+	reachable?: boolean;
+	readOnly?: boolean;
+	rulesetVersion?: string;
+	schemaVersion?: string;
+}
+
+export interface GatewayDoctorFix {
+	action: string;
+	checkId: string;
+	settingPath: string;
+	summary: string;
+}
+
+export interface GatewayDoctorFixResult {
+	appliedFixes: GatewayDoctorFix[];
+	dryRun: boolean;
+	plannedFixes: GatewayDoctorFix[];
+	report: GatewayDoctorReport;
+}
+
+export interface GatewayToolsConfig {
+	always_on: unknown[];
+	describe_top_n: number;
+	enabled: boolean;
+	max_rounds: number;
+	profiles: Record<string, unknown>;
 }
 
 /**
@@ -1459,9 +1677,13 @@ export interface GatewayAuthConfig {
 
 /** Partial update body accepted by PUT /v1/config (firewall/budgets/auth/routing are writable). */
 export interface GatewayConfigPatch {
+	/** ACP lifecycle/resource controls for Core-owned subprocesses. */
+	acp?: GatewayAcpSettings;
 	/** When present, replaces the api_keys list. Must include ALL keys to keep. */
 	auth?: { api_keys: GatewayApiKey[] };
 	budgets?: GatewayBudgetConfig;
+	/** Node-wide Ghost/computer-use policy. */
+	computer_use?: GatewayComputerUseConfig;
 	/**
 	 * User-created ("create from scratch") evaluators that EXTEND the built-in
 	 * catalog. Full-replacement: send the COMPLETE custom set every time (a
@@ -1482,6 +1704,10 @@ export interface GatewayConfigPatch {
 	 * full-replacement semantics as `firewall_agent_overlays`.
 	 */
 	firewall_org_overlays?: Record<string, GatewayFirewallOverlay>;
+	marketplace_recommendations?: {
+		cadence: "daily" | "weekly" | "monthly";
+		enabled: boolean;
+	};
 	/**
 	 * Ryu's user-level routing config (persisted; takes effect after gateway restart).
 	 * Runs before any upstream provider routing — this is the governance layer. PUT
@@ -1493,10 +1719,23 @@ export interface GatewayConfigPatch {
 
 export const DEFAULT_SMART_ROUTING: SmartRoutingConfig = {
 	enabled: false,
+	router_type: "llm_classifier",
 	strategy: "llm",
 	classifier_model: "",
 	embedding_model: "",
 	similarity_threshold: 0.35,
+	random_seed: null,
+	stage_capable_model: "",
+	stage_efficient_model: "",
+	stage_picker: "capable_first",
+	stage_confidence_threshold: 0.5,
+	stage_recent_message_window: 3,
+	escalation_weak_model: "",
+	escalation_strong_model: "",
+	escalation_judge_model: "",
+	escalation_confirmations: 2,
+	escalation_recent_message_window: 28,
+	escalation_message_chars: 500,
 	rules: [],
 	default_model: null,
 	cache_by_session: true,
@@ -1656,12 +1895,16 @@ export async function fetchGatewayConfig(
 	});
 	const routing = raw.routing ?? DEFAULT_ROUTING;
 	const budgets = raw.budgets ?? { users: {}, agents: {}, session: undefined };
+	const acp = raw.acp ?? DEFAULT_GATEWAY_ACP;
+	const computerUse = raw.computer_use ?? DEFAULT_GATEWAY_COMPUTER_USE;
 	// Guard the shared path: a 2xx always carries `firewall`, but this function
 	// backs several cards (budgets/keys/routing), so never let a missing section
 	// throw and take them all down.
 	const firewall = raw.firewall ?? ({} as GatewayFirewallConfig);
 	return {
 		...raw,
+		acp,
+		computer_use: computerUse,
 		budgets: {
 			users: budgets.users ?? {},
 			agents: budgets.agents ?? {},
@@ -1689,6 +1932,27 @@ export async function fetchGatewayConfig(
 		firewall_org_overlays: raw.firewall_org_overlays ?? {},
 		firewall_agent_overlays: raw.firewall_agent_overlays ?? {},
 	};
+}
+
+/** Fetch the redacted Gateway + Core doctor report through Core's proxy. */
+export async function fetchGatewayDoctor(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<GatewayDoctorReport> {
+	return request<GatewayDoctorReport>(target, "/api/gateway/doctor", {
+		signal,
+	});
+}
+
+/** Preview or apply Gateway-owned safe Doctor fixes through Core. */
+export async function fixGatewayDoctor(
+	target: ApiTarget,
+	dryRun: boolean
+): Promise<GatewayDoctorFixResult> {
+	return request<GatewayDoctorFixResult>(target, "/api/gateway/doctor/fix", {
+		body: { dryRun },
+		method: "POST",
+	});
 }
 
 /**
@@ -1997,24 +2261,24 @@ export async function removeByoaKey(
 export interface TrafficEvent {
 	/** API key, truncated to its prefix (`sk-sec***`). Never a full key. */
 	api_key: string;
-	/** Gateway-internal request id. */
-	request_id: string;
-	/** Provider that served the request (e.g. "openai", "anthropic"). */
-	provider: string;
-	/** Model name as seen by the gateway. */
-	model: string;
-	/** Input tokens billed (0 on error). */
-	input_tokens: number;
-	/** Output tokens billed (0 on error). */
-	output_tokens: number;
 	/** Whether the gateway's own response cache answered. */
 	cache_hit: boolean;
-	/** Wall-clock latency in milliseconds. */
-	latency_ms: number;
 	/** Error message, when the request failed. */
 	error: string | null;
 	/** Event type — "model_call" for LLM calls. */
 	event_type: string;
+	/** Input tokens billed (0 on error). */
+	input_tokens: number;
+	/** Wall-clock latency in milliseconds. */
+	latency_ms: number;
+	/** Model name as seen by the gateway. */
+	model: string;
+	/** Output tokens billed (0 on error). */
+	output_tokens: number;
+	/** Provider that served the request (e.g. "openai", "anthropic"). */
+	provider: string;
+	/** Gateway-internal request id. */
+	request_id: string;
 	/** Core session/conversation id, when tagged. */
 	session_id: string | null;
 	/** ISO-8601 timestamp when the event was published. */
@@ -2085,8 +2349,11 @@ export function subscribeGatewayTraffic(
 				}
 				buffer += decoder.decode(value, { stream: true });
 				// Split on event boundaries: `event: traffic\ndata: {…}\n\n`.
-				let idx: number;
-				while ((idx = buffer.indexOf("\n\n")) !== -1) {
+				while (true) {
+					const idx = buffer.indexOf("\n\n");
+					if (idx === -1) {
+						break;
+					}
 					const frame = buffer.slice(0, idx);
 					buffer = buffer.slice(idx + 2);
 					const dataLine = frame
@@ -2143,6 +2410,8 @@ export interface AuditEntry {
 	eval_score: number | null;
 	/** Event type — "model_call" for LLM calls, "exec" for sandbox executions. */
 	event_type: string | null;
+	/** Product surface tag when the node could attribute the request. */
+	feature: string | null;
 	/** Unique request id assigned by the gateway. */
 	id: string;
 	/** Number of input tokens billed. */
@@ -2157,8 +2426,12 @@ export interface AuditEntry {
 	provider: string | null;
 	/** Core session/conversation id for per-run correlation. */
 	session_id: string | null;
+	/** Billing/hosting source classified by the gateway for usage analytics. */
+	source?: "byok" | "local" | "managed" | "self_hosted" | "unknown";
 	/** ISO-8601 timestamp when the request was processed. */
 	timestamp: string;
+	/** Forwarded end-user id when the node could attribute the request. */
+	user_id: string | null;
 }
 
 /** Response from GET /api/gateway/audit (Core proxy). */
@@ -2175,10 +2448,18 @@ export interface GatewayAuditResponse {
 export interface GatewayAuditFilters {
 	/** Return only entries that have an error. */
 	errorsOnly?: boolean;
+	/** Inclusive ISO timestamp lower bound. */
+	from?: string;
 	/** Maximum number of entries to return (gateway default: 100). */
 	limit?: number;
+	/** Filter by model provider. */
+	model?: string;
+	/** Filter by upstream provider. */
+	provider?: string;
 	/** Filter by Core session/conversation id. */
 	sessionId?: string;
+	/** Exclusive ISO timestamp upper bound. */
+	until?: string;
 }
 
 /**
@@ -2194,6 +2475,15 @@ export async function fetchGatewayAudit(
 	signal?: AbortSignal
 ): Promise<GatewayAuditResponse> {
 	const qs = new URLSearchParams();
+	if (filters.from) {
+		qs.set("from", filters.from);
+	}
+	if (filters.provider) {
+		qs.set("provider", filters.provider);
+	}
+	if (filters.model) {
+		qs.set("model", filters.model);
+	}
 	if (filters.sessionId) {
 		qs.set("session_id", filters.sessionId);
 	}
@@ -2202,6 +2492,9 @@ export async function fetchGatewayAudit(
 	}
 	if (filters.limit !== undefined) {
 		qs.set("limit", String(filters.limit));
+	}
+	if (filters.until) {
+		qs.set("until", filters.until);
 	}
 	const path = qs.size > 0 ? `/api/gateway/audit?${qs}` : "/api/gateway/audit";
 	const raw = await request<GatewayAuditResponse>(target, path, { signal });
@@ -2214,7 +2507,7 @@ export async function fetchGatewayAudit(
 
 // ── Live budget spend (M2 control-layer UX) ──────────────────────────────────
 //
-// The gateway tracks live per-user / per-agent / per-session token spend in
+// The gateway tracks live per-user / per-agent / per-session charged spend in
 // memory; Core proxies its admin-gated `GET /v1/budget/spend` read surface so
 // the desktop budget panel can render spend-vs-limit. Counters only track ids
 // that have a CONFIGURED budget (the enforcer skips unbudgeted scopes and a
@@ -2223,25 +2516,29 @@ export async function fetchGatewayAudit(
 
 /** Configured limits echoed alongside spend so a caller can compute spend/limit. */
 export interface BudgetSpendLimits {
-	/** Per-agent lifetime token caps, keyed by agent id (0 = unlimited). */
+	/** Per-agent lifetime charged micro-USD caps, keyed by agent id (0 = unlimited). */
 	agents: Record<string, number>;
-	/** The single global per-session cap (0 = disabled). */
+	/** The single global per-session charged micro-USD cap (0 = disabled). */
 	session: number;
-	/** Per-user lifetime token caps, keyed by user id (0 = unlimited). */
+	/** Per-user lifetime charged micro-USD caps, keyed by user id (0 = unlimited). */
 	users: Record<string, number>;
 }
 
 /** Response from GET /api/gateway/budget/spend (Core proxy). */
 export interface BudgetSpend {
-	/** Per-agent lifetime tokens spent (input + output), keyed by agent id. */
+	/** Per-agent lifetime charged micro-USD spent, keyed by agent id. */
 	agents: Record<string, number>;
-	/** Configured caps for the same scopes (0 = unlimited / off). */
+	/** Currency for the spend and limit values. */
+	currency?: "USD";
+	/** Configured charged micro-USD caps for the same scopes (0 = unlimited / off). */
 	limits: BudgetSpendLimits;
 	/** Whether the gateway was reachable. Maps are empty when false. */
 	reachable: boolean;
-	/** Per-session lifetime tokens spent, keyed by Core conversation/session id. */
+	/** Per-session lifetime charged micro-USD spent, keyed by Core conversation/session id. */
 	sessions: Record<string, number>;
-	/** Per-user lifetime tokens spent, keyed by user id. */
+	/** Integer unit used on the wire. */
+	unit?: "micro_usd";
+	/** Per-user lifetime charged micro-USD spent, keyed by user id. */
 	users: Record<string, number>;
 }
 
@@ -2284,6 +2581,8 @@ export async function fetchBudgetSpend(
 	const raw = await request<BudgetSpend>(target, path, { signal });
 	return {
 		reachable: raw.reachable ?? false,
+		currency: raw.currency ?? "USD",
+		unit: raw.unit ?? "micro_usd",
 		users: raw.users ?? {},
 		agents: raw.agents ?? {},
 		sessions: raw.sessions ?? {},

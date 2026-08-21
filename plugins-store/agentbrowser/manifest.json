@@ -1,10 +1,16 @@
 {
+  "tags": ["browser","automation","web"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/agentbrowser",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/agentbrowser",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/agentbrowser",
   "name": "Agent Browser",
   "version": "0.1.14",
   "system": true,
   "builtin": true,
-  "description": "Browser automation via the `agent-browser` CLI's MCP server (https://agent-browser.dev). Provides the swappable `browser.control` layer, so selecting it re-points the stable `browser__*` tools at agent-browser without changing what agents call. Launched via `npx agent-browser mcp`; needs Node on PATH.",
+  "description": "Browser automation via the `agent-browser` CLI's MCP server (https://agent-browser.dev). Provides the swappable `browser.control` layer, recording tools, and the documented localhost live stream, so selecting it re-points the stable `browser.*` tools at agent-browser without changing what agents call. Launched via `npx agent-browser mcp --tools all`; needs Node on PATH.",
   "icon": "ai-browser",
   "iconDither": { "from": 3, "to": "transparent", "direction": "down" },
   "tagline": "A second real browser for the browser.control layer",
@@ -31,44 +37,44 @@
       "selectable": true,
       "target": "local-machine",
       "tools": {
-        "browser__navigate": {
-          "tool": "agentbrowser__agent_browser_open"
+        "browser.navigate": {
+          "tool": "agentbrowser.agent_browser_open"
         },
-        "browser__tabs": {
-          "tool": "agentbrowser__agent_browser_tab_list"
+        "browser.tabs": {
+          "tool": "agentbrowser.agent_browser_tab_list"
         },
-        "browser__click": {
-          "tool": "agentbrowser__agent_browser_click",
+        "browser.click": {
+          "tool": "agentbrowser.agent_browser_click",
           "args": {
             "ref": "selector",
             "tab_id": ""
           }
         },
-        "browser__scroll": {
-          "tool": "agentbrowser__agent_browser_scroll",
+        "browser.scroll": {
+          "tool": "agentbrowser.agent_browser_scroll",
           "args": {
             "tab_id": ""
           }
         },
-        "browser__type": {
-          "tool": "agentbrowser__agent_browser_type",
+        "browser.type": {
+          "tool": "agentbrowser.agent_browser_type",
           "adapter": {
-            "tools": ["agentbrowser__agent_browser_press"],
-            "code_file": "adapters/browser__type.js"
+            "tools": ["agentbrowser.agent_browser_press"],
+            "code_file": "adapters/browser.type.js"
           }
         },
-        "browser__snapshot": {
-          "tool": "agentbrowser__agent_browser_snapshot",
+        "browser.snapshot": {
+          "tool": "agentbrowser.agent_browser_snapshot",
           "adapter": {
-            "tools": ["agentbrowser__agent_browser_tab_switch"],
-            "code_file": "adapters/browser__snapshot.js"
+            "tools": ["agentbrowser.agent_browser_tab_switch"],
+            "code_file": "adapters/browser.snapshot.js"
           }
         },
-        "browser__screenshot": {
-          "tool": "agentbrowser__agent_browser_screenshot",
+        "browser.screenshot": {
+          "tool": "agentbrowser.agent_browser_screenshot",
           "adapter": {
-            "tools": ["agentbrowser__agent_browser_tab_switch"],
-            "code_file": "adapters/browser__screenshot.js"
+            "tools": ["agentbrowser.agent_browser_tab_switch"],
+            "code_file": "adapters/browser.screenshot.js"
           }
         }
       }
@@ -78,8 +84,8 @@
   "mcp_servers": {
     "agentbrowser": {
       "command": "npx",
-      "args": ["-y", "agent-browser", "mcp"],
-      "description": "Agent Browser — browser automation over MCP (navigate, snapshot, click, type, scroll, screenshot, tabs). Launched via `npx -y agent-browser mcp`; unavailable until Node is installed and the package can be fetched."
+      "args": ["-y", "agent-browser", "mcp", "--tools", "all"],
+      "description": "Agent Browser — browser automation, recording, and screenshot tools over MCP. Launched via `npx -y agent-browser mcp --tools all`; unavailable until Node is installed and the package can be fetched."
     }
   }
 }

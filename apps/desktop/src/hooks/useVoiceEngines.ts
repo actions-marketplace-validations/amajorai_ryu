@@ -1,9 +1,9 @@
 // apps/desktop/src/hooks/useVoiceEngines.ts
 //
-// Backs the Store's "run-alongside" engine sections (Speech, Image, Embeddings).
-// These engines — the catalog's `voice` (STT/TTS), `media` (image/video), and
-// `embedding` categories — all run *alongside* the resident chat engine (unlike
-// the mutually-exclusive `provider` chat engines, which swap). So instead of an
+// Backs the Store's "run-alongside" engine sections (Voice Recognition, Image, Embeddings).
+// These engines — the catalog's `voice` (Voice Recognition/Audio), `media` (image/video), and
+// `embedding` categories — all run *alongside* resident Chat (unlike
+// the mutually-exclusive `provider` Chat runtime, which swaps). So instead of an
 // active-swap, each has its own running state toggled via the generic sidecar
 // start/stop endpoints. Pass the categories to include (defaults to `["voice"]`).
 //
@@ -44,7 +44,7 @@ export interface VoiceEngineEntry {
 	updateAvailable: boolean;
 }
 
-/** Catalog categories whose engines run alongside the chat engine (start/stop). */
+/** Catalog categories whose engines run alongside Chat (start/stop). */
 const DEFAULT_RUN_ALONGSIDE_CATEGORIES = ["voice"] as const;
 
 export interface UseVoiceEnginesResult {

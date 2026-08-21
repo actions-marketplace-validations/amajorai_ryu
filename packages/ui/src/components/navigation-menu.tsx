@@ -107,6 +107,10 @@ function NavigationMenuPositioner({
 }: NavigationMenuPrimitive.Positioner.Props) {
 	return (
 		<NavigationMenuPrimitive.Portal>
+			<NavigationMenuPrimitive.Backdrop
+				className="ryu-popup-overlay"
+				data-slot="navigation-menu-overlay"
+			/>
 			<NavigationMenuPrimitive.Positioner
 				align={align}
 				alignOffset={alignOffset}

@@ -3,6 +3,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -42,6 +43,7 @@ const SAVE_LABEL: Record<SaveState, string> = {
 export default function FileEditorPage({ filePath }: { filePath: string }) {
 	const [initial, setInitial] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	const [loadNonce, setLoadNonce] = useState(0);
 	const [saveState, setSaveState] = useState<SaveState>("idle");
 
 	const markdownRef = useRef("");
@@ -49,6 +51,8 @@ export default function FileEditorPage({ filePath }: { filePath: string }) {
 
 	useEffect(() => {
 		let cancelled = false;
+		setError(null);
+		setInitial(null);
 		readProjectFile(filePath)
 			.then((text) => {
 				if (cancelled) {
@@ -66,7 +70,7 @@ export default function FileEditorPage({ filePath }: { filePath: string }) {
 		return () => {
 			cancelled = true;
 		};
-	}, [filePath]);
+	}, [filePath, loadNonce]);
 
 	// Offer this file as context to the global "Ask Ryu" assistant (capped so a
 	// huge file never bloats the first message).
@@ -135,6 +139,11 @@ export default function FileEditorPage({ filePath }: { filePath: string }) {
 					<EmptyTitle>Could not open file</EmptyTitle>
 					<EmptyDescription>{error}</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={() => setLoadNonce((nonce) => nonce + 1)} size="sm">
+						Try again
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}

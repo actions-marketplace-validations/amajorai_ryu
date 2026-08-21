@@ -7,7 +7,9 @@
 import { describe, expect, test } from "bun:test";
 import {
 	applyMention,
+	buildComposioMentionSources,
 	buildMentionGroups,
+	resolveFirstNamedMentionId,
 	resolveReferencedChatIds,
 } from "./candidates.ts";
 import type { MentionSources } from "./types.ts";
@@ -16,6 +18,7 @@ function sources(): MentionSources {
 	return {
 		agents: [{ id: "ryu", name: "Ryu" }],
 		apps: [],
+		appItems: [],
 		chats: [
 			{
 				id: "conv-architecture",
@@ -24,10 +27,13 @@ function sources(): MentionSources {
 			},
 		],
 		folders: [],
+		integrations: [],
 		mcp: [],
 		plugins: [],
 		skills: [],
 		spaces: [],
+		pages: [],
+		outputStyles: [],
 		teams: [],
 		workflows: [
 			{
@@ -41,6 +47,18 @@ function sources(): MentionSources {
 }
 
 describe("buildMentionGroups", () => {
+	test("offers installed agents as target mentions", () => {
+		const groups = buildMentionGroups(sources(), "ryu");
+		expect(groups.find((group) => group.kind === "agent")?.items).toEqual([
+			{
+				kind: "agent",
+				id: "ryu",
+				label: "Ryu",
+				icon: expect.anything(),
+			},
+		]);
+	});
+
 	test("offers chat-triggerable workflows as a labelled group", () => {
 		const groups = buildMentionGroups(sources(), "");
 		const workflows = groups.find((g) => g.kind === "workflow");
@@ -105,6 +123,142 @@ describe("buildMentionGroups", () => {
 		expect(groups.find((group) => group.kind === "plugin")?.items).toHaveLength(
 			8
 		);
+	});
+
+	test("offers app rows, Space pages, and output styles with destinations", () => {
+		const groups = buildMentionGroups(
+			{
+				...sources(),
+				appItems: [
+					{
+						description: "Canvas · Product brief",
+						id: "com.ryu.canvas:canvas:brief",
+						name: "Product brief",
+						target: { path: "/spaces/space-1/app/canvas/brief" },
+					},
+				],
+				pages: [
+					{
+						description: "Planning · Page",
+						id: "space-1:page-1",
+						name: "Launch plan",
+						target: { path: "/spaces/space-1/doc/page-1" },
+					},
+				],
+				outputStyles: [
+					{
+						description: "Short and direct",
+						id: "plain",
+						name: "Plain text",
+						target: { path: "/settings" },
+					},
+				],
+			},
+			""
+		);
+
+		expect(groups.map((group) => group.label)).toEqual([
+			"Agents",
+			"Workflows",
+			"Chats",
+			"App items",
+			"Space pages",
+			"Output styles",
+		]);
+		expect(groups.find((group) => group.kind === "app-item")?.items[0]).toEqual({
+			kind: "app-item",
+			description: "Canvas · Product brief",
+			id: "com.ryu.canvas:canvas:brief",
+			label: "Product brief",
+			target: { path: "/spaces/space-1/app/canvas/brief" },
+			icon: expect.anything(),
+		});
+		expect(groups.find((group) => group.kind === "page")?.items[0].target).toEqual(
+			{ path: "/spaces/space-1/doc/page-1" }
+		);
+	});
+
+	test("offers connected integrations and filters them by toolkit metadata", () => {
+		const groups = buildMentionGroups(
+			{
+				...sources(),
+				integrations: [
+					{
+						description: "Connected through Composio",
+						id: "github",
+						name: "GitHub",
+					},
+				],
+			},
+			"git"
+		);
+		expect(groups.find((group) => group.kind === "integration")?.items).toEqual(
+			[
+				{
+					kind: "integration",
+					id: "github",
+					label: "GitHub",
+					description: "Connected through Composio",
+					icon: expect.anything(),
+				},
+			]
+		);
+	});
+});
+
+describe("buildComposioMentionSources", () => {
+	test("fails closed when Composio is not configured", () => {
+		expect(
+			buildComposioMentionSources(
+				false,
+				[{ active: true, toolkit: "github" }],
+				[{ description: "GitHub tools", name: "GitHub", slug: "github" }]
+			)
+		).toEqual([]);
+	});
+
+	test("keeps active toolkits once and uses catalog labels", () => {
+		expect(
+			buildComposioMentionSources(
+				true,
+				[
+					{ active: false, toolkit: "slack" },
+					{ active: true, toolkit: "github" },
+					{ active: true, toolkit: "GITHUB" },
+				],
+				[
+					{
+						description: "Issues and repositories",
+						name: "GitHub",
+						slug: "github",
+					},
+				]
+			)
+		).toEqual([
+			{
+				description: "Issues and repositories",
+				id: "github",
+				name: "GitHub",
+			},
+		]);
+	});
+});
+
+describe("resolveFirstNamedMentionId", () => {
+	test("resolves full agent labels containing spaces", () => {
+		expect(
+			resolveFirstNamedMentionId("Ask @Claude Code to review this", [
+				{ id: "claude", name: "Claude Code" },
+			])
+		).toBe("claude");
+	});
+
+	test("does not resolve a partial name inside another token", () => {
+		expect(
+			resolveFirstNamedMentionId("email me at @ClaudeCode", [
+				{ id: "claude", name: "Claude" },
+			])
+		).toBeNull();
 	});
 });
 

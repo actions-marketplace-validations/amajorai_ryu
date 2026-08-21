@@ -46,12 +46,47 @@ import {
 } from "@ryu/ui/components/context-menu.tsx";
 import { UNAVAILABLE_ROW_CLASS } from "@ryu/ui/components/status-badge.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import type { ReactNode } from "react";
+import type { PublisherTrustLevel } from "@ryuhq/protocol/publisher-trust";
+import { createContext, type ReactNode, useContext } from "react";
 import ItemLikeButton from "../../likes/like-button.tsx";
 import { stabilityLabel } from "../stability.ts";
-import type { CardDither, CardThemePreview } from "../types.ts";
+import {
+	type CardDither,
+	type CardThemePreview,
+	type CatalogLayer,
+	catalogLayerBadges,
+} from "../types.ts";
 import AppIcon from "./app-icon.tsx";
 import VerifiedBadge from "./verified-badge.tsx";
+
+export interface StoreCardLinkProps {
+	ariaLabel: string;
+	className: string;
+	href: string;
+	onClick?: () => void;
+}
+
+export type StoreCardLinkRenderer = (props: StoreCardLinkProps) => ReactNode;
+
+const StoreCardLinkContext = createContext<StoreCardLinkRenderer | null>(null);
+
+/** Let a host preserve its router semantics without making this package import
+ * a framework-specific Link component. The web host supplies Next Link so its
+ * card anchors participate in intercepting routes; desktop falls back to the
+ * plain anchor below. */
+export function StoreCardLinkProvider({
+	children,
+	renderLink,
+}: {
+	children: ReactNode;
+	renderLink: StoreCardLinkRenderer;
+}) {
+	return (
+		<StoreCardLinkContext.Provider value={renderLink}>
+			{children}
+		</StoreCardLinkContext.Provider>
+	);
+}
 
 export default function StoreCatalogCard({
 	cacheKey,
@@ -66,9 +101,12 @@ export default function StoreCatalogCard({
 	seedId,
 	seedPlate,
 	description,
+	external = false,
+	layers,
 	stability,
 	orgVerified,
 	orgVerifiedTier,
+	publisherTrust,
 	selected = false,
 	dimmed = false,
 	href,
@@ -122,6 +160,9 @@ export default function StoreCatalogCard({
 	 *  wash — see {@link AppIcon.seedPlate}. */
 	seedPlate?: boolean;
 	description?: string | null;
+	/** Mark a hosted provider and its public swappable capability layers. */
+	external?: boolean;
+	layers?: CatalogLayer[] | null;
 	/** How finished this listing is ("alpha", "beta", …). Absent/stable renders
 	 *  nothing — a finished listing must not sprout a badge. */
 	stability?: string | null;
@@ -139,6 +180,9 @@ export default function StoreCatalogCard({
 	 *  Camel-cased like every other prop even though the card payload spells it
 	 *  `org_verified_tier` — props are camelCase regardless of the wire's casing. */
 	orgVerifiedTier?: string | null;
+	/** Complete publisher identity mark. When present, dotted is rendered as an
+	 * intentional community disclosure rather than hidden. */
+	publisherTrust?: PublisherTrustLevel | null;
 	selected?: boolean;
 	/** Dim the whole row — the listing exists but cannot be installed here (wrong
 	 *  platform, unmet requirement).
@@ -183,20 +227,33 @@ export default function StoreCatalogCard({
 	/** Optional right-click context menu content for the card. */
 	contextMenu?: ReactNode;
 }) {
+	const renderLink = useContext(StoreCardLinkContext);
+	const layerBadges = catalogLayerBadges(layers, external);
 	// The stretched, transparent click target. First child so every control that
 	// follows paints over it, and `absolute inset-0` so the WHOLE row is the hit
 	// area — the icon, the name and the description are all inert (their column
 	// carries `pointer-events-none`) and the click lands here instead.
-	const target = href ? (
-		// biome-ignore lint/a11y/useAnchorContent: the row's visible text is the
-		// accessible content; the overlay carries it as an aria-label so a screen
-		// reader announces one link, not a link plus a duplicate text node.
-		<a
-			aria-label={name}
-			className="absolute inset-0 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-			href={href}
-			onClick={onClick}
-		/>
+	const linkProps = href
+		? {
+				ariaLabel: name,
+				className:
+					"absolute inset-0 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+				href,
+				onClick,
+			}
+		: null;
+	const target = linkProps ? (
+		(renderLink?.(linkProps) ?? (
+			// biome-ignore lint/a11y/useAnchorContent: the row's visible text is the
+			// accessible content; the overlay carries it as an aria-label so a screen
+			// reader announces one link, not a link plus a duplicate text node.
+			<a
+				aria-label={linkProps.ariaLabel}
+				className={linkProps.className}
+				href={linkProps.href}
+				onClick={linkProps.onClick}
+			/>
+		))
 	) : (
 		<button
 			aria-label={name}
@@ -241,12 +298,24 @@ export default function StoreCatalogCard({
 					{/* Beside the NAME, not on the icon: the icon is the app's own
 					    identity, the check is a claim about who published it. `shrink-0`
 					    so a long name truncates and the badge survives. */}
-					<VerifiedBadge orgVerified={orgVerified} tier={orgVerifiedTier} />
+					<VerifiedBadge
+						orgVerified={orgVerified}
+						publisherTrust={publisherTrust}
+						tier={orgVerifiedTier}
+					/>
 					{stabilityLabel(stability) ? (
 						<span className="shrink-0 rounded-sm border border-amber-500/40 px-1 py-px text-[10px] text-amber-600 leading-tight">
 							{stabilityLabel(stability)}
 						</span>
 					) : null}
+					{layerBadges.slice(0, 2).map((label, index) => (
+						<span
+							className="shrink-0 rounded-sm border border-border/70 px-1 py-px text-[10px] text-muted-foreground leading-tight"
+							key={`${label}-${index}`}
+						>
+							{label}
+						</span>
+					))}
 					{/* The heart rides WITH THE TITLE, not out in the right-hand cluster:
 					    a like is a statement about this listing, so it belongs against
 					    the listing's name, and the right edge is reserved for the one

@@ -23,6 +23,8 @@ async function openMenu(page: Page) {
 	const trigger = page.getByRole("button", { name: "Agent" });
 	await expect(trigger).toBeVisible();
 	await trigger.click();
+	await expect(page.getByRole("slider", { name: "Thinking" })).toBeVisible();
+	await page.waitForTimeout(400);
 }
 
 test("the detent count follows the advertised level list", async ({ page }) => {
@@ -103,7 +105,7 @@ test("dragging the track to the far end commits the last level", async ({
  * which is exactly the failure a class-name assertion would sail past.
  */
 async function fillColor(page: Page, testId: string): Promise<string> {
-	await page.waitForTimeout(500);
+	await page.waitForTimeout(800);
 	return await page
 		.getByTestId(testId)
 		.locator("[data-slot='slider'] > div")
@@ -116,9 +118,7 @@ function oklab(color: string): { a: number; alpha: number; b: number } | null {
 	const m = color.match(
 		/^oklab\(\s*[\d.]+\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\/\s*([\d.]+)\s*\)$/
 	);
-	return m
-		? { a: Number(m[1]), b: Number(m[2]), alpha: Number(m[3]) }
-		: null;
+	return m ? { a: Number(m[1]), b: Number(m[2]), alpha: Number(m[3]) } : null;
 }
 
 test("the fill ramps green → orange → red → purple with the level", async ({

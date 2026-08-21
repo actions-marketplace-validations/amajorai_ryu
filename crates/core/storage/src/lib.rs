@@ -154,6 +154,32 @@ impl PluginStorage {
         Ok(removed)
     }
 
+    /// Return the number of records and value bytes owned by one plugin.
+    ///
+    /// The byte count intentionally measures stored values, which is the useful
+    /// number for the uninstall preview and does not expose another plugin's
+    /// namespace or key names.
+    pub async fn usage(&self, plugin_id: &str) -> Result<(u64, u64)> {
+        let conn = self.conn.lock().await;
+        let (count, bytes): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST(value AS BLOB))), 0)
+             FROM plugin_kv WHERE plugin_id = ?1",
+            params![plugin_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((count.max(0) as u64, bytes.max(0) as u64))
+    }
+
+    /// Delete every record owned by one plugin. Returns the number of rows
+    /// removed so callers can make the cleanup observable without reading keys.
+    pub async fn delete_plugin(&self, plugin_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        Ok(conn.execute(
+            "DELETE FROM plugin_kv WHERE plugin_id = ?1",
+            params![plugin_id],
+        )?)
+    }
+
     pub async fn keys(&self, plugin_id: &str, namespace: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn
@@ -230,5 +256,21 @@ mod tests {
         let mut keys = s.keys("p", "goals").await.unwrap();
         keys.sort();
         assert_eq!(keys, vec!["conv-1".to_string(), "conv-2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn usage_and_delete_plugin_are_scoped() {
+        let s = PluginStorage::in_memory().unwrap();
+        s.set("p", "default", "one", "123").await.unwrap();
+        s.set("p", "other", "two", "4567").await.unwrap();
+        s.set("other", "default", "one", "outside").await.unwrap();
+
+        assert_eq!(s.usage("p").await.unwrap(), (2, 7));
+        assert_eq!(s.delete_plugin("p").await.unwrap(), 2);
+        assert_eq!(s.usage("p").await.unwrap(), (0, 0));
+        assert_eq!(
+            s.get("other", "default", "one").await.unwrap().as_deref(),
+            Some("outside")
+        );
     }
 }

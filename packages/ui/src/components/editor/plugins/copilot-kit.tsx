@@ -3,8 +3,8 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { CopilotPlugin } from "@platejs/ai/react";
 import { serializeMd, stripMarkdown } from "@platejs/markdown";
-import { EDITOR_AI_UNCONFIGURED_ERROR } from "@ryu/ui/components/editor/use-chat.ts";
 import { GhostText } from "@ryu/ui/components/editor/ui/ghost-text.tsx";
+import { EDITOR_AI_UNCONFIGURED_ERROR } from "@ryu/ui/components/editor/use-chat.ts";
 import { getEditorAiConfig } from "@ryu/ui/lib/editor-ai.ts";
 import { generateText } from "ai";
 import type { TElement } from "platejs";
@@ -71,7 +71,7 @@ const copilotFetch = (async (_input, init) => {
 		maxOutputTokens: COPILOT_MAX_TOKENS,
 		model: provider(aiCfg.model),
 		prompt,
-		system,
+		instructions: system,
 		temperature: 0.7,
 	});
 

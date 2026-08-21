@@ -4,8 +4,24 @@ import type React from "react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import { cn } from "../lib/utils.ts";
+import {
+	blendExpressiveFrames,
+	type ExpressiveExpressionSelection,
+	expressiveFrame,
+	randomExpressiveExpression,
+} from "./expressive.ts";
+import {
+	type ExpressiveAnimationDecoration,
+	type ExpressiveAnimationSelection,
+	expressiveAnimationPreviewTime,
+	sampleExpressiveAnimation,
+} from "./expressive-animation.ts";
 
 interface LogoProps {
+	/** Disable gaze, blinking, and random expression changes. */
+	animated?: boolean;
+	/** Expressive ghost animation. Random follows the full reference-style cycle. */
+	animation?: ExpressiveAnimationSelection;
 	animationDuration?: number;
 	className?: string;
 	colors?: {
@@ -14,13 +30,16 @@ interface LogoProps {
 		c2?: string;
 		c3?: string;
 	};
+	expression?: ExpressiveExpressionSelection;
 	size?: string;
 	variant?:
 		| "default"
+		| "filled"
 		| "outline"
 		| "skeleton"
 		| "shimmer"
 		| "eyes"
+		| "expressive"
 		| "outline-static";
 }
 
@@ -212,12 +231,327 @@ const OutlineStatic: React.FC<Pick<LogoProps, "size" | "className">> = ({
 	);
 };
 
+interface ExpressiveDecorationLayerProps {
+	decorations: readonly ExpressiveAnimationDecoration[];
+	scaleFactor: number;
+}
+
+const ExpressiveDecorationLayer: React.FC<ExpressiveDecorationLayerProps> = ({
+	decorations,
+	scaleFactor,
+}) => (
+	<g>
+		{decorations.map((decoration, index) => {
+			const color =
+				"color" in decoration
+					? (decoration.color ?? "currentColor")
+					: "currentColor";
+			const key = `${decoration.kind}-${index}`;
+			switch (decoration.kind) {
+				case "dot":
+					return (
+						<circle
+							cx={decoration.x * scaleFactor}
+							cy={decoration.y * scaleFactor}
+							fill={color}
+							key={key}
+							opacity={decoration.opacity}
+							r={decoration.r * scaleFactor}
+						/>
+					);
+				case "ring":
+					return (
+						<ellipse
+							cx={decoration.cx * scaleFactor}
+							cy={decoration.cy * scaleFactor}
+							fill="none"
+							key={key}
+							opacity={decoration.opacity}
+							rx={decoration.radiusX * scaleFactor}
+							ry={decoration.radiusY * scaleFactor}
+							stroke={color}
+							strokeDasharray={decoration.dash}
+							strokeLinecap="round"
+							strokeWidth={Math.max(0.7, 0.08 * scaleFactor)}
+							transform={`rotate(${decoration.rotate} ${decoration.cx * scaleFactor} ${decoration.cy * scaleFactor})`}
+						/>
+					);
+				case "ray":
+					return (
+						<line
+							key={key}
+							opacity={decoration.opacity}
+							stroke={color}
+							strokeLinecap="round"
+							strokeWidth={Math.max(0.8, 0.11 * scaleFactor)}
+							x1={decoration.x1 * scaleFactor}
+							x2={decoration.x2 * scaleFactor}
+							y1={decoration.y1 * scaleFactor}
+							y2={decoration.y2 * scaleFactor}
+						/>
+					);
+				case "badge":
+					return (
+						<circle
+							cx={decoration.x * scaleFactor}
+							cy={decoration.y * scaleFactor}
+							fill={color}
+							key={key}
+							opacity={decoration.opacity}
+							r={decoration.r * scaleFactor}
+							stroke="currentColor"
+							strokeWidth={Math.max(0.6, 0.08 * scaleFactor)}
+						/>
+					);
+				case "exclamation":
+					return (
+						<g
+							key={key}
+							opacity={decoration.opacity}
+							transform={`translate(${decoration.x * scaleFactor} ${decoration.y * scaleFactor}) rotate(${decoration.rotate}) scale(${decoration.scale * scaleFactor})`}
+						>
+							<rect
+								fill="currentColor"
+								height="3.7"
+								rx="0.42"
+								width="0.84"
+								x="-0.42"
+								y="-2.6"
+							/>
+							<circle cy="2.2" fill="currentColor" r="0.52" />
+						</g>
+					);
+				case "comet":
+					return (
+						<g
+							key={key}
+							opacity={decoration.opacity}
+							transform={`translate(${decoration.x * scaleFactor} ${decoration.y * scaleFactor}) rotate(${decoration.rotate}) scale(${decoration.scale * scaleFactor})`}
+						>
+							<path
+								d="M-5 0C-3.4-1.4-1.7-1.5 0 0C-1.7 1.5-3.4 1.4-5 0Z"
+								fill="none"
+								stroke={color}
+								strokeLinecap="round"
+								strokeWidth="0.42"
+							/>
+							<circle cx="0" cy="0" fill={color} r="0.62" />
+						</g>
+					);
+				case "play":
+					return (
+						<polygon
+							fill="currentColor"
+							key={key}
+							opacity={decoration.opacity}
+							points="-1.6,-2.1 2.1,0 -1.6,2.1"
+							transform={`translate(${decoration.x * scaleFactor} ${decoration.y * scaleFactor}) rotate(${decoration.rotate}) scale(${decoration.scale * scaleFactor})`}
+						/>
+					);
+			}
+		})}
+	</g>
+);
+
+interface ExpressiveVariantProps {
+	animated: boolean;
+	animation: ExpressiveAnimationSelection;
+	className?: string;
+	expression: ExpressiveExpressionSelection;
+	eyePosition: { x: number; y: number };
+	ghostPathD: string;
+	isBlinking: boolean;
+	orbRef: React.RefObject<HTMLDivElement | null>;
+	size: string;
+	sizeValue: number;
+}
+
+/**
+ * Renders Ryu's own ghost body with the reference-style expressive timeline.
+ * Named states and the random cycle both pass through the same pure sampler, so
+ * state changes cross-fade instead of teleporting between unrelated drawings.
+ */
+const ExpressiveVariant: React.FC<ExpressiveVariantProps> = ({
+	animated,
+	animation,
+	className,
+	expression,
+	eyePosition,
+	isBlinking,
+	orbRef,
+	ghostPathD,
+	size,
+	sizeValue,
+}) => {
+	const initialFrame = expressiveFrame(expression);
+	const transitionRef = useRef({
+		from: initialFrame,
+		progress: 1,
+		to: initialFrame,
+	});
+	const [transition, setTransition] = useState(transitionRef.current);
+	const [animationTime, setAnimationTime] = useState(0);
+	const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+	const motionEnabled = animated && !prefersReducedMotion;
+
+	useEffect(() => {
+		if (typeof window === "undefined" || !window.matchMedia) {
+			return;
+		}
+		const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+		const update = () => setPrefersReducedMotion(media.matches);
+		update();
+		media.addEventListener?.("change", update);
+		return () => media.removeEventListener?.("change", update);
+	}, []);
+
+	useEffect(() => {
+		const next = expressiveFrame(expression);
+		const current = transitionRef.current;
+		if (current.to.id === next.id && current.progress === 1) {
+			return;
+		}
+		if (!motionEnabled) {
+			const settled = { from: next, progress: 1, to: next };
+			transitionRef.current = settled;
+			setTransition(settled);
+			return;
+		}
+
+		const started = performance.now();
+		const nextTransition = { from: current.to, progress: 0, to: next };
+		transitionRef.current = nextTransition;
+		setTransition(nextTransition);
+		let frameId = 0;
+		const tick = (now: number) => {
+			const progress = Math.min((now - started) / 450, 1);
+			const running = { from: current.to, progress, to: next };
+			transitionRef.current = running;
+			setTransition(running);
+			if (progress < 1) {
+				frameId = requestAnimationFrame(tick);
+			}
+		};
+		frameId = requestAnimationFrame(tick);
+		return () => cancelAnimationFrame(frameId);
+	}, [expression, motionEnabled]);
+
+	useEffect(() => {
+		if (!motionEnabled) {
+			setAnimationTime(0);
+			return;
+		}
+		const started = performance.now();
+		let frameId = 0;
+		const tick = (now: number) => {
+			setAnimationTime((now - started) / 1000);
+			frameId = requestAnimationFrame(tick);
+		};
+		frameId = requestAnimationFrame(tick);
+		return () => cancelAnimationFrame(frameId);
+	}, [motionEnabled]);
+
+	const expressionFrame = blendExpressiveFrames(
+		transition.from,
+		transition.to,
+		transition.progress
+	);
+	const sampleTime = motionEnabled
+		? animationTime
+		: animation === "random"
+			? 0
+			: expressiveAnimationPreviewTime(animation);
+	const sampled = sampleExpressiveAnimation(
+		sampleTime,
+		animation,
+		expressionFrame
+	);
+	const frame = sampled.eyes;
+	const scaleFactor = sizeValue / 24;
+	const centerX = 17 * scaleFactor + frame.gaze.x * scaleFactor;
+	const eyeGap = frame.gap * scaleFactor;
+	const gazePosition = sampled.followGaze ? eyePosition : { x: 0, y: 0 };
+	const eyeY = 10 * scaleFactor + frame.gaze.y * scaleFactor + gazePosition.y;
+	const eyeCenters = [centerX - eyeGap / 2, centerX + eyeGap / 2];
+	const openMultiplier = sampled.animation === "idle" && isBlinking ? 0.06 : 1;
+	const center = sizeValue / 2;
+	const bodyTransform = `translate(${sampled.body.x * scaleFactor} ${sampled.body.y * scaleFactor}) rotate(${sampled.body.rotate} ${center} ${center}) translate(${center} ${center}) scale(${sampled.body.scaleX} ${sampled.body.scaleY}) translate(${-center} ${-center})`;
+
+	return (
+		<div
+			className={cn(
+				"transition-[width,height] duration-300 ease-in-out",
+				className
+			)}
+			data-expressive-animation={sampled.animation}
+			data-expressive-animation-progress={sampled.progress.toFixed(3)}
+			data-expressive-expression={frame.id}
+			ref={orbRef}
+			style={{
+				height: size,
+				width: size,
+				transition: "width 0.3s ease-in-out, height 0.3s ease-in-out",
+			}}
+		>
+			<svg
+				aria-hidden="true"
+				height={size}
+				overflow="visible"
+				viewBox={`0 0 ${sizeValue} ${sizeValue}`}
+				width={size}
+			>
+				<ExpressiveDecorationLayer
+					decorations={sampled.decorations}
+					scaleFactor={scaleFactor}
+				/>
+				<g transform={bodyTransform}>
+					<path
+						d={ghostPathD}
+						fill="none"
+						opacity={0.96}
+						stroke="currentColor"
+						strokeLinecap="round"
+						strokeLinejoin="round"
+						strokeWidth="1.5"
+						vectorEffect="non-scaling-stroke"
+					/>
+					<g opacity={sampled.eyeAlpha}>
+						{frame.eyes.map((eye, index) => {
+							const width = Math.max(eye.width * scaleFactor, 0.1);
+							const height = Math.max(
+								eye.height * scaleFactor * eye.open * openMultiplier,
+								0.1
+							);
+							const cx = eyeCenters[index] ?? centerX;
+							return (
+								<rect
+									height={height}
+									key={index === 0 ? "left" : "right"}
+									opacity={sampled.eyeAlpha}
+									rx={Math.min(width, height) / 2}
+									transform={`rotate(${frame.gaze.roll + eye.tilt} ${cx} ${eyeY})`}
+									width={width}
+									x={cx - width / 2 + gazePosition.x}
+									y={eyeY - height / 2}
+								/>
+							);
+						})}
+					</g>
+				</g>
+			</svg>
+		</div>
+	);
+};
+
 const AnimatedLogo: React.FC<LogoProps> = ({
 	variant = "default",
 	size = "192px",
 	className,
 	colors,
 	animationDuration = 20,
+	animation,
+	animated = true,
+	expression,
 }) => {
 	const [isBlinking, setIsBlinking] = useState(false);
 	const [eyePosition, setEyePosition] = useState({ x: 0, y: 0 });
@@ -228,6 +562,15 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 		null
 	);
 	const shimmerGradientId = useId();
+	const filledMaskId = useId();
+	const expressionSelection = expression ?? "random";
+	const [activeExpression, setActiveExpression] = useState(() =>
+		expressionSelection === "random" && animated
+			? randomExpressiveExpression()
+			: expressionSelection === "random"
+				? "neutral"
+				: expressionSelection
+	);
 
 	const defaultColors = {
 		bg: "oklch(95% 0.02 264)",
@@ -312,6 +655,46 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 	}, [sizeValue]);
 
 	useEffect(() => {
+		if (variant !== "expressive") {
+			return;
+		}
+		if (expressionSelection !== "random") {
+			setActiveExpression(expressionSelection);
+		} else if (!animated) {
+			setActiveExpression("neutral");
+		}
+	}, [animated, expressionSelection, variant]);
+
+	useEffect(() => {
+		if (
+			variant !== "expressive" ||
+			!animated ||
+			expressionSelection !== "random"
+		) {
+			return;
+		}
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		const schedule = () => {
+			timer = setTimeout(
+				() => {
+					setActiveExpression(randomExpressiveExpression());
+					schedule();
+				},
+				2400 + Math.random() * 1800
+			);
+		};
+		schedule();
+		return () => {
+			if (timer) {
+				clearTimeout(timer);
+			}
+		};
+	}, [animated, expressionSelection, variant]);
+
+	useEffect(() => {
+		if (variant === "expressive" && !animated) {
+			return;
+		}
 		const blinkInterval = setInterval(
 			() => {
 				setIsBlinking(true);
@@ -320,9 +703,12 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 			3000 + Math.random() * 2000
 		);
 		return () => clearInterval(blinkInterval);
-	}, []);
+	}, [animated, variant]);
 
 	useEffect(() => {
+		if (variant === "expressive" && !animated) {
+			return;
+		}
 		const resetIdleTimer = () => {
 			setIsMouseIdle(false);
 			if (idleTimerRef.current) {
@@ -363,10 +749,10 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 				clearInterval(randomMoveTimerRef.current);
 			}
 		};
-	}, [sizeValue]);
+	}, [animated, sizeValue, variant]);
 
 	useEffect(() => {
-		if (!isMouseIdle) {
+		if (!isMouseIdle || (variant === "expressive" && !animated)) {
 			return;
 		}
 
@@ -385,7 +771,7 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 				clearInterval(randomMoveTimerRef.current);
 			}
 		};
-	}, [isMouseIdle, generateRandomEyePosition]);
+	}, [animated, generateRandomEyePosition, isMouseIdle, variant]);
 
 	// ── Eyes variant ─────────────────────────────────────────────────────────────
 	// Just the two eyes, centered and enlarged in the viewBox (no ghost body).
@@ -402,6 +788,123 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 				size={size}
 				sizeValue={sizeValue}
 			/>
+		);
+	}
+
+	// ── Expressive variant ──────────────────────────────────────────────────────
+	// Ryu keeps its recognizable ghost body while the two eye shapes morph
+	// independently through named moods. A random selection advances on its own;
+	// a named selection stays on that expression while still blinking and tracking.
+	if (variant === "expressive") {
+		return (
+			<ExpressiveVariant
+				animated={animated}
+				animation={animation ?? "random"}
+				className={className}
+				expression={activeExpression}
+				eyePosition={eyePosition}
+				ghostPathD={ghostPathD}
+				isBlinking={isBlinking}
+				orbRef={orbRef}
+				size={size}
+				sizeValue={sizeValue}
+			/>
+		);
+	}
+
+	// ── Filled variant ──────────────────────────────────────────────────────────
+	// The inverse of `outline`: the ghost body is solid, while the eyes are cut
+	// out of it so the surface behind the mark shows through. A luminance mask is
+	// used instead of painting the eyes with a background colour, which keeps the
+	// variant correct on every surface and lets the eyes continue to track.
+	if (variant === "filled") {
+		const strokeMargin = 1.5;
+		const filledViewBox = `${-strokeMargin} ${-strokeMargin} ${sizeValue + strokeMargin * 2} ${sizeValue + strokeMargin * 2}`;
+
+		return (
+			<div
+				className={cn("transition-all duration-300 ease-in-out", className)}
+				ref={orbRef}
+				style={{
+					width: size,
+					height: size,
+					transition: "width 0.3s ease-in-out, height 0.3s ease-in-out",
+				}}
+			>
+				<svg
+					aria-hidden="true"
+					height={size}
+					overflow="visible"
+					viewBox={filledViewBox}
+					width={size}
+				>
+					<defs>
+						<mask
+							height={sizeValue}
+							id={filledMaskId}
+							mask-type="luminance"
+							maskContentUnits="userSpaceOnUse"
+							maskUnits="userSpaceOnUse"
+							width={sizeValue}
+							x="0"
+							y="0"
+						>
+							<rect
+								fill="black"
+								height={sizeValue}
+								width={sizeValue}
+								x="0"
+								y="0"
+							/>
+							<path d={ghostPathD} fill="white" />
+							{isBlinking ? (
+								<>
+									<line
+										stroke="black"
+										strokeLinecap="round"
+										strokeWidth={blinkStrokeWidth}
+										x1={leftBlinkStart}
+										x2={leftBlinkEnd}
+										y1={eyeY}
+										y2={eyeY}
+									/>
+									<line
+										stroke="black"
+										strokeLinecap="round"
+										strokeWidth={blinkStrokeWidth}
+										x1={rightBlinkStart}
+										x2={rightBlinkEnd}
+										y1={eyeY}
+										y2={eyeY}
+									/>
+								</>
+							) : (
+								<>
+									<ellipse
+										cx={leftEyeX + eyePosition.x}
+										cy={eyeY + eyePosition.y}
+										fill="black"
+										rx={eyeWidth}
+										ry={eyeHeight}
+									/>
+									<ellipse
+										cx={rightEyeX + eyePosition.x}
+										cy={eyeY + eyePosition.y}
+										fill="black"
+										rx={eyeWidth}
+										ry={eyeHeight}
+									/>
+								</>
+							)}
+						</mask>
+					</defs>
+					<path
+						d={ghostPathD}
+						fill="currentColor"
+						mask={`url(#${filledMaskId})`}
+					/>
+				</svg>
+			</div>
 		);
 	}
 

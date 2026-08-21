@@ -23,7 +23,7 @@ Ryu Gateway is the control layer: a full LLM gateway that decides *what is allow
 # From this directory
 cargo build --release           # produces the `ryu-gateway` binary in target/release
 
-./target/release/ryu-gateway    # binds 0.0.0.0:7981 by default
+./target/release/ryu-gateway    # binds 127.0.0.1:7981 by default
 ```
 
 Configuration is loaded from `~/.ryu/gateway.toml` (providers, cache, rate limits, circuit breaker). Point any OpenAI-compatible client at `http://localhost:7981/v1`.

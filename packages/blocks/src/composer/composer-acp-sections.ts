@@ -174,6 +174,22 @@ export interface StreamedAcpConfig {
 }
 
 /**
+ * An accepted agent-level model/effort override for the next composer request.
+ * Unlike {@link StreamedAcpConfig}, this is conversation-scoped and must not be
+ * written into the agent's saved picker defaults.
+ */
+export interface StreamedAcpControl {
+	/** Agent target whose live composer should adopt this control. */
+	agentId: string | null;
+	/** Emission identity of the `data-ryu-agent-control` part. */
+	key: string;
+	/** Explicit model value, or null when the control cleared it. */
+	model?: string | null;
+	/** Explicit effort value, or null when the control cleared it. */
+	effort?: string | null;
+}
+
+/**
  * Whether a streamed write-back should be adopted, given the emission key of the
  * last one adopted. Keying on the PART means a re-render (the producer re-derives
  * a fresh object with identical contents on every stream chunk) never re-adopts,
@@ -258,6 +274,39 @@ export function isApprovalConfigOption(opt: AcpConfigOption): boolean {
 	const hay = `${opt.id} ${opt.name}`.toLowerCase();
 	return ["approval", "permission", "sandbox", "access"].some((k) =>
 		hay.includes(k)
+	);
+}
+
+/**
+ * Pick the Simple-mode approval preset from an agent's advertised values.
+ *
+ * Agents use different ids and labels for the same idea. Prefer a literal
+ * Auto/Automatic preset, then a value that explicitly keeps the human in the
+ * loop. Never guess with permissive values such as accept-edits or full access;
+ * when neither kind is advertised, returning null leaves the agent/Core
+ * default in force.
+ */
+export function selectSimpleApprovalValue(
+	items: readonly Pick<ComposerSettingItem, "id" | "name">[]
+): string | null {
+	const safeItems = items.filter((item) => {
+		const hay = `${item.id} ${item.name}`.toLowerCase();
+		return !/(accept|bypass|danger|full|no approval|skip|without)/.test(hay);
+	});
+	const auto = safeItems.find((item) =>
+		/(^|[\s_-])auto(?:matic)?($|[\s_-])/.test(
+			`${item.id} ${item.name}`.toLowerCase()
+		)
+	);
+	if (auto) {
+		return auto.id;
+	}
+	return (
+		safeItems.find((item) =>
+			/(ask|approval|confirm|default|interactive|manual|prompt|required|review|safe)/.test(
+				`${item.id} ${item.name}`.toLowerCase()
+			)
+		)?.id ?? null
 	);
 }
 
@@ -619,6 +668,11 @@ export interface AcpSectionsParams {
 	 */
 	onSelectionApplied?: AcpSelectionNotify;
 	/**
+	 * Simple mode has no approval picker. When true, derive a safe, hidden
+	 * approval default from the agent's own advertised options for the next turn.
+	 */
+	preferSimpleApprovalDefaults?: boolean;
+	/**
 	 * The active agent's reasoning is overridden off — suppress its reasoning
 	 * ("thinking") config option. Defaults to false: an agent that advertises a
 	 * reasoning picker gets one unless the surface knows reasoning is disabled.
@@ -639,6 +693,8 @@ export interface AcpSectionsParams {
 	 * (launchpad/dock) leave this undefined.
 	 */
 	streamedConfig?: StreamedAcpConfig | null;
+	/** Accepted conversation-scoped model/effort control from the live stream. */
+	streamedControl?: StreamedAcpControl | null;
 	/**
 	 * An agent-INITIATED permission-mode change observed on the live chat stream
 	 * (Core's `data-ryu-acp-mode` part). When this value changes to a new non-null
@@ -665,6 +721,11 @@ export interface AcpSectionsResult {
 	extraSections: ComposerSettingsSection[];
 	/** The agent-advertised (or engine-fallback) Model section. Empty items → hidden. */
 	modelSection: ComposerModelSection;
+	/** Permission defaults Simple may send without exposing a hidden picker. */
+	simpleApprovalDefaults: {
+		config: Record<string, string>;
+		mode: string | null;
+	};
 }
 
 const IDENTITY_DISPLAY_NAME: ModelDisplayName = (raw) => raw;
@@ -686,9 +747,11 @@ export function useAcpSections({
 	modelOptions,
 	onEngineModelChange,
 	onSelectionApplied,
+	preferSimpleApprovalDefaults = false,
 	reasoningOff = false,
 	store,
 	streamedConfig,
+	streamedControl,
 	streamedMode,
 }: AcpSectionsParams): AcpSectionsResult {
 	const [acpMode, setAcpMode] = useState<string | null>(() =>
@@ -697,6 +760,7 @@ export function useAcpSections({
 	const [acpModel, setAcpModel] = useState<string | null>(() =>
 		store.getAcpModel(agentId)
 	);
+	const [acpModelCleared, setAcpModelCleared] = useState(false);
 	const [acpOptionValues, setAcpOptionValues] = useState<
 		Record<string, string>
 	>(() => store.getAcpConfig(agentId));
@@ -710,6 +774,8 @@ export function useAcpSections({
 	// agent re-emits the same pairs on every cycle. Keying on the part means a
 	// re-render never re-adopts, and a genuinely new write-back always does.
 	const lastStreamedConfigRef = useRef<string | null>(null);
+	const lastStreamedControlModelRef = useRef<string | null>(null);
+	const lastStreamedControlEffortRef = useRef<string | null>(null);
 	// The agent the write-back below should be applied to, read through a ref so
 	// `agentId` need not be an effect dep — see that effect for why.
 	const agentIdRef = useRef(agentId);
@@ -727,6 +793,7 @@ export function useAcpSections({
 		const seeded = seedAcpSelections(store, agentId);
 		setAcpMode(seeded.mode);
 		setAcpModel(seeded.model);
+		setAcpModelCleared(false);
 		setAcpOptionValues(seeded.options);
 		// A streamed mode belongs to the previous agent's session; forget it, or the
 		// old agent's write-back would land on the new one.
@@ -780,6 +847,61 @@ export function useAcpSections({
 		persistStreamedConfig(store, agentIdRef.current, config);
 	}, [streamedConfig, store]);
 
+	// Adopt the model/effort values from an accepted agent-level control for this
+	// conversation only. These values deliberately stay out of the injected store:
+	// `set_active_target` is not allowed to mutate an agent's saved defaults. The
+	// agent id on the event prevents a control from a previous target being applied
+	// after the user switches agents in the same tab.
+	useEffect(() => {
+		if (!streamedControl || streamedControl.agentId !== agentId) {
+			return;
+		}
+		const hasModel = Object.hasOwn(streamedControl, "model");
+		if (
+			hasModel &&
+			streamedControl.key !== lastStreamedControlModelRef.current
+		) {
+			lastStreamedControlModelRef.current = streamedControl.key;
+			setAcpModelCleared(streamedControl.model === null);
+			setAcpModel(streamedControl.model ?? null);
+		}
+
+		if (
+			!Object.hasOwn(streamedControl, "effort") ||
+			streamedControl.key === lastStreamedControlEffortRef.current
+		) {
+			return;
+		}
+		const effortOption = (acpSessionConfig?.configOptions ?? []).find(
+			isReasoningOption
+		);
+		const knownEffortId =
+			effortOption?.id ??
+			["effort", "thought_level", "reasoning_effort"].find((id) =>
+				Object.hasOwn(acpOptionValues, id)
+			);
+		if (!knownEffortId) {
+			// The probe may still be loading the agent's option definitions. Keep the
+			// emission unconsumed so this effect can adopt it once they arrive.
+			return;
+		}
+		lastStreamedControlEffortRef.current = streamedControl.key;
+		setAcpOptionValues((previous) => {
+			const next = { ...previous };
+			if (typeof streamedControl.effort === "string") {
+				next[knownEffortId] = streamedControl.effort;
+			} else {
+				delete next[knownEffortId];
+			}
+			return next;
+		});
+	}, [
+		acpOptionValues,
+		acpSessionConfig,
+		agentId,
+		streamedControl,
+	]);
+
 	const handleAcpModeChange = useCallback(
 		(modeId: string) => {
 			setAcpMode(modeId);
@@ -791,6 +913,7 @@ export function useAcpSections({
 	);
 	const handleAcpModelChange = useCallback(
 		(modelId: string) => {
+			setAcpModelCleared(false);
 			setAcpModel(modelId);
 			if (agentId) {
 				store.setAcpModel(agentId, modelId);
@@ -809,10 +932,9 @@ export function useAcpSections({
 	);
 
 	return useMemo<AcpSectionsResult>(() => {
-		const effectiveAcpMode =
-			acpMode ?? acpSessionConfig?.modes?.currentModeId ?? null;
-		const effectiveAcpModel =
-			acpModel ?? acpSessionConfig?.models?.currentModelId ?? null;
+		const effectiveAcpModel = acpModelCleared
+			? null
+			: (acpModel ?? acpSessionConfig?.models?.currentModelId ?? null);
 
 		const {
 			acpModelConfigOption,
@@ -861,6 +983,32 @@ export function useAcpSections({
 						description: m.description,
 					}))
 				: [];
+		const simpleModeDefault = preferSimpleApprovalDefaults
+			? selectSimpleApprovalValue(modeItems)
+			: null;
+		const simpleConfigDefaults: Record<string, string> = {};
+		if (preferSimpleApprovalDefaults) {
+			for (const opt of visibleAcpConfigOptions) {
+				if (!isApprovalConfigOption(opt)) {
+					continue;
+				}
+				const items = isBooleanConfigOption(opt)
+					? BOOLEAN_CONFIG_ITEMS
+					: flattenConfigOptions(opt).map((item) => ({
+							id: item.value,
+							name: formatAcpOptionLabel(opt.name, item.name),
+						}));
+				const selected = selectSimpleApprovalValue(items);
+				if (selected) {
+					simpleConfigDefaults[opt.id] = selected;
+				}
+			}
+		}
+		const effectiveAcpMode =
+			acpMode ??
+			simpleModeDefault ??
+			acpSessionConfig?.modes?.currentModeId ??
+			null;
 		const extraSections: ComposerSettingsSection[] = [
 			{
 				key: "approval",
@@ -904,13 +1052,18 @@ export function useAcpSections({
 			// would keep setting effort twice, which is the bug the demotion fixes.
 			acpModel: modelsAreEffortCrossProduct ? null : effectiveAcpModel,
 			acpOptionValues,
+			simpleApprovalDefaults: {
+				config: simpleConfigDefaults,
+				mode: simpleModeDefault,
+			},
 		};
 	}, [
 		agentId,
 		agents,
 		acpSessionConfig,
 		acpMode,
-		acpModel,
+			acpModel,
+			acpModelCleared,
 		acpOptionValues,
 		engineModel,
 		filterModelItems,
@@ -919,6 +1072,7 @@ export function useAcpSections({
 		notify,
 		onEngineModelChange,
 		reasoningOff,
+		preferSimpleApprovalDefaults,
 		handleAcpModeChange,
 		handleAcpModelChange,
 		handleAcpOptionChange,

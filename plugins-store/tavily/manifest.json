@@ -1,9 +1,15 @@
 {
+  "tags": ["search","web","extract"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/tavily",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/tavily",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/tavily",
   "name": "Tavily Search",
   "version": "0.1.14",
   "stability": "experimental",
-  "description": "Search-and-extract for agents via the Tavily API (https://tavily.com), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Tavily without changing what agents call. Requires a BYOK Tavily API key.",
+  "description": "Search-and-extract for agents via the Tavily API (https://tavily.com), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web.search` / `web.extract` tools at Tavily without changing what agents call. Requires a BYOK Tavily API key.",
   "iconUrl": "https://www.tavily.com/favicon.ico",
   "iconPadding": "md",
   "iconDither": { "from": 272, "to": "transparent", "direction": "down" },
@@ -29,7 +35,7 @@
       "name": "Tavily Search",
       "kind": "tool",
       "config": {
-        "slug": "tavily__search",
+        "slug": "tavily.search",
         "backend": "http",
         "method": "POST",
         "url": "https://api.tavily.com/search",
@@ -71,7 +77,7 @@
       "name": "Tavily Extract",
       "kind": "tool",
       "config": {
-        "slug": "tavily__extract",
+        "slug": "tavily.extract",
         "backend": "http",
         "method": "POST",
         "url": "https://api.tavily.com/extract",
@@ -104,8 +110,8 @@
       "title": "Search",
       "selectable": true,
       "tools": {
-        "web__search": {
-          "tool": "tavily__search",
+        "web.search": {
+          "tool": "tavily.search",
           "args": {
             "limit": "max_results"
           },
@@ -127,8 +133,8 @@
       "title": "Extract",
       "selectable": true,
       "tools": {
-        "web__extract": {
-          "tool": "tavily__extract",
+        "web.extract": {
+          "tool": "tavily.extract",
           "args": {
             "url": "urls[]",
             "format": ""

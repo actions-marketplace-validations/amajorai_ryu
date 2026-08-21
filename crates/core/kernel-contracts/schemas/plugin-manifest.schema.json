@@ -43,10 +43,10 @@
       "type": "object"
     },
     "AssetSpec": {
-      "description": "A single asset an external runtime needs, fetched before first run. Either a\ndirect https URL or an `hf:<owner>/<repo>/<path>` reference; `dest_under_ryu`\nis the relative directory beneath `~/.ryu` where it lands (Core-owned) — the\nfilename is derived from the source's last path segment.",
+      "description": "A single asset an external runtime needs, fetched before first run. Either a\ndirect https URL or an `hf:<owner>/<repo>/<path>` reference; the destination\nis a relative directory beneath the plugin's dedicated runtime `assets/`\ndirectory — the filename is derived from the source's last path segment.",
       "properties": {
-        "dest_under_ryu": {
-          "description": "Destination directory relative to `~/.ryu` (e.g. `\"models/hf\"`); the\nfetched file lands at `~/.ryu/<dest_under_ryu>/<filename>`. Must be a\ntraversal-safe relative path (no `..`, not absolute).",
+        "dest_under_runtime": {
+          "description": "Destination directory relative to the runtime's `assets/` directory (e.g. `\"models/hf\"`). The fetched file lands at `<runtime>/assets/<dest_under_runtime>/<filename>`. Must be a traversal-safe relative path (no `..`, not absolute).",
           "type": "string"
         },
         "sha256": {
@@ -64,7 +64,7 @@
       },
       "required": [
         "source",
-        "dest_under_ryu"
+        "dest_under_runtime"
       ],
       "type": "object"
     },
@@ -192,7 +192,7 @@
       "type": "object"
     },
     "CapabilityToolBinding": {
-      "description": "How one capability **verb** maps onto a concrete provider tool.\n\nThe facade tool (`web__search`, `browser__navigate`, …) is registered by the host\nfrom its canonical verb table; at call time it resolves the capability's bound\nprovider, reads this binding, renames the arguments, re-enters tool dispatch on\n[`Self::tool`], and maps the response back. Swapping the provider therefore\nchanges neither the tool id nor its schema.",
+      "description": "How one capability **verb** maps onto a concrete provider tool.\n\nThe facade tool (`web.search`, `browser.navigate`, …) is registered by the host\nfrom its canonical verb table; at call time it resolves the capability's bound\nprovider, reads this binding, renames the arguments, re-enters tool dispatch on\n[`Self::tool`], and maps the response back. Swapping the provider therefore\nchanges neither the tool id nor its schema.",
       "properties": {
         "adapter": {
           "anyOf": [
@@ -209,7 +209,7 @@
           "additionalProperties": {
             "$ref": "#/$defs/ArgBounds"
           },
-          "description": "Per-argument numeric limits this provider can actually honour, keyed by the\n**canonical** argument name (before any rename).\n\nExists because canonical schemas describe what agents may ask for, while\nproviders differ in what they accept: `web__search.limit` allows up to 100,\nbut Brave's `count` maxes at 20. Without this, selecting Brave turns a\nperfectly valid `limit: 50` into an upstream 4xx — the swap stops being\ntransparent, which is the entire point of the facade. Clamping is the right\nresolution rather than erroring: the caller asked for \"up to N\", and fewer\nresults is a normal outcome, whereas a failed search is not.",
+          "description": "Per-argument numeric limits this provider can actually honour, keyed by the\n**canonical** argument name (before any rename).\n\nExists because canonical schemas describe what agents may ask for, while\nproviders differ in what they accept: `web.search.limit` allows up to 100,\nbut Brave's `count` maxes at 20. Without this, selecting Brave turns a\nperfectly valid `limit: 50` into an upstream 4xx — the swap stops being\ntransparent, which is the entire point of the facade. Clamping is the right\nresolution rather than erroring: the caller asked for \"up to N\", and fewer\nresults is a normal outcome, whereas a failed search is not.",
           "type": "object"
         },
         "arg_defaults": {
@@ -241,12 +241,86 @@
           "description": "Optional response normalization into the canonical result shape. Absent = the\nprovider's output is returned verbatim under `{ provider, raw }`."
         },
         "tool": {
-          "description": "The provider's own fully-qualified tool id (e.g. `\"exa__search\"`,\n`\"app__firecrawl_scrape\"`) that implements this verb.",
+          "description": "The provider's own fully-qualified tool id (e.g. `\"exa.search\"`,\n`\"app.firecrawl_scrape\"`) that implements this verb.",
           "type": "string"
         }
       },
       "required": [
         "tool"
+      ],
+      "type": "object"
+    },
+    "ChatWidgetTemplateBacking": {
+      "properties": {
+        "tool_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "view_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ChatWidgetTemplateContribution": {
+      "description": "A metadata-only entry the host may offer as a compact chat affordance.\n\n`backing` selects exactly one existing tool or view by id. The host owns the\neventual rendering and action dispatch; `safe_action_ids` are identifiers only\nand are never executable payloads.",
+      "properties": {
+        "availability": {
+          "default": "available",
+          "description": "`available`, `coming-soon`, or `unavailable`; unknown values are forwarded\nfor forward compatibility and are not offered by older shells.",
+          "type": "string"
+        },
+        "backing": {
+          "$ref": "#/$defs/ChatWidgetTemplateBacking"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "display_mode": {
+          "description": "Open vocabulary so newer shells can add display modes without breaking\nolder Core nodes; the desktop simply ignores modes it does not know.",
+          "type": "string"
+        },
+        "examples": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "safe_action_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        },
+        "triggers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "backing",
+        "display_mode"
       ],
       "type": "object"
     },
@@ -359,7 +433,7 @@
       "type": "object"
     },
     "Contributes": {
-      "description": "VS-Code-style **contribution points** (`contributes` in `package.json`).\n\nThe original five surfaces (`commands`/`tools`/`agents`/`workflows`/`policies`)\nare lists of [`ContributionId`] references into the manifest's `runnables`: the\nplugin *declares* that runnable `X` contributes to that surface. This is\ndeclare-by-id, not a second copy of the runnable — the loader cross-validates\nthat every referenced id exists in `runnables`, so a typo is caught at load.\n\nMost surfaces added since are **self-contained**: they carry their own payload\nand reference no runnable at all (`widgets`, `views`, `dock_panels`,\n`sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,\n`slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,\n`message_actions`, `context_menu_items`, `agent_edit_panels`).\n\n# Extending\n\nAdding a surface is two decisions, and getting either wrong is silent:\n\n1. **Id-reference or self-contained?** An id-reference surface is a\n   `Vec<ContributionId>` and MUST be chained into [`Contributes::referenced_ids`]\n   so the loader can catch a typo. A self-contained surface must be left OUT of\n   it — every id in it names something other than a runnable (a PATH binary, a\n   route, a tool namespace), so including it would reject every valid manifest.\n   `referenced_ids` therefore covers exactly the five original surfaces and\n   nothing else; that omission is deliberate, not an oversight to be tidied up.\n2. **Core-interpreted or client-rendered?** If Core acts on the payload\n   (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed\n   struct, because a key Core does not know is by construction a key Core cannot\n   act on. If a client shell renders it (`views`, `dock_panels`,\n   `sidebar_sections`, `settings_tabs`, `composer_controls`,\n   `agent_edit_panels`) it stays opaque\n   JSON, because deserializing into a struct here would DROP any key this Core\n   build does not know about and a newer desktop would lose exactly the fields it\n   was shipped to render.\n\nClient-rendered surfaces are then served, tagged with the owning plugin id, from\n`GET /api/plugins/contributions`. Core-interpreted ones deliberately are not —\nthey are gathered at their own consumption site instead.",
+      "description": "VS-Code-style **contribution points** (`contributes` in `package.json`).\n\nThe original five surfaces (`commands`/`tools`/`agents`/`workflows`/`policies`)\nare lists of [`ContributionId`] references into the manifest's `runnables`: the\nplugin *declares* that runnable `X` contributes to that surface. This is\ndeclare-by-id, not a second copy of the runnable — the loader cross-validates\nthat every referenced id exists in `runnables`, so a typo is caught at load.\n\nMost surfaces added since are **self-contained**: they carry their own payload\nand reference no runnable at all (`widgets`, `views`, `dock_panels`,\n`sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,\n`chat_features`, `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,\n`message_actions`, `context_menu_items`, `agent_edit_panels`).\n\n# Extending\n\nAdding a surface is two decisions, and getting either wrong is silent:\n\n1. **Id-reference or self-contained?** An id-reference surface is a\n   `Vec<ContributionId>` and MUST be chained into [`Contributes::referenced_ids`]\n   so the loader can catch a typo. A self-contained surface must be left OUT of\n   it — every id in it names something other than a runnable (a PATH binary, a\n   route, a tool namespace), so including it would reject every valid manifest.\n   `referenced_ids` therefore covers exactly the five original surfaces and\n   nothing else; that omission is deliberate, not an oversight to be tidied up.\n2. **Core-interpreted or client-rendered?** If Core acts on the payload\n   (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed\n   struct, because a key Core does not know is by construction a key Core cannot\n   act on. If a client shell renders it (`views`, `dock_panels`,\n   `sidebar_sections`, `settings_tabs`, `composer_controls`,\n   `agent_edit_panels`) it stays opaque\n   JSON, because deserializing into a struct here would DROP any key this Core\n   build does not know about and a newer desktop would lose exactly the fields it\n   was shipped to render.\n\nClient-rendered surfaces are then served, tagged with the owning plugin id, from\n`GET /api/plugins/contributions`. Core-interpreted ones deliberately are not —\nthey are gathered at their own consumption site instead.",
       "properties": {
         "agent_edit_panels": {
           "default": [],
@@ -374,6 +448,22 @@
             "$ref": "#/$defs/ContributionId"
           },
           "type": "array"
+        },
+        "chat_features": {
+          "default": [],
+          "description": "Declarative chat feature descriptors. These are opaque, client-rendered\ndeclarations used to feature-detect chat behaviors whose implementation\nremains in the host (for example side chats or temporary chats). The\nowning plugin id is stamped by Core when the contribution endpoint serves\nthem, so a disabled plugin removes both the descriptor and its UI affordance.",
+          "items": true,
+          "type": "array"
+        },
+        "chat_widget_templates": {
+          "description": "Metadata-only chat widget templates. Unlike [`Contributes::widgets`], this\ncatalog is safe to show before a turn runs: it names a host-owned prompt\naffordance and a tool/view binding, never HTML, React, or capabilities.",
+          "items": {
+            "$ref": "#/$defs/ChatWidgetTemplateContribution"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "commands": {
           "default": [],
@@ -492,7 +582,7 @@
         },
         "sidebar_modes": {
           "default": [],
-          "description": "App-registered sidebar **modes** — a named preset of the whole left sidebar:\nwhich sections it offers as tabs, and which one it opens on.\n\nThe third axis of the sidebar contract, after \"what sections exist\"\n([`Contributes::sidebar_sections`]) and \"what nav rows exist\"\n([`Contributes::sidebar_buttons`]): **how the sidebar as a whole is\narranged**. The shell ships three modes of its own (every section stacked;\nevery section as a tab; Agent mode, which is the pair Sessions ⇄ Agents), and\nbefore this member an app could add a section to that list but could not\npropose an arrangement — so a plugin wanting the Grok/Hermes bot-mode posture\nhad to ask for a shell change. See [`SidebarModeContribution`].\n\nSelf-contained (it names sections, not runnables), so it stays out of\n[`Contributes::referenced_ids`]; served + tagged with the owning `plugin` id\nat `GET /api/plugins/contributions`.",
+          "description": "App-registered sidebar **modes** — a named preset of the whole left sidebar:\nwhich sections it offers as tabs, and which one it opens on.\n\nThe third axis of the sidebar contract, after \"what sections exist\"\n([`Contributes::sidebar_sections`]) and \"what nav rows exist\"\n([`Contributes::sidebar_buttons`]): **how the sidebar as a whole is\narranged**. The shell ships three modes of its own (every section stacked;\nevery section as a tab; Bot mode, which is the pair Sessions ⇄ Agents), and\nbefore this member an app could add a section to that list but could not\npropose an arrangement — so a plugin wanting the Grok/Hermes bot-mode posture\nhad to ask for a shell change. See [`SidebarModeContribution`].\n\nSelf-contained (it names sections, not runnables), so it stays out of\n[`Contributes::referenced_ids`]; served + tagged with the owning `plugin` id\nat `GET /api/plugins/contributions`.",
           "items": {
             "$ref": "#/$defs/SidebarModeContribution"
           },
@@ -1312,7 +1402,7 @@
           "type": "object"
         },
         "type": {
-          "description": "Transport: `stdio`, `http`, `streamable-http`, or `sse`. Absent ⇒ inferred\nfrom whichever of `command`/`url` is present. `http`, `streamable-http`\nand `sse` all select Core's HTTP transport.",
+          "description": "Transport: `stdio`, `http`, `streamable-http`, or `sse`. Absent ⇒ inferred\nfrom whichever of `command`/`url` is present. `http` and `streamable-http`\nselect Streamable HTTP; `sse` selects the legacy HTTP+SSE transport.",
           "type": [
             "string",
             "null"
@@ -1640,7 +1730,7 @@
           "additionalProperties": {
             "$ref": "#/$defs/CapabilityToolBinding"
           },
-          "description": "Capability **verb → this provider's tool** bindings, the seam that keeps the\nmodel-visible tool surface stable across a swap.\n\nThe key is a canonical verb from the host's capability verb table (e.g.\n`\"web__search\"`); the value names the provider's own registered tool plus the\nargument/response mapping into the canonical shape. A provider that omits a\nverb simply does not serve it — the facade reports the verb unavailable\nrather than guessing.",
+          "description": "Capability **verb → this provider's tool** bindings, the seam that keeps the\nmodel-visible tool surface stable across a swap.\n\nThe key is a canonical verb from the host's capability verb table (e.g.\n`\"web.search\"`); the value names the provider's own registered tool plus the\nargument/response mapping into the canonical shape. A provider that omits a\nverb simply does not serve it — the facade reports the verb unavailable\nrather than guessing.",
           "type": "object"
         },
         "version": {
@@ -2064,7 +2154,7 @@
       "description": "One app-registered **sidebar mode** — a named arrangement of the whole left\nsidebar: the sections it offers as tabs, and the one it opens on.\n\nThe shape is deliberately thin, and every field it does NOT have is the point:\n\n- **No renderer, no code.** A mode names existing sections. It cannot draw a row,\n  which is why it needs no grants and cannot be a carriage channel — the worst a\n  hostile mode can do is offer a tab list the user does not want, one menu row\n  away from being switched off.\n- **No row style.** How a section's rows draw belongs to that SECTION\n  (`SidebarSectionSpec.rowStyle` in `@ryu/app-host/views`), because it is a\n  property of the feed, not of an arrangement: a roster of named bots wants\n  avatars whether or not the user is in a mode that features it. Putting it here\n  would also mean a mode reaching across into another contribution's rendering,\n  which is the coupling this member exists to avoid.\n- **No `hidden` list.** A mode is a positive statement about what to show. The\n  sections it does not name are simply not tabs in it.\n\nSection ids are the shell's own keys (`agents`, `chats`, `spaces`, …) or another\ncontributed section's namespaced key (`plugin:<pluginId>:<sectionId>`). A named\nsection that does not resolve is dropped rather than failing the mode — an app\nmay legitimately name a section from a sibling app the user has not installed,\nand losing one tab is a better answer than losing the mode.",
       "properties": {
         "default_section": {
-          "description": "Which of `sections` the mode opens on. Absent (or naming a section not in\n`sections`) = the first one. This is the field that makes a mode an opinion\nrather than a filter: the shell's own Agent mode lists Sessions first but\nopens on Agents, because the roster is what the mode is for.",
+          "description": "Which of `sections` the mode opens on. Absent (or naming a section not in\n`sections`) = the first one. This is the field that makes a mode an opinion\nrather than a filter: the shell's own Bot mode lists Sessions first but\nopens on Agents, because the roster is what the mode is for.",
           "type": [
             "string",
             "null"
@@ -2534,7 +2624,7 @@
       "type": "object"
     },
     "ToolFilterContribution": {
-      "description": "One **tool filter**: a fully-qualified tool id a plugin wants withheld from the\nmodel's offered tool list.\n\nTools are namespaced `<server>__<tool>` (e.g. `browser__navigate`), so `tool`\nmust carry the namespace — a bare `navigate` would be ambiguous across servers\nand is rejected at load. A **trailing** `*` is a prefix wildcard, which is how a\nplugin withholds a whole server (`shadow__*`); it is the only wildcard position\nallowed, because an interior or leading `*` invites a pattern that silently\nmatches far more than the author pictured.\n\nThis type is declaration + validation only. The filter is **applied** where the\ntool list is assembled for the model (the MCP offer site in\n`apps/core/src/sidecar/mcp`), which calls [`ToolFilterContribution::matches`] so\nthe wildcard rule has exactly one implementation. Hiding a tool from the model\nis not a security boundary — it does not revoke the capability, it only stops the\ntool being advertised; enforcement stays with permissions and grants.",
+      "description": "One **tool filter**: a fully-qualified tool id a plugin wants withheld from the\nmodel's offered tool list.\n\nTools are namespaced `<server>.<tool>` (e.g. `browser.navigate`), so `tool`\nmust carry the namespace — a bare `navigate` would be ambiguous across servers\nand is rejected at load. A **trailing** `*` is a prefix wildcard, which is how a\nplugin withholds a whole server (`shadow.*`); it is the only wildcard position\nallowed, because an interior or leading `*` invites a pattern that silently\nmatches far more than the author pictured.\n\nThis type is declaration + validation only. The filter is **applied** where the\ntool list is assembled for the model (the MCP offer site in\n`apps/core/src/sidecar/mcp`), which calls [`ToolFilterContribution::matches`] so\nthe wildcard rule has exactly one implementation. Hiding a tool from the model\nis not a security boundary — it does not revoke the capability, it only stops the\ntool being advertised; enforcement stays with permissions and grants.",
       "properties": {
         "reason": {
           "description": "Why the plugin hides it — surfaced in the plugin's listing so a user can see\nwhat a plugin is removing from the model's view before installing it.",
@@ -2544,7 +2634,7 @@
           ]
         },
         "tool": {
-          "description": "Fully-qualified tool id (`<server>__<tool>`), optionally ending in `*` to\nhide every tool whose id starts with the preceding prefix.",
+          "description": "Fully-qualified tool id (`<server>.<tool>`), optionally ending in `*` to\nhide every tool whose id starts with the preceding prefix.",
           "type": "string"
         }
       },
@@ -2587,6 +2677,12 @@
         "on": {
           "description": "The turn boundary this hook fires on. Today only `\"post_assistant_turn\"`.",
           "type": "string"
+        },
+        "priority": {
+          "default": 0,
+          "description": "Higher-priority hooks run first within a phase. Ties are resolved by\nplugin id and hook id, which makes first-writer-wins directives stable.",
+          "format": "int32",
+          "type": "integer"
         }
       },
       "required": [
@@ -2761,6 +2857,10 @@
       },
       "type": "array"
     },
+    "external": {
+      "description": "Whether the provider operates outside the local Ryu runtime, for example a\nhosted browser or remote MCP service. This is a presentation/provenance\nflag, not a permission grant; the actual remote endpoint remains declared\nunder `mcp_servers` and is governed by the Gateway.",
+      "type": "boolean"
+    },
     "hidden": {
       "description": "Hide this listing from the Store without uninstalling or disabling it.\n\nThe listing keeps working for anyone who already has it — this is a\n*catalog* control, not a lifecycle one. It exists so an app that is built\nbut not ready to be discovered can ship dark: the manifest stays compiled\nin, the routes stay registered, and the card simply is not offered.\n\nAbsent ⇒ visible, matching the identically-named field the published\n`marketplace.json` already carries for third-party indexes\n(`catalog_source::sources`), so both tiers spell \"don't list this\" the same\nway and a client that predates the field just shows everything.",
       "type": "boolean"
@@ -2876,6 +2976,13 @@
       },
       "type": "array"
     },
+    "repository": {
+      "description": "Public source repository URL (Claude/Codex `repository`). This is listing\nmetadata only; install and signature resolution still use the catalog's\nauthoritative source fields.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "requires": {
       "anyOf": [
         {
@@ -2954,6 +3061,13 @@
         "string",
         "null"
       ]
+    },
+    "tags": {
+      "description": "Curated store-filter tags (Ryu extension). Unlike `keywords`, which is\npublisher search vocabulary, these stable labels are the values the\nMarketplace filter exposes. Keeping both fields lets Claude/Codex\nmanifests round-trip their native `keywords` while Ryu authors opt into\na deliberately bounded taxonomy.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     },
     "targets": {
       "description": "Host surfaces this plugin runs on (desktop / island / mobile / …).\n\n**Empty or absent = runs on EVERY surface.** This is the backward-compatible\ndefault and must never be read as \"runs nowhere\" — every manifest that\npredates this field declares no targets and must keep surfacing everywhere.\nFiltering happens ONLY when this list is explicitly non-empty, and only at\nthe read/surface boundary (see [`PluginManifest::supports_surface`]) — never\nin the storage layer, so an unsupported-target plugin stays installable and\ninspectable.",

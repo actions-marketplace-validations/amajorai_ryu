@@ -25,6 +25,7 @@ import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -187,6 +188,17 @@ export default function ReviewsPanel({
 								: "Sign in to write the first review."}
 						</EmptyDescription>
 					</EmptyHeader>
+					<EmptyContent>
+						{service.canWrite() ? (
+							<Button onClick={() => setWriting(true)} size="sm">
+								Write the first review
+							</Button>
+						) : service.onSignIn ? (
+							<Button onClick={() => void service.onSignIn?.()} size="sm">
+								Sign in to review
+							</Button>
+						) : null}
+					</EmptyContent>
 				</Empty>
 			) : (
 				<ul className="flex flex-col gap-3">
@@ -199,12 +211,11 @@ export default function ReviewsPanel({
 			{state.nextCursor ? (
 				<Button
 					className="self-start"
-					disabled={state.loadingMore}
+					loading={state.loadingMore}
 					onClick={() => load(state.nextCursor)}
 					size="sm"
 					variant="ghost"
 				>
-					{state.loadingMore ? <Spinner className="size-4" /> : null}
 					Load more reviews
 				</Button>
 			) : null}
@@ -394,8 +405,7 @@ function WriteReviewForm({
 			</div>
 			{error ? <p className="text-destructive text-sm">{error}</p> : null}
 			<div className="flex items-center gap-2">
-				<Button disabled={busy} onClick={submit} size="sm">
-					{busy ? <Spinner className="size-4" /> : null}
+				<Button loading={busy} onClick={submit} size="sm">
 					{existing ? "Update review" : "Post review"}
 				</Button>
 				<Button disabled={busy} onClick={onClose} size="sm" variant="ghost">

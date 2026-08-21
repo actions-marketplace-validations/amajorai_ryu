@@ -3,9 +3,10 @@
 //! Anyone can publish a Ryu app or plugin by pushing a public GitHub repo and
 //! tagging it with the `ryu-app` / `ryu-plugin` topic. This source turns those
 //! two topics into a browsable catalog. A THIRD topic, `ryu-marketplace`,
-//! discovers community MARKETPLACES — repos hosting a `marketplace.json` whose
-//! `plugins` are individual listings; each is rendered grouped under the
-//! marketplace's own heading. It is deliberately the *least trusted* Plugin
+//! discovers community MARKETPLACES — repos containing folders with a
+//! `ryu.package.json`; each is rendered grouped under the marketplace's own
+//! heading. A legacy `marketplace.json` reader remains only as a compatibility
+//! fallback. It is deliberately the *least trusted* Plugin
 //! source in the registry, and its shape encodes that:
 //!
 //! - **No `raw.manifest` in the install descriptor.** `resolve_plugin_from_catalog`
@@ -48,8 +49,8 @@ const GITHUB_TOPIC_APP_ENV: &str = "RYU_GITHUB_TOPIC_APP";
 const GITHUB_TOPIC_PLUGIN_ENV: &str = "RYU_GITHUB_TOPIC_PLUGIN";
 
 /// The third discovery topic: a community MARKETPLACE. A repo tagged
-/// `ryu-marketplace` is a collection, not a single plugin — it hosts a
-/// `marketplace.json` whose `plugins` are the individual listings. The store
+/// `ryu-marketplace` is a collection, not a single plugin — it hosts package
+/// folders whose `ryu.package.json` files are the individual listings. The store
 /// renders its entries grouped under the marketplace's own heading (see
 /// [`GithubMarketplace`]).
 const GITHUB_TOPIC_MARKETPLACE: &str = "ryu-marketplace";
@@ -94,7 +95,7 @@ const GH_ID_PREFIX: &str = "gh:";
 
 /// Manifest paths tried (in order) when enriching a detail view. First hit wins;
 /// all missing is NOT an error.
-const REPO_MANIFEST_PATHS: [&str; 5] = [
+const REPO_MANIFEST_PATHS: [&str; 7] = [
     // `manifest.json` is the canonical name (MANIFEST_FILE_NAMES[0]); the older
     // `plugin.json` / `ryu.json` stay for third-party repos that predate the
     // rename, matching the loader's own back-compat order.
@@ -103,28 +104,28 @@ const REPO_MANIFEST_PATHS: [&str; 5] = [
     "ryu.json",
     ".ryu-plugin/manifest.json",
     ".ryu-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    ".claude-plugin/plugin.json",
 ];
 
-/// Marketplace manifest paths tried (in order) when hydrating a `ryu-marketplace`
-/// repo. First hit wins; all missing is NOT an error — a repo may tag the topic
-/// before it adds a manifest, and it then degrades to a single repo listing.
+/// Legacy marketplace manifest paths tried only after no portable package folder
+/// was found. New discovery never depends on a central index.
 const REPO_MARKETPLACE_PATHS: [&str; 4] = [
     ".ryu-plugin/marketplace.json",
     ".agents/plugins/marketplace.json",
     ".claude-plugin/marketplace.json",
     ".cursor-plugin/marketplace.json",
 ];
+const PACKAGE_MANIFEST_FILE: &str = "ryu.package.json";
 
 /// Display fields lifted from a third-party manifest. Everything outside this
 /// allowlist is dropped — in particular `ui_code`, `backend_code`, and any
 /// `*_sha256`, which must never travel from an unsigned source.
-const MANIFEST_DISPLAY_KEYS: [&str; 4] = ["version", "description", "category", "icon"];
-
 /// How long a repo's manifest probe result stays authoritative before it is
 /// re-checked. This is the **negative** cache that makes list-time hydration
-/// affordable: most `ryu-plugin` repos carry no manifest at any of the five
+/// affordable: most `ryu-plugin` repos carry no manifest at any of the seven
 /// [`REPO_MANIFEST_PATHS`], and without a remembered miss every 6h refresh would
-/// re-pay five raw fetches per manifest-less repo, forever. A repo that later
+/// re-pay seven raw fetches per manifest-less repo, forever. A repo that later
 /// adds a manifest is picked up on the next re-probe.
 const MANIFEST_PROBE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
@@ -146,6 +147,164 @@ const MAX_TAGLINE_CHARS: usize = 140;
 const MAX_CATEGORY_CHARS: usize = 40;
 const MAX_VERSION_CHARS: usize = 32;
 const MAX_ICON_ID_CHARS: usize = 64;
+const MAX_KEYWORDS: usize = 16;
+const MAX_TAGS: usize = 16;
+const MAX_SCREENSHOTS: usize = 8;
+const MAX_EXAMPLE_PROMPTS: usize = 8;
+const MAX_CAPABILITIES: usize = 16;
+const MAX_LAYERS: usize = 16;
+const MAX_LAYER_VERBS: usize = 32;
+const MAX_CAPABILITY_CHARS: usize = 80;
+
+fn manifest_interface_value<'a>(
+    obj: &'a serde_json::Map<String, Value>,
+    interface_key: &str,
+    top_level_keys: &[&str],
+) -> Option<&'a Value> {
+    obj.get("interface")
+        .and_then(Value::as_object)
+        .and_then(|interface| interface.get(interface_key))
+        .filter(|value| !value.is_null())
+        .or_else(|| {
+            top_level_keys
+                .iter()
+                .find_map(|key| obj.get(*key).filter(|value| !value.is_null()))
+        })
+}
+
+fn manifest_text(
+    obj: &serde_json::Map<String, Value>,
+    interface_key: &str,
+    top_level_keys: &[&str],
+    max_chars: usize,
+) -> Option<String> {
+    manifest_interface_value(obj, interface_key, top_level_keys)
+        .and_then(Value::as_str)
+        .and_then(|value| scrub_text(value, max_chars))
+}
+
+fn manifest_url(
+    obj: &serde_json::Map<String, Value>,
+    interface_key: &str,
+    top_level_keys: &[&str],
+) -> Option<String> {
+    manifest_interface_value(obj, interface_key, top_level_keys)
+        .and_then(Value::as_str)
+        .and_then(sanitize_url)
+}
+
+fn scrub_string_list(value: Option<&Value>, max_items: usize, max_chars: usize) -> Vec<String> {
+    let values = match value {
+        Some(Value::Array(values)) => values.iter().collect::<Vec<_>>(),
+        Some(value) => vec![value],
+        None => Vec::new(),
+    };
+    values
+        .into_iter()
+        .filter_map(Value::as_str)
+        .filter_map(|value| scrub_text(value, max_chars))
+        .take(max_items)
+        .collect()
+}
+
+fn scrub_url_list(value: Option<&Value>) -> Vec<String> {
+    scrub_string_list(value, MAX_SCREENSHOTS, MAX_URL_CHARS)
+        .into_iter()
+        .filter_map(|value| sanitize_url(&value))
+        .collect()
+}
+
+fn scrub_author(value: Option<&Value>) -> Option<Value> {
+    match value? {
+        Value::String(name) => scrub_text(name, MAX_NAME_CHARS).map(Value::String),
+        Value::Object(author) => {
+            let mut out = serde_json::Map::new();
+            if let Some(name) = author
+                .get("name")
+                .and_then(Value::as_str)
+                .and_then(|value| scrub_text(value, MAX_NAME_CHARS))
+            {
+                out.insert("name".to_owned(), Value::String(name));
+            }
+            if let Some(url) = author
+                .get("url")
+                .and_then(Value::as_str)
+                .and_then(sanitize_url)
+            {
+                out.insert("url".to_owned(), Value::String(url));
+            }
+            (!out.is_empty()).then_some(Value::Object(out))
+        }
+        _ => None,
+    }
+}
+
+fn author_developer_string(author: &Value) -> Option<String> {
+    match author {
+        Value::String(name) => Some(name.clone()),
+        Value::Object(author) => author
+            .get("name")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        _ => None,
+    }
+}
+
+fn scrub_layers(value: Option<&Value>) -> Vec<Value> {
+    let Some(provides) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    provides
+        .iter()
+        .filter_map(|provided| {
+            let object = provided.as_object()?;
+            let capability = object
+                .get("capability")
+                .and_then(Value::as_str)
+                .and_then(|value| scrub_text(value, MAX_CAPABILITY_CHARS))?;
+            let mut layer = serde_json::Map::new();
+            layer.insert("capability".to_owned(), Value::String(capability.clone()));
+            if let Some(title) = object
+                .get("title")
+                .and_then(Value::as_str)
+                .and_then(|value| scrub_text(value, MAX_NAME_CHARS))
+            {
+                layer.insert("title".to_owned(), Value::String(title));
+            }
+            layer.insert(
+                "toolkit".to_owned(),
+                Value::Bool(
+                    capability == "browser.control"
+                        || capability == "computer.control"
+                        || capability.starts_with("web."),
+                ),
+            );
+            if let Some(selectable) = object.get("selectable").and_then(Value::as_bool) {
+                layer.insert("selectable".to_owned(), Value::Bool(selectable));
+            }
+            if let Some(target) = object
+                .get("target")
+                .and_then(Value::as_str)
+                .and_then(|value| scrub_text(value, MAX_NAME_CHARS))
+            {
+                layer.insert("target".to_owned(), Value::String(target));
+            }
+            if let Some(tools) = object.get("tools").and_then(Value::as_object) {
+                let verbs = tools
+                    .keys()
+                    .filter_map(|verb| scrub_text(verb, MAX_CAPABILITY_CHARS))
+                    .take(MAX_LAYER_VERBS)
+                    .map(Value::String)
+                    .collect::<Vec<_>>();
+                if !verbs.is_empty() {
+                    layer.insert("verbs".to_owned(), Value::Array(verbs));
+                }
+            }
+            Some(Value::Object(layer))
+        })
+        .take(MAX_LAYERS)
+        .collect()
+}
 
 static GITHUB_TOPIC_CACHE: OnceLock<tokio::sync::Mutex<Option<GithubTopicCache>>> = OnceLock::new();
 
@@ -231,8 +390,7 @@ pub(crate) struct GithubTopicRecord {
 /// of them matched the name the plugin actually ships under. A listing's name and
 /// icon are declared by its manifest — the rule every other catalog source already
 /// follows — and `detail` was ALREADY lifting `icon` from the manifest
-/// ([`MANIFEST_DISPLAY_KEYS`]), so the list path was simply not doing what the
-/// detail path did.
+/// so the list path was simply not doing what the detail path did.
 ///
 /// Three constraints shape what is in here:
 ///
@@ -290,6 +448,34 @@ pub(crate) struct RepoManifestDisplay {
     /// shader, where an unbounded value is a frozen tab rather than an ugly card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     banner: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    homepage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repository_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    developer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    license: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    keywords: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    screenshots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    example_prompts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    privacy_policy_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terms_of_service_url: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    external: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    layers: Vec<Value>,
     /// Does the manifest claim a UI DESTINATION — a companion runnable, a dock
     /// panel, or a top-level sidebar-button target? The same three keys Core's own
     /// `manifest_declares_destination` reads, so one rule decides app-vs-plugin for
@@ -309,37 +495,34 @@ impl RepoManifestDisplay {
     /// hydrated record whose every field is empty.
     pub(crate) fn from_manifest(manifest: &Value) -> Option<Self> {
         let obj = manifest.as_object()?;
-        let text = |key: &str, max: usize| {
-            obj.get(key)
-                .and_then(|v| v.as_str())
-                .and_then(|s| scrub_text(s, max))
-        };
         // `icon` falls back to the Companion surface's glyph, which is how an app
         // authors its icon — the same fallback `plugin_manifest_to_entry` applies.
-        let icon = obj
-            .get("icon")
-            .and_then(|v| v.as_str())
+        let icon = manifest_interface_value(obj, "composerIcon", &["icon"])
+            .and_then(Value::as_str)
             .or_else(|| {
                 obj.get("companion")
-                    .and_then(|c| c.get("icon"))
-                    .and_then(|v| v.as_str())
+                    .and_then(|companion| companion.get("icon"))
+                    .and_then(Value::as_str)
             })
             .and_then(scrub_icon_id);
         let out = Self {
-            name: text("name", MAX_NAME_CHARS),
+            name: manifest_text(obj, "displayName", &["name"], MAX_NAME_CHARS),
             icon,
-            icon_url: obj
-                .get("iconUrl")
-                .or_else(|| obj.get("icon_url"))
-                .and_then(|v| v.as_str())
+            icon_url: manifest_interface_value(obj, "logo", &["iconUrl", "icon_url"])
+                .and_then(Value::as_str)
                 .and_then(sanitize_url),
-            description: text("description", MAX_DESCRIPTION_CHARS),
+            description: manifest_text(
+                obj,
+                "longDescription",
+                &["description"],
+                MAX_DESCRIPTION_CHARS,
+            ),
             version: obj
                 .get("version")
-                .and_then(|v| v.as_str())
+                .and_then(Value::as_str)
                 .and_then(scrub_version),
-            tagline: text("tagline", MAX_TAGLINE_CHARS),
-            category: text("category", MAX_CATEGORY_CHARS),
+            tagline: manifest_text(obj, "shortDescription", &["tagline"], MAX_TAGLINE_CHARS),
+            category: manifest_text(obj, "category", &["category"], MAX_CATEGORY_CHARS),
             // Both spellings, because a manifest is authored in camelCase
             // (`iconDither`) and read back from this cache in snake_case.
             icon_dither: obj
@@ -351,14 +534,74 @@ impl RepoManifestDisplay {
                 .or_else(|| obj.get("icon_background"))
                 .and_then(|v| v.as_str())
                 .and_then(scrub_css_color),
-            banner: obj.get("banner").and_then(scrub_banner),
+            banner: manifest_interface_value(obj, "banner", &["banner"]).and_then(scrub_banner),
+            homepage: manifest_url(obj, "websiteURL", &["homepage"]),
+            repository_url: obj
+                .get("repository")
+                .or_else(|| obj.get("repositoryUrl"))
+                .and_then(Value::as_str)
+                .and_then(sanitize_url),
+            author: scrub_author(obj.get("author")),
+            developer: manifest_text(obj, "developerName", &["developer"], MAX_NAME_CHARS).or_else(
+                || {
+                    obj.get("author")
+                        .and_then(author_developer_string)
+                        .and_then(|value| scrub_text(&value, MAX_NAME_CHARS))
+                },
+            ),
+            license: manifest_text(obj, "license", &["license"], MAX_NAME_CHARS),
+            keywords: scrub_string_list(
+                manifest_interface_value(obj, "keywords", &["keywords"]),
+                MAX_KEYWORDS,
+                MAX_NAME_CHARS,
+            ),
+            tags: scrub_string_list(
+                manifest_interface_value(obj, "tags", &["tags"]),
+                MAX_TAGS,
+                MAX_NAME_CHARS,
+            ),
+            screenshots: scrub_url_list(manifest_interface_value(
+                obj,
+                "screenshots",
+                &["screenshots"],
+            )),
+            example_prompts: scrub_string_list(
+                manifest_interface_value(
+                    obj,
+                    "defaultPrompt",
+                    &["examplePrompts", "defaultPrompt"],
+                ),
+                MAX_EXAMPLE_PROMPTS,
+                MAX_DESCRIPTION_CHARS,
+            ),
+            capabilities: scrub_string_list(
+                manifest_interface_value(obj, "capabilities", &["capabilities"]),
+                MAX_CAPABILITIES,
+                MAX_CAPABILITY_CHARS,
+            ),
+            privacy_policy_url: manifest_url(
+                obj,
+                "privacyPolicyURL",
+                &["privacyPolicyUrl", "privacy_policy_url"],
+            ),
+            terms_of_service_url: manifest_url(
+                obj,
+                "termsOfServiceURL",
+                &["termsOfServiceUrl", "terms_of_service_url"],
+            ),
+            external: obj
+                .get("external")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            layers: scrub_layers(obj.get("provides")),
             has_destination: manifest_claims_destination(obj),
         };
         (out != Self::default()).then_some(out)
     }
 }
 
-/// A community marketplace: a `ryu-marketplace` repo's parsed `marketplace.json`.
+/// A community collection: a `ryu-marketplace` repo's parsed package-folder
+/// entries. The legacy `marketplace.json` shape is retained only as a fallback.
 ///
 /// Identity rules mirror [`RepoManifestDisplay`]'s: the marketplace supplies the
 /// heading NAME, GitHub supplies `owner` / `repo` (the identity of who published
@@ -366,8 +609,8 @@ impl RepoManifestDisplay {
 /// move code or permission claims.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct GithubMarketplace {
-    /// The marketplace's display name for its sub-heading: marketplace.json
-    /// `displayName` → `name`, falling back to the repo slug. Scrub-bounded.
+    /// The marketplace's display name for its sub-heading: package metadata
+    /// `name`, falling back to the repo slug. Scrub-bounded.
     name: String,
     /// The parsed plugin entries. `from_manifest` returns `None` when nothing
     /// survives, so `Some` here always has at least one entry.
@@ -415,6 +658,12 @@ pub(crate) struct GithubMarketplaceEntry {
     source_repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     homepage: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    /// Folder path inside the collection. This is the package identity source;
+    /// it replaces the legacy marketplace.json entry pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package_path: Option<String>,
 }
 
 impl GithubMarketplace {
@@ -501,6 +750,59 @@ impl GithubMarketplaceEntry {
                 .get("homepage")
                 .and_then(|v| v.as_str())
                 .and_then(sanitize_url),
+            tags: scrub_string_list(obj.get("tags"), MAX_TAGS, MAX_NAME_CHARS),
+            package_path: None,
+        };
+        (out != Self::default()).then_some(out)
+    }
+
+    /// Lift a portable `ryu.package.json` into the same display-only entry.
+    /// Manifest code, permissions, and release bytes never enter this card.
+    fn from_package_manifest(
+        manifest: &Value,
+        package_path: String,
+        repo_url: String,
+    ) -> Option<Self> {
+        let obj = manifest.as_object()?;
+        let metadata = obj.get("metadata").and_then(Value::as_object);
+        let text = |key: &str, max: usize| {
+            obj.get(key)
+                .or_else(|| metadata.and_then(|m| m.get(key)))
+                .and_then(Value::as_str)
+                .and_then(|s| scrub_text(s, max))
+        };
+        let fallback_name = package_path
+            .rsplit('/')
+            .next()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("package");
+        let name = obj
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|value| scrub_text(value, MAX_NAME_CHARS))
+            .unwrap_or_else(|| fallback_name.to_string());
+        let display_name = text("name", MAX_NAME_CHARS);
+        let kind = obj.get("kind").and_then(Value::as_str).unwrap_or("plugin");
+        let out = Self {
+            name,
+            display_name,
+            description: text("description", MAX_DESCRIPTION_CHARS),
+            category: text("category", MAX_CATEGORY_CHARS),
+            version: obj
+                .get("version")
+                .and_then(Value::as_str)
+                .and_then(scrub_version),
+            tagline: text("tagline", MAX_TAGLINE_CHARS),
+            icon: text("icon", MAX_ICON_ID_CHARS).and_then(|value| scrub_icon_id(&value)),
+            icon_url: text("iconUrl", MAX_URL_CHARS).and_then(|value| sanitize_url(&value)),
+            icon_dither: None,
+            icon_background: None,
+            banner: None,
+            has_companion: kind == "app",
+            source_repo: Some(repo_url),
+            homepage: text("homepage", MAX_URL_CHARS).and_then(|value| sanitize_url(&value)),
+            tags: Vec::new(),
+            package_path: Some(package_path),
         };
         (out != Self::default()).then_some(out)
     }
@@ -1152,11 +1454,11 @@ impl GithubTopicSource {
         }
     }
 
-    /// Fill in each marketplace record's [`GithubMarketplace`] from the repo's own
-    /// `marketplace.json`, so its entries can render grouped under the
-    /// marketplace's name. Same cost story as [`Self::hydrate_manifests`]: raw CDN
-    /// fetches, a positive/negative cross-refresh memory, and a deadline bound —
-    /// what it does not reach degrades to a single repo listing on the next card.
+    /// Fill in each collection record's [`GithubMarketplace`] from package folders,
+    /// so its entries can render grouped under the collection's name. Same cost
+    /// story as [`Self::hydrate_manifests`]: raw CDN fetches, a positive/negative
+    /// cross-refresh memory, and a deadline bound — what it does not reach
+    /// degrades to a single repo listing on the next card.
     async fn hydrate_marketplaces(&self, records: &mut [GithubTopicRecord]) {
         let now = unix_now();
         let pending: Vec<usize> = records
@@ -1306,11 +1608,80 @@ impl GithubTopicSource {
         fetch_repo_manifest_for(&record.owner, &record.repo).await
     }
 
-    /// Best-effort `marketplace.json` enrichment for a `ryu-marketplace` repo.
+    /// Best-effort portable-package enrichment for a `ryu-marketplace` repo.
+    /// The Git tree is the collection index: every folder containing
+    /// `ryu.package.json` becomes one card. No generated marketplace.json is
+    /// consulted on the new path.
     async fn fetch_repo_marketplace(
         &self,
         record: &GithubTopicRecord,
     ) -> Option<GithubMarketplace> {
+        let tree_url = format!(
+            "{}/repos/{}/git/trees/HEAD?recursive=1",
+            self.resolve_api_base(),
+            record.full_name
+        );
+        if let Ok(bytes) =
+            crate::server::guarded_get_bytes_with_headers(&tree_url, &self.request_headers()).await
+        {
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                let mut entries = Vec::new();
+                if let Some(tree) = value.get("tree").and_then(Value::as_array) {
+                    for path in tree
+                        .iter()
+                        .filter_map(|entry| {
+                            let obj = entry.as_object()?;
+                            let path = obj.get("path")?.as_str()?;
+                            (obj.get("type").and_then(Value::as_str) == Some("blob")
+                                && (path == PACKAGE_MANIFEST_FILE
+                                    || path.ends_with(&format!("/{PACKAGE_MANIFEST_FILE}"))))
+                            .then_some(path.to_string())
+                        })
+                        .take(200)
+                    {
+                        let package_path = path
+                            .strip_suffix(&format!("/{PACKAGE_MANIFEST_FILE}"))
+                            .or_else(|| path.strip_suffix(PACKAGE_MANIFEST_FILE))
+                            .unwrap_or_default()
+                            .to_string();
+                        let raw_url = format!(
+                            "https://raw.githubusercontent.com/{}/{}/HEAD/{}",
+                            record.owner, record.repo, path
+                        );
+                        let Ok(package_bytes) = crate::server::guarded_get_bytes(&raw_url).await
+                        else {
+                            continue;
+                        };
+                        let Ok(manifest) = serde_json::from_slice::<Value>(&package_bytes) else {
+                            continue;
+                        };
+                        let package_url = if package_path.is_empty() {
+                            format!("https://github.com/{}/tree/HEAD", record.full_name)
+                        } else {
+                            format!(
+                                "https://github.com/{}/tree/HEAD/{}",
+                                record.full_name, package_path
+                            )
+                        };
+                        if let Some(entry) = GithubMarketplaceEntry::from_package_manifest(
+                            &manifest,
+                            package_path,
+                            package_url,
+                        ) {
+                            entries.push(entry);
+                        }
+                    }
+                }
+                if !entries.is_empty() {
+                    return Some(GithubMarketplace {
+                        name: record.full_name.clone(),
+                        entries,
+                    });
+                }
+            }
+        }
+        // Compatibility fallback for old community repositories. This path is
+        // intentionally read-only and is never generated or written by Ryu.
         for path in REPO_MARKETPLACE_PATHS {
             let url = format!(
                 "https://raw.githubusercontent.com/{}/{}/HEAD/{}",
@@ -1425,6 +1796,7 @@ fn repo_item_to_marketplace_record(item: &GithubRepoItem) -> Option<GithubTopicR
 /// Repo descriptions are attacker-controlled free text; bound them before they
 /// reach a card.
 const MAX_DESCRIPTION_CHARS: usize = 300;
+const MAX_URL_CHARS: usize = 500;
 
 fn truncate_description(value: &str) -> String {
     if value.chars().count() <= MAX_DESCRIPTION_CHARS {
@@ -1460,8 +1832,8 @@ impl GithubTopicRecord {
             || now.saturating_sub(self.manifest_probed_at) >= MANIFEST_PROBE_TTL_SECS
     }
 
-    /// Same TTL as the manifest probe: a repo that ADDS a `marketplace.json`
-    /// later (or fills an existing one) is picked up on the next re-probe.
+    /// Same TTL as the manifest probe: a repo that adds package folders later
+    /// (or fills an existing one) is picked up on the next re-probe.
     fn marketplace_probe_is_due(&self, now: u64) -> bool {
         self.marketplace_probed_at == 0
             || now.saturating_sub(self.marketplace_probed_at) >= MANIFEST_PROBE_TTL_SECS
@@ -1661,6 +2033,8 @@ pub(crate) fn marketplace_entry_to_item(
         "install_source": repo_url,
         "url": repo_url,
         "repo_url": repo_url,
+        "package_path": entry.package_path.clone(),
+        "package": entry.package_path.is_some(),
         "installed": false,
         "type": if entry.has_companion { "app" } else { "plugin" },
         "has_companion": entry.has_companion,
@@ -1671,6 +2045,7 @@ pub(crate) fn marketplace_entry_to_item(
         "icon_dither": entry.icon_dither.clone(),
         "icon_background": entry.icon_background.clone(),
         "banner": entry.banner.clone(),
+        "tags": entry.tags.clone(),
         "category": entry.category.clone().unwrap_or_else(|| "Community".to_string()),
         "tagline": entry.tagline.clone().or_else(|| entry.description.clone()),
         "stars": record.stars,
@@ -1709,6 +2084,15 @@ pub(crate) fn record_to_item(record: &GithubTopicRecord) -> Value {
     let name = manifest_str(|m| m.name.as_ref()).unwrap_or_else(|| record.repo.clone());
     let description = manifest_str(|m| m.description.as_ref())
         .or_else(|| record.description.clone())
+        .unwrap_or_default();
+    let tags = manifest
+        .map(|m| {
+            if m.tags.is_empty() {
+                m.keywords.clone()
+            } else {
+                m.tags.clone()
+            }
+        })
         .unwrap_or_default();
     serde_json::json!({
         "id": record.id,
@@ -1755,6 +2139,24 @@ pub(crate) fn record_to_item(record: &GithubTopicRecord) -> Value {
         // and re-guarded again at paint because the render layer can never assume
         // which source a banner arrived from.
         "banner": manifest.and_then(|m| m.banner.clone()),
+        "screenshots": manifest
+            .map(|m| m.screenshots.clone())
+            .unwrap_or_default(),
+        "external": manifest.map(|m| m.external).unwrap_or(false),
+        "layers": manifest.map(|m| m.layers.clone()).unwrap_or_default(),
+        "tags": tags,
+        "keywords": manifest.map(|m| m.keywords.clone()).unwrap_or_default(),
+        "author": manifest.and_then(|m| m.author.clone()),
+        "homepage": manifest_str(|m| m.homepage.as_ref()),
+        "repository_url": manifest_str(|m| m.repository_url.as_ref()),
+        "example_prompts": manifest
+            .map(|m| m.example_prompts.clone())
+            .unwrap_or_default(),
+        "capabilities": manifest
+            .map(|m| m.capabilities.clone())
+            .unwrap_or_default(),
+        "privacy_policy_url": manifest_str(|m| m.privacy_policy_url.as_ref()),
+        "terms_of_service_url": manifest_str(|m| m.terms_of_service_url.as_ref()),
         // "Community" stays the default shelf: it is the provenance disclosure, and
         // a self-declared category only refines it.
         "category": manifest_str(|m| m.category.as_ref()).unwrap_or_else(|| "Community".to_string()),
@@ -1795,37 +2197,81 @@ pub(crate) fn manifest_display_fields(manifest: &Value) -> serde_json::Map<Strin
     {
         out.insert("manifestId".to_string(), Value::String(id));
     }
-    if let Some(name) = obj
-        .get("name")
-        .and_then(|v| v.as_str())
-        .and_then(|s| scrub_text(s, MAX_NAME_CHARS))
-    {
+    let Some(display) = RepoManifestDisplay::from_manifest(manifest) else {
+        return out;
+    };
+    if let Some(name) = display.name.clone() {
         out.insert("manifestName".to_string(), Value::String(name));
     }
-    for key in MANIFEST_DISPLAY_KEYS {
-        let raw = obj.get(key).and_then(|v| v.as_str());
-        let scrubbed = match key {
-            "icon" => raw.and_then(scrub_icon_id),
-            "version" => raw.and_then(scrub_version),
-            "category" => raw.and_then(|s| scrub_text(s, MAX_CATEGORY_CHARS)),
-            _ => raw.and_then(|s| scrub_text(s, MAX_DESCRIPTION_CHARS)),
+    let insert_string =
+        |out: &mut serde_json::Map<String, Value>, key: &str, value: &Option<String>| {
+            if let Some(value) = value {
+                out.insert(key.to_owned(), Value::String(value.clone()));
+            }
         };
-        if let Some(v) = scrubbed {
-            out.insert(key.to_string(), Value::String(v));
-        }
+    insert_string(&mut out, "description", &display.description);
+    insert_string(&mut out, "version", &display.version);
+    insert_string(&mut out, "tagline", &display.tagline);
+    insert_string(&mut out, "category", &display.category);
+    insert_string(&mut out, "icon", &display.icon);
+    insert_string(&mut out, "iconUrl", &display.icon_url);
+    insert_string(&mut out, "homepage", &display.homepage);
+    insert_string(&mut out, "website", &display.homepage);
+    insert_string(&mut out, "repositoryUrl", &display.repository_url);
+    insert_string(&mut out, "license", &display.license);
+    insert_string(&mut out, "developerName", &display.developer);
+    if let Some(author) = &display.author {
+        out.insert("author".to_owned(), author.clone());
     }
-    if let Some(url) = obj
-        .get("homepage")
-        .or_else(|| obj.get("icon_url"))
-        .and_then(|v| v.as_str())
-        .and_then(sanitize_url)
-    {
-        let key = if obj.get("homepage").is_some() {
-            "homepage"
-        } else {
-            "iconUrl"
-        };
-        out.insert(key.to_string(), Value::String(url));
+    if let Some(icon_dither) = &display.icon_dither {
+        out.insert("iconDither".to_owned(), icon_dither.clone());
+    }
+    if let Some(icon_background) = &display.icon_background {
+        out.insert(
+            "iconBackground".to_owned(),
+            Value::String(icon_background.clone()),
+        );
+    }
+    if !display.screenshots.is_empty() {
+        out.insert(
+            "screenshots".to_owned(),
+            serde_json::json!(display.screenshots),
+        );
+    }
+    if !display.keywords.is_empty() {
+        out.insert("keywords".to_owned(), serde_json::json!(display.keywords));
+    }
+    if !display.tags.is_empty() {
+        out.insert("tags".to_owned(), serde_json::json!(display.tags));
+    } else if !display.keywords.is_empty() {
+        out.insert("tags".to_owned(), serde_json::json!(display.keywords));
+    }
+    if !display.example_prompts.is_empty() {
+        out.insert(
+            "examplePrompts".to_owned(),
+            serde_json::json!(display.example_prompts),
+        );
+    }
+    if !display.capabilities.is_empty() {
+        out.insert(
+            "capabilities".to_owned(),
+            serde_json::json!(display.capabilities),
+        );
+    }
+    if let Some(privacy) = &display.privacy_policy_url {
+        out.insert(
+            "privacyPolicyUrl".to_owned(),
+            Value::String(privacy.clone()),
+        );
+    }
+    if let Some(terms) = &display.terms_of_service_url {
+        out.insert("termsOfServiceUrl".to_owned(), Value::String(terms.clone()));
+    }
+    if display.external {
+        out.insert("external".to_owned(), Value::Bool(true));
+    }
+    if !display.layers.is_empty() {
+        out.insert("layers".to_owned(), Value::Array(display.layers.clone()));
     }
     for key in ["requires", "targets"] {
         if let Some(v) = obj.get(key).filter(|v| !v.is_null()) {
@@ -1836,7 +2282,7 @@ pub(crate) fn manifest_display_fields(manifest: &Value) -> serde_json::Map<Strin
     // path uses. The hero reads the card's copy, so this is not what paints today —
     // but a list and a detail that disagree about a listing's own art is the exact
     // drift this function's doc opens by warning about.
-    if let Some(banner) = obj.get("banner").and_then(scrub_banner) {
+    if let Some(banner) = display.banner {
         out.insert("banner".to_string(), banner);
     }
     // Runnable *kinds* only — the shapes, never their code.
@@ -2647,6 +3093,93 @@ mod tests {
         }
         // Runnable KINDS only — the shapes, never their code.
         assert_eq!(lifted["runnableKinds"], serde_json::json!(["companion"]));
+    }
+
+    #[test]
+    fn codex_plugin_interface_metadata_projects_to_the_shared_listing_contract() {
+        assert!(REPO_MANIFEST_PATHS.contains(&".codex-plugin/plugin.json"));
+        assert!(REPO_MANIFEST_PATHS.contains(&".claude-plugin/plugin.json"));
+        let manifest = serde_json::json!({
+            "$schema": "https://developers.openai.com/codex/schemas/plugin.json",
+            "name": "conductor",
+            "version": "1.0.0",
+            "description": "fallback",
+            "author": { "name": "Resend", "url": "https://resend.com" },
+            "homepage": "https://github.com/resend/openai-plugins",
+            "repository": "https://github.com/resend/openai-plugins",
+            "license": "MIT",
+            "keywords": ["email", "automation"],
+            "banner": { "style": "gradient", "colors": ["#111111", "#222222"] },
+            "external": true,
+            "provides": [{
+                "capability": "browser.control",
+                "title": "Browser",
+                "selectable": true,
+                "target": "remote-desktop",
+                "tools": { "browser.navigate": { "tool": "remote.open" } }
+            }],
+            "interface": {
+                "displayName": "Conductor",
+                "shortDescription": "A short pitch",
+                "longDescription": "A longer public description",
+                "category": "Productivity",
+                "websiteURL": "https://resend.com/conductor",
+                "privacyPolicyURL": "https://resend.com/legal/privacy",
+                "termsOfServiceURL": "https://resend.com/legal/terms",
+                "defaultPrompt": ["Draft an email"],
+                "screenshots": ["https://cdn.example.com/conductor.png"],
+                "composerIcon": "lucide:mail",
+                "logo": "https://cdn.example.com/conductor.svg",
+                "developerName": "Resend",
+                "capabilities": ["Send email"]
+            },
+            "permission_grants": ["tool:execute"],
+            "ui_code": "must not travel"
+        });
+        let display = RepoManifestDisplay::from_manifest(&manifest).expect("metadata survives");
+        assert_eq!(display.name.as_deref(), Some("Conductor"));
+        assert_eq!(display.tagline.as_deref(), Some("A short pitch"));
+        assert_eq!(
+            display.description.as_deref(),
+            Some("A longer public description")
+        );
+        assert_eq!(display.icon.as_deref(), Some("lucide:mail"));
+        assert_eq!(
+            display.icon_url.as_deref(),
+            Some("https://cdn.example.com/conductor.svg")
+        );
+        assert_eq!(
+            display.homepage.as_deref(),
+            Some("https://resend.com/conductor")
+        );
+        assert_eq!(display.screenshots.len(), 1);
+        assert_eq!(display.example_prompts, vec!["Draft an email"]);
+        assert_eq!(display.layers[0]["capability"], "browser.control");
+        assert!(display.external);
+
+        let lifted = manifest_display_fields(&manifest);
+        assert_eq!(lifted["manifestName"], "Conductor");
+        assert_eq!(lifted["description"], "A longer public description");
+        assert_eq!(lifted["website"], "https://resend.com/conductor");
+        assert_eq!(
+            lifted["privacyPolicyUrl"],
+            "https://resend.com/legal/privacy"
+        );
+        assert_eq!(
+            lifted["termsOfServiceUrl"],
+            "https://resend.com/legal/terms"
+        );
+        assert_eq!(
+            lifted["examplePrompts"],
+            serde_json::json!(["Draft an email"])
+        );
+        assert_eq!(
+            lifted["screenshots"],
+            serde_json::json!(["https://cdn.example.com/conductor.png"])
+        );
+        assert_eq!(lifted["external"], true);
+        assert!(lifted.get("ui_code").is_none());
+        assert!(lifted.get("permission_grants").is_none());
     }
 
     #[test]

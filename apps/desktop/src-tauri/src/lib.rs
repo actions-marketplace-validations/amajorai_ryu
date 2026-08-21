@@ -1,7 +1,7 @@
 mod core;
 mod hardware;
 mod identifier_migration;
-mod mcp_bridge;
+mod keep_awake;
 mod midnight_wipe;
 mod nodes;
 mod permissions;
@@ -1381,9 +1381,28 @@ struct ShellOutput {
 /// Resolve a caller-requested shell name to a concrete (binary, command-flag)
 /// pair through a FIXED ALLOWLIST. The caller's string is NEVER passed through
 /// as the binary directly — that would be arbitrary-binary execution. Any
-/// unrecognized, empty, or absent value falls back to the OS default (the
-/// historical behaviour), so a garbage value can never spawn something outside
-/// this list.
+/// unrecognized, empty, or absent value falls back to the OS default, so a
+/// garbage value can never spawn something outside this list.
+fn default_shell() -> (&'static str, &'static str) {
+    if cfg!(windows) {
+        return ("powershell", "-Command");
+    }
+
+    // `$SHELL` is the user's login-shell choice on Unix. Only accept the same
+    // fixed names exposed by the settings UI; an arbitrary environment path must
+    // never become an executable here.
+    let configured = std::env::var_os("SHELL")
+        .and_then(|value| std::path::Path::new(&value).file_name().map(|name| name.to_owned()));
+    match configured.as_deref().and_then(|name| name.to_str()) {
+        Some("bash") => ("bash", "-c"),
+        Some("zsh") => ("zsh", "-c"),
+        Some("sh") => ("sh", "-c"),
+        Some("fish") => ("fish", "-c"),
+        _ if cfg!(target_os = "macos") => ("zsh", "-c"),
+        _ => ("bash", "-c"),
+    }
+}
+
 fn resolve_shell(requested: Option<&str>) -> (&'static str, &'static str) {
     match requested.map(str::trim).filter(|s| !s.is_empty()) {
         Some("bash") => ("bash", "-c"),
@@ -1393,14 +1412,8 @@ fn resolve_shell(requested: Option<&str>) -> (&'static str, &'static str) {
         Some("powershell") => ("powershell", "-Command"),
         Some("pwsh") => ("pwsh", "-Command"),
         Some("cmd") => ("cmd", "/C"),
-        // None or any unrecognized value → the OS default (today's behavior).
-        _ => {
-            if cfg!(windows) {
-                ("powershell", "-Command")
-            } else {
-                ("bash", "-c")
-            }
-        }
+        // None or any unrecognized value → the OS default.
+        _ => default_shell(),
     }
 }
 
@@ -1547,6 +1560,107 @@ fn toggle_companion_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Open the live-media picture-in-picture surface as a real OS window.
+///
+/// Browser Picture-in-Picture is intentionally limited to video elements and is
+/// not consistently available in embedded webviews. A Tauri window gives the
+/// browser-tab screenshots and the VNC canvas the same always-on-top behaviour as
+/// a recording, while the renderer keeps all three sources in one shared channel.
+#[tauri::command]
+fn open_media_pip(app: tauri::AppHandle) -> Result<(), String> {
+    const LABEL: &str = "media-pip";
+
+    if let Some(win) = app.get_webview_window(LABEL) {
+        win.show().map_err(|e| e.to_string())?;
+        win.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let url = if cfg!(debug_assertions) {
+        WebviewUrl::External(
+            "http://localhost:5173/?window=media-pip"
+                .parse()
+                .map_err(|e| format!("bad media PiP URL: {e}"))?,
+        )
+    } else {
+        WebviewUrl::App("index.html?window=media-pip".into())
+    };
+
+    let win = WebviewWindowBuilder::new(&app, LABEL, url)
+        .title("Ryu Live Media")
+        .inner_size(420.0, 280.0)
+        .min_inner_size(280.0, 180.0)
+        .center()
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(true)
+        .zoom_hotkeys_enabled(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Close the live-media picture-in-picture surface, if it is open.
+#[tauri::command]
+fn close_media_pip(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("media-pip") {
+        win.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct AgentBrowserStreamStatus {
+    connected: bool,
+    enabled: bool,
+    port: Option<u16>,
+    screencasting: bool,
+}
+
+/// Read Agent Browser's session-scoped stream status. The CLI is the supported
+/// control surface for the daemon; the renderer only receives the localhost
+/// WebSocket frames after this fixed, read-only probe says a port is available.
+#[tauri::command]
+fn agent_browser_stream_status() -> Result<AgentBrowserStreamStatus, String> {
+    let binary =
+        which::which("agent-browser").map_err(|e| format!("agent-browser is unavailable: {e}"))?;
+    let output = std::process::Command::new(binary)
+        .args(["stream", "status", "--json"])
+        .output()
+        .map_err(|e| format!("couldn't query Agent Browser streaming: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Agent Browser returned invalid stream status: {e}"))?;
+    let data = envelope
+        .get("data")
+        .ok_or_else(|| "Agent Browser stream status did not include data".to_string())?;
+    Ok(AgentBrowserStreamStatus {
+        connected: data
+            .get("connected")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        enabled: data
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        port: data
+            .get("port")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok()),
+        screencasting: data
+            .get("screencasting")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
 /// Monotonic counter for tear-off window labels, unique for the lifetime of the
 /// process. A new window per increment (`tab-1`, `tab-2`, …) — labels must be
 /// unique and Tauri rejects reuse of a live one.
@@ -1690,6 +1804,43 @@ async fn read_project_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))
 }
 
+/// Read one committed workspace file without passing its path through a shell.
+/// Diff hydration handles repository-controlled paths, so keep the git refspec as
+/// one discrete argument and reject traversal/control characters before spawning.
+#[tauri::command]
+async fn read_git_project_file(folder: String, path: String) -> Result<String, String> {
+    use std::path::Component;
+
+    let workspace = std::fs::canonicalize(&folder)
+        .map_err(|e| format!("invalid workspace folder {folder}: {e}"))?;
+    if !workspace.is_dir() {
+        return Err(format!("workspace folder is not a directory: {folder}"));
+    }
+    if path.is_empty() || path.chars().any(|character| character.is_control()) {
+        return Err("invalid committed file path".to_string());
+    }
+    let relative = std::path::Path::new(&path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(component, Component::ParentDir | Component::Prefix(_))
+        })
+    {
+        return Err("committed file path must stay inside the workspace".to_string());
+    }
+
+    let spec = format!("HEAD:{path}");
+    let output = std::process::Command::new("git")
+        .current_dir(workspace)
+        .args(["show", spec.as_str()])
+        .output()
+        .map_err(|e| format!("read {path} from HEAD: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("unable to read {path} from HEAD"));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|e| format!("committed file {path} is not valid UTF-8: {e}"))
+}
+
 /// Write a UTF-8 text file by absolute path — the markdown editor's autosave.
 #[tauri::command]
 async fn write_project_file(path: String, content: String) -> Result<(), String> {
@@ -1751,6 +1902,7 @@ pub fn run() {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         ))
+        .manage(keep_awake::KeepAwakeState::default())
         // Single-instance MUST be the first plugin. On Windows/Linux a `ryu://`
         // link spawns a second process; this forwards the URL to the live
         // instance (the deep-link plugin's `onOpenUrl` fires there) and the
@@ -1793,29 +1945,6 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![startup::AUTOSTART_ARG]),
         ));
-
-    // MCP bridge (Tauri MCP server): a socket that can run JS in the webview and
-    // invoke IPC, so it exists only when the user has turned Developer Mode on —
-    // in every build, debug included. Gating on the persisted opt-in rather than
-    // `debug_assertions` is the whole point: attaching an agent to a *stable*
-    // build is what this is for. Bound to loopback, never the plugin's `0.0.0.0`
-    // default. See `mcp_bridge.rs` for the posture and the wire-auth gap.
-    if mcp_bridge::take_enabled() {
-        // Resolve the port with the plugin's own scan first: it walks forward from
-        // its base when that port is busy, and the settings tab has to hand the
-        // user the port it will really listen on, not the one we asked for.
-        let port = tauri_plugin_mcp_bridge::discovery::find_available_port(
-            "127.0.0.1",
-            profile::mcp_bridge_port(),
-        );
-        builder = builder.plugin(
-            tauri_plugin_mcp_bridge::Builder::new()
-                .bind_address("127.0.0.1")
-                .base_port(port)
-                .build(),
-        );
-        mcp_bridge::mark_live(port);
-    }
 
     builder.setup(|app| {
             let win = app.get_webview_window("main").unwrap();
@@ -2047,6 +2176,9 @@ pub fn run() {
             open_in_editor,
             open_workspace_item,
             reveal_workspace_item,
+            open_media_pip,
+            close_media_pip,
+            agent_browser_stream_status,
             open_tab_window,
             tray::get_hide_tray_icon,
             tray::set_hide_tray_icon,
@@ -2059,12 +2191,12 @@ pub fn run() {
             toggle_fullscreen,
             is_fullscreen,
             read_project_file,
+            read_git_project_file,
             write_project_file,
             list_project_markdown,
-            mcp_bridge::mcp_bridge_status,
-            mcp_bridge::set_mcp_bridge_enabled,
             hardware::get_hardware_info,
             hardware::get_system_usage,
+            keep_awake::set_keep_awake,
             nodes::list_nodes,
             nodes::add_node,
             nodes::local_node_token,

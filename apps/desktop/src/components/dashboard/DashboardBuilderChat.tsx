@@ -1,7 +1,7 @@
 // The "build with AI" pane of the Home page. A chat that authors and arranges
 // THIS dashboard's widgets: the user says "show me my unread email and a chart of
 // signups" and the model assembles the grid by calling Core's
-// `dashboard_builder__*` tools. After each settled turn we refetch the dashboard
+// `dashboard_builder.*` tools. After each settled turn we refetch the dashboard
 // so the grid re-materialises. Mirrors WorkflowBuilderChat exactly.
 
 import { useChat } from "@ai-sdk/react";
@@ -15,7 +15,7 @@ import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { WIDGET_DEFINITIONS } from "./widgets/registry.tsx";
 
 /** localStorage key for this builder's driving-agent pick (defaults to `ryu`,
- *  which reliably runs the `dashboard_builder__*` tool loop). Remembered apart
+ *  which reliably runs the `dashboard_builder.*` tool loop). Remembered apart
  *  from the other builders' picks. */
 const DASHBOARD_BUILDER_AGENT_KEY = "ryu_dashboard_builder_agent";
 
@@ -47,9 +47,9 @@ function buildPreamble(dashboardId: string, snapshot: string): string {
 		`dashboard with id "${dashboardId}". A dashboard is a grid of widgets, each with`,
 		`a kind (${WIDGET_KINDS}), a data source, and a grid layout. When the user describes`,
 		"what they want to see, BUILD it by calling the dashboard_builder tools. For edits",
-		`prefer dashboard_builder__configure_dashboard with dashboard_id "${dashboardId}"`,
+		`prefer dashboard_builder.configure_dashboard with dashboard_id "${dashboardId}"`,
 		"using widgets_upsert (pass each widget's layout x/y/w/h to place it on the",
-		"12-column grid) and widgets_remove. Call dashboard_builder__get_dashboard first",
+		"12-column grid) and widgets_remove. Call dashboard_builder.get_dashboard first",
 		"if you need the current widgets. Pick a sensible source: core_endpoint for",
 		"internal metrics (connections, quests, monitors, system_status, …), monitor,",
 		"workflow, composio, http, or agent. If a save is rejected, read the error and",
@@ -143,6 +143,7 @@ export function DashboardBuilderChat({
 	// the shared slot — no more bare textarea here.
 	const composer = useComposerSlot(runtime, {
 		target,
+		surface: "dashboard",
 		compact: messages.length > 0,
 		conversationId,
 		isWorking: status === "streaming" || status === "submitted",

@@ -18,7 +18,7 @@
         "policy_type": "sandbox",
         "definition": {
           "backend": "wasmtime",
-          "note": "On/off switch for the Core-local wasmtime sandbox tool (sandbox__sandbox_exec). Enabling this plugin makes the sandbox tool available; disabling marks it unavailable. Core-local — no gateway restart."
+          "note": "On/off switch for the Core-local wasmtime sandbox tool (sandbox.sandbox_exec). Enabling this plugin makes the sandbox tool available; disabling marks it unavailable. Core-local — no gateway restart."
         }
       }
     }

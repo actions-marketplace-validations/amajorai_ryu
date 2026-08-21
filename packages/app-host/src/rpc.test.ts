@@ -61,13 +61,15 @@ describe("dispatchRpc capability gate", () => {
 });
 
 describe("grant-mapping completeness invariant", () => {
-	// `widget.state` and `ui.displayMode` are LOCAL host caps added directly by the
+	// `widget.state`, `ui.displayMode`, and `host.capabilities` are LOCAL host caps
+	// added directly by the
 	// widget host on mount (never Gateway-sourced), so they intentionally have no
 	// grant-string mapping. Every OTHER capability a method gates MUST be unlockable
 	// via some grant string in GRANT_CAPABILITY — otherwise the whole method family
 	// is functionally dead: the Gateway-approved grant maps to nothing, the granted
 	// set is empty, and every call is denied (the `timeline.read` regression).
 	const LOCAL_HOST_CAPS = new Set<Capability>([
+		"host.capabilities",
 		"widget.state",
 		"ui.displayMode",
 	]);
@@ -126,6 +128,8 @@ describe("assistant bridge dispatch", () => {
 	it("routes each assistant method to its service when granted", async () => {
 		const calls: string[] = [];
 		const svc: HostServices = {
+			listAgents: () => Promise.resolve([]),
+			registerRoute: () => Promise.resolve(null),
 			assistantPublishContext: async ({ items }) => {
 				calls.push(`publish:${items.length}`);
 			},
@@ -169,6 +173,8 @@ describe("assistant bridge dispatch", () => {
 	it("REFUSES every assistant method without the grant, service untouched", async () => {
 		let touched = false;
 		const svc: HostServices = {
+			listAgents: () => Promise.resolve([]),
+			registerRoute: () => Promise.resolve(null),
 			assistantPublishContext: async () => {
 				touched = true;
 			},

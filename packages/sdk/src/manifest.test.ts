@@ -302,7 +302,7 @@ describe("defineApp", () => {
 		const widgets = manifest.contributes?.widgets ?? [];
 
 		expect(widgets).toHaveLength(1);
-		expect(widgets[0]?.tool_id).toBe("checklist__render");
+		expect(widgets[0]?.tool_id).toBe("checklist.render");
 		expect(widgets[0]?.uri).toBe("ui://widget/checklist.html");
 		expect(widgets[0]?.ui_entry).toBe("src/checklist.tsx");
 		expect(widgets[0]?.mime).toBe("text/html+skybridge");
@@ -314,9 +314,9 @@ describe("defineApp", () => {
 		expect(manifest.runnables).toHaveLength(2);
 		expect(manifest.runnables.every((r) => r.kind === "tool")).toBe(true);
 
-		const render = manifest.runnables.find((r) => r.id === "checklist__render");
+		const render = manifest.runnables.find((r) => r.id === "checklist.render");
 		expect(render?.config).toMatchObject({
-			slug: "checklist__render",
+			slug: "checklist.render",
 			// The manifest is the only channel for a packed app: description +
 			// input_schema must survive so Core can rebuild a driveable tool.
 			description: "Render a checklist",
@@ -332,9 +332,9 @@ describe("defineApp", () => {
 			invoked: "Ready",
 		});
 
-		const toggle = manifest.runnables.find((r) => r.id === "checklist__toggle");
+		const toggle = manifest.runnables.find((r) => r.id === "checklist.toggle");
 		expect(toggle?.config).toMatchObject({
-			slug: "checklist__toggle",
+			slug: "checklist.toggle",
 			widget: false,
 			widget_accessible: true,
 		});
@@ -350,13 +350,13 @@ describe("defineApp", () => {
 			uiEntry: "src/chart.tsx",
 			tools: [{ name: "render", description: "Render a chart" }],
 		});
-		const render = manifest.runnables.find((r) => r.id === "chart__render");
+		const render = manifest.runnables.find((r) => r.id === "chart.render");
 		expect(render?.config).toMatchObject({
 			widget: true,
 			widget_accessible: false,
 		});
 		// `server` override qualifies the tool id and the widget binding.
-		expect(manifest.contributes?.widgets[0]?.tool_id).toBe("chart__render");
+		expect(manifest.contributes?.widgets[0]?.tool_id).toBe("chart.render");
 		// The widget uri still derives from the slug, not the server.
 		expect(manifest.contributes?.widgets[0]?.uri).toBe(
 			"ui://widget/chart-studio.html"
@@ -377,12 +377,12 @@ describe("defineApp", () => {
 		}
 		expect(parsed.data.contributes?.widgets).toHaveLength(1);
 		expect(parsed.data.contributes?.widgets[0]?.tool_id).toBe(
-			"checklist__render"
+			"checklist.render"
 		);
 		// description + input_schema survive the strict parse (the only channel for
 		// a packed app — no `generated.rs` on the Core side).
 		const render = parsed.data.runnables.find(
-			(r) => r.id === "checklist__render"
+			(r) => r.id === "checklist.render"
 		);
 		expect(render?.config?.description).toBe("Render a checklist");
 		expect(render?.config?.input_schema).toBeDefined();
@@ -423,7 +423,7 @@ describe("AppBuilder", () => {
 		expect(manifest.id).toBe("com.example.checklist");
 		expect(manifest.runnables).toHaveLength(2);
 		expect(manifest.contributes?.widgets).toHaveLength(1);
-		expect(manifest.contributes?.widgets[0]?.tool_id).toBe("checklist__render");
+		expect(manifest.contributes?.widgets[0]?.tool_id).toBe("checklist.render");
 		// The author's own grant, plus the `widget:render` the builder adds because
 		// this app synthesises a widget — without it Core silently degrades the
 		// widget to plain text.
@@ -775,6 +775,36 @@ describe("contributes.lsp_servers", () => {
 	});
 });
 
+describe("contributes.message_actions", () => {
+	it("preserves renderer-specific action args through the pack-path parse", () => {
+		const action = {
+			args: {
+				dispatch: "reactions.toggle",
+				renderer: "reaction-picker",
+			},
+			capability: "reactions.toggle",
+			id: "reactions.picker",
+			kind: "menu",
+			label: "Add reaction",
+			plugin: "@ryu/reactions",
+			target: "user",
+		};
+		const parsed = PluginManifestSchema.safeParse({
+			id: "com.example.reactions",
+			name: "Reactions",
+			version: "1.0.0",
+			runnables: [],
+			contributes: { message_actions: [action] },
+		});
+
+		expect(parsed.success).toBe(true);
+		if (!parsed.success) {
+			return;
+		}
+		expect(parsed.data.contributes?.message_actions).toEqual([action]);
+	});
+});
+
 describe("mcp_servers OAuth", () => {
 	const manifest = {
 		id: "com.example.mail",
@@ -793,7 +823,7 @@ describe("mcp_servers OAuth", () => {
 
 	it("preserves the public OAuth declaration through the pack-path parse", () => {
 		const parsed = PluginManifestSchema.parse(manifest);
-		expect(parsed.mcp_servers?.mail.auth).toEqual({
+		expect(parsed.mcp_servers?.mail?.auth).toEqual({
 			client_id: "public-client",
 			type: "oauth",
 		});

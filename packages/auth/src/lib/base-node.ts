@@ -3,8 +3,7 @@ import type { PlanId } from "./plans.ts";
 /**
  * WHICH PLANS INCLUDE THE FREE BASE CLOUD NODE — the single source of truth.
  *
- * The free base node (the `cx23` BASE cloud tier: 2 vCPU · 4 GB · 40 GB) ships
- * with every RECURRING subscription: Pro, Max and Teams. It is NOT included with
+ * The included plan node is sized by the active recurring plan. The node is NOT included with
  * the one-time `desktop-license` (Lifetime), which grants no managed inference,
  * no credit pool and no cloud node, and obviously not with the free baseline.
  * There is no separate Polar product for it — holding a qualifying subscription
@@ -64,7 +63,21 @@ export const BASE_NODE_TYPE_BY_PLAN: Readonly<Record<string, string>> = {
 };
 
 /**
- * The type a plan's free node is provisioned at, or null when it gets none.
+ * Singapore's catalog does not offer the EU `cx23`. Keep the same Pro compute
+ * promise there with the regional `cpx22`; Max already uses the dedicated
+ * `ccx13`, which is available in Singapore. This is a runtime placement choice,
+ * not a billing boundary: the organization still owns one included node.
+ */
+export const BASE_NODE_TYPE_BY_PLAN_IN_SINGAPORE: Readonly<
+	Record<string, string>
+> = {
+	pro: "cpx22",
+	max: "ccx13",
+	teams: "cpx22",
+};
+
+/**
+ * The type a plan's included node is provisioned at, or null when it gets none.
  * Teams resolves through the seat ladder; everything else is fixed per plan.
  */
 export const baseNodeTypeForPlan = (
@@ -78,6 +91,24 @@ export const baseNodeTypeForPlan = (
 		return teamsNodeTierForSeats(seats).type;
 	}
 	return BASE_NODE_TYPE_BY_PLAN[plan] ?? "cx23";
+};
+
+/** Resolve the included node type for a plan in a specific Hetzner location. */
+export const baseNodeTypeForPlanAtLocation = (
+	plan: PlanId | null | undefined,
+	location: string | null | undefined,
+	seats = 1
+): string | null => {
+	if (!(plan && planIncludesBaseNode(plan))) {
+		return null;
+	}
+	if (location?.trim().toLowerCase() === "sin") {
+		if (plan === "teams") {
+			return BASE_NODE_TYPE_BY_PLAN_IN_SINGAPORE.teams ?? "cpx22";
+		}
+		return BASE_NODE_TYPE_BY_PLAN_IN_SINGAPORE[plan] ?? "cpx22";
+	}
+	return baseNodeTypeForPlan(plan, seats);
 };
 
 /**
@@ -122,7 +153,7 @@ export interface TeamsNodeTier {
  * reversibility note above; a `cx23` resized up keeps its 40 GB.
  */
 export const TEAMS_NODE_TIERS: readonly TeamsNodeTier[] = [
-	{ minSeats: 2, type: "cx23", count: 1 },
+	{ minSeats: 5, type: "cx23", count: 1 },
 	{ minSeats: 10, type: "cx33", count: 1 },
 	{ minSeats: 25, type: "cpx32", count: 1 },
 	{ minSeats: 50, type: "cpx32", count: 2 },

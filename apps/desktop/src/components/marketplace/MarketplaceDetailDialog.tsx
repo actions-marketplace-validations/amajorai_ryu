@@ -63,6 +63,7 @@ import { Input } from "@ryu/ui/components/input";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
 import { Textarea } from "@ryu/ui/components/textarea";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import {
 	type ReactNode,
 	useCallback,
@@ -202,7 +203,7 @@ function DetailBody({
 	const cells: (ListingStat | null)[] = [
 		rating.count > 0
 			? {
-					label: `${rating.count} Ratings`,
+					label: `${formatCount(rating.count) ?? "—"} Ratings`,
 					sub: (
 						<StarRating
 							className="justify-center"
@@ -217,7 +218,10 @@ function DetailBody({
 		detail?.category ? { label: "Category", value: detail.category } : null,
 		detail?.developer ? { label: "Developer", value: detail.developer } : null,
 		detail && detail.runnables.length > 0
-			? { label: "Includes", value: `${detail.runnables.length}` }
+			? {
+					label: "Includes",
+					value: formatCount(detail.runnables.length) ?? "—",
+				}
 			: null,
 	];
 	const statItems = cells.filter((cell): cell is ListingStat => cell !== null);
@@ -572,7 +576,7 @@ function RunnablesSection({ runnables }: { runnables: DetailRunnable[] }) {
 					className="size-4 text-muted-foreground"
 					icon={Layers01Icon}
 				/>
-				Skills {runnables.length}
+				Skills {formatCount(runnables.length) ?? "—"}
 			</h3>
 			<ul className="flex flex-col gap-2">
 				{runnables.map((r) => (
@@ -789,12 +793,11 @@ function ReviewsSection({
 			{nextCursor ? (
 				<Button
 					className="self-start"
-					disabled={loadingMore}
+					loading={loadingMore}
 					onClick={() => loadMore()}
 					size="sm"
 					variant="ghost"
 				>
-					{loadingMore ? <Spinner className="mr-2 size-4" /> : null}
 					Load more
 				</Button>
 			) : null}
@@ -963,8 +966,7 @@ function WriteReviewForm({
 				</p>
 			) : null}
 			<div className="flex items-center gap-2">
-				<Button disabled={busy} onClick={() => submit()} size="sm">
-					{busy ? <Spinner className="mr-2 size-4" /> : null}
+				<Button loading={busy} onClick={() => submit()} size="sm">
 					{existing ? "Update review" : "Post review"}
 				</Button>
 				{existing ? (

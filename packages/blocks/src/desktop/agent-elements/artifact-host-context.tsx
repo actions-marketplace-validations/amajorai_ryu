@@ -2,8 +2,8 @@ import type React from "react";
 import { createContext, useContext } from "react";
 
 /**
- * A serializable artifact as the agent's tool delivers it (`artifact__render` /
- * `artifact__create`). Kept loose so a newer Core can add fields without breaking
+ * A serializable artifact as the agent's tool delivers it (`artifact.render` /
+ * `artifact.create`). Kept loose so a newer Core can add fields without breaking
  * an older shell; `packages/blocks` never interprets it beyond passing it through
  * to the desktop renderer.
  */

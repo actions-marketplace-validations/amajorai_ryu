@@ -454,8 +454,12 @@ export const settingsApi = {
 			return fetchApi("/api/billing/subscription-status");
 		},
 
-		createLifetimeCheckout(): Promise<{ url: string }> {
-			return fetchApi("/api/billing/checkout/lifetime", { method: "POST" });
+		createLifetimeCheckout(organizationId?: string): Promise<{ url: string }> {
+			return fetchApi("/api/billing/checkout/lifetime", {
+				body: JSON.stringify(organizationId ? { organizationId } : {}),
+				headers: { "content-type": "application/json" },
+				method: "POST",
+			});
 		},
 
 		getPortalUrl(): Promise<{ url: string }> {

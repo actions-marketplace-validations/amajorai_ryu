@@ -509,7 +509,10 @@ mod tests {
 
         let request = &server.requests()[0];
         assert_eq!(request.path, "/embeddings");
-        assert_eq!(request.header("authorization").as_deref(), Some("Bearer sk-embed"));
+        assert_eq!(
+            request.header("authorization").as_deref(),
+            Some("Bearer sk-embed")
+        );
         assert_eq!(request.json()["model"], json!("text-embedding-3-small"));
         assert_eq!(request.json()["dimensions"], json!(2));
     }
@@ -530,7 +533,10 @@ mod tests {
 
         let request = &server.requests()[0];
         assert_eq!(request.path, "/rerank");
-        assert_eq!(request.header("authorization").as_deref(), Some("Bearer sk-rerank"));
+        assert_eq!(
+            request.header("authorization").as_deref(),
+            Some("Bearer sk-rerank")
+        );
         assert_eq!(request.json()["model"], json!("bge-reranker"));
         assert_eq!(request.json()["documents"][0], json!("hello world"));
     }

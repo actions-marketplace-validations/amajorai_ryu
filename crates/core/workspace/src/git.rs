@@ -1,11 +1,15 @@
-//! The git engine: read-only status/branches plus checkout/create-branch/
-//! commit-push, all shelling `git` against a caller-supplied cwd. This is the
-//! "reads/runs what-is, no policy" half of the workspace primitive; the axum
-//! HTTP handlers that call these functions stay in Core (server wiring), as do
-//! the pure-filesystem `/api/workspace/{new-folder,list}` handlers (they shell
-//! no git — node-fs, kernel-owned).
+//! The git engine: status/branches plus checkout/create-branch,
+//! pull/sync, and commit-push, all shelling `git` against a caller-supplied cwd.
+//! This is the "reads/runs what-is, no policy" half of the workspace primitive;
+//! the axum HTTP handlers that call these functions stay in Core (server
+//! wiring), as do the pure-filesystem `/api/workspace/{new-folder,list}`
+//! handlers (they shell no git — node-fs, kernel-owned).
 
-use std::process::Command;
+use std::collections::HashSet;
+use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::win_process::NoWindow;
 
@@ -75,27 +79,62 @@ fn untracked_paths(porcelain: &str) -> Vec<String> {
         .collect()
 }
 
-/// Undo git's C-style path quoting (`"a\tb"`). Non-quoted paths pass through.
+/// Undo Git's C-style path quoting (`"a\tb"`), including octal byte escapes.
+/// Non-quoted paths pass through. Git uses octal escapes for bytes that are not
+/// safe in the configured quote format, so decoding into bytes first preserves
+/// UTF-8 filenames instead of treating each escaped byte as a Unicode character.
 fn unquote_git_path(raw: &str) -> String {
     let Some(inner) = raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
         return raw.to_string();
     };
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
+    let bytes = inner.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            out.push(bytes[index]);
+            index += 1;
             continue;
         }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some(other) => out.push(other),
-            None => break,
+        index += 1;
+        let Some(&escaped) = bytes.get(index) else {
+            out.push(b'\\');
+            break;
+        };
+        match escaped {
+            b'a' => out.push(0x07),
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0c),
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'v' => out.push(0x0b),
+            b'\\' | b'"' => out.push(escaped),
+            b'0'..=b'7' => {
+                let mut value = 0u8;
+                let mut digits = 0;
+                while digits < 3 {
+                    let Some(&digit) = bytes.get(index) else {
+                        break;
+                    };
+                    if !(b'0'..=b'7').contains(&digit) {
+                        break;
+                    }
+                    value = value * 8 + (digit - b'0');
+                    index += 1;
+                    digits += 1;
+                }
+                out.push(value);
+                continue;
+            }
+            other => {
+                out.push(b'\\');
+                out.push(other);
+            }
         }
+        index += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Total added/removed lines for the working tree vs HEAD (staged + unstaged),
@@ -128,6 +167,57 @@ fn run_git(cwd: &str, args: &[&str]) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Return a `git` command whose hook directory cannot contain a repository
+/// hook. `--no-verify` covers commit/push hooks; this explicit `core.hooksPath`
+/// override also protects any future mutating command added here. `/dev/null`
+/// (or `NUL`) is intentionally used instead of a writable temp directory: a
+/// temp directory could itself be populated by another local process between
+/// creation and invocation.
+fn git_without_hooks(args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-c")
+        .arg(format!(
+            "core.hooksPath={}",
+            if cfg!(windows) { "NUL" } else { "/dev/null" }
+        ))
+        .args(args);
+    command
+}
+
+/// Repo-local clean/smudge/process filters are executable code invoked by Git
+/// during staging and checkout.
+/// The mutation endpoints do not have a safe way to review or authorize those
+/// commands, so fail closed before staging anything. Global filters are outside
+/// this repository's control and are not part of this guard.
+fn reject_local_executable_filters(cwd: &str) -> Result<(), String> {
+    let output = Command::new("git")
+        .args([
+            "config",
+            "--local",
+            "--get-regexp",
+            r"^filter\..*\.(clean|process|smudge)$",
+        ])
+        .current_dir(cwd)
+        .no_window()
+        .output()
+        .map_err(|_| "could not inspect repository filter configuration".to_string())?;
+    if output.status.success() && !output.stdout.is_empty() {
+        return Err(
+            "git mutation blocked: repository-local clean/smudge/process filters are not allowed"
+                .to_string(),
+        );
+    }
+    if output.status.success() || output.status.code() == Some(1) {
+        return Ok(());
+    }
+    Err("git mutation blocked: repository filter configuration could not be inspected".to_string())
+}
+
+fn git_mutation_failed(operation: &str) -> String {
+    format!("git {operation} failed; no command output was returned")
 }
 
 /// Compute the working-tree state for `cwd` (branch, ahead/behind, dirty, diff
@@ -313,8 +403,9 @@ pub struct CommitPushOutcome {
 
 /// Commit, push, or do both for `cwd`. `action` is one of `commit`,
 /// `commit-push`, or `push` (validated by the caller). When `include_unstaged`
-/// is set, stages everything before committing. Returns the raw git stderr on
-/// any failure.
+/// is set, stages everything before committing. Mutating commands reject
+/// repo-local executable filters, disable hooks, and return bounded operation
+/// errors rather than forwarding untrusted hook output to the caller.
 pub fn run_git_action(
     cwd: &str,
     message: &str,
@@ -325,17 +416,19 @@ pub fn run_git_action(
     if run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).is_none() {
         return Err("not a git repository".to_string());
     }
+    if action != "push" && include_unstaged {
+        reject_local_executable_filters(cwd)?;
+    }
 
     if action != "push" && include_unstaged {
         // Stage everything. A failure here is fatal (e.g. corrupt index).
-        let add = Command::new("git")
-            .args(["add", "-A"])
+        let add = git_without_hooks(&["add", "-A"])
             .current_dir(cwd)
             .no_window()
             .output()
-            .map_err(|e| format!("failed to run git: {e}"))?;
+            .map_err(|_| "could not start git add".to_string())?;
         if !add.status.success() {
-            return Err(String::from_utf8_lossy(&add.stderr).trim().to_string());
+            return Err(git_mutation_failed("add"));
         }
     }
 
@@ -355,16 +448,15 @@ pub fn run_git_action(
             }
         }
 
-        let commit = Command::new("git")
-            .args(["commit", "-m", message])
+        let commit = git_without_hooks(&["commit", "--no-verify", "-m", message])
             .current_dir(cwd)
             .no_window()
             .output()
-            .map_err(|e| format!("failed to run git: {e}"))?;
+            .map_err(|_| "could not start git commit".to_string())?;
         if has_staged && commit.status.success() {
             committed = true;
         } else if has_staged {
-            return Err(String::from_utf8_lossy(&commit.stderr).trim().to_string());
+            return Err(git_mutation_failed("commit"));
         }
     }
 
@@ -372,14 +464,13 @@ pub fn run_git_action(
     if action != "commit" {
         // Push to the configured upstream. When there is no tracking branch git
         // exits non-zero with a helpful message — surface it verbatim.
-        let push = Command::new("git")
-            .args(["push"])
+        let push = git_without_hooks(&["push", "--no-verify"])
             .current_dir(cwd)
             .no_window()
             .output()
-            .map_err(|e| format!("failed to run git: {e}"))?;
+            .map_err(|_| "could not start git push".to_string())?;
         if !push.status.success() {
-            return Err(String::from_utf8_lossy(&push.stderr).trim().to_string());
+            return Err(git_mutation_failed("push"));
         }
         pushed = true;
     }
@@ -391,6 +482,404 @@ pub fn run_git_action(
         committed,
         pushed,
         commit,
+    })
+}
+
+/// Shaped `POST /api/git/pull` and `POST /api/git/sync` result.
+#[derive(Debug, serde::Serialize)]
+pub struct GitRemoteOutcome {
+    pub success: bool,
+    pub pulled: bool,
+    pub pushed: bool,
+    pub commit: Option<String>,
+}
+
+fn remote_git_failed(operation: &str, output: &std::process::Output) -> String {
+    let details = String::from_utf8_lossy(&output.stderr)
+        .trim()
+        .chars()
+        .take(400)
+        .collect::<String>();
+    if details.is_empty() {
+        format!("git {operation} failed")
+    } else {
+        format!("git {operation} failed: {details}")
+    }
+}
+
+const REMOTE_GIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Run a remote Git mutation without giving Git an interactive credential or
+/// terminal path. A blocking `Command::output` cannot be cancelled when the
+/// HTTP client disconnects, so remote actions use a supervised child with a
+/// bounded lifetime and kill it on timeout.
+fn run_remote_git_command(cwd: &str, args: &[&str]) -> Result<Output, String> {
+    let ssh_command = std::env::var("GIT_SSH_COMMAND")
+        .map(|value| format!("{value} -o BatchMode=yes"))
+        .unwrap_or_else(|_| "ssh -o BatchMode=yes".to_string());
+    let mut child = git_without_hooks(args)
+        .current_dir(cwd)
+        .no_window()
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_SSH_COMMAND", ssh_command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start git: {error}"))?;
+    let deadline = Instant::now() + REMOTE_GIT_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| format!("could not collect git output: {error}"));
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("timed out after 120 seconds".to_string());
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("could not inspect git process: {error}"));
+            }
+        }
+    }
+}
+
+/// Pull the current branch from its upstream, or pull and then push for sync.
+///
+/// Pull is deliberately fast-forward-only: the Environment summary must not
+/// create an implicit merge commit or leave a conflict in the user's folder.
+/// Sync uses the same pull first, then pushes the current branch to its
+/// configured upstream. Neither action stages or commits working-tree files.
+pub fn run_git_remote_action(cwd: &str, action: &str) -> Result<GitRemoteOutcome, String> {
+    if !matches!(action, "pull" | "sync") {
+        return Err("invalid git remote action".to_string());
+    }
+    // Confirm this is a git repo before running a mutating remote command.
+    if run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).is_none() {
+        return Err("not a git repository".to_string());
+    }
+    reject_local_executable_filters(cwd)?;
+
+    let pull = run_remote_git_command(cwd, &["pull", "--ff-only", "--no-recurse-submodules"])
+        .map_err(|error| format!("git pull {error}"))?;
+    if !pull.status.success() {
+        return Err(remote_git_failed("pull", &pull));
+    }
+
+    let pushed = action == "sync";
+    if pushed {
+        let push = run_remote_git_command(cwd, &["push", "--no-verify"])
+            .map_err(|error| format!("git push {error}"))?;
+        if !push.status.success() {
+            return Err(remote_git_failed("push", &push));
+        }
+    }
+
+    Ok(GitRemoteOutcome {
+        success: true,
+        pulled: true,
+        pushed,
+        commit: run_git(cwd, &["rev-parse", "--short", "HEAD"]),
+    })
+}
+
+const PULL_REQUEST_FIELDS: &str =
+    "baseRefName,commentsCount,headRefName,headRefOid,isDraft,number,repository,state,title,url";
+
+#[derive(serde::Deserialize)]
+struct GhRepository {
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct GhPullRequest {
+    #[serde(rename = "baseRefName")]
+    base_ref_name: Option<String>,
+    #[serde(rename = "commentsCount")]
+    comments_count: Option<u64>,
+    #[serde(rename = "headRefName")]
+    head_ref_name: Option<String>,
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: Option<String>,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+    number: u64,
+    repository: Option<GhRepository>,
+    state: Option<String>,
+    title: String,
+    url: String,
+}
+
+static ACTIVE_PR_CREATIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+struct PullRequestCreationGuard {
+    key: String,
+}
+
+impl Drop for PullRequestCreationGuard {
+    fn drop(&mut self) {
+        if let Some(active) = ACTIVE_PR_CREATIONS.get() {
+            if let Ok(mut keys) = active.lock() {
+                keys.remove(&self.key);
+            }
+        }
+    }
+}
+
+fn begin_pull_request_creation(
+    cwd: &str,
+    branch: &str,
+) -> Result<PullRequestCreationGuard, String> {
+    let key = format!("{cwd}\0{branch}");
+    let active = ACTIVE_PR_CREATIONS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut keys = active
+        .lock()
+        .map_err(|_| "pull request operation lock is unavailable".to_string())?;
+    if !keys.insert(key.clone()) {
+        return Err("a pull request operation is already in progress for this branch".to_string());
+    }
+    Ok(PullRequestCreationGuard { key })
+}
+
+fn list_open_pull_requests(cwd: &str, branch: &str) -> Result<Vec<GhPullRequest>, String> {
+    let args = [
+        "pr",
+        "list",
+        "--head",
+        branch,
+        "--state",
+        "open",
+        "--limit",
+        "2",
+        "--json",
+        PULL_REQUEST_FIELDS,
+    ];
+    let gh = Command::new("gh")
+        .args(args)
+        .current_dir(cwd)
+        .no_window()
+        .output()
+        .map_err(|e| format!("failed to run gh: {e}"))?;
+    if !gh.status.success() {
+        return Err(String::from_utf8_lossy(&gh.stderr).trim().to_string());
+    }
+    serde_json::from_slice(&gh.stdout).map_err(|e| format!("invalid gh pull request response: {e}"))
+}
+
+fn existing_open_pull_request(cwd: &str, branch: &str) -> Result<Option<GhPullRequest>, String> {
+    let mut pulls = list_open_pull_requests(cwd, branch)?;
+    if pulls.len() > 1 {
+        return Err(format!(
+            "more than one open pull request exists for branch {branch}"
+        ));
+    }
+    Ok(pulls.pop())
+}
+
+fn pull_request_outcome(
+    pull: &GhPullRequest,
+    branch: &str,
+    fallback_base: Option<&str>,
+    already_exists: bool,
+) -> PullRequestOutcome {
+    PullRequestOutcome {
+        already_exists,
+        base: pull
+            .base_ref_name
+            .clone()
+            .or_else(|| fallback_base.map(str::to_owned)),
+        branch: pull
+            .head_ref_name
+            .clone()
+            .unwrap_or_else(|| branch.to_string()),
+        comments_count: pull.comments_count,
+        head_sha: pull.head_ref_oid.clone(),
+        is_draft: pull.is_draft,
+        number: Some(pull.number),
+        pr_url: pull.url.clone(),
+        repository: pull
+            .repository
+            .as_ref()
+            .and_then(|repo| repo.name_with_owner.clone()),
+        state: pull.state.clone(),
+        success: true,
+        title: Some(pull.title.clone()),
+    }
+}
+
+/// Shaped `POST /api/git/pull-request` result. The URL is returned by `gh` so
+/// the desktop can offer both a completion link and an explicit browser action.
+#[derive(serde::Serialize)]
+pub struct PullRequestOutcome {
+    pub already_exists: bool,
+    pub base: Option<String>,
+    pub branch: String,
+    pub comments_count: Option<u64>,
+    pub head_sha: Option<String>,
+    pub is_draft: bool,
+    pub number: Option<u64>,
+    pub pr_url: String,
+    pub repository: Option<String>,
+    pub state: Option<String>,
+    pub success: bool,
+    pub title: Option<String>,
+}
+
+/// Optionally commit local changes, push the current branch, and create a pull
+/// request through the authenticated GitHub CLI. Arguments are passed directly
+/// to `git`/`gh` — no shell interpolation is used.
+pub fn create_pull_request(
+    cwd: &str,
+    title: Option<&str>,
+    body: Option<&str>,
+    base: Option<&str>,
+    draft: bool,
+    include_unstaged: bool,
+) -> Result<PullRequestOutcome, String> {
+    let branch = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok_or_else(|| "not a git repository".to_string())?;
+    if branch == "HEAD" {
+        return Err("cannot create a pull request from a detached HEAD".to_string());
+    }
+
+    // The UI check is only an affordance. The node owns the final decision so
+    // two concurrent clicks (or two desktop windows) cannot create two PRs for
+    // the same local branch.
+    let _creation_guard = begin_pull_request_creation(cwd, &branch)?;
+    if include_unstaged {
+        reject_local_executable_filters(cwd)?;
+    }
+    if let Some(existing) = existing_open_pull_request(cwd, &branch)? {
+        return Ok(pull_request_outcome(
+            &existing,
+            &branch,
+            base.map(str::trim).filter(|value| !value.is_empty()),
+            true,
+        ));
+    }
+
+    let requested_title = title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Update {branch}"));
+
+    if include_unstaged {
+        let add = git_without_hooks(&["add", "-A"])
+            .current_dir(cwd)
+            .no_window()
+            .output()
+            .map_err(|_| "could not start git add".to_string())?;
+        if !add.status.success() {
+            return Err(git_mutation_failed("add"));
+        }
+    }
+
+    let staged = run_git(cwd, &["diff", "--cached", "--name-only"])
+        .map(|value| value.lines().any(|line| !line.trim().is_empty()))
+        .unwrap_or(false);
+    if staged {
+        let message = title
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Update via Ryu");
+        let commit = git_without_hooks(&["commit", "--no-verify", "-m", message])
+            .current_dir(cwd)
+            .no_window()
+            .output()
+            .map_err(|_| "could not start git commit".to_string())?;
+        if !commit.status.success() {
+            return Err(git_mutation_failed("commit"));
+        }
+    }
+
+    let has_upstream = run_git(
+        cwd,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .is_some();
+    let push_args: &[&str] = if has_upstream {
+        &["push", "--no-verify"]
+    } else {
+        &["push", "--no-verify", "-u", "origin", "HEAD"]
+    };
+    let push = git_without_hooks(push_args)
+        .current_dir(cwd)
+        .no_window()
+        .output()
+        .map_err(|_| "could not start git push".to_string())?;
+    if !push.status.success() {
+        return Err(git_mutation_failed("push"));
+    }
+
+    let body = body.unwrap_or("");
+    let mut args = vec![
+        "pr".to_string(),
+        "create".to_string(),
+        "--head".to_string(),
+        branch.clone(),
+        "--title".to_string(),
+        requested_title.clone(),
+        "--body".to_string(),
+        body.to_string(),
+    ];
+    if let Some(base) = base.map(str::trim).filter(|value| !value.is_empty()) {
+        args.extend(["--base".to_string(), base.to_string()]);
+    }
+    if draft {
+        args.push("--draft".to_string());
+    }
+
+    let gh = Command::new("gh")
+        .args(&args)
+        .current_dir(cwd)
+        .no_window()
+        .output()
+        .map_err(|e| format!("failed to run gh: {e}"))?;
+    if !gh.status.success() {
+        return Err(String::from_utf8_lossy(&gh.stderr).trim().to_string());
+    }
+    let pr_url = String::from_utf8_lossy(&gh.stdout).trim().to_string();
+    if pr_url.is_empty() {
+        return Err("gh did not return a pull request URL".to_string());
+    }
+
+    // A second lookup closes the check-then-create race across Core processes
+    // and enriches the result with the title/number/repository the app uses for
+    // its compact CI surface. The URL is still a valid success result if GitHub
+    // accepts creation but the follow-up read is temporarily unavailable.
+    if let Ok(Some(created)) = existing_open_pull_request(cwd, &branch) {
+        return Ok(pull_request_outcome(
+            &created,
+            &branch,
+            base.map(str::trim).filter(|value| !value.is_empty()),
+            false,
+        ));
+    }
+
+    Ok(PullRequestOutcome {
+        already_exists: false,
+        base: base
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        branch,
+        comments_count: None,
+        head_sha: None,
+        is_draft: draft,
+        number: None,
+        pr_url,
+        repository: None,
+        state: Some("OPEN".to_string()),
+        success: true,
+        title: Some(requested_title),
     })
 }
 
@@ -414,6 +903,117 @@ mod tests {
     }
 
     #[test]
+    fn remote_action_rejects_unknown_action() {
+        let error = run_git_remote_action("/tmp", "fetch").unwrap_err();
+        assert_eq!(error, "invalid git remote action");
+    }
+
+    #[test]
+    fn remote_action_requires_a_git_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = run_git_remote_action(dir.path().to_str().unwrap(), "pull").unwrap_err();
+        assert_eq!(error, "not a git repository");
+    }
+
+    #[test]
+    fn remote_action_rejects_local_executable_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        test_git(dir.path(), &["init"]);
+        test_git(dir.path(), &["config", "user.name", "Ryu Test"]);
+        test_git(
+            dir.path(),
+            &["config", "user.email", "ryu-test@example.com"],
+        );
+        std::fs::write(dir.path().join("tracked.txt"), "tracked\n").unwrap();
+        test_git(dir.path(), &["add", "tracked.txt"]);
+        test_git(dir.path(), &["commit", "-m", "initial"]);
+        test_git(dir.path(), &["config", "filter.external.smudge", "cat"]);
+        let error = run_git_remote_action(dir.path().to_str().unwrap(), "pull").unwrap_err();
+        assert_eq!(
+            error,
+            "git mutation blocked: repository-local clean/smudge/process filters are not allowed"
+        );
+    }
+
+    #[test]
+    fn remote_action_pulls_and_syncs_fast_forward_only() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = root.path().join("remote.git");
+        let remote_path = remote.to_str().unwrap();
+
+        test_git(root.path(), &["init", "--bare", remote_path]);
+        test_git(root.path(), &["clone", remote_path, "seed"]);
+        let seed = root.path().join("seed");
+        test_git(&seed, &["config", "user.name", "Ryu Test"]);
+        test_git(&seed, &["config", "user.email", "ryu-test@example.com"]);
+        std::fs::write(seed.join("tracked.txt"), "one\n").unwrap();
+        test_git(&seed, &["add", "tracked.txt"]);
+        test_git(&seed, &["commit", "-m", "initial"]);
+        test_git(&seed, &["push", "-u", "origin", "HEAD"]);
+
+        test_git(root.path(), &["clone", remote_path, "local"]);
+        test_git(root.path(), &["clone", remote_path, "peer"]);
+        let peer = root.path().join("peer");
+        test_git(&peer, &["config", "user.name", "Ryu Test"]);
+        test_git(&peer, &["config", "user.email", "ryu-test@example.com"]);
+        std::fs::write(peer.join("tracked.txt"), "one\ntwo\n").unwrap();
+        test_git(&peer, &["add", "tracked.txt"]);
+        test_git(&peer, &["commit", "-m", "remote update"]);
+        test_git(&peer, &["push"]);
+
+        let local = root.path().join("local");
+        let local_path = local.to_str().unwrap();
+        let pulled = run_git_remote_action(local_path, "pull").unwrap();
+        assert!(pulled.success);
+        assert!(pulled.pulled);
+        assert!(!pulled.pushed);
+        assert_eq!(
+            std::fs::read_to_string(local.join("tracked.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+
+        std::fs::write(local.join("local.txt"), "local\n").unwrap();
+        test_git(&local, &["add", "local.txt"]);
+        test_git(&local, &["commit", "-m", "local update"]);
+        let local_head = run_git(local_path, &["rev-parse", "HEAD"]).unwrap();
+        let synced = run_git_remote_action(local_path, "sync").unwrap();
+        assert!(synced.success);
+        assert!(synced.pulled);
+        assert!(synced.pushed);
+        let remote_head = String::from_utf8_lossy(
+            &test_git(
+                root.path(),
+                &["--git-dir", remote_path, "rev-parse", "HEAD"],
+            )
+            .stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(remote_head, local_head);
+    }
+
+    fn test_git(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgSign=false",
+            ])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    #[test]
     fn untracked_paths_picks_only_untracked_rows() {
         let porcelain = " M src/lib.rs\nA  src/new.rs\n?? notes.md\n?? src/scratch.rs\n";
         assert_eq!(
@@ -424,7 +1024,10 @@ mod tests {
 
     #[test]
     fn untracked_paths_unquotes_git_quoting() {
-        assert_eq!(untracked_paths("?? \"a\\tb.txt\"\n"), vec!["a\tb.txt"]);
+        assert_eq!(
+            untracked_paths("?? \"a\\tb-\\303\\251.txt\"\n"),
+            vec!["a\tb-é.txt"]
+        );
     }
 
     #[test]

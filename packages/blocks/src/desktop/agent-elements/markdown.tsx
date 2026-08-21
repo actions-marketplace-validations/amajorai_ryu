@@ -4,13 +4,24 @@ import { cn } from "@ryu/ui/lib/utils";
 import { createCodePlugin } from "@streamdown/code";
 import { type Components, Streamdown } from "streamdown";
 import "streamdown/styles.css";
-import { IconAt } from "@tabler/icons-react";
+import { ExpandIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Button } from "@ryu/ui/components/button.tsx";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogHeader,
+	DialogTitle,
+} from "@ryu/ui/components/dialog.tsx";
+import { type ReactNode, type TableHTMLAttributes, useState } from "react";
 import { useChatDisplayPrefs } from "./chat-display-prefs.tsx";
 import { FileTypeIcon } from "./file-type-icon.tsx";
 import { type Citation, CitationMarkLink } from "./inline-citation.tsx";
 import { LinkPreview, type LinkPreviewResolvers } from "./link-preview.tsx";
 import { decodeMentionHref, linkifyAtMentions } from "./linkify-mentions.ts";
 import { formatMentionContent } from "./mention-format.ts";
+import { MentionToken } from "./mention-token.tsx";
 import type { MentionItem } from "./types.ts";
 import { linkifyCitationMarkers } from "./utils/citations.ts";
 
@@ -77,6 +88,7 @@ export interface MarkdownProps {
 	mentionItems?: MentionItem[];
 	onOpenFile?: (path: string) => void;
 	onOpenLink?: (url: string) => void;
+	onOpenMention?: (item: MentionItem) => void;
 	previewResolvers?: LinkPreviewResolvers;
 	textContrast?: "normal" | "high";
 }
@@ -152,6 +164,56 @@ function decodeMentionLabel(value: string): string {
 	}
 }
 
+function ExpandableMarkdownTable({
+	children,
+	className,
+	...props
+}: TableHTMLAttributes<HTMLTableElement> & { children?: ReactNode }) {
+	const [open, setOpen] = useState(false);
+	const tableClassName = cn(
+		"an-md-table w-full min-w-max text-sm [&>thead>tr>th]:bg-muted [&>thead]:bg-muted",
+		className
+	);
+
+	const table = (extraClassName?: string) => (
+		<table className={cn(tableClassName, extraClassName)} {...props}>
+			{children}
+		</table>
+	);
+
+	return (
+		<>
+			<div className="group/an-md-table relative my-3 overflow-x-auto rounded-[var(--radius)]">
+				{table()}
+				<Button
+					aria-label="Expand table"
+					className="absolute top-1 right-1 z-10 size-7 bg-background/90 text-muted-foreground opacity-0 shadow-sm transition-opacity focus-visible:opacity-100 group-hover/an-md-table:opacity-100"
+					data-testid="markdown-table-expand"
+					onClick={() => setOpen(true)}
+					size="icon-xs"
+					title="Expand table"
+					variant="ghost"
+				>
+					<HugeiconsIcon icon={ExpandIcon} size={14} />
+				</Button>
+			</div>
+			<Dialog onOpenChange={setOpen} open={open}>
+				<DialogContent className="flex max-h-[min(90vh,60rem)] max-w-[min(95vw,90rem)] flex-col gap-3">
+					<DialogHeader>
+						<DialogTitle>Expanded markdown table</DialogTitle>
+						<DialogDescription>
+							Scroll horizontally or vertically to inspect the full table.
+						</DialogDescription>
+					</DialogHeader>
+					<div className="min-h-0 overflow-auto rounded-[var(--radius)] border border-border/60">
+						{table("min-w-[72rem]")}
+					</div>
+				</DialogContent>
+			</Dialog>
+		</>
+	);
+}
+
 export function Markdown({
 	mentionItems,
 	citations,
@@ -161,6 +223,7 @@ export function Markdown({
 	isAnimating = false,
 	onOpenFile,
 	onOpenLink,
+	onOpenMention,
 	previewResolvers,
 }: MarkdownProps) {
 	// Code blocks obey the same "Tool detail" level as tool calls: at anything
@@ -251,24 +314,60 @@ export function Markdown({
 			}
 			if (href.startsWith("#ryu-mention-")) {
 				const mentionHref = href.slice("#ryu-mention-".length);
+				// Resolve the complete kind+label token first. New mention kinds may
+				// contain hyphens (for example `app-item`), while older persisted
+				// messages use the original `kind-label` wire shape.
+				const resolvedMention = mentionItems?.find((candidate) =>
+					[candidate.label, candidate.id].some(
+						(value) =>
+							value !== undefined &&
+							mentionHref === `${candidate.kind}-${encodeURIComponent(value)}`
+					)
+				);
 				const separator = mentionHref.indexOf("-");
 				const kind =
-					separator === -1 ? mentionHref : mentionHref.slice(0, separator);
-				const encodedLabel =
-					separator === -1 ? "" : mentionHref.slice(separator + 1);
+					resolvedMention?.kind ??
+					(separator === -1 ? mentionHref : mentionHref.slice(0, separator));
+				const encodedLabel = resolvedMention
+					? ""
+					: separator === -1
+						? ""
+						: mentionHref.slice(separator + 1);
 				const label = encodedLabel ? decodeMentionLabel(encodedLabel) : "";
-				const item = mentionItems?.find(
-					(candidate) =>
-						candidate.kind === kind &&
-						(candidate.label === label || candidate.id === label)
+				const item =
+					resolvedMention ??
+					mentionItems?.find(
+						(candidate) =>
+							candidate.kind === kind &&
+							(candidate.label === label || candidate.id === label)
+					);
+				const mentionContent = (
+					<MentionToken item={item}>{children}</MentionToken>
 				);
+				if (item && onOpenMention) {
+					return (
+						<button
+							aria-label={`Open ${item.kind} ${item.label}`}
+							className="an-md-mention inline-flex max-w-full cursor-pointer rounded p-0 font-semibold outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+							data-mention-id={item.id}
+							data-mention-kind={item.kind}
+							onClick={(event) => {
+								event.preventDefault();
+								onOpenMention(item);
+							}}
+							title={`Open ${item.label}`}
+							type="button"
+						>
+							{mentionContent}
+						</button>
+					);
+				}
 				return (
 					<strong
 						className="inline-flex items-center gap-1 font-semibold text-primary"
 						{...props}
 					>
-						{item?.icon ?? <IconAt className="size-3.5" />}
-						<span>{children}</span>
+						{mentionContent}
 					</strong>
 				);
 			}
@@ -362,16 +461,7 @@ export function Markdown({
 		hr: ({ ...props }) => (
 			<hr className="an-md-hr my-4 border-border" {...props} />
 		),
-		table: ({ children, ...props }) => (
-			<div className="scroll-fade-x my-3 overflow-x-auto rounded-[var(--radius)]">
-				<table
-					className="an-md-table w-full text-sm [&>thead>tr>th]:bg-muted [&>thead]:bg-muted"
-					{...props}
-				>
-					{children}
-				</table>
-			</div>
-		),
+		table: (props) => <ExpandableMarkdownTable {...props} />,
 		th: ({ children, ...props }) => (
 			<th className="bg-muted px-3 py-2 text-left font-medium" {...props}>
 				{children}

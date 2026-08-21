@@ -4,7 +4,8 @@
  *
  * Usage:
  *   bunx ryu pack <dir>
- *   bunx ryu publish <dir>
+ *   bunx ryu github-publish <repository-or-package-url>
+ *   bunx ryu publish <dir>  (legacy migration escape hatch)
  *   bunx ryu agent-plugin <dir>
  *
  * Commands:
@@ -12,9 +13,10 @@
  *                   Plugin bundle at <dir>/dist/plugin.bundle.json, plus the
  *                   Agent Plugins interop pair in <dir> itself.
  *                   Exits 0 on success; exits 1 with the failing field on error.
- *   publish <dir>   Validate the manifest.json and POST it to the Ryu Marketplace
- *                   publish endpoint with the author's auth token. The item is
- *                   stored as `pending` until a moderator approves it.
+ *   github-publish <url>
+ *                   Submit a seller-owned GitHub repository/package URL to the
+ *                   GitHub-backed marketplace bridge.
+ *   publish <dir>   Deprecated server-artifact publishing; disabled by default.
  *   agent-plugin <dir>
  *                   Emit only the Agent Plugins v1 interop pair (plugin.json and,
  *                   when servers exist, mcp.json) derived from the manifest.json.
@@ -56,7 +58,9 @@ function printUsage(): void {
 			"",
 			"Usage:",
 			"  bunx ryu pack <dir>      Validate and bundle a manifest.json Plugin",
-			"  bunx ryu publish <dir>   Validate and publish a manifest.json Plugin to the Ryu Marketplace",
+			"  bunx ryu github-publish <url>",
+			"                           Submit a GitHub repository/package URL to the Marketplace",
+			"  bunx ryu publish <dir>   Deprecated server-artifact publishing (migration only)",
 			"  bunx ryu dev <entry>     Run a Runnable locally with an interactive chat loop",
 			"  bunx ryu agent-plugin <dir>",
 			"                           Emit the Agent Plugins v1 interop pair (plugin.json + mcp.json)",
@@ -91,17 +95,21 @@ const MANIFEST_FILE_NAMES = [
 // `manifest.json` — and then fail validation for missing `id`. The `$schema`
 // discriminator separates them (see `isAgentPluginManifest`).
 function resolveNativeManifestPath(dir: string): string | undefined {
-	return MANIFEST_FILE_NAMES.map((name) => join(dir, name)).find((candidate) => {
-		if (!existsSync(candidate)) {
-			return false;
+	return MANIFEST_FILE_NAMES.map((name) => join(dir, name)).find(
+		(candidate) => {
+			if (!existsSync(candidate)) {
+				return false;
+			}
+			try {
+				return !isAgentPluginManifest(
+					JSON.parse(readFileSync(candidate, "utf8"))
+				);
+			} catch {
+				// Unparseable: let the caller surface the JSON error against this path.
+				return true;
+			}
 		}
-		try {
-			return !isAgentPluginManifest(JSON.parse(readFileSync(candidate, "utf8")));
-		} catch {
-			// Unparseable: let the caller surface the JSON error against this path.
-			return true;
-		}
-	});
+	);
 }
 
 // Read + parse + validate the manifest in `dir`. Exits with the failing
@@ -572,8 +580,16 @@ async function commandPublish(rawDir: string): Promise<void> {
 		...(manifest.description ? { description: manifest.description } : {}),
 		...(manifest.tagline ? { tagline: manifest.tagline } : {}),
 		...(developer ? { developer } : {}),
+		...(manifest.author ? { author: manifest.author } : {}),
+		...(manifest.repository ? { repository: manifest.repository } : {}),
+		...(manifest.external ? { external: true } : {}),
 		...(manifest.category ? { category: manifest.category } : {}),
+		...(manifest.license ? { license: manifest.license } : {}),
+		...(manifest.keywords?.length ? { keywords: manifest.keywords } : {}),
 		...(manifest.iconUrl ? { iconUrl: manifest.iconUrl } : {}),
+		...(manifest.icon ? { icon: manifest.icon } : {}),
+		...(manifest.iconDither ? { iconDither: manifest.iconDither } : {}),
+		...(manifest.banner ? { banner: manifest.banner } : {}),
 		...(manifest.screenshots?.length
 			? { screenshots: manifest.screenshots }
 			: {}),
@@ -648,6 +664,58 @@ async function commandPublish(rawDir: string): Promise<void> {
 	);
 }
 
+async function commandGithubPublish(repositoryUrl: string): Promise<void> {
+	const input = repositoryUrl.trim();
+	if (!input) {
+		exitError(
+			"github-publish requires a GitHub repository or package URL, for example https://github.com/acme/my-app"
+		);
+	}
+	const token = authToken();
+	const url = `${publishBaseUrl()}/api/marketplace/github/publish`;
+	const proof = process.env.RYU_GITHUB_INSTALLATION_PROOF?.trim();
+	const body = {
+		url: input,
+		...(proof ? { installationProof: proof } : {}),
+	};
+	let response: Response;
+	try {
+		response = await fetch(url, {
+			method: "POST",
+			headers: {
+				authorization: `Bearer ${token}`,
+				"content-type": "application/json",
+			},
+			body: JSON.stringify(body),
+		});
+	} catch (error) {
+		exitError(`could not reach ${url}: ${String(error)}`);
+	}
+	const text = await response.text();
+	if (!response.ok) {
+		try {
+			const error = JSON.parse(text) as {
+				code?: string;
+				installationUrl?: string;
+				error?: string;
+			};
+			if (error.installationUrl) {
+				exitError(
+					`${error.error ?? "GitHub App installation required"}. Open ${error.installationUrl}, then set RYU_GITHUB_INSTALLATION_PROOF to the callback proof and retry.`
+				);
+			}
+			exitError(
+				`github-publish failed (${response.status}): ${error.error ?? text}`
+			);
+		} catch {
+			exitError(`github-publish failed (${response.status}): ${text}`);
+		}
+	}
+	process.stdout.write(
+		`GitHub-backed listing submitted for moderation:\n${text}\n`
+	);
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 const [, , command, ...args] = process.argv;
@@ -670,7 +738,22 @@ if (command === "pack") {
 	if (!dir) {
 		exitError("publish requires a directory argument: bunx ryu publish <dir>");
 	}
+	if (process.env.RYU_ENABLE_LEGACY_MARKETPLACE_WRITES !== "true") {
+		exitError(
+			"ryu publish is deprecated because marketplace package contents now live in GitHub Releases; use bunx ryu github-publish <repository-or-package-url>"
+		);
+	}
 	commandPublish(dir).catch((err: unknown) => {
+		exitError(String(err));
+	});
+} else if (command === "github-publish") {
+	const repositoryUrl = args[0];
+	if (!repositoryUrl) {
+		exitError(
+			"github-publish requires a GitHub repository or package URL, for example https://github.com/acme/my-app"
+		);
+	}
+	commandGithubPublish(repositoryUrl).catch((err: unknown) => {
 		exitError(String(err));
 	});
 } else if (command === "agent-plugin") {

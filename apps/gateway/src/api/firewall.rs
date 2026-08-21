@@ -154,6 +154,8 @@ fn audit_firewall_check_block(state: &SharedState, headers: &HeaderMap, kind: &s
         user_id: None,
         agent_id: None,
         feature: None,
+        managed_inference: false,
+        provider_cost_micro_usd: None,
         event_type: crate::audit::EventType::ModelCall,
         backend: Some("firewall".to_string()),
         command: None,

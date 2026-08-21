@@ -179,6 +179,29 @@ export function supportsUsage(agentId: string | null | undefined): boolean {
 }
 
 /**
+ * Whether a configured Ryu provider is eligible for the same subscription
+ * usage badge as an installed ACP agent. Managed Ryu pool rows have their own
+ * grant badge, and unconfigured rows should stay quiet until a login exists.
+ */
+export interface SubscriptionUsageProviderRef {
+	authKind: string;
+	configured: boolean;
+	id: string;
+	managed: boolean;
+}
+
+export function supportsSubscriptionProviderUsage(
+	provider: SubscriptionUsageProviderRef
+): boolean {
+	return (
+		provider.authKind === "subscription" &&
+		provider.configured &&
+		!provider.managed &&
+		supportsUsage(provider.id)
+	);
+}
+
+/**
  * Fetch the usage snapshot for one agent. `agentId` may be an `acp:`-prefixed id
  * (it's percent-encoded for the path).
  */

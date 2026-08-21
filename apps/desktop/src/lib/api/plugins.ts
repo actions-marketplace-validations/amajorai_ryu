@@ -21,6 +21,7 @@ import type {
 	CardDither,
 	CardThemePreview,
 	CatalogBanner,
+	CatalogLayer,
 } from "@ryu/marketplace/catalog/types";
 import {
 	type ApiTarget,
@@ -37,6 +38,9 @@ interface RunnableEntryWire {
 	id: string;
 	kind: string;
 	name: string;
+	/** Publisher identity mark from the control plane. */
+	publisher_trust?: "gold" | "blue" | "dotted" | null;
+	publisher_trust_source?: "ryu_staff" | "stripe_connect" | "none" | null;
 }
 
 /** One plugin-to-plugin dependency edge. Mirrors Core's `AppDependency`
@@ -54,6 +58,8 @@ interface RequiresWire {
 }
 
 interface AppManifestWire {
+	/** Primary brand accent from the manifest (`accentColor`). */
+	accentColor?: string | null;
 	/** Grants approved on the last successful enable, injected by `list_apps` from
 	 *  the lifecycle RECORD (absent on a node predating that, hence optional). */
 	approved_grants?: string[];
@@ -71,7 +77,9 @@ interface AppManifestWire {
 	} | null;
 	/** Long plaintext/markdown description. */
 	description?: string | null;
+	developer?: string | null;
 	enabled: boolean;
+	external?: boolean;
 	/** Icon-primitive id / `svgl:<slug>` (contract key `icon`). */
 	icon?: string | null;
 	/** CSS background for the icon square (contract key `iconBackground`). */
@@ -83,6 +91,7 @@ interface AppManifestWire {
 	id: string;
 	installed: boolean;
 	installed_version: string | null;
+	layers?: CatalogLayer[];
 	local_only: boolean;
 	/** Required for Core — Disable/Uninstall are refused (403, no force). */
 	mandatory?: boolean;
@@ -170,10 +179,13 @@ export interface AppRequires {
  *  Same names, same meanings, so `AppIcon`/`StoreCatalogCard` take them unchanged
  *  and one app looks identical on every surface. */
 export interface AppPresentation {
+	/** Primary brand accent colour used by compact app-owned tokens. */
+	accentColor?: string | null;
 	/** Free-text store category ("Productivity", …). */
 	category: string | null;
 	/** Long plaintext/markdown description — the detail body, not the card line. */
 	description: string | null;
+	external: boolean;
 	/** Icon-primitive id, or an `svgl:<slug>` brand mark. */
 	icon: string | null;
 	/** Flat CSS background for the icon square. */
@@ -182,6 +194,7 @@ export interface AppPresentation {
 	iconDither: CardDither | null;
 	/** Raster logo URL. */
 	iconUrl: string | null;
+	layers: CatalogLayer[];
 	/** "alpha" / "beta" / … — null or "stable" renders no badge. */
 	stability: string | null;
 	/** Short one-line pitch — the CARD line. Prefer this over `description`, which
@@ -252,6 +265,66 @@ export interface AppRecord {
 	id: string;
 	updatedAt: string | null;
 	version: string;
+}
+
+export const APP_LIFECYCLE_PERMISSIONS = [
+	"app.install",
+	"app.update",
+	"app.enable",
+	"app.disable",
+	"app.uninstall",
+] as const;
+
+export type AppLifecyclePermission = (typeof APP_LIFECYCLE_PERMISSIONS)[number];
+
+export interface AppLifecycleCapabilities {
+	node: {
+		id: string;
+		orgId: string | null;
+		ownerUserId: string | null;
+		scope: "org" | "team" | "personal";
+		teamId: string | null;
+	} | null;
+	permissions: Record<AppLifecyclePermission, boolean>;
+	reasons?: Partial<Record<AppLifecyclePermission, string>>;
+}
+
+export interface PluginDoctorFinding {
+	canAutoFix: boolean;
+	category: string;
+	checkId: string;
+	detail: string;
+	evidence?: unknown;
+	pluginId: string;
+	recommendedAction: string;
+	severity: "error" | "warning" | "info" | string;
+	source: string;
+	summary: string;
+}
+
+export interface PluginDoctorInventoryItem {
+	findingCount: number;
+	id: string;
+	name: string;
+	status: "healthy" | "warning" | "error" | string;
+}
+
+export interface PluginDoctorReport {
+	counts: {
+		errors: number;
+		info: number;
+		plugins: number;
+		warnings: number;
+	};
+	findings: PluginDoctorFinding[];
+	generatedAt: string;
+	plugins: PluginDoctorInventoryItem[];
+	profile: "lint" | string;
+	readOnly: boolean;
+	rulesetVersion: string;
+	schemaVersion: string;
+	scope: string;
+	score: number;
 }
 
 /** An {@link AppRecord} plus the "the change did not reach the gateway" truth Core
@@ -400,6 +473,8 @@ function toAppInfo(w: AppManifestWire): AppInfo {
 			: null,
 		description: w.description ?? null,
 		enabled: w.enabled,
+		external: w.external ?? false,
+		accentColor: w.accentColor ?? null,
 		icon: w.icon ?? null,
 		iconBackground: w.iconBackground ?? null,
 		iconDither: w.iconDither ?? null,
@@ -443,6 +518,7 @@ function toAppInfo(w: AppManifestWire): AppInfo {
 		stability: w.stability ?? null,
 		suppressedBySafeMode: w.suppressed_by_safe_mode ?? false,
 		tagline: w.tagline ?? null,
+		layers: w.layers ?? [],
 		// Absent/empty targets = every surface. Never invent a default surface here:
 		// treating "" as "none" would hide every plugin that predates the field.
 		targets: w.targets ?? [],
@@ -534,6 +610,34 @@ export async function fetchApps(target: ApiTarget): Promise<AppInfo[]> {
 	return (json.apps ?? []).map(toAppInfo);
 }
 
+/** `GET /api/plugins/lifecycle-capabilities` — advisory node-scoped lifecycle
+ *  projection for desktop controls. Mutating calls still re-check the server
+ *  permission immediately before touching the installed package. */
+export async function fetchAppLifecycleCapabilities(
+	target: ApiTarget
+): Promise<AppLifecycleCapabilities> {
+	return request<AppLifecycleCapabilities>(
+		target,
+		"/api/plugins/lifecycle-capabilities"
+	);
+}
+
+/** Run the read-only Core loader/lifecycle doctor for installed apps/plugins. */
+export async function fetchPluginDoctor(
+	target: ApiTarget,
+	id?: string
+): Promise<PluginDoctorReport> {
+	const suffix = id ? `?id=${encodeURIComponent(id)}` : "";
+	const resp = await fetch(apiUrl(target, `/api/plugins/doctor${suffix}`), {
+		method: "GET",
+		headers: { ...makeHeaders(target.token), ...identityHeaders() },
+	});
+	if (!resp.ok) {
+		throw new Error(`/api/plugins/doctor failed: ${resp.status}`);
+	}
+	return (await resp.json()) as PluginDoctorReport;
+}
+
 /**
  * Declarative UI contributions of every enabled plugin (composer controls,
  * settings tabs, slash commands) + its turn hooks. Each entry is tagged with its
@@ -556,6 +660,21 @@ export interface PluginWidgetApp {
 	widget_count: number;
 }
 
+/** Metadata-only chat widget template. Core forwards identifiers and copy; the
+ * desktop host owns the renderer and never executes manifest-provided UI. */
+export interface PluginChatWidgetTemplate {
+	availability?: string;
+	backing: { tool_id?: string; view_id?: string };
+	description?: string;
+	display_mode: string;
+	examples: string[];
+	id: string;
+	plugin?: string;
+	safe_action_ids: string[];
+	title: string;
+	triggers: string[];
+}
+
 /** One app event an enabled app declares it emits, as served (and tagged with its
  *  owning `plugin` id) by `GET /api/plugins/contributions`. */
 export interface PluginHookEvent {
@@ -569,6 +688,13 @@ export interface PluginHookEvent {
 	title: string;
 }
 
+/** Opaque host-rendered chat feature declaration from an enabled plugin. Core
+ * stamps `plugin`; the remaining vocabulary belongs to the desktop surface. */
+export interface PluginChatFeature {
+	plugin?: string;
+	[key: string]: unknown;
+}
+
 export interface PluginContributions {
 	/** Agent Edit panels supplied by enabled plugins. Panels are interpreted by
 	 * the desktop shell only by their declared type; the owning plugin id is
@@ -576,6 +702,9 @@ export interface PluginContributions {
 	agent_edit_panels: PluginAgentEditPanel[];
 	/** Messaging-channel adapters an enabled plugin makes available. */
 	channels: PluginChannel[];
+	/** Host-rendered chat feature declarations, tagged with their owning plugin. */
+	chat_features: PluginChatFeature[];
+	chat_widget_templates?: PluginChatWidgetTemplate[];
 	/** Companion surfaces (overlay/sidebar panels) an enabled plugin declares. */
 	companions: PluginCompanion[];
 	composer_controls: PluginComposerControl[];
@@ -1042,6 +1171,8 @@ export async function getPluginContributions(
 	return {
 		agent_edit_panels: json.agent_edit_panels ?? [],
 		composer_controls: json.composer_controls ?? [],
+		chat_features: json.chat_features ?? [],
+		chat_widget_templates: json.chat_widget_templates ?? [],
 		settings_tabs: json.settings_tabs ?? [],
 		message_actions: json.message_actions ?? [],
 		output_styles: json.output_styles ?? [],
@@ -1541,11 +1672,13 @@ export type { CatalogBanner };
 export interface CatalogEntry {
 	/** Hex accent color used for chrome tinting / banner fallback. */
 	accent_color?: string | null;
+	author?: string | null;
 	/** Hero-banner descriptor (colors + gradient/dither style). */
 	banner?: CatalogBanner | null;
 	built_in: boolean;
 	/** Ids of separate plugins this app ships as a logical bundle. */
 	bundles?: string[] | null;
+	capabilities?: string[];
 	/** Store category label (e.g. "Productivity"). */
 	category?: string | null;
 	description: string;
@@ -1553,8 +1686,15 @@ export interface CatalogEntry {
 	descriptor_only?: boolean;
 	/** Publisher / developer name shown on the card + detail. */
 	developer?: string | null;
+	/** Relative Ryu proxy route for the signed release asset. */
+	download_url?: string | null;
 	/** Public release-asset downloads, summed across release payloads only. */
 	downloads?: number | null;
+	example_prompts?: string[];
+	external?: boolean;
+	/** Redacted GitHub repository/release provenance. */
+	github_source?: Record<string, unknown> | null;
+	homepage?: string | null;
 	/** Icon-primitive glyph id painted inside the tile. Declared here as well as on
 	 *  `@ryu/marketplace`'s `CatalogEntry` because it is on the same wire and the
 	 *  Store's Home rows read it — without it those rows fell back to the
@@ -1571,7 +1711,9 @@ export interface CatalogEntry {
 	integration_kind?: string | null;
 	/** Link to the integration docs, spec, or MCP endpoint. */
 	integration_url?: string | null;
+	keywords?: string[];
 	kinds: string[];
+	layers?: CatalogLayer[];
 	/** SPDX licence id, when the source reports one. */
 	license?: string | null;
 	name: string;
@@ -1581,6 +1723,10 @@ export interface CatalogEntry {
 	 *  `plugin_marketplace_item_to_entry` emits, and a camelCase spelling would
 	 *  read as undefined, i.e. an unreviewed listing rendered with no notice. */
 	origin?: "community" | "first_party" | null;
+	/** SHA-256 of the immutable package release asset. */
+	package_checksum?: string | null;
+	/** Canonical portable package kind for GitHub-backed marketplace entries. */
+	package_kind?: string | null;
 	permission_grants: string[];
 	/** Commerce disclosure for a PAID listing; absent/null = free. Present on cards
 	 *  in the unified first-party view, where free (git catalog) and paid (hosted)
@@ -1591,6 +1737,7 @@ export interface CatalogEntry {
 		currency?: string;
 		kind?: string;
 	} | null;
+	privacy_policy_url?: string | null;
 	/** Which discovery source produced this listing (e.g. `"github-topic"`). */
 	provenance?: string | null;
 	/** Denormalized rating aggregate (0–5 mean + count), so a card and the detail
@@ -1599,6 +1746,7 @@ export interface CatalogEntry {
 	rating_count?: number | null;
 	/** Repository a community listing was discovered from. */
 	repo_url?: string | null;
+	repository_url?: string | null;
 	/** Plugin-to-plugin dependencies that must be enabled first (the manifest's
 	 *  `requires`). Emitted by Core's catalog source when non-empty; absent = none.
 	 *  Kept in sync with `@ryu/marketplace/catalog/types`' `CatalogEntry`, which is
@@ -1611,12 +1759,14 @@ export interface CatalogEntry {
 	reviewed?: boolean;
 	/** The bundled sub-items this item ships (the manifest runnables). */
 	runnables?: { id: string; kind: string; name?: string }[];
+	screenshots?: string[];
 	source: string;
 	/** Upstream popularity signal (GitHub stars) for unmoderated listings. */
 	stars?: number | null;
 	/** Short one-line pitch shown under the name. */
 	tagline?: string | null;
 	tags: string[];
+	terms_of_service_url?: string | null;
 	/** A theme listing's own palette (manifest `contributes.themes[0].preview`).
 	 *  The Store paints this as its icon square instead of a dither avatar or a
 	 *  generic glyph. Absent on everything that is not a theme. */
@@ -1624,6 +1774,7 @@ export interface CatalogEntry {
 	/** Explicit app-vs-plugin discriminator (preferred over the kinds derivation). */
 	type?: "app" | "plugin";
 	version: string;
+	website?: string | null;
 }
 
 /** `GET /api/plugins/catalog` — browse installable apps from the remote registry. */
@@ -1743,9 +1894,12 @@ export interface PluginSearchParams {
 }
 
 export interface PluginCatalogPage {
+	appTotal?: number | null;
 	entries: CatalogEntry[];
 	nextCursor: string | null;
 	note: string | null;
+	pluginTotal?: number | null;
+	total?: number | null;
 }
 
 /** Browse the active plugin catalog source (paginated for federated sources). */
@@ -1770,14 +1924,21 @@ export async function searchPluginCatalog(
 		q.set("source", params.source);
 	}
 	const json = await request<{
+		app_total?: number | null;
 		entries?: CatalogEntry[];
 		next_cursor?: string | null;
 		note?: string | null;
+		plugin_total?: number | null;
+		total?: number | null;
+		total_count?: number | null;
 	}>(target, `/api/plugins/catalog/browse?${q.toString()}`);
 	return {
+		appTotal: json.app_total ?? null,
 		entries: json.entries ?? [],
 		nextCursor: json.next_cursor ?? null,
 		note: typeof json.note === "string" ? json.note : null,
+		pluginTotal: json.plugin_total ?? null,
+		total: json.total ?? json.total_count ?? null,
 	};
 }
 
@@ -1786,8 +1947,11 @@ export type { VersionSnapshot } from "@ryu/marketplace/catalog/types";
 
 export interface PluginCatalogDetail {
 	accentColor?: string | null;
+	author?: string | null;
 	banner?: CatalogBanner | null;
+	capabilities?: string[];
 	categories?: string[];
+	category?: string | null;
 	description?: string | null;
 	descriptor?: {
 		integration_kind?: string;
@@ -1796,16 +1960,31 @@ export interface PluginCatalogDetail {
 		domain?: string | null;
 	};
 	domain?: string | null;
+	downloads?: number | null;
+	examplePrompts?: string[];
+	external?: boolean;
 	feeds?: string[];
 	iconBackground?: string | null;
 	iconUrl?: string | null;
 	id: string;
 	integration_kind?: string | null;
+	keywords?: string[];
 	kind?: string | null;
+	layers?: CatalogLayer[];
+	license?: string | null;
 	name?: string;
+	privacyPolicyUrl?: string | null;
+	repositoryUrl?: string | null;
+	screenshots?: string[];
 	source?: string;
 	sourceUrl?: string | null;
+	tagline?: string | null;
+	tags?: string[];
+	termsOfServiceUrl?: string | null;
+	updatedAt?: string | null;
 	url?: string | null;
+	version?: string | null;
+	website?: string | null;
 }
 
 /** Fetch detail for the selected entry from the active plugin catalog source. */
@@ -1825,10 +2004,20 @@ export async function fetchPluginCatalogDetail(
 	if (source) {
 		q.set("source", source);
 	}
-	return request<PluginCatalogDetail>(
-		target,
-		`/api/plugins/catalog/detail?${q.toString()}`
-	);
+	const detail = await request<
+		Omit<PluginCatalogDetail, "author"> & { author?: unknown }
+	>(target, `/api/plugins/catalog/detail?${q.toString()}`);
+	const rawAuthor = detail.author;
+	const author =
+		typeof rawAuthor === "string"
+			? rawAuthor
+			: rawAuthor &&
+					typeof rawAuthor === "object" &&
+					!Array.isArray(rawAuthor) &&
+					typeof (rawAuthor as { name?: unknown }).name === "string"
+				? (rawAuthor as { name: string }).name
+				: null;
+	return { ...detail, author };
 }
 
 /** `GET /api/plugins/catalog/version-detail` — the listing as it stood at one

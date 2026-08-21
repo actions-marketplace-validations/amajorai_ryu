@@ -500,7 +500,7 @@ mod tests {
         // Present → threaded to Core so the tool resolves `Owned` on a bound node.
         let with_id: ExecToolBody = serde_json::from_value(json!({
             "kind": "tool",
-            "tool_id": "threads__list",
+            "tool_id": "threads.list",
             "agent_id": "a",
             "host_conversation_id": "conv-123",
         }))

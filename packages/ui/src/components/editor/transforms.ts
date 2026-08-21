@@ -143,8 +143,9 @@ export const insertBlock = (
 
 			return;
 		}
-		if (type in insertBlockMap) {
-			insertBlockMap[type](editor, type);
+		const insertBlock = insertBlockMap[type];
+		if (insertBlock) {
+			insertBlock(editor, type);
 		} else {
 			editor.tf.insertNodes(editor.api.create.block({ type }), {
 				at: PathApi.next(path),
@@ -220,8 +221,9 @@ export const setBlockType = (
 			if (node[KEYS.listType]) {
 				editor.tf.unsetNodes([KEYS.listType, "indent"], { at: path });
 			}
-			if (type in setBlockMap) {
-				return setBlockMap[type](editor, type, entry);
+			const setBlock = setBlockMap[type];
+			if (setBlock) {
+				return setBlock(editor, type, entry);
 			}
 			if (node.type !== type) {
 				editor.tf.setNodes({ type }, { at: path });

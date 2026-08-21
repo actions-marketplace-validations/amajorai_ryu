@@ -9,7 +9,7 @@ import {
 	Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Button } from "@ryu/ui/components/button";
+import { Button, ButtonLabel } from "@ryu/ui/components/button";
 import {
 	Dialog,
 	DialogClose,
@@ -27,7 +27,6 @@ import {
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu";
 import { Input } from "@ryu/ui/components/input";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { cn } from "@ryu/ui/lib/utils";
 import { useCallback, useState } from "react";
 import {
@@ -38,13 +37,22 @@ import {
 import { ProjectGlyph } from "@/src/components/layout/ProjectIconDialog.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { createProjectFolder } from "@/src/lib/api/workspace.ts";
+import { sameFolder } from "@/src/lib/folder-path.ts";
+import {
+	findWorkspaceProject,
+	workspaceProjectName,
+} from "@/src/lib/workspace-projects.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 import { NodeFolderBrowser } from "./NodeFolderBrowser.tsx";
 
 const PATH_SEP = /[\\/]/;
 
-export function ProjectPicker() {
-	const { folder, projectNames, setFolder } = useWorkspaceStore();
+export function ProjectPicker({
+	onFolderSelected,
+}: {
+	onFolderSelected?: (folder: string) => void;
+} = {}) {
+	const { folder, projectNames, projects, setFolder } = useWorkspaceStore();
 	const [menuOpen, setMenuOpen] = useState(false);
 	// The create-folder and browse dialogs live OUTSIDE the menu so they survive
 	// the menu closing on select (a dialog nested in the menu would unmount with it).
@@ -56,16 +64,23 @@ export function ProjectPicker() {
 			// Browsed paths come from Core's own listing, so activation should
 			// succeed; on a transient failure keep the current folder rather than
 			// clearing it out from under the user.
-			setFolder(selected).catch(() => {
-				// no-op
-			});
+			void setFolder(selected)
+				.then(() => onFolderSelected?.(selected))
+				.catch(() => {
+					// no-op
+				});
 		},
-		[setFolder]
+		[onFolderSelected, setFolder]
 	);
 
-	const folderName = folder
-		? projectNames[folder]?.trim() || folder.split(PATH_SEP).at(-1) || null
-		: null;
+	const activeProject = folder
+		? findWorkspaceProject(projects, folder)
+		: undefined;
+	const folderName = activeProject
+		? workspaceProjectName(activeProject, projectNames)
+		: folder
+			? projectNames[folder]?.trim() || folder.split(PATH_SEP).at(-1) || null
+			: null;
 
 	return (
 		<>
@@ -83,7 +98,9 @@ export function ProjectPicker() {
 					}
 				>
 					<HugeiconsIcon className="size-3.5 shrink-0" icon={Folder03Icon} />
-					<span className="max-w-32 truncate">{folderName ?? "Project"}</span>
+					<ButtonLabel className="max-w-32">
+						{folderName ?? "Project"}
+					</ButtonLabel>
 				</DropdownMenuTrigger>
 
 				<DropdownMenuContent
@@ -98,6 +115,7 @@ export function ProjectPicker() {
 							setBrowseOpen(true);
 						}}
 						onClose={() => setMenuOpen(false)}
+						onFolderSelected={onFolderSelected}
 						onStartFromScratch={() => {
 							setMenuOpen(false);
 							setCreateOpen(true);
@@ -105,7 +123,11 @@ export function ProjectPicker() {
 					/>
 				</DropdownMenuContent>
 			</DropdownMenu>
-			<CreateFolderDialog onOpenChange={setCreateOpen} open={createOpen} />
+			<CreateFolderDialog
+				onFolderSelected={onFolderSelected}
+				onOpenChange={setCreateOpen}
+				open={createOpen}
+			/>
 			<NodeFolderBrowser
 				onOpenChange={setBrowseOpen}
 				onSelect={handleSelectBrowsed}
@@ -122,8 +144,10 @@ export function ProjectPickerContent({
 	onClose,
 	onStartFromScratch,
 	onBrowse,
+	onFolderSelected,
 }: {
 	onClose: () => void;
+	onFolderSelected?: (folder: string) => void;
 	/** Opens the create-folder dialog (owned by the persistent parent, so it
 	 *  survives this menu closing). Omit to hide the "New project" submenu (e.g.
 	 *  the empty-state popover offers recents only). */
@@ -136,9 +160,9 @@ export function ProjectPickerContent({
 }) {
 	const {
 		folder,
-		recentFolders,
 		projectIcons,
 		projectNames,
+		projects,
 		setFolder,
 		removeProject,
 		clearFolder,
@@ -156,41 +180,42 @@ export function ProjectPickerContent({
 			onClose();
 			// Selecting must never REMOVE the folder: removal is the X button's job
 			// only. If activation fails (e.g. the folder is gone), leave the row be.
-			await setFolder(path).catch(() => {
+			try {
+				await setFolder(path);
+				onFolderSelected?.(path);
+			} catch {
 				// no-op: keep the recent; the user removes it explicitly via the X.
-			});
+			}
 		},
-		[setFolder, onClose]
+		[onFolderSelected, setFolder, onClose]
 	);
 
 	// Removing here uses removeProject (not just removeRecentFolder) so the folder
 	// also disappears from the sidebar's Projects section and stays gone even if it
 	// still has conversations — both surfaces read the same store.
-	const handleRemoveRecent = useCallback(
-		(e: React.MouseEvent, path: string) => {
+	const handleRemoveProject = useCallback(
+		(e: React.MouseEvent, projectId: string) => {
 			e.stopPropagation();
-			removeProject(path);
+			removeProject(projectId);
 		},
 		[removeProject]
 	);
 
-	const hasRecents = recentFolders.length > 0;
+	const hasProjects = projects.length > 0;
 	const rq = recentQuery.trim().toLowerCase();
-	const filteredRecents = rq
-		? recentFolders.filter((p) => {
-				const leaf = p.split(PATH_SEP).at(-1) ?? p;
-				const label = projectNames[p]?.trim() || leaf;
+	const filteredProjects = rq
+		? projects.filter((project) => {
+				const name = workspaceProjectName(project, projectNames).toLowerCase();
 				return (
-					p.toLowerCase().includes(rq) ||
-					label.toLowerCase().includes(rq) ||
-					leaf.toLowerCase().includes(rq)
+					name.includes(rq) ||
+					project.folders.some((path) => path.toLowerCase().includes(rq))
 				);
 			})
-		: recentFolders;
+		: projects;
 
 	return (
 		<>
-			{hasRecents && (
+			{hasProjects && (
 				<>
 					<div className="sticky top-0 z-10 mb-1">
 						<div className="relative">
@@ -208,30 +233,35 @@ export function ProjectPickerContent({
 							/>
 						</div>
 					</div>
-					{filteredRecents.length === 0 ? (
+					{filteredProjects.length === 0 ? (
 						<p className="px-2 py-1.5 text-muted-foreground text-sm">
-							No matching folders.
+							No matching projects.
 						</p>
 					) : (
-						filteredRecents.map((path) => {
-							const name =
-								projectNames[path]?.trim() ||
-								path.split(PATH_SEP).at(-1) ||
-								path;
-							const isActive = path === folder;
+						filteredProjects.map((project) => {
+							const name = workspaceProjectName(project, projectNames);
+							const primary = project.folders[0];
+							const isActive = project.folders.some(
+								(path) => folder !== null && sameFolder(path, folder)
+							);
 							return (
 								<div
 									className={cn(
 										"group/recent relative flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-foreground/10",
 										isActive && "bg-foreground/10"
 									)}
-									key={path}
+									key={project.id}
 								>
 									{/* Full-row overlay: clicking the row opens/sets this folder. */}
 									<button
 										aria-label={`Open ${name}`}
 										className="absolute inset-0 cursor-pointer rounded-lg"
-										onClick={() => handleSelectRecent(path)}
+										disabled={!primary}
+										onClick={() => {
+											if (primary) {
+												handleSelectRecent(primary).catch(() => undefined);
+											}
+										}}
 										type="button"
 									/>
 
@@ -240,14 +270,25 @@ export function ProjectPickerContent({
 											fallback={
 												<HugeiconsIcon className="size-4" icon={Folder03Icon} />
 											}
-											icon={projectIcons[path]}
+											icon={primary ? projectIcons[primary] : undefined}
 											size={16}
 										/>
 									</span>
 
-									<span className="pointer-events-none relative min-w-0 flex-1 truncate font-medium text-foreground/80">
-										{name}
-									</span>
+									<div className="pointer-events-none relative min-w-0 flex-1">
+										<div className="truncate font-medium text-foreground/80">
+											{name}
+										</div>
+										{project.folders.map((source) => (
+											<div
+												className="truncate font-mono text-[10px] text-muted-foreground"
+												key={source}
+												title={source}
+											>
+												{source}
+											</div>
+										))}
+									</div>
 
 									{/* Right slot: active dot at rest, remove X on hover. */}
 									<div className="relative z-10 size-4 shrink-0">
@@ -259,9 +300,9 @@ export function ProjectPickerContent({
 											/>
 										)}
 										<button
-											aria-label={`Remove ${name} from recents`}
+											aria-label={`Remove ${name} from projects`}
 											className="pointer-events-none absolute inset-0 flex cursor-pointer items-center justify-center opacity-0 transition-opacity duration-150 group-hover/recent:pointer-events-auto group-hover/recent:opacity-100"
-											onClick={(e) => handleRemoveRecent(e, path)}
+											onClick={(e) => handleRemoveProject(e, project.id)}
 											type="button"
 										>
 											<HugeiconsIcon
@@ -277,7 +318,7 @@ export function ProjectPickerContent({
 				</>
 			)}
 
-			{hasRecents && <DropdownMenuSeparator />}
+			{hasProjects && <DropdownMenuSeparator />}
 
 			{/* Project creation stays flat: both actions are reachable in one click from
 			    this menu, with no flyout nested inside the project picker. */}
@@ -333,9 +374,11 @@ export function ProjectPickerContent({
 export function CreateFolderDialog({
 	open: dialogOpen,
 	onOpenChange,
+	onFolderSelected,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
+	onFolderSelected?: (folder: string) => void;
 }) {
 	const { setFolder } = useWorkspaceStore();
 	const activeNode = useActiveNode();
@@ -359,9 +402,12 @@ export function CreateFolderDialog({
 			const created = result.path;
 			setName("");
 			onOpenChange(false);
-			await setFolder(created).catch(() =>
-				setError("Created the folder, but could not open it")
-			);
+			try {
+				await setFolder(created);
+				onFolderSelected?.(created);
+			} catch {
+				setError("Created the folder, but could not open it");
+			}
 		} else {
 			setError(result.error ?? "Could not create the folder");
 		}
@@ -372,6 +418,7 @@ export function CreateFolderDialog({
 		activeNode.token,
 		setFolder,
 		onOpenChange,
+		onFolderSelected,
 	]);
 
 	return (
@@ -405,11 +452,12 @@ export function CreateFolderDialog({
 				<DialogFooter>
 					<DialogClose render={<Button variant="ghost" />}>Cancel</DialogClose>
 					<Button
-						disabled={creating || name.trim().length === 0}
+						disabled={name.trim().length === 0}
+						loading={creating}
 						onClick={handleCreate}
 						type="button"
 					>
-						{creating ? <Spinner className="size-4" /> : "Create project"}
+						Create project
 					</Button>
 				</DialogFooter>
 			</DialogContent>

@@ -8,7 +8,6 @@ import {
 } from "@ryu/ui/components/dialog";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { useState } from "react";
 import { ScrollFadeEffect } from "@/src/components/ui/scroll-fade-effect.tsx";
 
@@ -94,8 +93,11 @@ export function AddIdentityDialog({
 					<Button onClick={() => onOpenChange(false)} variant="ghost">
 						Cancel
 					</Button>
-					<Button disabled={!canSubmit || creating} onClick={handleCreate}>
-						{creating ? <Spinner className="size-4" /> : null}
+					<Button
+						disabled={!canSubmit}
+						loading={creating}
+						onClick={handleCreate}
+					>
 						Create
 					</Button>
 				</DialogFooter>

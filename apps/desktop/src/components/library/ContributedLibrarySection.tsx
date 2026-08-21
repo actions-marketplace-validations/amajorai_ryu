@@ -16,12 +16,11 @@
 // `spec.itemTarget`, the same `{{item.<key>}}` route template the sidebar honours.
 // Nothing here is per-app.
 
-import { GridIcon } from "@hugeicons/core-free-icons";
+import { Package01Icon } from "@hugeicons/core-free-icons";
 import {
-	isCoreApiPath,
+	isKnownLibraryViewKind,
 	renderTemplate,
 	type SourceItem,
-	sourceItemsFromResponse,
 } from "@ryu/app-host/views";
 import {
 	LibraryCard,
@@ -30,64 +29,28 @@ import {
 	LibraryLoading,
 } from "@ryu/blocks/desktop/library";
 import type { ViewMode } from "@ryu/blocks/desktop/view-toggle";
-import { useQuery } from "@tanstack/react-query";
+import { Icon } from "@ryu/ui/components/icon.tsx";
 import { useMemo } from "react";
+import LibraryView from "@/src/components/views/LibraryView.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { parseContributedTarget } from "@/src/contributions/contributed-target.ts";
-import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
-import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
+import type { SidebarSectionSourceData } from "@/src/hooks/useSidebarSectionSource.ts";
 import type { PluginSidebarSection } from "@/src/lib/api/plugins.ts";
-
-/** Poll floor, mirroring the sidebar's: a typo'd `refreshMs` must not turn the
- *  Library into a request loop. */
-const MIN_REFRESH_MS = 1000;
 
 export default function ContributedLibrarySection({
 	section,
+	sourceData,
 	query,
 	view,
 }: {
 	query: string;
 	section: PluginSidebarSection;
+	sourceData: SidebarSectionSourceData;
 	view: ViewMode;
 }) {
-	const node = useActiveNode();
 	const { openTab } = useTabsContext();
 	const spec = section.spec;
-	const source = spec?.source;
-	const path = source?.http.path;
-	const method = source?.http.method ?? "GET";
-	const target = toTarget(node);
-	const fetchable = Boolean(source && path && isCoreApiPath(path));
-
-	const { data: payload, isLoading } = useQuery({
-		// Same key shape the sidebar uses, so a section shown in both places shares
-		// one request and one poll rather than doubling them.
-		queryKey: [
-			"contributed-section-source",
-			target.url,
-			target.token,
-			path ?? "",
-			method,
-		],
-		enabled: fetchable,
-		retry: false,
-		queryFn: async () => {
-			const resp = await fetch(apiUrl(target, path as string), {
-				method,
-				headers: makeHeaders(target.token),
-			});
-			return resp.ok ? ((await resp.json()) as unknown) : null;
-		},
-		refetchInterval: source?.refreshMs
-			? Math.max(source.refreshMs, MIN_REFRESH_MS)
-			: false,
-	});
-
-	const rows: SourceItem[] = useMemo(
-		() => (source && payload ? sourceItemsFromResponse(source, payload) : []),
-		[source, payload]
-	);
+	const rows: SourceItem[] = sourceData.rows;
 
 	const visible = useMemo(() => {
 		const q = query.trim().toLowerCase();
@@ -113,8 +76,33 @@ export default function ContributedLibrarySection({
 		openTab(route, { ...options, title: row.item.title });
 	};
 
-	if (isLoading && rows.length === 0) {
+	if (sourceData.isLoading && rows.length === 0) {
+		if (isKnownLibraryViewKind(spec?.view)) {
+			return (
+				<LibraryView
+					error={sourceData.error}
+					isLoading={sourceData.isLoading}
+					onOpen={open}
+					rows={visible}
+					section={section}
+					view={view}
+				/>
+			);
+		}
 		return <LibraryLoading />;
+	}
+
+	if (isKnownLibraryViewKind(spec?.view)) {
+		return (
+			<LibraryView
+				error={sourceData.error}
+				isLoading={sourceData.isLoading}
+				onOpen={open}
+				rows={visible}
+				section={section}
+				view={view}
+			/>
+		);
 	}
 
 	if (visible.length === 0) {
@@ -126,7 +114,7 @@ export default function ContributedLibrarySection({
 						: (spec?.emptyState?.description ??
 							`${section.title} has nothing in it yet.`)
 				}
-				icon={GridIcon}
+				icon={Package01Icon}
 				title={
 					query ? "No results" : (spec?.emptyState?.title ?? "Nothing yet")
 				}
@@ -140,7 +128,14 @@ export default function ContributedLibrarySection({
 				<LibraryCard
 					item={{
 						key: row.item.id,
-						icon: GridIcon,
+						icon: Package01Icon,
+						iconNode: section.icon ? (
+							<Icon
+								className="size-4 shrink-0 opacity-70"
+								icon={section.icon}
+								size={16}
+							/>
+						) : undefined,
 						name: row.item.title,
 						subtitle: row.item.subtitle ?? null,
 						badge: row.item.accessory ?? null,

@@ -64,6 +64,8 @@ export interface LibraryCardData {
 	favorited: boolean;
 	/** Icon shown beside the name (per-type or per-item). */
 	icon: IconSvgElement;
+	/** Optional app-contributed icon node, used when the source icon is a string. */
+	iconNode?: ReactNode;
 	/** Stable key, unique within a tab. */
 	key: string;
 	name: string;
@@ -328,10 +330,12 @@ export function LibraryCard({
 				role="button"
 				tabIndex={0}
 			>
-				<HugeiconsIcon
-					className="size-4 shrink-0 opacity-70"
-					icon={item.icon}
-				/>
+				{item.iconNode ?? (
+					<HugeiconsIcon
+						className="size-4 shrink-0 opacity-70"
+						icon={item.icon}
+					/>
+				)}
 				<div className="flex min-w-0 flex-1 flex-col gap-0.5">
 					<div className="flex items-center gap-2">
 						<span className="truncate font-medium text-sm">{item.name}</span>
@@ -359,10 +363,12 @@ export function LibraryCard({
 		>
 			<CardHeader className="flex flex-row items-center justify-between gap-2 px-4 py-3">
 				<span className="flex min-w-0 items-center gap-2">
-					<HugeiconsIcon
-						className="size-4 shrink-0 opacity-70"
-						icon={item.icon}
-					/>
+					{item.iconNode ?? (
+						<HugeiconsIcon
+							className="size-4 shrink-0 opacity-70"
+							icon={item.icon}
+						/>
+					)}
 					<span className="truncate font-medium text-sm">{item.name}</span>
 				</span>
 				<span className="flex shrink-0 items-center gap-1">

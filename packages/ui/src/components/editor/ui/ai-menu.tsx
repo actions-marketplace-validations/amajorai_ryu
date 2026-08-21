@@ -130,7 +130,11 @@ export function AIMenu() {
 
 	useEditorChat({
 		onOpenBlockSelection: (blocks: NodeEntry[]) => {
-			show(editor.api.toDOMNode(blocks.at(-1)?.[0])!);
+			const lastBlock = blocks.at(-1);
+			if (!lastBlock) {
+				return;
+			}
+			show(editor.api.toDOMNode(lastBlock[0])!);
 		},
 		onOpenChange: (open) => {
 			if (!open) {
@@ -156,7 +160,11 @@ export function AIMenu() {
 			show(editor.api.toDOMNode(ancestor)!);
 		},
 		onOpenSelection: () => {
-			show(editor.api.toDOMNode(editor.api.blocks().at(-1)?.[0])!);
+			const lastBlock = editor.api.blocks().at(-1);
+			if (!lastBlock) {
+				return;
+			}
+			show(editor.api.toDOMNode(lastBlock[0])!);
 		},
 	});
 
@@ -273,7 +281,9 @@ export function AIMenu() {
 								}
 								if (isHotkey("enter")(e) && !e.shiftKey && !value) {
 									e.preventDefault();
-									api.aiChat.submit(input).catch(() => undefined);
+									Promise.resolve(api.aiChat.submit(input)).catch(
+										() => undefined
+									);
 									setInput("");
 								}
 							}}
@@ -495,10 +505,9 @@ Start writing a new paragraph AFTER <Document> ONLY ONE SENTENCE`
 		label: "Replace selection",
 		value: "replace",
 		onSelect: ({ aiEditor, editor }) => {
-			editor
-				.getTransforms(AIChatPlugin)
-				.aiChat.replaceSelection(aiEditor)
-				.catch(() => undefined);
+				Promise.resolve(
+					editor.getTransforms(AIChatPlugin).aiChat.replaceSelection(aiEditor)
+				).catch(() => undefined);
 		},
 	},
 	simplifyLanguage: {
@@ -537,10 +546,9 @@ Start writing a new paragraph AFTER <Document> ONLY ONE SENTENCE`
 		label: "Try again",
 		value: "tryAgain",
 		onSelect: ({ editor }) => {
-			editor
-				.getApi(AIChatPlugin)
-				.aiChat.reload()
-				.catch(() => undefined);
+			Promise.resolve(
+				editor.getApi(AIChatPlugin).aiChat.reload()
+			).catch(() => undefined);
 		},
 	},
 } satisfies Record<
@@ -641,8 +649,10 @@ export const AIMenuItems = ({
 	}, [menuState]);
 
 	useEffect(() => {
-		if (menuGroups.length > 0 && menuGroups[0].items.length > 0) {
-			setValue(menuGroups[0].items[0].value);
+		const firstGroup = menuGroups[0];
+		const firstItem = firstGroup?.items[0];
+		if (firstItem) {
+			setValue(firstItem.value);
 		}
 	}, [menuGroups, setValue]);
 

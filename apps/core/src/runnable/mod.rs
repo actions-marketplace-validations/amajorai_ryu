@@ -342,6 +342,9 @@ mod tests {
         AgentRecord {
             id: "agent-1".into(),
             name: "Test Agent".into(),
+            lifecycle_status: crate::agents::AgentLifecycleStatus::Active,
+            safety_profile: crate::agents::AgentSafetyProfile::Autonomous,
+            title: String::new(),
             description: None,
             system_prompt: None,
             tools: vec![],

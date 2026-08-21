@@ -19,10 +19,10 @@ import {
 	useRemoteCursorOverlayPositions,
 } from "@slate-yjs/react";
 import { useEditorContainerRef } from "platejs/react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, RefObject } from "react";
 
 /** Per-peer cursor metadata carried in awareness (set via `cursors.data`). */
-interface CursorData {
+interface CursorData extends Record<string, unknown> {
 	color: string;
 	name: string;
 }
@@ -41,7 +41,7 @@ function withAlpha(hexColor: string, opacity: number): string {
 export function RemoteCursorOverlay() {
 	const containerRef = useEditorContainerRef();
 	const [cursors] = useRemoteCursorOverlayPositions<CursorData>({
-		containerRef,
+		containerRef: containerRef as RefObject<HTMLDivElement>,
 	});
 
 	return (

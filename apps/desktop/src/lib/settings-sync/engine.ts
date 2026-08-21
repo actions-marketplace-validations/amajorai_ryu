@@ -108,6 +108,10 @@ export function setSyncEnabled(enabled: boolean): void {
 	writeString(ENABLED_KEY, enabled ? "true" : "false");
 	notify();
 	if (enabled) {
+		// Settings changed while sync was opted out still have durable local
+		// timestamps. Rebuild the pending set at the opt-in boundary so enabling
+		// sync uploads those changes instead of only watching future writes.
+		seedDirtyFromDisk();
 		void syncNow();
 	}
 }

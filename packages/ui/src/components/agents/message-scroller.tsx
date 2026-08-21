@@ -2,10 +2,18 @@
 
 // beui.dev/components/agents/message-scroller
 
+import { ArrowDown02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Button } from "@ryu/ui/components/button";
 import {
 	PreviewRail,
 	type PreviewRailItem,
 } from "@ryu/ui/components/motion/preview-rail";
+import {
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+} from "@ryu/ui/components/popover";
 import { cn } from "@ryu/ui/lib/utils";
 import { useReducedMotion } from "motion/react";
 import {
@@ -21,6 +29,7 @@ import {
 
 const PREVIEW_TITLE_LENGTH = 56;
 const PREVIEW_DESCRIPTION_LENGTH = 88;
+const RAIL_COLLAPSE_ITEM_COUNT = 18;
 
 function truncateMessageText(text: string, limit: number) {
 	if (text.length <= limit) {
@@ -33,7 +42,9 @@ function truncateMessageText(text: string, limit: number) {
 
 function getMessageText(message: HTMLElement) {
 	const surface =
-		message.querySelector<HTMLElement>('[data-slot="message-bubble-content"]') ??
+		message.querySelector<HTMLElement>(
+			'[data-slot="message-bubble-content"]'
+		) ??
 		message.querySelector<HTMLElement>('[data-slot="message-content"]') ??
 		message;
 	return (surface.textContent ?? "").replace(/\s+/g, " ").trim();
@@ -49,7 +60,9 @@ function getMessagePreview(
 	}
 
 	if (text.length <= PREVIEW_TITLE_LENGTH) {
-		const responseText = assistantResponse ? getMessageText(assistantResponse) : "";
+		const responseText = assistantResponse
+			? getMessageText(assistantResponse)
+			: "";
 		return {
 			label: text,
 			description: responseText
@@ -76,21 +89,157 @@ function getMessagePreview(
 	};
 }
 
+function CollapsedMessageRail({
+	items,
+	activeId,
+	onItemSelect,
+}: {
+	items: PreviewRailItem[];
+	activeId: string;
+	onItemSelect: (item: PreviewRailItem) => void;
+}) {
+	const [open, setOpen] = useState(false);
+	const messageListRef = useRef<HTMLUListElement>(null);
+
+	useEffect(() => {
+		if (!open) {
+			return;
+		}
+		const revealActiveItem = () => {
+			const list = messageListRef.current;
+			const activeItem = list?.querySelector<HTMLElement>(
+				'[data-active="true"]'
+			);
+			if (!(list && activeItem)) {
+				return;
+			}
+			list.scrollTop = Math.max(
+				0,
+				activeItem.offsetTop - (list.clientHeight - activeItem.offsetHeight) / 2
+			);
+		};
+		const frame = window.requestAnimationFrame(revealActiveItem);
+		const timer = window.setTimeout(revealActiveItem, 80);
+		return () => {
+			window.cancelAnimationFrame(frame);
+			window.clearTimeout(timer);
+		};
+	}, [activeId, open]);
+
+	return (
+		<Popover onOpenChange={setOpen} open={open}>
+			<PopoverTrigger
+				aria-label={`Browse ${items.length} messages`}
+				className="absolute top-1/2 right-1 z-20 flex h-[5.5rem] w-7 -translate-y-1/2 flex-col items-center justify-center gap-1.5 rounded-full border border-border/70 bg-background/80 text-muted-foreground shadow-sm backdrop-blur-md transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+				data-active-message-id={activeId}
+				data-count={items.length}
+				data-slot="message-navigation-collapsed-rail"
+				title={`Browse ${items.length} messages`}
+			>
+				<span aria-hidden="true" className="flex flex-col items-center gap-1">
+					<span className="h-px w-3 rounded-full bg-current/45" />
+					<span className="h-px w-4 rounded-full bg-current/70" />
+					<span className="h-px w-2.5 rounded-full bg-current/45" />
+					<span className="h-px w-3.5 rounded-full bg-current/70" />
+					<span className="h-px w-2 rounded-full bg-current/45" />
+				</span>
+				<span className="font-medium text-[9px] tabular-nums leading-none">
+					{items.length > 99 ? "99+" : items.length}
+				</span>
+			</PopoverTrigger>
+			<PopoverContent
+				align="center"
+				className="w-[min(22rem,calc(100vw-2rem))] gap-0 overflow-hidden p-0"
+				data-message-navigation-popover="true"
+				side="left"
+				sideOffset={10}
+			>
+				<div className="flex items-center justify-between border-border/60 border-b px-3 py-2.5">
+					<div className="min-w-0">
+						<p className="font-medium text-sm">Messages</p>
+						<p className="text-muted-foreground text-xs">
+							Jump to any message in this conversation
+						</p>
+					</div>
+					<span className="shrink-0 rounded-full bg-muted px-2 py-1 font-medium text-[10px] text-muted-foreground tabular-nums">
+						{items.length}
+					</span>
+				</div>
+				<ul
+					aria-label="All messages"
+					className="scroll-fade max-h-[min(70vh,32rem)] overflow-y-auto p-1"
+					data-slot="message-navigation-list"
+					ref={messageListRef}
+				>
+					{items.map((item, index) => {
+						const active = item.id === activeId;
+						return (
+							<li key={item.id}>
+								<button
+									aria-current={active ? "true" : undefined}
+									className={cn(
+										"flex w-full items-start gap-2 rounded-2xl px-2.5 py-2 text-left outline-none transition-colors hover:bg-muted focus-visible:bg-muted focus-visible:ring-2 focus-visible:ring-ring",
+										active && "bg-muted/80"
+									)}
+									data-active={active ? "true" : undefined}
+									data-message-id={item.id}
+									data-slot="message-navigation-item"
+									onClick={() => {
+										onItemSelect(item);
+										setOpen(false);
+									}}
+									type="button"
+								>
+									<span
+										aria-hidden="true"
+										className={cn(
+											"mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-muted font-medium text-[10px] text-muted-foreground tabular-nums",
+											active && "bg-foreground text-background"
+										)}
+									>
+										{index + 1}
+									</span>
+									<span className="min-w-0 flex-1">
+										<span className="line-clamp-2 block font-medium text-xs leading-4">
+											{item.label}
+										</span>
+										{item.description ? (
+											<span className="mt-0.5 line-clamp-2 block text-[11px] text-muted-foreground leading-4">
+												{item.description}
+											</span>
+										) : null}
+									</span>
+								</button>
+							</li>
+						);
+					})}
+				</ul>
+			</PopoverContent>
+		</Popover>
+	);
+}
+
 export interface MessageScrollerProps extends ComponentPropsWithRef<"div"> {
+	/** Marks the transcript as waiting for more streamed content. */
+	busy?: boolean;
+	contentClassName?: string;
+	contentProps?: Omit<
+		ComponentPropsWithRef<"div">,
+		"children" | "className" | "ref"
+	> & { "data-slot"?: string };
 	/** Keep streamed output pinned while the reader remains near the end. */
 	followOutput?: boolean;
 	/** Distance from the end that still counts as following the output. */
 	followThreshold?: number;
-	/** Smoothly follow growing content. */
-	smooth?: boolean;
-	/** Reports when the reader leaves or returns to the live edge. */
-	onFollowChange?: (following: boolean) => void;
 	/** Accessible label for the scrollable transcript. */
 	label?: string;
-	/** Marks the transcript as waiting for more streamed content. */
-	busy?: boolean;
 	/** Adds a compact rail for navigating between rendered Message rows. */
 	navigation?: "rail";
+	/** Accessible label for the optional message navigation rail. */
+	navigationLabel?: string;
+	/** Reports when the reader leaves or returns to the live edge. */
+	onFollowChange?: (following: boolean) => void;
+	railClassName?: string;
 	/**
 	 * Rich rail items supplied by the consumer instead of the auto-derived
 	 * message previews. Each item's `id` is matched to a rendered row carrying
@@ -100,20 +249,18 @@ export interface MessageScrollerProps extends ComponentPropsWithRef<"div"> {
 	railItems?: PreviewRailItem[];
 	/** Custom preview card for the rail. Receives the item being hovered. */
 	renderPreview?: (item: PreviewRailItem) => ReactNode;
-	/** Accessible label for the optional message navigation rail. */
-	navigationLabel?: string;
+	/** Render the shared scroll-to-latest control. */
+	showScrollToLatest?: boolean;
+	/** Track DOM message rows for the generic unread indicator. */
+	showUnreadMessages?: boolean;
+	/** Smoothly follow growing content. */
+	smooth?: boolean;
 	viewportClassName?: string;
-	contentClassName?: string;
-	railClassName?: string;
-	viewportRef?: Ref<HTMLElement>;
 	viewportProps?: Omit<
 		ComponentPropsWithRef<"section">,
 		"children" | "className" | "ref"
 	> & { "data-slot"?: string };
-	contentProps?: Omit<
-		ComponentPropsWithRef<"div">,
-		"children" | "className" | "ref"
-	> & { "data-slot"?: string };
+	viewportRef?: Ref<HTMLElement>;
 }
 
 export function MessageScroller({
@@ -121,6 +268,8 @@ export function MessageScroller({
 	followThreshold = 56,
 	smooth = true,
 	onFollowChange,
+	showScrollToLatest = true,
+	showUnreadMessages = true,
 	label = "Conversation",
 	busy,
 	navigation,
@@ -141,6 +290,7 @@ export function MessageScroller({
 	const viewportRef = useRef<HTMLElement>(null);
 	const contentRef = useRef<HTMLDivElement>(null);
 	const followingRef = useRef(followOutput);
+	const knownMessageIdsRef = useRef<Set<string>>(new Set());
 	const programmaticScrollRef = useRef(false);
 	const scrollTimerRef = useRef<number | undefined>(undefined);
 	const frameRef = useRef<number | undefined>(undefined);
@@ -151,6 +301,13 @@ export function MessageScroller({
 	const [railItems, setRailItems] = useState<PreviewRailItem[]>([]);
 	const [activeRailId, setActiveRailId] = useState("");
 	const [railOverflowing, setRailOverflowing] = useState(false);
+	const [following, setFollowingState] = useState(followOutput);
+	const [newMessageCount, setNewMessageCount] = useState(0);
+	const [unreadStartId, setUnreadStartId] = useState<string | null>(null);
+	const railCollapsed =
+		navigation === "rail" &&
+		railOverflowing &&
+		railItems.length > RAIL_COLLAPSE_ITEM_COUNT;
 	const {
 		onScroll: onViewportScroll,
 		onWheel: onViewportWheel,
@@ -171,16 +328,59 @@ export function MessageScroller({
 		[externalViewportRef]
 	);
 
+	const clearUnreadMessages = useCallback(() => {
+		setNewMessageCount((current) => (current === 0 ? current : 0));
+		setUnreadStartId((current) => (current === null ? current : null));
+	}, []);
+
 	const setFollowing = useCallback(
 		(next: boolean) => {
 			if (followingRef.current === next) {
+				if (next) {
+					clearUnreadMessages();
+				}
 				return;
 			}
 			followingRef.current = next;
+			setFollowingState(next);
+			if (next) {
+				clearUnreadMessages();
+			}
 			onFollowChange?.(next);
 		},
-		[onFollowChange]
+		[clearUnreadMessages, onFollowChange]
 	);
+
+	const syncUnreadMessages = useCallback(() => {
+		if (!showUnreadMessages) {
+			return;
+		}
+		const content = contentRef.current;
+		if (!content) {
+			return;
+		}
+
+		const messageIds = Array.from(content.children)
+			.filter(
+				(node): node is HTMLElement =>
+					node instanceof HTMLElement &&
+					node.dataset.slot === "message-scroller-item" &&
+					typeof node.dataset.messageId === "string" &&
+					node.dataset.messageId.length > 0
+			)
+			.map((node) => node.dataset.messageId as string);
+		const knownMessageIds = knownMessageIdsRef.current;
+		const addedMessageIds = messageIds.filter((id) => !knownMessageIds.has(id));
+
+		if (followingRef.current) {
+			clearUnreadMessages();
+		} else if (addedMessageIds.length > 0) {
+			setNewMessageCount((current) => current + addedMessageIds.length);
+			setUnreadStartId((current) => current ?? addedMessageIds[0] ?? null);
+		}
+
+		knownMessageIdsRef.current = new Set(messageIds);
+	}, [clearUnreadMessages, showUnreadMessages]);
 
 	const updateActiveRailItem = useCallback(() => {
 		if (navigation !== "rail") {
@@ -230,7 +430,7 @@ export function MessageScroller({
 		}
 		const content = contentRef.current;
 		const viewport = viewportRef.current;
-		if (!content || !viewport) {
+		if (!(content && viewport)) {
 			return;
 		}
 
@@ -326,29 +526,36 @@ export function MessageScroller({
 		});
 	}, [navigation, syncRailItems, updateActiveRailItem]);
 
-	const scrollToEnd = useCallback((behavior: ScrollBehavior) => {
-		const viewport = viewportRef.current;
-		if (!viewport) {
-			return;
-		}
+	const scrollToEnd = useCallback(
+		(behavior: ScrollBehavior) => {
+			const viewport = viewportRef.current;
+			if (!viewport) {
+				return;
+			}
 
-		programmaticScrollRef.current = true;
-		if (typeof viewport.scrollTo === "function") {
-			viewport.scrollTo({ top: viewport.scrollHeight, behavior });
-		} else {
-			viewport.scrollTop = viewport.scrollHeight;
-		}
-		if (scrollTimerRef.current) {
-			window.clearTimeout(scrollTimerRef.current);
-		}
-		scrollTimerRef.current = window.setTimeout(() => {
-			programmaticScrollRef.current = false;
-		}, behavior === "smooth" ? 320 : 0);
-	}, []);
+			setFollowing(true);
+			programmaticScrollRef.current = true;
+			if (typeof viewport.scrollTo === "function") {
+				viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+			} else {
+				viewport.scrollTop = viewport.scrollHeight;
+			}
+			if (scrollTimerRef.current) {
+				window.clearTimeout(scrollTimerRef.current);
+			}
+			scrollTimerRef.current = window.setTimeout(
+				() => {
+					programmaticScrollRef.current = false;
+				},
+				behavior === "smooth" ? 320 : 0
+			);
+		},
+		[setFollowing]
+	);
 
 	const handleScroll = useCallback(() => {
 		const viewport = viewportRef.current;
-		if (!viewport || programmaticScrollRef.current) {
+		if (!viewport) {
 			return;
 		}
 
@@ -363,7 +570,7 @@ export function MessageScroller({
 	}, []);
 
 	useLayoutEffect(() => {
-		followingRef.current = followOutput;
+		setFollowing(followOutput);
 		if (!followOutput) {
 			return;
 		}
@@ -374,7 +581,56 @@ export function MessageScroller({
 				cancelAnimationFrame(frameRef.current);
 			}
 		};
-	}, [followOutput, scrollToEnd]);
+	}, [followOutput, scrollToEnd, setFollowing]);
+
+	useEffect(() => {
+		if (!showUnreadMessages) {
+			return;
+		}
+		const content = contentRef.current;
+		if (!content) {
+			return;
+		}
+
+		syncUnreadMessages();
+		const observer =
+			typeof MutationObserver === "undefined"
+				? null
+				: new MutationObserver(syncUnreadMessages);
+		observer?.observe(content, { childList: true, subtree: true });
+		return () => observer?.disconnect();
+	}, [showUnreadMessages, syncUnreadMessages]);
+
+	useEffect(() => {
+		if (!showUnreadMessages) {
+			return;
+		}
+		const content = contentRef.current;
+		if (!content) {
+			return;
+		}
+
+		for (const node of Array.from(content.children)) {
+			if (!(node instanceof HTMLElement)) {
+				continue;
+			}
+			delete node.dataset.unreadStart;
+			delete node.dataset.unreadLabel;
+		}
+
+		if (!unreadStartId || newMessageCount === 0) {
+			return;
+		}
+
+		const unreadStart = Array.from(content.children).find(
+			(node): node is HTMLElement =>
+				node instanceof HTMLElement && node.dataset.messageId === unreadStartId
+		);
+		if (unreadStart) {
+			unreadStart.dataset.unreadStart = "true";
+			unreadStart.dataset.unreadLabel = `${newMessageCount} new messages`;
+		}
+	}, [newMessageCount, showUnreadMessages, unreadStartId]);
 
 	useEffect(() => {
 		const content = contentRef.current;
@@ -384,7 +640,7 @@ export function MessageScroller({
 
 		const observer = new ResizeObserver(() => {
 			scheduleRailSync();
-			if (!followOutput || !followingRef.current) {
+			if (!(followOutput && followingRef.current)) {
 				return;
 			}
 			scrollToEnd(reduce || !smooth ? "auto" : "smooth");
@@ -404,7 +660,7 @@ export function MessageScroller({
 
 		const content = contentRef.current;
 		const viewport = viewportRef.current;
-		if (!content || !viewport) {
+		if (!(content && viewport)) {
 			return;
 		}
 
@@ -451,7 +707,7 @@ export function MessageScroller({
 		(item: PreviewRailItem) => {
 			const viewport = viewportRef.current;
 			const target = railTargetsRef.current.get(item.id);
-			if (!viewport || !target) {
+			if (!(viewport && target)) {
 				return;
 			}
 
@@ -465,26 +721,37 @@ export function MessageScroller({
 
 			setFollowing(false);
 			programmaticScrollRef.current = true;
-			const viewportRect = viewport.getBoundingClientRect();
-			const targetRect = target.getBoundingClientRect();
-			const top =
-				viewport.scrollTop +
-				targetRect.top -
-				viewportRect.top -
-				(viewport.clientHeight - targetRect.height) / 2;
 			const behavior = reduce || !smooth ? "auto" : "smooth";
 
-			if (typeof viewport.scrollTo === "function") {
+			if (typeof target.scrollIntoView === "function") {
+				target.scrollIntoView({ behavior, block: "center", inline: "nearest" });
+			} else if (typeof viewport.scrollTo === "function") {
+				const viewportRect = viewport.getBoundingClientRect();
+				const targetRect = target.getBoundingClientRect();
+				const top =
+					viewport.scrollTop +
+					targetRect.top -
+					viewportRect.top -
+					(viewport.clientHeight - targetRect.height) / 2;
 				viewport.scrollTo({ top, behavior });
 			} else {
-				viewport.scrollTop = top;
+				const viewportRect = viewport.getBoundingClientRect();
+				const targetRect = target.getBoundingClientRect();
+				viewport.scrollTop =
+					viewport.scrollTop +
+					targetRect.top -
+					viewportRect.top -
+					(viewport.clientHeight - targetRect.height) / 2;
 			}
 			if (scrollTimerRef.current) {
 				window.clearTimeout(scrollTimerRef.current);
 			}
-			scrollTimerRef.current = window.setTimeout(() => {
-				programmaticScrollRef.current = false;
-			}, behavior === "smooth" ? 320 : 0);
+			scrollTimerRef.current = window.setTimeout(
+				() => {
+					programmaticScrollRef.current = false;
+				},
+				behavior === "smooth" ? 320 : 0
+			);
 		},
 		[railItems, reduce, scrollToEnd, setFollowing, smooth]
 	);
@@ -497,8 +764,7 @@ export function MessageScroller({
 				navigation === "rail"
 					? "[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
 					: "[scrollbar-gutter:stable]",
-				viewportClassName,
-				navigation === "rail" && railOverflowing && "pr-10"
+				viewportClassName
 			)}
 			{...restViewportProps}
 			onKeyDown={(event) => {
@@ -537,7 +803,7 @@ export function MessageScroller({
 
 	return (
 		<div
-			className={cn("min-h-0", className)}
+			className={cn("relative min-h-0", className)}
 			data-slot="message-scroller"
 			{...props}
 		>
@@ -547,7 +813,7 @@ export function MessageScroller({
 					className="h-full min-h-0 overflow-hidden"
 					highlightActive
 					itemSize={14}
-					items={railOverflowing ? railItems : []}
+					items={railCollapsed ? [] : railOverflowing ? railItems : []}
 					label={navigationLabel}
 					onItemSelect={scrollToRailItem}
 					previewClassName={
@@ -565,12 +831,42 @@ export function MessageScroller({
 						railClassName
 					)}
 					renderPreview={renderPreview}
+					showPreview={!railCollapsed}
 				>
 					{viewport}
+					{railCollapsed ? (
+						<CollapsedMessageRail
+							activeId={activeRailId}
+							items={railItems}
+							onItemSelect={scrollToRailItem}
+						/>
+					) : null}
 				</PreviewRail>
 			) : (
 				viewport
 			)}
+			{showScrollToLatest && !following ? (
+				<Button
+					aria-label={
+						newMessageCount > 0
+							? `${newMessageCount} new messages. Scroll to latest`
+							: "Scroll to latest message"
+					}
+					className="absolute bottom-4 left-1/2 z-30 -translate-x-1/2 gap-1.5 rounded-full border border-primary/30 bg-background/95 px-3 shadow-lg backdrop-blur-md"
+					data-new-message-count={newMessageCount}
+					data-slot="message-scroll-to-bottom"
+					onClick={() => scrollToEnd(reduce || !smooth ? "auto" : "smooth")}
+					size="sm"
+					variant="secondary"
+				>
+					<HugeiconsIcon icon={ArrowDown02Icon} size={15} strokeWidth={2} />
+					<span>
+						{newMessageCount > 0
+							? `${newMessageCount > 99 ? "99+" : newMessageCount} new messages`
+							: "Latest messages"}
+					</span>
+				</Button>
+			) : null}
 		</div>
 	);
 }

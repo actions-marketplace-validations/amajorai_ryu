@@ -126,6 +126,19 @@ describe("buildThemeTokenStyle (theme-token → :root style bridge)", () => {
 		);
 	});
 
+	it("adds legacy companion aliases from canonical Ryu tokens", () => {
+		const style = buildThemeTokenStyle({
+			"--background": "#101114",
+			"--foreground": "#f5f5f5",
+			"--card": "#181a20",
+			"--border": "#30343d",
+		});
+		expect(style).toContain("--bg: #101114;");
+		expect(style).toContain("--fg: #f5f5f5;");
+		expect(style).toContain("--panel: #181a20;");
+		expect(style).toContain("--line: #30343d;");
+	});
+
 	it("drops a token whose NAME is not exactly --<kebab> (no stray selector injection)", () => {
 		const style = buildThemeTokenStyle({
 			"color-bg": "#000", // missing leading --

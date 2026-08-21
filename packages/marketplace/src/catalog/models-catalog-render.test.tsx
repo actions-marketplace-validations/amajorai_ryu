@@ -224,7 +224,9 @@ describe("ModelsCatalogSection — list states", () => {
 		const html = render(
 			makeModelsState({ error: "boom", models: [], loading: false })
 		);
-		expect(html).toContain("load models: boom");
+		expect(html).toContain("Couldn&#x27;t load models");
+		expect(html).toContain("boom");
+		expect(html).toContain("Try again");
 	});
 
 	test("empty (loaded, no models) shows the browse empty state", () => {
@@ -245,11 +247,11 @@ describe("ModelsCatalogSection — populated list", () => {
 	test("renders a card's author + friendly download/like counts", () => {
 		const html = render(makeModelsState({ models: [makeModel()] }));
 		expect(html).toContain("google");
-		// formatCount: 1,234,567 -> 1.2M downloads, 4200 -> 4.2k likes.
-		expect(html).toContain("1.2M");
-		expect(html).toContain("4.2k");
-		// formatContext(32768) -> "32K context".
-		expect(html).toContain("32K context");
+		// formatCount: 1,234,567 -> 1.2m downloads, 4200 -> 4,200 likes.
+		expect(html).toContain("1.2m");
+		expect(html).toContain("4,200");
+		// formatContext(32768) -> "32,768 context".
+		expect(html).toContain("32,768 context");
 	});
 
 	test("an incompatible model surfaces the needs-engine badge", () => {
@@ -411,5 +413,30 @@ describe("ModelsCatalogSection — quant download picker", () => {
 		]);
 		expect(html).toContain('value="gemma-4b-Q4_K_M.gguf"');
 		expect(html).toContain("Recommended for your PC");
+	});
+
+	test("does not offer an importance matrix as a model quant", () => {
+		const html = renderDetail([
+			{
+				filename: "imatrix_unsloth.gguf",
+				fit: "great",
+				fitLabel: "Runs great — fully on your GPU",
+				installed: false,
+				quant: null,
+				sizeBytes: 13_000_000,
+				sizeHuman: "13 MB",
+			},
+			{
+				filename: "model-Q4_K_M.gguf",
+				fit: "ok",
+				fitLabel: "Fits",
+				installed: false,
+				quant: "Q4_K_M",
+				sizeBytes: 2_500_000_000,
+				sizeHuman: "2.5 GB",
+			},
+		]);
+		expect(html).toContain('value="model-Q4_K_M.gguf"');
+		expect(html).not.toContain("imatrix_unsloth.gguf");
 	});
 });

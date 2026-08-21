@@ -1,5 +1,7 @@
 import type { GradientDirection } from "@ryu/ui/components/dither-kit/gradient";
 import { isDitherColor } from "@ryu/ui/components/dither-kit/palette";
+import type { ExpressiveExpressionSelection } from "@ryu/ui/components/expressive.ts";
+import type { ExpressiveAnimationSelection } from "@ryu/ui/components/expressive-animation.ts";
 import type { GlyphDitherValue, GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { GlyphDisplay } from "@ryu/ui/components/glyph-display.tsx";
 import { Logo as RyuLogo } from "@ryu/ui/components/logo";
@@ -274,21 +276,37 @@ export interface AvatarDicebearSpec {
 	style?: string | null;
 }
 
+/** An expressive Ryu ghost selection as stored on `persona.expressive`. */
+export interface AvatarExpressiveSpec {
+	animation?: ExpressiveAnimationSelection | null;
+	expression?: ExpressiveExpressionSelection | null;
+}
+
 /**
  * Fold persona avatar fields into a {@link GlyphValue} for {@link GlyphDisplay}.
- * Priority: avatar_url → emoji (+ optional dither bg) → icon (+ optional dither
- * bg) → dicebear → dither-only.
+ * Priority: avatar_url → expressive → emoji (+ optional dither bg) → icon
+ * (+ optional dither bg) → dicebear → dither-only.
  */
 export function personaToGlyph(persona: {
 	avatarUrl?: string | null;
 	dicebear?: AvatarDicebearSpec | null;
 	dither?: AvatarDitherSpec | null;
 	emoji?: string | null;
+	expressive?: AvatarExpressiveSpec | null;
 	icon?: string | null;
 	iconColor?: string | null;
 }): GlyphValue {
 	if (persona.avatarUrl) {
 		return { kind: "avatar", dataUrl: persona.avatarUrl };
+	}
+	if (persona.expressive?.expression) {
+		return {
+			kind: "expressive",
+			...(persona.expressive.animation
+				? { animation: persona.expressive.animation }
+				: {}),
+			expression: persona.expressive.expression,
+		};
 	}
 	const ditherLayer: GlyphDitherValue | undefined =
 		persona.dither && isDitherColor(persona.dither.from)
@@ -330,19 +348,22 @@ export function personaToGlyph(persona: {
 
 /**
  * Renders an agent's avatar, resolving the persona's avatar source in priority
- * order: uploaded image → emoji → icon → DiceBear → dither → engine logo.
+ * order: uploaded image → expressive → emoji → icon → DiceBear → dither → engine logo.
  * Use this at every call site that shows "an agent" so a custom avatar wins
  * over the engine default consistently.
  */
 export function AgentAvatar({
 	avatarUrl,
+	glyph,
 	emoji,
 	icon,
 	iconColor,
 	dicebear,
 	dither,
+	expressive,
 	engine,
 	className,
+	thinking = false,
 	size,
 }: {
 	avatarUrl?: string | null;
@@ -350,28 +371,36 @@ export function AgentAvatar({
 	dicebear?: AvatarDicebearSpec | null;
 	dither?: AvatarDitherSpec | null;
 	emoji?: string | null;
+	expressive?: AvatarExpressiveSpec | null;
 	engine?: string | null;
+	glyph?: GlyphValue;
 	icon?: string | null;
 	iconColor?: string | null;
+	/** Force the expressive ghost into its orbit animation for a live thinking row. */
+	thinking?: boolean;
 	size?: string;
 }) {
 	const parsed = size ? Number.parseInt(size, 10) : Number.NaN;
 	const px = Number.isNaN(parsed) ? 16 : parsed;
-	const glyph = personaToGlyph({
-		avatarUrl,
-		emoji,
-		icon,
-		iconColor,
-		dicebear,
-		dither,
-	});
-	if (glyph) {
+	const resolvedGlyph =
+		glyph ??
+		personaToGlyph({
+			avatarUrl,
+			emoji,
+			icon,
+			iconColor,
+			dicebear,
+			dither,
+			expressive,
+		});
+	if (resolvedGlyph) {
 		return (
 			<GlyphDisplay
 				alt="agent avatar"
 				className={cn(className, "rounded-[inherit] object-cover")}
 				size={px}
-				value={glyph}
+				thinking={thinking}
+				value={resolvedGlyph}
 			/>
 		);
 	}
@@ -391,8 +420,26 @@ export function getAgentIcon(
 	avatarUrl: string | null | undefined,
 	engine: string | null | undefined,
 	icon?: string | null,
-	dither?: AvatarDitherSpec | null
+	dither?: AvatarDitherSpec | null,
+	glyph?: GlyphValue
 ): ComponentType<{ className?: string }> {
+	if (glyph) {
+		const cacheKey = `glyph:${JSON.stringify(glyph)}|engine:${engine ?? ""}`;
+		if (!agentIconCache.has(cacheKey)) {
+			const eng = engine;
+			const AvatarIcon = ({ className }: { className?: string }) => (
+				<AgentAvatar
+					className={className}
+					engine={eng}
+					glyph={glyph}
+					size="16px"
+				/>
+			);
+			agentIconCache.set(cacheKey, AvatarIcon);
+		}
+		// biome-ignore lint/style/noNonNullAssertion: just set above when missing
+		return agentIconCache.get(cacheKey)!;
+	}
 	if (!(avatarUrl || icon || dither)) {
 		return getEngineIcon(engine);
 	}
@@ -425,6 +472,7 @@ export interface AgentAvatarMember {
 	avatarUrl?: string | null;
 	dither?: AvatarDitherSpec | null;
 	engine?: string | null;
+	glyph?: GlyphValue;
 	icon?: string | null;
 	id: string;
 }
@@ -470,6 +518,7 @@ export function AgentAvatarStack({
 						className="object-contain"
 						dither={member.dither}
 						engine={member.engine}
+						glyph={member.glyph}
 						icon={member.icon}
 						size={shown.length === 1 && size === "sm" ? "16px" : logo}
 					/>

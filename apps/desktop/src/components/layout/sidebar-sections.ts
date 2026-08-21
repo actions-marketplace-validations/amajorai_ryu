@@ -35,20 +35,21 @@
 
 import {
 	Archive01Icon,
-	BookOpen01Icon,
-	BubbleChatIcon,
+	Chat01Icon,
 	ConnectIcon,
-	CpuIcon,
 	DeliverySecure01Icon,
+	FingerPrintIcon,
 	FolderOpenIcon,
 	GridIcon,
-	Key01Icon,
-	Mortarboard01Icon,
+	LayerIcon,
+	Package01Icon,
 	PinIcon,
-	PuzzleIcon,
+	PlugSocketIcon,
+	PotionIcon,
 	ServerStack01Icon,
 	Target01Icon,
-	UserGroupIcon,
+	Tv01Icon,
+	UserMultiple02Icon,
 	WorkflowCircle06Icon,
 	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
@@ -111,26 +112,26 @@ export const BUILTIN_SECTIONS = [
 	// Apps sits directly under Agents: an App surface is something the user opens
 	// and works in, so it belongs beside the other "things I use" sections rather
 	// than trailing the store-adjacent tail at the bottom.
-	{ key: "companions", label: "Apps", icon: GridIcon },
-	{ key: "teams", label: "Teams", icon: UserGroupIcon },
+	{ key: "companions", label: "Apps", icon: Package01Icon },
+	{ key: "teams", label: "Teams", icon: UserMultiple02Icon },
 	{ key: "projects", label: "Projects", icon: FolderOpenIcon },
 	{ key: "pinned", label: "Pinned", icon: PinIcon },
-	{ key: "chats", label: "Chats", icon: BookOpen01Icon },
+	{ key: "chats", label: "Chats", icon: Chat01Icon },
 	{ key: "spaces", label: "Spaces", icon: DeliverySecure01Icon },
-	{ key: "channels", label: "Channels", icon: BubbleChatIcon },
+	{ key: "channels", label: "Channels", icon: Tv01Icon },
 	{ key: "integrations", label: "Integrations", icon: ConnectIcon },
-	{ key: "identities", label: "Identities", icon: Key01Icon },
+	{ key: "identities", label: "Identities", icon: FingerPrintIcon },
 	{ key: "workflows", label: "Workflows", icon: WorkflowCircle06Icon },
-	{ key: "skills", label: "Skills", icon: Mortarboard01Icon },
+	{ key: "skills", label: "Skills", icon: PotionIcon },
 	{ key: "mcp", label: "MCP", icon: ServerStack01Icon },
 	{ key: "tools", label: "Tools", icon: Wrench01Icon },
-	{ key: "engines", label: "Engines", icon: CpuIcon },
+	{ key: "engines", label: "Engines", icon: LayerIcon },
 	{ key: "archived", label: "Archived", icon: Archive01Icon },
 	// Plugins sits at the bottom of the default order — the primary "work"
 	// sections come first and the store-adjacent surface trails. It is also
 	// default-HIDDEN (`DEFAULT_HIDDEN_SECTIONS` in `lib/features.ts`): a position
 	// here is the section's identity, not a promise that it renders.
-	{ key: "plugins", label: "Plugins", icon: PuzzleIcon },
+	{ key: "plugins", label: "Plugins", icon: PlugSocketIcon },
 ] as const satisfies readonly BuiltinSectionSpec[];
 
 /** The fixed, built-in sidebar sections (always present). */

@@ -11,6 +11,7 @@ import {
 	friendlyModelName,
 	friendlyQuant,
 	ggufFileRole,
+	isModelGgufFile,
 	matchesQuery,
 	modelHaystack,
 	parseModelSize,
@@ -258,6 +259,11 @@ describe("ggufFileRole", () => {
 		expect(ggufFileRole("gemma-4-E2B-it-Q4_K_M.gguf")).toBeNull();
 		expect(ggufFileRole("model.Q8_0.gguf")).toBeNull();
 	});
+
+	it("excludes importance matrices from model-weight selection", () => {
+		expect(isModelGgufFile("imatrix_unsloth.gguf")).toBe(false);
+		expect(isModelGgufFile("gemma-4-E2B-it-Q4_K_M.gguf")).toBe(true);
+	});
 });
 
 describe("search haystacks", () => {
@@ -273,6 +279,12 @@ describe("search haystacks", () => {
 		createdAt: null,
 		lastModified: null,
 		installed: false,
+		architecture: null,
+		compatible: true,
+		contextLength: null,
+		format: "gguf",
+		needsEngine: null,
+		params: null,
 	};
 
 	it("matches a model by org, derived token label, and size", () => {

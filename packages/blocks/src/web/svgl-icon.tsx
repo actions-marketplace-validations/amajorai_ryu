@@ -19,8 +19,6 @@ export function SvglIcon({
 	className?: string;
 	size?: number;
 }) {
-	const _style = { width: size, height: size };
-
 	if (typeof spec === "string") {
 		return (
 			<img

@@ -6,7 +6,7 @@ import {
 	HoverCardTrigger,
 } from "@ryu/ui/components/hover-card";
 import { cn } from "@ryu/ui/lib/utils";
-import { type ReactNode, useRef } from "react";
+import { type ReactNode, useRef, useState } from "react";
 
 const SIDEBAR_PREVIEW_BOUNDARY_SELECTOR = "[data-sidebar-preview-boundary]";
 
@@ -19,16 +19,20 @@ export function SidebarItemPreview({
 	children,
 	content,
 	className,
+	renderContent,
 	side = "right",
-	sideOffset = 8,
+	sideOffset = 14,
 }: {
 	children: ReactNode;
 	content: ReactNode;
 	className?: string;
+	/** Render optional expensive content only after the hover card opens. */
+	renderContent?: (open: boolean) => ReactNode;
 	side?: "top" | "bottom" | "left" | "right" | "inline-start" | "inline-end";
 	sideOffset?: number;
 }) {
 	const triggerRef = useRef<HTMLAnchorElement>(null);
+	const [open, setOpen] = useState(false);
 	const getPreviewAnchor = () => {
 		const trigger = triggerRef.current;
 		if (!trigger) {
@@ -58,7 +62,7 @@ export function SidebarItemPreview({
 	};
 
 	return (
-		<HoverCard>
+		<HoverCard onOpenChange={setOpen}>
 			<HoverCardTrigger
 				className="min-w-0 flex-1"
 				closeDelay={0}
@@ -79,6 +83,7 @@ export function SidebarItemPreview({
 				sideOffset={sideOffset}
 			>
 				{content}
+				{renderContent ? renderContent(open) : null}
 			</HoverCardContent>
 		</HoverCard>
 	);

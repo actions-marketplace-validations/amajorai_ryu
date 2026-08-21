@@ -166,7 +166,7 @@ const STARTER_LAYOUTS: Record<string, GridLayoutRect> = {
 /**
  * The prompt the "Generate a dashboard for me" button auto-sends to the AI
  * builder (the local `ryu`/Gemma agent), which authors widgets via Core's
- * `dashboard_builder__*` tools.
+ * `dashboard_builder.*` tools.
  */
 const AI_STARTER_PROMPT =
 	"Build me a useful starter Home dashboard. Add a few widgets that show my Ryu activity at a glance — for example connected clients, open quests, active monitors, and a short welcome note — using sensible core_endpoint sources, and arrange them neatly on the 12-column grid. Keep it clean and not overwhelming.";
@@ -655,7 +655,7 @@ export default function HomePage() {
 
 	// ── The dashboard as an assistant surface ────────────────────────────────
 	// While the user is in "Build with AI" mode, the global Ask Ryu panel becomes
-	// THIS dashboard's builder too — same `dashboard_builder__*` tools, same live
+	// THIS dashboard's builder too — same `dashboard_builder.*` tools, same live
 	// snapshot — so opening the dock does not start an unrelated second chat.
 	//
 	// Two deliberate scopings. It registers only while `builderOpen`, because a
@@ -682,7 +682,7 @@ export default function HomePage() {
 						`each with a kind (${widgetKinds}), a data source, and a grid layout.`,
 						"When the user describes what they want to see, BUILD it by calling the",
 						"dashboard_builder tools. For edits prefer",
-						'dashboard_builder__configure_dashboard with dashboard_id "{{targetId}}"',
+						'dashboard_builder.configure_dashboard with dashboard_id "{{targetId}}"',
 						"using widgets_upsert (pass each widget's layout x/y/w/h to place it on",
 						"the 12-column grid) and widgets_remove. Pick a sensible source:",
 						"core_endpoint for internal metrics (connections, quests, monitors,",
@@ -692,8 +692,8 @@ export default function HomePage() {
 						"\n\nCurrent dashboard:\n{{snapshot}}",
 					].join(" "),
 					tools: [
-						"dashboard_builder__configure_dashboard",
-						"dashboard_builder__get_dashboard",
+						"dashboard_builder.configure_dashboard",
+						"dashboard_builder.get_dashboard",
 					],
 					prompts: [
 						"Add a chart of my monitors",
@@ -734,13 +734,14 @@ export default function HomePage() {
 			<div className="flex items-center gap-1.5">
 				<ToggleGroup
 					className="rounded-lg bg-muted/60 p-0.5"
-					onValueChange={(v: string) => {
+					onValueChange={(values: string[]) => {
+						const v = values[0];
 						if (v === "grid" || v === "canvas") {
 							handleSetViewMode(v);
 						}
 					}}
 					spacing={0}
-					value={viewMode}
+					value={[viewMode]}
 					variant="default"
 				>
 					<ToggleGroupItem

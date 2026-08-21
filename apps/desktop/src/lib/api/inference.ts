@@ -192,7 +192,7 @@ export async function saveModelLaunchConfig(
 const LOCAL_ENGINES = new Set(["llamacpp", "ollama", "vllm", "sglang"]);
 const ACP_PREFIX = /^acp:/;
 
-/** Whether an agent's chat-engine binding is a local engine we can tune fully. */
+/** Whether an agent's Chat binding is a local engine we can tune fully. */
 export function isLocalEngine(engine: string | null | undefined): boolean {
 	if (!engine) {
 		return false;

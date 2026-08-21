@@ -1,11 +1,10 @@
 // apps/desktop/src/hooks/useStoreHome.ts
 //
 // The data behind the Store's "Home" tab — an app-store landing feed that pulls
-// together, in one place, a curated featured rail plus a "row per realm" of the
-// most relevant items to browse. This is the "featured + algorithmic mix": the
-// featured rail is admin-curated (control-plane /api/marketplace/featured), while
-// each realm row is the realm's own default ranking (trending models, featured
-// skills, recommended agents, the plugin catalog, the MCP registry).
+// together, in one place, the For you recommendations plus a "row per realm" of
+// the most relevant items to browse. Each realm row is the realm's own default
+// ranking (trending models, featured skills, recommended agents, the plugin
+// catalog, and the MCP registry).
 //
 // It routes AND it adds. Routing came first — a click opens the realm's own tab,
 // where the full detail flow lives — but "router, not installer" was taken to
@@ -19,12 +18,14 @@
 // shared `useInstallStore`, the same store the Apps tab's catalog hook writes, so
 // adding an app here and looking at its card there agree.
 //
-// Two API planes feed it: the node realms (Models/Skills/MCP/Agents/Plugins) hit
-// Core (:7980) via TanStack Query — reusing the sections' query keys where they
-// exist so the cache dedupes — and the featured rail hits the control-plane money
-// layer (:3000). The featured rail degrades to empty on any error (signed out, no
-// org, network) so a Core-only home is never blocked by the money layer.
+// The node realms (Models/Skills/MCP/Agents/Plugins) hit Core (:7980) via TanStack
+// Query — reusing the sections' query keys where they exist so the cache dedupes.
 
+import {
+	type NormalizedRecommendations,
+	normalizeRecommendations,
+	type RecommendationWire,
+} from "@ryu/marketplace/catalog/recommendations";
 import {
 	ALL_SKILL_SOURCES_ID,
 	type CardDither,
@@ -32,12 +33,11 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { fetchAgentCatalog, installAgent } from "@/src/lib/api/agents.ts";
-import type { ApiTarget } from "@/src/lib/api/client.ts";
+import { type ApiTarget, request } from "@/src/lib/api/client.ts";
 import {
-	fetchFeatured,
-	type MarketplaceCard,
-	type MarketplaceKind,
-} from "@/src/lib/api/marketplace.ts";
+	type GatewayConfigPatch,
+	updateGatewayConfig,
+} from "@/src/lib/api/gateway.ts";
 import { installMcpServer, searchMcpCatalog } from "@/src/lib/api/mcp.ts";
 import {
 	installModelSnapshot,
@@ -58,7 +58,6 @@ import type { StoreSearchRealm } from "./useStoreSearch.ts";
 // Each home row is a browse teaser, not the full list — the realm's own tab is
 // where you go for depth ("See all" carries you there).
 const PER_ROW_LIMIT = 12;
-const FEATURED_LIMIT = 12;
 
 /** One normalized card in a home row, realm-agnostic so rows render uniformly. */
 export interface HomeCard {
@@ -73,8 +72,8 @@ export interface HomeCard {
 	dither: CardDither | null;
 	/** ACP registry id and engine — AGENTS ROW ONLY, and null everywhere else.
 	 *
-	 *  They exist so Home can render the same themed brand mark the Agents tab
-	 *  does (`AgentCatalogLogo`). Home used to hand the agent's raw CDN `iconUrl`
+	 *  They exist so Home can render the same themed brand mark the Agents cards
+	 *  use (`AgentCatalogLogo`). Home used to hand the agent's raw CDN `iconUrl`
 	 *  straight to the icon square, and those marks are solid black SVGs: Claude
 	 *  and Codex rendered black-on-black on a dark theme. The Agents tab never had
 	 *  the bug because it goes through the logo component, which pairs a
@@ -103,38 +102,25 @@ export interface HomeRow {
 	/** Add one card from this row. Rejects with the realm client's own error. */
 	add: (card: HomeCard) => Promise<void>;
 	items: HomeCard[];
-	label: string;
-	realm: StoreSearchRealm;
-}
-
-/** A curated featured item, carrying its marketplace kind so a click can route. */
-export interface HomeFeaturedItem {
-	card: MarketplaceCard;
-	/** The Store realm this kind maps to, for routing a click. */
 	realm: StoreSearchRealm;
 }
 
 export interface UseStoreHomeResult {
-	/** Admin-curated cross-kind rail (empty when uncurated / money layer is off). */
-	featured: HomeFeaturedItem[];
+	forYou: StoreForYou;
 	/** True while at least one realm row is still loading its first page. */
 	loading: boolean;
 	/** The per-realm browse rows, in display order (empty rows omitted). */
 	rows: HomeRow[];
 }
 
-/** Marketplace kind → the Store realm/section that browses it. Marketplace
- *  "plugin" cards route to the Plugins section (third-party marketplace items
- *  are overwhelmingly non-companion plugins). */
-const KIND_TO_REALM: Partial<Record<MarketplaceKind, StoreSearchRealm>> = {
-	plugin: "plugins",
-	skill: "skills",
-	model: "models",
-	mcp: "mcp",
-	// A published agent definition browses in the Agents tab, alongside the ACP
-	// runtimes — the community shelf there is where it installs from.
-	agent: "agents",
-};
+export interface StoreForYou {
+	data: NormalizedRecommendations;
+	loading: boolean;
+	onCadenceChange: (cadence: NormalizedRecommendations["cadence"]) => void;
+	onHide: () => void;
+	onReenable: () => void;
+	onRefresh: () => void;
+}
 
 export function useStoreHome(): UseStoreHomeResult {
 	const activeNode = useActiveNode();
@@ -187,28 +173,17 @@ export function useStoreHome(): UseStoreHomeResult {
 		queryFn: () => fetchApps({ url, token }),
 	});
 
-	// Curated featured rail — control-plane (:3000). Fails soft to an empty rail so
-	// a signed-out / org-less / offline user still sees the Core browse feed.
-	const featuredQuery = useQuery({
-		queryKey: ["store-home", "featured"],
+	const recommendationsQuery = useQuery({
+		queryKey: ["store-home", "recommendations", url],
 		queryFn: async () => {
-			try {
-				return await fetchFeatured(undefined, FEATURED_LIMIT);
-			} catch {
-				return [] as MarketplaceCard[];
-			}
+			const wire = await request<RecommendationWire>(
+				target,
+				"/api/marketplace/recommendations"
+			);
+			return normalizeRecommendations(wire);
 		},
 		staleTime: 5 * 60 * 1000,
 	});
-
-	const featured = useMemo<HomeFeaturedItem[]>(
-		() =>
-			(featuredQuery.data ?? []).flatMap((card) => {
-				const realm = KIND_TO_REALM[card.kind];
-				return realm ? [{ card, realm }] : [];
-			}),
-		[featuredQuery.data]
-	);
 
 	// One `add` per realm, each the realm's own single endpoint. Wrapped once here
 	// rather than per row so the shared-flag bookkeeping (and the refresh that
@@ -216,6 +191,57 @@ export function useStoreHome(): UseStoreHomeResult {
 	// realms — the exact drift that gave the Store five different owners of
 	// "installing" in the first place.
 	const qc = useQueryClient();
+	const recommendationData =
+		recommendationsQuery.data ?? normalizeRecommendations(undefined);
+	const refreshRecommendations = useCallback(async () => {
+		try {
+			await request<RecommendationWire>(
+				target,
+				"/api/marketplace/recommendations?refresh=true",
+				{ method: "POST" }
+			);
+			await qc.invalidateQueries({
+				queryKey: ["store-home", "recommendations", url],
+			});
+		} catch {
+			// Recommendations are an enhancement; the rest of Home remains usable.
+		}
+	}, [qc, target, url]);
+	const setRecommendationHidden = useCallback(
+		async (hidden: boolean) => {
+			try {
+				await request(target, "/api/marketplace/recommendations/preference", {
+					body: { hidden },
+					method: "PUT",
+				});
+				await qc.invalidateQueries({
+					queryKey: ["store-home", "recommendations", url],
+				});
+			} catch {
+				// A hidden preference failing should not interrupt Store navigation.
+			}
+		},
+		[qc, target, url]
+	);
+	const setRecommendationCadence = useCallback(
+		async (cadence: NormalizedRecommendations["cadence"]) => {
+			const patch: GatewayConfigPatch = {
+				marketplace_recommendations: {
+					cadence,
+					enabled: recommendationData.enabled,
+				},
+			};
+			try {
+				await updateGatewayConfig(target, patch);
+				await qc.invalidateQueries({
+					queryKey: ["store-home", "recommendations", url],
+				});
+			} catch {
+				// Gateway policy remains authoritative if this node is temporarily down.
+			}
+		},
+		[qc, recommendationData.enabled, target, url]
+	);
 	const runAdd = useCallback(
 		async (id: string, call: () => Promise<unknown>, keys: unknown[][]) => {
 			beginInstall(id);
@@ -305,7 +331,6 @@ export function useStoreHome(): UseStoreHomeResult {
 		if (skills.length > 0) {
 			result.push({
 				realm: "skills",
-				label: "Featured skills",
 				items: skills,
 				add: addByRealm.skills,
 			});
@@ -328,7 +353,6 @@ export function useStoreHome(): UseStoreHomeResult {
 		if (models.length > 0) {
 			result.push({
 				realm: "models",
-				label: "Popular models",
 				items: models,
 				add: addByRealm.models,
 			});
@@ -360,7 +384,6 @@ export function useStoreHome(): UseStoreHomeResult {
 		if (agents.length > 0) {
 			result.push({
 				realm: "agents",
-				label: "Agents",
 				items: agents,
 				add: addByRealm.agents,
 			});
@@ -396,7 +419,6 @@ export function useStoreHome(): UseStoreHomeResult {
 		if (apps.length > 0) {
 			result.push({
 				realm: "apps",
-				label: "Apps",
 				items: apps,
 				add: addByRealm.apps,
 			});
@@ -409,7 +431,6 @@ export function useStoreHome(): UseStoreHomeResult {
 		if (plugins.length > 0) {
 			result.push({
 				realm: "plugins",
-				label: "Plugins",
 				items: plugins,
 				add: addByRealm.plugins,
 			});
@@ -432,7 +453,6 @@ export function useStoreHome(): UseStoreHomeResult {
 		if (mcp.length > 0) {
 			result.push({
 				realm: "mcp",
-				label: "MCP servers",
 				items: mcp,
 				add: addByRealm.mcp,
 			});
@@ -456,5 +476,26 @@ export function useStoreHome(): UseStoreHomeResult {
 		appsQuery.isLoading ||
 		agentsQuery.isLoading;
 
-	return { featured, rows, loading };
+	const forYou: StoreForYou = {
+		data: recommendationData,
+		loading: recommendationsQuery.isLoading,
+		onCadenceChange: (cadence) => {
+			void setRecommendationCadence(cadence);
+		},
+		onHide: () => {
+			void setRecommendationHidden(true);
+		},
+		onRefresh: () => {
+			void refreshRecommendations();
+		},
+		onReenable: () => {
+			void setRecommendationHidden(false);
+		},
+	};
+
+	return {
+		forYou,
+		rows,
+		loading,
+	};
 }

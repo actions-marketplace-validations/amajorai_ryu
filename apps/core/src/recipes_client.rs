@@ -3,7 +3,7 @@
 //! Recipes' stateless CRUD surface (list/get/save/delete) runs fully in the
 //! standalone `ryu-recipes` sidecar (pure `ghost-core` `RecipeStore` reads/writes
 //! against the shared `~/.ghost/recipes/` store). Its two LIVE-GHOST paths cannot:
-//! - **replay** (`run`) needs Core's shared MCP registry to call `ghost__ghost_run`;
+//! - **replay** (`run`) needs Core's shared MCP registry to call `ghost.ghost_run`;
 //! - the **recording session** (`record_start`..`record_stop`) holds a dedicated
 //!   ghost recorder subprocess (`McpSession`) across SEPARATE HTTP calls — that
 //!   session lives in [`CoreRecipesHost`]'s process-global slot, not in the sidecar

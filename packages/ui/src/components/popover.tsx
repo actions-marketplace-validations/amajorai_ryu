@@ -88,6 +88,10 @@ function PopoverContent({
 	const ctx = useContext(PopoverAnchorContext);
 	return (
 		<PopoverPrimitive.Portal>
+			<PopoverPrimitive.Backdrop
+				className="ryu-popup-overlay"
+				data-slot="popover-overlay"
+			/>
 			<PopoverPrimitive.Positioner
 				align={align}
 				alignOffset={alignOffset}

@@ -2,9 +2,10 @@
 
 // packages/ui/src/components/edge-scroller.tsx
 //
-// The ONE horizontal strip scroller: the Store's section tabs, the Library's
-// section tabs, and the window tab bar all scroll through this. Three surfaces
-// had three hand-rolled versions of it and every one of them was subtly wrong.
+// Shared horizontal overflow measurement and edge-fade primitives. TabsList
+// consumes the hook directly; EdgeScroller and EdgeScrollChevrons cover strips
+// that still own their scrolling box. Keeping the measurement here prevents
+// each surface from growing another subtly different implementation.
 //
 // Two bugs it exists to make unrepeatable:
 //
@@ -45,8 +46,20 @@ const PAGE_FRACTION = 0.8;
 
 /** Hides the native scrollbar in every engine, without depending on a utility
  *  class that may not exist in the consuming app's stylesheet. */
-const HIDE_SCROLLBAR =
+export const HORIZONTAL_SCROLLBAR_HIDDEN =
 	"[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
+
+export interface HorizontalOverflowEdges {
+	end: boolean;
+	start: boolean;
+}
+
+export interface HorizontalOverflowState {
+	dataEdges: "both" | "end" | "none" | "start";
+	edges: HorizontalOverflowEdges;
+	measure: () => void;
+	style: CSSProperties | undefined;
+}
 
 /**
  * Which edges of a horizontal scroller currently have more content, remeasured on
@@ -57,47 +70,81 @@ const HIDE_SCROLLBAR =
  * harness) and each builds its own stylesheet — a `@utility` defined in one is
  * dead everywhere else.
  */
-function useEdgeState(ref: RefObject<HTMLDivElement | null>) {
-	const [edges, setEdges] = useState({ end: false, start: false });
+export function useHorizontalOverflowState(
+	ref: RefObject<HTMLElement | null>,
+	enabled = true
+): HorizontalOverflowState {
+	const [edges, setEdges] = useState<HorizontalOverflowEdges>({
+		end: false,
+		start: false,
+	});
 
 	const measure = useCallback(() => {
 		const el = ref.current;
 		if (!el) {
 			return;
 		}
-		const max = el.scrollWidth - el.clientWidth;
+		const max = Math.max(0, el.scrollWidth - el.clientWidth);
 		// 1px slack: fractional layout widths otherwise leave a permanent
 		// sub-pixel "there is more" on a strip that fits exactly.
-		setEdges({
+		const nextEdges = {
 			end: max - el.scrollLeft > 1,
 			start: el.scrollLeft > 1,
-		});
+		};
+		setEdges((current) =>
+			current.end === nextEdges.end && current.start === nextEdges.start
+				? current
+				: nextEdges
+		);
 	}, [ref]);
 
-	// Layout effect so the first paint already carries the correct mask; a passive
-	// effect flashes an unfaded strip for a frame on a long list.
 	useLayoutEffect(() => {
 		const el = ref.current;
-		if (!el) {
+		if (!(enabled && el)) {
+			setEdges((current) =>
+				current.end || current.start ? { end: false, start: false } : current
+			);
 			return;
 		}
+
 		measure();
 		el.addEventListener("scroll", measure, { passive: true });
-		const observer = new ResizeObserver(measure);
+		const observer =
+			typeof ResizeObserver === "undefined"
+				? null
+				: new ResizeObserver(measure);
 		// The container gives the AVAILABLE width; its content row gives the
 		// CONTENT width. A strip that grows (an app registers a section, a tab
 		// opens) resizes only the second, so both have to be watched.
-		observer.observe(el);
-		for (const child of Array.from(el.children)) {
-			observer.observe(child);
-		}
+		const observeContent = () => {
+			observer?.disconnect();
+			observer?.observe(el);
+			for (const child of Array.from(el.children)) {
+				observer?.observe(child);
+			}
+		};
+		observeContent();
+		const mutationObserver =
+			typeof MutationObserver === "undefined"
+				? null
+				: new MutationObserver(() => {
+						observeContent();
+						measure();
+					});
+		mutationObserver?.observe(el, { childList: true });
 		return () => {
 			el.removeEventListener("scroll", measure);
-			observer.disconnect();
+			observer?.disconnect();
+			mutationObserver?.disconnect();
 		};
-	}, [measure, ref]);
+	}, [enabled, measure, ref]);
 
-	return { edges, measure };
+	return {
+		dataEdges: edgeStateName(edges.start, edges.end),
+		edges,
+		measure,
+		style: fadeStyle(edges.start, edges.end),
+	};
 }
 
 function fadeStyle(start: boolean, end: boolean): CSSProperties | undefined {
@@ -174,7 +221,7 @@ export function EdgeScroller({
 	"data-slot"?: string;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
-	const { edges, measure } = useEdgeState(ref);
+	const { dataEdges, edges, measure, style } = useHorizontalOverflowState(ref);
 
 	const page = (direction: -1 | 1) => {
 		const el = ref.current;
@@ -204,13 +251,13 @@ export function EdgeScroller({
 			<div
 				className={cn(
 					"min-w-0 overflow-x-auto overflow-y-hidden overscroll-x-contain",
-					HIDE_SCROLLBAR,
+					HORIZONTAL_SCROLLBAR_HIDDEN,
 					contentClassName
 				)}
-				data-edges={edgeStateName(edges.start, edges.end)}
+				data-edges={dataEdges}
 				data-slot={dataSlot ?? "edge-scroller"}
 				ref={ref}
-				style={fadeStyle(edges.start, edges.end)}
+				style={style}
 			>
 				{children}
 			</div>
@@ -244,8 +291,7 @@ export function EdgeScrollChevrons({
 	scrollRef: RefObject<HTMLElement | null>;
 }) {
 	// Same measurement as EdgeScroller's, over a ref this component does not own.
-	const ref = scrollRef as RefObject<HTMLDivElement | null>;
-	const { edges } = useEdgeState(ref);
+	const { edges } = useHorizontalOverflowState(scrollRef);
 
 	const page = (direction: -1 | 1) => {
 		const el = scrollRef.current;

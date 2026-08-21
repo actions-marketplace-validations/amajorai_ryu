@@ -1,7 +1,7 @@
 // Duplicate detection and merge.
 //
 // The half of a CRM that decides whether it stays usable a year in. Every import,
-// every form fill, and every agent that skipped `crm__find_record` adds another
+// every form fill, and every agent that skipped `crm.find_record` adds another
 // near-copy, and without a merge the answer to "which Acme is the real one" becomes
 // "all of them".
 //

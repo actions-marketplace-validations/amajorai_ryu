@@ -3,6 +3,8 @@
 // The "Cowork" context rail (Codex / Claude-cowork style). A read-only summary of
 // what the current run is doing and touching, surfaced beside the transcript:
 //
+//   • Plans     — every ACP/Pi plan snapshot, saved to the Artifacts Space and
+//                 opened in the artifact viewer.
 //   • Progress  — the agent's live plan (the latest `tool-TodoWrite` snapshot in
 //                 the message stream), rendered as an in-place checklist.
 //   • Artifacts — files the agent created this run (worktree diff, kind="added").
@@ -43,6 +45,7 @@ import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { TextShimmer } from "@ryu/blocks/desktop/agent-elements/text-shimmer";
 import { extractCitations } from "@ryu/blocks/desktop/agent-elements/utils/citations.ts";
+import { formatCount } from "@ryu/ui/lib/number-format";
 import { cn } from "@ryu/ui/lib/utils";
 import type { UIMessage } from "ai";
 import {
@@ -79,6 +82,7 @@ import {
 	PATH_KEYS,
 	toolNameOf,
 } from "@/src/lib/mission-control/turn-groups.ts";
+import type { PlanArtifact } from "@/src/lib/plan-artifacts.ts";
 import { compactAge } from "@/src/lib/time.ts";
 
 // ── Message-stream shapes (loose, mirroring the AI SDK parts we read) ──────────
@@ -142,8 +146,12 @@ export interface CoworkContextPanelProps {
 	onOpenSubagent?: (subagent: SubagentSummary) => void;
 	/** Open the complete Subagents list in its own workspace tab. */
 	onOpenSubagents?: () => void;
+	/** Every plan snapshot saved (or being saved) to the Artifacts Space. */
+	planArtifacts?: PlanArtifact[];
 	/** The active conversation id (== worktree run id). Null on a fresh chat. */
 	runId: string | null;
+	/** Whether the owning Side Chats plugin is enabled on this node. */
+	sideChatsEnabled?: boolean;
 	/** Bumped by the host after a new `/btw` so the side-chats list refetches. */
 	sideChatsRefreshKey?: number;
 	/** Node target for the worktree-diff / git-status fetches. */
@@ -247,7 +255,7 @@ const SHELL_TOOLS = new Set([
 	"shell",
 ]);
 const WEB_TOOLS = new Set(["WebFetch", "WebSearch", "web_search"]);
-const MCP_TOOL_RE = /^mcp__([^_]+(?:_[^_]+)*?)__(.*)$/;
+const MCP_TOOL_RE = /^mcp\.([^.]+)\.(.+)$/;
 
 function baseName(path: string): string {
 	const segments = path.split(/[\\/]/).filter(Boolean);
@@ -310,7 +318,7 @@ function sourceForTool(tool: string): Omit<DerivedSource, "items"> | null {
 	if (FILE_TOOLS.has(tool) || SEARCH_TOOLS.has(tool) || SHELL_TOOLS.has(tool)) {
 		return { id: "local", label: "Local files", icon: FolderOpenIcon };
 	}
-	// MCP tools carry the server name: mcp__<server>__<tool>.
+	// MCP tools carry the server name: mcp.<server>.<tool>.
 	const mcpMatch = MCP_TOOL_RE.exec(tool);
 	if (mcpMatch) {
 		const server = mcpMatch[1].toLowerCase();
@@ -843,12 +851,12 @@ function SubagentsList({
 								<span className="flex shrink-0 items-center gap-1 font-medium text-[11px] tabular-nums">
 									{sub.changes.insertions > 0 && (
 										<span className="text-emerald-600 dark:text-emerald-400/90">
-											+{sub.changes.insertions}
+											+{formatCount(sub.changes.insertions)}
 										</span>
 									)}
 									{sub.changes.deletions > 0 && (
 										<span className="text-red-600/90 dark:text-red-400/90">
-											-{sub.changes.deletions}
+											-{formatCount(sub.changes.deletions)}
 										</span>
 									)}
 								</span>
@@ -980,6 +988,48 @@ function RenderedArtifactsList({
 	);
 }
 
+function PlansList({
+	plans,
+	onOpen,
+}: {
+	onOpen?: (artifact: Artifact) => void;
+	plans: PlanArtifact[];
+}) {
+	return (
+		<ul className="flex flex-col gap-0.5" data-testid="pinned-summary-plans">
+			{plans.map((plan) => (
+				<li key={plan.key}>
+					<button
+						aria-label={`Open plan ${plan.title}`}
+						className={PANEL_ROW}
+						data-testid="pinned-summary-plan"
+						onClick={() => onOpen?.(plan.artifact)}
+						type="button"
+					>
+						<span aria-hidden className={PANEL_ROW_ICON}>
+							<HugeiconsIcon className="size-3.5" icon={File01Icon} />
+						</span>
+						<span className="flex min-w-0 flex-1 flex-col">
+							<span className="truncate text-foreground">{plan.title}</span>
+							<span className="truncate text-muted-foreground">
+								{plan.sourceLabel} ·{" "}
+								{plan.error
+									? "Not saved"
+									: plan.saved
+										? "Saved to Artifacts"
+										: "Saving…"}
+							</span>
+						</span>
+						<span className={PANEL_ROW_BADGE}>
+							{plan.error ? "Error" : plan.saved ? "Plan" : "…"}
+						</span>
+					</button>
+				</li>
+			))}
+		</ul>
+	);
+}
+
 // ── Accordion section helpers (same gooey BouncyAccordion as Getting started) ──
 
 function SectionIcon({ icon }: { icon: IconSvgElement }) {
@@ -1013,7 +1063,9 @@ function SectionTitle({ title, count }: { count?: number; title: string }) {
 		<span className="flex items-center gap-2">
 			<span className="font-medium text-foreground text-xs">{title}</span>
 			{count !== undefined && count > 0 && (
-				<span className={PANEL_ROW_BADGE}>{count}</span>
+				<span className={PANEL_ROW_BADGE} data-slot="cowork-section-count">
+					{count}
+				</span>
 			)}
 		</span>
 	);
@@ -1464,12 +1516,14 @@ export function CoworkContextPanel({
 	runId,
 	target,
 	chatStatus,
+	planArtifacts,
 	onOpenArtifact,
 	onOpenSideChat,
 	onOpenSubagent,
 	onOpenSources,
 	onOpenSubagents,
 	sideChatsRefreshKey,
+	sideChatsEnabled = true,
 	leadingItems,
 	maxItemsPerSection,
 	variant = "cards",
@@ -1507,7 +1561,7 @@ export function CoworkContextPanel({
 	}, [runId, chatStatus]);
 
 	useEffect(() => {
-		if (!runId) {
+		if (!(sideChatsEnabled && runId)) {
 			setSideChats([]);
 			return;
 		}
@@ -1524,7 +1578,7 @@ export function CoworkContextPanel({
 		return () => controller.abort();
 		// `sideChatsRefreshKey` is bumped by the composer after a `/btw` aside is
 		// persisted; without it the new aside never appears until the run changes.
-	}, [runId, sideChatsRefreshKey]);
+	}, [runId, sideChatsEnabled, sideChatsRefreshKey]);
 
 	const handleDeleteSideChat = useCallback((id: string) => {
 		setSideChats((prev) => prev.filter((e) => e.id !== id));
@@ -1538,13 +1592,35 @@ export function CoworkContextPanel({
 	// has something to show, so empty sections disappear rather than showing a
 	// hint. The project/branch/commit summary lives in leadingItems now, not
 	// here (see PinnedSummaryPanel).
-	const items: BouncyAccordionItem[] = [...(leadingItems ?? [])];
+	const summary = variant === "summary";
+	const items: BouncyAccordionItem[] = (leadingItems ?? []).map((item) =>
+		summary ? { ...item, icon: undefined } : item
+	);
+
+	if (planArtifacts && planArtifacts.length > 0) {
+		items.push({
+			id: "plans",
+			icon: summary ? undefined : <SectionIcon icon={File01Icon} />,
+			title: (
+				<SectionTitle
+					count={summary ? undefined : planArtifacts.length}
+					title="Plans"
+				/>
+			),
+			description: <PlansList onOpen={onOpenArtifact} plans={planArtifacts} />,
+		});
+	}
 
 	if (todos.length > 0) {
 		items.push({
 			id: "progress",
-			icon: <SectionIcon icon={Target02Icon} />,
-			title: <SectionTitle count={todos.length} title="Progress" />,
+			icon: summary ? undefined : <SectionIcon icon={Target02Icon} />,
+			title: (
+				<SectionTitle
+					count={summary ? undefined : todos.length}
+					title="Progress"
+				/>
+			),
 			description: (
 				<ProgressSection
 					chatStatus={chatStatus}
@@ -1558,8 +1634,13 @@ export function CoworkContextPanel({
 	if (createdFiles.length > 0) {
 		items.push({
 			id: "artifacts",
-			icon: <SectionIcon icon={PlusSignIcon} />,
-			title: <SectionTitle count={createdFiles.length} title="Artifacts" />,
+			icon: summary ? undefined : <SectionIcon icon={PlusSignIcon} />,
+			title: (
+				<SectionTitle
+					count={summary ? undefined : createdFiles.length}
+					title="Artifacts"
+				/>
+			),
 			description: (
 				<div className="flex flex-col">
 					{createdFiles.slice(0, maxItemsPerSection).map((file) => (
@@ -1582,7 +1663,7 @@ export function CoworkContextPanel({
 	if (runId && diffHasChanges) {
 		items.push({
 			id: "changes",
-			icon: <SectionIcon icon={GitBranchIcon} />,
+			icon: summary ? undefined : <SectionIcon icon={GitBranchIcon} />,
 			title: <SectionTitle title="Changes" />,
 			description: <DiffReviewPane runId={runId} target={target} />,
 		});
@@ -1591,9 +1672,12 @@ export function CoworkContextPanel({
 	if (artifacts.length > 0) {
 		items.push({
 			id: "rendered-artifacts",
-			icon: <SectionIcon icon={BrowserIcon} />,
+			icon: summary ? undefined : <SectionIcon icon={BrowserIcon} />,
 			title: (
-				<SectionTitle count={artifacts.length} title="Rendered artifacts" />
+				<SectionTitle
+					count={summary ? undefined : artifacts.length}
+					title="Rendered artifacts"
+				/>
 			),
 			description: (
 				<RenderedArtifactsList
@@ -1608,8 +1692,13 @@ export function CoworkContextPanel({
 	if (sources.length > 0) {
 		items.push({
 			id: "sources",
-			icon: <SectionIcon icon={Globe02Icon} />,
-			title: <SectionTitle count={sources.length} title="Sources" />,
+			icon: summary ? undefined : <SectionIcon icon={Globe02Icon} />,
+			title: (
+				<SectionTitle
+					count={summary ? undefined : sources.length}
+					title="Sources"
+				/>
+			),
 			description: (
 				<SourcesList
 					limit={maxItemsPerSection}
@@ -1623,8 +1712,13 @@ export function CoworkContextPanel({
 	if (subagents.length > 0) {
 		items.push({
 			id: "subagents",
-			icon: <SectionIcon icon={Robot01Icon} />,
-			title: <SectionTitle count={subagents.length} title="Subagents" />,
+			icon: summary ? undefined : <SectionIcon icon={Robot01Icon} />,
+			title: (
+				<SectionTitle
+					count={summary ? undefined : subagents.length}
+					title="Subagents"
+				/>
+			),
 			description: (
 				<SubagentsList
 					limit={maxItemsPerSection}
@@ -1636,11 +1730,16 @@ export function CoworkContextPanel({
 		});
 	}
 
-	if (runId && sideChats.length > 0) {
+	if (sideChatsEnabled && runId && sideChats.length > 0) {
 		items.push({
 			id: "side-chats",
-			icon: <SectionIcon icon={MessageQuestionIcon} />,
-			title: <SectionTitle count={sideChats.length} title="Side chats" />,
+			icon: summary ? undefined : <SectionIcon icon={MessageQuestionIcon} />,
+			title: (
+				<SectionTitle
+					count={summary ? undefined : sideChats.length}
+					title="Side chats"
+				/>
+			),
 			description: (
 				<SideChatsList
 					entries={sideChats}
@@ -1671,9 +1770,10 @@ export function CoworkContextPanel({
 				classNames={
 					variant === "summary"
 						? {
-								root: "rounded-3xl border border-border/70 bg-card/95 p-3 shadow-xl shadow-black/10 backdrop-blur-xl [&>div]:!mt-0 [&>div+div]:border-border/60 [&>div+div]:border-t",
-								item: "!rounded-none !bg-transparent",
-								trigger: "min-h-11 px-1.5 py-2 hover:bg-muted/35 rounded-lg",
+								root: "rounded-3xl border border-border/70 bg-card/95 p-1 shadow-xl shadow-black/10 backdrop-blur-xl [&>div]:!mt-0 [&>div+div]:border-border/60 [&>div+div]:border-t",
+								item: "!w-full !rounded-none !bg-transparent",
+								trigger:
+									"min-h-11 w-full rounded-2xl px-2 py-2 hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-muted/50",
 								icon: "h-6 w-6",
 								title: "truncate",
 								content: "px-0",

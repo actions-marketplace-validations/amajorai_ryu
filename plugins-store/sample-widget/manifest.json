@@ -1,11 +1,17 @@
 {
+  "tags": ["example","reference","developer","widget","mcp"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/sample-widget",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/sample-widget",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/sample-widget",
   "name": "Sample Widget",
   "version": "0.1.14",
   "stability": "experimental",
   "hidden": true,
   "category": "Developer Tools",
-  "description": "Reference third-party MCP widget plugin. A tiny local Node MCP server (server.mjs) exposes one render tool (sample_widget__render) that returns structured data AND serves a self-contained skybridge HTML resource (ui://widget/sample.html). contributes.widgets binds the tool to that resource; the widget:render grant + this manifest are the consent gate that lets Core promote the tool's result into an inline chat widget. Copy this directory as the starting point for your own widget plugin.",
+  "description": "Reference third-party MCP widget plugin. A tiny local Node MCP server (server.mjs) exposes one render tool (sample_widget.render) that returns structured data AND serves a self-contained skybridge HTML resource (ui://widget/sample.html). contributes.widgets binds the tool to that resource; the widget:render grant + this manifest are the consent gate that lets Core promote the tool's result into an inline chat widget. Copy this directory as the starting point for your own widget plugin.",
   "tagline": "Reference plugin: an inline chat widget",
   "keywords": ["example", "reference", "developer", "widget", "mcp"],
   "icon": "puzzle",
@@ -33,7 +39,7 @@
   "contributes": {
     "widgets": [
       {
-        "tool_id": "sample_widget__render",
+        "tool_id": "sample_widget.render",
         "uri": "ui://widget/sample.html",
         "mime": "text/html+skybridge",
         "default_display_mode": "inline"

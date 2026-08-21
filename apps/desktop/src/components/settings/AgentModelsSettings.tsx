@@ -32,7 +32,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { sileo } from "sileo";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
-import { AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
+import { AgentAvatar, engineForAgent } from "@/src/lib/agent-logos.tsx";
 import { fetchAcpConfig, flattenConfigOptions } from "@/src/lib/api/acp.ts";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import { fetchAgents } from "@/src/lib/api/agents.ts";
@@ -125,9 +125,10 @@ function AgentCard({
 			<Collapsible onOpenChange={setOpen} open={open}>
 				<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-[10px] p-3.5 text-left hover:bg-muted/40">
 					<div className="flex min-w-0 items-center gap-2.5">
-						<AgentLogo
+						<AgentAvatar
 							className="size-4 shrink-0"
 							engine={engineForAgent(agent)}
+							glyph={agent.avatarGlyph}
 						/>
 						<div className="flex min-w-0 flex-col gap-1">
 							<span className="font-medium text-sm">{agent.name}</span>

@@ -409,7 +409,7 @@ fn platform_match_score(name: &str) -> Option<u32> {
 }
 
 /// A single GitHub release asset as returned by the releases API.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct GhAsset {
     name: String,
     browser_download_url: String,
@@ -418,7 +418,7 @@ struct GhAsset {
 }
 
 /// The subset of the GitHub release payload we consume.
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct GhRelease {
     tag_name: String,
     #[serde(default)]
@@ -617,24 +617,107 @@ static RELEASE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, GhRelease)>>,
 > = std::sync::OnceLock::new();
 
+const RELEASE_DISK_CACHE_DIR: &str = "update-releases";
+
+#[derive(Serialize, Deserialize)]
+struct ReleaseDiskCache<T> {
+    fetched_at: u64,
+    value: T,
+}
+
+fn now_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn release_cache_path(name: &str) -> std::path::PathBuf {
+    let safe = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    crate::paths::ryu_dir()
+        .join("cache")
+        .join(RELEASE_DISK_CACHE_DIR)
+        .join(format!("{safe}.json"))
+}
+
+fn read_release_disk_cache<T>(path: &std::path::Path) -> Option<ReleaseDiskCache<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_release_disk_cache<T>(path: &std::path::Path, value: &T)
+where
+    T: Serialize,
+{
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let envelope = ReleaseDiskCache {
+        fetched_at: now_unix_seconds(),
+        value,
+    };
+    let Ok(json) = serde_json::to_vec(&envelope) else {
+        return;
+    };
+    let temporary = path.with_extension("json.tmp");
+    if std::fs::write(&temporary, json).is_ok() {
+        let _ = std::fs::rename(temporary, path);
+    }
+}
+
 fn cached_release(channel: &str, allow_stale: bool) -> Option<GhRelease> {
-    let cache = RELEASE_CACHE.get()?;
+    let cache = RELEASE_CACHE.get_or_init(Default::default);
     let guard = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (fetched_at, release) = guard.get(channel)?;
-    (allow_stale || fetched_at.elapsed() < RELEASE_CACHE_TTL).then(|| release.clone())
+    if let Some((fetched_at, release)) = guard.get(channel) {
+        return (allow_stale || fetched_at.elapsed() < RELEASE_CACHE_TTL).then(|| release.clone());
+    }
+    drop(guard);
+
+    let disk = read_release_disk_cache::<GhRelease>(&release_cache_path(channel))?;
+    let age = now_unix_seconds().saturating_sub(disk.fetched_at);
+    if age > RELEASE_CACHE_TTL.as_secs() {
+        return allow_stale.then_some(disk.value);
+    }
+    let fetched_at = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(age))
+        .unwrap_or_else(std::time::Instant::now);
+    let release = disk.value;
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.insert(channel.to_string(), (fetched_at, release.clone()));
+    (allow_stale || fetched_at.elapsed() < RELEASE_CACHE_TTL).then_some(release)
 }
 
 fn cache_release(channel: &str, release: &GhRelease) {
     let cache = RELEASE_CACHE.get_or_init(Default::default);
-    let mut guard = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard.insert(
-        channel.to_string(),
-        (std::time::Instant::now(), release.clone()),
-    );
+    {
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(
+            channel.to_string(),
+            (std::time::Instant::now(), release.clone()),
+        );
+    }
+    write_release_disk_cache(&release_cache_path(channel), release);
 }
 
 /// Fetch the release that represents the newest build on `channel`.

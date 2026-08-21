@@ -18,6 +18,7 @@
 //    `TeamDialog` modal; there is no full-page strategy screen).
 
 import { Badge } from "@ryu/ui/components/badge";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import type { ChatStatus, UIMessage } from "ai";
 import type { ReactNode } from "react";
 import { MessageList } from "./agent-elements/message-list.tsx";
@@ -230,7 +231,9 @@ export function TeamStrategyView({
 		<div className="flex h-full min-h-0 flex-col">
 			<header className="flex items-center gap-2 border-border border-b px-4 py-3">
 				<h2 className="font-semibold">{teamName}</h2>
-				<Badge variant="outline">{memberNames.length} members</Badge>
+				<Badge variant="outline">
+					{formatCount(memberNames.length) ?? "—"} members
+				</Badge>
 			</header>
 			<div className="mx-auto w-full max-w-xl space-y-6 p-6">
 				<section className="space-y-2">

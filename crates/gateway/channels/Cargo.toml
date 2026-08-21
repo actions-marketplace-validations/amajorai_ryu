@@ -1,6 +1,6 @@
 [package]
 name = "ryu-gw-channels"
-version = "0.1.15"
+version = "0.2.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 repository = "https://github.com/amajorai/ryu"
@@ -19,4 +19,5 @@ futures-util = "0.3"
 sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
+base64 = "0.22"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

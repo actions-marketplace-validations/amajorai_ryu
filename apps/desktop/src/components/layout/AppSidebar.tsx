@@ -1,45 +1,43 @@
 import {
 	Add01Icon,
-	Archive01Icon,
 	ArchiveRestoreIcon,
 	ArrowDown01Icon,
 	ArrowUp01Icon,
 	ArrowUpRight01Icon,
-	BubbleChatIcon,
 	Cancel01Icon,
-	ClipboardIcon,
 	ConnectIcon,
-	CpuIcon,
 	DatabaseIcon,
 	Delete01Icon,
 	DeliverySecure01Icon,
 	File01Icon,
 	FileCodeIcon,
+	FingerPrintIcon,
 	Folder01Icon,
 	Folder03Icon,
 	FolderOpenIcon,
+	GitBranchIcon,
 	GridIcon,
 	Image01Icon,
 	ImageAdd01Icon,
-	Key01Icon,
+	LayerIcon,
 	LibraryIcon,
-	Mail01Icon,
-	MessageQuestionIcon,
 	Mic01Icon,
 	MoreHorizontalIcon,
-	Mortarboard01Icon,
+	Package01Icon,
 	PackageIcon,
 	PackageOpenIcon,
 	PencilEdit01Icon,
 	PinIcon,
 	PinOffIcon,
+	PotionIcon,
 	Search01Icon,
 	ServerStack01Icon,
 	Settings03Icon,
 	SlidersHorizontalIcon,
 	Tick02Icon,
+	Tv01Icon,
 	Upload01Icon,
-	UserGroupIcon,
+	UserMultiple02Icon,
 	ViewOffSlashIcon,
 	WorkflowCircle06Icon,
 	Wrench01Icon,
@@ -57,6 +55,7 @@ import {
 import AppIcon from "@ryu/marketplace/catalog/chrome/app-icon";
 import { iconCacheKey } from "@ryu/marketplace/catalog/icon-cache";
 import { useOptionalReport } from "@ryu/marketplace/report";
+import { AgentTitleBadge } from "@ryu/ui/components/agent-title-badge.tsx";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -116,7 +115,6 @@ import {
 	SidebarRail,
 } from "@ryu/ui/components/sidebar.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
-import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { StatusBadge } from "@ryu/ui/components/status-badge.tsx";
 import {
 	type IconComponent,
@@ -128,6 +126,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	type Dispatch,
@@ -156,14 +155,18 @@ import {
 	ProjectIconDialog,
 } from "@/src/components/layout/ProjectIconDialog.tsx";
 import { ProjectSettingsDialog } from "@/src/components/layout/ProjectSettingsDialog.tsx";
+import { ResourceVisibilityConfirmationDialog } from "@/src/components/layout/ResourceVisibilityConfirmationDialog.tsx";
+import { ResourceVisibilityIndicator } from "@/src/components/layout/ResourceVisibilityIndicator.tsx";
 import { SplitPresetMenuItems } from "@/src/components/layout/SplitPresetMenu.tsx";
 import { NodeSelector } from "@/src/components/shell/NodeSelector.tsx";
 import { AddToSpaceDialog } from "@/src/components/spaces/AddToSpaceDialog.tsx";
 import { CreateSpaceDialog } from "@/src/components/spaces/CreateSpaceDialog.tsx";
+import { RenameSpaceDialog } from "@/src/components/spaces/RenameSpaceDialog.tsx";
 import {
 	TeamDialog,
 	type TeamDraft,
 } from "@/src/components/teams/TeamDialog.tsx";
+import { DestructiveConfirmDialog } from "@/src/components/ui/DestructiveConfirmDialog.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import type {
@@ -180,7 +183,11 @@ import { APPROVALS_ALIAS } from "@/src/contributions/companion-alias.ts";
 import { parseContributedTarget } from "@/src/contributions/contributed-target.ts";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
-import { useAgentRowStyle } from "@/src/hooks/useAgentRowStyle.ts";
+import {
+	setAgentRowStyle,
+	useAgentRowStyle,
+	useAgentRowStylePref,
+} from "@/src/hooks/useAgentRowStyle.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { useAutoSetupImport } from "@/src/hooks/useAutoSetupImport.ts";
@@ -193,6 +200,7 @@ import {
 	useComposioToolkits,
 } from "@/src/hooks/useComposioCatalog.ts";
 import { useEngines } from "@/src/hooks/useEngines.ts";
+import { useCanManagePermission } from "@/src/hooks/useGatewayConfigurable.ts";
 import { useIdentities } from "@/src/hooks/useIdentities.ts";
 import { useMcp } from "@/src/hooks/useMcp.ts";
 import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
@@ -201,6 +209,7 @@ import {
 	usePluginContributions,
 } from "@/src/hooks/usePluginContributions.ts";
 import { useSchedules } from "@/src/hooks/useSchedules.ts";
+import { useSidebarChatPreview } from "@/src/hooks/useSidebarChatPreview.ts";
 import { useSidebarGroupedNav } from "@/src/hooks/useSidebarGroupedNav.ts";
 import {
 	DEFAULT_SIDEBAR_MODE,
@@ -213,38 +222,33 @@ import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useTimezoneRevision } from "@/src/hooks/useTimezone.ts";
 import { useUsageBarPrefs } from "@/src/hooks/useUsageBarPrefs.ts";
+import { useVisibilityAdminAccess } from "@/src/hooks/useVisibilityAdminAccess.ts";
 import { useVoiceEngines } from "@/src/hooks/useVoiceEngines.ts";
 import { useWorkflows } from "@/src/hooks/useWorkflows.ts";
 import {
+	conversationGroupKey,
+	conversationParticipantIds,
+	directAgentThreads,
+	isForkedConversation,
+	isGroupConversation,
+} from "@/src/lib/agent-conversation-groups.ts";
+import {
 	AgentAvatar,
-	AgentLogo,
 	engineForAgent,
 	personaToGlyph,
 } from "@/src/lib/agent-logos.tsx";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import type { BtwEntry } from "@/src/lib/api/btw.ts";
-import { listBtw } from "@/src/lib/api/btw.ts";
 import { CHANNEL_LABELS } from "@/src/lib/api/channels.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
-import {
-	getConversationTitleHistory,
-	type TitleHistoryEntry,
-} from "@/src/lib/api/conversation-flags.ts";
-import {
-	getConversationLearningExclusion,
-	setConversationLearningExclusion,
-} from "@/src/lib/api/learn.ts";
-import {
-	type PluginContextMenuItem,
-	type PluginSidebarButton,
-	type PluginSidebarSection,
-	pluginHostInvoke,
+import type {
+	PluginSidebarButton,
+	PluginSidebarSection,
 } from "@/src/lib/api/plugins.ts";
 import { listSkills } from "@/src/lib/api/skills.ts";
 import type { Space, SpaceDocument } from "@/src/lib/api/spaces.ts";
 import { conversationRunStatusMeta } from "@/src/lib/conversation-run-status.ts";
-import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
 import {
 	DEFAULT_HIDDEN_CHROME,
 	DEFAULT_HIDDEN_SECTIONS,
@@ -255,6 +259,26 @@ import {
 	persistHiddenSections,
 } from "@/src/lib/features.ts";
 import { dedupeFolders, folderKey } from "@/src/lib/folder-path.ts";
+import { useFavorites } from "@/src/lib/library.ts";
+import { useNotificationLayout } from "@/src/lib/notification-layout.ts";
+import {
+	hasPluginChatFeature,
+	SIDE_CHAT_FEATURE_KIND,
+	SIDE_CHATS_PLUGIN_ID,
+} from "@/src/lib/plugin-chat-features.ts";
+import {
+	parseVisibilityDragPayload,
+	RESOURCE_VISIBILITY_DND_MIME,
+	type ResourceVisibilityGroup,
+	resourceVisibilityDndMime,
+	resourceVisibilityForGroup,
+	resourceVisibilityGroup,
+	resourceVisibilityLabel,
+	serializeVisibilityDragPayload,
+	type VisibilityChangeRequest,
+	type VisibilityDragPayload,
+	type VisibilityResourceType,
+} from "@/src/lib/resource-visibility.ts";
 import {
 	bucketByDate,
 	DATE_BUCKET_LABELS,
@@ -263,34 +287,52 @@ import {
 	rowStamp,
 	toEpoch,
 } from "@/src/lib/sidebar/date-buckets.ts";
+import { buildSidebarConversationPreviewStates } from "@/src/lib/sidebar-conversation-preview.ts";
 import { compactAge } from "@/src/lib/time.ts";
 import { formatDate, formatTime, startOfTodayMs } from "@/src/lib/timezone.ts";
 import {
 	scheduleJobFor,
 	WorkflowTriggerIcons,
 } from "@/src/lib/workflow-triggers.tsx";
+import { workspaceProjectName } from "@/src/lib/workspace-projects.ts";
+import { useChannelSetupDialog } from "@/src/store/useChannelSetupDialog.ts";
 import { useConversationFlagsStore } from "@/src/store/useConversationFlagsStore.ts";
 import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
-import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
-import type { Conversation, Message } from "@/types/chat.ts";
+import {
+	useWorkspaceStore,
+	type WorkspaceProject,
+} from "@/src/store/useWorkspaceStore.ts";
+import type { Conversation } from "@/types/chat.ts";
 import { AnnouncementsSection } from "./AnnouncementsSection.tsx";
+import { AnimatedTitle } from "./animated-title.tsx";
+import {
+	ContextMenuSectionHeading,
+	SIDEBAR_OVERFLOW_POPOVER_KEY,
+	SidebarListAppearanceMenuItems,
+} from "./appearance-context-menu.tsx";
 import { CustomizeSidebarDialog } from "./CustomizeSidebarDialog.tsx";
 import { NavUser } from "./NavUser.tsx";
-import { FadeLabel, OverflowTooltip } from "./overflow-tooltip.tsx";
+import { OverflowTooltip } from "./overflow-tooltip.tsx";
+import { PinnedAgentStage } from "./pinned-agent-stage.tsx";
 import { SidebarBrandBadge } from "./SidebarBrandBadge.tsx";
 import { SidebarSectionNav } from "./SidebarSectionNav.tsx";
+import { SidebarConversationPreview } from "./sidebar-conversation-preview.tsx";
+import type { ChatRowHandlers } from "./sidebar-conversation-rows.tsx";
 import {
-	ChatRowSubAccordion,
-	SidebarChatMessages,
-} from "./sidebar-chat-messages.tsx";
+	ChatRow,
+	ParticipantOrbitAvatar,
+	SidebarSideChats,
+} from "./sidebar-conversation-rows.tsx";
 import {
 	SidebarItemPreview,
 	SidebarPreviewMeta,
 	SidebarPreviewTitle,
-	SidebarPreviewTitleHistory,
 } from "./sidebar-item-preview.tsx";
-import { resolveSidebarMode } from "./sidebar-modes.ts";
+import {
+	orderedSidebarModeSections,
+	resolveSidebarMode,
+} from "./sidebar-modes.ts";
 // The section vocabulary (built-in keys + labels + glyphs) and the order
 // persistence/reconciliation that goes with it. Kept in its own module so the
 // part that must never lose a user's saved layout is unit-testable without a DOM.
@@ -323,6 +365,7 @@ export type {
 	DynamicSectionKey,
 	SectionKey,
 } from "./sidebar-sections.ts";
+export { ChatRow, SidebarSideChats };
 
 // The unread/pinned/archived keys moved to `useConversationFlagsStore` with the
 // state they persist — the tab context menus toggle the same flags, and a second
@@ -660,7 +703,8 @@ const DEFAULT_PAGE_SIZE = 10;
 const ALL_SELECTION = "all";
 
 const PROJECT_SELECTION_KEY = "ryu:sidebar-project-selection";
-const SPACE_SELECTION_KEY = "ryu:sidebar-space-selection";
+const SPACE_VISIBILITY_ORDER_KEY = "ryu:sidebar-space-visibility-order";
+const SPACE_VISIBILITY_COLLAPSED_KEY = "ryu:sidebar-collapsed-space-visibility";
 
 /** One picker option. `value` is the container's stable id (a folder path, a space
  *  id); {@link ALL_SELECTION} is reserved for the aggregate. */
@@ -901,19 +945,16 @@ const CONV_SORT_ACCESSORS: SortAccessors<Conversation> = {
 /** A chat is dated by last activity — the same stamp its rows already show. */
 const conversationStamp = (c: Conversation) => c.updatedAt;
 
-/** A space document is dated by CREATION, because `SpaceDocument` carries no
- *  `updatedAt` (see `lib/api/spaces.ts`). For the Uploads space — the one that
- *  accumulates every chat attachment and paste — creation IS the upload date, which
- *  is the thing a user is scanning for. */
-const spaceDocumentStamp = (d: SpaceDocument) => d.createdAt;
+/** A Space page is dated by its latest edit, falling back to creation for legacy
+ *  rows. For the Uploads Space, creation still equals the upload date until a file
+ *  is edited, which is the useful age to show while scanning its contents. */
+const spaceDocumentStamp = (d: SpaceDocument) => d.updatedAt || d.createdAt;
 
-/** Sort space documents by title / creation. `updated` reuses `createdAt` for the
- *  same reason {@link spaceDocumentStamp} does: it is the only stamp on the wire, so
- *  the alternative is a Sort-by option that silently does nothing. */
+/** Sort Space documents by title / their latest edit. */
 const SPACE_DOC_SORT_ACCESSORS: SortAccessors<SpaceDocument> = {
 	created: (d) => d.createdAt,
 	name: (d) => d.title,
-	updated: (d) => d.createdAt,
+	updated: (d) => d.updatedAt || d.createdAt,
 };
 
 const NAMED_SORT_ACCESSORS: SortAccessors<{
@@ -980,13 +1021,6 @@ function usePaged<T>(items: T[], pageSize: number) {
 		showLess: () => setPages((prev) => Math.max(1, prev - 1)),
 	};
 }
-
-// Overflow display mode. false (default) = the classic inline "Show N more /
-// Show N less" reveal; true = the "Show N more" control instead opens a
-// popover to the right with a searchable, infinite-scrolled list of the whole
-// section. Persisted + live-synced via usePersistedToggle, surfaced in
-// Settings → Appearance.
-const SIDEBAR_OVERFLOW_POPOVER_KEY = "ryu:sidebar-overflow-popover";
 
 // How many rows the overflow popover reveals per infinite-scroll step.
 const OVERFLOW_WINDOW_STEP = 30;
@@ -1196,868 +1230,229 @@ function ShowLessButton({
 }
 
 /** Shared callbacks/state threaded into every chat row, regardless of group. */
-interface ChatRowHandlers {
-	activeConversationId: string | null;
-	agents: AgentSummary[];
-	archivedIds: Set<string>;
-	loadMessages: (id: string) => Promise<Message[]>;
-	onDeleteConversation: (id: string) => void;
-	onJumpToMessage: (conversationId: string, messageId: string) => void;
-	onMarkRead: (id: string) => void;
-	onMarkUnread: (id: string) => void;
-	onOpenInNewTab: (id: string) => void;
-	/** Open a persisted side chat: select the thread + surface it in the overlay. */
-	onOpenSideChat: (conversationId: string, entry: BtwEntry) => void;
-	onRenameConversation: (id: string, title: string) => void;
-	onSelectConversation: (id: string) => void;
-	/** Set or clear a conversation's Notion-style glyph. */
-	onSetConversationIcon: (id: string, icon: GlyphValue) => void;
-	onToggleArchive: (id: string) => void;
-	onTogglePin: (id: string) => void;
-	pinnedIds: Set<string>;
-	/** Node target for lazily listing a conversation's side chats. */
-	target: ApiTarget;
-	unreadIds: Set<string>;
+
+interface ConversationListEntry {
+	conversation?: Conversation;
+	groupKey?: string;
+	threads?: Conversation[];
 }
 
-/** Lazily-loaded list of a conversation's persisted `/btw` side chats, shown
- *  indented under its row. Only mounted when the row is expanded, so collapsed
- *  rows never hit Core. Reads the node target through a ref so the fresh
- *  `toTarget()` object identity each render doesn't retrigger the fetch (see the
- *  desktop target-object deps gotcha). */
-function SidebarSideChats({
-	conversationId,
-	target,
-	onOpen,
-}: {
-	conversationId: string;
-	onOpen: (entry: BtwEntry) => void;
-	target: ApiTarget;
-}) {
-	const [entries, setEntries] = useState<BtwEntry[]>([]);
-	const [loading, setLoading] = useState(true);
-	const targetRef = useRef(target);
-	targetRef.current = target;
-
-	useEffect(() => {
-		const controller = new AbortController();
-		listBtw(targetRef.current, conversationId, controller.signal)
-			.then((list) => {
-				if (!controller.signal.aborted) {
-					setEntries(list);
-				}
-			})
-			.catch(() => {
-				/* treated as no side chats */
-			})
-			.finally(() => {
-				if (!controller.signal.aborted) {
-					setLoading(false);
-				}
-			});
-		return () => controller.abort();
-	}, [conversationId]);
-
-	if (loading) {
-		return <p className="py-1 pl-8 text-muted-foreground text-xs">Loading…</p>;
-	}
-	if (entries.length === 0) {
-		return (
-			<p className="py-1 pl-8 text-muted-foreground text-xs">No side chats</p>
-		);
-	}
-	return (
-		<SidebarMenu className="gap-0.5">
-			{entries.map((entry) => (
-				<SidebarMenuItem key={entry.id}>
-					<button
-						className="flex h-7 w-full items-center gap-2 rounded-md pr-2 pl-8 text-left transition-colors hover:bg-muted"
-						onClick={() => onOpen(entry)}
-						type="button"
-					>
-						<HugeiconsIcon
-							className="size-3 shrink-0 text-muted-foreground"
-							icon={MessageQuestionIcon}
-						/>
-						<OverflowTooltip
-							className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-muted-foreground text-xs"
-							fade
-							text={entry.question}
-						/>
-					</button>
-				</SidebarMenuItem>
-			))}
-		</SidebarMenu>
-	);
-}
-
-/** Lazily loads title history for the chat-row hover preview. */
-function ChatTitleHistoryPreview({
-	conversationId,
-	target,
-}: {
-	conversationId: string;
-	target: ApiTarget;
-}) {
-	const [entries, setEntries] = useState<TitleHistoryEntry[]>([]);
-	const targetRef = useRef(target);
-	targetRef.current = target;
-
-	useEffect(() => {
-		let cancelled = false;
-		getConversationTitleHistory(targetRef.current, conversationId).then(
-			(rows) => {
-				if (!cancelled) {
-					setEntries(rows);
-				}
-			}
-		);
-		return () => {
-			cancelled = true;
+/** Collapse all conversations with the same participant set into one group
+ *  header while preserving the original activity order. */
+function groupConversationEntries(
+	conversations: Conversation[]
+): ConversationListEntry[] {
+	const entries: ConversationListEntry[] = [];
+	const groups = new Map<string, ConversationListEntry>();
+	for (const conversation of conversations) {
+		const groupKey = conversationGroupKey(conversation);
+		if (!groupKey) {
+			entries.push({ conversation });
+			continue;
+		}
+		const existing = groups.get(groupKey);
+		if (existing) {
+			existing.threads?.push(conversation);
+			continue;
+		}
+		const entry: ConversationListEntry = {
+			groupKey,
+			threads: [conversation],
 		};
-	}, [conversationId]);
-
-	return <SidebarPreviewTitleHistory entries={entries} />;
+		groups.set(groupKey, entry);
+		entries.push(entry);
+	}
+	return entries;
 }
 
-/** A single-line chat row, Codex style: title only, actions on hover.
- *
- *  Exported for `e2e/harness/chat-row-menus-story.tsx`, which mounts the real row
- *  to prove its ⋯ dropdown and its right-click menu list the SAME app-contributed
- *  rows — a fact no type-check can see, and one the two menus had already lost. */
-export function ChatRow({
-	conv,
+function groupParticipantLabel(
+	conversation: Conversation,
+	agents: AgentSummary[]
+): string {
+	const names = conversationParticipantIds(conversation).map(
+		(id) => agents.find((agent) => agent.id === id)?.name ?? id
+	);
+	if (names.length === 0) {
+		return "Multiple participants";
+	}
+	if (names.length <= 3) {
+		return names.join(" · ");
+	}
+	return `${names.slice(0, 2).join(" · ")} +${names.length - 2}`;
+}
+
+/** One group-chat header with the same paginated child rows used by the rest of
+ *  the sidebar. The child rows remain real ChatRows, so rename/archive/open and
+ *  the existing Messages/Side chats accordions keep their behavior. */
+function GroupChatRow({
 	handlers,
+	pageSize,
+	threads,
 }: {
-	conv: Conversation;
 	handlers: ChatRowHandlers;
+	pageSize: number;
+	threads: Conversation[];
 }) {
-	const {
-		activeConversationId,
-		agents,
-		archivedIds,
-		pinnedIds,
-		unreadIds,
-		loadMessages,
-		onDeleteConversation,
-		onJumpToMessage,
-		onMarkRead,
-		onMarkUnread,
-		onOpenInNewTab,
-		onOpenSideChat,
-		onRenameConversation,
-		onSelectConversation,
-		onSetConversationIcon,
-		onToggleArchive,
-		onTogglePin,
-		target,
-	} = handlers;
-	const isActive = activeConversationId === conv.id;
-	const isUnread = unreadIds.has(conv.id);
-	const isPinned = pinnedIds.has(conv.id);
-	const isArchived = archivedIds.has(conv.id);
-	const runStatus = conversationRunStatusMeta(conv.runStatus);
-	// A state that cannot make progress without attention badges itself even when
-	// the chat is read. In particular, interrupted is not failed: it is a partial
-	// reply Core recovered after the local engine stopped, and it cannot auto-resume.
-	const showDot = isUnread || runStatus?.needsAttention === true;
-	const isRunning = runStatus?.isRunning === true;
-	// Who last took this thread. The row leads with that agent's mark — the same
-	// avatar the Messages sub-accordion puts on each turn — so a sidebar full of
-	// chats says WHO is on each one before it says anything else.
-	//
-	// A council thread (more than one participant) reads its LAST entry: Core
-	// appends on join and never sorts (`add_participant`), so that is the most
-	// recent joiner. Anything else prefers `agentId`, which tracks the agent the
-	// chat is bound to NOW — on a thread whose agent was swapped, a one-entry
-	// participants list still holds the original.
-	const participants = conv.participants ?? [];
-	const latestAgentId =
-		participants.length > 1
-			? participants.at(-1)
-			: (conv.agentId ?? participants[0] ?? null);
-	const latestAgent = latestAgentId
-		? agents.find((a) => a.id === latestAgentId)
-		: undefined;
-	// Ring colour matches the surface the badge sits ON, which is the sidebar at
-	// rest and `muted` once the row is hovered or active — a fixed sidebar-coloured
-	// ring would read as a mis-tinted halo on exactly the row being pointed at.
-	const dotRingClass = isActive
-		? "ring-2 ring-muted"
-		: "ring-2 ring-sidebar group-hover/row:ring-muted";
-
-	const pinLabel = isPinned ? "Unpin" : "Pin";
-	const pinIcon = isPinned ? PinOffIcon : PinIcon;
-	const archiveLabel = isArchived ? "Unarchive" : "Archive";
-	const archiveIcon = isArchived ? ArchiveRestoreIcon : Archive01Icon;
-	const readLabel = isUnread ? "Mark as read" : "Mark as unread";
-	const [learningExcluded, setLearningExcluded] = useState(false);
-
-	useEffect(() => {
-		let cancelled = false;
-		getConversationLearningExclusion(target, conv.id)
-			.then(({ excluded }) => {
-				if (!cancelled) {
-					setLearningExcluded(excluded);
-				}
-			})
-			.catch(() => undefined);
-		return () => {
-			cancelled = true;
-		};
-	}, [conv.id, target.token, target.url]);
-
-	const toggleLearningExclusion = useCallback(() => {
-		const next = !learningExcluded;
-		setLearningExcluded(next);
-		setConversationLearningExclusion(target, conv.id, next).catch(() => {
-			setLearningExcluded(!next);
-			toast.error("Couldn't update this chat's learning privacy", {
-				description: "Check your connection and try again.",
-			});
-		});
-	}, [conv.id, learningExcluded, target.token, target.url]);
-	const learningLabel = learningExcluded
-		? "Include in learning"
-		: "Exclude from learning";
-
-	// App-registered conversation-menu rows from the contributions feed, filtered
-	// to the `conversation` anchor. The "Make a skill from this chat" row is a
-	// Learning contribution, not a hardcoded menu item — disabling the app removes
-	// the row. Each row dispatches its declared capability through the owning
-	// plugin's granted host seam (`pluginHostInvoke`), never inline code.
-	const { context_menu_items } = usePluginContributions();
-	const contributedMenuRows = useMemo(
-		() =>
-			context_menu_items
-				.filter((item) => item.anchor === "conversation")
-				.sort(
-					(a, b) =>
-						(a.order ?? Number.MAX_SAFE_INTEGER) -
-						(b.order ?? Number.MAX_SAFE_INTEGER)
-				),
-		[context_menu_items]
-	);
-
-	// One dispatcher, both surfaces. The ⋯ dropdown and the right-click menu are
-	// separate primitives (`DropdownMenuItem` vs `ContextMenuItem`, so the rendered
-	// rows genuinely cannot be shared), but the *action* must be defined once —
-	// they had already drifted, with the right-click menu shipping no contributed
-	// rows at all.
-	const runContributedRow = useCallback(
-		(item: PluginContextMenuItem) => {
-			const feedback = item.feedback;
-			const run = () =>
-				pluginHostInvoke(target, item.plugin, item.capability ?? "", {
-					...item.args,
-					conversation_id: conv.id,
-				});
-			// `success` is passed unconditionally. That collapses what used to be two
-			// branches here without changing behavior: `toastPromise` already falls
-			// back to `loading` when `success` is omitted (`sileo.tsx`), so the
-			// no-feedback case resolved to this exact label before too.
-			toast.promise(run(), {
-				loading: feedback?.loading ?? item.label,
-				success: feedback?.success ?? item.label,
-				error: feedback?.error ?? `${item.label} failed`,
-			});
-		},
-		[conv.id, target]
-	);
-
-	// Inline rename: when `isEditing`, the title is replaced by a text input.
-	// Commit on Enter / blur, cancel on Escape. Seeded from the current title.
-	const [isEditing, setIsEditing] = useState(false);
-	const [draftTitle, setDraftTitle] = useState(conv.title);
-	const inputRef = useRef<HTMLInputElement | null>(null);
-	const [isRowHovered, setIsRowHovered] = useState(false);
-
-	// Row disclosure expands nested Messages + Side chats sub-accordions.
-	const [rowExpanded, setRowExpanded] = useState(false);
-	const [messagesExpanded, setMessagesExpanded] = useState(true);
-	const [sideChatsExpanded, setSideChatsExpanded] = useState(false);
-
-	// Deleting a chat is permanent, so both the dropdown and context-menu Delete
-	// actions open a confirmation dialog rather than wiping the thread outright.
-	const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
-	const [iconDialogOpen, setIconDialogOpen] = useState(false);
-
-	const startEditing = () => {
-		setDraftTitle(conv.title);
-		setIsEditing(true);
-	};
-	const commitEditing = () => {
-		if (!isEditing) {
-			return;
-		}
-		setIsEditing(false);
-		const next = draftTitle.trim();
-		if (next && next !== conv.title) {
-			onRenameConversation(conv.id, next);
-		}
-	};
-	const cancelEditing = () => setIsEditing(false);
-
-	useEffect(() => {
-		if (isEditing) {
-			inputRef.current?.focus();
-			inputRef.current?.select();
-		}
-	}, [isEditing]);
-
-	// The FULL folder path, not its leaf. The leaf is the project name the row is
-	// already filed under, so it carried no information at all; the path is the
-	// only place the user can see which of two same-named folders a chat belongs
-	// to (and the only way to tell an imported thread's folder from a native one).
-	const folderPath = conv.folderPath || null;
-	const worktreeLeaf = conv.worktreePath
-		? (conv.worktreePath.split(PATH_SEP_RE).pop() ?? conv.worktreePath)
-		: null;
-	const previewContent = (
-		<SidebarPreviewTitle title={conv.title}>
-			{conv.branch ? (
-				<SidebarPreviewMeta label="Branch" value={conv.branch} />
-			) : null}
-			{folderPath ? (
-				<SidebarPreviewMeta label="Folder" value={folderPath} wrap />
-			) : null}
-			{worktreeLeaf ? (
-				<SidebarPreviewMeta label="Worktree" value={worktreeLeaf} />
-			) : null}
-			{(conv.participants?.length || conv.agentId) && (
-				// `items-center`, not `items-baseline`: the value column holds avatars,
-				// and a baseline box aligns the text's baseline while the 14px image sits
-				// on it — which reads as the logo hanging below its own name.
-				<div className="flex min-w-0 items-center gap-2 text-xs">
-					<span className="shrink-0 text-muted-foreground">Agents</span>
-					<span className="flex min-w-0 flex-wrap items-center gap-1.5">
-						{(conv.participants ?? (conv.agentId ? [conv.agentId] : [])).map(
-							(id) => {
-								const agent = agents.find((a) => a.id === id);
-								return (
-									<span className="flex items-center gap-1" key={id}>
-										<AgentAvatar
-											avatarUrl={agent?.avatarUrl}
-											className="size-3.5 shrink-0 rounded-[2px] object-contain"
-											engine={engineForAgent({
-												id,
-												engine: agent?.engine ?? null,
-												builtIn: null,
-											})}
-											size="14px"
-										/>
-										<span className="truncate text-foreground/90">
-											{agent?.name ?? id.split("/").pop() ?? id}
-										</span>
-									</span>
-								);
-							}
-						)}
-					</span>
-				</div>
-			)}
-			{conv.runStatus ? (
-				<SidebarPreviewMeta
-					label="Status"
-					value={runStatus?.label ?? conv.runStatus}
-				/>
-			) : null}
-			<ChatTitleHistoryPreview conversationId={conv.id} target={target} />
-		</SidebarPreviewTitle>
-	);
-
+	const [expanded, setExpanded] = useState(false);
+	const paged = usePaged(threads, pageSize);
+	const latest = threads[0];
+	if (!latest) {
+		return null;
+	}
+	const participants = conversationParticipantIds(latest);
+	const participantLabel = groupParticipantLabel(latest, handlers.agents);
+	const preview = latest.lastMessage?.trim();
+	const openLatest = () => handlers.onSelectConversation(latest.id);
 	return (
 		<SidebarMenuItem>
-			<ContextMenu>
-				<ContextMenuTrigger>
-					{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-					<div
-						className={`group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted ${isActive ? "bg-muted" : ""}`}
-						onAuxClick={(e) => {
-							// Middle-click opens the chat in a new tab.
-							if (e.button === 1) {
-								e.preventDefault();
-								onOpenInNewTab(conv.id);
-							}
-						}}
-						onClick={() => onSelectConversation(conv.id)}
-						onKeyDown={(e) => {
-							if (e.key === "Enter") {
-								onSelectConversation(conv.id);
-							}
-						}}
-						onMouseEnter={() => setIsRowHovered(true)}
-						onMouseLeave={() => setIsRowHovered(false)}
-						role="button"
-						tabIndex={0}
-					>
-						<button
-							aria-label={
-								rowExpanded ? "Collapse chat details" : "Expand chat details"
-							}
-							className="relative flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
-							onClick={(e) => {
-								e.stopPropagation();
-								setRowExpanded((v) => !v);
-							}}
-							type="button"
-						>
-							{/* The agent that last took this thread, in the same slot the
-							    chevron lives in: shown at rest, crossfading out on hover (and
-							    hidden while expanded) so the disclosure affordance can morph
-							    in exactly as it did when this slot held only a dot. */}
-							{latestAgent && (
-								<AgentAvatar
-									avatarUrl={latestAgent.avatarUrl}
-									className={`absolute inset-0 m-auto size-4 rounded-[3px] object-contain transition-opacity ${
-										rowExpanded
-											? "opacity-0"
-											: "opacity-100 group-hover/row:opacity-0"
-									}`}
-									engine={engineForAgent(latestAgent)}
-									size="16px"
-								/>
-							)}
-							{/* Status dot. With an avatar it becomes a badge pinned to the
-							    avatar's top-right corner, ringed in the colour of whatever
-							    surface is behind it, and stays put through hover — the avatar
-							    fades to reveal the chevron, but "unread" / "this run failed"
-							    must not blink out from under the pointer. Without an agent
-							    there is nothing to badge, so it keeps its original behaviour:
-							    centred in the slot, crossfading out for the chevron.
-							    Deliberately outside the `latestAgent` branch — an agentless
-							    chat losing its unread state entirely is the bug this shape
-							    exists to avoid. */}
-							{showDot &&
-								(latestAgent ? (
-									<span
-										aria-label={runStatus?.description ?? "Unread"}
-										className={`absolute -top-0.5 -right-0.5 size-1.5 rounded-full ${dotRingClass} ${runStatus?.dotClass ?? "bg-primary"}`}
-										title={runStatus?.description ?? "Unread"}
-									/>
-								) : (
-									<span
-										aria-label={runStatus?.description ?? "Unread"}
-										className={`absolute inset-0 m-auto size-1.5 rounded-full transition-opacity ${
-											rowExpanded
-												? "opacity-0"
-												: "opacity-100 group-hover/row:opacity-0"
-										} ${runStatus?.dotClass ?? "bg-primary"}`}
-										title={runStatus?.description ?? "Unread"}
-									/>
-								))}
-							{/* Chevron: hidden at rest, fades in on hover; always shown (and
-							    un-rotated) once expanded so it can be collapsed again. */}
-							<HugeiconsIcon
-								className={`size-3 transition-all ${
-									rowExpanded
-										? "opacity-100"
-										: "-rotate-90 opacity-0 group-hover/row:opacity-100"
-								}`}
-								icon={ArrowDown01Icon}
-							/>
-						</button>
-						{conv.icon ? (
-							<span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground">
-								<GlyphDisplay fallback={null} size={14} value={conv.icon} />
+			{/* biome-ignore lint/a11y/useSemanticElements: group header owns a disclosure button and a row-level open action */}
+			<div
+				className="group/group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-muted"
+				onClick={openLatest}
+				onKeyDown={(event) => {
+					if (event.key === "Enter") {
+						openLatest();
+					}
+				}}
+				role="button"
+				tabIndex={0}
+			>
+				<button
+					aria-expanded={expanded}
+					aria-label={`${expanded ? "Collapse" : "Expand"} group chat threads`}
+					className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
+					onClick={(event) => {
+						event.stopPropagation();
+						setExpanded((value) => !value);
+					}}
+					type="button"
+				>
+					<HugeiconsIcon
+						className={`size-3 transition-transform ${expanded ? "" : "-rotate-90"}`}
+						icon={ArrowDown01Icon}
+					/>
+				</button>
+				<ParticipantOrbitAvatar
+					agents={handlers.agents}
+					participants={participants}
+					size="md"
+				/>
+				<span className="min-w-0 flex-1">
+					<span className="flex min-w-0 items-center gap-2">
+						<span className="truncate font-medium text-sm">Group chat</span>
+						<span className="shrink-0 text-[10px] text-muted-foreground/70 tabular-nums">
+							{compactAge(latest.updatedAt)}
+						</span>
+					</span>
+					<span className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
+						<span className="min-w-0 flex-1 truncate">{participantLabel}</span>
+						{preview ? (
+							<span className="max-w-[45%] truncate text-muted-foreground/70">
+								{preview}
 							</span>
 						) : null}
-						{isPinned && (
-							<HugeiconsIcon
-								className="size-3 shrink-0 text-muted-foreground/70"
-								icon={PinIcon}
+					</span>
+				</span>
+				<span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground tabular-nums">
+					{formatCount(threads.length) ?? "—"}
+				</span>
+			</div>
+			{expanded ? (
+				<div className="relative ml-7 border-sidebar-border/70 border-l pl-2">
+					<SidebarMenu className="gap-0.5">
+						{paged.visible.map((conversation) => (
+							<ChatRow
+								conv={conversation}
+								handlers={handlers}
+								key={conversation.id}
 							/>
-						)}
-						{isEditing ? (
-							<input
-								className="min-w-0 flex-1 rounded-sm bg-transparent text-sm outline-none ring-1 ring-primary/40 focus:ring-primary"
-								onBlur={commitEditing}
-								onChange={(e) => setDraftTitle(e.target.value)}
-								onClick={(e) => e.stopPropagation()}
-								onKeyDown={(e) => {
-									e.stopPropagation();
-									if (e.key === "Enter") {
-										commitEditing();
-									} else if (e.key === "Escape") {
-										cancelEditing();
-									}
-								}}
-								ref={inputRef}
-								value={draftTitle}
-							/>
-						) : (
-							// Wrap the preview so a double-click on the title starts an
-							// inline rename (SidebarItemPreview doesn't forward DOM handlers).
-							// biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: double-click rename on tooltip wrapper
-							<span
-								className="flex min-w-0 flex-1"
-								onDoubleClick={(e) => {
-									e.stopPropagation();
-									startEditing();
-								}}
-							>
-								{/* One label for both states (FadeLabel, not OverflowTooltip —
-								    the row already has the hover-card preview, and a second
-								    popup would fight it). Running only swaps the shimmer onto
-								    the same clipped line, so the title dissolves at the edge in
-								    either state and the row cannot jump when a run starts. */}
-								<SidebarItemPreview className="p-1" content={previewContent}>
-									<FadeLabel
-										autoScroll={isRowHovered}
-										className={`flex-1 text-sm ${isUnread ? "font-medium" : ""}`}
-										shimmer={isRunning}
-										text={conv.title}
-									/>
-								</SidebarItemPreview>
-							</span>
-						)}
-						{isRunning ? (
-							// A live run shows a spinner in place of the age (like ChatGPT's
-							// per-chat "running" indicator) so several concurrent chats are
-							// legible at a glance. Hidden on hover so the ⋯ menu can take its slot.
-							<Spinner
-								aria-label="Running"
-								className="size-3.5 shrink-0 text-muted-foreground/70 group-hover/row:hidden"
-							/>
-						) : runStatus?.needsAttention ? (
-							<span
-								className={`shrink-0 text-[10px] tabular-nums ${
-									conv.runStatus === "failed"
-										? "text-destructive"
-										: "text-amber-600 dark:text-amber-400"
-								}`}
-								title={runStatus.description}
-							>
-								{runStatus.label}
-							</span>
-						) : (
-							<span className="shrink-0 text-muted-foreground/70 text-xs tabular-nums group-hover/row:hidden">
-								{compactAge(conv.updatedAt)}
-							</span>
-						)}
-						<button
-							aria-label={pinLabel}
-							aria-pressed={isPinned}
-							className="hidden h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-accent group-hover/row:inline-flex"
-							onClick={(e) => {
-								e.stopPropagation();
-								onTogglePin(conv.id);
-							}}
-							type="button"
-						>
-							<HugeiconsIcon icon={pinIcon} size={12} />
-						</button>
-						<button
-							aria-label={archiveLabel}
-							aria-pressed={isArchived}
-							className="hidden h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-accent group-hover/row:inline-flex"
-							onClick={(e) => {
-								e.stopPropagation();
-								onToggleArchive(conv.id);
-							}}
-							type="button"
-						>
-							<HugeiconsIcon icon={archiveIcon} size={12} />
-						</button>
-						<DropdownMenu>
-							{/* data-[popup-open] keeps the trigger visible while the menu is
-							    open. Without it, moving onto the menu drops group-hover, the
-							    trigger goes display:none, and Base UI loses its anchor (the menu
-							    jumps to the top-left). Base UI sets data-popup-open, not
-							    data-state, on the trigger. */}
-							<DropdownMenuTrigger
-								className="hidden h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-accent group-hover/row:inline-flex data-[popup-open]:inline-flex"
-								onClick={(e) => e.stopPropagation()}
-							>
-								<HugeiconsIcon icon={MoreHorizontalIcon} size={12} />
-							</DropdownMenuTrigger>
-							<DropdownMenuContent align="end">
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										onOpenInNewTab(conv.id);
-									}}
-								>
-									<HugeiconsIcon
-										className="mr-2"
-										icon={ArrowUpRight01Icon}
-										size={12}
-									/>
-									Open in new tab
-								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										void copyChatTranscript(() => loadMessages(conv.id));
-									}}
-								>
-									<HugeiconsIcon
-										className="mr-2"
-										icon={ClipboardIcon}
-										size={12}
-									/>
-									Copy transcript
-								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										if (isUnread) {
-											onMarkRead(conv.id);
-										} else {
-											onMarkUnread(conv.id);
-										}
-									}}
-								>
-									<HugeiconsIcon className="mr-2" icon={Mail01Icon} size={12} />
-									{readLabel}
-								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										startEditing();
-									}}
-								>
-									<HugeiconsIcon
-										className="mr-2"
-										icon={PencilEdit01Icon}
-										size={12}
-									/>
-									Rename
-								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										setIconDialogOpen(true);
-									}}
-								>
-									<HugeiconsIcon
-										className="mr-2"
-										icon={ImageAdd01Icon}
-										size={12}
-									/>
-									Change icon…
-								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										onTogglePin(conv.id);
-									}}
-								>
-									<HugeiconsIcon className="mr-2" icon={pinIcon} size={12} />
-									{pinLabel}
-								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										onToggleArchive(conv.id);
-									}}
-								>
-									<HugeiconsIcon
-										className="mr-2"
-										icon={archiveIcon}
-										size={12}
-									/>
-									{archiveLabel}
-								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										toggleLearningExclusion();
-									}}
-								>
-									<HugeiconsIcon
-										className="mr-2"
-										icon={ViewOffSlashIcon}
-										size={12}
-									/>
-									{learningLabel}
-								</DropdownMenuItem>
-								{contributedMenuRows.length > 0 && <DropdownMenuSeparator />}
-								{contributedMenuRows.map((item) => (
-									<DropdownMenuItem
-										key={item.id}
-										onClick={(e) => {
-											e.stopPropagation();
-											runContributedRow(item);
-										}}
-									>
-										{item.icon ? (
-											<Icon className="mr-2" icon={item.icon} size={12} />
-										) : (
-											<HugeiconsIcon
-												className="mr-2"
-												icon={MoreHorizontalIcon}
-												size={12}
-											/>
-										)}
-										{item.label}
-									</DropdownMenuItem>
-								))}
-								<DropdownMenuSeparator />
-								<DropdownMenuItem
-									className="text-destructive"
-									onClick={(e) => {
-										e.stopPropagation();
-										setConfirmDeleteOpen(true);
-									}}
-								>
-									<HugeiconsIcon
-										className="mr-2"
-										icon={Delete01Icon}
-										size={12}
-									/>
-									Delete
-								</DropdownMenuItem>
-							</DropdownMenuContent>
-						</DropdownMenu>
-					</div>
-				</ContextMenuTrigger>
-				<ContextMenuContent>
-					<ContextMenuItem onClick={() => onOpenInNewTab(conv.id)}>
-						<HugeiconsIcon className="mr-2 size-4" icon={ArrowUpRight01Icon} />
-						Open in new tab
-					</ContextMenuItem>
-					<ContextMenuItem
-						onClick={() => {
-							void copyChatTranscript(() => loadMessages(conv.id));
+						))}
+					</SidebarMenu>
+					<SectionPagingControls
+						overflow={{
+							getSearchText: (conversation) => conversation.title,
+							items: paged.items,
+							label: "group threads",
+							renderList: (list) => (
+								<SidebarMenu className="gap-0.5">
+									{list.map((conversation) => (
+										<ChatRow
+											conv={conversation}
+											handlers={handlers}
+											key={conversation.id}
+										/>
+									))}
+								</SidebarMenu>
+							),
 						}}
-					>
-						<HugeiconsIcon className="mr-2 size-4" icon={ClipboardIcon} />
-						Copy transcript
-					</ContextMenuItem>
-					<ContextMenuItem
-						onClick={() =>
-							isUnread ? onMarkRead(conv.id) : onMarkUnread(conv.id)
-						}
-					>
-						<HugeiconsIcon className="mr-2 size-4" icon={Mail01Icon} />
-						{readLabel}
-					</ContextMenuItem>
-					<ContextMenuItem onClick={startEditing}>
-						<HugeiconsIcon className="mr-2 size-4" icon={PencilEdit01Icon} />
-						Rename
-					</ContextMenuItem>
-					<ContextMenuItem onClick={() => setIconDialogOpen(true)}>
-						<HugeiconsIcon className="mr-2 size-4" icon={ImageAdd01Icon} />
-						Change icon…
-					</ContextMenuItem>
-					<ContextMenuItem onClick={() => onTogglePin(conv.id)}>
-						<HugeiconsIcon className="mr-2 size-4" icon={pinIcon} />
-						{pinLabel}
-					</ContextMenuItem>
-					<ContextMenuItem onClick={() => onToggleArchive(conv.id)}>
-						<HugeiconsIcon className="mr-2 size-4" icon={archiveIcon} />
-						{archiveLabel}
-					</ContextMenuItem>
-					<ContextMenuItem onClick={toggleLearningExclusion}>
-						<HugeiconsIcon className="mr-2 size-4" icon={ViewOffSlashIcon} />
-						{learningLabel}
-					</ContextMenuItem>
-					{/* Same contributed rows the ⋯ dropdown renders, in the same slot and
-					    order. Right-clicking a chat is the more discoverable gesture of the
-					    two, so an app-registered row missing here read as the app simply
-					    not contributing anything. */}
-					{contributedMenuRows.length > 0 && <ContextMenuSeparator />}
-					{contributedMenuRows.map((item) => (
-						<ContextMenuItem
-							key={item.id}
-							onClick={() => runContributedRow(item)}
-						>
-							{item.icon ? (
-								<Icon className="mr-2 size-4" icon={item.icon} size={16} />
-							) : (
-								<HugeiconsIcon
-									className="mr-2 size-4"
-									icon={MoreHorizontalIcon}
-								/>
-							)}
-							{item.label}
-						</ContextMenuItem>
-					))}
-					<ContextMenuSeparator />
-					<ContextMenuItem
-						className="text-destructive"
-						onClick={() => setConfirmDeleteOpen(true)}
-					>
-						<HugeiconsIcon className="mr-2 size-4" icon={Delete01Icon} />
-						Delete
-					</ContextMenuItem>
-				</ContextMenuContent>
-			</ContextMenu>
-			{rowExpanded && (
-				<div className="flex flex-col gap-0.5 pb-1">
-					<ChatRowSubAccordion
-						expanded={messagesExpanded}
-						label="Messages"
-						onToggle={() => setMessagesExpanded((v) => !v)}
-					>
-						<SidebarChatMessages
-							agentId={conv.agentId}
-							conversationId={conv.id}
-							loadMessages={loadMessages}
-							onJump={(messageId) => onJumpToMessage(conv.id, messageId)}
-						/>
-					</ChatRowSubAccordion>
-					<ChatRowSubAccordion
-						expanded={sideChatsExpanded}
-						label="Side chats"
-						onToggle={() => setSideChatsExpanded((v) => !v)}
-					>
-						<SidebarSideChats
-							conversationId={conv.id}
-							onOpen={(entry) => onOpenSideChat(conv.id, entry)}
-							target={target}
-						/>
-					</ChatRowSubAccordion>
+						paged={paged}
+					/>
 				</div>
-			)}
-			<AlertDialog onOpenChange={setConfirmDeleteOpen} open={confirmDeleteOpen}>
-				<AlertDialogContent>
-					<AlertDialogHeader>
-						<AlertDialogTitle>Delete this chat?</AlertDialogTitle>
-						<AlertDialogDescription>
-							{`"${conv.title}" will be permanently deleted. This cannot be undone.`}
-						</AlertDialogDescription>
-					</AlertDialogHeader>
-					<AlertDialogFooter>
-						<AlertDialogCancel>Cancel</AlertDialogCancel>
-						<AlertDialogAction
-							onClick={() => onDeleteConversation(conv.id)}
-							variant="destructive"
-						>
-							Delete
-						</AlertDialogAction>
-					</AlertDialogFooter>
-				</AlertDialogContent>
-			</AlertDialog>
-			<EntityIconDialog
-				description={conv.title}
-				onChange={(icon) => onSetConversationIcon(conv.id, icon)}
-				onOpenChange={setIconDialogOpen}
-				open={iconDialogOpen}
-				title="Chat icon"
-				value={conv.icon ?? null}
-			/>
+			) : null}
 		</SidebarMenuItem>
 	);
 }
 
-/** Renders a flat list of chat rows sharing the same handler bundle. */
+/** Renders chat rows, converging multi-participant conversations into group
+ *  chats with expandable/paginated child threads. */
 function ChatRowList({
 	className,
 	conversations,
 	handlers,
+	groupMultiParticipant = true,
+	pageSize = DEFAULT_PAGE_SIZE,
 }: {
 	className?: string;
 	conversations: Conversation[];
+	groupMultiParticipant?: boolean;
 	handlers: ChatRowHandlers;
+	pageSize?: number;
 }) {
+	const entries: ConversationListEntry[] = groupMultiParticipant
+		? groupConversationEntries(conversations)
+		: conversations.map((conversation) => ({ conversation }));
 	return (
 		<SidebarMenu className={className ?? "gap-0.5"}>
-			{conversations.map((conv) => (
-				<ChatRow conv={conv} handlers={handlers} key={conv.id} />
-			))}
+			{entries.map((entry) =>
+				entry.threads ? (
+					<GroupChatRow
+						handlers={handlers}
+						key={entry.groupKey}
+						pageSize={pageSize}
+						threads={entry.threads}
+					/>
+				) : entry.conversation ? (
+					<ChatRow
+						conv={entry.conversation}
+						handlers={handlers}
+						key={entry.conversation.id}
+					/>
+				) : null
+			)}
 		</SidebarMenu>
+	);
+}
+
+/** The production conversation-list seam, exported for browser stories that
+ *  need to exercise grouping without mounting the whole desktop shell. */
+export function SidebarConversationList({
+	conversations,
+	groupMultiParticipant = true,
+	handlers,
+	pageSize = DEFAULT_PAGE_SIZE,
+}: {
+	conversations: Conversation[];
+	groupMultiParticipant?: boolean;
+	handlers: ChatRowHandlers;
+	pageSize?: number;
+}) {
+	return (
+		<ChatRowList
+			conversations={conversations}
+			groupMultiParticipant={groupMultiParticipant}
+			handlers={handlers}
+			pageSize={pageSize}
+		/>
 	);
 }
 
@@ -2065,10 +1460,14 @@ interface ProjectBucket {
 	conversations: Conversation[];
 	name: string;
 	path: string;
+	sourceFolders: string[];
 }
 
 /** Group conversations by their workspace folder (Codex-style projects). */
-function groupByProject(convs: Conversation[]): {
+function groupByProject(
+	convs: Conversation[],
+	workspaceProjects: readonly WorkspaceProject[] = []
+): {
 	projects: ProjectBucket[];
 	loose: Conversation[];
 } {
@@ -2076,19 +1475,30 @@ function groupByProject(convs: Conversation[]): {
 	// native run's folder are produced by different writers and differ by
 	// punctuation often enough that raw equality split one project in two.
 	const projects = new Map<string, ProjectBucket>();
+	const projectByFolder = new Map<string, WorkspaceProject>();
+	for (const project of workspaceProjects) {
+		for (const folder of project.folders) {
+			projectByFolder.set(folderKey(folder), project);
+		}
+	}
 	const loose: Conversation[] = [];
 	for (const conv of convs) {
 		if (!conv.folderPath) {
 			loose.push(conv);
 			continue;
 		}
-		const existing = projects.get(folderKey(conv.folderPath));
+		const workspaceProject = projectByFolder.get(folderKey(conv.folderPath));
+		const projectPath = workspaceProject?.folders[0] ?? conv.folderPath;
+		const existing = projects.get(folderKey(projectPath));
 		if (existing) {
 			existing.conversations.push(conv);
 		} else {
-			projects.set(folderKey(conv.folderPath), {
-				name: conv.folderPath.split(PATH_SEP_RE).pop() ?? conv.folderPath,
-				path: conv.folderPath,
+			projects.set(folderKey(projectPath), {
+				name: workspaceProject
+					? workspaceProjectName(workspaceProject)
+					: projectFolderLeaf(projectPath),
+				path: projectPath,
+				sourceFolders: workspaceProject?.folders ?? [conv.folderPath],
 				conversations: [conv],
 			});
 		}
@@ -2121,6 +1531,8 @@ interface SectionMenu {
 interface SectionProps {
 	collapsed: boolean;
 	dnd: SectionDnd;
+	/** Shared section glyph used by both the stacked header and tabbed selector. */
+	icon?: IconSvgElement;
 	menu: SectionMenu;
 	onToggleCollapsed: (key: SectionKey) => void;
 	/** Items to show before a "Show more" control (0 means show all). */
@@ -2320,6 +1732,7 @@ function SidebarSection({
 	collapsed,
 	dnd,
 	icon,
+	iconNode,
 	label,
 	menu,
 	onToggleCollapsed,
@@ -2332,6 +1745,7 @@ function SidebarSection({
 	action?: ReactNode;
 	children: ReactNode;
 	icon?: IconSvgElement;
+	iconNode?: ReactNode;
 	label: string;
 	sectionKey: SectionKey;
 	title?: string;
@@ -2363,7 +1777,8 @@ function SidebarSection({
 			}}
 			type="button"
 		>
-			{icon && <HugeiconsIcon className="size-3.5 shrink-0" icon={icon} />}
+			{iconNode ??
+				(icon && <HugeiconsIcon className="size-3.5 shrink-0" icon={icon} />)}
 			<span className="min-w-0 truncate">{label}</span>
 			<HugeiconsIcon
 				className={`-ml-1 size-3 shrink-0 opacity-0 transition group-hover/hdr:opacity-100 ${collapsed ? "-rotate-90" : ""}`}
@@ -2389,7 +1804,7 @@ function SidebarSection({
 		>
 			{isDragOver && (
 				<div
-					className={`pointer-events-none absolute inset-x-2 z-10 h-0.5 rounded-full bg-primary ${dropBelow ? "bottom-0" : "top-0"}`}
+					className={`reorder-drop-indicator pointer-events-none absolute inset-x-2 z-10 h-0.5 bg-primary ${dropBelow ? "bottom-0" : "top-0"}`}
 				/>
 			)}
 			{(() => {
@@ -2486,13 +1901,13 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 						{showBefore && (
 							<span
 								aria-hidden
-								className="pointer-events-none absolute inset-x-1 -top-0.5 z-20 h-0.5 rounded-full bg-primary"
+								className="reorder-drop-indicator pointer-events-none absolute inset-x-1 -top-0.5 z-20 h-0.5 bg-primary"
 							/>
 						)}
 						{showAfter && (
 							<span
 								aria-hidden
-								className="pointer-events-none absolute inset-x-1 -bottom-0.5 z-20 h-0.5 rounded-full bg-primary"
+								className="reorder-drop-indicator pointer-events-none absolute inset-x-1 -bottom-0.5 z-20 h-0.5 bg-primary"
 							/>
 						)}
 						{inSplit && (
@@ -2665,7 +2080,7 @@ function VerticalSplitBlock({
 						<span className="font-medium text-xs">
 							{canJoin && joinHover
 								? "Drop to add"
-								: `${label} · ${members.length}`}
+								: `${label} · ${formatCount(members.length) ?? "—"}`}
 						</span>
 						<button
 							className="ml-auto rounded px-1 text-muted-foreground text-xs hover:text-foreground"
@@ -2781,13 +2196,11 @@ function TabsSection({
 	);
 }
 
-/** The newest conversation each agent appears in, keyed by agent id.
+/** The newest direct conversation each agent appears in, keyed by agent id.
  *
- *  Membership uses the same rule the chat rows' agent chips use — `participants`
- *  when present, falling back to `agentId` — so an agent that only ever joined a
- *  council thread still gets a preview line instead of a blank one. Archived
- *  threads are skipped: they are hidden from the Chats list, so surfacing one as
- *  an agent's "latest message" would resurrect it in a second place.
+ *  Group conversations have their own group-chat row in Sessions. Keeping them
+ *  out here prevents one council/team thread from being duplicated under every
+ *  participating bot while preserving the direct-chat preview on each bot row.
  */
 function latestConversationByAgent(
 	convs: Conversation[]
@@ -2795,10 +2208,10 @@ function latestConversationByAgent(
 	const out = new Map<string, Conversation>();
 	const stampOf = (c: Conversation) => toEpoch(c.lastMessageAt ?? c.updatedAt);
 	for (const conv of convs) {
-		if (conv.archived) {
+		if (conv.archived || isGroupConversation(conv)) {
 			continue;
 		}
-		const ids = conv.participants ?? (conv.agentId ? [conv.agentId] : []);
+		const ids = conversationParticipantIds(conv);
 		for (const id of ids) {
 			const existing = out.get(id);
 			if (!existing || stampOf(existing) < stampOf(conv)) {
@@ -2840,15 +2253,21 @@ function messagingRowStamp(ts: number): string {
  *  The preview is whatever Core returned on the conversation summary; a fresh
  *  agent with no threads yet shows a muted placeholder rather than an empty
  *  second line, so every row keeps the same height. */
-function MessagingAgentRowBody({
+export function MessagingAgentRowBody({
 	agent,
 	conversation,
 	onEdit,
+	onToggleThreads,
+	threadsExpanded,
+	threadCount,
 	usageBarVisible,
 }: {
 	agent: AgentSummary;
 	conversation: Conversation | undefined;
 	onEdit: () => void;
+	onToggleThreads: () => void;
+	threadsExpanded: boolean;
+	threadCount: number;
 	usageBarVisible: boolean;
 }) {
 	// Subscribes to the display time zone so the stamp repaints the moment it
@@ -2856,18 +2275,21 @@ function MessagingAgentRowBody({
 	useTimezoneRevision();
 	const stampAt = conversation?.lastMessageAt ?? conversation?.updatedAt;
 	const stamp = stampAt ? messagingRowStamp(toEpoch(stampAt)) : null;
-	// "You: " mirrors every messaging client — it disambiguates a preview of the
-	// user's own last line from the agent's reply.
-	const preview = conversation?.lastMessage
-		? `${conversation.lastMessageRole === "user" ? "You: " : ""}${conversation.lastMessage}`
-		: "No messages yet";
+	const conversationStatus = conversationRunStatusMeta(conversation?.runStatus);
+	const previewStates = buildSidebarConversationPreviewStates({
+		lastMessage: conversation?.lastMessage,
+		lastMessageRole: conversation?.lastMessageRole,
+		statusLabel: conversationStatus?.label,
+		statusVisible:
+			conversationStatus?.isRunning || conversationStatus?.needsAttention,
+	});
 
 	return (
 		<>
 			<AgentAvatar
-				avatarUrl={agent.avatarUrl}
 				className="size-9 shrink-0 rounded-full object-cover"
 				engine={engineForAgent(agent)}
+				glyph={agent.avatarGlyph}
 				size="36px"
 			/>
 			<div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
@@ -2877,6 +2299,7 @@ function MessagingAgentRowBody({
 						fade
 						text={agent.name}
 					/>
+					<AgentTitleBadge title={agent.title} />
 					{usageBarVisible ? (
 						<UsageBar
 							agentId={agent.id}
@@ -2891,11 +2314,29 @@ function MessagingAgentRowBody({
 					) : null}
 				</div>
 				<div className="flex min-w-0 items-center gap-2">
-					<span
-						className={`min-w-0 flex-1 truncate text-xs ${conversation?.lastMessage ? "text-muted-foreground" : "text-muted-foreground/60 italic"}`}
-					>
-						{preview}
-					</span>
+					<SidebarConversationPreview
+						className={`flex-1 ${conversation?.lastMessage ? "" : "italic"}`}
+						states={previewStates}
+						testId={`agent-chat-preview-${agent.id}`}
+					/>
+					{threadCount > 0 ? (
+						<button
+							aria-expanded={threadsExpanded}
+							aria-label={`${threadsExpanded ? "Hide" : "Show"} ${threadCount} thread${threadCount === 1 ? "" : "s"} for ${agent.name}`}
+							className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-colors hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
+							onClick={(e) => {
+								e.stopPropagation();
+								onToggleThreads();
+							}}
+							title={`${threadsExpanded ? "Hide" : "Show"} ${threadCount} thread${threadCount === 1 ? "" : "s"}`}
+							type="button"
+						>
+							<HugeiconsIcon
+								className={`size-3 transition-transform ${threadsExpanded ? "" : "-rotate-90"}`}
+								icon={ArrowDown01Icon}
+							/>
+						</button>
+					) : null}
 					<Tooltip>
 						<TooltipTrigger
 							render={
@@ -2920,6 +2361,90 @@ function MessagingAgentRowBody({
 	);
 }
 
+/** A branch-tree list beneath one bot in Bot mode. Forked conversations are
+ *  ordinary Core summaries, so a new fork appears here as soon as the history
+ *  context receives the fork response; no second thread registry is needed. */
+export function AgentThreadList({
+	onOpen,
+	pageSize,
+	threads,
+}: {
+	onOpen: (conversationId: string) => void;
+	pageSize: number;
+	threads: Conversation[];
+}) {
+	const paged = usePaged(threads, pageSize);
+	const renderList = (list: Conversation[]) => (
+		<div className="relative ml-5 border-sidebar-border/70 border-l pl-2">
+			<SidebarMenu className="gap-0.5">
+				{list.map((thread) => {
+					const forked = isForkedConversation(thread);
+					const preview = thread.lastMessage?.trim();
+					return (
+						<SidebarMenuItem key={thread.id}>
+							<button
+								aria-label={`Open thread: ${thread.title}`}
+								className="group/thread relative flex min-h-9 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-muted"
+								onClick={() => onOpen(thread.id)}
+								type="button"
+							>
+								<span
+									aria-hidden="true"
+									className="absolute top-1/2 -left-[5px] size-2 -translate-y-1/2 rounded-full bg-sidebar-foreground/35 ring-2 ring-sidebar"
+								/>
+								<HugeiconsIcon
+									className={`size-3.5 shrink-0 ${forked ? "text-primary" : "text-muted-foreground"}`}
+									icon={GitBranchIcon}
+								/>
+								<span className="min-w-0 flex-1">
+									<span className="flex min-w-0 items-center gap-1.5">
+										<span className="min-w-0 flex-1 truncate text-foreground/85 text-xs">
+											<AnimatedTitle text={thread.title} />
+										</span>
+										<span className="shrink-0 text-[10px] text-muted-foreground/60 tabular-nums">
+											{compactAge(thread.updatedAt)}
+										</span>
+									</span>
+									{preview ? (
+										<span className="mt-0.5 block truncate text-[10px] text-muted-foreground/70">
+											{preview}
+										</span>
+									) : null}
+								</span>
+							</button>
+						</SidebarMenuItem>
+					);
+				})}
+			</SidebarMenu>
+		</div>
+	);
+
+	return (
+		<div className="mt-0.5" data-testid="agent-thread-list">
+			<div className="flex items-center gap-1.5 px-2 py-1 pl-7 text-[11px] text-muted-foreground">
+				<HugeiconsIcon
+					className="size-3 text-primary/75"
+					icon={GitBranchIcon}
+				/>
+				<span className="font-medium">Threads</span>
+				<span className="tabular-nums">
+					{formatCount(threads.length) ?? "—"}
+				</span>
+			</div>
+			{renderList(paged.visible)}
+			<SectionPagingControls
+				overflow={{
+					getSearchText: (thread) => thread.title,
+					items: paged.items,
+					label: "threads",
+					renderList,
+				}}
+				paged={paged}
+			/>
+		</div>
+	);
+}
+
 /** Agents list in the sidebar — single-line rows, each with the Ryu logo. */
 function AgentsSection({
 	collapsed,
@@ -2940,7 +2465,25 @@ function AgentsSection({
 	const usageBarPrefs = useUsageBarPrefs();
 	const rowStyle = useAgentRowStyle();
 	const messaging = rowStyle === "messaging";
+	const { favorites, toggle: toggleFavorite } = useFavorites();
 	const { conversations } = useChatHistoryContext();
+	const pinnedAgents = useMemo(() => {
+		const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+		return favorites
+			.filter((favorite) => favorite.type === "agent")
+			.map((favorite) => agentsById.get(favorite.id))
+			.filter((agent): agent is AgentSummary => agent !== undefined);
+	}, [agents, favorites]);
+	const pinnedAgentIds = useMemo(
+		() => new Set(pinnedAgents.map((agent) => agent.id)),
+		[pinnedAgents]
+	);
+	// Bot mode gives pinned agents their own visual priority shelf. In every other
+	// sidebar arrangement the regular agent list remains complete, so a pin never
+	// makes an agent disappear just because the user left Bot mode.
+	const listedAgents = messaging
+		? agents.filter((agent) => !pinnedAgentIds.has(agent.id))
+		: agents;
 	// Only the messaging rows read this, and it walks every conversation — skip
 	// the work entirely while the compact rows are on.
 	const latestByAgent = useMemo(
@@ -2950,8 +2493,21 @@ function AgentsSection({
 				: new Map<string, Conversation>(),
 		[messaging, conversations]
 	);
+	const directThreadsByAgent = useMemo(
+		() =>
+			new Map(
+				agents.map((agent) => [
+					agent.id,
+					directAgentThreads(agent.id, conversations),
+				])
+			),
+		[agents, conversations]
+	);
+	const [expandedAgentIds, setExpandedAgentIds] = useState<Set<string>>(
+		new Set()
+	);
 	const paged = usePaged(
-		sortItems(agents, sort, NAMED_SORT_ACCESSORS),
+		sortItems(listedAgents, sort, NAMED_SORT_ACCESSORS),
 		pageSize
 	);
 
@@ -2960,7 +2516,8 @@ function AgentsSection({
 		openTab(`/agents/${id}/edit`, {
 			title: name,
 			forceNew,
-			icon: personaToGlyph({ avatarUrl: agent?.avatarUrl }),
+			icon:
+				agent?.avatarGlyph ?? personaToGlyph({ avatarUrl: agent?.avatarUrl }),
 		});
 	};
 
@@ -2972,7 +2529,8 @@ function AgentsSection({
 	// piling up empty chats.
 	const startChatWithAgent = (id: string) => {
 		const agent = agents.find((a) => a.id === id);
-		const icon = personaToGlyph({ avatarUrl: agent?.avatarUrl });
+		const icon =
+			agent?.avatarGlyph ?? personaToGlyph({ avatarUrl: agent?.avatarUrl });
 		if (messaging) {
 			openTab(`/chat/agent/${encodeURIComponent(id)}`, {
 				title: agent?.name,
@@ -2987,115 +2545,157 @@ function AgentsSection({
 		});
 	};
 
+	const toggleAgentThreads = (agentId: string) => {
+		setExpandedAgentIds((current) => {
+			const next = new Set(current);
+			if (next.has(agentId)) {
+				next.delete(agentId);
+			} else {
+				next.add(agentId);
+			}
+			return next;
+		});
+	};
+
+	const openThread = (conversationId: string) => {
+		openTab("/chat", { conversationId });
+	};
+
 	const emptyMessage = loading ? "Loading…" : "No agents yet";
 
 	const renderAgentRows = (list: typeof agents) =>
-		list.map((agent) => (
-			<SidebarMenuItem key={agent.id}>
-				<ContextMenu>
-					<ContextMenuTrigger>
-						{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-						<div
-							className={
-								messaging
-									? "group/row flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors hover:bg-muted"
-									: "group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
-							}
-							draggable
-							onAuxClick={(e) => {
-								if (e.button === 1) {
-									e.preventDefault();
-									openAgent(agent.id, agent.name, true);
+		list.map((agent) => {
+			const threads = directThreadsByAgent.get(agent.id) ?? [];
+			const threadsExpanded = expandedAgentIds.has(agent.id);
+			return (
+				<SidebarMenuItem key={agent.id}>
+					<ContextMenu>
+						<ContextMenuTrigger>
+							{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
+							<div
+								className={
+									messaging
+										? "group/row flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors hover:bg-muted"
+										: "group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
 								}
-							}}
-							onClick={() => startChatWithAgent(agent.id)}
-							onDragStart={(e) => {
-								// Drag an agent onto a team in the Teams section to add it.
-								e.dataTransfer.effectAllowed = "copy";
-								e.dataTransfer.setData(AGENT_DND_FORMAT, agent.id);
-								// Some platforms require text/plain to start a drag.
-								e.dataTransfer.setData("text/plain", agent.name);
-							}}
-							onKeyDown={(e) => {
-								if (e.key === "Enter") {
-									startChatWithAgent(agent.id);
-								}
-							}}
-							role="button"
-							tabIndex={0}
-						>
-							{messaging ? (
-								<MessagingAgentRowBody
-									agent={agent}
-									conversation={latestByAgent.get(agent.id)}
-									onEdit={() => openAgent(agent.id, agent.name)}
-									usageBarVisible={usageBarPrefs.sidebar}
+								draggable
+								onAuxClick={(e) => {
+									if (e.button === 1) {
+										e.preventDefault();
+										openAgent(agent.id, agent.name, true);
+									}
+								}}
+								onClick={() => startChatWithAgent(agent.id)}
+								onDragStart={(e) => {
+									// Drag an agent onto a team in the Teams section to add it.
+									e.dataTransfer.effectAllowed = "copy";
+									e.dataTransfer.setData(AGENT_DND_FORMAT, agent.id);
+									// Some platforms require text/plain to start a drag.
+									e.dataTransfer.setData("text/plain", agent.name);
+								}}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") {
+										startChatWithAgent(agent.id);
+									}
+								}}
+								role="button"
+								tabIndex={0}
+							>
+								{messaging ? (
+									<MessagingAgentRowBody
+										agent={agent}
+										conversation={latestByAgent.get(agent.id)}
+										onEdit={() => openAgent(agent.id, agent.name)}
+										onToggleThreads={() => toggleAgentThreads(agent.id)}
+										threadCount={threads.length}
+										threadsExpanded={threadsExpanded}
+										usageBarVisible={usageBarPrefs.sidebar}
+									/>
+								) : (
+									<>
+										<AgentAvatar
+											className="size-4 shrink-0 rounded-[3px] object-contain"
+											engine={engineForAgent(agent)}
+											glyph={agent.avatarGlyph}
+											size="16px"
+										/>
+										<div className="flex min-w-0 shrink items-center gap-1.5">
+											<OverflowTooltip
+												className="min-w-0 overflow-hidden whitespace-nowrap text-sm"
+												fade
+												text={agent.name}
+											/>
+											<AgentTitleBadge title={agent.title} />
+										</div>
+										{usageBarPrefs.sidebar ? (
+											<UsageBar
+												agentId={agent.id}
+												className="shrink-0"
+												visible={usageBarPrefs.sidebar}
+											/>
+										) : null}
+										<div aria-hidden="true" className="flex-1" />
+										<Tooltip>
+											<TooltipTrigger
+												render={
+													<button
+														aria-label={`Edit ${agent.name}`}
+														className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
+														onClick={(e) => {
+															e.stopPropagation();
+															openAgent(agent.id, agent.name);
+														}}
+														type="button"
+													>
+														<HugeiconsIcon icon={PencilEdit01Icon} size={14} />
+													</button>
+												}
+											/>
+											<TooltipContent>Edit agent</TooltipContent>
+										</Tooltip>
+									</>
+								)}
+							</div>
+						</ContextMenuTrigger>
+						<ContextMenuContent>
+							<ContextMenuItem
+								onClick={() => openAgent(agent.id, agent.name, true)}
+							>
+								<HugeiconsIcon
+									className="mr-2 size-4"
+									icon={ArrowUpRight01Icon}
 								/>
-							) : (
-								<>
-									<AgentAvatar
-										avatarUrl={agent.avatarUrl}
-										className="size-4 shrink-0 rounded-[3px] object-contain"
-										engine={engineForAgent(agent)}
-										size="16px"
-									/>
-									<OverflowTooltip
-										className="min-w-0 shrink overflow-hidden whitespace-nowrap text-sm"
-										fade
-										text={agent.name}
-									/>
-									{usageBarPrefs.sidebar ? (
-										<UsageBar
-											agentId={agent.id}
-											className="shrink-0"
-											visible={usageBarPrefs.sidebar}
-										/>
-									) : null}
-									<div aria-hidden="true" className="flex-1" />
-									<Tooltip>
-										<TooltipTrigger
-											render={
-												<button
-													aria-label={`Edit ${agent.name}`}
-													className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
-													onClick={(e) => {
-														e.stopPropagation();
-														openAgent(agent.id, agent.name);
-													}}
-													type="button"
-												>
-													<HugeiconsIcon icon={PencilEdit01Icon} size={14} />
-												</button>
-											}
-										/>
-										<TooltipContent>Edit agent</TooltipContent>
-									</Tooltip>
-								</>
-							)}
-						</div>
-					</ContextMenuTrigger>
-					<ContextMenuContent>
-						<ContextMenuItem
-							onClick={() => openAgent(agent.id, agent.name, true)}
-						>
-							<HugeiconsIcon
-								className="mr-2 size-4"
-								icon={ArrowUpRight01Icon}
-							/>
-							Open in new tab
-						</ContextMenuItem>
-						{agentContributedRows(agent.id).map((row) => (
-							<ContextMenuItem key={row.id} onClick={row.onSelect}>
-								<span className="mr-2 inline-flex">
-									<EntityRowGlyph row={row} />
-								</span>
-								{row.label}
+								Open in new tab
 							</ContextMenuItem>
-						))}
-					</ContextMenuContent>
-				</ContextMenu>
-			</SidebarMenuItem>
-		));
+							<ContextMenuItem
+								onClick={() => toggleFavorite("agent", agent.id)}
+							>
+								<HugeiconsIcon
+									className="mr-2 size-4"
+									icon={pinnedAgentIds.has(agent.id) ? PinOffIcon : PinIcon}
+								/>
+								{pinnedAgentIds.has(agent.id) ? "Unpin agent" : "Pin agent"}
+							</ContextMenuItem>
+							{agentContributedRows(agent.id).map((row) => (
+								<ContextMenuItem key={row.id} onClick={row.onSelect}>
+									<span className="mr-2 inline-flex">
+										<EntityRowGlyph row={row} />
+									</span>
+									{row.label}
+								</ContextMenuItem>
+							))}
+						</ContextMenuContent>
+					</ContextMenu>
+					{messaging && threadsExpanded ? (
+						<AgentThreadList
+							onOpen={openThread}
+							pageSize={pageSize}
+							threads={threads}
+						/>
+					) : null}
+				</SidebarMenuItem>
+			);
+		});
 
 	return (
 		<SidebarSection
@@ -3117,22 +2717,39 @@ function AgentsSection({
 				</p>
 			) : (
 				<>
-					<SidebarMenu className="gap-0.5">
-						{renderAgentRows(paged.visible)}
-					</SidebarMenu>
-					<SectionPagingControls
-						overflow={{
-							getSearchText: (agent) => agent.name ?? "",
-							items: paged.items,
-							label: "agents",
-							renderList: (list) => (
-								<SidebarMenu className="gap-0.5">
-									{renderAgentRows(list)}
-								</SidebarMenu>
-							),
-						}}
-						paged={paged}
-					/>
+					{messaging ? (
+						<PinnedAgentStage
+							agents={pinnedAgents}
+							onEdit={(agent) => openAgent(agent.id, agent.name)}
+							onOpen={(agent) => startChatWithAgent(agent.id)}
+							onUnpin={(agent) => toggleFavorite("agent", agent.id)}
+						/>
+					) : null}
+					{messaging && pinnedAgents.length > 0 && listedAgents.length > 0 ? (
+						<div className="px-2 py-1 text-[10px] text-muted-foreground/70 uppercase tracking-[0.1em]">
+							Other agents
+						</div>
+					) : null}
+					{listedAgents.length > 0 ? (
+						<>
+							<SidebarMenu className="gap-0.5">
+								{renderAgentRows(paged.visible)}
+							</SidebarMenu>
+							<SectionPagingControls
+								overflow={{
+									getSearchText: (agent) => agent.name ?? "",
+									items: paged.items,
+									label: "agents",
+									renderList: (list) => (
+										<SidebarMenu className="gap-0.5">
+											{renderAgentRows(list)}
+										</SidebarMenu>
+									),
+								}}
+								paged={paged}
+							/>
+						</>
+					) : null}
 				</>
 			)}
 		</SidebarSection>
@@ -3144,13 +2761,13 @@ function AgentsSection({
 function TeamLogoStack({
 	members,
 }: {
-	members: { id: string; engine: string | null }[];
+	members: { id: string; engine: string | null; glyph?: GlyphValue }[];
 }) {
 	if (members.length === 0) {
 		return (
 			<HugeiconsIcon
 				className="size-4 shrink-0 text-muted-foreground"
-				icon={UserGroupIcon}
+				icon={UserMultiple02Icon}
 			/>
 		);
 	}
@@ -3163,9 +2780,10 @@ function TeamLogoStack({
 					key={member.id}
 					style={{ zIndex: shown.length - i }}
 				>
-					<AgentLogo
+					<AgentAvatar
 						className="size-2.5 object-contain"
 						engine={member.engine}
+						glyph={member.glyph}
 						size="10px"
 					/>
 				</span>
@@ -3209,8 +2827,12 @@ function TeamsSection({
 	} | null>(null);
 
 	const agentName = (id: string) => agents.find((a) => a.id === id)?.name ?? id;
-	const memberEngine = (id: string) => {
+	const memberAgent = (id: string) => {
 		const agent = agents.find((a) => a.id === id);
+		return agent ?? null;
+	};
+	const memberEngine = (id: string) => {
+		const agent = memberAgent(id);
 		return agent ? engineForAgent(agent) : null;
 	};
 
@@ -3273,6 +2895,7 @@ function TeamsSection({
 								<TeamLogoStack
 									members={team.members.map((id) => ({
 										engine: memberEngine(id),
+										glyph: memberAgent(id)?.avatarGlyph,
 										id,
 									}))}
 								/>
@@ -3282,7 +2905,7 @@ function TeamsSection({
 									text={team.name}
 								/>
 								<span className="shrink-0 text-muted-foreground text-xs">
-									{team.members.length}
+									{formatCount(team.members.length) ?? "—"}
 								</span>
 							</button>
 						</div>
@@ -3312,9 +2935,10 @@ function TeamsSection({
 						<ContextMenu key={memberId}>
 							<ContextMenuTrigger>
 								<div className="ml-6 flex h-7 items-center gap-2 rounded-md px-2 text-muted-foreground hover:bg-muted">
-									<AgentLogo
+									<AgentAvatar
 										className="size-3 shrink-0 object-contain"
 										engine={memberEngine(memberId)}
+										glyph={memberAgent(memberId)?.avatarGlyph}
 										size="12px"
 									/>
 									<span className="min-w-0 flex-1 truncate text-xs">
@@ -3395,73 +3019,62 @@ function TeamsSection({
 				open={dialogOpen}
 				team={editingTeam}
 			/>
-			<AlertDialog
+			<DestructiveConfirmDialog
+				description={
+					teamToDelete
+						? `"${teamToDelete.name}" will be permanently deleted. Its agents and channel history are not deleted.`
+						: ""
+				}
+				label={`Delete ${teamToDelete?.name ?? "this team"}`}
+				onConfirm={async () => {
+					if (!teamToDelete) {
+						return false;
+					}
+					try {
+						await remove(teamToDelete.id);
+						setTeamToDelete(null);
+						return true;
+					} catch {
+						toast.error("Couldn't delete this team");
+						return false;
+					}
+				}}
 				onOpenChange={(open) => {
 					if (!open) {
 						setTeamToDelete(null);
 					}
 				}}
 				open={teamToDelete !== null}
-			>
-				<AlertDialogContent>
-					<AlertDialogHeader>
-						<AlertDialogTitle>Delete this team?</AlertDialogTitle>
-						<AlertDialogDescription>
-							{teamToDelete
-								? `"${teamToDelete.name}" will be permanently deleted. Its agents are not deleted. This cannot be undone.`
-								: ""}
-						</AlertDialogDescription>
-					</AlertDialogHeader>
-					<AlertDialogFooter>
-						<AlertDialogCancel>Cancel</AlertDialogCancel>
-						<AlertDialogAction
-							onClick={() => {
-								if (teamToDelete) {
-									remove(teamToDelete.id).catch(() => undefined);
-								}
-							}}
-							variant="destructive"
-						>
-							Delete team
-						</AlertDialogAction>
-					</AlertDialogFooter>
-				</AlertDialogContent>
-			</AlertDialog>
-			<AlertDialog
+				title="Delete this team?"
+			/>
+			<DestructiveConfirmDialog
+				description={
+					memberToRemove
+						? `"${memberToRemove.name}" will be removed from this team. The agent itself is not deleted.`
+						: ""
+				}
+				label={`Remove ${memberToRemove?.name ?? "this member"}`}
+				onConfirm={async () => {
+					if (!memberToRemove) {
+						return false;
+					}
+					try {
+						await removeMember(memberToRemove.teamId, memberToRemove.memberId);
+						setMemberToRemove(null);
+						return true;
+					} catch {
+						toast.error("Couldn't remove that member");
+						return false;
+					}
+				}}
 				onOpenChange={(open) => {
 					if (!open) {
 						setMemberToRemove(null);
 					}
 				}}
 				open={memberToRemove !== null}
-			>
-				<AlertDialogContent>
-					<AlertDialogHeader>
-						<AlertDialogTitle>Remove from team?</AlertDialogTitle>
-						<AlertDialogDescription>
-							{memberToRemove
-								? `"${memberToRemove.name}" will be removed from this team. The agent itself is not deleted.`
-								: ""}
-						</AlertDialogDescription>
-					</AlertDialogHeader>
-					<AlertDialogFooter>
-						<AlertDialogCancel>Cancel</AlertDialogCancel>
-						<AlertDialogAction
-							onClick={() => {
-								if (memberToRemove) {
-									removeMember(
-										memberToRemove.teamId,
-										memberToRemove.memberId
-									).catch(() => undefined);
-								}
-							}}
-							variant="destructive"
-						>
-							Remove
-						</AlertDialogAction>
-					</AlertDialogFooter>
-				</AlertDialogContent>
-			</AlertDialog>
+				title="Remove from team?"
+			/>
 		</>
 	);
 }
@@ -3834,7 +3447,7 @@ function SidebarSpaceDocs({
 /** A single space row. Clicking the row toggles an indented list of its pages &
  *  databases (like a project folder expands to its chats); right-click opens the
  *  space page or deletes it. */
-function SpaceSidebarRow({
+export function SpaceSidebarRow({
 	space,
 	appIcon,
 	listDocuments,
@@ -3843,6 +3456,10 @@ function SpaceSidebarRow({
 	onOpenInNewTab,
 	onOpenDoc,
 	onRequestDelete,
+	onRename,
+	onRequestVisibilityChange,
+	canDelete,
+	canMakePrivate,
 	setDocumentIcon,
 	setSpaceIcon,
 }: {
@@ -3858,6 +3475,10 @@ function SpaceSidebarRow({
 	onOpenDoc: (doc: SpaceDocument, forceNew?: boolean) => void;
 	onOpenInNewTab: () => void;
 	onRequestDelete: () => void;
+	onRename: (name: string) => Promise<void>;
+	onRequestVisibilityChange: (request: VisibilityChangeRequest) => void;
+	canDelete: boolean;
+	canMakePrivate: boolean;
 	setDocumentIcon: (
 		spaceId: string,
 		documentId: string,
@@ -3871,7 +3492,27 @@ function SpaceSidebarRow({
 	const spaceContributedRows = useContributedRowsFor("space", "space_id");
 	const [expanded, setExpanded] = useState(false);
 	const [iconDialogOpen, setIconDialogOpen] = useState(false);
+	const [renameOpen, setRenameOpen] = useState(false);
 	const toggle = () => setExpanded((v) => !v);
+	const visibilityGroup = resourceVisibilityGroup(
+		space.visibility,
+		space.system
+	);
+	const handleVisibilityDragStart = (event: ReactDragEvent<HTMLDivElement>) => {
+		if (space.system) {
+			return;
+		}
+		event.dataTransfer.effectAllowed = "move";
+		const payload = serializeVisibilityDragPayload({
+			from: visibilityGroup,
+			id: space.id,
+			name: space.name,
+			resourceType: "space",
+		});
+		event.dataTransfer.setData(RESOURCE_VISIBILITY_DND_MIME, payload);
+		event.dataTransfer.setData(resourceVisibilityDndMime("space"), "1");
+		event.dataTransfer.setData("text/plain", payload);
+	};
 	const fallbackIcon = appIcon ? (
 		<Icon
 			className={`absolute inset-0 m-auto transition-opacity ${
@@ -3894,7 +3535,8 @@ function SpaceSidebarRow({
 				<ContextMenuTrigger>
 					{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
 					<div
-						className="group/row group/subsection flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+						className="group/row group/subsection flex h-8 cursor-grab items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted active:cursor-grabbing"
+						draggable={!space.system}
 						onAuxClick={(e) => {
 							if (e.button === 1) {
 								e.preventDefault();
@@ -3902,6 +3544,7 @@ function SpaceSidebarRow({
 							}
 						}}
 						onClick={toggle}
+						onDragStart={handleVisibilityDragStart}
 						onKeyDown={(e) => {
 							if (e.key === "Enter") {
 								toggle();
@@ -3941,6 +3584,10 @@ function SpaceSidebarRow({
 							fade
 							text={space.name}
 						/>
+						<ResourceVisibilityIndicator
+							system={space.system}
+							visibility={space.visibility}
+						/>
 						{/* Count and "+" share one slot, swapped on hover the same way the
 						    glyph above swaps to its chevron — an h-8 row has no width for
 						    both, and overlaying keeps the row from reflowing under the
@@ -3976,6 +3623,40 @@ function SpaceSidebarRow({
 						<HugeiconsIcon className="mr-2 size-4" icon={ImageAdd01Icon} />
 						Change icon…
 					</ContextMenuItem>
+					{space.system ? null : (
+						<ContextMenuItem onClick={() => setRenameOpen(true)}>
+							<HugeiconsIcon className="mr-2 size-4" icon={PencilEdit01Icon} />
+							Rename space
+						</ContextMenuItem>
+					)}
+					{space.system ? null : (
+						<ContextMenuItem
+							disabled={visibilityGroup === "team" && !canMakePrivate}
+							onClick={() =>
+								onRequestVisibilityChange({
+									from: visibilityGroup,
+									id: space.id,
+									name: space.name,
+									resourceType: "space",
+									to: visibilityGroup === "team" ? "private" : "team",
+								})
+							}
+						>
+							<HugeiconsIcon
+								className="mr-2 size-4"
+								icon={
+									resourceVisibilityGroup(space.visibility) === "team"
+										? ViewOffSlashIcon
+										: UserMultiple02Icon
+								}
+							/>
+							{visibilityGroup === "team"
+								? canMakePrivate
+									? "Make private"
+									: "Make private (admins only)"
+								: "Share with team"}
+						</ContextMenuItem>
+					)}
 					<ContextMenuSeparator />
 					{/* A Ryu-owned system Space (Artifacts, Meetings, Uploads…) is a node
 					    singleton Core refuses to delete — `SpaceStore::delete_space`
@@ -3985,7 +3666,7 @@ function SpaceSidebarRow({
 					    the tooltip is where the reason belongs. The wrapper span carries
 					    the tooltip because a disabled item is `pointer-events-none` and
 					    would never see the hover itself. */}
-					{space.system ? (
+					{space.system || !canDelete ? (
 						<Tooltip>
 							<TooltipTrigger render={<span className="block" />}>
 								<ContextMenuItem disabled variant="destructive">
@@ -3994,8 +3675,9 @@ function SpaceSidebarRow({
 								</ContextMenuItem>
 							</TooltipTrigger>
 							<TooltipContent className="max-w-56">
-								System spaces can't be deleted — Ryu creates and maintains this
-								one.
+								{space.system
+									? "System spaces can't be deleted — Ryu creates and maintains this one."
+									: "Only organization members with Space delete permission can delete Spaces."}
 							</TooltipContent>
 						</Tooltip>
 					) : (
@@ -4035,6 +3717,12 @@ function SpaceSidebarRow({
 				title="Space icon"
 				value={space.icon}
 			/>
+			<RenameSpaceDialog
+				onClose={() => setRenameOpen(false)}
+				onRename={onRename}
+				open={renameOpen}
+				space={space}
+			/>
 		</SidebarMenuItem>
 	);
 }
@@ -4055,10 +3743,63 @@ function SpacesSection({
 		reload,
 		create,
 		remove,
+		rename,
 		listDocuments,
 		setSpaceIcon,
+		setSpaceVisibility,
 		setDocumentIcon,
 	} = useSpacesContext();
+	const { canMakePrivate } = useVisibilityAdminAccess();
+	const canDeleteSpaces = useCanManagePermission("space.delete");
+	const [pendingVisibility, setPendingVisibility] =
+		useState<VisibilityChangeRequest | null>(null);
+	const [changingVisibility, setChangingVisibility] = useState(false);
+	const requestVisibilityChange = useCallback(
+		(request: VisibilityChangeRequest) => {
+			if (request.to === "private" && !canMakePrivate) {
+				toast.error(
+					"Only organization admins can make shared resources private"
+				);
+				return;
+			}
+			setPendingVisibility(request);
+		},
+		[canMakePrivate]
+	);
+	const confirmVisibilityChange = useCallback(async () => {
+		if (!pendingVisibility) {
+			return;
+		}
+		if (pendingVisibility.to === "private" && !canMakePrivate) {
+			toast.error("Only organization admins can make shared resources private");
+			return;
+		}
+		setChangingVisibility(true);
+		try {
+			await setSpaceVisibility(
+				pendingVisibility.id,
+				resourceVisibilityForGroup(pendingVisibility.to)
+			);
+			setPendingVisibility(null);
+		} catch {
+			toast.error("Couldn't change this Space's visibility", {
+				description: "The Space stayed in its current group.",
+			});
+		} finally {
+			setChangingVisibility(false);
+		}
+	}, [canMakePrivate, pendingVisibility, setSpaceVisibility]);
+	const visibilityDropFor = (group: ResourceVisibilityGroup) => ({
+		accept: "space" as const,
+		canDrop: (_payload: VisibilityDragPayload) =>
+			group !== "private" || canMakePrivate,
+		canDropOnDragOver: () => group !== "private" || canMakePrivate,
+		onDrop: (payload: VisibilityDragPayload) =>
+			requestVisibilityChange({
+				...payload,
+				to: group,
+			}),
+	});
 	const [createOpen, setCreateOpen] = useState(false);
 	// The row "+" target. Held at section level, and the dialog below stays mounted
 	// across `null`, so an upload started from one row keeps running (and keeps
@@ -4081,28 +3822,55 @@ function SpacesSection({
 	// section resolves them itself and the scope menu renders them for the selection
 	// — same rows a space row's context menu shows, same anchor.
 	const spaceContributedRows = useContributedRowsFor("space", "space_id");
-	const spaceOptions = useMemo(
-		() => visibleSpaces.map((s) => ({ label: s.name, value: s.id })),
+	const spacesByVisibility = useMemo(
+		() =>
+			visibleSpaces.reduce<Record<ResourceVisibilityGroup, Space[]>>(
+				(groups, space) => {
+					groups[resourceVisibilityGroup(space.visibility, space.system)].push(
+						space
+					);
+					return groups;
+				},
+				{ private: [], team: [] }
+			),
 		[visibleSpaces]
 	);
-	const [selection, setSelection] = usePickerSelection(
-		SPACE_SELECTION_KEY,
-		spaceOptions
+	const visibilityGroupKeys = useMemo(
+		() => ["private", "team"] as ResourceVisibilityGroup[],
+		[]
 	);
-	const shownSpaces = useMemo(
+	const visibilityGroups = useNestedSections(
+		SPACE_VISIBILITY_ORDER_KEY,
+		SPACE_VISIBILITY_COLLAPSED_KEY,
+		visibilityGroupKeys,
+		false
+	);
+	const privateOptions = useMemo(
 		() =>
-			selection === ALL_SELECTION
-				? visibleSpaces
-				: visibleSpaces.filter((s) => s.id === selection),
-		[visibleSpaces, selection]
+			spacesByVisibility.private.map((s) => ({ label: s.name, value: s.id })),
+		[spacesByVisibility.private]
 	);
-	// The one space the picker names, or null on the aggregate — the scope the
-	// picker's verbs (upload into, rename, delete) apply to. `null` on "all" is why
-	// those verbs are hidden there rather than acting on an arbitrary space.
-	const selectedSpace =
-		selection === ALL_SELECTION
+	const teamOptions = useMemo(
+		() => spacesByVisibility.team.map((s) => ({ label: s.name, value: s.id })),
+		[spacesByVisibility.team]
+	);
+	const [privateSelection, setPrivateSelection] = usePickerSelection(
+		"ryu:sidebar-private-space-selection",
+		privateOptions
+	);
+	const [teamSelection, setTeamSelection] = usePickerSelection(
+		"ryu:sidebar-team-space-selection",
+		teamOptions
+	);
+	const selectedPrivateSpace =
+		privateSelection === ALL_SELECTION
 			? null
-			: (visibleSpaces.find((s) => s.id === selection) ?? null);
+			: (spacesByVisibility.private.find((s) => s.id === privateSelection) ??
+				null);
+	const selectedTeamSpace =
+		teamSelection === ALL_SELECTION
+			? null
+			: (spacesByVisibility.team.find((s) => s.id === teamSelection) ?? null);
 	// Map an app companion's label → the icon id it registered, so a system space
 	// (Canvas/Whiteboard/Meetings/…) shows its owning app's icon, resolved through
 	// the shared <Icon> primitive. Data-driven off /api/plugins/contributions — no
@@ -4119,10 +3887,122 @@ function SpacesSection({
 		}
 		return map;
 	}, [companions]);
-	const paged = usePaged(
-		sortItems(visibleSpaces, sort, NAMED_SORT_ACCESSORS),
+	const privatePaged = usePaged(
+		sortItems(spacesByVisibility.private, sort, NAMED_SORT_ACCESSORS),
 		pageSize
 	);
+	const teamPaged = usePaged(
+		sortItems(spacesByVisibility.team, sort, NAMED_SORT_ACCESSORS),
+		pageSize
+	);
+
+	const visibilityIcon = (group: ResourceVisibilityGroup) =>
+		group === "private" ? ViewOffSlashIcon : UserMultiple02Icon;
+	const visibilityLabel = (group: ResourceVisibilityGroup) =>
+		group === "private" ? resourceVisibilityLabel("private") : "Team";
+
+	const renderSpacePickerGroup = (group: ResourceVisibilityGroup) => {
+		const groupSpaces = spacesByVisibility[group];
+		const isPrivate = group === "private";
+		const selection = isPrivate ? privateSelection : teamSelection;
+		const setSelection = isPrivate ? setPrivateSelection : setTeamSelection;
+		const selectedSpace = isPrivate ? selectedPrivateSpace : selectedTeamSpace;
+		const shownSpaces =
+			selection === ALL_SELECTION
+				? groupSpaces
+				: groupSpaces.filter((space) => space.id === selection);
+
+		return (
+			<SubSection
+				collapsed={visibilityGroups.isCollapsed(group)}
+				count={groupSpaces.length}
+				dnd={visibilityGroups.dnd}
+				icon={visibilityIcon(group)}
+				key={group}
+				label={visibilityLabel(group)}
+				onToggleCollapsed={visibilityGroups.toggle}
+				sectionKey={group}
+				size="md"
+				visibilityDrop={visibilityDropFor(group)}
+			>
+				<SidebarScopePicker
+					actions={
+						selectedSpace ? (
+							<SpaceScopeMenu
+								canDelete={canDeleteSpaces}
+								canMakePrivate={canMakePrivate}
+								contributedRows={spaceContributedRows(selectedSpace.id)}
+								onAdd={() => {
+									setAddTargetId(selectedSpace.id);
+									setAddOpen(true);
+								}}
+								onOpen={() => openSpace(selectedSpace)}
+								onOpenInNewTab={() => openSpace(selectedSpace, true)}
+								onRename={(name) => rename(selectedSpace.id, name)}
+								onRequestDelete={() =>
+									setPendingDelete({
+										id: selectedSpace.id,
+										name: selectedSpace.name,
+									})
+								}
+								onRequestVisibilityChange={requestVisibilityChange}
+								setSpaceIcon={setSpaceIcon}
+								space={selectedSpace}
+							/>
+						) : undefined
+					}
+					allLabel={isPrivate ? "All private spaces" : "All team spaces"}
+					icon={visibilityIcon(group)}
+					onValueChange={setSelection}
+					options={isPrivate ? privateOptions : teamOptions}
+					value={selection}
+				/>
+				<SpacesPickerBody
+					listDocuments={listDocuments}
+					onOpenDoc={(doc, forceNew) => openDoc(doc.spaceId, doc, forceNew)}
+					pageSize={pageSize}
+					setDocumentIcon={setDocumentIcon}
+					sort={sort}
+					spaces={shownSpaces}
+				/>
+			</SubSection>
+		);
+	};
+
+	const renderSpaceRowsGroup = (group: ResourceVisibilityGroup) => {
+		const groupPaged = group === "private" ? privatePaged : teamPaged;
+		return (
+			<SubSection
+				collapsed={visibilityGroups.isCollapsed(group)}
+				count={spacesByVisibility[group].length}
+				dnd={visibilityGroups.dnd}
+				icon={visibilityIcon(group)}
+				key={group}
+				label={visibilityLabel(group)}
+				onToggleCollapsed={visibilityGroups.toggle}
+				sectionKey={group}
+				size="md"
+				visibilityDrop={visibilityDropFor(group)}
+			>
+				<SidebarMenu className="gap-0.5">
+					{renderSpaceRows(groupPaged.visible)}
+				</SidebarMenu>
+				<SectionPagingControls
+					overflow={{
+						getSearchText: (space) => space.name ?? "",
+						items: groupPaged.items,
+						label: `${visibilityLabel(group).toLowerCase()} spaces`,
+						renderList: (list) => (
+							<SidebarMenu className="gap-0.5">
+								{renderSpaceRows(list)}
+							</SidebarMenu>
+						),
+					}}
+					paged={groupPaged}
+				/>
+			</SubSection>
+		);
+	};
 
 	// Open a specific space's page (`/spaces/:id`), pre-selecting it — the Spaces
 	// page no longer renders its own space list, so selection is driven from here.
@@ -4144,19 +4024,21 @@ function SpacesSection({
 		});
 	};
 
-	const confirmDelete = async () => {
+	const confirmDelete = async (): Promise<boolean> => {
 		if (!pendingDelete) {
-			return;
+			return false;
 		}
 		const { id, name } = pendingDelete;
 		setDeleting(true);
 		try {
 			await remove(id);
 			setPendingDelete(null);
+			return true;
 		} catch {
 			toast.error("Couldn't delete this space", {
 				description: `"${name}" and its documents weren't deleted. Please try again.`,
 			});
+			return false;
 		} finally {
 			setDeleting(false);
 		}
@@ -4168,6 +4050,8 @@ function SpacesSection({
 		list.map((space) => (
 			<SpaceSidebarRow
 				appIcon={appIconBySpaceName.get(space.name.toLowerCase())}
+				canDelete={canDeleteSpaces}
+				canMakePrivate={canMakePrivate}
 				key={space.id}
 				listDocuments={listDocuments}
 				onAdd={() => {
@@ -4177,14 +4061,19 @@ function SpacesSection({
 				onOpen={() => openSpace(space)}
 				onOpenDoc={(doc, forceNew) => openDoc(space.id, doc, forceNew)}
 				onOpenInNewTab={() => openSpace(space, true)}
+				onRename={(name) => rename(space.id, name)}
 				onRequestDelete={() =>
 					setPendingDelete({ id: space.id, name: space.name })
 				}
+				onRequestVisibilityChange={requestVisibilityChange}
 				setDocumentIcon={setDocumentIcon}
 				setSpaceIcon={setSpaceIcon}
 				space={space}
 			/>
 		));
+	const orderedVisibilityGroups = visibilityGroups.orderedKeys.filter(
+		(key): key is ResourceVisibilityGroup => key === "private" || key === "team"
+	);
 
 	return (
 		<>
@@ -4218,71 +4107,9 @@ function SpacesSection({
 					</p>
 				)}
 				{visibleSpaces.length > 0 &&
-					(groupedNav ? (
-						// One picker instead of a row per space. The rows underneath are the
-						// space's CONTENTS (pages, databases, files) rather than the spaces
-						// themselves, which is the point: a space row only ever told you a
-						// space existed.
-						<>
-							<SidebarScopePicker
-								actions={
-									selectedSpace ? (
-										<SpaceScopeMenu
-											contributedRows={spaceContributedRows(selectedSpace.id)}
-											onAdd={() => {
-												setAddTargetId(selectedSpace.id);
-												setAddOpen(true);
-											}}
-											onOpen={() => openSpace(selectedSpace)}
-											onOpenInNewTab={() => openSpace(selectedSpace, true)}
-											onRequestDelete={() =>
-												setPendingDelete({
-													id: selectedSpace.id,
-													name: selectedSpace.name,
-												})
-											}
-											setSpaceIcon={setSpaceIcon}
-											space={selectedSpace}
-										/>
-									) : undefined
-								}
-								allLabel="All spaces"
-								icon={SECTION_ICONS.spaces}
-								onValueChange={setSelection}
-								options={spaceOptions}
-								value={selection}
-							/>
-							<SpacesPickerBody
-								listDocuments={listDocuments}
-								onOpenDoc={(doc, forceNew) =>
-									openDoc(doc.spaceId, doc, forceNew)
-								}
-								pageSize={pageSize}
-								setDocumentIcon={setDocumentIcon}
-								sort={sort}
-								spaces={shownSpaces}
-							/>
-						</>
-					) : (
-						<>
-							<SidebarMenu className="gap-0.5">
-								{renderSpaceRows(paged.visible)}
-							</SidebarMenu>
-							<SectionPagingControls
-								overflow={{
-									getSearchText: (space) => space.name ?? "",
-									items: paged.items,
-									label: "spaces",
-									renderList: (list) => (
-										<SidebarMenu className="gap-0.5">
-											{renderSpaceRows(list)}
-										</SidebarMenu>
-									),
-								}}
-								paged={paged}
-							/>
-						</>
-					))}
+					(groupedNav
+						? orderedVisibilityGroups.map(renderSpacePickerGroup)
+						: orderedVisibilityGroups.map(renderSpaceRowsGroup))}
 			</SidebarSection>
 			<CreateSpaceDialog
 				onClose={() => setCreateOpen(false)}
@@ -4294,39 +4121,36 @@ function SpacesSection({
 				open={addOpen}
 				spaceId={addTargetId}
 			/>
-			<AlertDialog
+			<ResourceVisibilityConfirmationDialog
+				canMakePrivate={canMakePrivate}
+				changing={changingVisibility}
+				onConfirm={() => {
+					confirmVisibilityChange().catch(() => undefined);
+				}}
 				onOpenChange={(open) => {
-					if (!open) {
+					if (!(open || changingVisibility)) {
+						setPendingVisibility(null);
+					}
+				}}
+				request={pendingVisibility}
+			/>
+			<DestructiveConfirmDialog
+				busy={deleting}
+				description={
+					pendingDelete
+						? `"${pendingDelete.name}" and all its documents will be permanently deleted. This can't be undone.`
+						: ""
+				}
+				label={`Delete ${pendingDelete?.name ?? "this Space"}`}
+				onConfirm={confirmDelete}
+				onOpenChange={(open) => {
+					if (!(open || deleting)) {
 						setPendingDelete(null);
 					}
 				}}
 				open={pendingDelete !== null}
-			>
-				<AlertDialogContent>
-					<AlertDialogHeader>
-						<AlertDialogTitle>Delete this space?</AlertDialogTitle>
-						<AlertDialogDescription>
-							{pendingDelete
-								? `"${pendingDelete.name}" and all its documents will be permanently deleted. This can't be undone.`
-								: ""}
-						</AlertDialogDescription>
-					</AlertDialogHeader>
-					<AlertDialogFooter>
-						<AlertDialogCancel>Cancel</AlertDialogCancel>
-						<AlertDialogAction
-							disabled={deleting}
-							onClick={(e) => {
-								// Keep the dialog open while the request runs; close on success.
-								e.preventDefault();
-								confirmDelete().catch(() => undefined);
-							}}
-							variant="destructive"
-						>
-							{deleting ? "Deleting…" : "Delete"}
-						</AlertDialogAction>
-					</AlertDialogFooter>
-				</AlertDialogContent>
-			</AlertDialog>
+				title="Delete this Space?"
+			/>
 		</>
 	);
 }
@@ -4399,7 +4223,7 @@ function WorkflowsSection({
 								triggers={wf.triggers}
 							/>
 							<span className="shrink-0 text-muted-foreground/70 text-xs tabular-nums">
-								{wf.nodes.length}
+								{formatCount(wf.nodes.length) ?? "—"}
 							</span>
 						</div>
 					</ContextMenuTrigger>
@@ -4484,7 +4308,11 @@ function ChannelsSection({
 	const { agents } = useAgents();
 	const { teams } = useTeams();
 	const { openTab } = useTabsContext();
-	const [addDialogOpen, setAddDialogOpen] = useState(false);
+	const {
+		open: addDialogOpen,
+		request: channelSetupRequest,
+		setOpen: setAddDialogOpen,
+	} = useChannelSetupDialog();
 	const paged = usePaged(
 		sortItems(channels, sort, NAMED_SORT_ACCESSORS),
 		pageSize
@@ -4525,7 +4353,7 @@ function ChannelsSection({
 						>
 							<HugeiconsIcon
 								className="size-4 shrink-0 text-muted-foreground"
-								icon={BubbleChatIcon}
+								icon={Tv01Icon}
 							/>
 							<OverflowTooltip
 								className="min-w-0 flex-1 truncate text-sm"
@@ -4534,6 +4362,16 @@ function ChannelsSection({
 							<span className="shrink-0 text-muted-foreground/70 text-xs">
 								{CHANNEL_LABELS[channel.channelType]}
 							</span>
+							{channel.agentId &&
+							!agents.some((agent) => agent.id === channel.agentId) ? (
+								<span
+									aria-label="This channel was reverted to the default agent"
+									className="font-semibold text-amber-600 text-xs dark:text-amber-400"
+									title="This channel was reverted to the default agent because its original agent was deleted"
+								>
+									!
+								</span>
+							) : null}
 							{/* A dim dot marks a disabled bot; enabled bots show none. */}
 							{!channel.enabled && (
 								<span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
@@ -4598,6 +4436,9 @@ function ChannelsSection({
 			)}
 			<AddChannelDialog
 				agents={agents.map((a) => ({ id: a.id, name: a.name }))}
+				initialAgentId={channelSetupRequest?.agentId}
+				initialAgentName={channelSetupRequest?.agentName}
+				initialChannelType={channelSetupRequest?.channelType}
 				onCreate={async (input) => {
 					try {
 						await create(input);
@@ -4854,14 +4695,14 @@ function IdentitiesSection({
 						>
 							<HugeiconsIcon
 								className="size-4 shrink-0 text-muted-foreground"
-								icon={Key01Icon}
+								icon={FingerPrintIcon}
 							/>
 							<OverflowTooltip
 								className="min-w-0 flex-1 truncate text-sm"
 								text={row.name}
 							/>
 							<span className="shrink-0 text-muted-foreground/70 text-xs tabular-nums">
-								{row.count}
+								{formatCount(row.count) ?? "—"}
 							</span>
 						</div>
 					</ContextMenuTrigger>
@@ -5005,7 +4846,7 @@ function SkillsSection({
 						>
 							<HugeiconsIcon
 								className="size-4 shrink-0 text-muted-foreground"
-								icon={Mortarboard01Icon}
+								icon={PotionIcon}
 							/>
 							<OverflowTooltip
 								className="min-w-0 flex-1 truncate text-sm"
@@ -6022,6 +5863,20 @@ export function DynamicSidebarSection({
 			}
 			collapsed={collapsed}
 			dnd={dnd}
+			iconNode={
+				contribution.icon ? (
+					<Icon
+						className="size-3.5 shrink-0 text-muted-foreground"
+						icon={contribution.icon}
+						size={14}
+					/>
+				) : (
+					<HugeiconsIcon
+						className="size-3.5 shrink-0 text-muted-foreground"
+						icon={Package01Icon}
+					/>
+				)
+			}
 			label={contribution.title}
 			menu={menu}
 			onToggleCollapsed={onToggleCollapsed}
@@ -6065,7 +5920,7 @@ export function DynamicSidebarSection({
 
 /**
  * The run-alongside catalog categories this section lists beside the swappable
- * chat engines. `provider` is deliberately absent: that is the mutually
+ * Chat runtimes. `provider` is deliberately absent: that is the mutually
  * exclusive chat slot and it arrives via `useEngines`, which filters to it.
  *
  * Same pair as the Engines page's own `RUN_ALONGSIDE_CATEGORIES`
@@ -6092,7 +5947,7 @@ const ENGINE_SHELF_COLLAPSED_KEY = "ryu:sidebar-engine-shelf-collapsed";
  * it to "Text" would only make the sidebar and the page it opens disagree.
  */
 const ENGINE_SHELVES: { icon: IconSvgElement; key: string; label: string }[] = [
-	{ key: "text", label: "Text and Embedding", icon: CpuIcon },
+	{ key: "text", label: "Text and Embedding", icon: LayerIcon },
 	{ key: "media", label: "Image", icon: Image01Icon },
 	{ key: "voice", label: "Speech", icon: Mic01Icon },
 ];
@@ -6128,7 +5983,7 @@ interface SidebarEngineRow {
  * The fix is a second source rather than a wider filter: `useEngines().engines`
  * also backs `store/EnginesCatalogSection.tsx` and `pages/PreflightPage.tsx`,
  * where "engine" genuinely means the swappable chat runtime, and widening it
- * there would put a TTS voice in the chat-engine picker.
+ * there would put a TTS voice in the Chat picker.
  *
  * Shelved rather than listed flat once more than one kind is installed, and
  * paged BEFORE it is shelved — the shape the Chats/Spaces date buckets already
@@ -6225,7 +6080,7 @@ function EnginesSection({
 		loading || runAlongsideLoading ? "Loading…" : "No engines installed";
 
 	const iconOf = (shelfKey: string) =>
-		ENGINE_SHELVES.find((s) => s.key === shelfKey)?.icon ?? CpuIcon;
+		ENGINE_SHELVES.find((s) => s.key === shelfKey)?.icon ?? LayerIcon;
 
 	const renderEngineRows = (list: SidebarEngineRow[]) =>
 		list.map((engine) => (
@@ -6258,7 +6113,7 @@ function EnginesSection({
 								className="min-w-0 flex-1 truncate text-sm"
 								text={engine.displayName}
 							/>
-							{/* Resident chat engine, or a running speech/image sidecar. */}
+							{/* Resident Chat, or a running speech/image sidecar. */}
 							{engine.live && (
 								<span className="size-1.5 shrink-0 rounded-full bg-primary" />
 							)}
@@ -6419,8 +6274,8 @@ function PinnedSection({
 // "toggled" set (keys flipped away from the surface's default collapse state).
 // ---------------------------------------------------------------------------
 
-const CHAT_BUCKET_ORDER_KEY = "ryu:sidebar-chat-bucket-order";
-const CHAT_BUCKET_COLLAPSED_KEY = "ryu:sidebar-collapsed-chat-buckets";
+const CHAT_VISIBILITY_ORDER_KEY = "ryu:sidebar-chat-visibility-order";
+const CHAT_VISIBILITY_COLLAPSED_KEY = "ryu:sidebar-collapsed-chat-visibility";
 const PROJECT_ORDER_KEY = "ryu:sidebar-project-order";
 
 /** Persisted ordering for a set of nested sub-sections (keys the user dragged). */
@@ -6461,6 +6316,13 @@ interface SubSectionDnd {
 	onDragStart: (key: string) => void;
 	onDrop: (key: string) => void;
 	order: string[];
+}
+
+interface VisibilitySubSectionDrop {
+	accept: VisibilityResourceType;
+	canDrop: (payload: VisibilityDragPayload) => boolean;
+	canDropOnDragOver?: () => boolean;
+	onDrop: (payload: VisibilityDragPayload) => void;
 }
 
 interface NestedSectionsState {
@@ -6558,7 +6420,7 @@ function useNestedSections(
 /** A nested, collapsible, drag-reorderable sub-section that reuses the parent
  *  section header's look (chevron + grab cursor + hover). Indented under its
  *  parent for hierarchy. */
-function SubSection({
+export function SubSection({
 	action,
 	children,
 	collapsed,
@@ -6570,6 +6432,7 @@ function SubSection({
 	onToggleCollapsed,
 	sectionKey,
 	size = "sm",
+	visibilityDrop,
 	wrapHeader,
 }: {
 	action?: ReactNode;
@@ -6592,6 +6455,8 @@ function SubSection({
 	 * the section above rather than peers of it.
 	 */
 	size?: "sm" | "md";
+	/** Optional resource visibility drop target for this group header/body. */
+	visibilityDrop?: VisibilitySubSectionDrop;
 	/** Optional wrapper for the header row — e.g. a right-click "Delete all
 	 *  chats" context menu. Defaults to identity (no wrapper). */
 	wrapHeader?: (header: ReactNode) => ReactNode;
@@ -6605,12 +6470,50 @@ function SubSection({
 		isDragOver &&
 		dnd.draggingKey !== null &&
 		dnd.order.indexOf(dnd.draggingKey) < dnd.order.indexOf(sectionKey);
+	const [visibilityDragOver, setVisibilityDragOver] = useState(false);
+	const readVisibilityPayload = (event: ReactDragEvent<HTMLDivElement>) => {
+		const customPayload = parseVisibilityDragPayload(
+			event.dataTransfer.getData(RESOURCE_VISIBILITY_DND_MIME)
+		);
+		return (
+			customPayload ??
+			parseVisibilityDragPayload(event.dataTransfer.getData("text/plain"))
+		);
+	};
 	return (
 		// biome-ignore lint/a11y/noStaticElementInteractions: sub-section is the drag-and-drop reorder target; the header button carries the keyboard-reachable affordance
 		// biome-ignore lint/a11y/noNoninteractiveElementInteractions: sub-section is the drag-and-drop reorder target; the header button carries the keyboard-reachable affordance
 		<div
-			className={`group/subsection relative ${isDragging ? "opacity-50" : ""}`}
+			className={`group/subsection relative ${isDragging ? "opacity-50" : ""} ${visibilityDragOver ? "rounded-md bg-primary/5 ring-1 ring-primary/60" : ""}`}
+			data-subsection-key={sectionKey}
+			onDragLeave={(e) => {
+				const relatedTarget = e.relatedTarget;
+				if (
+					!(
+						relatedTarget instanceof Node &&
+						e.currentTarget.contains(relatedTarget)
+					)
+				) {
+					setVisibilityDragOver(false);
+				}
+			}}
 			onDragOver={(e) => {
+				const visibilityDrag =
+					visibilityDrop &&
+					e.dataTransfer.types.includes(
+						resourceVisibilityDndMime(visibilityDrop.accept)
+					);
+				if (visibilityDrag) {
+					const allowed = visibilityDrop.canDropOnDragOver?.() ?? true;
+					setVisibilityDragOver(allowed);
+					e.dataTransfer.dropEffect = allowed ? "move" : "none";
+					if (allowed) {
+						e.preventDefault();
+						e.stopPropagation();
+					}
+					return;
+				}
+				setVisibilityDragOver(false);
 				// Only intercept our own sub-section drags; let a top-level section
 				// drag pass through to the parent group's handler.
 				if (!dnd.draggingKey) {
@@ -6622,6 +6525,28 @@ function SubSection({
 				dnd.onDragOver(sectionKey);
 			}}
 			onDrop={(e) => {
+				const visibilityPayload = visibilityDrop
+					? readVisibilityPayload(e)
+					: null;
+				if (
+					visibilityDrop &&
+					visibilityPayload?.resourceType === visibilityDrop.accept &&
+					visibilityPayload.from !== sectionKey
+				) {
+					e.preventDefault();
+					e.stopPropagation();
+					setVisibilityDragOver(false);
+					// Let the native dragend/pointer-release sequence finish before
+					// opening a modal. Otherwise the release can be interpreted as an
+					// outside interaction and immediately dismiss the confirmation.
+					setTimeout(() => {
+						if (visibilityDrop.canDrop(visibilityPayload)) {
+							visibilityDrop.onDrop(visibilityPayload);
+						}
+					}, 0);
+					return;
+				}
+				setVisibilityDragOver(false);
 				if (!dnd.draggingKey) {
 					return;
 				}
@@ -6632,7 +6557,13 @@ function SubSection({
 		>
 			{isDragOver && (
 				<div
-					className={`pointer-events-none absolute inset-x-1 z-10 h-0.5 rounded-full bg-primary ${dropBelow ? "bottom-0" : "top-0"}`}
+					className={`reorder-drop-indicator pointer-events-none absolute inset-x-1 z-10 h-0.5 bg-primary ${dropBelow ? "bottom-0" : "top-0"}`}
+				/>
+			)}
+			{visibilityDragOver && (
+				<div
+					aria-hidden="true"
+					className="pointer-events-none absolute inset-0 rounded-md border border-primary/50"
 				/>
 			)}
 			{(() => {
@@ -6664,7 +6595,7 @@ function SubSection({
 								<span
 									className={`shrink-0 text-muted-foreground/60 ${action ? "transition-opacity group-hover/subsection:opacity-0" : ""}`}
 								>
-									{count}
+									{formatCount(count) ?? "—"}
 								</span>
 							)}
 							{/* The hover action owns the right edge, so drop the collapse
@@ -6907,50 +6838,105 @@ function ChatsSection({
 	onNew: () => void;
 }) {
 	const [groupByDate] = useChatDateGrouping();
-	const paged = usePaged(sortItems(loose, sort, CONV_SORT_ACCESSORS), pageSize);
+	const chatsByVisibility = useMemo(
+		() =>
+			loose.reduce<Record<ResourceVisibilityGroup, Conversation[]>>(
+				(groups, conversation) => {
+					groups[resourceVisibilityGroup(conversation.visibility)].push(
+						conversation
+					);
+					return groups;
+				},
+				{ private: [], team: [] }
+			),
+		[loose]
+	);
+	const visibilityGroupKeys = useMemo(
+		() => ["private", "team"] as ResourceVisibilityGroup[],
+		[]
+	);
+	const visibilityGroups = useNestedSections(
+		CHAT_VISIBILITY_ORDER_KEY,
+		CHAT_VISIBILITY_COLLAPSED_KEY,
+		visibilityGroupKeys,
+		false
+	);
+	const privatePaged = usePaged(
+		sortItems(chatsByVisibility.private, sort, CONV_SORT_ACCESSORS),
+		pageSize
+	);
+	const teamPaged = usePaged(
+		sortItems(chatsByVisibility.team, sort, CONV_SORT_ACCESSORS),
+		pageSize
+	);
 
-	// ChatGPT-style date buckets, each its own collapsible/reorderable sub-section
-	// indented under the Chats heading. Unlike the other bucketed lists this one
-	// buckets EVERY loose chat rather than the current page — the pre-existing
-	// behaviour, and safe here because the flat list is what paging is for.
-	const groupedBody = groupByDate ? (
-		<DateGroupedRows
-			className="ml-2 space-y-0.5"
-			collapsedKey={CHAT_BUCKET_COLLAPSED_KEY}
-			items={loose}
-			orderKey={CHAT_BUCKET_ORDER_KEY}
-			renderRows={(rows) => (
-				<ChatRowList conversations={rows} handlers={handlers} />
-			)}
-			stampOf={conversationStamp}
-			wrapHeader={(bucket, header) => (
-				<DeleteAllChatsMenu
-					conversationIds={bucket.items.map((c) => c.id)}
-					groupLabel={bucket.label}
-					onDelete={handlers.onDeleteConversation}
-					scope="group"
-				>
-					{header}
-				</DeleteAllChatsMenu>
-			)}
-		/>
-	) : null;
-
-	const flatBody = (
-		<>
-			<ChatRowList conversations={paged.visible} handlers={handlers} />
-			<SectionPagingControls
-				overflow={{
-					getSearchText: (c) => c.title ?? "",
-					items: paged.items,
-					label: "chats",
-					renderList: (list) => (
-						<ChatRowList conversations={list} handlers={handlers} />
-					),
+	const renderVisibilityGroup = (group: ResourceVisibilityGroup) => {
+		const groupChats = chatsByVisibility[group];
+		const groupPaged = group === "private" ? privatePaged : teamPaged;
+		const label = group === "private" ? "Private" : "Team";
+		return (
+			<SubSection
+				collapsed={visibilityGroups.isCollapsed(group)}
+				count={groupChats.length}
+				dnd={visibilityGroups.dnd}
+				icon={group === "private" ? ViewOffSlashIcon : UserMultiple02Icon}
+				key={group}
+				label={label}
+				onToggleCollapsed={visibilityGroups.toggle}
+				sectionKey={group}
+				size="md"
+				visibilityDrop={{
+					accept: "chat",
+					canDrop: () => group !== "private" || handlers.canMakePrivate,
+					canDropOnDragOver: () =>
+						group !== "private" || handlers.canMakePrivate,
+					onDrop: (payload) =>
+						handlers.onRequestConversationVisibility({
+							...payload,
+							to: group,
+						}),
 				}}
-				paged={paged}
-			/>
-		</>
+				wrapHeader={(header) => (
+					<DeleteAllChatsMenu
+						conversationIds={groupChats.map((conversation) => conversation.id)}
+						groupLabel={`${label} chats`}
+						onDelete={handlers.onDeleteConversation}
+						scope="group"
+					>
+						{header}
+					</DeleteAllChatsMenu>
+				)}
+			>
+				{groupByDate ? (
+					<SidebarChatList
+						conversations={groupChats}
+						handlers={handlers}
+						scope={`loose:${group}`}
+					/>
+				) : (
+					<>
+						<ChatRowList
+							conversations={groupPaged.visible}
+							handlers={handlers}
+						/>
+						<SectionPagingControls
+							overflow={{
+								getSearchText: (conversation) => conversation.title ?? "",
+								items: groupPaged.items,
+								label: `${label.toLowerCase()} chats`,
+								renderList: (list) => (
+									<ChatRowList conversations={list} handlers={handlers} />
+								),
+							}}
+							paged={groupPaged}
+						/>
+					</>
+				)}
+			</SubSection>
+		);
+	};
+	const orderedVisibilityGroups = visibilityGroups.orderedKeys.filter(
+		(key): key is ResourceVisibilityGroup => key === "private" || key === "team"
 	);
 
 	return (
@@ -7000,7 +6986,7 @@ function ChatsSection({
 			{loose.length === 0 ? (
 				<p className="px-2 py-2 text-muted-foreground text-xs">No chats yet</p>
 			) : (
-				(groupByDate && groupedBody) || flatBody
+				orderedVisibilityGroups.map(renderVisibilityGroup)
 			)}
 		</SidebarSection>
 	);
@@ -7114,10 +7100,12 @@ function ProjectRow({
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
 	const { openTab } = useTabsContext();
-	const openProjectView = (kind: "diff" | "files") => {
+	const openProjectView = (kind: "diff" | "files" | "graph") => {
 		const path = `/project/${kind}/${encodeURIComponent(bucket.path)}`;
+		const title =
+			kind === "diff" ? "Changes" : kind === "files" ? "Files" : "Git graph";
 		openTab(path, {
-			title: `${kind === "diff" ? "Changes" : "Files"} · ${label}`,
+			title: `${title} · ${label}`,
 		});
 	};
 	const noun = count === 1 ? "chat" : "chats";
@@ -7143,6 +7131,11 @@ function ProjectRow({
 									onClick={() => openProjectView("files")}
 									title="Browse project files"
 								/>
+								<SubSectionActionButton
+									icon={GitBranchIcon}
+									onClick={() => openProjectView("graph")}
+									title="Open Git graph"
+								/>
 							</div>
 						}
 						collapsed={collapsed}
@@ -7159,6 +7152,22 @@ function ProjectRow({
 						sectionKey={bucket.path}
 						size="md"
 					>
+						{bucket.sourceFolders.length > 1 && (
+							<div className="mb-1 space-y-0.5 px-2 text-[10px] text-muted-foreground">
+								<div className="font-medium uppercase tracking-wide">
+									Sources
+								</div>
+								{bucket.sourceFolders.map((source) => (
+									<div
+										className="truncate font-mono"
+										key={source}
+										title={source}
+									>
+										{source}
+									</div>
+								))}
+							</div>
+						)}
 						{count === 0 ? (
 							<p className="px-2 py-1 text-muted-foreground/70 text-xs">
 								No chats
@@ -7184,6 +7193,10 @@ function ProjectRow({
 					<ContextMenuItem onClick={() => setIconDialogOpen(true)}>
 						<HugeiconsIcon className="mr-2 size-4" icon={ImageAdd01Icon} />
 						Change icon…
+					</ContextMenuItem>
+					<ContextMenuItem onClick={() => openProjectView("graph")}>
+						<HugeiconsIcon className="mr-2 size-4" icon={GitBranchIcon} />
+						Open Git graph
 					</ContextMenuItem>
 					<ContextMenuSeparator />
 					<ContextMenuItem
@@ -7258,12 +7271,14 @@ function ProjectRow({
 function ProjectScopeMenu({
 	label,
 	onNewChat,
+	onOpenGraph,
 	onRemove,
 	onSetActive,
 	path,
 }: {
 	label: string;
 	onNewChat: (path: string) => void;
+	onOpenGraph: (path: string) => void;
 	onRemove: (path: string) => void;
 	onSetActive: (path: string) => void;
 	path: string;
@@ -7276,6 +7291,10 @@ function ProjectScopeMenu({
 				<DropdownMenuItem onClick={() => onNewChat(path)}>
 					<HugeiconsIcon className="mr-2 size-4" icon={Add01Icon} />
 					New chat in this folder
+				</DropdownMenuItem>
+				<DropdownMenuItem onClick={() => onOpenGraph(path)}>
+					<HugeiconsIcon className="mr-2 size-4" icon={GitBranchIcon} />
+					Open Git graph
 				</DropdownMenuItem>
 				<DropdownMenuItem onClick={() => onSetActive(path)}>
 					<HugeiconsIcon className="mr-2 size-4" icon={FolderOpenIcon} />
@@ -7321,25 +7340,34 @@ function ProjectScopeMenu({
  * delete is preserved verbatim in intent — Core refuses to delete one, so the item
  * is disabled with the reason rather than hidden.
  */
-function SpaceScopeMenu({
+export function SpaceScopeMenu({
+	canDelete,
+	canMakePrivate,
 	contributedRows,
 	onAdd,
 	onOpen,
 	onOpenInNewTab,
 	onRequestDelete,
+	onRename,
+	onRequestVisibilityChange,
 	setSpaceIcon,
 	space,
 }: {
+	canDelete: boolean;
+	canMakePrivate: boolean;
 	contributedRows: EntityRow[];
 	onAdd: () => void;
 	onOpen: () => void;
 	onOpenInNewTab: () => void;
 	onRequestDelete: () => void;
+	onRename: (name: string) => Promise<void>;
+	onRequestVisibilityChange: (request: VisibilityChangeRequest) => void;
 	setSpaceIcon: (id: string, icon: GlyphValue) => Promise<void>;
 	space: Space;
 }) {
 	const { updateTabsIconWhere } = useTabsContext();
 	const [iconDialogOpen, setIconDialogOpen] = useState(false);
+	const [renameOpen, setRenameOpen] = useState(false);
 	return (
 		<>
 			<ScopeMenu label={`${space.name} options`}>
@@ -7359,6 +7387,46 @@ function SpaceScopeMenu({
 					<HugeiconsIcon className="mr-2 size-4" icon={ImageAdd01Icon} />
 					Change icon…
 				</DropdownMenuItem>
+				{space.system ? null : (
+					<DropdownMenuItem onClick={() => setRenameOpen(true)}>
+						<HugeiconsIcon className="mr-2 size-4" icon={PencilEdit01Icon} />
+						Rename space
+					</DropdownMenuItem>
+				)}
+				{space.system ? null : (
+					<DropdownMenuItem
+						disabled={
+							resourceVisibilityGroup(space.visibility) === "team" &&
+							!canMakePrivate
+						}
+						onClick={() =>
+							onRequestVisibilityChange({
+								from: resourceVisibilityGroup(space.visibility),
+								id: space.id,
+								name: space.name,
+								resourceType: "space",
+								to:
+									resourceVisibilityGroup(space.visibility) === "team"
+										? "private"
+										: "team",
+							})
+						}
+					>
+						<HugeiconsIcon
+							className="mr-2 size-4"
+							icon={
+								resourceVisibilityGroup(space.visibility) === "team"
+									? ViewOffSlashIcon
+									: UserMultiple02Icon
+							}
+						/>
+						{resourceVisibilityGroup(space.visibility) === "team"
+							? canMakePrivate
+								? "Make private"
+								: "Make private (admins only)"
+							: "Share with team"}
+					</DropdownMenuItem>
+				)}
 				{contributedRows.map((row) => (
 					<DropdownMenuItem key={row.id} onClick={row.onSelect}>
 						<span className="mr-2 inline-flex">
@@ -7368,7 +7436,7 @@ function SpaceScopeMenu({
 					</DropdownMenuItem>
 				))}
 				<DropdownMenuSeparator />
-				{space.system ? (
+				{space.system || !canDelete ? (
 					<Tooltip>
 						<TooltipTrigger render={<span className="block" />}>
 							<DropdownMenuItem disabled variant="destructive">
@@ -7377,8 +7445,9 @@ function SpaceScopeMenu({
 							</DropdownMenuItem>
 						</TooltipTrigger>
 						<TooltipContent className="max-w-56">
-							System spaces can't be deleted — Ryu creates and maintains this
-							one.
+							{space.system
+								? "System spaces can't be deleted — Ryu creates and maintains this one."
+								: "Only organization members with Space delete permission can delete Spaces."}
 						</TooltipContent>
 					</Tooltip>
 				) : (
@@ -7400,6 +7469,12 @@ function SpaceScopeMenu({
 				open={iconDialogOpen}
 				title="Space icon"
 				value={space.icon}
+			/>
+			<RenameSpaceDialog
+				onClose={() => setRenameOpen(false)}
+				onRename={onRename}
+				open={renameOpen}
+				space={space}
 			/>
 		</>
 	);
@@ -7635,6 +7710,13 @@ function ProjectsSection({
 		});
 		openTab("/chat", { forceNew: true });
 	};
+	const handleOpenGraph = (path: string) => {
+		const project = projects.find((item) => item.path === path);
+		const label = projectNames[path]?.trim() || project?.name || path;
+		openTab(`/project/graph/${encodeURIComponent(path)}`, {
+			title: `Git graph · ${label}`,
+		});
+	};
 
 	return (
 		<>
@@ -7710,6 +7792,7 @@ function ProjectsSection({
 											selection
 										}
 										onNewChat={handleNewChatInFolder}
+										onOpenGraph={handleOpenGraph}
 										onRemove={removeProject}
 										onSetActive={handleSetActive}
 										path={selection}
@@ -7935,7 +8018,7 @@ function ChromeButtonShell({
 		>
 			{isDragOver && (
 				<div
-					className={`pointer-events-none absolute inset-x-2 z-10 h-0.5 rounded-full bg-primary ${dropBelow ? "bottom-0" : "top-0"}`}
+					className={`reorder-drop-indicator pointer-events-none absolute inset-x-2 z-10 h-0.5 bg-primary ${dropBelow ? "bottom-0" : "top-0"}`}
 				/>
 			)}
 			{children}
@@ -7984,14 +8067,6 @@ function SidebarContextMenuItem({
 			</span>
 			{children}
 		</ContextMenuItem>
-	);
-}
-
-function ContextMenuSectionHeading({ children }: { children: ReactNode }) {
-	return (
-		<div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
-			{children}
-		</div>
 	);
 }
 
@@ -8082,7 +8157,7 @@ function DynamicSidebarButton({
 					{button.icon ? (
 						<Icon className="size-4" icon={button.icon} size={16} />
 					) : (
-						<HugeiconsIcon className="size-4" icon={GridIcon} />
+						<HugeiconsIcon className="size-4" icon={Package01Icon} />
 					)}
 					<span>{button.title}</span>
 				</SidebarMenuButton>
@@ -8171,9 +8246,11 @@ export function SidebarPanelContent({
 		conversations,
 		renameConversation,
 		setConversationGlyph,
+		setConversationVisibility,
 		refresh,
 		loadMessages,
 	} = useChatHistoryContext();
+	const { canMakePrivate } = useVisibilityAdminAccess();
 	const { openTab, updateTabsIconWhere, requestScrollToMessage } =
 		useTabsContext();
 	const activeNode = useActiveNode();
@@ -8186,6 +8263,50 @@ export function SidebarPanelContent({
 	// and (when enabled) fed continuously by the background auto-importer below.
 	const [importOpen, setImportOpen] = useState(false);
 	const [setupImportOpen, setSetupImportOpen] = useState(false);
+	const [pendingChatVisibility, setPendingChatVisibility] =
+		useState<VisibilityChangeRequest | null>(null);
+	const [changingChatVisibility, setChangingChatVisibility] = useState(false);
+	const requestConversationVisibility = useCallback(
+		(request: VisibilityChangeRequest) => {
+			if (request.to === "private" && !canMakePrivate) {
+				toast.error(
+					"Only organization admins can make shared resources private"
+				);
+				return;
+			}
+			setPendingChatVisibility(request);
+		},
+		[canMakePrivate]
+	);
+	const confirmConversationVisibility = useCallback(async () => {
+		if (!pendingChatVisibility) {
+			return;
+		}
+		if (pendingChatVisibility.to === "private" && !canMakePrivate) {
+			toast.error("Only organization admins can make shared resources private");
+			return;
+		}
+		setChangingChatVisibility(true);
+		try {
+			const success = await setConversationVisibility(
+				pendingChatVisibility.id,
+				resourceVisibilityForGroup(pendingChatVisibility.to)
+			);
+			if (success) {
+				setPendingChatVisibility(null);
+				return;
+			}
+			toast.error("Couldn't change this chat's visibility", {
+				description: "The chat stayed in its current group.",
+			});
+		} catch {
+			toast.error("Couldn't change this chat's visibility", {
+				description: "The chat stayed in its current group.",
+			});
+		} finally {
+			setChangingChatVisibility(false);
+		}
+	}, [canMakePrivate, pendingChatVisibility, setConversationVisibility]);
 	const importTarget = useMemo(
 		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
 		[activeNode.url, activeNode.token]
@@ -8215,6 +8336,7 @@ export function SidebarPanelContent({
 	const recentFolders = useWorkspaceStore((s) => s.recentFolders);
 	const removedProjects = useWorkspaceStore((s) => s.removedProjects);
 	const projectNames = useWorkspaceStore((s) => s.projectNames);
+	const workspaceProjects = useWorkspaceStore((s) => s.projects);
 	// Drives whether the "Tabs" section renders (vertical layout) or is skipped
 	// (horizontal layout, where the title-bar strip owns the tabs).
 	const tabLayout = useTabLayout();
@@ -8222,13 +8344,21 @@ export function SidebarPanelContent({
 	// modes on offer (built-in + contributed) — see `layout/sidebar-modes.ts`.
 	const [sidebarMode, setSidebarMode] = useSidebarMode();
 	const [sidebarVariant, setSidebarVariant] = useSidebarVariant();
+	const [groupByDate, setGroupByDate] = useChatDateGrouping();
+	const [groupedNav, setGroupedNav] = useSidebarGroupedNav();
+	const [showSidebarChatPreview, setShowSidebarChatPreview] =
+		useSidebarChatPreview();
+	const [sidebarOverflowPopover, setSidebarOverflowPopover] =
+		usePersistedToggle(SIDEBAR_OVERFLOW_POPOVER_KEY, false);
+	const agentRowStyle = useAgentRowStylePref();
+	const notificationLayout = useNotificationLayout();
 	// Which section the tabbed bar currently reveals. Reconciled below against the
 	// visible keys so it never points at a hidden/missing section.
 	const [activeTabbedSection, setActiveTabbedSection] =
 		useState<SectionKey | null>(null);
 	// Changing mode drops the remembered tab. The reconciliation below only catches
 	// a selection the new mode does NOT offer, and "chats" is offered by both — so
-	// arriving in Agent mode from a Tabbed session parked on Chats would open on
+	// arriving in Bot mode from a Tabbed session parked on Chats would open on
 	// Sessions and quietly break the one thing that mode promises (land on the
 	// roster). Clearing lets each mode's own default win.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: reacting to the mode change itself, not to the setter.
@@ -8255,9 +8385,15 @@ export function SidebarPanelContent({
 	// appended to the persisted order (see `effectiveOrder`). Empty when no enabled
 	// app contributes one, so this is inert until a fixture declares a section.
 	const {
+		chat_features: chatFeatures,
 		sidebar_sections: contributedSections,
 		sidebar_buttons: contributedButtons,
 	} = usePluginContributions();
+	const sideChatsEnabled = hasPluginChatFeature(
+		chatFeatures,
+		SIDE_CHATS_PLUGIN_ID,
+		SIDE_CHAT_FEATURE_KIND
+	);
 	// The arrangements on offer, shared with the Appearance tab so the two surfaces
 	// cannot disagree about which contributed modes are real.
 	const { modes: sidebarModes, settled: contributionsSettled } =
@@ -8460,7 +8596,7 @@ export function SidebarPanelContent({
 	const visible = allConversations.filter((c) => !archivedIds.has(c.id));
 	const pinned = visible.filter((c) => pinnedIds.has(c.id));
 	const rest = visible.filter((c) => !pinnedIds.has(c.id));
-	const { projects, loose } = groupByProject(rest);
+	const { projects, loose } = groupByProject(rest, workspaceProjects);
 
 	// The project list shown in the sidebar is the synced union of the composer's
 	// recent folders and the folders of existing conversations (durable Core data),
@@ -8472,14 +8608,27 @@ export function SidebarPanelContent({
 	// Keyed on the raw string, `~/x` and `~/x/` were two folders with one name.
 	const bucketByPath = new Map(projects.map((p) => [folderKey(p.path), p]));
 	const removedSet = new Set(removedProjects.map(folderKey));
-	const projectPaths = dedupeFolders([
-		...(workspaceFolder ? [workspaceFolder] : []),
-		...recentFolders,
-		...projects.map((p) => p.path),
-	]).filter((path) => !removedSet.has(folderKey(path)));
+	const workspaceProjectByFolder = new Map(
+		workspaceProjects.flatMap((project) =>
+			project.folders.map((path) => [folderKey(path), project] as const)
+		)
+	);
+	const projectPaths = dedupeFolders(
+		[
+			...(workspaceFolder ? [workspaceFolder] : []),
+			...recentFolders,
+			...projects.map((p) => p.path),
+		].map(
+			(path) =>
+				workspaceProjectByFolder.get(folderKey(path))?.folders[0] ?? path
+		)
+	).filter((path) => !removedSet.has(folderKey(path)));
 	const projectList: ProjectBucket[] = projectPaths.map((path) => {
 		const existing = bucketByPath.get(folderKey(path));
-		const name = projectName(path, projectNames);
+		const workspaceProject = workspaceProjectByFolder.get(folderKey(path));
+		const name = workspaceProject
+			? workspaceProjectName(workspaceProject, projectNames)
+			: projectName(path, projectNames);
 		if (existing) {
 			return existing.name === name ? existing : { ...existing, name };
 		}
@@ -8487,6 +8636,7 @@ export function SidebarPanelContent({
 			conversations: [],
 			name,
 			path,
+			sourceFolders: workspaceProject?.folders ?? [path],
 		};
 	});
 	const looseChats: Conversation[] = [
@@ -8781,9 +8931,15 @@ export function SidebarPanelContent({
 			setConversationGlyph(id, icon);
 			updateTabsIconWhere((t) => t.conversationId === id, icon);
 		},
+		onRequestConversationVisibility: requestConversationVisibility,
 		onToggleArchive: handleToggleArchive,
 		onTogglePin: handleTogglePin,
+		canMakePrivate,
+		pullRequestsEnabled: pluginApps.some(
+			(app) => app.id === "@ryu/pull-requests" && app.enabled
+		),
 		target: toTarget(activeNode),
+		sideChatsEnabled,
 	};
 
 	const handleNewConversation = () => {
@@ -8907,6 +9063,7 @@ export function SidebarPanelContent({
 			// not a collapse toggle, decides what's visible.
 			collapsed: forceExpanded ? false : collapsedSections.has(key),
 			dnd: sectionDnd,
+			icon: isDynamicSectionKey(key) ? undefined : SECTION_ICONS[key],
 			menu: sectionMenu,
 			pageSize: sectionPageSizes[key] ?? DEFAULT_PAGE_SIZE,
 			sort: sectionSorts[key] ?? DEFAULT_SORT,
@@ -9015,25 +9172,19 @@ export function SidebarPanelContent({
 		(key) =>
 			!(hiddenSections.has(key) || (key === "tabs" && tabLayout !== "vertical"))
 	);
-	// A mode that NAMES sections narrows the strip to exactly those, in the user's
-	// own section order (so someone who dragged Chats above Agents keeps that
-	// reading order). `hiddenSections` is deliberately NOT applied to them: picking
-	// a mode is a more specific instruction than a section hidden back when the
-	// sidebar listed fifteen of them, and a two-tab toggle missing one of its halves
-	// is just the previous mode with fewer rows.
+	// A mode that NAMES sections narrows the strip to exactly those. Most modes
+	// follow the user's own section order (so someone who dragged Chats above
+	// Agents keeps that reading order); built-in Bot mode intentionally keeps its
+	// declared Agents → Sessions order. `hiddenSections` is deliberately NOT
+	// applied to them: picking a mode is a more specific instruction than a
+	// section hidden back when the sidebar listed fifteen of them, and a two-tab
+	// toggle missing one of its halves is just the previous mode with fewer rows.
 	const tabbedKeys = activeMode.sections
-		? [...activeMode.sections].sort((a, b) => {
-				const ai = effectiveOrder.indexOf(a);
-				const bi = effectiveOrder.indexOf(b);
-				return (
-					(ai === -1 ? Number.MAX_SAFE_INTEGER : ai) -
-					(bi === -1 ? Number.MAX_SAFE_INTEGER : bi)
-				);
-			})
+		? orderedSidebarModeSections(activeMode, effectiveOrder)
 		: visibleTabbedKeys;
 	// Keep the active tab pointed at a real, visible section. A mode's declared
-	// `defaultSection` wins over "the first tab" — that is what makes Agent mode open
-	// on the roster rather than on the chat list it lists first.
+	// `defaultSection` wins over "the first tab" — Bot mode declares Agents as
+	// both its first tab and its default, so the roster is the primary surface.
 	const defaultTabbedKey =
 		activeMode.defaultSection && tabbedKeys.includes(activeMode.defaultSection)
 			? activeMode.defaultSection
@@ -9043,7 +9194,7 @@ export function SidebarPanelContent({
 			? activeTabbedSection
 			: defaultTabbedKey;
 
-	// In Agent mode the chat list is the "Sessions" half of the toggle — the
+	// In Bot mode the chat list is the "Sessions" half of the toggle — the
 	// vocabulary Grok/Hermes bot mode uses, and the word that reads correctly
 	// opposite "Agents". A label the user renamed in Customize wins over both.
 	const stripLabels =
@@ -9122,7 +9273,7 @@ export function SidebarPanelContent({
 			    context menu stops propagation) opens the sidebar-wide menu. */}
 			<ContextMenu>
 				<ContextMenuTrigger
-					render={<SidebarContent className="scroll-fade-effect-y pt-2" />}
+					render={<SidebarContent className="scroll-fade pt-2" />}
 				>
 					{activeMode.layout === "stacked"
 						? effectiveOrder.map((key) => renderSection(key))
@@ -9155,6 +9306,20 @@ export function SidebarPanelContent({
 					>
 						Inset
 					</CheckedContextMenuItem>
+					<ContextMenuSeparator />
+					<SidebarListAppearanceMenuItems
+						activeModeKey={activeMode.key}
+						agentRowStyle={agentRowStyle}
+						groupByDate={groupByDate}
+						groupedNav={groupedNav}
+						setAgentRowStyle={setAgentRowStyle}
+						setGroupByDate={setGroupByDate}
+						setGroupedNav={setGroupedNav}
+						setShowSidebarChatPreview={setShowSidebarChatPreview}
+						setSidebarOverflowPopover={setSidebarOverflowPopover}
+						showSidebarChatPreview={showSidebarChatPreview}
+						sidebarOverflowPopover={sidebarOverflowPopover}
+					/>
 					<ContextMenuSeparator />
 					<ContextMenuSectionHeading>Tabs</ContextMenuSectionHeading>
 					<CheckedContextMenuItem
@@ -9199,15 +9364,31 @@ export function SidebarPanelContent({
 					</SidebarContextMenuItem>
 				</ContextMenuContent>
 			</ContextMenu>
+			<ResourceVisibilityConfirmationDialog
+				canMakePrivate={canMakePrivate}
+				changing={changingChatVisibility}
+				onConfirm={() => {
+					confirmConversationVisibility().catch(() => undefined);
+				}}
+				onOpenChange={(open) => {
+					if (!(open || changingChatVisibility)) {
+						setPendingChatVisibility(null);
+					}
+				}}
+				request={pendingChatVisibility}
+			/>
 
 			{/* Admin-authored announcements, pinned just above the account footer
 			    (outside the scroll/reorder area). Self-hides when the feed is empty;
 			    toggleable via the Customize dialog's "Bottom buttons" group. */}
-			{!hiddenChrome.has("announcements") && <AnnouncementsSection />}
+			{notificationLayout === "split" && !hiddenChrome.has("announcements") && (
+				<AnnouncementsSection />
+			)}
 
 			<SidebarFooter>
 				<NavUser
 					hiddenChrome={hiddenChrome}
+					notificationLayout={notificationLayout}
 					onHideChrome={(key) => setChromeHidden(key, true)}
 				/>
 			</SidebarFooter>

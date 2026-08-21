@@ -36,8 +36,9 @@
 //! `surface` filter, and a language server gated on which shell happened to poll
 //! would be a bug — Core is the consumer here, not the desktop.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::pi_config::app_extensions::{may_ship_pi_extensions, GRANT_PI_EXTENSION};
 use crate::plugin_manifest::{LspServerContribution, LspTransport, PluginManifest};
 use crate::server::ServerState;
 
@@ -152,11 +153,11 @@ impl LspResolution {
 /// plugin owns the language.
 pub fn resolve_lsp_servers(
     manifests: &[PluginManifest],
-    enabled: &HashSet<String>,
+    enabled: &HashMap<String, Vec<String>>,
 ) -> LspResolution {
     let mut candidates: Vec<&PluginManifest> = manifests
         .iter()
-        .filter(|m| enabled.contains(&m.id))
+        .filter(|m| enabled.contains_key(&m.id))
         .filter(|m| {
             m.contributes
                 .as_ref()
@@ -173,6 +174,21 @@ pub fn resolve_lsp_servers(
         let Some(contributes) = manifest.contributes.as_ref() else {
             continue;
         };
+        let grants = enabled.get(&manifest.id).map(Vec::as_slice).unwrap_or(&[]);
+        let tier = crate::plugins::builtins::tier_for_manifest(manifest);
+        if !may_ship_pi_extensions(tier, grants) {
+            for (server_name, _) in &contributes.lsp_servers {
+                resolution.skipped.push(LspSkip {
+                    key: format!("{}/{}", manifest.id, server_name),
+                    reason: format!(
+                        "plugin '{}' is {tier:?}-tier and has no approved '{}' grant, so its +lsp server is not started (fail-closed)",
+                        manifest.id,
+                        GRANT_PI_EXTENSION,
+                    ),
+                });
+            }
+            continue;
+        }
         for (server_name, decl) in &contributes.lsp_servers {
             let key = format!("{}/{server_name}", manifest.id);
 
@@ -253,10 +269,10 @@ pub async fn resolve_for_node(state: &ServerState) -> LspResolution {
     let Ok(records) = state.app_store.list().await else {
         return LspResolution::default();
     };
-    let enabled: HashSet<String> = records
+    let enabled: HashMap<String, Vec<String>> = records
         .iter()
         .filter(|r| r.enabled)
-        .map(|r| r.id.clone())
+        .map(|r| (r.id.clone(), r.approved_grants.clone()))
         .collect();
 
     // Filter before cloning: this runs on every managed-Pi spawn, and a node with
@@ -265,7 +281,7 @@ pub async fn resolve_for_node(state: &ServerState) -> LspResolution {
     let manifests = state.app_manifests.read().await;
     let candidates: Vec<PluginManifest> = manifests
         .iter()
-        .filter(|m| enabled.contains(&m.id))
+        .filter(|m| enabled.contains_key(&m.id))
         .cloned()
         .collect();
     drop(manifests);
@@ -349,8 +365,10 @@ mod tests {
         }
     }
 
-    fn enabled(ids: &[&str]) -> HashSet<String> {
-        ids.iter().map(|id| (*id).to_owned()).collect()
+    fn enabled(ids: &[&str]) -> HashMap<String, Vec<String>> {
+        ids.iter()
+            .map(|id| ((*id).to_owned(), vec![GRANT_PI_EXTENSION.to_owned()]))
+            .collect()
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! A tiny in-process pub/sub channel for events Core wants to push to a connected
 //! UI but cannot render itself — first consumer is **desktop notifications**: the
-//! built-in `notify__desktop` MCP action (an agent tool) publishes here, and the
+//! built-in `notify.desktop` MCP action (an agent tool) publishes here, and the
 //! desktop subscribes via the `/api/events/notifications/stream` SSE endpoint and
 //! renders a native OS notification.
 //!
@@ -53,6 +53,43 @@ fn sender() -> &'static broadcast::Sender<DesktopNotification> {
 /// means no UI is currently connected — never an error for the caller.
 pub fn publish(notification: DesktopNotification) {
     let _ = sender().send(notification);
+}
+
+/// Publish a Core-owned system notification to every connected surface.
+///
+/// This convenience seam keeps server call sites from having to know the
+/// transport-only fields on [`DesktopNotification`].
+pub fn publish_system_notification(
+    title: impl Into<String>,
+    body: impl Into<String>,
+    level: impl Into<String>,
+) {
+    publish(DesktopNotification {
+        title: title.into(),
+        body: Some(body.into()),
+        level: level.into(),
+        target_user_id: None,
+        notification_id: None,
+        source_app_id: None,
+    });
+}
+
+/// Publish a system notification addressed to one verified user. `None`
+/// preserves the broadcast behavior for personal/unbound nodes.
+pub fn publish_system_notification_for_user(
+    title: impl Into<String>,
+    body: impl Into<String>,
+    level: impl Into<String>,
+    target_user_id: Option<String>,
+) {
+    publish(DesktopNotification {
+        title: title.into(),
+        body: Some(body.into()),
+        level: level.into(),
+        target_user_id,
+        notification_id: None,
+        source_app_id: None,
+    });
 }
 
 /// Subscribe to the desktop-notification stream (used by the SSE endpoint).

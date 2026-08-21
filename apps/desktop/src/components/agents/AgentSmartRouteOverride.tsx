@@ -33,15 +33,19 @@ import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
 	CLASSIFY_MODEL_ID,
 	CLASSIFY_TIER_COPY,
+	type ClassifyTierState,
 	classifyTierCannotServeModel,
 	classifyTierServable,
-	type ClassifyTierState,
 	DEFAULT_SMART_ROUTING,
 	deriveClassifyTierState,
 	fetchClassifyWeightsPresent,
+	MODEL_ROUTER_TYPE_DESCRIPTIONS,
+	MODEL_ROUTER_TYPE_LABELS,
+	type ModelRouterType,
 	type RouteStrategy,
 	routeStrategyCopy,
 	type SmartRoutingConfig,
+	type StagePicker,
 } from "@/src/lib/api/gateway.ts";
 import {
 	getAgentSmartRoute,
@@ -53,6 +57,7 @@ interface RuleRow {
 	description: string;
 	id: string;
 	model: string;
+	weight: string;
 }
 
 // Same cadences the gateway's Smart routing card polls at: the run state flips
@@ -206,6 +211,7 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 					id: crypto.randomUUID(),
 					description: r.description,
 					model: r.model,
+					weight: String(r.weight ?? 1),
 				}))
 			);
 			setLoaded(true);
@@ -232,7 +238,11 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 	//    classification call errors, and smart routing fails open by design. This
 	//    is the live one, and the blank now lands straight on it by default.
 	const classifierModel = draft.classifier_model.trim();
-	const smartLlm = enabled && (draft.strategy ?? "llm") === "llm";
+	const routerType: ModelRouterType = draft.router_type ?? "llm_classifier";
+	const smartLlm =
+		enabled &&
+		routerType === "llm_classifier" &&
+		(draft.strategy ?? "llm") === "llm";
 	const classifierDefaulted = smartLlm && classifierModel === "";
 	// Probe what the gateway will RESOLVE to, not what the box holds — an empty
 	// string never matches the classify-tier prefix, so probing the raw value
@@ -251,7 +261,7 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 
 	const updateRule = (
 		id: string,
-		field: "description" | "model",
+		field: "description" | "model" | "weight",
 		value: string
 	) =>
 		setRules((prev) =>
@@ -261,7 +271,7 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 	const addRule = () =>
 		setRules((prev) => [
 			...prev,
-			{ id: crypto.randomUUID(), description: "", model: "" },
+			{ id: crypto.randomUUID(), description: "", model: "", weight: "1" },
 		]);
 
 	const removeRule = (id: string) =>
@@ -275,18 +285,66 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 				.map((r) => ({
 					description: r.description.trim(),
 					model: r.model.trim(),
+					weight: Number(r.weight),
 				}))
-				.filter((r) => r.description && r.model);
+				.filter(
+					(r) =>
+						((draft.router_type ?? "llm_classifier") === "random" ||
+							r.description) &&
+						r.model &&
+						Number.isFinite(r.weight) &&
+						r.weight >= 0
+				);
 			const defaultModel = draft.default_model?.trim();
+			const escalationConfirmations = draft.escalation_confirmations;
 			const config: SmartRoutingConfig = {
 				...draft,
 				enabled: true,
+				router_type: draft.router_type ?? "llm_classifier",
 				strategy: draft.strategy ?? "llm",
 				classifier_model: draft.classifier_model.trim(),
 				embedding_model: draft.embedding_model?.trim() ?? "",
 				similarity_threshold: Number.isFinite(draft.similarity_threshold)
 					? draft.similarity_threshold
 					: 0.35,
+				random_seed:
+					draft.random_seed === null || draft.random_seed === undefined
+						? null
+						: Number.isSafeInteger(draft.random_seed) && draft.random_seed >= 0
+							? draft.random_seed
+							: null,
+				stage_capable_model: draft.stage_capable_model?.trim() ?? "",
+				stage_efficient_model: draft.stage_efficient_model?.trim() ?? "",
+				stage_picker: draft.stage_picker ?? "capable_first",
+				stage_confidence_threshold: Number.isFinite(
+					draft.stage_confidence_threshold
+				)
+					? draft.stage_confidence_threshold
+					: 0.5,
+				stage_recent_message_window: Number.isInteger(
+					draft.stage_recent_message_window
+				)
+					? draft.stage_recent_message_window
+					: 3,
+				escalation_weak_model: draft.escalation_weak_model?.trim() ?? "",
+				escalation_strong_model: draft.escalation_strong_model?.trim() ?? "",
+				escalation_judge_model: draft.escalation_judge_model?.trim() ?? "",
+				escalation_confirmations:
+					typeof escalationConfirmations === "number" &&
+					Number.isInteger(escalationConfirmations) &&
+					escalationConfirmations >= 1
+						? escalationConfirmations
+						: 2,
+				escalation_recent_message_window: Number.isInteger(
+					draft.escalation_recent_message_window
+				)
+					? draft.escalation_recent_message_window
+					: 28,
+				escalation_message_chars: Number.isInteger(
+					draft.escalation_message_chars
+				)
+					? draft.escalation_message_chars
+					: 500,
 				rules: cleanRules,
 				default_model: defaultModel ? defaultModel : null,
 			};
@@ -354,35 +412,65 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 			{enabled ? (
 				<>
 					<div className="flex flex-col gap-1.5">
-						<Label htmlFor="agent-smart-route-strategy">
-							{friendly ? "How to choose a rule" : "Strategy"}
-						</Label>
+						<Label htmlFor="agent-smart-route-type">Router type</Label>
 						<Select
-							items={strategyCopy.labels}
-							onValueChange={(v) =>
-								v && patch({ strategy: v as RouteStrategy })
+							items={MODEL_ROUTER_TYPE_LABELS}
+							onValueChange={(value) =>
+								value && patch({ router_type: value as ModelRouterType })
 							}
-							value={draft.strategy ?? "llm"}
+							value={routerType}
 						>
-							<SelectTrigger id="agent-smart-route-strategy">
+							<SelectTrigger id="agent-smart-route-type">
 								<SelectValue />
 							</SelectTrigger>
 							<SelectContent>
 								{(
-									Object.entries(strategyCopy.labels) as [
-										RouteStrategy,
+									Object.entries(MODEL_ROUTER_TYPE_LABELS) as [
+										ModelRouterType,
 										string,
 									][]
-								).map(([val, label]) => (
-									<SelectItem key={val} value={val}>
-										{label}
+								).map(([value, label]) => (
+									<SelectItem key={value} value={value}>
+										{label} — {MODEL_ROUTER_TYPE_DESCRIPTIONS[value]}
 									</SelectItem>
 								))}
 							</SelectContent>
 						</Select>
 					</div>
 
-					{(draft.strategy ?? "llm") === "llm" ? (
+					{routerType === "llm_classifier" ? (
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="agent-smart-route-strategy">
+								{friendly ? "How to choose a rule" : "Strategy"}
+							</Label>
+							<Select
+								items={strategyCopy.labels}
+								onValueChange={(v) =>
+									v && patch({ strategy: v as RouteStrategy })
+								}
+								value={draft.strategy ?? "llm"}
+							>
+								<SelectTrigger id="agent-smart-route-strategy">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{(
+										Object.entries(strategyCopy.labels) as [
+											RouteStrategy,
+											string,
+										][]
+									).map(([val, label]) => (
+										<SelectItem key={val} value={val}>
+											{label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						</div>
+					) : null}
+
+					{routerType === "llm_classifier" &&
+					(draft.strategy ?? "llm") === "llm" ? (
 						<div className="flex flex-col gap-1.5">
 							<Label htmlFor="agent-smart-route-classifier">
 								Classifier model
@@ -415,7 +503,7 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 						</div>
 					) : null}
 
-					{draft.strategy === "embedding" ? (
+					{routerType === "llm_classifier" && draft.strategy === "embedding" ? (
 						<>
 							<div className="flex flex-col gap-1.5">
 								<Label htmlFor="agent-smart-route-embedding">
@@ -444,73 +532,250 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 						</>
 					) : null}
 
-					<div className="flex flex-col gap-2">
-						<div className="flex items-center justify-between">
-							<Label>Rules</Label>
-							<Button onClick={addRule} size="sm" variant="ghost">
-								<HugeiconsIcon className="size-4" icon={Add01Icon} />
-								Add rule
-							</Button>
-						</div>
-						{rules.length === 0 ? (
-							<p className="text-muted-foreground text-sm">
-								No rules yet. Add one like “writing or debugging code” →
-								“claude-sonnet-4-5”.
+					{routerType === "random" ? (
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="agent-smart-route-seed">Seed (optional)</Label>
+							<Input
+								id="agent-smart-route-seed"
+								inputMode="numeric"
+								onChange={(event) => {
+									const raw = event.target.value.trim();
+									const seed = Number(raw);
+									patch({
+										random_seed:
+											raw === "" || !Number.isSafeInteger(seed) || seed < 0
+												? null
+												: seed,
+									});
+								}}
+								placeholder="Leave blank for normal traffic"
+								value={draft.random_seed ?? ""}
+							/>
+							<p className="text-muted-foreground text-xs">
+								Targets are selected independently per request; the seed is for
+								reproducible tests, not conversation stickiness.
 							</p>
-						) : (
-							<div className="flex flex-col gap-3">
-								{rules.map((rule, idx) => (
-									<div className="flex items-start gap-2" key={rule.id}>
-										<div className="flex flex-1 flex-col gap-1.5">
-											<Input
-												onChange={(e) =>
-													updateRule(rule.id, "description", e.target.value)
-												}
-												placeholder="When the request is about… (plain language)"
-												value={rule.description}
-											/>
-											<Input
-												onChange={(e) =>
-													updateRule(rule.id, "model", e.target.value)
-												}
-												placeholder="Route to model id (e.g. claude-sonnet-4-5)"
-												value={rule.model}
-											/>
-										</div>
-										<Button
-											onClick={() => removeRule(rule.id)}
-											size="icon"
-											variant="ghost"
-										>
-											<HugeiconsIcon
-												className="size-3.5 text-destructive"
-												icon={Delete01Icon}
-											/>
-											<span className="sr-only">Remove rule {idx + 1}</span>
-										</Button>
-									</div>
-								))}
-							</div>
-						)}
-					</div>
+						</div>
+					) : null}
 
-					<div className="flex flex-col gap-1.5">
-						<Label htmlFor="agent-smart-route-default">
-							Default model when no rule matches
-						</Label>
-						<Input
-							id="agent-smart-route-default"
-							onChange={(e) => patch({ default_model: e.target.value })}
-							placeholder="Leave blank to keep the originally requested model"
-							value={draft.default_model ?? ""}
-						/>
-					</div>
+					{routerType === "stage_router" ? (
+						<div className="flex flex-col gap-3 rounded-md border p-3">
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="agent-smart-route-stage-capable">
+									Capable model
+								</Label>
+								<Input
+									id="agent-smart-route-stage-capable"
+									onChange={(e) =>
+										patch({ stage_capable_model: e.target.value })
+									}
+									placeholder="Model for exploration and recovery"
+									value={draft.stage_capable_model ?? ""}
+								/>
+							</div>
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="agent-smart-route-stage-efficient">
+									Efficient model
+								</Label>
+								<Input
+									id="agent-smart-route-stage-efficient"
+									onChange={(e) =>
+										patch({ stage_efficient_model: e.target.value })
+									}
+									placeholder="Model for settled mechanical work"
+									value={draft.stage_efficient_model ?? ""}
+								/>
+							</div>
+							<Label htmlFor="agent-smart-route-stage-picker">
+								Ambiguous-turn default
+							</Label>
+							<Select
+								items={{
+									capable_first: "Capable first",
+									efficient_first: "Efficient first",
+								}}
+								onValueChange={(value) =>
+									value && patch({ stage_picker: value as StagePicker })
+								}
+								value={draft.stage_picker ?? "capable_first"}
+							>
+								<SelectTrigger id="agent-smart-route-stage-picker">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="capable_first">Capable first</SelectItem>
+									<SelectItem value="efficient_first">
+										Efficient first
+									</SelectItem>
+								</SelectContent>
+							</Select>
+							<FluidSlider
+								format={(value) => value.toFixed(2)}
+								label="Signal confidence threshold"
+								max={1}
+								min={0}
+								onValueChange={(stage_confidence_threshold) =>
+									patch({ stage_confidence_threshold })
+								}
+								step={0.05}
+								value={draft.stage_confidence_threshold ?? 0.5}
+							/>
+						</div>
+					) : null}
+
+					{routerType === "escalation" ? (
+						<div className="flex flex-col gap-3 rounded-md border p-3">
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="agent-smart-route-escalation-weak">
+									Weak model
+								</Label>
+								<Input
+									id="agent-smart-route-escalation-weak"
+									onChange={(e) =>
+										patch({ escalation_weak_model: e.target.value })
+									}
+									placeholder="Default model for routine turns"
+									value={draft.escalation_weak_model ?? ""}
+								/>
+							</div>
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="agent-smart-route-escalation-strong">
+									Strong model
+								</Label>
+								<Input
+									id="agent-smart-route-escalation-strong"
+									onChange={(e) =>
+										patch({ escalation_strong_model: e.target.value })
+									}
+									placeholder="Model for confirmed trouble"
+									value={draft.escalation_strong_model ?? ""}
+								/>
+							</div>
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="agent-smart-route-escalation-judge">
+									Judge model
+								</Label>
+								<Input
+									id="agent-smart-route-escalation-judge"
+									onChange={(e) =>
+										patch({ escalation_judge_model: e.target.value })
+									}
+									placeholder="Small model that returns ESCALATE or DECLINE"
+									value={draft.escalation_judge_model ?? ""}
+								/>
+							</div>
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="agent-smart-route-escalation-confirmations">
+									Confirmations before escalation
+								</Label>
+								<Input
+									id="agent-smart-route-escalation-confirmations"
+									inputMode="numeric"
+									min={1}
+									onChange={(e) =>
+										patch({ escalation_confirmations: Number(e.target.value) })
+									}
+									placeholder="2"
+									value={draft.escalation_confirmations ?? 2}
+								/>
+							</div>
+							<p className="text-muted-foreground text-xs">
+								Ryu judges the current transcript before routing and latches a
+								session to strong after consecutive escalation verdicts.
+							</p>
+						</div>
+					) : null}
+
+					{routerType === "llm_classifier" || routerType === "random" ? (
+						<>
+							<div className="flex flex-col gap-2">
+								<div className="flex items-center justify-between">
+									<Label>Rules</Label>
+									<Button onClick={addRule} size="sm" variant="ghost">
+										<HugeiconsIcon className="size-4" icon={Add01Icon} />
+										Add rule
+									</Button>
+								</div>
+								{rules.length === 0 ? (
+									<p className="text-muted-foreground text-sm">
+										No targets yet. Add a model below
+										{routerType === "random"
+											? " and give it a relative weight"
+											: " with a matching rule"}
+										.
+									</p>
+								) : (
+									<div className="flex flex-col gap-3">
+										{rules.map((rule, idx) => (
+											<div className="flex items-start gap-2" key={rule.id}>
+												<div className="flex flex-1 flex-col gap-1.5">
+													<Input
+														onChange={(e) =>
+															updateRule(rule.id, "description", e.target.value)
+														}
+														placeholder={
+															routerType === "random"
+																? "Optional target label"
+																: "When the request is about… (plain language)"
+														}
+														value={rule.description}
+													/>
+													<Input
+														onChange={(e) =>
+															updateRule(rule.id, "model", e.target.value)
+														}
+														placeholder="Route to model id (e.g. claude-sonnet-4-5)"
+														value={rule.model}
+													/>
+													{routerType === "random" ? (
+														<Input
+															inputMode="decimal"
+															min={0}
+															onChange={(e) =>
+																updateRule(rule.id, "weight", e.target.value)
+															}
+															placeholder="Relative weight (default 1)"
+															value={rule.weight}
+														/>
+													) : null}
+												</div>
+												<Button
+													onClick={() => removeRule(rule.id)}
+													size="icon"
+													variant="ghost"
+												>
+													<HugeiconsIcon
+														className="size-3.5 text-destructive"
+														icon={Delete01Icon}
+													/>
+													<span className="sr-only">Remove rule {idx + 1}</span>
+												</Button>
+											</div>
+										))}
+									</div>
+								)}
+							</div>
+
+							{routerType === "llm_classifier" ? (
+								<div className="flex flex-col gap-1.5">
+									<Label htmlFor="agent-smart-route-default">
+										Default model when no rule matches
+									</Label>
+									<Input
+										id="agent-smart-route-default"
+										onChange={(e) => patch({ default_model: e.target.value })}
+										placeholder="Leave blank to keep the originally requested model"
+										value={draft.default_model ?? ""}
+									/>
+								</div>
+							) : null}
+						</>
+					) : null}
 				</>
 			) : null}
 
 			<div className="flex justify-end">
-				<Button disabled={saving} onClick={() => handleSave()} size="sm">
-					{saving ? <Spinner className="size-4" /> : null}
+				<Button loading={saving} onClick={() => handleSave()} size="sm">
 					Save
 				</Button>
 			</div>

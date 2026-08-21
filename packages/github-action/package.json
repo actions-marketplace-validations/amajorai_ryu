@@ -1,0 +1,35 @@
+{
+  "name": "@ryuhq/github-action",
+  "version": "0.2.0",
+  "description": "GitHub Action for running Ryu Core agents, teams, workflows, and tools",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "tsconfig.json",
+    "tsup.config.ts"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "check-types": "tsc --noEmit",
+    "test": "bun run build && bun test src",
+    "verify-dist": "bun run build && git diff --exit-code -- dist"
+  },
+  "dependencies": {
+    "@actions/core": "^1.11.1"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3"
+  }
+}

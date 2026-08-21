@@ -1,6 +1,8 @@
 ﻿import { Button } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { VoiceInputButton } from "../input/voice-input-button.tsx";
+import { useVoiceRecorder } from "../useVoiceRecorder.ts";
 
 export interface QuestionOption {
 	description?: string;
@@ -27,7 +29,22 @@ export interface QuestionAnswer {
 	text?: string;
 }
 
+export interface QuestionPromptVoice {
+	disabled?: boolean;
+	transcribe: (audio: Blob) => Promise<string>;
+}
+
 const QUESTION_CUSTOM_ID = "__custom__";
+const noopTranscribe = async (): Promise<string> => "";
+
+function appendVoiceText(current: string, transcript: string) {
+	const next = transcript.trim();
+	if (!next) {
+		return current;
+	}
+	const base = current.trim();
+	return base ? `${base} ${next}` : next;
+}
 
 function optionBadge(idx: number) {
 	return String.fromCharCode(65 + idx);
@@ -51,6 +68,7 @@ export interface QuestionPromptProps {
 	/** Label for the primary action on the LAST question (default "Send"). */
 	submitLabel?: string;
 	totalQuestions?: number;
+	voice?: QuestionPromptVoice;
 }
 
 export function QuestionPrompt({
@@ -67,10 +85,13 @@ export function QuestionPrompt({
 	onSubmit,
 	onSkip,
 	className,
+	voice,
 }: QuestionPromptProps) {
 	const [selectedIds, setSelectedIds] = useState<string[]>([]);
 	const [customText, setCustomText] = useState("");
 	const [textValue, setTextValue] = useState("");
+	const customTextRef = useRef(customText);
+	customTextRef.current = customText;
 	const resolvedTotal = totalQuestions ?? questions.length;
 	const clampedIndex = Math.max(1, Math.min(questionIndex, resolvedTotal));
 	const activeQuestion = questions[clampedIndex - 1];
@@ -81,6 +102,56 @@ export function QuestionPrompt({
 	const canGoNext = clampedIndex < resolvedTotal;
 	const isLastQuestion = clampedIndex >= resolvedTotal;
 	const primaryLabel = isLastQuestion ? submitLabel : nextLabel;
+
+	const handleCustomTextChange = useCallback(
+		(nextValue: string) => {
+			setCustomText(nextValue);
+			if (!activeQuestion) {
+				return;
+			}
+			if (activeQuestion.kind === "single") {
+				setSelectedIds(nextValue.trim().length > 0 ? [QUESTION_CUSTOM_ID] : []);
+				return;
+			}
+			setSelectedIds((prev) => {
+				const hasCustom = prev.includes(QUESTION_CUSTOM_ID);
+				if (nextValue.trim().length > 0 && !hasCustom) {
+					return [...prev, QUESTION_CUSTOM_ID];
+				}
+				if (nextValue.trim().length === 0 && hasCustom) {
+					return prev.filter((id) => id !== QUESTION_CUSTOM_ID);
+				}
+				return prev;
+			});
+		},
+		[activeQuestion]
+	);
+
+	const appendVoiceTranscript = useCallback(
+		(transcript: string) => {
+			if (activeQuestion?.kind === "text") {
+				setTextValue((current) => appendVoiceText(current, transcript));
+				return;
+			}
+			if (activeQuestion) {
+				handleCustomTextChange(
+					appendVoiceText(customTextRef.current, transcript)
+				);
+			}
+		},
+		[activeQuestion, handleCustomTextChange]
+	);
+	const {
+		state: voiceState,
+		error: voiceError,
+		start: startVoice,
+		stop: stopVoice,
+	} = useVoiceRecorder({
+		transcribe: voice?.transcribe ?? noopTranscribe,
+		onTranscript: appendVoiceTranscript,
+	});
+	const isRecording = voiceState === "recording";
+	const isTranscribing = voiceState === "transcribing";
 
 	useEffect(() => {
 		if (!initialAnswer || initialAnswer.kind === "skip") {
@@ -155,27 +226,6 @@ export function QuestionPrompt({
 
 	const handleSingleSelect = (id: string) => {
 		setSelectedIds([id]);
-	};
-
-	const handleCustomTextChange = (nextValue: string) => {
-		setCustomText(nextValue);
-		if (!activeQuestion) {
-			return;
-		}
-		if (activeQuestion.kind === "single") {
-			setSelectedIds(nextValue.trim().length > 0 ? [QUESTION_CUSTOM_ID] : []);
-			return;
-		}
-		setSelectedIds((prev) => {
-			const hasCustom = prev.includes(QUESTION_CUSTOM_ID);
-			if (nextValue.trim().length > 0 && !hasCustom) {
-				return [...prev, QUESTION_CUSTOM_ID];
-			}
-			if (nextValue.trim().length === 0 && hasCustom) {
-				return prev.filter((id) => id !== QUESTION_CUSTOM_ID);
-			}
-			return prev;
-		});
 	};
 
 	const handleSubmit = () => {
@@ -278,31 +328,61 @@ export function QuestionPrompt({
 								>
 									{/* The custom row's badge follows the last option, so with no
 								    options it is the first letter. */}
-								{optionBadge(activeQuestion.options?.length ?? 0)}
+									{optionBadge(activeQuestion.options?.length ?? 0)}
 								</span>
-								<input
-									className="h-7 w-full rounded-md border border-border bg-background px-2 text-foreground text-sm"
-									onChange={(event) =>
-										handleCustomTextChange(event.target.value)
-									}
-									placeholder={
-										activeQuestion.customPlaceholder ?? "Type your answer"
-									}
-									value={customText}
-								/>
+								<div className="flex min-w-0 flex-1 items-center gap-1 rounded-md border border-border bg-background px-1">
+									<input
+										aria-label={activeQuestion.customLabel ?? "Other"}
+										className="h-7 min-w-0 flex-1 border-0 bg-transparent px-1 text-foreground text-sm outline-none"
+										onChange={(event) =>
+											handleCustomTextChange(event.target.value)
+										}
+										placeholder={
+											activeQuestion.customPlaceholder ?? "Type your answer"
+										}
+										value={customText}
+									/>
+									{voice && (
+										<VoiceInputButton
+											className="shrink-0"
+											disabled={voice.disabled}
+											isRecording={isRecording}
+											isTranscribing={isTranscribing}
+											onStart={startVoice}
+											onStop={stopVoice}
+										/>
+									)}
+								</div>
 							</div>
 						)}
 					</div>
 				)}
 
 			{activeQuestion.kind === "text" && (
-				<textarea
-					className="w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-foreground text-sm"
-					onChange={(event) => setTextValue(event.target.value)}
-					placeholder={activeQuestion.placeholder ?? "Type your answer"}
-					rows={3}
-					value={textValue}
-				/>
+				<div className="flex items-end gap-1 rounded-md border border-border bg-background px-1">
+					<textarea
+						className="min-w-0 flex-1 resize-y border-0 bg-transparent px-1 py-1.5 text-foreground text-sm outline-none"
+						onChange={(event) => setTextValue(event.target.value)}
+						placeholder={activeQuestion.placeholder ?? "Type your answer"}
+						rows={3}
+						value={textValue}
+					/>
+					{voice && (
+						<VoiceInputButton
+							className="mb-0.5 shrink-0"
+							disabled={voice.disabled}
+							isRecording={isRecording}
+							isTranscribing={isTranscribing}
+							onStart={startVoice}
+							onStop={stopVoice}
+						/>
+					)}
+				</div>
+			)}
+			{voice && voiceError && (
+				<p aria-live="polite" className="text-destructive text-xs">
+					{voiceError}
+				</p>
 			)}
 
 			<div

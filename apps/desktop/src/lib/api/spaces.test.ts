@@ -434,13 +434,18 @@ describe("retrieval-mode job ownership", () => {
 
 	it("removes the polling abort listener after the timer completes", async () => {
 		const originalFetch = globalThis.fetch;
-		const originalRemoveEventListener = AbortSignal.prototype.removeEventListener;
+		const originalRemoveEventListener =
+			AbortSignal.prototype.removeEventListener;
 		const controller = new AbortController();
 		const removedListeners: EventListener[] = [];
 		let statusCalls = 0;
-		AbortSignal.prototype.removeEventListener = function (type, listener, options) {
-			if (type === "abort" && listener) {
-				removedListeners.push(listener as EventListener);
+		AbortSignal.prototype.removeEventListener = function (
+			type: string,
+			listener: EventListenerOrEventListenerObject,
+			options?: boolean | EventListenerOptions
+		) {
+			if (type === "abort" && typeof listener === "function") {
+				removedListeners.push(listener);
 			}
 			return originalRemoveEventListener.call(this, type, listener, options);
 		};
@@ -1149,6 +1154,92 @@ describe("the list route carries index state, so the client asks once", () => {
 			squeeze(
 				'"/api/spaces/:id/documents/:doc_id/index", get(get_document_index_status),'
 			)
+		);
+	});
+});
+
+describe("global lexical Spaces search mirrors Core", () => {
+	it("mounts the global search route before the dynamic Space route", () => {
+		expect(
+			rustAnchor(
+				serverRs,
+				SERVER_RS,
+				"fn spaces_routes(",
+				'.route("/api/spaces/search", get(search_space_documents))'
+			)
+		).toBe(ANCHOR_PRESENT);
+	});
+
+	it("keeps the client and Core on the same lexical hit contract", () => {
+		const search = rustItemBody(
+			spacesRs,
+			SPACES_RS,
+			"pub async fn search_documents_lexical("
+		);
+		expect(search).toContain("search_documents_lexical_term");
+		const termSearch = rustItemBody(
+			spacesRs,
+			SPACES_RS,
+			"async fn search_documents_lexical_term("
+		);
+		expect(termSearch).toContain("DOC_TENANCY_VISIBLE_PREDICATE");
+		expect(termSearch).toContain("LIKE lower(:pattern)");
+		expect(termSearch).toContain("LexicalDocumentMatch");
+
+		const client = rustSource(SPACES_TS);
+		expect(client).toContain("/api/spaces/search?");
+		expect(client).toContain("params.toString()");
+		expect(client).toContain("documentId: hit.document_id");
+		expect(client).toContain("updatedAt: hit.updated_at || hit.created_at");
+	});
+
+	it("carries document updated_at for relative dates in page rows", () => {
+		expect(
+			rustAnchor(
+				spacesRs,
+				SPACES_RS,
+				"pub async fn list_documents(",
+				"d.created_at, d.updated_at"
+			)
+		).toBe(ANCHOR_PRESENT);
+		expect(rustSource(SPACES_TS)).toContain(
+			"updatedAt: d.updated_at ?? d.created_at"
+		);
+	});
+});
+
+describe("shared-space visibility mirrors Core", () => {
+	it("sends the visibility field accepted by space creation", () => {
+		expect(
+			rustAnchor(
+				serverRs,
+				SERVER_RS,
+				"struct CreateSpaceBody",
+				"visibility: Option<String>"
+			)
+		).toBe(ANCHOR_PRESENT);
+		expect(rustSource(SPACES_TS)).toContain("body.visibility = visibility");
+	});
+
+	it("mounts the write route used by the desktop visibility menu", () => {
+		expect(
+			rustAnchor(
+				serverRs,
+				SERVER_RS,
+				"fn spaces_routes(",
+				'.route("/api/spaces/:id/visibility", post(set_space_visibility))'
+			)
+		).toBe(ANCHOR_PRESENT);
+		expect(
+			rustAnchor(
+				serverRs,
+				SERVER_RS,
+				"async fn set_space_visibility(",
+				"require_resource_write"
+			)
+		).toBe(ANCHOR_PRESENT);
+		expect(rustSource(SPACES_TS)).toContain(
+			"/api/spaces/\u0024{encodeURIComponent(id)}/visibility"
 		);
 	});
 });

@@ -5,6 +5,9 @@ import BackedBy from "./backed-by.tsx";
 import FooterBuildInfo from "./footer-build-info.tsx";
 import { ThemeToggle } from "./theme-toggle.tsx";
 
+// Cache Components requires client prerenders to be deterministic.
+const COPYRIGHT_YEAR = 2026;
+
 export default function Footer() {
 	return (
 		<footer className="relative overflow-x-clip pt-16">
@@ -150,8 +153,7 @@ export default function Footer() {
 						itemScope
 						itemType="https://schema.org/Organization"
 					>
-						© {new Date().getFullYear()}{" "}
-						<span itemProp="name">A Major Pte. Ltd.</span>,{" "}
+						© {COPYRIGHT_YEAR} <span itemProp="name">A Major Pte. Ltd.</span>,{" "}
 						<span itemProp="location">Singapore</span>. <br />
 						(UEN: <span itemProp="taxID">202616096G</span>)
 						<meta content="2026-04-12" itemProp="foundingDate" />

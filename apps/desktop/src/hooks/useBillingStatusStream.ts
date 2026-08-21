@@ -1,10 +1,10 @@
 // apps/desktop/src/hooks/useBillingStatusStream.ts
 //
-// Live subscription + seat status for the caller's active org, streamed from the
-// control-plane server (`/api/billing/status/stream`) via the shared SSE reader
-// (lib/api/teams-billing.ts → @ryuhq/protocol/sse). Any billing UI can mount this
-// to reflect a plan change, renewal, cancellation, or seat update the moment the
-// Polar/Stripe webhook lands, without polling.
+// Live hosted-agent subscription status for the caller's active org, streamed
+// from the control-plane server (`/api/billing/status/stream`) via the shared
+// SSE reader (lib/api/teams-billing.ts → @ryuhq/protocol/sse). Any billing UI
+// can mount this to reflect a plan change, renewal, cancellation, or capacity
+// update the moment the Polar/Stripe webhook lands, without polling.
 //
 // Like useWalletStream, this targets :3000 (session-authed) rather than the
 // active Core node, so it lives outside the node-scoped query cache. It keeps a
@@ -67,7 +67,7 @@ async function runBillingStatusStream(
 /**
  * Subscribe to the active org's live billing status. Returns the latest
  * {@link BillingStatusUpdate} (null until the first snapshot frame arrives),
- * updating in place as subscription/seat changes land.
+ * updating in place as subscription/capacity changes land.
  */
 export function useBillingStatusStream(): BillingStatusUpdate | null {
 	const [status, setStatus] = useState<BillingStatusUpdate | null>(null);

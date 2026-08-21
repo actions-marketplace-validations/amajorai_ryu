@@ -1,4 +1,4 @@
-//! Built-in authenticated web-fetch tool (`web_fetch__get`) — the Identity
+//! Built-in authenticated web-fetch tool (`web_fetch.get`) — the Identity
 //! Vault's first real **credential consumer** (epic #517 follow-up).
 //!
 //! The Identity Vault (`crate::identity`) captures and seals a user's per-domain
@@ -21,7 +21,7 @@
 //! ## Architecture note (Core-vs-Gateway)
 //!
 //! Deciding *what tools run* is Core, so this provider lives here, registered as a
-//! reserved server name (`web_fetch`) like spider/exa — the `<server>__<tool>` id
+//! reserved server name (`web_fetch`) like spider/exa — the `<server>.<tool>` id
 //! scheme, per-agent allowlist, catalog search, and the single dispatch entry all
 //! work for free. *Whether the credential may be read* stays a Gateway concern,
 //! enforced upstream in `identity::read_credential` before the secret ever reaches
@@ -50,8 +50,8 @@ pub const SERVER_NAME: &str = "web_fetch";
 
 /// The fully-qualified id of the one tool this provider exposes. Re-exported so
 /// the Identity Vault consult can recognize it as a credential-consuming tool
-/// without re-deriving the `<server>__<tool>` string.
-pub const GET_TOOL_ID: &str = "web_fetch__get";
+/// without re-deriving the `<server>.<tool>` string.
+pub const GET_TOOL_ID: &str = "web_fetch.get";
 
 /// Cap on returned page text (characters) so a large page can't blow the model's
 /// context. The full body is still bounded server-side (`MAX_WEB_FETCH_BODY_BYTES`).

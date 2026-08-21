@@ -125,6 +125,27 @@ export interface ThemeContribution {
  *  are RPCs over the postMessage bridge; the plugin never holds a Core token or
  *  Tauri IPC handle directly. */
 export interface RyuHostServices {
+	/** Read and cooperatively stop Core-visible background processes. */
+	background: {
+		list(input?: { producer?: string; running_only?: boolean }): Promise<
+			{
+				process_id: string;
+				command: string;
+				cwd: string;
+				elapsed_ms: number;
+				running: boolean;
+				[key: string]: unknown;
+			}[]
+		>;
+		stop(input: { process_id: string }): Promise<{
+			ok: boolean;
+			requested: boolean;
+			process_id: string;
+		}>;
+	};
+	/** Read-only feature discovery. Older hosts may omit this method; treat that
+	 * as an empty capability set rather than assuming a native surface exists. */
+	capabilities?(): Promise<RyuHostCapabilities>;
 	/** Run a registered command by id (built-in or contributed). */
 	commands: { execute(id: string, ...args: unknown[]): Promise<unknown> };
 	/** Gateway-governed model access (chat/embed). Mirrors `@ryuhq/sdk` model
@@ -140,24 +161,20 @@ export interface RyuHostServices {
 	 *  or any other agent field (invariant: no capability returns a secret). Gated
 	 *  by the `core:list_agents` grant. */
 	listAgents(): Promise<{ id: string; name: string }[]>;
-	/** Read and cooperatively stop Core-visible background processes. */
-	background: {
-		list(input?: {
-			producer?: string;
-			running_only?: boolean;
-		}): Promise<{
-			process_id: string;
-			command: string;
-			cwd: string;
-			elapsed_ms: number;
-			running: boolean;
-			[key: string]: unknown;
-		}[]>;
-		stop(input: { process_id: string }): Promise<{
-			ok: boolean;
-			requested: boolean;
-			process_id: string;
-		}>;
+	/** Mobile-native effects. These methods remain optional at the type boundary
+	 * because desktop, web, extension, and terminal hosts fail closed. */
+	native?: {
+		haptics(input: RyuNativeHapticsInput): Promise<RyuNativeHapticsResult>;
+		notifications: {
+			create(
+				input: RyuNativeNotificationInput
+			): Promise<RyuNativeNotificationResult>;
+		};
+		liveActivities: {
+			update(
+				input: RyuNativeLiveActivityInput
+			): Promise<RyuNativeLiveActivityResult>;
+		};
 	};
 	/** Open a tab at a path (built-in or a route this plugin contributed). */
 	openTab(path: string): void;
@@ -169,6 +186,52 @@ export interface RyuHostServices {
 			markdown: string
 		): Promise<{ docId: string }>;
 	};
+}
+
+/** The token-free, read-only native feature inventory returned by a host. */
+export interface RyuHostCapabilities {
+	androidOngoingNotifications: boolean;
+	browserNotifications: boolean;
+	dynamicIsland: boolean;
+	haptics: boolean;
+	hardwareBleRelay: boolean;
+	liveActivities: boolean;
+	localNotifications: boolean;
+	platform: "android" | "browser" | "ios" | "unknown";
+	pushRegistration: boolean;
+	quickActions: boolean;
+	sounds: boolean;
+}
+
+export type RyuNativeHapticStyle = "light" | "success" | "warning" | "error";
+
+export interface RyuNativeHapticsInput {
+	style: RyuNativeHapticStyle;
+}
+
+export interface RyuNativeNotificationInput {
+	body: string;
+	title: string;
+}
+
+export interface RyuNativeLiveActivityInput {
+	conversationId: string;
+	detail: string;
+	status: "running" | "waiting" | "review" | "done" | "error";
+	title: string;
+}
+
+export interface RyuNativeHapticsResult {
+	signaled: true;
+}
+
+export interface RyuNativeNotificationResult {
+	id: string;
+	scheduled: true;
+}
+
+export interface RyuNativeLiveActivityResult {
+	updated: true;
 }
 
 // ── The host API a plugin's activate() receives ───────────────────────────────

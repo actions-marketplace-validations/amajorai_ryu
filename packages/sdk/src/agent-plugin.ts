@@ -4,7 +4,9 @@
  * The Agent Plugins Specification (https://agent-plugins.org/, TSC: Amazon,
  * Cursor, Microsoft, OpenAI, Vercel) defines a small portable floor: a plugin is
  * a directory with `plugin.json`, Agent Skills under `skills/<slug>/SKILL.md`,
- * and MCP servers in `mcp.json`. Nothing else is portable.
+ * and MCP servers in `mcp.json`. Native stdio, Streamable HTTP, and legacy SSE
+ * servers all have a direct portable representation; richer Ryu-only fields stay
+ * in the extension namespace or are reported as notes.
  *
  * ## Why this is a SECOND file, not a migration
  *
@@ -88,24 +90,24 @@ export function isAgentPluginManifest(value: unknown): boolean {
 }
 
 /** Author object — the only three fields the spec permits (§5.4). */
-export type AgentPluginAuthor = {
-	name?: string;
+export interface AgentPluginAuthor {
 	email?: string;
+	name?: string;
 	url?: string;
-};
+}
 
 /** Ryu data carried under {@link AGENT_PLUGIN_EXTENSION_NS}. */
-export type RyuExtensionData = {
-	/** The real scoped plugin id (`@ryu/advisor`) — unrecoverable from spec `name`. */
-	id: string;
+export interface RyuExtensionData {
 	/** Human display name; spec `name` is a slug, not a display string. */
 	displayName: string;
+	/** The real scoped plugin id (`@ryu/advisor`) — unrecoverable from spec `name`. */
+	id: string;
 	/** Per-MCP-server fields the spec's closed server variants do not allow. */
 	mcp?: Record<string, RyuMcpServerExtras>;
-};
+}
 
 /** Native MCP fields stripped out of the exported `mcp.json`. */
-export type RyuMcpServerExtras = {
+export interface RyuMcpServerExtras {
 	/** Env var that overrides `command` with an absolute path at spawn. */
 	command_env?: string;
 	/** Human description for our MCP listing endpoint. */
@@ -117,41 +119,51 @@ export type RyuMcpServerExtras = {
 	 * deliberately do not.
 	 */
 	enabled?: false;
-};
+}
 
 /** A conformant `plugin.json` (§5.2). */
-export type AgentPluginJson = {
+export interface AgentPluginJson {
 	$schema: string;
-	name: string;
-	version?: string;
-	description?: string;
 	author?: AgentPluginAuthor;
-	homepage?: string;
-	repository?: string;
-	license?: string;
-	keywords?: string[];
+	description?: string;
 	extensions: Record<string, unknown>;
-};
+	homepage?: string;
+	keywords?: string[];
+	license?: string;
+	name: string;
+	repository?: string;
+	version?: string;
+}
 
-/** A stdio server entry (§7.2.1) — the only variant we export. */
-export type AgentPluginStdioServer = {
-	type: "stdio";
-	command: string;
+/** A stdio server entry (§7.2.1). */
+export interface AgentPluginStdioServer {
 	args?: string[];
-	env?: Record<string, string>;
+	command: string;
 	cwd?: string;
-};
+	env?: Record<string, string>;
+	type: "stdio";
+}
+
+/** A remote server entry (§7.2.1). */
+export interface AgentPluginRemoteServer {
+	headers?: Record<string, string>;
+	type: "streamable-http" | "sse";
+	url: string;
+}
+
+/** Any server variant a conformant Agent Plugins client can consume. */
+export type AgentPluginServer =
+	| AgentPluginStdioServer
+	| AgentPluginRemoteServer;
 
 /** A conformant `mcp.json` (§7.2.1). */
-export type AgentPluginMcpJson = {
+export interface AgentPluginMcpJson {
 	$schema: string;
-	mcpServers: Record<string, AgentPluginStdioServer>;
-};
+	mcpServers: Record<string, AgentPluginServer>;
+}
 
 /** What {@link toAgentPlugin} produces, plus what it had to leave behind. */
-export type AgentPluginExport = {
-	/** The `plugin.json` contents. */
-	plugin: AgentPluginJson;
+export interface AgentPluginExport {
 	/** The `mcp.json` contents, or null when the plugin exports no server. */
 	mcp: AgentPluginMcpJson | null;
 	/**
@@ -159,7 +171,9 @@ export type AgentPluginExport = {
 	 * is visible at the call site instead of silent.
 	 */
 	notes: string[];
-};
+	/** The `plugin.json` contents. */
+	plugin: AgentPluginJson;
+}
 
 const SPEC_NAME_MAX = 64;
 const ILLEGAL_NAME_CHARS = /[^a-z0-9.-]+/g;
@@ -258,8 +272,24 @@ function toSpecEnv(value: unknown): Record<string, string> | undefined {
 	return Object.keys(env).length > 0 ? env : undefined;
 }
 
+function validateRemoteUrl(name: string, raw: string): string | undefined {
+	let parsed: URL;
+	try {
+		parsed = new URL(raw);
+	} catch {
+		return `mcp server '${name}' remote url ${JSON.stringify(raw)} is invalid and was omitted`;
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+		return `mcp server '${name}' remote url must use http or https and was omitted`;
+	}
+	if (parsed.username || parsed.password || parsed.hash) {
+		return `mcp server '${name}' remote url must not contain credentials or a fragment and was omitted`;
+	}
+	return undefined;
+}
+
 /**
- * Convert one native MCP server declaration to a spec stdio entry, or return the
+ * Convert one native MCP server declaration to a spec entry, or return the
  * reason it cannot be exported.
  *
  * Strictness is not optional here and differs from the manifest: an unknown field
@@ -270,7 +300,7 @@ function toSpecEnv(value: unknown): Record<string, string> | undefined {
 function toSpecServer(
 	name: string,
 	decl: Record<string, unknown>
-): { server?: AgentPluginStdioServer; extras: RyuMcpServerExtras; note?: string } {
+): { server?: AgentPluginServer; extras: RyuMcpServerExtras; note?: string } {
 	const extras: RyuMcpServerExtras = {};
 	const commandEnv = asString(decl.command_env);
 	const description = asString(decl.description);
@@ -286,6 +316,48 @@ function toSpecServer(
 		return {
 			extras,
 			note: `mcp server '${name}' is disabled in the native manifest and was omitted from ${AGENT_PLUGIN_MCP_FILE}`,
+		};
+	}
+
+	const declaredType = asString(decl.type);
+	const remoteUrl = asString(decl.url);
+	const remoteType =
+		declaredType === "sse"
+			? "sse"
+			: declaredType === "streamable-http" ||
+					declaredType === "streamable_http" ||
+					declaredType === "http" ||
+					(!declaredType && remoteUrl)
+				? "streamable-http"
+				: undefined;
+	if (remoteType) {
+		if (!remoteUrl) {
+			return {
+				extras,
+				note: `mcp server '${name}' has remote type '${remoteType}' but no url and was omitted`,
+			};
+		}
+		const urlNote = validateRemoteUrl(name, remoteUrl);
+		if (urlNote) {
+			return { extras, note: urlNote };
+		}
+		const server: AgentPluginRemoteServer = {
+			type: remoteType,
+			url: remoteUrl,
+		};
+		const headers = toSpecEnv(decl.headers);
+		if (headers) {
+			server.headers = headers;
+		}
+		const note = decl.auth
+			? `mcp server '${name}' uses Ryu OAuth metadata that is not portable; static headers were exported`
+			: undefined;
+		return { server, extras, note };
+	}
+	if (declaredType && declaredType !== "stdio") {
+		return {
+			extras,
+			note: `mcp server '${name}' has unsupported transport '${declaredType}' and was omitted`,
 		};
 	}
 
@@ -359,7 +431,8 @@ export function toAgentPlugin(
 	}
 	// `tagline` is our one-line pitch; it is the better `description` when no long
 	// description exists, and the spec has no second summary field to put it in.
-	const description = asString(manifest.description) ?? asString(manifest.tagline);
+	const description =
+		asString(manifest.description) ?? asString(manifest.tagline);
 	if (description) {
 		plugin.description = description;
 	}
@@ -385,7 +458,7 @@ export function toAgentPlugin(
 	}
 
 	const declared = manifest.mcp_servers;
-	const servers: Record<string, AgentPluginStdioServer> = {};
+	const servers: Record<string, AgentPluginServer> = {};
 	const mcpExtras: Record<string, RyuMcpServerExtras> = {};
 	if (declared && typeof declared === "object" && !Array.isArray(declared)) {
 		for (const [name, raw] of Object.entries(

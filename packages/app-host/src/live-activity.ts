@@ -117,6 +117,16 @@ export interface LiveActivitySourceMap {
 	titleFallback?: string;
 }
 
+/** A host-served audio source contributed by a desktop-only plugin. Audio is
+ * intentionally metadata on a live-activity contribution rather than a second
+ * agent-run stream: the shell owns one player and decides when it is active. */
+export interface LiveActivityAudioSpec {
+	/** Keep the source looping while at least one matching activity is running. */
+	loop?: boolean;
+	/** Browser/Tauri-resolvable URL for the audio asset. */
+	src: string;
+}
+
 /**
  * The opaque `spec` of a manifest `contributes.live_activities` contribution (the
  * Rust `LiveActivityContribution`). Mirrors `SidebarSectionSpec`'s shape — a
@@ -124,6 +134,8 @@ export interface LiveActivitySourceMap {
  * plus the two activity-specific keys `map.status`/`map.progress`.
  */
 export interface LiveActivitySpec {
+	/** Optional ambient audio for the shell's singleton live-activity player. */
+	audio?: LiveActivityAudioSpec;
 	/** Optional field-map from activity fields to response-row keys. */
 	map?: LiveActivitySourceMap;
 	/** Live rows for the activity (same primitive a `list-detail` view uses). */

@@ -9,6 +9,7 @@
 // so the caller can keep its optimistic local state and not block the UI. The
 // localStorage mirror in the sidebar remains the offline fallback.
 
+import type { ResourceVisibility } from "@/src/lib/resource-visibility.ts";
 import { type ApiTarget, request } from "./client.ts";
 
 async function setFlag(
@@ -135,6 +136,31 @@ export async function setConversationIcon(
 			target,
 			`/api/conversations/${encodeURIComponent(id)}/icon`,
 			{ method: "POST", body: { icon } }
+		);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Set a conversation's private or shared visibility. */
+export async function setConversationVisibility(
+	target: ApiTarget,
+	id: string,
+	visibility: ResourceVisibility,
+	teamId?: string | null
+): Promise<boolean> {
+	try {
+		await request<{ ok?: boolean }>(
+			target,
+			`/api/conversations/${encodeURIComponent(id)}/visibility`,
+			{
+				method: "POST",
+				body: {
+					visibility,
+					...(visibility === "team" && teamId ? { team_id: teamId } : {}),
+				},
+			}
 		);
 		return true;
 	} catch {

@@ -15,6 +15,7 @@ import {
 	modelsDuplicateEffortLevels,
 	persistStreamedConfig,
 	seedAcpSelections,
+	selectSimpleApprovalValue,
 	shouldAdoptStreamedConfig,
 } from "./composer-acp-sections.ts";
 
@@ -127,6 +128,47 @@ describe("isApprovalConfigOption", () => {
 		expect(
 			isApprovalConfigOption(option({ id: "verbosity", name: "Verbosity" }))
 		).toBe(false);
+	});
+});
+
+describe("selectSimpleApprovalValue", () => {
+	it("prefers an advertised Auto preset", () => {
+		expect(
+			selectSimpleApprovalValue([
+				{ id: "default", name: "Ask for approval" },
+				{ id: "auto", name: "Auto" },
+				{ id: "full", name: "Full access" },
+			])
+		).toBe("auto");
+	});
+
+	it("falls back to an explicit approval choice", () => {
+		expect(
+			selectSimpleApprovalValue([
+				{ id: "plan", name: "Plan" },
+				{ id: "manual", name: "Manual" },
+				{ id: "bypass", name: "Bypass permissions" },
+			])
+		).toBe("manual");
+	});
+
+	it("uses Ask for approval when Auto is unavailable", () => {
+		expect(
+			selectSimpleApprovalValue([
+				{ id: "plan", name: "Plan" },
+				{ id: "default", name: "Ask for approval" },
+				{ id: "bypass", name: "Bypass permissions" },
+			])
+		).toBe("default");
+	});
+
+	it("does not guess a permissive mode", () => {
+		expect(
+			selectSimpleApprovalValue([
+				{ id: "acceptEdits", name: "Accept edits" },
+				{ id: "bypassPermissions", name: "Bypass permissions" },
+			])
+		).toBeNull();
 	});
 });
 

@@ -344,6 +344,35 @@ export const WidgetContributionSchema = z.object({
 
 export type WidgetContribution = z.infer<typeof WidgetContributionSchema>;
 
+/** Metadata-only chat affordance. The host owns rendering and dispatch; the
+ * manifest carries identifiers and copy only. */
+export const ChatWidgetTemplateSchema = z.object({
+	id: z.string().regex(/^[a-z0-9][a-z0-9._:-]*$/),
+	title: z.string().min(1),
+	description: z.string().optional(),
+	triggers: z.array(z.string()).default([]),
+	examples: z.array(z.string()).default([]),
+	backing: z
+		.object({
+			tool_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/).optional(),
+			view_id: z.string().regex(/^[a-z0-9][a-z0-9._:-]*$/).optional(),
+		}),
+	display_mode: z.string().min(1),
+	safe_action_ids: z.array(z.string().regex(/^[a-z0-9][a-z0-9._-]*$/)).default([]),
+	availability: z.string().default("available"),
+	})
+	.superRefine((value, ctx) => {
+		const count = Number(Boolean(value.backing.tool_id)) + Number(Boolean(value.backing.view_id));
+		if (count !== 1 && value.availability === "available") {
+			ctx.addIssue({ code: "custom", path: ["backing"], message: "available templates need exactly one backing tool_id or view_id" });
+		}
+		if (count > 1) {
+			ctx.addIssue({ code: "custom", path: ["backing"], message: "backing must declare at most one of tool_id or view_id" });
+		}
+	});
+
+export type ChatWidgetTemplate = z.infer<typeof ChatWidgetTemplateSchema>;
+
 // ── ToolAppConfig (Ryu Apps per-tool config) ─────────────────────────────────
 
 /**
@@ -380,7 +409,7 @@ export type ToolAppConfig = z.infer<typeof ToolAppConfigSchema>;
 /**
  * The `contributes` block. Mirrors `Contributes` in
  * `apps/core/src/plugin_manifest/mod.rs`. The declarative UI surfaces
- * (`composer_controls` / `settings_tabs` / `slash_commands`) are passed verbatim
+ * (`composer_controls` / `chat_features` / `settings_tabs` / `slash_commands`) are passed verbatim
  * to the desktop renderer, so they are typed loosely here (records).
  */
 export const ContributesSchema = z.object({
@@ -391,6 +420,11 @@ export const ContributesSchema = z.object({
 	 *  signing, leaving an app that emits events nothing is allowed to subscribe to. */
 	hook_events: z.array(HookEventContributionSchema).default([]),
 	composer_controls: z.array(z.record(z.string(), z.unknown())).default([]),
+	/** Chat feature descriptors whose behavior is implemented by the host shell.
+	 * Mirrors the Rust-side `Contributes.chat_features`; keeping this field in the
+	 * authoring schema prevents `ryu pack` from silently deleting a plugin's chat
+	 * feature declaration before signing. */
+	chat_features: z.array(z.record(z.string(), z.unknown())).default([]),
 	settings_tabs: z.array(z.record(z.string(), z.unknown())).default([]),
 	slash_commands: z.array(z.record(z.string(), z.unknown())).default([]),
 	/** App widgets (Ryu Apps). Each binds a render tool id to its
@@ -398,6 +432,8 @@ export const ContributesSchema = z.object({
 	 *  `Contributes.widgets` field, without which the CLI's zod parse would strip
 	 *  every widget an app authored here declares. */
 	widgets: z.array(WidgetContributionSchema).default([]),
+	/** Metadata-only chat widget templates. */
+	chat_widget_templates: z.array(ChatWidgetTemplateSchema).optional(),
 	/** App-registered sidebar sections (header + live list) and buttons (single nav
 	 *  rows). Loosely typed here — the shell owns the spec vocabulary — matching how
 	 *  `composer_controls`/`settings_tabs` are declared. Mirrors the Rust-side
@@ -457,6 +493,9 @@ export const ContributesSchema = z.object({
 	 *  would be no residue to notice — the plugin would install clean and contribute
 	 *  nothing. */
 	output_styles: z.array(OutputStyleContributionSchema).default([]),
+	/** Per-message actions contributed by an enabled plugin. Kept as loose records
+	 *  so renderer-specific `kind`/`args` payloads survive `ryu pack` unchanged. */
+	message_actions: z.array(z.record(z.string(), z.unknown())).default([]),
 });
 
 export type Contributes = z.infer<typeof ContributesSchema>;
@@ -856,10 +895,16 @@ export const PluginManifestSchema = z
 				}),
 			])
 			.optional(),
+		/** Public source repository URL (Claude/Codex `repository`). */
+		repository: z.string().url().optional(),
+		/** True when the provider operates outside the local Ryu runtime. */
+		external: z.boolean().optional(),
 		/** Project/marketing homepage — maps to the listing `website` (Claude field). */
 		homepage: z.string().optional(),
 		/** Free-text search keywords (Claude field). */
 		keywords: z.array(z.string()).optional(),
+		/** Stable Marketplace filter labels (Ryu extension). */
+		tags: z.array(z.string()).optional(),
 		/** Taxonomy category beyond the runnable kinds (Claude field). */
 		category: z.string().optional(),
 		/** SPDX-ish license identifier (Claude field). */
@@ -873,6 +918,8 @@ export const PluginManifestSchema = z
 		 * from `iconUrl` (a raster logo). Falls back to `iconUrl` when omitted.
 		 */
 		icon: z.string().optional(),
+		/** Optional detail-page hero banner metadata forwarded to the marketplace. */
+		banner: z.record(z.string(), z.unknown()).optional(),
 		/**
 		 * Dithered-gradient background for the card's icon square (Ryu extension),
 		 * mirroring dither-kit's `DitherGradient` props. `from`/`to` are a palette-colour

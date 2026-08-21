@@ -1,7 +1,7 @@
 // apps/desktop/src/hooks/useSandboxBackends.ts
 //
 // Backs the Sandboxes group in the Store. A sandbox backend is the isolated
-// runtime the agent's `sandbox_exec` tool runs in. Unlike the chat engine, these
+// runtime the agent's `sandbox_exec` tool runs in. Unlike Chat, these
 // are NOT mutually exclusive — this hook picks the *default* backend (the one
 // used when a call omits `backend`); a per-call argument always overrides it.
 //

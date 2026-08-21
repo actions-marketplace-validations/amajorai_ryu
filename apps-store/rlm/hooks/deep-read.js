@@ -22,11 +22,11 @@
 // has no HTTP and no capability call — by design, it is deny-by-default. The
 // supported way out is `host.runAgent`, which is also what `@ryu/reasoning` and
 // `@ryu/proof` use. The sub-agent is not asked to ANSWER the question; it is asked
-// only to call `rlm__query` and report what came back.
+// only to call `rlm.query` and report what came back.
 //
 // That transport is CONDITIONAL, which is the whole reason for the marker protocol
 // below. `delegation::call_sub_agent` only runs the real chat path — the sub-agent's
-// own engine, tools and MCP servers, so `rlm__query` exists — when an `agent_id` is
+// own engine, tools and MCP servers, so `rlm.query` exists — when an `agent_id` is
 // given AND a live agent runner is present. With no runner it falls back to a single
 // clean-context completion whose "tools" are a sentence in a system prompt, so the
 // sub-agent has NOTHING to call and can only answer from its own opinion.
@@ -78,14 +78,14 @@ const task = [
 	"yourself and do not use your own knowledge of the subject — your opinion is not what",
 	"is wanted here. Call the tool and report exactly what it returns.",
 	"",
-	`1. Call the \`rlm__query\` tool with context_id ${JSON.stringify(String(contextId).trim())}`,
+	`1. Call the \`rlm.query\` tool with context_id ${JSON.stringify(String(contextId).trim())}`,
 	"   and the question quoted verbatim below.",
 	"2. Write the tool's `answer` field. Then, for each entry in its `cites` array, write one",
 	"   line: the source, the line span, and the label.",
 	"3. End your reply with a final line, exactly:  RLM: <status> <run_id>",
 	"   Copy both values verbatim from the tool output — `status` is one of ok,",
 	"   budget_exhausted or error, and `run_id` is the tool's `run_id` field.",
-	"4. If you have no `rlm__query` tool available, or the call errors, do NOT write an RLM",
+	"4. If you have no `rlm.query` tool available, or the call errors, do NOT write an RLM",
 	"   line and do NOT answer the question from your own knowledge. Reply with one line",
 	"   saying what went wrong.",
 	"",

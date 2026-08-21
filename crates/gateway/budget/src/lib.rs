@@ -1,4 +1,4 @@
-//! Per-user and per-agent token budgets with local counters (data plane, U21).
+//! Per-user and per-agent spend budgets with local counters (data plane, U21).
 //!
 //! This is the data-plane half of budget enforcement: every request is checked
 //! inline against in-memory counters keyed by user id and agent id (no SQLite on
@@ -8,7 +8,7 @@
 //! Cross-user / team coordination (a shared budget pool across many gateways) is
 //! explicitly out of scope here; that is the control-plane coordinator (U29).
 //!
-//! Counters are lifetime totals (input + output tokens). They live only in
+//! Counters are lifetime charged spend totals in micro-USD. They live only in
 //! memory: a restart resets them. That matches "local counters" — durable,
 //! cross-restart accounting is the audit log's job and the coordinator's job.
 
@@ -51,10 +51,64 @@ pub enum BudgetAction {
     Stop,
 }
 
-/// A single budget rule: a token cap plus the action taken once it is reached.
+/// Which classes of charged work a budget rule includes.
+///
+/// The model and media paths already use the charged-USD counter. Tool calls
+/// are priced separately from model inference, so keeping their inclusion
+/// explicit lets an agent cap describe its intended spend rather than silently
+/// mixing unlike units. Missing fields in older configs default to included,
+/// preserving the meaning of a spend cap while making the new setting visible
+/// to editors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BudgetChargeInclusion {
+    /// OpenRouter, direct-provider, and other Gateway-routed model calls.
+    #[serde(default = "default_true")]
+    pub model: bool,
+    /// Image, video, TTS, and STT calls priced by the media meter.
+    #[serde(default = "default_true")]
+    pub media: bool,
+    /// Paid third-party actions such as Composio tool executions.
+    #[serde(default = "default_true")]
+    pub tools: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for BudgetChargeInclusion {
+    fn default() -> Self {
+        Self {
+            model: true,
+            media: true,
+            tools: true,
+        }
+    }
+}
+
+/// A charged spend category passed to the budget counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetChargeKind {
+    Model,
+    Media,
+    Tools,
+}
+
+impl BudgetChargeInclusion {
+    fn includes(self, kind: BudgetChargeKind) -> bool {
+        match kind {
+            BudgetChargeKind::Model => self.model,
+            BudgetChargeKind::Media => self.media,
+            BudgetChargeKind::Tools => self.tools,
+        }
+    }
+}
+
+/// A single budget rule: a charged-spend cap plus the action taken once it is reached.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BudgetRule {
-    /// Lifetime token cap (input + output combined) for this scope. 0 = unlimited.
+    /// Lifetime charged-spend cap in micro-USD for this scope. 1_000_000 = $1;
+    /// 0 = unlimited.
     pub limit: u64,
     /// Action to take once `limit` is reached. Defaults to `stop` so a
     /// configured limit blocks without an explicit action.
@@ -71,13 +125,17 @@ pub struct BudgetRule {
     /// Missing in old configs → `Silent`.
     #[serde(default)]
     pub alert: AlertTier,
+    /// Charged work categories included in this rule. Missing in old configs
+    /// defaults to all currently metered categories.
+    #[serde(default)]
+    pub include: BudgetChargeInclusion,
 }
 
 fn default_restrict_max_tokens() -> u64 {
     256
 }
 
-/// Per-user and per-agent token budgets (data plane, local counters).
+/// Per-user and per-agent charged-spend budgets (data plane, local counters).
 ///
 /// Keyed by the identity Core forwards on the request: `x-ryu-user-id` and
 /// `x-ryu-agent-id`. A request can match both a user budget and an agent
@@ -91,7 +149,7 @@ pub struct BudgetConfig {
     /// Per-agent budgets, keyed by agent id.
     #[serde(default)]
     pub agents: HashMap<String, BudgetRule>,
-    /// A single global per-session token cap (#510). Unlike `users`/`agents`,
+    /// A single global per-session charged-spend cap (#510). Unlike `users`/`agents`,
     /// this is NOT a map: session ids are ephemeral (Core mints a fresh
     /// conversation id per chat), so a per-session-id rule map would be dead
     /// config nobody could populate. Instead one rule applies to every session,
@@ -100,16 +158,16 @@ pub struct BudgetConfig {
     pub session: SessionBudgetConfig,
 }
 
-/// Global per-session token budget (#510). One rule that applies to every
+/// Global per-session charged-spend budget (#510). One rule that applies to every
 /// session; the running counter is keyed by session id at request time.
 ///
-/// Mirrors [`BudgetRule`]'s shape (a token cap plus an action) so the existing
+/// Mirrors [`BudgetRule`]'s shape (a charged-spend cap plus an action) so the existing
 /// `decide`/`enforce_budget` machinery enforces it identically — `stop` rejects,
 /// `downgrade` swaps the model, `restrict` clamps, `notify` only flags.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SessionBudgetConfig {
-    /// Lifetime token cap (input + output combined) for any single session.
-    /// 0 = unlimited (the feature is off).
+    /// Lifetime charged-spend cap in micro-USD for any single session.
+    /// 1_000_000 = $1; 0 = unlimited (the feature is off).
     #[serde(default)]
     pub limit: u64,
     /// Action to take once a session reaches `limit`. Defaults to `stop` so a
@@ -127,6 +185,9 @@ pub struct SessionBudgetConfig {
     /// `Silent`.
     #[serde(default)]
     pub alert: AlertTier,
+    /// Charged work categories included in the per-session rule.
+    #[serde(default)]
+    pub include: BudgetChargeInclusion,
 }
 
 impl Default for SessionBudgetConfig {
@@ -137,13 +198,14 @@ impl Default for SessionBudgetConfig {
             downgrade_to: None,
             restrict_max_tokens: default_restrict_max_tokens(),
             alert: AlertTier::default(),
+            include: BudgetChargeInclusion::default(),
         }
     }
 }
 
 /// Exec (sandbox) budget config: count and/or wall-clock per rolling window.
 ///
-/// Unlike the token budget (lifetime, model-call shaped), exec budgets apply
+/// Unlike the charged-spend budget (lifetime, category-shaped), exec budgets apply
 /// to non-model executions: sandbox runs, MCP tool invocations, and any
 /// event posted to `POST /v1/exec/audit`. Limits reset at each window boundary.
 ///
@@ -231,7 +293,9 @@ pub struct BudgetDecision {
     pub scope: BudgetScope,
     pub key: String,
     pub action: BudgetAction,
+    /// Charged model spend used by the matching scope, in micro-USD.
     pub used: u64,
+    /// Charged model spend cap for the matching scope, in micro-USD.
     pub limit: u64,
     pub downgrade_to: Option<String>,
     pub restrict_max_tokens: u64,
@@ -244,11 +308,11 @@ pub struct BudgetDecision {
 /// In-memory budget enforcer. Cheap to clone-check on the request path.
 pub struct BudgetEnforcer {
     config: BudgetConfig,
-    /// Lifetime tokens used per user id.
+    /// Lifetime charged micro-USD used per user id.
     user_usage: DashMap<String, u64>,
-    /// Lifetime tokens used per agent id.
+    /// Lifetime charged micro-USD used per agent id.
     agent_usage: DashMap<String, u64>,
-    /// Lifetime tokens used per session id (#510). Bounded by
+    /// Lifetime charged micro-USD used per session id (#510). Bounded by
     /// `MAX_SESSION_ENTRIES`; cleared wholesale on overflow.
     session_usage: DashMap<String, u64>,
     enabled: bool,
@@ -293,6 +357,19 @@ impl BudgetEnforcer {
         user_id: Option<&str>,
         agent_id: Option<&str>,
     ) -> Option<BudgetDecision> {
+        self.evaluate_charge(user_id, agent_id, BudgetChargeKind::Model)
+    }
+
+    /// Evaluate the request's user and agent budgets for a specific charged
+    /// spend category. Rules that exclude the category are not candidates for
+    /// this request, even when another included category exhausted the same
+    /// scope's counter.
+    pub fn evaluate_charge(
+        &self,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        kind: BudgetChargeKind,
+    ) -> Option<BudgetDecision> {
         if !self.enabled {
             return None;
         }
@@ -302,8 +379,10 @@ impl BudgetEnforcer {
         if let Some(uid) = user_id.filter(|s| !s.is_empty()) {
             if let Some(rule) = self.config.users.get(uid) {
                 let used = self.user_usage.get(uid).map(|v| *v).unwrap_or(0);
-                if let Some(decision) = Self::decide(BudgetScope::User, uid, rule, used) {
-                    best = Some(decision);
+                if rule.include.includes(kind) {
+                    if let Some(decision) = Self::decide(BudgetScope::User, uid, rule, used) {
+                        best = Some(decision);
+                    }
                 }
             }
         }
@@ -311,13 +390,15 @@ impl BudgetEnforcer {
         if let Some(aid) = agent_id.filter(|s| !s.is_empty()) {
             if let Some(rule) = self.config.agents.get(aid) {
                 let used = self.agent_usage.get(aid).map(|v| *v).unwrap_or(0);
-                if let Some(decision) = Self::decide(BudgetScope::Agent, aid, rule, used) {
-                    best = match best {
-                        Some(prev) if severity(prev.action) >= severity(decision.action) => {
-                            Some(prev)
-                        }
-                        _ => Some(decision),
-                    };
+                if rule.include.includes(kind) {
+                    if let Some(decision) = Self::decide(BudgetScope::Agent, aid, rule, used) {
+                        best = match best {
+                            Some(prev) if severity(prev.action) >= severity(decision.action) => {
+                                Some(prev)
+                            }
+                            _ => Some(decision),
+                        };
+                    }
                 }
             }
         }
@@ -333,7 +414,20 @@ impl BudgetEnforcer {
     /// transient [`BudgetRule`] from the [`SessionBudgetConfig`] — so the
     /// downgrade-without-target → restrict degrade behaves identically.
     pub fn evaluate_session(&self, session_id: Option<&str>) -> Option<BudgetDecision> {
+        self.evaluate_session_charge(session_id, BudgetChargeKind::Model)
+    }
+
+    /// Evaluate the request's per-session budget for a specific charged spend
+    /// category. Excluded categories do not consume or trigger the session cap.
+    pub fn evaluate_session_charge(
+        &self,
+        session_id: Option<&str>,
+        kind: BudgetChargeKind,
+    ) -> Option<BudgetDecision> {
         if !self.enabled || self.config.session.limit == 0 {
+            return None;
+        }
+        if !self.config.session.include.includes(kind) {
             return None;
         }
         let sid = session_id.filter(|s| !s.is_empty())?;
@@ -351,6 +445,7 @@ impl BudgetEnforcer {
             downgrade_to: cfg.downgrade_to.clone(),
             restrict_max_tokens: cfg.restrict_max_tokens,
             alert: cfg.alert,
+            include: cfg.include,
         }
     }
 
@@ -384,26 +479,48 @@ impl BudgetEnforcer {
         })
     }
 
-    /// Record consumed tokens against the request's user and agent counters.
+    /// Record charged micro-USD against the request's user and agent counters.
     /// Only increments scopes that actually have a configured budget so the
     /// maps stay bounded by the number of budgeted identities.
-    pub fn record(&self, user_id: Option<&str>, agent_id: Option<&str>, tokens: u64) {
-        if !self.enabled || tokens == 0 {
+    pub fn record(&self, user_id: Option<&str>, agent_id: Option<&str>, cost_micro_usd: u64) {
+        self.record_charge(user_id, agent_id, BudgetChargeKind::Model, cost_micro_usd);
+    }
+
+    /// Record a charged amount against the configured user and agent rules only
+    /// when that rule includes the requested spend category.
+    pub fn record_charge(
+        &self,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        kind: BudgetChargeKind,
+        cost_micro_usd: u64,
+    ) {
+        if !self.enabled || cost_micro_usd == 0 {
             return;
         }
         if let Some(uid) = user_id.filter(|s| !s.is_empty()) {
-            if self.config.users.contains_key(uid) {
-                *self.user_usage.entry(uid.to_string()).or_insert(0) += tokens;
+            if self
+                .config
+                .users
+                .get(uid)
+                .is_some_and(|rule| rule.include.includes(kind))
+            {
+                *self.user_usage.entry(uid.to_string()).or_insert(0) += cost_micro_usd;
             }
         }
         if let Some(aid) = agent_id.filter(|s| !s.is_empty()) {
-            if self.config.agents.contains_key(aid) {
-                *self.agent_usage.entry(aid.to_string()).or_insert(0) += tokens;
+            if self
+                .config
+                .agents
+                .get(aid)
+                .is_some_and(|rule| rule.include.includes(kind))
+            {
+                *self.agent_usage.entry(aid.to_string()).or_insert(0) += cost_micro_usd;
             }
         }
     }
 
-    /// Record consumed tokens against the request's session counter (#510). Kept
+    /// Record charged micro-USD against the request's session counter (#510). Kept
     /// separate from `record` so the prod call sites add it alongside without
     /// churning every existing `record` test, and the session-enabled gate lives
     /// with the session logic.
@@ -411,8 +528,22 @@ impl BudgetEnforcer {
     /// Only increments when the global session rule is active (`limit > 0`). The
     /// map is soft-bounded at `MAX_SESSION_ENTRIES` — on overflow it is cleared
     /// wholesale (counters are ephemeral and best-effort, so this is acceptable).
-    pub fn record_session(&self, session_id: Option<&str>, tokens: u64) {
-        if !self.enabled || tokens == 0 || self.config.session.limit == 0 {
+    pub fn record_session(&self, session_id: Option<&str>, cost_micro_usd: u64) {
+        self.record_session_charge(session_id, BudgetChargeKind::Model, cost_micro_usd);
+    }
+
+    /// Record a charged amount against a session when the session rule includes
+    /// that spend category.
+    pub fn record_session_charge(
+        &self,
+        session_id: Option<&str>,
+        kind: BudgetChargeKind,
+        cost_micro_usd: u64,
+    ) {
+        if !self.enabled || cost_micro_usd == 0 || self.config.session.limit == 0 {
+            return;
+        }
+        if !self.config.session.include.includes(kind) {
             return;
         }
         let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
@@ -422,22 +553,22 @@ impl BudgetEnforcer {
         {
             self.session_usage.clear();
         }
-        *self.session_usage.entry(sid.to_string()).or_insert(0) += tokens;
+        *self.session_usage.entry(sid.to_string()).or_insert(0) += cost_micro_usd;
     }
 
-    /// Current lifetime tokens recorded for a user (test/observability helper).
+    /// Current lifetime charged micro-USD recorded for a user (test/observability helper).
     #[allow(dead_code)]
     pub fn user_usage(&self, user_id: &str) -> u64 {
         self.user_usage.get(user_id).map(|v| *v).unwrap_or(0)
     }
 
-    /// Current lifetime tokens recorded for a session (test/observability helper).
+    /// Current lifetime charged micro-USD recorded for a session (test/observability helper).
     #[allow(dead_code)]
     pub fn session_usage(&self, session_id: &str) -> u64 {
         self.session_usage.get(session_id).map(|v| *v).unwrap_or(0)
     }
 
-    /// Current lifetime tokens recorded for an agent (test/observability helper).
+    /// Current lifetime charged micro-USD recorded for an agent (test/observability helper).
     #[allow(dead_code)]
     pub fn agent_usage(&self, agent_id: &str) -> u64 {
         self.agent_usage.get(agent_id).map(|v| *v).unwrap_or(0)
@@ -461,7 +592,7 @@ impl Default for BudgetEnforcer {
 
 // ─── Swappable budget enforcer (Lg decomposition) ────────────────────────────
 
-/// The per-user / per-agent / per-session token budget enforcer as a swappable
+/// The per-user / per-agent / per-session spend budget enforcer as a swappable
 /// capability. The built-in [`BudgetEnforcer`] (in-memory counters) is the
 /// default; an alternative (e.g. a control-plane-coordinated shared pool) can
 /// register without touching the pipeline, mirroring the
@@ -472,12 +603,66 @@ pub trait BudgetBackend: Send + Sync {
     fn config(&self) -> &BudgetConfig;
     /// Evaluate user + agent budgets, returning the most restrictive action.
     fn evaluate(&self, user_id: Option<&str>, agent_id: Option<&str>) -> Option<BudgetDecision>;
+    /// Evaluate user + agent budgets for a specific charged spend category.
+    /// Legacy backends that only implement model-shaped evaluation keep that
+    /// behavior for model requests and do not enforce non-model categories.
+    fn evaluate_charge(
+        &self,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        kind: BudgetChargeKind,
+    ) -> Option<BudgetDecision> {
+        if kind == BudgetChargeKind::Model {
+            self.evaluate(user_id, agent_id)
+        } else {
+            None
+        }
+    }
     /// Evaluate the per-session budget.
     fn evaluate_session(&self, session_id: Option<&str>) -> Option<BudgetDecision>;
-    /// Record consumed tokens against user + agent counters.
-    fn record(&self, user_id: Option<&str>, agent_id: Option<&str>, tokens: u64);
-    /// Record consumed tokens against the session counter.
-    fn record_session(&self, session_id: Option<&str>, tokens: u64);
+    /// Evaluate the per-session budget for a specific charged spend category.
+    /// Legacy backends that only implement model-shaped evaluation keep that
+    /// behavior for model requests and do not enforce non-model categories.
+    fn evaluate_session_charge(
+        &self,
+        session_id: Option<&str>,
+        kind: BudgetChargeKind,
+    ) -> Option<BudgetDecision> {
+        if kind == BudgetChargeKind::Model {
+            self.evaluate_session(session_id)
+        } else {
+            None
+        }
+    }
+    /// Record charged micro-USD against user + agent counters.
+    fn record(&self, user_id: Option<&str>, agent_id: Option<&str>, cost_micro_usd: u64);
+    /// Record a charged amount for a specific spend category. Backends that
+    /// only implement the legacy model-shaped method keep model accounting;
+    /// the built-in backend overrides this for category-aware rules.
+    fn record_charge(
+        &self,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        kind: BudgetChargeKind,
+        cost_micro_usd: u64,
+    ) {
+        if kind == BudgetChargeKind::Model {
+            self.record(user_id, agent_id, cost_micro_usd);
+        }
+    }
+    /// Record charged micro-USD against the session counter.
+    fn record_session(&self, session_id: Option<&str>, cost_micro_usd: u64);
+    /// Record a charged amount for a specific session spend category.
+    fn record_session_charge(
+        &self,
+        session_id: Option<&str>,
+        kind: BudgetChargeKind,
+        cost_micro_usd: u64,
+    ) {
+        if kind == BudgetChargeKind::Model {
+            self.record_session(session_id, cost_micro_usd);
+        }
+    }
     /// Snapshot the live per-user / per-agent / per-session spend counters for a
     /// read surface (`GET /v1/budget/spend`). Default returns an empty snapshot so
     /// a backend that keeps no local counters (e.g. a control-plane-coordinated
@@ -489,18 +674,18 @@ pub trait BudgetBackend: Send + Sync {
 }
 
 /// A point-in-time snapshot of the in-memory budget spend counters, keyed by
-/// identity. Lifetime token totals (input + output), the same figure the budget
+/// identity. Lifetime charged micro-USD totals, the same figure the budget
 /// gate compares against each scope's `limit`. In-memory only — a gateway
 /// restart resets these to empty (see the crate-level note on counter
 /// durability). Consumed by the `GET /v1/budget/spend` read surface so the
 /// desktop can show live per-scope spend.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct BudgetSpendSnapshot {
-    /// Lifetime tokens per user id (only ids with a configured budget accrue).
+    /// Lifetime charged micro-USD per user id (only ids with a configured budget accrue).
     pub users: HashMap<String, u64>,
-    /// Lifetime tokens per agent id (only ids with a configured budget accrue).
+    /// Lifetime charged micro-USD per agent id (only ids with a configured budget accrue).
     pub agents: HashMap<String, u64>,
-    /// Lifetime tokens per session id (populated only when the global session
+    /// Lifetime charged micro-USD per session id (populated only when the global session
     /// budget is active). Bounded by `MAX_SESSION_ENTRIES`.
     pub sessions: HashMap<String, u64>,
 }
@@ -512,14 +697,46 @@ impl BudgetBackend for BudgetEnforcer {
     fn evaluate(&self, user_id: Option<&str>, agent_id: Option<&str>) -> Option<BudgetDecision> {
         BudgetEnforcer::evaluate(self, user_id, agent_id)
     }
+    fn evaluate_charge(
+        &self,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        kind: BudgetChargeKind,
+    ) -> Option<BudgetDecision> {
+        BudgetEnforcer::evaluate_charge(self, user_id, agent_id, kind)
+    }
     fn evaluate_session(&self, session_id: Option<&str>) -> Option<BudgetDecision> {
         BudgetEnforcer::evaluate_session(self, session_id)
     }
-    fn record(&self, user_id: Option<&str>, agent_id: Option<&str>, tokens: u64) {
-        BudgetEnforcer::record(self, user_id, agent_id, tokens);
+    fn evaluate_session_charge(
+        &self,
+        session_id: Option<&str>,
+        kind: BudgetChargeKind,
+    ) -> Option<BudgetDecision> {
+        BudgetEnforcer::evaluate_session_charge(self, session_id, kind)
     }
-    fn record_session(&self, session_id: Option<&str>, tokens: u64) {
-        BudgetEnforcer::record_session(self, session_id, tokens);
+    fn record(&self, user_id: Option<&str>, agent_id: Option<&str>, cost_micro_usd: u64) {
+        BudgetEnforcer::record(self, user_id, agent_id, cost_micro_usd);
+    }
+    fn record_charge(
+        &self,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        kind: BudgetChargeKind,
+        cost_micro_usd: u64,
+    ) {
+        BudgetEnforcer::record_charge(self, user_id, agent_id, kind, cost_micro_usd);
+    }
+    fn record_session(&self, session_id: Option<&str>, cost_micro_usd: u64) {
+        BudgetEnforcer::record_session(self, session_id, cost_micro_usd);
+    }
+    fn record_session_charge(
+        &self,
+        session_id: Option<&str>,
+        kind: BudgetChargeKind,
+        cost_micro_usd: u64,
+    ) {
+        BudgetEnforcer::record_session_charge(self, session_id, kind, cost_micro_usd);
     }
     fn spend_snapshot(&self) -> BudgetSpendSnapshot {
         let dump = |m: &DashMap<String, u64>| -> HashMap<String, u64> {
@@ -673,6 +890,7 @@ mod tests {
             downgrade_to: None,
             restrict_max_tokens: 256,
             alert: AlertTier::default(),
+            include: BudgetChargeInclusion::default(),
         }
     }
 
@@ -738,6 +956,99 @@ mod tests {
     }
 
     #[test]
+    fn charged_spend_uses_micro_usd_units() {
+        let e = BudgetEnforcer::new(config_with_user("u1", rule(1_000_000, BudgetAction::Stop)));
+
+        e.record(Some("u1"), None, 250_000);
+        assert_eq!(e.user_usage("u1"), 250_000);
+        assert!(e.evaluate(Some("u1"), None).is_none());
+
+        e.record(Some("u1"), None, 750_000);
+        let decision = e
+            .evaluate(Some("u1"), None)
+            .expect("the one-dollar charged-cost cap should trigger");
+        assert_eq!(decision.used, 1_000_000);
+        assert_eq!(decision.limit, 1_000_000);
+    }
+
+    #[test]
+    fn charge_categories_can_exclude_paid_tools_without_excluding_models() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "agent-a".to_string(),
+            BudgetRule {
+                limit: 1_000_000,
+                action: BudgetAction::Stop,
+                downgrade_to: None,
+                restrict_max_tokens: 256,
+                alert: AlertTier::default(),
+                include: BudgetChargeInclusion {
+                    model: true,
+                    media: true,
+                    tools: false,
+                },
+            },
+        );
+        let enforcer = BudgetEnforcer::new(BudgetConfig {
+            agents,
+            ..BudgetConfig::default()
+        });
+
+        enforcer.record_charge(None, Some("agent-a"), BudgetChargeKind::Tools, 900_000);
+        assert_eq!(enforcer.agent_usage("agent-a"), 0);
+
+        enforcer.record_charge(None, Some("agent-a"), BudgetChargeKind::Model, 900_000);
+        assert_eq!(enforcer.agent_usage("agent-a"), 900_000);
+    }
+
+    #[test]
+    fn charge_categories_filter_budget_enforcement_by_kind() {
+        let mut rule = rule(100, BudgetAction::Stop);
+        rule.include = BudgetChargeInclusion {
+            model: false,
+            media: true,
+            tools: true,
+        };
+        let enforcer = BudgetEnforcer::new(config_with_user("u1", rule));
+
+        enforcer.record_charge(Some("u1"), None, BudgetChargeKind::Media, 100);
+        assert!(enforcer
+            .evaluate_charge(Some("u1"), None, BudgetChargeKind::Model)
+            .is_none());
+        assert!(enforcer
+            .evaluate_charge(Some("u1"), None, BudgetChargeKind::Media)
+            .is_some());
+
+        let session = BudgetEnforcer::new(config_with_session(SessionBudgetConfig {
+            limit: 100,
+            include: BudgetChargeInclusion {
+                model: false,
+                media: true,
+                tools: true,
+            },
+            ..SessionBudgetConfig::default()
+        }));
+        session.record_session_charge(Some("s1"), BudgetChargeKind::Media, 100);
+        assert!(session
+            .evaluate_session_charge(Some("s1"), BudgetChargeKind::Model)
+            .is_none());
+        assert!(session
+            .evaluate_session_charge(Some("s1"), BudgetChargeKind::Media)
+            .is_some());
+    }
+
+    #[test]
+    fn old_rules_default_to_all_metered_charge_categories() {
+        let rule: BudgetRule =
+            serde_json::from_str(r#"{ "limit": 10 }"#).expect("legacy rule deserializes");
+        assert_eq!(rule.include, BudgetChargeInclusion::default());
+
+        let session: SessionBudgetConfig =
+            serde_json::from_str(r#"{ "limit": 10 }"#).expect("legacy session rule deserializes");
+        assert_eq!(session.include, BudgetChargeInclusion::default());
+    }
+
+    #[test]
     fn counter_accumulates_then_triggers_stop() {
         let e = BudgetEnforcer::new(config_with_user("u1", rule(100, BudgetAction::Stop)));
         // Under budget: nothing fires.
@@ -778,6 +1089,7 @@ mod tests {
             downgrade_to: Some("gpt-4o-mini".to_string()),
             restrict_max_tokens: 256,
             alert: AlertTier::default(),
+            include: BudgetChargeInclusion::default(),
         };
         let e = BudgetEnforcer::new(config_with_user("u1", r));
         e.record(Some("u1"), None, 20);
@@ -805,6 +1117,34 @@ mod tests {
     }
 
     #[test]
+    fn agent_rules_are_independent_and_trigger_on_agent_id() {
+        let mut agents = HashMap::new();
+        agents.insert("agent-a".to_string(), rule(100, BudgetAction::Stop));
+        let enforcer = BudgetEnforcer::new(BudgetConfig {
+            agents,
+            ..BudgetConfig::default()
+        });
+
+        enforcer.record(None, Some("agent-a"), 60);
+        enforcer.record(None, Some("agent-b"), 1_000);
+
+        assert_eq!(enforcer.agent_usage("agent-a"), 60);
+        assert_eq!(enforcer.agent_usage("agent-b"), 0);
+        assert!(enforcer.evaluate(None, Some("agent-a")).is_none());
+        assert!(enforcer.evaluate(None, Some("agent-b")).is_none());
+
+        enforcer.record(None, Some("agent-a"), 40);
+        let decision = enforcer
+            .evaluate(None, Some("agent-a"))
+            .expect("the matching agent cap should trigger");
+        assert_eq!(decision.scope, BudgetScope::Agent);
+        assert_eq!(decision.key, "agent-a");
+        assert_eq!(decision.action, BudgetAction::Stop);
+        assert_eq!(decision.used, 100);
+        assert_eq!(decision.limit, 100);
+    }
+
+    #[test]
     fn record_only_tracks_budgeted_identities() {
         let e = BudgetEnforcer::new(config_with_user("u1", rule(100, BudgetAction::Stop)));
         // Unbudgeted user is not tracked, keeping the map bounded.
@@ -821,6 +1161,7 @@ mod tests {
             downgrade_to: None,
             restrict_max_tokens: 256,
             alert: AlertTier::default(),
+            include: BudgetChargeInclusion::default(),
         }
     }
 
@@ -888,7 +1229,7 @@ mod tests {
 
 // ── ExecBudgetEnforcer (M6 / #192) ──────────────────────────────────────────
 //
-// Per-period exec-event budget. Unlike the token budget (lifetime, model-call
+// Per-period exec-event budget. Unlike the charged-spend budget (lifetime, category-shaped,
 // shaped), exec budgets apply to sandbox/tool runs. Counters reset at each
 // window boundary. Thread-safe via atomics / Mutex.
 
@@ -1549,6 +1890,7 @@ mod registry_tests {
                 downgrade_to: None,
                 restrict_max_tokens: 256,
                 alert: AlertTier::default(),
+                include: BudgetChargeInclusion::default(),
             },
         );
         let cfg = BudgetConfig {

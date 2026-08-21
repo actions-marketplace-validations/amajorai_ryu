@@ -1,6 +1,6 @@
 [package]
 name = "ryu-core"
-version = "0.1.15"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -37,6 +37,7 @@ url = "2"
 futures-util = "0.3"
 async-stream = "0.3"
 sha2 = "0.10"
+hmac = "0.12"
 # Argv-safe splitting of agent-supplied command strings (rtk__run): quotes are
 # honored but shell metacharacters (;, $(), backticks, pipes) are never
 # interpreted, because the command is exec'd argv-style, not through `sh -c`.
@@ -127,6 +128,9 @@ agent-client-protocol = { version = "=0.11.1", features = [
     # the option never reaches the composer. Nothing errors; the picker is just
     # absent.
     "unstable_boolean_config",
+    # Let projects expose secondary source folders to ACP agents without
+    # changing the primary cwd used for relative commands and git worktrees.
+    "unstable_session_additional_directories",
 ] }
 agent-client-protocol-tokio = "=0.11.1"
 rmcp = { version = "1", features = ["server", "transport-io"] }
@@ -204,7 +208,7 @@ ryu-teams-contracts = { path = "../../crates/core/teams-contracts" }
 # surfaces are both served by its own binary now, so Core links none of its code:
 #   - `/api/research/*` → the app's sidecar, via the manifest `public_mount` (generic
 #     ext-proxy), as it already was;
-#   - the `research__*` MCP tools → the app's own stdio MCP server (`ryu-research mcp`,
+#   - the `research.*` MCP tools → the app's own stdio MCP server (`ryu-research mcp`,
 #     the crate's `mcp_stdio` module), declared in `apps-store/research/manifest.json`
 #     under `mcp_servers` and registered by the generic `register_manifest_mcp_servers`.
 #     The Core-side `sidecar/mcp/research.rs` provider this replaced was an app-specific
@@ -615,7 +619,7 @@ default = ["tool-exec-deno"]
 tool-exec-deno = ["ryu-tool-exec/tool-exec-deno", "ryu-eval-code/tool-exec-deno"]
 # Deep-research is now FULLY OUT-OF-PROCESS: the `ryu-research` sidecar serves
 # `/api/research/*` via the manifest `public_mount` (generic ext-proxy loader) and the
-# `research__*` MCP tools via `ryu-research mcp` (manifest `mcp_servers`), so Core
+# `research.*` MCP tools via `ryu-research mcp` (manifest `mcp_servers`), so Core
 # neither merges `research_routes` nor links the crate — there is no `research` cargo
 # feature and no `ryu-research` dependency. The Python engine lifecycle
 # (`ResearchManager` + `sidecar::tools::research`) stays Core-side; the Rust sidecar's

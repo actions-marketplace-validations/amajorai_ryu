@@ -289,7 +289,8 @@ export function summarizeTurns(samples: readonly TurnSample[]): TurnStat {
  *
  * When metrics are off this is exactly `fetch`, with no wrapper on the body.
  */
-export const instrumentedFetch: typeof fetch = (input, init) => {
+export const instrumentedFetch: typeof fetch = Object.assign(
+	(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
 	if (!isDevMetricsEnabled()) {
 		return fetch(input, init);
 	}
@@ -360,7 +361,9 @@ export const instrumentedFetch: typeof fetch = (input, init) => {
 			throw error;
 		}
 	);
-};
+	},
+	{ preconnect: fetch.preconnect }
+);
 
 // ── Text rendering (diagnostics bundle) ──────────────────────────────────────
 

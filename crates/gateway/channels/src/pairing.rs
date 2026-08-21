@@ -325,6 +325,10 @@ pub struct AccessPolicy {
     pub dm_allowlist: Vec<String>,
     /// Group/chat ids admitted under `GroupPolicy::Allowlist`.
     pub group_allowlist: Vec<String>,
+    /// Sender ids admitted in an allowlisted group. This is the platform-neutral
+    /// equivalent of Hermes' `allow_from` user rule: a known person can address
+    /// the bot in a room without opening every room with the same name.
+    pub group_sender_allowlist: Vec<String>,
 }
 
 impl AccessPolicy {
@@ -341,6 +345,22 @@ impl AccessPolicy {
                 }
             }
         }
+    }
+
+    /// Decide a group message with both the room and the sender available.
+    ///
+    /// Sender admission is intentionally an additive fast path: an explicitly
+    /// allowed sender may talk in a room even when the room itself is not listed,
+    /// but an empty sender allowlist preserves the existing room-only behavior.
+    pub fn decide_group_for_sender(&self, chat_id: &str, sender_id: Option<&str>) -> Decision {
+        if sender_id.is_some_and(|id| {
+            self.group_sender_allowlist
+                .iter()
+                .any(|allowed| allowed == id)
+        }) {
+            return Decision::Allow;
+        }
+        self.decide_group(chat_id)
     }
 
     /// Decide a **direct message**. `sender_id` is the platform's stable per-user
@@ -564,6 +584,28 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(off.decide_group("-100"), Decision::Deny);
+    }
+
+    #[test]
+    fn group_sender_allowlist_is_an_additive_fast_path() {
+        let policy = AccessPolicy {
+            group: GroupPolicy::Allowlist,
+            group_allowlist: vec!["room-1".into()],
+            group_sender_allowlist: vec!["trusted-user".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            policy.decide_group_for_sender("unlisted-room", Some("trusted-user")),
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.decide_group_for_sender("unlisted-room", Some("other-user")),
+            Decision::Deny
+        );
+        assert_eq!(
+            policy.decide_group_for_sender("room-1", Some("other-user")),
+            Decision::Allow
+        );
     }
 
     #[tokio::test]

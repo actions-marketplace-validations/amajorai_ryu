@@ -1,5 +1,4 @@
 import { Button } from "@ryu/ui/components/button";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { useEffect, useRef, useState } from "react";
 import { sileo } from "sileo";
 import { authClient } from "@/lib/auth-client.ts";
@@ -56,21 +55,17 @@ export function ResendVerificationButton({
 	return (
 		<Button
 			className="h-7 shrink-0 px-2 text-warning text-xs hover:text-warning dark:text-warning"
-			disabled={loading || cooldown > 0}
+			disabled={cooldown > 0}
+			loading={loading}
 			onClick={handleResend}
 			size="sm"
 			variant="ghost"
 		>
-			{loading ? (
-				<>
-					<Spinner className="size-3" />
-					Sending…
-				</>
-			) : cooldown > 0 ? (
-				`Resend in ${cooldown}s`
-			) : (
-				"Resend"
-			)}
+			{loading
+				? "Sending…"
+				: cooldown > 0
+					? `Resend in ${cooldown}s`
+					: "Resend"}
 		</Button>
 	);
 }

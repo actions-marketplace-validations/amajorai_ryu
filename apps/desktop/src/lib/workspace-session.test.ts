@@ -1,0 +1,94 @@
+import { describe, expect, test } from "bun:test";
+import {
+	emptyWorkspaceSessionState,
+	parseWorkspaceSessionState,
+	sameWorkspaceSessionState,
+} from "./workspace-session.ts";
+
+describe("workspace session snapshots", () => {
+	test("normalizes a saved dock and clamps its active tab", () => {
+		const state = parseWorkspaceSessionState({
+			bottom: {
+				activeIndex: 99.8,
+				tabs: [
+					{ kind: "terminal", label: "Terminal", project: true, uid: "p-1" },
+					{ kind: "codereview", label: "Changes" },
+				],
+			},
+			bottomOpen: true,
+			right: { activeIndex: -4, tabs: [{ kind: "files", label: "Files" }] },
+			rightOpen: false,
+		});
+
+		expect(state).toEqual({
+			bottom: {
+				activeIndex: 1,
+				tabs: [
+					{ kind: "terminal", label: "Terminal", project: true, uid: "p-1" },
+					{ kind: "codereview", label: "Changes" },
+				],
+			},
+			bottomOpen: true,
+			right: { activeIndex: 0, tabs: [{ kind: "files", label: "Files" }] },
+			rightOpen: false,
+		});
+	});
+
+	test("drops malformed tabs without breaking the rest of the snapshot", () => {
+		const state = parseWorkspaceSessionState({
+			bottom: {
+				activeIndex: 0,
+				tabs: [
+					null,
+					{ kind: "", label: "empty kind" },
+					{ kind: "files", label: "Files" },
+				],
+			},
+			bottomOpen: "yes",
+			right: null,
+			rightOpen: true,
+		});
+
+		expect(state?.bottom.tabs).toEqual([{ kind: "files", label: "Files" }]);
+		expect(state?.bottomOpen).toBe(false);
+		expect(state?.right).toEqual({ activeIndex: 0, tabs: [] });
+	});
+
+	test("treats missing and empty state as distinct input shapes safely", () => {
+		const empty = emptyWorkspaceSessionState();
+		expect(parseWorkspaceSessionState(null)).toBeUndefined();
+		expect(sameWorkspaceSessionState(empty, emptyWorkspaceSessionState())).toBe(
+			true
+		);
+		expect(sameWorkspaceSessionState(empty, undefined)).toBe(false);
+	});
+
+	test("compares tab fields instead of relying on JSON key order", () => {
+		const first = parseWorkspaceSessionState({
+			bottom: {
+				activeIndex: 0,
+				tabs: [
+					{ kind: "terminal", label: "Terminal", project: true, pinned: true },
+				],
+			},
+			bottomOpen: true,
+			right: { activeIndex: 0, tabs: [] },
+			rightOpen: false,
+		});
+		const second = parseWorkspaceSessionState({
+			bottom: {
+				activeIndex: 0,
+				tabs: [
+					{ kind: "terminal", label: "Terminal", pinned: true, project: true },
+				],
+			},
+			bottomOpen: true,
+			right: { activeIndex: 0, tabs: [] },
+			rightOpen: false,
+		});
+
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+		expect(sameWorkspaceSessionState(first, second)).toBe(true);
+	});
+});

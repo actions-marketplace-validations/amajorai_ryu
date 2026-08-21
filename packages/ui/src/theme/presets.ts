@@ -6,12 +6,39 @@
 
 type Tokens = Record<string, string>;
 
+export type ThemeDensity = "compact" | "comfortable" | "spacious";
+
+export interface ThemeAppearance {
+	uiFont?: string;
+	headingFont?: string;
+	codeFont?: string;
+	fontSizes?: Partial<
+		Record<"xs" | "sm" | "base" | "lg" | "xl" | "2xl", string>
+	>;
+	fontWeights?: Partial<
+		Record<"normal" | "medium" | "semibold" | "bold", number>
+	>;
+	spacingScale?: number;
+	density?: ThemeDensity;
+	radius?: number;
+	cardRadius?: number;
+	panelRadius?: number;
+	contentWidth?: string;
+	contentScale?: number;
+	layout?: {
+		navigation?: "sidebar" | "topbar" | "minimal";
+		contentAlign?: "start" | "center" | "wide";
+		panelStyle?: "flat" | "card" | "outline";
+	};
+}
+
 export interface ThemeVariant {
 	id: string;
 	label: string;
 	mode: "light" | "dark";
 	preview: { bg: string; surface: string; primary: string; text: string };
 	tokens: Tokens;
+	appearance?: ThemeAppearance;
 }
 
 interface Swatch {
@@ -1749,11 +1776,23 @@ export function colorToHex(color: string): string | null {
 	const rgba = color.match(RGBA_CHANNEL_RE);
 	if (rgba) {
 		const toHex = (n: string) => Number(n).toString(16).padStart(2, "0");
-		return `#${toHex(rgba[1])}${toHex(rgba[2])}${toHex(rgba[3])}`;
+		const [, r, g, b] = rgba;
+		if (r === undefined || g === undefined || b === undefined) {
+			return null;
+		}
+		return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 	}
 	const oklchMatch = color.match(OKLCH_RE);
 	if (oklchMatch) {
-		return oklchToHex(oklchMatch[1], oklchMatch[2], oklchMatch[3]);
+		const [, lightness, chroma, hue] = oklchMatch;
+		if (
+			lightness === undefined ||
+			chroma === undefined ||
+			hue === undefined
+		) {
+			return null;
+		}
+		return oklchToHex(lightness, chroma, hue);
 	}
 	return null;
 }

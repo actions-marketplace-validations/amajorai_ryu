@@ -204,6 +204,13 @@ export interface PluginManifest {
 	 */
 	examplePrompts?: string[];
 	/**
+	 * Whether the provider operates outside the local Ryu runtime, for example a
+	 * hosted browser or remote MCP service. This is a presentation/provenance
+	 * flag, not a permission grant; the actual remote endpoint remains declared
+	 * under `mcp_servers` and is governed by the Gateway.
+	 */
+	external?: boolean;
+	/**
 	 * Hide this listing from the Store without uninstalling or disabling it.
 	 *
 	 * The listing keeps working for anyone who already has it — this is a
@@ -415,6 +422,12 @@ export interface PluginManifest {
 	 */
 	provides?: ProvidesEntry[];
 	/**
+	 * Public source repository URL (Claude/Codex `repository`). This is listing
+	 * metadata only; install and signature resolution still use the catalog's
+	 * authoritative source fields.
+	 */
+	repository?: string | null;
+	/**
 	 * **Plugin-to-plugin dependencies** — the other plugins this one needs (the
 	 * npm-shaped edge that lets the app decompose into a kernel + features).
 	 * Resolved into a topological enable order by Core's `plugins::graph`.
@@ -495,6 +508,14 @@ export interface PluginManifest {
 	 */
 	tagline?: string | null;
 	/**
+	 * Curated store-filter tags (Ryu extension). Unlike `keywords`, which is
+	 * publisher search vocabulary, these stable labels are the values the
+	 * Marketplace filter exposes. Keeping both fields lets Claude/Codex
+	 * manifests round-trip their native `keywords` while Ryu authors opt into
+	 * a deliberately bounded taxonomy.
+	 */
+	tags?: string[];
+	/**
 	 * Host surfaces this plugin runs on (desktop / island / mobile / …).
 	 *
 	 * **Empty or absent = runs on EVERY surface.** This is the backward-compatible
@@ -556,7 +577,7 @@ export interface CompanionSurface {
  * Most surfaces added since are **self-contained**: they carry their own payload
  * and reference no runnable at all (`widgets`, `views`, `dock_panels`,
  * `sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,
- * `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,
+ * `chat_features`, `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,
  * `message_actions`, `context_menu_items`, `agent_edit_panels`).
  *
  * # Extending
@@ -599,6 +620,20 @@ export interface Contributes {
 	 * Agents the plugin contributes (referenced by runnable id).
 	 */
 	agents?: ContributionId[];
+	/**
+	 * Declarative chat feature descriptors. These are opaque, client-rendered
+	 * declarations used to feature-detect chat behaviors whose implementation
+	 * remains in the host (for example side chats or temporary chats). The
+	 * owning plugin id is stamped by Core when the contribution endpoint serves
+	 * them, so a disabled plugin removes both the descriptor and its UI affordance.
+	 */
+	chat_features?: unknown[];
+	/**
+	 * Metadata-only chat widget templates. Unlike [`Contributes::widgets`], this
+	 * catalog is safe to show before a turn runs: it names a host-owned prompt
+	 * affordance and a tool/view binding, never HTML, React, or capabilities.
+	 */
+	chat_widget_templates?: ChatWidgetTemplateContribution[] | null;
 	/**
 	 * Command-palette commands the plugin contributes (referenced by runnable id).
 	 */
@@ -958,7 +993,7 @@ export interface Contributes {
 	 * ([`Contributes::sidebar_sections`]) and "what nav rows exist"
 	 * ([`Contributes::sidebar_buttons`]): **how the sidebar as a whole is
 	 * arranged**. The shell ships three modes of its own (every section stacked;
-	 * every section as a tab; Agent mode, which is the pair Sessions ⇄ Agents), and
+	 * every section as a tab; Bot mode, which is the pair Sessions ⇄ Agents), and
 	 * before this member an app could add a section to that list but could not
 	 * propose an arrangement — so a plugin wanting the Grok/Hermes bot-mode posture
 	 * had to ask for a shell change. See [`SidebarModeContribution`].
@@ -1100,6 +1135,36 @@ export interface ContributionId {
 	 * Optional display title (e.g. the palette label for a command).
 	 */
 	title?: string | null;
+}
+/**
+ * A metadata-only entry the host may offer as a compact chat affordance.
+ *
+ * `backing` selects exactly one existing tool or view by id. The host owns the
+ * eventual rendering and action dispatch; `safe_action_ids` are identifiers only
+ * and are never executable payloads.
+ */
+export interface ChatWidgetTemplateContribution {
+	/**
+	 * `available`, `coming-soon`, or `unavailable`; unknown values are forwarded
+	 * for forward compatibility and are not offered by older shells.
+	 */
+	availability?: string;
+	backing: ChatWidgetTemplateBacking;
+	description?: string | null;
+	/**
+	 * Open vocabulary so newer shells can add display modes without breaking
+	 * older Core nodes; the desktop simply ignores modes it does not know.
+	 */
+	display_mode: string;
+	examples?: string[];
+	id: string;
+	safe_action_ids?: string[];
+	title: string;
+	triggers?: string[];
+}
+export interface ChatWidgetTemplateBacking {
+	tool_id?: string | null;
+	view_id?: string | null;
 }
 /**
  * One context-menu row a plugin contributes (see
@@ -1833,7 +1898,7 @@ export interface SidebarModeContribution {
 	/**
 	 * Which of `sections` the mode opens on. Absent (or naming a section not in
 	 * `sections`) = the first one. This is the field that makes a mode an opinion
-	 * rather than a filter: the shell's own Agent mode lists Sessions first but
+	 * rather than a filter: the shell's own Bot mode lists Sessions first but
 	 * opens on Agents, because the roster is what the mode is for.
 	 */
 	default_section?: string | null;
@@ -2016,7 +2081,7 @@ export interface ThemePreview {
  * Tools are namespaced `<server>.<tool>` (e.g. `browser.navigate`), so `tool`
  * must carry the namespace — a bare `navigate` would be ambiguous across servers
  * and is rejected at load. A **trailing** `*` is a prefix wildcard, which is how a
- * plugin withholds a whole server (`shadow__*`); it is the only wildcard position
+ * plugin withholds a whole server (`shadow.*`); it is the only wildcard position
  * allowed, because an interior or leading `*` invites a pattern that silently
  * matches far more than the author pictured.
  *
@@ -2086,6 +2151,11 @@ export interface TurnHookContribution {
 	 * The turn boundary this hook fires on. Today only `"post_assistant_turn"`.
 	 */
 	on: string;
+	/**
+	 * Higher-priority hooks run first within a phase. Ties are resolved by
+	 * plugin id and hook id, which makes first-writer-wins directives stable.
+	 */
+	priority?: number;
 }
 /**
  * A declarative pre-gate for a [`TurnHookContribution`]. The conditions are
@@ -2322,8 +2392,8 @@ export interface McpServerDecl {
 	};
 	/**
 	 * Transport: `stdio`, `http`, `streamable-http`, or `sse`. Absent ⇒ inferred
-	 * from whichever of `command`/`url` is present. `http`, `streamable-http`
-	 * and `sse` all select Core's HTTP transport.
+	 * from whichever of `command`/`url` is present. `http` and `streamable-http`
+	 * select Streamable HTTP; `sse` selects the legacy HTTP+SSE transport.
 	 */
 	type?: string | null;
 	/**
@@ -2531,7 +2601,7 @@ export interface ProvidesEntry {
 	 * model-visible tool surface stable across a swap.
 	 *
 	 * The key is a canonical verb from the host's capability verb table (e.g.
-	 * `"web__search"`); the value names the provider's own registered tool plus the
+	 * `"web.search"`); the value names the provider's own registered tool plus the
 	 * argument/response mapping into the canonical shape. A provider that omits a
 	 * verb simply does not serve it — the facade reports the verb unavailable
 	 * rather than guessing.
@@ -2549,7 +2619,7 @@ export interface ProvidesEntry {
 /**
  * How one capability **verb** maps onto a concrete provider tool.
  *
- * The facade tool (`web__search`, `browser__navigate`, …) is registered by the host
+ * The facade tool (`web.search`, `browser.navigate`, …) is registered by the host
  * from its canonical verb table; at call time it resolves the capability's bound
  * provider, reads this binding, renames the arguments, re-enters tool dispatch on
  * [`Self::tool`], and maps the response back. Swapping the provider therefore
@@ -2582,7 +2652,7 @@ export interface CapabilityToolBinding {
 	 * **canonical** argument name (before any rename).
 	 *
 	 * Exists because canonical schemas describe what agents may ask for, while
-	 * providers differ in what they accept: `web__search.limit` allows up to 100,
+	 * providers differ in what they accept: `web.search.limit` allows up to 100,
 	 * but Brave's `count` maxes at 20. Without this, selecting Brave turns a
 	 * perfectly valid `limit: 50` into an upstream 4xx — the swap stops being
 	 * transparent, which is the entire point of the facade. Clamping is the right
@@ -2632,8 +2702,8 @@ export interface CapabilityToolBinding {
 	 */
 	response?: CapabilityResponseMap | null;
 	/**
-	 * The provider's own fully-qualified tool id (e.g. `"exa__search"`,
-	 * `"app__firecrawl_scrape"`) that implements this verb.
+	 * The provider's own fully-qualified tool id (e.g. `"exa.search"`,
+	 * `"app.firecrawl_scrape"`) that implements this verb.
 	 */
 	tool: string;
 }
@@ -2919,17 +2989,17 @@ export interface ExternalRuntimeConfig {
 }
 /**
  * A single asset an external runtime needs, fetched before first run. Either a
- * direct https URL or an `hf:<owner>/<repo>/<path>` reference; `dest_under_ryu`
- * is the relative directory beneath `~/.ryu` where it lands (Core-owned) — the
- * filename is derived from the source's last path segment.
+ * direct https URL or an `hf:<owner>/<repo>/<path>` reference; the destination
+ * is a relative directory beneath the plugin's dedicated runtime `assets/`
+ * directory — the filename is derived from the source's last path segment.
  */
 export interface AssetSpec {
 	/**
 	 * Destination directory relative to `~/.ryu` (e.g. `"models/hf"`); the
-	 * fetched file lands at `~/.ryu/<dest_under_ryu>/<filename>`. Must be a
-	 * traversal-safe relative path (no `..`, not absolute).
+ * fetched file lands at `<runtime>/assets/<dest_under_runtime>/<filename>`. Must
+ * be a traversal-safe relative path (no `..`, not absolute).
 	 */
-	dest_under_ryu: string;
+	dest_under_runtime: string;
 	/**
 	 * Optional SHA-256 for checksum verification (direct-URL assets).
 	 */

@@ -73,7 +73,12 @@ function HostedProjectTab({
 	const target = slot ?? fallbackEl;
 
 	const content = (
-		<ProjectDockTabContent dockPanels={dockPanels} folder={folder} tab={tab} />
+		<ProjectDockTabContent
+			active={slot !== null}
+			dockPanels={dockPanels}
+			folder={folder}
+			tab={tab}
+		/>
 	);
 
 	return (

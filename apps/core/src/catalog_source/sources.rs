@@ -635,6 +635,8 @@ struct MarketplacePlugin {
     display_name: Option<String>,
     #[serde(default)]
     homepage: Option<String>,
+    #[serde(default)]
+    repository: Option<String>,
     /// Claude `author` — a bare string or an object with a `name` field.
     #[serde(default)]
     author: Option<serde_json::Value>,
@@ -692,6 +694,10 @@ struct MarketplacePlugin {
     terms_of_service_url: Option<String>,
     #[serde(default)]
     setup: Option<serde_json::Value>,
+    #[serde(default)]
+    external: bool,
+    #[serde(default)]
+    layers: Vec<serde_json::Value>,
     // ── Dependency + surface contract ─────────────────────────────────────────
     /// The plugins this entry depends on (`{ apps: [{ id, min_version }] }`) and
     /// the host surfaces it targets — mirrored from the plugin's manifest by the
@@ -717,6 +723,7 @@ struct MarketplaceItemMeta {
     stability: Option<String>,
     display_name: Option<String>,
     homepage: Option<String>,
+    repository: Option<String>,
     author: Option<serde_json::Value>,
     category: Option<String>,
     version: Option<String>,
@@ -738,6 +745,8 @@ struct MarketplaceItemMeta {
     privacy_policy_url: Option<String>,
     terms_of_service_url: Option<String>,
     setup: Option<serde_json::Value>,
+    external: bool,
+    layers: Vec<serde_json::Value>,
     requires: Option<serde_json::Value>,
     targets: Vec<String>,
 }
@@ -748,6 +757,7 @@ impl MarketplacePlugin {
         MarketplaceItemMeta {
             display_name: self.display_name.clone(),
             homepage: self.homepage.clone(),
+            repository: self.repository.clone(),
             author: self.author.clone(),
             category: self.category.clone(),
             version: self.version.clone(),
@@ -770,6 +780,8 @@ impl MarketplacePlugin {
             privacy_policy_url: self.privacy_policy_url.clone(),
             terms_of_service_url: self.terms_of_service_url.clone(),
             setup: self.setup.clone(),
+            external: self.external,
+            layers: scrub_marketplace_layers(&self.layers),
             requires: self.requires.clone(),
             targets: self.targets.clone(),
         }
@@ -789,6 +801,70 @@ fn author_developer_string(author: &serde_json::Value) -> Option<String> {
             .map(str::to_string),
         _ => None,
     }
+}
+
+/// Keep only the non-executable layer summary a marketplace publisher may show.
+/// The signed manifest remains the authority for actual bindings; custom
+/// marketplace JSON can only describe the public capability name, target, and
+/// verbs that the card renders.
+fn scrub_marketplace_layers(value: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    value
+        .iter()
+        .filter_map(|layer| {
+            let object = layer.as_object()?;
+            let capability = object
+                .get("capability")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)?;
+            let mut projected = serde_json::Map::new();
+            projected.insert("capability".to_owned(), Value::String(capability.clone()));
+            if let Some(title) = object
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                projected.insert("title".to_owned(), Value::String(title.to_owned()));
+            }
+            projected.insert(
+                "toolkit".to_owned(),
+                Value::Bool(
+                    capability == "browser.control"
+                        || capability == "computer.control"
+                        || capability.starts_with("web."),
+                ),
+            );
+            if let Some(selectable) = object.get("selectable").and_then(Value::as_bool) {
+                projected.insert("selectable".to_owned(), Value::Bool(selectable));
+            }
+            if let Some(target) = object
+                .get("target")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                projected.insert("target".to_owned(), Value::String(target.to_owned()));
+            }
+            if let Some(verbs) = object.get("verbs").and_then(Value::as_array) {
+                let verbs = verbs
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .take(32)
+                    .map(Value::String)
+                    .collect::<Vec<_>>();
+                if !verbs.is_empty() {
+                    projected.insert("verbs".to_owned(), Value::Array(verbs));
+                }
+            }
+            Some(Value::Object(projected))
+        })
+        .take(16)
+        .collect()
 }
 
 /// The marketplace manifest (only the fields we surface).
@@ -1018,6 +1094,30 @@ impl MarketplaceSource {
                     if let Some(tagline) = &item.meta.tagline {
                         obj.insert("tagline".to_owned(), serde_json::json!(tagline));
                     }
+                    if let Some(homepage) = item.meta.homepage.as_deref().and_then(http_url) {
+                        obj.insert("homepage".to_owned(), serde_json::json!(homepage));
+                    }
+                    if let Some(repository) = item.meta.repository.as_deref().and_then(http_url) {
+                        obj.insert("repository_url".to_owned(), serde_json::json!(repository));
+                    }
+                    if let Some(license) = &item.meta.license {
+                        obj.insert("license".to_owned(), serde_json::json!(license));
+                    }
+                    if !item.meta.keywords.is_empty() {
+                        obj.insert("keywords".to_owned(), serde_json::json!(item.meta.keywords));
+                    }
+                    if !item.meta.screenshots.is_empty() {
+                        obj.insert(
+                            "screenshots".to_owned(),
+                            serde_json::json!(item.meta.screenshots),
+                        );
+                    }
+                    if !item.meta.layers.is_empty() {
+                        obj.insert("layers".to_owned(), serde_json::json!(item.meta.layers));
+                    }
+                    if item.meta.external {
+                        obj.insert("external".to_owned(), serde_json::json!(true));
+                    }
                 }
                 card
             }
@@ -1118,6 +1218,9 @@ impl CatalogSource for MarketplaceSource {
         if let Some(site) = meta.homepage.as_deref().and_then(http_url) {
             detail.insert("website".to_owned(), serde_json::json!(site));
         }
+        if let Some(repository) = meta.repository.as_deref().and_then(http_url) {
+            detail.insert("repositoryUrl".to_owned(), serde_json::json!(repository));
+        }
         if let Some(license) = &meta.license {
             detail.insert("license".to_owned(), serde_json::json!(license));
         }
@@ -1153,6 +1256,12 @@ impl CatalogSource for MarketplaceSource {
         }
         if let Some(setup) = &meta.setup {
             detail.insert("setup".to_owned(), setup.clone());
+        }
+        if item.meta.external {
+            detail.insert("external".to_owned(), serde_json::json!(true));
+        }
+        if !item.meta.layers.is_empty() {
+            detail.insert("layers".to_owned(), serde_json::json!(item.meta.layers));
         }
         Ok(serde_json::Value::Object(detail))
     }
@@ -2321,12 +2430,22 @@ const RYU_MARKETPLACE_DEFAULT_BASE: &str = "https://api.ryuhq.com";
 /// (fine for free items; a paid item is denied 402). Nothing hardcoded.
 const RYU_MARKETPLACE_TOKEN_ENV: &str = "RYU_MARKETPLACE_TOKEN";
 
+/// Header carrying a short-lived control-plane install session redeemed from a
+/// private Marketplace share code. It is intentionally separate from the
+/// caller's account bearer: the session is scoped to one release and audience,
+/// while the bearer remains the caller's normal identity/entitlement proof.
+const RYU_MARKETPLACE_INSTALL_SESSION_HEADER: &str = "x-ryu-marketplace-install-session";
+
 tokio::task_local! {
     /// The authenticated buyer's bearer for the current install request, set by
     /// the install handler from the inbound `Authorization` header. Per-request
     /// and dynamic (an env var cannot carry a live session token to a
     /// long-running Core). `None` ⇒ no header on this request.
     static BUYER_TOKEN: Option<String>;
+
+    /// The short-lived release-scoped session for a private package install.
+    /// `None` is the normal public/paid Marketplace path.
+    static INSTALL_SESSION: Option<String>;
 }
 
 /// Run `fut` with `token` bound as the current request's buyer bearer, so a
@@ -2341,6 +2460,19 @@ where
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
     BUYER_TOKEN.scope(token, fut).await
+}
+
+/// Run `fut` with a private package install session bound to this request.
+/// Session material is never persisted in Core; it is forwarded only to the
+/// first-party Marketplace detail/archive routes below.
+pub async fn with_install_session<F, T>(session: Option<String>, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let session = session
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    INSTALL_SESSION.scope(session, fut).await
 }
 
 /// Resolve the optional buyer bearer to forward to the marketplace install
@@ -2359,6 +2491,184 @@ fn marketplace_buyer_token() -> Option<String> {
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
+}
+
+/// Resolve the current private-package install session. There is deliberately
+/// no environment fallback: unlike a headless buyer bearer, a share-code
+/// redemption is short-lived and must never become a process-wide credential.
+fn marketplace_install_session() -> Option<String> {
+    INSTALL_SESSION
+        .try_with(|session| session.clone())
+        .ok()
+        .flatten()
+        .filter(|session| !session.is_empty())
+}
+
+fn ryu_marketplace_base() -> String {
+    std::env::var(RYU_MARKETPLACE_API_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| RYU_MARKETPLACE_DEFAULT_BASE.to_owned())
+}
+
+/// Fetch the detail envelope for a portable GitHub-backed package. Portable
+/// package kinds intentionally do not expand `CatalogKind`: they are a package
+/// transport, not one of Core's legacy catalog adapters. The returned detail is
+/// still the signed marketplace handoff, so the caller can verify the manifest
+/// before asking for the entitlement-gated archive.
+pub async fn fetch_ryu_package_detail(
+    client: &reqwest::Client,
+    kind: &str,
+    id: &str,
+    update: bool,
+) -> Result<Value> {
+    let url = format!(
+        "{}/api/marketplace/catalog/detail?kind={}&id={}{}",
+        ryu_marketplace_base(),
+        urlencoding::encode(kind),
+        urlencoding::encode(id.trim()),
+        if update { "&operation=update" } else { "" },
+    );
+    let mut request = client.get(&url);
+    if let Some(token) = marketplace_buyer_token() {
+        request = request.bearer_auth(token);
+    }
+    if let Some(session) = marketplace_install_session() {
+        request = request.header(RYU_MARKETPLACE_INSTALL_SESSION_HEADER, session);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| anyhow::anyhow!("fetching Ryu package detail {url}: {error}"))?;
+    if response.status() == reqwest::StatusCode::PAYMENT_REQUIRED {
+        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+        let reason = body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("this package requires an active marketplace entitlement");
+        bail!("cannot install `{kind}/{id}`: {reason}");
+    }
+    if !response.status().is_success() {
+        bail!(
+            "Ryu package detail returned {} for `{kind}/{id}`",
+            response.status()
+        );
+    }
+    let detail = response
+        .json::<Value>()
+        .await
+        .context("Ryu package detail was not valid JSON")?;
+    let descriptor = detail
+        .get("descriptor")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("Ryu package detail has no descriptor"))?;
+    if descriptor.get("kind").and_then(Value::as_str) != Some("ryu_package") {
+        bail!("marketplace item `{kind}/{id}` is not a portable Ryu package");
+    }
+    Ok(detail)
+}
+
+/// Download the package archive from the Ryu proxy. The URL is deliberately
+/// constrained to the first-party marketplace path; a signed descriptor cannot
+/// turn Core into a generic outbound proxy.
+pub async fn fetch_ryu_package_archive(
+    client: &reqwest::Client,
+    detail: &Value,
+    update: bool,
+) -> Result<Vec<u8>> {
+    let raw_url = detail
+        .get("descriptor")
+        .and_then(Value::as_object)
+        .and_then(|descriptor| descriptor.get("download_url"))
+        .and_then(Value::as_str)
+        .filter(|value| value.starts_with("/api/marketplace/github/"))
+        .ok_or_else(|| {
+            anyhow::anyhow!("portable package descriptor has no first-party download URL")
+        })?;
+    let url = format!(
+        "{}{}{}",
+        ryu_marketplace_base(),
+        raw_url,
+        if update { "?purpose=update" } else { "" }
+    );
+    let mut request = client.get(&url);
+    if let Some(token) = marketplace_buyer_token() {
+        request = request.bearer_auth(token);
+    }
+    if let Some(session) = marketplace_install_session() {
+        request = request.header(RYU_MARKETPLACE_INSTALL_SESSION_HEADER, session);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| anyhow::anyhow!("downloading Ryu package archive {url}: {error}"))?;
+    if response.status() == reqwest::StatusCode::PAYMENT_REQUIRED {
+        bail!("marketplace entitlement is required to download this package");
+    }
+    if !response.status().is_success() {
+        bail!("Ryu package archive returned {}", response.status());
+    }
+    let bytes = response.bytes().await?.to_vec();
+    if bytes.len() > 64 * 1024 * 1024 {
+        bail!("Ryu package archive exceeds the 64 MiB limit");
+    }
+    Ok(bytes)
+}
+
+/// Verify the signed portable-package manifest using the existing Gateway
+/// signing path. Unlike legacy seed listings, a new GitHub package must carry a
+/// signature: otherwise the release digest could be valid while the listing
+/// identity and entitlement metadata were replaced at the control plane.
+pub async fn verify_ryu_package_signature(
+    client: &reqwest::Client,
+    id: &str,
+    detail: &Value,
+) -> Result<()> {
+    let signature = detail
+        .get("signature")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("portable package `{id}` has no manifest signature"))?;
+    let manifest = detail.get("manifest").cloned().unwrap_or(Value::Null);
+    let descriptor = detail.get("descriptor").cloned().unwrap_or(Value::Null);
+    let public_key = std::env::var("RYU_MARKETPLACE_PUBLIC_KEY")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let gateway = crate::sidecar::gateway::gateway_url();
+    let url = format!("{}/v1/manifests/verify", gateway.trim_end_matches('/'));
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "manifest".to_owned(),
+        serde_json::json!({ "descriptor": descriptor, "manifest": manifest }),
+    );
+    payload.insert("signature".to_owned(), Value::String(signature.to_owned()));
+    if let Some(public_key) = public_key {
+        payload.insert("public_key".to_owned(), Value::String(public_key));
+    }
+    let response = client
+        .post(&url)
+        .json(&Value::Object(payload))
+        .send()
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("signature verification unreachable for `{id}`: {error}")
+        })?;
+    if !response.status().is_success() {
+        bail!(
+            "signature verification failed for `{id}`: gateway returned {}",
+            response.status()
+        );
+    }
+    let body = response
+        .json::<Value>()
+        .await
+        .context("signature verification response was not valid JSON")?;
+    if body.get("valid").and_then(Value::as_bool) != Some(true) {
+        bail!("manifest signature is invalid for `{id}`; refusing portable package install");
+    }
+    Ok(())
 }
 
 /// The **Ryu Marketplace** federated catalog source (#467). One source type
@@ -2383,9 +2693,11 @@ fn marketplace_buyer_token() -> Option<String> {
 ///   return `Ok(None)` for the wrong kind so a model-kind marketplace source is
 ///   never wrongly installed down the skill path.
 ///
-/// Degrades gracefully: an unreachable server makes `search` return an empty,
-/// labelled per-kind envelope (with a `note`); `detail` / `install_descriptor`
-/// return a clear error. Never panics.
+/// Degrades gracefully: `search` serves the last successful list from memory or
+/// disk when the server is unavailable, with a staleness note; a first-ever
+/// offline search returns an empty, labelled per-kind envelope. `detail` /
+/// `install_descriptor` return a clear error, because stale detail must not
+/// bypass signature or entitlement checks. Never panics.
 #[derive(Clone)]
 pub struct RyuMarketplaceSource {
     pub id: String,
@@ -2397,7 +2709,7 @@ pub struct RyuMarketplaceSource {
 }
 
 /// One catalog card from the marketplace `GET /catalog` response.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct MarketplaceCard {
     id: String,
     name: String,
@@ -2479,6 +2791,13 @@ struct MarketplaceCard {
     /// renders nothing.
     #[serde(default, rename = "orgVerifiedTier")]
     org_verified_tier: Option<String>,
+    /// Canonical publisher trust level: `gold` is Ryu staff verification,
+    /// `blue` is Stripe Connect identity verification, and `dotted` means
+    /// the publisher is allowed to publish without identity verification.
+    #[serde(default, rename = "publisherTrust")]
+    publisher_trust: Option<String>,
+    #[serde(default, rename = "publisherTrustSource")]
+    publisher_trust_source: Option<String>,
     /// The plugin's declared dependency closure + host surfaces, when the
     /// marketplace server exposes them on the card. Raw JSON, and `Option` so an
     /// older server that omits the columns still parses (the fields survive inside
@@ -2488,13 +2807,132 @@ struct MarketplaceCard {
     requires: Option<Value>,
     #[serde(default)]
     targets: Option<Value>,
+    /// GitHub-backed package identity and public download metadata. The
+    /// installation URL is a relative Ryu route; Core never receives a GitHub
+    /// token or a raw release URL from this card.
+    #[serde(default, rename = "packageKind")]
+    package_kind: Option<String>,
+    #[serde(default, rename = "githubSource")]
+    github_source: Option<Value>,
+    #[serde(default, rename = "downloadUrl")]
+    download_url: Option<String>,
+    #[serde(default, rename = "packageChecksum")]
+    package_checksum: Option<String>,
 }
 
 /// The marketplace `GET /catalog` envelope.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct MarketplaceListEnvelope {
     #[serde(default)]
     items: Vec<MarketplaceCard>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct MarketplaceCacheEnvelope<T> {
+    fetched_at: u64,
+    value: T,
+}
+
+struct MarketplaceCards {
+    cards: Vec<MarketplaceCard>,
+    stale: bool,
+}
+
+const RYU_MARKETPLACE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const RYU_MARKETPLACE_CACHE_DIR: &str = "ryu-marketplace-catalog";
+
+type MarketplaceMemoryCache =
+    std::collections::HashMap<String, (std::time::Instant, Vec<MarketplaceCard>)>;
+
+static RYU_MARKETPLACE_MEMORY_CACHE: OnceLock<std::sync::Mutex<MarketplaceMemoryCache>> =
+    OnceLock::new();
+
+fn marketplace_cache_key(base: &str, kind: CatalogKind, query: &str, limit: usize) -> String {
+    format!("{base}\n{}\n{}\n{limit}", kind.as_str(), query.trim())
+}
+
+fn marketplace_cache_path(key: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+
+    crate::paths::ryu_dir()
+        .join("cache")
+        .join(RYU_MARKETPLACE_CACHE_DIR)
+        .join(format!(
+            "{}.json",
+            hex::encode(Sha256::digest(key.as_bytes()))
+        ))
+}
+
+fn now_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn marketplace_memory_cache_get(key: &str, allow_stale: bool) -> Option<MarketplaceCards> {
+    let cache = RYU_MARKETPLACE_MEMORY_CACHE.get_or_init(Default::default);
+    let guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (fetched_at, cards) = guard.get(key)?;
+    let stale = fetched_at.elapsed() >= RYU_MARKETPLACE_CACHE_TTL;
+    if stale && !allow_stale {
+        return None;
+    }
+    Some(MarketplaceCards {
+        cards: cards.clone(),
+        stale,
+    })
+}
+
+fn marketplace_memory_cache_set(key: String, cards: Vec<MarketplaceCard>) {
+    let cache = RYU_MARKETPLACE_MEMORY_CACHE.get_or_init(Default::default);
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.len() >= 128 && !guard.contains_key(&key) {
+        let oldest = guard
+            .iter()
+            .min_by_key(|(_, (fetched_at, _))| *fetched_at)
+            .map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest {
+            guard.remove(&oldest);
+        }
+    }
+    guard.insert(key, (std::time::Instant::now(), cards));
+}
+
+fn read_marketplace_disk_cache(
+    key: &str,
+) -> Option<MarketplaceCacheEnvelope<Vec<MarketplaceCard>>> {
+    let raw = std::fs::read_to_string(marketplace_cache_path(key)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_marketplace_disk_cache(key: &str, cards: &[MarketplaceCard]) {
+    let path = marketplace_cache_path(key);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let envelope = MarketplaceCacheEnvelope {
+        fetched_at: now_unix_seconds(),
+        value: cards,
+    };
+    let Ok(json) = serde_json::to_vec(&envelope) else {
+        return;
+    };
+    let temporary = path.with_extension("json.tmp");
+    if std::fs::write(&temporary, json).is_ok() {
+        let _ = std::fs::rename(temporary, path);
+    }
+}
+
+fn disk_cache_is_fresh(fetched_at: u64) -> bool {
+    now_unix_seconds().saturating_sub(fetched_at) <= RYU_MARKETPLACE_CACHE_TTL.as_secs()
 }
 
 impl RyuMarketplaceSource {
@@ -2513,18 +2951,11 @@ impl RyuMarketplaceSource {
     /// (`RYU_MARKETPLACE_API_URL`), else the hosted-marketplace default. Trailing
     /// slash trimmed.
     fn resolve_base(&self) -> String {
-        let raw = self
-            .base_url
+        self.base_url
             .clone()
-            .filter(|u| !u.trim().is_empty())
-            .or_else(|| {
-                std::env::var(RYU_MARKETPLACE_API_ENV)
-                    .ok()
-                    .map(|u| u.trim().to_string())
-                    .filter(|u| !u.is_empty())
-            })
-            .unwrap_or_else(|| RYU_MARKETPLACE_DEFAULT_BASE.to_string());
-        raw.trim_end_matches('/').to_string()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.trim_end_matches('/').to_owned())
+            .unwrap_or_else(ryu_marketplace_base)
     }
 
     /// Fetch the search results for this source's kind. A plain (non-guarded)
@@ -2535,27 +2966,73 @@ impl RyuMarketplaceSource {
         client: &reqwest::Client,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<MarketplaceCard>> {
+    ) -> Result<MarketplaceCards> {
+        let base = self.resolve_base();
+        let cache_key = marketplace_cache_key(&base, self.kind, query, limit);
+        if let Some(cached) = marketplace_memory_cache_get(&cache_key, false) {
+            return Ok(cached);
+        }
+        let cache_on_disk = query.trim().is_empty();
+        if cache_on_disk {
+            if let Some(cached) = read_marketplace_disk_cache(&cache_key) {
+                if disk_cache_is_fresh(cached.fetched_at) {
+                    marketplace_memory_cache_set(cache_key.clone(), cached.value.clone());
+                    return Ok(MarketplaceCards {
+                        cards: cached.value,
+                        stale: false,
+                    });
+                }
+            }
+        }
         let url = format!(
             "{}/api/marketplace/catalog?kind={}&query={}&limit={}",
-            self.resolve_base(),
+            base,
             self.kind.as_str(),
             urlencode_component(query.trim()),
             limit.max(1),
         );
-        let resp = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("fetching Ryu Marketplace {url}: {e}"))?;
-        if !resp.status().is_success() {
-            bail!("Ryu Marketplace {url} returned status {}", resp.status());
+        let fetched = async {
+            let resp = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("fetching Ryu Marketplace {url}: {e}"))?;
+            if !resp.status().is_success() {
+                bail!("Ryu Marketplace {url} returned status {}", resp.status());
+            }
+            let env: MarketplaceListEnvelope = resp
+                .json()
+                .await
+                .map_err(|e| anyhow::anyhow!("parsing Ryu Marketplace {url}: {e}"))?;
+            Ok::<Vec<MarketplaceCard>, anyhow::Error>(env.items)
         }
-        let env: MarketplaceListEnvelope = resp
-            .json()
-            .await
-            .map_err(|e| anyhow::anyhow!("parsing Ryu Marketplace {url}: {e}"))?;
-        Ok(env.items)
+        .await;
+        match fetched {
+            Ok(cards) => {
+                marketplace_memory_cache_set(cache_key.clone(), cards.clone());
+                if cache_on_disk {
+                    write_marketplace_disk_cache(&cache_key, &cards);
+                }
+                Ok(MarketplaceCards {
+                    cards,
+                    stale: false,
+                })
+            }
+            Err(error) => {
+                if let Some(cached) = marketplace_memory_cache_get(&cache_key, true) {
+                    return Ok(cached);
+                }
+                if cache_on_disk {
+                    if let Some(cached) = read_marketplace_disk_cache(&cache_key) {
+                        return Ok(MarketplaceCards {
+                            cards: cached.value,
+                            stale: true,
+                        });
+                    }
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Fetch one item's detail (manifest + descriptor) for this source's kind.
@@ -2854,6 +3331,10 @@ impl RyuMarketplaceSource {
                     "author": card.author,
                     "version": card.version,
                     "install_source": card.install_source,
+                    "package_kind": card.package_kind,
+                    "github_source": card.github_source,
+                    "download_url": card.download_url,
+                    "package_checksum": card.package_checksum,
                     "installed": false,
                     "icon_url": card.icon_url,
                     "category": card.category,
@@ -2897,10 +3378,28 @@ impl RyuMarketplaceSource {
                     if card.first_party {
                         obj.insert("first_party".to_owned(), serde_json::json!(true));
                     }
-                    // Publisher-identity blue check — see the `org_verified` note on
-                    // `MarketplaceCard` for why this is a different axis from the
-                    // listing-level `reviewed` flag, and why an absent signal is
-                    // omitted instead of being flattened to `false`.
+                    // Publisher identity trust is the canonical badge signal;
+                    // the org fields remain as a compatibility projection for
+                    // older desktop clients.
+                    if let Some(trust) = card
+                        .publisher_trust
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        obj.insert("publisher_trust".to_owned(), serde_json::json!(trust));
+                    }
+                    if let Some(source) = card
+                        .publisher_trust_source
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        obj.insert(
+                            "publisher_trust_source".to_owned(),
+                            serde_json::json!(source),
+                        );
+                    }
                     if let Some(org_verified) = card.org_verified {
                         obj.insert("org_verified".to_owned(), serde_json::json!(org_verified));
                     }
@@ -3154,12 +3653,16 @@ impl CatalogSource for RyuMarketplaceSource {
     async fn search(&self, client: &reqwest::Client, q: &CatalogQuery) -> Result<Value> {
         let limit = if q.limit == 0 { 40 } else { q.limit };
         match self.fetch_cards(client, &q.query, limit).await {
-            Ok(cards) => {
-                let values: Vec<Value> = cards.iter().map(|c| self.card_to_value(c)).collect();
-                Ok(self.wrap_envelope(values, None))
+            Ok(result) => {
+                let values: Vec<Value> =
+                    result.cards.iter().map(|c| self.card_to_value(c)).collect();
+                let note = result
+                    .stale
+                    .then_some("Ryu Marketplace is unavailable; showing cached listings.");
+                Ok(self.wrap_envelope(values, note))
             }
-            // Degrade to an empty, labelled per-kind envelope (server unreachable
-            // in dev, etc.) rather than erroring out the whole list — never panic.
+            // Degrade to an empty, labelled per-kind envelope when there is no
+            // previous browse result (for example, a first launch while offline).
             Err(e) => Ok(self.empty_envelope(&e.to_string())),
         }
     }
@@ -3803,11 +4306,20 @@ pub struct IntegrationBrand {
     pub description: Option<String>,
     pub logo: Option<String>,
     pub categories: Vec<String>,
-    pub sources: Vec<String>, // ["directory"] and/or ["composio"]
+    pub sources: Vec<String>, // ["directory"], ["composio"], and/or ["treg"]
     pub feeds: Vec<String>,   // integration kinds available (mcp/api/graphql/cli)
     /// Every directory record folded into this brand, deduped by record id. The
     /// actionable form of `feeds`.
     pub connections: Vec<IntegrationConnection>,
+    /// One unified preview list. Directory records remain in `connections` for
+    /// compatibility, while every source also projects into this richer option
+    /// shape for action routing and price display.
+    pub options: Vec<IntegrationOption>,
+    /// Native source ids used to lazily enrich a brand's preview. The normalized
+    /// brand id is intentionally not used here: source slugs can contain
+    /// punctuation that the cross-source brand slug removes.
+    pub composio_slug: Option<String>,
+    pub treg_slug: Option<String>,
     pub domain: Option<String>,
     pub popularity: Option<u64>,
 }
@@ -3827,6 +4339,130 @@ pub struct IntegrationConnection {
     pub name: String,
     /// The record's setup/docs/endpoint URL, when the directory carries one.
     pub url: Option<String>,
+}
+
+/// One provider option for a merged brand. An option is deliberately a
+/// descriptor, not an execution credential: the preview can compare sources
+/// without pretending that Ryu owns or can execute a user's provider account.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IntegrationOption {
+    pub id: String,
+    pub source: String, // "directory", "composio", or "treg"
+    pub kind: String,   // source-native kind, e.g. "openapi" or "treg-endpoint"
+    /// The action the preview can take without guessing from a provider name.
+    /// `chat-setup` is the honest fallback for installs that need environment,
+    /// credentials, or provider-specific judgment.
+    pub action: String, // "connect", "mcp", "rest-import", "graphql-import", "chat-setup"
+    /// Directory record id when this option came from integrations.sh.
+    pub connection_id: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
+    pub url: Option<String>,
+    pub provider: Option<String>,
+    /// Provider-native capability used to compare like-for-like priced options.
+    pub capability: Option<String>,
+    pub comparison_key: Option<String>,
+    pub price: Option<IntegrationPrice>,
+    pub is_cheapest: bool,
+    /// Treg can publish a platform-blocked endpoint. Preserve that signal so the
+    /// UI does not present a catalog row as executable when it is not eligible.
+    pub available: Option<bool>,
+    pub availability_note: Option<String>,
+}
+
+fn integration_connection_action(kind: &str) -> &'static str {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "mcp" => "mcp",
+        "api" | "openapi" | "rest" => "rest-import",
+        "graphql" => "graphql-import",
+        // CLI setup varies by machine, package manager, and credentials. It is
+        // intentionally a chat handoff rather than a fake one-click install.
+        _ => "chat-setup",
+    }
+}
+
+fn integration_connection_option(
+    connection: &IntegrationConnection,
+    description: Option<String>,
+) -> IntegrationOption {
+    IntegrationOption {
+        id: format!("directory:{}", connection.id),
+        source: "directory".to_owned(),
+        kind: connection.kind.clone(),
+        action: integration_connection_action(&connection.kind).to_owned(),
+        connection_id: Some(connection.id.clone()),
+        name: connection.name.clone(),
+        description,
+        url: connection.url.clone(),
+        provider: Some("integrations.sh".to_owned()),
+        capability: None,
+        comparison_key: None,
+        price: None,
+        is_cheapest: false,
+        available: Some(true),
+        availability_note: None,
+    }
+}
+
+/// Published provider pricing attached to an integration option. `usd` is the
+/// only field used for cross-provider comparison; the native value/unit remain
+/// available for a truthful display when a source has not published a USD
+/// conversion.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IntegrationPrice {
+    pub usd: Option<f64>,
+    pub currency: Option<String>,
+    pub value: Option<f64>,
+    pub per: Option<f64>,
+    pub unit: Option<String>,
+    pub confidence: Option<String>,
+}
+
+/// Mark the lowest published USD price within each provider-native capability
+/// and billing unit. Unknown prices, blocked endpoints, and unlike units are
+/// excluded; an option is only called cheapest when there are at least two
+/// comparable eligible options.
+pub fn mark_cheapest_options(options: &mut [IntegrationOption]) {
+    let mut groups: std::collections::HashMap<String, Vec<(usize, f64)>> =
+        std::collections::HashMap::new();
+    for (index, option) in options.iter_mut().enumerate() {
+        option.is_cheapest = false;
+        let Some(price) = option.price.as_ref() else {
+            continue;
+        };
+        let Some(usd) = price.usd.filter(|value| value.is_finite() && *value >= 0.0) else {
+            continue;
+        };
+        if option.available == Some(false) {
+            continue;
+        }
+        let Some(comparison_key) = option.comparison_key.as_deref() else {
+            continue;
+        };
+        let unit = price.unit.as_deref().unwrap_or("unit");
+        groups
+            .entry(format!("{comparison_key}\u{1f}{unit}"))
+            .or_default()
+            .push((index, usd));
+    }
+
+    for entries in groups.into_values() {
+        if entries.len() < 2 {
+            continue;
+        }
+        let Some(minimum) = entries
+            .iter()
+            .map(|(_, price)| *price)
+            .min_by(f64::total_cmp)
+        else {
+            continue;
+        };
+        for (index, price) in entries {
+            if (price - minimum).abs() <= f64::EPSILON.max(minimum.abs() * 1e-9) {
+                options[index].is_cheapest = true;
+            }
+        }
+    }
 }
 
 /// Normalize a display name / id into a stable brand slug for dedup+matching.
@@ -3866,6 +4502,7 @@ pub async fn integrations_sh_brands() -> Vec<IntegrationBrand> {
             name: record.name.clone(),
             url: record.url.clone(),
         };
+        let option = integration_connection_option(&connection, record.description.clone());
         match by_slug.get_mut(&slug) {
             Some(brand) => {
                 for cat in &record.categories {
@@ -3880,6 +4517,13 @@ pub async fn integrations_sh_brands() -> Vec<IntegrationBrand> {
                 }
                 if !brand.connections.iter().any(|c| c.id == connection.id) {
                     brand.connections.push(connection);
+                }
+                if !brand
+                    .options
+                    .iter()
+                    .any(|candidate| candidate.id == option.id)
+                {
+                    brand.options.push(option);
                 }
                 if brand.description.is_none() {
                     brand.description = record.description.clone();
@@ -3905,6 +4549,9 @@ pub async fn integrations_sh_brands() -> Vec<IntegrationBrand> {
                         sources: vec!["directory".into()],
                         feeds,
                         connections: vec![connection],
+                        options: vec![option],
+                        composio_slug: None,
+                        treg_slug: None,
                         domain: record.domain.clone(),
                         popularity: record.popularity,
                     },
@@ -4503,6 +5150,105 @@ fn envelope_key(kind: CatalogKind) -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cheapest_marks_only_comparable_eligible_options() {
+        let price = |usd: f64| IntegrationPrice {
+            usd: Some(usd),
+            currency: Some("USD".to_owned()),
+            value: Some(usd),
+            per: Some(1.0),
+            unit: Some("call".to_owned()),
+            confidence: Some("verified".to_owned()),
+        };
+        let mut options = vec![
+            IntegrationOption {
+                id: "free".to_owned(),
+                source: "treg".to_owned(),
+                kind: "treg-endpoint".to_owned(),
+                action: "chat-setup".to_owned(),
+                connection_id: None,
+                name: "Free".to_owned(),
+                description: None,
+                url: None,
+                provider: None,
+                capability: Some("profile".to_owned()),
+                comparison_key: Some("profile".to_owned()),
+                price: Some(price(0.0)),
+                is_cheapest: false,
+                available: Some(true),
+                availability_note: None,
+            },
+            IntegrationOption {
+                id: "paid".to_owned(),
+                source: "treg".to_owned(),
+                kind: "treg-endpoint".to_owned(),
+                action: "chat-setup".to_owned(),
+                connection_id: None,
+                name: "Paid".to_owned(),
+                description: None,
+                url: None,
+                provider: None,
+                capability: Some("profile".to_owned()),
+                comparison_key: Some("profile".to_owned()),
+                price: Some(price(0.01)),
+                is_cheapest: false,
+                available: Some(true),
+                availability_note: None,
+            },
+            IntegrationOption {
+                id: "blocked".to_owned(),
+                source: "treg".to_owned(),
+                kind: "treg-endpoint".to_owned(),
+                action: "chat-setup".to_owned(),
+                connection_id: None,
+                name: "Blocked".to_owned(),
+                description: None,
+                url: None,
+                provider: None,
+                capability: Some("profile".to_owned()),
+                comparison_key: Some("profile".to_owned()),
+                price: Some(price(-1.0)),
+                is_cheapest: false,
+                available: Some(false),
+                availability_note: Some("not eligible".to_owned()),
+            },
+        ];
+
+        mark_cheapest_options(&mut options);
+
+        assert!(options[0].is_cheapest);
+        assert!(!options[1].is_cheapest);
+        assert!(!options[2].is_cheapest);
+    }
+
+    #[test]
+    fn directory_options_preserve_each_install_surface() {
+        let cases = [
+            ("mcp", "mcp"),
+            ("openapi", "rest-import"),
+            ("api", "rest-import"),
+            ("rest", "rest-import"),
+            ("graphql", "graphql-import"),
+            ("cli", "chat-setup"),
+        ];
+        for (kind, action) in cases {
+            let connection = IntegrationConnection {
+                id: format!("{kind}/example"),
+                kind: kind.to_owned(),
+                name: format!("Example {kind}"),
+                url: Some("https://example.com/setup".to_owned()),
+            };
+            let option = integration_connection_option(&connection, None);
+            assert_eq!(option.source, "directory");
+            assert_eq!(option.kind, kind);
+            assert_eq!(option.action, action);
+            assert_eq!(
+                option.connection_id.as_deref(),
+                Some(connection.id.as_str())
+            );
+        }
+    }
+
     /// A source that does not publish release trains must REFUSE a named channel,
     /// not quietly serve its ordinary build under that name.
     ///
@@ -5071,6 +5817,50 @@ mod tests {
     }
 
     #[test]
+    fn ryu_marketplace_search_serves_stale_memory_cache_with_note() {
+        let source = RyuMarketplaceSource {
+            id: "ryu-marketplace".to_string(),
+            display_name: "Ryu Marketplace".to_string(),
+            kind: CatalogKind::Plugin,
+            base_url: Some("http://192.0.2.1:3".to_string()),
+        };
+        let key = marketplace_cache_key(&source.resolve_base(), source.kind, "", 40);
+        let cards: Vec<MarketplaceCard> =
+            serde_json::from_str(r#"[{"id":"acme/cached","name":"Cached Plugin"}]"#).unwrap();
+        let cache = RYU_MARKETPLACE_MEMORY_CACHE.get_or_init(Default::default);
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                key,
+                (
+                    std::time::Instant::now()
+                        - RYU_MARKETPLACE_CACHE_TTL
+                        - std::time::Duration::from_secs(1),
+                    cards,
+                ),
+            );
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(100))
+            .timeout(std::time::Duration::from_millis(250))
+            .build()
+            .unwrap();
+        let value = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(source.search(&client, &CatalogQuery::default()))
+            .expect("stale search should still return an envelope");
+
+        assert_eq!(value["items"][0]["id"], "acme/cached");
+        assert_eq!(
+            value["note"].as_str(),
+            Some("Ryu Marketplace is unavailable; showing cached listings.")
+        );
+    }
+
+    #[test]
     fn ryu_marketplace_search_envelope_maps_cards_per_kind() {
         // The happy path: a server `/catalog` body deserializes into cards, each
         // maps via `card_to_value`, and `wrap_envelope` emits the per-kind key the
@@ -5110,8 +5900,10 @@ mod tests {
         // positive "this publisher is not verified" claim about an honest listing.
         const BODY: &str = r#"{ "kind": "plugin", "items": [
             { "id": "acme/verified", "name": "Verified", "orgVerified": true,
-              "orgVerifiedTier": "partner" },
-            { "id": "acme/unverified", "name": "Unverified", "orgVerified": false },
+              "orgVerifiedTier": "partner", "publisherTrust": "blue",
+              "publisherTrustSource": "stripe_connect" },
+            { "id": "acme/unverified", "name": "Unverified", "orgVerified": false,
+              "publisherTrust": "dotted", "publisherTrustSource": "none" },
             { "id": "acme/silent", "name": "Silent" },
             { "id": "acme/blank-tier", "name": "Blank Tier", "orgVerified": true,
               "orgVerifiedTier": "  " }
@@ -5124,6 +5916,8 @@ mod tests {
         // Verified publisher: both keys land, renamed.
         assert_eq!(cards[0]["org_verified"], true);
         assert_eq!(cards[0]["org_verified_tier"], "partner");
+        assert_eq!(cards[0]["publisher_trust"], "blue");
+        assert_eq!(cards[0]["publisher_trust_source"], "stripe_connect");
         // The camelCase spellings must NOT leak onto the snake_case card.
         assert!(cards[0].get("orgVerified").is_none());
         assert!(cards[0].get("orgVerifiedTier").is_none());
@@ -5132,6 +5926,8 @@ mod tests {
         // server did not send stays absent rather than becoming `null`.
         assert_eq!(cards[1]["org_verified"], false);
         assert!(cards[1].get("org_verified_tier").is_none());
+        assert_eq!(cards[1]["publisher_trust"], "dotted");
+        assert_eq!(cards[1]["publisher_trust_source"], "none");
 
         // Absent ⇒ absent. Not `false`, not `null`.
         assert!(

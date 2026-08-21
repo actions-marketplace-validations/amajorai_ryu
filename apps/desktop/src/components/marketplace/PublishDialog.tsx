@@ -1,19 +1,9 @@
 // apps/desktop/src/components/marketplace/PublishDialog.tsx
 //
-// Universal "Publish" dialog (Phase 5a): a Notion-style flow to publish your own
-// Runnable (today: an agent) to the Ryu Marketplace from inside the desktop app.
-// It collects the App-Store-style listing metadata (display name, kebab slug,
-// tagline, description, category, example prompts, optional icon/screenshot URLs)
-// and submits via the packaged publish body → POST /api/marketplace/publish,
-// landing the item in the moderator's "pending review" queue.
-//
-// The dialog is deliberately kind-agnostic: it owns the listing FORM and hands a
-// finished `PublishListing` to the injected `buildBody` callback, so the exact
-// packaging (agent card vs. a future workflow) lives with the caller. That keeps
-// this reusable when workflow publishing lands.
-//
-// Publishing requires sign-in (the server runs requireAuth); the dialog gates on
-// `hasMarketplaceAuth()` and surfaces the "auth" MarketplaceError.
+// Seller-side GitHub bridge. A listing is created from the seller's own
+// repository/package URL; the control plane validates ryu.package.json and the
+// immutable .ryupack release, then stores only the GitHub binding and offer.
+// Buyers never see or need a GitHub credential.
 
 import { Rocket01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -28,162 +18,244 @@ import {
 } from "@ryu/ui/components/dialog.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
 import { Label } from "@ryu/ui/components/label.tsx";
-import { Spinner } from "@ryu/ui/components/spinner.tsx";
-import { Textarea } from "@ryu/ui/components/textarea.tsx";
-import { type ReactNode, useCallback, useMemo, useState } from "react";
 import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@ryu/ui/components/select.tsx";
+import { type ReactNode, useCallback, useState } from "react";
+import { openExternal } from "@/lib/tauri-bridge.ts";
+import {
+	completeGithubInstallation,
+	type GithubPublishPricing,
 	hasMarketplaceAuth,
 	MarketplaceError,
-	type PublishRequest,
-	type PublishResult,
-	publishRunnable,
+	publishGithubPackage,
 } from "@/src/lib/api/marketplace.ts";
-import type { PublishListing } from "@/src/lib/publish/packaging.ts";
-import { toKebab } from "@/src/lib/publish/packaging.ts";
 
-/** Split a textarea value into trimmed, non-empty lines (one entry per line). */
-function linesOf(value: string): string[] {
-	return value
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0);
+type OfferModel = "free" | GithubPublishPricing["model"];
+
+function buildOfferPricing(input: {
+	amount: string;
+	currency: string;
+	maxUpdates: string;
+	model: OfferModel;
+	interval: "month" | "year";
+}): GithubPublishPricing | undefined {
+	if (input.model === "free") {
+		return undefined;
+	}
+	const amount = Number(input.amount);
+	const amountMinor = Math.round(amount * 100);
+	if (!Number.isFinite(amount) || amountMinor <= 0) {
+		throw new Error("Enter a positive price in your selected currency.");
+	}
+	const currency = input.currency.trim().toLowerCase();
+	if (!/^[a-z]{3}$/.test(currency)) {
+		throw new Error("Currency must be a three-letter ISO code, such as USD.");
+	}
+	const pricing: GithubPublishPricing = {
+		amountMinor,
+		currency,
+		distribution: "github_release",
+		model: input.model,
+	};
+	if (input.model === "subscription") {
+		pricing.interval = input.interval;
+	}
+	if (input.model === "bounded_updates") {
+		const maxUpdates = Number.parseInt(input.maxUpdates, 10);
+		if (
+			!Number.isInteger(maxUpdates) ||
+			maxUpdates < 1 ||
+			maxUpdates > 10_000
+		) {
+			throw new Error("Included updates must be an integer from 1 to 10,000.");
+		}
+		pricing.maxUpdates = maxUpdates;
+	}
+	return pricing;
+}
+
+interface GithubInstallPrompt {
+	installationUrl: string;
+	repository: string;
+	state: string;
 }
 
 export interface PublishDialogProps {
-	/** Why this Runnable cannot be published at all (missing instructions, …).
-	 *  Set ⇒ submit is disabled and the reason renders in place of the error.
-	 *  Owned by the caller because only it knows the Runnable's own rules. */
+	/** Why publishing is unavailable for the current editor context. */
 	blockedReason?: string | null;
-	/** Package the collected listing into the wire body. Owned by the caller so
-	 *  the dialog stays kind-agnostic. */
-	buildBody: (listing: PublishListing) => PublishRequest;
-	/** Default long description (from the Runnable), or empty. */
-	defaultDescription?: string;
-	/** Default display name (from the Runnable). */
-	defaultDisplayName: string;
-	/** The "here is exactly what leaves your machine" panel, rendered above the
-	 *  form. Built by the caller from the payload it is about to send — this
-	 *  dialog cannot know what a given kind shares. */
+	/** Retained for callers that still build a local preview; GitHub is now the
+	 * source of truth and this disclosure is shown only as optional context. */
 	disclosure?: ReactNode;
-	/** Human label for the thing being published, e.g. "agent". Used in copy. */
+	/** Human label for the package being published. */
 	kindLabel: string;
 	onOpenChange: (open: boolean) => void;
 	open: boolean;
 }
 
+function githubInstallPrompt(
+	error: MarketplaceError
+): GithubInstallPrompt | null {
+	if (error.kind !== "github") {
+		return null;
+	}
+	const installationUrl = error.details.installationUrl;
+	const repository = error.details.repository;
+	const state = error.details.installationState;
+	return typeof installationUrl === "string" &&
+		typeof repository === "string" &&
+		typeof state === "string"
+		? { installationUrl, repository, state }
+		: null;
+}
+
 export function PublishDialog({
-	kindLabel,
-	defaultDisplayName,
-	defaultDescription = "",
-	buildBody,
 	blockedReason = null,
 	disclosure,
+	kindLabel,
 	open,
 	onOpenChange,
 }: PublishDialogProps) {
-	const [displayName, setDisplayName] = useState(defaultDisplayName);
-	const [slug, setSlug] = useState(toKebab(defaultDisplayName));
-	const [slugEdited, setSlugEdited] = useState(false);
-	const [tagline, setTagline] = useState("");
-	const [description, setDescription] = useState(defaultDescription);
-	const [category, setCategory] = useState("");
-	const [examplePromptsText, setExamplePromptsText] = useState("");
-	const [iconUrl, setIconUrl] = useState("");
-	const [screenshotsText, setScreenshotsText] = useState("");
-
+	const [repositoryUrl, setRepositoryUrl] = useState("");
 	const [submitting, setSubmitting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	const [result, setResult] = useState<PublishResult | null>(null);
-
+	const [offerModel, setOfferModel] = useState<OfferModel>("free");
+	const [offerAmount, setOfferAmount] = useState("");
+	const [offerCurrency, setOfferCurrency] = useState("USD");
+	const [offerInterval, setOfferInterval] = useState<"month" | "year">("month");
+	const [offerMaxUpdates, setOfferMaxUpdates] = useState("3");
+	const [installPrompt, setInstallPrompt] =
+		useState<GithubInstallPrompt | null>(null);
+	const [published, setPublished] = useState<{
+		id: string;
+		kind: string;
+		version: string;
+	} | null>(null);
 	const signedIn = hasMarketplaceAuth();
 
-	// The slug tracks the display name until the user overrides it, so the id
-	// (`<namespace>.<slug>`) stays predictable without extra typing.
-	const onDisplayNameChange = useCallback(
-		(value: string) => {
-			setDisplayName(value);
-			if (!slugEdited) {
-				setSlug(toKebab(value));
+	const handlePublish = useCallback(
+		async (installationProof?: string) => {
+			if (!signedIn) {
+				setError("Sign in to publish to the marketplace.");
+				return;
+			}
+			if (blockedReason) {
+				setError(blockedReason);
+				return;
+			}
+			const url = repositoryUrl.trim();
+			if (!url) {
+				setError("Paste a GitHub repository or package URL.");
+				return;
+			}
+			setSubmitting(true);
+			setError(null);
+			try {
+				const pricing = buildOfferPricing({
+					amount: offerAmount,
+					currency: offerCurrency,
+					interval: offerInterval,
+					maxUpdates: offerMaxUpdates,
+					model: offerModel,
+				});
+				const result = await publishGithubPackage({
+					installationProof,
+					pricing,
+					url,
+				});
+				setInstallPrompt(null);
+				setPublished({
+					id: result.id,
+					kind: result.kind,
+					version: result.version,
+				});
+			} catch (cause) {
+				if (cause instanceof MarketplaceError) {
+					const prompt = githubInstallPrompt(cause);
+					if (prompt) {
+						setInstallPrompt(prompt);
+						setError(
+							"GitHub needs one-time repository access. Install the Ryu App, then check again."
+						);
+						return;
+					}
+					setError(cause.message);
+					return;
+				}
+				setError(cause instanceof Error ? cause.message : "Failed to publish.");
+			} finally {
+				setSubmitting(false);
 			}
 		},
-		[slugEdited]
+		[
+			blockedReason,
+			offerAmount,
+			offerCurrency,
+			offerInterval,
+			offerMaxUpdates,
+			offerModel,
+			repositoryUrl,
+			signedIn,
+		]
 	);
 
-	const effectiveSlug = useMemo(() => toKebab(slug), [slug]);
+	const openGithubInstall = useCallback(async () => {
+		if (!installPrompt) {
+			return;
+		}
+		try {
+			await openExternal(installPrompt.installationUrl);
+			setError("Finish the GitHub App installation, then choose Check again.");
+		} catch {
+			setError(
+				"Could not open GitHub. Copy the installation link and open it in a browser."
+			);
+		}
+	}, [installPrompt]);
 
-	const handleSubmit = useCallback(async () => {
-		if (!signedIn) {
-			setError("Sign in to publish to the marketplace.");
-			return;
-		}
-		if (blockedReason) {
-			setError(blockedReason);
-			return;
-		}
-		if (!displayName.trim()) {
-			setError("A display name is required.");
-			return;
-		}
-		if (!effectiveSlug) {
-			setError("A URL name is required (letters, numbers, and dashes).");
+	const checkGithubInstall = useCallback(async () => {
+		if (!installPrompt) {
 			return;
 		}
 		setSubmitting(true);
 		setError(null);
 		try {
-			const listing: PublishListing = {
-				displayName: displayName.trim(),
-				slug: effectiveSlug,
-				tagline,
-				description,
-				category,
-				examplePrompts: linesOf(examplePromptsText),
-				iconUrl,
-				screenshots: linesOf(screenshotsText),
-			};
-			const body = buildBody(listing);
-			const res = await publishRunnable(body);
-			setResult(res);
-		} catch (e) {
-			if (e instanceof MarketplaceError && e.kind === "auth") {
-				setError("Sign in to publish to the marketplace.");
-			} else {
-				setError(e instanceof Error ? e.message : "Failed to publish.");
-			}
+			const result = await completeGithubInstallation({
+				repository: installPrompt.repository,
+				state: installPrompt.state,
+			});
+			await handlePublish(result.installationProof);
+		} catch (cause) {
+			setError(
+				cause instanceof Error
+					? cause.message
+					: "GitHub installation is not ready yet."
+			);
 		} finally {
 			setSubmitting(false);
 		}
-	}, [
-		signedIn,
-		blockedReason,
-		displayName,
-		effectiveSlug,
-		tagline,
-		description,
-		category,
-		examplePromptsText,
-		iconUrl,
-		screenshotsText,
-		buildBody,
-	]);
+	}, [handlePublish, installPrompt]);
 
-	// Reset the transient submit state whenever the dialog closes — by the Cancel
-	// button, Esc, the X, or a backdrop click — so re-opening always starts on a
-	// fresh form instead of a stale "Submitted for review" screen. The filled-in
-	// listing fields are intentionally kept so an accidental close isn't
-	// destructive.
 	const handleOpenChange = useCallback(
 		(next: boolean) => {
 			if (!next) {
-				setResult(null);
 				setError(null);
+				setInstallPrompt(null);
+				setPublished(null);
+				setOfferModel("free");
+				setOfferAmount("");
+				setOfferCurrency("USD");
+				setOfferInterval("month");
+				setOfferMaxUpdates("3");
 			}
 			onOpenChange(next);
 		},
 		[onOpenChange]
 	);
-
-	const close = useCallback(() => handleOpenChange(false), [handleOpenChange]);
 
 	return (
 		<Dialog onOpenChange={handleOpenChange} open={open}>
@@ -191,27 +263,27 @@ export function PublishDialog({
 				<DialogHeader>
 					<DialogTitle className="flex items-center gap-2">
 						<HugeiconsIcon className="size-4" icon={Rocket01Icon} />
-						Publish {kindLabel}
+						Publish {kindLabel} from GitHub
 					</DialogTitle>
 					<DialogDescription>
-						Share this {kindLabel} on the Ryu Marketplace. Only the portable
-						card is published — no API keys, credentials, identities, or local
-						paths are ever included.
+						Paste the repository or package URL. Ryu validates the package
+						manifest and immutable release, while GitHub remains the source of
+						truth.
 					</DialogDescription>
 				</DialogHeader>
 
-				{result ? (
+				{published ? (
 					<div className="flex flex-col gap-3 py-2">
 						<div className="rounded-2xl bg-secondary/60 p-4 text-sm">
 							<p className="font-medium">Submitted for review</p>
 							<p className="mt-1 text-muted-foreground">
-								<span className="font-mono">{result.id}</span> is now pending
-								moderation. It goes live on the marketplace once a moderator
-								approves it.
+								<span className="font-mono">{published.id}</span> (
+								{published.kind} {published.version}) is pending moderation.
+								Future releases stay in the linked GitHub repository.
 							</p>
 						</div>
 						<DialogFooter>
-							<Button onClick={close}>Done</Button>
+							<Button onClick={() => handleOpenChange(false)}>Done</Button>
 						</DialogFooter>
 					</div>
 				) : (
@@ -222,124 +294,196 @@ export function PublishDialog({
 							</p>
 						)}
 
-						{disclosure}
-
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="publish-name">Display name</Label>
-							<Input
-								id="publish-name"
-								onChange={(e) => onDisplayNameChange(e.target.value)}
-								placeholder="Research Assistant"
-								value={displayName}
-							/>
+						<div className="rounded-xl bg-secondary/50 p-3 text-muted-foreground text-sm">
+							The repository must use the <code>ryu-app</code>,{" "}
+							<code>ryu-plugin</code>, or <code>ryu-marketplace</code> topic and
+							contain a <code>ryu.package.json</code>. Buyers install through
+							Ryu; they do not need GitHub access.
 						</div>
 
+						{disclosure ? (
+							<div className="rounded-xl border p-3 text-sm">{disclosure}</div>
+						) : null}
+
 						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="publish-slug">URL name</Label>
+							<Label htmlFor="publish-github-url">
+								GitHub repository or package URL
+							</Label>
 							<Input
-								id="publish-slug"
-								onChange={(e) => {
-									setSlug(e.target.value);
-									setSlugEdited(true);
-								}}
-								placeholder="research-assistant"
-								value={slug}
+								autoComplete="url"
+								id="publish-github-url"
+								onChange={(event) => setRepositoryUrl(event.target.value)}
+								placeholder="https://github.com/acme/my-app"
+								value={repositoryUrl}
 							/>
 							<p className="text-muted-foreground text-xs">
-								Lowercase letters, numbers, and dashes. Used in the listing's
-								unique id.
+								For a collection repository, paste the package folder URL or the
+								repository root to scan all package folders.
 							</p>
 						</div>
 
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="publish-tagline">Tagline</Label>
-							<Input
-								id="publish-tagline"
-								onChange={(e) => setTagline(e.target.value)}
-								placeholder="A one-line pitch shown under the name"
-								value={tagline}
-							/>
+						<div className="flex flex-col gap-3 rounded-xl border p-3">
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="publish-offer-model">Offer</Label>
+								<Select
+									items={[
+										{ label: "Free", value: "free" },
+										{ label: "One-time purchase", value: "one_time" },
+										{ label: "Subscription", value: "subscription" },
+										{ label: "Bounded updates", value: "bounded_updates" },
+									]}
+									onValueChange={(value) => {
+										if (value) {
+											setOfferModel(value as OfferModel);
+										}
+									}}
+									value={offerModel}
+								>
+									<SelectTrigger id="publish-offer-model">
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem value="free">Free</SelectItem>
+										<SelectItem value="one_time">One-time purchase</SelectItem>
+										<SelectItem value="subscription">Subscription</SelectItem>
+										<SelectItem value="bounded_updates">
+											Bounded updates
+										</SelectItem>
+									</SelectContent>
+								</Select>
+							</div>
+
+							{offerModel === "free" ? (
+								<p className="text-muted-foreground text-xs">
+									Free packages need no seller payout setup.
+								</p>
+							) : (
+								<>
+									<div className="grid grid-cols-[1fr_7rem] gap-2">
+										<div className="flex flex-col gap-1.5">
+											<Label htmlFor="publish-offer-amount">Price</Label>
+											<Input
+												id="publish-offer-amount"
+												inputMode="decimal"
+												min="0.01"
+												onChange={(event) => setOfferAmount(event.target.value)}
+												placeholder="12.00"
+												step="0.01"
+												type="number"
+												value={offerAmount}
+											/>
+										</div>
+										<div className="flex flex-col gap-1.5">
+											<Label htmlFor="publish-offer-currency">Currency</Label>
+											<Input
+												id="publish-offer-currency"
+												maxLength={3}
+												onChange={(event) =>
+													setOfferCurrency(event.target.value.toUpperCase())
+												}
+												placeholder="USD"
+												value={offerCurrency}
+											/>
+										</div>
+									</div>
+
+									{offerModel === "subscription" ? (
+										<div className="flex flex-col gap-1.5">
+											<Label htmlFor="publish-offer-interval">
+												Billing interval
+											</Label>
+											<Select
+												items={[
+													{ label: "Monthly", value: "month" },
+													{ label: "Yearly", value: "year" },
+												]}
+												onValueChange={(value) => {
+													if (value === "month" || value === "year") {
+														setOfferInterval(value);
+													}
+												}}
+												value={offerInterval}
+											>
+												<SelectTrigger id="publish-offer-interval">
+													<SelectValue />
+												</SelectTrigger>
+												<SelectContent>
+													<SelectItem value="month">Monthly</SelectItem>
+													<SelectItem value="year">Yearly</SelectItem>
+												</SelectContent>
+											</Select>
+										</div>
+									) : null}
+
+									{offerModel === "bounded_updates" ? (
+										<div className="flex flex-col gap-1.5">
+											<Label htmlFor="publish-offer-updates">
+												Included updates
+											</Label>
+											<Input
+												id="publish-offer-updates"
+												max="10000"
+												min="1"
+												onChange={(event) =>
+													setOfferMaxUpdates(event.target.value)
+												}
+												step="1"
+												type="number"
+												value={offerMaxUpdates}
+											/>
+											<p className="text-muted-foreground text-xs">
+												One-time charge; each update is authorized separately.
+											</p>
+										</div>
+									) : null}
+									<p className="text-muted-foreground text-xs">
+										Paid offers require completed Stripe Connect seller payouts.
+										Ryu keeps the offer and entitlement; Stripe handles checkout
+										and payouts.
+									</p>
+								</>
+							)}
 						</div>
 
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="publish-description">Description</Label>
-							<Textarea
-								className="min-h-24"
-								id="publish-description"
-								onChange={(e) => setDescription(e.target.value)}
-								placeholder="What does it do, and when should someone use it?"
-								value={description}
-							/>
-						</div>
-
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="publish-category">Category</Label>
-							<Input
-								id="publish-category"
-								onChange={(e) => setCategory(e.target.value)}
-								placeholder="Productivity"
-								value={category}
-							/>
-						</div>
-
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="publish-prompts">Example prompts</Label>
-							<Textarea
-								className="min-h-20"
-								id="publish-prompts"
-								onChange={(e) => setExamplePromptsText(e.target.value)}
-								placeholder={
-									"One per line, e.g.\nSummarize this PDF\nDraft a reply"
-								}
-								value={examplePromptsText}
-							/>
-							<p className="text-muted-foreground text-xs">
-								Optional. One prompt per line.
-							</p>
-						</div>
-
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="publish-icon">Icon URL</Label>
-							<Input
-								id="publish-icon"
-								onChange={(e) => setIconUrl(e.target.value)}
-								placeholder="https://…/icon.png"
-								value={iconUrl}
-							/>
-							<p className="text-muted-foreground text-xs">
-								Optional. Must be an https link.
-							</p>
-						</div>
-
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="publish-screenshots">Screenshot URLs</Label>
-							<Textarea
-								className="min-h-16"
-								id="publish-screenshots"
-								onChange={(e) => setScreenshotsText(e.target.value)}
-								placeholder={"Optional. One https link per line."}
-								value={screenshotsText}
-							/>
-						</div>
+						{installPrompt ? (
+							<div className="flex flex-col gap-2 rounded-xl border border-primary/30 bg-primary/5 p-3 text-sm">
+								<p className="font-medium">One-time GitHub access</p>
+								<p className="text-muted-foreground">
+									This private repository needs the Ryu GitHub App. It grants
+									Ryu read-only release access for this seller; no GitHub token
+									is saved in the desktop.
+								</p>
+								<div className="flex flex-wrap gap-2">
+									<Button
+										onClick={() => openGithubInstall()}
+										size="sm"
+										variant="secondary"
+									>
+										Install GitHub access
+									</Button>
+									<Button
+										onClick={() => checkGithubInstall()}
+										size="sm"
+										variant="outline"
+									>
+										Check again
+									</Button>
+								</div>
+							</div>
+						) : null}
 
 						{error ? <p className="text-destructive text-sm">{error}</p> : null}
 
 						<DialogFooter>
-							<Button onClick={close} variant="ghost">
+							<Button onClick={() => handleOpenChange(false)} variant="ghost">
 								Cancel
 							</Button>
 							<Button
-								disabled={submitting || !signedIn || Boolean(blockedReason)}
-								onClick={() => handleSubmit()}
+								disabled={!signedIn || Boolean(blockedReason) || submitting}
+								loading={submitting}
+								onClick={() => handlePublish()}
 							>
-								{submitting ? (
-									<>
-										<Spinner className="size-4" />
-										Publishing…
-									</>
-								) : (
-									"Submit for review"
-								)}
+								{submitting ? "Validating…" : "Submit GitHub package"}
 							</Button>
 						</DialogFooter>
 					</div>

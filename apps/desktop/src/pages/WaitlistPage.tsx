@@ -357,6 +357,7 @@ export default function WaitlistPage({
 					setHandleError(null);
 				}}
 				onCopyReferral={copyReferral}
+				onLifetimeAccess={() => openExternal(`${SHARE_ORIGIN}/pricing#plans`)}
 				onRefresh={loadMe}
 				onReserve={reserveHandle}
 				// Same as the web: "Share your pass" opens the share sheet (preview,
@@ -365,6 +366,7 @@ export default function WaitlistPage({
 				onShare={() => setSharing(true)}
 				onSignOut={handleSignOut}
 				onUnreserve={unreserveHandle}
+				onUpgrade={() => openExternal(`${SHARE_ORIGIN}/pricing`)}
 				position={me?.position ?? null}
 				referralCount={me?.referralCount ?? 0}
 				referralUrl={me?.referralUrl}

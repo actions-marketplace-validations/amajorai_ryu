@@ -520,33 +520,25 @@ export function ServicesView({
 			<div className="flex items-start justify-end px-6 pt-6 pb-2">
 				<div className="mt-1 flex gap-2">
 					<Button
-						disabled={bulkPending != null}
+						disabled={bulkPending != null && bulkPending !== "start"}
+						loading={bulkPending === "start"}
 						onClick={onStartAll}
 						size="sm"
 						variant="ghost"
 					>
-						{bulkPending === "start" ? (
-							<HugeiconsIcon
-								className="mr-1.5 h-3.5 w-3.5 animate-spin"
-								icon={Loading01Icon}
-							/>
-						) : (
+						{bulkPending !== "start" && (
 							<HugeiconsIcon className="mr-1.5 h-3.5 w-3.5" icon={PlayIcon} />
 						)}
 						Start all
 					</Button>
 					<Button
-						disabled={bulkPending != null}
+						disabled={bulkPending != null && bulkPending !== "stop"}
+						loading={bulkPending === "stop"}
 						onClick={onStopAll}
 						size="sm"
 						variant="ghost"
 					>
-						{bulkPending === "stop" ? (
-							<HugeiconsIcon
-								className="mr-1.5 h-3.5 w-3.5 animate-spin"
-								icon={Loading01Icon}
-							/>
-						) : (
+						{bulkPending !== "stop" && (
 							<HugeiconsIcon
 								className="mr-1.5 h-3.5 w-3.5"
 								icon={Square01Icon}
@@ -569,7 +561,7 @@ export function ServicesView({
 					<p className="text-muted-foreground text-sm">{error}</p>
 				</div>
 			) : (
-				<div className="scroll-fade-effect-y flex-1 overflow-y-auto px-2 pb-6">
+				<div className="scroll-fade flex-1 overflow-y-auto px-2 pb-6">
 					<Section title="Runtime">
 						<GatewayRow
 							onStart={onGatewayStart}
@@ -639,17 +631,12 @@ export function ServicesView({
 							{hasMissingDeps ? (
 								<Button
 									className="mt-2"
-									disabled={bulkPending != null}
+									disabled={bulkPending != null && bulkPending !== "deps"}
+									loading={bulkPending === "deps"}
 									onClick={onInstallMissing}
 									size="sm"
 									variant="ghost"
 								>
-									{bulkPending === "deps" ? (
-										<HugeiconsIcon
-											className="mr-1.5 h-3.5 w-3.5 animate-spin"
-											icon={Loading01Icon}
-										/>
-									) : null}
 									Install missing
 								</Button>
 							) : null}

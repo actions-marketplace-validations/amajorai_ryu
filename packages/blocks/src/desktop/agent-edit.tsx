@@ -66,6 +66,7 @@ import {
 	TabsTrigger,
 } from "@ryu/ui/components/tabs";
 import { Textarea } from "@ryu/ui/components/textarea";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -399,7 +400,7 @@ export interface ClaudeGatewayConfigViewProps {
 }
 
 export function ClaudeGatewayConfigView({
-	enabled = false,
+	enabled = true,
 	loaded = true,
 	onToggle,
 }: ClaudeGatewayConfigViewProps) {
@@ -429,7 +430,7 @@ export function ClaudeGatewayConfigView({
 							onCheckedChange={onToggle}
 						/>
 					}
-					description="Off (default): Claude Code talks to Anthropic directly and its traffic is not governed. On: it routes through the local gateway (loopback-only) which applies request-side redaction + audit, then forwards your subscription login upstream. Takes effect the next time Claude Code starts."
+					description="On (default): Claude Code routes subscription egress through the local gateway (loopback-only), which applies request-side redaction + audit before forwarding your login upstream. Turn it off to keep direct egress. Takes effect the next time Claude Code starts."
 					title="Route through Ryu Gateway"
 				/>
 			</SettingsGroup>
@@ -449,7 +450,7 @@ export interface CodexGatewayConfigViewProps {
 }
 
 export function CodexGatewayConfigView({
-	enabled = false,
+	enabled = true,
 	loaded = true,
 	onToggle,
 }: CodexGatewayConfigViewProps) {
@@ -478,7 +479,7 @@ export function CodexGatewayConfigView({
 							onCheckedChange={onToggle}
 						/>
 					}
-					description="Off (default): Codex talks to OpenAI directly on your subscription and that traffic is not governed. On: it routes through the local gateway (loopback-only) which applies request-side redaction + audit, then forwards your subscription login upstream. Takes effect the next time Codex starts."
+					description="On (default): Codex routes subscription egress through the local gateway (loopback-only), which applies request-side redaction + audit before forwarding your login upstream. Turn it off to keep direct egress. Takes effect the next time Codex starts."
 					title="Route through Ryu Gateway"
 				/>
 			</SettingsGroup>
@@ -488,8 +489,8 @@ export function CodexGatewayConfigView({
 
 // ── Generic per-agent gateway routing (BYO OpenAI-compatible agents) ──────────
 // The "point any agent at the Ryu gateway via the OpenAI base-URL swap" toggle.
-// Unlike the Claude/Codex views (subscription passthroughs that are always true),
-// this is honest about scope: it only takes effect for an agent whose client
+// Like the Claude/Codex views, this is Gateway-governed by default, but it is
+// honest about scope: it only takes effect for an agent whose client
 // reads OPENAI_BASE_URL — i.e. an OpenAI-compatible BYO agent.
 
 export interface GatewayRoutingConfigViewProps {
@@ -499,7 +500,7 @@ export interface GatewayRoutingConfigViewProps {
 }
 
 export function GatewayRoutingConfigView({
-	enabled = false,
+	enabled = true,
 	loaded = true,
 	onToggle,
 }: GatewayRoutingConfigViewProps) {
@@ -530,7 +531,7 @@ export function GatewayRoutingConfigView({
 							onCheckedChange={onToggle}
 						/>
 					}
-					description="Off (default): the agent talks to its provider directly and its traffic is not governed. On: Ryu swaps its OpenAI-compatible endpoint to the local gateway (loopback-only). Takes effect the next time the agent starts."
+					description="On (default): the agent's OpenAI-compatible endpoint uses the local gateway (loopback-only), where its traffic is governed. Turn it off to keep direct provider egress. Takes effect the next time the agent starts."
 					title="Route through Ryu Gateway"
 				/>
 			</SettingsGroup>
@@ -555,6 +556,12 @@ export interface PiModelOption {
 	group?: string | null;
 	id: string;
 	name: string;
+}
+
+/** A compact id/label option shared by the editor's injected selectors. */
+export interface SlotOption {
+	id: string;
+	label: string;
 }
 
 export interface RyuPiConfigViewProps {
@@ -746,22 +753,24 @@ function PiModelPicker({
 
 	return (
 		<Popover onOpenChange={setOpen} open={open}>
-			<PopoverTrigger asChild>
-				<Button
-					aria-labelledby={id}
-					className="w-full justify-between font-normal"
-					id={id}
-					type="button"
-					variant="outline"
-				>
-					<span className="truncate">{selectedLabel}</span>
-					<HugeiconsIcon
-						className="shrink-0 opacity-50"
-						icon={ArrowDown01Icon}
-						size={16}
-					/>
-				</Button>
-			</PopoverTrigger>
+			<PopoverTrigger
+				render={
+					<Button
+						aria-labelledby={id}
+						className="w-full justify-between font-normal"
+						id={id}
+						type="button"
+						variant="outline"
+					>
+						<span className="truncate">{selectedLabel}</span>
+						<HugeiconsIcon
+							className="shrink-0 opacity-50"
+							icon={ArrowDown01Icon}
+							size={16}
+						/>
+					</Button>
+				}
+			/>
 			<PopoverContent
 				align="start"
 				className="w-[min(300px,var(--radix-popover-content-available-width))] p-0"
@@ -973,8 +982,12 @@ export function RyuPiConfigView({
 					<p className="text-destructive text-xs">{saveError}</p>
 				) : null}
 				<div className="flex items-center gap-3">
-					<Button disabled={!canSave} onClick={onSave} type="button">
-						{saving ? <Spinner className="size-4" /> : null}
+					<Button
+						disabled={!canSave}
+						loading={saving}
+						onClick={onSave}
+						type="button"
+					>
 						Save Pi config
 					</Button>
 					{saved && !saving ? (
@@ -1139,14 +1152,12 @@ export function AgentByoaView({
 
 						<Button
 							className="self-start"
-							disabled={saving}
+							loading={saving}
 							onClick={onGenerate}
 							size="sm"
 							variant={hasKey ? "outline" : "default"}
 						>
-							{saving ? (
-								<Spinner className="size-3" />
-							) : (
+							{!saving && (
 								<HugeiconsIcon className="size-3" icon={Refresh01Icon} />
 							)}
 							{hasKey ? "Regenerate key" : "Generate gateway key"}
@@ -1373,11 +1384,11 @@ export function AgentEvalsView({
 							/>
 						</div>
 						<Button
-							disabled={running || !model.trim()}
+							disabled={!model.trim()}
+							loading={running}
 							onClick={onRun}
 							size="sm"
 						>
-							{running ? <Spinner /> : null}
 							{running ? "Running…" : "Run evals"}
 						</Button>
 					</div>
@@ -1501,15 +1512,12 @@ export function AgentEvalsView({
 				caption="Recent model calls through the gateway."
 				headerAction={
 					<Button
-						disabled={historyLoading}
+						loading={historyLoading}
 						onClick={onReloadHistory}
 						size="icon-sm"
 						variant="ghost"
 					>
-						<HugeiconsIcon
-							className={`size-3.5 ${historyLoading ? "animate-spin" : ""}`}
-							icon={Refresh01Icon}
-						/>
+						<HugeiconsIcon className="size-3.5" icon={Refresh01Icon} />
 					</Button>
 				}
 				title="Run history"
@@ -1560,7 +1568,7 @@ export function AgentEvalsView({
 												{e.model}
 											</td>
 											<td className="px-2 py-1.5 text-right text-muted-foreground">
-												{e.tokens}
+												{formatCount(e.tokens) ?? "—"}
 											</td>
 											<td className="px-2 py-1.5 text-right text-muted-foreground">
 												{e.latencyLabel}
@@ -1625,6 +1633,12 @@ export interface AgentSettingsFormProps {
 	advancedInference?: ReactNode;
 	/** Optional icon node shown in the identity header (the agent's logo). */
 	agentIcon?: ReactNode;
+	/** Injected compact setup composer that combines instructions and model choice. */
+	agentSetupComposer?: ReactNode;
+	/** Optional role/title badge shown beside the agent name. */
+	agentTitle?: string;
+	/** Injected: the current agent's Gateway token budget editor. */
+	budgetPanel?: ReactNode;
 	byoaPanel?: ReactNode;
 	/** Injected: the per-agent Calendar view, rendered as its own tab. Omit to
 	 *  hide the tab. */
@@ -1698,6 +1712,7 @@ export interface AgentSettingsFormProps {
 	/** Open the Customize store on the Agents tab to install more engines. */
 	onAddMoreAgentProviders?: () => void;
 	onAddRule?: () => void;
+	onAgentTitleChange?: (v: string) => void;
 	onCancel?: () => void;
 	onChatModelChange?: (v: string) => void;
 	/** Clear the currently-shown toolkit's actions from the selection. */
@@ -1760,6 +1775,8 @@ export interface AgentSettingsFormProps {
 
 	// Composio event triggers
 	showComposioTriggers?: boolean;
+	/** Hide the model tab/step for the simplified interface preset. */
+	showModelPanel?: boolean;
 	skills: SkillRow[];
 
 	// Skills
@@ -1862,21 +1879,23 @@ function ProfileStat({ label, value }: { label: string; value: ReactNode }) {
 
 function ProfileHeader({
 	agentIcon,
+	agentTitle,
 	badge,
 	bannerColor,
 	bannerDirection,
 	builtIn,
 	description,
+	isNew,
 	isLocked,
 	modelLabel,
 	name,
+	onAgentTitleChange,
 	onDescriptionChange,
 	onNameChange,
 	saveDisabled,
 	saving,
 	selectedSkills,
 	selectedTools,
-	onCancel,
 	onCreateAndChat,
 	onSave,
 }: {
@@ -1887,13 +1906,15 @@ function ProfileHeader({
 	/** Banner wash direction. Omit to derive one from `name`. */
 	bannerDirection?: GradientDirection;
 	builtIn: boolean;
+	agentTitle: string;
 	description?: string;
+	isNew: boolean;
 	isLocked: boolean;
 	modelLabel: string;
 	name: string;
-	onCancel?: () => void;
 	onCreateAndChat?: () => void;
 	onDescriptionChange?: (v: string) => void;
+	onAgentTitleChange?: (v: string) => void;
 	onNameChange?: (v: string) => void;
 	onSave?: () => void;
 	saveDisabled?: boolean;
@@ -1963,16 +1984,21 @@ function ProfileHeader({
 					<div className="flex shrink-0 items-center gap-2 pb-3">
 						<Button
 							disabled={saveDisabled}
+							loading={saving}
 							onClick={onCreateAndChat}
 							size="sm"
 							variant="ghost"
 						>
 							{saving ? <Spinner className="size-3" /> : null}
-							Chat
+							{isNew ? "Create & chat" : "Chat"}
 						</Button>
-						<Button disabled={saveDisabled} onClick={onSave} size="sm">
-							{saving ? <Spinner className="size-3" /> : null}
-							Save
+						<Button
+							disabled={saveDisabled}
+							loading={saving}
+							onClick={onSave}
+							size="sm"
+						>
+							{isNew ? "Create agent" : "Save"}
 						</Button>
 					</div>
 				</div>
@@ -2005,6 +2031,26 @@ function ProfileHeader({
 						placeholder="Add a short description"
 						value={description ?? ""}
 					/>
+					<div className="flex items-center gap-2">
+						<Label
+							className="shrink-0 text-muted-foreground text-xs"
+							htmlFor="agent-title"
+						>
+							Badge
+						</Label>
+						<Input
+							className="h-8 max-w-xs text-sm"
+							disabled={isLocked}
+							id="agent-title"
+							maxLength={48}
+							onChange={(e) => onAgentTitleChange?.(e.target.value)}
+							placeholder="e.g. CTO"
+							value={agentTitle}
+						/>
+						<span className="text-muted-foreground text-xs">
+							Shown beside the name.
+						</span>
+					</div>
 					<div className="flex flex-wrap items-center gap-x-4 gap-y-2">
 						<ProfileStat label="tools" value={selectedTools.size} />
 						<ProfileStat label="skills" value={selectedSkills.size} />
@@ -2026,15 +2072,18 @@ function ProfileHeader({
 export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	const {
 		name,
+		agentTitle = "",
 		onNameChange,
 		description,
 		onDescriptionChange,
+		onAgentTitleChange,
 		agentIcon,
 		channelsPanel,
 		isBuiltIn,
 		isNew,
 		isLocked,
 		instructionsEditor,
+		agentSetupComposer,
 		promptStudioPanel,
 		rulesPanel,
 		evalsPanel,
@@ -2083,6 +2132,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		identityPanel,
 		chatModel,
 		chatModelPicker,
+		showModelPanel = true,
 		engineOptions,
 		onChatModelChange,
 		chatSlotDisabled,
@@ -2095,6 +2145,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		claudeConfig,
 		codexConfig,
 		gatewayRoutingConfig,
+		budgetPanel,
 		scheduleEnabled,
 		onScheduleEnabledChange,
 		schedulePhrase,
@@ -2168,6 +2219,8 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		schedulePhrase === "weekends";
 	const modelLabel =
 		engineOptions.find((option) => option.id === chatModel)?.label ?? chatModel;
+	const hasMergedSetup = Boolean(agentSetupComposer);
+	const showStandaloneModelPanel = showModelPanel && !hasMergedSetup;
 
 	// ── Panels ───────────────────────────────────────────────────────────────────
 	// Each panel is built once and then placed twice: into the tab strip below
@@ -2263,6 +2316,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			{piConfig}
 			{claudeConfig}
 			{codexConfig}
+			{budgetPanel}
 			{gatewayRoutingConfig}
 			{acpSessionPanel}
 		</>
@@ -2476,14 +2530,13 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 								) : null}
 								<Button
 									className="self-start"
-									disabled={isLocked || subscribing}
+									disabled={isLocked}
+									loading={subscribing}
 									onClick={onSubscribeTrigger}
 									size="sm"
 									variant="outline"
 								>
-									{subscribing ? (
-										<Spinner className="size-3" />
-									) : (
+									{!subscribing && (
 										<HugeiconsIcon className="size-4" icon={Add01Icon} />
 									)}
 									Add trigger
@@ -2518,7 +2571,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			}
 		}
 		for (const skill of skills) {
-			if (!selectedSkills.has(skill.id)) {
+			if (skill.enabled && !selectedSkills.has(skill.id)) {
 				onToggleSkill?.(skill.id);
 			}
 		}
@@ -2541,7 +2594,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			{capabilitiesPanel}
 			{/* 4. Tools + skills — one readable settings surface. */}
 			<SettingsSection
-				caption="Choose the tools and skills this agent can use."
+				caption="New agents start with every available tool and enabled skill. Turn off anything this agent should not use."
 				headerAction={
 					<div className="flex items-center gap-2">
 						<Button
@@ -2623,7 +2676,8 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 							<div>
 								<h3 className="font-medium text-sm">Skills</h3>
 								<p className="text-muted-foreground text-xs">
-									Leave all off to allow every enabled skill.
+									New agents start with every globally enabled skill. Turn off
+									individual skills to narrow this agent.
 								</p>
 							</div>
 							<Badge variant="secondary">{selectedSkills.size} enabled</Badge>
@@ -2910,7 +2964,11 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		<>
 			{/* 7. Instructions — the output: prompt + personality */}
 			<SettingsSection
-				caption="Describe how this agent should behave, what it should avoid, and how it should respond."
+				caption={
+					agentSetupComposer
+						? "Write its instructions and choose its agent and model from one simple composer."
+						: "Describe how this agent should behave, what it should avoid, and how it should respond."
+				}
 				headerAction={
 					isNew ? undefined : (
 						<button
@@ -2926,13 +2984,13 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 						</button>
 					)
 				}
-				title="Instructions"
+				title={agentSetupComposer ? "Instructions & model" : "Instructions"}
 			>
 				{/* `bare`: the editor (injected PlateJS, or the fallback textarea) is a
 				    tall bordered box that fills the card edge to edge, so the card
 				    surface only draws a second edge a few pixels outside the first. */}
 				<SettingsCard bare>
-					{instructionsEditor ?? (
+					{agentSetupComposer ?? instructionsEditor ?? (
 						<Textarea
 							className="min-h-32"
 							disabled={isLocked}
@@ -3118,12 +3176,16 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			id: "behavior",
 			label: "Behavior",
 		},
-		{
-			content: modelPanel,
-			hint: "Which AI runs this agent.",
-			id: "model",
-			label: "Model",
-		},
+		...(showStandaloneModelPanel
+			? [
+					{
+						content: modelPanel,
+						hint: "Which AI runs this agent.",
+						id: "model",
+						label: "Model",
+					},
+				]
+			: []),
 		{
 			content: toolsPanel,
 			hint: "What it is allowed to use, and what it is allowed to read and remember.",
@@ -3169,6 +3231,11 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			label: "Advanced",
 		},
 	];
+	useEffect(() => {
+		if (!showStandaloneModelPanel && activeTab === "model") {
+			setActiveTab("behavior");
+		}
+	}, [activeTab, showStandaloneModelPanel]);
 
 	const activeHint = editorTabs.find((tab) => tab.id === activeTab)?.hint ?? "";
 
@@ -3198,17 +3265,19 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 				    with isNew still true via "Set it up myself". */}
 				{isNew ? (
 					<>
-						<Button disabled={saveDisabled} onClick={onCreateAndChat}>
-							{saving ? <Spinner /> : null}
+						<Button
+							disabled={saveDisabled}
+							loading={saving}
+							onClick={onCreateAndChat}
+						>
 							Create &amp; chat
 						</Button>
 						<Button disabled={saveDisabled} onClick={onSave} variant="ghost">
-							Save
+							Create agent
 						</Button>
 					</>
 				) : (
-					<Button disabled={saveDisabled} onClick={onSave}>
-						{saving ? <Spinner /> : null}
+					<Button disabled={saveDisabled} loading={saving} onClick={onSave}>
 						Save changes
 					</Button>
 				)}
@@ -3245,7 +3314,8 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 					<div className="flex flex-col gap-1">
 						<h1 className="font-semibold text-xl">Create an agent</h1>
 						<p className="text-muted-foreground text-sm">
-							Four steps. Nothing here is permanent.
+							{hasMergedSetup ? "Three" : showModelPanel ? "Four" : "Three"}{" "}
+							steps. Nothing here is permanent.
 						</p>
 					</div>
 				}
@@ -3253,7 +3323,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 				onFinish={() => onCreateAndChat?.()}
 				onSkip={() => setGuided(false)}
 				secondaryFinish={{
-					label: "Create without chatting",
+					label: "Create agent",
 					onClick: () => onSave?.(),
 				}}
 				steps={[
@@ -3267,17 +3337,21 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 						label: "Basics",
 						title: "Name your agent",
 					},
-					{
-						blockedReason:
-							engineOptions.length > 0 && !chatModel
-								? "Pick a model to continue."
-								: null,
-						content: modelPanel,
-						hint: "This is the AI that does the thinking. You can swap it later at any time.",
-						id: "model",
-						label: "Model",
-						title: "Pick the model",
-					},
+					...(showStandaloneModelPanel
+						? [
+								{
+									blockedReason:
+										engineOptions.length > 0 && !chatModel
+											? "Pick a model to continue."
+											: null,
+									content: modelPanel,
+									hint: "This is the AI that does the thinking. You can swap it later at any time.",
+									id: "model",
+									label: "Model",
+									title: "Pick the model",
+								},
+							]
+						: []),
 					{
 						content: behaviorPanel,
 						hint: "Tell it what to do, in your own words. Rules are short lines it must always follow.",
@@ -3359,13 +3433,15 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			<div className="flex min-w-0 flex-col gap-7">
 				<ProfileHeader
 					agentIcon={agentIcon}
+					agentTitle={agentTitle}
 					badge={employeeBadge}
 					builtIn={isBuiltIn}
 					description={description}
 					isLocked={isLocked}
+					isNew={isNew}
 					modelLabel={modelLabel}
 					name={name}
-					onCancel={onCancel}
+					onAgentTitleChange={onAgentTitleChange}
 					onCreateAndChat={onCreateAndChat}
 					onDescriptionChange={onDescriptionChange}
 					onNameChange={onNameChange}
@@ -3456,8 +3532,7 @@ export function AgentPromptStudioView({
 			) : null}
 
 			<div className="flex gap-2">
-				<Button disabled={saveDisabled} onClick={onSave}>
-					{saving ? <Spinner /> : null}
+				<Button disabled={saveDisabled} loading={saving} onClick={onSave}>
 					Save prompt
 				</Button>
 				<Button onClick={onCancel} variant="ghost">

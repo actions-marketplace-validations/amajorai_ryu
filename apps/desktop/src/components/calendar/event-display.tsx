@@ -8,7 +8,7 @@ import {
 	CancelCircleIcon,
 	CheckmarkCircle02Icon,
 	Clock01Icon,
-	WorkflowSquare01Icon,
+	WorkflowCircle06Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
@@ -44,7 +44,7 @@ function targetBadge(event: CalendarEvent) {
 	}
 	return (
 		<Badge className="gap-1" variant="secondary">
-			<HugeiconsIcon className="size-3" icon={WorkflowSquare01Icon} />
+			<HugeiconsIcon className="size-3" icon={WorkflowCircle06Icon} />
 			{event.workflowName ?? "Workflow"}
 		</Badge>
 	);

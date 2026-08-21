@@ -9,6 +9,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { BorderBeam } from "border-beam";
 import { DoorClosed, DoorOpen } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { formatCount } from "../lib/number-format.ts";
 import { cn } from "../lib/utils.ts";
 import { Button } from "./button.tsx";
 import { METAL_EDGE_TILE_RING_PX, MetalEdge } from "./metal-edge.tsx";
@@ -73,6 +74,8 @@ function readCooldownUntil(): number {
  * the share dialog on web) or as the `userNav` slot.
  */
 export interface WaitlistQueueProps {
+	/** Optional web-only tab for redeeming an admin-issued waitlist code. */
+	accessCodeContent?: ReactNode;
 	/**
 	 * Canonical dither seed for the signed-in member (`ditherAvatarSeed`), so the
 	 * pass draws the same placeholder glyph as the account menu. Only a screen
@@ -91,6 +94,8 @@ export interface WaitlistQueueProps {
 	handleError?: string | null;
 	hasApplied?: boolean;
 	joinedAt?: string | null;
+	/** True once the waitlist is large enough to expose its points ranking. */
+	leaderboardEnabled?: boolean;
 	/** False until `/me` resolves; suppresses the facts, not the whole screen. */
 	loaded?: boolean;
 	metalTheme?: "auto" | "dark" | "light";
@@ -99,13 +104,21 @@ export interface WaitlistQueueProps {
 	onBack?: () => void;
 	onChangeHandle: (value: string) => void;
 	onCopyReferral: () => void;
+	/** Opens the Lifetime plan picker supplied by the host app. */
+	onLifetimeAccess?: () => void;
+	/** Opens the waitlist-only leaderboard dialog supplied by the host app. */
+	onOpenLeaderboard?: () => void;
 	/** Re-read the queue. Both apps get the button; both rate-limit it here. */
 	onRefresh?: () => void | Promise<void>;
 	onReserve: () => void;
 	onShare: () => void;
 	onSignOut: () => void;
 	onUnreserve?: () => void;
+	/** Opens the paid plan picker supplied by the host app. */
+	onUpgrade?: () => void;
 	position?: number | null;
+	/** Optional web-only quest surface. The desktop queue keeps this tab absent. */
+	questsContent?: ReactNode;
 	referralCount?: number;
 	referralUrl?: string | null;
 	reserved?: string | null;
@@ -134,9 +147,15 @@ const splitReferralUrl = (url: string): { code: string; origin: string } => {
 };
 
 export function WaitlistQueue({
+	accessCodeContent,
 	avatarSeed,
 	avatarUrl,
 	className,
+	questsContent,
+	leaderboardEnabled = false,
+	onOpenLeaderboard,
+	onUpgrade,
+	onLifetimeAccess,
 	copied = false,
 	error = false,
 	eta,
@@ -338,7 +357,7 @@ export function WaitlistQueue({
 								>
 									<p className="text-muted-foreground text-xs">In line</p>
 									<p className="font-medium text-lg tabular-nums">
-										{totalWaiting?.toLocaleString()}
+										{formatCount(totalWaiting) ?? "—"}
 									</p>
 								</div>
 							</MetalEdge>
@@ -366,6 +385,17 @@ export function WaitlistQueue({
 			id: "access",
 			label: "Early access",
 		},
+		...(accessCodeContent
+			? [
+					{
+						content: (
+							<div className="flex flex-col gap-4">{accessCodeContent}</div>
+						),
+						id: "access-code",
+						label: "Access code",
+					},
+				]
+			: []),
 		{
 			// Gated on `loaded` rather than the whole strip being gated: the sign-out
 			// under "More" has to stay reachable exactly when `/me` is slow or broken.
@@ -467,7 +497,7 @@ export function WaitlistQueue({
 									/>
 									Share your pass
 									<span className="text-primary-foreground/70 tabular-nums">
-										({referralCount.toLocaleString()}{" "}
+										({formatCount(referralCount) ?? "—"}{" "}
 										{referralCount === 1 ? "friend" : "friends"} referred)
 									</span>
 								</Button>
@@ -478,7 +508,75 @@ export function WaitlistQueue({
 					},
 				]
 			: []),
+		...(questsContent
+			? [
+					{
+						content: <div className="flex flex-col gap-4">{questsContent}</div>,
+						id: "quests",
+						label: "Quests",
+					},
+				]
+			: []),
+		...(onUpgrade && onLifetimeAccess
+			? [
+					{
+						content: (
+							<div className="flex flex-col gap-4">
+								<PageHeader
+									subtitle="Choose any paid plan and get access as soon as your payment is confirmed."
+									title="Upgrade now for instant access"
+								/>
+								<div className="flex flex-col gap-4 rounded-2xl border border-primary/20 bg-primary/5 p-5">
+									<div>
+										<p className="font-semibold">Skip the waitlist</p>
+										<p className="mt-1 text-muted-foreground text-sm">
+											Your account leaves the waitlist as soon as payment is
+											confirmed.
+										</p>
+									</div>
+									<div className="flex flex-wrap gap-2">
+										<Button onClick={onUpgrade} size="lg">
+											Upgrade to Pro
+										</Button>
+										<Button
+											onClick={onLifetimeAccess}
+											size="lg"
+											variant="outline"
+										>
+											Get Lifetime Access
+										</Button>
+									</div>
+								</div>
+							</div>
+						),
+						id: "upgrade",
+						label: "Upgrade",
+					},
+				]
+			: []),
+		...(leaderboardEnabled && onOpenLeaderboard
+			? [
+					{
+						content: (
+							<div className="flex flex-col gap-3">
+								<PageHeader
+									subtitle="The top 100 waitlist members by points."
+									title="Leaderboard"
+								/>
+								<p className="text-muted-foreground text-sm">
+									Open the leaderboard to see who is leading the queue.
+								</p>
+							</div>
+						),
+						id: "leaderboard",
+						label: "Leaderboard",
+					},
+				]
+			: []),
 	];
+	const selectedStep = steps.some((step) => step.id === activeStep)
+		? activeStep
+		: "access";
 
 	return (
 		<div
@@ -525,10 +623,16 @@ export function WaitlistQueue({
 					    screen in general. Reading order is therefore steps, then the
 					    heading for the step you are on, then its controls. */}
 					<Tabs
-						onValueChange={(next) => setChosenStep(String(next))}
-						value={activeStep}
+						onValueChange={(next) => {
+							const value = String(next);
+							setChosenStep(value);
+							if (value === "leaderboard") {
+								onOpenLeaderboard?.();
+							}
+						}}
+						value={selectedStep}
 					>
-						<TabsList className="w-full" variant="stepper">
+						<TabsList className="w-full" manageLayout={false} variant="stepper">
 							{steps.map((step) => (
 								<TabsTrigger key={step.id} value={step.id}>
 									{step.label}

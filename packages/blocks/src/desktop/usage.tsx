@@ -15,7 +15,14 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
+	type ChartConfig,
+	ChartContainer,
+	ChartTooltip,
+	ChartTooltipContent,
+} from "@ryu/ui/components/chart";
+import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -23,7 +30,13 @@ import {
 } from "@ryu/ui/components/empty";
 import { Separator } from "@ryu/ui/components/separator";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { formatMicroUsd } from "./credits.tsx";
+import {
+	UsageAnalyticsDashboard,
+	type UsageAnalyticsDashboardProps,
+} from "./usage-analytics-dashboard.tsx";
 
 /** Ledger reason → the words a customer would use. */
 const REASON_LABELS: Record<string, string> = {
@@ -79,6 +92,9 @@ export interface UsageRow {
 }
 
 export interface UsageSummaryData {
+	byModel: UsageBreakdownRow[];
+	byProvider: UsageBreakdownRow[];
+	byReason: UsageBreakdownRow[];
 	creditedMicroUsd: number;
 	durationMs: number;
 	inputTokens: number;
@@ -87,12 +103,162 @@ export interface UsageSummaryData {
 	transactions: number;
 }
 
-function SummaryTile({ label, value }: { label: string; value: string }) {
+export interface UsageBreakdownRow {
+	amountMicroUsd: number;
+	count: number;
+	key: string | null;
+}
+
+function SummaryTile({
+	color,
+	label,
+	value,
+}: {
+	color: string;
+	label: string;
+	value: string;
+}) {
 	return (
-		<div className="flex flex-col gap-1 rounded-lg border p-3">
-			<span className="text-muted-foreground text-xs">{label}</span>
+		<div className="flex flex-col gap-2 rounded-3xl border border-border/60 bg-card/80 p-4 shadow-sm">
+			<span className="flex items-center gap-2 text-muted-foreground text-xs">
+				<span
+					aria-hidden="true"
+					className="size-2 shrink-0 rounded-full"
+					style={{ backgroundColor: color }}
+				/>
+				{label}
+			</span>
 			<span className="font-semibold text-lg tabular-nums">{value}</span>
 		</div>
+	);
+}
+
+type UsageBreakdownKind = "model" | "provider" | "reason";
+
+const BREAKDOWN_TITLES: Record<UsageBreakdownKind, string> = {
+	model: "By model",
+	provider: "By provider",
+	reason: "By type",
+};
+
+const USAGE_CHART_CONFIG = {
+	amount: {
+		color: "var(--chart-1)",
+		label: "Credit spend",
+	},
+} satisfies ChartConfig;
+
+function breakdownLabel(kind: UsageBreakdownKind, key: string | null): string {
+	if (key === null) {
+		return "Unattributed";
+	}
+	return kind === "reason" ? usageReasonLabel(key) : key;
+}
+
+function UsageBreakdownChart({
+	kind,
+	rows,
+}: {
+	kind: UsageBreakdownKind;
+	rows: UsageBreakdownRow[];
+}) {
+	const shown = rows.filter((row) => row.amountMicroUsd > 0).slice(0, 6);
+	const title = BREAKDOWN_TITLES[kind];
+	const total = shown.reduce((sum, row) => sum + row.amountMicroUsd, 0);
+	const chartData = shown.map((row) => ({
+		amount: row.amountMicroUsd,
+		count: row.count,
+		label: breakdownLabel(kind, row.key),
+	}));
+
+	return (
+		<div
+			aria-label={`${title} credit spend chart`}
+			className="flex flex-col gap-4 rounded-3xl border border-border/60 bg-card/80 p-4 shadow-sm"
+			data-testid={`usage-chart-${kind}`}
+			role="group"
+		>
+			<div className="flex items-start justify-between gap-2">
+				<div className="flex flex-col gap-1">
+					<span className="font-medium text-sm">{title}</span>
+					<span className="text-muted-foreground text-xs">Credit spend</span>
+				</div>
+				<span className="font-semibold text-sm tabular-nums">
+					{formatMicroUsd(total)}
+				</span>
+			</div>
+			{shown.length > 0 ? (
+				<ChartContainer
+					aria-label={`${title} credit spend chart`}
+					className="h-[190px] min-h-[190px] w-full"
+					config={USAGE_CHART_CONFIG}
+				>
+					<BarChart
+						accessibilityLayer
+						barCategoryGap="24%"
+						data={chartData}
+						layout="vertical"
+						margin={{ bottom: 4, left: 0, right: 8, top: 4 }}
+					>
+						<CartesianGrid horizontal={false} />
+						<XAxis domain={[0, "dataMax"]} hide type="number" />
+						<YAxis
+							axisLine={false}
+							dataKey="label"
+							tick={{ fontSize: 11 }}
+							tickLine={false}
+							type="category"
+							width={96}
+						/>
+						<ChartTooltip
+							content={
+								<ChartTooltipContent
+									formatter={(value) => formatMicroUsd(Number(value))}
+									indicator="line"
+								/>
+							}
+						/>
+						<Bar
+							dataKey="amount"
+							fill="var(--color-amount)"
+							maxBarSize={24}
+							radius={[0, 4, 4, 0]}
+						/>
+					</BarChart>
+				</ChartContainer>
+			) : (
+				<p className="text-muted-foreground text-xs">
+					No credit spend recorded yet.
+				</p>
+			)}
+		</div>
+	);
+}
+
+function UsageAnalytics({ summary }: { summary: UsageSummaryData }) {
+	return (
+		<section
+			aria-label="Credit usage analytics"
+			className="flex flex-col gap-3"
+		>
+			<div>
+				<h4 className="font-semibold text-sm">Credit usage analytics</h4>
+				<p className="text-muted-foreground text-xs">
+					Where this organization&apos;s credits are being spent.
+				</p>
+			</div>
+			<div className="grid gap-2 md:grid-cols-3">
+				{(
+					[
+						["reason", summary.byReason],
+						["model", summary.byModel],
+						["provider", summary.byProvider],
+					] as const
+				).map(([kind, rows]) => (
+					<UsageBreakdownChart key={kind} kind={kind} rows={rows} />
+				))}
+			</div>
+		</section>
 	);
 }
 
@@ -100,9 +266,9 @@ function UsageRowItem({ row }: { row: UsageRow }) {
 	const tokens =
 		row.inputTokens === null && row.outputTokens === null
 			? null
-			: `${(row.inputTokens ?? 0).toLocaleString()} in · ${(
+			: `${formatNumber(row.inputTokens ?? 0)} in · ${formatNumber(
 					row.outputTokens ?? 0
-				).toLocaleString()} out`;
+				)} out`;
 	// Only the facts this row actually has. An absent model or duration is left
 	// OUT rather than shown as a dash-filled column, because a list row (unlike a
 	// table) has no column to keep aligned and empty slots just add noise.
@@ -134,7 +300,9 @@ function UsageRowItem({ row }: { row: UsageRow }) {
 				    reads correctly in greyscale or to a colour-blind reader. */}
 				<span
 					className={`font-medium text-sm tabular-nums ${
-						row.isCredit ? "text-green-600 dark:text-green-400" : "text-foreground"
+						row.isCredit
+							? "text-green-600 dark:text-green-400"
+							: "text-foreground"
 					}`}
 				>
 					{row.isCredit ? "+" : "−"}
@@ -149,6 +317,7 @@ function UsageRowItem({ row }: { row: UsageRow }) {
 }
 
 export function UsageView({
+	analyticsDashboard,
 	errorMessage,
 	hasMore,
 	loading,
@@ -158,6 +327,7 @@ export function UsageView({
 	rows,
 	summary,
 }: {
+	analyticsDashboard?: UsageAnalyticsDashboardProps;
 	errorMessage?: string | null;
 	hasMore: boolean;
 	loading: boolean;
@@ -168,12 +338,12 @@ export function UsageView({
 	summary: UsageSummaryData | null;
 }) {
 	return (
-		<div className="flex flex-col gap-4">
+		<div className="flex flex-col gap-4" data-testid="credit-usage-view">
 			<div className="flex items-center justify-between gap-2">
 				<div className="flex flex-col">
 					<h3 className="font-semibold text-base">Usage</h3>
 					<p className="text-muted-foreground text-sm">
-						Every credit this organization has spent, and what on.
+						Explore consumption across your profile, organization, or this node.
 					</p>
 				</div>
 				<Button
@@ -195,25 +365,36 @@ export function UsageView({
 				</div>
 			) : null}
 
+			{analyticsDashboard ? (
+				<UsageAnalyticsDashboard {...analyticsDashboard} />
+			) : null}
+
 			{summary ? (
-				<div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-					<SummaryTile
-						label="Spent"
-						value={formatMicroUsd(summary.spentMicroUsd)}
-					/>
-					<SummaryTile
-						label="Credited"
-						value={formatMicroUsd(summary.creditedMicroUsd)}
-					/>
-					<SummaryTile
-						label="Tokens"
-						value={(summary.inputTokens + summary.outputTokens).toLocaleString()}
-					/>
-					<SummaryTile
-						label="Billed time"
-						value={formatDurationMs(summary.durationMs)}
-					/>
-				</div>
+				<>
+					<div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+						<SummaryTile
+							color="oklch(0.76 0.16 76)"
+							label="Spent"
+							value={formatMicroUsd(summary.spentMicroUsd)}
+						/>
+						<SummaryTile
+							color="oklch(0.68 0.16 164)"
+							label="Credited"
+							value={formatMicroUsd(summary.creditedMicroUsd)}
+						/>
+						<SummaryTile
+							color="#0099ff"
+							label="Tokens"
+							value={formatNumber(summary.inputTokens + summary.outputTokens)}
+						/>
+						<SummaryTile
+							color="oklch(0.62 0.19 306)"
+							label="Billed time"
+							value={formatDurationMs(summary.durationMs)}
+						/>
+					</div>
+					<UsageAnalytics summary={summary} />
+				</>
 			) : null}
 
 			{loading && rows.length === 0 ? (
@@ -235,6 +416,11 @@ export function UsageView({
 							was for.
 						</EmptyDescription>
 					</EmptyHeader>
+					<EmptyContent>
+						<Button onClick={onRefresh} size="sm" variant="ghost">
+							Refresh usage
+						</Button>
+					</EmptyContent>
 				</Empty>
 			) : null}
 

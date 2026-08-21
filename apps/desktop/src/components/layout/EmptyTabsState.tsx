@@ -43,9 +43,10 @@ import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useEngineModels } from "@/src/hooks/useEngineModels.ts";
 import { useGettingStarted } from "@/src/hooks/useGettingStarted.ts";
+import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { useNodeDefaultAgentId } from "@/src/hooks/useNodeDefaultAgent.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
-import { AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
+import { AgentAvatar, engineForAgent } from "@/src/lib/agent-logos.tsx";
 import {
 	readLastUsedAgentId,
 	rememberLastUsedAgent,
@@ -267,7 +268,7 @@ function HomeSection({
 			{isDragOver && (
 				<div
 					className={cn(
-						"pointer-events-none absolute inset-x-1 z-10 h-0.5 rounded-full bg-primary",
+						"reorder-drop-indicator pointer-events-none absolute inset-x-1 z-10 h-0.5 bg-primary",
 						dropBelow ? "bottom-0" : "top-0"
 					)}
 				/>
@@ -378,6 +379,7 @@ function LaunchpadComposer() {
 	const { teams } = useTeams();
 	const engineModels = useEngineModels();
 	const activeNode = useActiveNode();
+	const interfaceLevel = useInterfaceLevel();
 
 	// The launchpad is always a BRAND NEW chat, so it runs the same seed chain a
 	// fresh ChatPage does — minus the conversation link, which does not exist yet.
@@ -469,6 +471,7 @@ function LaunchpadComposer() {
 	// so voice-mode turns stay ephemeral and `atConversationStart` derives true.
 	const composer = useComposerSlot(runtime, {
 		target,
+		surface: "new-tab",
 		teams,
 		teamId,
 		onSelectTeam: setTeamId,
@@ -534,7 +537,11 @@ function LaunchpadComposer() {
 					onStop={() => undefined}
 					placeholder="What do you want to do?"
 					status="ready"
-					workspaceBar={<WorkspaceBar target={target} />}
+					workspaceBar={
+						interfaceLevel === "simple" ? undefined : (
+							<WorkspaceBar target={target} />
+						)
+					}
 				/>
 			</div>
 			{composer.voiceModeOverlay}
@@ -619,16 +626,16 @@ export function EmptyTabsState() {
 			[...agents]
 				.sort(
 					(a, b) =>
-						normalizeTimestamp(b.updatedAt ?? b.createdAt) -
-						normalizeTimestamp(a.updatedAt ?? a.createdAt)
+						normalizeTimestamp(b.createdAt) - normalizeTimestamp(a.createdAt)
 				)
 				.slice(0, RECENT_LIMIT)
 				.map((a) => ({
 					id: a.id,
 					leading: (
-						<AgentLogo
+						<AgentAvatar
 							className="size-4 shrink-0 object-contain"
 							engine={engineForAgent(a)}
+							glyph={a.avatarGlyph}
 							size="16px"
 						/>
 					),

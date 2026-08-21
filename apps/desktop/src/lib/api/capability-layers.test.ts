@@ -106,7 +106,7 @@ async function firstProvider(
 describe("canServe", () => {
 	it("accepts a verb-backed provider", () => {
 		expect(
-			canServe(provider({ servesVerbs: true, verbs: ["web__search"] }))
+			canServe(provider({ servesVerbs: true, verbs: ["web.search"] }))
 		).toBe(true);
 	});
 
@@ -151,7 +151,7 @@ describe("fetchCapabilityLayers provider flags", () => {
 	// silently offers a dead pick.
 	it("falls back to the verb array when serves_verbs is absent", async () => {
 		expect(
-			(await firstProvider({ id: "@ryu/exa", verbs: ["web__search"] }))
+			(await firstProvider({ id: "@ryu/exa", verbs: ["web.search"] }))
 				.servesVerbs
 		).toBe(true);
 		expect(

@@ -1,12 +1,12 @@
-import { Button } from "@ryu/ui/components/button";
-import { cn } from "@ryu/ui/lib/utils";
+import { Button } from "@ryu/ui/components/button.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import {
 	IconArrowUp,
-	IconLoader2,
 	IconMicrophone,
+	IconPhoneCall,
+	IconPlayerPlayFilled,
 	IconPlayerStopFilled,
 } from "@tabler/icons-react";
-import { AudioLines } from "lucide-react";
 
 /**
  * Voice controls handed to the trailing button. When present and the composer is
@@ -26,7 +26,7 @@ export interface SendButtonVoice {
 /**
  * Live voice-mode entry handed to the trailing button. When present and the
  * composer is empty, the trailing button *becomes* the realtime voice-mode
- * trigger (opens the full-screen voice overlay) — the ChatGPT-style continuous
+ * trigger (opens the compact voice call surface) — the ChatGPT-style continuous
  * loop, distinct from `voice` (push-to-talk STT dictation, which relocates to
  * its own small toolbar button when this owns the trailing slot).
  */
@@ -85,7 +85,7 @@ export function SendButton({
 	if (voiceMode && !isTyping) {
 		return (
 			<Button
-				aria-label="Start voice mode"
+				aria-label="Start voice call"
 				className={cn(
 					CIRCLE,
 					"bg-primary text-primary-foreground hover:bg-primary/90"
@@ -93,10 +93,10 @@ export function SendButton({
 				disabled={voiceMode.disabled}
 				onClick={voiceMode.onStart}
 				size="icon"
-				title="Voice mode"
+				title="Start voice call"
 				type="button"
 			>
-				<AudioLines className="size-4" />
+				<IconPhoneCall className="size-4" />
 			</Button>
 		);
 	}
@@ -126,13 +126,11 @@ export function SendButton({
 				<Button
 					aria-label="Transcribing"
 					className={cn(CIRCLE, "bg-muted text-muted-foreground")}
-					disabled
+					loading
 					size="icon"
 					title="Transcribing…"
 					type="button"
-				>
-					<IconLoader2 className="size-4 animate-spin" />
-				</Button>
+				/>
 			);
 		}
 		return (
@@ -165,7 +163,11 @@ export function SendButton({
 			size="icon"
 			type="button"
 		>
-			<IconArrowUp className="size-4" />
+			{isTyping ? (
+				<IconArrowUp className="size-4" />
+			) : (
+				<IconPlayerPlayFilled className="size-4" />
+			)}
 		</Button>
 	);
 }

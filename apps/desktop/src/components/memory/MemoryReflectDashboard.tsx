@@ -23,6 +23,7 @@ import {
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import {
 	Activity,
 	ArrowUpRight,
@@ -87,7 +88,7 @@ function StatCard({
 				<div>
 					<p className="text-muted-foreground text-xs">{activity.label}</p>
 					<p className="mt-1 font-semibold text-2xl tracking-tight">
-						{activity.count.toLocaleString()}
+						{formatNumber(activity.count)}
 					</p>
 				</div>
 				<div className="rounded-full bg-primary/10 p-2 text-primary">
@@ -278,7 +279,9 @@ export function MemoryReflectDashboard({ target }: { target: ApiTarget }) {
 													</p>
 												) : null}
 											</div>
-											<Badge variant="secondary">{topic.count}</Badge>
+											<Badge variant="secondary">
+												{formatNumber(topic.count)}
+											</Badge>
 										</div>
 									))
 								) : (

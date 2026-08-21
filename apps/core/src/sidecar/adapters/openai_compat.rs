@@ -67,6 +67,7 @@ impl AgentAdapter for OpenAiCompatAdapter {
             Ok(vec![AgentInfo {
                 id: id.to_owned(),
                 name: name.to_owned(),
+                title: None,
                 description: None,
                 install_hint: None,
                 installed: None,
@@ -83,6 +84,9 @@ impl AgentAdapter for OpenAiCompatAdapter {
                 enabled: None,
                 gateway_bypass: None,
                 avatar_url: None,
+                avatar_glyph: None,
+                lifecycle_status: None,
+                safety_profile: None,
             }])
         })
     }
@@ -92,6 +96,7 @@ impl AgentAdapter for OpenAiCompatAdapter {
             Ok(AgentInfo {
                 id: config.name.clone(),
                 name: config.name,
+                title: None,
                 description: None,
                 install_hint: None,
                 installed: None,
@@ -108,6 +113,9 @@ impl AgentAdapter for OpenAiCompatAdapter {
                 enabled: None,
                 gateway_bypass: None,
                 avatar_url: None,
+                avatar_glyph: None,
+                lifecycle_status: None,
+                safety_profile: None,
             })
         })
     }

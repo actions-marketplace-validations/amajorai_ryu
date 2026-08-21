@@ -1,4 +1,10 @@
 {
+  "tags": ["automation","desktop"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/ghost",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/ghost",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/ghost",
   "name": "Ghost",
   "version": "0.1.14",
@@ -7,7 +13,7 @@
   "category": "Automation",
   "description": "Desktop automation: 29 screen perception and input control tools. Cross-platform (Windows, macOS, Linux).",
   "tagline": "Let agents see and drive your desktop",
-  "icon": "cursor-01",
+  "icon": "cursor-02",
   "iconDither": { "from": 354, "to": "transparent", "direction": "down" },
   "keywords": ["automation", "desktop"],
   "surfaces": {
@@ -40,23 +46,23 @@
       "default": true,
       "target": "local-machine",
       "tools": {
-        "computer__capture": {
-          "tool": "ghost__ghost_annotate"
+        "computer.capture": {
+          "tool": "ghost.ghost_annotate"
         },
-        "computer__click": {
-          "tool": "ghost__ghost_click"
+        "computer.click": {
+          "tool": "ghost.ghost_click"
         },
-        "computer__type": {
-          "tool": "ghost__ghost_type"
+        "computer.type": {
+          "tool": "ghost.ghost_type"
         },
-        "computer__key": {
-          "tool": "ghost__ghost_hotkey"
+        "computer.key": {
+          "tool": "ghost.ghost_hotkey"
         },
-        "computer__scroll": {
-          "tool": "ghost__ghost_scroll"
+        "computer.scroll": {
+          "tool": "ghost.ghost_scroll"
         },
-        "computer__focus_app": {
-          "tool": "ghost__ghost_focus"
+        "computer.focus_app": {
+          "tool": "ghost.ghost_focus"
         }
       }
     }

@@ -9,6 +9,7 @@ import {
 	SidebarProvider,
 } from "@ryu/ui/components/sidebar";
 import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import { useCallback, useState } from "react";
 
 const SIDEBAR_PANEL_ID = "sidebar";
@@ -56,7 +57,9 @@ export default function ResizableSettingsLayout({
 	storageKey,
 	sidebar,
 	content,
+	contentScrollable = true,
 }: {
+	contentScrollable?: boolean;
 	storageKey: string;
 	sidebar: React.ReactNode;
 	content: React.ReactNode;
@@ -88,14 +91,21 @@ export default function ResizableSettingsLayout({
 					<Sidebar className="h-full w-full rounded-xl" collapsible="none">
 						{/* Stacked, the nav starts at the dialog's top edge — which is
 						    also where the close button sits. Start the list below it. */}
-						<SidebarContent className="scroll-fade-effect-y overflow-x-hidden pt-10 pb-2">
+						<SidebarContent className="scroll-fade overflow-x-hidden pt-10 pb-2">
 							{sidebar}
 						</SidebarContent>
 					</Sidebar>
 				</div>
 				<div className="min-h-0 flex-1 overflow-hidden p-2">
 					<div className="relative h-full overflow-hidden rounded-xl bg-background shadow-sm">
-						<div className="scroll-fade-effect-y h-full w-full overflow-y-auto overflow-x-hidden">
+						<div
+							className={cn(
+								"h-full w-full overflow-x-hidden",
+								contentScrollable
+									? "scroll-fade overflow-y-auto"
+									: "overflow-y-hidden"
+							)}
+						>
 							{content}
 						</div>
 					</div>
@@ -120,7 +130,7 @@ export default function ResizableSettingsLayout({
 				>
 					<div className="h-full min-w-0 overflow-hidden p-2 pr-0">
 						<Sidebar className="h-full w-full rounded-xl" collapsible="none">
-							<SidebarContent className="scroll-fade-effect-y overflow-x-hidden pt-2">
+							<SidebarContent className="scroll-fade overflow-x-hidden pt-2">
 								{sidebar}
 							</SidebarContent>
 						</Sidebar>
@@ -137,7 +147,14 @@ export default function ResizableSettingsLayout({
 				>
 					<div className="h-full min-w-0 overflow-hidden p-2 pl-0">
 						<div className="relative h-full min-w-0 overflow-hidden rounded-xl bg-background shadow-sm">
-							<div className="scroll-fade-effect-y h-full w-full overflow-y-auto overflow-x-hidden">
+							<div
+								className={cn(
+									"h-full w-full overflow-x-hidden",
+									contentScrollable
+										? "scroll-fade overflow-y-auto"
+										: "overflow-y-hidden"
+								)}
+							>
 								{content}
 							</div>
 						</div>

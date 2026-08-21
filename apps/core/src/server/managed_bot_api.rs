@@ -100,6 +100,12 @@ pub struct BeginPairingBody {
     /// `mentions` | `all` — when the bot answers inside a group chat.
     #[serde(default)]
     pub group_reply_mode: Option<String>,
+    /// Send Ryu's first plain-language welcome to the explicit approved target
+    /// when the channel starts. This is opt-in and never broadcasts.
+    #[serde(default)]
+    pub proactive_opening: Option<bool>,
+    #[serde(default)]
+    pub proactive_target: Option<String>,
     /// The form's Enabled switch. Absent means "enabled": a caller that says nothing
     /// asked for a working bot, and a disabled config is one the gateway never spawns.
     #[serde(default)]
@@ -117,6 +123,8 @@ impl BeginPairingBody {
             model: trimmed(self.model.clone()),
             system_prompt: trimmed(self.system_prompt.clone()),
             group_reply_mode: trimmed(self.group_reply_mode.clone()),
+            proactive_opening: self.proactive_opening.unwrap_or(false),
+            proactive_target: trimmed(self.proactive_target.clone()),
             enabled: self.enabled.unwrap_or(true),
         }
     }
@@ -591,6 +599,8 @@ mod tests {
             model: Some("sonnet".into()),
             system_prompt: Some("Be brief.".into()),
             group_reply_mode: Some("mentions".into()),
+            proactive_opening: Some(true),
+            proactive_target: Some("chat-123".into()),
             enabled: Some(false),
         };
         let intent = body.intent();
@@ -599,6 +609,8 @@ mod tests {
         assert_eq!(intent.model.as_deref(), Some("sonnet"));
         assert_eq!(intent.system_prompt.as_deref(), Some("Be brief."));
         assert_eq!(intent.group_reply_mode.as_deref(), Some("mentions"));
+        assert!(intent.proactive_opening);
+        assert_eq!(intent.proactive_target.as_deref(), Some("chat-123"));
         assert!(!intent.enabled, "the form's Enabled switch is honoured");
 
         // A caller that says nothing gets a running bot: `create a bot for me` asks

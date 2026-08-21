@@ -12,6 +12,11 @@
 // Apps (plugins) realm
 // ---------------------------------------------------------------------------
 
+import type {
+	PublisherTrustLevel,
+	PublisherTrustSource,
+} from "@ryuhq/protocol/publisher-trust";
+
 /**
  * The `?source=` value that browses every marketplace at once — the store's
  * default view. Mirrors Core's `PLUGIN_ALL_SOURCES_ID`.
@@ -128,12 +133,7 @@ function compareTriples(
 	a: [number, number, number],
 	b: [number, number, number]
 ): number {
-	for (let i = 0; i < 3; i++) {
-		if (a[i] !== b[i]) {
-			return a[i] - b[i];
-		}
-	}
-	return 0;
+	return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
 /** Does `present` satisfy the semver requirement `required`?
@@ -364,6 +364,34 @@ export interface CardThemePreview {
 	text: string;
 }
 
+/** Public, non-executable summary of one swappable capability a listing serves. */
+export interface CatalogLayer {
+	capability: string;
+	selectable?: boolean;
+	target?: string | null;
+	title?: string | null;
+	toolkit?: boolean;
+	verbs?: string[];
+}
+
+/** Human-facing label shared by cards, detail heroes, and the provider picker. */
+export function catalogLayerLabel(layer: CatalogLayer): string {
+	const title = layer.title?.trim() || layer.capability;
+	return `${title} ${layer.toolkit ? "toolkit" : "layer"}`;
+}
+
+/** Compact badges for a catalog card or detail hero. */
+export function catalogLayerBadges(
+	layers: CatalogLayer[] | null | undefined,
+	external = false
+): string[] {
+	const labels = (layers ?? []).map(catalogLayerLabel);
+	if (external) {
+		labels.unshift("External");
+	}
+	return labels;
+}
+
 /** One row of the Versions tab. Sourced from published releases, falling back to
  *  git tags for a repo that tags without cutting releases (`tagOnly`). */
 export interface CatalogVersion {
@@ -517,7 +545,9 @@ export interface CatalogPermissions {
 /** One catalog entry as the Apps section reads it. */
 export interface CatalogEntry {
 	accent_color?: string | null;
+	author?: string | null;
 	banner?: CatalogBanner | null;
+	capabilities?: string[];
 	built_in?: boolean;
 	/** Which MARKETPLACE this row was browsed from, and how to name it in a
 	 *  heading. Stamped by Core only in the all-marketplaces view (`?source=all`),
@@ -538,6 +568,8 @@ export interface CatalogEntry {
 	 *  floors as advisory `unknown`. Re-evaluate with `evaluateCompatibility` and
 	 *  the local version overlaid; that turns an advisory into a real refusal. */
 	compatibility?: CompatibilityVerdict | null;
+	/** True when the listing calls a hosted/external provider rather than a local runtime. */
+	external?: boolean;
 	description: string;
 	descriptor_only?: boolean;
 	developer?: string | null;
@@ -545,6 +577,14 @@ export interface CatalogEntry {
 	 * release. The producer excludes signatures, manifests and text metadata so
 	 * this is a count of distributable payloads rather than release bookkeeping. */
 	downloads?: number | null;
+	/** Canonical portable package kind for GitHub-backed marketplace entries. */
+	package_kind?: string | null;
+	/** Redacted GitHub repository/release provenance. */
+	github_source?: Record<string, unknown> | null;
+	/** Relative Ryu proxy route for the signed release asset. */
+	download_url?: string | null;
+	/** SHA-256 of the immutable package release asset. */
+	package_checksum?: string | null;
 	/** Host version floors this listing declares (the manifest's `engines`), one
 	 *  semver requirement per surface. `ryu` is the CORE floor — the legacy
 	 *  spelling, kept because every manifest in the wild uses it.
@@ -552,6 +592,8 @@ export interface CatalogEntry {
 	 *  Absent = declares no floors. Present on the CARD, not just the detail, so a
 	 *  grid can grey a tile without a detail fetch per tile. */
 	engines?: HostFloors | null;
+	example_prompts?: string[];
+	homepage?: string | null;
 	/** Icon-primitive glyph id (Iconify `prefix:name`, bare Hugeicons name, or URL),
 	 *  masked with the current text colour. Distinct from `icon_url` (a raster logo);
 	 *  wins over it on the card when both are present. */
@@ -574,7 +616,11 @@ export interface CatalogEntry {
 	installed_but_incompatible?: boolean;
 	integration_kind?: string | null;
 	integration_url?: string | null;
+	/** Search-oriented manifest keywords, kept separate from curated tags. */
+	keywords?: string[];
 	kinds: string[];
+	/** Public layer summaries, never executable provider bindings. */
+	layers?: CatalogLayer[];
 	/** SPDX licence id, when the source reports one. */
 	license?: string | null;
 	/** This listing is REQUIRED FOR CORE: never render a Disable or Uninstall
@@ -628,6 +674,11 @@ export interface CatalogEntry {
 	 *  thing as `origin === "community"` — that is a listing-discovery fact, this
 	 *  is an org-identity fact. Never render the bare tier word. */
 	org_verified_tier?: string | null;
+	/** Complete publisher identity mark when the serving catalog knows it.
+	 *  `dotted` is explicit disclosure; absence preserves compatibility with
+	 *  older Core catalog payloads that only carry `org_verified`. */
+	publisher_trust?: PublisherTrustLevel | null;
+	publisher_trust_source?: PublisherTrustSource | null;
 	/** Who listed this and how much vetting it had. `"community"` = discovered
 	 *  automatically from a public GitHub topic and NOT reviewed by Ryu; absent or
 	 *  null = first-party. Deliberately snake_case (it rides on the card, not the
@@ -645,12 +696,15 @@ export interface CatalogEntry {
 		currency?: string;
 		kind?: string;
 	} | null;
+	privacy_policy_url?: string | null;
 	/** Which discovery source produced the listing (e.g. `"github-topic"`). */
 	provenance?: string | null;
 	/** Denormalized rating aggregate (0–5 mean + count) so a card and the detail
 	 *  header can show stars without loading the review list. Absent = unrated. */
 	rating_average?: number | null;
 	rating_count?: number | null;
+	/** Public source/repository URL declared by the listing. */
+	repository_url?: string | null;
 	/** The repository this listing was discovered from (community listings). */
 	repo_url?: string | null;
 	/** Plugin-to-plugin dependencies this app needs enabled first (the manifest's
@@ -691,9 +745,12 @@ export interface CatalogEntry {
 	 *  rather than emitting `[]`. Typed loosely for the same reason `surfaces` is on
 	 *  the detail: a newer manifest may name a surface this build has not heard of,
 	 *  and the card must carry it through rather than drop it. */
+	/** Screenshot gallery declared by the listing manifest. */
+	screenshots?: string[];
 	surfaces?: string[];
 	tagline?: string | null;
 	tags: string[];
+	terms_of_service_url?: string | null;
 	/** A theme listing's own palette (manifest `contributes.themes[0].preview`).
 	 *  The card paints this as its icon square instead of a dither avatar or a
 	 *  generic glyph. Absent on everything that is not a theme. */
@@ -702,6 +759,7 @@ export interface CatalogEntry {
 	 *  legacy `kinds.includes("companion")` derivation when present. */
 	type?: "app" | "plugin";
 	version?: string;
+	website?: string | null;
 }
 
 /** A catalog entry joined with its live lifecycle state (installed/enabled). */
@@ -741,6 +799,7 @@ export interface PluginCatalogDetail {
 	apiSurface?: CatalogApiSurface | null;
 	/** True when the source repository is archived (it will not receive fixes). */
 	archived?: boolean;
+	author?: string | null;
 	banner?: CatalogBanner | null;
 	/** True for a Core-shipped system plugin. */
 	builtIn?: boolean;
@@ -769,6 +828,7 @@ export interface PluginCatalogDetail {
 	 *  the health scan's "reads cleanly" check — surfaced, never swallowed. */
 	enrichmentError?: string | null;
 	examplePrompts?: string[];
+	external?: boolean;
 	feeds?: string[] | null;
 	forks?: number | null;
 	iconBackground?: string | null;
@@ -776,6 +836,7 @@ export interface PluginCatalogDetail {
 	/** False when the upstream issue tracker is turned off. */
 	issuesEnabled?: boolean;
 	keywords?: string[];
+	layers?: CatalogLayer[];
 	license?: string | null;
 	/** The plugin id the discovered repo's own manifest CLAIMS. Surfaced separately
 	 *  from the entry id on purpose, so an id-squatting repo can never masquerade
@@ -800,6 +861,9 @@ export interface PluginCatalogDetail {
 	 *  "community"). Plain string on purpose — an unknown tier renders the badge
 	 *  unqualified rather than dropping it. */
 	orgVerifiedTier?: string | null;
+	/** Complete publisher identity mark when the detail source knows it. */
+	publisherTrust?: PublisherTrustLevel | null;
+	publisherTrustSource?: PublisherTrustSource | null;
 	/** Who listed this. `"community"` = automatic discovery, nobody vetted it. */
 	origin?: string | null;
 	/** Opaque permission-grant ids the plugin asks the Gateway to approve. */
@@ -830,6 +894,7 @@ export interface PluginCatalogDetail {
 	 *  known set (e.g. to exhaustively label them). */
 	surfaces?: string[];
 	tagline?: string | null;
+	tags?: string[];
 	termsOfServiceUrl?: string | null;
 	/** Last upstream activity (a push or a release). */
 	updatedAt?: string | null;

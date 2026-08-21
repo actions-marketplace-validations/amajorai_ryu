@@ -60,18 +60,18 @@ describe("acceleratorPrimaryKeycode", () => {
 // leave `on` real, then drive the hook by emitting synthetic key events. State
 // persists in the module across tests, so afterEach(stopHooks) clears channels.
 
-let startSpy: Mock<() => typeof uIOhook>;
-let stopSpy: Mock<() => typeof uIOhook>;
+let startSpy: Mock<() => void>;
+let stopSpy: Mock<() => void>;
 
 beforeAll(() => {
-	startSpy = spyOn(uIOhook, "start").mockImplementation(() => uIOhook);
-	stopSpy = spyOn(uIOhook, "stop").mockImplementation(() => uIOhook);
+	startSpy = spyOn(uIOhook, "start").mockImplementation(() => undefined);
+	stopSpy = spyOn(uIOhook, "stop").mockImplementation(() => undefined);
 });
 
 beforeEach(() => {
 	startSpy.mockClear();
 	stopSpy.mockClear();
-	startSpy.mockImplementation(() => uIOhook);
+	startSpy.mockImplementation(() => undefined);
 });
 
 afterEach(() => {

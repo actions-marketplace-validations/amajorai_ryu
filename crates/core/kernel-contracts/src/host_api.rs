@@ -52,7 +52,7 @@ use serde::Serialize;
 /// `1.y` (y ≥ x) kernel unchanged. The `ryu-plugin-ready` handshake carries this
 /// value as `hostApiVersion`; the host accepts a missing value (legacy) this
 /// major and only annotates it (no rejection).
-pub const HOST_API_VERSION: &str = "1.3.0";
+pub const HOST_API_VERSION: &str = "1.4.0";
 
 /// One method in the host↔plugin RPC surface — the row type of the single-sourced
 /// `method → capability → grant` table.
@@ -746,6 +746,20 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     ),
     m(
         "webhooks.ingressStatus",
+        "webhooks.crud",
+        Some("webhooks:crud"),
+        false,
+        true,
+    ),
+    m(
+        "webhooks.secretGet",
+        "webhooks.crud",
+        Some("webhooks:crud"),
+        false,
+        true,
+    ),
+    m(
+        "webhooks.secretSet",
         "webhooks.crud",
         Some("webhooks:crud"),
         false,

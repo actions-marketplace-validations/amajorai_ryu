@@ -1,23 +1,31 @@
 import {
 	Add01Icon,
 	ArrowRight01Icon,
-	BotIcon,
+	BrainIcon,
+	Chat01Icon,
 	ComputerIcon,
+	DeliverySecure01Icon,
 	DollarCircleIcon,
 	Download01Icon,
+	FingerPrintIcon,
 	FullScreenIcon,
-	Key01Icon,
+	LayerIcon,
 	Logout01Icon,
 	Moon01Icon,
 	Package01Icon,
-	PuzzleIcon,
+	PlugSocketIcon,
+	PotionIcon,
 	Settings01Icon,
 	Settings02Icon,
 	Sun01Icon,
+	Target01Icon,
+	Tv01Icon,
+	WorkflowCircle06Icon,
+	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
 import { renderTemplate } from "@ryu/app-host/views";
 import { CommandPalette as SharedCommandPalette } from "@ryu/command/CommandPalette";
-import type { CommandAction } from "@ryu/command/types";
+import type { CommandAction, CommandPaletteTab } from "@ryu/command/types";
 import { useHotkey } from "@ryu/hotkeys/react";
 import {
 	AlertDialog,
@@ -32,7 +40,7 @@ import {
 import { toast } from "@ryu/ui/components/sileo";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useTheme } from "next-themes";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuthContext } from "@/contexts/auth-context.tsx";
 import { ImportSetupDialog } from "@/src/components/chat/ImportSetupDialog.tsx";
 import { ImportThreadsDialog } from "@/src/components/chat/ImportThreadsDialog.tsx";
@@ -42,12 +50,9 @@ import { parseContributedTarget } from "@/src/contributions/contributed-target.t
 import { contributionRegistry } from "@/src/contributions/registry.ts";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
-import { useAgents } from "@/src/hooks/useAgents.ts";
+import { useCommandSearchSections } from "@/src/hooks/useCommandSearchSections.ts";
 import { useContributedSectionItems } from "@/src/hooks/useContributedCommands.ts";
-import {
-	pluginCompanionPath,
-	usePluginContributions,
-} from "@/src/hooks/usePluginContributions.ts";
+import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	type MessageSearchHit,
@@ -56,8 +61,13 @@ import {
 import { fireActivationEvent } from "@/src/lib/api/plugins.ts";
 import { indexChunk } from "@/src/lib/api/retrieval.ts";
 import { type ShadowSearchResult, searchShadow } from "@/src/lib/api/shadow.ts";
+import {
+	type SpaceLexicalHit,
+	searchSpaceDocuments,
+} from "@/src/lib/api/spaces.ts";
 import { toggleFullscreen } from "@/src/lib/fullscreen.ts";
 import { listenWhenReady } from "@/src/lib/tauri-ready.ts";
+import { compactAge } from "@/src/lib/time.ts";
 import { SettingsDialog } from "../settings/SettingsDialog.tsx";
 
 /** Safely read a string field off an opaque plugin-contribution record. */
@@ -91,7 +101,7 @@ type SettingsSection =
  * Calendar / Timeline / Monitors / Tasks / Meetings / Learning used to sit here.
  * Each is an apps-store app (`com.ryu.{calendar,timeline,monitors,quests,
  * meetings,learning}`) that declares a `companion`, so it was already being
- * listed by the companion loop below — the hardcoded row was a second, dumber
+ * listed by the data-driven sidebar-section index — the hardcoded row was a second, dumber
  * copy that rendered whether or not the app was installed (all six are
  * default-OFF) and pointed at a shell alias route rather than the seam route the
  * companion mints. Same reasoning, and the same fix, as the sidebar's
@@ -102,27 +112,34 @@ type SettingsSection =
  * `CORE_DEFAULT_ON`, so on a fresh install "Inbox" opened a tab reading "App not
  * enabled" and "Memory" opened a Memory Library whose `/api/memory` reads 503
  * behind the same app gate. Neither needs a row here: an enabled approvals app is
- * listed by the companion loop, and an enabled memory app contributes a
+ * listed by the data-driven sidebar-section index, and an enabled memory app contributes a
  * `sidebar_buttons` entry targeting `/library/memory` that the contributed-button
  * loop lists. Note the dedupe below reads `navTargets` — while a target sat in
  * NAV_ITEMS the shell's dumb copy actively SUPPRESSED the app's own declaration.
  */
 const NAV_ITEMS = [
-	{ to: "/chat", label: "Chat", icon: Add01Icon },
-	{ to: "/library/agent", label: "Agents", icon: BotIcon },
-	{ to: "/engines", label: "Engines", icon: ArrowRight01Icon },
-	{ to: "/models", label: "Models", icon: Package01Icon },
-	{ to: "/skills", label: "Skills", icon: PuzzleIcon },
-	{ to: "/library/space", label: "Spaces", icon: ArrowRight01Icon },
-	{ to: "/tools", label: "Tools", icon: ArrowRight01Icon },
-	{ to: "/library/workflow", label: "Workflows", icon: ArrowRight01Icon },
+	{ to: "/chat", label: "Chat", icon: Chat01Icon },
+	{ to: "/library/agent", label: "Agents", icon: Target01Icon },
+	{ to: "/engines", label: "Engines", icon: LayerIcon },
+	{ to: "/models", label: "Models", icon: BrainIcon },
+	{ to: "/skills", label: "Skills", icon: PotionIcon },
+	{ to: "/library/space", label: "Spaces", icon: DeliverySecure01Icon },
+	{ to: "/tools", label: "Tools", icon: Wrench01Icon },
+	{ to: "/library/workflow", label: "Workflows", icon: WorkflowCircle06Icon },
 	{ to: "/review", label: "Weekly review", icon: ArrowRight01Icon },
 ] as const;
 
-const MAX_CHAT_RESULTS = 30;
+const NAV_RESULT_TYPES: Partial<Record<string, string>> = {
+	"/chat": "chats",
+	"/engines": "engines",
+	"/library/agent": "agents",
+	"/library/space": "spaces",
+	"/library/workflow": "workflows",
+	"/skills": "skills",
+	"/tools": "tools",
+};
 
-/** Split a folder path on either separator to show its last segment. */
-const PATH_SEPARATOR = /[\\/]/;
+const MAX_CHAT_RESULTS = 30;
 
 /** Turn a snake_case capture kind (e.g. "clipboard_copy") into plain words. */
 const SNAKE_CASE = /_/g;
@@ -147,11 +164,12 @@ export function CommandPalette() {
 	const [setupImportOpen, setSetupImportOpen] = useState(false);
 	const [settingsSection, setSettingsSection] =
 		useState<SettingsSection>("appearance");
-	const { openTab } = useTabsContext();
-	const { agents } = useAgents();
+	const [activeResultType, setActiveResultType] = useState("all");
+	const { openTab, requestScrollToMessage } = useTabsContext();
+	const { agents, sections: commandSearchSections } =
+		useCommandSearchSections();
 	const { theme, setTheme } = useTheme();
-	const { listConversations, setActiveConversationId } =
-		useChatHistoryContext();
+	const { setActiveConversationId } = useChatHistoryContext();
 	const { handleSignOut, isSigningOut } = useAuthContext();
 	const activeNode = useActiveNode();
 	const target: ApiTarget = {
@@ -162,9 +180,9 @@ export function CommandPalette() {
 	// app-registered sidebar buttons), shared via react-query cache with the
 	// route-registration hook in Layout.
 	const {
-		companions: pluginCompanions,
 		slash_commands: pluginCommands,
 		sidebar_buttons: contributedButtons,
+		sidebar_sections: contributedSidebarSections,
 	} = usePluginContributions();
 	// Live items of every app-contributed sidebar section (meeting notes, canvas
 	// boards, …), fetched only while the palette is open so they're searchable
@@ -174,8 +192,10 @@ export function CommandPalette() {
 	const [pendingMemory, setPendingMemory] = useState<string | null>(null);
 	const [shadowResults, setShadowResults] = useState<ShadowSearchResult[]>([]);
 	const [messageResults, setMessageResults] = useState<MessageSearchHit[]>([]);
+	const [spaceResults, setSpaceResults] = useState<SpaceLexicalHit[]>([]);
 	const searchAbort = useRef<AbortController | null>(null);
 	const messageAbort = useRef<AbortController | null>(null);
+	const spaceAbort = useRef<AbortController | null>(null);
 
 	// The palette toggle routes through the unified hotkey system so a rebind in
 	// Settings → Keyboard Shortcuts retargets it live. The custom event stays for
@@ -265,18 +285,19 @@ export function CommandPalette() {
 		return () => clearTimeout(handle);
 	}, [query]);
 
-	// Debounced semantic search over past chat messages (matches by meaning, not
-	// substring). Resolves to [] when Core has no message index or is unreachable,
-	// so the palette degrades to a plain launcher.
+	// Debounced exact + semantic search over past chat messages. Core puts lexical
+	// FTS hits first and semantic hits after them, so literal recall stays
+	// predictable without losing meaning-based matches when embeddings exist.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: `target` is a fresh object every render; depending on its primitive fields avoids an infinite update loop (see comment on the deps array below).
 	useEffect(() => {
 		const q = query.trim();
+		messageAbort.current?.abort();
 		if (q.length < 2) {
 			setMessageResults([]);
 			return;
 		}
+		setMessageResults([]);
 		const handle = setTimeout(async () => {
-			messageAbort.current?.abort();
 			const controller = new AbortController();
 			messageAbort.current = controller;
 			const result = await searchConversations(target, q, 8, controller.signal);
@@ -290,12 +311,73 @@ export function CommandPalette() {
 		// (a fresh array, never bailed) would spin into an infinite update loop.
 	}, [query, target.url, target.token]);
 
+	// Page/Space lexical search is separate from per-Space RAG search: the palette
+	// needs predictable literal recall over visible metadata, page source, and
+	// extracted chunks, even when no embedding model is available.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: `target` is a fresh object every render; primitive fields are the stable request identity.
+	useEffect(() => {
+		const q = query.trim();
+		spaceAbort.current?.abort();
+		if (q.length < 2) {
+			setSpaceResults([]);
+			return;
+		}
+		setSpaceResults([]);
+		const handle = setTimeout(async () => {
+			const controller = new AbortController();
+			spaceAbort.current = controller;
+			const results = await searchSpaceDocuments(
+				target,
+				q,
+				8,
+				controller.signal
+			);
+			if (results) {
+				setSpaceResults(results);
+			}
+		}, 250);
+		return () => clearTimeout(handle);
+	}, [query, target.url, target.token]);
+
 	const close = () => {
 		setOpen(false);
 		setQuery("");
+		setActiveResultType("all");
 		setShadowResults([]);
 		setMessageResults([]);
+		setSpaceResults([]);
 	};
+
+	const searchTabs = useMemo<CommandPaletteTab[]>(
+		() => [
+			{ id: "all", label: "All" },
+			{ id: "messages", label: "Messages", icon: Chat01Icon },
+			{ id: "pages", label: "Pages", icon: DeliverySecure01Icon },
+			...commandSearchSections.map((section) => ({
+				icon: section.icon,
+				id: section.id,
+				label: section.label,
+			})),
+			...contributedSidebarSections
+				.slice()
+				.sort(
+					(a, b) =>
+						(a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title)
+				)
+				.map((section) => ({
+					id: `plugin:${section.plugin}:${section.id}`,
+					label: section.title,
+					icon: PlugSocketIcon,
+				})),
+		],
+		[commandSearchSections, contributedSidebarSections]
+	);
+
+	useEffect(() => {
+		if (!searchTabs.some((tab) => tab.id === activeResultType)) {
+			setActiveResultType("all");
+		}
+	}, [activeResultType, searchTabs]);
 
 	// Saving to memory is an explicit, confirmed action — never the silent default
 	// for an unmatched query. Selecting it stashes the text and opens a confirm
@@ -336,9 +418,20 @@ export function CommandPalette() {
 		close();
 	};
 
-	const handleSelectChat = (id: string) => {
+	const handleSelectChat = (id: string, messageId?: string) => {
 		setActiveConversationId(id);
 		openTab("/chat", { conversationId: id });
+		if (messageId) {
+			requestScrollToMessage(id, messageId);
+		}
+		close();
+	};
+
+	const handleSelectPage = (hit: SpaceLexicalHit) => {
+		openTab(
+			`/spaces/${encodeURIComponent(hit.spaceId)}/doc/${encodeURIComponent(hit.documentId)}`,
+			{ title: hit.title }
+		);
 		close();
 	};
 
@@ -402,6 +495,19 @@ export function CommandPalette() {
 
 	const isMac = navigator.platform.toLowerCase().includes("mac");
 	const modKey = isMac ? "⌘" : "Ctrl";
+	const formatAgeAgo = (timestamp?: number): string | undefined => {
+		if (!(timestamp && Number.isFinite(timestamp))) {
+			return undefined;
+		}
+		const age = compactAge(timestamp);
+		return age === "now" ? "just now" : `${age} ago`;
+	};
+	const resultMeta = (
+		subtitle: string | null | undefined,
+		timestamp?: number
+	): string | undefined =>
+		[subtitle, formatAgeAgo(timestamp)].filter(Boolean).join(" · ") ||
+		undefined;
 
 	// Build the flat action list the shared palette renders. Same groups, values,
 	// icons, shortcuts, and side effects as the previous inline cmdk markup. Built
@@ -409,20 +515,31 @@ export function CommandPalette() {
 	// latest conversation list, theme, and sign-out state.
 	// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: assembles many independent, flat action groups (chats, nav, theme, account); splitting would scatter one cohesive list.
 	const buildActions = (): CommandAction[] => {
-		const conversations = listConversations().slice(0, MAX_CHAT_RESULTS);
 		const items: CommandAction[] = [];
 
-		for (const conv of conversations) {
-			items.push({
-				id: `chat-${conv.id}`,
-				group: "Chats",
-				title: conv.title,
-				value: `chat ${conv.title} ${conv.id}`,
-				trailing: conv.folderPath
-					? conv.folderPath.split(PATH_SEPARATOR).pop()
-					: undefined,
-				onSelect: () => handleSelectChat(conv.id),
-			});
+		// Every built-in sidebar section contributes its live rows to the same flat
+		// action list. The section id is the filter id, so adding a sidebar section
+		// only requires extending the shared section registry/data source.
+		for (const section of commandSearchSections) {
+			const rows =
+				section.id === "chats"
+					? section.items.slice(0, MAX_CHAT_RESULTS)
+					: section.items;
+			for (const row of rows) {
+				items.push({
+					id: `sidebar-${section.id}-${row.id}`,
+					group: section.label,
+					title: row.title,
+					value: `${section.label} ${row.title} ${row.subtitle ?? ""}`,
+					resultType: section.id,
+					trailing: resultMeta(row.subtitle, row.timestamp),
+					icon: row.icon ?? section.icon,
+					onSelect: () => {
+						row.onSelect();
+						close();
+					},
+				});
+			}
 		}
 
 		items.push(
@@ -473,12 +590,17 @@ export function CommandPalette() {
 		);
 
 		for (const { to, label, icon } of NAV_ITEMS) {
+			const resultType = NAV_RESULT_TYPES[to];
+			if (resultType && !searchTabs.some((tab) => tab.id === resultType)) {
+				continue;
+			}
 			items.push({
 				id: `nav-${to}`,
 				group: "Navigation",
 				title: label,
 				value: `navigate ${label}`,
 				icon,
+				resultType,
 				onSelect: () => handleNavigate(to, label),
 			});
 		}
@@ -520,6 +642,7 @@ export function CommandPalette() {
 					group: section.title,
 					title: row.item.title,
 					value: `${section.title} ${row.item.title} ${row.item.subtitle ?? ""}`,
+					resultType: `plugin:${section.plugin}:${section.sectionId}`,
 					icon: ArrowRight01Icon,
 					onSelect: () => handleNavigate(route, row.item.title),
 				});
@@ -551,11 +674,11 @@ export function CommandPalette() {
 				group: "Navigation",
 				title: "Extensions",
 				value: "navigate extensions browser desktop add-ons",
-				icon: PuzzleIcon,
+				icon: PlugSocketIcon,
 				onSelect: () => handleNavigate("/extensions"),
 			}
 			// "Webhooks" used to be a fourth row here. `/webhooks` is owned by the
-			// `@ryu/webhooks` app, which declares a companion — so the loop below
+			// `@ryu/webhooks` app, which declares a companion — so the section index
 			// already lists it, live, exactly when the app is enabled. The hardcoded
 			// row was the same mistake NAV_ITEMS' comment describes (it rendered on a
 			// fresh install, where the app is off, and led to "App not enabled"), and
@@ -563,20 +686,6 @@ export function CommandPalette() {
 			// then SUPPRESSED the app's own declaration. Deleting it is what makes
 			// the real entry appear.
 		);
-
-		// Companion surfaces contributed by enabled plugins — navigable entries
-		// sourced live from GET /api/plugins/contributions (nothing hardcoded).
-		for (const companion of pluginCompanions) {
-			const label = companion.label || companion.name;
-			items.push({
-				id: `nav-companion-${companion.id}`,
-				group: "Plugins",
-				title: label,
-				value: `plugin companion ${label} ${companion.name}`,
-				icon: PuzzleIcon,
-				onSelect: () => handleNavigate(pluginCompanionPath(companion.id)),
-			});
-		}
 
 		// Slash/commands contributed by enabled plugins. Selecting one fires its
 		// onCommand activation event so command-gated plugins wake.
@@ -593,7 +702,7 @@ export function CommandPalette() {
 				group: "Plugin Commands",
 				title: label,
 				value: `plugin command ${label} ${commandId} ${description ?? ""}`,
-				icon: PuzzleIcon,
+				icon: PlugSocketIcon,
 				trailing: description ? undefined : trigger,
 				onSelect: () => handleRunPluginCommand(commandId, label),
 			});
@@ -611,7 +720,7 @@ export function CommandPalette() {
 				title: entry.title,
 				value: `${entry.title} ${entry.keywords ?? ""}`,
 				shortcut: entry.shortcut,
-				icon: PuzzleIcon,
+				icon: PlugSocketIcon,
 				onSelect: () => {
 					void entry.run();
 					close();
@@ -625,8 +734,9 @@ export function CommandPalette() {
 			id: "nav-channels",
 			group: "Navigation",
 			title: "Channels",
-			value: "navigate channels telegram slack discord whatsapp bots",
-			icon: BotIcon,
+				value: "navigate channels telegram slack whatsapp personal business cloud api discord bots",
+			icon: Tv01Icon,
+			resultType: "channels",
 			onSelect: () => handleNavigate("/library/channel", "Channels"),
 		});
 
@@ -635,7 +745,8 @@ export function CommandPalette() {
 			group: "Navigation",
 			title: "Identities",
 			value: "navigate identities logins credentials connections vault",
-			icon: Key01Icon,
+			icon: FingerPrintIcon,
+			resultType: "identities",
 			onSelect: () => handleNavigate("/library/identity", "Identities"),
 		});
 
@@ -666,6 +777,7 @@ export function CommandPalette() {
 				group: "Actions",
 				title: "New Chat",
 				value: "new chat",
+				resultType: "chats",
 				icon: Add01Icon,
 				shortcut: `${modKey}N`,
 				onSelect: handleNewChat,
@@ -685,6 +797,7 @@ export function CommandPalette() {
 				title: "Import Thread",
 				value:
 					"import thread claude code codex history resume past conversation",
+				resultType: "chats",
 				icon: Download01Icon,
 				onSelect: handleImportThread,
 			},
@@ -751,7 +864,7 @@ export function CommandPalette() {
 					onSelect: () => handleOpenCapture(r.ts),
 				});
 			}
-			// Semantic message hits — jump straight to the conversation that
+			// Exact + semantic message hits — jump straight to the conversation that
 			// contains the matching message.
 			for (const [i, hit] of messageResults.entries()) {
 				const snippet =
@@ -765,8 +878,21 @@ export function CommandPalette() {
 					// Keep the query in `value` so the shared palette's own filter
 					// never hides a semantic hit that lacks a literal substring match.
 					value: `${q} message ${hit.messageId}`,
-					trailing: hit.role === "user" ? "you" : "assistant",
-					onSelect: () => handleSelectChat(hit.conversationId),
+					resultType: "messages",
+					trailing: `${hit.role === "user" ? "you" : "assistant"} · ${formatAgeAgo(hit.createdAt) ?? "just now"}`,
+					onSelect: () => handleSelectChat(hit.conversationId, hit.messageId),
+				});
+			}
+			for (const [i, hit] of spaceResults.entries()) {
+				items.push({
+					id: `page-${hit.documentId || i}`,
+					group: "Pages",
+					title: hit.title,
+					value: `${q} page ${hit.title} ${hit.spaceName} ${hit.snippet}`,
+					resultType: "pages",
+					trailing: resultMeta(hit.spaceName, hit.updatedAt),
+					icon: DeliverySecure01Icon,
+					onSelect: () => handleSelectPage(hit),
 				});
 			}
 			// "Remember" is listed last so it's never the auto-highlighted default
@@ -789,11 +915,14 @@ export function CommandPalette() {
 		<>
 			<SharedCommandPalette
 				actions={buildActions()}
+				activeTab={activeResultType}
 				onOpenChange={(o) => (o ? setOpen(true) : close())}
 				onSearchChange={setQuery}
+				onTabChange={setActiveResultType}
 				open={open}
 				placeholder="Search everything or run a command..."
 				search={query}
+				tabs={searchTabs}
 			/>
 
 			<SettingsDialog

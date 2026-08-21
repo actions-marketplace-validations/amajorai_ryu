@@ -107,11 +107,17 @@ export interface SkillSearchParams {
 	source?: string;
 }
 
+export interface SkillCatalogPage {
+	nextCursor: string | null;
+	skills: SkillCard[];
+	total: number | null;
+}
+
 /** Search/browse the skills directory. Core does ranking + installed lookup. */
-export async function searchSkills(
+export async function searchSkillCatalogPage(
 	target: ApiTarget,
 	params: SkillSearchParams = {}
-): Promise<SkillCard[]> {
+): Promise<SkillCatalogPage> {
 	const q = new URLSearchParams();
 	if (params.query) {
 		q.set("query", params.query);
@@ -125,11 +131,24 @@ export async function searchSkills(
 	if (params.source) {
 		q.set("source", params.source);
 	}
-	const json = await request<{ skills?: CardWire[] }>(
-		target,
-		`/api/skills/catalog?${q.toString()}`
-	);
-	return (json.skills ?? []).map(toCard);
+	const json = await request<{
+		next_cursor?: string | null;
+		skills?: CardWire[];
+		total?: number | null;
+		total_count?: number | null;
+	}>(target, `/api/skills/catalog?${q.toString()}`);
+	return {
+		nextCursor: json.next_cursor ?? null,
+		skills: (json.skills ?? []).map(toCard),
+		total: json.total ?? json.total_count ?? null,
+	};
+}
+
+export async function searchSkills(
+	target: ApiTarget,
+	params: SkillSearchParams = {}
+): Promise<SkillCard[]> {
+	return (await searchSkillCatalogPage(target, params)).skills;
 }
 
 /** Fetch a Skill's detail (SKILL.md docs, description, file list). */
@@ -225,7 +244,7 @@ export async function installSkill(
 		body: { id, ...(source ? { source } : {}) },
 		// Forward the buyer's control-plane session so a PAID marketplace item's
 		// entitlement check (#491) can resolve the org + license. Free items ignore it.
-		headers: buyerTokenHeader(),
+		headers: buyerTokenHeader(target),
 	});
 	if (json.success === false || !json.result) {
 		throw new Error(json.error ?? `Failed to install ${id}`);

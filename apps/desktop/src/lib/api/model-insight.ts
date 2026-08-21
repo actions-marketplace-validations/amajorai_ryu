@@ -1,7 +1,8 @@
 /**
  * Best-effort model hover-card insight via Core (`/api/models/insight`).
- * Cascade: models.dev → OpenRouter → Artificial Analysis. Returns `null` when
- * every source misses — the picker simply skips the hover card.
+ * Cascade: OpenRouter first for OpenRouter-routed models, models.dev otherwise,
+ * then Artificial Analysis. Returns `null` when every source misses — the picker
+ * simply skips the hover card.
  */
 
 import type { ApiTarget } from "./client.ts";

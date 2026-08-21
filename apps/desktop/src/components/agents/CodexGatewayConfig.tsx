@@ -22,7 +22,7 @@ import {
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
 export function CodexGatewayConfig() {
-	const [enabled, setEnabled] = useState(false);
+	const [enabled, setEnabled] = useState(true);
 	const [loaded, setLoaded] = useState(false);
 
 	useEffect(() => {

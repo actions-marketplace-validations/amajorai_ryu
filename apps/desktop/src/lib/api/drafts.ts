@@ -93,6 +93,20 @@ export async function listDrafts(target: ApiTarget): Promise<DraftWire[]> {
 	return body?.drafts ?? [];
 }
 
+/** Read one open draft by id. Sent rows are returned by the sidecar's history
+ * endpoint, but a sent row must never refill a composer after a restart. */
+export async function getDraft(
+	target: ApiTarget,
+	id: string
+): Promise<DraftWire | null> {
+	const body = await request<{ draft: DraftWire | null }>(
+		target,
+		`${BASE}/drafts/${encodeURIComponent(id)}`
+	);
+	const draft = body?.draft ?? null;
+	return draft?.state === "sent" ? null : draft;
+}
+
 /** Drafts already sent, newest first. */
 export async function listSentDrafts(
 	target: ApiTarget,

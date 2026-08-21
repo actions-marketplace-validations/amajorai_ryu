@@ -9,6 +9,7 @@
 
 import { Search01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { Icon } from "@ryu/ui/components/icon.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
 import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs.tsx";
 import { Fragment } from "react";
@@ -48,7 +49,15 @@ export default function StoreListHeader({
 										title={section.label}
 										value={section.value}
 									>
-										<HugeiconsIcon className="size-3.5" icon={section.icon} />
+										{typeof section.icon === "string" ? (
+											<Icon
+												className="size-3.5"
+												icon={section.icon}
+												size={14}
+											/>
+										) : (
+											<HugeiconsIcon className="size-3.5" icon={section.icon} />
+										)}
 										<span className="truncate">{section.label}</span>
 									</TabsTrigger>
 								</Fragment>

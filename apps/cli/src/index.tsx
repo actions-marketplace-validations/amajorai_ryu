@@ -13,6 +13,7 @@ import { setSurfaceProvider } from "@ryuhq/core-client/client";
 import { App } from "./App.tsx";
 import { isInteractive, runCli } from "./cli/dispatch.ts";
 import { ensureCoreRunning } from "./core/bootstrap.ts";
+import { reportCliReferralEvent } from "./core/quest-events.ts";
 import { buildTarget } from "./core/target.ts";
 
 // Declare the calling surface once, at entry, so EVERY core-client request carries
@@ -29,6 +30,7 @@ setSurfaceProvider(() => "cli");
 const bootInteractive = async (): Promise<void> => {
 	const target = buildTarget();
 	await ensureCoreRunning(target);
+	void reportCliReferralEvent(target);
 	const renderer = await createCliRenderer({ exitOnCtrlC: false });
 	createRoot(renderer).render(<App target={target} />);
 };
@@ -44,7 +46,10 @@ if (isInteractive(argv)) {
 		process.exitCode = 1;
 	});
 } else {
-	runCli(argv)
+	// Keep the process alive until the best-effort event has had a chance to
+	// leave the CLI, while still allowing unauthenticated commands to proceed.
+	reportCliReferralEvent(buildTarget())
+		.then(() => runCli(argv))
 		.then((code) => process.exit(code))
 		.catch((err) => {
 			process.stderr.write(`ryu: ${String(err)}\n`);

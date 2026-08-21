@@ -202,7 +202,6 @@ export function ConnectionsTab() {
 		try {
 			const result = await authClient.unlinkAccount({
 				accountId: googleAccount.accountId,
-				providerId: "google",
 			});
 			if (result.error) {
 				throw new Error(result.error.message);

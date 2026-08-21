@@ -5,6 +5,7 @@ import {
 	type ToolApprovalChoice,
 	ToolApprovalCode,
 } from "@ryu/ui/components/agents/tool-approval";
+import { cn } from "@ryu/ui/lib/utils";
 import { memo, useMemo } from "react";
 import type { AcpPermissionOption } from "@/src/lib/api/acp.ts";
 
@@ -15,8 +16,12 @@ export interface ActivePermission {
 }
 
 export interface PermissionPromptProps {
+	className?: string;
+	embedded?: boolean;
 	onRespond: (optionId: string | null) => void;
 	permission: ActivePermission;
+	/** Show raw tool input for technical interface levels. */
+	showTechnicalDetails?: boolean;
 }
 
 interface ToolCallShape {
@@ -72,6 +77,14 @@ function formatParameterValue(value: unknown): string {
 
 const ALLOW_KINDS = new Set(["allow_once", "allow_always"]);
 
+function approvalQuestion(title: string): string {
+	const action = title.trim().replace(/[?!.]+$/u, "");
+	const firstPersonAction = action
+		? `${action.slice(0, 1).toLowerCase()}${action.slice(1)}`
+		: "run this tool";
+	return `Can I ${firstPersonAction}?`;
+}
+
 function toneForKind(kind: string): ToolApprovalChoice["tone"] {
 	if (kind === "allow_once") {
 		return "primary";
@@ -83,18 +96,17 @@ function toneForKind(kind: string): ToolApprovalChoice["tone"] {
 }
 
 /**
- * Inline allow/reject prompt shown above the composer when an ACP agent in a
+ * Inline allow/reject prompt shown in the composer when an ACP agent in a
  * permission-gating mode asks to run a tool (Zed-style). One button per
  * agent-reported option; the chosen option id is sent back to Core to unblock
  * the awaiting turn.
- *
- * This is the FALLBACK surface. When the request names a tool call that already
- * has a row in the thread, ChatPage renders the approval on that row instead so
- * the question sits next to the command it is about — see `permissionsByToolCall`.
  */
 export const PermissionPrompt = memo(function PermissionPrompt({
+	embedded = false,
+	className,
 	permission,
 	onRespond,
+	showTechnicalDetails = true,
 }: PermissionPromptProps) {
 	const title = useMemo(
 		() => toolTitle(permission.toolCall),
@@ -133,16 +145,37 @@ export const PermissionPrompt = memo(function PermissionPrompt({
 	);
 
 	return (
-		<div className="mx-auto mb-1 w-full max-w-[720px] px-3">
+		<div
+			className={cn(
+				embedded ? "w-full" : "mx-auto mb-1 w-full max-w-[720px] px-3",
+				className
+			)}
+			data-composer-prompt="approval"
+		>
 			<ToolApproval
 				choices={choices}
-				description={`Allow the agent to ${title}?`}
+				description={
+					showTechnicalDetails
+						? `The agent is asking to ${title}.`
+						: `Ryu wants to ${title}. Review the details before it runs.`
+				}
 				parameters={parameters}
+				question={approvalQuestion(title)}
 				status="pending"
-				title="Permission required"
-				tool={fields.kind ? `${fields.kind} · ${title}` : title}
+				title={
+					showTechnicalDetails
+						? "Permission required"
+						: "Ryu wants to take an action"
+				}
+				tool={
+					showTechnicalDetails && fields.kind
+						? `${fields.kind} · ${title}`
+						: title
+				}
 			>
-				{command ? <ToolApprovalCode code={command} language="bash" /> : null}
+				{showTechnicalDetails && command ? (
+					<ToolApprovalCode code={command} language="bash" />
+				) : null}
 			</ToolApproval>
 		</div>
 	);

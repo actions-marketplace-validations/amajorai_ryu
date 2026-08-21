@@ -9,7 +9,6 @@ regexes = [
   '''sk-secret-1234567890''',
 ]
 paths = [
-  '''apps/gateway/src/audit/mod.rs''',
   # Vendored single-file plugin-UI fixtures: minified/bundled third-party web apps
   # (e.g. the Excalidraw-style whiteboard) shipped verbatim as Core manifest fixtures.
   # They embed public client identifiers (a Firebase web apiKey — a project id, not a

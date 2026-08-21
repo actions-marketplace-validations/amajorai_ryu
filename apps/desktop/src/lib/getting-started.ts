@@ -9,11 +9,11 @@
 // should not reopen "Send your first message").
 
 import {
-	AiBrain01Icon,
-	BubbleChatIcon,
-	CpuIcon,
-	Mortarboard01Icon,
+	BrainIcon,
+	Chat01Icon,
+	PotionIcon,
 	SlidersHorizontalIcon,
+	Target01Icon,
 	WorkflowCircle06Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
@@ -44,7 +44,7 @@ export const GETTING_STARTED_QUESTS: GettingStartedQuest[] = [
 		content: "Send your first message",
 		description: "Chat with Ryu to see an agent in action.",
 		cta: "Start a chat",
-		icon: BubbleChatIcon,
+		icon: Chat01Icon,
 		path: "/chat",
 		forceNew: true,
 	},
@@ -53,7 +53,7 @@ export const GETTING_STARTED_QUESTS: GettingStartedQuest[] = [
 		content: "Explore the agents",
 		description: "Pick an agent or build your own from swappable slots.",
 		cta: "Browse agents",
-		icon: AiBrain01Icon,
+		icon: Target01Icon,
 		path: "/library/agent",
 	},
 	{
@@ -61,7 +61,7 @@ export const GETTING_STARTED_QUESTS: GettingStartedQuest[] = [
 		content: "Install a local model",
 		description: "Run fully local and private with a model of your choice.",
 		cta: "Open the model store",
-		icon: CpuIcon,
+		icon: BrainIcon,
 		path: "/models",
 	},
 	{
@@ -69,7 +69,7 @@ export const GETTING_STARTED_QUESTS: GettingStartedQuest[] = [
 		content: "Add a skill",
 		description: "Give your agents new abilities from the skills catalog.",
 		cta: "Browse skills",
-		icon: Mortarboard01Icon,
+		icon: PotionIcon,
 		path: "/skills",
 	},
 	{

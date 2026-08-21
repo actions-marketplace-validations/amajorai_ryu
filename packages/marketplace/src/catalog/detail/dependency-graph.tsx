@@ -19,6 +19,7 @@
 import { Link01Icon, PackageIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { createContext, type ReactNode, useContext, useMemo } from "react";
 import { prettyPluginId } from "../plugin-id.ts";
 
@@ -187,7 +188,7 @@ export function tallyDependencies(
 
 /** English plural without a formatting dependency ("1 app", "3 apps"). */
 function plural(count: number, one: string, many: string): string {
-	return `${count} ${count === 1 ? one : many}`;
+	return `${formatNumber(count)} ${count === 1 ? one : many}`;
 }
 
 /** The one-line consequence of pressing Enable, in plain terms. Says only what the

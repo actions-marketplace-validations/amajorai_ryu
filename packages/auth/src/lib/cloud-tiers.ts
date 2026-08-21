@@ -1,5 +1,5 @@
 /**
- * Ryu Cloud hosting — the FREE managed node tied to the Max plan. This is NOT a
+ * Ryu Cloud hosting — the FREE managed node tied to a qualifying hosted plan. This is NOT a
  * standalone subscription plan (see `plans.ts`): it provisions a Hetzner node
  * running Core + Gateway. Buying compute is buying infrastructure, not a feature
  * tier.
@@ -10,11 +10,11 @@
  * + `cloud-catalog.ts` + the single `POLAR_PRODUCT_CLOUD_INSTANCE` product). The
  * per-tier 2X/3X Polar products are RETIRED.
  *
- * All that remains here is the free BASE node definition — the cx23 (2 vCPU · 4
- * GB · 40 GB) node that ships free with every recurring plan — Pro, Max and
- * Teams (its compute cost is absorbed into
- * the plan price). It has NO Polar product; it is granted by an active Max
- * subscription. The user never sees the Hetzner/CX name — only CPU / RAM / SSD +
+ * All that remains here is the default EU BASE node definition — the cx23 (2
+ * vCPU · 4 GB · 40 GB) profile. The hosted plan resolver selects the exact
+ * plan- and region-specific shape (for example CPX22 for Pro in Singapore or
+ * CCX13 for Max) and grants it without a standalone Polar product. The user
+ * never sees the Hetzner/CX name on marketing surfaces — only CPU / RAM / SSD +
  * a perf label ("Cost-optimized").
  *
  * LIVE PRICING: the `monthlyUsd` here is `0` (free). Real prices + specs for paid
@@ -52,8 +52,8 @@ export interface CloudTier {
 export const BASE_CLOUD_TYPE = "cx23";
 
 /**
- * The free BASE managed node — included with any recurring plan. Paid instances are no
- * longer a fixed ladder; they are picked dynamically from the live Hetzner
+ * The default BASE managed node profile. Paid instances are no longer a fixed
+ * ladder; they are picked dynamically from the live Hetzner
  * catalog and billed ad-hoc (see the module header).
  */
 export const BASE_CLOUD_TIER: CloudTier = {

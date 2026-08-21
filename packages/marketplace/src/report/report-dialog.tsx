@@ -1,7 +1,7 @@
 // packages/marketplace/src/report/report-dialog.tsx
 //
-// Controlled dialog for filing a marketplace/app report. Reason pills + optional
-// details. Submit is injected so desktop (bearer) and web (cookie) stay outside.
+// Controlled dialog for filing a marketplace/app report. Reason dropdown +
+// optional details. Submit is injected so desktop (bearer) and web (cookie) stay outside.
 
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
@@ -13,6 +13,13 @@ import {
 	DialogTitle,
 } from "@ryu/ui/components/dialog.tsx";
 import { Label } from "@ryu/ui/components/label.tsx";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@ryu/ui/components/select.tsx";
 import { Textarea } from "@ryu/ui/components/textarea.tsx";
 import { useEffect, useState } from "react";
 import { sileo } from "sileo";
@@ -55,6 +62,9 @@ export function ReportDialog({
 	}, [open, target?.id, target?.kind]);
 
 	const name = target?.itemName?.trim() || target?.id || "this item";
+	const selectedOption = REPORT_REASON_OPTIONS.find(
+		(option) => option.value === reason
+	);
 	const detailsRequired = reason === "other";
 	const canSubmit =
 		Boolean(target && reason) &&
@@ -114,32 +124,35 @@ export function ReportDialog({
 				</DialogHeader>
 
 				<div className="flex flex-col gap-3">
-					<fieldset className="flex flex-col gap-2">
-						<Legend>Reason</Legend>
-						<div className="flex flex-col gap-1.5">
-							{REPORT_REASON_OPTIONS.map((opt) => {
-								const selected = reason === opt.value;
-								return (
-									<button
-										aria-pressed={selected}
-										className={
-											selected
-												? "flex flex-col items-start gap-0.5 rounded-md border border-primary bg-primary/5 px-3 py-2 text-left transition-colors"
-												: "flex flex-col items-start gap-0.5 rounded-md border border-border px-3 py-2 text-left transition-colors hover:bg-muted/50"
-										}
-										key={opt.value}
-										onClick={() => setReason(opt.value)}
-										type="button"
-									>
-										<span className="font-medium text-sm">{opt.label}</span>
-										<span className="text-muted-foreground text-xs">
-											{opt.description}
-										</span>
-									</button>
+					<div className="flex flex-col gap-1.5">
+						<Label htmlFor="report-reason">Reason</Label>
+						<Select
+							items={REPORT_REASON_OPTIONS}
+							onValueChange={(value) => {
+								setReason(
+									REPORT_REASON_OPTIONS.find((option) => option.value === value)
+										?.value ?? null
 								);
-							})}
-						</div>
-					</fieldset>
+							}}
+							value={reason}
+						>
+							<SelectTrigger className="w-full" id="report-reason">
+								<SelectValue placeholder="Select a reason" />
+							</SelectTrigger>
+							<SelectContent>
+								{REPORT_REASON_OPTIONS.map((option) => (
+									<SelectItem key={option.value} value={option.value}>
+										{option.label}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+						{selectedOption ? (
+							<span className="text-muted-foreground text-xs">
+								{selectedOption.description}
+							</span>
+						) : null}
+					</div>
 
 					<div className="flex flex-col gap-1.5">
 						<Label htmlFor="report-details">
@@ -180,11 +193,5 @@ export function ReportDialog({
 				</DialogFooter>
 			</DialogContent>
 		</Dialog>
-	);
-}
-
-function Legend({ children }: { children: React.ReactNode }) {
-	return (
-		<legend className="font-medium text-sm leading-none">{children}</legend>
 	);
 }

@@ -48,6 +48,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
+import { formatCount as formatSharedCount } from "@ryu/ui/lib/number-format.ts";
 import {
 	type ComponentType,
 	useCallback,
@@ -81,6 +82,7 @@ import {
 	type ListingStat,
 	ListingStatStrip,
 } from "./detail/listing-detail-shell.tsx";
+import { ScorecardPanel } from "./detail/scorecard-panel.tsx";
 import { skillOrg, titleCase } from "./friendly.ts";
 import {
 	type CatalogHost,
@@ -93,6 +95,7 @@ import {
 import { useSyncInstalledOnly } from "./installed-filter.tsx";
 import { REALM_ICONS } from "./realm-icons.ts";
 import { safeHttpUrl } from "./safe-url.ts";
+import { runSkillScorecard } from "./scorecard.ts";
 import type {
 	AddMarketplaceParams,
 	MarketplaceMoveDirection,
@@ -113,17 +116,9 @@ const SORT_OPTIONS: { value: SkillSort; label: string }[] = [
 	{ value: "name", label: "Name (A–Z)" },
 ];
 
-/** Format a large count as a friendly short string (1234567 → "1.2M").
- *  Exported for unit tests (the detail/metadata/file helpers below run only
- *  inside the Dialog-portaled preview, which `renderToStaticMarkup` cannot emit). */
+/** Shared count policy, exported for the catalog helper tests. */
 export function formatCount(n: number): string {
-	if (n >= 1_000_000) {
-		return `${(n / 1_000_000).toFixed(1)}M`;
-	}
-	if (n >= 1000) {
-		return `${(n / 1000).toFixed(1)}k`;
-	}
-	return String(n);
+	return formatSharedCount(n) ?? "—";
 }
 
 function skillTrustLabel(value: string | null | undefined): string | null {
@@ -350,6 +345,7 @@ export default function SkillsCatalogSection({
 								onSelectOrg={setOrg}
 								onToggleEnabled={setSkillEnabled}
 								renderAffordance={host.renderAffordance}
+								runCatalogScan={host.runCatalogScan}
 								selectedId={selectedId}
 								togglingSkill={togglingSkill}
 							/>
@@ -408,6 +404,12 @@ export default function SkillsCatalogSection({
 							hasNextPage={hasNextPage}
 							installing={installing}
 							loading={loading}
+							onClearFilters={() => {
+								setQuery("");
+								setInstalledOnly(false);
+								setOrg("");
+							}}
+							onRetry={fetchNextPage}
 							onSelect={select}
 							selectedId={selectedId}
 							setSkillEnabled={setSkillEnabled}
@@ -676,6 +678,7 @@ function SkillSourcePicker({
 												<Button
 													aria-label={`Delete ${source.displayName}`}
 													disabled={sourceActionId !== null}
+													loading={busy}
 													onClick={() => {
 														runSourceAction(source.id, () =>
 															removeMarketplace(source.id)
@@ -684,9 +687,7 @@ function SkillSourcePicker({
 													size="icon"
 													variant="ghost"
 												>
-													{busy ? (
-														<Spinner className="size-4" />
-													) : (
+													{!busy && (
 														<HugeiconsIcon
 															className="size-4"
 															icon={Delete01Icon}
@@ -732,15 +733,14 @@ function SkillSourcePicker({
 								<p className="text-destructive text-xs">{addError}</p>
 							)}
 							<Button
-								disabled={addingMarketplace || sourceActionId !== null}
+								disabled={sourceActionId !== null}
+								loading={addingMarketplace}
 								onClick={() => {
 									submit().catch(() => undefined);
 								}}
 								size="sm"
 							>
-								{addingMarketplace ? (
-									<Spinner className="size-4" />
-								) : (
+								{!addingMarketplace && (
 									<HugeiconsIcon className="size-4" icon={Add01Icon} />
 								)}
 								{addingMarketplace ? "Adding…" : "Add marketplace"}
@@ -794,6 +794,8 @@ function SkillList({
 	togglingSkill,
 	fetchNextPage,
 	hasNextPage,
+	onClearFilters,
+	onRetry,
 	settingsOpener,
 }: {
 	skills: SkillCard[];
@@ -809,6 +811,8 @@ function SkillList({
 	togglingSkill: string | null;
 	fetchNextPage: () => void;
 	hasNextPage: boolean;
+	onClearFilters: () => void;
+	onRetry: () => void;
 	/** Resolves a card to the settings of the plugin that ships it, when one does. */
 	settingsOpener: PluginSettingsOpener;
 }) {
@@ -883,9 +887,20 @@ function SkillList({
 	}
 	if (error) {
 		return (
-			<div className="p-4 text-destructive text-sm">
-				Couldn't load skills: {error}
-			</div>
+			<Empty className="h-full p-6">
+				<EmptyHeader>
+					<EmptyMedia variant="icon">
+						<HugeiconsIcon icon={SparklesIcon} />
+					</EmptyMedia>
+					<EmptyTitle>Couldn&apos;t load skills</EmptyTitle>
+					<EmptyDescription>{error}</EmptyDescription>
+				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onRetry} size="sm" variant="ghost">
+						Try again
+					</Button>
+				</EmptyContent>
+			</Empty>
 		);
 	}
 	if (skills.length === 0) {
@@ -898,6 +913,11 @@ function SkillList({
 					<EmptyTitle>No skills found</EmptyTitle>
 					<EmptyDescription>Try a different search.</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onClearFilters} size="sm" variant="ghost">
+						Clear filters
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
@@ -983,6 +1003,7 @@ function SkillDetailPanel({
 	canAuthor,
 	installLayer,
 	renderAffordance,
+	runCatalogScan,
 	Markdown,
 }: {
 	selectedId: string | null;
@@ -1001,6 +1022,7 @@ function SkillDetailPanel({
 	canAuthor: boolean;
 	installLayer: CatalogInstall | null;
 	renderAffordance: CatalogHost["renderAffordance"];
+	runCatalogScan: CatalogHost["runCatalogScan"];
 	Markdown: ComponentType<CatalogMarkdownProps>;
 }) {
 	if (!selectedId) {
@@ -1065,6 +1087,26 @@ function SkillDetailPanel({
 	const title = friendly ? titleCase(card.name) : card.name;
 	const sourceLabel = card.source || "skills.sh";
 	const trustLabel = skillTrustLabel(card.trustLevel);
+	const scorecard = runSkillScorecard(card, detail);
+	const agentScan = runCatalogScan
+		? () =>
+				runCatalogScan({
+					description,
+					files: detail.files,
+					id: card.id,
+					kind: "skill",
+					metadata: {
+						githubStars: metadata.githubStars,
+						repositoryUrl: metadata.repositoryUrl,
+						securityAudits: metadata.securityAudits,
+						source: card.source,
+						trustLevel: card.trustLevel,
+					},
+					name: card.name,
+					readme,
+					scorecard,
+				})
+		: undefined;
 
 	return (
 		<ListingDetailShell
@@ -1138,6 +1180,13 @@ function SkillDetailPanel({
 				/>
 			}
 		>
+			<ListingSection title="Health">
+				<ScorecardPanel
+					agentScan={agentScan}
+					key={card.id}
+					scorecard={scorecard}
+				/>
+			</ListingSection>
 			{readme ? (
 				<ListingSection title="README">
 					<div className="prose prose-sm dark:prose-invert max-w-none text-sm">
@@ -1187,7 +1236,7 @@ function skillStatItems({
 			? {
 					label: "Audits",
 					sub: `${passed}/${audits.length} pass`,
-					value: `${audits.length}`,
+					value: formatCount(audits.length) ?? "—",
 				}
 			: null,
 	];
@@ -1468,7 +1517,9 @@ function SkillFilesPanel({
 	return (
 		<div className="flex min-h-0 flex-col border-l">
 			<div className="border-b px-3 py-2">
-				<h3 className="font-medium text-sm">Files ({files.length})</h3>
+				<h3 className="font-medium text-sm">
+					Files ({formatCount(files.length) ?? "—"})
+				</h3>
 			</div>
 			{/* File navigator (tree + flat list) vs. content are a resizable vertical
 			    split — drag the handle to give either side more room. */}
@@ -1579,11 +1630,11 @@ function SkillFileContent({
 				{file.path}
 			</div>
 			{hasContent && isMarkdownFile(file.path) ? (
-				<div className="scroll-fade-effect-y prose prose-sm dark:prose-invert min-h-0 max-w-none flex-1 overflow-auto p-3 text-sm">
+				<div className="scroll-fade prose prose-sm dark:prose-invert min-h-0 max-w-none flex-1 overflow-auto p-3 text-sm">
 					<Markdown className="[&_ol]:pl-10 [&_ul]:pl-9" content={content} />
 				</div>
 			) : (
-				<pre className="scroll-fade-effect-y min-h-0 flex-1 overflow-auto whitespace-pre-wrap p-3 font-mono text-xs leading-relaxed">
+				<pre className="scroll-fade min-h-0 flex-1 overflow-auto whitespace-pre-wrap p-3 font-mono text-xs leading-relaxed">
 					{content || "This file is empty."}
 				</pre>
 			)}

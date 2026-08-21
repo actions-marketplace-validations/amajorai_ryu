@@ -2,6 +2,7 @@
 //
 // Typed client for Core's git endpoints:
 //   - `GET /api/git/status?cwd=<path>` (consumed by WorkspacePicker)
+//   - `POST /api/git/pull` and `/api/git/sync` (consumed by PinnedSummaryPanel)
 //   - `GET /api/worktree/:run_id/diff` (consumed by DiffReviewPane)
 //   - `POST /api/worktree/:run_id/apply` (consumed by DiffReviewPane)
 
@@ -203,6 +204,16 @@ export interface CommitPushResult {
 
 export type GitCommitAction = "commit" | "commit-push" | "push";
 
+/** GitHub PRs are offered only for a branch that can merge into a default branch. */
+export function isPullRequestBranch(
+	branch: string | null | undefined
+): boolean {
+	const normalized = branch?.trim().toLowerCase();
+	return Boolean(
+		normalized && normalized !== "main" && normalized !== "master"
+	);
+}
+
 /**
  * Stage everything, commit with `message` (defaulting server-side to
  * "Update via Ryu"), and push to the tracking remote for `cwd`. Resolves with
@@ -247,6 +258,147 @@ export async function commitPush(
 		return {
 			success: false,
 			error: e instanceof Error ? e.message : "commit/push failed",
+		};
+	}
+}
+
+export interface GitRemoteResult {
+	commit?: string | null;
+	error?: string;
+	pulled?: boolean;
+	pushed?: boolean;
+	success: boolean;
+}
+
+export type GitRemoteAction = "pull" | "sync";
+
+async function runGitRemoteAction(
+	target: ApiTarget,
+	cwd: string,
+	action: GitRemoteAction,
+	signal?: AbortSignal
+): Promise<GitRemoteResult> {
+	const url = apiUrl(target, `/api/git/${action}`);
+	try {
+		const resp = await fetch(url, {
+			method: "POST",
+			headers: makeHeaders(target.token),
+			body: JSON.stringify({ cwd }),
+			signal,
+		});
+		const { data, error } = await readJsonBody<Partial<GitRemoteResult>>(
+			resp,
+			`git ${action}`
+		);
+		if (error) {
+			return { success: false, error };
+		}
+		return {
+			commit: data?.commit ?? null,
+			pulled: data?.pulled ?? true,
+			pushed: data?.pushed ?? action === "sync",
+			success: true,
+		};
+	} catch (error) {
+		return {
+			success: false,
+			error: error instanceof Error ? error.message : `git ${action} failed`,
+		};
+	}
+}
+
+export function pullGit(
+	target: ApiTarget,
+	cwd: string,
+	signal?: AbortSignal
+): Promise<GitRemoteResult> {
+	return runGitRemoteAction(target, cwd, "pull", signal);
+}
+
+export function syncGit(
+	target: ApiTarget,
+	cwd: string,
+	signal?: AbortSignal
+): Promise<GitRemoteResult> {
+	return runGitRemoteAction(target, cwd, "sync", signal);
+}
+
+// ── Pull request creation (pinned-summary action) ───────────────────────────
+
+export interface PullRequestOptions {
+	base?: string;
+	body?: string;
+	draft: boolean;
+	includeUnstaged: boolean;
+	title?: string;
+}
+
+export interface PullRequestResult {
+	already_exists?: boolean;
+	base?: string | null;
+	branch?: string | null;
+	comments_count?: number | null;
+	error?: string;
+	head_sha?: string | null;
+	is_draft?: boolean;
+	number?: number | null;
+	pr_url?: string | null;
+	repository?: string | null;
+	state?: string | null;
+	success: boolean;
+	title?: string | null;
+}
+
+/**
+ * Optionally commit and push the current folder, then create a GitHub pull
+ * request through Core's authenticated `gh` installation.
+ */
+export async function createPullRequest(
+	target: ApiTarget,
+	cwd: string,
+	opts: PullRequestOptions,
+	signal?: AbortSignal
+): Promise<PullRequestResult> {
+	const url = apiUrl(target, "/api/git/pull-request");
+	try {
+		const resp = await fetch(url, {
+			method: "POST",
+			headers: makeHeaders(target.token),
+			body: JSON.stringify({
+				base: opts.base,
+				body: opts.body,
+				cwd,
+				draft: opts.draft,
+				include_unstaged: opts.includeUnstaged,
+				title: opts.title,
+			}),
+			signal,
+		});
+		const { data, error } = await readJsonBody<Partial<PullRequestResult>>(
+			resp,
+			"pull request"
+		);
+		if (error) {
+			return { success: false, error };
+		}
+		return {
+			already_exists: data?.already_exists ?? false,
+			base: data?.base ?? null,
+			branch: data?.branch ?? null,
+			comments_count: data?.comments_count ?? null,
+			head_sha: data?.head_sha ?? null,
+			is_draft: data?.is_draft ?? opts.draft,
+			number: data?.number ?? null,
+			pr_url: data?.pr_url ?? null,
+			repository: data?.repository ?? null,
+			success: true,
+			state: data?.state ?? null,
+			title: data?.title ?? null,
+		};
+	} catch (e) {
+		return {
+			success: false,
+			error: e instanceof Error ? e.message : "pull request failed",
 		};
 	}
 }

@@ -51,6 +51,7 @@ import {
 	zoneAnchorPosition,
 } from "./island-snap.ts";
 import {
+	dismissIslandPromo,
 	type IslandState,
 	setIslandState,
 	useIslandStore,
@@ -198,6 +199,7 @@ function PromoScratchPanel({
 					code="LAUNCH30"
 					discountLabel="30%"
 					headline="I have a 30% discount. Just scratch this card!"
+					onNeverShowAgain={dismissIslandPromo}
 				/>
 			</div>
 		</ExpandedPanelShell>
@@ -699,8 +701,9 @@ function FloatingIsland({
 export function GlobalIsland() {
 	const { state, hasPromo, suppressed } = useIslandStore();
 	// A surface that draws its own island (the landing hero's workflow loop) takes
-	// the floor while it is on screen — one island at a time, always.
-	if (suppressed) {
+	// the floor while it is on screen — except for a promo, which is the one
+	// site-wide state allowed to interrupt the demo and open automatically.
+	if (suppressed && state !== "promo") {
 		return null;
 	}
 	return (

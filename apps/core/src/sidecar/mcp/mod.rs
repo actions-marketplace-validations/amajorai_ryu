@@ -24,18 +24,22 @@ pub mod orchestrator;
 pub mod sandbox;
 pub mod search_conversations;
 pub mod skills_tool;
+pub mod spaces_tool;
 pub mod threads;
 pub mod ui_tool;
 pub mod web_fetch;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, OnceLock, RwLock,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::RwLock as TokioRwLock;
+use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 
 use client::{McpHttpEndpoint, McpStdioCommand, McpTarget, McpTool};
 
@@ -247,25 +251,16 @@ async fn run_tool_result_hooks(
         tool_output: Some(output.clone()),
         ..Default::default()
     };
-    let fut = IN_TOOL_HOOK.scope(
-        (),
-        crate::plugin_host::dispatch_global(crate::plugin_host::ON_TOOL_RESULT, ctx),
-    );
-    let directives = match tokio::time::timeout(TOOL_RESULT_HOOK_TIMEOUT, fut).await {
-        Ok(d) => d,
+    let fut = IN_TOOL_HOOK.scope((), crate::plugin_host::dispatch_global_tool_result(ctx));
+    match tokio::time::timeout(TOOL_RESULT_HOOK_TIMEOUT, fut).await {
+        Ok(output) => output,
         Err(_) => {
             tracing::warn!(
                 "plugin_host: tool_result hook timed out for '{tool_id}'; using the original result"
             );
             return None;
         }
-    };
-    // First writer wins: a rewrite is never fed to another plugin's hook, so what
-    // a hook observes is always the real tool's output.
-    directives.into_iter().find_map(|d| match d {
-        crate::plugin_host::HookDirective::Transform { output } => Some(output),
-        _ => None,
-    })
+    }
 }
 
 /// Fire `post_tool_use` hooks (Claude's PostToolUse) DETACHED — observation-only,
@@ -296,7 +291,7 @@ fn fire_post_tool_hooks(tool_id: String, arguments: Value, output: Value) {
 ///
 /// The workflow executor ([`crate::workflow::executor`]) is a free function with
 /// no `ServerState`, so the `Tool` node reads the registry from here to invoke
-/// tools (e.g. `spider__crawl`) for real instead of echoing.
+/// tools (e.g. `spider.crawl`) for real instead of echoing.
 static GLOBAL_REGISTRY: OnceLock<Arc<McpRegistry>> = OnceLock::new();
 
 /// Publish the global registry. Idempotent: a second call is ignored.
@@ -310,7 +305,7 @@ pub fn global_registry() -> Option<Arc<McpRegistry>> {
 }
 
 /// A single MCP server as declared in config — **either** a stdio command to
-/// spawn **or** an HTTP endpoint to POST to.
+/// spawn, a Streamable HTTP endpoint, or a legacy HTTP+SSE endpoint.
 ///
 /// The two halves are `command`+`args`+`env` and `url`+`headers`; `type`
 /// disambiguates when both or neither are present. `command` is optional
@@ -330,7 +325,8 @@ pub struct McpServerConfig {
     pub command: Option<String>,
     /// Transport hint, as written in the config file's `type` key: `stdio`,
     /// `http`, `streamable-http`, or `sse`. Absent ⇒ inferred from which of
-    /// `command`/`url` is present. See [`McpServerConfig::transport_kind`].
+    /// `command`/`url` is present. `sse` selects the legacy event-stream
+    /// transport; see [`McpServerConfig::transport_kind`].
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
     /// Endpoint URL for a remote (HTTP) server. Absent for a stdio entry.
@@ -456,17 +452,24 @@ impl McpServerConfig {
     /// deliberately accepts it so ONE bad entry never costs the user the file.
     fn to_target(&self) -> Result<McpTarget> {
         match self.transport_kind() {
-            McpTransportKind::Http => {
+            McpTransportKind::Http | McpTransportKind::Sse => {
                 let url = self
                     .url
                     .as_deref()
                     .map(str::trim)
                     .filter(|u| !u.is_empty())
-                    .ok_or_else(|| anyhow!("MCP server declares an http transport but no 'url'"))?;
-                Ok(McpTarget::Http(McpHttpEndpoint {
+                    .ok_or_else(|| {
+                        anyhow!("MCP server declares a remote transport but no 'url'")
+                    })?;
+                let endpoint = McpHttpEndpoint {
                     url: url.to_owned(),
                     headers: self.headers.clone(),
-                }))
+                };
+                Ok(match self.transport_kind() {
+                    McpTransportKind::Http => McpTarget::Http(endpoint),
+                    McpTransportKind::Sse => McpTarget::Sse(endpoint),
+                    McpTransportKind::Stdio => unreachable!("matched remote transport"),
+                })
             }
             McpTransportKind::Stdio => {
                 let command = self
@@ -476,7 +479,7 @@ impl McpServerConfig {
                     .filter(|c| !c.is_empty())
                     .ok_or_else(|| {
                         anyhow!(
-                            "MCP server declares neither a 'command' (stdio) nor a 'url' (http)"
+                            "MCP server declares neither a 'command' (stdio) nor a 'url' (remote)"
                         )
                     })?;
                 Ok(McpTarget::Stdio(McpStdioCommand {
@@ -497,10 +500,10 @@ impl McpServerConfig {
     /// Explicit `type` wins, normalized the same way the MCP registry catalog
     /// normalizes a package's transport string (`PackageJson::transport_str`):
     /// lowercased, with `stdio` as the default when unstated. `http`,
-    /// `streamable-http` (the spec's current name) and `sse` (its predecessor,
-    /// still what many published configs say) all mean "reach it over HTTP" here
-    /// — Core POSTs a frame and reads either a JSON or an SSE response body, which
-    /// serves both.
+    /// `streamable-http` (the current name) uses the Streamable HTTP client, while
+    /// `sse` selects the predecessor's long-lived GET stream plus POST message
+    /// endpoint. The latter remains common in published configs, so it stays a
+    /// distinct runtime transport rather than being silently treated as POST-only.
     ///
     /// An **unrecognized** `type` is not guessed into a transport: it falls
     /// through to the same shape inference as an absent one (a `url` ⇒ HTTP,
@@ -513,7 +516,8 @@ impl McpServerConfig {
             .map(|t| t.trim().to_ascii_lowercase());
         match declared.as_deref() {
             Some("stdio") => McpTransportKind::Stdio,
-            Some("http" | "streamable-http" | "streamable_http" | "sse") => McpTransportKind::Http,
+            Some("sse") => McpTransportKind::Sse,
+            Some("http" | "streamable-http" | "streamable_http") => McpTransportKind::Http,
             // Unstated or unrecognized: infer from which half is filled in.
             _ if self.url.as_deref().is_some_and(|u| !u.trim().is_empty()) => {
                 McpTransportKind::Http
@@ -524,9 +528,21 @@ impl McpServerConfig {
 
     /// The transport name to report to clients (`GET /api/mcp/servers`).
     fn transport_label(&self) -> &'static str {
-        match self.transport_kind() {
-            McpTransportKind::Http => "http",
-            McpTransportKind::Stdio => "stdio",
+        match self
+            .transport
+            .as_deref()
+            .map(|transport| transport.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("sse") => "sse",
+            Some("streamable-http" | "streamable_http") => "streamable-http",
+            Some("http") => "http",
+            Some("stdio") => "stdio",
+            _ => match self.transport_kind() {
+                McpTransportKind::Http => "streamable-http",
+                McpTransportKind::Sse => "sse",
+                McpTransportKind::Stdio => "stdio",
+            },
         }
     }
 }
@@ -643,7 +659,7 @@ async fn oauth_target(
             session_id,
         )
         .await?;
-    if let McpTarget::Http(endpoint) = &mut target {
+    if let McpTarget::Http(endpoint) | McpTarget::Sse(endpoint) = &mut target {
         endpoint
             .headers
             .insert("Authorization".to_owned(), format!("Bearer {token}"));
@@ -695,13 +711,13 @@ async fn oauth_elicitation(
     ))
 }
 
-/// The two transports a config entry can name. Not the same axis as the wire
-/// string — `http`, `streamable-http` and `sse` all collapse to
-/// [`McpTransportKind::Http`] here.
+/// The three MCP transports a config entry can name. `Http` is Streamable HTTP;
+/// `Sse` is the deprecated HTTP+SSE transport retained for compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpTransportKind {
     Stdio,
     Http,
+    Sse,
 }
 
 /// Lower a manifest [`McpServerDecl`] (pure kernel-contracts data) into the
@@ -860,7 +876,7 @@ pub fn may_register_mcp_servers(
 /// tools that every call ENOENTs on. `ghost` is the live instance: it is Core-tier
 /// and default-ON, so registration used to be unconditional, and Ghost's binary is
 /// only ever fetched by its own downloader — whose `archive_url()` has no default, so
-/// no end user has it. Every agent on a stock node therefore carried ~29 `ghost__*`
+/// no end user has it. Every agent on a stock node therefore carried ~29 `ghost.*`
 /// tools that could not run. A model cannot tell "this tool is broken" from "I called
 /// it wrong", so it retries; an absent tool it simply routes around.
 ///
@@ -1004,7 +1020,9 @@ pub(crate) fn mcp_command_is_present(command: &str) -> bool {
 /// not installed — describing a command it never had.
 pub(crate) fn mcp_server_is_present(cfg: &McpServerConfig) -> bool {
     match cfg.transport_kind() {
-        McpTransportKind::Http => cfg.url.as_deref().is_some_and(|u| !u.trim().is_empty()),
+        McpTransportKind::Http | McpTransportKind::Sse => {
+            cfg.url.as_deref().is_some_and(|u| !u.trim().is_empty())
+        }
         McpTransportKind::Stdio => mcp_command_is_present(cfg.command.as_deref().unwrap_or("")),
     }
 }
@@ -1159,13 +1177,13 @@ impl McpConfigFile {
     ///
     /// Per-entry rather than one `BTreeMap<String, McpServerConfig>` deserialize
     /// because the all-or-nothing shape silently deleted the user's ENTIRE server
-    /// list. [`McpServerConfig::command`] is a required `String`, and the config
-    /// dialect we advertise compatibility with — Claude Desktop's — also carries
-    /// *remote* entries shaped `{"type":"http","url":"https://…"}`, which have no
-    /// `command` at all. Pasting a config with one of those made serde fail the
-    /// whole map, and every caller's error arm is a `warn!` + fall through: the
-    /// user's stdio servers all vanished, the built-ins came back, and the only
-    /// trace was a log line nobody reads.
+    /// list. The config dialect we advertise compatibility with — Claude
+    /// Desktop's — also carries *remote* entries shaped
+    /// `{"type":"http","url":"https://…"}`, which have no `command` at all.
+    /// Pasting a config with one of those used to make serde fail the whole map,
+    /// and every caller's error arm is a `warn!` + fall through: the user's
+    /// stdio servers all vanished, the built-ins came back, and the only trace
+    /// was a log line nobody reads.
     ///
     /// Keep it per-entry even after the remote (`url`/`transport`/`headers`)
     /// fields land. The invariant is not "we understand every entry" — it is that
@@ -1194,7 +1212,140 @@ impl McpConfigFile {
     }
 }
 
-/// Which declarative backend an `app__` tool resolved to, tagged onto its
+/// The single writer for the user's MCP config.
+///
+/// All Core mutation paths go through this store so read-modify-write operations
+/// cannot race and lose a server. The operation receives the raw JSON document,
+/// rather than a typed projection, which preserves `$schema`, alternate dialect
+/// keys, metadata, and unknown fields while Ryu changes only the server entry it
+/// owns.
+pub struct McpConfigStore;
+
+static MCP_CONFIG_WRITE_LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
+static MCP_CONFIG_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+impl McpConfigStore {
+    fn lock() -> &'static TokioMutex<()> {
+        MCP_CONFIG_WRITE_LOCK.get_or_init(|| TokioMutex::new(()))
+    }
+
+    /// Mutate one config document and atomically replace it when the operation
+    /// reports a change. The process-wide lock covers the whole read/modify/write
+    /// window; the unique temp path also prevents unrelated writers from sharing
+    /// `mcp.json.tmp`.
+    pub async fn mutate<T, F>(path: PathBuf, operation: F) -> std::result::Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Value) -> std::result::Result<(bool, T), String> + Send + 'static,
+    {
+        let _guard = Self::lock().lock().await;
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("cannot create config dir: {error}"))?;
+            }
+
+            let mut document = match std::fs::read_to_string(&path) {
+                Ok(raw) => serde_json::from_str::<Value>(&raw)
+                    .map_err(|error| format!("mcp.json is malformed: {error}"))?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    serde_json::json!({})
+                }
+                Err(error) => return Err(format!("cannot read mcp.json: {error}")),
+            };
+            if !document.is_object() {
+                return Err("mcp.json must contain a JSON object".to_owned());
+            }
+
+            let (changed, result) = operation(&mut document)?;
+            if changed {
+                let output = serde_json::to_vec_pretty(&document)
+                    .map_err(|error| format!("failed to serialize mcp.json: {error}"))?;
+                let sequence = MCP_CONFIG_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                let tmp = path.with_file_name(format!(
+                    ".{}.mcp.tmp.{}.{}",
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("config"),
+                    std::process::id(),
+                    sequence
+                ));
+                write_mcp_secret_file(&tmp, &output)?;
+                if let Err(error) = std::fs::rename(&tmp, &path) {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(format!("failed to replace mcp.json: {error}"));
+                }
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|error| format!("mcp.json write task panicked: {error}"))?
+    }
+
+    /// Return the raw server map, accepting the common config dialect aliases.
+    pub fn servers_mut(
+        document: &mut Value,
+    ) -> std::result::Result<&mut serde_json::Map<String, Value>, String> {
+        let object = document
+            .as_object_mut()
+            .ok_or_else(|| "mcp.json must contain a JSON object".to_owned())?;
+        let key = if object.contains_key("mcpServers") {
+            "mcpServers"
+        } else if object.contains_key("servers") {
+            "servers"
+        } else if object.contains_key("mcp_servers") {
+            "mcp_servers"
+        } else {
+            object.insert("mcpServers".to_owned(), serde_json::json!({}));
+            "mcpServers"
+        };
+        object
+            .get_mut(key)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| format!("mcp.json `{key}` must be an object"))
+    }
+
+    /// Replace one typed server while retaining unknown fields inside that entry.
+    pub fn replace_server(
+        servers: &mut serde_json::Map<String, Value>,
+        name: String,
+        config: &McpServerConfig,
+    ) -> std::result::Result<(), String> {
+        let mut replacement = serde_json::to_value(config)
+            .map_err(|error| format!("failed to serialize MCP server: {error}"))?;
+        if let (Some(old), Some(new)) = (
+            servers.get(&name).and_then(Value::as_object),
+            replacement.as_object_mut(),
+        ) {
+            for (key, value) in old {
+                new.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        servers.insert(name, replacement);
+        Ok(())
+    }
+}
+
+fn write_mcp_secret_file(path: &Path, data: &[u8]) -> std::result::Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true).mode(0o600);
+        let mut file = options
+            .open(path)
+            .map_err(|error| format!("failed to write mcp.json: {error}"))?;
+        std::io::Write::write_all(&mut file, data)
+            .map_err(|error| format!("failed to write mcp.json: {error}"))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, data).map_err(|error| format!("failed to write mcp.json: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Which declarative backend an `app.` tool resolved to, tagged onto its
 /// [`RegistryTool`] at registration so the catalog can surface a `command` tool as
 /// its own [`catalog::ToolKind`]. `None` on a row means "not an app tool, or
 /// untagged" — the http/inline_deno/alias app backends stay classified as
@@ -1211,7 +1362,7 @@ pub enum AppToolBackendTag {
 /// A tool exposed through the registry, tagged with its owning server.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RegistryTool {
-    /// Fully-qualified id: `<server>__<tool>` — unique across servers.
+    /// Fully-qualified id: `<server>.<tool>` — unique across servers.
     pub id: String,
     /// The server this tool belongs to.
     pub server: String,
@@ -1252,7 +1403,7 @@ impl RegistryTool {
     /// (`tools_for_server`, the in-process apps provider) set them explicitly.
     pub fn candidate(id: &str, server: &str, name: &str) -> Self {
         Self {
-            id: id.to_owned(),
+            id: canonical_tool_id(id),
             server: server.to_owned(),
             name: name.to_owned(),
             description: None,
@@ -1422,8 +1573,9 @@ pub struct ServerSummary {
     pub args: Vec<String>,
     pub description: Option<String>,
     pub enabled: bool,
-    /// `"stdio"` or `"http"` for a config-declared server; `None` for a built-in
-    /// (whose "command" is a parenthetical label, not a transport at all).
+    /// `"stdio"`, `"streamable-http"`, or `"sse"` for a config-declared server;
+    /// `None` for a built-in (whose "command" is a parenthetical label, not a
+    /// transport at all).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
     /// The endpoint of a remote server, so the UI can show *where* it points
@@ -1436,6 +1588,80 @@ pub struct ServerSummary {
     /// state instead of a hard error. `None` when availability can't be
     /// determined cheaply (e.g. a bare command resolved via `PATH`).
     pub available: Option<bool>,
+    /// Whether this server declares an OAuth flow or a conventional credential
+    /// header. Credential values never leave Core.
+    #[serde(default)]
+    pub auth_required: bool,
+    /// Whether a static credential is present in the server configuration. OAuth
+    /// connection state is resolved through the redacted OAuth API instead.
+    #[serde(default)]
+    pub auth_configured: bool,
+    /// `"oauth"` or `"header"` when authentication metadata is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_type: Option<String>,
+    /// Runtime owner for a manifest-declared OAuth server. This is a public id,
+    /// not a secret, and lets clients join the row to the OAuth connection API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_plugin_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_server_name: Option<String>,
+    /// Names only. Values are deliberately never returned by the listing API.
+    #[serde(default)]
+    pub env_keys: Vec<String>,
+    #[serde(default)]
+    pub header_names: Vec<String>,
+}
+
+/// Return the non-secret authentication metadata Core can know synchronously.
+///
+/// OAuth connection state belongs to `mcp_oauth`; a declared OAuth flow is not
+/// the same thing as a connected account. Static credentials are only detected
+/// for conventional auth headers and environment-variable names so unrelated
+/// configuration does not make a server look authenticated in the UI.
+fn auth_metadata(cfg: &McpServerConfig) -> (bool, bool, Option<String>) {
+    let oauth = cfg.auth.is_some();
+    let header_declared = cfg.headers.keys().any(|name| is_auth_header_name(name));
+    let env_declared = cfg.env.keys().any(|name| is_auth_env_name(name));
+    let static_header = cfg
+        .headers
+        .iter()
+        .any(|(name, value)| is_auth_header_name(name) && !value.trim().is_empty());
+    let static_env = cfg
+        .env
+        .iter()
+        .any(|(name, value)| is_auth_env_name(name) && !value.trim().is_empty());
+    (
+        oauth || header_declared || env_declared,
+        static_header || static_env,
+        if oauth {
+            Some("oauth".to_owned())
+        } else if header_declared {
+            Some("header".to_owned())
+        } else if env_declared {
+            Some("env".to_owned())
+        } else {
+            None
+        },
+    )
+}
+
+fn is_auth_header_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization" | "proxy-authorization" | "x-api-key" | "api-key" | "api_token" | "token"
+    )
+}
+
+fn is_auth_env_name(name: &str) -> bool {
+    let normalized = name.to_ascii_uppercase();
+    matches!(
+        normalized.as_str(),
+        "API_KEY" | "AUTH_TOKEN" | "CLIENT_SECRET" | "PASSWORD" | "SECRET" | "TOKEN"
+    ) || normalized.ends_with("_API_KEY")
+        || normalized.ends_with("_CLIENT_SECRET")
+        || normalized.ends_with("_PASSWORD")
+        || normalized.ends_with("_SECRET")
+        || normalized.ends_with("_TOKEN")
 }
 
 /// Name under which the Ghost desktop-automation MCP server (U14) is registered.
@@ -1449,10 +1675,10 @@ pub struct ServerSummary {
 #[allow(dead_code)]
 pub const GHOST_SERVER: &str = "ghost";
 
-/// Fully-qualified id of Ghost's recipe-replay tool (`<server>__<tool>`), as the
+/// Fully-qualified id of Ghost's recipe-replay tool (`<server>.<tool>`), as the
 /// registry namespaces it. One definition so the two kernel callers — the workflow
 /// executor's `Recipe` node and the recorder shim in `recipes_host` — cannot drift.
-pub const GHOST_RUN_TOOL: &str = "ghost__ghost_run";
+pub const GHOST_RUN_TOOL: &str = "ghost.ghost_run";
 
 /// Name under which the Agent Browser MCP server is registered. Agent Browser is
 /// the default web-browsing tool (npm `agentbrowser`, launched via `npx`),
@@ -1471,11 +1697,13 @@ pub const AGENTBROWSER_SERVER: &str = "agentbrowser";
 /// boundary, but newly generated ids use this separator.
 const TOOL_ID_SEP: &str = ".";
 const LEGACY_TOOL_ID_SEP: &str = "__";
+const LEGACY_EXT_TOOL_PREFIX: &str = "ryu_ext__";
 
 /// Synthetic "server" name for tools an enabled plugin re-exposes
-/// (tool-as-Runnable, M3). These ids look like `app__<target-tool-id>` and are
+/// (tool-as-Runnable, M3). These ids look like `app.<target-tool-id>` and are
 /// dispatched by aliasing to the target — see `call_tool_with_user`.
 const APP_TOOL_SERVER: &str = "app";
+const LEGACY_APP_TOOL_PREFIX: &str = "app__";
 
 /// Id prefix for app-registered tools (`APP_TOOL_SERVER` + `TOOL_ID_SEP`).
 const APP_TOOL_PREFIX: &str = "app.";
@@ -1528,47 +1756,103 @@ fn ext_api_key_owned_by(key: &str, plugin_id: &str) -> bool {
             && key.as_bytes()[plugin_id.len()] == b'/')
 }
 
+/// Convert a legacy fully-qualified tool id to the canonical dotted form.
+///
+/// This is deliberately a boundary conversion rather than a manifest rewrite:
+/// installed plugins and saved agent allowlists can still contain the historical
+/// `server__tool` spelling, while every new registry row and dispatch decision uses
+/// `server.tool`. Only the namespace separator is converted for ordinary ids, so a
+/// tool name that legitimately contains `__` remains the same tool. The historical
+/// ext-API ids had two namespace separators (`ryu_ext__plugin__operation`), so that
+/// known producer shape is normalized explicitly as well.
+pub(crate) fn canonical_tool_id(id: &str) -> String {
+    if let Some(rest) = id.strip_prefix(LEGACY_EXT_TOOL_PREFIX) {
+        if let Some((plugin, operation)) = rest.split_once(LEGACY_TOOL_ID_SEP) {
+            return format!("ryu_ext{TOOL_ID_SEP}{plugin}{TOOL_ID_SEP}{operation}");
+        }
+        return format!("ryu_ext{TOOL_ID_SEP}{rest}");
+    }
+    // Catalog server keys commonly use a slash (`io.github.acme/files`). In
+    // that shape a dunder after the slash is the old namespace separator when
+    // no canonical server/tool dot appears after the slash. A canonical tool
+    // name may itself contain a dunder, so preserve that form.
+    if let Some(legacy) = id.find(LEGACY_TOOL_ID_SEP) {
+        let slash = id[..legacy].rfind('/');
+        let canonical_tool_separator = slash
+            .map(|slash| id[slash + 1..legacy].contains(TOOL_ID_SEP))
+            .unwrap_or(false);
+        if slash.is_some() && !canonical_tool_separator {
+            return format!(
+                "{}{TOOL_ID_SEP}{}",
+                &id[..legacy],
+                &id[legacy + LEGACY_TOOL_ID_SEP.len()..]
+            );
+        }
+    }
+    // A canonical id may still contain the legacy characters inside its tool
+    // name (for example `web.search__preview`). Only translate a legacy
+    // namespace when its separator appears before the first canonical dot;
+    // otherwise the dot already proves that the prefix is canonical.
+    if let Some(dot) = id.find(TOOL_ID_SEP) {
+        if let Some(legacy) = id.find(LEGACY_TOOL_ID_SEP) {
+            if dot < legacy {
+                return id.to_owned();
+            }
+        }
+    }
+    id.split_once(LEGACY_TOOL_ID_SEP)
+        .map(|(server, tool)| format!("{server}{TOOL_ID_SEP}{tool}"))
+        .unwrap_or_else(|| id.to_owned())
+}
+
+fn is_app_tool_id(id: &str) -> bool {
+    id.starts_with(APP_TOOL_PREFIX) || id.starts_with(LEGACY_APP_TOOL_PREFIX)
+}
+
 /// The id under which a Tool runnable is REGISTERED and dispatched — the single
 /// source of truth both registration (server handler) and resolution
 /// (`resolve_app_tool_backend`) call, so they can never disagree.
 ///
 /// A declarative tool plugin that ships NEW behavior (a non-`Alias` backend) AND
-/// already namespaces its slug with the tool-id separator (`__`) keeps its NATIVE
-/// id verbatim (`exa__search`, `spider__crawl`, `rtk__run`), so allowlists and the
-/// gateway/ACP tool descriptors that name that id resolve unchanged end-to-end.
+/// already namespaces its slug with either the canonical or legacy tool-id
+/// separator keeps its native namespace (`exa.search`, `spider.crawl`, `rtk.run`),
+/// after the legacy spelling is normalized. This lets old manifests continue to
+/// work while new manifests expose only dotted ids.
 ///
-/// Everything else stays `app__<slug>`: an `Alias` tool (the other-apps re-expose
-/// path, which MUST keep the prefix), or a bare slug lacking the `__` separator
-/// that `split_tool_id` requires (a native id without a separator is unroutable, so
-/// `weather` correctly stays `app__weather`). This preserves the exact current
-/// behavior for every non-namespaced declarative tool.
+/// Everything else stays `app.<slug>`: an `Alias` tool (the other-apps re-expose
+/// path, which MUST keep the prefix), or a bare slug lacking the namespace
+/// separator that `split_tool_id` requires (a native id without a separator is
+/// unroutable, so `weather` correctly stays `app.weather`). This preserves the
+/// exact current behavior for every non-namespaced declarative tool.
 pub(crate) fn app_tool_registered_id(cfg: &crate::plugin_manifest::schema::ToolConfig) -> String {
     use crate::plugin_manifest::schema::ToolBackend;
+    let slug = canonical_tool_id(&cfg.slug);
     match cfg.resolve_backend() {
         Ok(backend)
-            if !matches!(backend, ToolBackend::Alias { .. }) && cfg.slug.contains(TOOL_ID_SEP) =>
+            if !matches!(backend, ToolBackend::Alias { .. })
+                && (cfg.slug.contains(TOOL_ID_SEP) || cfg.slug.contains(LEGACY_TOOL_ID_SEP)) =>
         {
-            cfg.slug.clone()
+            slug
         }
-        _ => format!("{APP_TOOL_PREFIX}{}", cfg.slug),
+        _ => format!("{APP_TOOL_PREFIX}{slug}"),
     }
 }
 
-/// The `skills__*` ids that are genuinely callable functions, sourced from the
+/// The `skills.*` ids that are genuinely callable functions, sourced from the
 /// `skills` provider's own exported constants rather than re-spelled here.
 ///
 /// These three are what [`skills_tool::dispatch`] has match arms for (`search` /
 /// `load` / `author`, after `split_tool_id` strips the server segment) and what
 /// [`skills_tool::tools`] advertises. Every other id under the `skills` server is a
-/// **catalog id** — a `skills__<slug>` discovery row for an Agent Skill, which
+/// **catalog id** — a `skills.<slug>` discovery row for an Agent Skill, which
 /// `dispatch`'s fallthrough refuses.
 ///
 /// **Cross-file dependency, stated deliberately:** this list and the refusal it
 /// depends on live in `skills_tool.rs`, not here. A drift guard test asserts
 /// `skills_tool::tools()` is a subset of this list. That direction is the
-/// load-bearing one: a new *callable* `skills__*` tool landing without a matching
+/// load-bearing one: a new *callable* `skills.*` tool landing without a matching
 /// entry here would be classified as a catalog id and silently skip the approval
-/// gate — and `skills__author` already writes files into the shared skills
+/// gate — and `skills.author` already writes files into the shared skills
 /// directory, so an un-gated sibling of it would be a real hole. The opposite drift
 /// (a catalog id mistaken for a tool) merely restores today's behaviour: a dead
 /// approval, which is what this whole change removes.
@@ -1586,29 +1870,31 @@ const SKILLS_CALLABLE_TOOL_IDS: [&str; 3] = [
 
 /// Whether the human-in-the-loop approval gate should run for this tool id.
 ///
-/// `false` for exactly one shape: a `skills__<slug>` **catalog** id. Approving one
+/// `false` for exactly one shape: a `skills.<slug>` **catalog** id. Approving one
 /// cannot make it run — it is a discovery row, not a function — so queuing an
 /// approval for it puts a pending item in the user's inbox that can only ever
 /// resolve to `skills_tool::dispatch`'s refusal. See the call site in
 /// [`McpRegistry::call_tool_with_identity`] for the full reasoning.
 ///
 /// The comparison is on the WHOLE id after confirming the server segment, because
-/// [`McpRegistry::split_tool_id`] is `split_once("__")`: `skills__a__b` splits to
-/// server `skills` + tool `a__b`, which is a slug containing the separator and
-/// correctly a catalog id, while `skills__search` matches a callable id exactly.
+/// [`McpRegistry::split_tool_id`] splits the first namespace separator:
+/// `skills.a__b` has server `skills` and tool `a__b`, which is a slug containing
+/// the legacy separator and correctly remains a catalog id, while `skills.search`
+/// matches a callable id exactly.
 /// An id with no separator at all (`skills`) is not routable to this provider and
 /// stays gated.
 ///
 /// The call site passes the **resolved** `gate_id`, not the raw `tool_id` — the
 /// same value the gate classifies risk on. That is deliberate and mirrors the
-/// alias rule directly above it: an `app__…` tool whose manifest-fixed alias target
-/// is a `skills__<slug>` catalog id resolves to that id here and is skipped for
+/// alias rule directly above it: an `app.…` tool whose manifest-fixed alias target
+/// is a `skills.<slug>` catalog id resolves to that id here and is skipped for
 /// exactly the same reason (the resolved call can only refuse), while an alias onto
-/// a real `skills__*` tool keeps its gate.
+/// a real `skills.*` tool keeps its gate.
 pub(crate) fn approval_gate_applies(tool_id: &str) -> bool {
-    match McpRegistry::split_tool_id(tool_id) {
+    let normalized = canonical_tool_id(tool_id);
+    match McpRegistry::split_tool_id(&normalized) {
         Some((server, _)) if server == skills_tool::SERVER_NAME => {
-            SKILLS_CALLABLE_TOOL_IDS.contains(&tool_id)
+            SKILLS_CALLABLE_TOOL_IDS.contains(&normalized.as_str())
         }
         _ => true,
     }
@@ -1925,25 +2211,25 @@ pub struct McpRegistry {
     /// `None` in test/CLI contexts that don't wire it (the tool then reports the
     /// index unavailable rather than failing the call).
     pub conversations: Option<crate::server::conversations::ConversationStore>,
-    /// Skill registry, wired so the `skills` built-in tools (`skills__search` /
-    /// `skills__load`) can discover + load Agent Skills on demand (progressive
+    /// Skill registry, wired so the `skills` built-in tools (`skills.search` /
+    /// `skills.load`) can discover + load Agent Skills on demand (progressive
     /// disclosure). Cheap to clone (`Arc` inside). `None` in test/CLI contexts
     /// that don't wire it (the tools then report skills unavailable).
     pub skills: Option<ryu_skills::SkillRegistry>,
     /// Preferences store, wired at boot. Cheap to clone (`Arc` inside). Currently
     /// unread by the registry: the former native `advisor` provider used it to
-    /// resolve the `advisor-model` preference, but `advisor__consult` is now a
+    /// resolve the `advisor-model` preference, but `advisor.consult` is now a
     /// declarative `http` tool whose Core bridge (`/api/advisor/consult`) reads the
     /// preference off `ServerState` directly. Kept as a wired seam for a future
     /// registry-local reader rather than churning the boot path.
     pub preferences: Option<crate::server::preferences::PreferencesStore>,
     /// Loopback client for the out-of-process `ryu-teams` sidecar, wired so the
-    /// `agent_builder__create_agent_team` tool can persist a team (over HTTP) after
+    /// `agent_builder.create_agent_team` tool can persist a team (over HTTP) after
     /// minting its members. Cheap to clone. `None` in test/CLI contexts; the tool
     /// then reports the team sink unavailable rather than partially creating agents
     /// with no team.
     pub teams_client: Option<crate::teams_client::TeamsClient>,
-    /// Spaces store, wired so the built-in `artifact__create` tool can save a
+    /// Spaces store, wired so the built-in `artifact.create` tool can save a
     /// generated file into a Space (default: the Artifacts system space) and the
     /// ACP auto-file hook can persist assistant-message media. Cheap to clone
     /// (`Arc` inside). `None` in test/CLI contexts; the tool then reports itself
@@ -2016,7 +2302,7 @@ impl McpRegistry {
     }
 
     /// Wire the teams sidecar client into the registry. Must be called after
-    /// construction to enable `agent_builder__create_agent_team` (mint a roster of
+    /// construction to enable `agent_builder.create_agent_team` (mint a roster of
     /// agents + persist them as a team over loopback HTTP).
     pub fn with_teams_client(mut self, client: crate::teams_client::TeamsClient) -> Self {
         self.teams_client = Some(client);
@@ -2035,16 +2321,16 @@ impl McpRegistry {
     }
 
     /// Wire the Spaces store into the registry. Must be called after construction
-    /// to enable the built-in `artifact__create` tool + the ACP artifact auto-file
-    /// hook to persist files into a Space.
+    /// to enable the built-in Spaces tools, `artifact.create`, and the ACP artifact
+    /// auto-file hook to persist files into a Space.
     pub fn with_spaces(mut self, spaces: crate::server::spaces::SpaceStore) -> Self {
         self.spaces = Some(spaces);
         self
     }
 
     /// Wire the skill registry into the registry. Must be called after
-    /// construction to enable the `skills` built-in tools (`skills__search` /
-    /// `skills__load`, progressive disclosure of Agent Skills).
+    /// construction to enable the `skills` built-in tools (`skills.search` /
+    /// `skills.load`, progressive disclosure of Agent Skills).
     pub fn with_skills(mut self, skills: ryu_skills::SkillRegistry) -> Self {
         self.skills = Some(skills);
         self
@@ -2245,7 +2531,7 @@ impl McpRegistry {
     /// plugin-map snapshot both complete before the `servers` write lock is taken).
     fn rebuild_servers(&self) {
         // An MCP-server-backed plugin (agentbrowser, ghost, …) can be a capability
-        // provider whose verbs map onto its `<server>__<tool>` ids, so registering or
+        // provider whose verbs map onto its `<server>.<tool>` ids, so registering or
         // deregistering one changes what the facade can serve. Every register /
         // deregister path funnels through here, which is why the invalidation sits at
         // this choke point rather than on each caller.
@@ -2281,7 +2567,7 @@ impl McpRegistry {
     /// Returns `false` — registering nothing — when the name is already owned by a
     /// DIFFERENT plugin. The plugin-declared overlay sits ABOVE the built-ins in
     /// [`Self::load_merged_servers`], so without this a plugin declaring
-    /// `mcp_servers: { "ghost": … }` would silently repoint every `ghost__*` tool
+    /// `mcp_servers: { "ghost": … }` would silently repoint every `ghost.*` tool
     /// call at its own command while keeping Ghost's tool descriptions (and the
     /// user's trust in them). First registration wins, mirroring the manifest
     /// loader's first-occurrence-wins rule for plugin IDs.
@@ -2350,8 +2636,10 @@ impl McpRegistry {
             || name == sandbox::SERVER_NAME
             || name == notify_tool::SERVER_NAME
             || name == artifact_tool::SERVER_NAME
+            || name == spaces_tool::SERVER_NAME
             || name == channel_tool::SERVER_NAME
             || name == search_conversations::SERVER_NAME
+            || name == crate::agent_control::SERVER_NAME
             || name == threads::SERVER_NAME
             || name == delegate::SERVER_NAME
             || name == orchestrator::SERVER_NAME
@@ -2461,11 +2749,37 @@ impl McpRegistry {
                 ..Default::default()
             },
             ServerSummary {
+                name: spaces_tool::SERVER_NAME.to_owned(),
+                command: "(built-in)".to_owned(),
+                args: vec![],
+                description: Some(
+                    "Built-in Spaces tools: list and search readable Spaces, create pages and \
+                     files, create or rename owned Spaces, and attach or detach a Space from the \
+                     calling agent with server-derived ownership checks."
+                        .to_owned(),
+                ),
+                enabled: true,
+                available: Some(true),
+                ..Default::default()
+            },
+            ServerSummary {
                 name: search_conversations::SERVER_NAME.to_owned(),
                 command: "(built-in)".to_owned(),
                 args: vec![],
                 description: Some(
                     "Built-in: semantic search over the user's past conversation messages."
+                        .to_owned(),
+                ),
+                enabled: true,
+                available: Some(true),
+                ..Default::default()
+            },
+            ServerSummary {
+                name: crate::agent_control::SERVER_NAME.to_owned(),
+                command: "(built-in)".to_owned(),
+                args: vec![],
+                description: Some(
+                    "Built-in agent control: request the next turn's agent, model, or reasoning effort."
                         .to_owned(),
                 ),
                 enabled: true,
@@ -2507,8 +2821,8 @@ impl McpRegistry {
                 description: Some(
                     "Built-in orchestration discovery: list the other agents available to \
                      delegate to, with each one's id/name/description, so an orchestrator can \
-                     find the right specialist (orchestrator__discover_agents) before handing \
-                     it a subtask via delegate__fanout."
+                     find the right specialist (orchestrator.discover_agents) before handing \
+                     it a subtask via delegate.fanout."
                         .to_owned(),
                 ),
                 enabled: true,
@@ -2520,7 +2834,7 @@ impl McpRegistry {
                 command: "(built-in)".to_owned(),
                 args: vec![],
                 // Not an inline literal like its neighbours: the text depends on the
-                // `skills__author` opt-in, so it is computed where that gate lives
+                // `skills.author` opt-in, so it is computed where that gate lives
                 // (see `skills_tool::server_description`).
                 description: Some(skills_tool::server_description()),
                 enabled: true,
@@ -2533,7 +2847,8 @@ impl McpRegistry {
                 args: vec![],
                 description: Some(
                     "Built-in generative UI: render a rich interactive UI inline in the chat \
-                     (ui__render) from a json-render spec, using the app's own shadcn components."
+                     (ui.render) from a native json-render spec or an A2UI v0.9 message \
+                     sequence, using the app's own shadcn components."
                         .to_owned(),
                 ),
                 enabled: true,
@@ -2558,6 +2873,7 @@ impl McpRegistry {
         }));
         let servers = self.servers.read().expect("mcp servers RwLock poisoned");
         summaries.extend(servers.iter().map(|(name, cfg)| {
+            let (auth_required, auth_configured, auth_type) = auth_metadata(cfg);
             ServerSummary {
                 name: name.clone(),
                 // A remote entry has no command; show the endpoint in the column the
@@ -2573,6 +2889,13 @@ impl McpRegistry {
                 available: config_availability(cfg),
                 transport: Some(cfg.transport_label().to_owned()),
                 url: cfg.url.clone(),
+                auth_required,
+                auth_configured,
+                auth_type,
+                owner_plugin_id: cfg.owner_plugin_id.clone(),
+                owner_server_name: cfg.owner_server_name.clone(),
+                env_keys: cfg.env.keys().cloned().collect(),
+                header_names: cfg.headers.keys().cloned().collect(),
             }
         }));
         summaries
@@ -2587,6 +2910,50 @@ impl McpRegistry {
     pub fn split_tool_id(id: &str) -> Option<(&str, &str)> {
         id.split_once(TOOL_ID_SEP)
             .or_else(|| id.split_once(LEGACY_TOOL_ID_SEP))
+    }
+
+    /// Normalize a tool id against the live server registry before dispatch.
+    ///
+    /// The global [`canonical_tool_id`] helper can normalize the reserved
+    /// namespaces, but it cannot tell whether `io.github.acme/files__read` is a
+    /// legacy id for the dotted server `io.github.acme/files` or a canonical id
+    /// whose tool name contains `__`. A registered server is the authoritative
+    /// answer for that ambiguity, so prefer an exact legacy server prefix here.
+    pub(crate) fn canonical_tool_id_for_registry(&self, id: &str) -> String {
+        if let Some((server, tool)) = id.split_once(LEGACY_TOOL_ID_SEP) {
+            let registered = self
+                .servers
+                .read()
+                .expect("mcp servers RwLock poisoned")
+                .contains_key(server);
+            if registered {
+                return format!("{server}{TOOL_ID_SEP}{tool}");
+            }
+        }
+        canonical_tool_id(id)
+    }
+
+    /// Split a canonical tool id using the longest registered server prefix.
+    ///
+    /// Server names are allowed to contain dots (`io.github.acme/files` is a
+    /// common catalog shape), so first-dot splitting is only a fallback for the
+    /// reserved namespaces and for callers with no matching live server.
+    pub(crate) fn split_registered_tool_id<'a>(&self, id: &'a str) -> Option<(&'a str, &'a str)> {
+        let server_len = self
+            .servers
+            .read()
+            .expect("mcp servers RwLock poisoned")
+            .keys()
+            .filter_map(|server| {
+                id.strip_prefix(server.as_str())
+                    .and_then(|rest| rest.strip_prefix(TOOL_ID_SEP))
+                    .map(|_| server.len())
+            })
+            .max();
+
+        server_len
+            .map(|len| (&id[..len], &id[len + TOOL_ID_SEP.len()..]))
+            .or_else(|| Self::split_tool_id(id))
     }
 
     /// List tools for one enabled server, using the cache when warm.
@@ -2662,11 +3029,12 @@ impl McpRegistry {
     /// resolved via `list_all_tools` (cached). Returns `None` for tools that do
     /// not render a widget.
     pub async fn widget_binding(&self, tool_id: &str) -> Option<WidgetBinding> {
-        let (_server, _tool) = Self::split_tool_id(tool_id)?;
+        let normalized_tool_id = self.canonical_tool_id_for_registry(tool_id);
+        let (_server, _tool) = self.split_registered_tool_id(&normalized_tool_id)?;
         self.list_all_tools()
             .await
             .into_iter()
-            .find(|t| t.id == tool_id)
+            .find(|t| t.id == normalized_tool_id)
             .and_then(|t| t.widget)
     }
 
@@ -2747,7 +3115,7 @@ impl McpRegistry {
     /// Resolve the manifest-side widget-contribution state for `tool_id`.
     ///
     /// The join to the owning plugin is by `contributes.widgets[].tool_id` (the
-    /// runtime `server__tool` id), NEVER by server name — a built-in app's server
+    /// runtime `server.tool` id), NEVER by server name — a built-in app's server
     /// namespace differs from its plugin id (server `app.form` ↔ plugin
     /// `smart-intake-form`). The grant source is `manifest.permission_grants`
     /// filtered to plugins whose lifecycle record is enabled, mirroring
@@ -2762,6 +3130,8 @@ impl McpRegistry {
     /// the widget: an installed third-party server cannot auto-promote a widget it
     /// did not consent to (goal (c)).
     async fn widget_contribution(&self, tool_id: &str) -> WidgetContributionState {
+        let normalized_tool_id = self.canonical_tool_id_for_registry(tool_id);
+        let tool_id = normalized_tool_id.as_str();
         let (Some(manifests), Some(store)) = (
             self.self_build_manifests.as_ref(),
             self.self_build_app_store.as_ref(),
@@ -2770,10 +3140,12 @@ impl McpRegistry {
             return WidgetContributionState::Unrecorded;
         };
 
-        // The tool's server namespace (`<server>__<tool>`) — used for the
+        // The tool's server namespace (`<server>.<tool>`) — used for the
         // fail-CLOSED join against a synth MCP-server record when no manifest
         // declares the tool_id.
-        let server = Self::split_tool_id(tool_id).map(|(s, _)| s.to_owned());
+        let server = self
+            .split_registered_tool_id(tool_id)
+            .map(|(s, _)| s.to_owned());
 
         // Snapshot under the read lock and drop it before touching the store
         // (never hold across .await). Two things resolved in one pass:
@@ -2788,7 +3160,7 @@ impl McpRegistry {
                 contributes
                     .widgets
                     .iter()
-                    .any(|w| w.tool_id == tool_id)
+                    .any(|w| canonical_tool_id(&w.tool_id) == tool_id)
                     .then(|| {
                         let has_grant =
                             m.permission_grants.iter().any(|g| g == WIDGET_RENDER_GRANT);
@@ -2951,7 +3323,7 @@ impl McpRegistry {
         let mut all = web_fetch::tools();
         // Capability facade verbs (swappable layers). Feature-detected: only the
         // verbs whose capability has a selected provider that serves them are
-        // listed, so an agent never sees `web__search` on a node with no search
+        // listed, so an agent never sees `web.search` on a node with no search
         // provider installed.
         all.extend(capability_tools::tools(&self.capability_verbs().await));
         // Built-in wasmtime sandbox tools (M6 / issue #190) — always listed;
@@ -2960,11 +3332,18 @@ impl McpRegistry {
         // Built-in actions (#456): desktop notification + send-to-channel.
         all.extend(notify_tool::tools());
         all.extend(artifact_tool::tools());
+        // Built-in Spaces provider: reads and controlled page/file/Space access
+        // mutations. Dispatch resolves the server-derived principal per call.
+        all.extend(spaces_tool::tools());
         all.extend(channel_tool::tools());
         // Built-in semantic search over past chat messages — always listed;
         // dispatch returns `available: false` when the conversation store / index
         // is not wired (test / CLI contexts).
         all.extend(search_conversations::tools());
+        // Built-in agent-level control — an active governed agent can request a
+        // target agent/model/effort for the next turn. Core validates and stores
+        // the patch against the host conversation before dispatch returns.
+        all.extend(crate::agent_control::tools());
         // Built-in coordinator-threads tools — always listed; dispatch reports
         // unavailable when the conversation store / agent runner is not wired.
         all.extend(threads::tools());
@@ -3005,6 +3384,40 @@ impl McpRegistry {
         all
     }
 
+    /// Resolve the provider metadata used by the lifecycle gate. App HTTP tools
+    /// carry their method in the manifest backend; MCP tools carry annotations in
+    /// the cached tools/list descriptor. Missing metadata deliberately falls
+    /// through to the conservative name classifier.
+    pub(crate) async fn tool_effect_metadata(
+        &self,
+        tool_id: &str,
+    ) -> (Option<Value>, Option<String>) {
+        let normalized = self.canonical_tool_id_for_registry(tool_id);
+        let mut lookup_id = normalized.clone();
+        let mut http_method = None;
+        if is_app_tool_id(&normalized) {
+            if let Some(resolved) = self.resolve_app_tool_backend(&normalized).await {
+                match &resolved.backend {
+                    crate::plugin_manifest::schema::ToolBackend::Alias { target } => {
+                        lookup_id = self.canonical_tool_id_for_registry(target);
+                    }
+                    crate::plugin_manifest::schema::ToolBackend::Http { method, .. } => {
+                        http_method = Some(method.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let annotations = self
+            .list_all_tools()
+            .await
+            .into_iter()
+            .find(|tool| tool.id == lookup_id || tool.id == normalized)
+            .and_then(|tool| tool.annotations);
+        (annotations, http_method)
+    }
+
     /// Tools visible to an agent, honoring its allowlist.
     ///
     /// `allowlist` semantics:
@@ -3012,12 +3425,21 @@ impl McpRegistry {
     ///   - `Some([])` → an explicit empty allowlist; no tools allowed.
     ///   - `Some([…])` → only tools whose fully-qualified id OR bare name OR
     ///     owning server appears in the list. Matching on server name lets an
-    ///     agent allow a whole server with one entry.
+    ///     agent allow a whole server with one entry. The `*` entry is the
+    ///     explicit all-tools marker used by newly-created agents.
     pub async fn tools_for_agent(&self, allowlist: Option<&[String]>) -> Vec<RegistryTool> {
         let all = self.list_all_tools().await;
         match allowlist {
             None => all,
-            Some(list) => all.into_iter().filter(|t| tool_allowed(t, list)).collect(),
+            Some(list) => {
+                let normalized: Vec<String> = list
+                    .iter()
+                    .map(|entry| self.canonical_tool_id_for_registry(entry))
+                    .collect();
+                all.into_iter()
+                    .filter(|t| tool_allowed(t, &normalized))
+                    .collect()
+            }
         }
     }
 
@@ -3040,7 +3462,7 @@ impl McpRegistry {
         AgentCapabilities::default()
     }
 
-    /// Invoke a registered tool by its fully-qualified id (`<server>__<tool>`),
+    /// Invoke a registered tool by its fully-qualified id (`<server>.<tool>`),
     /// honoring the agent allowlist. Returns the MCP server's `tools/call`
     /// result. This is the entry point the chat tool loop (U12) calls.
     ///
@@ -3062,7 +3484,7 @@ impl McpRegistry {
     /// locked P4 invoker contract; only the HTTP `call_mcp_tool` handler, which
     /// carries a `user_id` from the request body, calls this richer variant.
     ///
-    /// **Composio (#474):** `composio__<slug>` ids route to
+    /// **Composio (#474):** `composio.<slug>` ids route to
     /// [`composio::dispatch`]; the allowlist is matched on the **fully-qualified
     /// id only** (`e == tool_id`) — never bare name/server — to close the
     /// cross-plane allowlist bypass (spec security #2). `user_id` selects the
@@ -3084,7 +3506,7 @@ impl McpRegistry {
         // an ORG-BOUND node they resolve to `ToolPrincipal::Unresolved` and the
         // conversation-reading tools refuse. On an unbound node they resolve to
         // `Unrestricted` — byte-identical to before. (Verified: no such caller
-        // invokes a `threads__*` / `search_conversations__*` tool today.)
+        // invokes a `threads.*` / `search_conversations.*` tool today.)
         // `agent_id = None`: these callers have no agent card, so per-agent record
         // state (the skill allowlist) resolves to the unscoped default — byte-
         // identical to the behaviour before that lookup existed.
@@ -3141,24 +3563,31 @@ impl McpRegistry {
         session_id: Option<String>,
         host_conversation_id: Option<&str>,
     ) -> Result<Value> {
+        let normalized_tool_id = self.canonical_tool_id_for_registry(tool_id);
+        let tool_id = normalized_tool_id.as_str();
+        let normalized_allowlist = allowlist.map(|list| {
+            list.iter()
+                .map(|entry| self.canonical_tool_id_for_registry(entry))
+                .collect::<Vec<_>>()
+        });
+        let allowlist = normalized_allowlist.as_deref();
+
         // Layer A input: the calling agent's configured approval_tools. Missing
         // store / unknown id degrade to an empty list (Layers B/B′ still apply).
-        let agent_approval_tools: Vec<String> = match (agent_id, &self.agent_store) {
-            (Some(id), Some(store)) => store
-                .get(id)
-                .await
-                .ok()
-                .flatten()
-                .map(|rec| rec.approval_tools)
-                .unwrap_or_default(),
-            _ => Vec::new(),
+        let agent_record = match (agent_id, &self.agent_store) {
+            (Some(id), Some(store)) => store.get(id).await.ok().flatten(),
+            _ => None,
         };
-        // An `app__…` id's action segment is plugin-chosen and can look benign
-        // while its manifest-fixed alias target is risky (`gmail__send_email`),
+        let mut agent_approval_tools = agent_record
+            .as_ref()
+            .map(|record| record.approval_tools.clone())
+            .unwrap_or_default();
+        // An `app.…` id's action segment is plugin-chosen and can look benign
+        // while its manifest-fixed alias target is risky (`gmail.send_email`),
         // so the gate must classify the RESOLVED target — plugin naming must not
         // launder a risky call past `smart`. Non-alias backends (inline/http)
         // keep their own grant gates and classify under the outer id.
-        let gate_id: String = if tool_id.starts_with(APP_TOOL_PREFIX) {
+        let gate_id: String = if is_app_tool_id(tool_id) {
             match self.resolve_app_tool_backend(tool_id).await {
                 Some(resolved) => match resolved.backend {
                     crate::plugin_manifest::schema::ToolBackend::Alias { target } => target,
@@ -3173,8 +3602,30 @@ impl McpRegistry {
         } else {
             tool_id.to_owned()
         };
+        let (annotations, http_method) = self.tool_effect_metadata(&gate_id).await;
+        let effect = agent_record
+            .as_ref()
+            .map(|record| {
+                crate::agent_execution::ensure_tool_allowed_for_record_with_metadata(
+                    record,
+                    &gate_id,
+                    annotations.as_ref(),
+                    http_method.as_deref(),
+                )
+            })
+            .transpose()?;
+        if agent_record.as_ref().is_some_and(|record| {
+            record.safety_profile == crate::agents::AgentSafetyProfile::ApprovalRequired
+        }) && effect.is_some_and(|effect| !effect.is_read_only())
+            && !agent_approval_tools.iter().any(|id| id == &gate_id)
+        {
+            // Reuse Layer A's existing approval queue for the agent-scoped
+            // posture. This composes with global smart/manual policy rather than
+            // replacing it, and approval re-dispatch still enters no_gate below.
+            agent_approval_tools.push(gate_id.clone());
+        }
         // An approval is a promise that approving makes the action happen. A
-        // `skills__<slug>` CATALOG id cannot keep that promise: it is a discovery
+        // `skills.<slug>` CATALOG id cannot keep that promise: it is a discovery
         // row merged into `tool_search`, never a function, and every path to it
         // ends in `skills_tool::dispatch`'s fallthrough refusal — including the
         // approval engine's own re-run through `call_tool_with_identity_no_gate`.
@@ -3184,12 +3635,12 @@ impl McpRegistry {
         //
         // It is reachable with ordinary skill names, not adversarial ones:
         // `approvals::policy::classify_risk` substring-matches the action segment
-        // (the part after the last `__` — for `skills__deploy-to-staging` that is
+        // (the part after the last `.` — for `skills.deploy-to-staging` that is
         // the whole slug) against RISKY_PATTERNS, so `deploy-to-staging`,
         // `send-weekly-digest` and `delete-stale-branches` all classify risky under
         // the default `smart` mode; under `manual` every slug queues. Newly
         // reachable because skill rows only recently started appearing in front of
-        // models as `skills__<slug>` ids.
+        // models as `skills.<slug>` ids.
         //
         // Skipping the gate here is not a privilege grant: it removes the approval
         // for a call that had no privilege to begin with, and the refusal below is
@@ -3199,7 +3650,7 @@ impl McpRegistry {
         // so an agent whose tool allowlist excludes the `skills` server still gets
         // "not in this agent's allowlist" rather than the refusal, exactly as before.
         //
-        // Items already sitting in an inbox for a `skills__<slug>` id are untouched:
+        // Items already sitting in an inbox for a `skills.<slug>` id are untouched:
         // approving one still lands in the dispatch fallthrough and still returns
         // the refusal. This stops new ones being created; it does not migrate old.
         //
@@ -3210,6 +3661,7 @@ impl McpRegistry {
             if let Some(err) = crate::approvals::gate_tool_call(
                 &gate_id,
                 &arguments,
+                agent_id,
                 &agent_approval_tools,
                 allowlist,
                 user_id,
@@ -3305,11 +3757,43 @@ impl McpRegistry {
         session_id: Option<String>,
         host_conversation_id: Option<&str>,
     ) -> Result<Value> {
+        let normalized_tool_id = self.canonical_tool_id_for_registry(tool_id);
+        let tool_id = normalized_tool_id.as_str();
+        let normalized_allowlist = allowlist.map(|list| {
+            list.iter()
+                .map(|entry| self.canonical_tool_id_for_registry(entry))
+                .collect::<Vec<_>>()
+        });
+        let allowlist = normalized_allowlist.as_deref();
+
+        // Approved agent calls retain the lifecycle/read-only gate here so an
+        // internal caller cannot bypass it by selecting the ungated entry
+        // point. Missing identity is only valid for genuinely agent-less
+        // callers and legacy approvals; an identified call must fail closed if
+        // the store or record is unavailable.
+        if let Some(agent_id) = agent_id {
+            let store = self
+                .agent_store
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("agent store unavailable for governed tool call"))?;
+            let record = store
+                .get(agent_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("calling agent '{agent_id}' is no longer installed"))?;
+            let (annotations, http_method) = self.tool_effect_metadata(tool_id).await;
+            crate::agent_execution::ensure_tool_allowed_for_record_with_metadata(
+                &record,
+                tool_id,
+                annotations.as_ref(),
+                http_method.as_deref(),
+            )?;
+        }
+
         // Identity Vault consult (epic #517): for a bound agent, a tool call
         // targeting a NEEDS_AUTH domain returns the elicitation envelope as its
         // result (no dispatch); an AUTHENTICATED domain reads the credential under
         // the gateway grant + audit at this boundary. No-op when the agent has no
-        // bound profiles. Skipped internally for `composio__…` (it owns its own
+        // bound profiles. Skipped internally for `composio.…` (it owns its own
         // connection-required path).
         // An AUTHENTICATED bound domain for a credential-consuming tool (web_fetch)
         // returns the decrypted credential here so the tool can act AS the user;
@@ -3331,21 +3815,44 @@ impl McpRegistry {
         // Built-in Composio provider (#474): searchable-not-listed, executed by
         // id prefix. Detected before split because the allowlist guard is
         // id-only (no bare name/server fallback).
-        if tool_id.starts_with("composio.") || tool_id.starts_with("composio__") {
+        if tool_id.starts_with("composio.") {
             if let Some(list) = allowlist {
-                if !list.iter().any(|e| e == tool_id) {
+                if !list.iter().any(|e| canonical_tool_id(e) == tool_id) {
                     return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
                 }
             }
-            let slug = tool_id
-                .strip_prefix("composio.")
-                .or_else(|| tool_id.strip_prefix("composio__"))
-                .unwrap_or(tool_id);
-            return composio::dispatch(&self.http, slug, arguments, user_id).await;
+            let slug = tool_id.strip_prefix("composio.").unwrap_or(tool_id);
+            let output = composio::dispatch(&self.http, slug, arguments, user_id).await?;
+            // Native ACP sessions execute Composio inside this in-process MCP
+            // bridge, so the Gateway's OpenAI tool loop never sees the call.
+            // A non-empty session id is the bridge marker; the HTTP Gateway
+            // tool loop leaves it unset and marks its own call as metered.
+            // Elicitation is a connection prompt, not an executed action.
+            if session_id.is_some() && !output.get("__ryu_elicitation__").is_some() {
+                let http = self.http.clone();
+                let agent_id = agent_id.map(str::to_owned);
+                let user_id = user_id.map(str::to_owned);
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = crate::sidecar::gateway::record_tool_charge(
+                        &http,
+                        agent_id.as_deref(),
+                        user_id.as_deref(),
+                        session_id.as_deref(),
+                        1,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %error, "ACP Composio charge notification failed");
+                    }
+                });
+            }
+            return Ok(output);
         }
 
-        let (server, tool) = Self::split_tool_id(tool_id)
-            .ok_or_else(|| anyhow!("malformed tool id '{tool_id}' (expected server__tool)"))?;
+        let (server, tool) = self
+            .split_registered_tool_id(tool_id)
+            .ok_or_else(|| anyhow!("malformed tool id '{tool_id}' (expected server.tool)"))?;
 
         // Core self-API provider (agents driving Ryu itself): OpenAPI-derived tools
         // dispatched by looping back over HTTP to THIS Core with its own token.
@@ -3421,7 +3928,7 @@ impl McpRegistry {
                 }
             }
             // Only ids a live lowering actually registered — never an arbitrary
-            // `ryu_ext__`-prefixed id a caller invents. This is the plane's
+            // `ryu_ext.`-prefixed id a caller invents. This is the plane's
             // allowlist-of-record: it is also what pins the URL, since the route
             // (not the caller) supplies the method and the proxy path.
             let Some(route) = self.ext_api_route(tool_id) else {
@@ -3489,19 +3996,19 @@ impl McpRegistry {
         }
 
         // App-registered tool (tool-as-Runnable, M3): an enabled plugin re-exposes
-        // an existing registry tool under its own `app__` namespace. The plugin's
-        // Tool Runnable `slug` IS the target tool id (e.g. `app__web_search` →
+        // an existing registry tool under its own `app.` namespace. The plugin's
+        // Tool Runnable `slug` IS the target tool id (e.g. `app.web_search` →
         // `web_search`), so dispatch resolves the target and re-enters `call_tool`.
         //
-        // The allowlist is enforced HERE, on the `app__` id (the granted
+        // The allowlist is enforced HERE, on the `app.` id (the granted
         // capability). The inner dispatch runs with NO allowlist because the
         // target is fixed by the manifest, not chosen by the caller — the app tool
         // itself is the grant (the Shopify/Figma capability model). Without this
-        // arm an `app__*` id falls through to the generic server lookup and errors
+        // arm an `app.*` id falls through to the generic server lookup and errors
         // with "unknown MCP server: app", so registered app tools were listable
         // and searchable but not callable.
-        // A declarative tool plugin may register under its NATIVE id (`exa__search`)
-        // instead of `app__<slug>` (see `app_tool_registered_id`). Such an id splits
+        // A declarative tool plugin may register under its NATIVE id (`exa.search`)
+        // instead of `app.<slug>` (see `app_tool_registered_id`). Such an id splits
         // to a `server` that is NOT `"app"`, so route it through the app-tool arm too
         // when the id is a registered app tool. The bag is tiny + write-rare, so the
         // uncontended scan is negligible; a native app tool takes precedence over a
@@ -3522,7 +4029,7 @@ impl McpRegistry {
                 .unwrap_or(false);
         if server == APP_TOOL_SERVER || is_native_app_tool {
             // Only dispatch ids an enabled app actually registered — never an
-            // arbitrary `app__`-prefixed id a caller invents.
+            // arbitrary `app.`-prefixed id a caller invents.
             let known = self
                 .app_tools
                 .lock()
@@ -3564,7 +4071,7 @@ impl McpRegistry {
                         // Run in the Deno sandbox via the SAME host bridge a hook
                         // uses — the `Bridge` invoker, NEVER the `Registry` invoker.
                         // This is what keeps a plugin tool off the MCP registry: it
-                        // cannot call `threads__*`/memory/`search_conversations` and
+                        // cannot call `threads.*`/memory/`search_conversations` and
                         // so cannot bypass the ORG-BOUND ACL principal gates.
                         let Some(state) = crate::learning::global_state() else {
                             return Err(anyhow!(
@@ -3708,7 +4215,7 @@ impl McpRegistry {
                         // Exec an allowlisted local CLI through the governed path.
                         // The bin grant + allowlist are checked first (deterministic)
                         // inside `run_command_tool`. The approval gate (if any) has
-                        // already classified under the outer `app__` id (gate_id's
+                        // already classified under the outer `app.` id (gate_id's
                         // `_ => tool_id` arm), so no per-target re-gate is needed.
                         return crate::tool_exec::run_command_tool(
                             &bin,
@@ -3744,7 +4251,7 @@ impl McpRegistry {
             // Re-enter for the target. The recursive future is boxed because an
             // async fn cannot name its own type. No allowlist: the app-layer check
             // above is the gate; the target is manifest-fixed. Use the NO-GATE
-            // entry: the approval gate (if any) applies to the granted `app__` id,
+            // entry: the approval gate (if any) applies to the granted `app.` id,
             // not to the manifest-fixed target — otherwise an app tool would raise
             // a second approval for its inner target.
             return Box::pin(self.call_tool_with_identity_no_gate(
@@ -3794,7 +4301,43 @@ impl McpRegistry {
                     return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
                 }
             }
-            return artifact_tool::dispatch(tool, arguments, self.spaces.as_ref()).await;
+            let principal = match self.conversations.as_ref() {
+                Some(store) => ToolPrincipal::resolve(store, host_conversation_id).await,
+                None if crate::sidecar::control_plane::registered_org().is_none() => {
+                    ToolPrincipal::Unrestricted
+                }
+                None => ToolPrincipal::Unresolved,
+            };
+            return artifact_tool::dispatch(tool, arguments, self.spaces.as_ref(), &principal)
+                .await;
+        }
+
+        // Built-in Spaces provider. Reads and mutations share the same server-derived
+        // tenancy principal as conversation search; mutating calls are additionally
+        // held by the normal approval gate before they reach this branch.
+        if server == spaces_tool::SERVER_NAME {
+            if let Some(list) = allowlist {
+                let candidate = RegistryTool::candidate(tool_id, server, tool);
+                if !tool_allowed(&candidate, list) {
+                    return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
+                }
+            }
+            let principal = match self.conversations.as_ref() {
+                Some(store) => ToolPrincipal::resolve(store, host_conversation_id).await,
+                None if crate::sidecar::control_plane::registered_org().is_none() => {
+                    ToolPrincipal::Unrestricted
+                }
+                None => ToolPrincipal::Unresolved,
+            };
+            return spaces_tool::dispatch(
+                tool,
+                arguments,
+                self.spaces.as_ref(),
+                self.agent_store.as_ref(),
+                &principal,
+                agent_id,
+            )
+            .await;
         }
 
         // Built-in generative-UI provider: client-rendered (no-op in Core). The
@@ -3855,6 +4398,30 @@ impl McpRegistry {
                 }));
             }
             return search_conversations::dispatch(tool, arguments, store, &principal).await;
+        }
+
+        // Built-in agent-level control. The bridge supplies the calling agent and
+        // host conversation from server-owned context; neither can be chosen in
+        // the tool arguments. The conversation store persists the accepted patch
+        // for exactly one later interactive turn.
+        if server == crate::agent_control::SERVER_NAME {
+            if let Some(list) = allowlist {
+                let candidate = RegistryTool::candidate(tool_id, server, tool);
+                if !tool_allowed(&candidate, list) {
+                    return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
+                }
+            }
+            if tool_id != crate::agent_control::SET_ACTIVE_TARGET_TOOL_ID {
+                return Err(anyhow!("unknown agent control tool '{tool_id}'"));
+            }
+            return crate::agent_control::dispatch(
+                arguments,
+                agent_id,
+                host_conversation_id,
+                self.agent_store.as_ref(),
+                self.conversations.as_ref(),
+            )
+            .await;
         }
 
         // Built-in coordinator-threads provider (Codex-style cross-thread
@@ -3943,9 +4510,9 @@ impl McpRegistry {
             };
             // The calling agent's per-agent SKILL allowlist — a different list from
             // the `allowlist` argument, which is the TOOL allowlist checked above.
-            // Without it `skills__load` matched on the globally-enabled set, so an
+            // Without it `skills.load` matched on the globally-enabled set, so an
             // agent could load by id a skill its allowlist kept out of the injected
-            // index. Resolved here (lazily, only for a `skills__*` call) from the
+            // index. Resolved here (lazily, only for a `skills.*` call) from the
             // same store the approval gate reads `approval_tools` from.
             //
             // Fail-open to the empty list — which `enabled_for` defines as "all
@@ -3968,13 +4535,13 @@ impl McpRegistry {
         }
 
         // Capability tool facade (swappable layers): a stable verb id
-        // (`web__search`, `browser__navigate`, `memory__store`, …) whose concrete
+        // (`web.search`, `browser.navigate`, `memory.store`, …) whose concrete
         // provider is whatever the user has selected for that capability. Resolved
         // per call — an override taken mid-session takes effect on the next call
         // with no re-registration — then forwarded to the provider's own tool.
         //
         // The allowlist is enforced HERE, on the stable verb id, which is the point:
-        // an agent allowed `web__search` keeps that permission across a provider
+        // an agent allowed `web.search` keeps that permission across a provider
         // swap. The inner call carries NO allowlist because the target is fixed by
         // the provider's manifest, not chosen by the caller — the same reasoning as
         // the app-tool alias arm below, and the facade grants no authority the
@@ -4272,7 +4839,10 @@ impl McpRegistry {
         description: Option<String>,
         app_backend: Option<AppToolBackendTag>,
     ) {
-        // A capability verb id (`web__search`, `browser__navigate`, …) is reserved
+        let id = canonical_tool_id(&id);
+        let name = canonical_tool_id(&name);
+
+        // A capability verb id (`web.search`, `browser.navigate`, …) is reserved
         // by the facade. Letting a plugin register one would shadow the swappable
         // layer with a fixed implementation — the exact coupling the facade exists
         // to prevent — so the registration is refused rather than silently winning
@@ -4302,6 +4872,7 @@ impl McpRegistry {
     /// its tools stop being listable, searchable, and callable. Idempotent:
     /// removing an id that isn't present is a no-op.
     pub fn unregister_app_tool(&self, id: &str) {
+        let id = canonical_tool_id(id);
         if let Ok(mut tools) = self.app_tools.lock() {
             tools.retain(|t| t.id != id);
         }
@@ -4511,6 +5082,7 @@ impl McpRegistry {
     /// a guess. The scan is over a bounded set — see the caps on
     /// [`Self::set_ext_api_routes`].
     fn ext_api_route(&self, tool_id: &str) -> Option<crate::ext_api::ExtApiRoute> {
+        let tool_id = canonical_tool_id(tool_id);
         let map = self.ext_api.lock().ok()?;
         map.values().flatten().find(|r| r.id == tool_id).cloned()
     }
@@ -4756,13 +5328,14 @@ impl McpRegistry {
         &self,
         tool_id: &str,
     ) -> Option<capability_tools::ResolvedVerb> {
+        let tool_id = canonical_tool_id(tool_id);
         self.capability_verbs()
             .await
             .into_iter()
             .find(|r| r.verb.id == tool_id)
     }
 
-    /// Resolve the dispatch backend + grants for an `app__<slug>` tool id by
+    /// Resolve the dispatch backend + grants for an `app.<slug>` tool id by
     /// scanning the LIVE enabled-plugin manifests (the same source
     /// `plugin_host::collect_enabled_hooks` reads). Returns `None` when the
     /// registry has no self-build wiring (bare/test registries) or no enabled
@@ -4805,7 +5378,7 @@ impl McpRegistry {
                     continue;
                 };
                 // Match the SAME id registration mints (native id for a namespaced
-                // non-Alias tool, else `app__<slug>`) so resolution never diverges.
+                // non-Alias tool, else `app.<slug>`) so resolution never diverges.
                 if app_tool_registered_id(&cfg) != tool_id {
                     continue;
                 }
@@ -4974,27 +5547,29 @@ fn command_availability(command: &str) -> Option<bool> {
 /// available", prompting the user to install something that does not exist).
 fn config_availability(cfg: &McpServerConfig) -> Option<bool> {
     match cfg.transport_kind() {
-        McpTransportKind::Http => Some(cfg.url.as_deref().is_some_and(|u| !u.trim().is_empty())),
+        McpTransportKind::Http | McpTransportKind::Sse => {
+            Some(cfg.url.as_deref().is_some_and(|u| !u.trim().is_empty()))
+        }
         McpTransportKind::Stdio => command_availability(cfg.command.as_deref().unwrap_or("")),
     }
 }
 
 /// The fully-qualified id of the privileged agent-creation tool — gated by
-/// [`AgentCapabilities::can_create_agents`]. Other `agent_builder__*` tools
+/// [`AgentCapabilities::can_create_agents`]. Other `agent_builder.*` tools
 /// (read/configure existing agents) are not creation and stay available.
-pub const CREATE_AGENT_TOOL_ID: &str = "agent_builder__create_agent";
+pub const CREATE_AGENT_TOOL_ID: &str = "agent_builder.create_agent";
 
 /// The fully-qualified id of the team-creation tool. It mints permanent agents
 /// (a whole roster), so it is gated by the same [`AgentCapabilities::can_create_agents`]
 /// as [`CREATE_AGENT_TOOL_ID`].
-pub const CREATE_AGENT_TEAM_TOOL_ID: &str = "agent_builder__create_agent_team";
+pub const CREATE_AGENT_TEAM_TOOL_ID: &str = "agent_builder.create_agent_team";
 
 /// An agent's orchestration capabilities, resolved from its config record.
 #[derive(Debug, Clone, Copy)]
 pub struct AgentCapabilities {
-    /// May discover peers (`orchestrator__*`) and delegate to them (`delegate__*`).
+    /// May discover peers (`orchestrator.*`) and delegate to them (`delegate.*`).
     pub orchestrator: bool,
-    /// May mint new agents (`agent_builder__create_agent`).
+    /// May mint new agents (`agent_builder.create_agent`).
     pub can_create_agents: bool,
 }
 
@@ -5039,9 +5614,16 @@ pub fn filter_capability_tools(
 /// Whether `tool` passes an allowlist. A list entry matches if it equals the
 /// tool's fully-qualified id, its bare name, or its owning server name.
 pub(super) fn tool_allowed(tool: &RegistryTool, allowlist: &[String]) -> bool {
-    allowlist
+    if allowlist
         .iter()
-        .any(|entry| entry == &tool.id || entry == &tool.name || entry == &tool.server)
+        .any(|entry| entry == crate::agents::ALL_MCP_TOOLS)
+    {
+        return true;
+    }
+    let canonical_id = canonical_tool_id(&tool.id);
+    allowlist.iter().any(|entry| {
+        canonical_tool_id(entry) == canonical_id || entry == &tool.name || entry == &tool.server
+    })
 }
 
 impl Default for McpRegistry {
@@ -5065,7 +5647,97 @@ mod tests {
     }
 
     fn sample_tool() -> RegistryTool {
-        RegistryTool::candidate("fs__read_file", "fs", "read_file")
+        RegistryTool::candidate("fs.read_file", "fs", "read_file")
+    }
+
+    #[tokio::test]
+    async fn config_store_preserves_metadata_and_serializes_concurrent_mutations() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "ryu-mcp-config-store-test-{}-{}",
+            std::process::id(),
+            MCP_CONFIG_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let path = test_dir.join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "$schema": "https://example.test/mcp.schema.json",
+                "metadata": { "owner": "test" },
+                "mcpServers": {
+                    "existing": { "command": "one", "unknown": true }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let first_path = path.clone();
+        let second_path = path.clone();
+        let (first, second) = tokio::join!(
+            McpConfigStore::mutate(first_path, |document| {
+                let servers = McpConfigStore::servers_mut(document)?;
+                servers.insert(
+                    "first".to_owned(),
+                    serde_json::json!({ "command": "first" }),
+                );
+                Ok((true, ()))
+            }),
+            McpConfigStore::mutate(second_path, |document| {
+                let servers = McpConfigStore::servers_mut(document)?;
+                servers.insert(
+                    "second".to_owned(),
+                    serde_json::json!({ "command": "second" }),
+                );
+                Ok((true, ()))
+            })
+        );
+        first.unwrap();
+        second.unwrap();
+
+        let document: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["$schema"], "https://example.test/mcp.schema.json");
+        assert_eq!(document["metadata"]["owner"], "test");
+        assert_eq!(document["mcpServers"]["existing"]["unknown"], true);
+        assert_eq!(document["mcpServers"]["first"]["command"], "first");
+        assert_eq!(document["mcpServers"]["second"]["command"], "second");
+
+        std::fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[test]
+    fn auth_metadata_classifies_oauth_and_static_credentials_without_values() {
+        let mut config = McpServerConfig::default();
+        assert_eq!(auth_metadata(&config), (false, false, None));
+
+        config
+            .headers
+            .insert("Authorization".to_owned(), "Bearer secret".to_owned());
+        assert_eq!(
+            auth_metadata(&config),
+            (true, true, Some("header".to_owned()))
+        );
+
+        config.headers.clear();
+        config
+            .env
+            .insert("OPENAI_API_KEY".to_owned(), "secret".to_owned());
+        assert_eq!(auth_metadata(&config), (true, true, Some("env".to_owned())));
+
+        config.env.clear();
+        config.auth = Some(crate::plugin_manifest::McpServerAuthDecl::OAuth {
+            client_id: Some("public-client".to_owned()),
+        });
+        assert_eq!(
+            auth_metadata(&config),
+            (true, false, Some("oauth".to_owned()))
+        );
+
+        config.auth = None;
+        config
+            .headers
+            .insert("X-Trace-Id".to_owned(), "not a credential".to_owned());
+        assert_eq!(auth_metadata(&config), (false, false, None));
     }
 
     /// One derived row. Only `id`/`plugin_id` matter to the storage paths below.
@@ -5084,7 +5756,7 @@ mod tests {
 
     fn ext_rows(plugin: &str, tag: &str, n: usize) -> Vec<crate::ext_api::ExtApiRoute> {
         (0..n)
-            .map(|i| ext_row(&format!("ryu_ext__{tag}__get_op_{i:03}"), plugin))
+            .map(|i| ext_row(&format!("ryu_ext.{tag}.get_op_{i:03}"), plugin))
             .collect()
     }
 
@@ -5121,16 +5793,16 @@ mod tests {
         // …and the truncation kept the first N of the loser, not zero of it: a sidecar
         // silently latched at zero rows is the failure this arithmetic can produce.
         assert!(
-            reg.describe("ryu_ext__b__get_op_000").await.is_some(),
+            reg.describe("ryu_ext.b.get_op_000").await.is_some(),
             "the second sidecar must keep the budget that was left, not be zeroed"
         );
-        assert!(reg.describe("ryu_ext__a__get_op_000").await.is_some());
+        assert!(reg.describe("ryu_ext.a.get_op_000").await.is_some());
 
         // Re-storing the FIRST sidecar unchanged must not shrink it: its own previous
         // rows are being replaced and must not be counted against its own budget.
         reg.set_ext_api_routes_for_sidecar("@ryu/split", alpha, ext_rows("@ryu/split", "a", take));
         assert!(
-            reg.describe(&format!("ryu_ext__a__get_op_{:03}", take - 1))
+            reg.describe(&format!("ryu_ext.a.get_op_{:03}", take - 1))
                 .await
                 .is_some(),
             "a re-wake must not shrink a sidecar that fit a moment ago"
@@ -5226,46 +5898,46 @@ mod tests {
 
     #[test]
     fn adapter_primary_path_always_resolves_to_the_manifest_fixed_tool() {
-        let bridge = adapter_bridge("firecrawl__scrape", &[]);
+        let bridge = adapter_bridge("firecrawl.scrape", &[]);
         let target = bridge
             .resolve_target(
                 crate::tool_exec::CAPABILITY_ADAPTER_CALL_PATH,
                 &serde_json::json!({ "url": "https://example.com" }),
             )
             .expect("the primary path is always callable");
-        assert_eq!(target, "firecrawl__scrape");
+        assert_eq!(target, "firecrawl.scrape");
     }
 
     #[test]
     fn adapter_cannot_redirect_the_primary_path_at_another_tool() {
         // Arguments are attacker-shaped (an adapter builds them freely), so a `tool`
         // key riding along in them must NOT steer the primary call.
-        let bridge = adapter_bridge("firecrawl__scrape", &[]);
+        let bridge = adapter_bridge("firecrawl.scrape", &[]);
         let target = bridge
             .resolve_target(
                 crate::tool_exec::CAPABILITY_ADAPTER_CALL_PATH,
-                &serde_json::json!({ "tool": "fs__read_file" }),
+                &serde_json::json!({ "tool": "fs.read_file" }),
             )
             .expect("primary path resolves");
-        assert_eq!(target, "firecrawl__scrape");
+        assert_eq!(target, "firecrawl.scrape");
     }
 
     #[test]
     fn adapter_named_path_refuses_a_tool_the_manifest_did_not_declare() {
-        let bridge = adapter_bridge("firecrawl__crawl_start", &["firecrawl__crawl_status"]);
+        let bridge = adapter_bridge("firecrawl.crawl_start", &["firecrawl.crawl_status"]);
 
         let allowed = bridge
             .resolve_target(
                 crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH,
-                &serde_json::json!({ "tool": "firecrawl__crawl_status" }),
+                &serde_json::json!({ "tool": "firecrawl.crawl_status" }),
             )
             .expect("a declared tool is callable");
-        assert_eq!(allowed, "firecrawl__crawl_status");
+        assert_eq!(allowed, "firecrawl.crawl_status");
 
         // The escalation this seam exists to prevent.
         let denied = bridge.resolve_target(
             crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH,
-            &serde_json::json!({ "tool": "fs__read_file" }),
+            &serde_json::json!({ "tool": "fs.read_file" }),
         );
         assert!(denied.is_err(), "an undeclared tool must be refused");
 
@@ -5274,10 +5946,10 @@ mod tests {
             bridge
                 .resolve_target(
                     crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH,
-                    &serde_json::json!({ "tool": "firecrawl__crawl_start" }),
+                    &serde_json::json!({ "tool": "firecrawl.crawl_start" }),
                 )
                 .expect("the primary tool is reachable by name"),
-            "firecrawl__crawl_start"
+            "firecrawl.crawl_start"
         );
     }
 
@@ -5286,17 +5958,17 @@ mod tests {
         // A provider that declared a facade verb as a callable tool would loop the
         // facade back into itself — the manifest-driven infinite loop the
         // declarative arm already refuses for `binding.tool`.
-        let bridge = adapter_bridge("firecrawl__crawl_start", &["web__crawl"]);
+        let bridge = adapter_bridge("firecrawl.crawl_start", &["web.crawl"]);
         let denied = bridge.resolve_target(
             crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH,
-            &serde_json::json!({ "tool": "web__crawl" }),
+            &serde_json::json!({ "tool": "web.crawl" }),
         );
         assert!(denied.is_err(), "the facade must not be re-enterable");
     }
 
     #[test]
     fn adapter_refuses_unknown_bridge_paths_and_empty_ids() {
-        let bridge = adapter_bridge("firecrawl__scrape", &["firecrawl__crawl_status"]);
+        let bridge = adapter_bridge("firecrawl.scrape", &["firecrawl.crawl_status"]);
         // `host.*` is the plugin-hook surface an adapter deliberately does not get.
         assert!(bridge
             .resolve_target("host.sideModel", &serde_json::json!({}))
@@ -5409,7 +6081,7 @@ mod tests {
     /// puts its tools in the next `tools/list`, and every call then ENOENTs. `ghost`
     /// is the live instance — Core-tier, default-ON, and its binary is fetched only by
     /// a downloader whose `archive_url()` has no default, so every stock node carried
-    /// ~29 `ghost__*` tools that could not spawn.
+    /// ~29 `ghost.*` tools that could not spawn.
     ///
     /// Fail-soft: the sibling declarations in the SAME manifest still register, so one
     /// missing binary never costs a plugin its working servers.
@@ -5989,7 +6661,7 @@ mod tests {
     }
 
     /// HIJACK: the plugin-declared overlay sits ABOVE the built-ins, so registering
-    /// an established server name would repoint every `ghost__*` tool call at the
+    /// an established server name would repoint every `ghost.*` tool call at the
     /// squatter's command while keeping Ghost's tool descriptions. First
     /// registration owns the name.
     #[test]
@@ -6133,7 +6805,7 @@ mod tests {
     #[test]
     fn allowlist_matches_fully_qualified_id() {
         let t = sample_tool();
-        assert!(tool_allowed(&t, &["fs__read_file".to_owned()]));
+        assert!(tool_allowed(&t, &["fs.read_file".to_owned()]));
     }
 
     #[test]
@@ -6149,17 +6821,64 @@ mod tests {
     }
 
     #[test]
+    fn allowlist_all_marker_allows_everything() {
+        let t = sample_tool();
+        assert!(tool_allowed(&t, &[crate::agents::ALL_MCP_TOOLS.to_owned()]));
+    }
+
+    #[test]
     fn allowlist_rejects_unlisted() {
         let t = sample_tool();
-        assert!(!tool_allowed(&t, &["other__tool".to_owned()]));
+        assert!(!tool_allowed(&t, &["other.tool".to_owned()]));
         assert!(!tool_allowed(&t, &[]));
     }
 
     #[test]
     fn tool_id_round_trips() {
         let id = McpRegistry::tool_id("git", "commit");
-        assert_eq!(id, "git__commit");
+        assert_eq!(id, "git.commit");
         assert_eq!(McpRegistry::split_tool_id(&id), Some(("git", "commit")));
+        assert_eq!(canonical_tool_id("git__commit"), "git.commit");
+        assert_eq!(canonical_tool_id("skills__a__b"), "skills.a__b");
+        assert_eq!(
+            canonical_tool_id("io.github.acme/files__read"),
+            "io.github.acme/files.read"
+        );
+        assert_eq!(
+            canonical_tool_id("io.github.acme/files.foo__bar"),
+            "io.github.acme/files.foo__bar"
+        );
+        assert_eq!(
+            canonical_tool_id("ryu_ext__ryu_crm__post_records"),
+            "ryu_ext.ryu_crm.post_records"
+        );
+        assert_eq!(
+            canonical_tool_id("web.search__preview"),
+            "web.search__preview"
+        );
+        assert_eq!(canonical_tool_id("app__foo.bar"), "app.foo.bar");
+        assert_eq!(
+            McpRegistry::split_tool_id("git__commit"),
+            Some(("git", "commit"))
+        );
+
+        let registry = McpRegistry::from_servers(BTreeMap::from([
+            ("io".to_owned(), McpServerConfig::default()),
+            (
+                "io.github.acme/files".to_owned(),
+                McpServerConfig::default(),
+            ),
+        ]));
+        let legacy_dotted = registry.canonical_tool_id_for_registry("io.github.acme/files__read");
+        assert_eq!(legacy_dotted, "io.github.acme/files.read");
+        assert_eq!(
+            registry.split_registered_tool_id(&legacy_dotted),
+            Some(("io.github.acme/files", "read"))
+        );
+        assert_eq!(
+            registry.split_registered_tool_id("io.github.acme/files.read"),
+            Some(("io.github.acme/files", "read"))
+        );
     }
 
     /// Ghost moved from a hardcoded `builtin_servers()` entry to its plugin
@@ -6196,7 +6915,7 @@ mod tests {
 
     /// The other half of the same seam: with NO usable `ghost` binary — the state
     /// every stock node is actually in — the declaration is skipped rather than
-    /// registered, so the model is never offered ~29 `ghost__*` tools that ENOENT.
+    /// registered, so the model is never offered ~29 `ghost.*` tools that ENOENT.
     #[test]
     fn ghost_manifest_is_skipped_when_no_ghost_binary_exists() {
         let _lock = lock_mcp_env();
@@ -6253,7 +6972,9 @@ mod tests {
             vec![
                 "-y".to_owned(),
                 "agent-browser".to_owned(),
-                "mcp".to_owned()
+                "mcp".to_owned(),
+                "--tools".to_owned(),
+                "all".to_owned()
             ]
         );
         assert!(lowered.enabled);
@@ -6323,7 +7044,7 @@ mod tests {
         assert!(!servers["git"].enabled);
         let reg = McpRegistry::from_servers(servers);
         assert_eq!(reg.len(), 2);
-        // Two config servers plus the 10 always-present built-in providers
+        // Two config servers plus the 12 always-present built-in providers
         // (web_fetch, sandbox, notify, channel, search_conversations, threads,
         // delegate, orchestrator, skills, ui) — all unconditionally listed by
         // `server_summaries`. `research` (the
@@ -6341,7 +7062,7 @@ mod tests {
         // `memory`), which are listed unconditionally because their names are
         // reserved whether or not a provider is currently selected.
         let summaries = reg.server_summaries();
-        assert_eq!(summaries.len(), 16);
+        assert_eq!(summaries.len(), 18);
         assert!(
             !summaries.iter().any(|s| s.name == "research"),
             "`research` is no longer a hardcoded built-in — it registers (or does \
@@ -6461,6 +7182,8 @@ mod tests {
         for declared in [
             Some("http"),
             Some("streamable-http"),
+            // The legacy transport stays distinct so the client can open its GET
+            // event stream and use the announced POST endpoint.
             Some("sse"),
             // Unrecognized: falls through to shape inference, which sees the url.
             Some("htp"),
@@ -6471,11 +7194,12 @@ mod tests {
                 url: Some("https://mcp.example.com/mcp".to_owned()),
                 ..Default::default()
             };
-            assert_eq!(
-                cfg.transport_kind(),
-                McpTransportKind::Http,
-                "type={declared:?} with a url must select the HTTP transport"
-            );
+            let expected = if declared == Some("sse") {
+                McpTransportKind::Sse
+            } else {
+                McpTransportKind::Http
+            };
+            assert_eq!(cfg.transport_kind(), expected);
         }
 
         // An explicit `stdio` wins over an incidental url, and a bare command is
@@ -6490,6 +7214,29 @@ mod tests {
         // fail at lowering, not silently produce an empty-program spawn.
         let empty = McpServerConfig::default();
         assert!(empty.to_target().is_err());
+    }
+
+    #[test]
+    fn lowers_streamable_http_and_legacy_sse_to_distinct_targets() {
+        let streamable = McpServerConfig {
+            transport: Some("streamable-http".to_owned()),
+            url: Some("https://mcp.example.com/mcp".to_owned()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            streamable.to_target().expect("streamable target"),
+            McpTarget::Http(_)
+        ));
+
+        let legacy = McpServerConfig {
+            transport: Some("sse".to_owned()),
+            url: Some("https://mcp.example.com/sse".to_owned()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            legacy.to_target().expect("legacy SSE target"),
+            McpTarget::Sse(_)
+        ));
     }
 
     /// Happy-path guard: the per-entry loop must not become a filter that quietly
@@ -6614,13 +7361,13 @@ mod tests {
 
     #[tokio::test]
     async fn app_tool_dispatch_resolves_target_not_app_server() {
-        // Registering `app__foo__bar` then calling it must alias to `foo__bar`
+        // Registering `app.foo.bar` then calling it must alias to `foo.bar`
         // (re-entering call_tool), NOT error with "unknown MCP server: app".
         let reg = McpRegistry::empty();
-        reg.register_app_tool("app__foo__bar".into(), "foo__bar".into(), None);
+        reg.register_app_tool("app.foo.bar".into(), "foo.bar".into(), None);
 
         let err = reg
-            .call_tool("app__foo__bar", serde_json::json!({}), None)
+            .call_tool("app.foo.bar", serde_json::json!({}), None)
             .await
             .expect_err("foo is not a configured server, so dispatch must fail at the target");
         let msg = err.to_string();
@@ -6636,11 +7383,11 @@ mod tests {
 
     #[tokio::test]
     async fn app_tool_unknown_id_is_rejected() {
-        // An `app__`-prefixed id that no enabled app registered must be rejected,
+        // An `app.`-prefixed id that no enabled app registered must be rejected,
         // not silently re-dispatched.
         let reg = McpRegistry::empty();
         let err = reg
-            .call_tool("app__never__registered", serde_json::json!({}), None)
+            .call_tool("app.never.registered", serde_json::json!({}), None)
             .await
             .expect_err("unregistered app tool must be rejected");
         assert!(err.to_string().contains("unknown app tool"), "got: {err}");
@@ -6649,12 +7396,12 @@ mod tests {
     #[tokio::test]
     async fn app_tool_enforces_allowlist_at_the_app_layer() {
         let reg = McpRegistry::empty();
-        reg.register_app_tool("app__foo__bar".into(), "foo__bar".into(), None);
+        reg.register_app_tool("app.foo.bar".into(), "foo.bar".into(), None);
 
         // Not in the allowlist → rejected before any target dispatch.
         let denied = reg
             .call_tool(
-                "app__foo__bar",
+                "app.foo.bar",
                 serde_json::json!({}),
                 Some(&["something_else".to_owned()]),
             )
@@ -6670,7 +7417,7 @@ mod tests {
         // proving the gate was passed).
         let passed = reg
             .call_tool(
-                "app__foo__bar",
+                "app.foo.bar",
                 serde_json::json!({}),
                 Some(&["app".to_owned()]),
             )
@@ -6684,12 +7431,12 @@ mod tests {
 
     #[tokio::test]
     async fn app_tool_rejects_aliasing_another_app_tool() {
-        // Guard against an app tool whose target is itself an `app__` id
+        // Guard against an app tool whose target is itself an `app.` id
         // (privilege chain / loop).
         let reg = McpRegistry::empty();
-        reg.register_app_tool("app__app__x".into(), "app__x".into(), None);
+        reg.register_app_tool("app.app.x".into(), "app.x".into(), None);
         let err = reg
-            .call_tool("app__app__x", serde_json::json!({}), None)
+            .call_tool("app.app.x", serde_json::json!({}), None)
             .await
             .expect_err("app→app aliasing must be rejected");
         assert!(err.to_string().contains("invalid target"), "got: {err}");
@@ -6710,7 +7457,7 @@ mod tests {
         }
     }
 
-    /// A `ryu_ext__`-prefixed id that no live lowering registered must be refused,
+    /// A `ryu_ext.`-prefixed id that no live lowering registered must be refused,
     /// never forwarded. The registered set is this plane's allowlist-of-record: it is
     /// also what pins the URL and the method, so an unmatched id has no destination
     /// at all and a fallthrough would mean a caller-invented id choosing one.
@@ -6718,7 +7465,7 @@ mod tests {
     async fn derived_tool_dispatch_rejects_unknown_id() {
         let reg = McpRegistry::empty();
         let err = reg
-            .call_tool("ryu_ext__ryu_crm__get_records", serde_json::json!({}), None)
+            .call_tool("ryu_ext.ryu_crm.get_records", serde_json::json!({}), None)
             .await
             .expect_err("an unregistered derived id must be rejected");
         assert!(
@@ -6736,10 +7483,10 @@ mod tests {
         let reg = McpRegistry::empty();
         reg.set_ext_api_routes(
             "@ryu/crm",
-            vec![derived_route("ryu_ext__ryu_crm__get_records", "@ryu/crm")],
+            vec![derived_route("ryu_ext.ryu_crm.get_records", "@ryu/crm")],
         );
         let err = reg
-            .call_tool("ryu_ext__ryu_crm__get_records", serde_json::json!({}), None)
+            .call_tool("ryu_ext.ryu_crm.get_records", serde_json::json!({}), None)
             .await
             .expect_err("no wired app store means no enabled owner");
         assert!(
@@ -6757,11 +7504,11 @@ mod tests {
         let reg = McpRegistry::empty();
         reg.set_ext_api_routes(
             "@ryu/crm",
-            vec![derived_route("ryu_ext__ryu_crm__get_records", "@ryu/crm")],
+            vec![derived_route("ryu_ext.ryu_crm.get_records", "@ryu/crm")],
         );
         let denied = reg
             .call_tool(
-                "ryu_ext__ryu_crm__get_records",
+                "ryu_ext.ryu_crm.get_records",
                 serde_json::json!({}),
                 Some(&["something_else".to_owned()]),
             )
@@ -6776,7 +7523,7 @@ mod tests {
         // at the owner resolution, which is what proves the gate was passed.
         let passed = reg
             .call_tool(
-                "ryu_ext__ryu_crm__get_records",
+                "ryu_ext.ryu_crm.get_records",
                 serde_json::json!({}),
                 Some(&[crate::ext_api::SERVER_NAME.to_owned()]),
             )
@@ -6804,11 +7551,11 @@ mod tests {
         let reg = McpRegistry::empty();
         reg.set_ext_api_routes(
             "@ryu/crm",
-            vec![derived_route("ryu_ext__ryu_crm__get_records", "@ryu/crm")],
+            vec![derived_route("ryu_ext.ryu_crm.get_records", "@ryu/crm")],
         );
         reg.set_ext_api_routes(
             "@ryu/news",
-            vec![derived_route("ryu_ext__ryu_news__get_items", "@ryu/news")],
+            vec![derived_route("ryu_ext.ryu_news.get_items", "@ryu/news")],
         );
         assert!(reg.has_ext_api_routes("@ryu/crm"));
 
@@ -6818,13 +7565,13 @@ mod tests {
             "clearing must re-arm the lowering guard, not just empty the rows"
         );
         assert!(
-            reg.ext_api_route("ryu_ext__ryu_crm__get_records").is_none(),
+            reg.ext_api_route("ryu_ext.ryu_crm.get_records").is_none(),
             "the disabled app's derived tool must stop resolving"
         );
         // Ownership-scoped: the map is keyed by owner, so a clear can never reach
         // another app's rows the way an id-matching `retain` over one flat bag could.
         assert!(
-            reg.ext_api_route("ryu_ext__ryu_news__get_items").is_some(),
+            reg.ext_api_route("ryu_ext.ryu_news.get_items").is_some(),
             "another plugin's derived tools must survive"
         );
     }
@@ -6832,10 +7579,10 @@ mod tests {
     #[tokio::test]
     async fn unregister_app_tool_makes_it_uncallable() {
         let reg = McpRegistry::empty();
-        reg.register_app_tool("app__foo__bar".into(), "foo__bar".into(), None);
-        reg.unregister_app_tool("app__foo__bar");
+        reg.register_app_tool("app.foo.bar".into(), "foo.bar".into(), None);
+        reg.unregister_app_tool("app.foo.bar");
         let err = reg
-            .call_tool("app__foo__bar", serde_json::json!({}), None)
+            .call_tool("app.foo.bar", serde_json::json!({}), None)
             .await
             .expect_err("unregistered app tool must be uncallable");
         assert!(err.to_string().contains("unknown app tool"), "got: {err}");
@@ -6931,9 +7678,9 @@ mod tests {
         )
         .await;
         let resolved = reg
-            .resolve_app_tool_backend("app__collect")
+            .resolve_app_tool_backend("app.collect")
             .await
-            .expect("enabled plugin owns app__collect");
+            .expect("enabled plugin owns app.collect");
         assert!(
             !resolved
                 .grants
@@ -6943,9 +7690,9 @@ mod tests {
 
         // And the refusal is real end-to-end, not just an empty set: register the
         // tool the way the enable path's Tool handler does, then call it.
-        reg.register_app_tool("app__collect".into(), "collect".into(), None);
+        reg.register_app_tool("app.collect".into(), "collect".into(), None);
         let err = reg
-            .call_tool("app__collect", serde_json::json!({}), None)
+            .call_tool("app.collect", serde_json::json!({}), None)
             .await
             .expect_err("ungranted egress must be refused");
         assert!(
@@ -6966,9 +7713,9 @@ mod tests {
         )
         .await;
         let resolved = reg
-            .resolve_app_tool_backend("app__collect")
+            .resolve_app_tool_backend("app.collect")
             .await
-            .expect("enabled plugin owns app__collect");
+            .expect("enabled plugin owns app.collect");
         assert!(resolved
             .grants
             .contains("tool:http-egress:attacker.example"));
@@ -7051,21 +7798,21 @@ mod tests {
         // Discovery: register it the way the server Tool handler does, then confirm
         // it shows up in the flat tool listing that backs `/api/tools/search`.
         reg.register_app_tool(
-            "app__weather".into(),
+            "app.weather".into(),
             "weather".into(),
             Some("Look up weather".into()),
         );
         let all = reg.list_all_tools().await;
         assert!(
-            all.iter().any(|t| t.id == "app__weather"),
+            all.iter().any(|t| t.id == "app.weather"),
             "inline_deno tool must be discoverable via the tool listing"
         );
 
         // It resolves to the inline_deno backend — NOT an alias.
         let resolved = reg
-            .resolve_app_tool_backend("app__weather")
+            .resolve_app_tool_backend("app.weather")
             .await
-            .expect("enabled plugin owns app__weather");
+            .expect("enabled plugin owns app.weather");
         assert!(
             matches!(resolved.backend, ToolBackend::InlineDeno { .. }),
             "must resolve to inline_deno, not alias"
@@ -7077,7 +7824,7 @@ mod tests {
         // the runtime, but the message proves it is NOT the alias path (which would
         // say "unknown MCP server: weather").
         let err = reg
-            .call_tool("app__weather", serde_json::json!({ "city": "SG" }), None)
+            .call_tool("app.weather", serde_json::json!({ "city": "SG" }), None)
             .await
             .err();
         if let Some(e) = err {
@@ -7111,10 +7858,10 @@ mod tests {
             )],
         )
         .await;
-        reg.register_app_tool("app__quote".into(), "quote".into(), None);
+        reg.register_app_tool("app.quote".into(), "quote".into(), None);
 
         let err = reg
-            .call_tool("app__quote", serde_json::json!({ "q": "hi" }), None)
+            .call_tool("app.quote", serde_json::json!({ "q": "hi" }), None)
             .await
             .expect_err("ungranted http egress domain must be refused");
         let msg = err.to_string();
@@ -7145,10 +7892,10 @@ mod tests {
             )],
         )
         .await;
-        reg.register_app_tool("app__weather".into(), "weather".into(), None);
+        reg.register_app_tool("app.weather".into(), "weather".into(), None);
 
         let err = reg
-            .call_tool("app__weather", serde_json::json!({}), None)
+            .call_tool("app.weather", serde_json::json!({}), None)
             .await
             .expect_err("inline tool without tool:execute must be refused");
         assert!(
@@ -7161,7 +7908,7 @@ mod tests {
     async fn plugin_command_tool_ungranted_bin_is_refused() {
         // A plugin ships a `command` tool but holds NO `tool:command:echo` grant →
         // refused deterministically through the real dispatch path (proves the
-        // Command arm is wired and the gate applies to the outer `app__` id).
+        // Command arm is wired and the gate applies to the outer `app.` id).
         let reg = registry_with_plugin(
             "com.test.cmd",
             vec![], // no tool:command:echo
@@ -7177,7 +7924,7 @@ mod tests {
         )
         .await;
         reg.register_app_tool_tagged(
-            "app__echoer".into(),
+            "app.echoer".into(),
             "echoer".into(),
             None,
             Some(AppToolBackendTag::Command),
@@ -7185,9 +7932,9 @@ mod tests {
 
         // It resolves to the Command backend — NOT an alias.
         let resolved = reg
-            .resolve_app_tool_backend("app__echoer")
+            .resolve_app_tool_backend("app.echoer")
             .await
-            .expect("enabled plugin owns app__echoer");
+            .expect("enabled plugin owns app.echoer");
         assert!(
             matches!(
                 resolved.backend,
@@ -7197,7 +7944,7 @@ mod tests {
         );
 
         let err = reg
-            .call_tool("app__echoer", serde_json::json!({ "msg": "hi" }), None)
+            .call_tool("app.echoer", serde_json::json!({ "msg": "hi" }), None)
             .await
             .expect_err("ungranted command exec must be refused");
         let msg = err.to_string();
@@ -7230,14 +7977,14 @@ mod tests {
         )
         .await;
         reg.register_app_tool_tagged(
-            "app__echoer".into(),
+            "app.echoer".into(),
             "echoer".into(),
             None,
             Some(AppToolBackendTag::Command),
         );
 
         let err = reg
-            .call_tool("app__echoer", serde_json::json!({ "msg": "hi" }), None)
+            .call_tool("app.echoer", serde_json::json!({ "msg": "hi" }), None)
             .await
             .expect_err("unknown bin must be refused");
         assert!(
@@ -7257,7 +8004,7 @@ mod tests {
     #[tokio::test]
     async fn native_command_tool_keeps_native_id() {
         let cfg = serde_json::json!({
-            "slug": "spider__crawl",
+            "slug": "spider.crawl",
             "backend": "command",
             "bin": "spider",
             "command_args": ["crawl", "--", "{url}"],
@@ -7273,24 +8020,24 @@ mod tests {
         .await;
         // The id the handler mints for this config is the NATIVE id.
         let id = app_tool_registered_id(&tool_cfg(cfg));
-        assert_eq!(id, "spider__crawl");
+        assert_eq!(id, "spider.crawl");
         reg.register_app_tool_tagged(
             id.clone(),
-            "spider__crawl".into(),
+            "spider.crawl".into(),
             None,
             Some(AppToolBackendTag::Command),
         );
 
-        // Listed under the native id, NOT the app__ form.
+        // Listed under the native id, NOT the app. form.
         let all = reg.list_all_tools().await;
-        assert!(all.iter().any(|t| t.id == "spider__crawl"));
-        assert!(all.iter().all(|t| t.id != "app__spider__crawl"));
+        assert!(all.iter().any(|t| t.id == "spider.crawl"));
+        assert!(all.iter().all(|t| t.id != "app.spider.crawl"));
 
         // Resolves to the Command backend under the native id.
         let resolved = reg
-            .resolve_app_tool_backend("spider__crawl")
+            .resolve_app_tool_backend("spider.crawl")
             .await
-            .expect("enabled plugin owns spider__crawl");
+            .expect("enabled plugin owns spider.crawl");
         assert!(matches!(
             resolved.backend,
             crate::plugin_manifest::schema::ToolBackend::Command { .. }
@@ -7300,7 +8047,7 @@ mod tests {
         // server: spider" — the failure the routing change prevents.
         let err = reg
             .call_tool(
-                "spider__crawl",
+                "spider.crawl",
                 serde_json::json!({ "url": "http://93.184.216.34/" }),
                 None,
             )
@@ -7320,7 +8067,7 @@ mod tests {
     #[tokio::test]
     async fn native_http_tool_keeps_native_id() {
         let cfg = serde_json::json!({
-            "slug": "exa__search",
+            "slug": "exa.search",
             "backend": "http",
             "url": "https://api.exa.ai/search",
         });
@@ -7330,27 +8077,27 @@ mod tests {
             vec![tool_entry("tool-exa-search", cfg.clone())],
         )
         .await;
-        assert_eq!(app_tool_registered_id(&tool_cfg(cfg)), "exa__search");
+        assert_eq!(app_tool_registered_id(&tool_cfg(cfg)), "exa.search");
         reg.register_app_tool_tagged(
-            "exa__search".into(),
-            "exa__search".into(),
+            "exa.search".into(),
+            "exa.search".into(),
             None,
             Some(AppToolBackendTag::Http),
         );
 
         let all = reg.list_all_tools().await;
-        assert!(all.iter().any(|t| t.id == "exa__search"));
+        assert!(all.iter().any(|t| t.id == "exa.search"));
         let resolved = reg
-            .resolve_app_tool_backend("exa__search")
+            .resolve_app_tool_backend("exa.search")
             .await
-            .expect("owns exa__search");
+            .expect("owns exa.search");
         assert!(matches!(
             resolved.backend,
             crate::plugin_manifest::schema::ToolBackend::Http { .. }
         ));
 
         let err = reg
-            .call_tool("exa__search", serde_json::json!({ "q": "hi" }), None)
+            .call_tool("exa.search", serde_json::json!({ "q": "hi" }), None)
             .await
             .expect_err("ungranted http egress must be refused");
         let msg = err.to_string();
@@ -7367,7 +8114,7 @@ mod tests {
     #[tokio::test]
     async fn native_rtk_run_resolves_to_command_with_arg_specs() {
         let cfg = serde_json::json!({
-            "slug": "rtk__run",
+            "slug": "rtk.run",
             "backend": "command",
             "bin": "rtk",
             "args": [
@@ -7375,7 +8122,7 @@ mod tests {
                 { "from": "command", "split": "shell", "required": true }
             ]
         });
-        assert_eq!(app_tool_registered_id(&tool_cfg(cfg.clone())), "rtk__run");
+        assert_eq!(app_tool_registered_id(&tool_cfg(cfg.clone())), "rtk.run");
         let reg = registry_with_plugin(
             "com.test.rtk",
             vec!["tool:command:rtk"],
@@ -7383,15 +8130,15 @@ mod tests {
         )
         .await;
         reg.register_app_tool_tagged(
-            "rtk__run".into(),
-            "rtk__run".into(),
+            "rtk.run".into(),
+            "rtk.run".into(),
             None,
             Some(AppToolBackendTag::Command),
         );
         let resolved = reg
-            .resolve_app_tool_backend("rtk__run")
+            .resolve_app_tool_backend("rtk.run")
             .await
-            .expect("owns rtk__run");
+            .expect("owns rtk.run");
         match resolved.backend {
             crate::plugin_manifest::schema::ToolBackend::Command { arg_specs, .. } => {
                 assert!(arg_specs.is_some());
@@ -7402,13 +8149,24 @@ mod tests {
 
     #[tokio::test]
     async fn alias_and_bare_slug_tools_stay_app_namespaced() {
-        // An Alias tool (other-apps re-expose path) keeps app__<slug>.
+        // An Alias tool (other-apps re-expose path) keeps app.<slug>.
         let alias_cfg = serde_json::json!({ "slug": "web_search" });
         assert_eq!(
             app_tool_registered_id(&tool_cfg(alias_cfg.clone())),
-            "app__web_search"
+            "app.web_search"
         );
-        // A bare (non-namespaced) inline tool also stays app__<slug> — the `__`
+        // A pre-migration native slug is normalized at the registration source,
+        // so it cannot mint a second spelling of the same tool.
+        let legacy_native = serde_json::json!({
+            "slug": "exa__search",
+            "backend": "http",
+            "url": "https://api.exa.ai/search"
+        });
+        assert_eq!(
+            app_tool_registered_id(&tool_cfg(legacy_native)),
+            "exa.search"
+        );
+        // A bare (non-namespaced) inline tool also stays app.<slug> — the `.`
         // discriminator: a native id must carry the separator to be routable.
         let bare_inline = serde_json::json!({
             "slug": "weather",
@@ -7417,10 +8175,10 @@ mod tests {
         });
         assert_eq!(
             app_tool_registered_id(&tool_cfg(bare_inline)),
-            "app__weather"
+            "app.weather"
         );
 
-        // The alias still resolves under app__ and dispatch keeps the legacy re-enter.
+        // The alias still resolves under app. and dispatch keeps the legacy re-enter.
         let reg = registry_with_plugin(
             "com.test.alias",
             vec![],
@@ -7428,9 +8186,9 @@ mod tests {
         )
         .await;
         let resolved = reg
-            .resolve_app_tool_backend("app__web_search")
+            .resolve_app_tool_backend("app.web_search")
             .await
-            .expect("owns app__web_search");
+            .expect("owns app.web_search");
         assert!(matches!(
             resolved.backend,
             crate::plugin_manifest::schema::ToolBackend::Alias { target } if target == "web_search"
@@ -7462,7 +8220,7 @@ mod tests {
         }
     }
 
-    /// The widget fixture every promotion test drives. `checklist__render` was a
+    /// The widget fixture every promotion test drives. `checklist.render` was a
     /// real in-process app tool until 1af518d8 retired the eight inline-chat
     /// widget-apps; Core has had no in-process widget producer since, so the
     /// tests seed one. It stands in for the ONE producer that is still live in
@@ -7478,7 +8236,7 @@ mod tests {
     /// enabled with EMPTY approved_grants on purpose — so a passing grant test
     /// proves the gate reads `manifest.permission_grants`, not the record.
     ///
-    /// The `checklist__render` widget binding is seeded too: `resolve_widget_promotion`
+    /// The `checklist.render` widget binding is seeded too: `resolve_widget_promotion`
     /// returns `None` for a tool that renders no widget BEFORE it consults the
     /// governance gate, so without a binding every one of these tests would pass
     /// or fail for the wrong reason.
@@ -7513,11 +8271,11 @@ mod tests {
         // A synthetic plugin record whose manifest holds widget:render + a
         // contributes.widgets entry: the unified resolver promotes it —
         // contributes.widgets is the source of record (generic host machinery).
-        let manifest = widget_manifest("checklist", "checklist__render", &[WIDGET_RENDER_GRANT]);
+        let manifest = widget_manifest("checklist", "checklist.render", &[WIDGET_RENDER_GRANT]);
         let reg = registry_with_governance(manifest, "checklist", true).await;
         assert!(
             matches!(
-                reg.resolve_widget_promotion("checklist__render").await,
+                reg.resolve_widget_promotion("checklist.render").await,
                 WidgetPromotion::Allow(_)
             ),
             "enabled + granted built-in app widget must promote via contributes.widgets"
@@ -7527,39 +8285,39 @@ mod tests {
     #[tokio::test]
     async fn widget_without_grant_is_refused() {
         // Same enabled record, but the manifest does NOT declare widget:render.
-        let manifest = widget_manifest("checklist", "checklist__render", &["chat.sendFollowUp"]);
+        let manifest = widget_manifest("checklist", "checklist.render", &["chat.sendFollowUp"]);
         let reg = registry_with_governance(manifest, "checklist", true).await;
         assert!(
             matches!(
-                reg.resolve_widget_promotion("checklist__render").await,
+                reg.resolve_widget_promotion("checklist.render").await,
                 WidgetPromotion::DeniedNoGrant { .. }
             ),
             "an enabled plugin without widget:render must NOT auto-promote"
         );
         // The log-reducing wrapper yields no binding (text-only delivery).
         assert!(reg
-            .widget_promotion_or_log("checklist__render")
+            .widget_promotion_or_log("checklist.render")
             .await
             .is_none());
     }
 
     #[tokio::test]
     async fn widget_with_grant_promotes() {
-        let manifest = widget_manifest("checklist", "checklist__render", &[WIDGET_RENDER_GRANT]);
+        let manifest = widget_manifest("checklist", "checklist.render", &[WIDGET_RENDER_GRANT]);
         let reg = registry_with_governance(manifest, "checklist", true).await;
         assert!(reg
-            .widget_promotion_or_log("checklist__render")
+            .widget_promotion_or_log("checklist.render")
             .await
             .is_some());
     }
 
     #[tokio::test]
     async fn disabled_owner_refuses_widget() {
-        let manifest = widget_manifest("checklist", "checklist__render", &[WIDGET_RENDER_GRANT]);
+        let manifest = widget_manifest("checklist", "checklist.render", &[WIDGET_RENDER_GRANT]);
         let reg = registry_with_governance(manifest, "checklist", false).await;
         assert!(
             matches!(
-                reg.resolve_widget_promotion("checklist__render").await,
+                reg.resolve_widget_promotion("checklist.render").await,
                 WidgetPromotion::DeniedDisabled { .. }
             ),
             "a disabled owning plugin must not render its widget"
@@ -7578,7 +8336,7 @@ mod tests {
         );
         assert!(
             matches!(
-                reg.resolve_widget_promotion("checklist__render").await,
+                reg.resolve_widget_promotion("checklist.render").await,
                 WidgetPromotion::Allow(_)
             ),
             "bare registry must fail open so built-in widgets keep rendering"
@@ -7587,14 +8345,14 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_external_server_with_no_record_fails_open() {
-        // Governance IS wired, but no installed manifest declares checklist__render
+        // Governance IS wired, but no installed manifest declares checklist.render
         // (the wired manifest claims a different tool). A tool no manifest claims is
         // the legacy external server case → fail OPEN (documented delegate).
-        let manifest = widget_manifest("other-plugin", "other__render", &[WIDGET_RENDER_GRANT]);
+        let manifest = widget_manifest("other-plugin", "other.render", &[WIDGET_RENDER_GRANT]);
         let reg = registry_with_governance(manifest, "other-plugin", true).await;
         assert!(
             matches!(
-                reg.resolve_widget_promotion("checklist__render").await,
+                reg.resolve_widget_promotion("checklist.render").await,
                 WidgetPromotion::Allow(_)
             ),
             "an undeclared tool_id must fail open (legacy external delegate)"
@@ -7606,7 +8364,7 @@ mod tests {
         // A companion (non-render) tool has no binding at all → no widget.
         let reg = McpRegistry::empty();
         assert!(matches!(
-            reg.resolve_widget_promotion("checklist__update").await,
+            reg.resolve_widget_promotion("checklist.update").await,
             WidgetPromotion::None
         ));
     }
@@ -7646,14 +8404,14 @@ mod tests {
         let reg = registry_with_governance(manifest, "checklist", true).await;
         assert!(
             matches!(
-                reg.resolve_widget_promotion("checklist__render").await,
+                reg.resolve_widget_promotion("checklist.render").await,
                 WidgetPromotion::DeniedUndeclared { .. }
             ),
             "an enabled MCP-server record that never declared the widget must NOT auto-promote"
         );
         // The chat-path wrapper yields no binding → the result is delivered as text.
         assert!(reg
-            .widget_promotion_or_log("checklist__render")
+            .widget_promotion_or_log("checklist.render")
             .await
             .is_none());
     }
@@ -7664,7 +8422,7 @@ mod tests {
         let manifest = synth_mcp_manifest("checklist", None);
         let reg = registry_with_governance(manifest, "checklist", false).await;
         assert!(matches!(
-            reg.resolve_widget_promotion("checklist__render").await,
+            reg.resolve_widget_promotion("checklist.render").await,
             WidgetPromotion::DeniedDisabled { .. }
         ));
     }
@@ -7674,11 +8432,11 @@ mod tests {
         // The closed loop opens: once spawn-time widget discovery records the
         // widget tool in the MCP server's contributes.widgets (and the record is
         // enabled + holds widget:render), the SAME unified path promotes it.
-        let manifest = synth_mcp_manifest("checklist", Some("checklist__render"));
+        let manifest = synth_mcp_manifest("checklist", Some("checklist.render"));
         let reg = registry_with_governance(manifest, "checklist", true).await;
         assert!(
             matches!(
-                reg.resolve_widget_promotion("checklist__render").await,
+                reg.resolve_widget_promotion("checklist.render").await,
                 WidgetPromotion::Allow(_)
             ),
             "a declared + granted + enabled MCP-server widget must promote"
@@ -7687,10 +8445,10 @@ mod tests {
 
     // ── the approval gate never fires for a skill CATALOG id ───────────────────
     //
-    // `skills__<slug>` rows are discovery metadata merged into `tool_search`, not
+    // `skills.<slug>` rows are discovery metadata merged into `tool_search`, not
     // functions. Gating one queued a human approval whose only possible outcome was
     // the dispatch fallthrough's refusal. These pin both halves: the classification
-    // that skips the gate, and the fact that the three real `skills__*` tools are
+    // that skips the gate, and the fact that the three real `skills.*` tools are
     // still classified as gateable.
 
     /// The defect, stated in the terms the gate itself uses.
@@ -7706,9 +8464,9 @@ mod tests {
         use crate::approvals::policy::{should_require_approval_local, ApprovalMode};
 
         for slug_id in [
-            "skills__deploy-to-staging",
-            "skills__send-weekly-digest",
-            "skills__delete-stale-branches",
+            "skills.deploy-to-staging",
+            "skills.send-weekly-digest",
+            "skills.delete-stale-branches",
         ] {
             assert!(
                 should_require_approval_local(&[], slug_id, ApprovalMode::Smart, Some("smart"))
@@ -7724,7 +8482,7 @@ mod tests {
 
         // Manual mode gates every tool id, risky pattern or not, so an innocuous
         // slug queued too. Same guard covers it.
-        let innocuous = "skills__summarize-arxiv";
+        let innocuous = "skills.summarize-arxiv";
         assert!(
             should_require_approval_local(&[], innocuous, ApprovalMode::Manual, Some("manual"))
                 .is_some(),
@@ -7734,7 +8492,7 @@ mod tests {
     }
 
     /// The three real tools stay gated exactly as before, and the classification
-    /// follows `split_once(\"__\")` rather than a prefix guess.
+    /// follows the canonical namespace split rather than a prefix guess.
     #[test]
     fn the_real_skills_tools_stay_gateable_and_slug_shapes_do_not() {
         for callable in SKILLS_CALLABLE_TOOL_IDS {
@@ -7744,28 +8502,28 @@ mod tests {
             );
         }
         // A slug that itself contains the separator: `split_tool_id` yields
-        // ("skills", "a__b"), which is a slug, not `skills__search`.
-        assert!(!approval_gate_applies("skills__a__b"));
-        assert!(!approval_gate_applies("skills__search__extra"));
-        assert!(!approval_gate_applies("skills__"));
-        // Everything outside the `skills` server is untouched. `app__skills__load`
+        // ("skills", "a__b"), which is a slug, not `skills.search`.
+        assert!(!approval_gate_applies("skills.a__b"));
+        assert!(!approval_gate_applies("skills.search__extra"));
+        assert!(!approval_gate_applies("skills."));
+        // Everything outside the `skills` server is untouched. `app.skills.load`
         // is asserted in its RAW form here; in production the call site classifies
         // the resolved `gate_id`, so an alias is judged by whatever it resolves to —
         // a real skills tool stays gated, a catalog-id target is skipped for the
         // same reason a direct call to it is.
-        assert!(approval_gate_applies("gmail__send_email"));
-        assert!(approval_gate_applies("app__skills__load"));
-        assert!(approval_gate_applies("other__load"));
+        assert!(approval_gate_applies("gmail.send_email"));
+        assert!(approval_gate_applies("app.skills.load"));
+        assert!(approval_gate_applies("other.load"));
         // Unroutable (no separator) ids keep the gate rather than losing it.
         assert!(approval_gate_applies("skills"));
     }
 
     /// Drift guard, in the direction that can open a hole.
     ///
-    /// If a new genuinely-callable `skills__*` tool is added to
+    /// If a new genuinely-callable `skills.*` tool is added to
     /// [`skills_tool::tools`] without an entry in [`SKILLS_CALLABLE_TOOL_IDS`],
     /// [`approval_gate_applies`] would call it a catalog id and drop its approval
-    /// gate — and `skills__author` already writes into the shared skills directory,
+    /// gate — and `skills.author` already writes into the shared skills directory,
     /// so an un-gated sibling of it would be a real privilege loss, not a cosmetic
     /// one. `tools()` omits `author` unless `RYU_SKILLS_AUTHOR` is set, so this is a
     /// subset assertion (not equality) and needs no env manipulation.
@@ -7783,7 +8541,7 @@ mod tests {
 
     /// The call path is unchanged apart from the gate: a catalog id still reaches
     /// the `skills` provider and comes back with the fallthrough refusal naming
-    /// `skills__load`.
+    /// `skills.load`.
     ///
     /// Note this process has no global approval engine (`set_global_engine` is a
     /// `OnceLock`, and installing one here would gate every other test in this
@@ -7796,7 +8554,7 @@ mod tests {
         let err = reg
             .call_tool_with_identity(
                 None,
-                "skills__deploy-to-staging",
+                "skills.deploy-to-staging",
                 serde_json::json!({}),
                 None,
                 None,
@@ -7833,7 +8591,7 @@ impl McpRegistry {
         }
     }
 
-    /// Test-only: seed a widget-bearing tool (`<server>__<tool>`) plus its widget
+    /// Test-only: seed a widget-bearing tool (`<server>.<tool>`) plus its widget
     /// HTML resource directly into the registry, with no subprocess and no
     /// `_meta` round-trip.
     ///
@@ -7841,9 +8599,9 @@ impl McpRegistry {
     /// a [`WidgetBinding`], because [`Self::resolve_widget_promotion`] answers
     /// `WidgetPromotion::None` before it ever consults the manifest gate when the
     /// tool renders no widget. They used to get that from the in-process
-    /// `sidecar::mcp::apps` provider (`checklist__render` and seven siblings),
+    /// `sidecar::mcp::apps` provider (`checklist.render` and seven siblings),
     /// which was deleted in 1af518d8 when the inline-chat widget-apps were
-    /// retired in favour of `ui__render`. Core now has ZERO in-process widget
+    /// retired in favour of `ui.render`. Core now has ZERO in-process widget
     /// producers — the only live producer is an external MCP server whose
     /// `tools/list` `_meta` declares `ryu/outputTemplate` — so a fixture is the
     /// only way to keep exercising the grant gate without spawning one.

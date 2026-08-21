@@ -7,11 +7,11 @@
 //   - activate a desktop license key (validated via the control plane → Polar),
 //   - buy Lifetime access or subscribe to Pro (the two headline options),
 //   - expand "Want to run ryu 24/7?" for the Max plan (+ Ryu Cloud hosting), or
-//   - expand "Other plans" for the per-seat Teams plan.
+//   - expand "Other plans" for the For Teams agent plan.
 //
 // Checkout runs through the control-plane's generic bearer-authed endpoint
-// (createCheckout) and opens the hosted Polar URL externally. Teams (per-seat)
-// is refused by that endpoint, so it opens the web pricing page instead.
+// (createCheckout) and opens the hosted Polar URL externally. For Teams is
+// organization-scoped, so it opens the web pricing page for the agent contract.
 //
 // This is a deliberate departure from the open-core "never block the shell"
 // stance: it is a hard paywall by product decision.

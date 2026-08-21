@@ -7,6 +7,12 @@ import { Button } from "@ryu/ui/components/button.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
 
+const MOBILE_DRAWER_CONTENT_CLASSES =
+	"max-sm:!inset-x-0 max-sm:!top-auto max-sm:!bottom-0 max-sm:!left-0 max-sm:!w-full max-sm:!max-w-none max-sm:!translate-x-0 max-sm:!translate-y-0 max-sm:!rounded-t-4xl max-sm:!rounded-b-none max-sm:!max-h-[calc(100dvh-0.5rem)] max-sm:!overflow-y-auto max-sm:data-open:slide-in-from-bottom-4 max-sm:data-closed:slide-out-to-bottom-4 max-sm:data-open:zoom-in-100 max-sm:data-closed:zoom-out-100";
+
+const MOBILE_FULL_PAGE_CONTENT_CLASSES =
+	"max-sm:!inset-0 max-sm:!top-0 max-sm:!bottom-auto max-sm:!left-0 max-sm:!h-dvh max-sm:!max-h-dvh max-sm:!w-screen max-sm:!max-w-none max-sm:!translate-x-0 max-sm:!translate-y-0 max-sm:!rounded-none max-sm:!overflow-hidden max-sm:data-open:fade-in-0 max-sm:data-closed:fade-out-0";
+
 function Dialog({ ...props }: DialogPrimitive.Root.Props) {
 	return <DialogPrimitive.Root data-slot="dialog" {...props} />;
 }
@@ -43,9 +49,11 @@ function DialogContent({
 	className,
 	overlayClassName,
 	children,
+	mobileFullPage = false,
 	showCloseButton = true,
 	...props
 }: DialogPrimitive.Popup.Props & {
+	mobileFullPage?: boolean;
 	showCloseButton?: boolean;
 	overlayClassName?: string;
 }) {
@@ -55,11 +63,20 @@ function DialogContent({
 			<DialogPrimitive.Popup
 				className={cn(
 					"data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-4xl bg-popover/90 p-4 text-popover-foreground text-sm shadow-xl outline-none backdrop-blur-xl duration-(--modal-open-dur) ease-(--modal-ease) data-closed:animate-out data-open:animate-in data-closed:duration-(--modal-close-dur) sm:max-w-md",
-					className
+					className,
+					mobileFullPage
+						? MOBILE_FULL_PAGE_CONTENT_CLASSES
+						: MOBILE_DRAWER_CONTENT_CLASSES
 				)}
 				data-slot="dialog-content"
 				{...props}
 			>
+				{mobileFullPage ? null : (
+					<div
+						aria-hidden="true"
+						className="mx-auto mb-1 hidden h-1.5 w-16 shrink-0 rounded-full bg-muted max-sm:block"
+					/>
+				)}
 				{children}
 				{showCloseButton && (
 					<DialogPrimitive.Close
@@ -121,10 +138,7 @@ function DialogFooter({
 function DialogTitle({ className, ...props }: DialogPrimitive.Title.Props) {
 	return (
 		<DialogPrimitive.Title
-			className={cn(
-				"font-heading font-medium text-base leading-none",
-				className
-			)}
+			className={cn("font-heading font-medium text-xl leading-none", className)}
 			data-slot="dialog-title"
 			{...props}
 		/>

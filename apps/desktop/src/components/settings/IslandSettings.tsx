@@ -265,7 +265,7 @@ export function IslandSettings() {
 	const fromAgentValue = (value: string | null) =>
 		value && value !== LOCAL_MODEL_OPTION ? value : "";
 
-	// Speech-to-text engine (the island's voice input). Reuses the shared
+	// Voice Recognition engine (the island's voice input). Reuses the shared
 	// `voice-input` pref; only the engine (+ its bundled model) is edited here, the
 	// shortcut/enable stay owned by the Voice settings tab. The default whisper
 	// model (`ggml-base.en`) is the auto-downloaded one.
@@ -320,9 +320,9 @@ export function IslandSettings() {
 		setIslandCommandShortcut(target, value).catch(() => undefined);
 	};
 
-	// Text-to-speech: whether the island speaks replies aloud, and which engine +
-	// voice. The default engine is the auto-downloaded built-in OuteTTS. The engine
-	// list is whatever Core serves (built-in + Ryu TTS sidecar) — nothing hardcoded.
+	// Audio: whether the island speaks replies aloud, and which engine + voice.
+	// The default engine is the auto-downloaded built-in OuteTTS. The engine list
+	// is whatever Core serves (built-in + Ryu Audio sidecar) — nothing hardcoded.
 	const [tts, setTtsState] = useState<IslandTtsPrefs>(DEFAULT_ISLAND_TTS_PREFS);
 	const [ttsEngines, setTtsEngines] = useState<TtsEngine[]>([]);
 	useEffect(() => {
@@ -386,7 +386,10 @@ export function IslandSettings() {
 			(selectedTtsEngine?.voices ?? []).map((v) => ({ value: v, label: v })),
 		[selectedTtsEngine]
 	);
-	const handleTtsEngine = (engineId: string) => {
+	const handleTtsEngine = (engineId: string | null) => {
+		if (engineId === null) {
+			return;
+		}
 		const next = ttsEngines.find((e) => e.id === engineId);
 		const stillValid = next?.voices.includes(tts.voice);
 		writeTts({
@@ -529,7 +532,7 @@ export function IslandSettings() {
 							</Select>
 						}
 						description="Handles voice + typed chat in the island."
-						title="Chat agent (voice input)"
+						title="Chat agent (Voice Recognition)"
 					/>
 					<SettingsItem
 						actions={
@@ -583,7 +586,7 @@ export function IslandSettings() {
 					<SettingsItem
 						actions={
 							<Switch
-								aria-label="Enable push-to-talk voice input"
+								aria-label="Enable push-to-talk Voice Recognition"
 								checked={voicePrefs.enabled}
 								onCheckedChange={(v) =>
 									writeVoicePrefs({ ...voicePrefs, enabled: v })
@@ -591,7 +594,7 @@ export function IslandSettings() {
 							/>
 						}
 						description="Press the shortcut to dictate into the island; a live waveform shows while listening, then the transcript drops into chat."
-						title="Push-to-talk voice input"
+						title="Push-to-talk Voice Recognition"
 					/>
 					{voicePrefs.enabled ? (
 						<>
@@ -654,8 +657,8 @@ export function IslandSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Speech for the island. Voice input transcribes what you say (whisper is the bundled, auto-downloaded engine). Read-back speaks assistant replies aloud using the auto-downloaded Kokoro 82M by default (OuteTTS is the fallback). Read-back is automatically disabled while a meeting is recording."
-				title="Speech"
+				caption="Audio and Voice Recognition for the island. Voice Recognition transcribes what you say (whisper is the bundled, auto-downloaded engine). Read-back speaks assistant replies aloud using the auto-downloaded Kokoro 82M by default (OuteTTS is the fallback). Read-back is automatically disabled while a meeting is recording."
+				title="Audio & Voice Recognition"
 			>
 				<SettingsGroup>
 					<SettingsItem
@@ -680,8 +683,8 @@ export function IslandSettings() {
 								</SelectContent>
 							</Select>
 						}
-						description="Speech-to-text engine + bundled model."
-						title="Voice input (speech-to-text)"
+						description="Voice Recognition engine + bundled model."
+						title="Voice Recognition"
 					/>
 					<SettingsItem
 						actions={
@@ -702,7 +705,7 @@ export function IslandSettings() {
 									value={tts.engine}
 								>
 									<SelectTrigger
-										aria-label="Text-to-speech engine"
+										aria-label="Audio engine"
 										className="h-8 w-56 text-sm"
 									>
 										<SelectValue />
@@ -716,8 +719,8 @@ export function IslandSettings() {
 									</SelectContent>
 								</Select>
 							}
-							description="Text-to-speech engine for spoken replies."
-							title="Speech engine"
+							description="Audio engine for spoken replies."
+							title="Audio engine"
 						/>
 					)}
 					{tts.enabled &&
@@ -727,7 +730,11 @@ export function IslandSettings() {
 								actions={
 									<Select
 										items={ttsVoiceOptions}
-										onValueChange={(v) => writeTts({ ...tts, voice: v })}
+										onValueChange={(v) => {
+											if (v !== null) {
+												writeTts({ ...tts, voice: v });
+											}
+										}}
 										value={tts.voice || selectedTtsEngine.default_voice || ""}
 									>
 										<SelectTrigger

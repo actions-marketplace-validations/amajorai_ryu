@@ -127,18 +127,28 @@ const SDK_KNOWN_KINDS = new Set([
 const VALID_HOOK_PHASES = new Set([
 	"post_assistant_turn",
 	"pre_user_turn",
+	"pre_model_select",
+	"action",
 	"session_start",
 	"stop",
 	"pre_tool_use",
 	"post_tool_use",
+	"tool_result",
 	"subagent_stop",
 	"session_end",
 	"notification",
+	"context",
+	"message_end",
+	"session_before_compact",
+	"session_compact",
+	"model_select",
+	"session_tree",
 	// Kernel lifecycle phases fired by Core's own subsystems (the workflow
 	// executor), not by any app.
 	"workflow_run_started",
 	"workflow_run_finished",
 	"workflow_run_failed",
+	"delegation_lifecycle",
 ]);
 
 /** An **app event** — a phase some app declares in `contributes.hook_events`,
@@ -303,15 +313,15 @@ describe("glob_match oracle (ported from Core)", () => {
 		expect(globMatch("bash", "bashx")).toBe(false);
 	});
 	it("trailing star is a prefix match", () => {
-		expect(globMatch("bash*", "bash__run")).toBe(true);
+		expect(globMatch("bash*", "bash.run")).toBe(true);
 		expect(globMatch("bash*", "sh")).toBe(false);
 	});
 	it("leading star is a suffix match", () => {
-		expect(globMatch("*write", "fs__write")).toBe(true);
+		expect(globMatch("*write", "fs.write")).toBe(true);
 		expect(globMatch("*write", "writer")).toBe(false);
 	});
 	it("double star is a substring match", () => {
-		expect(globMatch("*edit*", "editor__do_edit")).toBe(true);
+		expect(globMatch("*edit*", "editor.do_edit")).toBe(true);
 		expect(globMatch("*edit*", "read_only")).toBe(false);
 	});
 	it("an interior star degrades to an exact-literal match (Core has no compile step)", () => {

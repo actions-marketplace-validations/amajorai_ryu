@@ -120,18 +120,40 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
     // agentbrowser
     (
         "@ryu/agentbrowser",
-        "adapters/browser__screenshot.js",
-        include_str!("../../../../plugins-store/agentbrowser/adapters/browser__screenshot.js"),
+        "adapters/browser.screenshot.js",
+        include_str!("../../../../plugins-store/agentbrowser/adapters/browser.screenshot.js"),
     ),
     (
         "@ryu/agentbrowser",
-        "adapters/browser__snapshot.js",
-        include_str!("../../../../plugins-store/agentbrowser/adapters/browser__snapshot.js"),
+        "adapters/browser.snapshot.js",
+        include_str!("../../../../plugins-store/agentbrowser/adapters/browser.snapshot.js"),
     ),
     (
         "@ryu/agentbrowser",
-        "adapters/browser__type.js",
-        include_str!("../../../../plugins-store/agentbrowser/adapters/browser__type.js"),
+        "adapters/browser.type.js",
+        include_str!("../../../../plugins-store/agentbrowser/adapters/browser.type.js"),
+    ),
+    // cloudflare-browser-run (external provider)
+    (
+        "@ryu/cloudflare-browser-run",
+        "adapters/browser.navigate.js",
+        include_str!(
+            "../../../../plugins-store/external_plugins/cloudflare-browser-run/adapters/browser.navigate.js"
+        ),
+    ),
+    (
+        "@ryu/cloudflare-browser-run",
+        "adapters/browser.screenshot.js",
+        include_str!(
+            "../../../../plugins-store/external_plugins/cloudflare-browser-run/adapters/browser.screenshot.js"
+        ),
+    ),
+    (
+        "@ryu/cloudflare-browser-run",
+        "adapters/browser.snapshot.js",
+        include_str!(
+            "../../../../plugins-store/external_plugins/cloudflare-browser-run/adapters/browser.snapshot.js"
+        ),
     ),
     // chat-title
     (
@@ -148,19 +170,19 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
     // exa
     (
         "@ryu/exa",
-        "adapters/web__search.js",
-        include_str!("../../../../plugins-store/exa/adapters/web__search.js"),
+        "adapters/web.search.js",
+        include_str!("../../../../plugins-store/exa/adapters/web.search.js"),
     ),
     // firecrawl
     (
         "@ryu/firecrawl",
-        "adapters/web__crawl.js",
-        include_str!("../../../../plugins-store/firecrawl/adapters/web__crawl.js"),
+        "adapters/web.crawl.js",
+        include_str!("../../../../plugins-store/firecrawl/adapters/web.crawl.js"),
     ),
     (
         "@ryu/firecrawl",
-        "adapters/web__extract.js",
-        include_str!("../../../../plugins-store/firecrawl/adapters/web__extract.js"),
+        "adapters/web.extract.js",
+        include_str!("../../../../plugins-store/firecrawl/adapters/web.extract.js"),
     ),
     // goal
     (
@@ -171,13 +193,13 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
     // honcho
     (
         "@ryu/honcho",
-        "adapters/memory__store.js",
-        include_str!("../../../../plugins-store/honcho/adapters/memory__store.js"),
+        "adapters/memory.store.js",
+        include_str!("../../../../plugins-store/honcho/adapters/memory.store.js"),
     ),
     (
         "@ryu/honcho",
-        "adapters/memory__sync.js",
-        include_str!("../../../../plugins-store/honcho/adapters/memory__sync.js"),
+        "adapters/memory.sync.js",
+        include_str!("../../../../plugins-store/honcho/adapters/memory.sync.js"),
     ),
     // hook-observers
     (
@@ -236,8 +258,8 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
     // parallel
     (
         "@ryu/parallel",
-        "adapters/web__search.js",
-        include_str!("../../../../plugins-store/parallel/adapters/web__search.js"),
+        "adapters/web.search.js",
+        include_str!("../../../../plugins-store/parallel/adapters/web.search.js"),
     ),
     // plan-continue
     (
@@ -277,14 +299,25 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
     // scrapling
     (
         "@ryu/scrapling",
-        "adapters/web__extract.js",
-        include_str!("../../../../plugins-store/scrapling/adapters/web__extract.js"),
+        "adapters/web.extract.js",
+        include_str!("../../../../plugins-store/scrapling/adapters/web.extract.js"),
     ),
     // security-guidance
     (
         "@ryu/security-guidance",
         "hooks/review.js",
         include_str!("../../../../plugins-store/security-guidance/hooks/review.js"),
+    ),
+    // security-scanner
+    (
+        "@ryu/security-scanner",
+        "hooks/auto-review.js",
+        include_str!("../../../../plugins-store/security-scanner/hooks/auto-review.js"),
+    ),
+    (
+        "@ryu/security-scanner",
+        "hooks/command.js",
+        include_str!("../../../../plugins-store/security-scanner/hooks/command.js"),
     ),
     // tool-firewall
     (
@@ -303,18 +336,18 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
 pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
     (
         "@ryu/agentbrowser",
-        "adapters/browser__type.js",
-        include_str!("../../../../plugins-store/agentbrowser/adapters/browser__type.js"),
+        "adapters/browser.type.js",
+        include_str!("../../../../plugins-store/agentbrowser/adapters/browser.type.js"),
     ),
     (
         "@ryu/agentbrowser",
-        "adapters/browser__snapshot.js",
-        include_str!("../../../../plugins-store/agentbrowser/adapters/browser__snapshot.js"),
+        "adapters/browser.snapshot.js",
+        include_str!("../../../../plugins-store/agentbrowser/adapters/browser.snapshot.js"),
     ),
     (
         "@ryu/agentbrowser",
-        "adapters/browser__screenshot.js",
-        include_str!("../../../../plugins-store/agentbrowser/adapters/browser__screenshot.js"),
+        "adapters/browser.screenshot.js",
+        include_str!("../../../../plugins-store/agentbrowser/adapters/browser.screenshot.js"),
     ),
 ];
 

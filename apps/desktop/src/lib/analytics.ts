@@ -108,7 +108,7 @@ export const ANALYTICS_EVENT_CATALOG: Record<
 		props: ["agent_id"],
 	},
 	engine_swapped: {
-		description: "The active chat engine was switched.",
+		description: "The active Chat was switched.",
 		props: ["engine"],
 	},
 	sandbox_backend_set: {

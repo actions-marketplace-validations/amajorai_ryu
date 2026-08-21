@@ -1,5 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import {
+	Chat01Icon,
+	FingerPrintIcon,
+	LayerIcon,
+	Package01Icon,
+	PlugSocketIcon,
+	PotionIcon,
+	Tv01Icon,
+	UserMultiple02Icon,
+	WorkflowCircle06Icon,
+} from "@hugeicons/core-free-icons";
+import {
 	BUILTIN_SECTIONS,
 	DEFAULT_SECTION_ORDER,
 	isSectionKey,
@@ -28,6 +39,18 @@ describe("section vocabulary", () => {
 		expect(isSectionKey("chats")).toBe(true);
 		expect(isSectionKey("plugin:@ryu/meetings:meetings")).toBe(true);
 		expect(isSectionKey("definitely-not-a-section")).toBe(false);
+	});
+
+	it("keeps the requested glyph vocabulary in one shared map", () => {
+		expect(SECTION_ICONS.companions).toBe(Package01Icon);
+		expect(SECTION_ICONS.plugins).toBe(PlugSocketIcon);
+		expect(SECTION_ICONS.skills).toBe(PotionIcon);
+		expect(SECTION_ICONS.workflows).toBe(WorkflowCircle06Icon);
+		expect(SECTION_ICONS.chats).toBe(Chat01Icon);
+		expect(SECTION_ICONS.teams).toBe(UserMultiple02Icon);
+		expect(SECTION_ICONS.channels).toBe(Tv01Icon);
+		expect(SECTION_ICONS.identities).toBe(FingerPrintIcon);
+		expect(SECTION_ICONS.engines).toBe(LayerIcon);
 	});
 });
 

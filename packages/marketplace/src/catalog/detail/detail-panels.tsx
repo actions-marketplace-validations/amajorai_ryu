@@ -18,6 +18,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
+import { formatCount as formatSharedCount } from "@ryu/ui/lib/number-format.ts";
 import type { ComponentType } from "react";
 import { useState } from "react";
 import { grantDescription, grantLabel } from "../grant-labels.ts";
@@ -28,6 +29,7 @@ import type {
 	PluginCatalogDetail,
 	VersionSnapshot,
 } from "../types.ts";
+import { catalogLayerLabel } from "../types.ts";
 import { RequiredPluginsSection } from "./dependency-graph.tsx";
 
 /** Render an ISO timestamp as a short absolute date. Absolute rather than
@@ -48,16 +50,9 @@ export function formatDate(iso?: string | null): string | null {
 	});
 }
 
-/** Compact download counts (12400 → "12.4k") — a store column, not an analytics
- *  readout. */
+/** Shared count policy for store metadata and version rows. */
 export function formatCount(value: number): string {
-	if (value < 1000) {
-		return String(value);
-	}
-	if (value < 1_000_000) {
-		return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0).replace(/\.0$/, "")}k`;
-	}
-	return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+	return formatSharedCount(value) ?? "—";
 }
 
 /** One item in the strip under the listing name. */
@@ -377,12 +372,14 @@ export function hasDependencies(
 	entry: CatalogEntry
 ): boolean {
 	const requires = detail?.requires ?? entry.requires ?? null;
+	const layers = detail?.layers?.length ? detail.layers : (entry.layers ?? []);
 	return Boolean(
 		requires?.apps?.length ||
 			requires?.grants?.length ||
 			detail?.permissionGrants?.length ||
 			detail?.engines?.ryu ||
-			detail?.apiSurface?.provides?.length
+			detail?.apiSurface?.provides?.length ||
+			layers.length
 	);
 }
 
@@ -416,6 +413,7 @@ export function DependenciesPanel({
 		? detail.permissionGrants
 		: (requires?.grants ?? []);
 	const engineReq = detail?.engines?.ryu ?? null;
+	const layers = detail?.layers?.length ? detail.layers : (entry.layers ?? []);
 
 	return (
 		<div className="flex flex-col gap-6">
@@ -468,6 +466,36 @@ export function DependenciesPanel({
 						<code className="font-mono">{engineReq}</code>. An incompatible node
 						refuses to load it rather than failing at runtime.
 					</p>
+				</section>
+			) : null}
+
+			{layers.length > 0 ? (
+				<section className="flex flex-col gap-2">
+					<h3 className="font-medium text-sm">Swappable layer</h3>
+					<ul className="flex flex-col gap-1.5">
+						{layers.map((layer) => (
+							<li
+								className="rounded-md bg-muted px-3 py-2"
+								key={layer.capability}
+							>
+								<div className="flex flex-wrap items-center gap-2">
+									<Badge variant="outline">{catalogLayerLabel(layer)}</Badge>
+									{layer.target ? (
+										<span className="text-muted-foreground text-xs">
+											{layer.target === "remote-desktop"
+												? "Hosted provider"
+												: "Local provider"}
+										</span>
+									) : null}
+								</div>
+								{showTechnical && layer.verbs?.length ? (
+									<p className="mt-1 text-muted-foreground text-xs">
+										Verbs: {layer.verbs.join(", ")}
+									</p>
+								) : null}
+							</li>
+						))}
+					</ul>
 				</section>
 			) : null}
 

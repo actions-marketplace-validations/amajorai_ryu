@@ -27,7 +27,7 @@ declare global {
 	}
 }
 
-const SAVE_TOOL_ID = "__APP_NAME____save";
+const SAVE_TOOL_ID = "__APP_NAME__.save";
 
 function Widget() {
 	const bridge = window.openai ?? {};

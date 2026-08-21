@@ -214,10 +214,10 @@ describe("widget → host callTool bridge over a real MessageChannel", () => {
 	it("routes window.openai.callTool to services.callTool with pinned name+args", async () => {
 		const { svc, calls } = recordingServices();
 		const { call, close } = channelPair(WIDGET_CAPS, svc);
-		const result = await call("tool.call", ["my-app__save", { note: "hi" }]);
-		expect(result).toEqual({ ok: true, echoed: "my-app__save" });
+		const result = await call("tool.call", ["my-app.save", { note: "hi" }]);
+		expect(result).toEqual({ ok: true, echoed: "my-app.save" });
 		expect(calls).toEqual([
-			{ method: "callTool", args: ["my-app__save", { note: "hi" }] },
+			{ method: "callTool", args: ["my-app.save", { note: "hi" }] },
 		]);
 		close();
 	});
@@ -259,7 +259,7 @@ describe("widget → host callTool bridge over a real MessageChannel", () => {
 		// No capabilities granted.
 		const { call, close } = channelPair(new Set<Capability>(), svc);
 		try {
-			await call("tool.call", ["my-app__save", {}]);
+			await call("tool.call", ["my-app.save", {}]);
 			throw new Error("expected rejection");
 		} catch (err) {
 			// `tool.call` is NOT in CODED_ERROR_CAPABILITIES → plain-string error,

@@ -38,8 +38,8 @@ test("with detail on, every turn renders, tool rows included", async ({
 
 	// Five turns: the assistant-only opener plus four user prompts.
 	await expect(pane.locator(ITEM)).toHaveCount(5);
-	await expect(pane.getByText(SILENT_TOOL_ONLY).first()).toBeVisible();
-	await expect(pane.getByText(OPENING_TOOL_ONLY).first()).toBeVisible();
+	await expect(pane.getByText(SILENT_TOOL_ONLY).last()).toBeVisible();
+	await expect(pane.getByText(OPENING_TOOL_ONLY).last()).toBeVisible();
 });
 
 test("at None the tool rows are gone but the prose and the failure stay", async ({
@@ -54,7 +54,7 @@ test("at None the tool rows are gone but the prose and the failure stay", async 
 	// notice included — would be gone.
 	await expect(pane.getByText(INTERRUPTED)).toBeVisible();
 	// A failed call is the one tool row None keeps.
-	await expect(pane.getByText(FAILED_COMMAND).first()).toBeVisible();
+	await expect(pane.getByText(FAILED_COMMAND).last()).toBeVisible();
 
 	// Succeeded calls leave nothing behind at all.
 	await expect(pane.getByText(SILENT_TOOL_ONLY)).toHaveCount(0);

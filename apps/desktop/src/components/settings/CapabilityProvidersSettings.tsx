@@ -1,7 +1,7 @@
 // apps/desktop/src/components/settings/CapabilityProvidersSettings.tsx
 //
 // The non-chat half of Settings > Providers: which provider serves image
-// generation, speech-to-text, text-to-speech and video, plus where embeddings
+// generation, voice recognition, audio and video, plus where embeddings
 // and reranking come from.
 //
 // # Why this is read-only
@@ -56,12 +56,12 @@ const ROUTED_CAPABILITIES: {
 	},
 	{
 		modality: "stt",
-		label: "Speech to text",
+		label: "Voice Recognition",
 		blurb: "Serves POST /v1/audio/transcriptions — dictation and voice mode.",
 	},
 	{
 		modality: "tts",
-		label: "Text to speech",
+		label: "Audio",
 		blurb: "Serves POST /v1/audio/speech — read-aloud and voice replies.",
 	},
 	{

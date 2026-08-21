@@ -11,6 +11,7 @@ import {
 import { Progress } from "@ryu/ui/components/progress";
 import { toast } from "@ryu/ui/components/sileo";
 import { useCallback, useEffect, useState } from "react";
+import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
 
 interface HardwareData {
 	cpu_brand: string;
@@ -39,17 +40,15 @@ export function HardwareMonitor() {
 		try {
 			// These will call Tauri backend commands
 			const [hardware, usage] = await Promise.all([
-				window.__TAURI__?.core.invoke("get_hardware_info") ||
-					Promise.resolve(null),
-				window.__TAURI__?.core.invoke("get_system_usage") ||
-					Promise.resolve(null),
+				invokeWhenReady<HardwareData>("get_hardware_info"),
+				invokeWhenReady<SystemUsage>("get_system_usage"),
 			]);
 
 			if (hardware) {
-				setHardwareData(hardware as HardwareData);
+				setHardwareData(hardware);
 			}
 			if (usage) {
-				setSystemUsage(usage as SystemUsage);
+				setSystemUsage(usage);
 			}
 		} catch (error) {
 			console.error("Failed to fetch hardware info:", error);
@@ -71,11 +70,9 @@ export function HardwareMonitor() {
 		// Poll for system usage every 5 seconds
 		const interval = setInterval(async () => {
 			try {
-				const usage = await (window.__TAURI__?.core.invoke(
-					"get_system_usage"
-				) || Promise.resolve(null));
+				const usage = await invokeWhenReady<SystemUsage>("get_system_usage");
 				if (usage) {
-					setSystemUsage(usage as SystemUsage);
+					setSystemUsage(usage);
 				}
 			} catch (error) {
 				console.error("Failed to fetch system usage:", error);
@@ -242,24 +239,17 @@ export function HardwareMonitor() {
 			{/* Refresh Button */}
 			<Button
 				className="w-full"
-				disabled={isRefreshing}
+				loading={isRefreshing}
 				onClick={() => fetchHardwareInfo(true)}
 				variant="ghost"
 			>
-				{isRefreshing ? (
-					<>
-						<HugeiconsIcon
-							className="mr-2 h-4 w-4 animate-spin"
-							icon={Loading01Icon}
-						/>
-						Refreshing...
-					</>
-				) : (
+				{!isRefreshing && (
 					<>
 						<HugeiconsIcon className="mr-2 h-4 w-4" icon={Refresh01Icon} />
 						Refresh Hardware Info
 					</>
 				)}
+				{isRefreshing ? "Refreshing..." : null}
 			</Button>
 		</div>
 	);

@@ -1,11 +1,13 @@
 import { configureSettingsApi } from "@ryu/settings";
 import {
+	anonymousClient,
 	inferAdditionalFields,
 	magicLinkClient,
 	twoFactorClient,
 	usernameClient,
 } from "better-auth/client/plugins";
 import { createAuthClient } from "better-auth/react";
+import { getStartupDefaultAccountId } from "@/src/lib/startup-selection.ts";
 import { TauriUnavailableError, withTauri } from "@/src/lib/tauri-ready.ts";
 import { BACKEND_URL, FRONTEND_URL } from "./app-urls.ts";
 import { AUTH_CORE_URL } from "./core-url.ts";
@@ -30,6 +32,7 @@ const WAITLIST_CACHE_KEY = "ryu_waitlist_approved";
 export interface StoredAccount {
 	email: string;
 	image: string | null;
+	isAnonymous?: boolean;
 	name: string | null;
 	token: string;
 	userId: string;
@@ -150,6 +153,7 @@ async function persistVault(
 async function fetchAccountProfile(token: string): Promise<{
 	userId: string;
 	email: string;
+	isAnonymous: boolean;
 	name: string | null;
 	image: string | null;
 }> {
@@ -163,6 +167,7 @@ async function fetchAccountProfile(token: string): Promise<{
 		user?: {
 			id?: string;
 			email?: string | null;
+			isAnonymous?: boolean;
 			name?: string | null;
 			image?: string | null;
 		};
@@ -174,6 +179,7 @@ async function fetchAccountProfile(token: string): Promise<{
 	return {
 		userId: user.id,
 		email: user.email ?? "",
+		isAnonymous: user.isAnonymous === true,
 		name: user.name ?? null,
 		image: user.image ?? null,
 	};
@@ -217,6 +223,10 @@ export async function switchAccount(userId: string): Promise<void> {
 export async function signOutAccount(userId: string): Promise<void> {
 	const remaining = readAccounts().filter((a) => a.userId !== userId);
 	const wasActive = getActiveUserId() === userId;
+	const account = readAccounts().find((a) => a.userId === userId);
+	if (wasActive && account?.isAnonymous) {
+		await authClient.deleteAnonymousUser().catch(() => undefined);
+	}
 	if (wasActive) {
 		localStorage.removeItem(WAITLIST_CACHE_KEY);
 	}
@@ -272,6 +282,12 @@ export async function clearCoreAuth(): Promise<void> {
 }
 
 export async function clearSessionToken(): Promise<void> {
+	const activeAccount = readAccounts().find(
+		(account) => account.userId === getActiveUserId()
+	);
+	if (activeAccount?.isAnonymous) {
+		await authClient.deleteAnonymousUser().catch(() => undefined);
+	}
 	// Full sign-out: clear the entire vault (every account).
 	localStorage.removeItem(TOKEN_KEY);
 	localStorage.removeItem(ACCOUNTS_KEY);
@@ -313,11 +329,13 @@ async function hydrateVault(): Promise<void> {
 	const local = readAccounts();
 	if (local.length > 0) {
 		const active =
-			local.find((a) => a.userId === readActiveUserId()) ?? local[0];
-		localStorage.setItem(TOKEN_KEY, active.token);
-		if (!readActiveUserId()) {
-			localStorage.setItem(ACTIVE_USER_KEY, active.userId);
-		}
+			local.find((a) => a.userId === getStartupDefaultAccountId()) ??
+			local.find((a) => a.userId === readActiveUserId()) ??
+			local[0];
+		// A startup default is a real account switch, not only a token preference.
+		// Keep the active-id mirror and the Tauri copy aligned so the session hook,
+		// account menu, and node hydration all observe the same account.
+		await persistVault(local, active.userId);
 		return;
 	}
 
@@ -327,7 +345,9 @@ async function hydrateVault(): Promise<void> {
 		const stored = await store.get<StoredAccount[]>("accounts");
 		if (Array.isArray(stored) && stored.length > 0) {
 			const storedActive =
-				(await store.get<string>("activeUserId")) ?? stored[0].userId;
+				getStartupDefaultAccountId() ??
+				(await store.get<string>("activeUserId")) ??
+				stored[0].userId;
 			const active = stored.find((a) => a.userId === storedActive) ?? stored[0];
 			localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(stored));
 			localStorage.setItem(ACTIVE_USER_KEY, active.userId);
@@ -358,6 +378,7 @@ async function hydrateVault(): Promise<void> {
 			token: legacyToken,
 			userId: legacyToken,
 			email: "",
+			isAnonymous: false,
 			name: null,
 			image: null,
 		};
@@ -381,12 +402,14 @@ export const authClient = createAuthClient({
 		},
 	},
 	plugins: [
+		anonymousClient(),
 		twoFactorClient(),
 		magicLinkClient(),
 		usernameClient(),
 		inferAdditionalFields({
 			user: {
 				avatarId: { type: "string", required: false },
+				isAnonymous: { type: "boolean", required: false },
 				profileVisibility: { type: "string", required: false },
 				referralCode: { type: "string", required: false },
 				referralCount: { type: "number", required: false },

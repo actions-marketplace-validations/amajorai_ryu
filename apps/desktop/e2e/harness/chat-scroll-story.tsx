@@ -18,6 +18,8 @@
 //                  tab) and is revealed after the history lands
 //   ?pref=off      the Appearance toggle is off — the transcript must be left
 //                  wherever it loaded, NOT yanked to the bottom
+//   ?paging=1      only the newest page is mounted first; reaching the top
+//                  prepends an older page while preserving the scroll anchor
 //
 // The pref is read through the REAL desktop provider (`ChatDisplayPrefs`, backed
 // by the `ryu:open-chat-at-bottom` localStorage toggle), so this covers the
@@ -42,6 +44,7 @@ const HYDRATION_DELAY_MS = 60;
 const params = new URLSearchParams(window.location.search);
 const startsHidden = params.get("hidden") === "1";
 const prefOff = params.get("pref") === "off";
+const paging = params.get("paging") === "1";
 
 // The story drives the REAL persisted toggle rather than the context default, so
 // the "off" case exercises the same read path the Appearance switch writes to.
@@ -78,6 +81,8 @@ function buildHistory(thread: string): UIMessage[] {
 function Story() {
 	const [messages, setMessages] = useState<UIMessage[]>([]);
 	const [hidden, setHidden] = useState(startsHidden);
+	const [pageStart, setPageStart] = useState(paging ? TURN_COUNT - 10 : 0);
+	const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
 	// Selecting a different chat inside a live transcript (sidebar click on a tab
 	// that is already open) swaps the history without remounting anything.
 	const [thread, setThread] = useState("conv-a");
@@ -85,15 +90,31 @@ function Story() {
 	// Mirrors ChatPage: the conversation id is known at mount, its history is not.
 	useEffect(() => {
 		const historyTimer = window.setTimeout(() => {
-			setMessages(buildHistory(thread));
+			const history = buildHistory(thread);
+			const nextStart = paging ? TURN_COUNT - 10 : 0;
+			setPageStart(nextStart);
+			setMessages(paging ? history.slice(nextStart * 2) : history);
 		}, HYDRATION_DELAY_MS);
 		return () => window.clearTimeout(historyTimer);
 	}, [thread]);
+
+	const loadOlderMessages = async () => {
+		if (!paging || pageStart === 0 || loadingOlderMessages) {
+			return;
+		}
+		setLoadingOlderMessages(true);
+		await new Promise((resolve) => window.setTimeout(resolve, 40));
+		const nextStart = Math.max(0, pageStart - 10);
+		setPageStart(nextStart);
+		setMessages(buildHistory(thread).slice(nextStart * 2));
+		setLoadingOlderMessages(false);
+	};
 
 	return (
 		<div className="flex h-screen flex-col bg-background">
 			<div
 				data-message-count={messages.length}
+				data-page-start={pageStart}
 				data-testid="story-state"
 				data-thread={thread}
 			>
@@ -134,6 +155,8 @@ function Story() {
 						// row's right edge is not the one the user sees.
 						currentUser={{ id: "me", name: "You" }}
 						emptyStatePosition="center"
+						hasOlderMessages={paging && pageStart > 0}
+						loadingOlderMessages={paging && loadingOlderMessages}
 						messages={messages}
 						// Present purely so the hover toolbar has buttons to align; the
 						// story never branches or edits.
@@ -143,6 +166,7 @@ function Story() {
 						onEditMessage={() => {
 							// no-op
 						}}
+						onLoadOlderMessages={loadOlderMessages}
 						onSend={() => {
 							// The story never sends; the composer is here because the real
 							// surface always carries one.

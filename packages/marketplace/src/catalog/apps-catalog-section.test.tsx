@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import AppsCatalogSection, {
 	AuthBridgeConsent,
+	matchesCatalogTag,
 } from "./apps-catalog-section.tsx";
 import StoreItemAction, {
 	StoreItemOverflowMenu,
@@ -129,6 +130,12 @@ function render(install: CatalogInstall | null): string {
 }
 
 describe("CatalogHost seam — Apps section", () => {
+	test("tag filtering matches explicit manifest tags and preserves the all-tags state", () => {
+		expect(matchesCatalogTag(SAMPLE_ITEM, null)).toBe(true);
+		expect(matchesCatalogTag(SAMPLE_ITEM, "demo")).toBe(true);
+		expect(matchesCatalogTag(SAMPLE_ITEM, "browser")).toBe(false);
+	});
+
 	test("auth-bridge enable consent discloses credential and traffic custody", () => {
 		const html = renderToStaticMarkup(
 			<AuthBridgeConsent
@@ -247,7 +254,9 @@ describe("CatalogHost seam — Apps section", () => {
 		// Asserted on `aria-label`, not `title`: a hover-only tooltip is unreachable
 		// by keyboard and invisible on touch, so the accessible name is the one that
 		// proves the reason actually reaches a user.
-		expect(html).toContain('aria-label="Requires Ryu &gt;=0.2.0 (you have 0.1.12)"');
+		expect(html).toContain(
+			'aria-label="Requires Ryu &gt;=0.2.0 (you have 0.1.12)"'
+		);
 	});
 
 	/** An installed-but-held-back plugin must stay removable — it is on disk, it is

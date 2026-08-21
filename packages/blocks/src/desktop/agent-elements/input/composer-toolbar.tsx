@@ -1,12 +1,9 @@
 "use client";
 
+import { ExpandIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import { Wave } from "@ryu/ui/components/wave";
-import {
-	IconLoader2,
-	IconMicrophone,
-	IconPlayerStopFilled,
-} from "@tabler/icons-react";
 import type { ContextUsage } from "../context-usage.tsx";
 import type { ComposerMenuGroup, ComposerMenuItem } from "./composer-menu.tsx";
 import { ContextMeter } from "./context-meter.tsx";
@@ -19,8 +16,11 @@ import {
 	type PluginComposerControlRow,
 } from "./goal-plus-button.tsx";
 import { SendButton } from "./send-button.tsx";
+import { VoiceInputButton } from "./voice-input-button.tsx";
 
 export interface ComposerToolbarProps {
+	/** Use a dedicated dictation control so compact chat keeps an idle Send action. */
+	compact?: boolean;
 	/**
 	 * Context-window usage for the persistent composer meter (a donut ring +
 	 * used-percentage shown left of the model selector). Omit to hide the meter;
@@ -77,6 +77,8 @@ export interface ComposerToolbarProps {
 	leftActions?: React.ReactNode;
 	onAttach?: () => void;
 	onDirectorySelect?: (item: ComposerMenuItem) => void;
+	/** Open the larger dialog composer when the host feature is enabled. */
+	onExpand?: () => void;
 	/** Generate an image from the current composer text. */
 	onGenerateImage?: () => void;
 	/** Generate a video from the current composer text. */
@@ -108,65 +110,6 @@ export interface ComposerToolbarProps {
  * SendButton slot (see `SendButton`'s `voice` branch). Morphs mic → stop →
  * spinner across idle / recording / transcribing.
  */
-function VoiceInputButton({
-	disabled,
-	isRecording,
-	isTranscribing,
-	onStart,
-	onStop,
-}: {
-	disabled?: boolean;
-	isRecording: boolean;
-	isTranscribing: boolean;
-	onStart: () => void;
-	onStop: () => void;
-}) {
-	if (isTranscribing) {
-		return (
-			<Button
-				aria-label="Transcribing"
-				className="size-7 text-muted-foreground"
-				disabled
-				size="icon"
-				title="Transcribing…"
-				type="button"
-				variant="ghost"
-			>
-				<IconLoader2 className="size-4 animate-spin" />
-			</Button>
-		);
-	}
-	if (isRecording) {
-		return (
-			<Button
-				aria-label="Stop recording"
-				className="size-7 text-destructive hover:text-destructive"
-				onClick={onStop}
-				size="icon"
-				title="Stop recording"
-				type="button"
-				variant="ghost"
-			>
-				<IconPlayerStopFilled className="size-3.5" />
-			</Button>
-		);
-	}
-	return (
-		<Button
-			aria-label="Start voice input"
-			className="size-7 text-muted-foreground hover:text-foreground"
-			disabled={disabled}
-			onClick={onStart}
-			size="icon"
-			title="Voice input"
-			type="button"
-			variant="ghost"
-		>
-			<IconMicrophone className="size-4" />
-		</Button>
-	);
-}
-
 /**
  * Build the `MediaGenControls` for a "+" dropdown gen row, or `undefined` when
  * the feature isn't wired.
@@ -275,6 +218,7 @@ export function ComposerToolbar({
 	directoryGroups,
 	directoryQuery,
 	onDirectorySelect,
+	onExpand,
 	onMenuOpenChange,
 	isStreaming,
 	hasInput,
@@ -284,6 +228,7 @@ export function ComposerToolbar({
 	contextMeter,
 	contextMeterOnOpen,
 	voiceMode,
+	compact = false,
 }: ComposerToolbarProps) {
 	// The primary action always reflects what the user can do next: a typed
 	// message sends (and the host queues it when a turn is active), while Stop
@@ -349,6 +294,20 @@ export function ComposerToolbar({
 			) : null}
 			{/* Model selector (host-supplied) sits to the left of the mic. */}
 			{rightActions}
+			{onExpand && (
+				<Button
+					aria-label="Expand composer"
+					className="size-8 text-muted-foreground hover:text-foreground"
+					disabled={disabled}
+					onClick={onExpand}
+					size="icon"
+					title="Expand composer"
+					type="button"
+					variant="ghost"
+				>
+					<HugeiconsIcon className="size-4" icon={ExpandIcon} />
+				</Button>
+			)}
 			{/* Recording is shown as the full-width waveform that replaces the
 			    textarea (see input-bar). Here we only surface the transcribing
 			    spinner-wave, so the two waveforms never render at once. */}
@@ -366,7 +325,7 @@ export function ComposerToolbar({
 				    mic beside it invites dictating into a composer that can't send. An
 				    in-flight recording keeps its control so it can still be stopped. */}
 			{hasVoice &&
-				voiceMode &&
+				(compact || voiceMode) &&
 				(!isStreaming || isRecording || isTranscribing) && (
 					<VoiceInputButton
 						disabled={voiceDisabled}
@@ -388,7 +347,7 @@ export function ComposerToolbar({
 				}}
 				state={sendState}
 				voice={
-					hasVoice && !voiceMode
+					hasVoice && !voiceMode && !compact
 						? {
 								isRecording,
 								isTranscribing,

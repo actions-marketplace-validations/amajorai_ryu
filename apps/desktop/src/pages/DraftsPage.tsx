@@ -29,6 +29,7 @@ import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyTitle,
@@ -49,6 +50,7 @@ import { cn } from "@ryu/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
@@ -330,6 +332,7 @@ function SettingsPanel({
 
 export default function DraftsPage() {
 	const node = useActiveNode();
+	const { openTab } = useTabsContext();
 	const target = toTarget(node);
 	const queryClient = useQueryClient();
 	const [composing, setComposing] = useState("");
@@ -450,6 +453,14 @@ export default function DraftsPage() {
 									kept here instead of being lost.
 								</EmptyDescription>
 							</EmptyHeader>
+							<EmptyContent>
+								<Button
+									onClick={() => openTab("/chat", { forceNew: true })}
+									size="sm"
+								>
+									Open a new chat
+								</Button>
+							</EmptyContent>
 						</Empty>
 					) : (
 						<div className="flex flex-col gap-2">

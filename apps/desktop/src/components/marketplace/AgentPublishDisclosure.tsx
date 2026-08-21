@@ -23,6 +23,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import type { ReactNode } from "react";
 import type {
 	AgentDescriptor,
@@ -96,7 +97,7 @@ export function AgentPublishDisclosure({
 					<SharedRow label="Instructions">
 						{promptChars > 0 ? (
 							<span className="text-muted-foreground">
-								{promptChars.toLocaleString()} characters, shared in full — read
+								{formatNumber(promptChars)} characters, shared in full — read
 								them before publishing.
 							</span>
 						) : (
@@ -232,6 +233,11 @@ function describeAvatar(descriptor: AgentDescriptor): string | null {
 	}
 	if (avatar.dither) {
 		parts.push("a dither gradient");
+	}
+	if (avatar.expressive) {
+		parts.push(
+			`an expressive ${avatar.expressive.expression ?? "random"} ghost avatar${avatar.expressive.animation ? ` with ${avatar.expressive.animation} animation` : ""}`
+		);
 	}
 	if (avatar.avatar_url) {
 		parts.push("a linked image");

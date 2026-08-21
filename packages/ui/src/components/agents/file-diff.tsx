@@ -9,6 +9,7 @@ import {
 } from "@ryu/ui/components/agents/agent-code";
 import { AgentDisclosure } from "@ryu/ui/components/agents/agent-disclosure";
 import { SPRING_PRESS, SPRING_SWAP } from "@ryu/ui/lib/ease";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import {
 	Check,
@@ -75,7 +76,7 @@ function ChangeCount({
 			)}
 		>
 			{type === "added" ? "+" : "−"}
-			{value}
+			{formatCount(value) ?? "—"}
 		</span>
 	);
 }

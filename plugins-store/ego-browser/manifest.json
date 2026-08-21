@@ -1,0 +1,235 @@
+{
+  "tags": ["browser","automation","ego-lite","chromium"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/ego-browser",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/ego-browser",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
+  "id": "@ryu/ego-browser",
+  "name": "Ego Browser",
+  "version": "0.1.14",
+  "stability": "experimental",
+  "description": "Ego lite (https://github.com/citrolabs/ego-lite) as an optional provider for Ryu's swappable browser.control layer. Each call launches the installed ego-browser CLI in a conversation-scoped Ego Space, while agents keep using the stable browser.navigate, browser.tabs, browser.snapshot, browser.click, browser.type, browser.scroll, and browser.screenshot verbs. Requires the Ego lite macOS app and ego-browser on PATH; Ryu does not install Ego lite or copy browser login state.",
+  "icon": "ai-browser",
+  "iconDither": { "from": 3, "to": "transparent", "direction": "down" },
+  "tagline": "Swap browser control onto Ego lite Spaces",
+  "keywords": ["browser", "automation", "ego-lite", "chromium"],
+  "category": "Browsers",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "none" },
+    "extension": { "support": "none" },
+    "web": { "support": "none" },
+    "cli": { "support": "full" }
+  },
+  "engines": { "ryu": ">=0.1.0" },
+  "permissions": { "child_process": true },
+  "runnables": [
+    {
+      "id": "tool-ego-browser-tabs",
+      "name": "Ego Browser Tabs",
+      "kind": "tool",
+      "config": {
+        "slug": "ego_browser.tabs",
+        "backend": "inline_deno",
+        "timeout_secs": 60,
+        "description": "List the tabs in the calling agent's Ego Space.",
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        },
+        "code": "const MARKER = '__RYU_EGO_RESULT__'; const scope = String(caller?.conversation_id ?? caller?.agent_id ?? 'default').replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 80) || 'default'; const taskSpace = caller?.conversation_id ? 'ryu-conversation-' + scope : 'ryu-agent-' + scope; const inputJson = JSON.stringify(input ?? {}); const operation = 'tabs'; const childScript = ['await taskSpaces.useOrCreate(' + JSON.stringify(taskSpace) + ');', 'const input = ' + inputJson + ';', 'const operation = ' + JSON.stringify(operation) + ';', `const resolveTab = async () => { const tabs = await browser.listTabs({ includeChrome: false }); const targetId = input.tab_id || tabs.find((tab) => tab.active)?.targetId || tabs[0]?.targetId; if (!targetId) throw new Error('ego-browser has no open tabs'); await browser.switchTab(targetId); return targetId; };`, `let result; if (operation === 'tabs') { result = { tabs: await browser.listTabs({ includeChrome: false }) }; } else if (operation === 'navigate') { if (typeof input.url !== 'string' || input.url.trim() === '') throw new Error('browser.navigate requires a non-empty url'); const tab = await browser.openOrReuseTab(input.url, { wait: true }); result = { tab_id: tab.targetId, tab }; } else if (operation === 'snapshot') { const tabId = await resolveTab(); if (typeof input.tab_id !== 'undefined' && typeof input.tab_id !== 'string') throw new Error('browser.snapshot tab_id must be a string'); const raw = await page.snapshotRaw(); result = { tab_id: tabId, snapshot: raw.content, refs: raw.refs }; } else if (operation === 'click') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.click requires a ref'); const tabId = await resolveTab(); await page.locator(input.ref).click(); result = { ok: true, tab_id: tabId }; } else if (operation === 'type') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.type requires a ref'); if (typeof input.text !== 'string') throw new Error('browser.type requires text'); const tabId = await resolveTab(); await page.locator(input.ref).fill(input.text, { clearFirst: input.replace === true }); if (input.submit === true) await page.locator(input.ref).press('Enter'); result = { ok: true, tab_id: tabId }; } else if (operation === 'scroll') { const vectors = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }; const vector = vectors[input.direction]; if (!vector) throw new Error('browser.scroll direction must be up, down, left, or right'); const tabId = await resolveTab(); const info = await page.info(); const amount = Number.isInteger(input.amount) ? Math.abs(input.amount) : Math.max(1, Math.round(info.h * 0.8)); await page.mouse.wheel(vector[0] * amount, vector[1] * amount); result = { ok: true, tab_id: tabId }; } else if (operation === 'screenshot') { const tabId = await resolveTab(); const capture = await cdp('Page.captureScreenshot', { format: 'png' }); if (typeof capture?.data !== 'string') throw new Error('ego-browser returned no screenshot data'); result = { tab_id: tabId, image: capture.data, encoding: 'base64', mime: 'image/png' }; } else { throw new Error('unsupported Ego Browser operation: ' + operation); }`, 'console.log(' + JSON.stringify(MARKER) + ' + JSON.stringify(result));'].join(''); const child = new Deno.Command('ego-browser', { args: ['nodejs'], stdin: 'piped', stdout: 'piped', stderr: 'piped' }).spawn(); const writer = child.stdin.getWriter(); await writer.write(new TextEncoder().encode(childScript)); await writer.close(); const output = await child.output(); const stdout = new TextDecoder().decode(output.stdout); const stderr = new TextDecoder().decode(output.stderr).trim(); if (!output.success) throw new Error('ego-browser failed: ' + (stderr || stdout || 'the command exited unsuccessfully').slice(-1000)); let resultLine = ''; for (const line of stdout.split('\\n')) { if (line.includes(MARKER)) resultLine = line; } if (!resultLine) throw new Error('ego-browser returned no marked result: ' + (stderr || stdout).slice(-1000)); const serialized = resultLine.slice(resultLine.lastIndexOf(MARKER) + MARKER.length).trim(); try { return JSON.parse(serialized); } catch { throw new Error('ego-browser returned invalid JSON: ' + serialized.slice(0, 1000)); }"
+      }
+    },
+    {
+      "id": "tool-ego-browser-navigate",
+      "name": "Ego Browser Navigate",
+      "kind": "tool",
+      "config": {
+        "slug": "ego_browser.navigate",
+        "backend": "inline_deno",
+        "timeout_secs": 60,
+        "description": "Open or reuse a tab at a URL in the calling agent's Ego Space and wait for the document to load.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "Absolute URL to open or reuse."
+            }
+          },
+          "required": ["url"],
+          "additionalProperties": false
+        },
+        "code": "const MARKER = '__RYU_EGO_RESULT__'; const scope = String(caller?.conversation_id ?? caller?.agent_id ?? 'default').replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 80) || 'default'; const taskSpace = caller?.conversation_id ? 'ryu-conversation-' + scope : 'ryu-agent-' + scope; const inputJson = JSON.stringify(input ?? {}); const operation = 'navigate'; const childScript = ['await taskSpaces.useOrCreate(' + JSON.stringify(taskSpace) + ');', 'const input = ' + inputJson + ';', 'const operation = ' + JSON.stringify(operation) + ';', `const resolveTab = async () => { const tabs = await browser.listTabs({ includeChrome: false }); const targetId = input.tab_id || tabs.find((tab) => tab.active)?.targetId || tabs[0]?.targetId; if (!targetId) throw new Error('ego-browser has no open tabs'); await browser.switchTab(targetId); return targetId; };`, `let result; if (operation === 'tabs') { result = { tabs: await browser.listTabs({ includeChrome: false }) }; } else if (operation === 'navigate') { if (typeof input.url !== 'string' || input.url.trim() === '') throw new Error('browser.navigate requires a non-empty url'); const tab = await browser.openOrReuseTab(input.url, { wait: true }); result = { tab_id: tab.targetId, tab }; } else if (operation === 'snapshot') { const tabId = await resolveTab(); if (typeof input.tab_id !== 'undefined' && typeof input.tab_id !== 'string') throw new Error('browser.snapshot tab_id must be a string'); const raw = await page.snapshotRaw(); result = { tab_id: tabId, snapshot: raw.content, refs: raw.refs }; } else if (operation === 'click') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.click requires a ref'); const tabId = await resolveTab(); await page.locator(input.ref).click(); result = { ok: true, tab_id: tabId }; } else if (operation === 'type') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.type requires a ref'); if (typeof input.text !== 'string') throw new Error('browser.type requires text'); const tabId = await resolveTab(); await page.locator(input.ref).fill(input.text, { clearFirst: input.replace === true }); if (input.submit === true) await page.locator(input.ref).press('Enter'); result = { ok: true, tab_id: tabId }; } else if (operation === 'scroll') { const vectors = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }; const vector = vectors[input.direction]; if (!vector) throw new Error('browser.scroll direction must be up, down, left, or right'); const tabId = await resolveTab(); const info = await page.info(); const amount = Number.isInteger(input.amount) ? Math.abs(input.amount) : Math.max(1, Math.round(info.h * 0.8)); await page.mouse.wheel(vector[0] * amount, vector[1] * amount); result = { ok: true, tab_id: tabId }; } else if (operation === 'screenshot') { const tabId = await resolveTab(); const capture = await cdp('Page.captureScreenshot', { format: 'png' }); if (typeof capture?.data !== 'string') throw new Error('ego-browser returned no screenshot data'); result = { tab_id: tabId, image: capture.data, encoding: 'base64', mime: 'image/png' }; } else { throw new Error('unsupported Ego Browser operation: ' + operation); }`, 'console.log(' + JSON.stringify(MARKER) + ' + JSON.stringify(result));'].join(''); const child = new Deno.Command('ego-browser', { args: ['nodejs'], stdin: 'piped', stdout: 'piped', stderr: 'piped' }).spawn(); const writer = child.stdin.getWriter(); await writer.write(new TextEncoder().encode(childScript)); await writer.close(); const output = await child.output(); const stdout = new TextDecoder().decode(output.stdout); const stderr = new TextDecoder().decode(output.stderr).trim(); if (!output.success) throw new Error('ego-browser failed: ' + (stderr || stdout || 'the command exited unsuccessfully').slice(-1000)); let resultLine = ''; for (const line of stdout.split('\\n')) { if (line.includes(MARKER)) resultLine = line; } if (!resultLine) throw new Error('ego-browser returned no marked result: ' + (stderr || stdout).slice(-1000)); const serialized = resultLine.slice(resultLine.lastIndexOf(MARKER) + MARKER.length).trim(); try { return JSON.parse(serialized); } catch { throw new Error('ego-browser returned invalid JSON: ' + serialized.slice(0, 1000)); }"
+      }
+    },
+    {
+      "id": "tool-ego-browser-snapshot",
+      "name": "Ego Browser Snapshot",
+      "kind": "tool",
+      "config": {
+        "slug": "ego_browser.snapshot",
+        "backend": "inline_deno",
+        "timeout_secs": 60,
+        "description": "Read the accessibility snapshot and stable element refs for the selected or active Ego tab.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "tab_id": {
+              "type": "string",
+              "description": "Optional Ego target id. Omit to use the active tab in the calling agent's Space."
+            }
+          },
+          "additionalProperties": false
+        },
+        "code": "const MARKER = '__RYU_EGO_RESULT__'; const scope = String(caller?.conversation_id ?? caller?.agent_id ?? 'default').replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 80) || 'default'; const taskSpace = caller?.conversation_id ? 'ryu-conversation-' + scope : 'ryu-agent-' + scope; const inputJson = JSON.stringify(input ?? {}); const operation = 'snapshot'; const childScript = ['await taskSpaces.useOrCreate(' + JSON.stringify(taskSpace) + ');', 'const input = ' + inputJson + ';', 'const operation = ' + JSON.stringify(operation) + ';', `const resolveTab = async () => { const tabs = await browser.listTabs({ includeChrome: false }); const targetId = input.tab_id || tabs.find((tab) => tab.active)?.targetId || tabs[0]?.targetId; if (!targetId) throw new Error('ego-browser has no open tabs'); await browser.switchTab(targetId); return targetId; };`, `let result; if (operation === 'tabs') { result = { tabs: await browser.listTabs({ includeChrome: false }) }; } else if (operation === 'navigate') { if (typeof input.url !== 'string' || input.url.trim() === '') throw new Error('browser.navigate requires a non-empty url'); const tab = await browser.openOrReuseTab(input.url, { wait: true }); result = { tab_id: tab.targetId, tab }; } else if (operation === 'snapshot') { const tabId = await resolveTab(); if (typeof input.tab_id !== 'undefined' && typeof input.tab_id !== 'string') throw new Error('browser.snapshot tab_id must be a string'); const raw = await page.snapshotRaw(); result = { tab_id: tabId, snapshot: raw.content, refs: raw.refs }; } else if (operation === 'click') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.click requires a ref'); const tabId = await resolveTab(); await page.locator(input.ref).click(); result = { ok: true, tab_id: tabId }; } else if (operation === 'type') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.type requires a ref'); if (typeof input.text !== 'string') throw new Error('browser.type requires text'); const tabId = await resolveTab(); await page.locator(input.ref).fill(input.text, { clearFirst: input.replace === true }); if (input.submit === true) await page.locator(input.ref).press('Enter'); result = { ok: true, tab_id: tabId }; } else if (operation === 'scroll') { const vectors = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }; const vector = vectors[input.direction]; if (!vector) throw new Error('browser.scroll direction must be up, down, left, or right'); const tabId = await resolveTab(); const info = await page.info(); const amount = Number.isInteger(input.amount) ? Math.abs(input.amount) : Math.max(1, Math.round(info.h * 0.8)); await page.mouse.wheel(vector[0] * amount, vector[1] * amount); result = { ok: true, tab_id: tabId }; } else if (operation === 'screenshot') { const tabId = await resolveTab(); const capture = await cdp('Page.captureScreenshot', { format: 'png' }); if (typeof capture?.data !== 'string') throw new Error('ego-browser returned no screenshot data'); result = { tab_id: tabId, image: capture.data, encoding: 'base64', mime: 'image/png' }; } else { throw new Error('unsupported Ego Browser operation: ' + operation); }`, 'console.log(' + JSON.stringify(MARKER) + ' + JSON.stringify(result));'].join(''); const child = new Deno.Command('ego-browser', { args: ['nodejs'], stdin: 'piped', stdout: 'piped', stderr: 'piped' }).spawn(); const writer = child.stdin.getWriter(); await writer.write(new TextEncoder().encode(childScript)); await writer.close(); const output = await child.output(); const stdout = new TextDecoder().decode(output.stdout); const stderr = new TextDecoder().decode(output.stderr).trim(); if (!output.success) throw new Error('ego-browser failed: ' + (stderr || stdout || 'the command exited unsuccessfully').slice(-1000)); let resultLine = ''; for (const line of stdout.split('\\n')) { if (line.includes(MARKER)) resultLine = line; } if (!resultLine) throw new Error('ego-browser returned no marked result: ' + (stderr || stdout).slice(-1000)); const serialized = resultLine.slice(resultLine.lastIndexOf(MARKER) + MARKER.length).trim(); try { return JSON.parse(serialized); } catch { throw new Error('ego-browser returned invalid JSON: ' + serialized.slice(0, 1000)); }"
+      }
+    },
+    {
+      "id": "tool-ego-browser-click",
+      "name": "Ego Browser Click",
+      "kind": "tool",
+      "config": {
+        "slug": "ego_browser.click",
+        "backend": "inline_deno",
+        "timeout_secs": 60,
+        "description": "Click a snapshot ref in the selected or active Ego tab.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string",
+              "description": "Element ref from a recent browser.snapshot result."
+            },
+            "tab_id": {
+              "type": "string",
+              "description": "Optional Ego target id. Omit to use the active tab."
+            }
+          },
+          "required": ["ref"],
+          "additionalProperties": false
+        },
+        "code": "const MARKER = '__RYU_EGO_RESULT__'; const scope = String(caller?.conversation_id ?? caller?.agent_id ?? 'default').replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 80) || 'default'; const taskSpace = caller?.conversation_id ? 'ryu-conversation-' + scope : 'ryu-agent-' + scope; const inputJson = JSON.stringify(input ?? {}); const operation = 'click'; const childScript = ['await taskSpaces.useOrCreate(' + JSON.stringify(taskSpace) + ');', 'const input = ' + inputJson + ';', 'const operation = ' + JSON.stringify(operation) + ';', `const resolveTab = async () => { const tabs = await browser.listTabs({ includeChrome: false }); const targetId = input.tab_id || tabs.find((tab) => tab.active)?.targetId || tabs[0]?.targetId; if (!targetId) throw new Error('ego-browser has no open tabs'); await browser.switchTab(targetId); return targetId; };`, `let result; if (operation === 'tabs') { result = { tabs: await browser.listTabs({ includeChrome: false }) }; } else if (operation === 'navigate') { if (typeof input.url !== 'string' || input.url.trim() === '') throw new Error('browser.navigate requires a non-empty url'); const tab = await browser.openOrReuseTab(input.url, { wait: true }); result = { tab_id: tab.targetId, tab }; } else if (operation === 'snapshot') { const tabId = await resolveTab(); if (typeof input.tab_id !== 'undefined' && typeof input.tab_id !== 'string') throw new Error('browser.snapshot tab_id must be a string'); const raw = await page.snapshotRaw(); result = { tab_id: tabId, snapshot: raw.content, refs: raw.refs }; } else if (operation === 'click') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.click requires a ref'); const tabId = await resolveTab(); await page.locator(input.ref).click(); result = { ok: true, tab_id: tabId }; } else if (operation === 'type') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.type requires a ref'); if (typeof input.text !== 'string') throw new Error('browser.type requires text'); const tabId = await resolveTab(); await page.locator(input.ref).fill(input.text, { clearFirst: input.replace === true }); if (input.submit === true) await page.locator(input.ref).press('Enter'); result = { ok: true, tab_id: tabId }; } else if (operation === 'scroll') { const vectors = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }; const vector = vectors[input.direction]; if (!vector) throw new Error('browser.scroll direction must be up, down, left, or right'); const tabId = await resolveTab(); const info = await page.info(); const amount = Number.isInteger(input.amount) ? Math.abs(input.amount) : Math.max(1, Math.round(info.h * 0.8)); await page.mouse.wheel(vector[0] * amount, vector[1] * amount); result = { ok: true, tab_id: tabId }; } else if (operation === 'screenshot') { const tabId = await resolveTab(); const capture = await cdp('Page.captureScreenshot', { format: 'png' }); if (typeof capture?.data !== 'string') throw new Error('ego-browser returned no screenshot data'); result = { tab_id: tabId, image: capture.data, encoding: 'base64', mime: 'image/png' }; } else { throw new Error('unsupported Ego Browser operation: ' + operation); }`, 'console.log(' + JSON.stringify(MARKER) + ' + JSON.stringify(result));'].join(''); const child = new Deno.Command('ego-browser', { args: ['nodejs'], stdin: 'piped', stdout: 'piped', stderr: 'piped' }).spawn(); const writer = child.stdin.getWriter(); await writer.write(new TextEncoder().encode(childScript)); await writer.close(); const output = await child.output(); const stdout = new TextDecoder().decode(output.stdout); const stderr = new TextDecoder().decode(output.stderr).trim(); if (!output.success) throw new Error('ego-browser failed: ' + (stderr || stdout || 'the command exited unsuccessfully').slice(-1000)); let resultLine = ''; for (const line of stdout.split('\\n')) { if (line.includes(MARKER)) resultLine = line; } if (!resultLine) throw new Error('ego-browser returned no marked result: ' + (stderr || stdout).slice(-1000)); const serialized = resultLine.slice(resultLine.lastIndexOf(MARKER) + MARKER.length).trim(); try { return JSON.parse(serialized); } catch { throw new Error('ego-browser returned invalid JSON: ' + serialized.slice(0, 1000)); }"
+      }
+    },
+    {
+      "id": "tool-ego-browser-type",
+      "name": "Ego Browser Type",
+      "kind": "tool",
+      "config": {
+        "slug": "ego_browser.type",
+        "backend": "inline_deno",
+        "timeout_secs": 60,
+        "description": "Type literal text into a snapshot ref, appending by default or replacing when requested; optionally press Enter.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string",
+              "description": "Focusable element ref from a recent browser.snapshot result."
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to insert."
+            },
+            "replace": {
+              "type": "boolean",
+              "description": "Replace the field instead of appending at the caret."
+            },
+            "submit": {
+              "type": "boolean",
+              "description": "Press Enter after typing."
+            },
+            "tab_id": {
+              "type": "string",
+              "description": "Optional Ego target id. Omit to use the active tab."
+            }
+          },
+          "required": ["ref", "text"],
+          "additionalProperties": false
+        },
+        "code": "const MARKER = '__RYU_EGO_RESULT__'; const scope = String(caller?.conversation_id ?? caller?.agent_id ?? 'default').replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 80) || 'default'; const taskSpace = caller?.conversation_id ? 'ryu-conversation-' + scope : 'ryu-agent-' + scope; const inputJson = JSON.stringify(input ?? {}); const operation = 'type'; const childScript = ['await taskSpaces.useOrCreate(' + JSON.stringify(taskSpace) + ');', 'const input = ' + inputJson + ';', 'const operation = ' + JSON.stringify(operation) + ';', `const resolveTab = async () => { const tabs = await browser.listTabs({ includeChrome: false }); const targetId = input.tab_id || tabs.find((tab) => tab.active)?.targetId || tabs[0]?.targetId; if (!targetId) throw new Error('ego-browser has no open tabs'); await browser.switchTab(targetId); return targetId; };`, `let result; if (operation === 'tabs') { result = { tabs: await browser.listTabs({ includeChrome: false }) }; } else if (operation === 'navigate') { if (typeof input.url !== 'string' || input.url.trim() === '') throw new Error('browser.navigate requires a non-empty url'); const tab = await browser.openOrReuseTab(input.url, { wait: true }); result = { tab_id: tab.targetId, tab }; } else if (operation === 'snapshot') { const tabId = await resolveTab(); if (typeof input.tab_id !== 'undefined' && typeof input.tab_id !== 'string') throw new Error('browser.snapshot tab_id must be a string'); const raw = await page.snapshotRaw(); result = { tab_id: tabId, snapshot: raw.content, refs: raw.refs }; } else if (operation === 'click') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.click requires a ref'); const tabId = await resolveTab(); await page.locator(input.ref).click(); result = { ok: true, tab_id: tabId }; } else if (operation === 'type') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.type requires a ref'); if (typeof input.text !== 'string') throw new Error('browser.type requires text'); const tabId = await resolveTab(); await page.locator(input.ref).fill(input.text, { clearFirst: input.replace === true }); if (input.submit === true) await page.locator(input.ref).press('Enter'); result = { ok: true, tab_id: tabId }; } else if (operation === 'scroll') { const vectors = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }; const vector = vectors[input.direction]; if (!vector) throw new Error('browser.scroll direction must be up, down, left, or right'); const tabId = await resolveTab(); const info = await page.info(); const amount = Number.isInteger(input.amount) ? Math.abs(input.amount) : Math.max(1, Math.round(info.h * 0.8)); await page.mouse.wheel(vector[0] * amount, vector[1] * amount); result = { ok: true, tab_id: tabId }; } else if (operation === 'screenshot') { const tabId = await resolveTab(); const capture = await cdp('Page.captureScreenshot', { format: 'png' }); if (typeof capture?.data !== 'string') throw new Error('ego-browser returned no screenshot data'); result = { tab_id: tabId, image: capture.data, encoding: 'base64', mime: 'image/png' }; } else { throw new Error('unsupported Ego Browser operation: ' + operation); }`, 'console.log(' + JSON.stringify(MARKER) + ' + JSON.stringify(result));'].join(''); const child = new Deno.Command('ego-browser', { args: ['nodejs'], stdin: 'piped', stdout: 'piped', stderr: 'piped' }).spawn(); const writer = child.stdin.getWriter(); await writer.write(new TextEncoder().encode(childScript)); await writer.close(); const output = await child.output(); const stdout = new TextDecoder().decode(output.stdout); const stderr = new TextDecoder().decode(output.stderr).trim(); if (!output.success) throw new Error('ego-browser failed: ' + (stderr || stdout || 'the command exited unsuccessfully').slice(-1000)); let resultLine = ''; for (const line of stdout.split('\\n')) { if (line.includes(MARKER)) resultLine = line; } if (!resultLine) throw new Error('ego-browser returned no marked result: ' + (stderr || stdout).slice(-1000)); const serialized = resultLine.slice(resultLine.lastIndexOf(MARKER) + MARKER.length).trim(); try { return JSON.parse(serialized); } catch { throw new Error('ego-browser returned invalid JSON: ' + serialized.slice(0, 1000)); }"
+      }
+    },
+    {
+      "id": "tool-ego-browser-scroll",
+      "name": "Ego Browser Scroll",
+      "kind": "tool",
+      "config": {
+        "slug": "ego_browser.scroll",
+        "backend": "inline_deno",
+        "timeout_secs": 60,
+        "description": "Scroll the selected or active Ego tab with a real mouse-wheel event.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "direction": {
+              "type": "string",
+              "enum": ["up", "down", "left", "right"],
+              "description": "Scroll direction."
+            },
+            "amount": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Distance in CSS pixels. Defaults to approximately 80% of the viewport."
+            },
+            "tab_id": {
+              "type": "string",
+              "description": "Optional Ego target id. Omit to use the active tab."
+            }
+          },
+          "required": ["direction"],
+          "additionalProperties": false
+        },
+        "code": "const MARKER = '__RYU_EGO_RESULT__'; const scope = String(caller?.conversation_id ?? caller?.agent_id ?? 'default').replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 80) || 'default'; const taskSpace = caller?.conversation_id ? 'ryu-conversation-' + scope : 'ryu-agent-' + scope; const inputJson = JSON.stringify(input ?? {}); const operation = 'scroll'; const childScript = ['await taskSpaces.useOrCreate(' + JSON.stringify(taskSpace) + ');', 'const input = ' + inputJson + ';', 'const operation = ' + JSON.stringify(operation) + ';', `const resolveTab = async () => { const tabs = await browser.listTabs({ includeChrome: false }); const targetId = input.tab_id || tabs.find((tab) => tab.active)?.targetId || tabs[0]?.targetId; if (!targetId) throw new Error('ego-browser has no open tabs'); await browser.switchTab(targetId); return targetId; };`, `let result; if (operation === 'tabs') { result = { tabs: await browser.listTabs({ includeChrome: false }) }; } else if (operation === 'navigate') { if (typeof input.url !== 'string' || input.url.trim() === '') throw new Error('browser.navigate requires a non-empty url'); const tab = await browser.openOrReuseTab(input.url, { wait: true }); result = { tab_id: tab.targetId, tab }; } else if (operation === 'snapshot') { const tabId = await resolveTab(); if (typeof input.tab_id !== 'undefined' && typeof input.tab_id !== 'string') throw new Error('browser.snapshot tab_id must be a string'); const raw = await page.snapshotRaw(); result = { tab_id: tabId, snapshot: raw.content, refs: raw.refs }; } else if (operation === 'click') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.click requires a ref'); const tabId = await resolveTab(); await page.locator(input.ref).click(); result = { ok: true, tab_id: tabId }; } else if (operation === 'type') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.type requires a ref'); if (typeof input.text !== 'string') throw new Error('browser.type requires text'); const tabId = await resolveTab(); await page.locator(input.ref).fill(input.text, { clearFirst: input.replace === true }); if (input.submit === true) await page.locator(input.ref).press('Enter'); result = { ok: true, tab_id: tabId }; } else if (operation === 'scroll') { const vectors = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }; const vector = vectors[input.direction]; if (!vector) throw new Error('browser.scroll direction must be up, down, left, or right'); const tabId = await resolveTab(); const info = await page.info(); const amount = Number.isInteger(input.amount) ? Math.abs(input.amount) : Math.max(1, Math.round(info.h * 0.8)); await page.mouse.wheel(vector[0] * amount, vector[1] * amount); result = { ok: true, tab_id: tabId }; } else if (operation === 'screenshot') { const tabId = await resolveTab(); const capture = await cdp('Page.captureScreenshot', { format: 'png' }); if (typeof capture?.data !== 'string') throw new Error('ego-browser returned no screenshot data'); result = { tab_id: tabId, image: capture.data, encoding: 'base64', mime: 'image/png' }; } else { throw new Error('unsupported Ego Browser operation: ' + operation); }`, 'console.log(' + JSON.stringify(MARKER) + ' + JSON.stringify(result));'].join(''); const child = new Deno.Command('ego-browser', { args: ['nodejs'], stdin: 'piped', stdout: 'piped', stderr: 'piped' }).spawn(); const writer = child.stdin.getWriter(); await writer.write(new TextEncoder().encode(childScript)); await writer.close(); const output = await child.output(); const stdout = new TextDecoder().decode(output.stdout); const stderr = new TextDecoder().decode(output.stderr).trim(); if (!output.success) throw new Error('ego-browser failed: ' + (stderr || stdout || 'the command exited unsuccessfully').slice(-1000)); let resultLine = ''; for (const line of stdout.split('\\n')) { if (line.includes(MARKER)) resultLine = line; } if (!resultLine) throw new Error('ego-browser returned no marked result: ' + (stderr || stdout).slice(-1000)); const serialized = resultLine.slice(resultLine.lastIndexOf(MARKER) + MARKER.length).trim(); try { return JSON.parse(serialized); } catch { throw new Error('ego-browser returned invalid JSON: ' + serialized.slice(0, 1000)); }"
+      }
+    },
+    {
+      "id": "tool-ego-browser-screenshot",
+      "name": "Ego Browser Screenshot",
+      "kind": "tool",
+      "config": {
+        "slug": "ego_browser.screenshot",
+        "backend": "inline_deno",
+        "timeout_secs": 60,
+        "description": "Capture a PNG screenshot of the selected or active Ego tab as base64 image data.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "tab_id": {
+              "type": "string",
+              "description": "Optional Ego target id. Omit to use the active tab."
+            }
+          },
+          "additionalProperties": false
+        },
+        "code": "const MARKER = '__RYU_EGO_RESULT__'; const scope = String(caller?.conversation_id ?? caller?.agent_id ?? 'default').replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 80) || 'default'; const taskSpace = caller?.conversation_id ? 'ryu-conversation-' + scope : 'ryu-agent-' + scope; const inputJson = JSON.stringify(input ?? {}); const operation = 'screenshot'; const childScript = ['await taskSpaces.useOrCreate(' + JSON.stringify(taskSpace) + ');', 'const input = ' + inputJson + ';', 'const operation = ' + JSON.stringify(operation) + ';', `const resolveTab = async () => { const tabs = await browser.listTabs({ includeChrome: false }); const targetId = input.tab_id || tabs.find((tab) => tab.active)?.targetId || tabs[0]?.targetId; if (!targetId) throw new Error('ego-browser has no open tabs'); await browser.switchTab(targetId); return targetId; };`, `let result; if (operation === 'tabs') { result = { tabs: await browser.listTabs({ includeChrome: false }) }; } else if (operation === 'navigate') { if (typeof input.url !== 'string' || input.url.trim() === '') throw new Error('browser.navigate requires a non-empty url'); const tab = await browser.openOrReuseTab(input.url, { wait: true }); result = { tab_id: tab.targetId, tab }; } else if (operation === 'snapshot') { const tabId = await resolveTab(); if (typeof input.tab_id !== 'undefined' && typeof input.tab_id !== 'string') throw new Error('browser.snapshot tab_id must be a string'); const raw = await page.snapshotRaw(); result = { tab_id: tabId, snapshot: raw.content, refs: raw.refs }; } else if (operation === 'click') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.click requires a ref'); const tabId = await resolveTab(); await page.locator(input.ref).click(); result = { ok: true, tab_id: tabId }; } else if (operation === 'type') { if (typeof input.ref !== 'string' || input.ref.trim() === '') throw new Error('browser.type requires a ref'); if (typeof input.text !== 'string') throw new Error('browser.type requires text'); const tabId = await resolveTab(); await page.locator(input.ref).fill(input.text, { clearFirst: input.replace === true }); if (input.submit === true) await page.locator(input.ref).press('Enter'); result = { ok: true, tab_id: tabId }; } else if (operation === 'scroll') { const vectors = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }; const vector = vectors[input.direction]; if (!vector) throw new Error('browser.scroll direction must be up, down, left, or right'); const tabId = await resolveTab(); const info = await page.info(); const amount = Number.isInteger(input.amount) ? Math.abs(input.amount) : Math.max(1, Math.round(info.h * 0.8)); await page.mouse.wheel(vector[0] * amount, vector[1] * amount); result = { ok: true, tab_id: tabId }; } else if (operation === 'screenshot') { const tabId = await resolveTab(); const capture = await cdp('Page.captureScreenshot', { format: 'png' }); if (typeof capture?.data !== 'string') throw new Error('ego-browser returned no screenshot data'); result = { tab_id: tabId, image: capture.data, encoding: 'base64', mime: 'image/png' }; } else { throw new Error('unsupported Ego Browser operation: ' + operation); }`, 'console.log(' + JSON.stringify(MARKER) + ' + JSON.stringify(result));'].join(''); const child = new Deno.Command('ego-browser', { args: ['nodejs'], stdin: 'piped', stdout: 'piped', stderr: 'piped' }).spawn(); const writer = child.stdin.getWriter(); await writer.write(new TextEncoder().encode(childScript)); await writer.close(); const output = await child.output(); const stdout = new TextDecoder().decode(output.stdout); const stderr = new TextDecoder().decode(output.stderr).trim(); if (!output.success) throw new Error('ego-browser failed: ' + (stderr || stdout || 'the command exited unsuccessfully').slice(-1000)); let resultLine = ''; for (const line of stdout.split('\\n')) { if (line.includes(MARKER)) resultLine = line; } if (!resultLine) throw new Error('ego-browser returned no marked result: ' + (stderr || stdout).slice(-1000)); const serialized = resultLine.slice(resultLine.lastIndexOf(MARKER) + MARKER.length).trim(); try { return JSON.parse(serialized); } catch { throw new Error('ego-browser returned invalid JSON: ' + serialized.slice(0, 1000)); }"
+      }
+    }
+  ],
+  "provides": [
+    {
+      "capability": "browser.control",
+      "version": "1.0.0",
+      "title": "Browser",
+      "grant": "browser:control",
+      "selectable": true,
+      "target": "local-machine",
+      "tools": {
+        "browser.navigate": { "tool": "ego_browser.navigate" },
+        "browser.tabs": { "tool": "ego_browser.tabs" },
+        "browser.snapshot": { "tool": "ego_browser.snapshot" },
+        "browser.click": { "tool": "ego_browser.click" },
+        "browser.type": { "tool": "ego_browser.type" },
+        "browser.scroll": { "tool": "ego_browser.scroll" },
+        "browser.screenshot": { "tool": "ego_browser.screenshot" }
+      }
+    }
+  ],
+  "permission_grants": ["browser:control", "tool:execute"]
+}

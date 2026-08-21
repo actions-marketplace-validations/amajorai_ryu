@@ -35,7 +35,7 @@ export function AgendaView({
 	}
 
 	return (
-		<div className="scroll-fade-effect-y min-h-0 flex-1 overflow-auto">
+		<div className="scroll-fade min-h-0 flex-1 overflow-auto">
 			<div className="mx-auto flex max-w-2xl flex-col gap-5 p-4">
 				{populated.map(({ day, events }) => (
 					<section className="flex flex-col gap-2" key={eventDayKey(day)}>

@@ -1,4 +1,4 @@
-//! Public RHP pairing ingress (`POST /api/hardware/pair`, PROTOCOL.md §5/§6).
+//! Protected RHP pairing ingress (`POST /api/hardware/pair`, PROTOCOL.md §5/§6).
 //!
 //! This is **kernel ingress** that forwards to the extracted [`ryu_hardware`]
 //! crate. It stays Core-side (not in the crate) because the node-URL resolution is
@@ -10,9 +10,9 @@
 //!
 //! ## Auth split
 //!
-//! `pair` is **public**: the proof-of-possession is the pairing nonce shown
-//! out-of-band on the device (QR / BLE), and the companion app may hold only a
-//! better-auth session, not the node's `RYU_TOKEN`. Once the node-url is resolved,
+//! `pair` is **protected**: although the device contributes a proof-of-possession
+//! nonce, this endpoint mints a durable device credential, so the caller must
+//! first be admitted by Core's node bearer gate. Once the node-url is resolved,
 //! the actual nonce verification + token issuance + registry write happen in
 //! [`ryu_hardware::pairing::pair`].
 //!
@@ -156,12 +156,12 @@ fn ws_scheme(host: &str) -> &'static str {
     }
 }
 
-/// `POST /api/hardware/pair` — register a device from a pairing nonce. **Public**.
+/// `POST /api/hardware/pair` — register a device from a pairing nonce. **Protected**.
 #[utoipa::path(
     post,
     path = "/api/hardware/pair",
     tag = "Hardware",
-    summary = "register a device from a pairing nonce. **Public**.",
+    summary = "register a device from a pairing nonce. **Protected**.",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]

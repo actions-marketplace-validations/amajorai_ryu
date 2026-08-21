@@ -14,6 +14,7 @@ import { ContributionsProvider } from "../core/ContributionsContext.tsx";
 import { CoreProvider } from "../core/CoreContext.tsx";
 import { InputFocusProvider } from "../core/InputFocusContext.tsx";
 import { OverlayProvider } from "../overlays/OverlayHost.tsx";
+import { TerminalThemeProvider } from "../ui/TerminalThemeProvider.tsx";
 import { ryuTheme } from "../ui/theme.ts";
 import { ToastProvider } from "../ui/toast.tsx";
 import { SplitView } from "../workspace/SplitView.tsx";
@@ -83,22 +84,24 @@ function Harness() {
 	return (
 		<ThemeProvider theme={ryuTheme}>
 			<CoreProvider initial={LOCAL_TARGET}>
-				<ContributionsProvider>
-					<InputFocusProvider>
-						<ToastProvider>
-							<ChatIntentProvider>
-								<WorkspaceProvider>
-									<OverlayProvider>
-										<Capture />
-										<box flexDirection="column" height="100%" width="100%">
-											<SplitView />
-										</box>
-									</OverlayProvider>
-								</WorkspaceProvider>
-							</ChatIntentProvider>
-						</ToastProvider>
-					</InputFocusProvider>
-				</ContributionsProvider>
+				<TerminalThemeProvider>
+					<ContributionsProvider>
+						<InputFocusProvider>
+							<ToastProvider>
+								<ChatIntentProvider>
+									<WorkspaceProvider>
+										<OverlayProvider>
+											<Capture />
+											<box flexDirection="column" height="100%" width="100%">
+												<SplitView />
+											</box>
+										</OverlayProvider>
+									</WorkspaceProvider>
+								</ChatIntentProvider>
+							</ToastProvider>
+						</InputFocusProvider>
+					</ContributionsProvider>
+				</TerminalThemeProvider>
 			</CoreProvider>
 		</ThemeProvider>
 	);

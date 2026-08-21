@@ -33,6 +33,11 @@ export interface CommandAction {
 	keywords?: string;
 	/** Invoked when the row is chosen. The consumer owns the side effect. */
 	onSelect: () => void;
+	/**
+	 * Optional result-type filter. Actions without a type remain available from
+	 * the `All` tab, while a typed tab only shows actions carrying its id.
+	 */
+	resultType?: string;
 	/** Right-aligned keyboard hint (e.g. `⌘N`). Mutually exclusive with `trailing`. */
 	shortcut?: string;
 	/** Primary label shown in the row. */
@@ -45,6 +50,16 @@ export interface CommandAction {
 	 * exact search terms a row should answer to.
 	 */
 	value?: string;
+}
+
+/** One result-type filter shown beneath a command palette's search input. */
+export interface CommandPaletteTab {
+	/** Optional leading HugeIcon. */
+	icon?: IconSvgElement;
+	/** Stable id shared with {@link CommandAction.resultType}. */
+	id: string;
+	/** Human-readable filter label. */
+	label: string;
 }
 
 // ── Chat transport (injected) ────────────────────────────────────────────────

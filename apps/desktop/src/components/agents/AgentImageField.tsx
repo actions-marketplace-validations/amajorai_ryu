@@ -1,6 +1,6 @@
 // Thin agent-facing wrapper around the shared GlyphPicker primitive
 // (`@ryu/ui/components/glyph-picker`). Agents use the `"agent"` preset
-// (avatar · icon · emoji · dicebear · dither). Re-exports the glyph types under
+// (avatar · icon · emoji · dicebear · expressive · dither). Re-exports the glyph types under
 // the historical `AgentAvatarValue` / `AgentDitherValue` names so existing
 // call sites keep compiling.
 

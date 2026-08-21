@@ -38,15 +38,20 @@ use crate::scheduler::store::{self as sched_store, JobTarget, Schedule, Schedule
 /// workflow into a failed emit. The count returned is therefore runs *started*, not
 /// runs completed.
 pub async fn fire_event_workflows(event: &str, payload: &serde_json::Value) -> usize {
-    let subscribed: Vec<(String, String)> = crate::workflow::store::list_workflows()
-        .into_iter()
-        .filter(|wf| {
-            wf.triggers
-                .iter()
-                .any(|t| matches!(t, WorkflowTrigger::Event { event: e } if e == event))
-        })
-        .map(|wf| (wf.id, wf.name))
-        .collect();
+    let mut subscribed = Vec::new();
+    for workflow in crate::workflow::store::list_workflows() {
+        let subscribed_to_event = workflow
+            .triggers
+            .iter()
+            .any(|t| matches!(t, WorkflowTrigger::Event { event: e } if e == event));
+        if subscribed_to_event
+            && crate::workflow::ensure_agents_active(&workflow)
+                .await
+                .is_ok()
+        {
+            subscribed.push((workflow.id, workflow.name));
+        }
+    }
     if subscribed.is_empty() {
         return 0;
     }

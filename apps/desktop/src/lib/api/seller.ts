@@ -22,11 +22,18 @@ export type SellerOnboardingStatus =
 	| "active"
 	| "restricted";
 
+export type SellerIdentityStatus =
+	| "none"
+	| "pending"
+	| "verified"
+	| "restricted";
+
 /** The stored seller state for the caller's active org. */
 export interface SellerStatus {
 	onboardingStatus: SellerOnboardingStatus;
 	payoutsEnabled: boolean;
 	stripeConnectAccountId: string | null;
+	stripeIdentityStatus: SellerIdentityStatus;
 }
 
 /** True when the user has a session token; the seller flow requires sign-in. */
@@ -125,6 +132,7 @@ export async function fetchSellerStatus(): Promise<SellerStatus> {
 		stripeConnectAccountId: json.stripeConnectAccountId ?? null,
 		payoutsEnabled: Boolean(json.payoutsEnabled),
 		onboardingStatus: json.onboardingStatus ?? "none",
+		stripeIdentityStatus: json.stripeIdentityStatus ?? "none",
 	};
 }
 

@@ -1,4 +1,4 @@
-//! Built-in desktop-notification action (`notify__desktop`).
+//! Built-in desktop-notification action (`notify.desktop`).
 //!
 //! An agent-callable tool that surfaces a native OS notification to the user.
 //! Core cannot show an OS notification itself (the desktop webview does), so the
@@ -7,7 +7,7 @@
 //! the Web Notification API.
 //!
 //! Registered as a reserved registry server (`notify`) like spider/exa, so the
-//! `<server>__<tool>` id scheme, per-agent allowlist, and single `call_tool`
+//! `<server>.<tool>` id scheme, per-agent allowlist, and single `call_tool`
 //! entry all work for free. Runs on the ACP tool loop today (the openai-compat
 //! default route has no Core-side MCP loop yet — tracked follow-up).
 
@@ -38,7 +38,7 @@ fn desktop_schema() -> Value {
 /// The notification tools exposed through the registry.
 pub fn tools() -> Vec<RegistryTool> {
     vec![RegistryTool {
-        id: format!("{SERVER_NAME}__desktop"),
+        id: format!("{SERVER_NAME}.desktop"),
         server: SERVER_NAME.to_owned(),
         name: "desktop".to_owned(),
         description: Some(
@@ -93,7 +93,7 @@ mod tests {
     fn lists_desktop_tool_with_qualified_id() {
         let tools = tools();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].id, "notify__desktop");
+        assert_eq!(tools[0].id, "notify.desktop");
         assert_eq!(tools[0].server, SERVER_NAME);
     }
 

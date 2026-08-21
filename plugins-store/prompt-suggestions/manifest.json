@@ -1,4 +1,10 @@
 {
+  "tags": ["chat","prompts","composer","suggestions","productivity"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/prompt-suggestions",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/prompt-suggestions",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/prompt-suggestions",
   "name": "Prompt Suggestions",
   "version": "0.1.0",

@@ -86,6 +86,17 @@ test.describe("sidebar chat row — contributed rows on both menus", () => {
 		);
 	});
 
+	test("the hover preview lists the conversation message count", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		await row(page).hover();
+		const preview = page.locator('[data-slot="hover-card-content"]');
+		await expect(preview).toBeVisible();
+		await expect(preview).toContainText("Messages");
+		await expect(preview).toContainText("6");
+	});
+
 	test("the ⋯ dropdown lists the app-contributed rows", async ({ page }) => {
 		await page.goto(STORY_URL);
 		await openDropdown(page);

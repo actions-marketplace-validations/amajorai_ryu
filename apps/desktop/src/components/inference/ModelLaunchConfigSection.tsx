@@ -403,11 +403,9 @@ export function ModelLaunchConfigSection({
 								<div className="flex items-center gap-2">
 									<Button
 										disabled={saveMutation.isPending}
+										loading={saveMutation.isPending}
 										onClick={() => saveMutation.mutate(draft)}
 									>
-										{saveMutation.isPending ? (
-											<Spinner className="size-3.5" />
-										) : null}
 										Save launch config
 									</Button>
 									{saveMutation.isSuccess ? (

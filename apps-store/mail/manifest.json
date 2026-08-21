@@ -1,4 +1,10 @@
 {
+  "tags": ["email","inbox","communication","agents"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-mail",
+  "homepage": "https://github.com/amajorai/ryu-mail",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/mail",
   "name": "Mail",
   "version": "0.1.14",
@@ -88,6 +94,7 @@
     "icon": "mail-01"
   },
   "contributes": {
+  "chat_widget_templates": [{"id":"mail.chat","title":"Mail widget","description":"Mail chat widget metadata is coming soon; no render tool is available yet.","triggers":["mail widget"],"examples":["Show me a mail widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}],
     "hook_events": [
       {
         "id": "@ryu/mail#message.received",

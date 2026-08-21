@@ -3,6 +3,7 @@ pub mod budget;
 pub mod chat;
 pub mod compat;
 pub mod config;
+pub mod doctor;
 pub mod embeddings;
 pub mod evals;
 pub mod evaluators;
@@ -44,6 +45,16 @@ pub fn router(state: SharedState) -> Router {
     Router::new()
         // OpenAI-compatible chat endpoint
         .route("/v1/chat/completions", post(chat::chat_completions))
+        // ACP subprocesses use this agent-scoped alias so the Gateway can bind
+        // OpenRouter usage and budget counters to the originating agent.
+        .route(
+            "/v1/agents/:agent_id/chat/completions",
+            post(chat::agent_chat_completions),
+        )
+        .route(
+            "/v1/agents/:agent_id/:agent_proof/chat/completions",
+            post(chat::agent_chat_completions_with_proof),
+        )
         .route("/v1/embeddings", post(embeddings::embeddings))
         .route("/v1/rerank", post(embeddings::rerank))
         // Anthropic Messages inbound (protocol-compat): lets Claude Code and other
@@ -111,15 +122,22 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/manifests/verify", post(governance::verify_manifest))
         .route("/v1/manifests/pubkey", get(governance::get_pubkey))
         // Live per-scope budget spend (read-only; same admin gate as config/audit).
-        // Exposes the in-memory per-user/agent/session token counters the budget
+        // Exposes the in-memory per-user/agent/session charged-spend counters the budget
         // stage tracks so the desktop can render live spend (P2 #1).
         .route("/v1/budget/spend", get(budget::get_spend))
+        // Core's ACP/MCP bridge posts successful Composio action counts here;
+        // the endpoint is master/trusted-forwarder or bearer-proof authenticated
+        // and shares the normal tool-loop debit helper so charges are not
+        // double-counted.
+        .route("/v1/budget/charge", post(budget::charge_tool))
         // Remaining Ryu $ wallet balance as of the last metered call. Backs
         // Core's dollar-threshold model fallback ("under $5, use the cheap
         // model"), which has no other way to see an org-level billing figure.
         .route("/v1/wallet", get(budget::get_wallet))
         // Audit log (local query; master-key only)
         .route("/v1/audit", get(audit::query_audit))
+        // Gateway control activity ingest (admin-authenticated; no payloads).
+        .route("/v1/audit/control", post(audit::record_control_change))
         // Exec audit ingest + pre-run budget gate (M6 / #192)
         .route("/v1/exec/audit", post(audit::ingest_exec_audit))
         .route("/v1/exec/budget/check", post(audit::check_exec_budget))
@@ -139,6 +157,12 @@ pub fn router(state: SharedState) -> Router {
             "/v1/config",
             get(config::get_config).put(config::put_config),
         )
+        // Read-only local configuration/security/performance doctor. Core adds
+        // its own approval and agent-routing coverage findings in its proxy.
+        .route("/v1/doctor", get(doctor::get_doctor))
+        // Explicit, idempotent protective fixes. The request supports dry-run
+        // so CLI/desktop callers can preview the exact settings before writing.
+        .route("/v1/doctor/fix", post(doctor::fix_doctor))
         // Firewall guardrail check (read-only over caller text; ungated like
         // governance). Called by Core's workflow Guardrails node.
         .route("/v1/firewall/check", post(firewall::firewall_check))

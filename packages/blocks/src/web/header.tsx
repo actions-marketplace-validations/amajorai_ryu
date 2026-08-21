@@ -37,7 +37,7 @@ interface HeaderLink {
 // the primary nav. Marketplace is the one flat link — it is the discovery
 // surface for every kind of thing an agent can run, so it stays one click from
 // the top bar rather than buried in the Resources dropdown. Docs, Compare,
-// Pricing, Engines, Blog, Changelog, and Help live inside that dropdown (and
+// Pricing, Blog, Changelog, and Help live inside that dropdown (and
 // the footer) to keep the top bar uncluttered.
 const MARKETING_LINKS: readonly HeaderLink[] = [
 	{ to: "/marketplace", label: "Marketplace" },
@@ -254,7 +254,6 @@ export default function Header({
 												pathname.startsWith("/marketplace") ||
 												pathname.startsWith("/compare") ||
 												pathname.startsWith("/pricing") ||
-												pathname.startsWith("/engines") ||
 												pathname.startsWith("/subscriptions") ||
 												pathname.startsWith("/community") ||
 												pathname.startsWith("/blog") ||
@@ -322,23 +321,6 @@ export default function Header({
 						</MotionNavigationMenu>
 					)}
 
-					{showOpenSource && (
-						<a
-							className={cn(
-								buttonVariants({ variant: "ghost" }),
-								"gap-2 rounded-4xl px-3 font-medium hover:bg-muted hover:text-foreground"
-							)}
-							href={GITHUB_CORE_URL}
-							rel="noopener noreferrer"
-							target="_blank"
-						>
-							Open Source
-							{githubStargazersCount != null && githubStargazersCount > 0 ? (
-								<GitHubStars stargazersCount={githubStargazersCount} />
-							) : null}
-						</a>
-					)}
-
 					{links.map(({ to, label, external }) => {
 						const isActive = !external && pathname.startsWith(to);
 						return (
@@ -357,6 +339,23 @@ export default function Header({
 							</a>
 						);
 					})}
+
+					{showOpenSource && (
+						<a
+							className={cn(
+								buttonVariants({ variant: "ghost" }),
+								"gap-2 rounded-4xl px-3 font-medium hover:bg-muted hover:text-foreground"
+							)}
+							href={GITHUB_CORE_URL}
+							rel="noopener noreferrer"
+							target="_blank"
+						>
+							Open Source
+							{githubStargazersCount != null && githubStargazersCount > 0 ? (
+								<GitHubStars stargazersCount={githubStargazersCount} />
+							) : null}
+						</a>
+					)}
 				</nav>
 
 				<div className="hidden flex-1 items-center justify-end md:flex">

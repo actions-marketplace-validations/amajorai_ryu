@@ -1,8 +1,8 @@
 // apps/desktop/src/pages/ArtifactViewPage.tsx
 //
 // The WORKSPACE-tab half of an artifact: `/artifact/<id>` renders the artifact
-// the agent surfaced (created via `artifact__create` or rendered inline via
-// `artifact__render`) full-size, using the same `ArtifactRenderer` the right
+// the agent surfaced (created via `artifact.create` or rendered inline via
+// `artifact.render`) full-size, using the same `ArtifactRenderer` the right
 // dock's artifact tab uses. Artifacts are session-local (see
 // `useArtifactStore`), so a restored tab whose id is gone shows the same
 // "no longer available" the dock tab does.

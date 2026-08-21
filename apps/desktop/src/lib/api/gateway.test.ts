@@ -39,6 +39,8 @@ import {
 	CLASSIFY_TIER_COPY,
 	classifyTierCannotServeModel,
 	classifyTierServable,
+	DEFAULT_GATEWAY_ACP,
+	DEFAULT_GATEWAY_COMPUTER_USE,
 	DEFAULT_INSPECTOR,
 	DEFAULT_SESSION_BUDGET,
 	DEFAULT_SMART_ROUTING,
@@ -50,6 +52,7 @@ import {
 	routingViewIncludesModalityMap,
 	routingViewIncludesSmartRouting,
 	updateGatewayConfig,
+	withAgentBudget,
 	withModalityMapping,
 	withResolvedInspectorModels,
 } from "./gateway.ts";
@@ -445,7 +448,7 @@ describe("local classify tier mirrors Rust", () => {
 	it("keeps the prefix above the generic gemma row, so it stays narrower", () => {
 		// `RoutingTables::route` takes the FIRST `starts_with` hit, not the longest.
 		// If `gemma` → `local` were ordered first, every id this module claims needs
-		// the local classify tier would actually reach the resident chat engine.
+		// the local classify tier would actually reach resident Chat.
 		const prefixes = routerBuiltinPrefixes().map(([prefix]) => prefix);
 		const classifyAt = prefixes.indexOf(CLASSIFY_MODEL_PREFIX);
 		const genericAt = prefixes.indexOf("gemma");
@@ -1026,6 +1029,47 @@ describe("buildBudgetRule", () => {
 			restrictMaxTokens: original.restrict_max_tokens,
 		});
 		expect(reopened).toEqual(original);
+	});
+});
+
+describe("withAgentBudget", () => {
+	it("changes one agent without dropping other budget scopes", () => {
+		const budgets = {
+			users: {
+				user1: buildBudgetRule({ limit: 10, action: "notify" }),
+			},
+			agents: {
+				other: buildBudgetRule({ limit: 20, action: "stop" }),
+			},
+			session: DEFAULT_SESSION_BUDGET,
+		};
+		const next = withAgentBudget(
+			budgets,
+			"agent-a",
+			buildBudgetRule({ limit: 100, action: "restrict" })
+		);
+
+		expect(next.users).toEqual(budgets.users);
+		expect(next.agents.other).toEqual(budgets.agents.other);
+		expect(next.agents["agent-a"]?.limit).toBe(100);
+		expect(next.session).toBe(budgets.session);
+		expect(next).not.toBe(budgets);
+	});
+
+	it("removes only the selected agent rule", () => {
+		const budgets = {
+			users: {},
+			agents: {
+				"agent-a": buildBudgetRule({ limit: 100, action: "stop" }),
+				"agent-b": buildBudgetRule({ limit: 200, action: "notify" }),
+			},
+			session: DEFAULT_SESSION_BUDGET,
+		};
+
+		const next = withAgentBudget(budgets, "agent-a", null);
+
+		expect(next.agents).toEqual({ "agent-b": budgets.agents["agent-b"] });
+		expect(next.session).toBe(budgets.session);
 	});
 });
 
@@ -1635,14 +1679,14 @@ async function fetchWithBody(
 }
 
 /** The routing section a current gateway serves, minus the field under test. */
-const SERVED_ROUTING_BASE = {
+const SERVED_ROUTING_BASE: GatewayRoutingConfig = {
 	default_provider: "openai",
 	model_map: {},
 	fallback_chain: [],
 	provider_tiers: {},
 	modality_map: {},
 	eval_routing: { enabled: false, candidates: [], explore_ratio: 0 },
-} as const;
+};
 
 describe("routingViewIncludesSmartRouting", () => {
 	it("separates a gateway that omits the section from one that serves it off", () => {
@@ -1737,6 +1781,34 @@ describe("routingViewIncludesSmartRouting", () => {
 });
 
 describe("fetchGatewayConfig preserves what the gateway did and did not serve", () => {
+	it("keeps the safe ACP defaults when an older gateway omits the section", async () => {
+		const cfg = await fetchWithBody({});
+		expect(cfg.acp).toEqual(DEFAULT_GATEWAY_ACP);
+	});
+
+	it("keeps locked use disabled when an older gateway omits the section", async () => {
+		const cfg = await fetchWithBody({});
+		expect(cfg.computer_use).toEqual(DEFAULT_GATEWAY_COMPUTER_USE);
+	});
+
+	it("preserves the Gateway computer-use policy when it is served", async () => {
+		const computerUse = { locked_use: true };
+		const cfg = await fetchWithBody({ computer_use: computerUse });
+		expect(cfg.computer_use).toEqual(computerUse);
+	});
+
+	it("preserves Gateway ACP policy and Core runtime status", async () => {
+		const acp = {
+			...DEFAULT_GATEWAY_ACP,
+			active_agents: 1,
+			auto_max_parallel_agents: 2,
+			effective_max_parallel_agents: 2,
+			max_parallel_agents: null,
+		};
+		const cfg = await fetchWithBody({ acp });
+		expect(cfg.acp).toEqual(acp);
+	});
+
 	it("leaves smart_routing absent when the gateway omitted it", async () => {
 		const cfg = await fetchWithBody({ routing: { ...SERVED_ROUTING_BASE } });
 		expect(routingViewIncludesSmartRouting(cfg.routing)).toBe(false);

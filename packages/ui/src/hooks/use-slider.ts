@@ -171,7 +171,10 @@ export function useSlider({
 			};
 			if (event.key in map) {
 				event.preventDefault();
-				commit(map[event.key]);
+				const next = map[event.key];
+				if (next !== undefined) {
+					commit(next);
+				}
 			}
 		},
 		[disabled, current, stride, lo, hi, commit]

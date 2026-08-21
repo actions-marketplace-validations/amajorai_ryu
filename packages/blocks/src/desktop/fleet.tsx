@@ -76,6 +76,7 @@ export interface FleetViewProps {
 	nodes: FleetNode[];
 	onInstall?: (name: string, sidecar: string) => void;
 	onlineCount?: number;
+	onOpenNodeSettings?: () => void;
 	onRefresh?: () => void;
 	onRefreshServices?: (name: string) => void;
 	onRestart?: (name: string, sidecar: string) => void;
@@ -447,6 +448,7 @@ export function FleetView({
 	onlineCount = 0,
 	totalCount = 0,
 	lastRefreshedLabel,
+	onOpenNodeSettings,
 	onRefresh,
 	onToggleExpand,
 	onInstall,
@@ -464,21 +466,18 @@ export function FleetView({
 						</span>
 					) : null}
 					<Button
-						disabled={healthLoading}
+						loading={healthLoading}
 						onClick={onRefresh}
 						size="sm"
 						variant="ghost"
 					>
-						<HugeiconsIcon
-							className={`size-4 ${healthLoading ? "animate-spin" : ""}`}
-							icon={Refresh01Icon}
-						/>
+						<HugeiconsIcon className="size-4" icon={Refresh01Icon} />
 						Refresh
 					</Button>
 				</div>
 			</div>
 
-			<div className="scroll-fade-effect-y flex-1 overflow-y-auto p-6">
+			<div className="scroll-fade flex-1 overflow-y-auto p-6">
 				{nodes.length === 0 ? (
 					<Empty>
 						<EmptyHeader>
@@ -492,13 +491,18 @@ export function FleetView({
 							</EmptyDescription>
 						</EmptyHeader>
 						<EmptyContent>
-							<div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-muted-foreground text-sm">
-								<HugeiconsIcon
-									className="size-4 shrink-0"
-									icon={ServerStack01Icon}
-								/>
-								<span>Use the node settings to add your first node.</span>
-							</div>
+							<p className="text-muted-foreground text-sm">
+								Use the node settings to add your first node.
+							</p>
+							{onOpenNodeSettings ? (
+								<Button onClick={onOpenNodeSettings} size="sm">
+									Open node settings
+								</Button>
+							) : onRefresh ? (
+								<Button onClick={onRefresh} size="sm" variant="ghost">
+									Refresh nodes
+								</Button>
+							) : null}
 						</EmptyContent>
 					</Empty>
 				) : healthLoading && nodes.every((n) => !n.statusKnown) ? (

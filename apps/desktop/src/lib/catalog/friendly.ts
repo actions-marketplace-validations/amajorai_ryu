@@ -280,6 +280,22 @@ function segments(text: string): string[] {
 		.filter((s) => s.length > 0);
 }
 
+// Exact filename tokens for GGUF artifacts that are not standalone model
+// weights. Keep this in lockstep with the shared marketplace helper because
+// deep links can select a quant without rendering the catalog first.
+const NON_MODEL_GGUF_SEGMENTS = new Set(["draft", "imatrix", "mmproj", "mtp"]);
+
+/** Whether a GGUF filename represents a selectable model-weight quant. */
+export function isModelGgufFile(filename: string): boolean {
+	const segs = new Set(segments(filename));
+	for (const segment of NON_MODEL_GGUF_SEGMENTS) {
+		if (segs.has(segment)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /** Build the set of every alias across the vocabulary, for fast name-stripping. */
 const ALL_ALIASES = new Set<string>(CATALOG_TOKENS.flatMap((t) => t.aliases));
 

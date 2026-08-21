@@ -14,20 +14,21 @@ import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { Label } from "@ryu/ui/components/label.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { StatusBadge } from "@ryu/ui/components/status-badge.tsx";
-import { Textarea } from "@ryu/ui/components/textarea.tsx";
 import { composeRules, parseRules } from "@ryuhq/protocol/agent-rules";
 import { useQuery } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { AgentModelPickerField } from "@/components/agent-elements/input/agent-model-picker-field.tsx";
 import { AcpSessionControls } from "@/src/components/agents/AcpSessionControls.tsx";
+import { AgentBudgetPanel } from "@/src/components/agents/AgentBudgetPanel.tsx";
 import { AgentCalendarView } from "@/src/components/agents/AgentCalendarView.tsx";
 import { AgentCapabilitiesPanel } from "@/src/components/agents/AgentCapabilitiesPanel.tsx";
 import { AgentChannelsSection } from "@/src/components/agents/AgentChannelsSection.tsx";
 import { AgentEvalsView } from "@/src/components/agents/AgentEvalsView.tsx";
+import { AgentExecutionPolicyPanel } from "@/src/components/agents/AgentExecutionPolicyPanel.tsx";
 import { AgentImageField } from "@/src/components/agents/AgentImageField.tsx";
 import { AgentLanyardCard } from "@/src/components/agents/AgentLanyardCard.tsx";
 import { AgentRunHistoryView } from "@/src/components/agents/AgentRunHistoryView.tsx";
+import { AgentSetupComposer } from "@/src/components/agents/AgentSetupComposer.tsx";
 import { AgentSmartRouteOverride } from "@/src/components/agents/AgentSmartRouteOverride.tsx";
 import { ClaudeGatewayConfig } from "@/src/components/agents/ClaudeGatewayConfig.tsx";
 import { CodexGatewayConfig } from "@/src/components/agents/CodexGatewayConfig.tsx";
@@ -37,7 +38,6 @@ import { RulesAgentEditPanel } from "@/src/components/agents/RulesAgentEditPanel
 import { RyuPiConfig } from "@/src/components/agents/RyuPiConfig.tsx";
 import { AdvancedInferenceSection } from "@/src/components/inference/AdvancedInferenceSection.tsx";
 import { ModelLaunchConfigSection } from "@/src/components/inference/ModelLaunchConfigSection.tsx";
-import { AgentPublishDisclosure } from "@/src/components/marketplace/AgentPublishDisclosure.tsx";
 import { PublishDialog } from "@/src/components/marketplace/PublishDialog.tsx";
 import { PromptStudio } from "@/src/components/PromptStudio.tsx";
 import {
@@ -59,7 +59,15 @@ import {
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import { useIdentities } from "@/src/hooks/useIdentities.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
+import {
+	encodeSkillAllowlist,
+	encodeToolAllowlist,
+	hydrateSkillSelection,
+	hydrateToolSelection,
+} from "@/src/lib/agent-capabilities.ts";
+import { agentEngineOptionId } from "@/src/lib/agent-engine.ts";
 import { AgentLogo } from "@/src/lib/agent-logos.tsx";
+import { buildNewAgentChatSeed } from "@/src/lib/agent-onboarding.ts";
 import {
 	glyphToPersonaFields,
 	personaToGlyphValue,
@@ -70,11 +78,13 @@ import {
 } from "@/src/lib/api/agent-rules.ts";
 import {
 	type Agent,
-	type AgentSummary,
+	type AgentLifecycleStatus,
+	type AgentSafetyProfile,
 	type AgentTools,
 	bumpPatchVersion,
 	fetchAgent,
 	fetchAgentTools,
+	updateAgentPosture,
 } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
@@ -90,7 +100,6 @@ import {
 	registerByoaKey,
 } from "@/src/lib/api/gateway.ts";
 import { isLocalEngine, type SamplingConfig } from "@/src/lib/api/inference.ts";
-import type { PublishRequest } from "@/src/lib/api/marketplace.ts";
 import { fetchMcpTools } from "@/src/lib/api/mcp.ts";
 import { getActiveModel } from "@/src/lib/api/models.ts";
 import { type InstalledSkill, listSkills } from "@/src/lib/api/skills.ts";
@@ -101,12 +110,6 @@ import {
 	type SchedulePhrase,
 } from "@/src/lib/automations.ts";
 import { friendlyModelDisplay } from "@/src/lib/catalog/friendly.ts";
-import {
-	type AgentPublishSource,
-	buildAgentDescriptor,
-	buildAgentPublishBody,
-	type PublishListing,
-} from "@/src/lib/publish/packaging.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
 // ── BYOA panel ────────────────────────────────────────────────────────────────
@@ -398,16 +401,6 @@ const ACP_CUSTOM_ENGINE = "__acp_exec_custom__";
 /** Engine prefix Core treats as a literal ACP spawn command (`agent_route`). */
 const ACP_EXEC_PREFIX = "acp-exec:";
 
-function agentEngineOptionId(agent: AgentSummary): string | null {
-	if (!agent.builtIn) {
-		return null;
-	}
-	if (agent.id === "ryu") {
-		return "acp:pi";
-	}
-	return agent.id;
-}
-
 function isInstalledChatModel(
 	chatModel: string,
 	installedAgentEngineIds: Set<string>
@@ -437,7 +430,7 @@ export default function AgentEditPage({
 }: {
 	agentIdProp?: string;
 	onClose?: () => void;
-} = {}) {
+}) {
 	const { agentId: routeAgentId } = useParams<{ agentId: string }>();
 	const agentId = agentIdProp ?? routeAgentId;
 	const navigate = useNavigate();
@@ -454,7 +447,7 @@ export default function AgentEditPage({
 		}
 	}, [onClose, navigate]);
 	const isNew = agentId === "new" || !agentId;
-	const { agents, activeEngine, loading, create, update } = useAgents();
+	const { agents, activeEngine, loading, create, reload, update } = useAgents();
 
 	const activeNode = useActiveNode();
 	const projectCwd = useWorkspaceStore((state) => state.folder);
@@ -508,9 +501,12 @@ export default function AgentEditPage({
 
 	// ── Core form state ──────────────────────────────────────────────────────────
 	const [name, setName] = useState("");
+	const [agentTitle, setAgentTitle] = useState("");
 	const [description, setDescription] = useState("");
 	const [systemPrompt, setSystemPrompt] = useState("");
 	const [chatModel, setChatModel] = useState("");
+	const [agentModel, setAgentModel] = useState("");
+	const [agentModelEngine, setAgentModelEngine] = useState<string | null>(null);
 	const selectedUninstalledAgent =
 		Boolean(chatModel) &&
 		!isInstalledChatModel(chatModel, installedAgentEngineIds);
@@ -518,9 +514,19 @@ export default function AgentEditPage({
 	// lazily create a draft on the first builder message and adopt its id here;
 	// from then on the page edits the draft instead of creating a new agent.
 	const [draftId, setDraftId] = useState<string | null>(null);
+	// A `/agents/new/edit` tab stays mounted after it opens the first chat. Keep
+	// the hand-off one-shot so returning to the editor and saving an update does
+	// not create another welcome thread.
+	const newAgentChatOpenedRef = useRef(false);
 	// Free-text ACP command shown when the "Custom ACP command…" engine is picked.
 	const [acpCommand, setAcpCommand] = useState("");
 	const [existing, setExisting] = useState<Agent | null>(null);
+	const [lifecycleStatus, setLifecycleStatus] =
+		useState<AgentLifecycleStatus>("trial");
+	const [safetyProfile, setSafetyProfile] =
+		useState<AgentSafetyProfile>("read_only");
+	const [postureSaving, setPostureSaving] = useState(false);
+	const [postureError, setPostureError] = useState<string | null>(null);
 	const [agentToolsData, setAgentToolsData] = useState<AgentTools | null>(null);
 	const [recordLoading, setRecordLoading] = useState(!isNew);
 	const [saving, setSaving] = useState(false);
@@ -536,7 +542,7 @@ export default function AgentEditPage({
 	const [tone, setTone] = useState<ToneOption>("neutral");
 	const [customTone, setCustomTone] = useState("");
 	// Custom agent avatar — single GlyphValue covering avatar/icon/emoji/
-	// dicebear/dither. Null = use the engine logo.
+	// dicebear/expressive/dither. Null = use the engine logo.
 	const [avatarGlyph, setAvatarGlyph] = useState<GlyphValue>(null);
 
 	// ── Advanced inference (per-agent sampling defaults) ─────────────────────────
@@ -551,7 +557,7 @@ export default function AgentEditPage({
 	// ── Engine / hardware launch config (only for local-engine agents) ───────────
 	// The launch flags are keyed by the model the local engine actually serves —
 	// the active served model — matching what Core resolves at spawn time. We only
-	// surface the editor when this agent's chat engine is a local one we can tune.
+	// surface the editor when this agent's Chat runtime is a local one we can tune.
 	const [friendly] = useFriendlyMode();
 	const localEngineSelected = isLocalEngine(chatModel);
 	const activeModelQuery = useQuery({
@@ -584,10 +590,11 @@ export default function AgentEditPage({
 	const [selectedTools, setSelectedTools] = useState<Set<string>>(new Set());
 	const [toolsLoading, setToolsLoading] = useState(false);
 
-	// ── Skills state (per-agent allowlist; empty Set = all enabled skills) ───────
+	// ── Skills state (new cards hydrate with all globally enabled skills) ──────────
 	const [availableSkills, setAvailableSkills] = useState<InstalledSkill[]>([]);
 	const [selectedSkills, setSelectedSkills] = useState<Set<string>>(new Set());
 	const [skillsLoading, setSkillsLoading] = useState(false);
+	const capabilitiesHydratedRef = useRef(false);
 
 	// ── Identity Vault binding state (per-agent profile allowlist; empty = none) ─
 	const [selectedIdentities, setSelectedIdentities] = useState<Set<string>>(
@@ -701,6 +708,10 @@ export default function AgentEditPage({
 	}, [loadTriggerSubs]);
 
 	const handleSubscribeTrigger = async () => {
+		if (lifecycleStatus !== "active") {
+			setTriggerError("Promote this agent to Active before adding a trigger.");
+			return;
+		}
 		if (
 			!(agentId && composioToolkit && triggerSlug && connectedAccountId.trim())
 		) {
@@ -769,6 +780,39 @@ export default function AgentEditPage({
 		load();
 	}, [target]);
 
+	// A new card starts with every currently available capability selected. An
+	// existing empty list is the legacy all-enabled value; explicit subsets and
+	// explicit no-capabilities markers remain narrow. Hydrate once per record so
+	// a late catalog refresh never overwrites a user's edits.
+	useEffect(() => {
+		capabilitiesHydratedRef.current = false;
+	}, [agentId, isNew]);
+
+	useEffect(() => {
+		if (
+			capabilitiesHydratedRef.current ||
+			toolsLoading ||
+			skillsLoading ||
+			!(isNew || existing)
+		) {
+			return;
+		}
+		setSelectedTools(
+			hydrateToolSelection(existing?.tools ?? [], availableTools, isNew)
+		);
+		setSelectedSkills(
+			hydrateSkillSelection(existing?.skills ?? [], availableSkills, isNew)
+		);
+		capabilitiesHydratedRef.current = true;
+	}, [
+		availableSkills,
+		availableTools,
+		existing,
+		isNew,
+		skillsLoading,
+		toolsLoading,
+	]);
+
 	// ── Load Spaces (for the Memory / Spaces slot multi-select) ──────────────────
 	useEffect(() => {
 		const load = async () => {
@@ -815,6 +859,9 @@ export default function AgentEditPage({
 		}
 		if (existing) {
 			setName(existing.name);
+			setLifecycleStatus(existing.lifecycleStatus);
+			setSafetyProfile(existing.safetyProfile);
+			setAgentTitle(existing.title ?? "");
 			setDescription(existing.description ?? "");
 			// Split the stored prompt back into free-form instructions + the
 			// structured rules list (round-trips the fenced rules block).
@@ -831,10 +878,9 @@ export default function AgentEditPage({
 			} else {
 				setChatModel(existing.engine ?? "");
 			}
-			// Pre-select the agent's existing tools
-			setSelectedTools(new Set(existing.tools ?? []));
+			setAgentModel(existing.chatModel?.modelId ?? existing.model ?? "");
+			setAgentModelEngine(existing.chatModel?.engine ?? null);
 			setSelectedComposio(new Set(existing.composioActions ?? []));
-			setSelectedSkills(new Set(existing.skills ?? []));
 			setSelectedIdentities(new Set(existing.identityProfileIds ?? []));
 			// Memory / Spaces slot round-trips from the record. Empty read_levels
 			// stays empty here (the "all three levels" default is applied by Core).
@@ -911,6 +957,15 @@ export default function AgentEditPage({
 		});
 	};
 
+	const savedTools = useMemo(
+		() => encodeToolAllowlist(availableTools, selectedTools),
+		[availableTools, selectedTools]
+	);
+	const savedSkills = useMemo(
+		() => encodeSkillAllowlist(availableSkills, selectedSkills),
+		[availableSkills, selectedSkills]
+	);
+
 	// ── Toggle an Identity Vault profile binding ─────────────────────────────────
 	const toggleIdentity = (profileId: string) => {
 		setSelectedIdentities((prev) => {
@@ -952,7 +1007,7 @@ export default function AgentEditPage({
 
 	// ── Save handler ─────────────────────────────────────────────────────────────
 	// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
-	const handleSave = async (navigateToChat = false) => {
+	const handleSave = async () => {
 		if (!name.trim()) {
 			setFormError("Name is required");
 			return;
@@ -987,7 +1042,13 @@ export default function AgentEditPage({
 
 		const input = {
 			name: name.trim(),
+			title: agentTitle.trim(),
 			description: description.trim() || null,
+			model: agentModel.trim() || null,
+			chatModel: {
+				engine: agentModelEngine,
+				modelId: agentModel.trim() || null,
+			},
 			// An enabled Rules contribution persists rules in its own Ryu preference.
 			// If the plugin is disabled/unavailable, retain the legacy prompt block so
 			// opening and saving an agent can never silently discard existing rules.
@@ -999,9 +1060,9 @@ export default function AgentEditPage({
 				chatModel === ACP_CUSTOM_ENGINE
 					? `${ACP_EXEC_PREFIX}${acpCommand.trim()}`
 					: chatModel,
-			tools: Array.from(selectedTools),
+			tools: savedTools,
 			composioActions: Array.from(selectedComposio),
-			skills: Array.from(selectedSkills),
+			skills: savedSkills,
 			identityProfileIds: Array.from(selectedIdentities),
 			version: nextVersion,
 			// Persona fields — passed through; Core stores them when the field exists.
@@ -1017,6 +1078,7 @@ export default function AgentEditPage({
 			// Orchestration capabilities (delegation/discovery + agent creation).
 			orchestrator,
 			canCreateAgents,
+			safetyProfile,
 			// Memory / Spaces slot. Empty read_levels means "all three levels"
 			// (Core's back-compat default), so we send the raw selection as-is.
 			memory: {
@@ -1043,6 +1105,19 @@ export default function AgentEditPage({
 				savedId = created.id;
 				setDraftId(savedId);
 				setExisting(created);
+			}
+
+			// The API intentionally creates every custom agent in Trial. A new
+			// editor may explicitly save as Draft, but it can never skip the Trial
+			// checkpoint to become Active in one step.
+			if (lifecycleStatus === "draft") {
+				const drafted = await updateAgentPosture(target, savedId, {
+					lifecycleStatus: "draft",
+					safetyProfile,
+				});
+				setExisting(drafted);
+			} else if (lifecycleStatus === "trial" && existing === null) {
+				setLifecycleStatus("trial");
 			}
 
 			// A brand-new editor has no id while it is being filled, so its
@@ -1089,91 +1164,23 @@ export default function AgentEditPage({
 				}
 			}
 
-			if (navigateToChat && isNew) {
+			if (
+				isNew &&
+				lifecycleStatus !== "draft" &&
+				!newAgentChatOpenedRef.current
+			) {
+				newAgentChatOpenedRef.current = true;
 				localStorage.setItem("ryu_default_agent", savedId);
+				openTab("/chat", buildNewAgentChatSeed(savedId, name.trim()));
+			} else {
+				goBack();
 			}
-			goBack();
 		} catch (e) {
 			setFormError(e instanceof Error ? e.message : "Failed to save agent");
 		} finally {
 			setSaving(false);
 		}
 	};
-
-	// ── Marketplace publish packaging ────────────────────────────────────────────
-	// The SHAREABLE view of the current form state, built once and used twice: the
-	// dialog's disclosure renders it, and the publish body is packaged from it. One
-	// object, so what the user is shown and what is sent cannot diverge.
-	//
-	// Every non-portable / per-user binding is dropped on the way in: Identity Vault
-	// profiles and Memory space_ids are never passed to the packager (the publish
-	// boundary refuses them by name anyway), and a custom `acp-exec:` command is
-	// scrubbed inside it. The agent record itself carries no keys (BYOK/gateway keys
-	// live behind the separate gateway endpoints), so no secret can leak here by
-	// construction.
-	const publishSource: AgentPublishSource = useMemo(() => {
-		const resolvedTone =
-			tone === "custom" ? customTone.trim() || "neutral" : tone;
-		return {
-			systemPrompt: systemPrompt.trim() || null,
-			// The saved engine binding; the packager scrubs a custom `acp-exec:`
-			// command (a local binary path is never shipped).
-			engine:
-				chatModel === ACP_CUSTOM_ENGINE
-					? `${ACP_EXEC_PREFIX}${acpCommand.trim()}`
-					: chatModel || null,
-			tools: Array.from(selectedTools),
-			composioActions: Array.from(selectedComposio),
-			skills: Array.from(selectedSkills),
-			// Space NAMES, resolved from the ids this agent reads — the ids
-			// themselves resolve to rows only this node has, which is exactly why
-			// the publish boundary refuses them and asks for names instead.
-			expectedSpaces: Array.from(memorySpaceIds)
-				.map(
-					(spaceId) => availableSpaces.find((s) => s.id === spaceId)?.name ?? ""
-				)
-				.filter((spaceName) => spaceName.length > 0),
-			// Presentation only: the glyph and tone, never the persona display name
-			// (the listing title is the name the store moderates).
-			persona: {
-				tone: resolvedTone === "neutral" ? null : resolvedTone,
-				...glyphToPersonaFields(avatarGlyph),
-			},
-			description: description.trim() || null,
-			version: existing?.version ?? "1.0.0",
-		};
-	}, [
-		systemPrompt,
-		rules,
-		chatModel,
-		acpCommand,
-		selectedTools,
-		selectedComposio,
-		selectedSkills,
-		memorySpaceIds,
-		availableSpaces,
-		tone,
-		customTone,
-		avatarGlyph,
-		description,
-		existing?.version,
-	]);
-
-	// The descriptor that will be sent, kept live so the dialog can disclose it and
-	// refuse a publish the marketplace would reject (an agent with no instructions).
-	const publishPackage = useMemo(
-		() => buildAgentDescriptor(publishSource, name.trim()),
-		[publishSource, name]
-	);
-
-	const buildPublishBody = useCallback(
-		(listing: PublishListing): PublishRequest =>
-			buildAgentPublishBody(
-				publishSource,
-				listing
-			) as unknown as PublishRequest,
-		[publishSource]
-	);
 
 	// Publish is offered only for a saved, custom agent (built-ins are Ryu's; a
 	// brand-new unsaved agent has no record to package yet).
@@ -1182,6 +1189,46 @@ export default function AgentEditPage({
 	// The id the builder chat edits: the existing agent, or a draft (lazily
 	// created on first builder message for brand-new agents).
 	const effectiveAgentId = isNew ? draftId : (agentId ?? null);
+
+	const savePosture = useCallback(
+		async (posture: {
+			lifecycleStatus?: AgentLifecycleStatus;
+			safetyProfile?: AgentSafetyProfile;
+		}) => {
+			if (posture.lifecycleStatus !== undefined) {
+				setLifecycleStatus(posture.lifecycleStatus);
+				if (posture.lifecycleStatus !== "active") {
+					setScheduleEnabled(false);
+				}
+			}
+			if (posture.safetyProfile !== undefined) {
+				setSafetyProfile(posture.safetyProfile);
+			}
+			setPostureError(null);
+			if (!effectiveAgentId) {
+				return;
+			}
+			setPostureSaving(true);
+			try {
+				const updated = await updateAgentPosture(
+					target,
+					effectiveAgentId,
+					posture
+				);
+				setExisting(updated);
+				setLifecycleStatus(updated.lifecycleStatus);
+				setSafetyProfile(updated.safetyProfile);
+				await reload();
+			} catch (error) {
+				setPostureError(
+					error instanceof Error ? error.message : "Could not update lifecycle"
+				);
+			} finally {
+				setPostureSaving(false);
+			}
+		},
+		[effectiveAgentId, reload, target]
+	);
 
 	// Lazily ensure a real record exists so the builder chat has something to
 	// patch. Returns null if we can't (e.g. no engine picked yet).
@@ -1203,18 +1250,25 @@ export default function AgentEditPage({
 		try {
 			const created = await create({
 				name: name.trim() || "Untitled agent",
+				title: agentTitle.trim(),
 				description: description.trim() || null,
+				model: agentModel.trim() || null,
+				chatModel: {
+					engine: agentModelEngine,
+					modelId: agentModel.trim() || null,
+				},
 				systemPrompt: null,
 				engine:
 					chatModel === ACP_CUSTOM_ENGINE
 						? `${ACP_EXEC_PREFIX}${acpCommand.trim()}`
 						: chatModel,
-				tools: Array.from(selectedTools),
+				tools: savedTools,
 				composioActions: Array.from(selectedComposio),
-				skills: Array.from(selectedSkills),
+				skills: savedSkills,
 				identityProfileIds: Array.from(selectedIdentities),
 				orchestrator,
 				canCreateAgents,
+				safetyProfile,
 			});
 			setDraftId(created.id);
 			setExisting(created);
@@ -1230,15 +1284,19 @@ export default function AgentEditPage({
 		agentId,
 		draftId,
 		chatModel,
+		agentModel,
+		agentModelEngine,
 		acpCommand,
 		name,
+		agentTitle,
 		description,
-		selectedTools,
+		savedTools,
 		selectedComposio,
-		selectedSkills,
+		savedSkills,
 		selectedIdentities,
 		orchestrator,
 		canCreateAgents,
+		safetyProfile,
 		selectedUninstalledAgent,
 		create,
 	]);
@@ -1250,6 +1308,7 @@ export default function AgentEditPage({
 			try {
 				const rec = await fetchAgent(target, id);
 				setExisting(rec);
+				capabilitiesHydratedRef.current = false;
 				setHydrated(false);
 			} catch {
 				// Non-fatal: the next save/load reconciles.
@@ -1264,20 +1323,26 @@ export default function AgentEditPage({
 			JSON.stringify({
 				id: effectiveAgentId,
 				name: name.trim(),
+				title: agentTitle.trim(),
 				description: description.trim(),
 				engine: chatModel,
-				tools: Array.from(selectedTools),
-				skills: Array.from(selectedSkills),
+				model: agentModel,
+				modelEngine: agentModelEngine,
+				tools: savedTools,
+				skills: savedSkills,
 				composioActions: Array.from(selectedComposio),
 				tone,
 			}),
 		[
 			effectiveAgentId,
 			name,
+			agentTitle,
 			description,
 			chatModel,
-			selectedTools,
-			selectedSkills,
+			agentModel,
+			agentModelEngine,
+			savedTools,
+			savedSkills,
 			selectedComposio,
 			tone,
 		]
@@ -1292,6 +1357,16 @@ export default function AgentEditPage({
 				<span className="truncate font-semibold">
 					{isNew ? "New agent" : name.trim() || "Edit agent"}
 				</span>
+				<Badge
+					className="shrink-0"
+					variant={lifecycleStatus === "active" ? "secondary" : "outline"}
+				>
+					{lifecycleStatus === "draft"
+						? "Draft"
+						: lifecycleStatus === "trial"
+							? "Trial"
+							: "Active"}
+				</Badge>
 				{/* The shared status glyph, not a second LockedIcon badge: the "Locked"
 				    chip on the very next line already wears that mark, and two identical
 				    padlocks side by side said nothing about which was which. */}
@@ -1304,13 +1379,13 @@ export default function AgentEditPage({
 				) : null}
 			</span>
 		),
-		[isNew, name, isBuiltIn, isLocked]
+		[isBuiltIn, isLocked, isNew, lifecycleStatus, name]
 	);
 
 	useTitleBar(titleBarTitle);
 
 	// Hand the docked Ask Ryu panel over to the agent builder while this page is
-	// focused: it drives the `agent_builder__*` tools (with the allow/deny
+	// focused: it drives the `agent_builder.*` tools (with the allow/deny
 	// permission prompt) and refreshes the config form after each change. This
 	// replaced the old inline builder chat pane — the left rail now shows the badge.
 	useAssistantBuilder({
@@ -1377,7 +1452,7 @@ export default function AgentEditPage({
 
 	return (
 		<div className="flex h-full flex-col overflow-hidden">
-			<div className="scroll-fade-effect-y min-h-0 flex-1 overflow-auto p-4 lg:p-6">
+			<div className="scroll-fade min-h-0 flex-1 overflow-auto p-4 lg:p-6">
 				{canPublish ? (
 					<div className="mb-4 flex items-center justify-end">
 						<Button
@@ -1392,16 +1467,6 @@ export default function AgentEditPage({
 				) : null}
 				{canPublish ? (
 					<PublishDialog
-						blockedReason={publishPackage.notes.blockedReason}
-						buildBody={buildPublishBody}
-						defaultDescription={description}
-						defaultDisplayName={personaDisplayName.trim() || name}
-						disclosure={
-							<AgentPublishDisclosure
-								descriptor={publishPackage.descriptor}
-								notes={publishPackage.notes}
-							/>
-						}
 						kindLabel="agent"
 						onOpenChange={setPublishOpen}
 						open={publishOpen}
@@ -1430,6 +1495,29 @@ export default function AgentEditPage({
 							value={avatarGlyph}
 						/>
 					}
+					agentSetupComposer={
+						<AgentSetupComposer
+							agents={agents}
+							disabled={isLocked}
+							engine={chatModel}
+							instructions={systemPrompt}
+							model={agentModel}
+							modelEngine={agentModelEngine}
+							onEngineChange={setChatModel}
+							onInstructionsChange={setSystemPrompt}
+							onModelChange={setAgentModel}
+							onModelEngineChange={setAgentModelEngine}
+						/>
+					}
+					agentTitle={agentTitle}
+					budgetPanel={
+						!isNew && effectiveAgentId ? (
+							<AgentBudgetPanel
+								agentId={effectiveAgentId}
+								disabled={isLocked}
+							/>
+						) : null
+					}
 					byoaPanel={
 						isNew || !agentId ? null : (
 							<ByoaPanel agentId={agentId} target={target} />
@@ -1440,6 +1528,20 @@ export default function AgentEditPage({
 					}
 					capabilitiesPanel={
 						<>
+							<AgentExecutionPolicyPanel
+								disabled={isLocked}
+								isNew={isNew}
+								lifecycleStatus={lifecycleStatus}
+								onLifecycleStatusChange={(status) =>
+									savePosture({ lifecycleStatus: status })
+								}
+								onSafetyProfileChange={(profile) =>
+									savePosture({ safetyProfile: profile })
+								}
+								postureError={postureError}
+								postureSaving={postureSaving}
+								safetyProfile={safetyProfile}
+							/>
 							{effectiveAgentId ? (
 								<AgentCapabilitiesPanel
 									agentId={effectiveAgentId}
@@ -1457,20 +1559,6 @@ export default function AgentEditPage({
 					}
 					channelsPanel={<AgentChannelsSection agentId={effectiveAgentId} />}
 					chatModel={chatModel}
-					chatModelPicker={
-						<AgentModelPickerField
-							ariaLabel="Choose agent model provider"
-							disabled={
-								isLocked ||
-								(isBuiltIn && installedAgentEngineOptions.length === 0)
-							}
-							mode="model"
-							onChange={setChatModel}
-							placeholder="Select chat model"
-							target={target}
-							value={chatModel}
-						/>
-					}
 					chatSlotDisabled={
 						isLocked || (isBuiltIn && installedAgentEngineOptions.length === 0)
 					}
@@ -1534,17 +1622,6 @@ export default function AgentEditPage({
 							selected={selectedIdentities}
 						/>
 					}
-					instructionsEditor={
-						<Textarea
-							className="min-h-40"
-							disabled={isLocked}
-							id="agent-prompt"
-							onChange={(event) => setSystemPrompt(event.target.value)}
-							placeholder="Describe how this agent should behave, what it should avoid, and how it should respond."
-							readOnly={isLocked}
-							value={systemPrompt}
-						/>
-					}
 					isBuiltIn={isBuiltIn}
 					isLocked={isLocked}
 					isNew={isNew}
@@ -1564,12 +1641,13 @@ export default function AgentEditPage({
 					onAcpCommandChange={setAcpCommand}
 					onAddMoreAgentProviders={openAgentsCatalog}
 					onAddRule={() => setRules((prev) => [...prev, ""])}
+					onAgentTitleChange={setAgentTitle}
 					onCancel={() => goBack()}
 					onChatModelChange={setChatModel}
 					onClearComposio={clearComposioActions}
 					onComposioToolkitChange={setComposioToolkit}
 					onConnectedAccountIdChange={setConnectedAccountId}
-					onCreateAndChat={() => handleSave(true)}
+					onCreateAndChat={() => handleSave()}
 					onCustomCronChange={setCustomCron}
 					onCustomToneChange={setCustomTone}
 					onDailyTimeChange={setDailyTime}
@@ -1584,8 +1662,14 @@ export default function AgentEditPage({
 					onRuleChange={(index, value) =>
 						setRules((prev) => prev.map((r, i) => (i === index ? value : r)))
 					}
-					onSave={() => handleSave(false)}
+					onSave={() => handleSave()}
 					onScheduleEnabledChange={(next) => {
+						if (next && lifecycleStatus !== "active") {
+							setFormError(
+								"Promote this agent to Active before enabling an automation."
+							);
+							return;
+						}
 						if (next && !canUse("local-background-runs")) {
 							requestUpgrade();
 							return;

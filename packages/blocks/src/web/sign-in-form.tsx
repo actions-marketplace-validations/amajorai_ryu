@@ -14,6 +14,7 @@ import {
 import { Input } from "@ryu/ui/components/input";
 import PageHeader from "@ryu/ui/components/page-header";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
+import { Fingerprint } from "lucide-react";
 import type { ReactNode, SVGProps } from "react";
 import { useEffect, useState } from "react";
 
@@ -42,7 +43,12 @@ function Google(props: SVGProps<SVGSVGElement>) {
 	);
 }
 
-export type SignInLastUsedMethod = "email" | "magic-link" | "google" | null;
+export type SignInLastUsedMethod =
+	| "email"
+	| "magic-link"
+	| "google"
+	| "passkey"
+	| null;
 
 export interface SignInValues {
 	email: string;
@@ -64,18 +70,26 @@ export interface SignInFormProps {
 	onForgotPassword?: () => void;
 	/** Continue-with-Google handler. */
 	onGoogle?: () => void | Promise<void>;
+	/** Sign in with the device's passkey or security key. */
+	onPasskey?: () => void | Promise<void>;
+	/** Continue-with-enterprise-SSO handler. Receives the email field value. */
+	onSSO?: (email: string) => void | Promise<void>;
 	/** Called with the entered credentials when the form is submitted. */
 	onSubmit?: (value: SignInValues) => void | Promise<void>;
 	/** Switch to the sign-up view. */
 	onSwitchToSignUp?: () => void;
 	/** Toggle between password and magic-link mode. */
 	onToggleMagicLink?: () => void;
+	/** True when a passkey ceremony is in flight. */
+	passkeyLoading?: boolean;
 	/** Field-level validation error message for password. */
 	passwordError?: string;
 	/** True when the magic-link request is in flight. */
 	sendingMagicLink?: boolean;
 	/** Show the "Forgot your password?" link (the live app sets this true). */
 	showForgotPassword?: boolean;
+	/** Enterprise SSO sign-in request in flight. */
+	ssoLoading?: boolean;
 	/** Render the magic-link variant (email only, "Send me a link"). */
 	useMagicLink?: boolean;
 }
@@ -94,10 +108,14 @@ export default function SignInForm({
 	loading = false,
 	sendingMagicLink = false,
 	googleLoading = false,
+	ssoLoading = false,
+	passkeyLoading = false,
 	lastUsedMethod = null,
 	useMagicLink = false,
 	onToggleMagicLink = noop,
 	onGoogle = noop,
+	onSSO,
+	onPasskey,
 	onSwitchToSignUp = noop,
 	onForgotPassword = noop,
 	showForgotPassword = false,
@@ -118,7 +136,8 @@ export default function SignInForm({
 	useEffect(() => setPasswordEdited(false), [passwordError]);
 	const visibleEmailError = emailEdited ? undefined : emailError;
 	const visiblePasswordError = passwordEdited ? undefined : passwordError;
-	const submitting = loading || sendingMagicLink;
+	const submitting =
+		loading || sendingMagicLink || passkeyLoading || ssoLoading;
 
 	return (
 		<div className="mx-auto flex w-full max-w-md flex-col gap-6">
@@ -163,7 +182,7 @@ export default function SignInForm({
 							<Input
 								aria-describedby={visibleEmailError ? "email-error" : undefined}
 								aria-invalid={Boolean(visibleEmailError)}
-								autoComplete="email"
+								autoComplete="username webauthn"
 								className="h-16 border-0 bg-muted shadow-none"
 								id="email"
 								inputMode="email"
@@ -271,6 +290,29 @@ export default function SignInForm({
 				</form>
 
 				<div className="flex flex-col gap-4 text-center">
+					{onPasskey ? (
+						<div className="relative">
+							<Button
+								className="w-full gap-3"
+								disabled={submitting}
+								onClick={onPasskey}
+								size="lg"
+								variant="secondary"
+							>
+								<Fingerprint className="h-5 w-5" />
+								{passkeyLoading ? "Checking passkey..." : "Use a passkey"}
+							</Button>
+							{lastUsedMethod === "passkey" ? (
+								<Badge
+									className="absolute -top-2 -right-2 text-[10px]"
+									variant="secondary"
+								>
+									Last used
+								</Badge>
+							) : null}
+						</div>
+					) : null}
+
 					<div className="relative">
 						<Button
 							className="w-full gap-3"
@@ -291,6 +333,20 @@ export default function SignInForm({
 							</Badge>
 						) : null}
 					</div>
+
+					{onSSO ? (
+						<Button
+							className="w-full gap-3"
+							disabled={submitting}
+							onClick={() => onSSO(email)}
+							size="lg"
+							variant="secondary"
+						>
+							{ssoLoading
+								? "Redirecting to your identity provider..."
+								: "Continue with SSO"}
+						</Button>
+					) : null}
 
 					<Button onClick={onToggleMagicLink} size="lg" variant="secondary">
 						{useMagicLink ? "Use password instead" : "Send me a link"}

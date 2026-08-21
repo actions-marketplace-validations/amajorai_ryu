@@ -1,7 +1,8 @@
 import {
-	BubbleChatIcon,
+	Chat01Icon,
 	CommandLineIcon,
 	ComputerIcon,
+	FolderOpenIcon,
 	LayoutTable01Icon,
 	Rocket01Icon,
 } from "@hugeicons/core-free-icons";
@@ -24,6 +25,7 @@ import {
 } from "@tauri-apps/plugin-autostart";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { listAccounts } from "@/lib/auth-client.ts";
 import { TAB_UNLOAD_MINUTES_KEY } from "@/src/contexts/TabsContext.tsx";
 import { useAutoHideTitleBar } from "@/src/hooks/useAutoHideTitleBar.ts";
 import { useAutoImportThreads } from "@/src/hooks/useAutoImportThreads.ts";
@@ -32,6 +34,7 @@ import {
 	type ComposerSelectionApplyMode,
 	useComposerSelectionApplyMode,
 } from "@/src/hooks/useComposerSelectionApplyMode.ts";
+import { useFloatingTabs } from "@/src/hooks/useFloatingTabs.ts";
 import {
 	setNodeTabOverride,
 	useNodeTabOverride,
@@ -48,6 +51,7 @@ import {
 	setStartupBehavior,
 	useStartupBehavior,
 } from "@/src/hooks/useStartupBehavior.ts";
+import { useStartupSelection } from "@/src/hooks/useStartupSelection.ts";
 import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
 import {
 	setTabOpenBehavior,
@@ -59,7 +63,10 @@ import {
 	type TabSwitchBehavior,
 	useTabSwitchBehavior,
 } from "@/src/hooks/useTabSwitchBehavior.ts";
+import type { DefaultFileOpener } from "@/src/lib/default-file-opener.ts";
+import type { StartupSelectionMode } from "@/src/lib/startup-selection.ts";
 import { STORAGE_KEYS } from "@/src/lib/themes/presets.ts";
+import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 import { SafeModeSettings } from "./SafeModeSettings.tsx";
 import { SplitPresetSettings } from "./SplitPresetSettings.tsx";
@@ -77,6 +84,17 @@ const STARTUP_OPTIONS: { value: StartupBehavior; label: string }[] = [
 	{ value: "chat", label: "A new chat" },
 	{ value: "restore", label: "Reopen previous tabs" },
 ];
+
+const STARTUP_SELECTION_OPTIONS: {
+	value: StartupSelectionMode;
+	label: string;
+}[] = [
+	{ value: "always", label: "Always ask" },
+	{ value: "defaults", label: "Use defaults" },
+	{ value: "never", label: "Never show" },
+];
+
+const NO_STARTUP_DEFAULT = "__ask_at_startup__";
 
 // How the message queue drains while an agent is still responding.
 const QUEUE_DRAIN_OPTIONS: { value: QueueDrainMode; label: string }[] = [
@@ -99,7 +117,7 @@ const COMPOSER_SELECTION_APPLY_OPTIONS: {
 // "auto" lets the Rust side pick the OS default; every other value is an
 // allowlisted shell name understood by the `shell_execute` command.
 const TERMINAL_SHELL_OPTIONS = [
-	{ value: "auto", label: "Auto (OS default)" },
+	{ value: "auto", label: "OS default" },
 	{ value: "bash", label: "Bash" },
 	{ value: "zsh", label: "Zsh" },
 	{ value: "sh", label: "sh" },
@@ -107,6 +125,22 @@ const TERMINAL_SHELL_OPTIONS = [
 	{ value: "powershell", label: "PowerShell" },
 	{ value: "pwsh", label: "pwsh" },
 	{ value: "cmd", label: "cmd" },
+];
+
+const FILE_MANAGER_NAME = navigator.userAgent.includes("Mac")
+	? "Finder"
+	: navigator.userAgent.includes("Windows")
+		? "Explorer"
+		: "Files";
+
+const DEFAULT_FILE_OPENER_OPTIONS: {
+	value: DefaultFileOpener;
+	label: string;
+}[] = [
+	{ value: "system", label: `OS default (${FILE_MANAGER_NAME})` },
+	{ value: "vscode", label: "VS Code" },
+	{ value: "cursor", label: "Cursor" },
+	{ value: "zed", label: "Zed" },
 ];
 
 // Minute thresholds offered for auto-unloading inactive tabs. 0 disables it.
@@ -133,15 +167,37 @@ export function GeneralTab() {
 	const tabOverrideEnabled = useNodeTabOverride();
 	const tabLayout = useTabLayout();
 	const tabSizing = useTabSizing();
+	const [floatingTabs, setFloatingTabs] = useFloatingTabs();
 	const [autoHideTitleBar, setAutoHideTitleBar] = useAutoHideTitleBar();
 	const tabOpenBehavior = useTabOpenBehavior();
 	const tabSwitchBehavior = useTabSwitchBehavior();
 	const startupBehavior = useStartupBehavior();
+	const {
+		preferences: startupSelection,
+		setDefaultAccountId,
+		setDefaultNodeName,
+		setMode: setStartupSelectionMode,
+	} = useStartupSelection();
+	const startupAccounts = listAccounts();
+	const startupNodes = useNodeStore((state) => state.nodes);
+	const setDefaultNode = useNodeStore((state) => state.setDefault);
+	const startupDefaultAccountValue = startupAccounts.some(
+		(account) => account.userId === startupSelection.defaultAccountId
+	)
+		? (startupSelection.defaultAccountId ?? NO_STARTUP_DEFAULT)
+		: NO_STARTUP_DEFAULT;
+	const startupDefaultNodeValue = startupNodes.some(
+		(node) => node.name === startupSelection.defaultNodeName
+	)
+		? (startupSelection.defaultNodeName ?? NO_STARTUP_DEFAULT)
+		: NO_STARTUP_DEFAULT;
 	const queueDrainMode = useQueueDrainMode();
 	const [composerSelectionApplyMode, setComposerSelectionApplyModeSetting] =
 		useComposerSelectionApplyMode();
 	const terminalShell = useWorkspaceStore((s) => s.terminalShell);
 	const setTerminalShell = useWorkspaceStore((s) => s.setTerminalShell);
+	const defaultFileOpener = useWorkspaceStore((s) => s.defaultFileOpener);
+	const setDefaultFileOpener = useWorkspaceStore((s) => s.setDefaultFileOpener);
 	const [autoImportThreads, setAutoImportThreads] = useAutoImportThreads();
 	const [autoImportSetup, setAutoImportSetup] = useAutoSetupImportSetting();
 	const [tabUnloadMinutes, setTabUnloadMinutes] = usePersistedNumber(
@@ -240,6 +296,23 @@ export function GeneralTab() {
 		}
 	};
 
+	const handleDefaultNodeChange = (name: string) => {
+		const nextName = name === NO_STARTUP_DEFAULT ? null : name;
+		if (!nextName) {
+			setDefaultNodeName(null);
+			return;
+		}
+		void setDefaultNode(nextName)
+			.then(() => {
+				setDefaultNodeName(nextName);
+			})
+			.catch(() => {
+				toast.error("Couldn't update the default node", {
+					description: "Your change wasn't saved. Please try again.",
+				});
+			});
+	};
+
 	const resetOnboarding = () => {
 		for (const key of [
 			"ryu_onboarding_complete",
@@ -263,7 +336,8 @@ export function GeneralTab() {
 	};
 
 	// ── Sub-pages ────────────────────────────────────────────────────────────
-	// Six groups covering tabs, chats, the terminal, tray behaviour and setup —
+	// Seven groups covering tabs, chats, the terminal, file opening, tray behaviour
+	// and setup —
 	// unrelated topics that shared one scroll. Split the way iOS/macOS General
 	// is: an index of topics, one page each. "On startup" stays on the index
 	// because it is the question people open this pane to answer.
@@ -302,6 +376,111 @@ export function GeneralTab() {
 						}
 						description="Choose what opens when the window launches: a clean launchpad with no tabs, the Home page, a new chat, or the tabs you had open last time."
 						title="Open with"
+					/>
+					<SettingsItem
+						actions={
+							<Select
+								items={STARTUP_SELECTION_OPTIONS}
+								onValueChange={(value) =>
+									setStartupSelectionMode(value as StartupSelectionMode)
+								}
+								value={startupSelection.mode}
+							>
+								<SelectTrigger
+									className="h-8 w-56 flex-shrink-0 text-sm"
+									id="startup-selection-mode-select"
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{STARTUP_SELECTION_OPTIONS.map((option) => (
+										<SelectItem key={option.value} value={option.value}>
+											{option.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						}
+						description="Choose whether Ryu asks for an account and node every time, uses the defaults below when available, or skips this screen."
+						title="Account and node selection"
+					/>
+					<SettingsItem
+						actions={
+							<Select
+								disabled={startupAccounts.length === 0}
+								items={[
+									{ label: "Ask at startup", value: NO_STARTUP_DEFAULT },
+									...startupAccounts.map((account) => ({
+										label: account.isAnonymous
+											? "Guest"
+											: account.name || account.email || "Account",
+										value: account.userId,
+									})),
+								]}
+								onValueChange={(value) =>
+									setDefaultAccountId(
+										value === NO_STARTUP_DEFAULT ? null : value
+									)
+								}
+								value={startupDefaultAccountValue}
+							>
+								<SelectTrigger
+									className="h-8 w-56 flex-shrink-0 text-sm"
+									id="startup-default-account-select"
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value={NO_STARTUP_DEFAULT}>
+										Ask at startup
+									</SelectItem>
+									{startupAccounts.map((account) => (
+										<SelectItem key={account.userId} value={account.userId}>
+											{account.isAnonymous
+												? "Guest"
+												: account.name || account.email || "Account"}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						}
+						description="Used by Use defaults. Choose Ask at startup to select an account on the next launch."
+						title="Default account"
+					/>
+					<SettingsItem
+						actions={
+							<Select
+								disabled={startupNodes.length === 0}
+								items={[
+									{ label: "Ask at startup", value: NO_STARTUP_DEFAULT },
+									...startupNodes.map((node) => ({
+										label: node.name,
+										value: node.name,
+									})),
+								]}
+								onValueChange={handleDefaultNodeChange}
+								value={startupDefaultNodeValue}
+							>
+								<SelectTrigger
+									className="h-8 w-56 flex-shrink-0 text-sm"
+									id="startup-default-node-select"
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value={NO_STARTUP_DEFAULT}>
+										Ask at startup
+									</SelectItem>
+									{startupNodes.map((node) => (
+										<SelectItem key={node.name} value={node.name}>
+											{node.name}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						}
+						description="Used by Use defaults. Choose Ask at startup to select a node on the next launch."
+						title="Default node"
 					/>
 				</SettingsGroup>
 			</SettingsSection>
@@ -365,6 +544,17 @@ export function GeneralTab() {
 						}
 						description="Show open tabs as a collapsible list in the left sidebar (Zen-browser style) instead of a horizontal bar at the top."
 						title="Vertical tabs"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={floatingTabs}
+								id="floating-tabs-toggle"
+								onCheckedChange={setFloatingTabs}
+							/>
+						}
+						description="Keep tabs as separate floating pills. Turn this off to let the active tab blend into the page surface with a morphing-tab shape."
+						title="Floating tabs"
 					/>
 					<SettingsItem
 						actions={
@@ -535,7 +725,11 @@ export function GeneralTab() {
 						actions={
 							<Select
 								items={TERMINAL_SHELL_OPTIONS}
-								onValueChange={setTerminalShell}
+								onValueChange={(value) => {
+									if (value) {
+										setTerminalShell(value);
+									}
+								}}
 								value={terminalShell}
 							>
 								<SelectTrigger
@@ -553,12 +747,56 @@ export function GeneralTab() {
 								</SelectContent>
 							</Select>
 						}
-						description="Which shell the built-in terminal and git actions use. Auto picks the OS default (PowerShell on Windows, Bash elsewhere)."
-						title="Terminal shell"
+						description="Which shell the built-in terminal and git actions use. OS default follows the platform shell (PowerShell on Windows, Zsh on macOS, and the user's configured Unix shell when available)."
+						title="Default shell"
 					/>
 				</SettingsGroup>
 			</SettingsSection>
 		</>
+	);
+
+	const filesPage = (
+		<SettingsSection
+			caption="How the workspace file tree opens files and folders."
+			title="Files"
+		>
+			<SettingsGroup>
+				<SettingsItem
+					actions={
+						<Select
+							items={DEFAULT_FILE_OPENER_OPTIONS}
+							onValueChange={(value) => {
+								if (
+									value === "system" ||
+									value === "vscode" ||
+									value === "cursor" ||
+									value === "zed"
+								) {
+									setDefaultFileOpener(value);
+								}
+							}}
+							value={defaultFileOpener}
+						>
+							<SelectTrigger
+								className="h-8 w-56 flex-shrink-0 text-sm"
+								id="default-file-opener-select"
+							>
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								{DEFAULT_FILE_OPENER_OPTIONS.map((option) => (
+									<SelectItem key={option.value} value={option.value}>
+										{option.label}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					}
+					description={`Choose what the file tree's Open action uses. ${FILE_MANAGER_NAME} is used for the OS default, or choose an installed editor for files and folders.`}
+					title="Default file opener"
+				/>
+			</SettingsGroup>
+		</SettingsSection>
 	);
 
 	const systemPage = (
@@ -660,7 +898,7 @@ export function GeneralTab() {
 					id: "chats",
 					title: "Chats",
 					hint: "How Ryu shows your agents' own chat history.",
-					icon: BubbleChatIcon,
+					icon: Chat01Icon,
 					tint: "teal",
 					content: chatsPage,
 				},
@@ -671,6 +909,14 @@ export function GeneralTab() {
 					icon: CommandLineIcon,
 					tint: "gray",
 					content: terminalPage,
+				},
+				{
+					id: "files",
+					title: "Files",
+					hint: "How the workspace file tree opens files and folders.",
+					icon: FolderOpenIcon,
+					tint: "purple",
+					content: filesPage,
 				},
 				{
 					id: "system",

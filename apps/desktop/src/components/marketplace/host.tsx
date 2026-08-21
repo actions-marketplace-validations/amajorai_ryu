@@ -14,7 +14,7 @@ import {
 } from "@ryu/marketplace/host";
 import type { ReactNode } from "react";
 import { sileo } from "sileo";
-import { getActiveUserId } from "@/lib/auth-client.ts";
+import { FRONTEND_URL, getActiveUserId } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useMyLicenses } from "@/src/hooks/useMyLicenses.ts";
 import { useSellerReports } from "@/src/hooks/useSellerReports.ts";
@@ -65,6 +65,7 @@ const desktopReviews: MarketplaceReviewsService = {
 		};
 	},
 	remove: ({ kind, id }) => deleteReview(kind, id),
+	onSignIn: () => openExternal(`${FRONTEND_URL.replace(/\/$/, "")}/login`),
 };
 
 /** The heart on a store card, backed by the control plane (:3000).
@@ -91,6 +92,11 @@ const desktopLikes: MarketplaceLikesService = {
 const desktopMarketplaceHost: MarketplaceHost = {
 	likes: desktopLikes,
 	openExternal,
+	openMarketplace: () =>
+		openExternal(`${FRONTEND_URL.replace(/\/$/, "")}/marketplace`),
+	openOrganization: () =>
+		openExternal(`${FRONTEND_URL.replace(/\/$/, "")}/organizations`),
+	openSignIn: () => openExternal(`${FRONTEND_URL.replace(/\/$/, "")}/login`),
 	reviews: desktopReviews,
 	startPurchase,
 	useLicenses: useMyLicenses,

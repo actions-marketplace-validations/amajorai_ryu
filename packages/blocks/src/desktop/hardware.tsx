@@ -93,8 +93,13 @@ export function HardwareView({
 
 	if (!(hardware && usage)) {
 		return (
-			<div className="flex h-32 items-center justify-center text-muted-foreground text-sm">
-				Could not load hardware info. Try refreshing.
+			<div className="flex h-32 flex-col items-center justify-center gap-2 text-muted-foreground text-sm">
+				<p>Could not load hardware info.</p>
+				{onRefresh ? (
+					<Button onClick={onRefresh} size="sm" variant="ghost">
+						Try again
+					</Button>
+				) : null}
 			</div>
 		);
 	}
@@ -167,15 +172,12 @@ export function HardwareView({
 
 			<div className="flex justify-center pt-2">
 				<Button
-					disabled={refreshing}
+					loading={refreshing}
 					onClick={onRefresh}
 					size="sm"
 					variant="ghost"
 				>
-					<HugeiconsIcon
-						className={`mr-2 size-4 ${refreshing ? "animate-spin" : ""}`}
-						icon={Refresh01Icon}
-					/>
+					<HugeiconsIcon className="mr-2 size-4" icon={Refresh01Icon} />
 					Refresh
 				</Button>
 			</div>

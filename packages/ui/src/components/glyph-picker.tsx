@@ -6,8 +6,9 @@
  *
  * Allowed kinds are decided here via {@link GLYPH_PRESETS} (or an explicit
  * allowlist). The canonical set is avatar · icon · emoji · dicebear; agents
- * additionally allow a standalone dither gradient. Icons and emojis can also
- * take dither as an optional *background* layer (DiceBear cannot).
+ * additionally allow expressive ghost faces and a standalone dither gradient.
+ * Icons and emojis can also take dither as an optional *background* layer
+ * (DiceBear and expressive faces cannot).
  */
 
 import data from "@emoji-mart/data";
@@ -31,6 +32,8 @@ import {
 	PALETTE,
 	rgb,
 } from "@ryu/ui/components/dither-kit/palette.ts";
+import { EXPRESSIVE_EXPRESSION_OPTIONS } from "@ryu/ui/components/expressive.ts";
+import { EXPRESSIVE_ANIMATION_OPTIONS } from "@ryu/ui/components/expressive-animation.ts";
 import {
 	DEFAULT_DICEBEAR_STYLE,
 	DICEBEAR_STYLES,
@@ -278,6 +281,7 @@ const TAB_LABEL: Record<GlyphKind, string> = {
 	icon: "Icon",
 	emoji: "Emoji",
 	dicebear: "DiceBear",
+	expressive: "Expressive",
 	dither: "Dither",
 };
 
@@ -369,6 +373,16 @@ export function GlyphPicker({
 	const [diceStyle, setDiceStyle] = useState<string>(DEFAULT_DICEBEAR_STYLE);
 	const [diceSeed, setDiceSeed] = useState(() => randomDicebearSeed());
 
+	// Expressive ghost avatar
+	const [expressiveSelection, setExpressiveSelection] =
+		useState<Extract<GlyphValue, { kind: "expressive" }>["expression"]>(
+			"random"
+		);
+	const [expressiveAnimationSelection, setExpressiveAnimationSelection] =
+		useState<
+			NonNullable<Extract<GlyphValue, { kind: "expressive" }>["animation"]>
+		>("random");
+
 	// Dither — standalone tab and/or background under icon/emoji
 	const [dither, setDither] = useState<GlyphDitherValue>(DEFAULT_DITHER);
 	const [ditherAsBg, setDitherAsBg] = useState(false);
@@ -398,6 +412,13 @@ export function GlyphPicker({
 		} else {
 			setDiceStyle(DEFAULT_DICEBEAR_STYLE);
 			setDiceSeed(randomDicebearSeed());
+		}
+		if (value?.kind === "expressive") {
+			setExpressiveSelection(value.expression);
+			setExpressiveAnimationSelection(value.animation ?? "random");
+		} else {
+			setExpressiveSelection("random");
+			setExpressiveAnimationSelection("random");
 		}
 		const layered = glyphDitherOf(value);
 		if (layered) {
@@ -512,6 +533,20 @@ export function GlyphPicker({
 		setIsDialogOpen(false);
 	}, [dither, onChange, setIsDialogOpen]);
 
+	const applyExpressive = useCallback(() => {
+		onChange({
+			animation: expressiveAnimationSelection,
+			kind: "expressive",
+			expression: expressiveSelection,
+		});
+		setIsDialogOpen(false);
+	}, [
+		expressiveAnimationSelection,
+		expressiveSelection,
+		onChange,
+		setIsDialogOpen,
+	]);
+
 	const guideSide = rendered
 		? Math.min(rendered.width, rendered.height) / zoom
 		: 0;
@@ -538,7 +573,7 @@ export function GlyphPicker({
 					onValueChange={(v) => setTab(v as GlyphKind)}
 					value={tab}
 				>
-					<TabsList className="w-full">
+					<TabsList className="w-full flex-wrap">
 						{kinds.map((kind) => (
 							<TabsTrigger key={kind} value={kind}>
 								{TAB_LABEL[kind]}
@@ -784,6 +819,121 @@ export function GlyphPicker({
 						</TabsContent>
 					) : null}
 
+					{/* ── Expressive ghost ── */}
+					{kinds.includes("expressive") ? (
+						<TabsContent className="pt-3" value="expressive">
+							<div className="space-y-3">
+								<div className="flex min-h-36 items-center justify-center rounded-lg bg-muted/30">
+									<GlyphDisplay
+										alt="Expressive Ryu avatar preview"
+										className="text-foreground"
+										size={96}
+										value={{
+											animation: expressiveAnimationSelection,
+											kind: "expressive",
+											expression: expressiveSelection,
+										}}
+									/>
+								</div>
+								<p className="text-muted-foreground text-xs">
+									Choose a mood and animation for Ryu's ghost. Random cycles
+									through the full state timeline with seamless morphs.
+								</p>
+								<div className="h-72 overflow-hidden rounded-lg border border-border">
+									<ScrollArea className="h-full">
+										<div className="space-y-3 p-2">
+											<div>
+												<p className="mb-1.5 font-medium text-muted-foreground text-xs">
+													Expression
+												</p>
+												<div className="grid grid-cols-4 gap-1.5 sm:grid-cols-6">
+													{EXPRESSIVE_EXPRESSION_OPTIONS.map((option) => {
+														const active = expressiveSelection === option.value;
+														return (
+															<button
+																aria-label={option.label}
+																aria-pressed={active}
+																className={cn(
+																	"flex flex-col items-center gap-1 rounded-md p-1.5 outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring",
+																	active && "bg-accent ring-2 ring-primary"
+																)}
+																key={option.value}
+																onClick={() =>
+																	setExpressiveSelection(option.value)
+																}
+																title={option.description}
+																type="button"
+															>
+																<GlyphDisplay
+																	alt=""
+																	animated={false}
+																	className="size-11"
+																	size={44}
+																	value={{
+																		animation: expressiveAnimationSelection,
+																		kind: "expressive",
+																		expression: option.value,
+																	}}
+																/>
+																<span className="w-full truncate text-center text-[10px] text-muted-foreground leading-tight">
+																	{option.label}
+																</span>
+															</button>
+														);
+													})}
+												</div>
+												<div className="border-border border-t pt-2">
+													<p className="mb-1.5 font-medium text-muted-foreground text-xs">
+														Animation
+													</p>
+													<div className="grid grid-cols-4 gap-1.5 sm:grid-cols-6">
+														{EXPRESSIVE_ANIMATION_OPTIONS.map((option) => {
+															const active =
+																expressiveAnimationSelection === option.value;
+															return (
+																<button
+																	aria-label={option.label}
+																	aria-pressed={active}
+																	className={cn(
+																		"flex flex-col items-center gap-1 rounded-md p-1.5 outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring",
+																		active && "bg-accent ring-2 ring-primary"
+																	)}
+																	key={option.value}
+																	onClick={() =>
+																		setExpressiveAnimationSelection(
+																			option.value
+																		)
+																	}
+																	title={option.description}
+																	type="button"
+																>
+																	<GlyphDisplay
+																		alt=""
+																		animated={false}
+																		className="size-11"
+																		size={44}
+																		value={{
+																			animation: option.value,
+																			kind: "expressive",
+																			expression: expressiveSelection,
+																		}}
+																	/>
+																	<span className="w-full truncate text-center text-[10px] text-muted-foreground leading-tight">
+																		{option.label}
+																	</span>
+																</button>
+															);
+														})}
+													</div>
+												</div>
+											</div>
+										</div>
+									</ScrollArea>
+								</div>
+							</div>
+						</TabsContent>
+					) : null}
+
 					{/* ── DiceBear ── */}
 					{kinds.includes("dicebear") ? (
 						<TabsContent className="pt-3" value="dicebear">
@@ -918,6 +1068,11 @@ export function GlyphPicker({
 						<Button onClick={applyDicebear} type="button">
 							<Dices className="size-4" />
 							Use avatar
+						</Button>
+					) : null}
+					{tab === "expressive" ? (
+						<Button onClick={applyExpressive} type="button">
+							Use expression
 						</Button>
 					) : null}
 					{tab === "dither" ? (

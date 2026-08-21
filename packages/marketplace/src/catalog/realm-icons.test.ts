@@ -4,6 +4,15 @@
 // wearing the plugins puzzle, workflows using a mismatched variant).
 
 import { describe, expect, test } from "bun:test";
+import {
+	BrainIcon,
+	Package01Icon,
+	PlugSocketIcon,
+	PotionIcon,
+	ServerStack01Icon,
+	Target01Icon,
+	WorkflowCircle06Icon,
+} from "@hugeicons/core-free-icons";
 import { type CatalogRealm, REALM_ICONS } from "./realm-icons.ts";
 
 const REALMS: CatalogRealm[] = [
@@ -30,5 +39,15 @@ describe("REALM_ICONS", () => {
 	test("glyphs are distinct across realms (no accidental reuse)", () => {
 		const glyphs = REALMS.map((r) => REALM_ICONS[r]);
 		expect(new Set(glyphs).size).toBe(REALMS.length);
+	});
+
+	test("matches the sidebar vocabulary for shared catalog realms", () => {
+		expect(REALM_ICONS.apps).toBe(Package01Icon);
+		expect(REALM_ICONS.plugins).toBe(PlugSocketIcon);
+		expect(REALM_ICONS.models).toBe(BrainIcon);
+		expect(REALM_ICONS.skills).toBe(PotionIcon);
+		expect(REALM_ICONS.mcp).toBe(ServerStack01Icon);
+		expect(REALM_ICONS.agents).toBe(Target01Icon);
+		expect(REALM_ICONS.workflows).toBe(WorkflowCircle06Icon);
 	});
 });

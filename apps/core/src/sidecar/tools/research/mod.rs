@@ -10,7 +10,7 @@
 //! Placement (Core vs Gateway, AGENTS.md §1): **Core** — it decides *what runs*
 //! (which experiment, in which workspace). The chat calls the researcher agent
 //! makes still route through the Gateway. Nothing in Core consumes the engine any
-//! more: both consumers — the `/api/research/*` data path and the `research__*` MCP
+//! more: both consumers — the `/api/research/*` data path and the `research.*` MCP
 //! tools — are served out-of-process by the `@ryu/research` app itself, which
 //! reaches the engine directly over loopback.
 //!
@@ -21,7 +21,7 @@
 //! registered so the catalog/routes can reach it, but never in `startup_order`.
 //!
 //! This module is the kernel side of the research decomposition: the `/api/research/*`
-//! proxy handlers and the `research__*` MCP tool contract live in the `ryu-research`
+//! proxy handlers and the `research.*` MCP tool contract live in the `ryu-research`
 //! crate (`apps-store/research/backend`), which Core no longer links at all — its HTTP
 //! surface is served by the app's own sidecar through the generic ext-proxy, and its
 //! MCP tools by the app's own `ryu-research mcp` stdio server through the generic
@@ -271,7 +271,11 @@ impl Sidecar for ResearchManager {
             ];
             let args: Vec<String> = vec!["-m".into(), "ryu_research".into()];
             process
-                .start_path_with_env(&program, &args, &env)
+                // The research runner executes publisher-controlled experiment
+                // code. Give it only the scrubbed benign environment plus the
+                // explicit loopback/workspace values above; Core credentials
+                // must never be inherited by an experiment process.
+                .start_path_with_clean_env(&program, &args, &env)
                 .await
                 .with_context(|| {
                     format!(

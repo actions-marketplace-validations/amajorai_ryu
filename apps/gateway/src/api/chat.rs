@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -106,6 +106,8 @@ fn apply_budget_headers(hdrs: &mut HeaderMap, budget: &BudgetDecision) {
     if let Ok(v) = HeaderValue::from_str(&budget.limit.to_string()) {
         hdrs.insert("x-budget-limit", v);
     }
+    hdrs.insert("x-budget-currency", HeaderValue::from_static("USD"));
+    hdrs.insert("x-budget-unit", HeaderValue::from_static("micro_usd"));
 }
 
 pub async fn chat_completions(
@@ -118,6 +120,7 @@ pub async fn chat_completions(
     // Caller identity for per-user / per-agent budgets (U21).
     let user_id = header_string(&headers, "x-ryu-user-id");
     let agent_id = header_string(&headers, "x-ryu-agent-id");
+    let agent_proof = header_string(&headers, "x-ryu-agent-proof");
     // Active skill ids for attribution (M3 / #145 AC3).
     let skill_ids = header_string(&headers, "x-ryu-skill-ids");
     // Per-agent egress tool allowlist (#475 C7). CSV of FQ tool ids forwarded by
@@ -216,6 +219,7 @@ pub async fn chat_completions(
             raw_api_key: raw_key,
             user_id,
             agent_id,
+            agent_proof,
             skill_ids,
             tool_actions,
             tools_header_present,
@@ -344,6 +348,58 @@ pub async fn chat_completions(
 
         Ok(response)
     }
+}
+
+/// Agent-scoped OpenAI-compatible ingress used by ACP subprocesses.
+///
+/// ACP agents make their own HTTP requests, so Core cannot add the normal
+/// forwarded identity header after the subprocess starts. Giving them an
+/// agent-specific base URL lets the gateway bind that identity at the ingress
+/// boundary; the existing authentication rules still decide whether the
+/// caller is allowed to use the forwarded id.
+pub async fn agent_chat_completions(
+    State(state): State<SharedState>,
+    Path(agent_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Response, GatewayError> {
+    agent_chat_completions_inner(state, agent_id, None, headers, body).await
+}
+
+/// Agent-scoped ingress variant used by managed/remote ACP routes. The proof is
+/// bound to the Gateway bearer held by Core, so a tenant token cannot simply
+/// rewrite the path and move spend to another agent.
+pub async fn agent_chat_completions_with_proof(
+    State(state): State<SharedState>,
+    Path((agent_id, proof)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Response, GatewayError> {
+    agent_chat_completions_inner(state, agent_id, Some(proof), headers, body).await
+}
+
+async fn agent_chat_completions_inner(
+    state: SharedState,
+    agent_id: String,
+    proof: Option<String>,
+    mut headers: HeaderMap,
+    body: Value,
+) -> Result<Response, GatewayError> {
+    let agent_id = agent_id.trim();
+    if agent_id.is_empty() {
+        return Err(GatewayError::BadRequest(
+            "agent_id must not be empty".to_owned(),
+        ));
+    }
+    let value = HeaderValue::from_str(agent_id)
+        .map_err(|_| GatewayError::BadRequest("invalid agent_id".to_owned()))?;
+    headers.insert("x-ryu-agent-id", value);
+    if let Some(proof) = proof {
+        let value = HeaderValue::from_str(proof.trim())
+            .map_err(|_| GatewayError::BadRequest("invalid agent route proof".to_owned()))?;
+        headers.insert("x-ryu-agent-proof", value);
+    }
+    chat_completions(State(state), headers, Json(body)).await
 }
 
 #[cfg(test)]

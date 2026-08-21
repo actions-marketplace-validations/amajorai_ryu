@@ -8,7 +8,9 @@
 //! the desktop's dumb bar never branches on status codes — it just hides on
 //! `unsupported` and shows a hint otherwise. All the provider logic + the
 //! never-refresh token safety lives in the extracted [`ryu_usage`] crate; this
-//! handler is the kernel-side route ingress that delegates to it.
+//! handler is the kernel-side route ingress that delegates to it. Ryu-managed
+//! subscription providers use the same route, with their isolated Pi OAuth
+//! credential selected by the provider's login mapping.
 
 use axum::{extract::Path, response::IntoResponse, Json};
 
@@ -26,7 +28,12 @@ use axum::{extract::Path, response::IntoResponse, Json};
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 pub async fn agent_usage(Path(id): Path<String>) -> impl IntoResponse {
-    Json(ryu_usage::fetch_usage(&id).await)
+    let snapshot = if crate::pi_config::oauth_login::oauth_provider_id(&id).is_some() {
+        ryu_usage::fetch_ryu_provider_usage(&id).await
+    } else {
+        ryu_usage::fetch_usage(&id).await
+    };
+    Json(snapshot)
 }
 
 /// `GET /api/providers/:id/credits` — remaining prepaid API credit on the BYOK

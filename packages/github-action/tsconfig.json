@@ -1,0 +1,10 @@
+{
+  "extends": "@ryu/config/tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM"],
+    "outDir": "./dist",
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src/**/*"]
+}

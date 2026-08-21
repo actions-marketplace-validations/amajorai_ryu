@@ -1,6 +1,6 @@
 /**
  * Plan catalog: the single source of truth for Ryu's subscription / license
- * plans (epic #496 — Ryu Cloud + Teams monetization, Unit 0).
+ * plans (epic #496 — Ryu Cloud + organization pricing, Unit 0).
  *
  * CLAUDE.md placement rule (§1): "what is allowed, shared, measured, or paid
  * for" is control-plane. Plans decide *what a user is entitled to* (desktop
@@ -14,17 +14,18 @@
  * env var. See `docs/polar-products.md` for the products/prices/benefits that
  * must be created in Polar and which env vars carry their ids.
  *
- * Pricing decisions (defaults, epic #496 — repriced 2026-08-14, see
- * docs/pricing-decision-2026-08-14.md):
- *  - Desktop license  one-time $69 list (launch $29 via the LAUNCH29 discount;
+ * Pricing decisions (defaults, unified organization catalog, 2026-08-19):
+ *  - Desktop license  one-time $200 list (launch $129 via the LIFETIME129 discount;
  *                     Polar license-key benefit, 7-day trial, 1yr updates).
  *                     Grants desktop access, NO managed inference.
- *  - Pro              $39/mo ($390/yr, 2 months free) + $15/mo included pool.
- *  - Max              $99/mo ($990/yr, 2 months free) + $30/mo included pool.
- *  - Teams            $49/seat/mo (min 2) + $15/seat/mo pool. Org-scoped; a
- *                     governance premium over Pro — see
- *                     {@link PLAN_MONTHLY_PRICE_MICRO_USD}.
- *  - Credits top-up   deposit fee 15% base (13% Pro, 12% Max/Teams) + $2.40
+ *  - Pro              $39/mo legacy plan; hidden from the public business shelf;
+ *                     fixed $15 pool.
+ *  - Max              $99/mo legacy plan; hidden from the public business shelf;
+ *                     fixed $30 pool.
+ *  - Teams            $50/member seat/mo, five-seat minimum ($250 floor),
+ *                     organization-owned; pooled credits grow by $50 per five
+ *                     billed seats in the current pricing version.
+ *  - Credits top-up   deposit fee 15% base (13% Pro, 12% Max) + $2.40
  *                     floor; usage debits AT COST (markup 0).
  *
  * The credit pool / markup is captured at DEPOSIT, not per-usage. The wallet is
@@ -33,7 +34,7 @@
  *
  * Usage that debits at cost is BOTH model tokens (reason `gateway_usage`,
  * OpenRouter pass-through) AND tool calls. Composio is not free — it charges per
- * action execution — so each executed `composio__*` tool call debits the wallet
+ * action execution — so each executed `composio.*` tool call debits the wallet
  * at cost under reason `composio`, separately from the token debit. The managed
  * gateway meters tool calls and the per-call rate is provisioned per managed node
  * (`GATEWAY_CREDITS_COST_PER_TOOL_CALL_MICRO_USD`); builtin/MCP/app tools are free.
@@ -46,6 +47,10 @@ const MICRO_USD_PER_USD = 1_000_000;
 export const usdToMicro = (usd: number): number =>
 	Math.round(usd * MICRO_USD_PER_USD);
 
+/** Lifetime list and launch prices shared by checkout, Polar provisioning, and UI. */
+export const LIFETIME_LIST_PRICE_USD = 200;
+export const LIFETIME_LAUNCH_PRICE_USD = 129;
+
 /** The four plan identifiers. `none` is the un-entitled free baseline. */
 export const PLAN_IDS = ["desktop-license", "pro", "max", "teams"] as const;
 export type PlanId = (typeof PLAN_IDS)[number];
@@ -55,22 +60,22 @@ export type BillingInterval = "one_time" | "monthly" | "yearly";
 
 /** How seats are counted for a plan. */
 export type SeatModel =
-	| { kind: "single" } // one entitlement per buyer (desktop/pro/max)
+	| { kind: "single" } // one fixed entitlement per buyer; hosted member limits are separate
 	| { kind: "per_seat"; minSeats: number }; // org-scoped, billed per seat
 
+/** Whether the included managed-inference pool is fixed or grows with seats. */
+export type CreditPoolModel = "fixed" | "per_seat" | "per_bundle";
+
+/** Whether a recurring plan is for one person's workspace or an organization. */
+export type PlanAudience = "individual" | "organization";
+
 /**
- * A Polar product/price binding. Both ids read from env with the documented
+ * A Polar product binding. The product id reads from env with the documented
  * default (the existing sandbox UUIDs in `constants.ts`) as a placeholder. A
  * missing/placeholder id is still a valid string so imports never crash; the
- * checkout layer (later units) is responsible for refusing a placeholder id.
+ * checkout layer is responsible for refusing a placeholder id.
  */
 export interface PolarBinding {
-	/**
-	 * Env var that carries the Polar price id, when checkout needs an explicit
-	 * price (per-seat / metered). Optional: product-level checkout suffices for
-	 * the simple fixed-price products.
-	 */
-	readonly priceIdEnv?: string;
 	/** Documented default product id (a sandbox UUID where one already exists). */
 	readonly productIdDefault: string;
 	/** Env var that carries the real Polar product id for this offering. */
@@ -83,17 +88,16 @@ export const resolveProductId = (
 	read: (key: string) => string | undefined = (k) => process.env[k]
 ): string => read(binding.productIdEnv) ?? binding.productIdDefault;
 
-/** Resolve a binding's optional price id from env. */
-export const resolvePriceId = (
-	binding: PolarBinding,
-	read: (key: string) => string | undefined = (k) => process.env[k]
-): string | undefined =>
-	binding.priceIdEnv ? read(binding.priceIdEnv) : undefined;
-
 /** A plan in the catalog. */
 export interface Plan {
+	/** The ownership boundary that the checkout and entitlement must preserve. */
+	readonly audience: PlanAudience;
 	/** The Polar bindings, keyed by interval this plan offers. */
 	readonly bindings: Partial<Record<BillingInterval, PolarBinding>>;
+	/** Number of seats represented by one pool grant for a per-bundle plan. */
+	readonly creditPoolBundleSize?: number;
+	/** Whether the included credit pool scales with the billed seat count. */
+	readonly creditPoolModel: CreditPoolModel;
 	/** Whether holding this plan unlocks the desktop app. */
 	readonly desktopAccess: boolean;
 	/**
@@ -108,14 +112,15 @@ export interface Plan {
 	/**
 	 * Whether this plan includes Agent Inboxes (Ryu Mail — the AgentMail-style
 	 * email-as-a-service over AWS SES: store inboxes, receive + send email).
-	 * Individual subscription plans (pro/max) and teams include it; the desktop
-	 * license and the free baseline do not.
+	 * The free baseline and recurring subscription plans include it; the desktop
+	 * license remains local-only and does not.
 	 */
 	readonly emailEnabled: boolean;
 	/**
-	 * Max number of Agent Inboxes the plan may create (0 when disabled). Paid
-	 * plans (pro/max/teams) allow UNLIMITED inboxes ({@link Number.POSITIVE_INFINITY});
-	 * the cap is on STORAGE ({@link emailStorageLimitGb}), not count.
+	 * Max number of Agent Inboxes the plan may create (0 when disabled). The free
+	 * baseline allows one inbox; paid plans (pro/max/teams) allow UNLIMITED
+	 * inboxes ({@link Number.POSITIVE_INFINITY}); the cap is on STORAGE
+	 * ({@link emailStorageLimitGb}), not count.
 	 */
 	readonly emailInboxLimit: number;
 	/** Max outbound emails the plan may send per calendar month (0 when off). */
@@ -123,7 +128,7 @@ export interface Plan {
 	/**
 	 * Max total stored Agent Inbox bytes the plan may hold, expressed in whole GB
 	 * (0 when email is disabled). This — not inbox count — is what caps Agent
-	 * Inboxes: desktop 0, pro 5, max 10, teams 20. Enforced by the mail router;
+	 * Inboxes: free 1, desktop 0, pro 20, max 100, teams 20. Enforced by the mail router;
 	 * the byte figure is derived via {@link emailStorageLimitBytes}.
 	 */
 	readonly emailStorageLimitGb: number;
@@ -318,8 +323,9 @@ export const CREDITS_TOPUP_BINDING: PolarBinding = {
 /**
  * The ONE rule for a plan's included credit pool: a fixed FRACTION of its
  * recurring price, documented once, here. The default is 50% — a $40/mo plan
- * grants $20/mo of credits, and Teams' $49/seat grants $15/seat (then × seats,
- * applied by {@link resolveEntitlement}). A plan
+ * grants $20/mo of credits. Teams' current version instead grants one $50
+ * organization pool for each five billed seats, applied by
+ * {@link resolveEntitlement}. A plan
  * with no recurring price (the one-time desktop license) grants 0.
  *
  * This is the "nothing hardcoded" seam: to change what a plan includes, change
@@ -357,9 +363,9 @@ export const INCLUDED_CREDIT_FRACTION_MAX = 0.4;
 /**
  * Derive a plan's monthly included credit pool from its recurring price. Returns
  * integer micro-USD = round(price * fraction); 0 when there is no recurring
- * price. Per-seat plans pass their PER-SEAT price and get the per-seat pool; the
- * ×seats scaling is applied by `resolveEntitlement` from the live seat count, so
- * the fraction rule stays seat-agnostic here.
+ * price. A per-seat plan may use this helper for a per-seat pool, while Teams'
+ * current version uses a fixed organization pool per five billed seats; the
+ * scaling decision is applied by `resolveEntitlement` from the plan row.
  */
 export const includedCreditPoolMicroUsd = (
 	monthlyPriceMicroUsd: number,
@@ -379,41 +385,11 @@ export const includedCreditPoolMicroUsd = (
  * {@link includedCreditPoolMicroUsd}, never hand-typed per row.
  */
 export const PLAN_MONTHLY_PRICE_MICRO_USD: Record<PlanId, number> = {
-	"desktop-license": 0, // one-time $69 list — no recurring price
+	"desktop-license": 0, // one-time list price; no recurring price
 	pro: usdToMicro(39),
-	// Ryu Max — $99/mo, down from $200.
-	//
-	// The $200 tier could not be sold: its only advantage over Teams was a bigger
-	// credit pool, and credits are the one thing a customer can already buy à la
-	// carte. Upgrading cost +$161/seat for +$130.50 of credits that a top-up
-	// delivered for $143.55, so Max was $17.45/seat/month WORSE than the tier
-	// below it — and the option the customer should rationally pick was the one
-	// that earned Ryu less. A tier whose differentiator is volume of a
-	// commodity is not a tier; it is a worse-priced credit pack.
-	//
-	// At $99 Max differentiates on things a top-up cannot buy: double the
-	// machine (cx33 — 4 vCPU / 8 GB, vs Pro's 2 vCPU / 4 GB), 10 GB of mail, and
-	// the 12% deposit rate. It is also charm-priced under $100 on purpose.
 	max: usdToMicro(99),
-	// Teams is per SEAT / month at $49 — ABOVE Pro, which is the correction.
-	//
-	// Pricing Teams AT Pro was meant to avoid taxing collaboration, but it made
-	// Teams invisible: same price, slightly SMALLER pool ($19.50 vs $20), and a
-	// customer never actually chose it — `/checkout` refuses a `pro-*` slug for
-	// any org with more than one member, so a growing team was shoved through a
-	// tollbooth that looked identical to where it started. That is why it read as
-	// indistinguishable from Pro: it was.
-	//
-	// A team seat costs more and buys GOVERNANCE, not more inference — which is
-	// what the market does (a Cursor Teams seat is $40 against Pro's $20 and
-	// includes the same usage; Copilot Business is $19 for $19 of credits). Here
-	// the premium buys pooled billing, roles, 20 GB of mail, an extra node per 10
-	// seats, the 12% deposit rate, and volume discounts (see ./seat-tiers.ts).
-	//
-	// $49 is also what PRODUCTION POLAR HAS ALWAYS CHARGED. The catalog said $39
-	// while checkout billed $49, so the pricing page advertised a price nobody
-	// paid. Adopting $49 closes that gap without repricing anything.
-	teams: usdToMicro(49), // per seat / month — a governance premium over Pro
+	// Per-seat list price. Five seats therefore start at $250/mo.
+	teams: usdToMicro(50),
 };
 
 /* -------------------------------------------------------------------------- *
@@ -422,7 +398,11 @@ export const PLAN_MONTHLY_PRICE_MICRO_USD: Record<PlanId, number> = {
 
 /** One historical (price, pool) pairing for a plan. Append-only. */
 export interface PlanVersion {
-	/** Included pool per month, per SEAT for seat-based plans. */
+	/** Bundle size for a `per_bundle` historical pool. */
+	readonly creditPoolBundleSize?: number;
+	/** Historical pool scaling, when it differs from the current plan model. */
+	readonly creditPoolModel?: CreditPoolModel;
+	/** Included pool per month; scaling is controlled by this row or the live plan. */
 	readonly monthlyCreditPoolMicroUsd: number;
 	/** List price when this version was sold, per month / per seat. */
 	readonly monthlyPriceMicroUsd: number;
@@ -470,10 +450,34 @@ export interface PlanVersion {
 export const PLAN_VERSIONS: Record<PlanId, readonly PlanVersion[]> = {
 	"desktop-license": [
 		{ version: 1, monthlyPriceMicroUsd: 0, monthlyCreditPoolMicroUsd: 0 },
+		{ version: 2, monthlyPriceMicroUsd: 0, monthlyCreditPoolMicroUsd: 0 },
+		{ version: 3, monthlyPriceMicroUsd: 0, monthlyCreditPoolMicroUsd: 0 },
+		{ version: 4, monthlyPriceMicroUsd: 0, monthlyCreditPoolMicroUsd: 0 },
+		{ version: 5, monthlyPriceMicroUsd: 0, monthlyCreditPoolMicroUsd: 0 },
 	],
 	pro: [
 		{
 			version: 1,
+			monthlyPriceMicroUsd: usdToMicro(39),
+			monthlyCreditPoolMicroUsd: usdToMicro(15),
+		},
+		{
+			version: 2,
+			monthlyPriceMicroUsd: usdToMicro(250),
+			monthlyCreditPoolMicroUsd: usdToMicro(50),
+		},
+		{
+			version: 3,
+			monthlyPriceMicroUsd: usdToMicro(250),
+			monthlyCreditPoolMicroUsd: usdToMicro(50),
+		},
+		{
+			version: 4,
+			monthlyPriceMicroUsd: usdToMicro(39),
+			monthlyCreditPoolMicroUsd: usdToMicro(15),
+		},
+		{
+			version: 5,
 			monthlyPriceMicroUsd: usdToMicro(39),
 			monthlyCreditPoolMicroUsd: usdToMicro(15),
 		},
@@ -484,18 +488,75 @@ export const PLAN_VERSIONS: Record<PlanId, readonly PlanVersion[]> = {
 			monthlyPriceMicroUsd: usdToMicro(99),
 			monthlyCreditPoolMicroUsd: usdToMicro(30),
 		},
+		{
+			version: 2,
+			monthlyPriceMicroUsd: usdToMicro(2500),
+			monthlyCreditPoolMicroUsd: usdToMicro(250),
+		},
+		{
+			version: 3,
+			monthlyPriceMicroUsd: usdToMicro(2500),
+			monthlyCreditPoolMicroUsd: usdToMicro(250),
+		},
+		{
+			version: 4,
+			monthlyPriceMicroUsd: usdToMicro(99),
+			monthlyCreditPoolMicroUsd: usdToMicro(30),
+		},
+		{
+			version: 5,
+			monthlyPriceMicroUsd: usdToMicro(99),
+			monthlyCreditPoolMicroUsd: usdToMicro(30),
+		},
 	],
 	teams: [
 		{
 			version: 1,
 			monthlyPriceMicroUsd: usdToMicro(49),
 			monthlyCreditPoolMicroUsd: usdToMicro(15),
+			creditPoolModel: "fixed",
+		},
+		{
+			version: 2,
+			monthlyPriceMicroUsd: usdToMicro(49),
+			monthlyCreditPoolMicroUsd: usdToMicro(15),
+			creditPoolModel: "fixed",
+		},
+		{
+			version: 3,
+			monthlyPriceMicroUsd: usdToMicro(49),
+			monthlyCreditPoolMicroUsd: usdToMicro(15),
+			creditPoolModel: "fixed",
+		},
+		{
+			version: 4,
+			monthlyPriceMicroUsd: usdToMicro(250),
+			monthlyCreditPoolMicroUsd: usdToMicro(50),
+			creditPoolModel: "fixed",
+		},
+		{
+			version: 5,
+			monthlyPriceMicroUsd: usdToMicro(50),
+			monthlyCreditPoolMicroUsd: usdToMicro(50),
+			creditPoolModel: "per_bundle",
+			creditPoolBundleSize: 5,
 		},
 	],
 };
 
 /** The version a NEW checkout is stamped with. Bump when adding a row. */
-export const CURRENT_PLAN_VERSION = 1;
+export const CURRENT_PLAN_VERSION = 5;
+
+/** Current immutable pricing snapshot per recurring plan. */
+export const CURRENT_PLAN_VERSION_BY_PLAN: Record<PlanId, number> = {
+	"desktop-license": 4,
+	pro: 4,
+	max: 4,
+	teams: 5,
+};
+
+export const currentPlanVersionFor = (plan: PlanId): number =>
+	CURRENT_PLAN_VERSION_BY_PLAN[plan];
 
 /**
  * The version row for `plan`, or the OLDEST row when the version is unknown.
@@ -521,6 +582,49 @@ export const planVersionFor = (
 		}
 	}
 	return rows[0] as PlanVersion;
+};
+
+/** Resolve the historical/current pool model for one plan version. */
+export const creditPoolModelForVersion = (
+	plan: Plan,
+	version: PlanVersion
+): CreditPoolModel => version.creditPoolModel ?? plan.creditPoolModel;
+
+/**
+ * Calculate the monthly included pool for a plan at a billed seat count.
+ *
+ * Teams v5 uses a five-seat bundle: five billed seats receive $50, ten receive
+ * $100, and so on. The version row owns the scaling rule so older fixed-pool
+ * contracts remain grandfathered when the public offer changes.
+ */
+export const monthlyCreditPoolMicroUsdForSeats = (input: {
+	plan: Plan;
+	version: PlanVersion;
+	seats: number;
+}): number => {
+	const seats = Number.isFinite(input.seats)
+		? Math.max(1, Math.floor(input.seats))
+		: 1;
+	const model = creditPoolModelForVersion(input.plan, input.version);
+	if (model === "fixed") {
+		return input.version.monthlyCreditPoolMicroUsd;
+	}
+	if (model === "per_seat") {
+		return input.version.monthlyCreditPoolMicroUsd * seats;
+	}
+	const bundleSize = Math.max(
+		1,
+		Math.floor(
+			input.version.creditPoolBundleSize ??
+				input.plan.creditPoolBundleSize ??
+				(input.plan.seatModel.kind === "per_seat"
+					? input.plan.seatModel.minSeats
+					: 1)
+		)
+	);
+	return (
+		input.version.monthlyCreditPoolMicroUsd * Math.ceil(seats / bundleSize)
+	);
 };
 
 /**
@@ -552,11 +656,12 @@ export const planVersionFor = (
  */
 export const PLANS: Record<PlanId, Plan> = {
 	"desktop-license": {
+		audience: "individual",
 		id: "desktop-license",
 		name: "Ryu Desktop",
 		desktopAccess: true,
 		managedInference: false,
-		// One-time $69 list license — no RECURRING price, so the 50% rule derives a 0
+		// One-time $200 list license — no RECURRING price, so the 50% rule derives a 0
 		// monthly grant (no managed inference).
 		monthlyPriceMicroUsd: PLAN_MONTHLY_PRICE_MICRO_USD["desktop-license"],
 		monthlyCreditPoolMicroUsd: includedCreditPoolMicroUsd(
@@ -569,7 +674,7 @@ export const PLANS: Record<PlanId, Plan> = {
 		emailBrandingRemovable: false,
 		seatModel: { kind: "single" },
 		bindings: {
-			// One-time $69 list ($29 launch) with a Polar license-key benefit + 7-day trial. Defaults
+			// One-time $200 list ($129 launch) with a Polar license-key benefit + 7-day trial. Defaults
 			// to the existing "lifetime" sandbox product until a dedicated
 			// desktop-license product is created (see docs).
 			one_time: {
@@ -577,27 +682,24 @@ export const PLANS: Record<PlanId, Plan> = {
 				productIdDefault: "e689e9bc-2535-4571-9573-8e11e188bf52",
 			},
 		},
+		creditPoolModel: "fixed",
 	},
 	pro: {
+		audience: "individual",
 		id: "pro",
 		name: "Ryu Pro",
 		desktopAccess: true,
 		managedInference: true,
-		// Ryu Pro — $39/mo ($390/yr, 2 months free) with $15/mo of included AI
-		// usage. A PERSONAL (single-user) plan: an org with 2+ members must use
-		// Teams. The pool is a round $15 (38% of price), inside the 40% cap in
-		// {@link INCLUDED_CREDIT_FRACTION_MAX} — down from $20, which was 51% and
-		// left too little room once the 5.5% cost of funding a granted credit was
-		// counted. Credits beyond it are a top-up, which is the point: the plan
-		// sells access, the wallet sells fuel.
+		// Ryu Pro — the original $39/mo individual plan. It is for one person's
+		// managed workspace; shared organization ownership belongs to Teams.
 		monthlyPriceMicroUsd: PLAN_MONTHLY_PRICE_MICRO_USD.pro,
 		monthlyCreditPoolMicroUsd: usdToMicro(15),
-		// Agent Inboxes: UNLIMITED count for an individual builder; capped by 5 GB
+		// Agent Inboxes: UNLIMITED count for a personal workspace; capped by 20 GB
 		// of stored mail (emailStorageLimitGb), not by inbox count.
 		emailEnabled: true,
 		emailInboxLimit: Number.POSITIVE_INFINITY,
-		emailMonthlySendLimit: 1000,
-		emailStorageLimitGb: 5,
+		emailMonthlySendLimit: 10_000,
+		emailStorageLimitGb: 20,
 		// Paid: may drop the "Sent from Ryu" footer (per-inbox toggle, off by default).
 		emailBrandingRemovable: true,
 		seatModel: { kind: "single" },
@@ -611,39 +713,28 @@ export const PLANS: Record<PlanId, Plan> = {
 				productIdDefault: "05b73727-21e8-4e0f-82bf-cb6e3b2e848c",
 			},
 		},
+		creditPoolModel: "fixed",
 	},
 	max: {
+		audience: "individual",
 		id: "max",
 		name: "Ryu Max",
 		desktopAccess: true,
 		managedInference: true,
-		// Ryu Max — $99/mo ($990/yr, 2 months free) with $30 of AI usage (30% of
-		// price, inside the 40% cap). Perks: unlimited Agent Inboxes · 10 GB
-		// storage · a BIGGER free node (`cx33`, 4 vCPU · 8 GB · 80 GB, where Pro
-		// and Teams get `cx23`, 2 vCPU · 4 GB) · the 12% deposit rate.
-		//
-		// The pool DROPPED from $150, and that is the whole repositioning. At
-		// $150 the grant was 75% of price and cost $158.25 to fund, so Max yearly
-		// LOST $27 at full list price; worse, it made the tier a credit pack that
-		// a top-up beat on price. Max now differentiates on what a top-up cannot
-		// sell you — machine, mail, deposit rate — and the pool is a sweetener.
+		// Ryu Max — the original $99/mo individual power plan. The public business
+		// automation offer is Teams; Max is not a substitute for shared ownership.
 		monthlyPriceMicroUsd: PLAN_MONTHLY_PRICE_MICRO_USD.max,
 		monthlyCreditPoolMicroUsd: usdToMicro(30),
-		// Agent Inboxes: UNLIMITED count; capped by 10 GB of stored mail.
+		// Agent Inboxes: UNLIMITED count; capped by 100 GB of stored mail.
 		emailEnabled: true,
 		emailInboxLimit: Number.POSITIVE_INFINITY,
-		emailMonthlySendLimit: 25_000,
-		emailStorageLimitGb: 10,
+		emailMonthlySendLimit: 100_000,
+		emailStorageLimitGb: 100,
 		emailBrandingRemovable: true,
-		// SINGLE-SEAT, deliberately — Max used to be `per_seat` with `minSeats: 1`
-		// so an org could buy N Max seats, which is precisely what made the ladder
-		// unreadable: two seat-scalable business plans sat side by side, differing
-		// only in credit volume, and a buyer had to do arithmetic to discover the
-		// cheaper one was also the better one. Multi-seat is Teams' job. Max is the
-		// individual power tier and stops competing with it.
-		//
-		// Safe to flip because no multi-seat Max subscription exists to migrate:
-		// production had ZERO active subscriptions when this was changed.
+		// A Max subscription is personal even though the surrounding billing system
+		// also supports organization-scoped hosted-agent contracts with the `max`
+		// id. Keep the legacy seat model single so the fixed personal pool is never
+		// multiplied by a member count.
 		seatModel: { kind: "single" },
 		bindings: {
 			monthly: {
@@ -655,44 +746,37 @@ export const PLANS: Record<PlanId, Plan> = {
 				productIdDefault: "d4cc175d-a301-4e56-b677-1542bf160a79",
 			},
 		},
+		creditPoolModel: "fixed",
 	},
 	teams: {
+		audience: "organization",
 		id: "teams",
 		name: "Ryu Teams",
 		desktopAccess: true,
 		managedInference: true,
-		// Per-seat pool pinned to a round $15/seat/mo (31% of the $49 seat price,
-		// inside the 40% cap) — the SAME per-person grant as Pro, on purpose: a
-		// team seat costs more than Pro because it buys governance, not more
-		// inference. That is the market convention (a Cursor Teams seat is double
-		// Pro's price for identical included usage), and it is what stops Teams
-		// from being read as "Pro with a discount attached".
-		//
-		// The per-org pool = pool * seats, computed by resolveEntitlement from the
-		// live seat count.
+		// The public business offer is member-seat based: $50/seat/mo with a
+		// five-seat floor ($250/mo). The current credit grant is pooled at the
+		// organization level and grows by $50 for each additional five billed seats.
 		monthlyPriceMicroUsd: PLAN_MONTHLY_PRICE_MICRO_USD.teams,
-		monthlyCreditPoolMicroUsd: usdToMicro(15),
+		monthlyCreditPoolMicroUsd: usdToMicro(50),
 		// Agent Inboxes: UNLIMITED count; capped by a flat org-wide 20 GB of stored
-		// mail (not per-seat — tunable here only).
+		// mail.
 		emailEnabled: true,
 		emailInboxLimit: Number.POSITIVE_INFINITY,
 		emailMonthlySendLimit: 100_000,
 		emailStorageLimitGb: 20,
 		emailBrandingRemovable: true,
-		seatModel: { kind: "per_seat", minSeats: 2 },
+		seatModel: { kind: "per_seat", minSeats: 5 },
+		creditPoolModel: "per_bundle",
+		creditPoolBundleSize: 5,
 		bindings: {
 			monthly: {
 				productIdEnv: "POLAR_PRODUCT_TEAMS_MONTHLY",
 				productIdDefault: "polar_product_teams_monthly",
-				priceIdEnv: "POLAR_PRICE_TEAMS_MONTHLY_SEAT",
 			},
-			// $390/seat/yr (two months free vs the $39/seat monthly), the offering
-			// the pricing grid shows on the yearly toggle. Was missing before, so the
-			// Teams yearly checkout had no product to resolve and failed.
 			yearly: {
 				productIdEnv: "POLAR_PRODUCT_TEAMS_YEARLY",
 				productIdDefault: "polar_product_teams_yearly",
-				priceIdEnv: "POLAR_PRICE_TEAMS_YEARLY_SEAT",
 			},
 		},
 	},
@@ -704,7 +788,7 @@ export const ALL_PLANS: readonly Plan[] = Object.values(PLANS);
 /* -------------------------------------------------------------------------- *
  * Bucket-3 numeric quotas (free-tier gating plan, 2026-07-11)
  *
- * Deliberately GENEROUS and SYMBOLIC: enforced only on the managed path +
+ * Deliberately SMALL starter caps and SYMBOLIC: enforced only on the managed path +
  * desktop client, never in OSS core/gateway (self-host stays uncapped).
  *
  * These used to be fourteen hand-written fields on {@link Plan}, repeated once
@@ -728,7 +812,7 @@ export type QuotaUnit = "count" | "days" | "gigabytes";
 
 /** One numeric quota: what it means, who owns the key, and its per-tier numbers. */
 export interface QuotaSpec {
-	/** The FREE (null-plan) baseline — the deliberately generous gating number. */
+	/** The FREE (null-plan) baseline — the managed starter cap. */
 	readonly free: number;
 	/** Human label for upgrade prompts and the pricing grid ("Website monitors"). */
 	readonly label: string;
@@ -767,7 +851,7 @@ export interface QuotaSpec {
  * really is out-of-process (the `ryu-monitors` sidecar owns the data).
  */
 export const KERNEL_QUOTAS = {
-	maxAgents: { free: 10, label: "Agents", owner: null, unit: "count" },
+	maxAgents: { free: 3, label: "Agents", owner: null, unit: "count" },
 	maxConcurrentRuns: {
 		free: 1,
 		label: "Concurrent runs",
@@ -777,15 +861,15 @@ export const KERNEL_QUOTAS = {
 		unit: "count",
 	},
 	maxEvalRunsMonthly: {
-		free: 20,
+		free: 10,
 		label: "Eval runs per month",
 		owner: null,
 		unit: "count",
 	},
-	maxMcpServers: { free: 5, label: "MCP servers", owner: null, unit: "count" },
-	maxOpenTabs: { free: 8, label: "Open tabs", owner: null, unit: "count" },
+	maxMcpServers: { free: 3, label: "MCP servers", owner: null, unit: "count" },
+	maxOpenTabs: { free: 3, label: "Open tabs", owner: null, unit: "count" },
 	maxPlugins: {
-		free: 10,
+		free: 5,
 		label: "Installed apps and plugins",
 		owner: null,
 		unit: "count",
@@ -797,16 +881,16 @@ export const KERNEL_QUOTAS = {
 		unit: "count",
 	},
 	maxSchedules: {
-		free: 3,
+		free: 1,
 		label: "Scheduled automations",
 		owner: null,
 		unit: "count",
 	},
-	maxSkills: { free: 10, label: "Skills", owner: null, unit: "count" },
-	maxSpaces: { free: 5, label: "Spaces", owner: null, unit: "count" },
-	maxWorkflows: { free: 10, label: "Workflows", owner: null, unit: "count" },
+	maxSkills: { free: 5, label: "Skills", owner: null, unit: "count" },
+	maxSpaces: { free: 1, label: "Spaces", owner: null, unit: "count" },
+	maxWorkflows: { free: 3, label: "Workflows", owner: null, unit: "count" },
 	spaceStorageLimitGb: {
-		free: 2,
+		free: 1,
 		label: "Space storage",
 		owner: null,
 		// Real storage cost, so finite on paid rows too.
@@ -824,13 +908,13 @@ export const KERNEL_QUOTAS = {
  */
 export const APP_QUOTAS = {
 	maxMonitors: {
-		free: 5,
+		free: 3,
 		label: "Website monitors",
 		owner: "@ryu/monitors",
 		unit: "count",
 	},
 	meetingRetentionDays: {
-		free: 30,
+		free: 14,
 		label: "Meeting-note retention",
 		owner: "@ryu/meetings",
 		unit: "days",
@@ -891,18 +975,21 @@ export const planLimit = (
 /** Bytes in one gibibyte; the unit the storage cap is expressed against. */
 const BYTES_PER_GB = 1024 ** 3;
 
+/** Free baseline hosted-mail storage, kept small to bound inbound abuse. */
+export const FREE_EMAIL_STORAGE_LIMIT_GB = 1;
+
 /**
  * The total stored-mail cap (in bytes) a plan grants for Agent Inboxes, derived
- * from its {@link Plan.emailStorageLimitGb}. A null plan (free baseline) gets 0.
+ * from its {@link Plan.emailStorageLimitGb}. A null plan receives the free
+ * baseline's 1 GiB storage allowance.
  * An unbounded GB figure ({@link Number.POSITIVE_INFINITY}) maps straight to
  * Infinity (no byte multiply). Single source of truth; never inline the multiply
  * in the mail router.
  */
 export const emailStorageLimitBytes = (plan: PlanId | null): number => {
-	if (!plan) {
-		return 0;
-	}
-	const gb = PLANS[plan].emailStorageLimitGb;
+	const gb = plan
+		? PLANS[plan].emailStorageLimitGb
+		: FREE_EMAIL_STORAGE_LIMIT_GB;
 	return gb === Number.POSITIVE_INFINITY
 		? Number.POSITIVE_INFINITY
 		: gb * BYTES_PER_GB;
@@ -913,7 +1000,7 @@ export interface EmailQuota {
 	/** Whether Agent Inboxes are available at all on this plan. */
 	readonly enabled: boolean;
 	/**
-	 * Max inboxes the plan may hold. Paid plans are UNLIMITED
+	 * Max inboxes the plan may hold. Free has one; paid plans are UNLIMITED
 	 * ({@link Number.POSITIVE_INFINITY}); enforcement caps STORAGE, not count.
 	 */
 	readonly inboxLimit: number;
@@ -927,7 +1014,7 @@ export interface EmailQuota {
 	readonly storageLimitBytes: number;
 }
 
-/** The un-entitled (free / no plan) email quota: feature off. */
+/** The disabled email quota used by plans that have no hosted mail entitlement. */
 export const EMAIL_QUOTA_NONE: EmailQuota = {
 	enabled: false,
 	inboxLimit: 0,
@@ -936,14 +1023,27 @@ export const EMAIL_QUOTA_NONE: EmailQuota = {
 };
 
 /**
+ * The free growth-loop allowance. Fifty sends is enough for a real agent to
+ * reach a small audience without turning a free account into a bulk-mail
+ * account. It is intentionally branded and capped to one inbox; paid tiers
+ * buy materially more volume and storage.
+ */
+export const EMAIL_QUOTA_FREE: EmailQuota = {
+	enabled: true,
+	inboxLimit: 1,
+	monthlySendLimit: 50,
+	storageLimitBytes: emailStorageLimitBytes(null),
+};
+
+/**
  * Resolve the Agent Inboxes quota for a plan id. A null plan (the free
- * baseline) gets {@link EMAIL_QUOTA_NONE}. The numbers live ONLY in the plan
+ * baseline) gets {@link EMAIL_QUOTA_FREE}. The numbers live ONLY in the plan
  * catalog above — never inline them in the mail router or the pricing page (that
  * page's strings are marketing copy; THIS is the enforced limit).
  */
 export const emailQuotaForPlan = (plan: PlanId | null): EmailQuota => {
 	if (!plan) {
-		return EMAIL_QUOTA_NONE;
+		return EMAIL_QUOTA_FREE;
 	}
 	const p = PLANS[plan];
 	return {
@@ -1018,7 +1118,7 @@ export interface LicenseView {
 export interface Entitlement {
 	readonly desktopAccess: boolean;
 	readonly managedInference: boolean;
-	/** Total included credit pool (pool * seats for per-seat plans). */
+	/** Total included credit pool after the plan's fixed/per-seat model is applied. */
 	readonly monthlyCreditPoolMicroUsd: number;
 	/** The effective plan, or null when un-entitled (free baseline). */
 	readonly plan: PlanId | null;
@@ -1086,10 +1186,11 @@ export const resolveEntitlement = (
 			// catalog — that is what makes a future pool increase unable to reach a
 			// customer still paying an older price.
 			const versioned = planVersionFor(plan.id, subscription.planVersion);
-			const pool =
-				plan.seatModel.kind === "per_seat"
-					? versioned.monthlyCreditPoolMicroUsd * seats
-					: versioned.monthlyCreditPoolMicroUsd;
+			const pool = monthlyCreditPoolMicroUsdForSeats({
+				plan,
+				seats,
+				version: versioned,
+			});
 			return {
 				plan: plan.id,
 				desktopAccess: plan.desktopAccess,
@@ -1220,9 +1321,10 @@ export const DESKTOP_GATE: DesktopGateConfig = {
 
 /**
  * The paywall is SOFT and THREE-BANDED. Free (Band 1) local features — local/
- * BYOK chat, a single agent, tool calling / MCP / skills, basic run-while-open
+ * BYOK chat, starter agents, tool calling / MCP / skills, basic run-while-open
  * workflows, Ghost/Shadow/memory/RAG — are NOT gated at all and are absent from
- * this map by construction. Only the two paid bands appear here:
+ * this map by construction. Numeric starter caps are a separate managed-path
+ * concern. Only the two paid capability bands appear here:
  *
  *  - `"pro"`  (Band 2) — local power features that cost Ryu NOTHING to run, so a
  *    one-time Lifetime license unlocks them forever (as does any subscription,
@@ -1471,11 +1573,12 @@ export const decideDesktopAccess = (
 /* -------------------------------------------------------------------------- *
  * Agent Inbox lifecycle (subscription lapse → grace → deactivated → deletable).
  *
- * Agent Inboxes (Ryu Mail) are a Band-3 subscription feature: only an active
- * Pro/Max/Teams plan carries `emailEnabled`. When that plan LAPSES an inbox must
- * not simply vanish (its address is a real, published identity and its stored
- * mail is the user's data), nor keep costing Ryu SES/storage forever. This is the
- * one place the lapse policy lives; it is a PURE, deterministic function (inject
+ * Agent Inboxes (Ryu Mail) are a hosted feature: the free baseline gets a small
+ * allowance, while an active Pro/Max/Teams plan carries the larger
+ * `emailEnabled` quota. When hosted mail entitlement LAPSES an inbox must not
+ * simply vanish (its address is a real, published identity and its stored mail
+ * is the user's data), nor keep costing Ryu SES/storage forever. This is the one
+ * place the lapse policy lives; it is a PURE, deterministic function (inject
  * `nowMs`) mirroring {@link decideDesktopAccess} — the only verification surface
  * without a live SES/Polar runtime.
  *

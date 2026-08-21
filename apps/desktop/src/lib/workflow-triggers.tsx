@@ -32,7 +32,7 @@ import {
 	RepeatIcon,
 	Shield01Icon,
 	WebhookIcon,
-	WorkflowSquare01Icon,
+	WorkflowCircle06Icon,
 	ZapIcon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
@@ -113,7 +113,7 @@ const NODE_KIND_ICONS: Record<string, IconSvgElement> = {
 	tool: ZapIcon,
 	webhook: WebhookIcon,
 	delay: Clock01Icon,
-	sub_workflow: WorkflowSquare01Icon,
+	sub_workflow: WorkflowCircle06Icon,
 	agent_delegate: CircleIcon,
 	note: Note01Icon,
 	while: RepeatIcon,

@@ -213,6 +213,7 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 
 	const contributes: Contributes = {
 		turn_hooks: [],
+		chat_features: [],
 		// This builder synthesises an app from its runnables; an app that emits
 		// events declares them in a hand-authored `manifest.json`, same as
 		// `lsp_servers` below.
@@ -236,6 +237,7 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 		data_categories: [],
 		pi_extensions: [],
 		output_styles: [],
+		message_actions: [],
 		widgets,
 	};
 

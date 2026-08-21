@@ -17,6 +17,7 @@
 // min, provider balances 5 min, the Ryu $ wallet 60 s), so calling this once per
 // turn costs a preference read and arithmetic, not vendor round-trips.
 
+import { formatCurrency } from "@ryu/ui/lib/number-format.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { request } from "@/src/lib/api/client.ts";
 import type { AgentSelection } from "@/src/lib/api/preferences.ts";
@@ -157,7 +158,10 @@ export async function saveRoutingPolicy(
 /** Format a reading for the info bar, in whichever unit it came in. */
 export function formatRoutingSignal(signal: RoutingSignalReading): string {
 	return signal.unit === "usd"
-		? `$${signal.value.toFixed(2)}`
+		? formatCurrency(signal.value, "USD", {
+				maximumFractionDigits: 2,
+				minimumFractionDigits: 2,
+			})
 		: `${Math.round(signal.value)}%`;
 }
 

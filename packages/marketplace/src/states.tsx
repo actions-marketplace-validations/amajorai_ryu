@@ -8,16 +8,20 @@ import { Building01Icon, Store01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty.tsx";
+import type { ReactNode } from "react";
 
 export function SignedOutState({
 	title,
 	description,
+	action,
 }: {
+	action?: ReactNode;
 	title: string;
 	description: string;
 }) {
@@ -30,6 +34,7 @@ export function SignedOutState({
 				<EmptyTitle>{title}</EmptyTitle>
 				<EmptyDescription>{description}</EmptyDescription>
 			</EmptyHeader>
+			{action ? <EmptyContent>{action}</EmptyContent> : null}
 		</Empty>
 	);
 }
@@ -37,7 +42,9 @@ export function SignedOutState({
 export function NoOrgState({
 	title,
 	message,
+	action,
 }: {
+	action?: ReactNode;
 	title: string;
 	message: string;
 }) {
@@ -50,6 +57,7 @@ export function NoOrgState({
 				<EmptyTitle>{title}</EmptyTitle>
 				<EmptyDescription>{message}</EmptyDescription>
 			</EmptyHeader>
+			{action ? <EmptyContent>{action}</EmptyContent> : null}
 		</Empty>
 	);
 }

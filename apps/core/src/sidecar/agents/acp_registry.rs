@@ -5,7 +5,7 @@
 //! spawn/install metadata Core can run. Ryu-specific agents (the flagship `ryu`,
 //! OpenClaw, ZeroClaw, Hermes) are merged separately in `AcpAgentRegistry::new`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -121,6 +121,76 @@ fn read_cache() -> Option<RegistryFile> {
     serde_json::from_str(&raw).ok()
 }
 
+/// Keep a small, stable ACP catalog available when the CDN and its cache are
+/// both unavailable. The full registry is still preferred and merged ahead of
+/// these rows; this only keeps a cold/offline install from losing the agents
+/// that the Store advertises in its first-run catalog.
+fn bundled_fallback_agents() -> Vec<RegistryAgent> {
+    let npx = |id: &str, name: &str, package: &str, args: &[&str]| RegistryAgent {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        version: "0.0.0".to_owned(),
+        description: format!("{name} ACP agent (offline catalog fallback)"),
+        icon: None,
+        distribution: RegistryDistribution {
+            npx: Some(RegistryNpx {
+                package: package.to_owned(),
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                env: HashMap::new(),
+            }),
+            ..RegistryDistribution::default()
+        },
+    };
+    let uvx = |id: &str, name: &str, package: &str, args: &[&str]| RegistryAgent {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        version: "0.0.0".to_owned(),
+        description: format!("{name} ACP agent (offline catalog fallback)"),
+        icon: None,
+        distribution: RegistryDistribution {
+            uvx: Some(RegistryUvx {
+                package: package.to_owned(),
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            }),
+            ..RegistryDistribution::default()
+        },
+    };
+    vec![
+        npx("cline", "Cline", "cline", &["--acp"]),
+        npx("auggie", "Auggie CLI", "@augmentcode/auggie", &["--acp"]),
+        npx(
+            "qwen-code",
+            "Qwen Code",
+            "@qwen-code/qwen-code",
+            &["--acp", "--experimental-skills"],
+        ),
+        npx(
+            "github-copilot-cli",
+            "GitHub Copilot",
+            "@github/copilot",
+            &["--acp"],
+        ),
+        npx(
+            "grok-build",
+            "Grok Build",
+            "@xai-official/grok",
+            &["agent", "stdio"],
+        ),
+        uvx("fast-agent", "fast-agent", "fast-agent-acp", &["-x"]),
+        uvx("minion-code", "Minion Code", "minion-code", &["acp"]),
+    ]
+}
+
+fn merge_bundled_fallback_agents(mut agents: Vec<RegistryAgent>) -> Vec<RegistryAgent> {
+    let mut seen: HashSet<String> = agents.iter().map(|agent| agent.id.clone()).collect();
+    for fallback in bundled_fallback_agents() {
+        if seen.insert(fallback.id.clone()) {
+            agents.push(fallback);
+        }
+    }
+    agents
+}
+
 fn write_cache(file: &RegistryFile) -> Result<()> {
     let path = cache_path();
     if let Some(parent) = path.parent() {
@@ -205,7 +275,7 @@ pub fn load_registry_agents() -> Vec<RegistryAgent> {
                                     "refreshed ACP registry from CDN"
                                 );
                             }
-                            return agents;
+                            return merge_bundled_fallback_agents(agents);
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "ACP registry fetch failed; using cache")
@@ -217,15 +287,15 @@ pub fn load_registry_agents() -> Vec<RegistryAgent> {
     }
     if let Some(file) = read_cache() {
         tracing::debug!(count = file.agents.len(), "loaded ACP registry from cache");
-        return file.agents;
+        return merge_bundled_fallback_agents(file.agents);
     }
-    tracing::warn!("ACP registry unavailable (no cache); agent catalog will be partial");
-    Vec::new()
+    tracing::warn!("ACP registry unavailable (no cache); using bundled fallback agents");
+    merge_bundled_fallback_agents(Vec::new())
 }
 
 /// Bounded fetch used by [`ensure_registry_cached`]. A cold first launch must not
 /// hang boot behind an unreachable CDN, so the wait is capped and failure is
-/// non-fatal (we fall through to the 4 curated agents, as before).
+/// non-fatal (we fall through to the bundled fallback agents).
 const COLD_START_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Populate the on-disk registry cache **before** the process builds its
@@ -261,12 +331,12 @@ pub async fn ensure_registry_cached() {
             }
         }
         Ok(Err(e)) => {
-            tracing::warn!(error = %e, "cold-start ACP registry fetch failed; agent catalog will be partial until the next launch");
+            tracing::warn!(error = %e, "cold-start ACP registry fetch failed; using bundled fallback agents until the next refresh");
         }
         Err(_) => {
             tracing::warn!(
                 timeout_secs = COLD_START_FETCH_TIMEOUT.as_secs(),
-                "cold-start ACP registry fetch timed out; agent catalog will be partial until the next launch"
+                "cold-start ACP registry fetch timed out; using bundled fallback agents until the next refresh"
             );
         }
     }
@@ -478,6 +548,7 @@ pub fn underlying_cli_probe(registry_id: &str) -> Option<(&'static str, &'static
         "sigit" => Some(("sigit", "@smbcloud/sigit")),
         "stakpak" => Some(("stakpak", "stakpak")),
         "vtcode" => Some(("vtcode", "vtcode")),
+        "devin" => Some(("devin", "devin")),
         _ => None,
     }
 }

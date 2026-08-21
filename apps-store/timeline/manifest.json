@@ -1,10 +1,16 @@
 {
+  "tags": ["timeline", "replay", "screen", "journal"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
+  "repository": "https://github.com/amajorai/ryu-timeline",
+  "homepage": "https://github.com/amajorai/ryu-timeline",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/timeline",
   "name": "Timeline",
   "version": "0.1.14",
   "stability": "experimental",
   "category": "Productivity",
-  "description": "The activity replay timeline: a CapCut-style scrubber over Shadow's captured screen/input/window/audio lanes with a keyframe preview, a Dayflow work journal, and jump-to-moment focus.",
+  "description": "The activity timeline with Replay lanes and a chronological History view over Shadow's captured screen/input/window/audio lanes, plus a keyframe preview, Dayflow work journal, and jump-to-moment focus.",
   "tagline": "Scrub back through everything your screen did",
   "keywords": ["timeline", "replay", "screen", "journal"],
   "icon": "timeline",
@@ -45,5 +51,20 @@
   "companion": {
     "label": "Timeline",
     "icon": "timeline"
+  },
+  "contributes": {
+    "chat_widget_templates": [
+      {
+        "id": "timeline.chat",
+        "title": "Timeline widget",
+        "description": "Timeline chat widget metadata is coming soon; no render tool is available yet.",
+        "triggers": ["timeline widget"],
+        "examples": ["Show me a timeline widget"],
+        "backing": {},
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "coming-soon"
+      }
+    ]
   }
 }

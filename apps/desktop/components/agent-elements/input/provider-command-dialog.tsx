@@ -1,9 +1,12 @@
 "use client";
 
+import { ArrowLeft01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	Command,
 	CommandDialog,
 	CommandInput,
+	CommandItem,
 	CommandList,
 } from "@ryu/ui/components/command";
 import {
@@ -21,6 +24,7 @@ export interface ProviderCommandPage {
 }
 
 interface ProviderCommandNavigation {
+	close: () => void;
 	page: ProviderCommandPage | null;
 	pop: () => void;
 	push: (page: ProviderCommandPage) => void;
@@ -53,6 +57,7 @@ export function ProviderCommandDialog({
 		setOpen(false);
 	};
 	const navigation: ProviderCommandNavigation = {
+		close,
 		page,
 		pop: () => setPages((current) => current.slice(0, -1)),
 		push: (next) => setPages((current) => [...current, next]),
@@ -73,17 +78,24 @@ export function ProviderCommandDialog({
 				title={page?.title ?? title}
 			>
 				<Command>
-					{page && (
-						<button
-							className="sticky top-0 z-20 border-b px-3 py-2 text-left text-muted-foreground text-xs"
-							onClick={navigation.pop}
-							type="button"
-						>
-							← Back to {pages.at(-2)?.title ?? title}
-						</button>
-					)}
 					<CommandInput placeholder="Search providers and models…" />
 					<CommandList className="max-h-[min(60vh,520px)]">
+						{page && (
+							<CommandItem
+								forceMount
+								onSelect={navigation.pop}
+								value={`back to ${pages.at(-2)?.title ?? title}`}
+							>
+								<HugeiconsIcon
+									icon={ArrowLeft01Icon}
+									size={16}
+									strokeWidth={2}
+								/>
+								<span className="truncate">
+									Back to {pages.at(-2)?.title ?? title}
+								</span>
+							</CommandItem>
+						)}
 						<ProviderCommandNavigationContext.Provider value={navigation}>
 							{page?.body ?? renderBody(close)}
 						</ProviderCommandNavigationContext.Provider>

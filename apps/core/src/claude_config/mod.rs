@@ -3,8 +3,8 @@
 //!
 //! Claude Code (`acp:claude`) speaks the Anthropic Messages wire format and, on a
 //! Pro/Max **subscription**, authenticates with the user's own OAuth bearer — not
-//! an API key. Its LLM egress therefore bypasses the Ryu gateway by default
-//! (`gateway_bypass: true`). This toggle opts the user into routing that egress
+//! an API key. Its LLM egress therefore bypasses the Ryu gateway unless the user
+//! explicitly opts in. This toggle controls routing that egress
 //! through the gateway's **transparent passthrough proxy**
 //! (`apps/gateway/src/passthrough`): Core injects `ANTHROPIC_BASE_URL` at spawn so
 //! Claude Code's internal HTTP client points at the gateway, which forwards the
@@ -16,27 +16,34 @@
 //! precedence over the subscription OAuth and flip Claude Code onto API-key
 //! billing. The injection is in [`crate::sidecar::adapters::acp::claude_gateway_cmd`].
 //!
-//! Off by default (opt-in): unlike the managed Pi (which defaults to gateway-
-//! routed), enabling this changes how the user's subscription credential flows, so
-//! the user must choose it explicitly. Mirrors [`crate::composio_auth`]: a
-//! process-global flag seeded from the `claude-gateway-routing` preference at
-//! startup and on change, read synchronously on the (sync) spawn path.
+//! On by default for a newly installed ACP agent, matching the governed baseline
+//! for routable agents. Because this changes how the user's subscription
+//! credential flows, the UI keeps a clear per-agent direct-egress opt-out.
+//! Mirrors [`crate::composio_auth`]: a process-global flag seeded from the
+//! `claude-gateway-routing` preference at startup and on change, read
+//! synchronously on the (sync) spawn path.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Preferences key the desktop writes; Core loads it on startup and on change.
 pub const CLAUDE_GATEWAY_ROUTING_PREF_KEY: &str = "claude-gateway-routing";
 
-/// In-process flag, populated from preferences. Defaults to `false` (opt-in).
-static GATEWAY_ROUTING: AtomicBool = AtomicBool::new(false);
+/// Shared default for ACP subscription egress: Gateway-governed traffic until
+/// the user explicitly opts this agent out.
+pub const DEFAULT_CLAUDE_GATEWAY_ROUTING: bool = crate::agent_routing::DEFAULT_GATEWAY_ROUTING;
+
+/// In-process flag, populated from preferences. Defaults to `true`; an explicit
+/// preference value of `false` is the user's direct-egress opt-out.
+static GATEWAY_ROUTING: AtomicBool = AtomicBool::new(DEFAULT_CLAUDE_GATEWAY_ROUTING);
 
 /// Set the in-process flag from a preferences value. Accepts the common truthy
 /// string forms the desktop may persist (`"true"`, `"1"`, `"on"`).
 pub fn set_enabled(value: &str) {
-    let on = matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "true" | "1" | "on" | "yes"
-    );
+    let on = match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" | "yes" => true,
+        "false" | "0" | "off" | "no" => false,
+        _ => DEFAULT_CLAUDE_GATEWAY_ROUTING,
+    };
     GATEWAY_ROUTING.store(on, Ordering::Relaxed);
 }
 
@@ -60,5 +67,13 @@ mod tests {
         assert!(is_gateway_routing());
         set_enabled("0");
         assert!(!is_gateway_routing());
+    }
+
+    #[test]
+    fn missing_or_unparseable_preference_keeps_governed_default() {
+        set_enabled("");
+        assert!(is_gateway_routing());
+        set_enabled("not-a-boolean");
+        assert!(is_gateway_routing());
     }
 }

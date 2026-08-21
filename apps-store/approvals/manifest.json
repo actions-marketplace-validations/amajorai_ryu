@@ -1,4 +1,10 @@
 {
+  "tags": ["approvals","human-in-the-loop","security","review"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-approvals",
+  "homepage": "https://github.com/amajorai/ryu-approvals",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/approvals",
   "name": "Approvals",
   "version": "0.1.14",
@@ -51,5 +57,9 @@
   "companion": {
     "label": "Inbox",
     "icon": "shield-01"
+  }
+,
+  "contributes": {
+ "chat_widget_templates": [{"id":"approvals.chat","title":"Approvals widget","description":"Approvals chat widget metadata is coming soon; no render tool is available yet.","triggers":["approvals widget"],"examples":["Show me a approvals widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}]
   }
 }

@@ -127,6 +127,7 @@ impl InspectorClient {
             cfg.timeout_ms,
             providers,
             router,
+            true,
         )
         .await
     }
@@ -161,6 +162,7 @@ impl InspectorClient {
             timeout_ms,
             providers,
             router,
+            false,
         )
         .await
     }
@@ -178,6 +180,7 @@ async fn run_inspection(
     timeout_ms: u64,
     providers: &ProviderRegistry,
     router: &dyn RouterBackend,
+    restrict_categories: bool,
 ) -> InspectorVerdict {
     let decision = router.route(model);
     let Some(provider) = providers.get(decision.provider.as_str()) else {
@@ -227,7 +230,7 @@ async fn run_inspection(
     let content = resp["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or("");
-    match parse_verdict(content) {
+    match parse_verdict_with_category_policy(content, restrict_categories) {
         Some(v) => v,
         None => {
             // An echoing model can mirror user message content back in its
@@ -282,6 +285,13 @@ Set \"flagged\" to true only if you are confident. Do not include any prose outs
 /// deserializes it defensively. Returns `None` when no JSON object is present,
 /// so the caller fails open.
 fn parse_verdict(text: &str) -> Option<InspectorVerdict> {
+    parse_verdict_with_category_policy(text, true)
+}
+
+fn parse_verdict_with_category_policy(
+    text: &str,
+    restrict_categories: bool,
+) -> Option<InspectorVerdict> {
     let json_slice = extract_json_object(text)?;
     let raw: RawVerdict = serde_json::from_str(json_slice).ok()?;
     // A `flagged: true` verdict must name at least one of the categories the
@@ -309,7 +319,8 @@ fn parse_verdict(text: &str) -> Option<InspectorVerdict> {
     // supplied, and none of them are ours" keeps the fix aimed at the observed
     // failure instead of quietly weakening every well-behaved judge that omits
     // the field.
-    if raw.flagged
+    if restrict_categories
+        && raw.flagged
         && !raw.categories.is_empty()
         && !raw.categories.iter().any(|c| is_known_category(c))
     {
@@ -553,6 +564,20 @@ mod tests {
             let v = parse_verdict(reply).expect("in-enum verdict parses");
             assert!(v.flagged && v.available, "must still flag: {reply}");
         }
+    }
+
+    #[test]
+    fn rubric_verdicts_accept_rubric_owned_categories() {
+        let reply = r#"{"flagged": true, "categories": ["toxicity"], "reason": "harassment"}"#;
+        assert!(
+            parse_verdict_with_category_policy(reply, false)
+                .expect("rubric verdict parses")
+                .flagged
+        );
+        assert!(
+            parse_verdict_with_category_policy(reply, true).is_none(),
+            "the built-in inspector vocabulary must remain strict"
+        );
     }
 
     /// `flagged: false` needs no categories — only a *positive* claim made with

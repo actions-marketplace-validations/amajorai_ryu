@@ -19,6 +19,7 @@ import {
 } from "@ryu/ui/components/select.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { formatMicroUsd } from "@ryu/ui/lib/number-format.ts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -28,6 +29,7 @@ import {
 	type OrgSummary,
 	transferCredits,
 } from "@/src/lib/api/orgs.ts";
+import { MICRO_USD_PER_DOLLAR } from "@/src/lib/api/credits.ts";
 import { formatDate } from "@/src/lib/timezone.ts";
 
 /**
@@ -52,19 +54,8 @@ import { formatDate } from "@/src/lib/timezone.ts";
  */
 
 const TRANSFERABLE_KEY = ["credits", "transferable"] as const;
-const MICRO_USD_PER_USD = 1_000_000;
-
 function formatUsd(microUsd: number): string {
-	const dollars = microUsd / MICRO_USD_PER_USD;
-	try {
-		return new Intl.NumberFormat(undefined, {
-			style: "currency",
-			currency: "USD",
-			maximumFractionDigits: dollars % 1 === 0 ? 0 : 2,
-		}).format(dollars);
-	} catch {
-		return `$${dollars.toFixed(2)}`;
-	}
+	return formatMicroUsd(microUsd);
 }
 
 /**
@@ -184,7 +175,7 @@ export function CreditTransferCard() {
 	const grants = data?.source?.grants ?? [];
 	const topupAvailable = data?.source?.topupMicroUsd ?? 0;
 	const topupMicroUsd = Math.round(
-		Math.max(0, Number.parseFloat(topupDollars) || 0) * MICRO_USD_PER_USD
+		Math.max(0, Number.parseFloat(topupDollars) || 0) * MICRO_USD_PER_DOLLAR
 	);
 	const selectedMicroUsd = grants
 		.filter((grant) => selectedGrants.has(grant.id))
@@ -375,19 +366,13 @@ export function CreditTransferCard() {
 					</p>
 					<Button
 						disabled={
-							nothingChosen ||
-							overdrawn ||
-							!(destOrgId && resolvedSource) ||
-							transferMutation.isPending
+							nothingChosen || overdrawn || !(destOrgId && resolvedSource)
 						}
+						loading={transferMutation.isPending}
 						onClick={() => transferMutation.mutate()}
 						type="button"
 					>
-						{transferMutation.isPending ? (
-							<Spinner className="size-4" />
-						) : (
-							<ArrowRight className="size-4" />
-						)}
+						{!transferMutation.isPending && <ArrowRight className="size-4" />}
 						Move credits
 					</Button>
 				</div>

@@ -1,9 +1,15 @@
 {
+  "tags": ["search","web","extract","scrape"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/firecrawl",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/firecrawl",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/firecrawl",
   "name": "Firecrawl",
   "version": "0.1.14",
   "stability": "experimental",
-  "description": "Web search and page scraping via the Firecrawl v2 API (https://firecrawl.dev), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Firecrawl without changing what agents call. Requires a BYOK Firecrawl API key.",
+  "description": "Web search and page scraping via the Firecrawl v2 API (https://firecrawl.dev), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web.search` / `web.extract` tools at Firecrawl without changing what agents call. Requires a BYOK Firecrawl API key.",
   "icon": "svgl:firecrawl|firecrawl-dark",
   "iconPadding": "md",
   "iconDither": { "from": 315, "to": "transparent", "direction": "down" },
@@ -29,7 +35,7 @@
       "name": "Firecrawl Search",
       "kind": "tool",
       "config": {
-        "slug": "firecrawl__search",
+        "slug": "firecrawl.search",
         "backend": "http",
         "method": "POST",
         "url": "https://api.firecrawl.dev/v2/search",
@@ -62,7 +68,7 @@
       "name": "Firecrawl Scrape",
       "kind": "tool",
       "config": {
-        "slug": "firecrawl__scrape",
+        "slug": "firecrawl.scrape",
         "backend": "http",
         "method": "POST",
         "url": "https://api.firecrawl.dev/v2/scrape",
@@ -89,7 +95,7 @@
       "name": "Firecrawl Crawl (start)",
       "kind": "tool",
       "config": {
-        "slug": "firecrawl__crawl_start",
+        "slug": "firecrawl.crawl_start",
         "backend": "http",
         "method": "POST",
         "url": "https://api.firecrawl.dev/v2/crawl",
@@ -98,7 +104,7 @@
         },
         "fail_open": true,
         "unwrap_body": true,
-        "description": "Start a Firecrawl crawl job and return its id. Asynchronous: poll firecrawl__crawl_status with the returned id. Requires RYU_FIRECRAWL_API_KEY.",
+        "description": "Start a Firecrawl crawl job and return its id. Asynchronous: poll firecrawl.crawl_status with the returned id. Requires RYU_FIRECRAWL_API_KEY.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -126,7 +132,7 @@
       "name": "Firecrawl Crawl (status)",
       "kind": "tool",
       "config": {
-        "slug": "firecrawl__crawl_status",
+        "slug": "firecrawl.crawl_status",
         "backend": "http",
         "method": "GET",
         "url": "https://api.firecrawl.dev/v2/crawl/{id}",
@@ -135,13 +141,13 @@
         },
         "fail_open": true,
         "unwrap_body": true,
-        "description": "Read the status and accumulated pages of a Firecrawl crawl job started by firecrawl__crawl_start. Requires RYU_FIRECRAWL_API_KEY.",
+        "description": "Read the status and accumulated pages of a Firecrawl crawl job started by firecrawl.crawl_start. Requires RYU_FIRECRAWL_API_KEY.",
         "input_schema": {
           "type": "object",
           "properties": {
             "id": {
               "type": "string",
-              "description": "The crawl job id returned by firecrawl__crawl_start."
+              "description": "The crawl job id returned by firecrawl.crawl_start."
             }
           },
           "required": ["id"]
@@ -156,8 +162,8 @@
       "title": "Search",
       "selectable": true,
       "tools": {
-        "web__search": {
-          "tool": "firecrawl__search",
+        "web.search": {
+          "tool": "firecrawl.search",
           "args": {
             "limit": "limit"
           },
@@ -178,10 +184,10 @@
       "title": "Extract",
       "selectable": true,
       "tools": {
-        "web__extract": {
-          "tool": "firecrawl__scrape",
+        "web.extract": {
+          "tool": "firecrawl.scrape",
           "adapter": {
-            "code_file": "adapters/web__extract.js"
+            "code_file": "adapters/web.extract.js"
           }
         }
       }
@@ -192,11 +198,11 @@
       "title": "Crawl",
       "selectable": true,
       "tools": {
-        "web__crawl": {
-          "tool": "firecrawl__crawl_start",
+        "web.crawl": {
+          "tool": "firecrawl.crawl_start",
           "adapter": {
-            "tools": ["firecrawl__crawl_status"],
-            "code_file": "adapters/web__crawl.js"
+            "tools": ["firecrawl.crawl_status"],
+            "code_file": "adapters/web.crawl.js"
           }
         }
       }

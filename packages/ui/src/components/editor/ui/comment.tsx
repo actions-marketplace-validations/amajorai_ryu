@@ -274,9 +274,9 @@ export function Comment(props: {
 							<div className="ml-auto flex shrink-0 gap-1">
 								<Button
 									className="size-[28px]"
-									onClick={(e: MouseEvent<HTMLButtonElement>) => {
-										e.stopPropagation();
-										onCancel().catch(() => undefined);
+						onClick={(e: MouseEvent<HTMLButtonElement>) => {
+							 e.stopPropagation();
+							onCancel();
 									}}
 									size="icon"
 									variant="ghost"
@@ -287,9 +287,9 @@ export function Comment(props: {
 								</Button>
 
 								<Button
-									onClick={(e: MouseEvent<HTMLButtonElement>) => {
-										e.stopPropagation();
-										onSave().catch(() => undefined);
+						onClick={(e: MouseEvent<HTMLButtonElement>) => {
+							e.stopPropagation();
+							onSave();
 									}}
 									size="icon"
 									variant="ghost"

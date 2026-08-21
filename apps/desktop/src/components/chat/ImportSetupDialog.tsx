@@ -423,10 +423,10 @@ export function ImportSetupDialog({
 						Close
 					</Button>
 					<Button
-						disabled={selected.size === 0 || importing || scanning}
+						disabled={selected.size === 0 || scanning}
+						loading={importing}
 						onClick={handleImport}
 					>
-						{importing && <Spinner className="size-3" />}
 						{selected.size > 0 ? `Import ${selected.size}` : "Import"}
 					</Button>
 				</DialogFooter>

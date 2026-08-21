@@ -16,6 +16,7 @@
 //! so it belongs in Core.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -35,15 +36,23 @@ use ryu_kernel_contracts::ResourceKey;
 ///     principal and the node token is the boundary — identical to the pre-ACL
 ///     behaviour, and identical to `enforce_permission`'s unbound rule.
 ///   - node ORG-BOUND: a row is visible iff the caller OWNS it, or it is explicitly
-///     shared (`visibility` in `org`/`team`) within the caller's org. An untenanted
-///     (NULL-owner) row is therefore INVISIBLE on a bound node — matching the ACL's
-///     fail-closed reading of an unattributable legacy row.
+///     shared with the caller's org/team membership. An untenanted (NULL-owner) row
+///     is therefore INVISIBLE on a bound node — matching the ACL's fail-closed
+///     reading of an unattributable legacy row.
 ///   - node ORG-BOUND + anonymous caller (`:uid IS NULL`): nothing matches → empty.
 const TENANCY_VISIBLE_PREDICATE: &str = "(
         :bound = 0
         OR (:uid IS NOT NULL AND c.owner_user_id = :uid)
         OR (:uid IS NOT NULL AND :org IS NOT NULL AND c.org_id = :org
-            AND c.visibility IN ('org', 'team'))
+            AND (
+                c.visibility = 'org'
+                OR (c.visibility = 'team' AND c.team_id IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1
+                        FROM json_each(COALESCE(:teams, '[]')) AS caller_team
+                        WHERE caller_team.value = c.team_id
+                    ))
+            ))
      )";
 
 /// The caller context a tenancy-filtered query is evaluated against.
@@ -56,6 +65,9 @@ struct TenancyFilter<'a> {
     owner_user_id: Option<&'a str>,
     /// The caller's org (already narrowed to this node's org by `identity_verify`).
     org_id: Option<&'a str>,
+    /// JSON array of verified team ids, narrowed to the caller's node org. Kept
+    /// as JSON so SQLite can evaluate membership inside the same SQL predicate.
+    team_ids_json: Option<&'a str>,
 }
 
 impl TenancyFilter<'_> {
@@ -65,6 +77,7 @@ impl TenancyFilter<'_> {
             node_bound: false,
             owner_user_id: None,
             org_id: None,
+            team_ids_json: None,
         }
     }
 
@@ -93,6 +106,11 @@ pub enum Tenancy {
         user_id: String,
         org_id: Option<String>,
     },
+    /// Attribute a machine-created conversation to the node's organization
+    /// without inventing a human owner. Channel ingress uses this for a shared
+    /// bot session so every member of the org can continue the same transcript
+    /// from the desktop while the bot remains the write authority.
+    SharedOrg { org_id: String },
     /// No principal. This is what an UNBOUND personal node passes: there is exactly
     /// one principal and `RYU_TOKEN` is the boundary, so rows stay NULL-tenanted
     /// exactly as they did before the ACL existed (no offline lockout). It is also
@@ -109,6 +127,7 @@ impl Tenancy {
     pub(crate) fn parts(&self) -> (Option<&str>, Option<&str>) {
         match self {
             Self::Owned { user_id, org_id } => (Some(user_id.as_str()), org_id.as_deref()),
+            Self::SharedOrg { org_id } => (None, Some(org_id.as_str())),
             Self::Unattributed => (None, None),
         }
     }
@@ -123,6 +142,13 @@ impl Tenancy {
                 org_id: org_id.map(str::to_owned),
             },
             None => Self::Unattributed,
+        }
+    }
+
+    /// Attribute a machine-created row to an organization without a human owner.
+    pub fn shared_with_org(org_id: &str) -> Self {
+        Self::SharedOrg {
+            org_id: org_id.to_owned(),
         }
     }
 
@@ -181,6 +207,17 @@ struct ConvRow<'a> {
     branch: Option<&'a str>,
     worktree_path: Option<&'a str>,
     participants: Option<&'a str>,
+    /// Stable control-plane channel config id for a channel-backed session.
+    channel_id: Option<&'a str>,
+    /// Visibility is seeded as `org` for org-shared channel sessions and remains
+    /// existing-wins on later message writes.
+    visibility: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProactiveOpeningStatus {
+    pub conversation_id: String,
+    pub status: String,
 }
 
 /// **THE CHOKE POINT** — the one and only `INSERT INTO conversations` in Core.
@@ -219,14 +256,14 @@ fn upsert_conversation_row(
         "INSERT INTO conversations
             (id, title, agent_id, created_at, updated_at,
              folder_path, branch, worktree_path, participants,
-             owner_user_id, org_id)
+             channel_id, visibility, owner_user_id, org_id)
          VALUES (:id, :title, :agent_id, :now, :now,
                  :folder_path, :branch, :worktree_path,
                  -- `participants` is NOT NULL DEFAULT '[]'; the choke point names it
                  -- explicitly (so `fork` can carry the source's list), which bypasses
                  -- the column default — restore it here for the callers that pass none.
                  COALESCE(:participants, '[]'),
-                 :owner, :org)
+                 :channel_id, COALESCE(:visibility, 'private'), :owner, :org)
          ON CONFLICT(id) DO UPDATE SET
              title         = COALESCE(conversations.title, excluded.title),
              agent_id      = COALESCE(excluded.agent_id, conversations.agent_id),
@@ -239,6 +276,8 @@ fn upsert_conversation_row(
              branch        = COALESCE(conversations.branch, excluded.branch),
              worktree_path = COALESCE(conversations.worktree_path, excluded.worktree_path),
              participants  = COALESCE(conversations.participants, excluded.participants),
+             channel_id    = COALESCE(conversations.channel_id, excluded.channel_id),
+             visibility    = COALESCE(conversations.visibility, excluded.visibility),
              owner_user_id = COALESCE(conversations.owner_user_id, excluded.owner_user_id),
              org_id        = COALESCE(conversations.org_id, excluded.org_id)",
         named_params! {
@@ -250,6 +289,8 @@ fn upsert_conversation_row(
             ":branch": row.branch,
             ":worktree_path": row.worktree_path,
             ":participants": row.participants,
+            ":channel_id": row.channel_id,
+            ":visibility": row.visibility,
             ":owner": owner_user_id,
             ":org": org_id,
             ":touch": touch_flag,
@@ -428,6 +469,10 @@ pub struct ConversationSummary {
     /// title-only row (no leading custom icon).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<serde_json::Value>,
+    /// `private` keeps the conversation owner-only; `org`/`team` share it with
+    /// the corresponding organization scope.
+    #[serde(default = "default_private_visibility")]
+    pub visibility: String,
     /// First line of the newest message, capped at [`PREVIEW_MAX_CHARS`]. Only
     /// populated when the caller asked for previews (`?preview=1`) — the
     /// messaging-style sidebar rows need it, every other lister does not, and
@@ -444,6 +489,10 @@ pub struct ConversationSummary {
     pub last_message_at: Option<i64>,
 }
 
+fn default_private_visibility() -> String {
+    "private".to_owned()
+}
+
 /// Detail view of a conversation, including messages and participants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationDetail {
@@ -456,6 +505,17 @@ pub struct ConversationDetail {
     /// All agent ids participating in this conversation.
     #[serde(default)]
     pub participants: Vec<String>,
+    /// Whether another page exists before the returned message slice. Only set
+    /// by the paged conversation read; full reads keep the legacy shape.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_older_messages: bool,
+    /// Stable message id to pass as `before` for the next older page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_messages_cursor: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A persisted `/btw` side question + its answer, keyed to the conversation it
@@ -610,6 +670,10 @@ fn normalize_folder_path(path: &str) -> String {
 pub struct ConversationStore {
     conn: Arc<Mutex<Connection>>,
     cipher: ryu_crypto::FieldCipher,
+    /// Whether chat messages are opted into the Memory app's source index.
+    /// The preference is process-local here so the search UI and background
+    /// Dream routes share one gate without reopening the preferences database.
+    chat_memory_enabled: Arc<AtomicBool>,
     /// Optional semantic index over message bodies, backing the
     /// `search_conversations` builtin tool. `None` in contexts that don't wire it
     /// (tests, CLI, headless). Indexing on append and lazy backfill on search are
@@ -721,6 +785,7 @@ impl ConversationStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             cipher: ryu_crypto::global_cipher()?,
+            chat_memory_enabled: Arc::new(AtomicBool::new(false)),
             message_index: None,
             message_fts: None,
             realtime: None,
@@ -867,6 +932,39 @@ impl ConversationStore {
         Ok((runs, flagged))
     }
 
+    /// Preference key shared by Core's preference route and the Memory app.
+    pub const CHAT_MEMORY_ENABLED_PREF_KEY: &'static str = "chat-memory-enabled";
+
+    /// Parse the persisted Memory source-index flag defensively. Only explicit
+    /// truthy values enable it; unset or malformed values stay opt-in-off.
+    pub fn parse_chat_memory_enabled(raw: Option<&str>) -> bool {
+        matches!(
+            raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+            Some("true") | Some("1") | Some("on") | Some("yes")
+        )
+    }
+
+    /// Whether chat messages are currently opted into Memory search/Dream.
+    pub fn chat_memory_enabled(&self) -> bool {
+        self.chat_memory_enabled.load(Ordering::Acquire)
+    }
+
+    /// Update the process-local Memory source-index gate after a preference
+    /// write. The preference store remains the durable source of truth.
+    pub async fn set_chat_memory_enabled(&self, enabled: bool) -> Result<()> {
+        self.chat_memory_enabled.store(enabled, Ordering::Release);
+        Ok(())
+    }
+
+    /// Clear the derived semantic message index while retaining the encrypted
+    /// conversation transcript. Re-enabling chat memory can backfill it again.
+    pub async fn clear_message_embeddings(&self) -> anyhow::Result<()> {
+        if let Some(index) = self.message_index.clone() {
+            index.clear().await?;
+        }
+        Ok(())
+    }
+
     /// Wire the semantic message index (backing the `search_conversations` builtin
     /// tool) into the store. Cheap to clone (`Arc` inside). Must be called after
     /// construction to enable indexing-on-append + searchable history.
@@ -893,6 +991,9 @@ impl ConversationStore {
     /// indexing remains best-effort per message so one malformed/deleted row
     /// cannot strand the rest of the pass.
     pub async fn reindex_message_embeddings(&self) -> anyhow::Result<usize> {
+        if !self.chat_memory_enabled() {
+            return Ok(0);
+        }
         let Some(index) = self.message_index.clone() else {
             return Ok(0);
         };
@@ -970,6 +1071,7 @@ impl ConversationStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             cipher: ryu_crypto::FieldCipher::new(&[0x11; 32]),
+            chat_memory_enabled: Arc::new(AtomicBool::new(false)),
             message_index: None,
             message_fts: None,
             realtime: None,
@@ -986,6 +1088,14 @@ impl ConversationStore {
                  created_at  INTEGER NOT NULL,
                  updated_at  INTEGER NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS agent_controls (
+                 conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+                 requested_by    TEXT NOT NULL,
+                 agent_id        TEXT,
+                 model           TEXT,
+                 effort          TEXT,
+                 requested_at    INTEGER NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS messages (
                  id              TEXT PRIMARY KEY,
                  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -995,6 +1105,13 @@ impl ConversationStore {
              );
              CREATE INDEX IF NOT EXISTS idx_messages_conversation
                  ON messages(conversation_id, created_at);
+             CREATE TABLE IF NOT EXISTS proactive_openings (
+                 idempotency_key TEXT PRIMARY KEY,
+                 conversation_id TEXT NOT NULL,
+                 status          TEXT NOT NULL,
+                 created_at      INTEGER NOT NULL,
+                 completed_at    INTEGER
+             );
              CREATE TABLE IF NOT EXISTS sessions (
                  id              TEXT PRIMARY KEY,
                  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -1120,6 +1237,13 @@ impl ConversationStore {
             (
                 "team_id",
                 "ALTER TABLE conversations ADD COLUMN team_id       TEXT",
+            ),
+            // Channel-backed sessions carry the control-plane config id so Core
+            // can distinguish an org-shared bot room from a human conversation
+            // when the machine ingress gate runs.
+            (
+                "channel_id",
+                "ALTER TABLE conversations ADD COLUMN channel_id    TEXT",
             ),
             // Imported threads (agent-native history import, Zed/VS Code parity):
             // `origin` marks where a conversation came from (e.g. `import:claude`)
@@ -1310,6 +1434,49 @@ impl ConversationStore {
         )
     }
 
+    /// Ensure a channel-originated conversation exists with stable source
+    /// metadata. On an org-bound node the row is shared with the organization
+    /// without assigning it to a human owner; on an unbound node it preserves
+    /// the local single-user behavior.
+    pub async fn ensure_channel_conversation(
+        &self,
+        conversation_id: &str,
+        channel_id: &str,
+        agent_id: Option<&str>,
+        org_id: Option<&str>,
+    ) -> Result<()> {
+        let tenancy = org_id
+            .map(Tenancy::shared_with_org)
+            .unwrap_or(Tenancy::Unattributed);
+        let conn = self.conn.lock().await;
+        upsert_conversation_row(
+            &conn,
+            conversation_id,
+            now_millis(),
+            &tenancy,
+            &ConvRow {
+                agent_id,
+                channel_id: Some(channel_id),
+                visibility: org_id.map(|_| "org"),
+                ..ConvRow::default()
+            },
+            Touch::Keep,
+        )
+    }
+
+    /// Persist the active agent for a conversation after an agent-level handoff.
+    /// Participants remain recorded separately so the previous agent is still a
+    /// valid caller for conversation-scoped tools during the same thread.
+    pub async fn set_active_agent(&self, conversation_id: &str, agent_id: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE conversations SET agent_id = ?2, updated_at = ?3 WHERE id = ?1",
+            params![conversation_id, agent_id, now_millis()],
+        )
+        .context("setting active conversation agent")?;
+        Ok(())
+    }
+
     /// Record run metadata (folder_path, branch, worktree_path) on the
     /// conversation row at run start. Call after `ensure_conversation` so the
     /// row is guaranteed to exist.
@@ -1345,6 +1512,138 @@ impl ConversationStore {
         )
         .context("setting run metadata")?;
         Ok(())
+    }
+
+    /// Whether an agent is already participating in a conversation. Agent-plane
+    /// tools use this as their conversation boundary: the caller identity comes
+    /// from Core's ACP/MCP bridge, never from tool arguments.
+    pub async fn is_conversation_agent(
+        &self,
+        conversation_id: &str,
+        agent_id: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let row: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT agent_id, participants FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .context("checking conversation agent membership")?;
+        let Some((primary_agent_id, participants_json)) = row else {
+            return Ok(false);
+        };
+        if primary_agent_id.as_deref() == Some(agent_id) {
+            return Ok(true);
+        }
+        Ok(parse_participants_json(participants_json.as_deref())
+            .iter()
+            .any(|participant| participant == agent_id))
+    }
+
+    /// Store or merge a next-turn agent control. A second partial request in the
+    /// same turn fills another field rather than discarding the first request.
+    pub async fn set_pending_agent_control(
+        &self,
+        conversation_id: &str,
+        control: &crate::agent_control::PendingAgentControl,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO agent_controls
+                 (conversation_id, requested_by, agent_id, model, effort, requested_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(conversation_id) DO UPDATE SET
+                 requested_by = excluded.requested_by,
+                 agent_id = COALESCE(excluded.agent_id, agent_controls.agent_id),
+                 model = COALESCE(excluded.model, agent_controls.model),
+                 effort = COALESCE(excluded.effort, agent_controls.effort),
+                 requested_at = excluded.requested_at",
+            params![
+                conversation_id,
+                control.requested_by,
+                control
+                    .patch
+                    .clear_agent_id
+                    .then_some(crate::agent_control::CLEAR_SENTINEL)
+                    .or(control.patch.agent_id.as_deref()),
+                control
+                    .patch
+                    .clear_model
+                    .then_some(crate::agent_control::CLEAR_SENTINEL)
+                    .or(control.patch.model.as_deref()),
+                control
+                    .patch
+                    .clear_effort
+                    .then_some(crate::agent_control::CLEAR_SENTINEL)
+                    .or(control.patch.effort.as_deref()),
+                control.requested_at,
+            ],
+        )
+        .context("setting pending agent control")?;
+        Ok(())
+    }
+
+    /// Atomically consume the pending control for the next user turn.
+    pub async fn take_pending_agent_control(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<crate::agent_control::PendingAgentControl>> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn
+            .transaction()
+            .context("starting agent control transaction")?;
+        let row: Option<(String, Option<String>, Option<String>, Option<String>, i64)> = tx
+            .query_row(
+                "SELECT requested_by, agent_id, model, effort, requested_at
+                 FROM agent_controls WHERE conversation_id = ?1",
+                params![conversation_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("reading pending agent control")?;
+        let Some((requested_by, agent_id, model, effort, requested_at)) = row else {
+            tx.commit()
+                .context("committing empty agent control transaction")?;
+            return Ok(None);
+        };
+        tx.execute(
+            "DELETE FROM agent_controls WHERE conversation_id = ?1",
+            params![conversation_id],
+        )
+        .context("consuming pending agent control")?;
+        tx.commit().context("committing consumed agent control")?;
+        let decode = |value: Option<String>| {
+            if value.as_deref() == Some(crate::agent_control::CLEAR_SENTINEL) {
+                (None, true)
+            } else {
+                (value, false)
+            }
+        };
+        let (agent_id, clear_agent_id) = decode(agent_id);
+        let (model, clear_model) = decode(model);
+        let (effort, clear_effort) = decode(effort);
+        Ok(Some(crate::agent_control::PendingAgentControl {
+            patch: crate::agent_control::AgentControlPatch {
+                agent_id,
+                clear_agent_id,
+                model,
+                clear_model,
+                effort,
+                clear_effort,
+            },
+            requested_by,
+            requested_at,
+        }))
     }
 
     /// Record that a conversation was imported from an agent's native history
@@ -1422,7 +1721,7 @@ impl ConversationStore {
                 "SELECT c.id, c.title, c.agent_id, c.created_at, c.updated_at,
                         (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id),
                         c.folder_path, c.branch, c.worktree_path, c.run_status,
-                        c.participants, c.pinned, c.archived, c.icon
+                        c.participants, c.pinned, c.archived, c.icon, c.visibility
                  FROM conversations c
                  WHERE c.id = ?1",
             )?;
@@ -1445,6 +1744,7 @@ impl ConversationStore {
                     pinned: row.get::<_, i64>(11)? != 0,
                     archived: row.get::<_, i64>(12)? != 0,
                     icon: icon_raw.and_then(|s| serde_json::from_str(&s).ok()),
+                    visibility: row.get(14)?,
                     last_message: None,
                     last_message_role: None,
                     last_message_at: None,
@@ -1637,6 +1937,47 @@ impl ConversationStore {
         Ok(n > 0)
     }
 
+    /// Set a conversation's sharing visibility. The HTTP layer owns the resource
+    /// write gate; this store method keeps the column update atomic and explicit.
+    pub async fn set_visibility(
+        &self,
+        conversation_id: &str,
+        visibility: &str,
+        team_id: Option<&str>,
+        admin_authorized: bool,
+    ) -> Result<bool> {
+        if !matches!(visibility, "private" | "org" | "team") {
+            anyhow::bail!(
+                "unknown visibility {visibility:?}: expected \"private\", \"org\", or \"team\""
+            );
+        }
+        if visibility == "team" && team_id.is_none() {
+            anyhow::bail!("team visibility requires team_id");
+        }
+        let now = now_millis();
+        let conn = self.conn.lock().await;
+        if visibility == "private" {
+            let current: Option<String> = conn
+                .query_row(
+                    "SELECT visibility FROM conversations WHERE id = ?1",
+                    params![conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("reading current conversation visibility")?;
+            if matches!(current.as_deref(), Some("org" | "team")) && !admin_authorized {
+                anyhow::bail!("only organization admins can make shared conversations private");
+            }
+        }
+        let updated = conn
+            .execute(
+                "UPDATE conversations SET visibility = ?1, team_id = ?2, updated_at = ?3 WHERE id = ?4",
+                params![visibility, team_id, now, conversation_id],
+            )
+            .context("setting conversation visibility")?;
+        Ok(updated > 0)
+    }
+
     /// Append a message and bump the conversation's `updated_at`. Returns the new
     /// message id. **Creates the conversation if it does not exist yet** — which is
     /// why it takes a [`Tenancy`]: an append that mints a row on an org-bound node
@@ -1753,37 +2094,39 @@ impl ConversationStore {
         // We spawn BEFORE taking the DB lock and embed the *plaintext* (pre-seal)
         // in the spawned task, so the network embed never holds the conversation
         // mutex and a down embed sidecar can never block or slow the chat write.
-        if let Some(index) = self.message_index.clone() {
-            if !content.trim().is_empty() {
-                let index_msg_id = message_id.clone();
-                let index_conv_id = conversation_id.to_owned();
-                let index_role = role.to_owned();
-                let index_content = content.to_owned();
-                tokio::spawn(async move {
-                    let embedder = index.embedder();
-                    match embedder.embed(&index_content).await {
-                        Ok(vec) => {
-                            if let Err(e) = index
-                                .index_message(
-                                    &index_msg_id,
-                                    &index_conv_id,
-                                    &index_role,
-                                    &vec,
-                                    embedder.model_id(),
-                                    now,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    "message-index write failed for {index_msg_id}: {e:#}"
-                                );
+        if self.chat_memory_enabled() {
+            if let Some(index) = self.message_index.clone() {
+                if !content.trim().is_empty() {
+                    let index_msg_id = message_id.clone();
+                    let index_conv_id = conversation_id.to_owned();
+                    let index_role = role.to_owned();
+                    let index_content = content.to_owned();
+                    tokio::spawn(async move {
+                        let embedder = index.embedder();
+                        match embedder.embed(&index_content).await {
+                            Ok(vec) => {
+                                if let Err(e) = index
+                                    .index_message(
+                                        &index_msg_id,
+                                        &index_conv_id,
+                                        &index_role,
+                                        &vec,
+                                        embedder.model_id(),
+                                        now,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "message-index write failed for {index_msg_id}: {e:#}"
+                                    );
+                                }
                             }
+                            Err(e) => tracing::warn!(
+                                "message-index embed failed for {index_msg_id} (sidecar down?): {e:#}"
+                            ),
                         }
-                        Err(e) => tracing::warn!(
-                            "message-index embed failed for {index_msg_id} (sidecar down?): {e:#}"
-                        ),
-                    }
-                });
+                    });
+                }
             }
         }
 
@@ -1993,12 +2336,26 @@ impl ConversationStore {
         org_id: Option<&str>,
         node_bound: bool,
     ) -> Result<Vec<ConversationSummary>> {
+        self.list_conversations_visible_for_teams(owner_user_id, org_id, node_bound, None)
+            .await
+    }
+
+    /// Team-aware variant used by authenticated HTTP callers. `team_ids_json`
+    /// must contain only signature-verified team ids narrowed to the node org.
+    pub async fn list_conversations_visible_for_teams(
+        &self,
+        owner_user_id: Option<&str>,
+        org_id: Option<&str>,
+        node_bound: bool,
+        team_ids_json: Option<&str>,
+    ) -> Result<Vec<ConversationSummary>> {
         self.list_summaries(
             "",
             TenancyFilter {
                 node_bound,
                 owner_user_id,
                 org_id,
+                team_ids_json,
             },
         )
         .await
@@ -2014,12 +2371,31 @@ impl ConversationStore {
         org_id: Option<&str>,
         node_bound: bool,
     ) -> Result<Vec<ConversationSummary>> {
+        self.list_conversations_visible_with_preview_for_teams(
+            owner_user_id,
+            org_id,
+            node_bound,
+            None,
+        )
+        .await
+    }
+
+    /// Preview variant with the same verified team-membership boundary as the
+    /// summary list. The SQL gate runs before any newest-message content is opened.
+    pub async fn list_conversations_visible_with_preview_for_teams(
+        &self,
+        owner_user_id: Option<&str>,
+        org_id: Option<&str>,
+        node_bound: bool,
+        team_ids_json: Option<&str>,
+    ) -> Result<Vec<ConversationSummary>> {
         self.list_summaries_inner(
             "",
             TenancyFilter {
                 node_bound,
                 owner_user_id,
                 org_id,
+                team_ids_json,
             },
             true,
         )
@@ -2047,12 +2423,25 @@ impl ConversationStore {
         org_id: Option<&str>,
         node_bound: bool,
     ) -> Result<Vec<ConversationSummary>> {
+        self.list_runs_visible_for_teams(owner_user_id, org_id, node_bound, None)
+            .await
+    }
+
+    /// Team-aware variant of [`Self::list_runs_visible`].
+    pub async fn list_runs_visible_for_teams(
+        &self,
+        owner_user_id: Option<&str>,
+        org_id: Option<&str>,
+        node_bound: bool,
+        team_ids_json: Option<&str>,
+    ) -> Result<Vec<ConversationSummary>> {
         self.list_summaries(
             "AND c.run_status IS NOT NULL",
             TenancyFilter {
                 node_bound,
                 owner_user_id,
                 org_id,
+                team_ids_json,
             },
         )
         .await
@@ -2068,10 +2457,25 @@ impl ConversationStore {
         org_id: Option<&str>,
         node_bound: bool,
     ) -> Result<Vec<String>> {
+        self.visible_conversation_ids_for_teams(owner_user_id, org_id, node_bound, None)
+            .await
+    }
+
+    /// Team-aware variant used before semantic search builds its conversation id
+    /// intersection. Without this boundary, search could expose a team preview
+    /// even when the sidebar list was correctly filtered.
+    pub async fn visible_conversation_ids_for_teams(
+        &self,
+        owner_user_id: Option<&str>,
+        org_id: Option<&str>,
+        node_bound: bool,
+        team_ids_json: Option<&str>,
+    ) -> Result<Vec<String>> {
         let filter = TenancyFilter {
             node_bound,
             owner_user_id,
             org_id,
+            team_ids_json,
         };
         let sql = format!("SELECT c.id FROM conversations c WHERE {TENANCY_VISIBLE_PREDICATE}");
         let conn = self.conn.lock().await;
@@ -2081,6 +2485,7 @@ impl ConversationStore {
                 ":bound": filter.bound_flag(),
                 ":uid": filter.owner_user_id,
                 ":org": filter.org_id,
+                ":teams": filter.team_ids_json,
             },
             |row| row.get::<_, String>(0),
         )?;
@@ -2135,7 +2540,7 @@ impl ConversationStore {
             "SELECT c.id, c.title, c.agent_id, c.created_at, c.updated_at,
                     (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id),
                     c.folder_path, c.branch, c.worktree_path, c.run_status,
-                    c.participants, c.pinned, c.archived, c.icon{preview_cols}
+                    c.participants, c.pinned, c.archived, c.icon, c.visibility{preview_cols}
              FROM conversations c
              WHERE {TENANCY_VISIBLE_PREDICATE} {extra}
              ORDER BY c.updated_at DESC"
@@ -2147,6 +2552,7 @@ impl ConversationStore {
                 ":bound": filter.bound_flag(),
                 ":uid": filter.owner_user_id,
                 ":org": filter.org_id,
+                ":teams": filter.team_ids_json,
             },
             |row| {
                 let participants_json: Option<String> = row.get(10)?;
@@ -2155,7 +2561,7 @@ impl ConversationStore {
                 // Still sealed here — decrypted below, once the db lock is out of
                 // the way, exactly like `title`.
                 let (last_message, last_message_role, last_message_at) = if with_preview {
-                    (row.get(14)?, row.get(15)?, row.get(16)?)
+                    (row.get(15)?, row.get(16)?, row.get(17)?)
                 } else {
                     (None, None, None)
                 };
@@ -2174,6 +2580,7 @@ impl ConversationStore {
                     pinned: row.get::<_, i64>(11)? != 0,
                     archived: row.get::<_, i64>(12)? != 0,
                     icon: icon_raw.and_then(|s| serde_json::from_str(&s).ok()),
+                    visibility: row.get(14)?,
                     last_message,
                     last_message_role,
                     last_message_at,
@@ -2273,6 +2680,76 @@ impl ConversationStore {
             out.push(msg);
         }
         Ok(out)
+    }
+
+    /// Atomically claim a proactive opening. A completed key is permanent so a
+    /// retry after a lost response cannot send a second greeting. A stale running
+    /// claim is reclaimed after fifteen minutes, which lets a process killed
+    /// during model startup recover without requiring a manual database repair.
+    pub async fn claim_proactive_opening(
+        &self,
+        idempotency_key: &str,
+        conversation_id: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let stale_before = now_millis() - 15 * 60 * 1000;
+        conn.execute(
+            "DELETE FROM proactive_openings
+             WHERE idempotency_key = ?1 AND status = 'running' AND created_at < ?2",
+            params![idempotency_key, stale_before],
+        )?;
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO proactive_openings
+             (idempotency_key, conversation_id, status, created_at)
+             VALUES (?1, ?2, 'running', ?3)",
+            params![idempotency_key, conversation_id, now_millis()],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    /// Durable state and conversation binding of a proactive opening claim.
+    pub async fn proactive_opening_status(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<ProactiveOpeningStatus>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT conversation_id, status
+             FROM proactive_openings
+             WHERE idempotency_key = ?1",
+            params![idempotency_key],
+            |row| {
+                Ok(ProactiveOpeningStatus {
+                    conversation_id: row.get(0)?,
+                    status: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Mark a proactive opening complete only after its assistant message is
+    /// durable. The update is deliberately idempotent.
+    pub async fn complete_proactive_opening(&self, idempotency_key: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE proactive_openings
+             SET status = 'completed', completed_at = ?2
+             WHERE idempotency_key = ?1",
+            params![idempotency_key, now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Release a failed opening so a readiness retry can try again.
+    pub async fn release_proactive_opening(&self, idempotency_key: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "DELETE FROM proactive_openings WHERE idempotency_key = ?1 AND status = 'running'",
+            params![idempotency_key],
+        )?;
+        Ok(())
     }
 
     /// Read only the plaintext user/assistant projection allowed into learning.
@@ -2595,6 +3072,13 @@ impl ConversationStore {
         limit: usize,
         conversation_ids: Option<&[String]>,
     ) -> Result<Option<Vec<MessageSearchHit>>> {
+        // Chat-message search is an explicit Memory opt-in. Guard the semantic
+        // backfill as well as KNN so callers cannot materialize an index by
+        // invoking the store directly instead of going through the HTTP/MCP
+        // gates.
+        if !self.chat_memory_enabled() {
+            return Ok(None);
+        }
         let Some(index) = self.message_index.clone() else {
             return Ok(None);
         };
@@ -2744,6 +3228,12 @@ impl ConversationStore {
         limit: usize,
         conversation_ids: Option<&[String]>,
     ) -> Result<Option<Vec<MessageSearchHit>>> {
+        // Chat-message search is an explicit Memory opt-in. Guard the FTS
+        // backfill as well as MATCH so a disabled feature never materializes a
+        // lexical index merely because a caller asks for an exact search.
+        if !self.chat_memory_enabled() {
+            return Ok(None);
+        }
         let Some(index) = self.message_fts.clone() else {
             return Ok(None);
         };
@@ -2980,6 +3470,201 @@ impl ConversationStore {
                     updated_at,
                     messages,
                     participants,
+                    has_older_messages: false,
+                    older_messages_cursor: None,
+                }))
+            }
+        }
+    }
+
+    /// Fetch one chronological page from a never-branched conversation without
+    /// loading or decrypting the rest of the transcript. The extra row is the
+    /// existence check for the next older page.
+    async fn get_flat_message_page(
+        &self,
+        conversation_id: &str,
+        before: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<StoredMessage>, bool)> {
+        let page_limit = limit.max(1);
+        let cursor_position = if let Some(cursor) = before {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT created_at, rowid FROM messages
+                 WHERE id = ?1 AND conversation_id = ?2",
+                params![cursor, conversation_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+        } else {
+            None
+        };
+        let fetch_limit = page_limit.saturating_add(1) as i64;
+        let conn = self.conn.lock().await;
+        let mut out = Vec::new();
+        if let Some((cursor_created_at, cursor_rowid)) = cursor_position {
+            let mut stmt = conn.prepare(
+                "SELECT id, role, content, agent_id, created_at, author_user_id, author_name, source, widget_instance_id, origin_server, parts, parent_message_id, interrupted
+                 FROM messages
+                 WHERE conversation_id = ?1
+                   AND (created_at < ?2 OR (created_at = ?2 AND rowid < ?3))
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT ?4",
+            )?;
+            let rows = stmt.query_map(
+                params![
+                    conversation_id,
+                    cursor_created_at,
+                    cursor_rowid,
+                    fetch_limit
+                ],
+                |row| {
+                    let sealed_parts: Option<String> = row.get(10)?;
+                    Ok((
+                        StoredMessage {
+                            id: row.get(0)?,
+                            role: row.get(1)?,
+                            content: row.get(2)?,
+                            agent_id: row.get(3)?,
+                            author_user_id: row.get(5)?,
+                            author_name: row.get(6)?,
+                            source: row.get(7)?,
+                            widget_instance_id: row.get(8)?,
+                            origin_server: row.get(9)?,
+                            parts: None,
+                            parent_message_id: row.get(11)?,
+                            interrupted: row.get::<_, i64>(12)? != 0,
+                            sibling_index: 0,
+                            sibling_count: 1,
+                            sibling_ids: Vec::new(),
+                            created_at: row.get(4)?,
+                        },
+                        sealed_parts,
+                    ))
+                },
+            )?;
+            for row in rows {
+                let (mut message, sealed_parts) = row?;
+                message.content = self.open_content(std::mem::take(&mut message.content));
+                message.parts = self.open_parts(sealed_parts);
+                out.push(message);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, role, content, agent_id, created_at, author_user_id, author_name, source, widget_instance_id, origin_server, parts, parent_message_id, interrupted
+                 FROM messages
+                 WHERE conversation_id = ?1
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![conversation_id, fetch_limit], |row| {
+                let sealed_parts: Option<String> = row.get(10)?;
+                Ok((
+                    StoredMessage {
+                        id: row.get(0)?,
+                        role: row.get(1)?,
+                        content: row.get(2)?,
+                        agent_id: row.get(3)?,
+                        author_user_id: row.get(5)?,
+                        author_name: row.get(6)?,
+                        source: row.get(7)?,
+                        widget_instance_id: row.get(8)?,
+                        origin_server: row.get(9)?,
+                        parts: None,
+                        parent_message_id: row.get(11)?,
+                        interrupted: row.get::<_, i64>(12)? != 0,
+                        sibling_index: 0,
+                        sibling_count: 1,
+                        sibling_ids: Vec::new(),
+                        created_at: row.get(4)?,
+                    },
+                    sealed_parts,
+                ))
+            })?;
+            for row in rows {
+                let (mut message, sealed_parts) = row?;
+                message.content = self.open_content(std::mem::take(&mut message.content));
+                message.parts = self.open_parts(sealed_parts);
+                out.push(message);
+            }
+        }
+        let has_older = out.len() > page_limit;
+        out.truncate(page_limit);
+        out.reverse();
+        Ok((out, has_older))
+    }
+
+    /// Fetch the newest message page, or the page immediately before a stable
+    /// message cursor. The desktop uses this for reverse scrolling so opening a
+    /// long chat only decrypts/renders the latest slice at first.
+    pub async fn get_conversation_message_page(
+        &self,
+        conversation_id: &str,
+        before: Option<&str>,
+        limit: usize,
+    ) -> Result<Option<ConversationDetail>> {
+        let active_leaf = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT active_leaf_message_id FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+        };
+        let (messages, has_older_messages, older_messages_cursor) = if active_leaf.is_none() {
+            let (messages, has_older_messages) = self
+                .get_flat_message_page(conversation_id, before, limit)
+                .await?;
+            let older_messages_cursor = if has_older_messages {
+                messages.first().map(|message| message.id.clone())
+            } else {
+                None
+            };
+            (messages, has_older_messages, older_messages_cursor)
+        } else {
+            let active = self.get_active_messages(conversation_id).await?;
+            let end = match before {
+                Some(cursor) => active
+                    .iter()
+                    .position(|message| message.id == cursor)
+                    .unwrap_or(active.len()),
+                None => active.len(),
+            };
+            let start = end.saturating_sub(limit.max(1));
+            let messages = active[start..end].to_vec();
+            let has_older_messages = start > 0;
+            let older_messages_cursor = if has_older_messages {
+                messages.first().map(|message| message.id.clone())
+            } else {
+                None
+            };
+            (messages, has_older_messages, older_messages_cursor)
+        };
+
+        let conn = self.conn.lock().await;
+        let row: Option<(Option<String>, Option<String>, i64, i64, Option<String>)> = conn
+            .query_row(
+                "SELECT title, agent_id, created_at, updated_at, participants FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        match row {
+            None => Ok(None),
+            Some((title, agent_id, created_at, updated_at, participants_json)) => {
+                let participants = parse_participants_json(participants_json.as_deref());
+                Ok(Some(ConversationDetail {
+                    id: conversation_id.to_owned(),
+                    title: self.open_opt(title),
+                    agent_id,
+                    created_at,
+                    updated_at,
+                    older_messages_cursor,
+                    has_older_messages,
+                    messages,
+                    participants,
                 }))
             }
         }
@@ -3078,6 +3763,8 @@ impl ConversationStore {
                 branch: branch.as_deref(),
                 worktree_path: worktree_path.as_deref(),
                 participants: Some(participants_json.as_str()),
+                channel_id: None,
+                visibility: None,
             },
             Touch::Keep,
         )
@@ -3117,6 +3804,7 @@ impl ConversationStore {
             pinned: false,
             archived: false,
             icon: None,
+            visibility: "private".to_owned(),
             last_message: None,
             last_message_role: None,
             last_message_at: None,
@@ -3685,6 +4373,25 @@ impl ConversationStore {
         Ok(meta)
     }
 
+    /// Whether a conversation was created by a registered channel bot. This is
+    /// intentionally separate from the public tenancy quartet: the machine
+    /// ingress gate uses it to allow the node-token channel writer to continue
+    /// its own org-shared room, while human reads still go through the normal
+    /// organization visibility ACL.
+    pub async fn is_channel_conversation(&self, conversation_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let found: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM conversations
+                 WHERE id = ?1 AND channel_id IS NOT NULL",
+                params![conversation_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("checking channel conversation metadata")?;
+        Ok(found.is_some())
+    }
+
     /// Delete a conversation and its messages. Returns true if a row was removed.
     pub async fn delete_conversation(&self, conversation_id: &str) -> Result<bool> {
         let conn = self.conn.lock().await;
@@ -3701,6 +4408,14 @@ impl ConversationStore {
         // outlive both the messages and the conversation forever.
         conn.execute(
             "DELETE FROM message_reactions WHERE conversation_id = ?1",
+            params![conversation_id],
+        )?;
+        // Proactive openings deliberately have no FK (their key survives a
+        // failed message write), so delete the idempotency tombstone with the
+        // conversation. Otherwise deleting and recreating the same conversation
+        // id can suppress its first greeting forever.
+        conn.execute(
+            "DELETE FROM proactive_openings WHERE conversation_id = ?1",
             params![conversation_id],
         )?;
         let removed = conn.execute(
@@ -3884,6 +4599,7 @@ impl ConversationStore {
         conn.execute("DELETE FROM messages", [])?;
         conn.execute("DELETE FROM sessions", [])?;
         conn.execute("DELETE FROM btw_entries", [])?;
+        conn.execute("DELETE FROM proactive_openings", [])?;
         let removed = conn.execute("DELETE FROM conversations", [])?;
         Ok(removed as u64)
     }
@@ -3909,6 +4625,10 @@ impl ConversationStore {
         )?;
         conn.execute(
             &format!("DELETE FROM btw_entries WHERE conversation_id IN ({owned})"),
+            params![owner_user_id],
+        )?;
+        conn.execute(
+            &format!("DELETE FROM proactive_openings WHERE conversation_id IN ({owned})"),
             params![owner_user_id],
         )?;
         let removed = conn.execute(
@@ -4193,6 +4913,109 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn channel_sessions_are_org_shared_and_machine_marked() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .ensure_channel_conversation(
+                "channel:bot-1:chat-1",
+                "bot-1",
+                Some("agent-1"),
+                Some("org-1"),
+            )
+            .await
+            .unwrap();
+
+        assert!(store
+            .is_channel_conversation("channel:bot-1:chat-1")
+            .await
+            .unwrap());
+        let meta = store
+            .get_access_meta("channel:bot-1:chat-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.owner_user_id, None);
+        assert_eq!(meta.org_id.as_deref(), Some("org-1"));
+        assert_eq!(meta.visibility, "org");
+    }
+
+    #[tokio::test]
+    async fn agent_control_is_conversation_scoped_and_consumed_once() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .ensure_conversation(
+                "control-conversation",
+                Some("caller-agent"),
+                None,
+                Tenancy::Unattributed,
+            )
+            .await
+            .unwrap();
+
+        let pending = crate::agent_control::PendingAgentControl {
+            patch: crate::agent_control::AgentControlPatch {
+                agent_id: Some("better-agent".to_owned()),
+                clear_agent_id: false,
+                model: Some("strong-model".to_owned()),
+                clear_model: false,
+                effort: Some("high".to_owned()),
+                clear_effort: false,
+            },
+            requested_by: "caller-agent".to_owned(),
+            requested_at: 123,
+        };
+        store
+            .set_pending_agent_control("control-conversation", &pending)
+            .await
+            .unwrap();
+
+        assert!(store
+            .is_conversation_agent("control-conversation", "caller-agent")
+            .await
+            .unwrap());
+        assert!(!store
+            .is_conversation_agent("control-conversation", "other-agent")
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .take_pending_agent_control("control-conversation")
+                .await
+                .unwrap(),
+            Some(pending)
+        );
+        assert!(store
+            .take_pending_agent_control("control-conversation")
+            .await
+            .unwrap()
+            .is_none());
+
+        let clear_pending = crate::agent_control::PendingAgentControl {
+            patch: crate::agent_control::AgentControlPatch {
+                agent_id: None,
+                clear_agent_id: false,
+                model: None,
+                clear_model: true,
+                effort: None,
+                clear_effort: true,
+            },
+            requested_by: "caller-agent".to_owned(),
+            requested_at: 456,
+        };
+        store
+            .set_pending_agent_control("control-conversation", &clear_pending)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .take_pending_agent_control("control-conversation")
+                .await
+                .unwrap(),
+            Some(clear_pending)
+        );
+    }
+
+    #[tokio::test]
     async fn verified_widget_provenance_survives_message_reload() {
         let store = ConversationStore::open_in_memory().unwrap();
         let provenance = MessageProvenance {
@@ -4239,6 +5062,133 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn conversation_visibility_controls_visible_summaries_and_previews() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .claim_tenancy("alice-chat", "alice", Some("org1"))
+            .await
+            .unwrap();
+        store
+            .append_message(
+                "alice-chat",
+                "user",
+                "shared roadmap",
+                None,
+                Some("alice"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let bob_private = store
+            .list_conversations_visible(Some("bob"), Some("org1"), true)
+            .await
+            .unwrap();
+        assert!(bob_private.is_empty());
+
+        assert!(store
+            .set_visibility("alice-chat", "org", None, true)
+            .await
+            .unwrap());
+        let bob_shared = store
+            .list_conversations_visible_with_preview(Some("bob"), Some("org1"), true)
+            .await
+            .unwrap();
+        assert_eq!(bob_shared.len(), 1);
+        assert_eq!(bob_shared[0].visibility, "org");
+        assert_eq!(
+            bob_shared[0].last_message.as_deref(),
+            Some("shared roadmap")
+        );
+
+        let meta = store
+            .get_access_meta("alice-chat")
+            .await
+            .unwrap()
+            .expect("conversation ACL metadata");
+        assert_eq!(meta.visibility, "org");
+
+        assert!(store
+            .set_visibility("alice-chat", "private", None, false)
+            .await
+            .is_err());
+        assert!(store
+            .set_visibility("alice-chat", "private", None, true)
+            .await
+            .unwrap());
+        assert!(store
+            .list_conversations_visible(Some("bob"), Some("org1"), true)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .set_visibility("alice-chat", "team", None, true)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn team_visibility_requires_verified_team_membership_for_list_preview_and_search() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .claim_tenancy("team-chat", "alice", Some("org1"))
+            .await
+            .unwrap();
+        store
+            .append_message(
+                "team-chat",
+                "user",
+                "team-only roadmap",
+                None,
+                Some("alice"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .set_visibility("team-chat", "team", Some("team-alpha"), true)
+            .await
+            .unwrap();
+
+        // Same-org membership alone is not enough for a team-scoped row. The
+        // compatibility wrapper intentionally passes no team ids, matching an
+        // authenticated caller whose JWT predates team claims.
+        assert!(store
+            .list_conversations_visible_with_preview(Some("bob"), Some("org1"), true)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .visible_conversation_ids(Some("bob"), Some("org1"), true)
+            .await
+            .unwrap()
+            .is_empty());
+
+        let team_ids = Some(r#"["team-alpha"]"#);
+        let visible = store
+            .list_conversations_visible_with_preview_for_teams(
+                Some("bob"),
+                Some("org1"),
+                true,
+                team_ids,
+            )
+            .await
+            .unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(
+            visible[0].last_message.as_deref(),
+            Some("team-only roadmap")
+        );
+        assert_eq!(
+            store
+                .visible_conversation_ids_for_teams(Some("bob"), Some("org1"), true, team_ids)
+                .await
+                .unwrap(),
+            vec!["team-chat".to_owned()]
+        );
     }
 
     /// **The choke-point acceptance test** (task item 1).
@@ -4485,6 +5435,7 @@ mod tests {
         let store = ConversationStore::open_in_memory()
             .unwrap()
             .with_message_index(index);
+        store.set_chat_memory_enabled(true).await.unwrap();
         store
             .append_message(
                 "c1",
@@ -4524,6 +5475,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_messages_opt_out_skips_search_and_backfill() {
+        let index = crate::search_host::in_memory_message_index().unwrap();
+        let store = ConversationStore::open_in_memory()
+            .unwrap()
+            .with_message_index(index.clone());
+        store
+            .append_message("c1", "user", "private semantic content", None, None, None)
+            .await
+            .unwrap();
+
+        let hits = store.search_messages("private", 5, None).await.unwrap();
+        assert!(
+            hits.is_none(),
+            "opted-out semantic search must be unavailable"
+        );
+        assert!(
+            index.indexed_ids().await.unwrap().is_empty(),
+            "opted-out semantic search must not backfill the vector index"
+        );
+    }
+
+    #[tokio::test]
     async fn fts_search_none_without_index() {
         // No FTS index wired (open_in_memory) → search returns None, never errors.
         let store = ConversationStore::open_in_memory().unwrap();
@@ -4545,6 +5518,7 @@ mod tests {
         let store = ConversationStore::open_in_memory()
             .unwrap()
             .with_message_fts_index(index);
+        store.set_chat_memory_enabled(true).await.unwrap();
         store
             .append_message(
                 "c1",
@@ -4634,6 +5608,7 @@ mod tests {
         let store = ConversationStore::open_in_memory()
             .unwrap()
             .with_message_fts_index(index);
+        store.set_chat_memory_enabled(true).await.unwrap();
         store
             .append_message("c1", "user", "alpha beta gamma", None, None, None)
             .await
@@ -4649,6 +5624,25 @@ mod tests {
             .expect("fts index wired");
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|h| h.conversation_id == "c2"));
+    }
+
+    #[tokio::test]
+    async fn fts_search_opt_out_skips_search_and_backfill() {
+        let index = ryu_search::MessageFtsIndex::open_in_memory().unwrap();
+        let store = ConversationStore::open_in_memory()
+            .unwrap()
+            .with_message_fts_index(index.clone());
+        store
+            .append_message("c1", "user", "private lexical content", None, None, None)
+            .await
+            .unwrap();
+
+        let hits = store.fts_search_messages("private", 5, None).await.unwrap();
+        assert!(hits.is_none(), "opted-out FTS search must be unavailable");
+        assert!(
+            index.indexed_ids().await.unwrap().is_empty(),
+            "opted-out exact search must not backfill the FTS index"
+        );
     }
 
     #[tokio::test]
@@ -5200,6 +6194,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_removes_proactive_opening_tombstones() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .append_message("conv-recreated", "user", "hello", None, None, None)
+            .await
+            .unwrap();
+        assert!(store
+            .claim_proactive_opening("opening-recreated", "conv-recreated")
+            .await
+            .unwrap());
+        store
+            .complete_proactive_opening("opening-recreated")
+            .await
+            .unwrap();
+
+        assert!(store.delete_conversation("conv-recreated").await.unwrap());
+        assert_eq!(
+            store
+                .proactive_opening_status("opening-recreated")
+                .await
+                .unwrap(),
+            None
+        );
+        // Recreating the same conversation id starts with a fresh idempotency
+        // lifecycle instead of inheriting the deleted row's completed tombstone.
+        assert!(store
+            .claim_proactive_opening("opening-recreated", "conv-recreated")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
     async fn sealed_content_count_separates_sealed_rows_from_legacy_plaintext() {
         // The Encryption settings tab reports this as MEASURED coverage, so a
         // legacy plaintext row must drag the count down, not be assumed sealed.
@@ -5729,6 +6755,66 @@ mod tests {
         assert!(detail.participants.contains(&"agent-x".to_owned()));
         assert!(detail.participants.contains(&"agent-y".to_owned()));
         assert_eq!(detail.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn conversation_message_pages_walk_backwards_from_latest() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        for index in 0..5 {
+            store
+                .append_message(
+                    "conv-page",
+                    if index % 2 == 0 { "user" } else { "assistant" },
+                    &format!("message-{index}"),
+                    Some("agent-x"),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let latest = store
+            .get_conversation_message_page("conv-page", None, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            latest
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["message-3", "message-4"]
+        );
+        assert!(latest.has_older_messages);
+        let cursor = latest.older_messages_cursor.clone().unwrap();
+
+        let middle = store
+            .get_conversation_message_page("conv-page", Some(&cursor), 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            middle
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["message-1", "message-2"]
+        );
+        assert!(middle.has_older_messages);
+
+        let oldest_cursor = middle.older_messages_cursor.clone().unwrap();
+        let oldest = store
+            .get_conversation_message_page("conv-page", Some(&oldest_cursor), 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(oldest.messages.len(), 1);
+        assert_eq!(oldest.messages[0].content, "message-0");
+        assert!(!oldest.has_older_messages);
+        assert_eq!(oldest.older_messages_cursor, None);
     }
 
     // ── Version tree (edit + regenerate + select) ──────────────────────────
@@ -6284,5 +7370,62 @@ mod tests {
             );
         }
         assert_eq!(store.list_conversations().await.unwrap().len(), 6);
+    }
+
+    #[tokio::test]
+    async fn proactive_opening_claim_is_exactly_once_until_completed() {
+        let store = ConversationStore::open_in_memory().unwrap();
+
+        assert!(store
+            .claim_proactive_opening("opening-1", "conversation-1")
+            .await
+            .unwrap());
+        assert!(!store
+            .claim_proactive_opening("opening-1", "conversation-1")
+            .await
+            .unwrap());
+        assert_eq!(
+            store.proactive_opening_status("opening-1").await.unwrap(),
+            Some(ProactiveOpeningStatus {
+                conversation_id: "conversation-1".to_string(),
+                status: "running".to_string(),
+            })
+        );
+
+        store.complete_proactive_opening("opening-1").await.unwrap();
+        assert_eq!(
+            store.proactive_opening_status("opening-1").await.unwrap(),
+            Some(ProactiveOpeningStatus {
+                conversation_id: "conversation-1".to_string(),
+                status: "completed".to_string(),
+            })
+        );
+        assert!(!store
+            .claim_proactive_opening("opening-1", "conversation-1")
+            .await
+            .unwrap());
+        assert!(!store
+            .claim_proactive_opening("opening-1", "conversation-2")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn failed_proactive_opening_can_be_released_for_a_readiness_retry() {
+        let store = ConversationStore::open_in_memory().unwrap();
+
+        assert!(store
+            .claim_proactive_opening("opening-2", "conversation-2")
+            .await
+            .unwrap());
+        store.release_proactive_opening("opening-2").await.unwrap();
+        assert_eq!(
+            store.proactive_opening_status("opening-2").await.unwrap(),
+            None
+        );
+        assert!(store
+            .claim_proactive_opening("opening-2", "conversation-2")
+            .await
+            .unwrap());
     }
 }

@@ -24,6 +24,7 @@
 // visible by the caller (`isInterruptedMessage` in message-list.tsx) rather than
 // here. That split is the point — turn status is not part content.
 
+import { hasTurnEndCards } from "./turn-end-cards.ts";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -131,6 +132,9 @@ function rendersRegardlessOfDetail(part: unknown): boolean {
  * disagree about a part whose input/output arrived as a JSON string.
  */
 export function hasVisibleContentAtNoDetail(parts: unknown[]): boolean {
+	if (hasTurnEndCards(parts)) {
+		return true;
+	}
 	for (const part of normalizeAssistantToolParts(parts ?? [])) {
 		if (isToolLikePart(part)) {
 			if (!isHiddenAtNoDetail(part)) {

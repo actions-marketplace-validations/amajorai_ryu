@@ -45,7 +45,9 @@ import {
 	Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { useFullAccessSelectionGuard } from "@ryu/blocks/composer/full-access-warning";
 import { SvglIcon } from "@ryu/blocks/web/svgl-icon.tsx";
+import { AgentTitleBadge } from "@ryu/ui/components/agent-title-badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { CommandItem } from "@ryu/ui/components/command.tsx";
 import {
@@ -54,6 +56,7 @@ import {
 	DropdownMenuSubContent,
 	DropdownMenuSubTrigger,
 } from "@ryu/ui/components/dropdown-menu.tsx";
+import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { Input } from "@ryu/ui/components/input.tsx";
 import {
 	Tooltip,
@@ -71,10 +74,11 @@ import type {
 import { EffortSliderRow } from "@/components/agent-elements/input/effort-slider-row.tsx";
 import { groupModelItems } from "@/components/agent-elements/input/model-groups.ts";
 import { createModelMenuRenderer } from "@/components/agent-elements/input/model-menu-content.tsx";
+import { modelMenuItem } from "@/components/agent-elements/input/model-router.ts";
 import { useProviderCommandNavigation } from "@/components/agent-elements/input/provider-command-dialog.tsx";
 import {
-	AgentUsageBadge,
 	ProviderCreditsBadge,
+	UsageBar,
 } from "@/components/agent-elements/input/usage-bar.tsx";
 import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import type { ModelOption } from "@/components/agent-elements/types.ts";
@@ -82,12 +86,13 @@ import { TabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
-import { AgentLogo } from "@/src/lib/agent-logos.tsx";
+import { AgentAvatar, AgentLogo } from "@/src/lib/agent-logos.tsx";
 import type { AgentCatalogEntry, AgentSummary } from "@/src/lib/api/agents.ts";
 import { fetchAgentAccounts } from "@/src/lib/api/agents.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { formatMicroUsd } from "@/src/lib/api/credits.ts";
 import { discoverModels, isPiModelEnabled } from "@/src/lib/api/pi-config.ts";
+import { supportsSubscriptionProviderUsage } from "@/src/lib/api/usage.ts";
 import {
 	expiryClass,
 	formatCountdown,
@@ -119,6 +124,12 @@ export interface ProviderEntry {
 	accounts?: ProviderAccount[];
 	/** Pi auth kind: "subscription" (OAuth login) | "api-key" | "none". */
 	authKind: string;
+	/** Browser-provider capability status, when this is the extension's synthetic row. */
+	browserCapabilities?: {
+		actionSupport: boolean;
+		chatSupport: boolean;
+		visionSupport: boolean;
+	};
 	/** Whether a usable credential is stored (drives the models-vs-configure body). */
 	configured: boolean;
 	/** The provider's current model when it is the active target, else null. */
@@ -168,6 +179,9 @@ export interface ProviderEntry {
 		expiresAt: string | null;
 		remainingMicroUsd: number;
 	};
+	/** Browser runtime status shown beside the provider's current model. */
+	status?: "ready" | "not-prepared" | "preparing" | "failed" | "unsupported";
+	statusMessage?: string;
 	/** Whether Core can dynamically enumerate this provider's full model list. */
 	supportsDiscovery: boolean;
 	/** The managed provider with no active paid plan → show the subscription upsell
@@ -222,6 +236,8 @@ export interface UniversalPickerData {
 	 * advertise no model/thinking config to drill into. Defaults to none.
 	 */
 	customAgents?: AgentSummary[];
+	/** Keep model rows visible for setup surfaces at every interface level. */
+	forceModelPicker?: boolean;
 	/**
 	 * Suppress the "Auto" (Plane B) row. The composer always offers Auto so a turn
 	 * can be routed per-rule; a controlled settings *field* (which persists one
@@ -369,6 +385,8 @@ function SettingItemRow({
  * rendered inline instead of behind a sub-trigger.
  */
 function SettingSub({ section }: { section: ComposerSettingsSection }) {
+	const commandNavigation = useProviderCommandNavigation();
+	const selectionGuard = useFullAccessSelectionGuard();
 	const loadingEmpty = Boolean(section.loading) && section.items.length === 0;
 	if (section.items.length === 0 && !section.renderContent && !loadingEmpty) {
 		return null;
@@ -378,10 +396,67 @@ function SettingSub({ section }: { section: ComposerSettingsSection }) {
 	const activeDeco = active ? section.decorate?.(active) : undefined;
 	// Keep the root menu open so model → thinking → approval can be chained.
 	const onSelect = (id: string) => {
-		section.onChange(id);
+		const item = section.items.find((candidate) => candidate.id === id);
+		const apply = () => section.onChange(id);
+		selectionGuard?.request(item ?? { id, name: id }, apply, section.label);
 	};
 	if (section.variant === "slider" && !loadingEmpty) {
+		if (commandNavigation) {
+			return (
+				<CommandItem
+					data-checked={section.value === section.items[0]?.id}
+					onSelect={() =>
+						commandNavigation.push({
+							body: section.items.map((item) => (
+								<CommandItem
+									data-checked={item.id === section.value}
+									key={item.id}
+									onSelect={() => {
+										onSelect(item.id);
+										commandNavigation.close();
+									}}
+								>
+									{item.name}
+								</CommandItem>
+							)),
+							title: section.label,
+						})
+					}
+				>
+					{section.label}
+				</CommandItem>
+			);
+		}
 		return <EffortSliderRow onSelect={onSelect} section={section} />;
+	}
+	if (commandNavigation) {
+		return (
+			<CommandItem
+				data-checked={active?.id === section.value}
+				onSelect={() =>
+					commandNavigation.push({
+						body: section.items.map((item) => (
+							<CommandItem
+								data-checked={
+									item.id === (section.value ?? section.items[0]?.id)
+								}
+								key={item.id}
+								onSelect={() => {
+									onSelect(item.id);
+									commandNavigation.close();
+								}}
+							>
+								{item.name}
+							</CommandItem>
+						)),
+						title: section.label,
+					})
+				}
+			>
+				<span className="flex-1">{section.label}</span>
+				<span className="text-muted-foreground text-xs">{active?.name}</span>
+			</CommandItem>
+		);
 	}
 	return (
 		<DropdownMenuSub>
@@ -462,6 +537,20 @@ function UseTargetItem({
 	label: string;
 	onSelect: () => void;
 }) {
+	const commandNavigation = useProviderCommandNavigation();
+	if (commandNavigation) {
+		return (
+			<CommandItem
+				data-checked={isActive}
+				onSelect={() => {
+					onSelect();
+					commandNavigation.close();
+				}}
+			>
+				<span className="flex-1 truncate">{label}</span>
+			</CommandItem>
+		);
+	}
 	return (
 		<DropdownMenuItem className="gap-2" closeOnClick={false} onClick={onSelect}>
 			<HugeiconsIcon
@@ -497,6 +586,7 @@ function UseTargetItem({
 function ExternalAgentSettings({
 	agent,
 	agents,
+	forceModelPicker = false,
 	isActive,
 	onSelect,
 	onRemoveAccount,
@@ -504,6 +594,7 @@ function ExternalAgentSettings({
 }: {
 	agent: AgentSummary;
 	agents: AgentSummary[];
+	forceModelPicker?: boolean;
 	isActive: boolean;
 	onRemoveAccount: (accountId: string) => void;
 	onSelect: () => void;
@@ -513,7 +604,7 @@ function ExternalAgentSettings({
 	// Interface level decides whether this agent's row offers anything BUT "Use
 	// it" — the same gate the host applies to the active agent's sections, applied
 	// again here because this body builds its own (see the hook's header). Without
-	// it, Simple would strip the model from the trigger summary and still list one
+	// it, Ryu Work would strip the model from the trigger summary and still list one
 	// under every agent in the popover.
 	//
 	// It also feeds `agentId: null` when nothing would render, which skips the
@@ -521,7 +612,7 @@ function ExternalAgentSettings({
 	// first fetch, and a level that shows none of the answers should not be asking
 	// the question.
 	const interfaceLevel = useInterfaceLevel();
-	const showModelSection = showsModelPicker(interfaceLevel);
+	const showModelSection = forceModelPicker || showsModelPicker(interfaceLevel);
 	const showTuningSections = showsComposerTuning(interfaceLevel);
 	const { modelSection, extraSections } = useComposerAcpSections({
 		agentId: showModelSection || showTuningSections ? agent.id : null,
@@ -735,8 +826,10 @@ function ProviderSubBody({
 	onSwitchAccount,
 	onRemoveAccount,
 	close,
+	forceModelPicker = false,
 }: {
 	close: () => void;
+	forceModelPicker?: boolean;
 	onConfigure: () => void;
 	onModel: (modelId: string) => void;
 	onRemoveAccount: (accountId: string) => void;
@@ -749,8 +842,9 @@ function ProviderSubBody({
 }) {
 	const node = useActiveNode();
 	const interfaceLevel = useInterfaceLevel();
-	const showModelSection = showsModelPicker(interfaceLevel);
+	const showModelSection = forceModelPicker || showsModelPicker(interfaceLevel);
 	const showTuningSections = showsComposerTuning(interfaceLevel);
+	const [customBrowserModelId, setCustomBrowserModelId] = useState("");
 	// Live-enumerate the provider's full model list once the submenu opens (this
 	// component only mounts on open). OpenRouter exposes hundreds of models Core's
 	// static `suggestedModels` can't carry, so a discovery-capable provider gets the
@@ -796,7 +890,7 @@ function ProviderSubBody({
 				return;
 			}
 			seen.add(id);
-			out.push({ id, name: name ?? id });
+			out.push(modelMenuItem(id, name));
 		};
 		for (const m of discovery.data?.models ?? []) {
 			push(m.id, m.name);
@@ -883,7 +977,9 @@ function ProviderSubBody({
 		renderContent: useGroupedMenu
 			? createModelMenuRenderer(
 					groupModelItems(modelItems),
-					provider.currentModel ?? undefined
+					provider.currentModel ?? undefined,
+					undefined,
+					discoveryId === "openrouter" ? "openrouter" : undefined
 				)
 			: undefined,
 	};
@@ -917,9 +1013,41 @@ function ProviderSubBody({
 				onRemove={onRemoveAccount}
 				onSwitch={onSwitchAccount}
 			/>
-			{/* Same interface-level gate as the external-agent body above: Simple
+			{/* Same interface-mode gate as the external-agent body above: Ryu Work
 			    offers the provider itself and nothing to tune inside it. */}
 			{showModelSection && <SettingSub section={modelSection} />}
+			{provider.id === "browser" && (
+				<div className="space-y-2 px-3 py-2">
+					<p className="text-muted-foreground text-xs">
+						Use any compatible Hugging Face model id. Unverified custom models
+						are chat-only.
+					</p>
+					<div className="flex items-center gap-2">
+						<Input
+							aria-label="Custom Hugging Face model id"
+							onChange={(event) => setCustomBrowserModelId(event.target.value)}
+							placeholder="org/model"
+							value={customBrowserModelId}
+						/>
+						<Button
+							onClick={() => {
+								const modelId = customBrowserModelId.trim();
+								if (
+									/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(
+										modelId
+									)
+								) {
+									onModel(modelId);
+									setCustomBrowserModelId("");
+								}
+							}}
+							size="sm"
+						>
+							Add
+						</Button>
+					</div>
+				</div>
+			)}
 			{showTuningSections && thinkingLevels.length > 0 && (
 				<SettingSub section={thinkingSection} />
 			)}
@@ -933,17 +1061,21 @@ function TargetSub({
 	engineKey,
 	providerId,
 	avatarUrl,
+	glyph,
 	isActive,
+	title,
 	trailing,
 	children,
 }: {
 	avatarUrl?: string | null;
 	children: ReactNode;
 	engineKey: string | null;
+	glyph?: GlyphValue;
 	/** Pi provider id — routes the row through the svgl brand mark when set. */
 	providerId?: string;
 	isActive: boolean;
 	label: string;
+	title?: string;
 	/**
 	 * A small right-aligned status for this row, before the active checkmark: an
 	 * agent's subscription usage, or a Ryu pool's remaining granted credit. This is
@@ -965,7 +1097,10 @@ function TargetSub({
 					commandNavigation.push({ body: children, title: label })
 				}
 			>
-				<span className="flex min-w-0 flex-1 items-center gap-2">{label}</span>
+				<span className="flex min-w-0 flex-1 items-center gap-2">
+					<span className="truncate">{label}</span>
+					<AgentTitleBadge title={title ?? ""} />
+				</span>
 				{trailing}
 			</CommandItem>
 		);
@@ -975,7 +1110,14 @@ function TargetSub({
 		<DropdownMenuSub>
 			<DropdownMenuSubTrigger className={cn(isActive && "bg-foreground/10")}>
 				<span className="flex min-w-0 flex-1 items-center gap-2">
-					{avatarUrl ? (
+					{glyph ? (
+						<AgentAvatar
+							className="size-4 shrink-0 rounded-full object-contain"
+							engine={engineKey}
+							glyph={glyph}
+							size="16px"
+						/>
+					) : avatarUrl ? (
 						// biome-ignore lint/performance/noImgElement: Tauri/Vite, data URL avatar
 						// biome-ignore lint/correctness/useImageSize: sized via class
 						<img
@@ -997,6 +1139,7 @@ function TargetSub({
 						/>
 					)}
 					<span className="truncate">{label}</span>
+					<AgentTitleBadge title={title ?? ""} />
 				</span>
 				{trailing}
 				{isActive && (
@@ -1092,7 +1235,8 @@ function AvailableAgentRow({
 			</span>
 			<Button
 				className="h-6 shrink-0 gap-1 px-2 text-xs"
-				disabled={installing || !entry.available}
+				disabled={!entry.available}
+				loading={installing}
 				onClick={(e) => {
 					e.stopPropagation();
 					onInstall();
@@ -1101,16 +1245,7 @@ function AvailableAgentRow({
 				type="button"
 				variant="ghost"
 			>
-				{installing ? (
-					<HugeiconsIcon
-						className="animate-spin"
-						icon={Loading03Icon}
-						size={12}
-						strokeWidth={2}
-					/>
-				) : (
-					<HugeiconsIcon icon={Download04Icon} size={12} strokeWidth={2} />
-				)}
+				<HugeiconsIcon icon={Download04Icon} size={12} strokeWidth={2} />
 				{installing ? "Installing" : "Install"}
 			</Button>
 		</div>
@@ -1280,10 +1415,22 @@ export function UniversalPickerBody({
 			label={provider.label}
 			providerId={provider.id}
 			trailing={
-				// A pool row shows the pool's granted credit; a BYOK row shows what's
-				// left on the key the user pasted. Never both — a pool has no key and
-				// a BYOK provider has no pool, so this is a fork, not a stack.
-				provider.poolGrant ? (
+				provider.id === "browser" ? (
+					<span className="shrink-0 text-[11px] text-muted-foreground">
+						{provider.status === "ready"
+							? "Ready"
+							: provider.status === "preparing"
+								? "Preparing…"
+								: provider.status === "failed"
+									? "Retry"
+									: "Browser"}
+					</span>
+				) : supportsSubscriptionProviderUsage(provider) ? (
+					<UsageBar agentId={provider.id} className="shrink-0" />
+				) : provider.poolGrant ? (
+					// A pool row shows the pool's granted credit; a BYOK row shows what's
+					// left on the key the user pasted. Never both — a pool has no key and
+					// a BYOK provider has no pool, so this is a fork, not a stack.
 					<PoolGrantBadge grant={provider.poolGrant} label={provider.label} />
 				) : (
 					<ProviderCreditsBadge
@@ -1295,6 +1442,7 @@ export function UniversalPickerBody({
 		>
 			<ProviderSubBody
 				close={close}
+				forceModelPicker={data.forceModelPicker}
 				onConfigure={onConfigureCredentials}
 				onModel={(modelId) => onSelectProviderModel(provider.id, modelId)}
 				onRemoveAccount={(accountId) =>
@@ -1318,14 +1466,16 @@ export function UniversalPickerBody({
 			<TargetSub
 				avatarUrl={agent.avatarUrl}
 				engineKey={agent.engine ?? agent.id}
+				glyph={agent.avatarGlyph}
 				isActive={isActive}
 				key={agent.id}
 				label={agent.name}
+				title={agent.title}
 				// Installed subscription harnesses only. The not-installed catalog rows
 				// (`AvailableAgentRow`) deliberately get none: their ids match the same
-				// engine substrings, so a badge there would read a credential for a CLI
+				// engine substrings, so a meter there would read a credential for a CLI
 				// that isn't on this machine and answer "not logged in" every time.
-				trailing={<AgentUsageBadge agentId={agent.id} />}
+				trailing={<UsageBar agentId={agent.id} className="shrink-0" />}
 			>
 				{isActive && activeSections.length > 0 ? (
 					<>
@@ -1345,6 +1495,7 @@ export function UniversalPickerBody({
 					<ExternalAgentSettings
 						agent={agent}
 						agents={agents}
+						forceModelPicker={data.forceModelPicker}
 						isActive={isActive}
 						onRemoveAccount={(accountId) =>
 							onRemoveAgentAccount(agent.id, accountId)
@@ -1374,7 +1525,14 @@ export function UniversalPickerBody({
 					onSelectAgent(agent.id);
 				}}
 			>
-				{agent.avatarUrl ? (
+				{agent.avatarGlyph ? (
+					<AgentAvatar
+						className="size-4 shrink-0 rounded-full object-contain"
+						engine={agent.engine ?? null}
+						glyph={agent.avatarGlyph}
+						size="16px"
+					/>
+				) : agent.avatarUrl ? (
 					// biome-ignore lint/performance/noImgElement: Tauri/Vite, data URL avatar
 					// biome-ignore lint/correctness/useImageSize: sized via class
 					<img
@@ -1389,7 +1547,10 @@ export function UniversalPickerBody({
 						size="16px"
 					/>
 				)}
-				<span className="flex-1 truncate">{agent.name}</span>
+				<span className="flex min-w-0 flex-1 items-center gap-2">
+					<span className="truncate">{agent.name}</span>
+					<AgentTitleBadge title={agent.title ?? ""} />
+				</span>
 				{isActive && (
 					<HugeiconsIcon
 						className="shrink-0 text-muted-foreground"
@@ -1406,8 +1567,10 @@ export function UniversalPickerBody({
 		<TargetSub
 			avatarUrl={ryuAgent.avatarUrl}
 			engineKey="ryu"
+			glyph={ryuAgent.avatarGlyph}
 			isActive={ryuRowActive}
 			label={ryuAgent.name}
+			title={ryuAgent.title}
 		>
 			<UseTargetItem
 				isActive={ryuActive}

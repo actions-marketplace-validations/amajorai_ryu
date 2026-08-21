@@ -1,7 +1,7 @@
 {
   "name": "cli",
   "private": true,
-  "version": "0.1.15",
+  "version": "0.2.0",
   "type": "module",
   "bin": {
     "ryu": "./src/index.tsx",
@@ -13,7 +13,7 @@
     "check": "tsc --noEmit",
     "check-types": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test --max-concurrency=1",
     "vendor:termcn": "bun run scripts/vendor-termcn.ts"
   },
   "dependencies": {

@@ -370,7 +370,8 @@ function CreateConnectionForm({
 			</div>
 			<div className="flex gap-2">
 				<Button
-					disabled={!canSubmit || creating}
+					disabled={!canSubmit}
+					loading={creating}
 					onClick={() => {
 						onCreate({
 							profile_id: profileId.trim(),
@@ -378,7 +379,6 @@ function CreateConnectionForm({
 						});
 					}}
 				>
-					{creating ? <Spinner className="size-4" /> : null}
 					Create
 				</Button>
 				<Button onClick={onCancel} variant="ghost">
@@ -432,26 +432,19 @@ function ConnectionDetail({
 			</div>
 
 			<div className="flex flex-wrap gap-2">
-				<Button disabled={loggingIn} onClick={onLogin}>
-					{loggingIn ? <Spinner className="size-4" /> : null}
+				<Button loading={loggingIn} onClick={onLogin}>
 					Start login
 				</Button>
-				<Button disabled={polling} onClick={onRefresh} variant="ghost">
-					{polling ? (
-						<Spinner className="size-4" />
-					) : (
-						<HugeiconsIcon className="size-4" icon={RefreshIcon} />
-					)}
+				<Button loading={polling} onClick={onRefresh} variant="ghost">
+					{!polling && <HugeiconsIcon className="size-4" icon={RefreshIcon} />}
 					Check status
 				</Button>
 				<Button
-					disabled={deleting}
+					loading={deleting}
 					onClick={() => setConfirmDelete(true)}
 					variant="destructive"
 				>
-					{deleting ? (
-						<Spinner className="size-4" />
-					) : (
+					{!deleting && (
 						<HugeiconsIcon className="size-4" icon={Delete02Icon} />
 					)}
 					Delete
@@ -502,14 +495,14 @@ function ConnectionDetail({
 					value={manualState}
 				/>
 				<Button
-					disabled={importing || manualState.trim() === ""}
+					disabled={manualState.trim() === ""}
+					loading={importing}
 					onClick={async () => {
 						await onImport(manualState.trim());
 						setManualState("");
 					}}
 					size="sm"
 				>
-					{importing ? <Spinner className="size-4" /> : null}
 					Import credentials
 				</Button>
 			</div>

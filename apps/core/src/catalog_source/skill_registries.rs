@@ -44,15 +44,18 @@
 //! GitHub's unauthenticated API allows 60 requests/hour, and a tap costs one
 //! request per *search*. With several taps registered that budget is gone in
 //! minutes, so every tree fetch goes through the shared 24h disk cache in
-//! [`crate::skills_catalog`] (`read_fresh_cache`/`write_cache`) and a search on a
-//! warm cache makes no network call at all. `GITHUB_TOKEN`, when set, is sent to
-//! raise the ceiling — it is never required.
+//! [`crate::skills_catalog`] (`read_fresh_cache`/`read_stale_cache`/`write_cache`)
+//! and a search on a warm cache makes no network call at all. If GitHub is down,
+//! the last known tree remains browseable and an already-installed skill remains
+//! usable; a first install still fails closed when its bytes cannot be fetched.
+//! `GITHUB_TOKEN`, when set, is sent to raise the ceiling — it is never required.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{CatalogKind, CatalogQuery, CatalogSource, InstallDescriptor};
+use crate::server::guarded_get_bytes_with_headers;
 use crate::skills_catalog::{self, from_source, InstallResult, SkillCard};
 
 /// Trust label for a vendor repo we pin by name.
@@ -62,50 +65,49 @@ pub(crate) const TRUST_COMMUNITY: &str = "community";
 
 // ── shared helpers ───────────────────────────────────────────────────────────
 
-/// A `GET` that sends `GITHUB_TOKEN` when one is present.
+/// The fixed request headers for a GitHub tap.
 ///
 /// Unauthenticated GitHub is 60 req/hour; a token raises it to 5,000. The token
-/// is strictly an optimization — every tap works without one.
-fn github_get(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
-    let req = skills_catalog::get(client, url).header("Accept", "application/vnd.github+json");
+/// is strictly an optimization — every tap works without one. The actual GET is
+/// made by Core's shared SSRF-guarded client below; keeping the header assembly
+/// separate prevents a future caller from accidentally attaching the token to an
+/// unvalidated URL.
+fn github_headers() -> Vec<(String, String)> {
+    let mut headers = vec![(
+        "Accept".to_string(),
+        "application/vnd.github+json".to_string(),
+    )];
     match std::env::var("GITHUB_TOKEN") {
         Ok(token) if !token.trim().is_empty() => {
-            req.header("Authorization", format!("Bearer {}", token.trim()))
+            headers.push((
+                "Authorization".to_string(),
+                format!("Bearer {}", token.trim()),
+            ));
         }
-        _ => req,
+        _ => {}
     }
+    headers
 }
 
 /// Fetch and deserialize JSON, with the source id in the error for triage.
 async fn fetch_json<T: serde::de::DeserializeOwned>(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     url: &str,
     who: &str,
 ) -> Result<T> {
-    let resp = skills_catalog::get(client, url)
-        .send()
+    let bytes = crate::server::guarded_get_bytes(url)
         .await
         .with_context(|| format!("requesting {who} ({url})"))?;
-    if !resp.status().is_success() {
-        anyhow::bail!("{who} returned HTTP {}", resp.status());
-    }
-    resp.json::<T>()
-        .await
-        .with_context(|| format!("decoding {who} response"))
+    serde_json::from_slice(&bytes).with_context(|| format!("decoding {who} response"))
 }
 
 /// Fetch plain text (a `SKILL.md` body).
 async fn fetch_text(client: &reqwest::Client, url: &str, who: &str) -> Result<String> {
-    let resp = skills_catalog::get(client, url)
-        .send()
+    let _ = client;
+    let bytes = crate::server::guarded_get_bytes(url)
         .await
         .with_context(|| format!("requesting {who} ({url})"))?;
-    if !resp.status().is_success() {
-        anyhow::bail!("{who} returned HTTP {}", resp.status());
-    }
-    resp.text()
-        .await
-        .with_context(|| format!("reading {who} body"))
+    String::from_utf8(bytes).with_context(|| format!("reading {who} body"))
 }
 
 /// Case-insensitive match of a query against a card's searchable text.
@@ -121,6 +123,24 @@ fn matches_query(query: &str, haystacks: &[&str]) -> bool {
     haystacks
         .iter()
         .any(|h| h.to_lowercase().contains(q.as_str()))
+}
+
+const ROOT_SKILL_PATH: &str = ".";
+
+/// Derive the directory containing a `SKILL.md` blob. A repository-root
+/// `SKILL.md` is represented by `.` so it can travel through the same cached
+/// path and pack-resolution contracts as nested skills.
+fn skill_dir_from_blob_path(path: &str) -> Option<String> {
+    let name = path.rsplit('/').next().unwrap_or_default();
+    if !name.eq_ignore_ascii_case("SKILL.md") {
+        return None;
+    }
+    Some(
+        path.rsplit_once('/')
+            .map(|(dir, _)| dir.to_string())
+            .filter(|dir| !dir.is_empty())
+            .unwrap_or_else(|| ROOT_SKILL_PATH.to_string()),
+    )
 }
 
 /// Turn a slug into a human-facing title (`pdf-forms` -> `Pdf Forms`).
@@ -317,7 +337,10 @@ impl GithubTapSource {
     /// tree walk to enumerate a repo's member skills — a pack is a repo whose
     /// `SKILL.md` dirs are its members, the same layout this tap indexes.
     pub(crate) async fn skill_paths(&self, client: &reqwest::Client) -> Result<Vec<String>> {
-        let cache = skills_catalog::github_cache_path(&format!("tap-{}", self.repo));
+        // v2 invalidates pre-root-support caches. Without this, a previously
+        // browsed root-skill repository would stay invisible until its 24h TTL
+        // elapsed after an upgrade.
+        let cache = skills_catalog::github_cache_path(&format!("tap-v2-{}", self.repo));
         if let Some(cached) = skills_catalog::read_fresh_cache::<Vec<String>>(&cache) {
             return Ok(cached);
         }
@@ -327,56 +350,62 @@ impl GithubTapSource {
             self.api_base(),
             self.repo
         );
-        let resp = github_get(client, &url)
-            .send()
-            .await
-            .with_context(|| format!("requesting git tree for {}", self.repo))?;
-        if !resp.status().is_success() {
-            anyhow::bail!(
-                "GitHub tree for {} returned HTTP {}",
-                self.repo,
-                resp.status()
-            );
-        }
-        let tree: TreeResponse = resp
-            .json()
-            .await
-            .with_context(|| format!("decoding git tree for {}", self.repo))?;
-        if tree.truncated {
-            tracing::warn!(
-                repo = %self.repo,
-                "git tree truncated; some skills may be missing from this tap"
-            );
-        }
+        let fetched = async {
+            let _ = client;
+            let bytes = guarded_get_bytes_with_headers(&url, &github_headers())
+                .await
+                .with_context(|| format!("requesting git tree for {}", self.repo))?;
+            let tree: TreeResponse = serde_json::from_slice(&bytes)
+                .with_context(|| format!("decoding git tree for {}", self.repo))?;
+            if tree.truncated {
+                tracing::warn!(
+                    repo = %self.repo,
+                    "git tree truncated; some skills may be missing from this tap"
+                );
+            }
 
-        // A skill is any directory holding a SKILL.md. Derive them from the blob
-        // entries rather than the tree entries so a directory that merely looks
-        // like a skill (no SKILL.md) is never listed.
-        let mut paths: Vec<String> = tree
-            .tree
-            .iter()
-            .filter(|e| e.kind == "blob")
-            .filter_map(|e| {
-                let name = e.path.rsplit('/').next().unwrap_or_default();
-                if !name.eq_ignore_ascii_case("SKILL.md") {
-                    return None;
+            // A skill is any directory holding a SKILL.md. Derive them from the blob
+            // entries rather than the tree entries so a directory that merely looks
+            // like a skill (no SKILL.md) is never listed. A root SKILL.md is a valid
+            // single-skill repository and is represented by `.`.
+            let mut paths: Vec<String> = tree
+                .tree
+                .iter()
+                .filter(|e| e.kind == "blob")
+                .filter_map(|e| skill_dir_from_blob_path(&e.path))
+                .collect();
+            paths.sort();
+            paths.dedup();
+            Ok::<Vec<String>, anyhow::Error>(paths)
+        }
+        .await;
+        match fetched {
+            Ok(paths) => {
+                skills_catalog::write_cache(&cache, &paths);
+                Ok(paths)
+            }
+            Err(error) => {
+                if let Some(cached) = skills_catalog::read_stale_cache::<Vec<String>>(&cache) {
+                    tracing::warn!(
+                        repo = %self.repo,
+                        error = %error,
+                        "GitHub skill tap unavailable; using stale cached paths"
+                    );
+                    Ok(cached)
+                } else {
+                    Err(error)
                 }
-                // `skills/pdf/SKILL.md` -> `skills/pdf`; a root SKILL.md has no dir.
-                e.path
-                    .rsplit_once('/')
-                    .map(|(dir, _)| dir.to_string())
-                    .filter(|d| !d.is_empty())
-            })
-            .collect();
-        paths.sort();
-        paths.dedup();
-        skills_catalog::write_cache(&cache, &paths);
-        Ok(paths)
+            }
+        }
     }
 
     /// `<owner>/<repo>/<leaf>` — the id shape the Skill card contract documents.
     fn id_for(&self, path: &str) -> String {
-        let leaf = path.rsplit('/').next().unwrap_or(path);
+        let leaf = if path == ROOT_SKILL_PATH {
+            self.repo.rsplit('/').next().unwrap_or(&self.repo)
+        } else {
+            path.rsplit('/').next().unwrap_or(path)
+        };
         format!("{}/{leaf}", self.repo)
     }
 
@@ -391,14 +420,26 @@ impl GithubTapSource {
         let paths = self.skill_paths(client).await?;
         paths
             .into_iter()
-            .find(|p| p.rsplit('/').next().unwrap_or(p) == leaf)
+            .find(|p| {
+                let candidate = if p == ROOT_SKILL_PATH {
+                    self.repo.rsplit('/').next().unwrap_or(&self.repo)
+                } else {
+                    p.rsplit('/').next().unwrap_or(p)
+                };
+                candidate == leaf
+            })
             .ok_or_else(|| anyhow::anyhow!("`{leaf}` not found in {}", self.repo))
     }
 
     fn raw_url(&self, path: &str) -> String {
+        let skill_md_path = if path == ROOT_SKILL_PATH {
+            "SKILL.md".to_string()
+        } else {
+            format!("{path}/SKILL.md")
+        };
         format!(
-            "https://raw.githubusercontent.com/{}/HEAD/{path}/SKILL.md",
-            self.repo
+            "https://raw.githubusercontent.com/{}/HEAD/{skill_md_path}",
+            self.repo,
         )
     }
 
@@ -407,12 +448,63 @@ impl GithubTapSource {
     /// `HEAD` is a valid ref for codeload's tarball endpoint, so the default
     /// branch resolves without an extra API call to look it up.
     fn install_source(&self, path: &str) -> String {
-        format!("https://github.com/{}/tree/HEAD/{path}", self.repo)
+        if path == ROOT_SKILL_PATH {
+            format!("https://github.com/{}", self.repo)
+        } else {
+            format!("https://github.com/{}/tree/HEAD/{path}", self.repo)
+        }
     }
 
     pub async fn install(&self, client: &reqwest::Client, id: &str) -> Result<InstallResult> {
-        let path = self.path_for(client, id).await?;
-        from_source::install_from_source(client, &self.install_source(&path)).await
+        let path = match self.path_for(client, id).await {
+            Ok(path) => path,
+            Err(error) => {
+                if let Some(local) = self.local_install_fallback(id) {
+                    tracing::warn!(
+                        repo = %self.repo,
+                        id,
+                        error = %error,
+                        "GitHub skill tap unavailable; keeping the existing local skill"
+                    );
+                    return Ok(local);
+                }
+                return Err(error);
+            }
+        };
+        match from_source::install_from_source(client, &self.install_source(&path)).await {
+            Ok(result) => {
+                skills_catalog::record_provenance(&result.slug, id);
+                Ok(result)
+            }
+            Err(error) => self
+                .local_install_fallback(id)
+                .map(|local| {
+                    tracing::warn!(
+                        repo = %self.repo,
+                        id,
+                        error = %error,
+                        "GitHub skill download unavailable; keeping the existing local skill"
+                    );
+                    local
+                })
+                .ok_or(error),
+        }
+    }
+
+    /// Reuse the same catalog skill already on disk when GitHub is unavailable.
+    /// Provenance is required because different repositories can share a slug.
+    fn local_install_fallback(&self, id: &str) -> Option<InstallResult> {
+        let slug = skills_catalog::slug_of(id);
+        let path = ryu_skills::SkillRegistry::skills_dir()
+            .join(&slug)
+            .join("SKILL.md");
+        if !path.is_file() || !skills_catalog::skill_provenance_matches(&slug, id) {
+            return None;
+        }
+        Some(InstallResult {
+            slug,
+            path: path.to_string_lossy().into_owned(),
+        })
     }
 }
 
@@ -432,9 +524,20 @@ impl CatalogSource for GithubTapSource {
         let paths = self.skill_paths(client).await?;
         let cards: Vec<SkillCard> = paths
             .iter()
-            .filter(|path| matches_query(&q.query, &[path]))
+            .filter(|path| {
+                let leaf = if path.as_str() == ROOT_SKILL_PATH {
+                    self.repo.rsplit('/').next().unwrap_or(&self.repo)
+                } else {
+                    path.rsplit('/').next().unwrap_or(path)
+                };
+                matches_query(&q.query, &[path.as_str(), leaf, &self.repo])
+            })
             .map(|path| {
-                let leaf = path.rsplit('/').next().unwrap_or(path);
+                let leaf = if path.as_str() == ROOT_SKILL_PATH {
+                    self.repo.rsplit('/').next().unwrap_or(&self.repo)
+                } else {
+                    path.rsplit('/').next().unwrap_or(path)
+                };
                 card(
                     self.id_for(path),
                     self.repo.clone(),
@@ -454,7 +557,15 @@ impl CatalogSource for GithubTapSource {
 
     async fn detail(&self, client: &reqwest::Client, id: &str) -> Result<Value> {
         let path = self.path_for(client, id).await?;
-        let leaf = path.rsplit('/').next().unwrap_or(&path).to_string();
+        let leaf = if path == ROOT_SKILL_PATH {
+            self.repo
+                .rsplit('/')
+                .next()
+                .unwrap_or(&self.repo)
+                .to_string()
+        } else {
+            path.rsplit('/').next().unwrap_or(&path).to_string()
+        };
         let markdown = fetch_text(client, &self.raw_url(&path), "GitHub raw SKILL.md").await?;
         let installed = skills_catalog::installed_slugs();
         let (description, _) = split_front_matter(&markdown);
@@ -1344,6 +1455,33 @@ mod tests {
         assert_eq!(
             tap.install_source("skills/pdf"),
             "https://github.com/anthropics/skills/tree/HEAD/skills/pdf"
+        );
+    }
+
+    #[test]
+    fn root_skill_uses_repo_name_and_repo_source() {
+        let tap = GithubTapSource::new("gh-unlazy", "Unlazy", "Leonxlnx/unlazy", "trusted");
+        assert_eq!(tap.id_for(ROOT_SKILL_PATH), "Leonxlnx/unlazy/unlazy");
+        assert_eq!(
+            tap.raw_url(ROOT_SKILL_PATH),
+            "https://raw.githubusercontent.com/Leonxlnx/unlazy/HEAD/SKILL.md"
+        );
+        assert_eq!(
+            tap.install_source(ROOT_SKILL_PATH),
+            "https://github.com/Leonxlnx/unlazy"
+        );
+    }
+
+    #[test]
+    fn root_skill_blob_is_a_pack_member() {
+        assert_eq!(
+            skill_dir_from_blob_path("SKILL.md"),
+            Some(ROOT_SKILL_PATH.into())
+        );
+        assert_eq!(skill_dir_from_blob_path("references/method.md"), None);
+        assert_eq!(
+            skill_dir_from_blob_path("skills/pdf/SKILL.md"),
+            Some("skills/pdf".into())
         );
     }
 

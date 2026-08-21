@@ -214,10 +214,15 @@ export const models: Model[] = [
 	{ label: "GLM 4.5V", value: "zai/glm-4.5v" },
 ];
 
+const DEFAULT_MODEL: Model = models[7] ?? models[0] ?? {
+	label: "GPT-4o Mini",
+	value: "openai/gpt-4o-mini",
+};
+
 export function SettingsDialog() {
 	const editor = useEditorRef();
 
-	const [tempModel, setTempModel] = useState(models[7]);
+	const [tempModel, setTempModel] = useState<Model>(DEFAULT_MODEL);
 	const [tempKeys, setTempKeys] = useState<Record<string, string>>({
 		aiGatewayApiKey: "",
 		uploadthing: "",

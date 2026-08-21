@@ -13,8 +13,10 @@ use axum::{
 use serde_json::Value;
 
 use crate::{
+    budget::BudgetDecision,
+    config::BudgetAction,
     error::GatewayError,
-    pipeline::{authenticate, AuthInputs},
+    pipeline::{self, authenticate, AuthInputs, EmbeddingOperation, PipelineOutput},
     state::SharedState,
 };
 
@@ -29,7 +31,7 @@ pub async fn embeddings(
     Json(body): Json<Value>,
 ) -> Result<Response, GatewayError> {
     validate_embeddings(&body)?;
-    let model = required_model(&body)?;
+    required_model(&body)?;
     let ctx = authenticate(
         &state,
         AuthInputs {
@@ -40,7 +42,8 @@ pub async fn embeddings(
         },
     )
     .await?;
-    dispatch(&state, &ctx.request_id, &model, &body, Operation::Embed).await
+    let output = pipeline::run_embedding(state, ctx, body, EmbeddingOperation::Embed).await?;
+    Ok(pipeline_response(output))
 }
 
 pub async fn rerank(
@@ -49,7 +52,7 @@ pub async fn rerank(
     Json(body): Json<Value>,
 ) -> Result<Response, GatewayError> {
     validate_rerank(&body)?;
-    let model = required_model(&body)?;
+    required_model(&body)?;
     let ctx = authenticate(
         &state,
         AuthInputs {
@@ -60,46 +63,68 @@ pub async fn rerank(
         },
     )
     .await?;
-    dispatch(&state, &ctx.request_id, &model, &body, Operation::Rerank).await
+    let output = pipeline::run_embedding(state, ctx, body, EmbeddingOperation::Rerank).await?;
+    Ok(pipeline_response(output))
 }
 
-#[derive(Clone, Copy)]
-enum Operation {
-    Embed,
-    Rerank,
-}
-
-async fn dispatch(
-    state: &SharedState,
-    request_id: &str,
-    requested_model: &str,
-    body: &Value,
-    operation: Operation,
-) -> Result<Response, GatewayError> {
-    let route = state
-        .router
-        .route(requested_model.strip_prefix("gateway/").unwrap_or(requested_model));
-    let provider_id = route.provider.as_str();
-    let provider = state
-        .providers
-        .get(provider_id)
-        .ok_or_else(|| GatewayError::NoProvider(provider_id.to_owned()))?;
-    let response = match operation {
-        Operation::Embed => provider.embed(&route.model, body).await?,
-        Operation::Rerank => provider.rerank(&route.model, body).await?,
-    };
-    let mut output = Json(response).into_response();
-    let headers = output.headers_mut();
-    if let Ok(value) = HeaderValue::from_str(request_id) {
+fn pipeline_response(output: PipelineOutput) -> Response {
+    let budget = output.budget.clone();
+    let degraded = output.degraded.clone();
+    let policy_alert = output.policy_alert.clone();
+    let prompt_cache = output.prompt_cache;
+    let mut response = Json(output.response).into_response();
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&output.context.request_id) {
         headers.insert("x-request-id", value);
     }
-    if let Ok(value) = HeaderValue::from_str(provider_id) {
-        headers.insert("x-provider", value);
-    }
-    if let Ok(value) = HeaderValue::from_str(&route.model) {
+    headers.insert("x-provider", HeaderValue::from_static(output.provider_used));
+    if let Ok(value) = HeaderValue::from_str(&output.model_used) {
         headers.insert("x-routed-model", value);
     }
-    Ok(output)
+    if let Some(budget) = budget.as_ref() {
+        apply_budget_headers(headers, budget);
+    }
+    if let Some(degraded) = degraded {
+        if let Ok(value) = HeaderValue::from_str(&degraded.header_value()) {
+            headers.insert("x-degraded", value);
+        }
+    }
+    headers.insert(
+        "x-ryu-prompt-cache",
+        HeaderValue::from_static(prompt_cache.as_str()),
+    );
+    if let Some(alert) = policy_alert {
+        response.extensions_mut().insert(alert);
+    }
+    response
+}
+
+fn apply_budget_headers(headers: &mut HeaderMap, budget: &BudgetDecision) {
+    headers.insert(
+        "x-budget-scope",
+        HeaderValue::from_static(budget.scope.as_str()),
+    );
+    headers.insert(
+        "x-budget-action",
+        HeaderValue::from_static(budget_action_label(budget.action)),
+    );
+    if let Ok(value) = HeaderValue::from_str(&budget.used.to_string()) {
+        headers.insert("x-budget-used", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&budget.limit.to_string()) {
+        headers.insert("x-budget-limit", value);
+    }
+    headers.insert("x-budget-currency", HeaderValue::from_static("USD"));
+    headers.insert("x-budget-unit", HeaderValue::from_static("micro_usd"));
+}
+
+fn budget_action_label(action: BudgetAction) -> &'static str {
+    match action {
+        BudgetAction::Notify => "notify",
+        BudgetAction::Downgrade => "downgrade",
+        BudgetAction::Restrict => "restrict",
+        BudgetAction::Stop => "stop",
+    }
 }
 
 fn required_model(body: &Value) -> Result<String, GatewayError> {
@@ -165,9 +190,11 @@ fn validate_rerank(body: &Value) -> Result<(), GatewayError> {
         ));
     }
     if query.len() > MAX_RERANK_CHARS
-        || documents
-            .iter()
-            .any(|document| document.as_str().is_some_and(|text| text.len() > MAX_RERANK_CHARS))
+        || documents.iter().any(|document| {
+            document
+                .as_str()
+                .is_some_and(|text| text.len() > MAX_RERANK_CHARS)
+        })
     {
         return Err(GatewayError::BadRequest(format!(
             "rerank text may be at most {MAX_RERANK_CHARS} characters"

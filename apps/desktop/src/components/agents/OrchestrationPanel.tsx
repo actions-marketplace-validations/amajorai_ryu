@@ -4,9 +4,9 @@
 // that travel with the normal agent save (unlike the model-capability overrides
 // in AgentCapabilitiesPanel, which persist via a separate endpoint):
 //
-//   - Orchestrator: may discover other agents (orchestrator__discover_agents)
-//     and delegate work to them (delegate__fanout). Default on.
-//   - Create agents: may mint new custom agents (agent_builder__create_agent).
+//   - Orchestrator: may discover other agents (orchestrator.discover_agents)
+//     and delegate work to them (delegate.fanout). Default on.
+//   - Create agents: may mint new custom agents (agent_builder.create_agent).
 //     Default off — a privileged capability, enabled per agent.
 //
 // Controlled by AgentEditPage state so the values are folded into the agent's

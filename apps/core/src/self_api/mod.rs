@@ -36,8 +36,10 @@ use ryu_tool_registry::{
 
 /// The synthetic MCP "server" segment for every CoreApi tool id.
 pub const SERVER_NAME: &str = "ryu_api";
-/// Fully-qualified id prefix (`<server>__`). Every CoreApi tool id starts here.
-pub const ID_PREFIX: &str = "ryu_api__";
+/// Fully-qualified id prefix (`<server>.`). Every newly generated CoreApi tool
+/// id starts here. The legacy spelling remains accepted at the call boundary.
+pub const ID_PREFIX: &str = "ryu_api.";
+const LEGACY_ID_PREFIX: &str = "ryu_api__";
 
 /// Bound on a single loopback call so a slow/streaming endpoint can never wedge
 /// the tool loop (SSE/WS routes are denylisted, but this is the backstop).
@@ -106,7 +108,7 @@ pub fn is_denied(path: &str, method: &str) -> bool {
 /// One CoreApi tool: an OpenAPI operation reduced to what dispatch needs.
 #[derive(Debug, Clone)]
 pub struct CoreApiRoute {
-    /// `ryu_api__<method>_<path_slug>`.
+    /// `ryu_api.<method>_<path_slug>`.
     pub id: String,
     /// Uppercase HTTP method (`GET`/`POST`/…).
     pub method: String,
@@ -295,7 +297,8 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
 
 /// Describe one CoreApi tool by id (`None` when the id is unknown / not CoreApi).
 pub fn describe(id: &str) -> Option<DescribedTool> {
-    let r = routes().iter().find(|r| r.id == id)?;
+    let normalized_id = crate::sidecar::mcp::canonical_tool_id(id);
+    let r = routes().iter().find(|r| r.id == normalized_id)?;
     Some(describe_from_parts(
         &r.id,
         &format!("{} {}", r.method, r.path_template),
@@ -309,16 +312,17 @@ pub fn describe(id: &str) -> Option<DescribedTool> {
 
 /// Whether a tool id belongs to the CoreApi plane.
 pub fn is_core_api(tool_id: &str) -> bool {
-    tool_id.starts_with(ID_PREFIX)
+    tool_id.starts_with(ID_PREFIX) || tool_id.starts_with(LEGACY_ID_PREFIX)
 }
 
-/// The lowercase HTTP method encoded in a CoreApi tool id (`ryu_api__get_…` →
+/// The lowercase HTTP method encoded in a CoreApi tool id (`ryu_api.get_…` →
 /// `get`). `None` for non-CoreApi ids. HTTP verbs contain no `_`, so the method
 /// is exactly the segment between the prefix and the first `_`.
 pub fn method_of(tool_id: &str) -> Option<&str> {
-    tool_id
+    let rest = tool_id
         .strip_prefix(ID_PREFIX)
-        .map(|rest| rest.split('_').next().unwrap_or(rest))
+        .or_else(|| tool_id.strip_prefix(LEGACY_ID_PREFIX))?;
+    rest.split('_').next()
 }
 
 /// Whether this is a **mutating** CoreApi tool (any non-GET verb). The approval
@@ -528,12 +532,12 @@ mod tests {
             .iter()
             .find(|r| r.path_template == "/api/quests" && r.method == "GET")
             .unwrap();
-        assert_eq!(get.id, "ryu_api__get_api_quests");
+        assert_eq!(get.id, "ryu_api.get_api_quests");
         assert_eq!(method_of(&get.id), Some("get"));
         assert!(!is_mutating(&get.id));
 
         let del = routes.iter().find(|r| r.method == "DELETE").unwrap();
-        assert_eq!(del.id, "ryu_api__delete_api_quests_id");
+        assert_eq!(del.id, "ryu_api.delete_api_quests_id");
         assert_eq!(method_of(&del.id), Some("delete"));
         assert!(is_mutating(&del.id));
         assert_eq!(del.path_params, vec!["id".to_string()]);
@@ -639,9 +643,29 @@ mod tests {
 
     #[test]
     fn method_of_is_none_for_non_core_api() {
-        assert_eq!(method_of("exa__search"), None);
-        assert!(!is_core_api("exa__search"));
-        assert!(!is_mutating("exa__search"));
+        assert_eq!(method_of("exa.search"), None);
+        assert!(!is_core_api("exa.search"));
+        assert!(!is_mutating("exa.search"));
+    }
+
+    #[test]
+    fn legacy_core_api_ids_are_accepted_at_the_boundary() {
+        let canonical = routes()
+            .first()
+            .map(|route| route.id.as_str())
+            .expect("the generated Core API has at least one exposed route");
+        let (server, method) = canonical
+            .split_once('.')
+            .expect("Core API ids use the canonical dotted separator");
+        let legacy = format!("{server}__{method}");
+        assert!(is_core_api(canonical));
+        assert!(is_core_api(&legacy));
+        assert_eq!(
+            method_of(canonical),
+            Some(method.split('_').next().unwrap())
+        );
+        assert_eq!(method_of(&legacy), Some(method.split('_').next().unwrap()));
+        assert!(describe(&legacy).is_some());
     }
 
     #[tokio::test]
@@ -659,7 +683,7 @@ mod tests {
         });
 
         let route = CoreApiRoute {
-            id: "ryu_api__get_api_quests".to_string(),
+            id: "ryu_api.get_api_quests".to_string(),
             method: "GET".to_string(),
             path_template: "/api/quests".to_string(),
             summary: "List quests".to_string(),
@@ -694,7 +718,7 @@ mod tests {
         });
 
         let route = CoreApiRoute {
-            id: "ryu_api__get_api_quests_id".to_string(),
+            id: "ryu_api.get_api_quests_id".to_string(),
             method: "GET".to_string(),
             path_template: "/api/quests/{id}".to_string(),
             summary: String::new(),

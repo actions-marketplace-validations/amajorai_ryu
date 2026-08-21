@@ -74,7 +74,7 @@ export function AppUpdatesSettings() {
 			const [appVersion, info, enabled, booked] = await Promise.all([
 				getVersion().catch(() => null),
 				getVersionInfo(target).catch(() => null),
-				getAutoUpdateEnabled(target),
+				getAutoUpdateEnabled(target).catch(() => true),
 				getPendingAppUpdate(),
 			]);
 			if (!active) {
@@ -90,10 +90,17 @@ export function AppUpdatesSettings() {
 	}, [getNode]);
 
 	const onToggle = async (next: boolean) => {
+		const previous = autoUpdate;
 		setAutoUpdate(next);
-		const ok = await setAutoUpdateEnabled(toTarget(getNode()), next);
-		if (!ok) {
-			setAutoUpdate(!next);
+		try {
+			const ok = await setAutoUpdateEnabled(toTarget(getNode()), next);
+			if (ok) {
+				return;
+			}
+			setAutoUpdate(previous);
+			sileo.error({ title: "Could not save the auto-update setting" });
+		} catch {
+			setAutoUpdate(previous);
 			sileo.error({ title: "Could not save the auto-update setting" });
 		}
 	};

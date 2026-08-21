@@ -27,12 +27,10 @@
 //! - Workspace: `msb create --name <id> <image>` → `msb exec <id> -- <cmd>` →
 //!   `msb rm <id>`
 //!
-//! Network / volume-mount flags are **not documented** in the CLI today, so the
-//! capability descriptor is honored only at the microVM's inherent deny-by-
-//! default boundary (no extra flags emitted). This is the same honest-but-
-//! conservative posture Core takes for other unverified CLI flag surfaces (e.g.
-//! the omlx engine). When the CLI documents network/mount flags, extend
-//! [`caps_to_flags`].
+//! Network / volume-mount flags are **not documented** in the CLI today. Core
+//! therefore accepts only the deny-all capability set for this backend and
+//! rejects any request that would require an unverified flag. This prevents a
+//! requested read, write, or network grant from being silently ignored.
 //!
 //! ## Config
 //!
@@ -123,16 +121,20 @@ pub async fn detect() -> DetectResult {
     }
 }
 
-// ── Capability flags ─────────────────────────────────────────────────────────
+// ── Capability validation ────────────────────────────────────────────────────
 
-/// Translate [`SandboxCapabilities`] into `msb` CLI flags.
+/// Reject capabilities that the documented `msb` CLI cannot express safely.
 ///
-/// The CLI does not currently document network/volume flags, so this returns an
-/// empty flag set: the microVM's own deny-by-default boundary provides the
-/// isolation. The `caps` argument is retained so this becomes the single edit
-/// site once the flag surface is documented.
-fn caps_to_flags(_caps: &SandboxCapabilities) -> Vec<String> {
-    Vec::new()
+/// The microVM remains deny-by-default, but an empty flag list must not be
+/// mistaken for enforcement of a requested grant. Once `msb` documents and
+/// Core verifies equivalent flags, this is the single edit site to extend.
+fn ensure_capabilities_supported(caps: &SandboxCapabilities) -> Result<()> {
+    if caps.network || !caps.fs_read_paths.is_empty() || !caps.fs_write_paths.is_empty() {
+        return Err(anyhow!(
+            "microsandbox cannot safely express requested filesystem or network capabilities; use wasmtime or docker"
+        ));
+    }
+    Ok(())
 }
 
 // ── MicrosandboxSandbox ──────────────────────────────────────────────────────
@@ -211,11 +213,9 @@ impl Sandbox for MicrosandboxSandbox {
 
     fn exec(&self, spec: ExecSpec) -> BoxFuture<Result<ExecOutput>> {
         Box::pin(async move {
+            ensure_capabilities_supported(&spec.capabilities)?;
             let mut cmd = Command::new(binary());
             cmd.arg("run");
-            for flag in caps_to_flags(&spec.capabilities) {
-                cmd.arg(flag);
-            }
             cmd.arg(image());
             cmd.arg("--");
             cmd.arg(&spec.command);
@@ -240,12 +240,10 @@ impl Sandbox for MicrosandboxSandbox {
         capabilities: SandboxCapabilities,
     ) -> BoxFuture<Result<WorkspaceId>> {
         Box::pin(async move {
+            ensure_capabilities_supported(&capabilities)?;
             let name = format!("ryu-{}", uuid::Uuid::new_v4());
             let mut cmd = Command::new(binary());
             cmd.arg("create").arg("--name").arg(&name);
-            for flag in caps_to_flags(&capabilities) {
-                cmd.arg(flag);
-            }
             cmd.arg(image());
             cmd.no_window();
 
@@ -276,6 +274,7 @@ impl Sandbox for MicrosandboxSandbox {
     fn exec_in_workspace(&self, id: &WorkspaceId, spec: ExecSpec) -> BoxFuture<Result<ExecOutput>> {
         let name = id.0.clone();
         Box::pin(async move {
+            ensure_capabilities_supported(&spec.capabilities)?;
             let mut cmd = Command::new(binary());
             cmd.arg("exec").arg(&name).arg("--").arg(&spec.command);
             for arg in &spec.args {
@@ -346,13 +345,14 @@ mod tests {
     }
 
     #[test]
-    fn caps_emit_no_flags_yet() {
-        // Until msb documents network/mount flags, the mapping is empty and the
-        // microVM boundary provides isolation.
-        assert!(caps_to_flags(&SandboxCapabilities::default()).is_empty());
+    fn unsupported_capabilities_fail_closed() {
+        assert!(ensure_capabilities_supported(&SandboxCapabilities::default()).is_ok());
         let mut caps = SandboxCapabilities::default();
         caps.network = true;
-        assert!(caps_to_flags(&caps).is_empty());
+        assert!(ensure_capabilities_supported(&caps).is_err());
+        caps.network = false;
+        caps.fs_read_paths.insert(std::path::PathBuf::from("/tmp"));
+        assert!(ensure_capabilities_supported(&caps).is_err());
     }
 
     #[tokio::test]

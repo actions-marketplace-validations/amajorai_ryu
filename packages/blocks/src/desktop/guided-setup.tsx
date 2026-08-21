@@ -12,7 +12,6 @@
 import { ArrowLeft01Icon, ArrowRight01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
-import { Spinner } from "@ryu/ui/components/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs";
 // biome-ignore lint/correctness/noUnresolvedImports: ReactNode is a valid React export; biome's resolver misreports it
 import { type ReactNode, useState } from "react";
@@ -150,8 +149,7 @@ export function GuidedSetup({
 
 				{last ? (
 					<>
-						<Button disabled={busy || finishDisabled} onClick={onFinish}>
-							{busy ? <Spinner /> : null}
+						<Button disabled={finishDisabled} loading={busy} onClick={onFinish}>
 							{finishLabel}
 						</Button>
 						{secondaryFinish ? (

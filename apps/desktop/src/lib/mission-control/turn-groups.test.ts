@@ -295,8 +295,8 @@ describe("toolNameOf", () => {
 	it("reads the name out of a typed part and a dynamic part", () => {
 		expect(toolNameOf({ type: "tool-Edit" })).toBe("Edit");
 		expect(
-			toolNameOf({ type: "dynamic-tool", toolName: "mcp__thing__do" })
-		).toBe("mcp__thing__do");
+			toolNameOf({ type: "dynamic-tool", toolName: "mcp.thing.do" })
+		).toBe("mcp.thing.do");
 	});
 
 	it("degrades to a generic name rather than throwing on a malformed part", () => {

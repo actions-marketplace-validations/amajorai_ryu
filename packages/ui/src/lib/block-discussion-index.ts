@@ -375,7 +375,12 @@ const toResolvedSuggestion = ({
 		});
 	}
 
-	const suggestionData = getSuggestionData(sortedEntries[0][0]);
+	const firstEntry = sortedEntries[0];
+	if (!firstEntry) {
+		return null;
+	}
+
+	const suggestionData = getSuggestionData(firstEntry[0]);
 
 	if (!suggestionData) {
 		return null;

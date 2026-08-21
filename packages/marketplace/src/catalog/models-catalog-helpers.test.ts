@@ -10,6 +10,7 @@ import {
 	buildModelChips,
 	deviceSummaryLines,
 	filterModelsByTokens,
+	fineTuneHrefForModel,
 	formatAgo,
 	formatContext,
 	formatCount,
@@ -114,6 +115,14 @@ describe("filterModelsByTokens", () => {
 		];
 		const kept = filterModelsByTokens(models, new Set(["vision"]), "google");
 		expect(kept.map((m) => m.id)).toEqual(["keep"]);
+	});
+});
+
+describe("fineTuneHrefForModel", () => {
+	test("preserves the selected model as a URL-safe handoff", () => {
+		expect(fineTuneHrefForModel("unsloth/Llama 3/8B")).toBe(
+			"/plugin/@ryu/finetune?base_model_id=unsloth%2FLlama%203%2F8B"
+		);
 	});
 });
 
@@ -224,12 +233,12 @@ describe("formatDate", () => {
 });
 
 describe("formatCount", () => {
-	test("millions render as N.NM", () => {
-		expect(formatCount(1_234_567)).toBe("1.2M");
+	test("million-scale counts render with a lowercase m", () => {
+		expect(formatCount(1_234_567)).toBe("1.2m");
 	});
 
-	test("thousands render as N.Nk", () => {
-		expect(formatCount(1500)).toBe("1.5k");
+	test("thousands keep comma separators", () => {
+		expect(formatCount(1500)).toBe("1,500");
 	});
 
 	test("under 1000 renders the raw integer", () => {
@@ -245,17 +254,17 @@ describe("formatContext", () => {
 		expect(formatContext(-5)).toBeNull();
 	});
 
-	test("a kilo-range window rounds to the nearest K", () => {
-		expect(formatContext(32_768)).toBe("32K");
+	test("a kilo-range window uses comma-separated thousands", () => {
+		expect(formatContext(32_768)).toBe("32,768");
 	});
 
-	test("an exact power-of-two mega window renders a whole M", () => {
-		expect(formatContext(1_048_576)).toBe("1M");
+	test("an exact power-of-two mega window renders a whole lowercase m", () => {
+		expect(formatContext(1_048_576)).toBe("1m");
 	});
 
 	test("a non-round mega window keeps one decimal", () => {
-		// 1.5 * 1,048,576 = 1,572,864 -> 1.5M
-		expect(formatContext(1_572_864)).toBe("1.5M");
+		// 1,572,864 -> 1.6m at the shared display precision.
+		expect(formatContext(1_572_864)).toBe("1.6m");
 	});
 
 	test("a sub-1024 window renders the raw token count", () => {

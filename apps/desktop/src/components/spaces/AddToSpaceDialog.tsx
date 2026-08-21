@@ -276,7 +276,11 @@ export function AddToSpaceDialog({
 							<Label>Space</Label>
 							<Select
 								items={spaces.map((s) => ({ label: s.name, value: s.id }))}
-								onValueChange={(value: string) => setPickedId(value)}
+								onValueChange={(value) => {
+									if (value !== null) {
+										setPickedId(value);
+									}
+								}}
 								value={targetId ?? ""}
 							>
 								<SelectTrigger className="h-9 w-full text-sm">

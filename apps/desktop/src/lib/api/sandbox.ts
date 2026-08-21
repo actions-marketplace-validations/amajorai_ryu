@@ -2,7 +2,7 @@
 //
 // Typed client for Core's sandbox-backend endpoint (`/api/sandbox/backend`).
 // A sandbox backend is the isolated runtime the agent's `sandbox_exec` tool runs
-// in (wasmtime / docker / microsandbox / opensandbox). Unlike the chat engine,
+// in (wasmtime / docker / microsandbox / opensandbox). Unlike Chat,
 // backends are NOT mutually exclusive — this picks the *default* used when a call
 // omits an explicit backend; a per-call `backend` argument always overrides it.
 

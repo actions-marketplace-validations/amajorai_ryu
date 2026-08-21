@@ -27,8 +27,14 @@ import { useCallback, useMemo, useState } from "react";
 import { TOKEN_KEY } from "@/lib/auth-client.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
+	fetchInstalledPortablePackages,
+	installPortablePackage,
+	setPortablePackageEnabled,
+} from "@/src/lib/api/marketplace.ts";
+import {
 	type AddMarketplaceParams,
 	type AppInfo,
+	type AppToggleResult,
 	addMarketplaceSource,
 	type CatalogEntry,
 	disableApp,
@@ -131,6 +137,16 @@ const PAGE_LIMIT = 40;
  *  is allowed to go idle anyway. `/api/apps` is a local Core read, so this is a
  *  backstop against a wedged fetch — never the normal path. */
 const INSTALLED_REFRESH_DEADLINE_MS = 10_000;
+
+function portablePackageTarget(
+	entry: CatalogEntry
+): { id: string; kind: string } | null {
+	const kind = entry.package_kind?.trim();
+	if (!(kind && (entry.github_source || entry.download_url))) {
+		return null;
+	}
+	return { id: entry.id, kind };
+}
 
 /** Sources the picker must not offer.
  *
@@ -279,6 +295,10 @@ export function useAppsCatalog(
 	);
 
 	const appsQuery = useQuery(installedAppsQuery(target));
+	const portablePackagesQuery = useQuery({
+		queryKey: ["marketplace", "packages", "installed", url],
+		queryFn: () => fetchInstalledPortablePackages(target),
+	});
 
 	const listQuery = useInfiniteQuery({
 		...pluginCatalogQuery(target, {
@@ -298,8 +318,18 @@ export function useAppsCatalog(
 	const items = useMemo<AppCatalogItem[]>(() => {
 		const infos = appsQuery.data ?? [];
 		const byId = new Map(infos.map((a) => [a.id, a]));
+		const portableByKey = new Map(
+			(portablePackagesQuery.data ?? []).map((pkg) => [
+				`${pkg.kind}:${pkg.id}`,
+				pkg,
+			])
+		);
 		return catalogEntries.map((entry) => {
 			const info = byId.get(entry.id) ?? null;
+			const portableTarget = portablePackageTarget(entry);
+			const portable = portableTarget
+				? portableByKey.get(`${portableTarget.kind}:${portableTarget.id}`)
+				: undefined;
 			// Surface plugin dependencies in the catalog detail ("Requires these
 			// apps"). Core's catalog source emits `requires`, but fall back to the
 			// live app record (list_apps carries it too) so a built-in app's deps
@@ -319,19 +349,19 @@ export function useAppsCatalog(
 			return {
 				entry: requires === entry.requires ? entry : { ...entry, requires },
 				info,
-				installed: info?.installed ?? false,
-				enabled: info?.enabled ?? false,
+				installed: portable ? true : (info?.installed ?? false),
+				enabled: portable?.enabled ?? info?.enabled ?? false,
 				// The train this install follows, so the detail bar can say "Beta
 				// channel" instead of leaving the user to infer it from a version
 				// suffix that a channel pin does not always show.
 				channel: info?.channel ?? null,
 				// What is on the machine, which is what a channel switch is compared
 				// against — the entry's own `version` is the newest published one.
-				installedVersion: info?.installedVersion ?? null,
+				installedVersion: portable?.version ?? info?.installedVersion ?? null,
 				grants: info?.permissionGrants ?? entry.permission_grants ?? [],
 			};
 		});
-	}, [catalogEntries, appsQuery.data]);
+	}, [catalogEntries, appsQuery.data, portablePackagesQuery.data]);
 
 	const selectedItem = useMemo(
 		() => items.find((it) => it.entry.id === selectedId) ?? null,
@@ -390,6 +420,9 @@ export function useAppsCatalog(
 		() =>
 			Promise.race([
 				qc.invalidateQueries({ queryKey: ["apps", "list", url] }),
+				qc.invalidateQueries({
+					queryKey: ["marketplace", "packages", "installed", url],
+				}),
 				new Promise<void>((resolve) => {
 					setTimeout(resolve, INSTALLED_REFRESH_DEADLINE_MS);
 				}),
@@ -433,6 +466,11 @@ export function useAppsCatalog(
 					"Integration descriptors are browse-only — open the link to configure."
 				);
 			}
+			const portableTarget = portablePackageTarget(item.entry);
+			if (portableTarget && !item.installed) {
+				await installPortablePackage({ url, token }, portableTarget);
+				return;
+			}
 			if (!item.installed && item.entry.source !== "built-in") {
 				await installPluginFromCatalog(
 					{ url, token },
@@ -468,16 +506,37 @@ export function useAppsCatalog(
 		},
 	});
 
-	const lifecycleMutation = useMutation({
-		mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
-			enabled ? enableApp({ url, token }, id) : disableApp({ url, token }, id),
+	const lifecycleMutation = useMutation<
+		AppToggleResult | import("@/src/lib/api/marketplace.ts").PortablePackageState,
+		Error,
+		{ item: AppCatalogItem; enabled: boolean }
+	>({
+		mutationFn: ({
+			item,
+			enabled,
+		}: {
+			item: AppCatalogItem;
+			enabled: boolean;
+		}) => {
+			const portableTarget = portablePackageTarget(item.entry);
+			if (portableTarget) {
+				return setPortablePackageEnabled(
+					{ url, token },
+					portableTarget,
+					enabled
+				);
+			}
+			return enabled
+				? enableApp({ url, token }, item.entry.id)
+				: disableApp({ url, token }, item.entry.id);
+		},
 		// Enable/disable share the flag with add: the card's control is the same
 		// control, and the item is equally un-clickable during either.
-		onMutate: ({ id }) => beginInstall(id),
-		onSettled: async (_data, _error, { id }) => {
+		onMutate: ({ item }) => beginInstall(item.entry.id),
+		onSettled: async (_data, _error, { item }) => {
 			revalidateBrowse();
 			await revalidateInstalledState();
-			endInstall(id);
+			endInstall(item.entry.id);
 		},
 	});
 
@@ -508,9 +567,13 @@ export function useAppsCatalog(
 			if (!selectedId) {
 				return;
 			}
-			await lifecycleMutation.mutateAsync({ id: selectedId, enabled });
+			const item = items.find((candidate) => candidate.entry.id === selectedId);
+			if (!item) {
+				return;
+			}
+			await lifecycleMutation.mutateAsync({ item, enabled });
 		},
-		[selectedId, lifecycleMutation]
+		[items, selectedId, lifecycleMutation]
 	);
 
 	const installFromUrl = useCallback(
@@ -549,7 +612,10 @@ export function useAppsCatalog(
 
 	const errorOf = (e: unknown): string | null =>
 		e instanceof Error ? e.message : null;
-	const loadError = errorOf(listQuery.error) ?? errorOf(appsQuery.error);
+	const loadError =
+		errorOf(listQuery.error) ??
+		errorOf(appsQuery.error) ??
+		errorOf(portablePackagesQuery.error);
 	const browseNote = listQuery.data?.pages.find((p) => p.note)?.note ?? null;
 	const actionError =
 		errorOf(lifecycleMutation.error) ??
@@ -559,7 +625,10 @@ export function useAppsCatalog(
 
 	return {
 		items,
-		loading: listQuery.isLoading || appsQuery.isLoading,
+		loading:
+			listQuery.isLoading ||
+			appsQuery.isLoading ||
+			portablePackagesQuery.isLoading,
 		error: actionError ?? browseNote ?? loadError,
 		fetchNextPage: listQuery.fetchNextPage,
 		hasNextPage: listQuery.hasNextPage,

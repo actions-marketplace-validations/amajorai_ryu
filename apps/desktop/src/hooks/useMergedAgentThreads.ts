@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
+import { conversationParticipantIds } from "@/src/lib/agent-conversation-groups.ts";
 import type { Conversation, Message } from "@/types/chat.ts";
 
 /** How many older threads are loaded above the live one. */
@@ -84,8 +85,7 @@ export function useAgentThreads(agentId: string | null): Conversation[] {
 				if (conv.archived) {
 					return false;
 				}
-				const ids = conv.participants ?? (conv.agentId ? [conv.agentId] : []);
-				return ids.includes(agentId);
+				return conversationParticipantIds(conv).includes(agentId);
 			})
 			.sort((a, b) => stampOf(b) - stampOf(a));
 	}, [agentId, conversations]);

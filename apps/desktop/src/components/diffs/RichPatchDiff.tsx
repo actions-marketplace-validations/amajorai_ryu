@@ -14,6 +14,7 @@ import {
 	HoverCardContent,
 	HoverCardTrigger,
 } from "@ryu/ui/components/hover-card.tsx";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { CSSProperties, ReactElement, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -239,7 +240,7 @@ export function RichPatchDiff({
 						<span className="font-medium">Review comment</span>
 						<span className="text-muted-foreground">
 							{annotation.side === "additions" ? "added" : "removed"} line{" "}
-							{annotation.lineNumber}
+							{formatCount(annotation.lineNumber) ?? "—"}
 						</span>
 						<button
 							aria-label="Remove review comment"

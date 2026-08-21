@@ -42,8 +42,10 @@ function streamResponse(chunks: string[], status = 200): Response {
 function collector() {
 	const deltas: string[] = [];
 	const tools: string[] = [];
+	const toolInputs: unknown[] = [];
 	const toolInputIds: Array<string | undefined> = [];
 	const outputs: string[] = [];
+	const outputBodies: unknown[] = [];
 	const toolOutputIds: Array<string | undefined> = [];
 	const reasoning: string[] = [];
 	const todos: unknown[] = [];
@@ -53,12 +55,14 @@ function collector() {
 	let doneCount = 0;
 	const handlers: ChatStreamHandlers = {
 		onTextDelta: (d) => deltas.push(d),
-		onToolInput: (t, _input, id) => {
+		onToolInput: (t, input, id) => {
 			tools.push(t);
+			toolInputs.push(input);
 			toolInputIds.push(id);
 		},
-		onToolOutput: (s, _output, id) => {
+		onToolOutput: (s, output, id) => {
 			outputs.push(s);
+			outputBodies.push(output);
 			toolOutputIds.push(id);
 		},
 		onReasoningDelta: (d) => reasoning.push(d),
@@ -74,7 +78,9 @@ function collector() {
 		handlers,
 		deltas,
 		tools,
+		toolInputs,
 		outputs,
+		outputBodies,
 		toolInputIds,
 		toolOutputIds,
 		reasoning,
@@ -159,10 +165,14 @@ test("dispatches tool-input, tool-output, and plugin-note frames", async () => {
 				frame({
 					type: "tool-output-available",
 					toolCallId: "call-1",
-					output: { status: "ok" },
+					output: { status: "ok", output: { stdout: "file" } },
 				}),
-				// status absent → onToolOutput NOT called.
-				frame({ type: "tool-output-available", output: {} }),
+				// Raw AI SDK output bodies have no status envelope.
+				frame({
+					type: "tool-output-available",
+					toolCallId: "call-raw",
+					output: { stdout: "raw", isError: false },
+				}),
 				frame({ type: "reasoning-delta", delta: "think" }),
 				frame({
 					type: "tool-input-available",
@@ -181,6 +191,8 @@ test("dispatches tool-input, tool-output, and plugin-note frames", async () => {
 						options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
 					},
 				}),
+				// A malformed permission payload is ignored by the stream layer.
+				frame({ type: "data-ryu-permission", data: null }),
 				// text absent → onPluginNote NOT called.
 				frame({ type: "data-plugin_note", data: {} }),
 				frame({ type: "finish" }),
@@ -190,7 +202,11 @@ test("dispatches tool-input, tool-output, and plugin-note frames", async () => {
 	const c = collector();
 	await streamChat(target, noTurns, noOpts, c.handlers);
 	expect(c.tools).toEqual(["search", "tool", "TodoWrite"]);
-	expect(c.outputs).toEqual(["ok"]);
+	expect(c.outputs).toEqual(["ok", "completed"]);
+	expect(c.outputBodies).toEqual([
+		{ stdout: "file" },
+		{ stdout: "raw", isError: false },
+	]);
 	expect(c.reasoning).toEqual(["think"]);
 	expect(c.todos).toEqual([
 		{ todos: [{ content: "ship", status: "pending" }] },
@@ -203,6 +219,52 @@ test("dispatches tool-input, tool-output, and plugin-note frames", async () => {
 			options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
 		},
 	]);
+	expect(c.done()).toBe(1);
+});
+
+test("keeps Question tool inputs answerable across frame shapes", async () => {
+	globalThis.fetch = (() =>
+		Promise.resolve(
+			streamResponse([
+				frame({
+					type: "tool-input-available",
+					toolCallId: "question-1",
+					toolName: "Question",
+					input: {
+						questions: [
+							{
+								id: "q-1",
+								title: "Pick one",
+								kind: "single",
+								options: [{ id: "yes", label: "Yes" }],
+							},
+						],
+					},
+				}),
+				frame({
+					type: "data-ryu-question",
+					data: {
+						questions: [
+							{
+								id: "q-2",
+								title: "Confirm",
+								kind: "text",
+								options: [],
+							},
+						],
+					},
+					toolCallId: "question-2",
+				}),
+				frame({ type: "finish" }),
+			])
+		)) as unknown as typeof fetch;
+
+	const c = collector();
+	await streamChat(target, noTurns, noOpts, c.handlers);
+	expect(c.tools).toEqual(["Question", "Question"]);
+	expect(c.toolInputIds).toEqual(["question-1", "question-2"]);
+	expect(c.toolInputs[0]).toMatchObject({ toolCallId: "question-1" });
+	expect(c.toolInputs[1]).toMatchObject({ toolCallId: "question-2" });
 	expect(c.done()).toBe(1);
 });
 
@@ -241,6 +303,9 @@ test("ignores unrecognized frame types and non-string deltas", async () => {
 			streamResponse([
 				frame({ type: "text-start" }),
 				frame({ type: "tool-input-start" }),
+				frame(null),
+				frame([]),
+				frame({}),
 				// text-delta with a non-string delta is a no-op.
 				frame({ type: "text-delta", delta: 42 }),
 				frame({ type: "finish" }),
@@ -250,6 +315,27 @@ test("ignores unrecognized frame types and non-string deltas", async () => {
 	const c = collector();
 	await streamChat(target, noTurns, noOpts, c.handlers);
 	expect(c.deltas).toEqual([]);
+	expect(c.errors).toEqual([]);
+	expect(c.done()).toBe(1);
+});
+
+test("accepts data: without a space and flushes an unterminated frame", async () => {
+	globalThis.fetch = (() =>
+		Promise.resolve(
+			streamResponse([
+				": keep-alive\n",
+				'data:{"type":"text-delta","delta":"recovered"}\n',
+				"data: null\n",
+				"data: [1, 2]\n",
+				'data: {"type":123,"delta":"ignored"}\n',
+				"data: {not valid json\n",
+				'data: {"type":"finish"}',
+			])
+		)) as unknown as typeof fetch;
+
+	const c = collector();
+	await streamChat(target, noTurns, noOpts, c.handlers);
+	expect(c.deltas).toEqual(["recovered"]);
 	expect(c.errors).toEqual([]);
 	expect(c.done()).toBe(1);
 });

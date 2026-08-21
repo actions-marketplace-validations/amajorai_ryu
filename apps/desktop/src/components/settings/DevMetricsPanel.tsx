@@ -7,6 +7,7 @@
 
 import { Button } from "@ryu/ui/components/button.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useSyncExternalStore } from "react";
 import {
 	clearDevMetrics,
@@ -107,7 +108,7 @@ export function DevMetricsPanel() {
 					title="Chat turns"
 				>
 					<div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-						<Stat label="turns" value={String(turnStats.count)} />
+						<Stat label="turns" value={formatCount(turnStats.count) ?? "—"} />
 						<Stat
 							label="first token (median)"
 							value={formatMs(turnStats.medianTtft)}
@@ -165,7 +166,9 @@ export function DevMetricsPanel() {
 										<td className="py-1 pr-3 text-right">
 											{formatBytes(turn.bytes)}
 										</td>
-										<td className="py-1 text-right">{turn.chunks}</td>
+										<td className="py-1 text-right">
+											{formatCount(turn.chunks) ?? "—"}
+										</td>
 									</tr>
 								))}
 							</tbody>
@@ -201,7 +204,9 @@ export function DevMetricsPanel() {
 										<td className="max-w-[22rem] truncate py-1 pr-3 font-mono">
 											{stat.path}
 										</td>
-										<td className="py-1 pr-3 text-right">{stat.count}</td>
+										<td className="py-1 pr-3 text-right">
+											{formatCount(stat.count) ?? "—"}
+										</td>
 										<td className="py-1 pr-3 text-right">
 											{formatMs(stat.median)}
 										</td>
@@ -212,7 +217,7 @@ export function DevMetricsPanel() {
 											{formatMs(stat.max)}
 										</td>
 										<td className="py-1 text-right">
-											{stat.errors > 0 ? stat.errors : "—"}
+											{stat.errors > 0 ? formatCount(stat.errors) : "—"}
 										</td>
 									</tr>
 								))}

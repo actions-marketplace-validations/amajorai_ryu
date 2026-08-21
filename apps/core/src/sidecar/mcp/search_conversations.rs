@@ -1,11 +1,11 @@
-//! Built-in semantic conversation-history search (`search_conversations__search`).
+//! Built-in semantic conversation-history search (`search_conversations.search`).
 //!
 //! An agent-callable tool that searches across the user's stored chat messages
 //! using the same embedder the rest of Core uses (local hashing by default, or a
 //! remote `/v1/embeddings` endpoint via `RYU_EMBED_BASE_URL` — nothing hardcoded).
 //!
 //! Registered as a reserved registry server (`search_conversations`) like
-//! spider/exa/notify, so the `<server>__<tool>` id scheme, per-agent allowlist,
+//! spider/exa/notify, so the `<server>.<tool>` id scheme, per-agent allowlist,
 //! catalog search (`GET /api/tools/search`), and the single `call_tool` entry all
 //! work for free — and it is allowlist-gated + audited on BOTH planes (ACP +
 //! openai-compat) through the shared dispatch path. No bespoke dispatch.
@@ -58,7 +58,7 @@ fn search_schema() -> Value {
 /// The search tools exposed through the registry.
 pub fn tools() -> Vec<RegistryTool> {
     vec![RegistryTool {
-        id: format!("{SERVER_NAME}__search"),
+        id: format!("{SERVER_NAME}.search"),
         server: SERVER_NAME.to_owned(),
         name: "search".to_owned(),
         description: Some(
@@ -107,6 +107,21 @@ pub async fn dispatch(
                 .and_then(Value::as_u64)
                 .map(|n| n.clamp(1, 20) as usize)
                 .unwrap_or(5);
+
+            // Conversation embeddings are a Memory app contribution surface, so
+            // agent access follows the same explicit opt-in as the REST/UI search.
+            // Keep the envelope successful at the transport level so agents can
+            // continue without treating an optional capability as a tool failure.
+            if !store.chat_memory_enabled() {
+                return Ok(json!({
+                    "ok": false,
+                    "available": false,
+                    "error": "conversation memory search is disabled; enable Remember chats first",
+                    "results": [],
+                    "count": 0
+                }));
+            }
+
             let requested_ids: Option<Vec<String>> = arguments
                 .get("conversation_ids")
                 .and_then(Value::as_array)
@@ -197,7 +212,7 @@ mod tests {
     fn lists_search_tool_with_qualified_id() {
         let tools = tools();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].id, "search_conversations__search");
+        assert_eq!(tools[0].id, "search_conversations.search");
         assert_eq!(tools[0].server, SERVER_NAME);
     }
 
@@ -253,6 +268,7 @@ mod tests {
     #[tokio::test]
     async fn a_caller_supplied_conversation_id_is_intersected_never_widened() {
         let store = ConversationStore::open_in_memory().expect("store");
+        store.set_chat_memory_enabled(true).await.unwrap();
         store
             .ensure_conversation(
                 "alice-thread",

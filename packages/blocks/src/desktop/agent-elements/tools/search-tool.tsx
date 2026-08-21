@@ -1,4 +1,5 @@
 ﻿import { AgentActivity } from "@ryu/ui/components/agents/agent-activity";
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { memo, useMemo } from "react";
 import { useToolComplete } from "../hooks/use-tool-complete.ts";
 import type { SourceType } from "../icons/source-icons.tsx";
@@ -32,7 +33,7 @@ export interface SearchGroupRichProps {
 /** Truthful completion label for a finished search. */
 function searchCompleteLabel(count: number, hasBody: boolean): string {
 	if (count > 0) {
-		return `Found ${count} results`;
+		return `Found ${formatNumber(count)} results`;
 	}
 	if (hasBody) {
 		return "Search complete";

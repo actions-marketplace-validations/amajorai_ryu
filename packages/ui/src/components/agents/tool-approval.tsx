@@ -69,6 +69,7 @@ export interface ToolApprovalProps {
 	onOpenChange?: (open: boolean) => void;
 	open?: boolean;
 	parameters?: ToolApprovalParameter[];
+	question?: ReactNode;
 	status?: ToolApprovalStatus;
 	title?: ReactNode;
 	tool: ReactNode;
@@ -218,6 +219,7 @@ export function ToolApproval({
 	onOpenChange,
 	children,
 	className,
+	question,
 }: ToolApprovalProps) {
 	const reduce = useReducedMotion() ?? false;
 	const baseId = useId();
@@ -285,6 +287,11 @@ export function ToolApproval({
 							{STATUS_COPY[status]}
 						</span>
 					</div>
+					{question ? (
+						<p className="mt-2 font-medium text-foreground leading-5">
+							{question}
+						</p>
+					) : null}
 					{description ? (
 						<p className="mt-2 text-muted-foreground leading-5">
 							{description}

@@ -2,6 +2,7 @@ import { Accordion as AccordionPrimitive } from "@base-ui/react/accordion";
 import { ArrowDown01Icon, ArrowUp01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@ryu/ui/lib/utils.ts";
+import { FadeOverflowTextChildren } from "./fade-overflow-text.tsx";
 
 function Accordion({ className, ...props }: AccordionPrimitive.Root.Props) {
 	return (
@@ -41,7 +42,9 @@ function AccordionTrigger({
 				data-slot="accordion-trigger"
 				{...props}
 			>
-				{children}
+				<FadeOverflowTextChildren className="flex-1">
+					{children}
+				</FadeOverflowTextChildren>
 				<HugeiconsIcon
 					className="pointer-events-none shrink-0 group-aria-expanded/accordion-trigger:hidden"
 					data-slot="accordion-trigger-icon"

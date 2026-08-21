@@ -1304,65 +1304,71 @@ impl MemoryStore {
         }
 
         // The proposal is re-checked under the transaction so two reviewers cannot
-        // apply the same pending row concurrently.
-        let mut conn = self.conn.lock().await;
-        let tx = conn.transaction().context("starting proposal approval")?;
-        let current_status: String = tx.query_row(
-            "SELECT status FROM memory_proposals WHERE id = ?1",
-            params![id],
-            |row| row.get(0),
-        )?;
-        if MemoryProposalStatus::from_str(&current_status) != MemoryProposalStatus::Pending {
-            tx.rollback()?;
-            return self.get_proposal(id).await;
-        }
-        let new_id = uuid::Uuid::new_v4().to_string();
-        let draft = &proposal.draft;
-        let content = draft.content.trim();
-        let when = draft
-            .when_to_use
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        let (nonce, ciphertext) =
-            self.encrypt(&encode_payload(content, when, &draft.metadata.provenance))?;
-        let supersedes_id = target.as_ref().map(|entry| entry.id.clone());
-        tx.execute(
-            "INSERT INTO memory_entries
-                (id, user_id, agent_id, nonce, ciphertext, created_at,
-                 scope, scope_id, category, importance, tags, updated_at,
-                 lifecycle, supersedes_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?6, 'active', ?12)",
-            params![
-                new_id,
-                proposal.owner_user_id,
-                proposal.agent_id,
-                nonce,
-                ciphertext,
-                now,
-                draft.scope.as_str(),
-                draft.scope_id,
-                draft.category.as_str(),
-                draft.importance.clamp(1, 5),
-                encode_tags(&draft.tags),
-                supersedes_id,
-            ],
-        )?;
-        if let Some(target_id) = proposal.target_memory_id.as_deref() {
-            tx.execute(
-                "UPDATE memory_entries SET lifecycle = 'superseded', updated_at = ?1
-                 WHERE id = ?2 AND lifecycle = 'active'",
-                params![now, target_id],
+        // apply the same pending row concurrently. Keep the complete transaction
+        // in this synchronous lexical block: `rusqlite::Transaction` borrows the
+        // connection, which is not safe to carry across the async reread below.
+        let needs_reload = {
+            let mut conn = self.conn.lock().await;
+            let tx = conn.transaction().context("starting proposal approval")?;
+            let current_status: String = tx.query_row(
+                "SELECT status FROM memory_proposals WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
             )?;
-        }
-        tx.execute(
-            "UPDATE memory_proposals SET status = 'applied', updated_at = ?1,
-                reviewed_at = ?1, reviewed_by = ?2, applied_memory_id = ?3
-             WHERE id = ?4 AND status = 'pending'",
-            params![now, reviewer, new_id, id],
-        )?;
-        tx.commit().context("committing proposal approval")?;
-        drop(conn);
+            if MemoryProposalStatus::from_str(&current_status) != MemoryProposalStatus::Pending {
+                tx.rollback()?;
+                true
+            } else {
+                let new_id = uuid::Uuid::new_v4().to_string();
+                let draft = &proposal.draft;
+                let content = draft.content.trim();
+                let when = draft
+                    .when_to_use
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let (nonce, ciphertext) =
+                    self.encrypt(&encode_payload(content, when, &draft.metadata.provenance))?;
+                let supersedes_id = target.as_ref().map(|entry| entry.id.clone());
+                tx.execute(
+                    "INSERT INTO memory_entries
+                        (id, user_id, agent_id, nonce, ciphertext, created_at,
+                         scope, scope_id, category, importance, tags, updated_at,
+                         lifecycle, supersedes_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?6, 'active', ?12)",
+                    params![
+                        new_id,
+                        proposal.owner_user_id,
+                        proposal.agent_id,
+                        nonce,
+                        ciphertext,
+                        now,
+                        draft.scope.as_str(),
+                        draft.scope_id,
+                        draft.category.as_str(),
+                        draft.importance.clamp(1, 5),
+                        encode_tags(&draft.tags),
+                        supersedes_id,
+                    ],
+                )?;
+                if let Some(target_id) = proposal.target_memory_id.as_deref() {
+                    tx.execute(
+                        "UPDATE memory_entries SET lifecycle = 'superseded', updated_at = ?1
+                         WHERE id = ?2 AND lifecycle = 'active'",
+                        params![now, target_id],
+                    )?;
+                }
+                tx.execute(
+                    "UPDATE memory_proposals SET status = 'applied', updated_at = ?1,
+                        reviewed_at = ?1, reviewed_by = ?2, applied_memory_id = ?3
+                     WHERE id = ?4 AND status = 'pending'",
+                    params![now, reviewer, new_id, id],
+                )?;
+                tx.commit().context("committing proposal approval")?;
+                false
+            }
+        };
+        let _ = needs_reload;
         self.get_proposal(id).await
     }
 

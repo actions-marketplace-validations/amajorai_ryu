@@ -44,9 +44,9 @@ const BUILTIN_SERVERS: &[&str] = &[
     super::ui_tool::SERVER_NAME,
 ];
 
-/// Classify a fully-qualified tool id (`<server>__<tool>`) into a [`ToolKind`].
+/// Classify a fully-qualified tool id (`<server>.<tool>`) into a [`ToolKind`].
 ///
-/// `composio__*` → Composio; a built-in server segment → Builtin; the synthetic
+/// `composio.*` → Composio; a built-in server segment → Builtin; the synthetic
 /// `app` server (tool-as-Runnable) → App; the self-build server → Builtin;
 /// anything else → Mcp. Bound to Core's sidecar server inventory, so it stays
 /// kernel-side rather than in the crate.
@@ -121,16 +121,16 @@ impl McpRegistry {
     /// ## `skills_allowlist` — where every plane gets its value
     ///
     /// This is the calling agent's **skill** allowlist (`AgentRecord.skills`), the
-    /// same list `skills__search` / `skills__load` scope on; empty = every enabled
+    /// same list `skills.search` / `skills.load` scope on; empty = every enabled
     /// skill. It is a different list from the tool allowlist, so it has to be
     /// threaded here rather than applied afterwards. Every caller today:
     ///
-    /// - agent-less callers → empty → identical to `skills__search`'s own default;
+    /// - agent-less callers → empty → identical to `skills.search`'s own default;
     /// - the ACP plane → resolved from the bound agent in
     ///   `mcp_bridge::dispatch_tool_search` (and, so the two cannot be played against
     ///   each other, in `dispatch_describe` via [`Self::describe_scoped`]) from the
     ///   same agent id and the same `AgentRecord.skills` field the `skills` provider
-    ///   reads at dispatch. So on that plane `tool_search` and `skills__search` show
+    ///   reads at dispatch. So on that plane `tool_search` and `skills.search` show
     ///   the same skills;
     /// - **`GET /api/tools/search?agent=X`** → resolved from the same store and the
     ///   same field, in `server::agent_skill_allowlist`. This is also what scopes the
@@ -157,7 +157,7 @@ impl McpRegistry {
     /// node with no such variable it narrows nothing at all. Which is why the skill
     /// list had to be threaded in here — before it was, an agent scoped to two skills
     /// got every enabled skill on the node back as an L1 row (id/name/description),
-    /// though `skills__load` still refused the bodies.
+    /// though `skills.load` still refused the bodies.
     pub async fn search_scoped(
         &self,
         query: &str,
@@ -190,9 +190,9 @@ impl McpRegistry {
         //
         // Appended AFTER the skills merge on purpose. `skill_candidates` takes the
         // already-built candidate list to drop id collisions, and that de-dup is
-        // about the `skills__*` namespace specifically — a skill slugged `search`
-        // colliding with the `skills__search` tool. Derived ids all live under
-        // `ryu_ext__`, so they can never take part in that collision, and feeding
+        // about the `skills.*` namespace specifically — a skill slugged `search`
+        // colliding with the `skills.search` tool. Derived ids all live under
+        // `ryu_ext.`, so they can never take part in that collision, and feeding
         // them in as `already_listed` would only widen a check to a namespace it
         // has nothing to say about.
         builtins.extend(self.ext_api_candidates());
@@ -222,19 +222,19 @@ impl McpRegistry {
         .await
     }
 
-    /// Enabled, loadable Agent Skills as catalog descriptors (`skills__<slug>`,
+    /// Enabled, loadable Agent Skills as catalog descriptors (`skills.<slug>`,
     /// [`ToolKind::Skill`]), scoped by `skills_allowlist` (empty = all enabled).
     ///
     /// `already_listed` is the tool half of the candidate set, used to drop the one
     /// genuine collision this namespace has: the `skills` server's own tools are
-    /// `skills__search` / `skills__load` / `skills__author`, so a skill whose slug is
+    /// `skills.search` / `skills.load` / `skills.author`, so a skill whose slug is
     /// literally `search`, `load` or `author` would mint a duplicate id. The **tool**
     /// wins — it is the callable thing, `describe` resolves it first, and a duplicate
     /// id in a ranked list the model picks from by id is worse than a shadowed skill.
-    /// The shadowed skill is still reachable through `skills__search` (which returns
-    /// bare slugs and so cannot collide) and through `skills__load`. Three slugs, and
+    /// The shadowed skill is still reachable through `skills.search` (which returns
+    /// bare slugs and so cannot collide) and through `skills.load`. Three slugs, and
     /// this drops them by comparing ids rather than by hardcoding the three names, so
-    /// a fourth `skills__*` tool cannot reintroduce the duplicate.
+    /// a fourth `skills.*` tool cannot reintroduce the duplicate.
     ///
     /// Returns empty when no skill registry is wired (test/CLI contexts).
     fn skill_candidates(
@@ -249,7 +249,7 @@ impl McpRegistry {
             .enabled_for(skills_allowlist)
             .iter()
             // A body-less record (a plugin skill registered but not materialised on
-            // disk) is excluded: `skills__load` has nothing to return for it. See
+            // disk) is excluded: `skills.load` has nothing to return for it. See
             // `skills_tool::is_loadable`.
             .filter(|s| super::skills_tool::is_loadable(s))
             .map(super::skills_tool::descriptor_for)
@@ -301,12 +301,12 @@ impl McpRegistry {
     }
 
     /// Describe a single catalog entry by its fully-qualified id. Returns `None`
-    /// when the id is not found. A `composio__*` id is `shallow:true` with a single
+    /// when the id is not found. A `composio.*` id is `shallow:true` with a single
     /// freeform `arguments` row (the action's full schema is not listed).
     ///
-    /// A `skills__<slug>` id that is not one of the `skills` server's own tools
+    /// A `skills.<slug>` id that is not one of the `skills` server's own tools
     /// describes the **Agent Skill** — see [`Self::describe_skill`]. Real tools are
-    /// resolved first, so `skills__search` / `skills__load` / `skills__author` always
+    /// resolved first, so `skills.search` / `skills.load` / `skills.author` always
     /// describe as the tools they are.
     ///
     /// Unscoped, like the `?agent=`-less HTTP route it backs. A caller that knows the
@@ -322,7 +322,7 @@ impl McpRegistry {
     /// Only the skill branch is scoped, because only skills have a second, per-agent
     /// list; tool descriptions are governed by the tool allowlist at *call* time, as
     /// they always were. Pairing this with [`Self::search_scoped`] is what makes the
-    /// ACP plane's discovery genuinely equal to `skills__search`'s scope: scoping the
+    /// ACP plane's discovery genuinely equal to `skills.search`'s scope: scoping the
     /// search alone would have left `describe` handing back the `name` and
     /// `description` of any skill whose id an agent could guess.
     pub async fn describe_scoped(
@@ -330,8 +330,10 @@ impl McpRegistry {
         id: &str,
         skills_allowlist: &[String],
     ) -> Option<DescribedTool> {
+        let normalized_id = super::canonical_tool_id(id);
+        let id = normalized_id.as_str();
         // Composio: not in list_all_tools — describe shallowly.
-        if id.starts_with("composio.") || id.starts_with("composio__") {
+        if id.starts_with("composio.") {
             return Some(ryu_tool_registry::describe_composio(id));
         }
 
@@ -371,7 +373,7 @@ impl McpRegistry {
         self.describe_skill(id, skills_allowlist)
     }
 
-    /// Describe a `ryu_ext__…` id as the derived HTTP operation it names.
+    /// Describe a `ryu_ext.…` id as the derived HTTP operation it names.
     ///
     /// **This method is why derived tools are callable at all.** Search returns
     /// name + description only (an L1 row), so a model that finds a derived tool
@@ -399,16 +401,16 @@ impl McpRegistry {
         ))
     }
 
-    /// Describe a `skills__<slug>` id as the Agent Skill it names.
+    /// Describe a `skills.<slug>` id as the Agent Skill it names.
     ///
     /// The result is deliberately **not tool-shaped**: `kind` is [`ToolKind::Skill`]
     /// and `args` is empty, because there is no call to make against this id. The
-    /// description carries the literal `skills__load` invocation, so a model that
+    /// description carries the literal `skills.load` invocation, so a model that
     /// followed the search → describe path lands on the loader instead of trying to
     /// call the skill. (If it tries anyway, `skills_tool::dispatch` refuses; see that
     /// module's "Discovery is unified, execution is not".)
     ///
-    /// Scoped by `skills_allowlist` exactly as `skills__load` is, so an out-of-scope
+    /// Scoped by `skills_allowlist` exactly as `skills.load` is, so an out-of-scope
     /// id is indistinguishable from one that names no skill: both return `None`, which
     /// the HTTP route renders as the same 404 and the ACP bridge as the same
     /// `unknown tool id` error.
@@ -481,7 +483,7 @@ async fn composio_candidates(http: &reqwest::Client, query: &str) -> Vec<ToolDes
                         .unwrap_or(slug)
                         .to_string();
                     Some(ToolDescriptor {
-                        id: format!("composio__{slug}"),
+                        id: format!("composio.{slug}"),
                         name,
                         description: a
                             .get("description")
@@ -509,26 +511,26 @@ mod tests {
     #[test]
     fn classify_kind_by_server() {
         assert_eq!(
-            classify_kind("sandbox__run", super::super::sandbox::SERVER_NAME),
+            classify_kind("sandbox.run", super::super::sandbox::SERVER_NAME),
             ToolKind::Builtin
         );
-        assert_eq!(classify_kind("foo__bar", "foo"), ToolKind::Mcp);
+        assert_eq!(classify_kind("foo.bar", "foo"), ToolKind::Mcp);
         assert_eq!(
-            classify_kind("composio__slack", "composio"),
+            classify_kind("composio.slack", "composio"),
             ToolKind::Composio
         );
         // `shadow`/`advisor` are now declarative `app`-registered plugin tools
         // (server "app"), not built-in servers — they classify as App like exa.
-        assert_eq!(classify_kind("app__thing", "app"), ToolKind::App);
+        assert_eq!(classify_kind("app.thing", "app"), ToolKind::App);
         assert_eq!(
-            classify_kind("skills__load", super::super::skills_tool::SERVER_NAME),
+            classify_kind("skills.load", super::super::skills_tool::SERVER_NAME),
             ToolKind::Builtin
         );
     }
 
     #[test]
     fn description_option_maps_to_empty_string() {
-        let tool = RegistryTool::candidate("foo__bar", "foo", "bar");
+        let tool = RegistryTool::candidate("foo.bar", "foo", "bar");
         let d = descriptor_from(&tool);
         assert_eq!(d.description, "");
         assert_eq!(d.kind, ToolKind::Mcp);
@@ -539,14 +541,14 @@ mod tests {
         let reg = McpRegistry::empty();
         // A command-tagged app tool …
         reg.register_app_tool_tagged(
-            "app__exa_search".into(),
+            "app.exa_search".into(),
             "exa_search".into(),
             Some("Search the web".into()),
             Some(AppToolBackendTag::Command),
         );
         // … and an http-tagged one (which must stay classified as App).
         reg.register_app_tool_tagged(
-            "app__other".into(),
+            "app.other".into(),
             "other".into(),
             None,
             Some(AppToolBackendTag::Http),
@@ -559,19 +561,19 @@ mod tests {
         assert!(
             results
                 .iter()
-                .any(|d| d.id == "app__exa_search" && d.kind == ToolKind::Command),
+                .any(|d| d.id == "app.exa_search" && d.kind == ToolKind::Command),
             "command tool must be surfaced + selected by kind=command"
         );
         // The http app tool is NOT a command (asymmetry) — absent from kind=Command.
         assert!(
-            results.iter().all(|d| d.id != "app__other"),
+            results.iter().all(|d| d.id != "app.other"),
             "http app tool must not appear under kind=command"
         );
 
         // describe honors the tag on both sites.
-        let described = reg.describe("app__exa_search").await.expect("described");
+        let described = reg.describe("app.exa_search").await.expect("described");
         assert_eq!(described.kind, ToolKind::Command);
-        let http_desc = reg.describe("app__other").await.expect("described");
+        let http_desc = reg.describe("app.other").await.expect("described");
         assert_eq!(http_desc.kind, ToolKind::App);
     }
 
@@ -606,7 +608,7 @@ mod tests {
             "## Purpose\nresolve conflicts",
         )]);
         reg.register_app_tool_tagged(
-            "app__git_status".into(),
+            "app.git_status".into(),
             "git_status".into(),
             Some("show the git working tree status".into()),
             Some(AppToolBackendTag::Http),
@@ -617,13 +619,13 @@ mod tests {
             .await;
         let skill_row = results
             .iter()
-            .find(|d| d.id == "skills__merge-conflicts")
+            .find(|d| d.id == "skills.merge-conflicts")
             .expect("the skill is in the merged catalog");
         assert_eq!(skill_row.kind, ToolKind::Skill, "the row names its plane");
         assert_eq!(skill_row.name, "Resolve merge conflicts");
         let tool_row = results
             .iter()
-            .find(|d| d.id == "app__git_status")
+            .find(|d| d.id == "app.git_status")
             .expect("the tool is still in the merged catalog");
         assert_eq!(tool_row.kind, ToolKind::App);
     }
@@ -639,7 +641,7 @@ mod tests {
             "## Purpose\nresearch",
         )]);
         reg.register_app_tool_tagged(
-            "app__web_search".into(),
+            "app.web_search".into(),
             "web_search".into(),
             Some("search the web".into()),
             Some(AppToolBackendTag::Http),
@@ -664,7 +666,7 @@ mod tests {
     }
 
     /// The one genuine id collision in this namespace: a skill slugged `search`
-    /// would mint `skills__search`, which is the search TOOL's id. The tool wins,
+    /// would mint `skills.search`, which is the search TOOL's id. The tool wins,
     /// and the skill row is dropped rather than duplicating an id the model picks
     /// from.
     #[tokio::test]
@@ -672,14 +674,12 @@ mod tests {
         let reg = registry_with_skills(vec![skill(
             "search",
             "A skill called search",
-            "this collides with skills__search",
+            "this collides with skills.search",
             "## Purpose\ncollide",
         )]);
         let results = reg.search_scoped("search", None, 25, &[]).await;
-        let rows: Vec<&ToolDescriptor> = results
-            .iter()
-            .filter(|d| d.id == "skills__search")
-            .collect();
+        let rows: Vec<&ToolDescriptor> =
+            results.iter().filter(|d| d.id == "skills.search").collect();
         assert_eq!(rows.len(), 1, "exactly one row may own an id: {rows:?}");
         assert_eq!(
             rows[0].kind,
@@ -687,7 +687,7 @@ mod tests {
             "the callable tool wins the id, not the skill"
         );
         // …and `describe` agrees with `search` about who owns it.
-        let described = reg.describe("skills__search").await.expect("described");
+        let described = reg.describe("skills.search").await.expect("described");
         assert_eq!(described.kind, ToolKind::Builtin);
         assert!(
             !described.args.is_empty(),
@@ -695,7 +695,7 @@ mod tests {
         );
     }
 
-    /// `describe` on a skill leads the model to `skills__load` and gives it nothing
+    /// `describe` on a skill leads the model to `skills.load` and gives it nothing
     /// to call.
     #[tokio::test]
     async fn describe_on_a_skill_points_at_the_loader() {
@@ -706,7 +706,7 @@ mod tests {
             "## Purpose\npdf",
         )]);
         let d = reg
-            .describe("skills__pdf-processing")
+            .describe("skills.pdf-processing")
             .await
             .expect("a merged skill must be describable");
         assert_eq!(d.kind, ToolKind::Skill);
@@ -723,11 +723,11 @@ mod tests {
         );
         assert!(
             d.description.contains("\"id\": \"pdf-processing\""),
-            "describe must spell out the bare id skills__load takes: {}",
+            "describe must spell out the bare id skills.load takes: {}",
             d.description
         );
         // An id in the namespace that names no skill is simply unknown.
-        assert!(reg.describe("skills__nope").await.is_none());
+        assert!(reg.describe("skills.nope").await.is_none());
     }
 
     /// A plugin-registered skill with no instruction body has nothing to load, so
@@ -737,7 +737,7 @@ mod tests {
     async fn a_registered_but_unmaterialised_plugin_skill_is_not_advertised() {
         let skills = ryu_skills::SkillRegistry::empty();
         skills.register_app_skill(
-            "app__summarize".into(),
+            "app.summarize".into(),
             "Summarize".into(),
             Some("App-registered skill (skill_id: summarize)".into()),
         );
@@ -745,14 +745,14 @@ mod tests {
 
         let results = reg.search_scoped("summarize", None, 25, &[]).await;
         assert!(
-            results.iter().all(|d| d.id != "skills__app__summarize"),
+            results.iter().all(|d| d.id != "skills.app.summarize"),
             "a body-less skill must not be offered: {results:?}"
         );
-        assert!(reg.describe("skills__app__summarize").await.is_none());
+        assert!(reg.describe("skills.app.summarize").await.is_none());
     }
 
     /// `search_scoped` applies the calling agent's SKILL allowlist — the same
-    /// predicate `skills__search` / `skills__load` use — while the plain `search`
+    /// predicate `skills.search` / `skills.load` use — while the plain `search`
     /// entry point stays unscoped (agent-less callers see every enabled skill).
     #[tokio::test]
     async fn search_scoped_narrows_skills_to_the_agents_skill_allowlist() {
@@ -769,20 +769,20 @@ mod tests {
         let scoped = reg
             .search_scoped("skill", None, 25, &["mine".to_string()])
             .await;
-        assert!(scoped.iter().any(|d| d.id == "skills__mine"));
+        assert!(scoped.iter().any(|d| d.id == "skills.mine"));
         assert!(
-            scoped.iter().all(|d| d.id != "skills__theirs"),
+            scoped.iter().all(|d| d.id != "skills.theirs"),
             "an out-of-allowlist skill must not appear: {scoped:?}"
         );
 
         // Empty allowlist = every enabled skill (enabled_for's back-compat default),
         // which is what the unscoped `search` entry point passes.
         let unscoped = reg.search_scoped("skill", None, 25, &[]).await;
-        assert!(unscoped.iter().any(|d| d.id == "skills__mine"));
-        assert!(unscoped.iter().any(|d| d.id == "skills__theirs"));
+        assert!(unscoped.iter().any(|d| d.id == "skills.mine"));
+        assert!(unscoped.iter().any(|d| d.id == "skills.theirs"));
     }
 
-    /// **The end-to-end execution boundary.** A model handed `skills__<slug>` by the
+    /// **The end-to-end execution boundary.** A model handed `skills.<slug>` by the
     /// merged catalog may try to call it. This exercises the real routing —
     /// `call_tool` → `split_tool_id` → the `skills` provider → `skills_tool::dispatch`
     /// — and asserts it refuses and names the loader, rather than dispatching or
@@ -804,16 +804,16 @@ mod tests {
             .search_scoped("pdf", None, 25, &[])
             .await
             .iter()
-            .any(|d| d.id == "skills__pdf-processing"));
+            .any(|d| d.id == "skills.pdf-processing"));
 
         for allowlist in [
             None,
             Some(vec!["skills".to_string()]),
-            Some(vec!["skills__pdf-processing".to_string()]),
+            Some(vec!["skills.pdf-processing".to_string()]),
         ] {
             let err = reg
                 .call_tool(
-                    "skills__pdf-processing",
+                    "skills.pdf-processing",
                     serde_json::json!({}),
                     allowlist.as_deref(),
                 )
@@ -831,7 +831,7 @@ mod tests {
         // allowed to reach the skills server (the allowlist branch cannot mask it).
         let msg = reg
             .call_tool(
-                "skills__pdf-processing",
+                "skills.pdf-processing",
                 serde_json::json!({}),
                 Some(&["skills".to_string()]),
             )
@@ -843,7 +843,7 @@ mod tests {
             "{msg}"
         );
 
-        // …while the real `skills__load` tool still works through the same path.
+        // …while the real `skills.load` tool still works through the same path.
         let loaded = reg
             .call_tool(
                 super::super::skills_tool::LOAD_TOOL_ID,
@@ -851,13 +851,13 @@ mod tests {
                 Some(&["skills".to_string()]),
             )
             .await
-            .expect("skills__load is a real tool");
+            .expect("skills.load is a real tool");
         assert_eq!(loaded["ok"], serde_json::json!(true), "{loaded}");
         assert_eq!(loaded["instructions"], serde_json::json!("## Purpose\npdf"));
     }
 
     /// Scoping the search but not `describe` would have let an agent recover, by
-    /// guessing `skills__<slug>`, the exact L1 metadata the scoped search withheld.
+    /// guessing `skills.<slug>`, the exact L1 metadata the scoped search withheld.
     /// An out-of-scope id must be indistinguishable from a nonexistent one.
     #[tokio::test]
     async fn describe_scoped_hides_skills_outside_the_agents_allowlist() {
@@ -872,15 +872,13 @@ mod tests {
         ]);
         let allow = ["mine".to_string()];
 
-        assert!(reg.describe_scoped("skills__mine", &allow).await.is_some());
+        assert!(reg.describe_scoped("skills.mine", &allow).await.is_some());
         assert!(
-            reg.describe_scoped("skills__theirs", &allow)
-                .await
-                .is_none(),
+            reg.describe_scoped("skills.theirs", &allow).await.is_none(),
             "an out-of-allowlist skill must describe as unknown"
         );
         // Same verdict as an id that names nothing at all.
-        assert!(reg.describe_scoped("skills__nope", &allow).await.is_none());
+        assert!(reg.describe_scoped("skills.nope", &allow).await.is_none());
 
         // Tool descriptions are untouched by the skill allowlist — only the skill
         // branch is scoped.
@@ -890,7 +888,7 @@ mod tests {
             .is_some());
 
         // The unscoped entry point (the `?agent=`-less HTTP route) is unchanged.
-        assert!(reg.describe("skills__theirs").await.is_some());
+        assert!(reg.describe("skills.theirs").await.is_some());
     }
 
     /// No skill registry wired (test/CLI contexts) ⇒ no skill rows, no panic.
@@ -899,7 +897,7 @@ mod tests {
         let reg = McpRegistry::empty();
         let results = reg.search_scoped("anything", None, 25, &[]).await;
         assert!(results.iter().all(|d| d.kind != ToolKind::Skill));
-        assert!(reg.describe("skills__whatever").await.is_none());
+        assert!(reg.describe("skills.whatever").await.is_none());
     }
 
     // ── Derived ext-API routes in the one catalog ────────────────────────────
@@ -941,7 +939,7 @@ mod tests {
         reg.set_ext_api_routes(
             "@ryu/crm",
             vec![ext_route(
-                "ryu_ext__ryu_crm__post_tools_search",
+                "ryu_ext.ryu_crm.post_tools_search",
                 "@ryu/crm",
                 "POST",
                 "Search contacts",
@@ -953,7 +951,7 @@ mod tests {
         assert!(
             found
                 .iter()
-                .any(|d| d.id == "ryu_ext__ryu_crm__post_tools_search"),
+                .any(|d| d.id == "ryu_ext.ryu_crm.post_tools_search"),
             "the derived row must be reachable through search: {found:?}"
         );
 
@@ -980,14 +978,14 @@ mod tests {
         reg.set_ext_api_routes(
             "@ryu/crm",
             vec![ext_route(
-                "ryu_ext__ryu_crm__get_api_contacts",
+                "ryu_ext.ryu_crm.get_api_contacts",
                 "@ryu/crm",
                 "GET",
                 "List contacts",
             )],
         );
         reg.register_app_tool_tagged(
-            "app__crm_sync".into(),
+            "app.crm_sync".into(),
             "crm_sync".into(),
             Some("sync the CRM contact book".into()),
             Some(AppToolBackendTag::Http),
@@ -997,7 +995,7 @@ mod tests {
             .search_scoped("contacts", None, 25, &[])
             .await
             .into_iter()
-            .find(|d| d.id == "ryu_ext__ryu_crm__get_api_contacts")
+            .find(|d| d.id == "ryu_ext.ryu_crm.get_api_contacts")
             .expect("the derived route is in the merged catalog");
         assert_eq!(
             row.kind,
@@ -1021,7 +1019,7 @@ mod tests {
         );
         assert!(only_ext
             .iter()
-            .any(|d| d.id == "ryu_ext__ryu_crm__get_api_contacts"));
+            .any(|d| d.id == "ryu_ext.ryu_crm.get_api_contacts"));
 
         // …and a different filter does not leak them.
         let only_apps = reg
@@ -1043,7 +1041,7 @@ mod tests {
         reg.set_ext_api_routes(
             "@ryu/crm",
             vec![ext_route(
-                "ryu_ext__ryu_crm__post_tools_search",
+                "ryu_ext.ryu_crm.post_tools_search",
                 "@ryu/crm",
                 "POST",
                 "Search contacts",
@@ -1051,7 +1049,7 @@ mod tests {
         );
 
         let d = reg
-            .describe("ryu_ext__ryu_crm__post_tools_search")
+            .describe("ryu_ext.ryu_crm.post_tools_search")
             .await
             .expect("a derived route must be describable");
         assert_eq!(d.kind, ToolKind::ExtApi);
@@ -1083,14 +1081,14 @@ mod tests {
         // The scoped entry point agrees — the skill allowlist has no say here.
         assert!(reg
             .describe_scoped(
-                "ryu_ext__ryu_crm__post_tools_search",
+                "ryu_ext.ryu_crm.post_tools_search",
                 &["some-unrelated-skill".to_string()]
             )
             .await
             .is_some());
 
         // An id in the namespace that names no route is simply unknown.
-        assert!(reg.describe("ryu_ext__ryu_crm__get_nope").await.is_none());
+        assert!(reg.describe("ryu_ext.ryu_crm.get_nope").await.is_none());
     }
 
     /// The per-plugin cap truncates rather than rejects, and it keeps the FIRST
@@ -1104,7 +1102,7 @@ mod tests {
         let routes: Vec<_> = (0..over)
             .map(|i| {
                 ext_route(
-                    &format!("ryu_ext__ryu_crm__get_op_{i:03}"),
+                    &format!("ryu_ext.ryu_crm.get_op_{i:03}"),
                     "@ryu/crm",
                     "GET",
                     "Contacts operation",
@@ -1124,12 +1122,12 @@ mod tests {
         );
         // The surviving prefix is the FIRST N, in mint order.
         assert!(
-            reg.describe("ryu_ext__ryu_crm__get_op_000").await.is_some(),
+            reg.describe("ryu_ext.ryu_crm.get_op_000").await.is_some(),
             "the first operation must survive truncation"
         );
         assert!(
             reg.describe(&format!(
-                "ryu_ext__ryu_crm__get_op_{:03}",
+                "ryu_ext.ryu_crm.get_op_{:03}",
                 super::super::EXT_API_PER_PLUGIN_CAP - 1
             ))
             .await
@@ -1138,7 +1136,7 @@ mod tests {
         );
         assert!(
             reg.describe(&format!(
-                "ryu_ext__ryu_crm__get_op_{:03}",
+                "ryu_ext.ryu_crm.get_op_{:03}",
                 super::super::EXT_API_PER_PLUGIN_CAP
             ))
             .await
@@ -1156,7 +1154,7 @@ mod tests {
         reg.set_ext_api_routes(
             "@ryu/crm",
             vec![ext_route(
-                "ryu_ext__ryu_crm__get_api_contacts",
+                "ryu_ext.ryu_crm.get_api_contacts",
                 "@ryu/crm",
                 "GET",
                 "List contacts",
@@ -1165,7 +1163,7 @@ mod tests {
         reg.set_ext_api_routes(
             "@ryu/quests",
             vec![ext_route(
-                "ryu_ext__ryu_quests__get_api_quests_id",
+                "ryu_ext.ryu_quests.get_api_quests_id",
                 "@ryu/quests",
                 "GET",
                 "Get a quest",
@@ -1182,11 +1180,11 @@ mod tests {
         );
         assert!(reg.has_ext_api_routes("@ryu/quests"));
         assert!(reg
-            .describe("ryu_ext__ryu_crm__get_api_contacts")
+            .describe("ryu_ext.ryu_crm.get_api_contacts")
             .await
             .is_none());
         assert!(reg
-            .describe("ryu_ext__ryu_quests__get_api_quests_id")
+            .describe("ryu_ext.ryu_quests.get_api_quests_id")
             .await
             .is_some());
         let rows = reg

@@ -11,23 +11,39 @@ import { type ApiTarget, request } from "./client.ts";
 /** A registered MCP server as Core summarizes it for the listing endpoint. */
 export interface McpServer {
 	args: string[];
+	/** True when static credentials are stored in the server config. */
+	authConfigured: boolean;
+	/** True when OAuth or a conventional auth header is declared. */
+	authRequired: boolean;
+	authType: "env" | "header" | "oauth" | null;
 	/** Whether the command is present on disk; null when it can't be determined. */
 	available: boolean | null;
 	command: string;
 	description: string | null;
 	enabled: boolean;
+	envKeys: string[];
+	headerNames: string[];
 	name: string;
+	ownerPluginId: string | null;
+	ownerServerName: string | null;
+	/** `stdio`, Streamable HTTP, or the legacy HTTP+SSE transport. */
+	transport: string | null;
+	/** The configured endpoint for a remote server, if any. */
+	url: string | null;
 }
 
 /** A tool advertised by a registered MCP server. */
 export interface McpTool {
 	description: string | null;
-	/** Fully-qualified id `<server>__<tool>`, unique across servers. */
+	/** Fully-qualified id `<server>.<tool>`, unique across servers. */
 	id: string;
 	inputSchema: unknown | null;
 	name: string;
 	server: string;
 }
+
+/** Transport names accepted by the desktop add-server form. */
+export type McpTransport = "stdio" | "streamable-http" | "sse";
 
 /** Outcome of a test tool call: success carries output, failure carries error. */
 export interface McpCallResult {
@@ -38,11 +54,20 @@ export interface McpCallResult {
 
 interface ServerWire {
 	args?: string[];
+	auth_configured?: boolean;
+	auth_required?: boolean;
+	auth_type?: "env" | "header" | "oauth" | null;
 	available?: boolean | null;
 	command: string;
 	description?: string | null;
 	enabled: boolean;
+	env_keys?: string[];
+	header_names?: string[];
 	name: string;
+	owner_plugin_id?: string | null;
+	owner_server_name?: string | null;
+	transport?: string | null;
+	url?: string | null;
 }
 
 interface ToolWire {
@@ -61,6 +86,15 @@ function toServer(s: ServerWire): McpServer {
 		description: s.description ?? null,
 		enabled: s.enabled,
 		available: s.available ?? null,
+		authRequired: s.auth_required ?? false,
+		authConfigured: s.auth_configured ?? false,
+		authType: s.auth_type ?? null,
+		transport: s.transport ?? null,
+		url: s.url ?? null,
+		envKeys: s.env_keys ?? [],
+		headerNames: s.header_names ?? [],
+		ownerPluginId: s.owner_plugin_id ?? null,
+		ownerServerName: s.owner_server_name ?? null,
 	};
 }
 
@@ -101,14 +135,36 @@ export async function fetchMcpTools(
 /** Input for registering a new MCP server via POST /api/mcp/servers. */
 export interface CreateMcpServerInput {
 	args?: string[];
-	command: string;
+	command?: string;
 	description?: string;
 	env?: Record<string, string>;
+	headers?: Record<string, string>;
 	name: string;
+	transport?: McpTransport;
+	url?: string;
 }
 
 /** Result from POST /api/mcp/servers. */
 export interface CreateMcpServerResult {
+	error?: string;
+	ok: boolean;
+	server?: McpServer;
+}
+
+/** Partial update for a user-owned MCP server. Secret maps use the masked value
+ * `••••••` to keep an existing value without returning it to the client. */
+export interface UpdateMcpServerInput {
+	args?: string[];
+	command?: string;
+	description?: string;
+	enabled?: boolean;
+	env?: Record<string, string>;
+	headers?: Record<string, string>;
+	transport?: McpTransport;
+	url?: string;
+}
+
+export interface UpdateMcpServerResult {
 	error?: string;
 	ok: boolean;
 	server?: McpServer;
@@ -126,48 +182,75 @@ export async function createMcpServer(
 	target: ApiTarget,
 	input: CreateMcpServerInput
 ): Promise<CreateMcpServerResult> {
-	const resp = await fetch(`${target.url.replace(/\/$/, "")}/api/mcp/servers`, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			...(target.token ? { Authorization: `Bearer ${target.token}` } : {}),
-		},
-		body: JSON.stringify({
+	const parsed = await request<{
+		error?: string;
+		ok?: boolean;
+		server?: ServerWire;
+	}>(target, "/api/mcp/servers", {
+		body: {
 			name: input.name,
-			command: input.command,
+			...(input.command ? { command: input.command } : {}),
+			type: input.transport,
+			...(input.url ? { url: input.url } : {}),
+			headers: input.headers ?? {},
 			args: input.args ?? [],
 			env: input.env ?? {},
 			description: input.description ?? null,
-		}),
+		},
+		method: "POST",
 	});
-	const text = await resp.text();
-	const parsed = (text ? JSON.parse(text) : {}) as {
-		ok?: boolean;
-		server?: {
-			name: string;
-			command: string;
-			args: string[];
-			description: string | null;
-			enabled: boolean;
-		};
-		error?: string;
-	};
-	if (!resp.ok) {
-		return { ok: false, error: parsed.error ?? `HTTP ${resp.status}` };
-	}
-	const srv = parsed.server;
 	return {
-		ok: true,
-		server: srv
-			? {
-					name: srv.name,
-					command: srv.command,
-					args: srv.args ?? [],
-					description: srv.description ?? null,
-					enabled: srv.enabled ?? true,
-					available: null,
-				}
-			: undefined,
+		ok: parsed.ok !== false,
+		error: parsed.error,
+		server: parsed.server ? toServer(parsed.server) : undefined,
+	};
+}
+
+/** Update a user-owned MCP server and reload Core's registry. */
+export async function updateMcpServer(
+	target: ApiTarget,
+	name: string,
+	input: UpdateMcpServerInput
+): Promise<UpdateMcpServerResult> {
+	const parsed = await request<{
+		error?: string;
+		ok?: boolean;
+		server?: ServerWire;
+	}>(target, `/api/mcp/servers/${encodeURIComponent(name)}`, {
+		body: {
+			...(input.command ? { command: input.command } : {}),
+			...(input.transport ? { type: input.transport } : {}),
+			...(input.url ? { url: input.url } : {}),
+			...(input.args ? { args: input.args } : {}),
+			...(input.env ? { env: input.env } : {}),
+			...(input.headers ? { headers: input.headers } : {}),
+			...(input.description === undefined
+				? {}
+				: { description: input.description }),
+			...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+		},
+		method: "PUT",
+	});
+	return {
+		error: parsed.error,
+		ok: parsed.ok !== false,
+		server: parsed.server ? toServer(parsed.server) : undefined,
+	};
+}
+
+/** Remove a user-owned MCP server. Built-in and plugin-owned servers are refused by Core. */
+export async function deleteMcpServer(
+	target: ApiTarget,
+	name: string
+): Promise<{ error?: string; ok: boolean }> {
+	const parsed = await request<{ error?: string; ok?: boolean }>(
+		target,
+		`/api/mcp/servers/${encodeURIComponent(name)}`,
+		{ method: "DELETE" }
+	);
+	return {
+		ok: parsed.ok !== false,
+		error: parsed.error,
 	};
 }
 
@@ -288,6 +371,7 @@ export interface McpSearchParams {
 export interface McpCatalogPage {
 	nextCursor: string | null;
 	servers: McpCatalogCard[];
+	total?: number | null;
 }
 
 /**
@@ -312,10 +396,13 @@ export async function searchMcpCatalog(
 	const json = await request<{
 		servers?: CatalogCardWire[];
 		next_cursor?: string | null;
+		total?: number | null;
+		total_count?: number | null;
 	}>(target, `/api/mcp/catalog?${q.toString()}`);
 	return {
 		servers: (json.servers ?? []).map(toCatalogCard),
 		nextCursor: json.next_cursor ?? null,
+		total: json.total ?? json.total_count ?? null,
 	};
 }
 
@@ -497,7 +584,7 @@ function ghostActionToCall(
 				return null;
 			}
 			return {
-				tool: "ghost__ghost_focus",
+				tool: "ghost.ghost_focus",
 				arguments: { app: input.target },
 			};
 		}
@@ -506,13 +593,13 @@ function ghostActionToCall(
 				return null;
 			}
 			return {
-				tool: "ghost__ghost_click",
+				tool: "ghost.ghost_click",
 				arguments: { query: input.target },
 			};
 		}
 		case "screenshot": {
 			return {
-				tool: "ghost__ghost_screenshot",
+				tool: "ghost.ghost_screenshot",
 				arguments: {},
 			};
 		}

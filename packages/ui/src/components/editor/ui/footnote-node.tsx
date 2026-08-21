@@ -160,7 +160,7 @@ export function FootnoteReferenceElement(
 			className="group/footnote-ref mx-0.5 align-super"
 		>
 			{props.children}
-			<HoverCard onOpenChange={setHoverOpen} open={hoverOpen} openDelay={150}>
+			<HoverCard onOpenChange={setHoverOpen} open={hoverOpen}>
 				<HoverCardTrigger
 					render={
 						<button
@@ -295,9 +295,8 @@ export function FootnoteDefinitionElement(
 						onOpenChange={setReferencePickerOpen}
 						open={referencePickerOpen}
 					>
-						<PopoverAnchor
-							render={
-								<button
+						<PopoverAnchor>
+							<button
 									aria-expanded={
 										hasMultipleReferences ? referencePickerOpen : undefined
 									}
@@ -320,11 +319,10 @@ export function FootnoteDefinitionElement(
 
 										footnoteTransforms.focusReference({ identifier });
 									}}
-									type="button"
-								/>
-							}
-						>
-							{identifier}
+								type="button"
+							>
+								{identifier}
+							</button>
 						</PopoverAnchor>
 
 						{hasMultipleReferences && referencePickerOpen ? (

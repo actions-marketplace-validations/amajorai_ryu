@@ -21,6 +21,16 @@
 // classification (see kind.ts), so it shows up here only as the `--kind` filter
 // and the KIND column, never as a second install path.
 
+import {
+	decryptSecrets,
+	hasEncryptedSecrets,
+	packageSummary,
+	readPackageInput,
+	redactPackageTree,
+	validatePublishablePackage,
+	writePackageArchive,
+	writePackageFolder,
+} from "@ryu/portable-packages";
 import { loadNodes, resolveActive, setActive } from "../core/nodes.ts";
 import {
 	catalogEntryKind,
@@ -34,6 +44,160 @@ import { type CliContext, type Command, UsageError } from "./types.ts";
 import { VERSION } from "./version.ts";
 
 const DESCRIPTION_WIDTH = 50;
+
+function packageArg(ctx: CliContext, index: number, usage: string): string {
+	const value = ctx.args[index];
+	if (!value) {
+		throw new UsageError(`Usage: ${usage}`);
+	}
+	return value;
+}
+
+function packageOutput(ctx: CliContext, value: unknown, human: string): void {
+	ctx.io.out(
+		ctx.flags.json
+			? `${JSON.stringify(value, null, 2)}\n`
+			: `${human}\n`
+	);
+}
+
+async function packageUnlockKey(ctx: CliContext): Promise<string> {
+	const key = process.env.RYU_PACKAGE_KEY?.trim();
+	if (key) {
+		return key;
+	}
+	if (!process.stdin.isTTY || !process.stdout.isTTY) {
+		throw new Error(
+			"An encrypted package requires RYU_PACKAGE_KEY when stdin is not interactive."
+		);
+	}
+	const { createInterface } = await import("node:readline/promises");
+	const readline = createInterface({ input: process.stdin, output: process.stdout });
+	try {
+		const answer = await readline.question("Package unlock key: ");
+		if (!answer.trim()) {
+			throw new Error("A package unlock key is required");
+		}
+		return answer;
+	} finally {
+		readline.close();
+	}
+}
+
+async function writePackageDestination(
+	destination: string,
+	tree: Awaited<ReturnType<typeof readPackageInput>>
+): Promise<void> {
+	if (destination.toLowerCase().endsWith(".ryupack")) {
+		await writePackageArchive(destination, tree);
+		return;
+	}
+	await writePackageFolder(destination, tree);
+}
+
+const packageCommand: Command = {
+	name: "package",
+	aliases: ["pkg"],
+	summary: "Validate, inspect, import, export, and pack portable packages",
+	usage:
+		"ryu package <validate|inspect|pack|unpack|import|export|publish> <path> [destination]",
+	run: async (ctx) => {
+		const action = ctx.args[0];
+		const usage =
+			"ryu package <validate|inspect|pack|unpack|import|export|publish> <path> [destination]";
+		if (!action) {
+			throw new UsageError(`Usage: ${usage}`);
+		}
+		if (action === "validate" || action === "inspect") {
+			const input = packageArg(ctx, 1, usage);
+			const tree = await readPackageInput(input);
+			const summary = packageSummary(tree);
+			packageOutput(
+				ctx,
+				summary,
+				action === "validate"
+					? `Valid package ${summary.id}@${summary.version} (${summary.kind}) · ${summary.files.length} files`
+					: `${summary.id}@${summary.version}\n${summary.files.map((path) => `  ${path}`).join("\n")}`
+			);
+			return 0;
+		}
+		if (action === "pack") {
+			const input = packageArg(ctx, 1, usage);
+			const destination = ctx.args[2] ?? `${input.replace(/\/$/, "")}.ryupack`;
+			const tree = await readPackageInput(input);
+			await writePackageDestination(destination, tree);
+			packageOutput(
+				ctx,
+				{ destination, ...packageSummary(tree) },
+				`Packed ${destination}`
+			);
+			return 0;
+		}
+		if (action === "unpack" || action === "import") {
+			const input = packageArg(ctx, 1, usage);
+			const destination = packageArg(ctx, 2, usage);
+			const tree = await readPackageInput(input);
+			if (action === "import" && hasEncryptedSecrets(tree)) {
+				decryptSecrets(
+					tree.files["secrets.enc"]!,
+					await packageUnlockKey(ctx),
+					tree.manifest
+				);
+			}
+			await writePackageDestination(destination, tree);
+			packageOutput(
+				ctx,
+				{ destination, ...packageSummary(tree) },
+				`Imported ${tree.manifest.id} into ${destination}`
+			);
+			return 0;
+		}
+		if (action === "export") {
+			const input = packageArg(ctx, 1, usage);
+			const destination = packageArg(ctx, 2, usage);
+			const tree = await readPackageInput(input);
+			if (!ctx.flags.includeSecrets) {
+				const redacted = redactPackageTree(tree);
+				await writePackageDestination(destination, redacted);
+				packageOutput(
+					ctx,
+					{ destination, redacted: true, ...packageSummary(redacted) },
+					`Exported redacted package to ${destination}`
+				);
+				return 0;
+			}
+			if (!hasEncryptedSecrets(tree)) {
+				throw new Error(
+					"--include-secrets requires a package that already contains an encrypted secrets.enc envelope"
+				);
+			}
+			decryptSecrets(
+				tree.files["secrets.enc"]!,
+				await packageUnlockKey(ctx),
+				tree.manifest
+			);
+			await writePackageDestination(destination, tree);
+			packageOutput(
+				ctx,
+				{ destination, redacted: false, ...packageSummary(tree) },
+				`Exported package to ${destination}`
+			);
+			return 0;
+		}
+		if (action === "publish") {
+			const input = packageArg(ctx, 1, usage);
+			const tree = await readPackageInput(input);
+			validatePublishablePackage(tree);
+			packageOutput(
+				ctx,
+				{ publishable: true, ...packageSummary(tree) },
+				`Package ${tree.manifest.id}@${tree.manifest.version} is publishable`
+			);
+			return 0;
+		}
+		throw new UsageError(`Usage: ${usage}`);
+	},
+};
 
 async function callCore(
 	ctx: CliContext,
@@ -237,6 +401,320 @@ const setupCommand = rawCommand(
 	"/api/setup/status",
 	"GET"
 );
+
+interface DoctorFindingView {
+	canAutoFix: boolean;
+	category: string;
+	checkId: string;
+	detail: string;
+	recommendedAction: string | null;
+	settingPath: string | null;
+	severity: string;
+	summary: string;
+}
+
+interface DoctorReportView {
+	counts: { errors: number; info: number; warnings: number };
+	findings: DoctorFindingView[];
+	posture: string;
+}
+
+interface DoctorFixView {
+	action: string;
+	checkId: string;
+	settingPath: string;
+	summary: string;
+}
+
+interface DoctorResponseView {
+	appliedFixes: DoctorFixView[];
+	dryRun: boolean;
+	plannedFixes: DoctorFixView[];
+	report: DoctorReportView;
+}
+
+function doctorRecord(value: unknown, label: string): Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(`Gateway Doctor returned an invalid ${label}.`);
+	}
+	return value as Record<string, unknown>;
+}
+
+function doctorString(
+	record: Record<string, unknown>,
+	key: string,
+	defaultValue = ""
+): string {
+	return typeof record[key] === "string" ? record[key] : defaultValue;
+}
+
+function doctorCount(record: Record<string, unknown>, key: string): number {
+	const value = record[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function parseDoctorFinding(value: unknown): DoctorFindingView {
+	const record = doctorRecord(value, "finding");
+	return {
+		canAutoFix: record.canAutoFix === true,
+		category: doctorString(record, "category", "unknown"),
+		checkId: doctorString(record, "checkId", "unknown"),
+		detail: doctorString(record, "detail"),
+		recommendedAction:
+			typeof record.recommendedAction === "string"
+				? record.recommendedAction
+				: null,
+		settingPath:
+			typeof record.settingPath === "string" ? record.settingPath : null,
+		severity: doctorString(record, "severity", "info"),
+		summary: doctorString(record, "summary", "Unknown finding"),
+	};
+}
+
+function parseDoctorReport(value: unknown): DoctorReportView {
+	const record = doctorRecord(value, "report");
+	const counts = doctorRecord(record.counts, "counts");
+	if (!Array.isArray(record.findings)) {
+		throw new Error("Gateway Doctor returned no findings.");
+	}
+	return {
+		counts: {
+			errors: doctorCount(counts, "errors"),
+			info: doctorCount(counts, "info"),
+			warnings: doctorCount(counts, "warnings"),
+		},
+		findings: record.findings.map(parseDoctorFinding),
+		posture: doctorString(record, "posture", "unknown"),
+	};
+}
+
+function parseDoctorFix(value: unknown): DoctorFixView {
+	const record = doctorRecord(value, "fix");
+	return {
+		action: doctorString(record, "action"),
+		checkId: doctorString(record, "checkId", "unknown"),
+		settingPath: doctorString(record, "settingPath", "unknown"),
+		summary: doctorString(record, "summary", "Unknown fix"),
+	};
+}
+
+function parseDoctorResponse(value: unknown): DoctorResponseView {
+	const record = doctorRecord(value, "response");
+	const planned = Array.isArray(record.plannedFixes)
+		? record.plannedFixes.map(parseDoctorFix)
+		: [];
+	const applied = Array.isArray(record.appliedFixes)
+		? record.appliedFixes.map(parseDoctorFix)
+		: [];
+	const report = parseDoctorReport(record.report ?? record);
+	return {
+		appliedFixes: applied,
+		dryRun: record.dryRun === true,
+		plannedFixes: planned,
+		report,
+	};
+}
+
+function renderDoctorResponse(result: DoctorResponseView): string {
+	const { counts } = result.report;
+	const lines = [
+		`Gateway Doctor · posture ${result.report.posture}`,
+		`${counts.errors} error${counts.errors === 1 ? "" : "s"} · ${counts.warnings} warning${counts.warnings === 1 ? "" : "s"} · ${counts.info} info`,
+		"",
+	];
+
+	if (result.report.findings.length === 0) {
+		lines.push(
+			"Healthy — no configuration, security, or performance issues found."
+		);
+	} else {
+		for (const finding of result.report.findings) {
+			lines.push(
+				`[${finding.severity}] ${finding.category} · ${finding.summary}`,
+				`  ${finding.detail}`
+			);
+			if (finding.settingPath) {
+				lines.push(`  setting: ${finding.settingPath}`);
+			}
+			if (finding.recommendedAction) {
+				lines.push(`  action: ${finding.recommendedAction}`);
+			}
+			lines.push("");
+		}
+	}
+
+	if (result.plannedFixes.length > 0) {
+		lines.push(
+			result.dryRun
+				? `Safe fixes available (dry run — nothing changed): ${result.plannedFixes.length}`
+				: `Safe fixes planned: ${result.plannedFixes.length}`
+		);
+		for (const fix of result.plannedFixes) {
+			lines.push(`  - ${fix.settingPath}: ${fix.action}`);
+		}
+		if (result.appliedFixes.length > 0) {
+			lines.push(
+				`Applied: ${result.appliedFixes.length} safe fix${result.appliedFixes.length === 1 ? "" : "es"}.`
+			);
+		}
+	} else if (result.report.findings.some((finding) => finding.canAutoFix)) {
+		lines.push(
+			"Safe fixes are available; run `ryu doctor --dry-run` to preview them."
+		);
+	}
+
+	return `${lines.join("\n").trimEnd()}\n`;
+}
+
+const doctorCommand: Command = {
+	name: "doctor",
+	summary: "Audit Gateway configuration and security",
+	usage: "ryu doctor [--fix] [--dry-run] [--json]",
+	run: async (ctx) => {
+		const previewOrFix = ctx.flags.fix || ctx.flags.dryRun;
+		const raw = await callCore(
+			ctx,
+			previewOrFix ? "/api/gateway/doctor/fix" : "/api/gateway/doctor",
+			previewOrFix
+				? { method: "POST", body: { dryRun: ctx.flags.dryRun } }
+				: { method: "GET" }
+		);
+		const result = parseDoctorResponse(raw);
+		ctx.io.out(
+			ctx.flags.json
+				? `${JSON.stringify(raw, null, 2)}\n`
+				: renderDoctorResponse(result)
+		);
+		return result.report.counts.errors > 0 ? 1 : 0;
+	},
+};
+
+interface PluginDoctorFindingView {
+	category: string;
+	checkId: string;
+	detail: string;
+	pluginId: string;
+	recommendedAction: string;
+	severity: string;
+	summary: string;
+}
+
+interface PluginDoctorResponseView {
+	counts: { errors: number; info: number; plugins: number; warnings: number };
+	findings: PluginDoctorFindingView[];
+	plugins: {
+		findingCount: number;
+		id: string;
+		name: string;
+		status: string;
+	}[];
+	score: number;
+}
+
+function parsePluginDoctorFinding(value: unknown): PluginDoctorFindingView {
+	const record = doctorRecord(value, "plugin doctor finding");
+	return {
+		category: doctorString(record, "category", "unknown"),
+		checkId: doctorString(record, "checkId", "unknown"),
+		detail: doctorString(record, "detail"),
+		pluginId: doctorString(record, "pluginId", "unknown"),
+		recommendedAction: doctorString(record, "recommendedAction"),
+		severity: doctorString(record, "severity", "info"),
+		summary: doctorString(record, "summary", "Unknown finding"),
+	};
+}
+
+function parsePluginDoctorResponse(value: unknown): PluginDoctorResponseView {
+	const record = doctorRecord(value, "plugin doctor response");
+	const counts = doctorRecord(record.counts, "plugin doctor counts");
+	const plugins = Array.isArray(record.plugins) ? record.plugins : [];
+	const findings = Array.isArray(record.findings)
+		? record.findings.map(parsePluginDoctorFinding)
+		: [];
+	return {
+		counts: {
+			errors: doctorCount(counts, "errors"),
+			info: doctorCount(counts, "info"),
+			plugins: doctorCount(counts, "plugins"),
+			warnings: doctorCount(counts, "warnings"),
+		},
+		findings,
+		plugins: plugins.map((value) => {
+			const plugin = doctorRecord(value, "plugin doctor inventory");
+			return {
+				findingCount: doctorCount(plugin, "findingCount"),
+				id: doctorString(plugin, "id", "unknown"),
+				name: doctorString(plugin, "name", "Unknown plugin"),
+				status: doctorString(plugin, "status", "unknown"),
+			};
+		}),
+		score:
+			typeof record.score === "number" && Number.isFinite(record.score)
+				? record.score
+				: 0,
+	};
+}
+
+function renderPluginDoctorResponse(result: PluginDoctorResponseView): string {
+	const lines = [
+		`Plugin Doctor · ${result.score}/100 · ${result.counts.plugins} artifact${result.counts.plugins === 1 ? "" : "s"}`,
+		`${result.counts.errors} error${result.counts.errors === 1 ? "" : "s"} · ${result.counts.warnings} warning${result.counts.warnings === 1 ? "" : "s"}`,
+		"Read-only lint: Core validated the loaded manifest and lifecycle state; it did not execute plugin code or start sidecars.",
+		"",
+	];
+	if (result.plugins.length > 0) {
+		for (const plugin of result.plugins) {
+			lines.push(
+				`${plugin.status.padEnd(7)} ${plugin.id} · ${plugin.name}`,
+				plugin.findingCount > 0
+					? `  ${plugin.findingCount} finding${plugin.findingCount === 1 ? "" : "s"}`
+					: "  no findings"
+			);
+		}
+		lines.push("");
+	}
+	if (result.findings.length === 0) {
+		lines.push(
+			"Healthy — no manifest, lifecycle, dependency, or permission drift found."
+		);
+	} else {
+		for (const finding of result.findings) {
+			lines.push(
+				`[${finding.severity}] ${finding.pluginId} · ${finding.summary}`,
+				`  ${finding.detail}`,
+				`  action: ${finding.recommendedAction}`,
+				`  check: ${finding.checkId}`,
+				""
+			);
+		}
+	}
+	return `${lines.join("\n").trimEnd()}\n`;
+}
+
+const pluginDoctorCommand: Command = {
+	aliases: ["app"],
+	name: "plugin",
+	summary: "Validate an installed plugin or app",
+	usage: "ryu plugin doctor [id] [--json]",
+	run: async (ctx) => {
+		if (ctx.args[0] !== "doctor" || ctx.args.length > 2) {
+			throw new UsageError("Usage: ryu plugin doctor [id] [--json]");
+		}
+		const id = ctx.args[1];
+		const path = id
+			? `/api/plugins/doctor?id=${encodeURIComponent(id)}`
+			: "/api/plugins/doctor";
+		const raw = await callCore(ctx, path, { method: "GET" });
+		const result = parsePluginDoctorResponse(raw);
+		ctx.io.out(
+			ctx.flags.json
+				? `${JSON.stringify(raw, null, 2)}\n`
+				: renderPluginDoctorResponse(result)
+		);
+		return result.counts.errors > 0 ? 1 : 0;
+	},
+};
+
 const openCommand = rawCommand(
 	"open",
 	"ryu open <page>",
@@ -631,6 +1109,9 @@ const BASE_COMMANDS: Command[] = [
 	loginCommand,
 	logoutCommand,
 	setupCommand,
+	doctorCommand,
+	pluginDoctorCommand,
+	packageCommand,
 	openCommand,
 	listCommand,
 	catalogCommand,
@@ -675,8 +1156,17 @@ export function renderHelp(): string {
 		"  --template <t>  Template for 'ryu init' (passed to create-ryu-app)",
 		"  --force         Override a refused operation where supported",
 		"  --cascade       Include dependents on disable/uninstall",
+		"  --fix           Apply safe fixes for commands that support them",
+		"  --dry-run       Preview safe fixes without writing changes",
+		"  --include-secrets  Include an encrypted local secrets envelope when exporting",
 		"  -h, --help      Show this help",
 		"  --version       Print the version",
+		"",
+		"Examples:",
+		"  ryu doctor",
+		"  ryu doctor --dry-run",
+		"  ryu doctor --fix",
+		"  ryu doctor --fix --dry-run --json",
 		"",
 		"Apps vs plugins: both install, enable, disable and uninstall by id through the",
 		"same commands — an app is a plugin that also ships a full-page UI. Use --kind",

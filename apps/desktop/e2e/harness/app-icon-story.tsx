@@ -34,7 +34,7 @@ const SAMPLES: Array<{ hue: number; icon: string; id: string; name: string }> =
 		{ hue: 185, icon: "brain-01", id: "@ryu/memory", name: "Memory" },
 		{
 			hue: 233,
-			icon: "workflow-square-01",
+			icon: "workflow-circle-06",
 			id: "@ryu/workflows",
 			name: "Workflows",
 		},

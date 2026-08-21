@@ -80,26 +80,39 @@ export function useIslandAcpSections({
 	streamedConfig,
 	streamedMode,
 }: IslandAcpSectionsParams): IslandAcpSectionsResult {
-	const { acpMode, acpModel, acpOptionValues, extraSections, modelSection } =
-		useAcpSections({
-			acpSessionConfig,
-			agentId,
-			agents,
-			engineModel,
-			modelOptions,
-			onEngineModelChange,
-			// Not a mystery constant: the island has never rendered a thinking /
-			// reasoning-effort picker — it filtered those options out
-			// unconditionally. The desktop hides them only when the agent's
-			// capabilities report reasoning overridden off, but that probe is a
-			// Core-backed desktop hook the island has no path to. Hardcoding `true`
-			// keeps the island's pre-extraction behaviour exactly; true parity needs
-			// an island-side capability probe, and only then should this go away.
-			reasoningOff: true,
-			store: ACP_SELECTION_STORE,
-			streamedConfig,
-			streamedMode,
-		});
+	const {
+		acpMode,
+		acpModel,
+		acpOptionValues,
+		extraSections,
+		modelSection,
+		simpleApprovalDefaults,
+	} = useAcpSections({
+		acpSessionConfig,
+		agentId,
+		agents,
+		engineModel,
+		modelOptions,
+		onEngineModelChange,
+		// Not a mystery constant: the island has never rendered a thinking /
+		// reasoning-effort picker — it filtered those options out
+		// unconditionally. The desktop hides them only when the agent's
+		// capabilities report reasoning overridden off, but that probe is a
+		// Core-backed desktop hook the island has no path to. Hardcoding `true`
+		// keeps the island's pre-extraction behaviour exactly; true parity needs
+		// an island-side capability probe, and only then should this go away.
+		reasoningOff: true,
+		store: ACP_SELECTION_STORE,
+		streamedConfig,
+		streamedMode,
+	});
 
-	return { acpMode, acpModel, acpOptionValues, extraSections, modelSection };
+	return {
+		acpMode,
+		acpModel,
+		acpOptionValues,
+		extraSections,
+		modelSection,
+		simpleApprovalDefaults,
+	};
 }

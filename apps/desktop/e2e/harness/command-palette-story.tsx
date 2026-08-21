@@ -17,6 +17,7 @@ import "../../src/index.css";
 
 function Story() {
 	const [open, setOpen] = useState(false);
+	const [activeTab, setActiveTab] = useState("all");
 	const [lastSelected, setLastSelected] = useState("");
 
 	const select = (id: string) => () => {
@@ -44,6 +45,7 @@ function Story() {
 			group: "Chat",
 			title: "New Chat",
 			value: "new chat",
+			resultType: "chats",
 			shortcut: "⌘N",
 			onSelect: select("new-chat"),
 		},
@@ -52,7 +54,24 @@ function Story() {
 			group: "Chat",
 			title: "Import Threads",
 			value: "import threads",
+			resultType: "chats",
 			onSelect: select("import"),
+		},
+		{
+			id: "space-roadmap",
+			group: "Spaces",
+			title: "Product Roadmap",
+			value: "space product roadmap",
+			resultType: "spaces",
+			onSelect: select("space-roadmap"),
+		},
+		{
+			id: "canvas-launch",
+			group: "Canvas",
+			title: "Launch Canvas",
+			value: "canvas launch",
+			resultType: "plugin:com.ryu.canvas:boards",
+			onSelect: select("canvas-launch"),
 		},
 		{
 			id: "dark",
@@ -76,9 +95,20 @@ function Story() {
 			<div data-testid="last-selected">{lastSelected}</div>
 			<CommandPalette
 				actions={actions}
+				activeTab={activeTab}
 				chrome="dialog"
 				onOpenChange={setOpen}
+				onTabChange={setActiveTab}
 				open={open}
+				tabs={[
+					{ id: "all", label: "All" },
+					{ id: "chats", label: "Chats" },
+					{ id: "spaces", label: "Spaces" },
+					{
+						id: "plugin:com.ryu.canvas:boards",
+						label: "Canvas",
+					},
+				]}
 			/>
 		</div>
 	);

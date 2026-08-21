@@ -11,7 +11,31 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
 
-const Select = SelectPrimitive.Root;
+type SelectProps<Value extends string = string> = Omit<
+	SelectPrimitive.Root.Props<Value, false>,
+	"onValueChange"
+> & {
+	onValueChange?: (
+		value: Value,
+		eventDetails: SelectPrimitive.Root.ChangeEventDetails
+	) => void;
+};
+
+function Select<Value extends string = string>({
+	onValueChange,
+	...props
+}: SelectProps<Value>) {
+	return (
+		<SelectPrimitive.Root
+			{...props}
+			onValueChange={(value, eventDetails) => {
+				if (value !== null) {
+					onValueChange?.(value, eventDetails);
+				}
+			}}
+		/>
+	);
+}
 
 function SelectGroup({ className, ...props }: SelectPrimitive.Group.Props) {
 	return (
@@ -81,6 +105,10 @@ function SelectContent({
 	>) {
 	return (
 		<SelectPrimitive.Portal>
+			<SelectPrimitive.Backdrop
+				className="ryu-popup-overlay"
+				data-slot="select-overlay"
+			/>
 			<SelectPrimitive.Positioner
 				align={align}
 				alignItemWithTrigger={alignItemWithTrigger}

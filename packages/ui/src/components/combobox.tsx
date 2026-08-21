@@ -16,11 +16,25 @@ import {
 } from "@ryu/ui/components/input-group.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { type ComponentPropsWithRef, useRef } from "react";
+import {
+	FadeOverflowText,
+	FadeOverflowTextChildren,
+} from "./fade-overflow-text.tsx";
 
 const Combobox = ComboboxPrimitive.Root;
 
-function ComboboxValue({ ...props }: ComboboxPrimitive.Value.Props) {
-	return <ComboboxPrimitive.Value data-slot="combobox-value" {...props} />;
+function ComboboxValue({
+	className,
+	...props
+}: ComboboxPrimitive.Value.Props & { className?: string }) {
+	return (
+		<FadeOverflowText
+			className={cn("min-w-0 flex-1", className)}
+			data-slot="combobox-value"
+		>
+			<ComboboxPrimitive.Value {...props} />
+		</FadeOverflowText>
+	);
 }
 
 function ComboboxTrigger({
@@ -30,11 +44,13 @@ function ComboboxTrigger({
 }: ComboboxPrimitive.Trigger.Props) {
 	return (
 		<ComboboxPrimitive.Trigger
-			className={cn("[&_svg:not([class*='size-'])]:size-4", className)}
+			className={cn("min-w-0 [&_svg:not([class*='size-'])]:size-4", className)}
 			data-slot="combobox-trigger"
 			{...props}
 		>
-			{children}
+			<FadeOverflowTextChildren className="flex-1">
+				{children}
+			</FadeOverflowTextChildren>
 			<HugeiconsIcon
 				className="pointer-events-none size-4 text-muted-foreground"
 				icon={ArrowDown01Icon}
@@ -118,6 +134,10 @@ function ComboboxContent({
 	>) {
 	return (
 		<ComboboxPrimitive.Portal>
+			<ComboboxPrimitive.Backdrop
+				className="ryu-popup-overlay"
+				data-slot="combobox-overlay"
+			/>
 			<ComboboxPrimitive.Positioner
 				align={align}
 				alignOffset={alignOffset}

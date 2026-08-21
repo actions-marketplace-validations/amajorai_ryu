@@ -61,7 +61,7 @@ pub struct WorkflowConfig {
 /// tool backend is a swappable config kind" seam:
 ///
 ///   - `alias` (default / absent): the legacy behavior — re-expose an existing
-///     registry tool named `slug` under the plugin's `app__<slug>` namespace.
+///     registry tool named `slug` under the plugin's `app.<slug>` namespace.
 ///     Ships no new behavior; dispatch re-enters the target tool.
 ///   - `inline_deno`: the plugin ships NEW logic. `code` is a JS body run in the
 ///     existing `tool_exec` Deno sandbox with the same grant model as a turn hook
@@ -80,7 +80,7 @@ pub struct WorkflowConfig {
 pub struct ToolConfig {
     /// Tool slug. For an `alias` tool this is the target registry tool id it
     /// wraps (e.g. `"web_search"`); for `inline_deno`/`http` it is the tool's own
-    /// name. The registered, callable id is always `app__<slug>`.
+    /// name. The registered, callable id is always `app.<slug>`.
     pub slug: String,
     /// Backend kind: `"alias"` (default when absent) | `"inline_deno"` | `"http"`
     /// | `"command"`.
@@ -848,9 +848,9 @@ pub struct SourceArchiveSpec {
 }
 
 /// A single asset an external runtime needs, fetched before first run. Either a
-/// direct https URL or an `hf:<owner>/<repo>/<path>` reference; `dest_under_ryu`
-/// is the relative directory beneath `~/.ryu` where it lands (Core-owned) — the
-/// filename is derived from the source's last path segment.
+/// direct https URL or an `hf:<owner>/<repo>/<path>` reference; the destination
+/// is a relative directory beneath the plugin's dedicated runtime `assets/`
+/// directory — the filename is derived from the source's last path segment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AssetSpec {
     /// A direct **https** URL, or an `hf:<owner>/<repo>/<path>` reference to a
@@ -860,10 +860,14 @@ pub struct AssetSpec {
     /// (`crate::sidecar::external_runtime`) rejects `http://` and other schemes.
     pub source: String,
 
-    /// Destination directory relative to `~/.ryu` (e.g. `"models/hf"`); the
-    /// fetched file lands at `~/.ryu/<dest_under_ryu>/<filename>`. Must be a
-    /// traversal-safe relative path (no `..`, not absolute).
-    pub dest_under_ryu: String,
+    /// Destination directory relative to the runtime's `assets/` directory
+    /// (e.g. `"models/hf"`). The fetched file lands at
+    /// `<runtime>/assets/<dest_under_runtime>/<filename>`. Must be a
+    /// traversal-safe relative path (no `..`, not absolute). The old
+    /// `dest_under_ryu` spelling is accepted as a wire alias but is never
+    /// resolved against the shared Core data directory.
+    #[serde(alias = "dest_under_ryu")]
+    pub dest_under_runtime: String,
 
     /// Optional SHA-256 for checksum verification (direct-URL assets).
     #[serde(default)]
@@ -1057,6 +1061,31 @@ impl ProviderRegistrationSpec {
         self.api.as_deref().unwrap_or(DEFAULT_PROVIDER_API)
     }
 
+    /// Whether a declared path remains a path on the fixed loopback origin.
+    /// Requiring a leading single slash and rejecting query/fragment/userinfo
+    /// syntax prevents a value such as `@attacker.example/v1` from turning the
+    /// concatenated URL into `http://127.0.0.1:PORT@attacker.example/...`.
+    pub fn base_path_is_safe(path: &str) -> bool {
+        if path.is_empty()
+            || !path.starts_with('/')
+            || path.starts_with("//")
+            || path.contains('\\')
+            || path.chars().any(char::is_control)
+        {
+            return false;
+        }
+        let candidate = format!("http://127.0.0.1:1{path}");
+        let Ok(url) = url::Url::parse(&candidate) else {
+            return false;
+        };
+        url.scheme() == "http"
+            && url.host_str() == Some("127.0.0.1")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    }
+
     /// The loopback `baseUrl` for `port`, applying the [`base_path`] default.
     ///
     /// [`base_path`]: ProviderRegistrationSpec::base_path
@@ -1064,6 +1093,7 @@ impl ProviderRegistrationSpec {
         let path = self
             .base_path
             .as_deref()
+            .filter(|path| Self::base_path_is_safe(path))
             .unwrap_or(DEFAULT_PROVIDER_BASE_PATH);
         let path = path.strip_suffix('/').unwrap_or(path);
         format!("http://127.0.0.1:{port}{path}")
@@ -1901,6 +1931,27 @@ mod tests {
     }
 
     #[test]
+    fn provider_base_url_cannot_escape_loopback_through_userinfo() {
+        let mut spec = ProviderRegistrationSpec {
+            id: "custom".into(),
+            label: None,
+            api: None,
+            base_path: None,
+            models: Vec::new(),
+        };
+        spec.base_path = Some("@attacker.example/v1".into());
+        assert!(!ProviderRegistrationSpec::base_path_is_safe(
+            spec.base_path.as_deref().unwrap()
+        ));
+        assert_eq!(spec.base_url(4312), "http://127.0.0.1:4312/v1");
+
+        for path in ["//attacker.example/v1", "/v1?redirect=evil", "/v1#fragment"] {
+            assert!(!ProviderRegistrationSpec::base_path_is_safe(path), "{path}");
+        }
+        assert!(ProviderRegistrationSpec::base_path_is_safe("/v1/chat"));
+    }
+
+    #[test]
     fn command_backend_resolves_with_defaults() {
         let cfg: ToolConfig = serde_json::from_value(json!({
             "slug": "exa_search",
@@ -1993,7 +2044,7 @@ mod tests {
         // The exact `rtk` shape: a mode-map (wrap → zero tokens) + a shell-split
         // command. It must resolve to a Command backend carrying `arg_specs`.
         let cfg: ToolConfig = serde_json::from_value(json!({
-            "slug": "rtk__run",
+            "slug": "rtk.run",
             "backend": "command",
             "bin": "rtk",
             "timeout_secs": 120,
@@ -2117,7 +2168,7 @@ mod tests {
     fn resolve_backend_http_carries_secret_headers_and_fail_open() {
         // Present secret_headers + fail_open:true resolve onto the backend.
         let cfg: ToolConfig = serde_json::from_value(json!({
-            "slug": "exa__search",
+            "slug": "exa.search",
             "backend": "http",
             "url": "https://api.exa.ai/search",
             "secret_headers": { "Authorization": "env:RYU_EXA_API_KEY" },

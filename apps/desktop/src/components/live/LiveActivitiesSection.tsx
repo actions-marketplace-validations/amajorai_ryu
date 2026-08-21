@@ -119,7 +119,7 @@ export function LiveActivitiesSection() {
 					className="size-1.5 animate-pulse rounded-full bg-primary"
 				/>
 			</div>
-			<div className="scroll-fade-effect-y flex max-h-[38vh] flex-col gap-1.5 overflow-y-auto">
+			<div className="scroll-fade flex max-h-[38vh] flex-col gap-1.5 overflow-y-auto">
 				{activities.map((activity) => (
 					<LiveActivityRow
 						activity={activity}

@@ -1,4 +1,5 @@
 import {
+	dayPeriodKey,
 	monthPeriodKey,
 	periodKeyFor,
 	QUESTS,
@@ -40,6 +41,24 @@ describe("QUESTS catalog", () => {
 		expect(refer5?.reward.kind).toBe("credit");
 	});
 
+	it("includes a once-per-day check-in quest", () => {
+		const checkIn = questByKey("daily-check-in");
+		expect(checkIn).toBeDefined();
+		expect(checkIn?.cadence).toBe("daily");
+		expect(checkIn?.verification).toBe("auto");
+		expect(checkIn?.target).toBe(1);
+		expect(checkIn?.reward).toEqual({ kind: "points", points: 25 });
+	});
+
+	it("includes the one-time desktop app quest", () => {
+		const desktop = questByKey("download-desktop-app");
+		expect(desktop).toBeDefined();
+		expect(desktop?.cadence).toBe("one_time");
+		expect(desktop?.verification).toBe("auto");
+		expect(desktop?.target).toBe(1);
+		expect(desktop?.reward).toEqual({ kind: "points", points: 100 });
+	});
+
 	it("keeps submit-verified quests on a single-proof target", () => {
 		for (const quest of QUESTS.filter((q) => q.verification === "submit")) {
 			expect(quest.target).toBe(1);
@@ -55,6 +74,11 @@ describe("period keys", () => {
 	it("derives a UTC month key", () => {
 		expect(monthPeriodKey(new Date("2026-08-15T12:00:00Z"))).toBe("2026-08");
 		expect(monthPeriodKey(new Date("2026-12-31T23:59:59Z"))).toBe("2026-12");
+	});
+
+	it("derives a UTC day key", () => {
+		expect(dayPeriodKey(new Date("2026-08-17T23:59:59Z"))).toBe("2026-08-17");
+		expect(dayPeriodKey(new Date("2026-08-18T00:00:00Z"))).toBe("2026-08-18");
 	});
 
 	it("derives ISO weeks, handling the year turn", () => {
@@ -73,6 +97,7 @@ describe("period keys", () => {
 		const date = new Date("2026-08-15T12:00:00Z");
 		expect(periodKeyFor(date, "one_time")).toBeNull();
 		expect(periodKeyFor(date, "permanent")).toBeNull();
+		expect(periodKeyFor(date, "daily")).toBe("2026-08-15");
 		expect(periodKeyFor(date, "weekly")).toBe("2026-W33");
 		expect(periodKeyFor(date, "monthly")).toBe("2026-08");
 	});

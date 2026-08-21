@@ -1,8 +1,8 @@
 //! Unified model insight for the agent-picker hover card.
 //!
 //! Cascade (first hit wins for base facts; AA always enriches when keyed):
-//! 1. **models.dev** — cost, context, modalities, capabilities (built-in / ACP)
-//! 2. **OpenRouter** — same shape when models.dev misses, or provider is OpenRouter
+//! 1. **OpenRouter** — authoritative transaction pricing when the route is OpenRouter
+//! 2. **models.dev** — cost, context, modalities, capabilities (built-in / ACP)
 //! 3. **Artificial Analysis** — intelligence / speed / blended price when an AA
 //!    key is configured (local models especially; also fills cloud gaps)
 //!
@@ -71,11 +71,24 @@ pub async fn insight_for(model: &str, provider: Option<&str>) -> Option<ModelIns
         return None;
     }
 
-    let mut meta = models_dev::meta_for(trimmed, provider).await;
+    let openrouter_first = provider_is_openrouter(provider);
+    let mut meta = if openrouter_first {
+        openrouter_meta::meta_for(trimmed).await
+    } else {
+        models_dev::meta_for(trimmed, provider).await
+    };
     let mut source = meta.as_ref().map(|m| m.source.clone()).unwrap_or_default();
 
+    // OpenRouter's response contains the final transaction price, including
+    // temporary provider promotions. If that registry misses, retain the
+    // normal cross-provider fallback rather than returning no insight.
     if meta.is_none() {
-        if let Some(m) = openrouter_meta::meta_for(trimmed).await {
+        let fallback = if openrouter_first {
+            models_dev::meta_for(trimmed, provider).await
+        } else {
+            openrouter_meta::meta_for(trimmed).await
+        };
+        if let Some(m) = fallback {
             source = m.source.clone();
             meta = Some(m);
         }
@@ -110,6 +123,14 @@ pub async fn insight_for(model: &str, provider: Option<&str>) -> Option<ModelIns
 
     let meta = meta?;
     Some(build_insight(meta, source, aa_stats, aa_key_present))
+}
+
+fn provider_is_openrouter(provider: Option<&str>) -> bool {
+    provider.map(str::trim).is_some_and(|provider| {
+        provider.eq_ignore_ascii_case("openrouter")
+            || provider.eq_ignore_ascii_case("managed-openrouter")
+            || provider.eq_ignore_ascii_case("ryu-openrouter")
+    })
 }
 
 fn bare_model_id(model: &str) -> &str {
@@ -317,5 +338,14 @@ mod tests {
         assert_eq!(score_intelligence(20.0), Some(2));
         assert_eq!(score_speed(200.0), Some(5));
         assert_eq!(score_speed(10.0), Some(1));
+    }
+
+    #[test]
+    fn openrouter_routes_use_openrouter_pricing_first() {
+        assert!(provider_is_openrouter(Some("openrouter")));
+        assert!(provider_is_openrouter(Some("managed-openrouter")));
+        assert!(provider_is_openrouter(Some(" ryu-openrouter ")));
+        assert!(!provider_is_openrouter(Some("openai")));
+        assert!(!provider_is_openrouter(None));
     }
 }

@@ -12,6 +12,7 @@ import { usePrefersReducedMotion } from "@/src/hooks/usePrefersReducedMotion.ts"
  * ToolRenderer / EditTool / ToolGroup / Markdown can read the user's choices.
  */
 export function ChatDisplayPrefs({ children }: { children: ReactNode }) {
+	const [markdownComposer] = usePersistedToggle("ryu:markdown-composer", false);
 	const [groupToolUses] = usePersistedToggle("ryu:group-tool-uses", true);
 	const [expandFileEdits] = usePersistedToggle("ryu:expand-file-edits", false);
 	const [expandCommands] = usePersistedToggle("ryu:expand-commands", false);
@@ -43,12 +44,14 @@ export function ChatDisplayPrefs({ children }: { children: ReactNode }) {
 	const streamAnimation =
 		animationsEnabled && streamAnimationPref && !prefersReducedMotion;
 
-	// All nine are stable primitives, so this object only changes when a
+	// All prefs are stable primitives, so this object only changes when a
 	// preference actually changes. It must be memoised HERE as well as inside the
 	// blocks-level provider: a fresh literal at this level re-renders every chat
 	// consumer (context reads bypass `memo()`) on every render of Layout.
 	const prefs = useMemo(
 		() => ({
+			animationsEnabled,
+			markdownComposer,
 			groupToolUses,
 			hideToolDetail,
 			expandFileEdits,
@@ -60,6 +63,8 @@ export function ChatDisplayPrefs({ children }: { children: ReactNode }) {
 			streamAnimation,
 		}),
 		[
+			animationsEnabled,
+			markdownComposer,
 			groupToolUses,
 			hideToolDetail,
 			expandFileEdits,

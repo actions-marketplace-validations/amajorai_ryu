@@ -7,14 +7,17 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use std::collections::HashMap;
 
 use crate::{
+    audit::AuditLogger,
     config::{
-        ApiKeyConfig, AuthConfig, BudgetConfig, EvalRoutingConfig, FirewallConfig, FirewallOverlay,
-        GatewayConfig, Modality, ModalityMapping, ProviderId, ProvidersConfig, RoutingConfig,
-        SmartRoutingConfig, StageBackendsConfig, ToolProfile, ToolsConfig,
+        AcpConfig, ApiKeyConfig, AuthConfig, BudgetConfig, ComputerUseConfig, EvalRoutingConfig,
+        FirewallConfig, FirewallOverlay, GatewayConfig, MarketplaceRecommendationsConfig, Modality,
+        ModalityMapping, ProviderId, ProvidersConfig, RoutingConfig, SmartRoutingConfig,
+        StageBackendsConfig, ToolProfile, ToolsConfig,
     },
     error::GatewayError,
     pipeline::{authenticate, AuthInputs},
@@ -26,6 +29,8 @@ use crate::{
 /// Public view of GatewayConfig with provider api_key fields redacted.
 #[derive(Serialize)]
 struct ConfigView {
+    acp: AcpConfig,
+    computer_use: ComputerUseConfig,
     firewall: FirewallConfig,
     budgets: BudgetConfig,
     providers: ProvidersView,
@@ -36,6 +41,10 @@ struct ConfigView {
     /// secret, so the section is returned verbatim for the UI to read/edit
     /// (mirrors how `firewall` / `smart_routing` are surfaced).
     tools: ToolsConfigView,
+    /// Gateway-owned Marketplace recommendation policy. This is returned from
+    /// persisted config so a read-modify-write client sees the kill switch and
+    /// cadence it will actually save.
+    marketplace_recommendations: MarketplaceRecommendationsConfig,
     /// Gateway-local standalone-desktop firewall overlay stores (§6 of the
     /// hierarchical-policy spec): the org and per-agent [`FirewallOverlay`]s
     /// authored via `PUT /v1/config` when there is no control plane. Keyed by org
@@ -544,12 +553,15 @@ pub async fn get_config(
     );
 
     let view = ConfigView {
+        acp: persisted.acp.clone(),
+        computer_use: persisted.computer_use.clone(),
         firewall: firewall_cfg,
         budgets: budget_cfg,
         providers: redact_providers(&state.config.providers),
         auth: redact_auth(&auth_cfg),
         routing: routing_view,
         tools: tools_view,
+        marketplace_recommendations: persisted.marketplace_recommendations.clone(),
         // Snapshot the resolver's standalone-local overlay stores so the desktop
         // can read-modify-write them. Empty on the hosted path (overlays arrive
         // on the resolve response there, not via this store).
@@ -592,6 +604,14 @@ pub struct AuthConfigPatch {
 /// environment-variable change.
 #[derive(Deserialize)]
 pub struct ConfigPatch {
+    /// ACP lifecycle/resource controls. Core enforces these settings where the
+    /// subprocesses run; the Gateway owns persistence and authorization.
+    #[serde(default)]
+    pub acp: Option<AcpConfig>,
+    /// Node-wide Ghost/computer-use policy. The setting is persisted here so
+    /// Core and the provider boundary can make one node-level decision.
+    #[serde(default)]
+    pub computer_use: Option<ComputerUseConfig>,
     pub firewall: Option<FirewallConfig>,
     pub budgets: Option<BudgetConfig>,
     /// When present, replaces the list of per-client API keys. The master key
@@ -603,6 +623,10 @@ pub struct ConfigPatch {
     /// on the next gateway restart; the request path reads `state.config.tools`
     /// directly, which is fixed at startup.
     pub tools: Option<ToolsConfig>,
+    /// Personalized Marketplace recommendation policy. The closed cadence enum
+    /// rejects values outside daily/weekly/monthly during JSON deserialization.
+    #[serde(default)]
+    pub marketplace_recommendations: Option<MarketplaceRecommendationsConfig>,
     /// Full replacement of the gateway-local standalone org overlay store (§6).
     /// Full-replacement semantics, matching `auth.api_keys`: any org id absent
     /// from this map is removed. Applied to the resolver's in-memory store
@@ -652,20 +676,85 @@ fn patch_is_empty(
     auth: bool,
     routing: bool,
     tools: bool,
+    acp: bool,
     org_overlays: bool,
     agent_overlays: bool,
     custom_evaluators: bool,
     backends: bool,
+    marketplace_recommendations: bool,
+    computer_use: bool,
 ) -> bool {
     !(firewall
         || budgets
         || auth
         || routing
         || tools
+        || acp
         || org_overlays
         || agent_overlays
         || custom_evaluators
-        || backends)
+        || backends
+        || marketplace_recommendations
+        || computer_use)
+}
+
+fn config_patch_sections(patch: &ConfigPatch) -> Vec<&'static str> {
+    let mut sections = Vec::new();
+    if patch.firewall.is_some() {
+        sections.push("firewall");
+    }
+    if patch.budgets.is_some() {
+        sections.push("budgets");
+    }
+    if patch.auth.is_some() {
+        sections.push("auth");
+    }
+    if patch.routing.is_some() {
+        sections.push("routing");
+    }
+    if patch.tools.is_some() {
+        sections.push("tools");
+    }
+    if patch.acp.is_some() {
+        sections.push("acp");
+    }
+    if patch.firewall_org_overlays.is_some() {
+        sections.push("firewall_org_overlays");
+    }
+    if patch.firewall_agent_overlays.is_some() {
+        sections.push("firewall_agent_overlays");
+    }
+    if patch.custom_evaluators.is_some() {
+        sections.push("custom_evaluators");
+    }
+    if patch.backends.is_some() {
+        sections.push("backends");
+    }
+    if patch.marketplace_recommendations.is_some() {
+        sections.push("marketplace_recommendations");
+    }
+    if patch.computer_use.is_some() {
+        sections.push("computer_use");
+    }
+    sections
+}
+
+fn forwarded_control_actor(headers: &HeaderMap, fallback: &str) -> (String, Option<String>) {
+    let read = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.chars().count() <= 240)
+            .map(str::to_owned)
+    };
+    let actor_id = read("x-ryu-control-actor-id");
+    let actor_name = read("x-ryu-control-actor-name");
+    let actor = actor_name
+        .clone()
+        .or_else(|| actor_id.clone())
+        .unwrap_or_else(|| fallback.to_owned());
+    (actor, actor_id)
 }
 
 /// Validate a per-stage backend selection against the live registries before it
@@ -777,23 +866,33 @@ pub async fn put_config(
         patch.auth.is_some(),
         patch.routing.is_some(),
         patch.tools.is_some(),
+        patch.acp.is_some(),
         patch.firewall_org_overlays.is_some(),
         patch.firewall_agent_overlays.is_some(),
         patch.custom_evaluators.is_some(),
         patch.backends.is_some(),
+        patch.marketplace_recommendations.is_some(),
+        patch.computer_use.is_some(),
     ) {
         return Err(GatewayError::BadRequest(
-            "Patch body must include at least one of: firewall, budgets, auth, routing, tools, \
-             firewall_org_overlays, firewall_agent_overlays, custom_evaluators, backends"
+            "Patch body must include at least one of: acp, firewall, budgets, auth, routing, tools, \
+             firewall_org_overlays, firewall_agent_overlays, custom_evaluators, backends, \
+             marketplace_recommendations, computer_use"
                 .to_string(),
         ));
     }
+
+    let changed_sections = config_patch_sections(&patch).join(", ");
 
     // Validate any incoming per-stage backend selection against the live
     // registries BEFORE persisting: an unknown id here would refuse the NEXT boot
     // (AppState::new fails closed), so reject it now with the registered ids.
     if let Some(backends) = &patch.backends {
         validate_stage_backends(&state, backends)?;
+    }
+
+    if let Some(acp) = &patch.acp {
+        acp.validate().map_err(GatewayError::BadRequest)?;
     }
 
     // Validate any incoming custom evaluators before persisting (non-empty ids, no
@@ -833,8 +932,11 @@ pub async fn put_config(
         || patch.auth.is_some()
         || patch.routing.is_some()
         || patch.tools.is_some()
+        || patch.acp.is_some()
         || patch.custom_evaluators.is_some()
-        || patch.backends.is_some();
+        || patch.backends.is_some()
+        || patch.marketplace_recommendations.is_some()
+        || patch.computer_use.is_some();
     let has_overlay_field = org_next.is_some() || agent_next.is_some();
     // Persist when a config-backed field changed (always — `save()` errors if no
     // path, as before), OR when overlays changed AND a writable config path exists
@@ -873,6 +975,9 @@ pub async fn put_config(
         if let Some(tools) = &patch.tools {
             updated_config.tools = tools.clone();
         }
+        if let Some(acp) = &patch.acp {
+            updated_config.acp = acp.clone();
+        }
         // Per-stage backend selection (W6a): persisted so a restart's
         // `AppState::new` reapplies it. Already validated against the live
         // registries above, so the persisted ids can never brick the next boot.
@@ -888,6 +993,12 @@ pub async fn put_config(
         // snapshot-only section.
         if let Some(custom) = &patch.custom_evaluators {
             updated_config.custom_evaluators = custom.clone();
+        }
+        if let Some(recommendations) = &patch.marketplace_recommendations {
+            updated_config.marketplace_recommendations = recommendations.clone();
+        }
+        if let Some(computer_use) = &patch.computer_use {
+            updated_config.computer_use = computer_use.clone();
         }
         // Overlay stores (FIX 4): the resulting full-replacement store equals the
         // normalized `next` map when the patch carries it, else the resolver's
@@ -955,12 +1066,28 @@ pub async fn put_config(
         );
     }
 
+    let fallback_actor = if ctx.is_master_key {
+        "master-key"
+    } else {
+        "loopback-admin"
+    };
+    let (actor, actor_id) = forwarded_control_actor(&headers, fallback_actor);
+    state.log_audit(AuditLogger::make_control_record(
+        Uuid::new_v4().to_string(),
+        ctx.api_key,
+        actor,
+        actor_id,
+        "config.update".to_string(),
+        "gateway_config".to_string(),
+        Some(changed_sections),
+    ));
+
     Ok(Json(json!({ "ok": true })))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::admin_loopback_allowed;
+    use super::{admin_loopback_allowed, get_config, put_config};
 
     #[test]
     fn loopback_no_auth_no_mesh_is_allowed() {
@@ -1018,7 +1145,7 @@ mod tests {
     use crate::{
         audit::AuditLogger,
         config::{
-            AlertTier, AuditConfig, AuthConfig, BudgetAction, BudgetConfig, BudgetRule,
+            AcpConfig, AlertTier, AuditConfig, AuthConfig, BudgetAction, BudgetConfig, BudgetRule,
             CustomPattern, CustomPatternKind, EvalRoutingConfig, EvalsConfig, FirewallConfig,
             FirewallOverlay, FirewallPolicy, GatewayConfig, Modality, ModalityMapping, ProviderId,
             ProvidersConfig, RoutingConfig, ToolsConfig,
@@ -1101,28 +1228,60 @@ mod tests {
     fn patch_is_empty_true_only_when_every_field_absent() {
         // The all-none case is the only rejection.
         assert!(patch_is_empty(
-            false, false, false, false, false, false, false, false, false
+            false, false, false, false, false, false, false, false, false, false, false, false
         ));
         // Regression guard for the loosened check: an OVERLAY-ONLY patch (the
         // standalone-desktop authoring case) must NOT be rejected as empty.
         assert!(!patch_is_empty(
-            false, false, false, false, false, true, false, false, false
+            false, false, false, false, false, false, true, false, false, false, false, false
         ));
         assert!(!patch_is_empty(
-            false, false, false, false, false, false, true, false, false
+            false, false, false, false, false, false, false, true, false, false, false, false
         ));
         // A custom-evaluators-only patch is also non-empty.
         assert!(!patch_is_empty(
-            false, false, false, false, false, false, false, true, false
+            false, false, false, false, false, false, false, false, true, false, false, false
         ));
         // A backends-only patch (per-stage backend selection) is non-empty.
         assert!(!patch_is_empty(
-            false, false, false, false, false, false, false, false, true
+            false, false, false, false, false, false, false, false, false, true, false, false
         ));
         // A classic config-field patch is still non-empty.
         assert!(!patch_is_empty(
-            true, false, false, false, false, false, false, false, false
+            true, false, false, false, false, false, false, false, false, false, false, false
         ));
+        // ACP-only updates are first-class config writes.
+        assert!(!patch_is_empty(
+            false, false, false, false, false, true, false, false, false, false, false, false
+        ));
+        assert!(!patch_is_empty(
+            false, false, false, false, false, false, false, false, false, false, true, false
+        ));
+        // Computer-use policy updates are first-class config writes.
+        assert!(!patch_is_empty(
+            false, false, false, false, false, false, false, false, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn acp_defaults_and_validation_protect_resource_bounds() {
+        let defaults = AcpConfig::default();
+        assert_eq!(defaults.idle_timeout_minutes, 10);
+        assert_eq!(defaults.max_parallel_agents, None);
+        assert!(defaults.keep_computer_awake);
+        assert!(defaults.validate().is_ok());
+
+        let mut invalid = defaults.clone();
+        invalid.idle_timeout_minutes = 0;
+        assert!(invalid.validate().is_err());
+        invalid.idle_timeout_minutes = defaults.idle_timeout_minutes;
+        invalid.max_parallel_agents = Some(0);
+        assert!(invalid.validate().is_err());
+
+        let serialized = toml::to_string(&defaults).expect("Auto should be TOML-safe");
+        assert!(!serialized.contains("max_parallel_agents"));
+        let round_trip: AcpConfig = toml::from_str(&serialized).expect("ACP TOML round-trip");
+        assert_eq!(round_trip, defaults);
     }
 
     /// The PUT path validates every requested stage backend against the live
@@ -1233,6 +1392,7 @@ mod tests {
                 downgrade_to: None,
                 restrict_max_tokens: 256,
                 alert: AlertTier::Email,
+                include: crate::config::BudgetChargeInclusion::default(),
             },
         );
         budgets.session.limit = 5_000;
@@ -1278,6 +1438,94 @@ mod tests {
         );
     }
 
+    #[test]
+    fn computer_use_policy_survives_the_config_view_to_patch_round_trip() {
+        let mut view = config_view(
+            FirewallConfig::default(),
+            BudgetConfig::default(),
+            HashMap::new(),
+        );
+        view.computer_use = super::ComputerUseConfig { locked_use: true };
+        let wire = serde_json::to_value(&view).expect("the view serializes");
+
+        assert_eq!(wire["computer_use"]["locked_use"], true);
+
+        let patch: ConfigPatch = serde_json::from_value(wire).expect("the view parses as a patch");
+        assert!(
+            patch
+                .computer_use
+                .expect("computer-use policy echoed")
+                .locked_use,
+            "a desktop save must not silently turn locked use off"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn computer_use_put_updates_the_persisted_config_and_view() {
+        use axum::extract::{ConnectInfo, State};
+        use axum::http::HeaderMap;
+        use axum::Json;
+        use std::net::SocketAddr;
+
+        let _guard = crate::config::test_config_path::ConfigPathGuard::isolated("computer-use-put");
+        GatewayConfig::default()
+            .save()
+            .expect("seed the persisted config");
+
+        let audit = AuditLogger::new(&AuditConfig {
+            enabled: false,
+            db_path: String::new(),
+        })
+        .expect("disabled audit logger");
+        let state = std::sync::Arc::new(AppState::new_for_test(
+            GatewayConfig::default(),
+            audit,
+            EvalsRunner::new(EvalsConfig::default()),
+        ));
+        let peer = ConnectInfo("127.0.0.1:5".parse::<SocketAddr>().unwrap());
+        let patch = ConfigPatch {
+            acp: None,
+            computer_use: Some(super::ComputerUseConfig { locked_use: true }),
+            firewall: None,
+            budgets: None,
+            auth: None,
+            routing: None,
+            tools: None,
+            firewall_org_overlays: None,
+            firewall_agent_overlays: None,
+            custom_evaluators: None,
+            backends: None,
+            marketplace_recommendations: None,
+        };
+
+        let Json(saved) = put_config(
+            State(std::sync::Arc::clone(&state)),
+            peer,
+            HeaderMap::new(),
+            Json(patch),
+        )
+        .await
+        .expect("computer-use PUT succeeds");
+        assert_eq!(saved["ok"], true);
+
+        let text = std::fs::read_to_string(
+            crate::config::GatewayConfig::config_path().expect("isolated config path"),
+        )
+        .expect("gateway.toml written");
+        let on_disk: GatewayConfig = toml::from_str(&text).expect("re-parse persisted config");
+        assert!(on_disk.computer_use.locked_use);
+
+        let Json(view) = get_config(
+            State(state),
+            ConnectInfo("127.0.0.1:5".parse::<SocketAddr>().unwrap()),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("computer-use GET succeeds");
+        assert_eq!(view["computer_use"]["locked_use"], true);
+    }
+
     /// Build a [`ConfigView`] the way `get_config` does, with the three sections this
     /// test cares about injected and everything else defaulted. Constructing the real
     /// view type (rather than a hand-written JSON literal) is what makes the round-trip
@@ -1310,6 +1558,8 @@ mod tests {
     ) -> super::ConfigView {
         let tools = ToolsConfig::default();
         super::ConfigView {
+            acp: AcpConfig::default(),
+            computer_use: super::ComputerUseConfig::default(),
             firewall,
             budgets,
             providers: super::redact_providers(&ProvidersConfig::default()),
@@ -1342,6 +1592,7 @@ mod tests {
                 describe_top_n: tools.describe_top_n,
                 profiles: tools.profiles.clone(),
             },
+            marketplace_recommendations: super::MarketplaceRecommendationsConfig::default(),
             firewall_org_overlays,
             firewall_agent_overlays: HashMap::new(),
             pipeline_stages: stage_order.stages().iter().map(|s| s.as_str()).collect(),
@@ -1808,6 +2059,7 @@ mod tests {
                 name: "client-1".to_string(),
                 org_id: Some("org-1".to_string()),
                 team_id: Some("team-1".to_string()),
+                channel_id: None,
                 project_id: None,
                 requests_per_minute: None,
                 tokens_per_minute: None,
@@ -2246,6 +2498,8 @@ mod tests {
 
         // ── Act: a firewall-only save, the ordinary "tighten a guardrail" flow ──
         let patch = ConfigPatch {
+            acp: None,
+            computer_use: None,
             firewall: Some(FirewallConfig {
                 policy: FirewallPolicy::Block,
                 ..FirewallConfig::default()
@@ -2258,6 +2512,7 @@ mod tests {
             firewall_agent_overlays: None,
             custom_evaluators: None,
             backends: None,
+            marketplace_recommendations: None,
         };
         let Json(saved) = put_config(
             State(Arc::clone(&state)),
@@ -2523,6 +2778,8 @@ mod tests {
             peer(),
             admin_headers(),
             Json(ConfigPatch {
+                acp: None,
+                computer_use: None,
                 firewall: None,
                 budgets: None,
                 auth: None,
@@ -2532,6 +2789,7 @@ mod tests {
                 firewall_agent_overlays: None,
                 custom_evaluators: None,
                 backends: None,
+                marketplace_recommendations: None,
             }),
         )
         .await

@@ -120,7 +120,9 @@ describe("SkillsCatalogSection — list states", () => {
 	test("error surfaces the message", () => {
 		const html = render(makeSkillsState({ error: "nope" }));
 		// The apostrophe in "Couldn't" is HTML-escaped in static markup.
-		expect(html).toContain("load skills: nope");
+		expect(html).toContain("Couldn&#x27;t load skills");
+		expect(html).toContain("nope");
+		expect(html).toContain("Try again");
 	});
 
 	test("empty (loaded, no skills) shows the empty state", () => {
@@ -148,8 +150,8 @@ describe("SkillsCatalogSection — list states", () => {
 		);
 		// friendly mode (default ON via getServerSnapshot) title-cases the name.
 		expect(html).toContain("Popular");
-		// formatCount(1_500_000) -> "1.5M", wired into the "source · N installs" line.
-		expect(html).toContain("1.5M installs");
+		// formatCount(1_500_000) -> "1.5m", wired into the "source · N installs" line.
+		expect(html).toContain("1.5m installs");
 		expect(html).toContain("org");
 	});
 

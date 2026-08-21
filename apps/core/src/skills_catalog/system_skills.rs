@@ -362,6 +362,24 @@ mod tests {
     }
 
     #[test]
+    fn diagram_design_is_in_the_bundled_repositories() {
+        assert!(
+            bundled_repos()
+                .iter()
+                .any(|repo| repo == "cathrynlavery/diagram-design"),
+            "diagram-design should be included in boot sync"
+        );
+    }
+
+    #[test]
+    fn unlazy_is_in_the_bundled_repositories() {
+        assert!(
+            bundled_repos().iter().any(|repo| repo == "Leonxlnx/unlazy"),
+            "unlazy should be included in boot sync"
+        );
+    }
+
+    #[test]
     fn default_skill_is_bundled() {
         for slug in DEFAULT_SKILLS {
             assert!(

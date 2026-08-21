@@ -9,10 +9,12 @@ import {
 	deleteDocument as apiDeleteDocument,
 	deleteSpace as apiDeleteSpace,
 	ingestDocument as apiIngestDocument,
+	renameSpace as apiRenameSpace,
 	searchSpace as apiSearchSpace,
 	setDocumentIcon as apiSetDocumentIcon,
 	setSpaceIcon as apiSetSpaceIcon,
 	setSpaceRetrievalMode as apiSetSpaceRetrievalMode,
+	setSpaceVisibility as apiSetSpaceVisibility,
 	updateDocument as apiUpdateDocument,
 	uploadSpaceFile as apiUploadSpaceFile,
 	fetchDocument,
@@ -29,6 +31,7 @@ import {
 } from "@/src/lib/api/spaces.ts";
 import { useCoreRefresh } from "@/src/lib/core-refresh.ts";
 import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
+import type { ResourceVisibility } from "@/src/lib/resource-visibility.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
 export interface UseSpacesResult {
@@ -46,7 +49,8 @@ export interface UseSpacesResult {
 	create: (
 		name: string,
 		description: string | null,
-		retrievalMode?: RetrievalMode
+		retrievalMode?: RetrievalMode,
+		visibility?: ResourceVisibility
 	) => Promise<RetrievalMode | null>;
 	/** Create a new blank database (data grid); returns its document id. */
 	createDatabase: (spaceId: string, title: string) => Promise<string>;
@@ -78,6 +82,8 @@ export interface UseSpacesResult {
 	remove: (id: string) => Promise<void>;
 	/** Delete a single page. */
 	removeDocument: (spaceId: string, documentId: string) => Promise<boolean>;
+	/** Rename a user-created Space and update the shared list in place. */
+	rename: (id: string, name: string) => Promise<void>;
 	/** Persist a page's markdown (Core re-embeds on save). Callers debounce. */
 	saveDocument: (
 		spaceId: string,
@@ -108,6 +114,12 @@ export interface UseSpacesResult {
 	) => Promise<RetrievalModeChange>;
 	/** Set or clear a Space glyph. */
 	setSpaceIcon: (id: string, icon: GlyphValue) => Promise<void>;
+	/** Set a Space's owner-only or team visibility. */
+	setSpaceVisibility: (
+		id: string,
+		visibility: ResourceVisibility,
+		teamId?: string | null
+	) => Promise<void>;
 	spaces: Space[];
 	/**
 	 * Store a binary file as a file document in a Space.
@@ -177,7 +189,8 @@ export function useSpaces(): UseSpacesResult {
 		async (
 			name: string,
 			description: string | null,
-			retrievalMode?: RetrievalMode
+			retrievalMode?: RetrievalMode,
+			visibility?: ResourceVisibility
 		) => {
 			// Managed-path numeric cap (free tier). Blocks + opens the upgrade modal
 			// when at the limit; a no-op off the managed path (self-host uncapped).
@@ -188,7 +201,8 @@ export function useSpaces(): UseSpacesResult {
 				{ url, token },
 				name,
 				description,
-				retrievalMode
+				retrievalMode,
+				visibility
 			);
 			await reload();
 			return created.retrievalMode;
@@ -200,6 +214,18 @@ export function useSpaces(): UseSpacesResult {
 		async (id: string) => {
 			await apiDeleteSpace({ url, token }, id);
 			setSpaces((prev) => prev.filter((s) => s.id !== id));
+		},
+		[url, token]
+	);
+
+	const rename = useCallback(
+		async (id: string, name: string) => {
+			await apiRenameSpace({ url, token }, id, name);
+			setSpaces((prev) =>
+				prev.map((space) =>
+					space.id === id ? { ...space, name, updatedAt: Date.now() } : space
+				)
+			);
 		},
 		[url, token]
 	);
@@ -297,6 +323,28 @@ export function useSpaces(): UseSpacesResult {
 		[url, token]
 	);
 
+	const setSpaceVisibility = useCallback(
+		async (
+			id: string,
+			visibility: ResourceVisibility,
+			teamId?: string | null
+		) => {
+			await apiSetSpaceVisibility({ url, token }, id, visibility, teamId);
+			setSpaces((prev) =>
+				prev.map((space) =>
+					space.id === id
+						? {
+								...space,
+								visibility,
+								teamId: visibility === "team" ? (teamId ?? null) : null,
+							}
+						: space
+				)
+			);
+		},
+		[url, token]
+	);
+
 	const setRetrievalMode = useCallback(
 		async (id: string, mode: RetrievalMode, options = {}) => {
 			const change = await apiSetSpaceRetrievalMode(
@@ -334,6 +382,7 @@ export function useSpaces(): UseSpacesResult {
 		reload,
 		create,
 		remove,
+		rename,
 		listDocuments,
 		ingest,
 		search,
@@ -344,6 +393,7 @@ export function useSpaces(): UseSpacesResult {
 		saveDocument,
 		removeDocument,
 		setSpaceIcon,
+		setSpaceVisibility,
 		setRetrievalMode,
 		setDocumentIcon,
 		uploadFile,

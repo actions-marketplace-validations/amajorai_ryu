@@ -41,6 +41,7 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select";
 import { Switch } from "@ryu/ui/components/switch";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useState } from "react";
@@ -463,7 +464,7 @@ export function DangerZoneSettings() {
 									description={
 										def.count === 0
 											? `No ${def.noun}`
-											: `${def.count} ${def.noun}`
+											: `${formatCount(def.count) ?? "—"} ${def.noun}`
 									}
 									key={def.id}
 									title={def.title}
@@ -754,7 +755,7 @@ export function DangerZoneSettings() {
 						<AlertDialogTitle>{active?.title}?</AlertDialogTitle>
 						<AlertDialogDescription>
 							{active
-								? `This will delete ${active.count} ${active.noun}. ${active.detail} This cannot be undone.`
+								? `This will delete ${formatCount(active.count) ?? "—"} ${active.noun}. ${active.detail} This cannot be undone.`
 								: ""}
 						</AlertDialogDescription>
 					</AlertDialogHeader>

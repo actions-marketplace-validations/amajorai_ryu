@@ -71,6 +71,24 @@ function App() {
 				/>
 			</section>
 
+			<section data-testid="simple-permission-prompt">
+				<PermissionPrompt
+					onRespond={() => {
+						// Story only — the real handler POSTs to /api/chat/permission.
+					}}
+					permission={{
+						requestId: "req-simple",
+						options: OPTIONS,
+						toolCall: {
+							kind: "execute",
+							title: "run a shell command",
+							rawInput: { command: COMMAND, cwd: "/Users/dev/ryu" },
+						},
+					}}
+					showTechnicalDetails={false}
+				/>
+			</section>
+
 			<section data-testid="bash-card">
 				<BashToolTerminalCard
 					approval={{

@@ -13,7 +13,7 @@ export interface SlashCommand {
 }
 
 interface SlashCommandAutocompleteProps {
-	anchorRef: React.RefObject<HTMLTextAreaElement | null>;
+	anchorRef: React.RefObject<HTMLElement | null>;
 	commands: SlashCommand[];
 	onDismiss: () => void;
 	onSelect: (command: SlashCommand) => void;

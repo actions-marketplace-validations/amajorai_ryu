@@ -9,8 +9,8 @@
 // The answer is also persisted as a lightweight "side chat" keyed to its parent
 // conversation, so it can be listed later in the Context rail and under the
 // thread in the sidebar (see listBtw/deleteBtw). The desktop passes the Core
-// `conversation_id` (Core holds the authoritative transcript); the model/effort
-// live in preferences (see preferences.ts). See apps/core/src/server/mod.rs
+// `conversation_id` plus the visible main-chat transcript; the model/effort live
+// in preferences (see preferences.ts). See apps/core/src/server/mod.rs
 // `btw_handler`.
 
 import { type ApiTarget, request } from "./client.ts";
@@ -23,6 +23,12 @@ export interface BtwResult {
 	id?: string | null;
 	/** The model id that answered (resolved server-side). */
 	model: string;
+}
+
+/** A bounded, plain-text turn from the main chat sent as side-chat context. */
+export interface BtwMessage {
+	content: string;
+	role: "user" | "assistant";
 }
 
 /** A persisted `/btw` side chat, as returned by the list endpoint. */
@@ -40,16 +46,21 @@ export interface BtwEntry {
 	question: string;
 }
 
-/** Ask a side question against a conversation's context (also persisted). */
+/** Ask a side question against the current main-chat context (also persisted). */
 export function askBtw(
 	target: ApiTarget,
 	conversationId: string,
 	question: string,
+	messages: readonly BtwMessage[] = [],
 	signal?: AbortSignal
 ): Promise<BtwResult> {
 	return request<BtwResult>(target, "/api/btw", {
 		method: "POST",
-		body: { question, conversation_id: conversationId },
+		body: {
+			question,
+			conversation_id: conversationId,
+			...(messages.length > 0 ? { messages } : {}),
+		},
 		signal,
 	});
 }

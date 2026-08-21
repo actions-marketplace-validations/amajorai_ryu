@@ -50,7 +50,7 @@ export const POINTS_TOKEN_DAILY_CAP = 100;
 export const POINTS_PER_STREAK_DAY = 2;
 /** Streak length past which the per-day bonus stops growing. */
 export const STREAK_POINTS_CAP_DAYS = 7;
-/** Points for a converted referral (reason `referral`). */
+/** Points for a validated referral signup (awarded to both sides). */
 export const POINTS_REFERRAL = 200;
 /** Milestone award bounds (reason `milestone`); the exact value is per-milestone. */
 export const POINTS_MILESTONE_MIN = 50;

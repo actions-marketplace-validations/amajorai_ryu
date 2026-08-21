@@ -62,10 +62,26 @@ const DIRECTORY_GROUPS: ComposerMenuGroup[] = [
 			},
 		],
 	},
+	{
+		id: "skills",
+		label: "Skills",
+		items: [
+			{
+				description: "Review the answer against a checklist",
+				id: "skill:review",
+				label: "Review checklist",
+				badge: "Skill",
+			},
+		],
+	},
 ];
 
 function Story() {
 	const [attachCount, setAttachCount] = useState(0);
+	const [attachmentOnly, setAttachmentOnly] = useState(false);
+	const [attachmentSent, setAttachmentSent] = useState<string | null>(null);
+	const [voiceModeStarted, setVoiceModeStarted] = useState(false);
+	const [expandedDraft, setExpandedDraft] = useState("");
 	const [ghost, setGhost] = useState(false);
 	const [flag, setFlag] = useState(false);
 
@@ -88,7 +104,7 @@ function Story() {
 							{ path: "src/composer.tsx", insertions: 12, deletions: 2 },
 							{ path: "src/menu.tsx", insertions: 6, deletions: 1 },
 						],
-						plan: {
+						todos: {
 							current: 2,
 							total: 3,
 							items: [
@@ -99,6 +115,47 @@ function Story() {
 						},
 					}}
 				/>
+			</section>
+
+			{/* An attachment-only turn must use Send even when live voice mode is
+			    wired: the staged file is input, so the phone action must not take over
+			    the trailing slot. */}
+			<section className="flex flex-col gap-2" data-testid="attachment-only">
+				<h2 className="font-medium text-sm">Attachment-only send</h2>
+				<InputBar
+					attachedImages={
+						attachmentOnly
+							? [
+									{
+										filename: "brief.png",
+										id: "attachment-only-image",
+										mimeType: "image/png",
+										url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+									},
+								]
+							: []
+					}
+					enableImagePreview={false}
+					onAttach={() => setAttachmentOnly(true)}
+					onSend={(message) => {
+						setAttachmentSent(message.content);
+						setAttachmentOnly(false);
+					}}
+					onStop={noop}
+					status="ready"
+					voiceMode={{ onStart: () => setVoiceModeStarted(true) }}
+				/>
+				<output data-testid="attachment-stage">
+					{attachmentOnly ? "attached" : "empty"}
+				</output>
+				<output data-testid="attachment-sent">
+					{attachmentSent === null
+						? "not-sent"
+						: attachmentSent || "sent-attachment-only"}
+				</output>
+				<output data-testid="voice-mode-started">
+					{voiceModeStarted ? "started" : "idle"}
+				</output>
 			</section>
 
 			{/* The chat-page shape: the same menu, carrying its extra rows. */}
@@ -122,6 +179,23 @@ function Story() {
 						},
 					]}
 					status="ready"
+				/>
+			</section>
+
+			{/* The plugin-owned surface: the host only opts into this feature when
+			    @ryu/expanded-composer contributes the chat feature. */}
+			<section className="flex flex-col gap-2" data-testid="expanded">
+				<h2 className="font-medium text-sm">Expanded Composer plugin</h2>
+				<InputBar
+					composerMenuGroups={DIRECTORY_GROUPS}
+					expandComposer
+					onAttach={() => setAttachCount((n) => n + 1)}
+					onChange={setExpandedDraft}
+					onSend={noop}
+					onStop={noop}
+					placeholder="Write a longer prompt…"
+					status="ready"
+					value={expandedDraft}
 				/>
 			</section>
 

@@ -28,6 +28,7 @@ interface AgentSummaryWire {
 	model?: string | null;
 	name: string;
 	system_prompt?: string | null;
+	title?: string | null;
 	transport?: string | null;
 	version?: string | null;
 }
@@ -42,6 +43,7 @@ interface AgentRecordWire {
 	model?: string | null;
 	name: string;
 	system_prompt?: string | null;
+	title?: string | null;
 	tools?: string[];
 	updated_at?: string | null;
 	version?: string;
@@ -61,6 +63,7 @@ function toSummary(a: AgentSummaryWire): AgentSummary {
 		model: a.model ?? null,
 		installed: a.installed ?? null,
 		installHint: a.install_hint ?? null,
+		title: a.title ?? "",
 		builtIn: a.transport != null,
 		createdAt: a.created_at ?? null,
 		version: a.version ?? null,
@@ -76,6 +79,7 @@ function toAgent(a: AgentRecordWire): Agent {
 		systemPrompt: a.system_prompt ?? null,
 		engine: a.engine ?? null,
 		model: a.model ?? null,
+		title: a.title ?? "",
 		tools: a.tools ?? [],
 		builtIn: a.built_in ?? false,
 		createdAt: a.created_at ?? null,

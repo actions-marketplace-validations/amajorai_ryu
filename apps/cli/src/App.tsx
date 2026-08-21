@@ -21,7 +21,7 @@ import type { KeyEvent } from "@opentui/core";
 import { useKeyboard, useRenderer } from "@opentui/react";
 import type { ApiTarget } from "@ryuhq/core-client/client";
 import { useEffect, useState } from "react";
-import { ThemeProvider } from "@/components/ui/theme-provider.tsx";
+import { useTheme } from "@/components/ui/theme-provider.tsx";
 import { ChatIntentProvider } from "./core/ChatIntentContext.tsx";
 import { ContributionsProvider } from "./core/ContributionsContext.tsx";
 import { CoreProvider, useCore } from "./core/CoreContext.tsx";
@@ -46,7 +46,7 @@ import "./overlays/register.ts";
 import { CommandPalette } from "./palette/CommandPalette.tsx";
 import { Sidebar } from "./sidebar/Sidebar.tsx";
 import { StatusBar } from "./ui/StatusBar.tsx";
-import { ryuTheme } from "./ui/theme.ts";
+import { TerminalThemeProvider } from "./ui/TerminalThemeProvider.tsx";
 import { ToastHost, ToastProvider, useToast } from "./ui/toast.tsx";
 import { NodePicker } from "./workspace/NodePicker.tsx";
 import { SplitView } from "./workspace/SplitView.tsx";
@@ -79,6 +79,7 @@ const CLOSED_NODE_PICKER: NodePickerState = {
 
 function WorkspaceShell() {
 	const renderer = useRenderer();
+	const theme = useTheme();
 	const { target, url, setTarget } = useCore();
 	const { notify } = useToast();
 	const { openId: overlayOpenId } = useOverlay();
@@ -256,7 +257,7 @@ function WorkspaceShell() {
 
 	return (
 		<box
-			backgroundColor={ryuTheme.colors.background}
+			backgroundColor={theme.colors.background}
 			flexDirection="column"
 			height="100%"
 			width="100%"
@@ -293,8 +294,8 @@ function WorkspaceShell() {
 /** Root component: stacks the providers around the workspace shell. */
 export function App({ target }: { target?: ApiTarget }) {
 	return (
-		<ThemeProvider theme={ryuTheme}>
-			<CoreProvider initial={target}>
+		<CoreProvider initial={target}>
+			<TerminalThemeProvider>
 				<ContributionsProvider>
 					<InputFocusProvider>
 						<ToastProvider>
@@ -308,7 +309,7 @@ export function App({ target }: { target?: ApiTarget }) {
 						</ToastProvider>
 					</InputFocusProvider>
 				</ContributionsProvider>
-			</CoreProvider>
-		</ThemeProvider>
+			</TerminalThemeProvider>
+		</CoreProvider>
 	);
 }

@@ -62,6 +62,7 @@ describe("AgentsAPI.list mapper", () => {
 			model: null,
 			installed: null,
 			installHint: null,
+			title: "",
 			builtIn: true, // transport != null
 			createdAt: null,
 			version: null,

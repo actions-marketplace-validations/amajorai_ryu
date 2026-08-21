@@ -19,7 +19,7 @@
 //! `Recorder*` structs. Changing a key here breaks the sidecar; the key-set tests
 //! below pin them.
 //!
-//! Stateless replay needs none of this: `ghost__ghost_run` goes straight through
+//! Stateless replay needs none of this: `ghost.ghost_run` goes straight through
 //! the shared MCP registry, which both the workflow executor's `Recipe` node and
 //! the `ghost.replay` capability do directly.
 //!
@@ -93,7 +93,7 @@ fn stopped_body(task: &str, started_at: &str, payload: Value) -> Value {
 pub struct CoreRecipesHost;
 
 impl CoreRecipesHost {
-    /// Replay a recipe by calling `ghost__ghost_run` through the shared MCP
+    /// Replay a recipe by calling `ghost.ghost_run` through the shared MCP
     /// registry. Returns the RAW MCP `tools/call` envelope — the sidecar's `run()`
     /// wrapper unwraps it with its own `extract_mcp_json`, so do not unwrap here.
     pub async fn call_ghost_run(&self, recipe: &str, params: Value) -> Result<Value> {

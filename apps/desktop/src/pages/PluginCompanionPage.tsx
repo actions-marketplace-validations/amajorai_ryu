@@ -9,17 +9,20 @@
 // Gateway-approved grants). A companion WITHOUT a bundle renders the benign,
 // data-driven summary below and runs no plugin code at all.
 
-import { PuzzleIcon } from "@hugeicons/core-free-icons";
+import { Package01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
+import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
 import { useMemo } from "react";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { PluginHostPanel } from "@/src/contributions/host/PluginHostPanel.tsx";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 
@@ -39,12 +42,14 @@ import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
  * names the Store so the state is actionable instead of a dead end.
  */
 export function CompanionUnavailable() {
+	const { openTab } = useTabsContext();
+
 	return (
 		<div className="flex h-full items-center justify-center p-6">
 			<Empty>
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={PuzzleIcon} />
+						<HugeiconsIcon icon={Package01Icon} />
 					</EmptyMedia>
 					<EmptyTitle>App not enabled</EmptyTitle>
 					<EmptyDescription>
@@ -52,6 +57,11 @@ export function CompanionUnavailable() {
 						may have been disabled.
 					</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={() => openTab("/apps", { title: "Apps" })} size="sm">
+						Open Apps
+					</Button>
+				</EmptyContent>
 			</Empty>
 		</div>
 	);
@@ -101,7 +111,7 @@ export default function PluginCompanionPage({
 			<div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
 				<div className="flex items-center gap-3">
 					<div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-						<HugeiconsIcon className="size-5" icon={PuzzleIcon} />
+						<HugeiconsIcon className="size-5" icon={Package01Icon} />
 					</div>
 					<div className="min-w-0">
 						<h1 className="truncate font-semibold text-lg">

@@ -44,8 +44,10 @@
 //! runtime no-ops (logged), so chat is never blocked — same graceful-degrade
 //! posture as the Python `external_runtime` plugins.
 
+pub mod action_stream;
 mod bridge;
 
+pub use action_stream::ActionFrameProbe;
 pub use bridge::{dispatch_path_for, PluginHookBridge};
 
 use serde::{Deserialize, Serialize};
@@ -60,6 +62,22 @@ use crate::tool_exec::{self, ExecOutcome, SandboxToolInvoker};
 pub struct HookMessage {
     pub role: String,
     pub content: String,
+}
+
+/// A normalized action observed in the shared assistant stream.
+///
+/// Action hooks receive one of these for thinking/reasoning and tool-call
+/// boundaries, so a plugin can describe what the model is doing without
+/// coupling itself to a provider-specific stream format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookAction {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
+    pub status: String,
+    pub sequence: u64,
 }
 
 /// The context a `post_assistant_turn` hook receives (serialized to the sandbox
@@ -88,6 +106,11 @@ pub struct HookContext {
     /// which read the already-persisted `transcript` instead.
     #[serde(default)]
     pub input: Option<String>,
+    /// The normalized streamed action for an [`ON_ACTION`] hook. This is
+    /// intentionally separate from `tool_name`/`tool_input`: action hooks also
+    /// observe thinking boundaries and may run before a tool result exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<HookAction>,
     /// The tool being called — set for `pre_tool_use` / `post_tool_use` hooks.
     /// `tool_name` is the fully-qualified tool id, `tool_input` its arguments, and
     /// `tool_output` the result (only on `post_tool_use`). A tool hook reads these
@@ -143,6 +166,10 @@ pub enum HookDirective {
     None,
     /// Surface `text` to the user out-of-band (not added to chat history).
     Note { text: String },
+    /// Surface a first-person tool intent together with its plain-language
+    /// summary. Action observers use this to keep the approval question above
+    /// the explanation without pretending the observer itself is the gate.
+    ToolApproval { question: String, summary: String },
     /// Inject `text` as a follow-up user turn and run another assistant turn
     /// (the goal-loop primitive). Capped server-side by the chat path.
     Continue { text: String },
@@ -175,11 +202,10 @@ pub enum HookDirective {
     /// never enter the transcript. `Deny` blocks a call from happening;
     /// `Transform` reshapes what a call that already happened reports back.
     ///
-    /// The first hook (in plugin order) to return `Transform` wins; the rewrite is
-    /// not re-fed through the remaining `tool_result` hooks. Chaining is
-    /// deliberately unsupported in v1 — with it, the value a hook inspects would
-    /// depend on plugin ordering, so a redaction hook could be silently defeated by
-    /// another plugin installed ahead of it.
+    /// `Transform` directives are chained in priority order. Each subsequent
+    /// `tool_result` hook receives the latest transformed value, never the raw
+    /// result that entered the phase, so a later policy cannot restore an earlier
+    /// redaction.
     ///
     /// The downstream detached `post_tool_use` observers DO see the rewritten
     /// output, not the original: the rewrite is a security boundary, so the raw
@@ -224,6 +250,11 @@ pub enum HookDirective {
         /// request contract; this is not merely explanatory metadata.
         #[serde(default)]
         effort: Option<String>,
+        /// ACP session config options to apply for this turn. Values are kept as
+        /// strings because ACP distinguishes boolean values by their exact
+        /// `"true"`/`"false"` spellings at the transport boundary.
+        #[serde(default)]
+        acp_config: Option<std::collections::HashMap<String, String>>,
         #[serde(default)]
         reason: Option<String>,
     },
@@ -268,6 +299,11 @@ pub const ON_PRE_USER_TURN: &str = "pre_user_turn";
 /// Fires after the agent binding is resolved but before either model transport is
 /// opened. This is the one awaited hook phase allowed to select a per-turn model.
 pub const ON_PRE_MODEL_SELECT: &str = "pre_model_select";
+
+/// Fires for normalized thinking and tool-call actions observed in the shared
+/// assistant stream. This is an out-of-band observation hook: a directive is
+/// never allowed to block or rewrite the model stream.
+pub const ON_ACTION: &str = "action";
 
 // ── Claude-Code-style hook phases (the extended set) ─────────────────────────
 //
@@ -322,6 +358,11 @@ pub const ON_SESSION_END: &str = "session_end";
 /// Fires when a notification is fanned out (Claude's `Notification`).
 /// Observation-only (detached). Node-level: no chat context.
 pub const ON_NOTIFICATION: &str = "notification";
+
+/// Fires for each admitted/departed delegated agent. The event payload is the
+/// deliberately narrow `{run_id, agent_id, active_count, transition_id}` carrier
+/// emitted by the delegation engine; it contains no work or machine context.
+pub const ON_DELEGATION_LIFECYCLE: &str = "delegation_lifecycle";
 
 // ── Pi-parity phases (the message plane) ─────────────────────────────────────
 //
@@ -715,6 +756,37 @@ pub async fn dispatch_phase(
     run_hooks(state, ctx, &hooks, phase).await
 }
 
+/// Run `tool_result` hooks as a sequential transform pipeline. The first hook
+/// may inspect the real result; every later hook sees the output produced so far.
+/// This is separate from [`dispatch_phase`], whose observation semantics return a
+/// collection of independent directives.
+pub async fn dispatch_tool_result_phase(
+    state: &ServerState,
+    ctx: &HookContext,
+) -> Option<serde_json::Value> {
+    if !tool_exec::is_available() || !any_manifest_declares(state, ON_TOOL_RESULT).await {
+        return None;
+    }
+    let hooks = collect_enabled_hooks(state).await;
+    let mut current = ctx.tool_output.clone()?;
+    let mut transformed = false;
+    for hook in hooks {
+        if !phase_matches(&hook.on, ON_TOOL_RESULT) {
+            continue;
+        }
+        let mut hook_ctx = ctx.clone();
+        hook_ctx.tool_output = Some(current.clone());
+        if !hook_should_run(state, &hook, &hook_ctx).await {
+            continue;
+        }
+        if let HookDirective::Transform { output } = run_hook(state, &hook, &hook_ctx).await {
+            current = output;
+            transformed = true;
+        }
+    }
+    transformed.then_some(current)
+}
+
 /// Process-global hook dispatcher. Installed once at boot (`main.rs`) so code
 /// paths that have no [`ServerState`] in scope — the shared tool-dispatch core,
 /// the delegation engine, the notification fan-out — can still fire hooks.
@@ -725,6 +797,22 @@ pub trait HookDispatch: Send + Sync {
         phase: &'a str,
         ctx: HookContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<HookDirective>> + Send + 'a>>;
+
+    fn dispatch_tool_result<'a>(
+        &'a self,
+        ctx: HookContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<serde_json::Value>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.dispatch(ON_TOOL_RESULT, ctx)
+                .await
+                .into_iter()
+                .find_map(|directive| match directive {
+                    HookDirective::Transform { output } => Some(output),
+                    _ => None,
+                })
+        })
+    }
 }
 
 static GLOBAL: std::sync::OnceLock<Arc<dyn HookDispatch>> = std::sync::OnceLock::new();
@@ -742,6 +830,15 @@ pub async fn dispatch_global(phase: &str, ctx: HookContext) -> Vec<HookDirective
     match GLOBAL.get() {
         Some(d) => d.dispatch(phase, ctx).await,
         None => Vec::new(),
+    }
+}
+
+/// Run the global tool-result transform pipeline. No dispatcher means no
+/// rewrite, preserving the fail-open behavior used by every hook phase.
+pub async fn dispatch_global_tool_result(ctx: HookContext) -> Option<serde_json::Value> {
+    match GLOBAL.get() {
+        Some(dispatcher) => dispatcher.dispatch_tool_result(ctx).await,
+        None => None,
     }
 }
 
@@ -942,6 +1039,7 @@ const host = {{
   sideModel: (a) => tools.host.sideModel(a ?? {{}}),
   runAgent: (a) => tools.host.runAgent(a ?? {{}}),
   runFanout: (a) => tools.host.runFanout(a ?? {{}}),
+  notify: (a) => tools.host.notify(a ?? {{}}),
   setConversationTitle: (a) => tools.host.setConversationTitle(a ?? {{}}),
   getPreference: (a) => tools.host.getPreference(a ?? {{}}),
   background: {{
@@ -1046,6 +1144,17 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_directive(Some(&json!({
+                "kind": "tool_approval",
+                "question": "Can I run the tests?",
+                "summary": "I will run the test suite to verify the change."
+            }))),
+            HookDirective::ToolApproval {
+                question: "Can I run the tests?".into(),
+                summary: "I will run the test suite to verify the change.".into(),
+            }
+        );
+        assert_eq!(
             parse_directive(Some(&json!({ "kind": "continue", "text": "keep going" }))),
             HookDirective::Continue {
                 text: "keep going".into()
@@ -1090,6 +1199,22 @@ mod tests {
             )),
             HookDirective::Transform {
                 output: json!("plain string")
+            }
+        );
+        assert_eq!(
+            parse_directive(Some(&json!({
+                "kind": "select_model",
+                "model": "opus",
+                "acp_config": { "fast_mode": "true" }
+            }))),
+            HookDirective::SelectModel {
+                model: "opus".into(),
+                effort: None,
+                acp_config: Some(std::collections::HashMap::from([(
+                    "fast_mode".into(),
+                    "true".into(),
+                )])),
+                reason: None,
             }
         );
         // Garbage / unknown shape → None (fail-safe, never loops on noise).
@@ -1139,7 +1264,21 @@ mod tests {
         assert!(program.contains("conv-1"));
         assert!(program.contains("host.sideModel") || program.contains("sideModel:"));
         assert!(program.contains("tools.host.sideModel"));
+        assert!(program.contains("notify: (a) => tools.host.notify(a ?? {}),"));
         assert!(program.contains("return { kind: 'note', text: 'x' };"));
+    }
+
+    #[test]
+    fn delegation_lifecycle_is_an_exact_match_phase() {
+        assert!(phase_matches(
+            ON_DELEGATION_LIFECYCLE,
+            ON_DELEGATION_LIFECYCLE
+        ));
+        assert!(!phase_matches(ON_DELEGATION_LIFECYCLE, ON_NOTIFICATION));
+        assert!(!phase_matches(
+            ON_DELEGATION_LIFECYCLE,
+            ON_POST_ASSISTANT_TURN
+        ));
     }
 
     #[test]
@@ -1197,10 +1336,10 @@ mod tests {
         assert!(glob_match("*", "anything"));
         assert!(glob_match("bash", "bash"));
         assert!(!glob_match("bash", "bashx"));
-        assert!(glob_match("bash*", "bash__run"));
+        assert!(glob_match("bash*", "bash.run"));
         assert!(!glob_match("bash*", "sh"));
-        assert!(glob_match("*write", "fs__write"));
-        assert!(glob_match("*edit*", "editor__do_edit"));
+        assert!(glob_match("*write", "fs.write"));
+        assert!(glob_match("*edit*", "editor.do_edit"));
         assert!(!glob_match("*edit*", "read_only"));
     }
 
@@ -1214,12 +1353,9 @@ mod tests {
             tool_name: Some(name.into()),
             ..Default::default()
         };
+        assert_eq!(gate_without_storage(&m, &ctx("bash.run")), GateVerdict::Run);
         assert_eq!(
-            gate_without_storage(&m, &ctx("bash__run")),
-            GateVerdict::Run
-        );
-        assert_eq!(
-            gate_without_storage(&m, &ctx("fs__delete_file")),
+            gate_without_storage(&m, &ctx("fs.delete_file")),
             GateVerdict::Run
         );
         // A tool the firewall doesn't watch → skip (no sandbox spawn).
@@ -1602,6 +1738,65 @@ mod tests {
                     .into()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn live_security_scanner_clear_command_handles() {
+        if !tool_exec::is_available() {
+            return;
+        }
+        let ctx = HookContext {
+            conversation_id: Some("security-scanner-clear".into()),
+            input: Some("/security-clear".into()),
+            transcript: vec![HookMessage {
+                role: "user".into(),
+                content: "/security-clear".into(),
+            }],
+            ..Default::default()
+        };
+        let directive = run_fixture("@ryu/security-scanner", ctx, serde_json::Value::Null).await;
+        assert_eq!(
+            directive,
+            HookDirective::Handled {
+                text: "Security Scanner state cleared for this conversation.".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn live_security_scanner_auto_review_flags_pattern() {
+        if !tool_exec::is_available() {
+            return;
+        }
+        let ctx = HookContext {
+            conversation_id: Some("security-scanner-review".into()),
+            agent_id: Some("ryu".into()),
+            transcript: vec![
+                HookMessage {
+                    role: "user".into(),
+                    content: "load the config".into(),
+                },
+                HookMessage {
+                    role: "assistant".into(),
+                    content: "The generated configuration loader is shown below. It must be reviewed carefully before deployment. cfg = yaml.load(open('config.yml')) and the resulting object is passed to the application configuration layer.".into(),
+                },
+            ],
+            flags: std::iter::once((
+                "io.ryu.security-scanner.auto-review".to_string(),
+                true,
+            ))
+            .collect(),
+            ..Default::default()
+        };
+        let code = fixture_hook_from_file("security-scanner", "security-scanner.auto-review");
+        let directive = run_code(&code, ctx, serde_json::json!("RESULT: clean")).await;
+        match directive {
+            HookDirective::Note { text } => {
+                assert!(text.contains("Static signals"), "note: {text}");
+                assert!(text.contains("YAML"), "note: {text}");
+            }
+            other => panic!("expected a security scanner note, got {other:?}"),
+        }
     }
 
     #[tokio::test]

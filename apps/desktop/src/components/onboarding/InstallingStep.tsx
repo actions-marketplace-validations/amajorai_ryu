@@ -6,7 +6,7 @@ import {
 	Loading01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { IconSwap } from "@ryu/ui/components/icon-swap.tsx";
+import { MorphIconSwap } from "@ryu/ui/components/morph-icon.tsx";
 import { NumberPopIn } from "@ryu/ui/components/number-pop-in";
 import { SuccessCheck } from "@ryu/ui/components/success-check.tsx";
 import { useEffect, useRef, useState } from "react";
@@ -193,18 +193,13 @@ export function InstallingStep({
 								<div className="h-1.5 w-1.5 rounded-full bg-muted-foreground/30" />
 							)}
 							{(item.status === "installing" || item.status === "done") && (
-								<IconSwap
-									a={
-										<HugeiconsIcon
-											className="h-4 w-4 animate-spin text-primary"
-											icon={Loading01Icon}
-										/>
-									}
-									b={
-										<HugeiconsIcon
-											className="h-4 w-4 text-success"
-											icon={CheckmarkCircle01Icon}
-										/>
+								<MorphIconSwap
+									a={Loading01Icon}
+									b={CheckmarkCircle01Icon}
+									className={
+										item.status === "done"
+											? "h-4 w-4 text-success"
+											: "h-4 w-4 animate-spin text-primary"
 									}
 									state={item.status === "done" ? "b" : "a"}
 								/>

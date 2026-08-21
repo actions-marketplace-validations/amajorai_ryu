@@ -46,8 +46,9 @@ import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { useModelCatalog } from "@/src/hooks/useModelCatalog.ts";
 import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
-import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
 import { useSkillPacks } from "@/src/hooks/useSkillPacks.ts";
+import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
+import { runCatalogScan } from "@/src/lib/api/catalog-scan.ts";
 import type { DownloadKind } from "@/src/lib/api/downloads.ts";
 import { estimateLlmfit, listInstalledModels } from "@/src/lib/api/models.ts";
 import {
@@ -202,6 +203,8 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 				),
 			navigate,
 			openExternal,
+			runCatalogScan: (input) =>
+				runCatalogScan({ url: activeNode.url, token: activeNode.token }, input),
 			useAppsCatalog,
 			useSkillsCatalog,
 			useModelCatalog,
@@ -217,8 +220,8 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			// the user to find it. Web omits this and the affordance never renders.
 			usePluginSettingsOpener,
 			installSidecar,
-			estimateLlmfit: (node, repo) =>
-				estimateLlmfit({ url: node.url, token: node.token }, repo),
+			estimateLlmfit: (node, repo, options) =>
+				estimateLlmfit({ url: node.url, token: node.token }, repo, options),
 			useInstalledModels,
 			ActiveModelControl,
 			fitStyle,

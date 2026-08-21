@@ -29,7 +29,6 @@ import { cn } from "@ryu/ui/lib/utils";
 import {
 	IconAlertTriangle,
 	IconFolder,
-	IconLoader2,
 	IconVideoPlus,
 } from "@tabler/icons-react";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -218,18 +217,12 @@ export function AttachVideoControl({
 
 				<Button
 					className="gap-1.5"
-					disabled={busy || !source}
+					disabled={!source}
+					loading={busy}
 					onClick={handleSubmit}
 					type="button"
 				>
-					{busy ? (
-						<>
-							<IconLoader2 className="size-4 animate-spin" />
-							Ingesting…
-						</>
-					) : (
-						"Attach video"
-					)}
+					{busy ? "Ingesting…" : "Attach video"}
 				</Button>
 			</PopoverContent>
 		</Popover>

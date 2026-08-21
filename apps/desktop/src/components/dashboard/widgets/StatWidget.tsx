@@ -1,6 +1,7 @@
 // Stat / KPI widget: one big number with an optional label, unit, and delta.
 // Pure shadcn primitives — no custom styling beyond layout utilities.
 
+import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { dottedGet, resolveNumber, toNumber } from "./data.ts";
 import { parseConfig, statConfigSchema } from "./schema.ts";
 
@@ -16,7 +17,7 @@ export function StatBody({
 	const delta = cfg.delta_key
 		? toNumber(dottedGet(value, cfg.delta_key))
 		: null;
-	const display = n === null ? "—" : n.toLocaleString();
+	const display = formatNumber(n);
 
 	return (
 		<div className="flex h-full flex-col justify-center gap-2">
@@ -39,7 +40,7 @@ export function StatBody({
 							: "inline-flex w-fit items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 font-medium text-destructive text-xs"
 					}
 				>
-					{delta >= 0 ? "▲" : "▼"} {Math.abs(delta).toLocaleString()}
+					{delta >= 0 ? "▲" : "▼"} {formatNumber(Math.abs(delta))}
 				</span>
 			)}
 		</div>

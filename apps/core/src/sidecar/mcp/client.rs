@@ -1,5 +1,5 @@
-//! Minimal MCP client (JSON-RPC 2.0) over **two** transports: a child process's
-//! stdin/stdout (stdio), and HTTP POST against a remote endpoint.
+//! Minimal MCP client (JSON-RPC 2.0) over stdio, Streamable HTTP, and the
+//! deprecated HTTP+SSE transport.
 //!
 //! Core already spawns MCP stdio servers (see `tools/ghost/process.rs`); this is
 //! the *client* side of the same transport. It implements just the slice the
@@ -9,22 +9,11 @@
 //! connection keeps the registry stateless and crash-safe (a wedged server can
 //! never leak a long-lived child).
 //!
-//! ## Why the HTTP half is small
-//!
-//! That statelessness is exactly what makes the HTTP transport cheap to add.
-//! Every call site here is *connect → one request → shutdown*, so Core never
-//! needs the hard half of MCP's Streamable HTTP transport: the long-lived
-//! server→client `GET` stream that carries unsolicited notifications, sampling
-//! requests, and progress. We only ever need the response to the POST we just
-//! made. So the whole HTTP transport is "POST one frame, buffer whatever frames
-//! come back", and the id-correlation loop, the 60 s deadline, the error
-//! unwrapping — the parts that are actually protocol — stay in ONE
-//! transport-agnostic driver ([`McpConnection`]) shared by both.
-//!
-//! If Core ever *does* need server-initiated messages, that is the point at which
-//! the HTTP half stops being a request/response shim and needs a real SSE reader
-//! task; do not bolt one on here without revisiting [`McpConnection`]'s
-//! one-response-per-request assumption.
+//! Streamable HTTP keeps the request/response body on each POST; that body may
+//! be JSON or a request-scoped SSE stream. Legacy HTTP+SSE keeps a long-lived
+//! GET stream open after an `endpoint` event and sends JSON-RPC messages to the
+//! endpoint supplied by that event. The protocol-agnostic driver below owns
+//! correlation, timeouts, and lifecycle; each transport only moves frames.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::process::Stdio;
@@ -90,7 +79,8 @@ const MCP_HTTP_STATELESS_PROTOCOL_VERSION: &str = "2026-07-28";
 #[derive(Clone, Copy)]
 enum HttpProtocolMode {
     Modern,
-    Legacy,
+    LegacyStreamable,
+    LegacySse,
 }
 
 fn http_protocol_modes() -> &'static tokio::sync::RwLock<BTreeMap<String, HttpProtocolMode>> {
@@ -234,6 +224,8 @@ pub struct McpHttpEndpoint {
 pub enum McpTarget {
     Stdio(McpStdioCommand),
     Http(McpHttpEndpoint),
+    /// A legacy HTTP+SSE server whose configured URL is its SSE endpoint.
+    Sse(McpHttpEndpoint),
 }
 
 impl McpTarget {
@@ -246,7 +238,7 @@ impl McpTarget {
     fn describe(&self) -> String {
         match self {
             Self::Stdio(cmd) => cmd.command.clone(),
-            Self::Http(ep) => crate::server::redact_url_for_display(&ep.url),
+            Self::Http(ep) | Self::Sse(ep) => crate::server::redact_url_for_display(&ep.url),
         }
     }
 }
@@ -276,6 +268,23 @@ fn classify_frame(raw: &str, id: i64) -> FrameVerdict {
     let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
         return FrameVerdict::Skip;
     };
+    classify_value(&value, id)
+}
+
+/// Classify either a single JSON-RPC message or a legacy batch response. The
+/// 2025-06-18 revision removed client batching, but older servers are still
+/// allowed to send batches, so accepting one here materially improves
+/// interoperability without changing what Core emits.
+fn classify_value(value: &Value, id: i64) -> FrameVerdict {
+    if let Some(batch) = value.as_array() {
+        for item in batch {
+            let verdict = classify_value(item, id);
+            if !matches!(verdict, FrameVerdict::Skip) {
+                return verdict;
+            }
+        }
+        return FrameVerdict::Skip;
+    }
     if value.get("id").and_then(Value::as_i64) != Some(id) {
         return FrameVerdict::Skip;
     }
@@ -311,6 +320,125 @@ fn sse_data_frames(body: &str) -> Vec<String> {
         frames.push(current);
     }
     frames
+}
+
+/// One parsed SSE event. Legacy MCP uses an `endpoint` event during connection
+/// setup and ordinary message events for JSON-RPC frames afterwards.
+#[derive(Debug, PartialEq, Eq)]
+struct SseEvent {
+    event: Option<String>,
+    data: String,
+}
+
+/// Incremental SSE reader for a response body that may remain open for the
+/// lifetime of a legacy MCP session. Keeping this parser separate from the
+/// buffered Streamable HTTP parser is important: a legacy POST usually returns
+/// `202 Accepted` while its result arrives later on this GET stream.
+struct SseReader {
+    response: reqwest::Response,
+    line_buffer: Vec<u8>,
+    event_name: Option<String>,
+    data_lines: Vec<String>,
+    event_bytes: usize,
+    stream_ended: bool,
+}
+
+impl SseReader {
+    fn new(response: reqwest::Response) -> Self {
+        Self {
+            response,
+            line_buffer: Vec::new(),
+            event_name: None,
+            data_lines: Vec::new(),
+            event_bytes: 0,
+            stream_ended: false,
+        }
+    }
+
+    fn take_line(&mut self) -> Option<Vec<u8>> {
+        let newline = self.line_buffer.iter().position(|byte| *byte == b'\n')?;
+        Some(self.line_buffer.drain(..=newline).collect())
+    }
+
+    fn flush_event(&mut self) -> Option<SseEvent> {
+        if self.data_lines.is_empty() {
+            self.event_name = None;
+            self.event_bytes = 0;
+            return None;
+        }
+        let data = self.data_lines.drain(..).collect::<Vec<_>>().join("\n");
+        self.event_bytes = 0;
+        Some(SseEvent {
+            event: self.event_name.take(),
+            data,
+        })
+    }
+
+    fn process_line(&mut self, raw_line: &[u8]) -> Result<Option<SseEvent>> {
+        let line = String::from_utf8_lossy(raw_line)
+            .trim_end_matches(['\n', '\r'])
+            .to_owned();
+        if line.is_empty() {
+            return Ok(self.flush_event());
+        }
+        if line.starts_with(':') {
+            return Ok(None);
+        }
+        if let Some(value) = line.strip_prefix("event:") {
+            self.event_name = Some(value.strip_prefix(' ').unwrap_or(value).to_owned());
+        } else if let Some(value) = line.strip_prefix("data:") {
+            let event_bytes = self
+                .event_bytes
+                .checked_add(line.len())
+                .ok_or_else(|| anyhow!("legacy MCP SSE event exceeded its byte cap"))?;
+            if event_bytes > MAX_MCP_HTTP_BODY_BYTES as usize {
+                return Err(anyhow!(
+                    "legacy MCP SSE event exceeded the {MAX_MCP_HTTP_BODY_BYTES}-byte cap"
+                ));
+            }
+            self.event_bytes = event_bytes;
+            self.data_lines
+                .push(value.strip_prefix(' ').unwrap_or(value).to_owned());
+        }
+        Ok(None)
+    }
+
+    async fn next_event(&mut self) -> Result<Option<SseEvent>> {
+        loop {
+            if let Some(line) = self.take_line() {
+                if let Some(event) = self.process_line(&line)? {
+                    return Ok(Some(event));
+                }
+                continue;
+            }
+
+            if self.stream_ended {
+                return Ok(self.flush_event());
+            }
+
+            match self.response.chunk().await? {
+                Some(chunk) => {
+                    if self.line_buffer.len() + chunk.len() > MAX_MCP_HTTP_BODY_BYTES as usize {
+                        return Err(anyhow!(
+                            "legacy MCP SSE line buffer exceeded the {MAX_MCP_HTTP_BODY_BYTES}-byte cap"
+                        ));
+                    }
+                    self.line_buffer.extend_from_slice(&chunk);
+                }
+                None => {
+                    self.stream_ended = true;
+                    // SSE permits a final event without a blank line. Process a
+                    // final partial line before flushing the event.
+                    if !self.line_buffer.is_empty() {
+                        let line = std::mem::take(&mut self.line_buffer);
+                        if let Some(event) = self.process_line(&line)? {
+                            return Ok(Some(event));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The stdio half, reduced to write-one-line / read-one-line. Everything that
@@ -352,16 +480,273 @@ struct HttpTransport {
 /// A `tools/list` for a large server is tens of KB; 8 MB is ample.
 const MAX_MCP_HTTP_BODY_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Configured headers must not override headers generated by the transport.
+/// Agent Plugins makes this precedence explicit, and it also avoids ambiguous
+/// duplicate `Accept`/`Content-Type` values in reqwest's wire request.
+fn configured_headers(
+    headers: &BTreeMap<String, String>,
+    reserved: &[&str],
+) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter(|(name, _)| {
+            !reserved
+                .iter()
+                .any(|reserved| name.eq_ignore_ascii_case(reserved))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+/// Read an HTTP error body without allowing a hostile endpoint to grow Core's
+/// memory without bound.
+async fn read_capped_response_body(mut response: reqwest::Response) -> Result<String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_MCP_HTTP_BODY_BYTES)
+    {
+        return Err(anyhow!(
+            "MCP response exceeded the {MAX_MCP_HTTP_BODY_BYTES}-byte body cap"
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len() as u64 + chunk.len() as u64 > MAX_MCP_HTTP_BODY_BYTES {
+            return Err(anyhow!(
+                "MCP response exceeded the {MAX_MCP_HTTP_BODY_BYTES}-byte body cap"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Turn a non-success response into the same sanitized error shape for both
+/// remote HTTP transports. Configured header values never enter the error text.
+fn redact_configured_header_values(
+    mut text: String,
+    configured: &BTreeMap<String, String>,
+) -> String {
+    for value in configured.values().filter(|value| !value.is_empty()) {
+        text = text.replace(value, "<redacted>");
+        for token in value.split_whitespace() {
+            text = text.replace(token, "<redacted>");
+        }
+    }
+    text
+}
+
+fn ensure_http_success(
+    url: &str,
+    configured: &BTreeMap<String, String>,
+    status: reqwest::StatusCode,
+    response_headers: &reqwest::header::HeaderMap,
+    body: &str,
+) -> Result<()> {
+    if status.is_redirection() {
+        let location = response_headers
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(crate::server::redact_url_for_display)
+            .unwrap_or_else(|| "(no Location header)".to_owned());
+        return Err(anyhow!(
+            "MCP endpoint {} returned HTTP {status} redirecting to {location}. Redirects are not followed (a redirect could bounce past the SSRF screen) — configure the final URL for this server instead",
+            crate::server::redact_url_for_display(url)
+        ));
+    }
+    if status.is_success() {
+        return Ok(());
+    }
+
+    let snippet = redact_configured_header_values(body.chars().take(300).collect(), configured);
+    Err(anyhow!(McpHttpFailure {
+        status,
+        www_authenticate: response_headers
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .map(|value| redact_configured_header_values(value, configured)),
+        body_snippet: snippet,
+    }))
+    .with_context(|| {
+        format!(
+            "MCP endpoint {} authentication/HTTP failure",
+            crate::server::redact_url_for_display(url)
+        )
+    })
+}
+
+fn same_http_origin(left: &str, right: &str) -> bool {
+    let (Ok(left), Ok(right)) = (url::Url::parse(left), url::Url::parse(right)) else {
+        return false;
+    };
+    left.scheme().eq_ignore_ascii_case(right.scheme())
+        && left
+            .host_str()
+            .zip(right.host_str())
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+/// The deprecated HTTP+SSE transport: a long-lived GET carries responses while
+/// each client frame is POSTed to the endpoint announced by the first event.
+struct LegacySseTransport {
+    url: String,
+    headers: BTreeMap<String, String>,
+    endpoint: String,
+    reader: SseReader,
+    pending: VecDeque<String>,
+}
+
+impl LegacySseTransport {
+    async fn connect(url: &str, headers: &BTreeMap<String, String>) -> Result<Self> {
+        let mut get_headers = configured_headers(headers, &["Accept"]);
+        get_headers.push(("Accept".to_owned(), "text/event-stream".to_owned()));
+        let response = crate::server::guarded_get_stream_with_headers(url, &get_headers).await?;
+        let status = response.status();
+        let response_headers = response.headers().clone();
+        if !status.is_success() {
+            let body = read_capped_response_body(response).await?;
+            ensure_http_success(url, headers, status, &response_headers, &body)?;
+            return Err(anyhow!(
+                "legacy MCP SSE endpoint returned an unexpected successful status"
+            ));
+        }
+        let content_type = response_headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !content_type.contains("text/event-stream") {
+            let body = read_capped_response_body(response).await?;
+            return Err(anyhow!(
+                "legacy MCP endpoint {} did not return text/event-stream (got {content_type:?}): {}",
+                crate::server::redact_url_for_display(url),
+                redact_configured_header_values(
+                    body.chars().take(300).collect(),
+                    headers,
+                )
+            ));
+        }
+
+        let base_url = url::Url::parse(url).with_context(|| {
+            format!(
+                "invalid legacy MCP SSE URL {}",
+                crate::server::redact_url_for_display(url)
+            )
+        })?;
+        let mut reader = SseReader::new(response);
+        let endpoint = tokio::time::timeout(RPC_TIMEOUT, async {
+            loop {
+                let Some(event) = reader.next_event().await? else {
+                    return Err(anyhow!(
+                        "legacy MCP SSE stream closed before its endpoint event"
+                    ));
+                };
+                let is_endpoint_event = event.event.as_deref() == Some("endpoint")
+                    || (event.event.is_none()
+                        && (event.data.starts_with('/')
+                            || event.data.starts_with("http://")
+                            || event.data.starts_with("https://")));
+                if !is_endpoint_event {
+                    continue;
+                }
+                let endpoint = event.data.trim();
+                if endpoint.is_empty() {
+                    return Err(anyhow!("legacy MCP SSE endpoint event was empty"));
+                }
+                let endpoint_url = base_url
+                    .join(endpoint)
+                    .context("resolving the legacy MCP SSE endpoint event")?;
+                if endpoint_url.username() != "" || endpoint_url.fragment().is_some() {
+                    return Err(anyhow!(
+                        "legacy MCP SSE endpoint event contained credentials or a fragment"
+                    ));
+                }
+                return Ok(endpoint_url.to_string());
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("timed out waiting for the legacy MCP SSE endpoint event"))??;
+
+        Ok(Self {
+            url: url.to_owned(),
+            headers: headers.clone(),
+            endpoint,
+            reader,
+            pending: VecDeque::new(),
+        })
+    }
+
+    async fn post(&mut self, line: &str) -> Result<()> {
+        // Legacy servers normally announce a same-origin message endpoint. If
+        // an older server announces a different origin, keep the connection
+        // usable but do not forward configured credentials there.
+        let mut headers = if same_http_origin(&self.url, &self.endpoint) {
+            configured_headers(&self.headers, &["Accept", "Content-Type"])
+        } else {
+            Vec::new()
+        };
+        headers.push((
+            "Accept".to_owned(),
+            "application/json, text/event-stream".to_owned(),
+        ));
+        headers.push(("Content-Type".to_owned(), "application/json".to_owned()));
+        let (status, response_headers, body) = crate::server::guarded_post_json(
+            &self.endpoint,
+            &headers,
+            line.to_owned(),
+            MAX_MCP_HTTP_BODY_BYTES,
+        )
+        .await?;
+        ensure_http_success(
+            &self.endpoint,
+            &self.headers,
+            status,
+            &response_headers,
+            &body,
+        )?;
+        let content_type = response_headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if content_type.contains("text/event-stream") {
+            self.pending.extend(sse_data_frames(&body));
+        } else if !body.trim().is_empty() {
+            self.pending.push_back(body);
+        }
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<Option<String>> {
+        if let Some(frame) = self.pending.pop_front() {
+            return Ok(Some(frame));
+        }
+        loop {
+            let Some(event) = self.reader.next_event().await? else {
+                return Ok(None);
+            };
+            if event.event.as_deref() == Some("endpoint") || event.data.trim().is_empty() {
+                continue;
+            }
+            return Ok(Some(event.data));
+        }
+    }
+}
+
 /// The transport-specific half of a connection: move bytes, nothing more.
 enum Transport {
     Stdio(StdioTransport),
     Http(HttpTransport),
+    Sse(LegacySseTransport),
 }
 
 impl Transport {
     /// Write one JSON-RPC frame. For stdio this is a line on the child's stdin;
-    /// for HTTP it is the whole request/response round-trip (responses land in
-    /// the pending queue for [`recv`](Self::recv)).
+    /// for Streamable HTTP it is the whole request/response round-trip; for
+    /// legacy SSE it POSTs to the announced message endpoint while responses
+    /// land on the long-lived GET stream.
     async fn send(&mut self, line: &str) -> Result<()> {
         match self {
             Self::Stdio(t) => {
@@ -373,6 +758,7 @@ impl Transport {
                 Ok(())
             }
             Self::Http(t) => t.post(line).await,
+            Self::Sse(t) => t.post(line).await,
         }
     }
 
@@ -385,10 +771,11 @@ impl Transport {
                 Ok(if n == 0 { None } else { Some(buf) })
             }
             Self::Http(t) => Ok(t.pending.pop_front()),
+            Self::Sse(t) => t.recv().await,
         }
     }
 
-    /// Why no further frame can arrive — the two transports fail differently and
+    /// Why no further frame can arrive — the transports fail differently and
     /// the distinction is the whole diagnosis (a crashed child vs. a response
     /// that simply never contained our id).
     fn exhausted_error(&self) -> anyhow::Error {
@@ -398,6 +785,10 @@ impl Transport {
             // string is logged and shown. Same rule as `HttpTransport::post`.
             Self::Http(t) => anyhow!(
                 "MCP endpoint {} returned no response frame matching the request id",
+                crate::server::redact_url_for_display(&t.url)
+            ),
+            Self::Sse(t) => anyhow!(
+                "legacy MCP SSE endpoint {} closed without a response frame matching the request id",
                 crate::server::redact_url_for_display(&t.url)
             ),
         }
@@ -413,11 +804,14 @@ impl Transport {
                 drop(stdin);
                 let _ = child.kill().await;
             }
-            // Nothing to tear down: an HTTP endpoint holds no Core-side resource.
+            // Nothing to tear down: a request/response HTTP endpoint holds no
+            // Core-side resource.
             // (MCP's `DELETE <url>` session teardown is deliberately not sent —
             // it is optional, servers may reject it, and a stateless per-call
             // connection has nothing to reclaim.)
             Self::Http(_) => {}
+            // Dropping the response body closes the long-lived legacy SSE GET.
+            Self::Sse(_) => {}
         }
     }
 }
@@ -431,11 +825,17 @@ impl HttpTransport {
     /// URL in-process, `http://169.254.169.254/` is Core's own SSRF, so the
     /// resolve → screen → **pin** builder runs per request against this host.
     async fn post(&mut self, line: &str) -> Result<()> {
-        let mut headers: Vec<(String, String)> = self
-            .headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let mut headers = configured_headers(
+            &self.headers,
+            &[
+                "Accept",
+                "Content-Type",
+                "Mcp-Method",
+                "Mcp-Name",
+                "Mcp-Session-Id",
+                "MCP-Protocol-Version",
+            ],
+        );
         // Both are required by MCP's Streamable HTTP transport: a server may
         // answer a POST with either a JSON body or an SSE stream, and it picks
         // based on this Accept.
@@ -482,58 +882,7 @@ impl HttpTransport {
             }
         }
 
-        if status.is_redirection() {
-            // Named rather than lumped into the generic failure below, because a
-            // 3xx here is almost always a benign `/mcp` → `/mcp/` normalization
-            // and the generic message ("returned HTTP 308: ") carries an empty
-            // body snippet — nothing the user can act on. Redirects are refused
-            // by design (`Policy::none()`): following one would let a screened
-            // host bounce Core to an unscreened address after the SSRF check, so
-            // the fix is for the user to configure the final URL, and the message
-            // has to say so and show it.
-            // Both URLs go through the redactor: ours may carry the operator's
-            // credential, and a `Location` a remote chose can carry anything at
-            // all. See `server::redact_url_for_display`.
-            let location = resp_headers
-                .get(reqwest::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .map(crate::server::redact_url_for_display)
-                .unwrap_or_else(|| "(no Location header)".to_owned());
-            return Err(anyhow!(
-                "MCP endpoint {} returned HTTP {status} redirecting to {location}. Redirects \
-                 are not followed (a redirect could bounce past the SSRF screen) — configure \
-                 the final URL for this server instead",
-                crate::server::redact_url_for_display(&self.url)
-            ));
-        }
-        if !status.is_success() {
-            // Body snippet, truncated: a remote's error page is untrusted text
-            // and this string reaches logs and the model. The URL is redacted for
-            // the complementary reason — it is OUR secret, not the remote's text.
-            let mut snippet: String = body.chars().take(300).collect();
-            for (name, value) in &self.headers {
-                if name.eq_ignore_ascii_case("authorization") {
-                    snippet = snippet.replace(value, "<redacted>");
-                    if let Some((_, token)) = value.split_once(' ') {
-                        snippet = snippet.replace(token, "<redacted>");
-                    }
-                }
-            }
-            return Err(anyhow!(McpHttpFailure {
-                status,
-                www_authenticate: resp_headers
-                    .get(reqwest::header::WWW_AUTHENTICATE)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_owned),
-                body_snippet: snippet,
-            }))
-            .with_context(|| {
-                format!(
-                    "MCP endpoint {} authentication/HTTP failure",
-                    crate::server::redact_url_for_display(&self.url)
-                )
-            });
-        }
+        ensure_http_success(&self.url, &self.headers, status, &resp_headers, &body)?;
 
         let content_type = resp_headers
             .get(reqwest::header::CONTENT_TYPE)
@@ -570,18 +919,26 @@ impl McpConnection {
                 .await
                 .get(&endpoint.url)
                 .copied(),
-            McpTarget::Stdio(_) => None,
+            McpTarget::Stdio(_) | McpTarget::Sse(_) => None,
         };
         let transport = match target {
             McpTarget::Stdio(cmd) => Transport::Stdio(Self::spawn_stdio(cmd).await?),
-            McpTarget::Http(ep) => Transport::Http(HttpTransport {
-                url: ep.url.clone(),
-                headers: ep.headers.clone(),
-                session_id: None,
-                protocol_version: None,
-                modern: !matches!(cached_http_mode, Some(HttpProtocolMode::Legacy)),
-                pending: VecDeque::new(),
-            }),
+            McpTarget::Sse(ep) => {
+                Transport::Sse(LegacySseTransport::connect(&ep.url, &ep.headers).await?)
+            }
+            McpTarget::Http(ep) => match cached_http_mode {
+                Some(HttpProtocolMode::LegacySse) => {
+                    Transport::Sse(LegacySseTransport::connect(&ep.url, &ep.headers).await?)
+                }
+                _ => Transport::Http(HttpTransport {
+                    url: ep.url.clone(),
+                    headers: ep.headers.clone(),
+                    session_id: None,
+                    protocol_version: None,
+                    modern: !matches!(cached_http_mode, Some(HttpProtocolMode::LegacyStreamable)),
+                    pending: VecDeque::new(),
+                }),
+            },
         };
 
         let mut conn = Self {
@@ -639,28 +996,51 @@ impl McpConnection {
                     http_protocol_modes()
                         .write()
                         .await
-                        .insert(endpoint.url.clone(), HttpProtocolMode::Legacy);
+                        .insert(endpoint.url.clone(), HttpProtocolMode::LegacyStreamable);
                 }
                 Err(error) => return Err(error).context("MCP server/discover"),
             }
         }
 
-        // Legacy `initialize` request → `initialized` notification.
+        // Legacy `initialize` request → `initialized` notification. An auto HTTP
+        // entry that receives a 4xx from this request may actually be pointing at
+        // the old `/sse` endpoint; discover its message endpoint and retry the
+        // same initialize request over the legacy transport.
         let offered = match target {
-            McpTarget::Stdio(_) => MCP_PROTOCOL_VERSION,
+            McpTarget::Stdio(_) | McpTarget::Sse(_) => MCP_PROTOCOL_VERSION,
             McpTarget::Http(_) => MCP_HTTP_PROTOCOL_VERSION,
         };
-        let result = conn
-            .request(
-                "initialize",
-                json!({
-                    "protocolVersion": offered,
-                    "capabilities": {},
-                    "clientInfo": { "name": "ryu-core", "version": env!("CARGO_PKG_VERSION") },
-                }),
-            )
-            .await
-            .with_context(|| format!("MCP initialize ({})", conn.label))?;
+        let initialize_params = |protocol_version: &str| {
+            json!({
+                "protocolVersion": protocol_version,
+                "capabilities": {},
+                "clientInfo": { "name": "ryu-core", "version": env!("CARGO_PKG_VERSION") },
+            })
+        };
+        let result = conn.request("initialize", initialize_params(offered)).await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error)
+                if matches!(target, McpTarget::Http(_)) && error_indicates_legacy_sse(&error) =>
+            {
+                let McpTarget::Http(endpoint) = target else {
+                    unreachable!("guarded by the HTTP match")
+                };
+                conn.transport = Transport::Sse(
+                    LegacySseTransport::connect(&endpoint.url, &endpoint.headers).await?,
+                );
+                conn.next_id = 1;
+                http_protocol_modes()
+                    .write()
+                    .await
+                    .insert(endpoint.url.clone(), HttpProtocolMode::LegacySse);
+                conn.request("initialize", initialize_params(MCP_PROTOCOL_VERSION))
+                    .await?
+            }
+            Err(error) => {
+                return Err(error).context(format!("MCP initialize ({})", conn.label));
+            }
+        };
 
         // Adopt whatever the server settled on, falling back to what we offered.
         // A server is allowed to answer with an OLDER revision than the client
@@ -827,7 +1207,30 @@ fn error_proves_legacy(error: &anyhow::Error) -> bool {
             .is_some_and(|failure| {
                 matches!(
                     failure.status,
-                    reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+                    reqwest::StatusCode::BAD_REQUEST
+                        | reqwest::StatusCode::NOT_FOUND
+                        | reqwest::StatusCode::METHOD_NOT_ALLOWED
+                )
+            })
+    })
+}
+
+/// A failed initialize POST can identify a legacy `/sse` URL. A JSON-RPC
+/// `-32601` response means the endpoint did receive a normal request and should
+/// stay on the Streamable HTTP initialize path, so do not treat it as SSE.
+fn error_indicates_legacy_sse(error: &anyhow::Error) -> bool {
+    if error.to_string().contains("-32601") {
+        return false;
+    }
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<McpHttpFailure>()
+            .is_some_and(|failure| {
+                matches!(
+                    failure.status,
+                    reqwest::StatusCode::BAD_REQUEST
+                        | reqwest::StatusCode::NOT_FOUND
+                        | reqwest::StatusCode::METHOD_NOT_ALLOWED
                 )
             })
     })
@@ -1102,6 +1505,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legacy_sse_origin_policy_distinguishes_cross_origin_endpoints() {
+        let base = url::Url::parse("https://mcp.example.com/sse").unwrap();
+        let same = url::Url::parse("https://mcp.example.com/message").unwrap();
+        let different_host = url::Url::parse("https://messages.example.com/post").unwrap();
+        let different_port = url::Url::parse("https://mcp.example.com:8443/post").unwrap();
+
+        assert!(same_http_origin(base.as_str(), same.as_str()));
+        assert!(!same_http_origin(base.as_str(), different_host.as_str()));
+        assert!(!same_http_origin(base.as_str(), different_port.as_str()));
+    }
+
+    #[test]
+    fn http_failures_redact_all_configured_header_values() {
+        let configured = BTreeMap::from([
+            (
+                "Authorization".to_owned(),
+                "Bearer bearer-secret".to_owned(),
+            ),
+            ("X-API-Key".to_owned(), "api-secret".to_owned()),
+        ]);
+        let mut response_headers = reqwest::header::HeaderMap::new();
+        response_headers.insert(
+            reqwest::header::WWW_AUTHENTICATE,
+            reqwest::header::HeaderValue::from_static("Bearer bearer-secret"),
+        );
+
+        let error = ensure_http_success(
+            "https://mcp.example.com/mcp",
+            &configured,
+            reqwest::StatusCode::UNAUTHORIZED,
+            &response_headers,
+            "echoed api-secret and bearer-secret",
+        )
+        .expect_err("an unauthorized response must fail");
+        let failure = error
+            .downcast_ref::<McpHttpFailure>()
+            .expect("the sanitized failure should remain downcastable");
+
+        assert!(!failure.body_snippet.contains("api-secret"));
+        assert!(!failure.body_snippet.contains("bearer-secret"));
+        assert!(!failure
+            .www_authenticate
+            .as_deref()
+            .unwrap_or_default()
+            .contains("bearer-secret"));
+    }
+
     /// A Streamable-HTTP endpoint may answer one POST with an event stream that
     /// interleaves progress notifications and unrelated responses around our
     /// answer. Correlation by JSON-RPC `id` — not "take the first frame" — is what
@@ -1157,6 +1608,19 @@ mod tests {
     fn sse_last_frame_without_trailing_blank_line_is_kept() {
         let frames = sse_data_frames("data: {\"id\":1,\"result\":42}");
         assert_eq!(frames, vec!["{\"id\":1,\"result\":42}".to_owned()]);
+    }
+
+    #[test]
+    fn batch_response_is_correlated_by_id() {
+        let frame = r#"[
+            {"jsonrpc":"2.0","id":2,"result":{"stale":true}},
+            {"jsonrpc":"2.0","id":9,"result":{"ok":true}}
+        ]"#;
+        assert!(matches!(
+            classify_frame(frame, 9),
+            FrameVerdict::Done(result) if result == json!({"ok": true})
+        ));
+        assert!(matches!(classify_frame(frame, 7), FrameVerdict::Skip));
     }
 
     /// Multi-line `data:` payloads join with `\n`, per the SSE grammar — a server

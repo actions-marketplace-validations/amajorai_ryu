@@ -201,7 +201,7 @@ pub async fn ensure_kokoro_runtime() -> anyhow::Result<bool> {
     }
     let Some(python) = resolve_python().await else {
         tracing::info!(
-            "no Python >= 3.{TTS_MIN_PYTHON_MINOR} on this node — skipping Kokoro TTS \
+            "no Python >= 3.{TTS_MIN_PYTHON_MINOR} on this node — skipping Kokoro Audio \
              provisioning; spoken output uses the built-in OuteTTS engine"
         );
         return Ok(false);
@@ -218,14 +218,14 @@ pub async fn ensure_kokoro_runtime() -> anyhow::Result<bool> {
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Voice,
                 role: crate::downloads::DownloadRole::Engine,
-                label: "Ryu TTS sidecar".to_string(),
+                label: "Ryu Audio sidecar".to_string(),
                 url: tts_sidecar_wheel_url(),
                 dest: dir.join("dist").join(TTS_SIDECAR_WHEEL_FILE),
                 sha256: Some(TTS_SIDECAR_WHEEL_SHA256.to_string()),
                 version_record: None,
             })
             .await
-            .context("downloading the Ryu TTS sidecar wheel")?;
+            .context("downloading the Ryu Audio sidecar wheel")?;
         // `pip install "<path>.whl[kokoro]"` — PEP 508 extras apply to a local
         // wheel exactly as they do to a named requirement, so this pulls
         // kokoro-onnx + onnxruntime + soundfile alongside the sidecar itself.
@@ -239,7 +239,7 @@ pub async fn ensure_kokoro_runtime() -> anyhow::Result<bool> {
     // runs against a Python the wheel accepts.
     tokio::fs::create_dir_all(&dir)
         .await
-        .with_context(|| format!("creating the TTS sidecar dir at {}", dir.display()))?;
+        .with_context(|| format!("creating the Audio sidecar dir at {}", dir.display()))?;
     let venv = dir.join(".venv");
     let out = tokio::process::Command::new(&python)
         .arg("-m")
@@ -275,7 +275,7 @@ pub async fn ensure_kokoro_runtime() -> anyhow::Result<bool> {
             // retryable on the next boot.
             let _ = tokio::fs::remove_dir_all(&venv).await;
             Err(anyhow::anyhow!(
-                "provisioning the Kokoro TTS runtime failed: {e}"
+                "provisioning the Kokoro Audio runtime failed: {e}"
             ))
         }
     }
@@ -368,7 +368,9 @@ impl Sidecar for RyuTtsManager {
             // spawning a competitor that would fail to bind the port.
             if Self::server_reachable(&client).await {
                 adopted_external.store(true, Ordering::Relaxed);
-                tracing::info!("ryu-tts already running on {TTS_ADDR} — adopting existing server");
+                tracing::info!(
+                    "Ryu Audio sidecar already running on {TTS_ADDR} — adopting existing server"
+                );
                 return Ok(());
             }
             adopted_external.store(false, Ordering::Relaxed);
@@ -376,7 +378,7 @@ impl Sidecar for RyuTtsManager {
             let dir = sidecar_dir();
             if !dir.exists() {
                 anyhow::bail!(
-                    "Ryu TTS sidecar not found at {}. Onboarding provisions it there from the \
+                    "Ryu Audio sidecar not found at {}. Onboarding provisions it there from the \
                      published wheel when a usable `python3` is present — check the boot log for \
                      a provisioning warning. Otherwise point RYU_TTS_DIR at a checkout of \
                      `apps-store/voice/sidecar`, or run `bun run dev:tts` and Core will adopt it.",
@@ -386,7 +388,7 @@ impl Sidecar for RyuTtsManager {
 
             let program = python_program(&dir);
             tracing::info!(
-                "ryu-tts starting ({} -m ryu_tts, dir={})",
+                "Ryu Audio sidecar starting ({} -m ryu_tts, dir={})",
                 program,
                 dir.display()
             );
@@ -422,7 +424,7 @@ impl Sidecar for RyuTtsManager {
                 .await
                 .with_context(|| {
                     format!(
-                        "spawning the Ryu TTS sidecar ({program} -m ryu_tts). Is Python installed \
+                        "spawning the Ryu Audio sidecar ({program} -m ryu_tts). Is Python installed \
                          and the base deps available? See apps-store/voice/sidecar/README.md."
                     )
                 })?;
@@ -437,9 +439,9 @@ impl Sidecar for RyuTtsManager {
                 }
             })
             .await
-            .context("ryu-tts did not start within 30s")?;
+            .context("Ryu Audio sidecar did not start within 30s")?;
 
-            tracing::info!("ryu-tts started on {TTS_ADDR}");
+            tracing::info!("Ryu Audio sidecar started on {TTS_ADDR}");
             Ok(())
         })
     }
@@ -449,11 +451,13 @@ impl Sidecar for RyuTtsManager {
         let adopted_external = Arc::clone(&self.adopted_external);
         Box::pin(async move {
             if adopted_external.swap(false, Ordering::Relaxed) {
-                tracing::info!("ryu-tts was an adopted external server — leaving it running");
+                tracing::info!(
+                    "Ryu Audio sidecar was an adopted external server — leaving it running"
+                );
                 return Ok(());
             }
-            process.stop().await.context("stopping ryu-tts process")?;
-            tracing::info!("ryu-tts stopped");
+            process.stop().await.context("stopping Ryu Audio sidecar")?;
+            tracing::info!("Ryu Audio sidecar stopped");
             Ok(())
         })
     }
@@ -465,7 +469,7 @@ impl Sidecar for RyuTtsManager {
         Box::pin(async move {
             let owned_running = process.is_running();
             if !owned_running && !adopted_external.load(Ordering::Relaxed) {
-                return HealthStatus::Unhealthy("ryu-tts process not running".into());
+                return HealthStatus::Unhealthy("Ryu Audio sidecar process not running".into());
             }
             match client
                 .get(format!("{}/health", tts_base_url()))
@@ -473,7 +477,10 @@ impl Sidecar for RyuTtsManager {
                 .await
             {
                 Ok(r) if r.status().is_success() => HealthStatus::Healthy,
-                Ok(r) => HealthStatus::Unhealthy(format!("ryu-tts health returned {}", r.status())),
+                Ok(r) => HealthStatus::Unhealthy(format!(
+                    "Ryu Audio sidecar health returned {}",
+                    r.status()
+                )),
                 Err(e) => HealthStatus::Unhealthy(format!("health check failed: {e}")),
             }
         })
@@ -510,14 +517,14 @@ pub async fn list_engines(client: &reqwest::Client) -> anyhow::Result<Value> {
         .bearer_auth(bearer())
         .send()
         .await
-        .with_context(|| format!("ryu-tts not reachable at {url}"))?;
+        .with_context(|| format!("Ryu Audio sidecar not reachable at {url}"))?;
     if !resp.status().is_success() {
-        anyhow::bail!("ryu-tts /engines returned {}", resp.status());
+        anyhow::bail!("Ryu Audio sidecar /engines returned {}", resp.status());
     }
     resp.json::<Value>().await.context("parsing /engines JSON")
 }
 
-/// Fetch the sidecar's curated, installable TTS model catalog (`GET /models`).
+/// Fetch the sidecar's curated, installable Audio model catalog (`GET /models`).
 /// Each row is a known-good model variant bound to its engine + cache state.
 pub async fn list_models(client: &reqwest::Client) -> anyhow::Result<Value> {
     let url = format!("{}/models", tts_base_url());
@@ -526,9 +533,9 @@ pub async fn list_models(client: &reqwest::Client) -> anyhow::Result<Value> {
         .bearer_auth(bearer())
         .send()
         .await
-        .with_context(|| format!("ryu-tts not reachable at {url}"))?;
+        .with_context(|| format!("Ryu Audio sidecar not reachable at {url}"))?;
     if !resp.status().is_success() {
-        anyhow::bail!("ryu-tts /models returned {}", resp.status());
+        anyhow::bail!("Ryu Audio sidecar /models returned {}", resp.status());
     }
     resp.json::<Value>().await.context("parsing /models JSON")
 }
@@ -548,7 +555,7 @@ pub async fn install_model(
         .json(&serde_json::json!({ "engine": engine, "model_name": model_name }))
         .send()
         .await
-        .with_context(|| format!("ryu-tts not reachable at {url}"))?;
+        .with_context(|| format!("Ryu Audio sidecar not reachable at {url}"))?;
     let status = resp.status();
     let body = resp
         .json::<Value>()
@@ -559,7 +566,7 @@ pub async fn install_model(
             .get("error")
             .and_then(Value::as_str)
             .unwrap_or("unknown error");
-        anyhow::bail!("ryu-tts model install failed ({status}): {err}");
+        anyhow::bail!("Ryu Audio model install failed ({status}): {err}");
     }
     Ok(body)
 }

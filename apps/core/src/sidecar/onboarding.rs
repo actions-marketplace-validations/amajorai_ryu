@@ -873,7 +873,7 @@ impl SetupManager {
                     }
                     Err(e) => {
                         let msg = format!(
-                            "parakeet model download failed (parakeet STT unavailable): {e:#}"
+                            "parakeet model download failed (parakeet Voice Recognition unavailable): {e:#}"
                         );
                         tracing::warn!("{}", msg);
                         warnings.push(msg);
@@ -963,18 +963,18 @@ impl SetupManager {
             // `POST /api/voice/speak` falls back to it per-request.
             //
             // Non-fatal throughout — chat readiness never depends on any of this.
-            let runtime_ready = match crate::sidecar::providers::ryutts::ensure_kokoro_runtime()
-                .await
-            {
-                Ok(ready) => ready,
-                Err(e) => {
-                    let msg =
-                        format!("Kokoro TTS runtime provisioning failed (TTS uses OuteTTS): {e:#}");
-                    tracing::warn!("{}", msg);
-                    warnings.push(msg);
-                    false
-                }
-            };
+            let runtime_ready =
+                match crate::sidecar::providers::ryutts::ensure_kokoro_runtime().await {
+                    Ok(ready) => ready,
+                    Err(e) => {
+                        let msg = format!(
+                            "Kokoro Audio runtime provisioning failed (Audio uses OuteTTS): {e:#}"
+                        );
+                        tracing::warn!("{}", msg);
+                        warnings.push(msg);
+                        false
+                    }
+                };
             let kokoro_installed = if runtime_ready {
                 match crate::sidecar::providers::ryutts::kokoro::KokoroDownloader::new()
                     .ensure_installed(downloads)
@@ -983,7 +983,7 @@ impl SetupManager {
                     Ok(_) => {
                         self.mark_installed("ryutts").await;
                         // Persist so a restart re-seeds `ryutts` as installed and
-                        // `start_all` brings the default TTS engine up automatically.
+                        // `start_all` brings the default Audio engine up automatically.
                         if let Err(e) =
                             crate::sidecar::download_manager::VersionStore::record_persisted(
                                 "ryutts",
@@ -994,13 +994,13 @@ impl SetupManager {
                             tracing::warn!("recording ryutts install failed: {e:#}");
                         }
                         tracing::info!(
-                            "onboarding: Kokoro 82M default TTS installed + sidecar provisioned"
+                            "onboarding: Kokoro 82M default Audio installed + sidecar provisioned"
                         );
                         true
                     }
                     Err(e) => {
                         let msg = format!(
-                            "Kokoro 82M model download failed (TTS falls back to OuteTTS): {e:#}"
+                            "Kokoro 82M model download failed (Audio falls back to OuteTTS): {e:#}"
                         );
                         tracing::warn!("{}", msg);
                         warnings.push(msg);
@@ -1009,7 +1009,7 @@ impl SetupManager {
                 }
             } else {
                 tracing::info!(
-                    "onboarding: Kokoro TTS sidecar not provisionable on this node — skipping the \
+                    "onboarding: Kokoro Audio sidecar not provisionable on this node — skipping the \
                  Kokoro model download. Spoken output uses the built-in OuteTTS engine."
                 );
                 false

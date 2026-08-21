@@ -93,15 +93,23 @@ export interface Runnable {
 
 // ── Gateway reachability check ────────────────────────────────────────────────
 
+export type GatewayFetch = (
+	input: string | URL | Request,
+	init?: RequestInit
+) => Promise<Response>;
+
 /**
  * Probe the gateway at `baseUrl` with a HEAD request.
  *
  * Returns `true` when any HTTP response is received (even 4xx — the gateway
  * is reachable), `false` when the request fails with a network error.
  */
-export async function probeGateway(baseUrl: string): Promise<boolean> {
+export async function probeGateway(
+	baseUrl: string,
+	fetchImpl: GatewayFetch = fetch
+): Promise<boolean> {
 	try {
-		await fetch(`${baseUrl}/health`, {
+		await fetchImpl(`${baseUrl}/health`, {
 			method: "HEAD",
 			signal: AbortSignal.timeout(3000),
 		});

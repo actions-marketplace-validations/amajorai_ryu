@@ -235,8 +235,7 @@ function EditorAiCard({
 					Leave blank to use this node's Gateway ({deriveGatewayBase(nodeUrl)}).
 				</p>
 			</div>
-			<Button disabled={saving} onClick={save} size="sm">
-				{saving ? <Spinner className="size-4" /> : null}
+			<Button loading={saving} onClick={save} size="sm">
 				Save
 			</Button>
 		</div>
@@ -373,8 +372,7 @@ function EmbeddingCard({ target }: { target: ApiTarget }) {
 				</div>
 			</div>
 			<div className="flex items-center gap-2">
-				<Button disabled={busy} onClick={applyModel} size="sm">
-					{busy ? <Spinner className="size-4" /> : null}
+				<Button loading={busy} onClick={applyModel} size="sm">
 					Change & reindex
 				</Button>
 				<Button

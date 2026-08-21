@@ -1127,10 +1127,10 @@ pub fn repo_from_hf_url(url: &str) -> Option<String> {
     }
 }
 
-/// Stems of every model `*.gguf` file currently in `~/.ryu/models/`. Excludes
-/// vision adapters (`*.mmproj.gguf`): a projector is a companion of a model, not
-/// a selectable/activatable model itself, so it must never surface as its own
-/// catalog card (and must never be served as `--model`).
+/// Stems of every runnable model `*.gguf` file currently in `~/.ryu/models/`.
+/// Excludes vision adapters and importance matrices: both are companions or
+/// quantization inputs, not selectable/activatable models, so they must never
+/// surface as their own catalog card (or be served as `--model`).
 fn on_disk_gguf_stems() -> Vec<String> {
     let dir = ryu_dir().join("models");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1140,7 +1140,7 @@ fn on_disk_gguf_stems() -> Vec<String> {
         .filter_map(Result::ok)
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if name.to_ascii_lowercase().ends_with(".mmproj.gguf") {
+            if is_mmproj_filename(&name) || is_imatrix_filename(&name) {
                 return None;
             }
             name.strip_suffix(".gguf").map(str::to_string)
@@ -1249,7 +1249,9 @@ pub async fn model_detail(
         info.siblings
             .iter()
             .filter(|s| {
-                s.rfilename.to_lowercase().ends_with(".gguf") && !is_mmproj_filename(&s.rfilename)
+                s.rfilename.to_lowercase().ends_with(".gguf")
+                    && !is_mmproj_filename(&s.rfilename)
+                    && !is_imatrix_filename(&s.rfilename)
             })
             .map(|s| {
                 let (size_bytes, sha256) = sizes.get(&s.rfilename).cloned().unwrap_or((None, None));
@@ -1398,6 +1400,12 @@ async fn fetch_tree_sizes(
             .iter()
             .any(|ext| lower.ends_with(ext))
         {
+            continue;
+        }
+        // Importance matrices are GGUF-shaped quantization inputs, not model
+        // weights. Keep them out of the GGUF size/checksum map while preserving
+        // mmproj files for the companion-adapter picker below.
+        if format == ModelFormat::Gguf && is_imatrix_filename(&e.path) {
             continue;
         }
         let (size, sha) = match e.lfs {
@@ -1562,6 +1570,16 @@ pub(crate) fn is_mmproj_filename(name: &str) -> bool {
     name.to_ascii_lowercase().contains("mmproj")
 }
 
+/// Whether a GGUF file is an importance matrix produced for quantization. These
+/// files commonly use names such as `imatrix_unsloth.gguf`; token matching keeps
+/// a normal model name containing `imatrix` as a substring from being rejected
+/// accidentally.
+pub(crate) fn is_imatrix_filename(name: &str) -> bool {
+    name.to_ascii_lowercase()
+        .split(|c: char| c == '-' || c == '_' || c == '.' || c == '/' || c.is_whitespace())
+        .any(|segment| segment == "imatrix")
+}
+
 /// Pick the best multimodal projector from a repo tree map (path → size/sha).
 /// Prefers the configured precision (`RYU_MMPROJ_QUANT`, default `f16`), then any
 /// `f16`, then the smallest remaining candidate (a deterministic tiebreak).
@@ -1673,6 +1691,9 @@ pub async fn install_file(
     // path-traversal filenames (the stem becomes an on-disk path) and malformed
     // repo ids (interpolated into Hub URLs) before any download or write.
     validate_gguf_filename(filename)?;
+    if is_imatrix_filename(filename) {
+        anyhow::bail!("importance matrix files are not runnable model weights: {filename}");
+    }
     validate_repo_id(repo_id)?;
 
     let stem = local_stem(filename);
@@ -1767,6 +1788,9 @@ pub async fn install_from_descriptor(
     // Security: dest_filename becomes the on-disk stem, so it must be a single
     // safe `.gguf` component (no traversal, no separators).
     validate_gguf_filename(dest_filename)?;
+    if is_imatrix_filename(dest_filename) {
+        anyhow::bail!("importance matrix files are not runnable model weights: {dest_filename}");
+    }
 
     let stem = local_stem(dest_filename);
 
@@ -2013,6 +2037,16 @@ mod tests {
         assert!(is_mmproj_filename("MMPROJ-BF16.GGUF"));
         // A normal weight quant is never a projector.
         assert!(!is_mmproj_filename("gemma-4-E2B-it-Q4_K_M.gguf"));
+    }
+
+    #[test]
+    fn is_imatrix_rejects_quantization_inputs_but_not_normal_weights() {
+        assert!(is_imatrix_filename("imatrix_unsloth.gguf"));
+        assert!(is_imatrix_filename("model-imatrix.gguf"));
+        assert!(is_imatrix_filename("IMATRIX.GGUF"));
+        assert!(!is_imatrix_filename("gemma-4-E2B-it-Q4_K_M.gguf"));
+        // A non-token substring is not enough to classify a normal filename.
+        assert!(!is_imatrix_filename("myimatrix-model-Q4_K_M.gguf"));
     }
 
     #[test]
@@ -2309,6 +2343,7 @@ mod tests {
         std::fs::create_dir_all(&models).unwrap();
         std::fs::write(models.join(format!("{stem}.gguf")), b"x").unwrap();
         std::fs::write(models.join(format!("{stem}.mmproj.gguf")), b"p").unwrap();
+        std::fs::write(models.join("imatrix_unsloth.gguf"), b"matrix").unwrap();
 
         assert!(models_dir_has(stem));
         assert!(!models_dir_has("ondisk-nope-f1"));
@@ -2319,9 +2354,14 @@ mod tests {
             !stems.contains(&format!("{stem}.mmproj")),
             "the vision adapter must never surface as its own stem"
         );
+        assert!(
+            !stems.contains(&"imatrix_unsloth".to_string()),
+            "an importance matrix must never surface as its own stem"
+        );
 
         let _ = std::fs::remove_file(models.join(format!("{stem}.gguf")));
         let _ = std::fs::remove_file(models.join(format!("{stem}.mmproj.gguf")));
+        let _ = std::fs::remove_file(models.join("imatrix_unsloth.gguf"));
     }
 
     #[test]
@@ -2610,6 +2650,7 @@ mod tests {
                     { "path": "model-Q4_K_M.gguf", "size": 0, "lfs": { "oid": "abc", "size": 4000 } },
                     { "path": "model-Q8_0.gguf", "size": 8000 },
                     { "path": "mmproj-f16.gguf", "size": 500 },
+                    { "path": "imatrix_unsloth.gguf", "size": 13000000 },
                     { "path": "README.md", "size": 10 }
                 ])
                 .to_string()
@@ -2634,6 +2675,7 @@ mod tests {
                         { "rfilename": "model-Q4_K_M.gguf" },
                         { "rfilename": "model-Q8_0.gguf" },
                         { "rfilename": "mmproj-f16.gguf" },
+                        { "rfilename": "imatrix_unsloth.gguf" },
                         { "rfilename": "README.md" }
                     ]
                 })
@@ -2660,7 +2702,7 @@ mod tests {
         assert_eq!(detail.card.id, "acme/widget-detail-model");
         assert_eq!(detail.card.context_length, Some(4096));
         assert!(detail.vision, "repo ships an mmproj projector ⇒ vision");
-        // mmproj + README excluded → exactly the two selectable quants.
+        // mmproj + imatrix + README excluded → exactly the two selectable quants.
         assert_eq!(detail.files.len(), 2);
         // Smallest-first (both un-installed): Q4 (4000) before Q8 (8000).
         assert_eq!(detail.files[0].filename, "model-Q4_K_M.gguf");
@@ -2738,6 +2780,13 @@ mod tests {
         std::fs::create_dir_all(ryu_dir().join("models")).unwrap();
         let stem = "install-desc-unique-c1";
         let url = format!("http://{addr}/acme/desc-repo/resolve/main/{stem}.gguf");
+        let matrix_error =
+            install_from_descriptor("acme/desc-repo", &url, None, "imatrix_unsloth.gguf", &dc)
+                .await
+                .expect_err("importance matrices must never be installed as models");
+        assert!(matrix_error
+            .to_string()
+            .contains("not runnable model weights"));
         let res =
             install_from_descriptor("acme/desc-repo", &url, None, &format!("{stem}.gguf"), &dc)
                 .await
@@ -2798,6 +2847,18 @@ mod tests {
                 .await
                 .is_err()
         );
+        let matrix_error = install_file(
+            &test_client(),
+            &endpoint,
+            "acme/x",
+            "imatrix_unsloth.gguf",
+            &dc,
+        )
+        .await
+        .expect_err("importance matrices must never be installed as models");
+        assert!(matrix_error
+            .to_string()
+            .contains("not runnable model weights"));
 
         let _ = installed::remove(stem);
         let _ = std::fs::remove_file(ryu_dir().join("models").join(format!("{stem}.gguf")));

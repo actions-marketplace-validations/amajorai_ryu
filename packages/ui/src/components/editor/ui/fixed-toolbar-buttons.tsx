@@ -1,14 +1,25 @@
 "use client";
 
 import {
+	NestedOverflowToolbar,
+	type NestedOverflowToolbarProps,
+} from "@ryu/ui/components/nested-overflow-toolbar.tsx";
+import {
 	ArrowUpToLineIcon,
 	BaselineIcon,
+	BlocksIcon,
 	BoldIcon,
 	Code2Icon,
+	FileTextIcon,
 	HighlighterIcon,
+	ImageIcon,
 	ItalicIcon,
+	ListTreeIcon,
+	MessageSquareIcon,
 	PaintBucketIcon,
+	Settings2Icon,
 	StrikethroughIcon,
+	TypeIcon,
 	UnderlineIcon,
 	WandSparklesIcon,
 } from "lucide-react";
@@ -48,123 +59,197 @@ import { ToggleToolbarButton } from "./toggle-toolbar-button.tsx";
 import { ToolbarGroup } from "./toolbar.tsx";
 import { TurnIntoToolbarButton } from "./turn-into-toolbar-button.tsx";
 
-export function FixedToolbarButtons() {
+export function FixedToolbarButtons({
+	placement = "fixed",
+}: Pick<NestedOverflowToolbarProps, "placement"> = {}) {
 	const readOnly = useEditorReadOnly();
 
+	const reviewControls = (
+		<ToolbarGroup>
+			<MarkToolbarButton nodeType={KEYS.highlight} tooltip="Highlight">
+				<HighlighterIcon />
+			</MarkToolbarButton>
+			<CommentToolbarButton />
+			<ModeToolbarButton />
+		</ToolbarGroup>
+	);
+
 	return (
-		<div className="flex w-full">
-			{!readOnly && (
-				<>
+		<NestedOverflowToolbar
+			ariaLabel="Page editor tools"
+			categories={
+				readOnly
+					? [
+							{
+								content: (
+									<ToolbarGroup>
+										<MarkToolbarButton
+											nodeType={KEYS.highlight}
+											tooltip="Highlight"
+										>
+											<HighlighterIcon />
+										</MarkToolbarButton>
+										<CommentToolbarButton />
+									</ToolbarGroup>
+								),
+								icon: <MessageSquareIcon />,
+								id: "review",
+								label: "Review",
+							},
+						]
+					: [
+							{
+								content: (
+									<ToolbarGroup>
+										<ExportToolbarButton>
+											<ArrowUpToLineIcon />
+										</ExportToolbarButton>
+										<ImportToolbarButton />
+									</ToolbarGroup>
+								),
+								icon: <FileTextIcon />,
+								id: "file",
+								label: "File",
+							},
+							{
+								content: (
+									<ToolbarGroup>
+										<InsertToolbarButton />
+										<TurnIntoToolbarButton />
+										<FontSizeToolbarButton />
+									</ToolbarGroup>
+								),
+								icon: <BlocksIcon />,
+								id: "insert",
+								label: "Insert",
+							},
+							{
+								content: (
+									<ToolbarGroup>
+										<MarkToolbarButton
+											aria-label="Bold (⌘+B)"
+											nodeType={KEYS.bold}
+											tooltip="Bold (⌘+B)"
+										>
+											<BoldIcon />
+										</MarkToolbarButton>
+										<MarkToolbarButton
+											aria-label="Italic (⌘+I)"
+											nodeType={KEYS.italic}
+											tooltip="Italic (⌘+I)"
+										>
+											<ItalicIcon />
+										</MarkToolbarButton>
+										<MarkToolbarButton
+											aria-label="Underline (⌘+U)"
+											nodeType={KEYS.underline}
+											tooltip="Underline (⌘+U)"
+										>
+											<UnderlineIcon />
+										</MarkToolbarButton>
+										<MarkToolbarButton
+											aria-label="Strikethrough (⌘+⇧+M)"
+											nodeType={KEYS.strikethrough}
+											tooltip="Strikethrough (⌘+⇧+M)"
+										>
+											<StrikethroughIcon />
+										</MarkToolbarButton>
+										<MarkToolbarButton
+											aria-label="Code (⌘+E)"
+											nodeType={KEYS.code}
+											tooltip="Code (⌘+E)"
+										>
+											<Code2Icon />
+										</MarkToolbarButton>
+										<FontColorToolbarButton
+											nodeType={KEYS.color}
+											tooltip="Text color"
+										>
+											<BaselineIcon />
+										</FontColorToolbarButton>
+										<FontColorToolbarButton
+											nodeType={KEYS.backgroundColor}
+											tooltip="Background color"
+										>
+											<PaintBucketIcon />
+										</FontColorToolbarButton>
+									</ToolbarGroup>
+								),
+								icon: <TypeIcon />,
+								id: "format",
+								label: "Format",
+							},
+							{
+								content: (
+									<ToolbarGroup>
+										<AlignToolbarButton />
+										<NumberedListToolbarButton />
+										<BulletedListToolbarButton />
+										<TodoListToolbarButton />
+										<ToggleToolbarButton />
+										<LineHeightToolbarButton />
+										<OutdentToolbarButton />
+										<IndentToolbarButton />
+									</ToolbarGroup>
+								),
+								icon: <ListTreeIcon />,
+								id: "blocks",
+								label: "Blocks",
+							},
+							{
+								content: (
+									<ToolbarGroup>
+										<LinkToolbarButton />
+										<TableToolbarButton />
+										<EmojiToolbarButton />
+										<MediaToolbarButton nodeType={KEYS.img} />
+										<MediaToolbarButton nodeType={KEYS.video} />
+										<MediaToolbarButton nodeType={KEYS.audio} />
+										<MediaToolbarButton nodeType={KEYS.file} />
+									</ToolbarGroup>
+								),
+								icon: <ImageIcon />,
+								id: "media",
+								label: "Media",
+							},
+							{
+								content: reviewControls,
+								icon: <MessageSquareIcon />,
+								id: "review",
+								label: "Review",
+							},
+							{
+								content: (
+									<ToolbarGroup>
+										<MoreToolbarButton />
+									</ToolbarGroup>
+								),
+								icon: <Settings2Icon />,
+								id: "advanced",
+								label: "Advanced",
+							},
+						]
+			}
+			placement={placement}
+			primary={
+				readOnly ? (
 					<ToolbarGroup>
-						<UndoToolbarButton />
-						<RedoToolbarButton />
+						<ModeToolbarButton />
 					</ToolbarGroup>
-
-					<ToolbarGroup>
-						<AIToolbarButton tooltip="AI commands">
-							<WandSparklesIcon />
-						</AIToolbarButton>
-					</ToolbarGroup>
-
-					<ToolbarGroup>
-						<ExportToolbarButton>
-							<ArrowUpToLineIcon />
-						</ExportToolbarButton>
-
-						<ImportToolbarButton />
-					</ToolbarGroup>
-
-					<ToolbarGroup>
-						<InsertToolbarButton />
-						<TurnIntoToolbarButton />
-						<FontSizeToolbarButton />
-					</ToolbarGroup>
-
-					<ToolbarGroup>
-						<MarkToolbarButton nodeType={KEYS.bold} tooltip="Bold (⌘+B)">
-							<BoldIcon />
-						</MarkToolbarButton>
-
-						<MarkToolbarButton nodeType={KEYS.italic} tooltip="Italic (⌘+I)">
-							<ItalicIcon />
-						</MarkToolbarButton>
-
-						<MarkToolbarButton
-							nodeType={KEYS.underline}
-							tooltip="Underline (⌘+U)"
-						>
-							<UnderlineIcon />
-						</MarkToolbarButton>
-
-						<MarkToolbarButton
-							nodeType={KEYS.strikethrough}
-							tooltip="Strikethrough (⌘+⇧+M)"
-						>
-							<StrikethroughIcon />
-						</MarkToolbarButton>
-
-						<MarkToolbarButton nodeType={KEYS.code} tooltip="Code (⌘+E)">
-							<Code2Icon />
-						</MarkToolbarButton>
-
-						<FontColorToolbarButton nodeType={KEYS.color} tooltip="Text color">
-							<BaselineIcon />
-						</FontColorToolbarButton>
-
-						<FontColorToolbarButton
-							nodeType={KEYS.backgroundColor}
-							tooltip="Background color"
-						>
-							<PaintBucketIcon />
-						</FontColorToolbarButton>
-					</ToolbarGroup>
-
-					<ToolbarGroup>
-						<AlignToolbarButton />
-
-						<NumberedListToolbarButton />
-						<BulletedListToolbarButton />
-						<TodoListToolbarButton />
-						<ToggleToolbarButton />
-					</ToolbarGroup>
-
-					<ToolbarGroup>
-						<LinkToolbarButton />
-						<TableToolbarButton />
-						<EmojiToolbarButton />
-					</ToolbarGroup>
-
-					<ToolbarGroup>
-						<MediaToolbarButton nodeType={KEYS.img} />
-						<MediaToolbarButton nodeType={KEYS.video} />
-						<MediaToolbarButton nodeType={KEYS.audio} />
-						<MediaToolbarButton nodeType={KEYS.file} />
-					</ToolbarGroup>
-
-					<ToolbarGroup>
-						<LineHeightToolbarButton />
-						<OutdentToolbarButton />
-						<IndentToolbarButton />
-					</ToolbarGroup>
-
-					<ToolbarGroup>
-						<MoreToolbarButton />
-					</ToolbarGroup>
-				</>
-			)}
-
-			<div className="grow" />
-
-			<ToolbarGroup>
-				<MarkToolbarButton nodeType={KEYS.highlight} tooltip="Highlight">
-					<HighlighterIcon />
-				</MarkToolbarButton>
-				<CommentToolbarButton />
-			</ToolbarGroup>
-
-			<ToolbarGroup>
-				<ModeToolbarButton />
-			</ToolbarGroup>
-		</div>
+				) : (
+					<>
+						<ToolbarGroup>
+							<UndoToolbarButton />
+							<RedoToolbarButton />
+						</ToolbarGroup>
+						<ToolbarGroup>
+							<AIToolbarButton tooltip="AI commands">
+								<WandSparklesIcon />
+							</AIToolbarButton>
+						</ToolbarGroup>
+					</>
+				)
+			}
+		/>
 	);
 }

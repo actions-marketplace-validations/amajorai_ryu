@@ -52,11 +52,11 @@ export interface Artifact {
 	mime?: string;
 	/** The message this artifact was extracted from. */
 	sourceMessageId: string;
-	/** Space + doc ids for an artifact persisted via `artifact__create`. */
+	/** Space + doc ids for an artifact persisted via `artifact.create`. */
 	spaceId?: string;
 	/** A short human label for the list row + panel tab. */
 	title: string;
-	/** Blob download URL for a created artifact (from `artifact__create`). */
+	/** Blob download URL for a created artifact (from `artifact.create`). */
 	url?: string;
 }
 
@@ -274,11 +274,11 @@ function isArtifactToolPart(
 		return false;
 	}
 	return (
-		part.type === "tool-artifact__render" ||
-		part.type === "tool-artifact__create" ||
+		part.type === "tool-artifact.render" ||
+		part.type === "tool-artifact.create" ||
 		(part.type === "dynamic-tool" &&
-			(part.toolName === "artifact__render" ||
-				part.toolName === "artifact__create"))
+			(part.toolName === "artifact.render" ||
+				part.toolName === "artifact.create"))
 	);
 }
 
@@ -288,8 +288,8 @@ function isArtifactToolPart(
  * artifact to render. Returns them in stream order; ids are stable per message.
  *
  * Two sources feed it: fenced blocks in the message text (html/svg/mermaid/code)
- * and the agent's own artifact TOOL parts (`artifact__render` input /
- * `artifact__create` result), so a file/page/space/database the agent minted
+ * and the agent's own artifact TOOL parts (`artifact.render` input /
+ * `artifact.create` result), so a file/page/space/database the agent minted
  * shows up in the cowork panel's Rendered artifacts list too.
  */
 export function extractArtifacts(
@@ -323,7 +323,7 @@ export function extractArtifacts(
 				);
 				const input = record.input as Record<string, unknown> | undefined;
 				const output = record.output as Record<string, unknown> | undefined;
-				if (toolName === "artifact__create") {
+				if (toolName === "artifact.create") {
 					// The create RESULT carries url/mime/ids (title lived in the input).
 					const mime =
 						typeof output?.mime === "string" ? output.mime : undefined;
@@ -362,7 +362,7 @@ export function extractArtifacts(
 	return all;
 }
 
-// ── Agent-provided artifacts (artifact__render / artifact__create) ────────────
+// ── Agent-provided artifacts (artifact.render / artifact.create) ────────────
 //
 // These arrive as a structured tool payload rather than being mined out of
 // message text. The desktop still normalizes them into the same `Artifact` shape
@@ -420,8 +420,8 @@ export function artifactIdFromToolCall(toolCallId: string | undefined): string {
 	return `artifact-${base}`;
 }
 
-/** The loose payload an agent sends through `artifact__render` (or that the
- *  desktop reads out of an `artifact__create` result). Every field optional so a
+/** The loose payload an agent sends through `artifact.render` (or that the
+ *  desktop reads out of an `artifact.create` result). Every field optional so a
  *  malformed payload degrades to a "code" card instead of throwing. */
 export interface ArtifactPayload {
 	actions?: ArtifactAction[];

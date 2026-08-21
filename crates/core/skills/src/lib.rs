@@ -119,7 +119,7 @@ pub fn global_registry() -> Option<&'static SkillRegistry> {
 // ── Disclosure mode (progressive vs full) ───────────────────────────────────────
 //
 // Progressive disclosure injects only each skill's name+description (L1) up front
-// and lets the model load a full body (L2) on demand via the `skills__load` tool —
+// and lets the model load a full body (L2) on demand via the `skills.load` tool —
 // the Agent Skills standard. It is only safe where the turn has a tool loop (the
 // ACP plane); the no-tool openai-compat fast path keeps full injection regardless,
 // so a weak model is never starved (see `adapters::route_chat_stream`).
@@ -133,7 +133,7 @@ pub const SKILLS_DISCLOSURE_PREF: &str = "skills-disclosure";
 /// handler) is the real source of truth, exactly like `headroom::is_enabled`.
 const ENV_SKILLS_DISCLOSURE: &str = "RYU_SKILLS_DISCLOSURE";
 
-/// Max L1 index entries injected before the model is told to use `skills__search`
+/// Max L1 index entries injected before the model is told to use `skills.search`
 /// instead of relying on the inline list.
 ///
 /// **The cut is id-alphabetical, and that bias is permanent.** Sorting the scan
@@ -145,7 +145,7 @@ const ENV_SKILLS_DISCLOSURE: &str = "RYU_SKILLS_DISCLOSURE";
 /// [`SkillRegistry::progressive_block`]), and a rotating/random cut makes the
 /// injected prefix differ between two identical turns — the same cache cost plus
 /// irreproducible behaviour. Nothing is *lost* by the cut either: the trailing
-/// "...and N more" line points at `skills__search`, which ranks over every enabled
+/// "...and N more" line points at `skills.search`, which ranks over every enabled
 /// skill regardless of index position, so the bias costs a skill its free mention,
 /// never its reachability.
 pub const SKILL_INDEX_CAP: usize = 20;
@@ -290,14 +290,14 @@ impl SkillRecord {
     /// keep agreeing: advertising a skill whose load returns nothing is the
     /// healthy-status-for-a-thing-that-is-not-there defect, and it is *louder* on the
     /// injected surfaces than on the searched ones, because the injected index tells
-    /// the model in so many words to call `skills__load` with the id.
+    /// the model in so many words to call `skills.load` with the id.
     ///
     /// | Surface | Where the rule is applied |
     /// |---|---|
     /// | progressive-disclosure L1 index | [`SkillRegistry::progressive_block`], via [`SkillRegistry::loadable_for`] |
     /// | always-on / full-body injection | [`SkillRegistry::progressive_block`] and [`SkillRegistry::skill_block`], via [`SkillRegistry::loadable_for`] |
-    /// | `skills__search` | `do_search` in `apps/core/src/sidecar/mcp/skills_tool.rs` |
-    /// | `skills__load` | `do_load` in the same module — the one surface that must still **see** the record, so it can refuse it by name rather than answering `ok:true` with an empty body |
+    /// | `skills.search` | `do_search` in `apps/core/src/sidecar/mcp/skills_tool.rs` |
+    /// | `skills.load` | `do_load` in the same module — the one surface that must still **see** the record, so it can refuse it by name rather than answering `ok:true` with an empty body |
     /// | merged tool catalog (`tool_search` list + resolve) | `apps/core/src/sidecar/mcp/catalog.rs` |
     /// | workflow `Skill` node | `compose_skill_prompt` in `apps/core/src/workflow/executor.rs` |
     ///
@@ -324,7 +324,7 @@ impl SkillRecord {
     /// record, and this crate owns both the type and producer (1). The block builders
     /// below cannot call into `apps/core`, so leaving it there would have forced a
     /// second spelling of the same rule — which is exactly the drift that let the
-    /// injected index keep advertising what `skills__load` had started refusing.
+    /// injected index keep advertising what `skills.load` had started refusing.
     /// `skills_tool::is_loadable` is now a delegate to this method.
     pub fn is_loadable(&self) -> bool {
         !self.instructions.trim().is_empty()
@@ -509,7 +509,7 @@ pub fn scan_all_skill_dirs() -> Vec<InstalledSkillPath> {
 /// already resolves *anywhere* does not add an id — it takes one over:
 /// [`scan_all_skill_dirs`] hands the winning entry to [`SkillRegistry::reload`], and
 /// from there `enabled`/`enabled_for`/`skill_block`/`progressive_block`, the
-/// `skills__search`/`skills__load` tools and the skills library all serve the new
+/// `skills.search`/`skills.load` tools and the skills library all serve the new
 /// bytes under the old id. The shadowed file survives on disk but is unreachable,
 /// which for every consumer equals an overwrite.
 ///
@@ -844,7 +844,7 @@ impl SkillRegistry {
 
     /// Resolve the **write/install target** directory: `RYU_SKILLS_DIR` if set,
     /// else `~/.claude/skills`. This is the single dir Ryu's installer and
-    /// `skills__author` write into (one canonical home for Ryu-authored skills).
+    /// `skills.author` write into (one canonical home for Ryu-authored skills).
     ///
     /// Detection is *broader* than this: [`scan_all_skill_dirs`] also reads the
     /// vendor-neutral `~/.agents/skills`, so a skill installed by Ryu is usable
@@ -925,6 +925,33 @@ impl SkillRegistry {
         }
     }
 
+    /// Register a body-bearing skill shipped by Core itself. Built-in skills use
+    /// the same live bag as plugin contributions so a disk reload cannot remove
+    /// them, while keeping their instructions available through the normal
+    /// progressive `skills.search` / `skills.load` path.
+    pub fn register_builtin_skill(
+        &self,
+        id: String,
+        name: String,
+        description: Option<String>,
+        instructions: String,
+    ) {
+        let record = SkillRecord {
+            id: id.clone(),
+            name,
+            description,
+            instructions,
+            allowed_tools: Vec::new(),
+            enabled: true,
+            always_on: false,
+        };
+        if let Ok(mut skills) = self.app_skills.write() {
+            skills.retain(|skill| skill.id != id);
+            skills.push(record);
+            skills.sort_by(|a, b| a.id.cmp(&b.id));
+        }
+    }
+
     /// Remove a plugin-registered skill by id. Called when a plugin is disabled so
     /// its skill stops being listable and injectable. Idempotent: removing an id
     /// that is not present is a no-op.
@@ -1000,7 +1027,7 @@ impl SkillRegistry {
     /// serve ([`SkillRecord::is_loadable`]) — the **injection scope**.
     ///
     /// Deliberately a separate step rather than a filter inside `enabled_for`:
-    /// `skills__load` resolves against `enabled_for` and *must still see* a body-less
+    /// `skills.load` resolves against `enabled_for` and *must still see* a body-less
     /// record, so it can refuse it by name ("registered by a plugin but its
     /// instructions are not installed on this node yet") instead of falling into the
     /// deliberately indistinguishable "no enabled skill with id" branch that exists to
@@ -1059,7 +1086,7 @@ impl SkillRegistry {
     /// hatch). `always_on` skills get their full body injected up front; every
     /// other enabled+allowed skill contributes one compact L1 index line
     /// (`- <id> — <name>: <description>`) and is loaded on demand via the
-    /// `skills__load` tool. Returns `(text, injected_ids)` where `injected_ids`
+    /// `skills.load` tool. Returns `(text, injected_ids)` where `injected_ids`
     /// are the `always_on` skills whose full bodies are actually in context (for
     /// `x-ryu-skill-ids` attribution); the indexed-only skills are not attributed
     /// until loaded.
@@ -1075,13 +1102,13 @@ impl SkillRegistry {
     /// every ACP turn. A query-dependent prefix changes on every message and busts
     /// the provider prompt cache each turn — paying full uncached input price on
     /// the largest, most repeated part of the request to reorder a list the model
-    /// can already search. Query-aware selection belongs in the `skills__search`
+    /// can already search. Query-aware selection belongs in the `skills.search`
     /// tool, which is per-call and caches nothing. What this function owes the
     /// caller instead is *determinism*: see [`scan_skill_dir_opts`].
     ///
     /// **Scoped by [`Self::loadable_for`], not `enabled_for`.** This is the loudest
     /// discovery surface there is: every id it lists arrives under a sentence telling
-    /// the model to call `skills__load` with that id "before acting". Listing a
+    /// the model to call `skills.load` with that id "before acting". Listing a
     /// body-less record here therefore *instructs* the model to make a call that
     /// `do_load` now refuses — a wasted round the model cannot avoid, on the one
     /// surface it cannot opt out of. (An `always_on` body-less record was worse still:
@@ -1108,7 +1135,7 @@ impl SkillRegistry {
             let mut lines = vec![
                 "## Available skills (load on demand)".to_owned(),
                 "These skills are available but not yet loaded. When one is relevant, \
-                 call the `skills__load` tool with its id to read its full instructions \
+                 call the `skills.load` tool with its id to read its full instructions \
                  before acting, then follow them."
                     .to_owned(),
             ];
@@ -1118,7 +1145,7 @@ impl SkillRegistry {
             }
             if on_demand.len() > SKILL_INDEX_CAP {
                 lines.push(format!(
-                    "...and {} more. Use the `skills__search` tool to find skills by task.",
+                    "...and {} more. Use the `skills.search` tool to find skills by task.",
                     on_demand.len() - SKILL_INDEX_CAP
                 ));
             }
@@ -1557,7 +1584,7 @@ Do something minimal.
             "{text}"
         );
         assert!(
-            text.contains("skills__load"),
+            text.contains("skills.load"),
             "must tell the model how to load"
         );
         // No always-on skills => nothing attributed as injected.
@@ -1636,7 +1663,7 @@ Do something minimal.
 
         let registry = registry_of(vec![hollow, real]);
 
-        // `enabled_for` is deliberately unfiltered: `skills__load` resolves against it
+        // `enabled_for` is deliberately unfiltered: `skills.load` resolves against it
         // so it can refuse a body-less id by name. Only the blocks narrow.
         assert_eq!(registry.enabled_for(&[]).len(), 2);
 
@@ -1667,7 +1694,7 @@ Do something minimal.
     ///
     /// It stays listable and `has_enabled()`-true on purpose: `GET /api/skills`
     /// (`api::list_skills` → [`Self::list_all`]) is the skills-library inventory and
-    /// must keep showing the plugin's contribution, and `skills__load` must still
+    /// must keep showing the plugin's contribution, and `skills.load` must still
     /// find it to explain why it cannot be loaded. Only the injected surfaces filter,
     /// so the user-visible inventory and the model-visible offer legitimately differ —
     /// which is why the assertions below pin *both* sides.
@@ -1863,7 +1890,7 @@ Do something minimal.
         assert_eq!(both, vec!["delta".to_owned(), "gamma".to_owned()]);
     }
 
-    /// The namespace predicate `skills__author` guards creates with.
+    /// The namespace predicate `skills.author` guards creates with.
     ///
     /// Root-explicit on purpose: the two standard roots are not individually
     /// env-overridable (`RYU_SKILLS_DIR` collapses the list to one root), and the only

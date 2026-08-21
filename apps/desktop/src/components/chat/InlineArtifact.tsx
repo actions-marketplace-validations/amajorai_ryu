@@ -1,7 +1,7 @@
 // apps/desktop/src/components/chat/InlineArtifact.tsx
 //
 // The desktop's injected Renderer for the blocks artifact host: a compact
-// artifact card that the agent's `artifact__render` / `artifact__create` tool
+// artifact card that the agent's `artifact.render` / `artifact.create` tool
 // renders INLINE in the chat. Shows a live preview (same ArtifactContentView as
 // the dock tab) and two affordances — "Open" (right dock artifact tab) and
 // "Open in tab" (a workspace window tab) — so a user can keep one artifact on
@@ -16,6 +16,10 @@ import {
 	useArtifactHost,
 } from "@ryu/blocks/desktop/agent-elements/artifact-host-context.tsx";
 import { Button } from "@ryu/ui/components/button";
+import {
+	ButtonGroup,
+	ButtonGroupSeparator,
+} from "@ryu/ui/components/button-group";
 import { useEffect, useMemo, useState } from "react";
 import {
 	ArtifactContentView,
@@ -76,17 +80,24 @@ export function InlineArtifact({
 					<ArtifactContentView artifact={artifact} />
 				)}
 			</div>
-			<div className="flex shrink-0 items-center justify-end gap-2 border-border/60 border-t bg-sidebar/50 px-3 py-1.5">
-				<Button
-					onClick={() => host?.openInPanel(payload, id)}
-					size="sm"
-					variant="ghost"
-				>
-					Open
-				</Button>
-				<Button onClick={() => host?.openInTab(payload, id)} size="sm">
-					Open in tab
-				</Button>
+			<div className="flex shrink-0 items-center justify-end border-border/60 border-t bg-sidebar/50 px-3 py-1.5">
+				<ButtonGroup aria-label="Artifact actions">
+					<Button
+						onClick={() => host?.openInPanel(payload, id)}
+						size="sm"
+						variant="ghost"
+					>
+						Open
+					</Button>
+					<ButtonGroupSeparator />
+					<Button
+						onClick={() => host?.openInTab(payload, id)}
+						size="sm"
+						variant="ghost"
+					>
+						Open in tab
+					</Button>
+				</ButtonGroup>
 			</div>
 		</div>
 	);

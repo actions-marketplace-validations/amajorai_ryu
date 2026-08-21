@@ -3,8 +3,9 @@
 import { Input } from "@ryu/ui/components/input";
 import { cn } from "@ryu/ui/lib/utils";
 import { Search } from "lucide-react";
+import type { Route } from "next";
 import Image from "next/image";
-import Link from "next/link";
+import Link, { useLinkStatus } from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { SeededGrainientBanner } from "./seeded-grainient-banner.tsx";
 
@@ -42,6 +43,21 @@ const AVATAR_SIZES = {
 	large: { width: 96, height: 96, className: "h-24 w-24" },
 } as const;
 
+function LinkPendingIndicator({ className }: { className: string }) {
+	const { pending } = useLinkStatus();
+
+	return (
+		<span
+			aria-hidden="true"
+			className={cn(
+				"pointer-events-none absolute size-2 rounded-full bg-primary opacity-0 transition-opacity",
+				pending && "animate-pulse opacity-100",
+				className
+			)}
+		/>
+	);
+}
+
 /** Inline author avatars + names, presentational. */
 export function BlogAuthor({
 	authors,
@@ -63,9 +79,10 @@ export function BlogAuthor({
 			{authors.map((author, index) => (
 				<span className="flex items-center gap-2" key={author.slug}>
 					<Link
-						className="flex items-center gap-2 transition-colors hover:text-foreground"
+						className="relative flex items-center gap-2 transition-colors hover:text-foreground"
 						href={`/blog/author/${author.slug}`}
 					>
+						<LinkPendingIndicator className="-top-0.5 -right-1" />
 						{author.avatar && (
 							<Image
 								alt={author.name}
@@ -99,7 +116,7 @@ export const BLOG_TAGS = [
 	{ label: "Research", value: "Research" },
 ];
 
-/** Tag filter chips, presentational (plain links). */
+/** Tag filter chips, presentational client links. */
 export function BlogTags({
 	activeTag,
 	authorFilter,
@@ -118,18 +135,19 @@ export function BlogTags({
 					: baseUrl;
 
 				return (
-					<a
+					<Link
 						className={cn(
-							"rounded-full border px-4 py-2 font-medium text-sm transition-colors",
+							"relative rounded-full border px-4 py-2 font-medium text-sm transition-colors",
 							isActive
 								? "border-transparent bg-black text-white hover:bg-black/80 dark:bg-white dark:text-black dark:hover:bg-white/80"
 								: "text-foreground/60 hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10"
 						)}
-						href={url}
+						href={url as Route}
 						key={tag.label}
 					>
+						<LinkPendingIndicator className="-top-0.5 -right-0.5" />
 						{tag.label}
-					</a>
+					</Link>
 				);
 			})}
 		</div>
@@ -181,7 +199,8 @@ export function BlogPostCard({ post }: { post: BlogPostData }) {
 	return (
 		<div className="group transition-all duration-200">
 			<div className="flex flex-col gap-1 pb-3">
-				<a className="block" href={`/blog/${post.slug}`}>
+				<Link className="relative block" href={`/blog/${post.slug}`}>
+					<LinkPendingIndicator className="top-3 right-3" />
 					<div className="mb-4 aspect-video w-full overflow-hidden rounded-md">
 						{post.banner ? (
 							<Image
@@ -201,7 +220,7 @@ export function BlogPostCard({ post }: { post: BlogPostData }) {
 							{post.title}
 						</h2>
 					</div>
-				</a>
+				</Link>
 				<div className="mb-2 flex items-center gap-2 text-muted-foreground text-sm">
 					<BlogAuthor authors={post.authors} avatarSize="small" />
 					{post.authors && post.authors.length > 0 && <span>&bull;</span>}

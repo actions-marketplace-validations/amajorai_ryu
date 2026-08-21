@@ -38,7 +38,10 @@ async function section<T>(
  * Build the full diagnostics text for the active node. Every probe fails soft, so
  * this resolves even when Core is down (each section reports "unavailable").
  */
-export async function collectDiagnostics(target: ApiTarget): Promise<string> {
+export async function collectDiagnostics(
+	target: ApiTarget,
+	options: { includeConsole?: boolean } = {}
+): Promise<string> {
 	const desktopVersion = await getVersion().catch(() => "unknown");
 	const sections = await Promise.all([
 		Promise.resolve(
@@ -59,7 +62,10 @@ export async function collectDiagnostics(target: ApiTarget): Promise<string> {
 				.join("\n");
 		}),
 	]);
-	const consoleText = getConsoleBufferText();
+	// Console capture can contain user prompts, tool results, and provider output.
+	// It remains available for explicit local copy, but issue reports must not send
+	// it to the crash sink as part of an otherwise consented diagnostics bundle.
+	const consoleText = options.includeConsole === false ? "" : getConsoleBufferText();
 	// Timings only exist when the same gate that fills the console buffer is on,
 	// so an empty string here means "not recording", not "everything was fast".
 	// Omit the section rather than print a table of zeroes that reads as a result.
@@ -69,7 +75,9 @@ export async function collectDiagnostics(target: ApiTarget): Promise<string> {
 		`node ${target.url}`,
 		...sections,
 		...(metricsText ? [`## Performance\n${metricsText}`] : []),
-		`## Recent console\n${consoleText || "(empty — console capture is DEV-only)"}`,
+		...(options.includeConsole === false
+			? []
+			: [`## Recent console\n${consoleText || "(empty — console capture is DEV-only)"}`]),
 	].join("\n\n");
 }
 
@@ -88,7 +96,7 @@ export async function copyDiagnostics(target: ApiTarget): Promise<string> {
  * DSN/key is configured.
  */
 export async function reportIssue(target: ApiTarget): Promise<void> {
-	const text = await collectDiagnostics(target);
+	const text = await collectDiagnostics(target, { includeConsole: false });
 	reportError(new Error(`[preflight-report]\n${text}`));
 	track({ event: "error_shown", code: "preflight_report" });
 }

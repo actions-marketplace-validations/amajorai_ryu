@@ -1,11 +1,11 @@
-//! Classifier-driven ("smart") model routing.
+//! Model routing for Gateway Plane A.
 //!
-//! When [`crate::config::SmartRoutingConfig`] is active, a cheap "router" model
-//! reads the user's latest message and picks the best-matching natural-language
-//! rule. The request's model is then rewritten to that rule's target model and
-//! handed to the ordinary [`crate::router::ModelRouter`], which resolves the
-//! target's provider exactly as a hand-picked model would be. Nothing about
-//! providers is decided here — only *which model* the request should use.
+//! When [`crate::config::SmartRoutingConfig`] is active, the configured algorithm
+//! keeps the requested model, selects a weighted target, reads recent signals,
+//! or asks a judge for a weak/strong tier. Any selected model is then rewritten
+//! into the request and handed to the ordinary [`crate::router::ModelRouter`],
+//! which resolves its provider exactly as a hand-picked model would. Nothing
+//! about providers is decided here — only *which model* the request should use.
 //!
 //! Everything fails open: an inactive config, an unparseable reply, a classifier
 //! error, or a timeout all leave the originally requested model untouched, so a
@@ -13,7 +13,8 @@
 //! `Provider::complete` directly (never the pipeline), so it cannot recurse back
 //! into smart routing.
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use reqwest::Client;
@@ -22,12 +23,14 @@ use tokio::sync::OnceCell;
 use tracing::{debug, warn};
 
 use ryu_gw_router::{
-    build_prompt, keyword_match, last_user_message, parse_choice, truncate,
-    MAX_CLASSIFIER_INPUT_CHARS,
+    build_prompt, keyword_match, last_user_message, parse_choice, stage_target, truncate,
+    weighted_index, StageTarget, MAX_CLASSIFIER_INPUT_CHARS,
 };
 
 use crate::{
-    config::{OpenAiProviderConfig, RouteStrategy, SmartRoutingConfig},
+    config::{
+        ModelRouterType, OpenAiProviderConfig, RouteStrategy, SmartRoutingConfig, StagePicker,
+    },
     providers::ProviderRegistry,
     router::RouterBackend,
     semantic_cache::{cosine_similarity, embed_text},
@@ -36,6 +39,19 @@ use crate::{
 /// Fallback embedding model for the `Embedding` strategy when the config leaves
 /// `embedding_model` empty (matches the semantic cache's default local sidecar).
 const DEFAULT_EMBED_MODEL: &str = "nomic-embed-text-v1.5";
+
+fn process_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0x9e37_79b9_7f4a_7c15)
+}
+
+fn mix_u64(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
 
 /// Holds the smart-routing config snapshot plus a per-session decision cache.
 ///
@@ -55,15 +71,27 @@ pub struct SmartRouter {
     /// probed once on the first `Llm`-strategy request. See
     /// [`SmartRouter::classifier_discriminates`].
     classifier_sane: OnceCell<bool>,
+    /// Process-local pseudo-random state for the `random` router. A configured
+    /// seed makes the sequence reproducible for the same request order; it is
+    /// deliberately not a session-affinity mechanism.
+    random_seed: u64,
+    random_counter: AtomicU64,
+    /// Consecutive escalation verdicts by session. A missing session id cannot
+    /// accumulate a streak, which keeps escalation fail-open on one-shot calls.
+    escalation_streaks: DashMap<String, u32>,
 }
 
 impl SmartRouter {
     pub fn new(config: SmartRoutingConfig) -> Self {
+        let random_seed = config.random_seed.unwrap_or_else(process_seed);
         Self {
             config,
             decisions: DashMap::new(),
             rule_embeddings: OnceCell::new(),
             classifier_sane: OnceCell::new(),
+            random_seed,
+            random_counter: AtomicU64::new(0),
+            escalation_streaks: DashMap::new(),
         }
     }
 
@@ -90,8 +118,11 @@ impl SmartRouter {
             return None;
         }
 
-        // 1. Per-session cache: classify once per conversation, reuse afterwards.
-        if self.config.cache_by_session {
+        // 1. The classifier is sticky when requested. Random and stage routers are
+        // intentionally per-request; escalation has its own streak/latch state.
+        if self.config.router_type == ModelRouterType::LlmClassifier
+            && self.config.cache_by_session
+        {
             if let Some(sid) = session_id {
                 if let Some(hit) = self.decisions.get(sid) {
                     debug!(session = sid, model = %*hit, "smart routing: session cache hit");
@@ -100,17 +131,28 @@ impl SmartRouter {
             }
         }
 
-        // 2. Dispatch to the configured strategy. Each fails open (→ None).
-        let chosen = match self.config.strategy {
-            RouteStrategy::Llm => self.classify_llm(messages, providers, router).await,
-            RouteStrategy::Embedding => {
-                self.classify_embedding(messages, http, embed_provider)
+        // 2. Dispatch to the configured router. Each path fails open (→ None).
+        let chosen = match self.config.router_type {
+            ModelRouterType::Passthrough => None,
+            ModelRouterType::LlmClassifier => match self.config.strategy {
+                RouteStrategy::Llm => self.classify_llm(messages, providers, router).await,
+                RouteStrategy::Embedding => {
+                    self.classify_embedding(messages, http, embed_provider)
+                        .await
+                }
+                RouteStrategy::Keyword => self.classify_keyword(messages),
+            },
+            ModelRouterType::Random => self.classify_random(),
+            ModelRouterType::StageRouter => self.classify_stage(messages),
+            ModelRouterType::Escalation => {
+                self.classify_escalation(messages, session_id, providers, router)
                     .await
             }
-            RouteStrategy::Keyword => self.classify_keyword(messages),
         }?;
 
-        if self.config.cache_by_session {
+        if self.config.router_type == ModelRouterType::LlmClassifier
+            && self.config.cache_by_session
+        {
             if let Some(sid) = session_id {
                 self.decisions.insert(sid.to_string(), chosen.clone());
             }
@@ -142,6 +184,175 @@ impl SmartRouter {
                 fallback
             }
         }
+    }
+
+    fn next_random_ticket(&self) -> u64 {
+        let sequence = self.random_counter.fetch_add(1, Ordering::Relaxed);
+        mix_u64(self.random_seed.wrapping_add(sequence))
+    }
+
+    /// Weighted random routing. Rules are the target list; descriptions are
+    /// intentionally ignored. Selection is independent for each request and a
+    /// seed reproduces the sequence for the same request order.
+    fn classify_random(&self) -> Option<String> {
+        let weights: Vec<f32> = self
+            .config
+            .rules
+            .iter()
+            .map(|rule| {
+                if rule.model.trim().is_empty() {
+                    0.0
+                } else {
+                    rule.weight
+                }
+            })
+            .collect();
+        let index = weighted_index(&weights, self.next_random_ticket())?;
+        let model = self.config.rules[index].model.trim();
+        if model.is_empty() {
+            None
+        } else {
+            debug!(rule = index, model, "smart routing: random target selected");
+            Some(model.to_owned())
+        }
+    }
+
+    /// Signal-driven stage routing. The pure scorer reads recent tool/result
+    /// history and chooses the configured capable/efficient tier; no extra model
+    /// call is made for this Ryu adaptation.
+    fn classify_stage(&self, messages: &Value) -> Option<String> {
+        let target = stage_target(
+            messages,
+            self.config.stage_recent_message_window,
+            self.config.stage_confidence_threshold,
+            matches!(self.config.stage_picker, StagePicker::CapableFirst),
+        );
+        let model = match target {
+            StageTarget::Capable => self.config.stage_capable_model.trim(),
+            StageTarget::Efficient => self.config.stage_efficient_model.trim(),
+        };
+        if model.is_empty() {
+            return None;
+        }
+        debug!(?target, model, "smart routing: stage target selected");
+        Some(model.to_owned())
+    }
+
+    /// Trajectory-aware escalation preflight.
+    ///
+    /// Ryu's current pipeline chooses the model before it calls the provider, so
+    /// this route asks the judge to assess the accumulated transcript before the
+    /// weak call rather than buffering a completed weak response and replaying it
+    /// through a strong model. The session streak/latch and fail-open behavior are
+    /// retained; the deliberate boundary is documented in Fumadocs.
+    async fn classify_escalation(
+        &self,
+        messages: &Value,
+        session_id: Option<&str>,
+        providers: &ProviderRegistry,
+        router: &dyn RouterBackend,
+    ) -> Option<String> {
+        let weak = self.config.escalation_weak_model.trim();
+        let strong = self.config.escalation_strong_model.trim();
+        let judge = self.config.escalation_judge_model.trim();
+        if weak.is_empty() || strong.is_empty() || judge.is_empty() {
+            return None;
+        }
+
+        let confirmations = self.config.escalation_confirmations.max(1);
+        let sid = session_id.map(str::trim).filter(|value| !value.is_empty());
+        if let Some(sid) = sid {
+            if self
+                .escalation_streaks
+                .get(sid)
+                .is_some_and(|streak| *streak >= confirmations)
+            {
+                debug!(session = sid, model = strong, "smart routing: escalation latched");
+                return Some(strong.to_owned());
+            }
+        }
+
+        let decision = router.route(judge);
+        let Some(provider) = providers.get(decision.provider.as_str()) else {
+            warn!(
+                provider = decision.provider.as_str(),
+                model = %decision.model,
+                "smart routing: escalation judge provider unavailable; using weak target"
+            );
+            return Some(weak.to_owned());
+        };
+
+        let prompt = self.escalation_prompt(messages);
+        let body = json!({
+            "model": decision.model,
+            "messages": [{ "role": "user", "content": prompt }],
+            "temperature": 0,
+            "max_tokens": 4,
+            "stream": false,
+        });
+        let response = match tokio::time::timeout(
+            Duration::from_millis(self.config.timeout_ms),
+            provider.complete(&decision.model, &body),
+        )
+        .await
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                warn!(error = %error, "smart routing: escalation judge failed; using weak target");
+                return Some(weak.to_owned());
+            }
+            Err(_) => {
+                warn!(
+                    timeout_ms = self.config.timeout_ms,
+                    "smart routing: escalation judge timed out; using weak target"
+                );
+                return Some(weak.to_owned());
+            }
+        };
+
+        let verdict = response["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let escalate = verdict.starts_with("escalate");
+        if !escalate {
+            if let Some(sid) = sid {
+                self.escalation_streaks.remove(sid);
+            }
+            return Some(weak.to_owned());
+        }
+
+        let streak = if let Some(sid) = sid {
+            let mut entry = self.escalation_streaks.entry(sid.to_owned()).or_insert(0);
+            *entry = entry.saturating_add(1);
+            *entry
+        } else {
+            1
+        };
+        if streak >= confirmations && (sid.is_some() || confirmations == 1) {
+            debug!(?streak, model = strong, "smart routing: escalation confirmed");
+            Some(strong.to_owned())
+        } else {
+            Some(weak.to_owned())
+        }
+    }
+
+    fn escalation_prompt(&self, messages: &Value) -> String {
+        let mut prompt = String::from(
+            "You are a trajectory judge. Decide whether the current agent run is stuck, failing, or needs a stronger model. Reply with exactly ESCALATE or DECLINE.\n\nRecent transcript:\n",
+        );
+        if let Some(history) = messages.as_array() {
+            let start = history.len().saturating_sub(self.config.escalation_recent_message_window);
+            for message in &history[start..] {
+                if let Ok(serialized) = serde_json::to_string(message) {
+                    prompt.push_str(truncate(&serialized, self.config.escalation_message_chars));
+                    prompt.push('\n');
+                }
+            }
+        }
+        prompt.push_str("\nVerdict:");
+        prompt
     }
 
     /// `Embedding` (RAG) strategy: embed the query and each rule description, then
@@ -440,10 +651,12 @@ mod tests {
             SmartRule {
                 description: "coding".into(),
                 model: "claude-sonnet-4-5".into(),
+                weight: 1.0,
             },
             SmartRule {
                 description: "chit-chat".into(),
                 model: "gemma-local".into(),
+                weight: 1.0,
             },
         ]
     }
@@ -510,18 +723,101 @@ mod tests {
         });
         assert!(!sr.is_active());
     }
+
+    #[test]
+    fn random_router_is_weighted_and_seeded_sequences_replay() {
+        use crate::config::ModelRouterType;
+
+        let config = SmartRoutingConfig {
+            enabled: true,
+            router_type: ModelRouterType::Random,
+            random_seed: Some(42),
+            rules: vec![
+                SmartRule {
+                    description: "strong".into(),
+                    model: "strong-model".into(),
+                    weight: 1.0,
+                },
+                SmartRule {
+                    description: "weak".into(),
+                    model: "weak-model".into(),
+                    weight: 3.0,
+                },
+            ],
+            ..Default::default()
+        };
+        let first = SmartRouter::new(config.clone());
+        let second = SmartRouter::new(config);
+        assert!(first.is_active());
+
+        let first_sequence: Vec<_> = (0..256).map(|_| first.classify_random()).collect();
+        let second_sequence: Vec<_> = (0..256).map(|_| second.classify_random()).collect();
+        assert_eq!(first_sequence, second_sequence);
+        assert!(first_sequence.iter().any(|model| model == &Some("strong-model".into())));
+        assert!(first_sequence.iter().any(|model| model == &Some("weak-model".into())));
+    }
+
+    #[test]
+    fn stage_router_uses_recent_error_and_progress_signals() {
+        use crate::config::{ModelRouterType, StagePicker};
+
+        let router = SmartRouter::new(SmartRoutingConfig {
+            enabled: true,
+            router_type: ModelRouterType::StageRouter,
+            stage_capable_model: "capable-model".into(),
+            stage_efficient_model: "efficient-model".into(),
+            stage_picker: StagePicker::EfficientFirst,
+            ..Default::default()
+        });
+        assert_eq!(
+            router.classify_stage(&serde_json::json!([
+                {"role": "tool", "content": "command failed with error"}
+            ])),
+            Some("capable-model".into())
+        );
+        assert_eq!(
+            router.classify_stage(&serde_json::json!([
+                {"role": "assistant", "content": "applied patch; tests passed"}
+            ])),
+            Some("efficient-model".into())
+        );
+    }
+
+    #[test]
+    fn escalation_prompt_honors_message_window_and_character_cap() {
+        use crate::config::ModelRouterType;
+
+        let router = SmartRouter::new(SmartRoutingConfig {
+            enabled: true,
+            router_type: ModelRouterType::Escalation,
+            escalation_weak_model: "weak-model".into(),
+            escalation_strong_model: "strong-model".into(),
+            escalation_judge_model: "judge-model".into(),
+            escalation_recent_message_window: 1,
+            escalation_message_chars: 48,
+            ..Default::default()
+        });
+        let prompt = router.escalation_prompt(&serde_json::json!([
+            {"role": "user", "content": "old context"},
+            {"role": "tool", "content": "recent failure that must be cut, followed by a long tail that cannot fit"}
+        ]));
+        assert!(!prompt.contains("old context"));
+        assert!(prompt.contains("recent failure"));
+        assert!(!prompt.contains("long tail that cannot fit"));
+        assert!(prompt.ends_with("\nVerdict:"));
+    }
 }
 
 // ─── Swappable smart-routing backend (W6c decomposition) ─────────────────────
 
-/// Classifier-driven model routing (the "smart routing" sub-plane of Plane A) as
-/// a swappable capability. The built-in [`SmartRouter`] (LLM/embedding classifier
-/// + per-session cache) is the default; an alternative can register without
-/// touching the pipeline, mirroring the [`crate::budget::BudgetRegistry`]
-/// inversion. Async because [`SmartRouter::resolve`] runs the classifier over the
-/// network, so it follows the [`crate::providers`] async-trait shape and the
-/// registry hands out an `Arc` (held across the `.await`) rather than a borrowing
-/// closure.
+/// Model routing (the "smart routing" sub-plane of Plane A) as a swappable
+/// capability. The built-in [`SmartRouter`] (classifier, weighted random, stage,
+/// and escalation algorithms) is the default; an alternative can register
+/// without touching the pipeline, mirroring the [`crate::budget::BudgetRegistry`]
+/// inversion. Async because [`SmartRouter::resolve`] may run a classifier or
+/// judge over the network, so it follows the [`crate::providers`] async-trait
+/// shape and the registry hands out an `Arc` (held across the `.await`) rather
+/// than a borrowing closure.
 #[async_trait::async_trait]
 pub trait SmartRouterBackend: Send + Sync {
     /// Whether smart routing should run for this gateway at all.
@@ -738,6 +1034,7 @@ mod smart_router_registry_tests {
             rules: vec![SmartRule {
                 description: "writing code".to_string(),
                 model: "claude-sonnet-4-5".to_string(),
+                weight: 1.0,
             }],
             ..Default::default()
         };

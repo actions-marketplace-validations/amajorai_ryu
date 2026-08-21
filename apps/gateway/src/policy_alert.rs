@@ -40,7 +40,8 @@ pub struct PolicyAlert {
     /// The subject id within `scope` (user id, agent id, session id, org id), or
     /// empty when there is none.
     pub subject_key: String,
-    /// Tokens/units used when the rule matched (0 for firewall / wallet-empty).
+    /// Charged micro-USD used when the rule matched (0 for firewall /
+    /// wallet-empty).
     pub used: u64,
     /// The configured limit that was reached (0 when not applicable).
     pub limit: u64,
@@ -86,7 +87,7 @@ impl PolicyAlert {
         }
     }
 
-    /// A per-user / per-agent token-budget alert.
+    /// A per-user / per-agent charged-cost budget alert.
     pub fn budget(
         scope: &str,
         subject_key: &str,
@@ -108,7 +109,7 @@ impl PolicyAlert {
         )
     }
 
-    /// A per-session running-cap alert.
+    /// A per-session running-cost-cap alert.
     pub fn session(
         subject_key: &str,
         enforcement: &str,

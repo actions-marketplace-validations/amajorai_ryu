@@ -59,9 +59,9 @@ pub trait ToolEmbedder: Send + Sync {
 /// Every other variant names a *function the model may invoke*. [`ToolKind::Skill`]
 /// names **instruction text the model may load** — an Agent Skill discovered through
 /// the same catalog so a model faces one search door instead of two, but reached with
-/// `skills__load` rather than by calling its id. The kind is the model's (and the
+/// `skills.load` rather than by calling its id. The kind is the model's (and the
 /// gateway's) signal for that distinction: Core's `McpRegistry::describe` points a
-/// skill row at `skills__load`, the gateway declines to inject skill rows as function
+/// skill row at `skills.load`, the gateway declines to inject skill rows as function
 /// definitions, and Core's `skills` provider refuses a call that names a skill id as
 /// a tool. Discovery is unified; execution is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,9 +80,9 @@ pub enum ToolKind {
     /// the governed tool-exec path. Surfaced as its own kind so `?kind=command`
     /// selects these; the other app backends (http/inline_deno/alias) stay `App`.
     Command,
-    /// An Agent Skill: instruction text loaded with `skills__load`, **not** a
-    /// callable function. Ids are namespaced `skills__<slug>` so a skill row lives
-    /// in the same id space as the `skills__*` tools that serve it — which is what
+    /// An Agent Skill: instruction text loaded with `skills.load`, **not** a
+    /// callable function. Ids are namespaced `skills.<slug>` so a skill row lives
+    /// in the same id space as the `skills.*` tools that serve it — which is what
     /// makes the allowlist arm below, and Core's refusal path, work without a
     /// bespoke lookup.
     Skill,
@@ -170,7 +170,7 @@ impl ToolKind {
 /// A ranked tool descriptor (Contract 1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDescriptor {
-    /// `<server>__<tool>` | `composio__<slug>`.
+    /// `<server>.<tool>` | `composio.<slug>`.
     pub id: String,
     pub name: String,
     /// Never null — `""` when absent.
@@ -205,23 +205,23 @@ impl ToolDescriptor {
     ///
     /// ## [`ToolKind::Skill`]: id or server segment, never the bare name
     ///
-    /// A skill row's id is `skills__<slug>`, so its server segment is the `skills`
-    /// provider — the grant that lets an agent call `skills__load` at all. Matching
+    /// A skill row's id is `skills.<slug>`, so its server segment is the `skills`
+    /// provider — the grant that lets an agent call `skills.load` at all. Matching
     /// on id-or-server therefore mirrors the execution gate's *tool-allowlist half*
     /// exactly: an agent with no grant on the `skills` server cannot load any skill,
     /// so surfacing skill rows to it would advertise nothing reachable.
     ///
     /// The bare `name` is deliberately excluded. A skill's `name` is human prose
     /// ("Resolve merge conflicts"), and the default arm's `e == name` would let an
-    /// allowlist entry written for a tool (`search`, meant for `exa__search`) match
+    /// allowlist entry written for a tool (`search`, meant for `exa.search`) match
     /// a skill that happens to be *called* "search" — the same cross-plane
     /// bare-name match the gateway's `is_allowed` doc records as security fix #1.
     ///
     /// **What this does NOT check** is the agent's per-agent *skill* allowlist
     /// (`AgentRecord.skills`), which is a different list this crate never sees; it
-    /// is what `skills__search` / `skills__load` scope on. So under a tool
+    /// is what `skills.search` / `skills.load` scope on. So under a tool
     /// allowlist that grants `skills`, this returns `true` for every enabled skill,
-    /// including ones outside that agent's skill allowlist — which `skills__load`
+    /// including ones outside that agent's skill allowlist — which `skills.load`
     /// will still refuse. See `McpRegistry::search_scoped` for where the skill
     /// allowlist *is* applied and which plane still misses it.
     ///
@@ -235,7 +235,7 @@ impl ToolDescriptor {
     /// somebody else's OpenAPI `operationId`, so ordinary words (`search`,
     /// `send`, `get_api_users`) fall out of a document nobody on this node
     /// reviewed. An allowlist entry a user wrote for an entirely different plane
-    /// (`search`, meant for `exa__search`) would then admit a derived endpoint —
+    /// (`search`, meant for `exa.search`) would then admit a derived endpoint —
     /// the cross-plane bare-name match recorded above as security fix #1, over a
     /// much larger name space.
     ///
@@ -253,7 +253,7 @@ impl ToolDescriptor {
         }
         let (server, name) = self
             .id
-            .split_once("__")
+            .split_once('.')
             .map_or((self.id.as_str(), self.name.as_str()), |(s, t)| (s, t));
         if self.kind == ToolKind::Skill {
             return allowlist.iter().any(|e| e == &self.id || e == server);
@@ -549,11 +549,11 @@ pub async fn run_search(
     ranker.rank(query, candidates, limit, embedder).await
 }
 
-/// Describe a `composio__<slug>` id shallowly: a single freeform `arguments`
+/// Describe a `composio.<slug>` id shallowly: a single freeform `arguments`
 /// object row (the action's full schema is not listed). The pure body of the
 /// Composio branch of Core's `McpRegistry::describe`.
 pub fn describe_composio(id: &str) -> DescribedTool {
-    let slug = id.strip_prefix("composio__").unwrap_or(id);
+    let slug = id.strip_prefix("composio.").unwrap_or(id);
     DescribedTool {
         id: id.to_string(),
         name: slug.to_string(),
@@ -705,12 +705,12 @@ mod tests {
     #[test]
     fn ext_api_allowlist_matches_by_id_only() {
         let d = desc(
-            "ryu_ext__crm_get_api_users",
+            "ryu_ext.crm_get_api_users",
             "get_api_users",
             "list users",
             ToolKind::ExtApi,
         );
-        assert!(d.matches_allowlist(&["ryu_ext__crm_get_api_users".to_string()]));
+        assert!(d.matches_allowlist(&["ryu_ext.crm_get_api_users".to_string()]));
         // The bare name comes out of an OpenAPI document nobody reviewed; an
         // allowlist entry written for another plane must not admit it.
         assert!(!d.matches_allowlist(&["get_api_users".to_string()]));
@@ -720,7 +720,7 @@ mod tests {
         assert!(!d.matches_allowlist(&[]));
         // The other planes are unchanged: the same bare name on a real MCP tool
         // still matches — only the derived row refuses it.
-        let m = desc("exa__get_api_users", "get_api_users", "", ToolKind::Mcp);
+        let m = desc("exa.get_api_users", "get_api_users", "", ToolKind::Mcp);
         assert!(m.matches_allowlist(&["get_api_users".to_string()]));
     }
 
@@ -737,45 +737,45 @@ mod tests {
         assert_eq!(ToolKind::parse_filter("command"), Some(ToolKind::Command));
         assert_eq!(ToolKind::parse_filter("COMMAND"), Some(ToolKind::Command));
         // `skill` is canonical; `skills` (the provider's name) is accepted as an
-        // alias because that is what a model that just read `skills__search` will
+        // alias because that is what a model that just read `skills.search` will
         // reach for.
         assert_eq!(ToolKind::parse_filter("skill"), Some(ToolKind::Skill));
         assert_eq!(ToolKind::parse_filter("Skills"), Some(ToolKind::Skill));
     }
 
     /// A skill row is reachable via its id or the `skills` server segment (the grant
-    /// that lets an agent call `skills__load` at all), and **never** via its bare
+    /// that lets an agent call `skills.load` at all), and **never** via its bare
     /// human-readable name — which would let a tool-shaped allowlist entry match a
     /// skill across planes.
     #[test]
     fn skill_rows_match_on_id_or_server_but_never_on_name() {
         let s = desc(
-            "skills__merge-conflicts",
+            "skills.merge-conflicts",
             "search",
             "resolve conflicts",
             ToolKind::Skill,
         );
-        assert!(s.matches_allowlist(&["skills__merge-conflicts".to_string()]));
+        assert!(s.matches_allowlist(&["skills.merge-conflicts".to_string()]));
         assert!(s.matches_allowlist(&["skills".to_string()]));
-        // The name is "search" — an allowlist entry meant for `exa__search` must
+        // The name is "search" — an allowlist entry meant for `exa.search` must
         // not reach this skill.
         assert!(!s.matches_allowlist(&["search".to_string()]));
         assert!(!s.matches_allowlist(&["merge-conflicts".to_string()]));
         assert!(!s.matches_allowlist(&[]));
         // The non-skill arm is unchanged: a bare name still matches a real tool.
-        let t = desc("exa__search", "search", "web search", ToolKind::Mcp);
+        let t = desc("exa.search", "search", "web search", ToolKind::Mcp);
         assert!(t.matches_allowlist(&["search".to_string()]));
     }
 
     /// `kind=skill` selects only skill rows out of a mixed candidate set — the
-    /// property that makes `skills__search` a filtered view of the one catalog
+    /// property that makes `skills.search` a filtered view of the one catalog
     /// rather than a second registry.
     #[tokio::test]
     async fn run_search_kind_skill_selects_only_skill_rows() {
         let candidates = vec![
-            desc("exa__search", "search", "search the web", ToolKind::Mcp),
+            desc("exa.search", "search", "search the web", ToolKind::Mcp),
             desc(
-                "skills__web-research",
+                "skills.web-research",
                 "Web research",
                 "search the web methodically",
                 ToolKind::Skill,
@@ -792,33 +792,33 @@ mod tests {
         )
         .await;
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].id, "skills__web-research");
+        assert_eq!(out[0].id, "skills.web-research");
     }
 
     #[test]
     fn matches_allowlist_matches_id_name_or_server() {
-        let d = desc("spider__crawl", "crawl", "crawl a site", ToolKind::Mcp);
-        assert!(d.matches_allowlist(&["spider__crawl".to_string()])); // id
+        let d = desc("spider.crawl", "crawl", "crawl a site", ToolKind::Mcp);
+        assert!(d.matches_allowlist(&["spider.crawl".to_string()])); // id
         assert!(d.matches_allowlist(&["crawl".to_string()])); // bare name
         assert!(d.matches_allowlist(&["spider".to_string()])); // server segment
         assert!(!d.matches_allowlist(&["other".to_string()]));
         // Composio is id-only (no name/server grant form).
-        let c = desc("composio__slack", "Slack", "", ToolKind::Composio);
-        assert!(c.matches_allowlist(&["composio__slack".to_string()]));
+        let c = desc("composio.slack", "Slack", "", ToolKind::Composio);
+        assert!(c.matches_allowlist(&["composio.slack".to_string()]));
         assert!(!c.matches_allowlist(&["Slack".to_string()]));
     }
 
     #[tokio::test]
     async fn bm25_ranks_exact_match_first() {
         let items = vec![
-            desc("foo__search", "search", "search the web", ToolKind::Mcp),
+            desc("foo.search", "search", "search the web", ToolKind::Mcp),
             desc(
-                "foo__send",
+                "foo.send",
                 "send_message",
                 "send a search-related message",
                 ToolKind::Mcp,
             ),
-            desc("foo__noise", "noise", "totally unrelated", ToolKind::Mcp),
+            desc("foo.noise", "noise", "totally unrelated", ToolKind::Mcp),
         ];
         let ranked = ToolRanker::Bm25.rank("search", items, 8, None).await;
         assert_eq!(ranked[0].name, "search", "exact name match ranks first");
@@ -838,8 +838,8 @@ mod tests {
         // BM25 path produces a deterministic exact-match-first ordering. (The
         // Semantic path needs a reachable embedder, which is not asserted here.)
         let items = vec![
-            desc("foo__search", "search", "find things", ToolKind::Mcp),
-            desc("foo__x", "x", "nothing", ToolKind::Mcp),
+            desc("foo.search", "search", "find things", ToolKind::Mcp),
+            desc("foo.x", "x", "nothing", ToolKind::Mcp),
         ];
         let ranked = ToolRanker::Bm25.rank("search", items, 8, None).await;
         assert_eq!(ranked[0].name, "search");
@@ -869,7 +869,7 @@ mod tests {
 
     #[test]
     fn describe_composio_id_is_shallow() {
-        let d = describe_composio("composio__GITHUB_CREATE_ISSUE");
+        let d = describe_composio("composio.GITHUB_CREATE_ISSUE");
         assert!(d.shallow);
         assert_eq!(d.kind, ToolKind::Composio);
         assert_eq!(d.name, "GITHUB_CREATE_ISSUE");
@@ -886,7 +886,7 @@ mod tests {
             "required": ["url"]
         });
         let d = describe_from_parts(
-            "spider__crawl",
+            "spider.crawl",
             "crawl",
             "",
             ToolKind::Builtin,
@@ -897,7 +897,7 @@ mod tests {
         assert_eq!(d.args.len(), 1);
         assert_eq!(d.parameters.as_ref(), Some(&schema));
         // No schema → shallow, no args.
-        let bare = describe_from_parts("foo__bar", "bar", "", ToolKind::Mcp, None);
+        let bare = describe_from_parts("foo.bar", "bar", "", ToolKind::Mcp, None);
         assert!(bare.shallow);
         assert!(bare.args.is_empty());
     }
@@ -907,10 +907,10 @@ mod tests {
         // `kind = Composio`: built-ins filtered out, the caller-fetched Composio
         // candidates (searchable-not-listed) still appear.
         let builtins = vec![
-            desc("foo__search", "search", "search the web", ToolKind::Mcp),
-            desc("bar__do", "do", "do a thing", ToolKind::Builtin),
+            desc("foo.search", "search", "search the web", ToolKind::Mcp),
+            desc("bar.do", "do", "do a thing", ToolKind::Builtin),
         ];
-        let composio = vec![desc("composio__slack", "Slack", "send", ToolKind::Composio)];
+        let composio = vec![desc("composio.slack", "Slack", "send", ToolKind::Composio)];
         let out = run_search(
             "search",
             builtins,
@@ -922,11 +922,11 @@ mod tests {
         )
         .await;
         assert!(out.iter().all(|d| d.kind == ToolKind::Composio));
-        assert!(out.iter().any(|d| d.id == "composio__slack"));
+        assert!(out.iter().any(|d| d.id == "composio.slack"));
 
         // `kind = None`: everything is ranked; no Composio unless the caller
         // passed candidates (mirrors Core's key-gated fetch — empty here).
-        let builtins = vec![desc("foo__search", "search", "the web", ToolKind::Mcp)];
+        let builtins = vec![desc("foo.search", "search", "the web", ToolKind::Mcp)];
         let out = run_search(
             "search",
             builtins,

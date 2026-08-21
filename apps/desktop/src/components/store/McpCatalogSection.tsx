@@ -28,6 +28,7 @@ import { Button } from "@ryu/ui/components/button";
 import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
@@ -41,6 +42,7 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import InfiniteSentinel from "@/src/components/store/InfiniteSentinel.tsx";
 import { useMcpCatalog } from "@/src/hooks/useMcpCatalog.ts";
@@ -190,6 +192,7 @@ export default function McpCatalogSection({
 					loadingMore={loadingMore}
 					onInstall={cardInstall}
 					onSelect={select}
+					onClearSearch={() => setQuery("")}
 					selectedId={selectedId}
 					servers={visibleServers}
 					settingsOpener={settingsOpener}
@@ -265,6 +268,7 @@ function McpServerList({
 	fetchNextPage,
 	hasNextPage,
 	settingsOpener,
+	onClearSearch,
 }: {
 	servers: McpCatalogCard[];
 	loading: boolean;
@@ -274,6 +278,7 @@ function McpServerList({
 	installing: string | null;
 	onSelect: (id: string) => void;
 	onInstall: (id: string) => void;
+	onClearSearch: () => void;
 	fetchNextPage: () => void;
 	hasNextPage: boolean;
 	/** Resolves a server to the settings of the plugin that provides it, when one
@@ -308,6 +313,11 @@ function McpServerList({
 					<EmptyTitle>No MCP servers found</EmptyTitle>
 					<EmptyDescription>Try a different search.</EmptyDescription>
 				</EmptyHeader>
+				<EmptyContent>
+					<Button onClick={onClearSearch} size="sm" variant="ghost">
+						Clear search
+					</Button>
+				</EmptyContent>
 			</Empty>
 		);
 	}
@@ -460,10 +470,10 @@ function McpDetailPanel({
 	const statItems: (ListingStat | null)[] = [
 		card.version ? { label: "Version", value: `v${card.version}` } : null,
 		packages.length > 0
-			? { label: "Packages", value: `${packages.length}` }
+			? { label: "Packages", value: formatCount(packages.length) ?? "—" }
 			: null,
 		remotes.length > 0
-			? { label: "Remotes", value: `${remotes.length}` }
+			? { label: "Remotes", value: formatCount(remotes.length) ?? "—" }
 			: null,
 		transports.length > 0
 			? { label: "Transport", value: transports.join(", ") }
@@ -544,7 +554,9 @@ function McpDetailPanel({
 			}
 		>
 			{packages.length > 0 && (
-				<ListingSection title={`Packages (${packages.length})`}>
+				<ListingSection
+					title={`Packages (${formatCount(packages.length) ?? "—"})`}
+				>
 					{/* Two-up on a wide dialog: a launch target is a short line, and one
 					    per full-width row was a column of mostly-empty cards. */}
 					<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -576,7 +588,9 @@ function McpDetailPanel({
 			)}
 
 			{remotes.length > 0 && (
-				<ListingSection title={`Remotes (${remotes.length})`}>
+				<ListingSection
+					title={`Remotes (${formatCount(remotes.length) ?? "—"})`}
+				>
 					<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
 						{remotes.map((r) => (
 							<div

@@ -5,15 +5,15 @@ import {
 } from "./agent-message-tool-logic.ts";
 
 describe("agent message transcript tool", () => {
-	it("recognizes MCP and dynamic send parts without catching other tools", () => {
-		expect(
-			isAgentMessageToolPart("tool-mcp__agent-comms__agents__send")
-		).toBe(true);
-		expect(isAgentMessageToolPart("dynamic-tool", "agents__send")).toBe(true);
-		expect(isAgentMessageToolPart("tool-mcp__agent-comms__agents__ask")).toBe(
-			false
+	it("recognizes MCP send/ask parts without catching other tools", () => {
+		expect(isAgentMessageToolPart("tool-mcp-agent-comms.agents.send")).toBe(
+			true
 		);
-		expect(isAgentMessageToolPart("tool-mcp__mail__send")).toBe(false);
+		expect(isAgentMessageToolPart("dynamic-tool", "agents.send")).toBe(true);
+		expect(isAgentMessageToolPart("tool-mcp-agent-comms.agents.ask")).toBe(
+			true
+		);
+		expect(isAgentMessageToolPart("tool-mcp-mail.send")).toBe(false);
 	});
 
 	it("reads the message from input and the host-derived sender from output", () => {
@@ -29,6 +29,7 @@ describe("agent message transcript tool", () => {
 			})
 		).toEqual({
 			from: "builder",
+			kind: "send",
 			text: "The deploy is ready.",
 			to: "research",
 		});
@@ -41,7 +42,32 @@ describe("agent message transcript tool", () => {
 				state: "input-available",
 			})
 		).toEqual({
+			kind: "send",
 			text: "Still working",
+			to: "reviewer",
+		});
+	});
+
+	it("reads an ask question and its returned peer reply", () => {
+		expect(
+			readAgentMessagePayload({
+				input: {
+					question: "Can you review the migration?",
+					to: "reviewer",
+				},
+				output: {
+					from: "builder",
+					question: "Can you review the migration?",
+					reply: "The migration is safe to ship.",
+					to: "reviewer",
+				},
+				type: "tool-mcp-agent-comms.agents.ask",
+			})
+		).toEqual({
+			from: "builder",
+			kind: "ask",
+			reply: "The migration is safe to ship.",
+			text: "Can you review the migration?",
 			to: "reviewer",
 		});
 	});

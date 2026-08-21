@@ -1,3 +1,5 @@
+/// <reference path="../../../types/lodash-subpaths.d.ts" />
+
 "use client";
 
 import { buttonVariants } from "@ryu/ui/components/editor/ui/button.tsx";

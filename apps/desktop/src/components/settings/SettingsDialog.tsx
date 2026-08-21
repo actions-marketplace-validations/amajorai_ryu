@@ -1,20 +1,20 @@
 import {
 	CloudIcon,
 	Coins01Icon,
+	ColorsIcon,
 	ComputerIcon,
 	CreditCardIcon,
 	GiftIcon,
-	GridIcon,
 	KeyboardIcon,
 	Mic01Icon,
-	PaintBoardIcon,
-	PuzzleIcon,
+	Package01Icon,
+	PlugSocketIcon,
 	Refresh01Icon,
 	SecurityCheckIcon,
 	Settings01Icon,
 	SourceCodeIcon,
 	UserCircleIcon,
-	UserGroupIcon,
+	UserMultiple02Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import {
@@ -40,6 +40,7 @@ import { useSession } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import ResizableSettingsLayout from "@/src/components/ResizableSettingsLayout.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import {
 	APP_SECTION_PREFIX,
 	buildEntityNavGroups,
@@ -147,7 +148,7 @@ const NAV_GROUPS: NavGroup[] = [
 			{
 				value: "appearance",
 				label: "Appearance",
-				icon: PaintBoardIcon,
+				icon: ColorsIcon,
 				tint: "purple",
 			},
 			{
@@ -177,7 +178,7 @@ const NAV_GROUPS: NavGroup[] = [
 			{
 				value: "authorized-apps",
 				label: "Authorized Apps",
-				icon: GridIcon,
+				icon: Package01Icon,
 				tint: "gray",
 			},
 		],
@@ -194,7 +195,12 @@ const NAV_GROUPS: NavGroup[] = [
 				tint: "green",
 			},
 			{ value: "referrals", label: "Referrals", icon: GiftIcon, tint: "pink" },
-			{ value: "teams", label: "Teams", icon: UserGroupIcon, tint: "indigo" },
+			{
+				value: "teams",
+				label: "Teams",
+				icon: UserMultiple02Icon,
+				tint: "indigo",
+			},
 			{ value: "credits", label: "Credits", icon: Coins01Icon, tint: "green" },
 			// Next to Credits on purpose: the balance and what drew it down are the
 			// same question asked twice, and splitting them across groups is how a
@@ -348,6 +354,7 @@ export function SettingsDialog({
 	const openGateway = useGatewayDialog((s) => s.openGateway);
 	const { resolvedTheme } = useTheme();
 	const target = toTarget(useActiveNode());
+	const simpleInterface = useInterfaceLevel() === "simple";
 
 	// User-scoped app/plugin settings tabs (node-scoped ones render in the Gateway
 	// dialog instead). Each becomes its own nav item under the Apps / Plugins header.
@@ -379,7 +386,7 @@ export function SettingsDialog({
 				title: group.title,
 				items: group.items.map((item) => ({
 					...item,
-					icon: group.title === "Apps" ? GridIcon : PuzzleIcon,
+					icon: group.title === "Apps" ? Package01Icon : PlugSocketIcon,
 					tint: "gray" as SettingsTint,
 				})),
 			})),
@@ -465,12 +472,27 @@ export function SettingsDialog({
 				<DialogContent className="!w-[85vw] !max-w-7xl max-md:!w-screen max-md:!max-w-none [&>[data-slot=dialog-close]]:!top-5 [&>[data-slot=dialog-close]]:!right-5 h-[85vh] gap-0 overflow-hidden p-0 max-md:h-[100dvh] max-md:rounded-none">
 					<ResizableSettingsLayout
 						content={
-							<div className="px-4 py-4 md:px-8 md:py-6" ref={contentRef}>
-								<h2 className="mb-6 font-semibold text-base">{activeLabel}</h2>
+							<div
+								className={
+									activeSection === "keyboard"
+										? "flex h-full min-h-0 flex-col px-4 py-4 md:px-8 md:py-6"
+										: "px-4 py-4 md:px-8 md:py-6"
+								}
+								ref={contentRef}
+							>
+								<h2 className="mb-6 shrink-0 font-semibold text-base">
+									{activeLabel}
+								</h2>
 								{activeEntity ? (
 									<EntitySettings entity={activeEntity} target={target} />
 								) : (
-									<div className="space-y-6">
+									<div
+										className={
+											activeSection === "keyboard"
+												? "min-h-0 flex-1"
+												: "space-y-6"
+										}
+									>
 										<SectionContent value={activeSection as SectionValue} />
 										{keyboardShortcutDescription ? (
 											<KeyboardShortcutsLink
@@ -482,6 +504,7 @@ export function SettingsDialog({
 								)}
 							</div>
 						}
+						contentScrollable={activeSection !== "keyboard"}
 						sidebar={
 							<>
 								<SidebarGroup className="py-1">
@@ -570,7 +593,9 @@ export function SettingsDialog({
 									</SidebarMenu>
 								</SidebarGroup>
 								<SidebarGroup className="py-1">
-									<SidebarGroupLabel>Node</SidebarGroupLabel>
+									<SidebarGroupLabel>
+										{simpleInterface ? "Computer" : "Node"}
+									</SidebarGroupLabel>
 									<SidebarMenu>
 										<SidebarMenuItem>
 											<SidebarMenuButton onClick={handleOpenGateway}>
@@ -579,7 +604,11 @@ export function SettingsDialog({
 													size="sm"
 													tint="gray"
 												/>
-												<span className="truncate">Gateway settings</span>
+												<span className="truncate">
+													{simpleInterface
+														? "Computer settings"
+														: "Gateway settings"}
+												</span>
 											</SidebarMenuButton>
 										</SidebarMenuItem>
 									</SidebarMenu>

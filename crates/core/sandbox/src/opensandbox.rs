@@ -19,11 +19,11 @@
 //! while the workspace methods map one-to-one to create / run / delete and keep
 //! the sandbox alive between calls.
 //!
-//! Network / volume flags are not documented in the README excerpt, so the
-//! capability descriptor is honored only at the runtime's inherent isolation
-//! boundary (no extra flags emitted) — the same conservative posture as the
-//! microsandbox backend. The connection (domain / protocol / api-key) is
-//! configured out-of-band via `osb config set …`; Core does not manage it.
+//! Network / volume flags are not documented in the README excerpt. Core
+//! therefore accepts only the deny-all capability set and rejects any request
+//! that would require an unverified flag. The connection (domain / protocol /
+//! api-key) is configured out-of-band via `osb config set …`; Core does not
+//! manage it.
 //!
 //! ## Config
 //!
@@ -132,8 +132,19 @@ impl Default for OpenSandboxSandbox {
     }
 }
 
+/// Reject capabilities that the documented `osb` CLI cannot express safely.
+fn ensure_capabilities_supported(caps: &SandboxCapabilities) -> Result<()> {
+    if caps.network || !caps.fs_read_paths.is_empty() || !caps.fs_write_paths.is_empty() {
+        return Err(anyhow!(
+            "opensandbox cannot safely express requested filesystem or network capabilities; use wasmtime or docker"
+        ));
+    }
+    Ok(())
+}
+
 /// Create a sandbox and return its id (parsed from the `-o json` create output).
-async fn create_sandbox(_caps: &SandboxCapabilities) -> Result<String> {
+async fn create_sandbox(caps: &SandboxCapabilities) -> Result<String> {
+    ensure_capabilities_supported(caps)?;
     let output = Command::new(binary())
         .arg("sandbox")
         .arg("create")
@@ -187,6 +198,7 @@ fn extract_sandbox_id(stdout: &str) -> Option<String> {
 
 /// Run a command in an existing sandbox via `osb command run <id> -o raw`.
 async fn run_in(id: &str, spec: &ExecSpec) -> Result<ExecOutput> {
+    ensure_capabilities_supported(&spec.capabilities)?;
     let mut cmd = Command::new(binary());
     cmd.arg("command")
         .arg("run")
@@ -328,6 +340,17 @@ mod tests {
         );
         assert!(extract_sandbox_id("not json").is_none());
         assert!(extract_sandbox_id(r#"{"other":"x"}"#).is_none());
+    }
+
+    #[test]
+    fn unsupported_capabilities_fail_closed() {
+        assert!(ensure_capabilities_supported(&SandboxCapabilities::default()).is_ok());
+        let mut caps = SandboxCapabilities::default();
+        caps.network = true;
+        assert!(ensure_capabilities_supported(&caps).is_err());
+        caps.network = false;
+        caps.fs_write_paths.insert(std::path::PathBuf::from("/tmp"));
+        assert!(ensure_capabilities_supported(&caps).is_err());
     }
 
     #[tokio::test]

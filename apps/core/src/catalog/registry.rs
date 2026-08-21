@@ -67,7 +67,7 @@ pub struct CatalogEntry {
 /// This exists because the catalog's `latest_version` was fetched from upstream
 /// (GitHub/npm) for EVERY entry, while several downloaders build their download
 /// URL from a hardcoded tag. Upstream's newer tag is unreachable by
-/// construction, so the client saw a permanent "b9670 → b10159, Update"
+/// construction, so the client saw a permanent "b10218 → upstream, Update"
 /// row whose button hit `ensure_installed`'s already-installed fast path and did
 /// nothing. Reporting the pin makes the catalog honest: a pinned engine gains an
 /// update when Ryu ships a new pin, i.e. it rides the app release train.
@@ -388,7 +388,7 @@ pub fn static_registry() -> Vec<CatalogEntry> {
         CatalogEntry {
             name: "whispercpp",
             display_name: "whisper.cpp",
-            description: "Local speech-to-text · OpenAI-compatible · CPU-friendly GGML models",
+            description: "Local voice recognition · OpenAI-compatible · CPU-friendly GGML models",
             category: SidecarCategory::Voice,
             source: SidecarSource::Github {
                 repo: "ggml-org/whisper.cpp",
@@ -406,7 +406,7 @@ pub fn static_registry() -> Vec<CatalogEntry> {
         CatalogEntry {
             name: "outetts",
             display_name: "OuteTTS",
-            description: "Local text-to-speech · OuteTTS + WavTokenizer (GGUF) · runs on llama.cpp · CPU-friendly",
+            description: "Local audio generation · OuteTTS + WavTokenizer (GGUF) · runs on llama.cpp · CPU-friendly",
             category: SidecarCategory::Voice,
             source: SidecarSource::Github {
                 repo: "edwko/OuteTTS",
@@ -422,8 +422,8 @@ pub fn static_registry() -> Vec<CatalogEntry> {
         // set is whatever the sidecar registry serves (nothing hardcoded).
         CatalogEntry {
             name: "ryutts",
-            display_name: "Ryu TTS (multi-engine)",
-            description: "Universal local text-to-speech · swap between KittenTTS, Pocket TTS, and more · CPU-friendly · voice cloning on supported engines",
+            display_name: "Ryu Audio (multi-engine)",
+            description: "Universal local audio generation · swap between KittenTTS, Pocket TTS, and more · CPU-friendly · voice cloning on supported engines",
             category: SidecarCategory::Voice,
             source: SidecarSource::Github {
                 repo: "jamiepine/voicebox",

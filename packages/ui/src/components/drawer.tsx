@@ -97,7 +97,7 @@ function DrawerTitle({
 	return (
 		<DrawerPrimitive.Title
 			className={cn(
-				"font-heading font-medium text-base text-foreground",
+				"font-heading font-medium text-foreground text-xl",
 				className
 			)}
 			data-slot="drawer-title"

@@ -2,13 +2,13 @@
 //
 // The presentational shell for one swappable "layer" of a node in the node
 // selector dropdown: services (Core / Gateway / Shadow / Island), the resident
-// chat engine, the run-alongside engines (speech / image / embeddings), the
-// text-to-speech and speech-to-text engines, and the sandbox backend.
+// Chat, the run-alongside engines (Audio / image / embeddings), the
+// Audio and Voice Recognition engines, and the sandbox backend.
 //
 // Every layer renders as the same submenu so the dropdown reads as one system:
 //
 //   ┌ trigger ─────────────────────────────┐
-//   │ Chat engine        ● llama.cpp b9670 │──▸ ┌ submenu ──────────────┐
+//   │ Chat               ● llama.cpp b9670 │──▸ ┌ submenu ──────────────┐
 //   └──────────────────────────────────────┘    │ llama.cpp     b9670   │ header
 //                                               │ Running · 2.1 GB      │
 //                                               ├───────────────────────┤
@@ -28,12 +28,12 @@
 // decides the SEMANTICS of its layer and passes only the slots that apply:
 //
 //   - services      → header + actions (start/stop, and update for Core/Gateway)
-//   - chat engine   → header + installed (swap) + available (install); NO
+//   - Chat          → header + installed (swap) + available (install); NO
 //                     start/stop, because the chat slot is swap-managed, not a
 //                     sidecar toggle (see ENGINE_GROUPS in NodeSelector)
 //   - run-alongside → header + actions (start/stop) + uninstall; these engines
 //                     are NOT mutually exclusive, so they get no swap list
-//   - tts/stt       → header + installed (swap) + available (install)
+//   - Audio/Voice Recognition → header + installed (swap) + available (install)
 //   - sandbox       → header + installed (swap); backends are node capabilities,
 //                     not installables
 //
@@ -107,7 +107,7 @@ export interface LayerOption {
  * backend semantics, and it must match Core:
  *
  *   `swap`   — mutually exclusive. Exactly one option is active; picking another
- *              moves the layer onto it (chat engine, sandbox backend, TTS, STT).
+ *              moves the layer onto it (Chat, sandbox backend, Audio, Voice Recognition).
  *   `toggle` — independent. Every option runs (or not) on its own; the tick means
  *              "running", and picking one starts/stops just that engine. The
  *              run-alongside engines (speech / image / embeddings) are this — they
@@ -128,7 +128,7 @@ export interface NodeLayerMenuProps {
 	icon?: IconSvgElement;
 	/** Options already on the node — picking one swaps the layer onto it. */
 	installed?: LayerOption[];
-	/** The layer's name, shown on the trigger row: "Chat engine", "Core". */
+	/** The layer's name, shown on the trigger row: "Chat", "Core". */
 	label: string;
 	running?: LayerRunState;
 	/** Semantics of `installed` — see {@link LayerSelectionMode}. Default `swap`. */
@@ -333,12 +333,6 @@ export function NodeLayerMenu({
 			})
 			.finally(() => setPending(null));
 	};
-
-	const hasBody =
-		actions.length > 0 ||
-		installed.length > 0 ||
-		available.length > 0 ||
-		children != null;
 
 	// A singleton layer names itself on both slots ("Core" / "Core"), so it shows
 	// its live detail on the trigger instead of echoing its own label.

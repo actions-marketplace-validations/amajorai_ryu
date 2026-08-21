@@ -6,10 +6,12 @@
 // it here keeps base-URL + bearer handling out of the page.
 
 export {
+	answerNowChat,
 	cancelChat,
 	chatHeaders,
 	chatStreamResumeUrl,
 	chatStreamUrl,
 	fetchNextPromptSuggestions,
+	startProactiveOpening,
 } from "@ryuhq/core-client/chat";
 export type { ApiTarget } from "@ryuhq/core-client/client";

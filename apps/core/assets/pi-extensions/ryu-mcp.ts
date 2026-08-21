@@ -21,7 +21,7 @@
  *   - it would require converting each tool's JSON Schema into a TypeBox schema,
  *     which is fragile and untestable without a live Pi.
  * The model still invokes a widget-bearing tool BY NAME: it passes the tool's
- * fully-qualified id (e.g. `quest-board__list_quests`) as the `tool` argument, and
+ * fully-qualified id (e.g. `quest-board.list_quests`) as the `tool` argument, and
  * the available tools are advertised in `ryu_call_tool`'s description (folded in at
  * load time) plus discoverable via `ryu_list_tools`.
  *
@@ -407,7 +407,7 @@ export default async function (pi: ExtensionAPI) {
 		"Call a Ryu tool by its fully-qualified id and return its result. Some Ryu " +
 		"tools render an interactive inline widget (an app) in the chat — call them " +
 		"the same way. Pass `tool` as the fully-qualified id (e.g. " +
-		"`quest-board__list_quests`) and `arguments` as its JSON arguments object." +
+		"`quest-board.list_quests`) and `arguments` as its JSON arguments object." +
 		(catalogText
 			? `\n\nAvailable Ryu tools:\n${catalogText}`
 			: "\n\nUse ryu_list_tools to discover available Ryu tools first.");
@@ -424,7 +424,7 @@ export default async function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			tool: Type.String({
 				description:
-					"Fully-qualified Ryu tool id, formatted <server>__<tool> (e.g. quest-board__list_quests).",
+					"Fully-qualified Ryu tool id, formatted <server>.<tool> (e.g. quest-board.list_quests).",
 			}),
 			// Open object: the model's structured arguments pass through unchanged.
 			// (Type.Object({}) alone defaults to additionalProperties:false and would
@@ -444,7 +444,7 @@ export default async function (pi: ExtensionAPI) {
 			if (!tool) {
 				// Throwing marks the tool result isError:true and reports it to the LLM.
 				throw new Error(
-					"ryu_call_tool: `tool` is required (a fully-qualified Ryu tool id like quest-board__list_quests)."
+					"ryu_call_tool: `tool` is required (a fully-qualified Ryu tool id like quest-board.list_quests)."
 				);
 			}
 			const args = (params as { arguments?: unknown })?.arguments ?? {};

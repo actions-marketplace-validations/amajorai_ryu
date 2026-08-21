@@ -6,6 +6,27 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
 
+interface LegacyFocusEvent {
+	preventDefault: () => void;
+}
+type LegacyFocusHandler = (event: LegacyFocusEvent) => void;
+
+function toFinalFocus(handler?: LegacyFocusHandler) {
+	if (!handler) {
+		return undefined;
+	}
+
+	return () => {
+		let prevented = false;
+		handler({
+			preventDefault: () => {
+				prevented = true;
+			},
+		});
+		return !prevented;
+	};
+}
+
 function ContextMenu({ ...props }: ContextMenuPrimitive.Root.Props) {
 	return <ContextMenuPrimitive.Root data-slot="context-menu" {...props} />;
 }
@@ -35,14 +56,26 @@ function ContextMenuContent({
 	alignOffset = 4,
 	side = "right",
 	sideOffset = 0,
+	finalFocus,
+	onCloseAutoFocus,
+	withBackdrop = true,
 	...props
-}: ContextMenuPrimitive.Popup.Props &
-	Pick<
+}: ContextMenuPrimitive.Popup.Props & {
+	onCloseAutoFocus?: LegacyFocusHandler;
+	/** Render the shared full-window backdrop for a top-level menu. */
+	withBackdrop?: boolean;
+} & Pick<
 		ContextMenuPrimitive.Positioner.Props,
 		"align" | "alignOffset" | "side" | "sideOffset"
 	>) {
 	return (
 		<ContextMenuPrimitive.Portal>
+			{withBackdrop && (
+				<ContextMenuPrimitive.Backdrop
+					className="ryu-popup-overlay"
+					data-slot="context-menu-overlay"
+				/>
+			)}
 			<ContextMenuPrimitive.Positioner
 				align={align}
 				alignOffset={alignOffset}
@@ -56,6 +89,7 @@ function ContextMenuContent({
 						className
 					)}
 					data-slot="context-menu-content"
+					finalFocus={finalFocus ?? toFinalFocus(onCloseAutoFocus)}
 					{...props}
 				/>
 			</ContextMenuPrimitive.Positioner>
@@ -155,6 +189,7 @@ function ContextMenuSubContent({
 			data-slot="context-menu-sub-content"
 			side="right"
 			{...props}
+			withBackdrop={false}
 		/>
 	);
 }

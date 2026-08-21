@@ -10,7 +10,7 @@
 //! [`ExperienceStore`] + a `&dyn LearningHost`), so this crate has ZERO dependency
 //! on `apps/core`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -499,6 +499,21 @@ Given a user message and the assistant's reply, rate the reply's correctness and
 helpfulness on a scale from 0.0 (wrong or useless) to 1.0 (perfect). \
 Respond with ONLY the number, e.g. 0.82.";
 
+/// Return the conversation ids visible through this context's host. Core gives
+/// bound HTTP callers a host that applies the node/user conversation ACL, while
+/// the scheduler keeps its unrestricted host for the local maintenance pass.
+/// Batch consumers must use this set before loading durable experience text.
+async fn visible_conversation_ids(ctx: &LearningCtx) -> Result<HashSet<String>> {
+    Ok(ctx
+        .host()
+        .list_conversations()
+        .await
+        .context("listing visible conversations for learning")?
+        .into_iter()
+        .map(|conversation| conversation.id)
+        .collect())
+}
+
 /// Extract a reward in `[0,1]` from a judge's free-text answer. Tolerant of
 /// `Score: 0.8/1.0`, `0.8`, `80%`, etc. Returns `None` when no number is found.
 ///
@@ -553,9 +568,10 @@ pub async fn score_buffer(ctx: &LearningCtx, limit: usize) -> Result<usize> {
         return Ok(0);
     }
     let src = resolve_prm(ctx.host()).await;
+    let visible_conversation_ids = visible_conversation_ids(ctx).await?;
     let pending = ctx
         .store
-        .list_unscored(limit)
+        .list_unscored_visible(limit, &visible_conversation_ids)
         .await
         .context("listing unscored experience")?;
     let mut scored = 0usize;
@@ -1060,10 +1076,11 @@ pub async fn run_cycle(ctx: &LearningCtx, execute: bool) -> Result<CyclePlan> {
     let scored = score_buffer(ctx, 256).await?;
     let min_reward = resolve_min_reward(ctx.host()).await;
     let base_model = resolve_base_model(ctx.host()).await;
+    let visible_conversation_ids = visible_conversation_ids(ctx).await?;
 
     let candidate_rows = ctx
         .store
-        .list_for_training(min_reward, 4096)
+        .list_for_training_visible(min_reward, 4096, &visible_conversation_ids)
         .await
         .context("collecting training set")?;
     // Defense-in-depth: drop any row whose conversation is excluded by PREF, not
@@ -1719,7 +1736,11 @@ mod flow_tests {
 
     #[tokio::test]
     async fn score_applies_prm_reward_to_unscored_rows() {
-        let mut host = MockHost::new().enabled();
+        let mut host = MockHost::new()
+            .enabled()
+            // The scoped batch path only scores rows from conversations visible
+            // through the host, just as a bound Core caller would be.
+            .with_conversation("c1", 10, 2);
         host.prm_reply = Some("0.85".to_string());
         let c = ctx(host, store("score-on"));
         // Seed an unscored, non-excluded, completed row.

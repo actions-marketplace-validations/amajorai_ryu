@@ -674,7 +674,14 @@ export function PassCardShell({
 	warpColors,
 	warpOpacity,
 }: PassCardShellProps) {
-	const reduceMotion = useReducedMotion();
+	// Motion can resolve the browser preference before hydration, while the server
+	// has no media query result. Hold the preference until after hydration so the
+	// shell's initial transform markup is identical on both sides.
+	const reducedMotionPreference = useReducedMotion();
+	const [reduceMotion, setReduceMotion] = useState(false);
+	useEffect(() => {
+		setReduceMotion(reducedMotionPreference ?? false);
+	}, [reducedMotionPreference]);
 	// The card is held STILL for its first moment on screen, and that is a
 	// correctness requirement, not a polish detail.
 	//

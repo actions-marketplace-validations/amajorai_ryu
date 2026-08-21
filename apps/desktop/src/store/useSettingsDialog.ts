@@ -28,6 +28,7 @@ export type SettingsSectionValue =
 	| "referrals"
 	| "teams"
 	| "credits"
+	| "usage"
 	| "voice"
 	| "goals"
 	| "double-check"

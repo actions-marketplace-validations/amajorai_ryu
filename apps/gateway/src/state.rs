@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{atomic::AtomicI64, Arc, OnceLock, RwLock};
 
 use dashmap::DashMap;
 
@@ -121,7 +121,7 @@ pub struct AppState {
     /// Audit sink as a swappable registry (Lg decomposition): the built-in
     /// [`crate::audit::AuditLogger`] is the default active backend.
     pub audit: AuditRegistry,
-    /// Token budget enforcer as a swappable, live-swap registry (Lg
+    /// Charged-spend budget enforcer as a swappable, live-swap registry (Lg
     /// decomposition): the built-in [`crate::budget::BudgetEnforcer`] is the
     /// default active backend. `PUT /v1/config` hot-swaps it without a restart
     /// (see [`Self::update_budget_config`]); a plugin backend can register.
@@ -178,6 +178,10 @@ pub struct AppState {
     /// [`Self::log_audit`] is also broadcast here (redacted), so the desktop's
     /// live dashboard needs no polling. Inert when no subscriber is connected.
     pub traffic: TrafficBus,
+    /// Highest local audit row id acknowledged by the control plane reporter.
+    /// The cursor advances only after a successful ingest response, allowing a
+    /// retry to reuse the same idempotency key when a response is lost.
+    pub report_cursor: AtomicI64,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -391,6 +395,7 @@ impl AppState {
             jobs: MediaJobStore::new(),
             wasm_host: OnceLock::new(),
             traffic: TrafficBus::new(),
+            report_cursor: AtomicI64::new(0),
         })
     }
 
@@ -674,6 +679,7 @@ impl AppState {
             jobs: MediaJobStore::new(),
             wasm_host: OnceLock::new(),
             traffic: TrafficBus::new(),
+            report_cursor: AtomicI64::new(0),
         }
     }
 }
@@ -816,6 +822,7 @@ mod smart_router_swap_tests {
             rules: vec![SmartRule {
                 description: "writing or refactoring code".to_string(),
                 model: "claude-sonnet-4-5".to_string(),
+                weight: 1.0,
             }],
             ..Default::default()
         };

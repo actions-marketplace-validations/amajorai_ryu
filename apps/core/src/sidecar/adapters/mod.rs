@@ -5,6 +5,7 @@ pub mod context_window;
 pub mod mcp_bridge;
 pub mod openai_compat;
 pub mod sdk;
+pub mod turn_control;
 
 pub use acp::{AcpAgentRegistry, FallbackProvider};
 
@@ -116,12 +117,162 @@ pub fn subscribe_live_stream(
     })
 }
 
+// ── Client-tool continuation registry ────────────────────────────────────────
+//
+// Browser tools execute in the extension, never in Core. A pending provider
+// tool call parks on a one-shot waiter keyed by a server-minted nonce; the
+// authenticated result endpoint below resolves that waiter after it checks the
+// conversation ACL, owner, call id, nonce and expiry.
+
+struct ClientToolWaiter {
+    conversation_id: String,
+    owner_user_id: Option<String>,
+    tool_call_id: String,
+    expires_at_ms: i64,
+    sender: tokio::sync::oneshot::Sender<Value>,
+}
+
+fn client_tool_waiters(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, ClientToolWaiter>> {
+    static WAITERS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, ClientToolWaiter>>,
+    > = std::sync::OnceLock::new();
+    WAITERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn client_tool_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+pub fn register_client_tool_waiter(
+    conversation_id: &str,
+    tool_call_id: &str,
+    owner_user_id: Option<String>,
+) -> (String, i64, tokio::sync::oneshot::Receiver<Value>) {
+    let nonce = format!("browser_{}", uuid::Uuid::new_v4().simple());
+    let expires_at_ms = client_tool_now_ms() + 120_000;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    if let Ok(mut waiters) = client_tool_waiters().lock() {
+        waiters.insert(
+            nonce.clone(),
+            ClientToolWaiter {
+                conversation_id: conversation_id.to_owned(),
+                owner_user_id,
+                tool_call_id: tool_call_id.to_owned(),
+                expires_at_ms,
+                sender,
+            },
+        );
+    }
+    (nonce, expires_at_ms, receiver)
+}
+
+pub fn resolve_client_tool_result(
+    conversation_id: &str,
+    tool_call_id: &str,
+    nonce: &str,
+    result: Value,
+    provenance: &Value,
+    caller_user_id: Option<&str>,
+) -> Result<(), String> {
+    if !provenance.is_object()
+        || provenance.get("source").and_then(Value::as_str) != Some("browser-extension")
+    {
+        return Err("invalid browser tool provenance".to_owned());
+    }
+    if result.to_string().len() > 1_000_000 {
+        return Err("browser tool result is too large".to_owned());
+    }
+    let waiter = client_tool_waiters()
+        .lock()
+        .map_err(|_| "client tool registry unavailable".to_owned())?
+        .remove(nonce)
+        .ok_or_else(|| "browser tool nonce is unknown or already used".to_owned())?;
+    if waiter.expires_at_ms < client_tool_now_ms() {
+        return Err("browser tool nonce expired".to_owned());
+    }
+    if waiter.conversation_id != conversation_id || waiter.tool_call_id != tool_call_id {
+        return Err("browser tool result is bound to a different call".to_owned());
+    }
+    if waiter.owner_user_id.as_deref() != caller_user_id {
+        return Err("browser tool result owner mismatch".to_owned());
+    }
+    waiter
+        .sender
+        .send(result)
+        .map_err(|_| "browser tool stream is no longer waiting".to_owned())
+}
+
+fn allowed_client_tool_schema(value: &Value) -> bool {
+    let name = value.get("name").and_then(Value::as_str).or_else(|| {
+        value
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(Value::as_str)
+    });
+    name.is_some_and(|name| name.starts_with("browser_"))
+}
+
+#[cfg(test)]
+mod client_tool_tests {
+    use super::*;
+
+    #[test]
+    fn only_browser_namespace_is_eligible_for_client_continuation() {
+        assert!(allowed_client_tool_schema(&serde_json::json!({
+            "type": "function",
+            "function": { "name": "browser_click" }
+        })));
+        assert!(!allowed_client_tool_schema(&serde_json::json!({
+            "type": "function",
+            "function": { "name": "delete_everything" }
+        })));
+    }
+
+    #[tokio::test]
+    async fn nonce_result_is_single_use_and_owner_bound() {
+        let (nonce, _, receiver) = register_client_tool_waiter(
+            "browser-conversation",
+            "tool-call-1",
+            Some("user-1".to_owned()),
+        );
+        resolve_client_tool_result(
+            "browser-conversation",
+            "tool-call-1",
+            &nonce,
+            serde_json::json!({ "ok": true }),
+            &serde_json::json!({ "source": "browser-extension" }),
+            Some("user-1"),
+        )
+        .expect("the matching owner should resume the waiter");
+        assert_eq!(
+            receiver.await.expect("waiter result"),
+            serde_json::json!({ "ok": true })
+        );
+        assert!(resolve_client_tool_result(
+            "browser-conversation",
+            "tool-call-1",
+            &nonce,
+            serde_json::json!({ "ok": true }),
+            &serde_json::json!({ "source": "browser-extension" }),
+            Some("user-1"),
+        )
+        .is_err());
+    }
+}
+
 // ── Shared domain types ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub id: String,
     pub name: String,
+    /// Persisted role/title shown beside the agent name when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub description: Option<String>,
     pub install_hint: Option<String>,
     pub installed: Option<bool>,
@@ -185,6 +336,19 @@ pub struct AgentInfo {
     /// the response when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
+    /// Complete custom glyph payload from the persona slot. This mirrors the
+    /// shared desktop `GlyphValue` shape so non-image avatars survive the list
+    /// endpoint without requiring a full-record fetch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_glyph: Option<serde_json::Value>,
+    /// Persisted lifecycle for DB-backed agents. Registry-only entries omit it
+    /// and are treated as active by clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_status: Option<String>,
+    /// Persisted safety profile for DB-backed agents. Registry-only entries omit
+    /// it and are treated as autonomous by clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +478,11 @@ pub struct ChatStreamRequest {
     ///                    and the self-fetching ACP-registry agents)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// OpenAI-compatible model pin selected for this turn. ACP model selection
+    /// uses [`Self::acp_model`] instead; keeping both fields lets the same
+    /// composer target either transport without silently dropping the pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     /// Saved chats explicitly attached to this turn through an `@Chat` mention.
@@ -334,6 +503,10 @@ pub struct ChatStreamRequest {
     /// rooted here instead of the Core process cwd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// All source folders in the selected desktop project. The first folder is
+    /// `cwd`; remaining folders become additional ACP workspace roots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_folders: Vec<String>,
     /// When `true` (and `cwd` resolves to a git repo), Core creates an isolated
     /// `ryu/run-<id>` worktree for the ACP session and removes it on completion.
     /// Defaults to `false` — non-git directories or opt-out callers get the plain
@@ -366,6 +539,17 @@ pub struct ChatStreamRequest {
     /// redaction fires unconditionally before the provider call.
     #[serde(default)]
     pub companion_source: bool,
+    /// Client-owned tool schemas (currently browser tools). Core offers these to
+    /// compatible providers only when the caller also grants browser-context
+    /// consent; execution remains on the client boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub client_tools: Vec<Value>,
+    /// Per-turn consent gate for page-derived context and client tool results.
+    #[serde(default)]
+    pub browser_context_consent: bool,
+    /// Browser surface metadata used for audit/session linking, never as a route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_surface: Option<String>,
     /// Route this specific message to a particular agent within a multi-agent
     /// conversation (#414). When set, Core validates the agent is a participant
     /// in the conversation (auto-adding it if needed) and uses that agent's
@@ -416,6 +600,11 @@ pub struct ChatStreamRequest {
     /// Core-verified widget provenance. Never deserialized from the client.
     #[serde(skip)]
     pub widget_provenance: Option<crate::server::widgets::VerifiedWidgetProvenance>,
+    /// Core-owned next-turn target accepted from the running agent. This is
+    /// populated after the normal model-router pass and is emitted as a data
+    /// part by the selected stream adapter; clients cannot provide it.
+    #[serde(skip)]
+    pub agent_control_applied: Option<crate::agent_control::AgentControlApplied>,
     /// Per-request inference / sampling override (temperature, top_p, top_k, …).
     /// Merged on top of the agent's stored [`crate::agents::AgentRecord::inference`]
     /// defaults (request wins per field) and applied to the OpenAI-compat body,
@@ -444,6 +633,11 @@ pub struct ChatStreamRequest {
     /// capability; ignored if the agent doesn't advertise model selection).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_model: Option<String>,
+    /// Core set this when the model/effort came from a node lane default. Lane
+    /// defaults are resolved per request and must not rewrite the shared Pi
+    /// configuration; explicit composer picks retain their historical behavior.
+    #[serde(skip)]
+    pub lane_default: bool,
     /// True when this turn is programmatic background work (sub-agent fan-out,
     /// background worker, scheduled/triggered run) rather than a user-facing
     /// chat turn. Forwarded to the Gateway as `x-ryu-priority: background` so the
@@ -498,6 +692,12 @@ pub struct ChatStreamRequest {
     /// for 1:1 / anonymous turns.
     #[serde(skip)]
     pub author_name: Option<String>,
+    /// Verified raw user JWT for the server-owned ACP/Pi child process. This is
+    /// never accepted from or serialized to the client; `chat_stream` copies it
+    /// from the authenticated request extension so the child can preserve the
+    /// same caller partition for background-process operations.
+    #[serde(skip)]
+    pub user_jwt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -967,7 +1167,7 @@ fn acp_tool_ui_name(kind: &str, title: &str, input: &Value) -> (String, bool) {
         "edit" => ("Edit".to_owned(), false),
         "fetch" => ("WebFetch".to_owned(), false),
         "search" => ("WebSearch".to_owned(), false),
-        // Built-in artifact surface (`artifact__render`). ACP exposes no stable
+        // Built-in artifact surface (`artifact.render`). ACP exposes no stable
         // machine tool name either, so detect it by its unique payload shape — a
         // nested `artifact` object, or a top-level `kind` + `content` pair — and
         // emit a stable name the desktop matches to render the inline card.
@@ -975,19 +1175,21 @@ fn acp_tool_ui_name(kind: &str, title: &str, input: &Value) -> (String, bool) {
             || (input.get("kind").is_some_and(Value::is_string)
                 && input.get("content").is_some_and(Value::is_string)) =>
         {
-            ("artifact__render".to_owned(), true)
+            ("artifact.render".to_owned(), true)
         }
-        // Built-in generative-UI tool (`ui__render`). ACP exposes no stable machine
+        // Built-in generative-UI tool (`ui.render`). ACP exposes no stable machine
         // tool name (the `title` is humanized per-adapter), so detect it by its
-        // unique spec-shaped input and emit a stable name the desktop matches to
-        // render the UI inline. The `{ spec: { root, elements } }` shape is specific
-        // to json-render and used by no other tool.
+        // unique format/spec-shaped input and emit a stable name the desktop matches
+        // to render the UI inline. Native json-render uses `{ root, elements }`,
+        // while A2UI is explicitly tagged with `format: "a2ui"`.
         _ if input
             .get("spec")
             .and_then(Value::as_object)
-            .is_some_and(|s| s.contains_key("root") && s.contains_key("elements")) =>
+            .is_some_and(|s| s.contains_key("root") && s.contains_key("elements"))
+            || (input.get("format").and_then(Value::as_str) == Some("a2ui")
+                && input.get("spec").is_some()) =>
         {
-            ("ui__render".to_owned(), true)
+            ("ui.render".to_owned(), true)
         }
         _ => {
             let name = if title.is_empty() { kind } else { title };
@@ -1321,6 +1523,17 @@ impl PartsAccumulator {
             "type": "file",
             "mediaType": media_type,
             "url": url,
+        }));
+    }
+
+    /// Append a structured data part emitted alongside the assistant stream.
+    /// Data parts are metadata rather than prose, but keeping them in the
+    /// persisted reduced UIMessage lets the desktop show the same control
+    /// notice after a conversation reload.
+    fn data(&mut self, name: &str, data: &Value) {
+        self.parts.push(serde_json::json!({
+            "type": format!("data-{name}"),
+            "data": data,
         }));
     }
 
@@ -1711,9 +1924,17 @@ fn ryu_agent_route(
     acp_registry: &AcpAgentRegistry,
     provider_reg: &ProviderRegistry,
 ) -> Option<AgentRoute> {
+    ryu_agent_route_with_user_jwt(acp_registry, provider_reg, None)
+}
+
+fn ryu_agent_route_with_user_jwt(
+    acp_registry: &AcpAgentRegistry,
+    provider_reg: &ProviderRegistry,
+    user_jwt: Option<&str>,
+) -> Option<AgentRoute> {
     // Prefer Core's own managed Pi binary (~/.ryu/bin/pi). This is a separate
     // install from any Pi the user has on PATH — same relationship as OpenClaw to Pi.
-    if let Some(cmd) = acp::ryu_pi_acp_cmd() {
+    if let Some(cmd) = acp::ryu_pi_acp_cmd_for_agent(user_jwt, Some("ryu")) {
         return Some(AgentRoute::Acp { spawn_cmd: cmd });
     }
 
@@ -1732,8 +1953,7 @@ fn ryu_agent_route(
             }
             let config_dir = crate::pi_config::config_dir_str();
             let gateway = crate::pi_config::is_gateway_routing();
-            let gateway_base = crate::sidecar::gateway::gateway_url();
-            let gateway_v1 = format!("{}/v1", gateway_base.trim_end_matches('/'));
+            let gateway_v1 = acp::openai_gateway_v1(Some("ryu"));
             // Fail closed on a remote data plane (WS1): a hosted multi-tenant gateway
             // must reject the shared "ryu-local" literal, so refuse to route this
             // fallback Pi rather than present it. Only resolved when gateway routing
@@ -1769,7 +1989,7 @@ fn ryu_agent_route(
                 } else {
                     String::new()
                 };
-                let mcp_env = acp::pi_mcp_extension_env(true);
+                let mcp_env = acp::pi_mcp_extension_env(true, user_jwt);
                 format!(
                     "cmd /c {gateway_env}{mcp_env}set PI_CODING_AGENT_DIR={config_dir}&& {}",
                     spawn_cmd.trim_start_matches("cmd /c ")
@@ -1780,7 +2000,7 @@ fn ryu_agent_route(
                 } else {
                     String::new()
                 };
-                let mcp_env = acp::pi_mcp_extension_env(false);
+                let mcp_env = acp::pi_mcp_extension_env(false, user_jwt);
                 format!("{gateway_env}{mcp_env}PI_CODING_AGENT_DIR={config_dir} {spawn_cmd}")
             };
             return Some(AgentRoute::Acp {
@@ -1817,10 +2037,21 @@ fn agent_route(
     acp_registry: &AcpAgentRegistry,
     provider_reg: &ProviderRegistry,
 ) -> Option<AgentRoute> {
+    agent_route_with_user_jwt(agent_id, engine, model, acp_registry, provider_reg, None)
+}
+
+fn agent_route_with_user_jwt(
+    agent_id: Option<&str>,
+    engine: Option<&str>,
+    model: Option<&str>,
+    acp_registry: &AcpAgentRegistry,
+    provider_reg: &ProviderRegistry,
+    user_jwt: Option<&str>,
+) -> Option<AgentRoute> {
     // Ryu flagship: Pi engine with gateway on top. Checked before the generic
     // default so "ryu" never falls through to the plain-LLM path.
     if agent_id == Some("ryu") {
-        return ryu_agent_route(acp_registry, provider_reg);
+        return ryu_agent_route_with_user_jwt(acp_registry, provider_reg, user_jwt);
     }
     if is_default_agent(agent_id) {
         return Some(default_agent_route(provider_reg));
@@ -1842,20 +2073,21 @@ fn agent_route(
     // cursor, opencode, …), a private/in-house agent, or a future one. It flows
     // through the same `run_acp_prompt` path, so session modes/models/effort,
     // interactive permissions, and diff rendering all apply uniformly. Like the
-    // self-fetching registry agents it makes its own provider calls (no gateway
-    // env-injection). Its TOOLS still arrive over the MCP bridge, which is a
-    // separate gate (`agent-tool-bridge`, default ON) from the egress decision this
+    // self-fetching registry agents it makes its own provider calls, with the
+    // default gateway env injection applied when the client is routable. Its TOOLS
+    // still arrive over the MCP bridge, which is a separate gate
+    // (`agent-tool-bridge`, default ON) from the egress decision this
     // branch is making — the two were one preference until they were split, and
     // "tool egress" was the phrase that conflated them. Tools are not egress.
     if let Some(cmd) = engine.strip_prefix("acp-exec:") {
         let cmd = cmd.trim();
         if !cmd.is_empty() {
-            // Generic gateway routing (opt-in per agent): when enabled, swap this
-            // BYO agent's OpenAI-compatible endpoint to the local gateway so its
-            // egress is governed (the lever this whole feature exists for). When
-            // off, run the command verbatim (its own provider calls, ungoverned).
+            // Generic gateway routing is ON by default: swap this BYO agent's
+            // OpenAI-compatible endpoint to the local gateway so its egress is
+            // governed (the lever this whole feature exists for). An explicit
+            // direct-egress opt-out runs the command verbatim.
             let spawn_cmd = if crate::agent_routing::is_gateway_routing(route_id) {
-                match acp::openai_gateway_cmd(cmd) {
+                match acp::openai_gateway_cmd_for_agent(cmd, Some(route_id)) {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::error!(error = %e, route_id, "agent_route: refusing gateway routing for BYO acp-exec agent without a bearer");
@@ -1902,8 +2134,8 @@ fn agent_route(
     // Ryu cannot intercept their egress. The ones that honour OPENAI_BASE_URL
     // (Codex, Pi, the Ryu flagship) get the gateway env injected at spawn.
     // Claude Code (Anthropic format) is now governable too via the gateway's
-    // transparent passthrough proxy when the user opts in (see the match arm
-    // below). The rest — Gemini CLI (Google format), OpenClaw (its own WebSocket
+    // transparent passthrough proxy by default (see the match arm below). The rest
+    // — Gemini CLI (Google format), OpenClaw (its own WebSocket
     // gateway), Hermes (its own creds), and the self-fetching ACP-registry agents
     // — still carry `gateway_bypass: true` (no base-URL hook we can transparently
     // proxy yet).
@@ -1911,11 +2143,11 @@ fn agent_route(
     Some(match &entry.transport {
         acp::AgentTransport::Acp { spawn_cmd } => {
             // Claude Code (`acp:claude`) speaks Anthropic format with the user's
-            // own subscription auth, so it normally bypasses the gateway. When the
-            // user opts in (claude-gateway-routing pref), inject ANTHROPIC_BASE_URL
-            // so its egress traverses the gateway's transparent passthrough proxy
+            // own subscription auth. By default, inject ANTHROPIC_BASE_URL so its
+            // egress traverses the gateway's transparent passthrough proxy
             // (firewall/DLP/audit) while the subscription bearer is forwarded
-            // upstream unchanged. Other ACP agents are spawned verbatim.
+            // upstream unchanged. An explicit direct-egress opt-out leaves it
+            // direct. Other ACP agents are spawned verbatim.
             // Claude and Codex have their own dedicated, format-specific routing
             // (and always take it regardless of the generic toggle); guard the
             // generic OPENAI_BASE_URL injection off their ids so a stale generic-map
@@ -1925,18 +2157,31 @@ fn agent_route(
             {
                 acp::claude_gateway_cmd(spawn_cmd)
             } else if entry.id == "acp:codex" && crate::codex_config::is_gateway_routing() {
-                // Codex subscription passthrough (opt-in): point Codex at an
+                // Codex subscription passthrough (default-on): point Codex at an
                 // isolated CODEX_HOME → gateway passthrough so its ChatGPT-login
                 // Responses egress is governed while the OAuth subscription
                 // credential is forwarded upstream unchanged. Overrides the
                 // default API-key OPENAI_BASE_URL injection baked into the entry.
                 acp::codex_acp_gateway_cmd()
+            } else if entry.id == "acp:codex" && crate::agent_routing::is_gateway_routing(route_id)
+            {
+                // API-key Codex remains on the OpenAI-compatible path when the
+                // subscription-preserving toggle is off; keep its spend under
+                // the selected agent as well.
+                match acp::openai_gateway_cmd_for_agent(spawn_cmd, Some(route_id)) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!(error = %e, route_id, "agent_route: refusing Codex gateway routing without a bearer");
+                        return None;
+                    }
+                }
             } else if !is_special && crate::agent_routing::is_gateway_routing(route_id) {
-                // Generic per-agent gateway routing (opt-in): point a registry ACP
+                // Generic per-agent gateway routing (default-on): point a registry ACP
                 // agent at the gateway via the OpenAI base-URL swap. Only meaningful
                 // for agents whose client honours OPENAI_BASE_URL; a harmless no-op
-                // otherwise (e.g. Gemini/OpenClaw/Hermes).
-                match acp::openai_gateway_cmd(spawn_cmd) {
+                // otherwise (e.g. Gemini/OpenClaw/Hermes). An explicit false entry
+                // is the direct-egress opt-out.
+                match acp::openai_gateway_cmd_for_agent(spawn_cmd, Some(route_id)) {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::error!(error = %e, route_id, "agent_route: refusing generic gateway routing for registry ACP agent without a bearer");
@@ -2501,6 +2746,7 @@ async fn resolve_binding(
 ) {
     match store.get(agent_id).await {
         Ok(Some(record)) => {
+            let skills_allowlist = record.skill_allowlist();
             let engine = record.engine.or_else(|| Some(agent_id.to_owned()));
             // Chat slot: engine doubles as the gateway ProviderKind identifier
             // (e.g. "openai", "anthropic", "local"). When set, the gateway's
@@ -2537,7 +2783,7 @@ async fn resolve_binding(
                 slots,
                 persona,
                 record.composio_actions,
-                record.skills,
+                skills_allowlist,
                 record.identity_profile_ids,
             )
         }
@@ -2563,6 +2809,29 @@ async fn resolve_binding(
             )
         }
     }
+}
+
+/// Resolve the effective MCP tool allowlist for a chat turn. An environment
+/// override remains the highest-priority operator control; otherwise the
+/// persisted agent card supplies the per-agent setting. A missing record keeps
+/// the historical unrestricted behavior for registry-only callers.
+async fn resolve_agent_tool_allowlist(
+    agent_id: Option<&str>,
+    registry: &AcpAgentRegistry,
+    store: &AgentStore,
+) -> Option<Vec<String>> {
+    let Some(id) = agent_id else {
+        return None;
+    };
+    if let Some(allowlist) = registry.allowlist_for(id) {
+        return Some(allowlist);
+    }
+    store
+        .get(id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|record| record.mcp_tool_allowlist())
 }
 
 /// Build a persona tone prefix for the system prompt from a [`PersonaSlot`].
@@ -2642,7 +2911,10 @@ const RYU_DOCS_HINT: &str = "## Ryu's own documentation\n\
     point the user at https://docs.ryuhq.com. Never cite a documentation URL \
     you have not actually fetched; fetch the index and follow it instead of \
     guessing a path. If you cannot fetch pages, say so and link \
-    https://docs.ryuhq.com rather than inventing the answer.";
+    https://docs.ryuhq.com rather than inventing the answer. When speaking to \
+    someone who is not technical, use familiar terms such as apps, connections, \
+    files, instructions, routines, and approvals instead of internal platform \
+    names unless they ask for the technical detail.";
 
 /// [`RYU_DOCS_HINT`], or `None` when Safe Mode is active.
 ///
@@ -3033,6 +3305,21 @@ pub struct AutoRecallConfig {
     /// traversal. Non-empty here now means real Space content (and real
     /// `spaces.db` work) on the turn; empty still means none of either.
     pub space_ids: Vec<String>,
+    /// Verified human caller for the interactive turn. Shared conversations
+    /// must use the current caller's private context, never the conversation
+    /// owner's context; programmatic turns leave this unset and retain the
+    /// conversation-owner fallback below.
+    pub caller_user_id: Option<String>,
+}
+
+/// Resolve the principal used for per-caller auto-recall. Interactive requests
+/// carry the verified caller explicitly; the conversation owner is only a
+/// fallback for trusted programmatic turns that do not have a human caller.
+fn effective_recall_user_id(
+    caller_user_id: Option<&str>,
+    conversation_owner_id: Option<String>,
+) -> Option<String> {
+    caller_user_id.map(str::to_owned).or(conversation_owner_id)
 }
 
 /// Truncate a snippet to `AUTO_RECALL_SNIPPET_CHARS` on a char boundary, adding
@@ -3235,9 +3522,9 @@ async fn run_auto_recall(
     // Per-caller tenancy: auto-recall is the BUSIEST memory read path (every chat
     // turn), so it must apply the same owner filter as `/api/retrieval/search`, or a
     // bound-node member's turn would inject a colleague's private user-scope memory
-    // into the model context. The memory principal is the HOST CONVERSATION'S OWNER
-    // (already stamped by `gate_and_claim_conversation`). Unbound node → `node_bound`
-    // false → no filter (byte-identical). `node`/`project`-scope facts stay shared.
+    // into the model context. On an interactive turn the verified caller wins; the
+    // conversation owner is only the fallback for trusted programmatic callers.
+    // Unbound node → `node_bound` false → no filter (byte-identical).
     let registered_org = crate::sidecar::control_plane::registered_org();
     let node_bound = registered_org.is_some();
     // `caller_org_id` ALWAYS falls back to the node's own registered org when bound
@@ -3248,13 +3535,15 @@ async fn run_auto_recall(
     // org, and a `None` here would silently drop OKF grounding out of every first-turn
     // auto-recall on a bound node.
     let node_org_id = registered_org.map(|o| o.id);
-    let (caller_user_id, caller_org_id) = match current_conversation_id {
+    let (conversation_owner_id, caller_org_id) = match current_conversation_id {
         Some(cid) => match conversations.get_access_meta(cid).await {
             Ok(Some(t)) => (t.owner_user_id, t.org_id.or_else(|| node_org_id.clone())),
             _ => (None, node_org_id.clone()),
         },
         None => (None, node_org_id.clone()),
     };
+    let caller_user_id =
+        effective_recall_user_id(cfg.caller_user_id.as_deref(), conversation_owner_id);
 
     // Memory + Space half, gated by the agent's readable levels + Space allowlist
     // and the active project. Fetch more than top_k so dropping the recency-injected
@@ -3319,6 +3608,9 @@ async fn run_auto_recall(
     } else {
         None
     };
+    // Remember chats gates the read path as well as append-time indexing. Calling
+    // `search_messages` while it is off can lazily rebuild the semantic index.
+    let chat_memory_enabled = conversations.chat_memory_enabled();
     let chat_filter = visible_convo_ids.as_deref();
     // An EMPTY visible set on a bound node (anonymous caller, or a resolve error)
     // must yield NO chat hits — but `MessageIndex::search`/`MessageFtsIndex::search`
@@ -3338,7 +3630,7 @@ async fn run_auto_recall(
 
     // Past-chat half (current conversation excluded). `search_messages` returns
     // `Ok(None)` when no message index is wired — treat as no hits.
-    let mut chat_hits = if visible_empty {
+    let mut chat_hits = if !chat_memory_enabled || visible_empty {
         Vec::new()
     } else {
         match conversations
@@ -3364,7 +3656,7 @@ async fn run_auto_recall(
     // both surface the same message). The current conversation is excluded, same as
     // the semantic half. Fully fail-open. `assemble_recall_block` still caps the
     // TOTAL injected lines at `top_k`.
-    if cfg.fts_enabled && !visible_empty {
+    if cfg.fts_enabled && chat_memory_enabled && !visible_empty {
         match conversations
             .fts_search_messages(query, cfg.top_k, chat_filter)
             .await
@@ -3433,6 +3725,8 @@ pub async fn run_reply_text(
     skills: SkillRegistry,
     traces: TraceStore,
 ) -> anyhow::Result<String> {
+    crate::agent_execution::ensure_noninteractive_run_allowed(&agent_store, agent_id.as_deref())
+        .await?;
     // Pre-turn: a plugin may rewrite the inbound message, fold context into it, or
     // answer it outright. A `Handled` turn makes no model call, so it must persist
     // both rows itself (see `persist_handled_turn`).
@@ -3557,6 +3851,11 @@ pub async fn run_team_reply_text(
             "Team '{}' has no members. Add agents to the team first.",
             team.name
         );
+    }
+
+    for member_id in &team.members {
+        crate::agent_execution::ensure_noninteractive_run_allowed(&agent_store, Some(member_id))
+            .await?;
     }
 
     let deps = TeamRunDeps {
@@ -3855,16 +4154,21 @@ pub(crate) async fn run_text_turn_in(
             parts: vec![],
         }],
         agent_id,
+        model: None,
         conversation_id: Some(conversation_id),
         referenced_conversation_ids: Vec::new(),
         enable_long_term: false,
         cwd,
+        workspace_folders: Vec::new(),
         worktree_isolation,
         branch: None,
         worktree_path: None,
         worktree_branch,
         project_environment: None,
         companion_source: false,
+        client_tools: Vec::new(),
+        browser_context_consent: false,
+        browser_surface: None,
         target_agent_id: None,
         team_id: None,
         workflow_id: None,
@@ -3872,6 +4176,7 @@ pub(crate) async fn run_text_turn_in(
         skip_user_append: false,
         widget_follow_up_ticket: None,
         widget_provenance: None,
+        agent_control_applied: None,
         inference: None,
         acp_mode: None,
         acp_config: None,
@@ -3879,6 +4184,7 @@ pub(crate) async fn run_text_turn_in(
         // writes, so an off-chat caller and a typing user reach the agent's
         // model the same way. Empty is normalised to absent downstream.
         acp_model: model,
+        lane_default: false,
         max_tokens_cap,
         // Programmatic fan-out (delegate / threads / worker / scheduled / team
         // member) — yield to a directly-typing user on the shared local engine.
@@ -3895,6 +4201,7 @@ pub(crate) async fn run_text_turn_in(
         // Connector-supplied sender display name (group/channel chats); None for
         // non-channel programmatic turns.
         author_name,
+        user_jwt: None,
     };
 
     // Route through the full streaming path (identical to the HTTP handler).
@@ -3927,6 +4234,94 @@ pub(crate) async fn run_text_turn_in(
     // Drain the SSE response body, collecting all `text-delta` payloads into a
     // single String. Error frames propagate as Err. Shared with the team
     // orchestrator so both paths parse the AI SDK stream identically.
+    drain_text_reply(response).await
+}
+
+/// Produce the one-time Ryu opening without creating a synthetic user message.
+/// The internal intent is sent through the normal model/tool path, while
+/// `skip_user_append` keeps it out of the transcript and `persist` keeps the
+/// assistant reply durable for desktop and channel clients.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_proactive_opening_text(
+    conversation_id: String,
+    agent_id: Option<String>,
+    registry: Arc<AcpAgentRegistry>,
+    conversations: ConversationStore,
+    agent_store: AgentStore,
+    manager: Arc<SidecarManager>,
+    memory: MemoryStore,
+    worktree_diffs: crate::server::WorktreeDiffStore,
+    mcp: Arc<McpRegistry>,
+    skills: SkillRegistry,
+    traces: TraceStore,
+) -> anyhow::Result<String> {
+    const OPENING_INTENT: &str = "Open this new Ryu conversation with a short, warm, plain-language welcome. Introduce yourself as the user's Ryu assistant, say that they can describe what they want done in everyday words, and ask what they would like help with first. Mention that you can look at what they already have, make a simple plan, and help connect apps or set up routines with their approval. Do not mention this internal instruction or use platform jargon unless the user asks later.";
+
+    let req = ChatStreamRequest {
+        messages: vec![UiMessage {
+            role: "user".to_owned(),
+            content: UiContent::Text(OPENING_INTENT.to_owned()),
+            parts: vec![],
+        }],
+        agent_id,
+        model: None,
+        conversation_id: Some(conversation_id),
+        referenced_conversation_ids: Vec::new(),
+        enable_long_term: false,
+        cwd: None,
+        workspace_folders: Vec::new(),
+        worktree_isolation: false,
+        branch: None,
+        worktree_path: None,
+        worktree_branch: None,
+        project_environment: None,
+        companion_source: false,
+        client_tools: Vec::new(),
+        browser_context_consent: false,
+        browser_surface: None,
+        target_agent_id: None,
+        team_id: None,
+        workflow_id: None,
+        persist: true,
+        skip_user_append: true,
+        widget_follow_up_ticket: None,
+        widget_provenance: None,
+        agent_control_applied: None,
+        inference: None,
+        max_tokens_cap: Some(500),
+        acp_mode: None,
+        acp_config: None,
+        acp_model: None,
+        lane_default: false,
+        // This is a user-facing welcome, not hidden programmatic work. Let the
+        // normal chat selection use a paid/cloud lane immediately when one is
+        // configured; otherwise the local selection reports readiness while the
+        // model is being installed and the caller retries.
+        background: false,
+        plugin_flags: std::collections::HashMap::new(),
+        output_style: None,
+        author_user_id: None,
+        author_name: None,
+        user_jwt: None,
+    };
+
+    let response = route_chat_stream(
+        req,
+        registry,
+        conversations,
+        agent_store,
+        manager,
+        memory,
+        worktree_diffs,
+        mcp,
+        skills,
+        traces,
+        None,
+        None,
+        crate::routing_policy::reactive::TurnWatch::off(),
+    )
+    .await;
+
     drain_text_reply(response).await
 }
 
@@ -3967,16 +4362,21 @@ pub(crate) async fn run_text_turn_stream(
             parts: vec![],
         }],
         agent_id,
+        model: None,
         conversation_id: Some(conversation_id),
         referenced_conversation_ids: Vec::new(),
         enable_long_term: false,
         cwd: None,
+        workspace_folders: Vec::new(),
         worktree_isolation: false,
         branch: None,
         worktree_path: None,
         worktree_branch: None,
         project_environment: None,
         companion_source: false,
+        client_tools: Vec::new(),
+        browser_context_consent: false,
+        browser_surface: None,
         target_agent_id: None,
         team_id: None,
         workflow_id: None,
@@ -3984,17 +4384,20 @@ pub(crate) async fn run_text_turn_stream(
         skip_user_append: false,
         widget_follow_up_ticket: None,
         widget_provenance: None,
+        agent_control_applied: None,
         inference: None,
         max_tokens_cap: None,
         acp_mode: None,
         acp_config: None,
         acp_model: None,
+        lane_default: false,
         background: true,
         plugin_flags: std::collections::HashMap::new(),
         // Unstyled, same scope rule as [`run_text_turn_in`].
         output_style: None,
         author_user_id: None,
         author_name: None,
+        user_jwt: None,
     };
     route_chat_stream(
         req,
@@ -4190,16 +4593,21 @@ async fn run_member_text(
     let req = ChatStreamRequest {
         messages,
         agent_id: Some(member_id.to_owned()),
+        model: None,
         conversation_id,
         referenced_conversation_ids: Vec::new(),
         enable_long_term: false,
         cwd: None,
+        workspace_folders: Vec::new(),
         worktree_isolation: false,
         branch: None,
         worktree_path: None,
         worktree_branch: None,
         project_environment: None,
         companion_source: false,
+        client_tools: Vec::new(),
+        browser_context_consent: false,
+        browser_surface: None,
         target_agent_id: Some(member_id.to_owned()),
         team_id: None,
         workflow_id: None,
@@ -4207,11 +4615,13 @@ async fn run_member_text(
         skip_user_append: false,
         widget_follow_up_ticket: None,
         widget_provenance: None,
+        agent_control_applied: None,
         inference: None,
         max_tokens_cap: None,
         acp_mode: None,
         acp_config: None,
         acp_model: None,
+        lane_default: false,
         // Programmatic fan-out (delegate / threads / worker / scheduled / team
         // member) — yield to a directly-typing user on the shared local engine.
         background: true,
@@ -4221,6 +4631,7 @@ async fn run_member_text(
         // Programmatic per-member turn, no human author to attribute.
         author_user_id: None,
         author_name: None,
+        user_jwt: None,
     };
     // Team members run with auto-recall OFF: a single user message is fanned out
     // to N members, so per-member recall would be N× redundant retrieval on the
@@ -4912,13 +5323,43 @@ fn apply_hook_effort(req: &mut ChatStreamRequest, effort: &str) {
         .insert("reasoning_effort".to_owned(), serde_json::json!(effort));
 
     if let Some(config) = req.acp_config.as_mut() {
-        if let Some(config_id) = ["effort", "thought_level"]
+        if let Some(config_id) = ["effort", "thought_level", "reasoning_effort"]
             .into_iter()
             .find(|id| config.contains_key(*id))
         {
             config.insert(config_id.to_owned(), effort.to_owned());
         }
     }
+}
+
+fn clear_hook_effort(req: &mut ChatStreamRequest) {
+    if let Some(inference) = req.inference.as_mut() {
+        inference.extra.remove("reasoning_effort");
+    }
+    if let Some(config) = req.acp_config.as_mut() {
+        for key in ["effort", "thought_level", "reasoning_effort"] {
+            config.remove(key);
+        }
+    }
+}
+
+/// Merge ACP config options selected by a pre-model hook into this turn only.
+/// Non-ACP routes carry the field harmlessly and ignore it; ACP applies the
+/// resulting map through its existing best-effort `session/set_config_option`
+/// path. Hook options intentionally win over the client's same-turn value so a
+/// quota policy can activate an emergency mode at the threshold it describes.
+fn apply_hook_acp_config(
+    req: &mut ChatStreamRequest,
+    acp_config: &std::collections::HashMap<String, String>,
+) {
+    if acp_config.is_empty() {
+        return;
+    }
+    req.acp_config.get_or_insert_with(Default::default).extend(
+        acp_config
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4967,41 +5408,6 @@ pub async fn route_chat_stream(
                 origin_server: p.origin_server.clone(),
             });
 
-    // Persist the latest user turn before we stream the reply, so history
-    // survives even if the connection drops mid-stream. Skipped when `persist`
-    // is false (the team orchestrator records the user turn once itself and runs
-    // each member with `persist = false` to avoid N duplicate user rows).
-    if req.persist && !req.skip_user_append {
-        if let Some(conversation_id) = req.conversation_id.clone() {
-            if !user_text.is_empty() {
-                if let Err(e) = conversations
-                    .append_message_as_with_provenance(
-                        &conversation_id,
-                        "user",
-                        &user_text,
-                        req.agent_id.as_deref(),
-                        // Verified human author (Phase 0): stamped from the request's
-                        // user JWT in `chat_stream`. `None` in the anonymous /
-                        // loopback flow, which keeps the single-tenant behavior.
-                        req.author_user_id.as_deref(),
-                        // Unverified sender display name for group/channel chats.
-                        req.author_name.as_deref(),
-                        // Tenancy is stamped UPSTREAM, before this ever runs:
-                        // `chat_stream` gates + claims the conversation
-                        // (`gate_and_claim_conversation`) so the row already carries
-                        // its owner. The choke point COALESCEs, so passing
-                        // `Unattributed` here preserves that owner and never wipes it.
-                        Tenancy::Unattributed,
-                        widget_provenance.as_ref(),
-                    )
-                    .await
-                {
-                    tracing::warn!("failed to persist user message: {e:#}");
-                }
-            }
-        }
-    }
-
     // Load the unified provider/model/strategy registry (env > file > literal).
     // This is the single source of truth for the default chat base_url and model.
     let provider_reg = ProviderRegistry::load();
@@ -5032,7 +5438,7 @@ pub async fn route_chat_stream(
     // session keying, and persistence below all read this resolved id. Runs before
     // `resolve_binding` so the resolved agent's engine/model binding is loaded.
     // Always yields a concrete id (fails open to `default_agent_id`, else "ryu").
-    let effective_agent_id = if effective_agent_id.as_deref()
+    let mut effective_agent_id = if effective_agent_id.as_deref()
         == Some(crate::agent_routing::AUTO_AGENT_ID)
     {
         let resolved =
@@ -5053,6 +5459,35 @@ pub async fn route_chat_stream(
     } else {
         effective_agent_id
     };
+
+    // Interactive chats consume the cloud lane when it is configured, and
+    // transparently fall back to the local lane otherwise. Programmatic work
+    // (plugins, delegated turns, and local utility features) consumes the local
+    // lane unless it provides an explicit model. Ryu is the built-in facade
+    // that can carry the agent, provider, model, and effort together; external
+    // ACP agents are left to their advertised controls below.
+    if effective_agent_id.is_none() || effective_agent_id.as_deref() == Some("ryu") {
+        let selection = if req.background {
+            crate::agent_selection::local_default_selection()
+        } else {
+            crate::agent_selection::chat_default_selection()
+        };
+        let using_lane_default = req
+            .acp_model
+            .as_deref()
+            .is_none_or(|model| model.trim().is_empty());
+        if using_lane_default && !selection.agent_id.is_empty() {
+            req.lane_default = true;
+            effective_agent_id = Some(selection.agent_id.clone());
+            req.agent_id = effective_agent_id.clone();
+        }
+        if using_lane_default && !selection.model.is_empty() {
+            req.acp_model = Some(selection.model);
+        }
+        if using_lane_default && !selection.effort.is_empty() {
+            apply_hook_effort(&mut req, &selection.effort);
+        }
+    }
 
     // Resolve the agent's engine binding from the store (U6), then map it to a
     // concrete route. The binding lets a custom agent target a local engine or a
@@ -5089,6 +5524,18 @@ pub async fn route_chat_stream(
         ),
     };
 
+    // The desktop's Standard/Expert composer sends its explicit OpenAI-compatible
+    // pin as `model`. Apply it before the policy pass so routing rules can still
+    // deliberately replace it, while Simple mode (which omits the field) keeps
+    // the automatic binding/default behavior.
+    let model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or(model);
+
     // Threshold-driven fallback (`crate::routing_policy`). THE enforcement point
     // for it: every chat turn — gateway-routed and ACP alike — passes through
     // here with its agent and model resolved but nothing dispatched yet, and the
@@ -5100,14 +5547,14 @@ pub async fn route_chat_stream(
     // Inert unless the user wrote a rule: `advice_for_turn` short-circuits on an
     // empty policy before it reads a single signal.
     let (
-        effective_agent_id,
-        engine,
+        mut effective_agent_id,
+        mut engine,
         mut model,
-        agent_slots,
-        persona,
-        composio_actions,
-        skills_allowlist,
-        identity_profile_ids,
+        mut agent_slots,
+        mut persona,
+        mut composio_actions,
+        mut skills_allowlist,
+        mut identity_profile_ids,
     ) = apply_routing_policy(
         effective_agent_id,
         engine,
@@ -5145,15 +5592,16 @@ pub async fn route_chat_stream(
             },
         )
         .await;
-        if let Some((replacement, effort, reason)) =
+        if let Some((replacement, effort, acp_config, reason)) =
             directives
                 .into_iter()
                 .find_map(|directive| match directive {
                     crate::plugin_host::HookDirective::SelectModel {
                         model,
                         effort,
+                        acp_config,
                         reason,
-                    } if !model.trim().is_empty() => Some((model, effort, reason)),
+                    } if !model.trim().is_empty() => Some((model, effort, acp_config, reason)),
                     _ => None,
                 })
         {
@@ -5172,6 +5620,294 @@ pub async fn route_chat_stream(
                 .filter(|value| !value.is_empty())
             {
                 apply_hook_effort(&mut req, effort);
+            }
+            if let Some(acp_config) = acp_config.as_ref() {
+                apply_hook_acp_config(&mut req, acp_config);
+            }
+        }
+    }
+
+    // An active agent may request a one-turn promotion or handoff through the
+    // governed `agent_control.set_active_target` tool. Consume the persisted
+    // patch only for a normal interactive turn: an explicit @agent, team, or
+    // workflow target is a stronger user intent and leaves the pending control
+    // for the next ordinary turn. Applying here keeps the ordinary model router
+    // as the default and makes agent control the deliberate post-routing override.
+    if !req.background
+        && req.target_agent_id.is_none()
+        && req.team_id.is_none()
+        && req.workflow_id.is_none()
+    {
+        if let Some(conversation_id) = req.conversation_id.clone() {
+            match conversations
+                .take_pending_agent_control(&conversation_id)
+                .await
+            {
+                Ok(Some(control)) => {
+                    if let Err(error) = crate::agent_control::validate_pending_control(
+                        &control,
+                        effective_agent_id.as_deref(),
+                        &agent_store,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            requested_by = %control.requested_by,
+                            agent_id = ?control.patch.agent_id,
+                            error = %error,
+                            "discarding stale or invalid agent control before applying it"
+                        );
+                    } else {
+                        let patch = control.patch;
+                        if patch.clear_agent_id {
+                            // Clearing the agent resumes the node's ordinary
+                            // interactive lane. Re-resolve the full binding so
+                            // the old agent's persona, tools, skills, and identity
+                            // scope cannot leak into the automatic target.
+                            let selection = if req.background {
+                                crate::agent_selection::local_default_selection()
+                            } else {
+                                crate::agent_selection::chat_default_selection()
+                            };
+                            let target_agent_id = if selection.agent_id.trim().is_empty() {
+                                crate::registry::DEFAULT_AGENT_ID.to_owned()
+                            } else {
+                                selection.agent_id.trim().to_owned()
+                            };
+                            let (
+                                next_engine,
+                                next_model,
+                                next_slots,
+                                next_persona,
+                                next_composio_actions,
+                                next_skills_allowlist,
+                                next_identity_profile_ids,
+                            ) = resolve_binding(&target_agent_id, &agent_store).await;
+                            effective_agent_id = Some(target_agent_id.clone());
+                            req.agent_id = Some(target_agent_id.clone());
+                            req.lane_default = true;
+                            req.acp_model = (!selection.model.trim().is_empty())
+                                .then(|| selection.model.trim().to_owned());
+                            if !selection.effort.trim().is_empty() {
+                                apply_hook_effort(&mut req, selection.effort.trim());
+                            }
+                            engine = next_engine;
+                            model = next_model;
+                            agent_slots = next_slots;
+                            persona = next_persona;
+                            composio_actions = next_composio_actions;
+                            skills_allowlist = next_skills_allowlist;
+                            identity_profile_ids = next_identity_profile_ids;
+                            if let Err(error) = conversations
+                                .add_participant(
+                                    &conversation_id,
+                                    &target_agent_id,
+                                    Tenancy::Unattributed,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    conversation_id,
+                                    agent_id = %target_agent_id,
+                                    "agent control could not add the automatic target participant: {error:#}"
+                                );
+                            }
+                            if let Err(error) = conversations
+                                .set_active_agent(&conversation_id, &target_agent_id)
+                                .await
+                            {
+                                tracing::warn!(
+                                    conversation_id,
+                                    agent_id = %target_agent_id,
+                                    "agent control could not update the conversation target after clearing the agent: {error:#}"
+                                );
+                            }
+                        }
+                        if let Some(target_agent_id) = patch.agent_id.clone() {
+                            let (
+                                next_engine,
+                                next_model,
+                                next_slots,
+                                next_persona,
+                                next_composio_actions,
+                                next_skills_allowlist,
+                                next_identity_profile_ids,
+                            ) = resolve_binding(&target_agent_id, &agent_store).await;
+                            effective_agent_id = Some(target_agent_id.clone());
+                            req.agent_id = Some(target_agent_id.clone());
+                            // A handoff without an explicit model resumes the new
+                            // agent's binding rather than leaking the old agent's
+                            // per-turn model pin across the boundary.
+                            req.acp_model = None;
+                            engine = next_engine;
+                            model = next_model;
+                            agent_slots = next_slots;
+                            persona = next_persona;
+                            composio_actions = next_composio_actions;
+                            skills_allowlist = next_skills_allowlist;
+                            identity_profile_ids = next_identity_profile_ids;
+                            if let Err(error) = conversations
+                                .add_participant(
+                                    &conversation_id,
+                                    &target_agent_id,
+                                    Tenancy::Unattributed,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    conversation_id,
+                                    agent_id = %target_agent_id,
+                                    "agent control could not add the handoff participant: {error:#}"
+                                );
+                            }
+                            if let Err(error) = conversations
+                                .set_active_agent(&conversation_id, &target_agent_id)
+                                .await
+                            {
+                                tracing::warn!(
+                                    conversation_id,
+                                    agent_id = %target_agent_id,
+                                    "agent control could not update the conversation target: {error:#}"
+                                );
+                            }
+                        }
+
+                        if patch.clear_model {
+                            req.acp_model = None;
+                        } else if let Some(target_model) = patch.model.clone() {
+                            model = Some(target_model.clone());
+                            req.acp_model = Some(target_model);
+                        }
+                        if patch.clear_effort {
+                            clear_hook_effort(&mut req);
+                        } else if let Some(effort) = patch.effort.clone() {
+                            apply_hook_effort(&mut req, &effort);
+                        }
+
+                        let effective_model = req
+                            .acp_model
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                            .or_else(|| model.clone());
+                        let effective_effort = req
+                            .inference
+                            .as_ref()
+                            .and_then(|inference| inference.extra.get("reasoning_effort"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                            .or_else(|| {
+                                req.acp_config.as_ref().and_then(|config| {
+                                    ["effort", "thought_level", "reasoning_effort"]
+                                        .into_iter()
+                                        .find_map(|key| {
+                                            config
+                                                .get(key)
+                                                .cloned()
+                                                .filter(|value| !value.is_empty())
+                                        })
+                                })
+                            });
+                        let applied = crate::agent_control::AgentControlApplied {
+                            requested_agent_id: patch.agent_id,
+                            requested_model: patch.model,
+                            requested_effort: patch.effort,
+                            effective_agent_id: effective_agent_id.clone(),
+                            effective_model,
+                            effective_effort,
+                            model_cleared: patch.clear_model,
+                            effort_cleared: patch.clear_effort,
+                        };
+                        tracing::info!(
+                            conversation_id,
+                            agent_id = ?applied.effective_agent_id,
+                            model = ?applied.effective_model,
+                            effort = ?applied.effective_effort,
+                            "agent-level control applied to next turn"
+                        );
+                        req.agent_control_applied = Some(applied);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        conversation_id,
+                        "agent-level control could not be loaded; continuing with normal routing: {error:#}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Lifecycle is enforced after every routing/handoff decision and before any
+    // memory write, worktree allocation, model connection, or tool bridge is
+    // opened. A foreground trial is the one deliberately allowed evaluation
+    // path; all background/channel/delegated requests require active. Keep the
+    // shared helpers as the authority so direct chat, team members, and future
+    // callers cannot drift into subtly different lifecycle rules.
+    if let Some(agent_id) = effective_agent_id.as_deref() {
+        let lifecycle = if req.background {
+            crate::agent_execution::ensure_noninteractive_run_allowed(&agent_store, Some(agent_id))
+                .await
+        } else {
+            crate::agent_execution::ensure_foreground_run_allowed(&agent_store, Some(agent_id))
+                .await
+        };
+        if let Err(error) = lifecycle {
+            return error_stream(error.to_string());
+        }
+        match agent_store.get(agent_id).await {
+            Ok(Some(record)) => {
+                if record.lifecycle_status == crate::agents::AgentLifecycleStatus::Trial
+                    || record.safety_profile == crate::agents::AgentSafetyProfile::ReadOnly
+                {
+                    // Evaluation/read-only turns may inspect existing memory but
+                    // must not create durable facts or mirror raw text out.
+                    req.enable_long_term = false;
+                }
+            }
+            Ok(None) => {
+                return error_stream(format!("Unknown agent: {agent_id}"));
+            }
+            Err(error) => {
+                tracing::warn!(agent_id, "failed to load agent lifecycle: {error:#}");
+                return error_stream("Unable to load the selected agent's lifecycle.".to_owned());
+            }
+        }
+    }
+
+    // Persist the latest user turn after routing and lifecycle gates have
+    // accepted it, so a rejected Draft or non-active background turn cannot
+    // leave a durable message behind. It still happens before model work, so
+    // history survives if the connection drops mid-stream. Skipped when
+    // `persist` is false because the team orchestrator records the user turn
+    // once itself and runs each member without duplicate rows.
+    if req.persist && !req.skip_user_append {
+        if let Some(conversation_id) = req.conversation_id.clone() {
+            if !user_text.is_empty() {
+                if let Err(e) = conversations
+                    .append_message_as_with_provenance(
+                        &conversation_id,
+                        "user",
+                        &user_text,
+                        req.agent_id.as_deref(),
+                        // Verified human author (Phase 0): stamped from the request's
+                        // user JWT in `chat_stream`. `None` in the anonymous /
+                        // loopback flow, which keeps the single-tenant behavior.
+                        req.author_user_id.as_deref(),
+                        // Unverified sender display name for group/channel chats.
+                        req.author_name.as_deref(),
+                        // Tenancy is stamped UPSTREAM, before this ever runs:
+                        // `chat_stream` gates + claims the conversation
+                        // (`gate_and_claim_conversation`) so the row already carries
+                        // its owner. The choke point COALESCEs, so passing
+                        // `Unattributed` here preserves that owner and never wipes it.
+                        Tenancy::Unattributed,
+                        widget_provenance.as_ref(),
+                    )
+                    .await
+                {
+                    tracing::warn!("failed to persist user message: {e:#}");
+                }
             }
         }
     }
@@ -5319,10 +6055,7 @@ pub async fn route_chat_stream(
         Some(state) => user_personalization_block(&state.preferences).await,
         None => None,
     };
-    let long_term_system = merge_system_prompt(
-        long_term_system,
-        user_personalization,
-    );
+    let long_term_system = merge_system_prompt(long_term_system, user_personalization);
 
     // Project instructions remain host-discovered data, but injection belongs to
     // the rules plugin. Keeping the raw legacy file and the normalized folder
@@ -5362,6 +6095,16 @@ pub async fn route_chat_stream(
     let docs_hint = ryu_docs_hint();
     breakdown.add_text("system", "Ryu docs", docs_hint.as_deref());
     let long_term_system = merge_system_prompt(docs_hint, long_term_system);
+    let platform_contract = crate::ryu_platform::operating_contract(
+        effective_agent_id.as_deref(),
+        crate::safe_mode::is_active(),
+    );
+    breakdown.add_text(
+        "platform",
+        "Ryu everyday setup guide",
+        platform_contract.as_deref(),
+    );
+    let long_term_system = merge_system_prompt(platform_contract, long_term_system);
 
     // The agent scope for long-term memory facts — the SAME one the recency path
     // (`assemble_long_term_system_message`) used, so backfill + dedup ids line up.
@@ -5497,12 +6240,13 @@ pub async fn route_chat_stream(
         crate::memory_provider::sync_turn(&user_text, "user");
     }
 
-    let route = match agent_route(
+    let route = match agent_route_with_user_jwt(
         effective_agent_id.as_deref(),
         engine.as_deref(),
         model.as_deref(),
         &registry,
         &provider_reg,
+        req.user_jwt.as_deref(),
     ) {
         Some(r) => r,
         None => {
@@ -5783,9 +6527,12 @@ pub async fn route_chat_stream(
                     // branch — chat egress is via the healthy gateway, so every
                     // tool dispatch is governed through `/v1/exec/tool` (D5). The
                     // agent's allowlist narrows which app render tools are offered.
-                    let tool_allowlist = effective_agent_id
-                        .as_deref()
-                        .and_then(|id| registry.allowlist_for(id));
+                    let tool_allowlist = resolve_agent_tool_allowlist(
+                        effective_agent_id.as_deref(),
+                        registry.as_ref(),
+                        &agent_store,
+                    )
+                    .await;
                     // The governed chat tool loop has no built-in widget producers
                     // left (the in-process Ryu Apps provider was removed), so the
                     // loop is permanently inert; the generic emit/host machinery
@@ -5823,6 +6570,7 @@ pub async fn route_chat_stream(
                         // This hop targets the gateway, so the node's own routing
                         // preferences may ride along (see `node_routing_header`).
                         crate::sidecar::gateway::node_routing_header(),
+                        None,
                         watch.clone(),
                     )
                     .await;
@@ -5887,6 +6635,7 @@ pub async fn route_chat_stream(
                 None,
                 // …and no gateway on this hop → no `x-ryu-node-routing` either.
                 None,
+                None,
                 watch.clone(),
             )
             .await
@@ -5909,6 +6658,20 @@ pub async fn route_chat_stream(
             // Local engines go direct (no gateway hop), so the governed chat tool
             // loop is OFF here — dispatch must be gateway-governed (D5). A local
             // model served THROUGH the gateway takes the OpenAiCompat branch above.
+            let native_turn_control = if engine == "llamacpp" {
+                turn_control::NativeTurnControl::new(
+                    req.conversation_id.as_deref(),
+                    base_url.clone(),
+                    model.clone(),
+                    sampling
+                        .extra
+                        .get("reasoning_effort")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                )
+            } else {
+                None
+            };
             route_openai_stream(
                 req,
                 base_url,
@@ -5934,6 +6697,7 @@ pub async fn route_chat_stream(
                 None,
                 // …and no gateway on this hop → no `x-ryu-node-routing` either.
                 None,
+                native_turn_control,
                 watch.clone(),
             )
             .await
@@ -5960,9 +6724,12 @@ pub async fn route_chat_stream(
             // Resolve the per-agent allowlist so the MCP bridge only offers the
             // tools the agent is permitted to call (AC3 governance). Use the
             // effective agent id so target_agent_id routing gets the correct allowlist.
-            let allowlist = effective_agent_id
-                .as_deref()
-                .and_then(|id| registry.allowlist_for(id));
+            let allowlist = resolve_agent_tool_allowlist(
+                effective_agent_id.as_deref(),
+                registry.as_ref(),
+                &agent_store,
+            )
+            .await;
             // Effective agent id for the MCP bridge (PTC scoping). Falls back to
             // the ACP transport id form when no agent id is set.
             let bridge_agent_id = effective_agent_id
@@ -5978,7 +6745,7 @@ pub async fn route_chat_stream(
             // The ACP plane always runs a tool loop (the MCP bridge), so it is the
             // one plane where progressive disclosure is safe: inject only the L1
             // index (+ any always-on bodies) and let the model load full bodies on
-            // demand via `skills__load`. When the global mode is `full` (or there
+            // demand via `skills.load`. When the global mode is `full` (or there
             // are no progressive skills) we fall back to the full-body block. The
             // no-tool openai-compat path always uses the full block (see
             // `route_openai_stream`), so a weak model is never starved.
@@ -6120,6 +6887,7 @@ pub async fn route_chat_stream(
                 // no gateway on this hop → no `ryu_smart_route`.
                 None,
                 // …and no gateway on this hop → no `x-ryu-node-routing` either.
+                None,
                 None,
                 watch.clone(),
             )
@@ -6379,6 +7147,9 @@ async fn connect_openai(
     // less gracefully than a gateway ignores one. `None` on an untouched install,
     // which keeps the request byte-identical to before this channel existed.
     node_routing: Option<String>,
+    // Provider-native llama.cpp control is request-scoped and must never be
+    // inferred for a Gateway or arbitrary OpenAI-compatible endpoint.
+    reasoning_control: bool,
 ) -> Result<reqwest::Response, String> {
     let mut payload_map = serde_json::Map::new();
     payload_map.insert("model".to_owned(), Value::String(model.to_owned()));
@@ -6410,6 +7181,9 @@ async fn connect_openai(
     // agent set nothing, so the body stays identical to the pre-feature shape.
     if !sampling.is_empty() {
         sampling.apply_to_body(sampling_engine, &mut payload_map);
+    }
+    if reasoning_control {
+        payload_map.insert("reasoning_control".to_owned(), Value::Bool(true));
     }
     let payload = Value::Object(payload_map);
 
@@ -6483,11 +7257,11 @@ async fn connect_openai(
     if !composio_actions.is_empty() {
         builder = builder.header("x-ryu-composio-actions", composio_actions.join(","));
         // Canonical egress allowlist header (Contract 7, #477): `x-ryu-tools` is a
-        // CSV of fully-qualified tool ids; Composio actions are `composio__<slug>`.
+        // CSV of fully-qualified tool ids; Composio actions are `composio.<slug>`.
         // The gateway reads `x-ryu-tools` first with the legacy header as fallback.
         let tool_ids = composio_actions
             .iter()
-            .map(|slug| format!("composio__{slug}"))
+            .map(|slug| format!("composio.{slug}"))
             .collect::<Vec<_>>()
             .join(",");
         builder = builder.header("x-ryu-tools", tool_ids);
@@ -6581,6 +7355,7 @@ async fn connect_with_fallback(
     // `smart_route_override`, forwarded only on the primary gateway-forward
     // attempt; the fallback leg targets a raw provider.
     node_routing: Option<String>,
+    reasoning_control: bool,
 ) -> Result<reqwest::Response, String> {
     match connect_openai(
         messages,
@@ -6600,6 +7375,7 @@ async fn connect_with_fallback(
         tools,
         smart_route_override,
         node_routing,
+        reasoning_control,
     )
     .await
     {
@@ -6643,6 +7419,7 @@ async fn connect_with_fallback(
                 // can reject an unknown header far less gracefully than it ignores
                 // an unknown body field.
                 None,
+                false,
             )
             .await
             {
@@ -6733,6 +7510,10 @@ async fn route_openai_stream<F, Fut>(
     // its own extra firewall rules). `Some` only on the gateway-forward path, for
     // the same reason `smart_route_override` is.
     node_routing: Option<String>,
+    // A provider-native in-flight reasoning control target. Only direct
+    // llama.cpp routes populate this; the stream suppresses it when a browser
+    // tool loop is active because ending reasoning must not bypass tool policy.
+    native_turn_control: Option<turn_control::NativeTurnControl>,
     // How this turn ended, for the reactive failover wrapper. Disarmed on every
     // path but the interactive chat one.
     watch: crate::routing_policy::reactive::TurnWatch,
@@ -6863,22 +7644,35 @@ where
     // attribution and budgets are live. `None` on anonymous/loopback turns.
     let user_id = req.author_user_id.clone();
 
-    // Governed chat tool loop (R1): there are no built-in widget render tools left
-    // to offer (the in-process Ryu Apps provider was removed), so the payload is
-    // always empty and the loop reduces to the exact prior single-shot behaviour.
-    // The generic loop machinery below stays dormant for future third-party
-    // widget producers.
+    // Browser client tools are offered only when the authenticated caller opted
+    // into browser-context consent. The closed prefix check prevents a client
+    // from turning this continuation lane into an arbitrary server tool bridge.
     let _ = &tool_allowlist;
-    let tools_payload: Vec<Value> = Vec::new();
+    let client_tools_payload: Vec<Value> = if req.browser_context_consent {
+        req.client_tools
+            .iter()
+            .filter(|tool| allowed_client_tool_schema(tool))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let client_tool_mode = !client_tools_payload.is_empty();
+    let tools_payload: Vec<Value> = client_tools_payload;
 
     // A loop with no tools to offer is just a plain single-shot chat.
-    let tool_loop_active = tools_enabled && !tools_payload.is_empty();
+    let tool_loop_active = !tools_payload.is_empty() && (tools_enabled || client_tool_mode);
+    let native_turn_control = native_turn_control.filter(|_| !tool_loop_active);
+    let native_reasoning_control = native_turn_control.is_some();
 
     // Values moved into the (`'static`) stream. The connection now happens INSIDE
     // the stream so it can be re-issued per tool-loop iteration.
     let companion_source = req.companion_source;
     let background = req.background;
     let http_client = shared_http_client();
+    let agent_control_applied = req.agent_control_applied.clone();
+    let client_tool_owner_user_id = req.author_user_id.clone();
+    let client_tool_conversation_id = req.conversation_id.clone();
 
     // Bounded number of tool-executing rounds. After the cap, one final tool-free
     // request produces a closing answer instead of terminating mid-tool-result.
@@ -6890,8 +7684,15 @@ where
         // single terminal exit (or once on any error exit).
         let mut reply_all = String::new();
         let mut iteration: usize = 0;
+        let turn_registration = native_turn_control.map(turn_control::register);
 
         yield Ok::<_, std::convert::Infallible>(ui_start());
+        if let Some(control) = agent_control_applied.as_ref() {
+            yield Ok::<_, std::convert::Infallible>(ui_data(
+                "ryu-agent-control",
+                &serde_json::to_value(control).unwrap_or(Value::Null),
+            ));
+        }
 
         loop {
             // Offer tools only while under the cap. Once at the cap we send a
@@ -6920,6 +7721,7 @@ where
                 request_tools,
                 smart_route_override.as_ref(),
                 node_routing.clone(),
+                native_reasoning_control,
             )
             .await
             {
@@ -7053,6 +7855,19 @@ where
                     }
 
                     if let Ok(json) = serde_json::from_str::<Value>(&data) {
+                        if let Some(completion_id) = json.get("id").and_then(Value::as_str) {
+                            if let Some(registration) = turn_registration.as_ref() {
+                                if turn_control::set_completion_id(
+                                    &registration.turn_id,
+                                    completion_id,
+                                ) {
+                                    yield Ok::<_, std::convert::Infallible>(ui_data(
+                                        "ryu-turn-control",
+                                        &turn_control::descriptor(registration, "reasoning"),
+                                    ));
+                                }
+                            }
+                        }
                         // Stats siblings (llama.cpp `timings` / OpenAI `usage`)
                         // arrive on a trailing `choices: []` chunk; keep the last.
                         if json.get("timings").is_some_and(Value::is_object) {
@@ -7070,6 +7885,14 @@ where
                             .and_then(|t| t.as_str())
                         {
                             if !delta_text.is_empty() {
+                                if let Some(registration) = turn_registration.as_ref() {
+                                    if turn_control::mark_answering(&registration.turn_id) {
+                                        yield Ok::<_, std::convert::Infallible>(ui_data(
+                                            "ryu-turn-control",
+                                            &turn_control::descriptor(registration, "answering"),
+                                        ));
+                                    }
+                                }
                                 if first_token_at.is_none() {
                                     first_token_at = Some(std::time::Instant::now());
                                 }
@@ -7226,6 +8049,68 @@ where
             for t in &tool_calls {
                 let args_val: Value =
                     serde_json::from_str(&t.arguments).unwrap_or(Value::Object(Default::default()));
+                if client_tool_mode {
+                    let Some(conversation_id) = client_tool_conversation_id.as_deref() else {
+                        yield Ok::<_, std::convert::Infallible>(ui_tool_output(
+                            &t.id,
+                            &serde_json::json!({ "isError": true, "error": "browser client tools require a conversation" }),
+                            true,
+                            None,
+                        ));
+                        continue;
+                    };
+                    let (nonce, expires_at_ms, receiver) = register_client_tool_waiter(
+                        conversation_id,
+                        &t.id,
+                        client_tool_owner_user_id.clone(),
+                    );
+                    yield Ok::<_, std::convert::Infallible>(ui_tool_input(
+                        &t.id,
+                        &t.name,
+                        &args_val,
+                        true,
+                        Some(tool_now_ms()),
+                    ));
+                    yield Ok::<_, std::convert::Infallible>(ui_data(
+                        "browser-tool-request",
+                        &serde_json::json!({
+                            "conversationId": conversation_id,
+                            "expiresAtMs": expires_at_ms,
+                            "nonce": nonce,
+                            "toolCallId": t.id,
+                            "toolName": t.name,
+                            "input": args_val,
+                        }),
+                    ));
+                    let result = match tokio::time::timeout(
+                        std::time::Duration::from_millis(
+                            (expires_at_ms - client_tool_now_ms()).max(1) as u64,
+                        ),
+                        receiver,
+                    )
+                    .await
+                    {
+                        Ok(Ok(value)) => value,
+                        Ok(Err(_)) => serde_json::json!({ "isError": true, "error": "browser tool stream closed" }),
+                        Err(_) => serde_json::json!({ "isError": true, "error": "browser tool approval timed out" }),
+                    };
+                    yield Ok::<_, std::convert::Infallible>(ui_tool_output(
+                        &t.id,
+                        &result,
+                        true,
+                        None,
+                    ));
+                    let content = match &result {
+                        Value::String(value) => value.clone(),
+                        other => other.to_string(),
+                    };
+                    oai_messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": t.id,
+                        "content": mcp_bridge::neutralize_external_result(&t.name, content),
+                    }));
+                    continue;
+                }
                 // No `ToolClock` here: this path runs the call inline, so the
                 // start and the finish are two statements apart.
                 let tool_started = tool_now_ms();
@@ -8121,7 +9006,25 @@ async fn route_acp_stream(
         .map(str::trim)
         .filter(|summary| !summary.is_empty())
         .map(str::to_owned);
-    let prompt = build_acp_prompt(long_term_system, short_term, &user_message);
+    let source_folders_hint = if req.workspace_folders.len() > 1 {
+        let mut hint = String::from(
+            "## Project source folders\nThis project includes these source folders. ".to_owned(),
+        );
+        hint.push_str("You may read and edit files in any of them:\n");
+        for folder in &req.workspace_folders {
+            hint.push_str("- `");
+            hint.push_str(&folder.replace('`', "'").replace('\n', " "));
+            hint.push_str("`\n");
+        }
+        Some(hint)
+    } else {
+        None
+    };
+    let prompt = build_acp_prompt(
+        merge_system_prompt(long_term_system, source_folders_hint),
+        short_term,
+        &user_message,
+    );
     let images = last_user_images(&req.messages);
 
     // [QA B2] Make the composer's model pick actually reach the flagship `ryu`
@@ -8139,8 +9042,10 @@ async fn route_acp_stream(
             .map(str::trim)
             .filter(|m| !m.is_empty())
         {
-            if let Err(e) = crate::pi_config::persist_turn_model(model) {
-                tracing::warn!(error = %e, model, "could not persist ryu model pick into Pi config");
+            if !req.lane_default {
+                if let Err(e) = crate::pi_config::persist_turn_model(model) {
+                    tracing::warn!(error = %e, model, "could not persist ryu model pick into Pi config");
+                }
             }
             // Keep the resident local engine aligned with the pick: selecting
             // Apple Intelligence (apple-foundationmodel) makes the on-device
@@ -8173,6 +9078,10 @@ async fn route_acp_stream(
             .into_iter()
             .collect(),
         model_id: req.acp_model.clone().filter(|s| !s.is_empty()),
+        agent_effort: req
+            .agent_control_applied
+            .as_ref()
+            .and_then(|control| control.requested_effort.clone()),
         interactive: true,
     };
 
@@ -8198,6 +9107,19 @@ async fn route_acp_stream(
         .is_some_and(|rewrite| rewrite.fresh_session);
     let prompt = rewritten_prompt.map_or(prompt, |rewrite| rewrite.text);
 
+    // The primary cwd is already the first ACP root. Secondary roots are
+    // validated here and included in the session pool key so a warm session can
+    // never inherit a different project's filesystem scope.
+    let requested_cwd = req.cwd.as_deref().map(PathBuf::from);
+    let additional_directories = req
+        .workspace_folders
+        .iter()
+        .map(PathBuf::from)
+        .filter(|path| requested_cwd.as_ref() != Some(path))
+        .filter(|path| path != &cwd)
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+
     // ACP event channel — the completion task is the sole consumer.
     let mut acp_rx = acp::spawn_acp_task(
         spawn_cmd,
@@ -8207,7 +9129,8 @@ async fn route_acp_stream(
         user_message.clone(),
         fresh_session,
         images,
-        cwd,
+        cwd.clone(),
+        additional_directories,
         project_environment,
         Some(mcp),
         allowlist,
@@ -8239,6 +9162,7 @@ async fn route_acp_stream(
     // task outlives this function, and a `message_end` hook reads its own composer
     // flag to decide whether to act this turn.
     let plugin_flags = req.plugin_flags.clone();
+    let agent_control_applied = req.agent_control_applied.clone();
     tokio::spawn(async move {
         // After stream completes the guard is transferred into WorktreeRun
         // (so the worktree survives for apply). If abandoned before completion
@@ -8361,6 +9285,11 @@ async fn route_acp_stream(
         let mut usage_cost: Option<(f64, String)> = None;
 
         emit!(ui_start());
+        if let Some(control) = agent_control_applied.as_ref() {
+            let data = serde_json::to_value(control).unwrap_or(Value::Null);
+            emit!(ui_data("ryu-agent-control", &data,));
+            acc.data("ryu-agent-control", &data);
+        }
 
         // ACP context replay may compact older turns into an explicit summary.
         // Make that boundary visible in the transcript as well as the Context
@@ -9016,6 +9945,30 @@ async fn route_acp_stream(
                 acp::AcpEvent::SessionInfo(info) => {
                     // Session metadata is agent-provided ACP state. Keep it as
                     // data rather than pretending it was assistant prose.
+                    if let (Some(conversation_id), Some(session_id)) = (
+                        persist_conversation_id.as_deref(),
+                        info.get("sessionId").and_then(Value::as_str),
+                    ) {
+                        if let Some(store) = crate::server::agent_sync::global_store() {
+                            let agent_id = persist_agent_id.as_deref().unwrap_or("unknown");
+                            let engine = agent_id.strip_prefix("acp:").unwrap_or(agent_id);
+                            if let Err(error) = store
+                                .record_acp_binding_async(
+                                    conversation_id,
+                                    agent_id,
+                                    engine,
+                                    session_id,
+                                    Some(&cwd),
+                                    info.get("capabilities").unwrap_or(&Value::Null),
+                                )
+                                .await
+                            {
+                                tracing::debug!(
+                                    "agent sync: ACP binding ledger update skipped: {error:#}"
+                                );
+                            }
+                        }
+                    }
                     emit!(ui_data("ryu-acp-session-info", &info));
                 }
                 acp::AcpEvent::Usage(u) => {
@@ -9506,13 +10459,30 @@ mod tests {
     #[test]
     fn ui_render_call_normalized_by_spec_shape() {
         // ACP gives no stable machine name; a spec-shaped input must still map to
-        // the stable `ui__render` name (dynamic) so the desktop renders it inline,
+        // the stable `ui.render` name (dynamic) so the desktop renders it inline,
         // regardless of the humanized title the adapter reports.
         let input = serde_json::json!({
             "spec": { "root": "a", "elements": { "a": { "type": "Text" } } }
         });
         let (name, dynamic) = acp_tool_ui_name("other", "Render some UI", &input);
-        assert_eq!(name, "ui__render");
+        assert_eq!(name, "ui.render");
+        assert!(dynamic);
+    }
+
+    #[test]
+    fn a2ui_render_call_normalized_by_explicit_format() {
+        let input = serde_json::json!({
+            "format": "a2ui",
+            "spec": [{
+                "version": "v0.9",
+                "createSurface": {
+                    "surfaceId": "status",
+                    "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
+                }
+            }]
+        });
+        let (name, dynamic) = acp_tool_ui_name("other", "Render some UI", &input);
+        assert_eq!(name, "ui.render");
         assert!(dynamic);
     }
 
@@ -9554,8 +10524,8 @@ mod tests {
         );
         // Unknown names stay dynamic under their own label: generic, never blank.
         assert_eq!(
-            nested_step_tool_name("mcp__foo__bar"),
-            ("mcp__foo__bar".to_owned(), true),
+            nested_step_tool_name("mcp.foo.bar"),
+            ("mcp.foo.bar".to_owned(), true),
         );
     }
 
@@ -10055,6 +11025,7 @@ mod tests {
             fts_enabled: false,
             read_levels: Vec::new(),
             space_ids: Vec::new(),
+            caller_user_id: None,
         };
         let block_off = run_auto_recall(
             &cfg_off,
@@ -10078,7 +11049,24 @@ mod tests {
             fts_enabled: true,
             read_levels: Vec::new(),
             space_ids: Vec::new(),
+            caller_user_id: None,
         };
+        let block_disabled = run_auto_recall(
+            &cfg_on,
+            &conversations,
+            &memory,
+            None,
+            &recency,
+            "kubernetes migration",
+            Some("c-current"),
+        )
+        .await;
+        assert!(
+            block_disabled.is_none(),
+            "chat memory disabled must suppress auto-recall chat hits, got: {block_disabled:?}"
+        );
+
+        conversations.set_chat_memory_enabled(true).await.unwrap();
         let block_on = run_auto_recall(
             &cfg_on,
             &conversations,
@@ -10094,6 +11082,19 @@ mod tests {
             block_on.contains("kubernetes migration retro"),
             "fts-surfaced past chat must appear, got: {block_on}"
         );
+    }
+
+    #[test]
+    fn interactive_auto_recall_uses_current_caller_over_conversation_owner() {
+        assert_eq!(
+            effective_recall_user_id(Some("bob"), Some("alice".to_owned())),
+            Some("bob".to_owned())
+        );
+        assert_eq!(
+            effective_recall_user_id(None, Some("alice".to_owned())),
+            Some("alice".to_owned())
+        );
+        assert_eq!(effective_recall_user_id(None, None), None);
     }
 
     // ── ACP skill injection seam (per-agent allowlist on the ACP plane) ─────────
@@ -10683,7 +11684,7 @@ mod tests {
             }),
             &[],
         );
-        assert_eq!(name, "artifact__render");
+        assert_eq!(name, "artifact.render");
         assert!(dynamic);
 
         // Flat `kind` + `content` pair.
@@ -10693,7 +11694,7 @@ mod tests {
             &serde_json::json!({ "kind": "code", "title": "main.rs", "content": "fn main(){}" }),
             &[],
         );
-        assert_eq!(name2, "artifact__render");
+        assert_eq!(name2, "artifact.render");
 
         // A generic tool whose input is a stringified file shape is untouched.
         let (name3, _, _) = acp_tool_frame(
@@ -10702,7 +11703,7 @@ mod tests {
             &serde_json::json!({ "query": "hello" }),
             &[],
         );
-        assert_ne!(name3, "artifact__render");
+        assert_ne!(name3, "artifact.render");
     }
 
     #[test]
@@ -10823,7 +11824,7 @@ mod tests {
         // fallback's injection was deleted. So pin the property that removes the drift
         // instead: exactly one renderer, both roads calling it.
         for windows in [true, false] {
-            let env = acp::pi_mcp_extension_env(windows);
+            let env = acp::pi_mcp_extension_env(windows, None);
             for var in ["RYU_MCP_CORE_URL", "RYU_MCP_AGENT_ID"] {
                 assert!(env.contains(var), "{var} missing from rendered env: {env}");
             }
@@ -10866,7 +11867,7 @@ mod tests {
             ("acp.rs", acp_rs, "pi_mcp_extension_env("),
             ("mod.rs", mod_rs, "acp::pi_mcp_extension_env("),
         ] {
-            for arg in ["true)", "false)"] {
+            for arg in ["true, None)", "false, None)"] {
                 let want = format!("{call}{arg}");
                 assert!(
                     src.contains(&want),
@@ -11444,9 +12445,10 @@ mod tests {
             false, // not background fan-out
             &crate::inference::SamplingConfig::default(),
             crate::inference::Engine::Other,
-            &[],  // no tools
-            None, // no per-agent smart-route override
-            None, // no node routing preferences
+            &[],   // no tools
+            None,  // no per-agent smart-route override
+            None,  // no node routing preferences
+            false, // no provider-native reasoning control
         )
         .await;
         // Both primary and fallback should fail; the error message must mention
@@ -11483,9 +12485,10 @@ mod tests {
             false, // not background fan-out
             &crate::inference::SamplingConfig::default(),
             crate::inference::Engine::Other,
-            &[],  // no tools
-            None, // no per-agent smart-route override
-            None, // no node routing preferences
+            &[],   // no tools
+            None,  // no per-agent smart-route override
+            None,  // no node routing preferences
+            false, // no provider-native reasoning control
         )
         .await;
         let err = result.expect_err("unreachable primary");
@@ -12053,6 +13056,36 @@ mod tests {
     }
 
     #[test]
+    fn parts_data_roundtrips_for_transcript_metadata() {
+        let mut acc = PartsAccumulator::default();
+        acc.data(
+            "ryu-agent-control",
+            &serde_json::json!({ "effective_agent_id": "research-agent" }),
+        );
+
+        let round: Vec<Value> = serde_json::from_str(&acc.to_json()).unwrap();
+        assert_eq!(
+            round[0]["type"],
+            serde_json::json!("data-ryu-agent-control")
+        );
+        assert_eq!(
+            round[0]["data"]["effective_agent_id"],
+            serde_json::json!("research-agent")
+        );
+    }
+
+    #[test]
+    fn chat_request_preserves_openai_model_pin() {
+        let request: ChatStreamRequest = serde_json::from_value(serde_json::json!({
+            "messages": [],
+            "model": "provider/model"
+        }))
+        .expect("chat request should accept the desktop model field");
+
+        assert_eq!(request.model.as_deref(), Some("provider/model"));
+    }
+
+    #[test]
     fn parts_empty_accumulator_serializes_to_empty_array() {
         let acc = PartsAccumulator::default();
         assert_eq!(acc.to_json(), "[]");
@@ -12101,6 +13134,31 @@ mod tests {
         assert_eq!(
             req.acp_config.unwrap().get("effort"),
             Some(&"high".to_owned())
+        );
+    }
+
+    #[test]
+    fn hook_acp_config_merges_and_overrides_same_turn_values() {
+        let mut req = ChatStreamRequest {
+            acp_config: Some(std::collections::HashMap::from([(
+                "fast_mode".to_owned(),
+                "false".to_owned(),
+            )])),
+            ..Default::default()
+        };
+        let hook_config = std::collections::HashMap::from([
+            ("fast_mode".to_owned(), "true".to_owned()),
+            ("service_tier".to_owned(), "priority".to_owned()),
+        ]);
+
+        apply_hook_acp_config(&mut req, &hook_config);
+
+        assert_eq!(
+            req.acp_config.unwrap(),
+            std::collections::HashMap::from([
+                ("fast_mode".to_owned(), "true".to_owned()),
+                ("service_tier".to_owned(), "priority".to_owned()),
+            ])
         );
     }
 }

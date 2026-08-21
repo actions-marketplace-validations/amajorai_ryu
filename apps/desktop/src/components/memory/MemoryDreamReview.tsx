@@ -280,12 +280,8 @@ export function MemoryDreamReview({ target }: { target: ApiTarget }) {
 						memories. Nothing is saved until you accept it.
 					</p>
 				</div>
-				<Button disabled={running || loading} onClick={run}>
-					{running ? (
-						<Spinner className="size-4" />
-					) : (
-						<RefreshCw className="size-4" />
-					)}
+				<Button disabled={loading} loading={running} onClick={run}>
+					{!running && <RefreshCw className="size-4" />}
 					{running ? "Reviewing…" : "Run Dream now"}
 				</Button>
 			</div>

@@ -10,6 +10,12 @@ import { createContext, useContext, useMemo } from "react";
  */
 export interface ChatDisplayPrefs {
 	/**
+	 * Global motion master switch. New chat animations must read this value;
+	 * callers still need to respect the OS reduced-motion preference as well.
+	 * Default: true.
+	 */
+	animationsEnabled: boolean;
+	/**
 	 * How much room the transcript gives each turn.
 	 * - "comfortable" (default): the full desktop chat — centred 720px column,
 	 *   generous padding, floating table of contents, pinned user message.
@@ -106,6 +112,11 @@ export interface ChatDisplayPrefs {
 	 */
 	inferenceStats: boolean;
 	/**
+	 * Render the composer through the shared Plate Markdown editor. When false,
+	 * the lightweight textarea remains the default. Default: false.
+	 */
+	markdownComposer: boolean;
+	/**
 	 * When true, opening a conversation jumps the transcript to the newest message
 	 * instead of leaving it wherever the scroller happened to settle while the
 	 * history was still loading. The jump fires once per conversation (on mount,
@@ -129,6 +140,8 @@ export interface ChatDisplayPrefs {
 }
 
 const DEFAULT_PREFS: ChatDisplayPrefs = {
+	markdownComposer: false,
+	animationsEnabled: true,
 	density: "comfortable",
 	groupToolUses: true,
 	expandFileEdits: false,
@@ -157,10 +170,11 @@ export function ChatDisplayPrefsProvider({
 	children: React.ReactNode;
 	value: Partial<ChatDisplayPrefs>;
 }) {
+	const parent = useContext(ChatDisplayPrefsContext);
 	// Memoised because a context value is NOT gated by `memo()`: a fresh object
 	// here re-renders every consumer in the transcript (MessageList, every tool
 	// row, every markdown block) on every render of the provider's parent.
-	const merged = useMemo(() => ({ ...DEFAULT_PREFS, ...value }), [value]);
+	const merged = useMemo(() => ({ ...parent, ...value }), [parent, value]);
 	return (
 		<ChatDisplayPrefsContext.Provider value={merged}>
 			{children}

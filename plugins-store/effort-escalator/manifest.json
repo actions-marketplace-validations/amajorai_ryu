@@ -1,4 +1,10 @@
 {
+  "tags": ["models","effort","stuck","agent","automation"],
+  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/effort-escalator",
+  "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/effort-escalator",
+  "privacyPolicyUrl": "https://ryuhq.com/privacy",
+  "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/effort-escalator",
   "name": "Effort Escalator",
   "version": "0.1.0",

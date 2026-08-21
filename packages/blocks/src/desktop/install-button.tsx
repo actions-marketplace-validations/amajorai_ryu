@@ -6,7 +6,6 @@
 // `useInstallProgress` hook) and passed in.
 
 import { Button, type ButtonProps } from "@ryu/ui/components/button.tsx";
-import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 
@@ -66,11 +65,11 @@ function InstallProgressButton({
 		<Button
 			aria-disabled
 			className={cn("pointer-events-none", className)}
+			loading
 			progress={value}
 			size={size}
 			variant="progress"
 		>
-			<Spinner className="size-4" />
 			{known ? `${Math.round(value)}%` : busyLabel}
 		</Button>
 	);

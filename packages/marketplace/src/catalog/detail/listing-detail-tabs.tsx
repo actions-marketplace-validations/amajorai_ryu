@@ -27,6 +27,7 @@ import type { ComponentType, ReactNode } from "react";
 import { useMemo, useState } from "react";
 import type { MarketplaceReviewsService } from "../../host.tsx";
 import type { MarketplaceKind } from "../../types.ts";
+import type { CatalogScanResult } from "../host.tsx";
 import type { Scorecard } from "../scorecard.ts";
 import { runScorecard } from "../scorecard.ts";
 import type {
@@ -54,18 +55,22 @@ export type DetailTabId =
 	| "health";
 
 export function ListingDetailTabs({
+	agentScan,
 	entry,
 	detail,
 	Markdown,
 	reviewsService,
 	overview,
 	scorecard: scorecardProp,
+	developerDoctor,
 	showTechnical = true,
 	activeTab: activeTabProp,
 	onTabChange,
 	kind = "plugin",
 	fetchVersionDetail,
 }: {
+	/** Optional configured-agent review. Omitted on read-only hosts. */
+	agentScan?: () => Promise<CatalogScanResult>;
 	entry: CatalogEntry;
 	detail: PluginCatalogDetail | null;
 	/** Markdown renderer — crosses the host seam (desktop uses Streamdown, web
@@ -80,6 +85,8 @@ export function ListingDetailTabs({
 	 *  BADGE in its header, so the same listing is graded once rather than twice
 	 *  and the badge can never disagree with the Health tab. */
 	scorecard?: Scorecard | null;
+	/** Optional host action for a live installed-artifact doctor. */
+	developerDoctor?: ReactNode;
 	/** Show the technical tabs (API, Versions, Dependencies, Health).
 	 *
 	 *  Defaults to TRUE so every existing caller — the web marketplace, the desktop
@@ -241,7 +248,13 @@ export function ListingDetailTabs({
 			) : null}
 			{showHealth && scorecard ? (
 				<TabsContent className="pt-2" value="health">
-					<ScorecardPanel scorecard={scorecard} />
+					<ScorecardPanel
+						agentScan={agentScan}
+						developerCommand={`ryu plugin doctor ${entry.id}`}
+						developerDoctor={developerDoctor}
+						key={entry.id}
+						scorecard={scorecard}
+					/>
 				</TabsContent>
 			) : null}
 		</Tabs>

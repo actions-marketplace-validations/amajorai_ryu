@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -137,6 +137,7 @@ pub struct HostDispatchBody {
 )]
 pub async fn plugin_bridge_dispatch(
     State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(plugin_id): Path<String>,
     Json(body): Json<HostDispatchBody>,
 ) -> axum::response::Response {
@@ -192,6 +193,33 @@ pub async fn plugin_bridge_dispatch(
         );
     }
 
+    // Manual hooks read a caller-selected transcript. Bind that selection to a
+    // verified caller and the exact conversation ACL before any hook code is
+    // spawned; the bridge repeats the binding as defense in depth.
+    let authorized_conversation_id = if body.method == "hooks.run" {
+        let Some(conversation_id) = body
+            .args
+            .get("conversation_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_args",
+                "hooks.run requires a non-empty conversation_id".to_owned(),
+            );
+        };
+        if let Err(response) =
+            crate::server::require_conversation_read_by_id(&state, &caller, conversation_id).await
+        {
+            return response;
+        }
+        Some(conversation_id.to_owned())
+    } else {
+        None
+    };
+
     // `view.action` v1: the method EXISTS, is grant-gated (above), and is audited
     // (the tracing line below feeds the standard log/audit pipeline), but no app
     // turn-hook runtime consumes view intents yet — the declarative `http` tier is
@@ -236,7 +264,13 @@ pub async fn plugin_bridge_dispatch(
 
     // Reuse the exact bridge the Deno sandbox uses — one implementation, one grant
     // vocabulary. `plugin_id` moves in as both the grant subject and the storage owner.
-    let bridge = PluginHookBridge::new(plugin_id, grants, state);
+    let bridge = PluginHookBridge::new_for_request(
+        plugin_id,
+        grants,
+        state,
+        caller,
+        authorized_conversation_id,
+    );
     match bridge.handle(bridge_path.to_owned(), body.args).await {
         InvokeOutcome::Result(r) if r.is_error => {
             let message = r

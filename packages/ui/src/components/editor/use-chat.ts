@@ -7,8 +7,10 @@ import { aiChatPlugin } from "@ryu/ui/components/editor/plugins/ai-kit.tsx";
 import { getEditorAiConfig } from "@ryu/ui/lib/editor-ai.ts";
 import {
 	convertToModelMessages,
+	createUIMessageStreamResponse,
 	DefaultChatTransport,
 	streamText,
+	toUIMessageStream,
 	type UIMessage,
 } from "ai";
 import type { PlateEditor } from "platejs/react";
@@ -32,7 +34,7 @@ export const EDITOR_AI_UNCONFIGURED_ERROR =
 
 export type ToolName = "comment" | "edit" | "generate";
 
-// biome-ignore lint/style/useConsistentTypeDefinitions: must be a type alias, not an interface — ai@6's `UIDataTypes` is `Record<string, unknown>` and an interface has no implicit index signature, so an interface here fails the UIMessage constraint (TS2344).
+// biome-ignore lint/style/useConsistentTypeDefinitions: must be a type alias, not an interface — ai@7's `UIDataTypes` is `Record<string, unknown>` and an interface has no implicit index signature, so an interface here fails the UIMessage constraint (TS2344).
 export type MessageDataPart = {
 	toolName: ToolName;
 };
@@ -94,7 +96,7 @@ function createChatTransport({
 				headers,
 			});
 
-			// `convertToModelMessages` is async in ai@6 — the pre-mock-removal code
+			// `convertToModelMessages` is async in ai@7 — the pre-mock-removal code
 			// passed the un-awaited Promise straight to `streamText`, which threw and
 			// was swallowed into the fake stream. That is how a broken real path went
 			// unnoticed for so long: never swallow, and never fabricate.
@@ -103,11 +105,16 @@ function createChatTransport({
 			const result = streamText({
 				abortSignal: init?.signal ?? undefined,
 				model: provider(aiCfg.model),
-				system: EDITOR_AI_SYSTEM,
+				instructions: EDITOR_AI_SYSTEM,
 				messages,
 			});
 
-			return result.toUIMessageStreamResponse({ onError: toErrorMessage });
+			const uiStream = toUIMessageStream({
+				stream: result.stream,
+				onError: toErrorMessage,
+			});
+
+			return createUIMessageStreamResponse({ stream: uiStream });
 		}) as typeof fetch,
 	});
 }

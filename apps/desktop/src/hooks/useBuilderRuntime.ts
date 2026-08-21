@@ -9,6 +9,12 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import type { ModelOption } from "@/components/agent-elements/types.ts";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import {
+	type ChatRoutingFields,
+	modelRoutingFieldsForInterface,
+	type SimpleApprovalDefaults,
+} from "@/src/lib/chat-routing.ts";
+import { readInterfaceLevel } from "@/src/lib/interface-level.ts";
+import {
 	getAgentModel,
 	modelsForAgent,
 	setAgentModel,
@@ -17,7 +23,7 @@ import { useAgents } from "./useAgents.ts";
 import { useEngineModels } from "./useEngineModels.ts";
 
 /** The agent a builder pane defaults to — the flagship `ryu`, which reliably runs
- *  the in-process tool loop the `*_builder__*` tools need. */
+ *  the in-process tool loop the `*_builder.*` tools need. */
 export const DEFAULT_BUILDER_AGENT = "ryu";
 
 /** Synthetic "no real model" id `modelsForAgent` returns when an agent advertises
@@ -47,10 +53,8 @@ function isAcpAgent(agentId: string, agents: AgentSummary[]): boolean {
 /** Body fields a builder turn merges into the chat request to target the chosen
  *  agent + model. `model` (catalog/openai-compat) vs `acp_model` (ACP) are routed
  *  by the agent's transport, matching the chat composer. */
-export interface BuilderBodyFields {
-	acp_model?: string;
+export interface BuilderBodyFields extends ChatRoutingFields {
 	agent_id: string;
-	model?: string;
 }
 
 export interface BuilderRuntime {
@@ -61,6 +65,7 @@ export interface BuilderRuntime {
 	modelOptions: ModelOption[];
 	setAgentId: (id: string) => void;
 	setModel: (id: string) => void;
+	setSimpleApprovalDefaults: (defaults: SimpleApprovalDefaults | null) => void;
 }
 
 /**
@@ -119,14 +124,25 @@ export function useBuilderRuntime(storageKey: string): BuilderRuntime {
 		effectiveModel,
 		isAcp: isAcpAgent(agentId, agents),
 	};
+	const simpleApprovalDefaultsRef = useRef<SimpleApprovalDefaults | null>(null);
+	const setSimpleApprovalDefaults = useCallback(
+		(defaults: SimpleApprovalDefaults | null) => {
+			simpleApprovalDefaultsRef.current = defaults;
+		},
+		[]
+	);
 
 	const bodyFields = useCallback((): BuilderBodyFields => {
 		const { agentId: id, effectiveModel: model, isAcp } = liveRef.current;
 		const override = model && model !== AUTO_MODEL ? model : undefined;
+		const routingFields = modelRoutingFieldsForInterface(readInterfaceLevel(), {
+			model: isAcp ? null : override,
+			acpModel: isAcp ? override : null,
+			simpleApprovalDefaults: simpleApprovalDefaultsRef.current,
+		});
 		return {
 			agent_id: id,
-			model: isAcp ? undefined : override,
-			acp_model: isAcp ? override : undefined,
+			...routingFields,
 		};
 	}, []);
 
@@ -137,5 +153,6 @@ export function useBuilderRuntime(storageKey: string): BuilderRuntime {
 		effectiveModel,
 		setModel,
 		bodyFields,
+		setSimpleApprovalDefaults,
 	};
 }

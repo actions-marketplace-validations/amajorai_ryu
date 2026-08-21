@@ -9,7 +9,7 @@
 // and it still works there (it just fills its own tab).
 
 import {
-	BubbleChatIcon,
+	Chat01Icon,
 	Calendar04Icon,
 	DashboardSquare01Icon,
 	InboxIcon,
@@ -35,7 +35,7 @@ interface PaneRoute {
 // The same surfaces the launchpad offers, minus anything that only makes sense
 // full-window. Deliberately a short list: this is a pane, not a home page.
 const PANE_ROUTES: PaneRoute[] = [
-	{ path: "/chat", label: "New chat", icon: BubbleChatIcon },
+	{ path: "/chat", label: "New chat", icon: Chat01Icon },
 	{ path: DASHBOARD_DEFAULT_PATH, label: "Home", icon: DashboardSquare01Icon },
 	{ path: "/library", label: "Library", icon: LibraryIcon },
 	{ path: "/inbox", label: "Inbox", icon: InboxIcon },

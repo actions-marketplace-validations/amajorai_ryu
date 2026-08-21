@@ -2,17 +2,14 @@ import {
 	ArrowShrink02Icon,
 	Bug01Icon,
 	ClipboardPasteIcon,
-	ComputerIcon,
 	ConsoleIcon,
 	Copy01Icon,
 	FullScreenIcon,
 	MinusSignIcon,
-	Moon01Icon,
 	PlusSignIcon,
 	Refresh01Icon,
 	ScissorIcon,
 	Settings01Icon,
-	Sun01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -29,6 +26,7 @@ import {
 	ContextMenuTrigger,
 } from "@ryu/ui/components/context-menu";
 import { toast } from "@ryu/ui/components/sileo";
+import { Laptop, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 import { type ReactNode, useEffect, useEffectEvent, useState } from "react";
 import { isDeveloperMode } from "@/src/hooks/useDeveloperMode.ts";
@@ -390,16 +388,13 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps) {
 						</ContextMenuItem>
 						<ContextMenuSub>
 							<ContextMenuSubTrigger>
-								{resolvedTheme === "dark" ? (
-									<HugeiconsIcon icon={Moon01Icon} />
-								) : (
-									<HugeiconsIcon icon={Sun01Icon} />
-								)}
-								Appearance
+								<Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+								<Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+								<span>Appearance</span>
 							</ContextMenuSubTrigger>
 							<ContextMenuSubContent>
 								<ContextMenuItem onClick={() => setTheme("light")}>
-									<HugeiconsIcon icon={Sun01Icon} />
+									<Sun className="h-4 w-4" />
 									Light
 									{theme === "light" ? (
 										<span className="ml-auto text-muted-foreground text-xs">
@@ -408,7 +403,7 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps) {
 									) : null}
 								</ContextMenuItem>
 								<ContextMenuItem onClick={() => setTheme("dark")}>
-									<HugeiconsIcon icon={Moon01Icon} />
+									<Moon className="h-4 w-4" />
 									Dark
 									{theme === "dark" ? (
 										<span className="ml-auto text-muted-foreground text-xs">
@@ -417,7 +412,7 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps) {
 									) : null}
 								</ContextMenuItem>
 								<ContextMenuItem onClick={() => setTheme("system")}>
-									<HugeiconsIcon icon={ComputerIcon} />
+									<Laptop className="h-4 w-4" />
 									System
 									{theme === "system" ? (
 										<span className="ml-auto text-muted-foreground text-xs">

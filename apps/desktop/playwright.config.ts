@@ -27,6 +27,9 @@ export default defineConfig({
 	// server past their 30s timeout. CI has no Core either way.
 	testIgnore: process.env.RYU_E2E_LIVE ? undefined : /\.live\.spec\.ts$/,
 	fullyParallel: true,
+	// The shared Vite harness compiles its module graph lazily. Serial CI keeps a
+	// cold first navigation from starving sibling stories while they start together.
+	workers: process.env.CI ? 1 : undefined,
 	forbidOnly: !!process.env.CI,
 	retries: process.env.CI ? 1 : 0,
 	reporter: process.env.CI ? "github" : "list",

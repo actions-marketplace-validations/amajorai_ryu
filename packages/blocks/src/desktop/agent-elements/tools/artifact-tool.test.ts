@@ -59,19 +59,19 @@ describe("artifactFromCreateResult", () => {
 
 describe("isArtifactPart", () => {
 	it("recognizes the typed render/create part types", () => {
-		expect(isArtifactPart("tool-artifact__render", undefined)).toBe(true);
-		expect(isArtifactPart("tool-artifact__create", undefined)).toBe(true);
+		expect(isArtifactPart("tool-artifact.render", undefined)).toBe(true);
+		expect(isArtifactPart("tool-artifact.create", undefined)).toBe(true);
 	});
 
 	it("recognizes dynamic-tool parts by their toolName", () => {
-		expect(isArtifactPart("dynamic-tool", "artifact__render")).toBe(true);
-		expect(isArtifactPart("dynamic-tool", "artifact__create")).toBe(true);
+		expect(isArtifactPart("dynamic-tool", "artifact.render")).toBe(true);
+		expect(isArtifactPart("dynamic-tool", "artifact.create")).toBe(true);
 	});
 
 	it("ignores unrelated parts", () => {
 		expect(isArtifactPart("tool-Bash", undefined)).toBe(false);
 		expect(isArtifactPart("dynamic-tool", "web_search")).toBe(false);
-		expect(isArtifactPart("tool-ui__render", undefined)).toBe(false);
+		expect(isArtifactPart("tool-ui.render", undefined)).toBe(false);
 	});
 });
 

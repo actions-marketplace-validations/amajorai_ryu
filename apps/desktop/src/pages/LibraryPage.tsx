@@ -21,15 +21,15 @@
 import {
 	Add01Icon,
 	AudioWave01Icon,
-	BookOpen01Icon,
-	BubbleChatIcon,
 	Clock01Icon,
+	ConnectIcon,
 	DeliverySecure01Icon,
-	Key01Icon,
+	FolderOpenIcon,
+	GridIcon,
 	LibraryIcon,
+	ServerStack01Icon,
 	StarIcon,
 	Target01Icon,
-	UserGroupIcon,
 	WorkflowCircle06Icon,
 	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
@@ -51,16 +51,6 @@ import {
 	StoreSectionTabs,
 } from "@ryu/blocks/desktop/store.tsx";
 import type { ViewMode } from "@ryu/blocks/desktop/view-toggle.tsx";
-import {
-	AlertDialog,
-	AlertDialogAction,
-	AlertDialogCancel,
-	AlertDialogContent,
-	AlertDialogDescription,
-	AlertDialogFooter,
-	AlertDialogHeader,
-	AlertDialogTitle,
-} from "@ryu/ui/components/alert-dialog.tsx";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { BookCard } from "@ryu/ui/components/book-card.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
@@ -83,7 +73,9 @@ import {
 	StatusBadge,
 	type StatusKind,
 } from "@ryu/ui/components/status-badge.tsx";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
+import { useQuery } from "@tanstack/react-query";
 import {
 	type ReactNode,
 	useCallback,
@@ -96,8 +88,16 @@ import {
 	LibraryItemMenuContent,
 	useLibraryContributedRows,
 } from "@/src/components/layout/library-entity-menu.tsx";
-import { SURFACE_PLUGIN_OWNER } from "@/src/components/layout/sidebar-sections.ts";
+import {
+	BUILTIN_SECTIONS,
+	type BuiltinSectionKey,
+	SECTION_ICONS,
+	SURFACE_PLUGIN_OWNER,
+} from "@/src/components/layout/sidebar-sections.ts";
 import ContributedLibrarySection from "@/src/components/library/ContributedLibrarySection.tsx";
+import SidebarLibrarySection, {
+	type SidebarLibraryItem,
+} from "@/src/components/library/SidebarLibrarySection.tsx";
 import { MemoryLibrary } from "@/src/components/memory/MemoryLibrary.tsx";
 import { CreateSpaceDialog } from "@/src/components/spaces/CreateSpaceDialog.tsx";
 import {
@@ -105,20 +105,40 @@ import {
 	type TeamDraft,
 } from "@/src/components/teams/TeamDialog.tsx";
 import ToolsLibrary from "@/src/components/tools/ToolsLibrary.tsx";
+import { DestructiveConfirmDialog } from "@/src/components/ui/DestructiveConfirmDialog.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
+import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { useChannels } from "@/src/hooks/useChannels.ts";
+import {
+	useComposioConnections,
+	useComposioStatus,
+} from "@/src/hooks/useComposioCatalog.ts";
+import { useEngines } from "@/src/hooks/useEngines.ts";
+import { useCanManagePermission } from "@/src/hooks/useGatewayConfigurable.ts";
 import { useIdentities } from "@/src/hooks/useIdentities.ts";
+import { useMcp } from "@/src/hooks/useMcp.ts";
 import { useMeetings } from "@/src/hooks/useMeetings.ts";
-import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
+import {
+	pluginCompanionPath,
+	usePluginContributions,
+	usePluginContributionsQuery,
+} from "@/src/hooks/usePluginContributions.ts";
+import { useSandboxBackends } from "@/src/hooks/useSandboxBackends.ts";
+import { useSidebarSectionSources } from "@/src/hooks/useSidebarSectionSource.ts";
+import { installedSkillsQuery } from "@/src/hooks/useSkillsCatalog.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
+import { useVoiceEngines } from "@/src/hooks/useVoiceEngines.ts";
 import { useWorkflows } from "@/src/hooks/useWorkflows.ts";
 import { CHANNEL_LABELS } from "@/src/lib/api/channels.ts";
 import type { PluginSidebarSection } from "@/src/lib/api/plugins.ts";
+import type { InstalledSkill } from "@/src/lib/api/skills.ts";
+import { basename } from "@/src/lib/files.ts";
+import { dedupeFolders, folderKey } from "@/src/lib/folder-path.ts";
 import {
 	type LibraryItemType,
 	normalizeTimestamp,
@@ -128,7 +148,13 @@ import {
 	useRecents,
 } from "@/src/lib/library.ts";
 import { WorkflowFlowStrip } from "@/src/lib/workflow-triggers.tsx";
+import {
+	findWorkspaceProject,
+	workspaceProjectName,
+} from "@/src/lib/workspace-projects.ts";
+import { useConversationFlagsStore } from "@/src/store/useConversationFlagsStore.ts";
 import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
+import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
 /** A Library tab.
  *
@@ -137,12 +163,59 @@ import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
  *  advertise have their own hierarchy (a tool belongs to a server) and their own
  *  actions (test-call a tool), so it renders a bespoke surface inside the Library
  *  shell — the same escape hatch `"memory"` already uses. */
-type LibrarySection = "recents" | "favorites" | "tools" | LibraryItemType; // agent | workflow | chat | space | team | meeting | channel | identity
+type SidebarOnlySection = Exclude<
+	BuiltinSectionKey,
+	| "agents"
+	| "teams"
+	| "chats"
+	| "spaces"
+	| "channels"
+	| "identities"
+	| "workflows"
+>;
+
+const LIBRARY_ITEM_TYPE_BY_BUILTIN_KEY: Partial<
+	Record<BuiltinSectionKey, LibraryItemType>
+> = {
+	agents: "agent",
+	chats: "chat",
+	channels: "channel",
+	identities: "identity",
+	spaces: "space",
+	teams: "team",
+	workflows: "workflow",
+};
+
+function isSidebarOnlySectionKey(
+	key: BuiltinSectionKey
+): key is SidebarOnlySection {
+	return LIBRARY_ITEM_TYPE_BY_BUILTIN_KEY[key] === undefined;
+}
+
+type BuiltinSection = (typeof BUILTIN_SECTIONS)[number];
+function isSidebarOnlySection(
+	section: BuiltinSection
+): section is BuiltinSection & { key: SidebarOnlySection } {
+	return isSidebarOnlySectionKey(section.key);
+}
+
+const SIDEBAR_LIBRARY_SECTIONS = BUILTIN_SECTIONS.filter(isSidebarOnlySection);
+
+type LibrarySection =
+	| "recents"
+	| "favorites"
+	| "tools"
+	| LibraryItemType
+	| SidebarOnlySection;
 
 /** Sections that render their OWN surface instead of the shared card grid, and so
  *  bypass the collection pipeline (normalise → filter → sort → cards). They keep
  *  the section nav so switching tabs still works. */
 const CUSTOM_SURFACE_SECTIONS = new Set<LibrarySection>(["tools"]);
+
+const SIDEBAR_SURFACE_SECTIONS = new Set<SidebarOnlySection>(
+	SIDEBAR_LIBRARY_SECTIONS.map((section) => section.key)
+);
 
 const SECTIONS: {
 	value: LibrarySection;
@@ -151,17 +224,18 @@ const SECTIONS: {
 }[] = [
 	{ value: "recents", label: "Recents", icon: Clock01Icon },
 	{ value: "favorites", label: "Favorites", icon: StarIcon },
-	{ value: "agent", label: "Agents", icon: Target01Icon },
-	{ value: "workflow", label: "Workflows", icon: WorkflowCircle06Icon },
-	{ value: "chat", label: "Chats", icon: BookOpen01Icon },
-	{ value: "space", label: "Spaces", icon: DeliverySecure01Icon },
-	{ value: "team", label: "Teams", icon: UserGroupIcon },
+	...BUILTIN_SECTIONS.map((section) => ({
+		icon: section.icon,
+		label: section.label,
+		value:
+			LIBRARY_ITEM_TYPE_BY_BUILTIN_KEY[section.key] ??
+			(section.key as SidebarOnlySection),
+	})),
+	// Meetings are a Library collection but intentionally are not a fixed sidebar
+	// section: the Meetings app contributes its own dynamic sidebar section. Keep
+	// the existing built-in collection available until that app is the source of
+	// truth, while still letting a source-backed contribution replace it above.
 	{ value: "meeting", label: "Meetings", icon: AudioWave01Icon },
-	{ value: "channel", label: "Channels", icon: BubbleChatIcon },
-	{ value: "identity", label: "Identities", icon: Key01Icon },
-	// Tools moved here from the Store: the Store is for FINDING things to add, this
-	// is for managing and invoking what is already installed.
-	{ value: "tools", label: "Tools", icon: Wrench01Icon },
 ];
 
 /** The app that owns each built-in collection. A tab shows only when its owning
@@ -187,12 +261,12 @@ const TYPE_META: Record<
 > = {
 	agent: { label: "Agent", icon: Target01Icon },
 	workflow: { label: "Workflow", icon: WorkflowCircle06Icon },
-	chat: { label: "Chat", icon: BookOpen01Icon },
+	chat: { label: "Chat", icon: SECTION_ICONS.chats },
 	space: { label: "Space", icon: DeliverySecure01Icon },
-	team: { label: "Team", icon: UserGroupIcon },
+	team: { label: "Team", icon: SECTION_ICONS.teams },
 	meeting: { label: "Meeting", icon: AudioWave01Icon },
-	channel: { label: "Channel", icon: BubbleChatIcon },
-	identity: { label: "Identity", icon: Key01Icon },
+	channel: { label: "Channel", icon: SECTION_ICONS.channels },
+	identity: { label: "Identity", icon: SECTION_ICONS.identities },
 };
 
 const SORT_OPTIONS: LibrarySortOption[] = [
@@ -245,10 +319,6 @@ function contributedSectionValue(section: PluginSidebarSection): string {
 	return `plugin:${section.plugin}:${section.id}`;
 }
 
-/** Apps that own a compiled-in Library tab already — their contributed sidebar
- *  sections must not appear a second time as an app collection. */
-const SURFACE_OWNER_IDS = new Set<string>(Object.values(SURFACE_PLUGIN_OWNER));
-
 /** The active tab: one of the shell's own collections, or an app-registered one
  *  (`plugin:<pluginId>:<sectionId>`). Deliberately open — the Library's tab list
  *  is no longer a closed union the shell can enumerate at compile time. */
@@ -260,9 +330,14 @@ type ActiveSection = LibrarySection | string;
  *  must never be offered as a type filter chip). */
 function isItemType(value: LibrarySection): value is LibraryItemType {
 	return (
-		value !== "recents" &&
-		value !== "favorites" &&
-		!CUSTOM_SURFACE_SECTIONS.has(value)
+		value === "agent" ||
+		value === "workflow" ||
+		value === "chat" ||
+		value === "space" ||
+		value === "team" ||
+		value === "meeting" ||
+		value === "channel" ||
+		value === "identity"
 	);
 }
 
@@ -285,7 +360,9 @@ function LibraryCollections({
 	initialSection?: string;
 }) {
 	const [active, setActive] = useState<ActiveSection>(
-		isLibrarySection(initialSection) ? initialSection : "recents"
+		isLibrarySection(initialSection) || initialSection.startsWith("plugin:")
+			? initialSection
+			: "recents"
 	);
 	// Everything below the tab strip is written against the built-in collections;
 	// an app-registered tab renders its own surface instead, so the built-in
@@ -328,7 +405,7 @@ function LibraryCollections({
 		}
 	};
 
-	const { openTab } = useTabsContext();
+	const { activateTab, openTab, tabs } = useTabsContext();
 	const { openCreateAgent } = useCreateAgentDialog();
 	const { favorites, toggle: toggleFavorite } = useFavorites();
 	const recents = useRecents();
@@ -383,6 +460,8 @@ function LibraryCollections({
 		loading: identitiesLoading,
 		remove: removeIdentity,
 	} = useIdentities();
+	const canDeleteAgents = useCanManagePermission("agent.delete");
+	const canDeleteSpaces = useCanManagePermission("space.delete");
 
 	// Only show a collection tab when its owning app is enabled — an uninstalled
 	// Workflows/Teams/Meetings app should leave no empty tab. Host surfaces
@@ -394,7 +473,7 @@ function LibraryCollections({
 	);
 	// While the app list is still loading, show every tab — gating on an empty set
 	// would flash the default-on collections (Agents/Spaces/Teams) off then on.
-	const visibleSections = useMemo(
+	const appVisibleSections = useMemo(
 		() =>
 			appsLoading
 				? SECTIONS
@@ -410,18 +489,79 @@ function LibraryCollections({
 	// needed here. A section owned by an app that also owns a built-in tab is
 	// skipped: @ryu/meetings ships both, and two tabs called "Meetings" listing the
 	// same rows is worse than either alone.
-	const { sidebar_sections } = usePluginContributions();
+	const { isLoading: contributionsLoading } = usePluginContributionsQuery();
+	const { companions, sidebar_sections } = usePluginContributions();
 	const contributedSections = useMemo(
 		() =>
-			sidebar_sections
-				.filter((c) => !SURFACE_OWNER_IDS.has(c.plugin))
-				.filter((c) => Boolean(c.spec?.source))
-				.sort(
-					(a, b) =>
-						(a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title)
-				),
+			[...sidebar_sections].sort(
+				(a, b) =>
+					(a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title)
+			),
 		[sidebar_sections]
 	);
+	const contributedSourceData = useSidebarSectionSources(contributedSections);
+	const contributedSourceByValue = useMemo(
+		() =>
+			new Map(
+				contributedSourceData.map((data) => [
+					contributedSectionValue(data.contribution),
+					data,
+				])
+			),
+		[contributedSourceData]
+	);
+
+	// If an app owns one of the compiled-in surfaces and also contributes its
+	// sidebar section, the source-backed app section is the Library tab. This
+	// keeps Meetings/Workflows/etc. from appearing twice while still allowing any
+	// other app-registered section to arrive automatically.
+	const visibleSections = useMemo(
+		() =>
+			appVisibleSections.filter((section) => {
+				const owner = SECTION_PLUGIN[section.value];
+				return !(
+					owner &&
+					contributedSections.some(
+						(c) => c.plugin === owner && Boolean(c.spec?.source)
+					)
+				);
+			}),
+		[appVisibleSections, contributedSections]
+	);
+
+	// The remaining Library collections mirror the sidebar's built-in registry. They
+	// deliberately consume the same host hooks as the sidebar, so adding a sidebar
+	// section is a data decision in one place rather than a second page-specific API.
+	const activeNode = useActiveNode();
+	const installedSkillsResult = useQuery(
+		installedSkillsQuery({
+			token: activeNode.token ?? null,
+			url: activeNode.url,
+		})
+	);
+	const installedSkills = installedSkillsResult.data ?? [];
+	const composioStatus = useComposioStatus();
+	const composioConnections = useComposioConnections(
+		"",
+		composioStatus.data?.configured ?? false
+	);
+	const {
+		servers: mcpServers,
+		tools: mcpTools,
+		loading: mcpLoading,
+	} = useMcp();
+	const { engines: localEngines, loading: localEnginesLoading } = useEngines();
+	const { engines: alongsideEngines, loading: alongsideEnginesLoading } =
+		useVoiceEngines(["media", "voice", "embedding"]);
+	const { backends: sandboxBackends, loading: sandboxBackendsLoading } =
+		useSandboxBackends();
+	const workspaceFolder = useWorkspaceStore((state) => state.folder);
+	const recentFolders = useWorkspaceStore((state) => state.recentFolders);
+	const removedProjects = useWorkspaceStore((state) => state.removedProjects);
+	const projectNames = useWorkspaceStore((state) => state.projectNames);
+	const workspaceProjects = useWorkspaceStore((state) => state.projects);
+	const pinnedIds = useConversationFlagsStore((state) => state.pinnedIds);
+	const archivedIds = useConversationFlagsStore((state) => state.archivedIds);
 
 	const contributedFor = useCallback(
 		(value: string) =>
@@ -430,25 +570,6 @@ function LibraryCollections({
 		[contributedSections]
 	);
 	const activeContributed = contributedFor(active);
-
-	// The tab strip: the shell's own collections, then every app-registered one.
-	const navSections = useMemo((): StoreSectionTab[] => {
-		const own = visibleSections.map((s) => ({
-			icon: s.icon,
-			label: s.label,
-			value: s.value as string,
-			group: "own",
-		}));
-		return [
-			...own,
-			...contributedSections.map((c) => ({
-				icon: c.icon ?? "grid",
-				label: c.title,
-				value: contributedSectionValue(c),
-				group: "apps",
-			})),
-		];
-	}, [visibleSections, contributedSections]);
 
 	// If the active tab's app was just disabled (or its contribution withdrawn),
 	// fall back to Recents so the page never sits on a now-hidden collection.
@@ -518,10 +639,12 @@ function LibraryCollections({
 				remove: () => removeAgent(a.id),
 				removeBlockedReason: a.builtIn
 					? "Built-in agents ship with Ryu and can't be deleted."
-					: undefined,
+					: canDeleteAgents
+						? undefined
+						: "Only organization admins can delete agents.",
 			})),
 		// engines feed engineLabel; rebuild when either changes.
-		[agents, engineLabel, openTab, removeAgent]
+		[agents, canDeleteAgents, engineLabel, openTab, removeAgent]
 	);
 
 	const workflowItems = useMemo<LibraryItem[]>(
@@ -532,7 +655,7 @@ function LibraryCollections({
 				name: w.name,
 				subtitle:
 					w.description ??
-					`${w.nodes.length} ${w.nodes.length === 1 ? "node" : "nodes"}`,
+					`${formatCount(w.nodes.length) ?? "—"} ${w.nodes.length === 1 ? "node" : "nodes"}`,
 				badge: null,
 				icon: WorkflowCircle06Icon,
 				updatedAt: normalizeTimestamp(w.updatedAt ?? w.createdAt),
@@ -559,7 +682,7 @@ function LibraryCollections({
 				name: c.title || "Untitled chat",
 				subtitle: c.folderPath ?? null,
 				badge: c.archived ? "Archived" : null,
-				icon: BookOpen01Icon,
+				icon: SECTION_ICONS.chats,
 				updatedAt: normalizeTimestamp(c.updatedAt ?? c.createdAt),
 				open: () => openTab("/chat", { conversationId: c.id }),
 				openInNewTab: () =>
@@ -601,9 +724,11 @@ function LibraryCollections({
 					// sidebar's Spaces row makes.
 					removeBlockedReason: s.system
 						? "System spaces can't be deleted — Ryu creates and maintains this one."
-						: undefined,
+						: canDeleteSpaces
+							? undefined
+							: "You don't have permission to delete Spaces.",
 				})),
-		[spaces, openTab, removeSpace]
+		[canDeleteSpaces, spaces, openTab, removeSpace]
 	);
 
 	const teamItems = useMemo<LibraryItem[]>(
@@ -614,9 +739,9 @@ function LibraryCollections({
 				name: t.name,
 				subtitle:
 					t.description ??
-					`${t.members.length} ${t.members.length === 1 ? "member" : "members"}`,
+					`${formatCount(t.members.length) ?? "—"} ${t.members.length === 1 ? "member" : "members"}`,
 				badge: null,
-				icon: UserGroupIcon,
+				icon: SECTION_ICONS.teams,
 				updatedAt: normalizeTimestamp(t.updatedAt ?? t.createdAt),
 				open: () => {
 					stampRecent("team", t.id);
@@ -656,7 +781,7 @@ function LibraryCollections({
 				name: c.name,
 				subtitle: CHANNEL_LABELS[c.channelType],
 				badge: c.enabled ? null : "Disabled",
-				icon: BubbleChatIcon,
+				icon: SECTION_ICONS.channels,
 				updatedAt: normalizeTimestamp(c.updatedAt ?? c.createdAt),
 				open: () => openTab(`/channels/${c.id}`, { title: c.name }),
 				openInNewTab: () =>
@@ -682,9 +807,12 @@ function LibraryCollections({
 					type: "identity" as const,
 					id: p.profile_id,
 					name: p.profile_id,
-					subtitle: `${count} ${count === 1 ? "connection" : "connections"}`,
-					badge: count > 0 ? `${authenticated}/${count} signed in` : null,
-					icon: Key01Icon,
+					subtitle: `${formatCount(count) ?? "—"} ${count === 1 ? "connection" : "connections"}`,
+					badge:
+						count > 0
+							? `${formatCount(authenticated) ?? "—"}/${formatCount(count) ?? "—"} signed in`
+							: null,
+					icon: SECTION_ICONS.identities,
 					updatedAt: normalizeTimestamp(latest),
 					open: () => {
 						stampRecent("identity", p.profile_id);
@@ -705,6 +833,168 @@ function LibraryCollections({
 			}),
 		[profiles, openTab, removeIdentity]
 	);
+
+	const projectPaths = useMemo(() => {
+		const removed = new Set(removedProjects.map(folderKey));
+		const candidates = dedupeFolders([
+			...(workspaceFolder ? [workspaceFolder] : []),
+			...recentFolders,
+			...workspaceProjects.flatMap((project) => project.folders),
+			...conversations.flatMap((conversation) =>
+				conversation.folderPath ? [conversation.folderPath] : []
+			),
+		]);
+		return dedupeFolders(
+			candidates.map(
+				(path) =>
+					findWorkspaceProject(workspaceProjects, path)?.folders[0] ?? path
+			)
+		).filter((path) => !removed.has(folderKey(path)));
+	}, [
+		conversations,
+		recentFolders,
+		removedProjects,
+		workspaceFolder,
+		workspaceProjects,
+	]);
+
+	const setWorkspaceFolder = useWorkspaceStore((state) => state.setFolder);
+	const sidebarItemsBySection = useMemo<
+		Record<SidebarOnlySection, SidebarLibraryItem[]>
+	>(() => {
+		const chatToSidebarItem = (item: LibraryItem): SidebarLibraryItem => ({
+			icon: item.icon,
+			id: item.id,
+			name: item.name,
+			onOpen: item.open,
+			subtitle: item.subtitle,
+		});
+		const engineItems = [
+			...localEngines.map((engine) => ({
+				icon: SECTION_ICONS.engines,
+				id: `provider:${engine.name}`,
+				name: engine.displayName || engine.name,
+				onOpen: () => openTab("/store/engines", { title: "Engines" }),
+				subtitle: "Text",
+			})),
+			...alongsideEngines.map((engine) => ({
+				icon: SECTION_ICONS.engines,
+				id: `${engine.category}:${engine.name}`,
+				name: engine.displayName || engine.name,
+				onOpen: () => openTab("/store/engines", { title: "Engines" }),
+				subtitle: engine.category,
+			})),
+			...sandboxBackends.map((backend) => ({
+				icon: SECTION_ICONS.engines,
+				id: `sandbox:${backend.name}`,
+				name: backend.name,
+				onOpen: () => openTab("/store/engines", { title: "Engines" }),
+				subtitle: "Sandbox",
+			})),
+		];
+		const archivedItems = chatItems.filter(
+			(item) => archivedIds.has(item.id) || item.badge === "Archived"
+		);
+		return {
+			archived: archivedItems.map(chatToSidebarItem),
+			companions: companions.map((companion) => ({
+				icon: SECTION_ICONS.companions,
+				id: companion.id,
+				name: companion.label || companion.name,
+				onOpen: () =>
+					openTab(pluginCompanionPath(companion.id), {
+						title: companion.label || companion.name,
+					}),
+				subtitle: companion.pluginId,
+			})),
+			engines: engineItems,
+			integrations: (composioConnections.data ?? []).map((connection) => ({
+				icon: ConnectIcon,
+				id: connection.id,
+				name: connection.toolkit || connection.id,
+				onOpen: () => openTab("/store/account", { title: "Connections" }),
+				subtitle: connection.active ? "Connected" : connection.status,
+			})),
+			mcp: mcpServers.map((server) => ({
+				icon: ServerStack01Icon,
+				id: server.name,
+				name: server.name,
+				onOpen: () => openTab("/store/mcp", { title: "MCP" }),
+				subtitle: server.description,
+			})),
+			pinned: chatItems
+				.filter((item) => pinnedIds.has(item.id))
+				.map(chatToSidebarItem),
+			plugins: apps
+				.filter((app) => app.installed)
+				.map((app) => ({
+					icon: SECTION_ICONS.plugins,
+					id: app.id,
+					name: app.name,
+					onOpen: () => openTab("/apps", { title: "Plugins" }),
+					subtitle: app.tagline,
+				})),
+			projects: projectPaths.map((path) => {
+				const project = findWorkspaceProject(workspaceProjects, path);
+				const title = project
+					? workspaceProjectName(project, projectNames)
+					: projectNames[path]?.trim() || basename(path);
+				return {
+					icon: FolderOpenIcon,
+					id: folderKey(path),
+					name: title,
+					onOpen: () => {
+						void setWorkspaceFolder(path);
+						openTab("/chat", {
+							initialProject: path,
+							title,
+						});
+					},
+					subtitle: path,
+				};
+			}),
+			skills: installedSkills.map((skill: InstalledSkill) => ({
+				icon: SECTION_ICONS.skills,
+				id: skill.id,
+				name: skill.name,
+				onOpen: () => openTab("/store/skills", { title: "Skills" }),
+				subtitle: skill.description,
+			})),
+			tabs: tabs.map((tab) => ({
+				icon: GridIcon,
+				id: tab.id,
+				name: tab.title,
+				onOpen: () => activateTab(tab.id),
+				subtitle: tab.path,
+			})),
+			tools: mcpTools.map((tool) => ({
+				icon: Wrench01Icon,
+				id: tool.id,
+				name: tool.name,
+				onOpen: () => openTab("/library/tools", { title: "Tools" }),
+				subtitle: tool.server,
+			})),
+		};
+	}, [
+		activateTab,
+		apps,
+		archivedIds,
+		alongsideEngines,
+		companions,
+		composioConnections.data,
+		chatItems,
+		installedSkills,
+		localEngines,
+		mcpServers,
+		mcpTools,
+		openTab,
+		pinnedIds,
+		projectNames,
+		projectPaths,
+		sandboxBackends,
+		setWorkspaceFolder,
+		tabs,
+	]);
 
 	const itemsByType = useMemo<Record<LibraryItemType, LibraryItem[]>>(
 		() => ({
@@ -875,6 +1165,126 @@ function LibraryCollections({
 		return set;
 	}, [allItems, baseItems, searchingAll]);
 
+	const sidebarSectionLoading: Record<SidebarOnlySection, boolean> = {
+		archived: conversationsLoading,
+		companions: contributionsLoading,
+		engines:
+			localEnginesLoading || alongsideEnginesLoading || sandboxBackendsLoading,
+		integrations: composioStatus.isLoading || composioConnections.isLoading,
+		mcp: mcpLoading,
+		pinned: conversationsLoading,
+		plugins: appsLoading,
+		projects: false,
+		skills: installedSkillsResult.isLoading,
+		tabs: false,
+		tools: mcpLoading,
+	};
+
+	const libraryCounts = useMemo<Record<LibrarySection, number | undefined>>(
+		() => ({
+			agent: agentsLoading ? undefined : agentItems.length,
+			archived: sidebarSectionLoading.archived
+				? undefined
+				: sidebarItemsBySection.archived.length,
+			channel: channelsLoading ? undefined : channelItems.length,
+			chat: conversationsLoading ? undefined : chatItems.length,
+			companions: sidebarSectionLoading.companions
+				? undefined
+				: sidebarItemsBySection.companions.length,
+			engines: sidebarSectionLoading.engines
+				? undefined
+				: sidebarItemsBySection.engines.length,
+			favorites: anySourceLoading ? undefined : favoriteItems.length,
+			identity: identitiesLoading ? undefined : identityItems.length,
+			integrations: sidebarSectionLoading.integrations
+				? undefined
+				: sidebarItemsBySection.integrations.length,
+			mcp: sidebarSectionLoading.mcp
+				? undefined
+				: sidebarItemsBySection.mcp.length,
+			meeting: meetingsLoading ? undefined : meetingItems.length,
+			pinned: sidebarSectionLoading.pinned
+				? undefined
+				: sidebarItemsBySection.pinned.length,
+			plugins: sidebarSectionLoading.plugins
+				? undefined
+				: sidebarItemsBySection.plugins.length,
+			projects: sidebarItemsBySection.projects.length,
+			recents: anySourceLoading ? undefined : recentItems.length,
+			skills: sidebarSectionLoading.skills
+				? undefined
+				: sidebarItemsBySection.skills.length,
+			space: spacesLoading ? undefined : spaceItems.length,
+			tabs: sidebarItemsBySection.tabs.length,
+			team: teamItems.length,
+			tools: sidebarSectionLoading.tools
+				? undefined
+				: sidebarItemsBySection.tools.length,
+			workflow: workflowsLoading ? undefined : workflowItems.length,
+		}),
+		[
+			agentItems.length,
+			agentsLoading,
+			anySourceLoading,
+			channelItems.length,
+			channelsLoading,
+			chatItems.length,
+			composioConnections.isLoading,
+			composioStatus.isLoading,
+			contributionsLoading,
+			favoriteItems.length,
+			identityItems.length,
+			identitiesLoading,
+			installedSkillsResult.isLoading,
+			localEnginesLoading,
+			alongsideEnginesLoading,
+			mcpLoading,
+			meetingItems.length,
+			meetingsLoading,
+			recentItems.length,
+			removedProjects,
+			sandboxBackendsLoading,
+			spaceItems.length,
+			spacesLoading,
+			teamItems.length,
+			workflowItems.length,
+			workflowsLoading,
+			sidebarItemsBySection,
+			appsLoading,
+			conversationsLoading,
+		]
+	);
+
+	// The tab strip is a projection of the same data that renders each collection.
+	// Counts are collection totals, never the result of the active search field.
+	const navSections = useMemo<StoreSectionTab[]>(() => {
+		const own = visibleSections.map((item) => ({
+			count: libraryCounts[item.value],
+			group: "own",
+			icon: item.icon,
+			label: item.label,
+			value: item.value,
+		}));
+		const apps = contributedSections.map((item) => {
+			const sourceData = contributedSourceByValue.get(
+				contributedSectionValue(item)
+			);
+			return {
+				count: sourceData?.total ?? undefined,
+				group: "apps",
+				icon: item.icon ?? "package-01",
+				label: item.title,
+				value: contributedSectionValue(item),
+			};
+		});
+		return [...own, ...apps];
+	}, [
+		contributedSections,
+		contributedSourceByValue,
+		libraryCounts,
+		visibleSections,
+	]);
+
 	// --- Per-tab CTA --------------------------------------------------------
 
 	const handleNewChat = () => openTab("/chat", { forceNew: true });
@@ -927,12 +1337,19 @@ function LibraryCollections({
 					label: "New identity",
 					onCta: () => openTab("/identities/new", { title: "New identity" }),
 				};
+			case "favorites":
+				return {
+					label: "Browse agents",
+					onCta: () => openTab("/library/agent", { title: "Agents" }),
+				};
 			default:
-				// Favorites has no create affordance — you favorite existing items.
 				return null;
 		}
 	};
 	const cta = ctaForSection();
+	const emptyAction = query.trim()
+		? { label: "Clear search", onCta: () => setQuery("") }
+		: cta;
 
 	// --- Card context menu --------------------------------------------------
 
@@ -964,18 +1381,20 @@ function LibraryCollections({
 		}
 	}, [renaming, renameDraft]);
 
-	const commitDelete = useCallback(async () => {
+	const commitDelete = useCallback(async (): Promise<boolean> => {
 		const item = deleting;
 		if (!item?.remove) {
 			setDeleting(null);
-			return;
+			return true;
 		}
 		setBusy(true);
 		try {
 			await item.remove();
 			setDeleting(null);
+			return true;
 		} catch {
 			toast.error(`Couldn't delete ${item.name}`);
+			return false;
 		} finally {
 			setBusy(false);
 		}
@@ -1042,6 +1461,16 @@ function LibraryCollections({
 		// exhaustive over LibrarySection so a new tab cannot be added without deciding
 		// what its empty state says.
 		tools: "Add an MCP server to give your agents new tools.",
+		tabs: "Open a tab to keep it close at hand.",
+		companions: "Install an app with a workspace surface to see it here.",
+		projects: "Open a project folder to see it here.",
+		pinned: "Pin a chat to keep it close at hand.",
+		integrations: "Connect an integration to see it here.",
+		skills: "Install a skill to see it here.",
+		mcp: "Register an MCP server to see it here.",
+		engines: "Add an engine to see it here.",
+		archived: "Archived chats will show up here.",
+		plugins: "Install an app or plugin to see it here.",
 	};
 
 	const editingTeam = teams.find((t) => t.id === editingTeamId) ?? null;
@@ -1063,6 +1492,12 @@ function LibraryCollections({
 	// surface that owns its own (Tools) or to an app-registered collection, which
 	// declares its rows and gets the shared search only.
 	const showCollectionToolbar = !(customSurface || activeContributed);
+	const sidebarSurface = SIDEBAR_SURFACE_SECTIONS.has(
+		section as SidebarOnlySection
+	);
+	const sidebarItems = sidebarSurface
+		? sidebarItemsBySection[section as SidebarOnlySection]
+		: [];
 
 	return (
 		<div className="flex h-full flex-col overflow-hidden pt-12">
@@ -1153,12 +1588,39 @@ function LibraryCollections({
 							<ContributedLibrarySection
 								query={query}
 								section={activeContributed}
+								sourceData={
+									contributedSourceByValue.get(
+										contributedSectionValue(activeContributed)
+									) ?? {
+										contribution: activeContributed,
+										error: null,
+										isLoading: true,
+										rows: [],
+										total: null,
+									}
+								}
+								view={view}
+							/>
+						) : sidebarSurface ? (
+							<SidebarLibrarySection
+								icon={sectionMeta?.icon ?? SECTION_ICONS.companions}
+								items={sidebarItems}
+								label={sectionMeta?.label ?? "Library"}
+								loading={sidebarSectionLoading[section as SidebarOnlySection]}
+								query={query}
 								view={view}
 							/>
 						) : loading ? (
 							<LibraryLoading />
 						) : visibleItems.length === 0 ? (
 							<LibraryEmpty
+								action={
+									emptyAction ? (
+										<Button onClick={emptyAction.onCta} size="sm">
+											{emptyAction.label}
+										</Button>
+									) : null
+								}
 								description={
 									query ? "Nothing matches your search." : emptyCopy[section]
 								}
@@ -1309,39 +1771,38 @@ function LibraryCollections({
 				</DialogContent>
 			</Dialog>
 
-			<AlertDialog
+			<DestructiveConfirmDialog
+				busy={busy}
+				description={`"${deleting?.name ?? ""}" will be permanently deleted. This cannot be undone.`}
+				impact={
+					deleting?.type === "agent" ? (
+						<p className="text-muted-foreground">
+							Channels and their shared Core session history stay in place. If a
+							channel receives a new message, it uses the default agent and
+							shows a binding warning. Scheduled jobs for this agent are
+							removed.
+						</p>
+					) : deleting?.type === "space" ? (
+						<p className="text-muted-foreground">
+							The Space and its documents are permanently deleted.
+						</p>
+					) : deleting?.type === "channel" ? (
+						<p className="text-muted-foreground">
+							The bot credentials and channel configuration are deleted; its
+							Core session history is kept.
+						</p>
+					) : null
+				}
+				label={`Delete ${deleting?.name ?? "this item"}`}
+				onConfirm={commitDelete}
 				onOpenChange={(open) => {
-					if (!open) {
+					if (!(open || busy)) {
 						setDeleting(null);
 					}
 				}}
 				open={deleting !== null}
-			>
-				<AlertDialogContent>
-					<AlertDialogHeader>
-						<AlertDialogTitle>
-							Delete{" "}
-							{deleting ? TYPE_META[deleting.type].label.toLowerCase() : "item"}
-							?
-						</AlertDialogTitle>
-						<AlertDialogDescription>
-							{`"${deleting?.name ?? ""}" will be permanently deleted. This cannot be undone.`}
-						</AlertDialogDescription>
-					</AlertDialogHeader>
-					<AlertDialogFooter>
-						<AlertDialogCancel>Cancel</AlertDialogCancel>
-						<AlertDialogAction
-							disabled={busy}
-							onClick={() => {
-								void commitDelete();
-							}}
-							variant="destructive"
-						>
-							Delete
-						</AlertDialogAction>
-					</AlertDialogFooter>
-				</AlertDialogContent>
-			</AlertDialog>
+				title={`Delete ${deleting ? TYPE_META[deleting.type].label.toLowerCase() : "item"}?`}
+			/>
 		</div>
 	);
 }

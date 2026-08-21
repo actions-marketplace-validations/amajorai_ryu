@@ -74,6 +74,7 @@ import PluginCompanionPage, {
 } from "@/src/pages/PluginCompanionPage.tsx";
 import ProjectDiffPage from "@/src/pages/ProjectDiffPage.tsx";
 import ProjectFilesPage from "@/src/pages/ProjectFilesPage.tsx";
+import ProjectGitGraphPage from "@/src/pages/ProjectGitGraphPage.tsx";
 import ReviewPage from "@/src/pages/ReviewPage.tsx";
 import SettingsPage from "@/src/pages/SettingsPage.tsx";
 import SpaceAppDocPage from "@/src/pages/SpaceAppDocPage.tsx";
@@ -123,7 +124,7 @@ const WORKFLOW_DETAIL = /^\/workflows\/[^/]+$/;
 // /workflows/build/:id — the NL workflow builder for an existing workflow (the
 // `/workflows/build` new-draft entry is an exact route). The builder is shell-
 // only (see WorkflowsPage): host.runAgent's PermissionPreset never exposes the
-// `workflow_builder__*` tools to the sandboxed canvas companion.
+// `workflow_builder.*` tools to the sandboxed canvas companion.
 const WORKFLOW_BUILD = /^\/workflows\/build\/[^/]+$/;
 // /meetings/:id — a specific meeting's transcript + notes.
 const MEETING_DETAIL = /^\/meetings\/[^/]+$/;
@@ -143,7 +144,7 @@ const ARTIFACT_VIEW = /^\/artifact\/[^/]+$/;
 // Project-scoped workspace surfaces can be opened as first-class main tabs. The
 // folder is encoded into one segment so Windows drives and nested paths survive
 // the tab router without being mistaken for additional route segments.
-const PROJECT_VIEW = /^\/project\/(diff|files)\/([^/]+)$/;
+const PROJECT_VIEW = /^\/project\/(diff|files|graph)\/([^/]+)$/;
 // /skills/:id/edit — the SKILL.md editor for an existing skill (the `/skills/new`
 // fresh-draft entry is an exact route). Single id segment ([^/]+), deeper than the
 // `/skills` store exact, so no collision. The skill id is baked into the sandboxed
@@ -263,8 +264,10 @@ export function seedBuiltinRoutes(): void {
 				initialImages: tab.initialImages as AttachedImage[] | undefined,
 				initialProject: tab.initialProject,
 				initialPrompt: tab.initialPrompt,
+				initialProactiveOpening: tab.initialProactiveOpening,
 				initialSubmit: tab.initialSubmit,
 				tabConversationId: tab.conversationId,
+				tabWorktreeMode: tab.worktreeMode,
 			})
 		)
 	);
@@ -289,6 +292,9 @@ export function seedBuiltinRoutes(): void {
 	);
 	exact("/store/workflows", () =>
 		createElement(StorePage, { initialSection: "workflows" })
+	);
+	exact("/store/integrations", () =>
+		createElement(StorePage, { initialSection: "integrations" })
 	);
 	exact("/library", () => createElement(LibraryPage));
 	// Channels/Identities: bare routes open the Library collection tab; manage
@@ -413,6 +419,7 @@ export function seedBuiltinRoutes(): void {
 				initialProject: tab.initialProject,
 				mergedAgentId: agentId ? decodeURIComponent(agentId) : undefined,
 				tabConversationId: tab.conversationId,
+				tabWorktreeMode: tab.worktreeMode,
 			})
 		);
 	});
@@ -497,7 +504,8 @@ export function seedBuiltinRoutes(): void {
 		const filePath = decodeURIComponent(tab.path.slice("/file/".length));
 		return createElement(FileEditorPage, { filePath });
 	});
-	// /project/diff/<encoded folder> and /project/files/<encoded folder>
+	// /project/diff/<encoded folder>, /project/files/<encoded folder>, and
+	// /project/graph/<encoded folder>
 	pattern(PROJECT_VIEW, (tab) => {
 		const match = tab.path.match(PROJECT_VIEW);
 		let folder = match?.[2] ?? "";
@@ -508,7 +516,11 @@ export function seedBuiltinRoutes(): void {
 			// project surface rather than crashing the whole tab shell.
 		}
 		return createElement(
-			match?.[1] === "files" ? ProjectFilesPage : ProjectDiffPage,
+			match?.[1] === "files"
+				? ProjectFilesPage
+				: match?.[1] === "graph"
+					? ProjectGitGraphPage
+					: ProjectDiffPage,
 			{ folder }
 		);
 	});

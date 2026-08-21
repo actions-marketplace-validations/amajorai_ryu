@@ -1,5 +1,7 @@
 "use client";
 
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
+
 import { EntityAvatar } from "./entity-avatar.tsx";
 import { Logo } from "./logo.tsx";
 import { PassCardShell, type PassEdge } from "./pass-card-shell.tsx";
@@ -45,11 +47,6 @@ export const WRAPPED_FIT_STEP_PX = FIT_STEP_PX;
 /** The year printed in the header kicker. Baked in, like the pass family's
  * serials — a Wrapped card is a record of a specific year. */
 export const WRAPPED_YEAR = 2026;
-
-const compactNumber = new Intl.NumberFormat("en-US", {
-	notation: "compact",
-	maximumFractionDigits: 1,
-});
 
 export interface WrappedPassProps {
 	agentHours?: number;
@@ -195,10 +192,7 @@ export function WrappedPass({
 				    hidden, exactly as the referral pass prints "0 joined": it is
 				    the honest starting state. */}
 				<div className="grid grid-cols-2 gap-3">
-					<WrappedStat
-						label="Tokens"
-						value={compactNumber.format(totalTokens)}
-					/>
+					<WrappedStat label="Tokens" value={formatCount(totalTokens) ?? "—"} />
 					<WrappedStat
 						label="Agent hours"
 						value={`${agentHours.toFixed(1)}h`}

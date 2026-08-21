@@ -4,6 +4,7 @@ import {
 	HoverCardTrigger,
 } from "@ryu/ui/components/hover-card";
 import { NumberTicker } from "@ryu/ui/components/number-ticker";
+import { formatCount, formatCurrency } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import type { UIMessage } from "ai";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -89,12 +90,12 @@ export function MessageStats({
 	return (
 		<HoverCard>
 			<HoverCardTrigger
-				closeDelay={80}
-				delay={120}
 				className={cn(
 					"flex w-fit cursor-default select-none items-center gap-1.5 text-muted-foreground",
 					className
 				)}
+				closeDelay={80}
+				delay={120}
 			>
 				{hasRing ? <ContextRing pct={pct} /> : null}
 				<span className="tabular-nums">{speed} tok/s</span>
@@ -260,7 +261,7 @@ function acpBreakdownRows(usage: AcpUsage): Array<{
 	const rows: Array<{ label: string; value: string }> = [];
 	const push = (label: string, value: number | undefined, unit: string) => {
 		if (typeof value === "number") {
-			rows.push({ label, value: `${value} ${unit}` });
+			rows.push({ label, value: `${formatCount(value) ?? "—"} ${unit}` });
 		}
 	};
 	if (typeof usage.tokensPerSecond === "number" && usage.tokensPerSecond > 0) {
@@ -291,7 +292,14 @@ function acpBreakdownRows(usage: AcpUsage): Array<{
 	) {
 		rows.push({
 			label: "Session cost",
-			value: `${usage.sessionCostAmount.toFixed(4)} ${usage.sessionCostCurrency}`,
+			value: formatCurrency(
+				usage.sessionCostAmount,
+				usage.sessionCostCurrency,
+				{
+					maximumFractionDigits: 4,
+					minimumFractionDigits: 2,
+				}
+			),
 		});
 	}
 	return rows;

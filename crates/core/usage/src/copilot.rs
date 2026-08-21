@@ -135,6 +135,24 @@ fn token_from_hosts_yml(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Read the managed Pi OAuth entry for Ryu's Copilot subscription provider.
+fn token_from_ryu_json(root: &serde_json::Value) -> Option<String> {
+    let entry = root.get("github-copilot")?;
+    ["access", "accessToken", "oauth_token"]
+        .iter()
+        .find_map(|key| entry.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+fn load_ryu_token() -> Option<String> {
+    let path = super::host()?.ryu_pi_auth_path()?;
+    let text = read_file(&path)?;
+    let root = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    token_from_ryu_json(&root)
+}
+
 /// The `gh` CLI stores its token as a login-Keychain generic password (service
 /// `gh:github.com`) when the system keyring is in use. Shell out to the signed
 /// `security` tool, exactly as the Claude reader does.
@@ -158,16 +176,30 @@ fn read_keychain() -> Option<String> {
 }
 
 pub(super) async fn fetch(agent_id: &str) -> UsageSnapshot {
-    let unavailable =
-        |reason: UsageUnavailable| UsageSnapshot::unavailable(agent_id, "copilot", reason);
-
-    // Off the async worker: the Keychain fallback can block on an authorization
-    // dialog, and the file reads are sync IO either way.
     let token = match tokio::task::spawn_blocking(load_token).await {
         Ok(Some(token)) => token,
-        Ok(None) => return unavailable(UsageUnavailable::NotLoggedIn),
-        Err(_) => return unavailable(UsageUnavailable::Error),
+        Ok(None) => {
+            return UsageSnapshot::unavailable(agent_id, "copilot", UsageUnavailable::NotLoggedIn)
+        }
+        Err(_) => return UsageSnapshot::unavailable(agent_id, "copilot", UsageUnavailable::Error),
     };
+    fetch_with_token(agent_id, token).await
+}
+
+pub(super) async fn fetch_ryu(agent_id: &str) -> UsageSnapshot {
+    let token = match tokio::task::spawn_blocking(load_ryu_token).await {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            return UsageSnapshot::unavailable(agent_id, "copilot", UsageUnavailable::NotLoggedIn)
+        }
+        Err(_) => return UsageSnapshot::unavailable(agent_id, "copilot", UsageUnavailable::Error),
+    };
+    fetch_with_token(agent_id, token).await
+}
+
+async fn fetch_with_token(agent_id: &str, token: String) -> UsageSnapshot {
+    let unavailable =
+        |reason: UsageUnavailable| UsageSnapshot::unavailable(agent_id, "copilot", reason);
 
     let resp = http_client()
         .get(usage_url())
@@ -665,5 +697,19 @@ mod tests {
         let snap = fetch("acp:copilot").await;
         assert!(!snap.available);
         assert!(matches!(snap.reason, Some(UsageUnavailable::Error)));
+    }
+
+    #[test]
+    fn ryu_auth_entry_maps_to_copilot_token() {
+        let root = serde_json::json!({
+            "github-copilot": {
+                "type": "oauth",
+                "access": "copilot-access",
+            }
+        });
+        assert_eq!(
+            token_from_ryu_json(&root).as_deref(),
+            Some("copilot-access")
+        );
     }
 }

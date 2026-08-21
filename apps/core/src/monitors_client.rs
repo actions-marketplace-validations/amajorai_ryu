@@ -20,7 +20,7 @@
 //!   theirs removed.
 //! - **Spider fetch** (the `mcp.callTool` kernel capability) — the sidecar's Spider fetch
 //!   backend needs Core's `McpRegistry`, which it cannot host; [`host_spider_crawl`]
-//!   runs `spider__crawl` (the declarative command plugin) on its behalf.
+//!   runs `spider.crawl` (the declarative command plugin) on its behalf.
 //! - **alert fan-out** (the `notify.fanout` kernel capability) — the sidecar posts each fired
 //!   alert back; [`host_monitor_alert`] fans it out through the kernel notification
 //!   store AND records it on the unified activity feed (the two independent consumers
@@ -297,7 +297,7 @@ pub fn spawn(client: MonitorsClient) {
 
 // ── Host callbacks (sidecar → Core) ───────────────────────────────────────────────
 
-/// `POST /api/host/capability/mcp.callTool` — run `spider__crawl` (or any MCP tool the
+/// `POST /api/host/capability/mcp.callTool` — run `spider.crawl` (or any MCP tool the
 /// monitor engine requests) through Core's [`McpRegistry`](crate::sidecar::mcp::McpRegistry) on
 /// the sidecar's behalf. Registered on the PUBLIC router (the sidecar holds only its
 /// minted ext token, not the node bearer); [`authenticate_sidecar`] does the token +

@@ -1,8 +1,7 @@
-// Chooses how live voice mode is presented: the ChatGPT-style transcript panel
-// (default) or the classic full-screen orb. Driven by the "Show transcript in
-// voice mode" desktop setting (`ryu:voice-show-transcript`, default ON). One
-// swap-in for every voice mount point (ChatPage, EmptyTabsState, composer slot)
-// so the choice lives in a single place.
+// Chooses whether the compact live voice call includes its running transcript.
+// Driven by the "Show transcript in voice mode" desktop setting
+// (`ryu:voice-show-transcript`, default ON). One swap-in for every voice mount
+// point (ChatPage, EmptyTabsState, composer slot) keeps the choice centralized.
 
 import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import type { VoiceMode } from "@/src/hooks/useVoiceMode.ts";

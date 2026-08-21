@@ -11,16 +11,18 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { ChatDisplayPrefsProvider } from "./chat-display-prefs.tsx";
 import { deriveContextUsage } from "./context-usage.tsx";
 import { type SuggestionItem, Suggestions } from "./input/suggestions.tsx";
 import { InputBar } from "./input-bar.tsx";
 import { MessageList } from "./message-list.tsx";
 import { ComposerQuotePreview } from "./quote.tsx";
 import type { AgentChatProps } from "./types.ts";
-import { useDeferredQuestion } from "./use-deferred-question.ts";
+import { useDeferredComposerPrompt } from "./use-deferred-question.ts";
 
 export function AgentChat({
 	messages,
+	answerNow,
 	onSend,
 	status,
 	onStop,
@@ -36,10 +38,9 @@ export function AgentChat({
 	onRegenerateMessage,
 	onRetryGeneration,
 	onFeedback,
-	onToggleReaction,
-	reactionsByMessage,
 	feedback,
 	messageActions,
+	messageActionStates,
 	onContributedMessageAction,
 	onSelectVersion,
 	versions,
@@ -47,6 +48,7 @@ export function AgentChat({
 	onQuote,
 	onOpenFile,
 	onOpenLink,
+	onOpenMention,
 	mentionItems,
 	onWorkflowResume,
 	previewResolvers,
@@ -56,10 +58,19 @@ export function AgentChat({
 	enableImagePreview,
 	assistantAvatar,
 	assistantName,
+	assistantTitle,
 	assistantPlanningAvatars,
 	agentMessageContext,
+	composerPrompt,
+	composerMenuGroups,
+	density,
+	composerDisabled,
+	composerFooter,
+	onComposerMenuSelect,
+	onComposerResize,
 	currentUser,
 	seedDraft,
+	onSeedDraftConsumed,
 	onDraftChange,
 	suggestions,
 	followUps,
@@ -70,6 +81,9 @@ export function AgentChat({
 	emptyStateFooter,
 	historyLoading,
 	historyError,
+	hasOlderMessages,
+	loadingOlderMessages,
+	onLoadOlderMessages,
 	questionTool,
 	historyNotice,
 	className,
@@ -81,19 +95,30 @@ export function AgentChat({
 }: AgentChatProps) {
 	const rootRef = useRef<HTMLDivElement>(null);
 	const [draft, setDraft] = useState("");
+	const draftTouchedRef = useRef(false);
+	const setDraftFromUser = useCallback((nextDraft: string) => {
+		draftTouchedRef.current = true;
+		setDraft(nextDraft);
+	}, []);
 	const resolvedDraftControls = draftControls
-		? { ...draftControls, onInsert: (text: string) => setDraft(text) }
+		? { ...draftControls, onInsert: setDraftFromUser }
 		: undefined;
 
 	// Apply a composer seed (e.g. from a deep link) once per distinct value, so a
 	// pre-filled prompt lands in the textarea without clobbering later edits.
 	const seededValueRef = useRef<string | undefined>(undefined);
 	useEffect(() => {
-		if (seedDraft && seedDraft !== seededValueRef.current) {
+		if (
+			seedDraft &&
+			seedDraft !== seededValueRef.current &&
+			!draftTouchedRef.current &&
+			draft.length === 0
+		) {
 			seededValueRef.current = seedDraft;
 			setDraft(seedDraft);
+			onSeedDraftConsumed?.();
 		}
-	}, [seedDraft]);
+	}, [draft, onSeedDraftConsumed, seedDraft]);
 
 	// Observe the composer text for surfaces that persist it (the desktop keeps
 	// unsent text as a draft). A ref for the callback so a consumer passing an
@@ -159,20 +184,33 @@ export function AgentChat({
 
 	const pendingQuestion = findPendingQuestion(messages, questionTool);
 	const {
-		markComposerActivity,
-		markComposerIdle,
-		visibleQuestion: visiblePendingQuestion,
-	} = useDeferredQuestion(pendingQuestion);
+		markComposerActivity: markQuestionActivity,
+		markComposerIdle: markQuestionIdle,
+		visiblePrompt: visiblePendingQuestion,
+	} = useDeferredComposerPrompt(pendingQuestion);
+	const {
+		markComposerActivity: markPromptActivity,
+		markComposerIdle: markPromptIdle,
+		visiblePrompt: visibleComposerPrompt,
+	} = useDeferredComposerPrompt(composerPrompt);
 	const handleDraftChange = useCallback(
 		(nextDraft: string) => {
-			setDraft(nextDraft);
+			setDraftFromUser(nextDraft);
 			if (nextDraft) {
-				markComposerActivity();
+				markQuestionActivity();
+				markPromptActivity();
 			} else {
-				markComposerIdle();
+				markQuestionIdle();
+				markPromptIdle();
 			}
 		},
-		[markComposerActivity, markComposerIdle]
+		[
+			markPromptActivity,
+			markPromptIdle,
+			markQuestionActivity,
+			markQuestionIdle,
+			setDraftFromUser,
+		]
 	);
 	const suggestionConfig = resolveSuggestions(suggestions);
 	const showInputSuggestions =
@@ -185,7 +223,7 @@ export function AgentChat({
 		suggestionConfig.items.length > 0;
 
 	const handleEmptySuggestionSelect = (item: SuggestionItem) => {
-		setDraft(item.value ?? item.label);
+		setDraftFromUser(item.value ?? item.label);
 	};
 
 	const emptySuggestionsNode = showEmptySuggestions ? (
@@ -229,17 +267,23 @@ export function AgentChat({
 			attachedFiles={attachments?.files}
 			attachedImages={attachments?.images}
 			className={cn(classNames?.inputBar, isCenteredEmptyState && "px-0 pb-0")}
+			compact={density === "compact"}
 			composerHeader={
 				quote ? (
 					<ComposerQuotePreview onDismiss={onClearQuote} text={quote} />
 				) : undefined
 			}
+			composerMenuGroups={composerMenuGroups}
+			composerPrompt={visibleComposerPrompt ?? undefined}
 			contextMeter={contextMeter}
 			contextMeterOnOpen={onOpenContext}
+			disabled={composerDisabled}
 			draftControls={resolvedDraftControls}
 			isDragOver={attachments?.isDragOver}
 			onAttach={attachments?.onAttach}
 			onChange={handleDraftChange}
+			onComposerMenuSelect={onComposerMenuSelect}
+			onHeightChange={onComposerResize}
 			onPaste={attachments?.onPaste}
 			onRemoveFile={attachments?.onRemoveFile}
 			onRemoveImage={attachments?.onRemoveImage}
@@ -323,9 +367,11 @@ export function AgentChat({
 		transcriptNode = (
 			<MessageList
 				agentMessageContext={agentMessageContext}
+				answerNow={answerNow}
 				assistantAvatar={assistantAvatar}
 				assistantName={assistantName}
 				assistantPlanningAvatars={assistantPlanningAvatars}
+				assistantTitle={assistantTitle}
 				className={classNames?.messageList}
 				classNames={classNames}
 				contextSize={contextSize}
@@ -333,13 +379,16 @@ export function AgentChat({
 				currentUser={currentUser}
 				enableImagePreview={enableImagePreview}
 				feedback={feedback}
+				hasOlderMessages={hasOlderMessages}
 				// Declared and destructured since the prop was introduced, but never
 				// actually handed to the transcript — so a surface that set it got
 				// nothing on screen. It renders as a `Marker` after the last message
 				// (see MessageListProps.historyNotice).
 				historyNotice={historyNotice}
 				initialScrollBehavior={initialScrollBehavior}
+				loadingOlderMessages={loadingOlderMessages}
 				mentionItems={mentionItems}
+				messageActionStates={messageActionStates}
 				messageActions={messageActions}
 				messages={listMessages}
 				onAgentUiSubmit={onAgentUiSubmit}
@@ -347,17 +396,17 @@ export function AgentChat({
 				onContributedMessageAction={onContributedMessageAction}
 				onEditMessage={onEditMessage}
 				onFeedback={onFeedback}
+				onLoadOlderMessages={onLoadOlderMessages}
 				onOpenFile={onOpenFile}
 				onOpenLink={onOpenLink}
+				onOpenMention={onOpenMention}
 				onQuote={onQuote}
 				onRegenerateMessage={onRegenerateMessage}
 				onRetryGeneration={onRetryGeneration}
 				onSelectVersion={onSelectVersion}
 				onSpeak={onSpeak}
-				onToggleReaction={onToggleReaction}
 				onWorkflowResume={onWorkflowResume}
 				previewResolvers={previewResolvers}
-				reactionsByMessage={reactionsByMessage}
 				showCopyToolbar={showCopyToolbar}
 				slots={slots}
 				status={status}
@@ -368,7 +417,7 @@ export function AgentChat({
 		);
 	}
 
-	return (
+	const chatNode = (
 		<div
 			className={cn(
 				"flex h-full min-h-0 flex-col",
@@ -383,9 +432,20 @@ export function AgentChat({
 				<>
 					{followUpsNode}
 					{inputBarNode}
+					{composerFooter ? (
+						<div className="shrink-0 px-3 pb-2">{composerFooter}</div>
+					) : null}
 				</>
 			)}
 		</div>
+	);
+
+	return density ? (
+		<ChatDisplayPrefsProvider value={{ density }}>
+			{chatNode}
+		</ChatDisplayPrefsProvider>
+	) : (
+		chatNode
 	);
 }
 

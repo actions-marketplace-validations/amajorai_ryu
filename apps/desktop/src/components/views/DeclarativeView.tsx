@@ -40,6 +40,7 @@ import {
 } from "@ryu/ui/components/card";
 import {
 	Empty,
+	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyTitle,
@@ -231,6 +232,9 @@ function ListDetail({
 				<EmptyHeader>
 					<EmptyTitle>{spec.emptyText ?? "Nothing here yet."}</EmptyTitle>
 				</EmptyHeader>
+				<EmptyContent>
+					<Actions actions={spec.actions} ctx={{}} onAction={onAction} />
+				</EmptyContent>
 			</Empty>
 		);
 	}

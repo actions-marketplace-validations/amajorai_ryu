@@ -361,7 +361,7 @@ const DropLine = memo(function DropLine({
 			{...props}
 			className={cn(
 				"slate-dropLine",
-				"absolute inset-x-0 h-0.5 opacity-100 transition-opacity",
+				"reorder-drop-indicator absolute inset-x-0 h-0.5 opacity-100 transition-opacity",
 				"bg-brand/50",
 				dropLine === "top" && "-top-px",
 				dropLine === "bottom" && "-bottom-px",
@@ -450,11 +450,13 @@ const createDragPreviewElements = (
 
 			const domNodeRect = domNode.parentElement?.getBoundingClientRect();
 
-			const distance = domNodeRect.top - lastDomNodeRect.bottom;
+			if (domNodeRect && lastDomNodeRect) {
+				const distance = domNodeRect.top - lastDomNodeRect.bottom;
 
-			// Check if the two elements are adjacent (touching each other)
-			if (distance > 15) {
-				wrapper.style.marginTop = `${distance}px`;
+				// Check if the two elements are adjacent (touching each other)
+				if (distance > 15) {
+					wrapper.style.marginTop = `${distance}px`;
+				}
 			}
 		}
 
@@ -484,6 +486,9 @@ const calculatePreviewTop = (
 	const child = editor.api.toDOMNode(element)!;
 	const editable = editor.api.toDOMNode(editor)!;
 	const firstSelectedChild = blocks[0];
+	if (!firstSelectedChild) {
+		return 0;
+	}
 
 	const firstDomNode = editor.api.toDOMNode(firstSelectedChild)!;
 	// Get editor's top padding

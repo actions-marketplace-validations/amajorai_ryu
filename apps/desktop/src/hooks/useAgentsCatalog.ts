@@ -29,6 +29,7 @@ export interface UseAgentsCatalogResult {
 	loading: boolean;
 	/** Id of the agent whose install/uninstall is currently in flight, or null. */
 	pendingId: string | null;
+	reload: () => Promise<void>;
 	uninstall: (id: string) => Promise<void>;
 }
 
@@ -91,6 +92,9 @@ export function useAgentsCatalog(): UseAgentsCatalogResult {
 		(installMutation.isPending ? installMutation.variables : null) ??
 		(uninstallMutation.isPending ? uninstallMutation.variables : null) ??
 		null;
+	const reload = useCallback(async () => {
+		await catalogQuery.refetch();
+	}, [catalogQuery]);
 
 	return {
 		agents: catalogQuery.data ?? [],
@@ -101,6 +105,7 @@ export function useAgentsCatalog(): UseAgentsCatalogResult {
 			errorOf(catalogQuery.error),
 		install,
 		uninstall,
+		reload,
 		pendingId,
 	};
 }

@@ -17,7 +17,7 @@ import {
 	CheckmarkCircle02Icon,
 	Clock01Icon,
 	Delete01Icon,
-	WorkflowSquare01Icon,
+	WorkflowCircle06Icon,
 	ZapIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -115,6 +115,7 @@ export interface SchedulesViewProps {
 	loading?: boolean;
 	onCreate?: (payload: CreateSchedulePayload) => Promise<unknown>;
 	onDelete?: (id: string) => void;
+	onRetry?: () => void;
 	workflows: WorkflowOption[];
 	workflowsLoading?: boolean;
 }
@@ -554,7 +555,7 @@ function JobCard({
 						<Badge variant="secondary">{job.agentId}</Badge>
 					) : (
 						<Badge className="gap-1" variant="secondary">
-							<HugeiconsIcon className="size-3" icon={WorkflowSquare01Icon} />
+							<HugeiconsIcon className="size-3" icon={WorkflowCircle06Icon} />
 							{job.workflowName ?? "Workflow"}
 						</Badge>
 					)}
@@ -597,6 +598,7 @@ export function SchedulesView({
 	workflowsLoading,
 	onCreate,
 	onDelete,
+	onRetry,
 }: SchedulesViewProps) {
 	if (loading) {
 		return (
@@ -616,6 +618,13 @@ export function SchedulesView({
 					<EmptyTitle>Could not load automations</EmptyTitle>
 					<EmptyDescription>{error}</EmptyDescription>
 				</EmptyHeader>
+				{onRetry ? (
+					<EmptyContent>
+						<Button onClick={onRetry} size="sm" variant="ghost">
+							Try again
+						</Button>
+					</EmptyContent>
+				) : null}
 			</Empty>
 		);
 	}
@@ -636,7 +645,7 @@ export function SchedulesView({
 				{createDialog}
 			</div>
 
-			<div className="scroll-fade-effect-y flex-1 overflow-auto p-4">
+			<div className="scroll-fade flex-1 overflow-auto p-4">
 				{jobs.length === 0 ? (
 					<Empty className="h-full">
 						<EmptyHeader>

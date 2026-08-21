@@ -4,6 +4,78 @@
 @source "../../../apps/**/*.{ts,tsx}";
 @source "../**/*.{ts,tsx}";
 
+/* Sileo's bundled title rule capitalizes every word. Toast titles are sentence
+   copy, so the shared toaster opts into this more-specific rule to preserve the
+   casing supplied by each caller across web and desktop. */
+[data-sileo-title].ryu-sileo-title {
+	text-transform: none;
+}
+
+/* The welcome wordmark stays foreground-coloured while a diagonal primary
+   highlight crosses it twice. The base text never fades, so the second pass is
+   a sweep over visible text rather than a second reveal from transparency. */
+@keyframes ryu-welcome-wordmark-sweep {
+	0%,
+	14%,
+	38%,
+	52%,
+	76%,
+	100% {
+		background-position: 140% 0;
+		opacity: 0;
+	}
+	24%,
+	62% {
+		background-position: -40% 0;
+		opacity: 1;
+	}
+}
+
+.ryu-welcome-wordmark {
+	position: relative;
+	display: inline-block;
+	font-weight: 650;
+}
+
+.ryu-welcome-wordmark__sweep {
+	position: absolute;
+	inset: 0;
+	color: transparent;
+	-webkit-text-fill-color: transparent;
+	background-image: linear-gradient(
+		110deg,
+		transparent 32%,
+		color-mix(in oklab, var(--primary) 25%, transparent) 44%,
+		var(--primary) 50%,
+		color-mix(in oklab, var(--primary) 25%, transparent) 56%,
+		transparent 68%
+	);
+	-webkit-background-clip: text;
+	background-clip: text;
+	background-size: 240% 100%;
+	animation: ryu-welcome-wordmark-sweep 5s ease-in-out both;
+}
+
+/* Match the Google switch in decosmicweb: the Code mode uses the same four
+   Google colours, 300% moving canvas, and three-second background loop. */
+@keyframes ryu-interface-mode-gradient {
+	0%,
+	100% {
+		background-position: 0% 50%;
+	}
+	50% {
+		background-position: 100% 50%;
+	}
+}
+
+.ryu-interface-mode-switch[data-checked] {
+	background-image: linear-gradient(45deg, #db4437, #f4b400, #0f9d58, #4285f4);
+	background-repeat: no-repeat;
+	background-position: 0% 50%;
+	background-size: 300% 100%;
+	animation: ryu-interface-mode-gradient 3s ease infinite;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 /* Backport of shadcn's scroll-fade utilities. The classes are documented by
@@ -228,6 +300,13 @@
 	mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent);
 }
 
+/* Reorder/drop markers are deliberately pills even when they are only a couple
+   of pixels thick. Keep the cap geometry shared by tabs, sidebar sections, and
+   editor drag targets instead of relying on each surface to remember it. */
+@utility reorder-drop-indicator {
+	border-radius: 9999px;
+}
+
 :root {
 	--card: oklch(1 0 0);
 	--card-foreground: oklch(0.145 0 0);
@@ -288,8 +367,27 @@
 	--sidebar-ring: oklch(0.708 0 0);
 	--background: oklch(1 0 0);
 	--foreground: oklch(0.145 0 0);
+	--ryu-popup-overlay-background: rgb(0 0 0 / 18%);
+	--ryu-popup-overlay-blur: 8px;
 	--ryu-dialog-overlay-background: rgb(0 0 0 / 30%);
 	--ryu-dialog-overlay-blur: 8px;
+}
+
+/* Popup backdrops are opt-in on desktop. The Base UI backdrop parts stay in the
+   DOM while a popup is open so outside-click and keyboard dismissal keep their
+   normal behavior; this class only supplies the visual treatment. */
+.ryu-popup-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 40;
+	background-color: var(--ryu-popup-overlay-background);
+	border-radius: var(--ryu-window-radius, 0px);
+	-webkit-backdrop-filter: blur(var(--ryu-popup-overlay-blur));
+	backdrop-filter: blur(var(--ryu-popup-overlay-blur));
+}
+
+html:not([data-popup-overlay-blur="on"]) .ryu-popup-overlay {
+	display: none;
 }
 
 .ryu-dialog-overlay {
@@ -1536,11 +1634,18 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	[data-slot="drawer-content"],
 	[data-slot="popover-content"],
 	[data-slot="dropdown-menu-content"],
+	[data-slot="dropdown-menu-sub-content"],
+	[data-slot="select-content"],
+	[data-slot="context-menu-content"],
+	[data-slot="context-menu-sub-content"],
+	[data-slot="combobox-content"],
+	[data-slot="navigation-menu-popup"],
 	[data-slot="tooltip-content"] {
 		background-color: var(--popover) !important;
 	}
 
-	.ryu-dialog-overlay {
+	.ryu-dialog-overlay,
+	.ryu-popup-overlay {
 		-webkit-backdrop-filter: none !important;
 		backdrop-filter: none !important;
 	}
@@ -1563,9 +1668,20 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	[data-slot="drawer-content"],
 	[data-slot="popover-content"],
 	[data-slot="dropdown-menu-content"],
+	[data-slot="dropdown-menu-sub-content"],
+	[data-slot="select-content"],
+	[data-slot="context-menu-content"],
+	[data-slot="context-menu-sub-content"],
+	[data-slot="combobox-content"],
+	[data-slot="navigation-menu-popup"],
 	[data-slot="tooltip-content"] {
 		background-color: var(--popover) !important;
 		border: 1px solid var(--foreground) !important;
+	}
+
+	.ryu-popup-overlay {
+		-webkit-backdrop-filter: none !important;
+		backdrop-filter: none !important;
 	}
 
 	:root {
@@ -1663,4 +1779,23 @@ html {
 }
 .ryu-tracking-caption {
 	letter-spacing: var(--tracking-caption);
+}
+
+/* A message boundary that appears while the reader is away from the live
+   edge. The label is supplied by MessageScroller so the separator and the
+   scroll-to-latest control always show the same count. */
+[data-slot="message-scroller-item"][data-unread-start="true"] {
+	padding-top: 0.5rem;
+	border-top: 1px solid color-mix(in oklch, var(--primary) 45%, transparent);
+}
+
+[data-slot="message-scroller-item"][data-unread-start="true"]::before {
+	display: block;
+	margin-bottom: 0.5rem;
+	font-size: 0.75rem;
+	font-weight: 600;
+	line-height: 1rem;
+	color: var(--primary);
+	text-align: center;
+	content: attr(data-unread-label);
 }
