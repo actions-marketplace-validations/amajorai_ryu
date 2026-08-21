@@ -36,6 +36,7 @@
       "dependencies": {
         "@opentui/core": "^0.4.2",
         "@opentui/react": "^0.4.2",
+        "@ryu/portable-packages": "workspace:*",
         "@ryuhq/core-client": "workspace:*",
         "cli-spinners": "^3.4.0",
         "react": "^19.2.0",
@@ -434,6 +435,18 @@
       "peerDependencies": {
         "react": "^19",
         "react-dom": "^19",
+      },
+    },
+    "packages/portable-packages": {
+      "name": "@ryu/portable-packages",
+      "version": "0.2.0",
+      "dependencies": {
+        "fflate": "^0.8.3",
+      },
+      "devDependencies": {
+        "@ryu/config": "workspace:*",
+        "@types/bun": "catalog:",
+        "typescript": "^5",
       },
     },
     "packages/protocol": {
@@ -1889,6 +1902,8 @@
     "@ryu/hotkeys": ["@ryu/hotkeys@workspace:packages/hotkeys"],
 
     "@ryu/marketplace": ["@ryu/marketplace@workspace:packages/marketplace"],
+
+    "@ryu/portable-packages": ["@ryu/portable-packages@workspace:packages/portable-packages"],
 
     "@ryu/settings": ["@ryu/settings@workspace:packages/settings"],
 

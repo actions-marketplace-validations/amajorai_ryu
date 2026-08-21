@@ -19,6 +19,7 @@
   "dependencies": {
     "@opentui/core": "^0.4.2",
     "@opentui/react": "^0.4.2",
+    "@ryu/portable-packages": "workspace:*",
     "@ryuhq/core-client": "workspace:*",
     "cli-spinners": "^3.4.0",
     "react": "^19.2.0"

@@ -1,0 +1,302 @@
+import { expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	canonicalJson,
+	decryptSecrets,
+	diffPackageTrees,
+	hasEncryptedSecrets,
+	type PackageTree,
+	packageDigest,
+	packPackage,
+	parseGithubPackageReference,
+	readGithubPackage,
+	readPackageFolder,
+	readPackageInput,
+	redactPackageTree,
+	unpackPackage,
+	validatePackageManifest,
+	validatePackageTree,
+	validatePublishablePackage,
+	withEncryptedSecrets,
+	writePackageFolder,
+} from "./index.ts";
+
+const manifest = {
+	artifacts: ["agent.json"],
+	capabilities: ["chat"],
+	id: "ryu/example-agent",
+	kind: "agent",
+	name: "Example Agent",
+	requires: {},
+	schemaVersion: 1,
+	security: {
+		containsSecrets: false,
+		permissions: [],
+		privateContent: false,
+		redacted: false,
+	},
+	scopes: ["agent"],
+	targets: ["ryu-desktop"],
+	version: "1.0.0",
+};
+
+function tree(agentText = '{"id":"agent-1","tools":["search"]}\n'): PackageTree {
+	return {
+		files: {
+			"agent.json": new TextEncoder().encode(agentText),
+			"README.md": new TextEncoder().encode("# Example\n"),
+		},
+		manifest: validatePackageManifest(manifest),
+	};
+}
+
+test("validates and canonicalizes the package envelope", () => {
+	const parsed = validatePackageManifest({ ...manifest, scopes: ["agent"] });
+	expect(parsed.schemaVersion).toBe(1);
+	expect(canonicalJson({ b: 1, a: 2 })).toBe('{"a":2,"b":1}');
+	expect(() => validatePackageManifest({ ...manifest, id: "../unsafe" })).toThrow(
+		"unsupported characters"
+	);
+});
+
+test("validates declared artifacts and preserves safe metadata", () => {
+	const parsed = validatePackageManifest({
+		...manifest,
+		metadata: { category: "Design", tagline: "Portable" },
+	});
+	expect(parsed.metadata).toEqual({ category: "Design", tagline: "Portable" });
+	expect(() => validatePackageTree({ files: {}, manifest: parsed })).toThrow(
+		"declared artifact is missing"
+	);
+});
+
+test("folder and archive representations have the same package digest", async () => {
+	const root = await mkdtemp(join(tmpdir(), "ryu-package-folder-"));
+	try {
+		await writePackageFolder(root, tree());
+		const fromFolder = await readPackageFolder(root);
+		const fromArchive = unpackPackage(packPackage(fromFolder));
+		expect(packageDigest(fromFolder)).toBe(packageDigest(fromArchive));
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("folder trees pack and unpack deterministically", () => {
+	const first = packPackage(tree());
+	const second = packPackage(tree());
+	expect(Buffer.from(first).equals(Buffer.from(second))).toBe(true);
+	const unpacked = unpackPackage(first);
+	expect(packageDigest(unpacked)).toBe(packageDigest(tree()));
+	expect(new TextDecoder().decode(unpacked.files["agent.json"])).toContain(
+		"agent-1"
+	);
+});
+
+test("encrypted secrets are detected and require the unlock key", () => {
+	const encrypted = withEncryptedSecrets(tree(), { token: "do-not-log" }, "correct horse");
+	expect(hasEncryptedSecrets(encrypted)).toBe(true);
+	expect(decryptSecrets(encrypted.files["secrets.enc"]!, "correct horse", encrypted.manifest)).toEqual({
+		token: "do-not-log",
+	});
+	expect(() =>
+		decryptSecrets(encrypted.files["secrets.enc"]!, "wrong key", encrypted.manifest)
+	).toThrow("unlock key is incorrect");
+	});
+
+test("redaction removes secret and private-content files", () => {
+	const encrypted = withEncryptedSecrets(
+		{
+			...tree(),
+			files: {
+				...tree().files,
+				"content/private.md": new TextEncoder().encode("private"),
+				"credentials.json": new TextEncoder().encode("secret"),
+			},
+		},
+		{ token: "secret" },
+		"passphrase"
+	);
+	const redacted = redactPackageTree(encrypted);
+	expect(redacted.files["secrets.enc"]).toBeUndefined();
+	expect(redacted.files["credentials.json"]).toBeUndefined();
+	expect(redacted.files["content/private.md"]).toBeUndefined();
+	expect(redacted.manifest.security.containsSecrets).toBe(false);
+	});
+
+test("three-way JSON merge preserves local edits and accepts upstream edits", () => {
+	const base = tree('{"id":"agent-1","tools":["search"],"prompt":"base"}\n');
+	const local = tree('{"id":"agent-1","tools":["search","calendar"],"prompt":"base"}\n');
+	const upstream = tree('{"id":"agent-1","tools":["search"],"prompt":"upstream"}\n');
+	const diff = diffPackageTrees(base, local, upstream);
+	expect(diff.conflicts).toEqual([]);
+	expect(diff.merged).not.toBeNull();
+	const merged = new TextDecoder().decode(diff.merged?.files["agent.json"]);
+	expect(merged).toContain("calendar");
+	expect(merged).toContain("upstream");
+});
+
+test("conflicts are explicit and secret files remain opaque", () => {
+	const base = tree('{"id":"agent-1","prompt":"base"}\n');
+	const local = tree('{"id":"agent-1","prompt":"local"}\n');
+	const upstream = tree('{"id":"agent-1","prompt":"upstream"}\n');
+	const diff = diffPackageTrees(base, local, upstream);
+	expect(diff.conflicts).toContain("agent.json.prompt");
+	expect(diff.merged).toBeNull();
+
+	const secretTree = withEncryptedSecrets(base, { token: "secret" }, "passphrase");
+	const secretUpstream = withEncryptedSecrets(base, { token: "new" }, "passphrase");
+	const secretDiff = diffPackageTrees(secretTree, secretTree, secretUpstream);
+	const secretChange = secretDiff.changes.find((change) => change.path === "secrets.enc");
+	expect(secretChange?.secret).toBe(true);
+	});
+
+test("publish validation rejects secret-bearing packages", () => {
+	const clean = tree();
+	validatePublishablePackage(clean);
+	const secret = withEncryptedSecrets(clean, { token: "secret" }, "passphrase");
+	expect(() => validatePublishablePackage(secret)).toThrow(
+		"cannot be published"
+	);
+});
+
+test("only tool and skill arrays merge as sets", () => {
+	const base = tree('{"id":"agent-1","tools":["search"]}\n');
+	const local = tree('{"id":"agent-1","tools":["search","calendar"]}\n');
+	const upstream = tree('{"id":"agent-1","tools":["search","browser"]}\n');
+	const toolDiff = diffPackageTrees(base, local, upstream);
+	const merged = new TextDecoder().decode(
+		toolDiff.merged?.files["agent.json"] ?? new Uint8Array()
+	);
+
+	expect(toolDiff.conflicts).not.toContain("agent.json.tools");
+	expect(merged).toContain('"browser"');
+	expect(merged).toContain('"calendar"');
+
+	const labelDiff = diffPackageTrees(
+		tree('{"id":"agent-1","labels":["base"]}\n'),
+		tree('{"id":"agent-1","labels":["local"]}\n'),
+		tree('{"id":"agent-1","labels":["upstream"]}\n')
+	);
+	expect(labelDiff.conflicts).toContain("agent.json.labels");
+
+	const orderedDiff = diffPackageTrees(
+		tree('{"id":"agent-1","steps":[{"id":"first"},{"id":"second"}]}\n'),
+		tree('{"id":"agent-1","steps":[{"id":"second"},{"id":"first"}]}\n'),
+		tree('{"id":"agent-1","steps":[{"id":"first"},{"id":"third"}]}\n')
+	);
+	expect(orderedDiff.conflicts).toContain("agent.json.steps");
+});
+
+test("resolves a GitHub package folder and pins its commit", async () => {
+	expect(parseGithubPackageReference("acme/agents")).toEqual({
+		path: "",
+		ref: "main",
+		repository: "acme/agents",
+	});
+	expect(parseGithubPackageReference("acme/agents/demo@main")).toEqual({
+		path: "demo",
+		ref: "main",
+		repository: "acme/agents",
+	});
+	expect(
+		parseGithubPackageReference(
+			"https://github.com/acme/agents/tree/main/demo"
+		)
+	).toEqual({ path: "demo", ref: "main", repository: "acme/agents" });
+
+	const remoteManifest = {
+		...manifest,
+		id: "ryu/remote-agent",
+		name: "Remote Agent",
+		source: {
+			type: "github",
+			repository: "acme/agents",
+			path: "demo",
+			ref: "main",
+		},
+	};
+	const fetcher = async (url: string): Promise<Response> => {
+		if (url.includes("/commits/main")) {
+			return new Response(JSON.stringify({ sha: "abc123" }), { status: 200 });
+		}
+		if (url.includes("/git/trees/abc123")) {
+			return new Response(
+				JSON.stringify({
+					tree: [
+						{ path: "demo/ryu.package.json", type: "blob" },
+						{ path: "demo/agent.json", type: "blob" },
+					],
+				}),
+				{ status: 200 }
+			);
+		}
+		if (url.endsWith("demo/ryu.package.json")) {
+			return new Response(JSON.stringify(remoteManifest), { status: 200 });
+		}
+		return new Response('{"template":{}}\n', { status: 200 });
+	};
+	const resolved = await readGithubPackage(
+		"https://github.com/acme/agents/tree/main/demo",
+		fetcher
+	);
+	expect(resolved.commit).toBe("abc123");
+	expect(resolved.source.commit).toBe("abc123");
+	expect(resolved.tree.manifest.source?.commit).toBeUndefined();
+	expect(resolved.tree.files["agent.json"]).toBeDefined();
+});
+
+test("prefers a local package path before GitHub shorthand resolution", async () => {
+	const root = await mkdtemp(join(tmpdir(), "ryu-package-local-input-"));
+	try {
+		await writePackageFolder(root, tree());
+		const resolved = await readPackageInput(root);
+		expect(resolved.manifest.id).toBe("ryu/example-agent");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("rejects truncated or oversized GitHub tree responses", async () => {
+	const truncatedFetcher = async (url: string): Promise<Response> => {
+		if (url.includes("/commits/main")) {
+			return new Response(JSON.stringify({ sha: "abc123" }), { status: 200 });
+		}
+		return new Response(JSON.stringify({ truncated: true, tree: [] }), {
+			status: 200,
+		});
+	};
+	await expect(
+		readGithubPackage(
+			"https://github.com/acme/agents/tree/main/demo",
+			truncatedFetcher
+		)
+	).rejects.toThrow("tree was truncated");
+
+	const oversizedFetcher = async (url: string): Promise<Response> => {
+		if (url.includes("/commits/main")) {
+			return new Response(JSON.stringify({ sha: "abc123" }), { status: 200 });
+		}
+		return new Response(
+			JSON.stringify({
+				tree: [
+					{ path: "demo/ryu.package.json", type: "blob", size: 1 },
+					{
+						path: "demo/agent.json",
+						type: "blob",
+						size: 33 * 1024 * 1024,
+					},
+				],
+			}),
+			{ status: 200 }
+		);
+	};
+	await expect(
+		readGithubPackage(
+			"https://github.com/acme/agents/tree/main/demo",
+			oversizedFetcher
+		)
+	).rejects.toThrow("32 MiB limit");
+});
