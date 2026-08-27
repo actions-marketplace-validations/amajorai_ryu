@@ -113,8 +113,10 @@ ENV PORT=7980
 VOLUME ["/data"]
 EXPOSE 7980
 
-# Core's liveness endpoint, for platform health checks.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=5 \
+# Core's liveness endpoint, for platform health checks. First boot can spend
+# several minutes materializing the verified official package set before the
+# listener binds; give that bounded startup path room, then keep probing normally.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=5 \
   CMD ["/bin/sh", "-c", "curl -fsS \"http://127.0.0.1:${PORT:-7980}/api/health\" || exit 1"]
 
 ENTRYPOINT ["docker-entrypoint.sh"]
