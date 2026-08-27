@@ -30,6 +30,7 @@ import {
 	ServerStack01Icon,
 	StarIcon,
 	Target01Icon,
+	UserMultiple02Icon,
 	WorkflowCircle06Icon,
 	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
@@ -50,15 +51,9 @@ import {
 	type StoreSectionTab,
 	StoreSectionTabs,
 } from "@ryu/blocks/desktop/store.tsx";
-import type { ViewMode } from "@ryu/blocks/desktop/view-toggle.tsx";
+import type { LibraryViewMode } from "@ryu/blocks/desktop/view-toggle.tsx";
 import { Badge } from "@ryu/ui/components/badge.tsx";
-import { BookCard } from "@ryu/ui/components/book-card.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
-import {
-	ContextMenu,
-	ContextMenuContent,
-	ContextMenuTrigger,
-} from "@ryu/ui/components/context-menu.tsx";
 import {
 	Dialog,
 	DialogContent,
@@ -66,7 +61,6 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@ryu/ui/components/dialog.tsx";
-import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import {
@@ -74,7 +68,6 @@ import {
 	type StatusKind,
 } from "@ryu/ui/components/status-badge.tsx";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
-import { cn } from "@ryu/ui/lib/utils.ts";
 import { useQuery } from "@tanstack/react-query";
 import {
 	type ReactNode,
@@ -98,6 +91,8 @@ import ContributedLibrarySection from "@/src/components/library/ContributedLibra
 import SidebarLibrarySection, {
 	type SidebarLibraryItem,
 } from "@/src/components/library/SidebarLibrarySection.tsx";
+import SkillRelationsGraph from "@/src/components/library/SkillRelationsGraph.tsx";
+import { SpaceProjectFolder } from "@/src/components/library/SpaceProjectFolder.tsx";
 import { MemoryLibrary } from "@/src/components/memory/MemoryLibrary.tsx";
 import { CreateSpaceDialog } from "@/src/components/spaces/CreateSpaceDialog.tsx";
 import {
@@ -130,6 +125,7 @@ import {
 } from "@/src/hooks/usePluginContributions.ts";
 import { useSandboxBackends } from "@/src/hooks/useSandboxBackends.ts";
 import { useSidebarSectionSources } from "@/src/hooks/useSidebarSectionSource.ts";
+import { useSkillRelations } from "@/src/hooks/useSkillRelations.ts";
 import { installedSkillsQuery } from "@/src/hooks/useSkillsCatalog.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useVoiceEngines } from "@/src/hooks/useVoiceEngines.ts";
@@ -165,13 +161,7 @@ import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
  *  shell — the same escape hatch `"memory"` already uses. */
 type SidebarOnlySection = Exclude<
 	BuiltinSectionKey,
-	| "agents"
-	| "teams"
-	| "chats"
-	| "spaces"
-	| "channels"
-	| "identities"
-	| "workflows"
+	"agents" | "teams" | "chats" | "spaces" | "channels" | "identities"
 >;
 
 const LIBRARY_ITEM_TYPE_BY_BUILTIN_KEY: Partial<
@@ -182,8 +172,6 @@ const LIBRARY_ITEM_TYPE_BY_BUILTIN_KEY: Partial<
 	channels: "channel",
 	identities: "identity",
 	spaces: "space",
-	teams: "team",
-	workflows: "workflow",
 };
 
 function isSidebarOnlySectionKey(
@@ -263,7 +251,7 @@ const TYPE_META: Record<
 	workflow: { label: "Workflow", icon: WorkflowCircle06Icon },
 	chat: { label: "Chat", icon: SECTION_ICONS.chats },
 	space: { label: "Space", icon: DeliverySecure01Icon },
-	team: { label: "Team", icon: SECTION_ICONS.teams },
+	team: { label: "Team", icon: UserMultiple02Icon },
 	meeting: { label: "Meeting", icon: AudioWave01Icon },
 	channel: { label: "Channel", icon: SECTION_ICONS.channels },
 	identity: { label: "Identity", icon: SECTION_ICONS.identities },
@@ -372,11 +360,10 @@ function LibraryCollections({
 	const setSection = setActive;
 
 	// View mode persists across tabs and sessions; query/sort reset per tab.
-	const [view, setView] = useState<ViewMode>(() => {
+	const [view, setView] = useState<LibraryViewMode>(() => {
 		try {
-			return localStorage.getItem("ryu:library-view") === "list"
-				? "list"
-				: "grid";
+			const stored = localStorage.getItem("ryu:library-view");
+			return stored === "list" || stored === "graph" ? stored : "grid";
 		} catch {
 			return "grid";
 		}
@@ -396,7 +383,7 @@ function LibraryCollections({
 		setTypeFilter(null);
 	}, [section]);
 
-	const onViewChange = (mode: ViewMode) => {
+	const onViewChange = (mode: LibraryViewMode) => {
 		setView(mode);
 		try {
 			localStorage.setItem("ryu:library-view", mode);
@@ -472,7 +459,7 @@ function LibraryCollections({
 		[apps]
 	);
 	// While the app list is still loading, show every tab — gating on an empty set
-	// would flash the default-on collections (Agents/Spaces/Teams) off then on.
+	// would flash the pre-installed collections (Agents/Spaces/Teams) off then on.
 	const appVisibleSections = useMemo(
 		() =>
 			appsLoading
@@ -540,6 +527,11 @@ function LibraryCollections({
 		})
 	);
 	const installedSkills = installedSkillsResult.data ?? [];
+	const skillRelationsEnabled = section === "skills" && view === "graph";
+	const skillRelations = useSkillRelations({
+		agents,
+		enabled: skillRelationsEnabled,
+	});
 	const composioStatus = useComposioStatus();
 	const composioConnections = useComposioConnections(
 		"",
@@ -741,7 +733,7 @@ function LibraryCollections({
 					t.description ??
 					`${formatCount(t.members.length) ?? "—"} ${t.members.length === 1 ? "member" : "members"}`,
 				badge: null,
-				icon: SECTION_ICONS.teams,
+				icon: UserMultiple02Icon,
 				updatedAt: normalizeTimestamp(t.updatedAt ?? t.createdAt),
 				open: () => {
 					stampRecent("team", t.id);
@@ -1316,7 +1308,7 @@ function LibraryCollections({
 			case "team":
 				return { label: "New team", onCta: () => openTeam(null) };
 			case "meeting":
-				// `/meetings` is owned by the default-OFF `@ryu/meetings` app and
+				// `/meetings` is owned by the not-pre-installed `@ryu/meetings` app and
 				// resolves through the companion-alias catch-all, so with no enabled
 				// app claiming it this button's only outcome was an "App not enabled"
 				// tab. No CTA at all is the honest answer — same AFFORDANCE gate the
@@ -1487,6 +1479,7 @@ function LibraryCollections({
 	// than rendered dead beside them — two search fields on one screen is the exact
 	// kind of duplication that made this area feel bolted together.
 	const customSurface = CUSTOM_SURFACE_SECTIONS.has(section);
+	const collectionView = view === "graph" ? "grid" : view;
 
 	// Neither a built-in collection's controls nor the shell's search apply to a
 	// surface that owns its own (Tools) or to an app-registered collection, which
@@ -1553,6 +1546,7 @@ function LibraryCollections({
 									onCta={cta?.onCta}
 									onSortChange={setSort}
 									onViewChange={onViewChange}
+									showGraph={section === "skills"}
 									showSearch={false}
 									sort={section === "recents" ? undefined : sort}
 									sortOptions={section === "recents" ? [] : SORT_OPTIONS}
@@ -1599,7 +1593,25 @@ function LibraryCollections({
 										total: null,
 									}
 								}
-								view={view}
+								view={collectionView}
+							/>
+						) : skillRelationsEnabled ? (
+							<SkillRelationsGraph
+								agents={skillRelations.agents}
+								error={installedSkillsResult.isError}
+								loading={
+									installedSkillsResult.isLoading || skillRelations.loading
+								}
+								onOpenCatalog={() =>
+									openTab("/store/skills", { title: "Skills" })
+								}
+								onRetry={() => {
+									installedSkillsResult.refetch().catch(() => undefined);
+								}}
+								query={query}
+								skills={installedSkills}
+								usage={skillRelations.usage}
+								usageAvailable={skillRelations.usageAvailable}
 							/>
 						) : sidebarSurface ? (
 							<SidebarLibrarySection
@@ -1608,7 +1620,8 @@ function LibraryCollections({
 								label={sectionMeta?.label ?? "Library"}
 								loading={sidebarSectionLoading[section as SidebarOnlySection]}
 								query={query}
-								view={view}
+								variant={section === "skills" ? "books" : "cards"}
+								view={collectionView}
 							/>
 						) : loading ? (
 							<LibraryLoading />
@@ -1631,28 +1644,31 @@ function LibraryCollections({
 										: `No ${sectionMeta?.label.toLowerCase() ?? "items"} yet`
 								}
 							/>
-						) : section === "space" && view === "grid" ? (
-							/* Spaces are the one collection that reads as a shelf: each is a
-							   long-lived body of documents, not a row in a list. They get the
-							   book presentation instead of the shared card — gated on the
-							   SECTION, not the item type, so a space appearing in
-							   Recents/Favorites stays a card among cards. Own container
-							   because `LibraryGrid` lays out full-width cards and a portrait
-							   book needs a fixed track. */
+						) : section === "space" && collectionView === "grid" ? (
 							<div className="flex flex-wrap gap-6 pt-1">
-								{visibleItems.map((item) => (
-									<SpaceBook
-										contextMenu={menuFor(item)}
-										favorited={favorites.some(
-											(f) => f.type === item.type && f.id === item.id
-										)}
-										item={item}
-										key={refKey(item.type, item.id)}
-										onToggleFavorite={() => toggleFavorite(item.type, item.id)}
-									/>
-								))}
+								{visibleItems.flatMap((item) => {
+									const space = spaces.find(
+										(candidate) => candidate.id === item.id
+									);
+									if (!space) {
+										return [];
+									}
+									return (
+										<SpaceProjectFolder
+											contextMenu={menuFor(item)}
+											favorited={favorites.some(
+												(f) => f.type === item.type && f.id === item.id
+											)}
+											key={refKey(item.type, item.id)}
+											onToggleFavorite={() =>
+												toggleFavorite(item.type, item.id)
+											}
+											space={space}
+										/>
+									);
+								})}
 							</div>
-						) : section === "agent" && view === "grid" ? (
+						) : section === "agent" && collectionView === "grid" ? (
 							/* An agent gets the card it already has everywhere else: the
 							   employee badge, the same physical object its profile page and
 							   the Store's Agents tab show. Gated on the SECTION exactly like
@@ -1660,7 +1676,7 @@ function LibraryCollections({
 							   a card among cards, because those tabs mix types (a 27rem badge
 							   beside a 5rem chat card reads as a broken grid) and Recents is
 							   the tab the app lands on. */
-							<LibraryGrid columns={2} view={view}>
+							<LibraryGrid columns={2} view={collectionView}>
 								{visibleItems.map((item) => (
 									<AgentBadgeCard
 										action={
@@ -1693,7 +1709,7 @@ function LibraryCollections({
 								))}
 							</LibraryGrid>
 						) : (
-							<LibraryGrid columns={2} view={view}>
+							<LibraryGrid columns={2} view={collectionView}>
 								{visibleItems.map((item) => (
 									<LibraryCard
 										contextMenu={menuFor(item)}
@@ -1701,7 +1717,7 @@ function LibraryCollections({
 										key={refKey(item.type, item.id)}
 										onOpen={item.open}
 										onToggleFavorite={() => toggleFavorite(item.type, item.id)}
-										view={view}
+										view={collectionView}
 									/>
 								))}
 							</LibraryGrid>
@@ -1804,76 +1820,5 @@ function LibraryCollections({
 				title={`Delete ${deleting ? TYPE_META[deleting.type].label.toLowerCase() : "item"}?`}
 			/>
 		</div>
-	);
-}
-
-/** One Space on the shelf.
- *
- *  The interaction is `LibraryCard`'s, not a new one: the whole book opens the
- *  item, but it cannot be a `<button>` because the favorite star nested inside it
- *  is itself interactive — so `role="button"` plus the Enter/Space handler, with
- *  the star stopping propagation. `group` is what lets `BookCard` tilt from the
- *  wrapper's hover and keyboard focus rather than only from a pointer over the
- *  cover. */
-function SpaceBook({
-	contextMenu,
-	favorited,
-	item,
-	onToggleFavorite,
-}: {
-	/** Rows for the book's right-click menu, same set the shared card gets. */
-	contextMenu?: ReactNode;
-	favorited: boolean;
-	item: LibraryItem;
-	onToggleFavorite: () => void;
-}) {
-	const book = (
-		<div
-			className="group relative cursor-pointer rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
-			onClick={item.open}
-			onKeyDown={(e) => {
-				if (e.key === "Enter" || e.key === " ") {
-					item.open();
-				}
-			}}
-			role="button"
-			tabIndex={0}
-		>
-			<BookCard
-				coverArt={
-					// Decorative: the cover already prints the name, so the generative
-					// art must not read its raw seed (a space id) out to a screen reader.
-					// Seeded by id, not name, so renaming a space keeps its cover.
-					<div aria-hidden className="size-full">
-						<DitherAvatar className="size-full" name={item.id} />
-					</div>
-				}
-				footer={item.subtitle}
-				title={item.name}
-			/>
-			{/* Floats over the cover so it costs the book no layout; revealed on
-			    hover/focus, but kept visible while starred so the state is legible at
-			    rest. */}
-			<FavoriteStar
-				className={cn(
-					"absolute top-1 right-1 bg-background/70 backdrop-blur-sm transition-opacity",
-					favorited
-						? "opacity-100"
-						: "opacity-0 focus-within:opacity-100 group-hover:opacity-100"
-				)}
-				favorited={favorited}
-				onToggle={onToggleFavorite}
-			/>
-		</div>
-	);
-
-	if (!contextMenu) {
-		return book;
-	}
-	return (
-		<ContextMenu>
-			<ContextMenuTrigger render={book} />
-			<ContextMenuContent align="end">{contextMenu}</ContextMenuContent>
-		</ContextMenu>
 	);
 }

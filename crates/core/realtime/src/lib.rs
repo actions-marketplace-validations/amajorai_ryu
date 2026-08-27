@@ -86,6 +86,8 @@ const BROADCAST_CAPACITY: usize = 256;
 /// CRDT sync and is relayed opaquely for now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RealtimeChannel {
+    /// Transport control that requires an authoritative client recovery.
+    Control,
     /// Durable-ish app events (e.g. a new chat message). JSON payload.
     Events,
     /// Ephemeral awareness (cursor / typing / name / color). JSON payload, never
@@ -120,6 +122,15 @@ pub enum Frame {
     Event(Value),
     Presence(Value),
     DocSync(Vec<u8>),
+    /// This subscriber overflowed the bounded broadcast queue. The client must
+    /// reload an authoritative snapshot or restart its CRDT handshake.
+    ResyncRequired {
+        dropped: u64,
+    },
+    /// An authoritative document restore discarded the prior CRDT generation.
+    DocumentReset {
+        epoch: u64,
+    },
 }
 
 impl Frame {
@@ -129,6 +140,8 @@ impl Frame {
             Frame::Event(_) => RealtimeChannel::Events,
             Frame::Presence(_) => RealtimeChannel::Presence,
             Frame::DocSync(_) => RealtimeChannel::DocSync,
+            Frame::ResyncRequired { .. } => RealtimeChannel::Control,
+            Frame::DocumentReset { .. } => RealtimeChannel::Control,
         }
     }
 }
@@ -403,6 +416,14 @@ impl RoomRegistry {
     pub fn publish_event(&self, room_id: &str, value: Value) {
         if let Some(handle) = self.lock().get(room_id) {
             let _ = handle.broadcast.send(Frame::Event(value));
+        }
+    }
+
+    /// Tell every live document subscriber that the authoritative CRDT
+    /// generation was replaced. No-op when the room has no subscribers.
+    pub fn publish_document_reset(&self, room_id: &str, epoch: u64) {
+        if let Some(handle) = self.lock().get(room_id) {
+            let _ = handle.broadcast.send(Frame::DocumentReset { epoch });
         }
     }
 
@@ -725,6 +746,14 @@ pub struct Connection {
     targeted_open: bool,
 }
 
+/// A typed connection delivery. Lag is an explicit recovery signal rather than
+/// a silently skipped hole in the event stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionDelivery {
+    Event(Event),
+    ResyncRequired { dropped: u64 },
+}
+
 impl Connection {
     /// This connection's process-unique id — the address for
     /// [`RoomHandle::send_event`].
@@ -732,11 +761,11 @@ impl Connection {
         self.conn_id
     }
 
-    /// Await the next typed [`Event`] for this connection, from either the room
+    /// Await the next typed delivery for this connection, from either the room
     /// broadcast or a targeted `send_event`. Non-event frames are skipped. Returns
     /// `None` once both delivery paths are permanently closed (the room actor exited
     /// and the broadcast channel is drained), so it drives a `while let` loop.
-    pub async fn recv(&mut self) -> Option<Event> {
+    pub async fn recv(&mut self) -> Option<ConnectionDelivery> {
         loop {
             if !self.broadcast_open && !self.targeted_open {
                 return None;
@@ -756,7 +785,9 @@ impl Connection {
                 },
                 broadcast = self.broadcast_rx.recv(), if self.broadcast_open => match broadcast {
                     Ok(frame) => frame,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                    return Some(ConnectionDelivery::ResyncRequired { dropped });
+                }
                     Err(broadcast::error::RecvError::Closed) => {
                         self.broadcast_open = false;
                         continue;
@@ -764,9 +795,20 @@ impl Connection {
                 },
             };
             if let Some(event) = Event::decode(&frame) {
-                return Some(event);
+                return Some(ConnectionDelivery::Event(event));
             }
             // Non-event frame (presence / doc-sync / raw value): skip and keep waiting.
+        }
+    }
+
+    /// Await only application events. Callers that need loss recovery should use
+    /// [`Self::recv`], which surfaces [`ConnectionDelivery::ResyncRequired`].
+    pub async fn recv_event(&mut self) -> Option<Event> {
+        loop {
+            match self.recv().await? {
+                ConnectionDelivery::Event(event) => return Some(event),
+                ConnectionDelivery::ResyncRequired { .. } => continue,
+            }
         }
     }
 }
@@ -1217,7 +1259,7 @@ mod tests {
 
         reg.broadcast_event("evt-room", "counter.tick", json!({"n": 7}));
 
-        let ev = conn.recv().await.expect("typed event");
+        let ev = conn.recv_event().await.expect("typed event");
         assert_eq!(ev.name, "counter.tick");
         assert_eq!(ev.payload["n"], 7);
 
@@ -1260,6 +1302,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typed_connection_surfaces_lag_as_resync_required() {
+        let registry = RoomRegistry::new();
+        let room = registry.get_or_create("lagged-room");
+        let mut connection = room.open_connection();
+
+        for sequence in 0..(BROADCAST_CAPACITY + 8) {
+            room.publish_event(json!({ "sequence": sequence }));
+        }
+
+        match connection.recv().await.expect("lag delivery") {
+            ConnectionDelivery::ResyncRequired { dropped } => assert!(dropped > 0),
+            ConnectionDelivery::Event(event) => {
+                panic!("expected lag recovery signal, got event {}", event.name)
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn send_event_is_isolated_to_its_connection() {
         let reg = RoomRegistry::new();
         let handle = reg.get_or_create("target-room");
@@ -1275,15 +1335,15 @@ mod tests {
         handle.broadcast_event("marker", json!({}));
 
         // conn_a sees its private event first (biased), then the broadcast.
-        let first = conn_a.recv().await.expect("a first");
+        let first = conn_a.recv_event().await.expect("a first");
         assert_eq!(first.name, "secret");
         assert_eq!(first.payload["for"], "a");
-        let second = conn_a.recv().await.expect("a second");
+        let second = conn_a.recv_event().await.expect("a second");
         assert_eq!(second.name, "marker");
 
         // conn_b NEVER sees the targeted event — its first (and only) event is the
         // broadcast marker. This is the core isolation guarantee.
-        let b_first = conn_b.recv().await.expect("b first");
+        let b_first = conn_b.recv_event().await.expect("b first");
         assert_eq!(b_first.name, "marker");
 
         // The raw broadcast subscriber likewise only ever saw the broadcast, not the
@@ -1315,7 +1375,7 @@ mod tests {
         handle.send_event(a_id, "ghost", json!({}));
         handle.broadcast_event("alive", json!({}));
         let mut conn_b = conn_b;
-        assert_eq!(conn_b.recv().await.expect("b").name, "alive");
+        assert_eq!(conn_b.recv_event().await.expect("b").name, "alive");
     }
 
     #[tokio::test]
@@ -1330,7 +1390,7 @@ mod tests {
         handle.publish_event(json!({"legacy": true}));
         handle.broadcast_event("real", json!({"ok": 1}));
 
-        let ev = conn.recv().await.expect("named event");
+        let ev = conn.recv_event().await.expect("named event");
         assert_eq!(ev.name, "real");
         assert_eq!(ev.payload["ok"], 1);
     }

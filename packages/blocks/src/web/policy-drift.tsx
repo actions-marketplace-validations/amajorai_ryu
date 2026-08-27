@@ -10,35 +10,33 @@ import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 import { StaggerLines } from "./stagger-lines.tsx";
 
 /**
- * The sub-problem firms feel but do not name: the rules move, and nobody is
- * told. Framed as a problem the firm ALREADY has with its own staff — not one
- * that AI introduced — because that framing disarms the "AI is risky" objection
- * instead of arguing with it.
+ * The trust problem startups feel but do not name: the context moves, and
+ * nobody knows which version the answer used.
  */
 const DRIFT = [
 	{
-		title: "The rules keep changing",
-		body: "Client confidentiality terms, regulator guidance and your own procedures all move on their own schedule.",
+		title: "The working rules keep changing",
+		body: "Product decisions, customer commitments, and internal policies move on their own schedule.",
 	},
 	{
 		title: "They live in different places",
-		body: "An email thread, a PDF, the shared drive, a chat group, and one partner's memory.",
+		body: "An email thread, a doc, the shared drive, a project board, and someone's memory.",
 	},
 	{
-		title: "People are already working off stale rules",
-		body: "Your staff usually find out a rule changed only when something goes wrong.",
+		title: "People discover the change too late",
+		body: "Your team usually finds out a rule changed only when a customer or a launch exposes the gap.",
 	},
 	{
-		title: "Nothing adds up over time",
-		body: "When one person learns the rule changed, that knowledge leaves with them.",
+		title: "Nobody can explain which version was used",
+		body: "When an answer is challenged, the context behind it is scattered across the company.",
 	},
 ] as const;
 
 const FIXES = [
-	"One current copy of how your firm does the work",
-	"Every change kept, so you can see what was true on the day a job ran",
+	"One current copy of how your team works",
+	"Every change kept, so you can see what was true when an answer was made",
 	"A correction someone makes today is what the work follows tomorrow",
-	"One copy, whether a person or the software does the job",
+	"One source for people and AI to work from",
 ] as const;
 
 function VersionStack() {
@@ -73,10 +71,10 @@ export default function PolicyDrift() {
 		<section className="container mx-auto px-4 py-20 md:py-28">
 			<div className="mx-auto max-w-5xl">
 				<StaggerLines className="max-w-2xl">
-					<SectionTitle title="Set it up right today, out of policy by March." />
+					<SectionTitle title="Your team's context is spread across too many places." />
 					<p className={sectionSubtitleClass}>
-						Your rules move whether or not anyone writes them down. That is
-						already true of your team. It quietly makes the work wrong.
+						The files, rules, and decisions behind an answer are often in
+						different tools.
 					</p>
 				</StaggerLines>
 
@@ -89,7 +87,7 @@ export default function PolicyDrift() {
 								strokeWidth={1.75}
 							/>
 							<p className="mt-6 font-semibold text-muted-foreground/60 text-xs uppercase tracking-widest">
-								How it happens
+								Everyday reality
 							</p>
 							<h3 className="mt-2 font-medium text-foreground text-xl tracking-tight md:text-2xl">
 								Nobody holds the whole picture
@@ -130,7 +128,7 @@ export default function PolicyDrift() {
 									tone.title
 								)}
 							>
-								One copy everyone works from
+								One current source for every answer
 							</h3>
 							<ul className="mt-6 space-y-3">
 								{FIXES.map((fix) => (
@@ -154,8 +152,8 @@ export default function PolicyDrift() {
 				</div>
 
 				<p className="mt-10 max-w-2xl text-muted-foreground text-sm leading-relaxed md:text-base">
-					Every correction your team makes is kept, so the work gets more
-					accurate the longer you run it.
+					Every correction your team makes is kept, so the answers become more
+					consistent the longer you use them.
 				</p>
 			</div>
 		</section>

@@ -127,6 +127,10 @@ enum RoomKind {
 struct JoinFrame {
     room_id: String,
     kind: RoomKind,
+    /// Opaque correlation id shared with related HTTP mutations. It is never
+    /// consulted for authorization.
+    #[serde(default)]
+    client_id: Option<String>,
     /// Required only for `kind: "application"`; Core canonicalizes it and uses
     /// it as the room namespace. The client never gets to choose another app's
     /// id through the companion host bridge.
@@ -154,8 +158,8 @@ pub async fn realtime_ws(
     // ── Node admittance (mirror `require_auth`) ──────────────────────────────
     // Treat an empty/whitespace configured token as "not configured" (loopback
     // dev) — exactly like `require_auth`, which only enforces a non-empty token.
-    if let Some(expected) = state
-        .node_token
+    let active_node_token = crate::node_token::active_token();
+    if let Some(expected) = active_node_token
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -284,6 +288,7 @@ fn decide_access(
                 tenancy.org_id.as_deref(),
                 &tenancy.visibility,
                 tenancy.team_id.as_deref(),
+                &tenancy.collaborators,
             );
             match access {
                 Access::None => AccessOutcome::Deny("forbidden"),
@@ -351,6 +356,22 @@ async fn handle_socket(
             .await;
         return;
     }
+    let client_id = match join.client_id.as_deref().map(str::trim) {
+        Some("") | None => uuid::Uuid::new_v4(),
+        Some(value) => match uuid::Uuid::parse_str(value) {
+            Ok(id) => id,
+            Err(_) => {
+                let _ = ws_tx
+                    .send(close(
+                        CLOSE_UNSUPPORTED,
+                        "join.client_id must be a UUID".into(),
+                    ))
+                    .await;
+                return;
+            }
+        },
+    }
+    .to_string();
     // Only `document` rooms drive the authoritative CRDT engine; a `conversation`
     // room keeps the pure event/presence relay (a stray binary frame on it must NOT
     // mint a spurious Y.Doc keyed by a conversation id). Application rooms use the
@@ -454,6 +475,11 @@ async fn handle_socket(
             .collab
             .claim_seed(&room_id, &member_id)
             .unwrap_or(false);
+    let document_epoch = if is_document {
+        state.collab.epoch(&room_id).unwrap_or(0)
+    } else {
+        0
+    };
 
     // ── Join the room ────────────────────────────────────────────────────────
     // Race-safe join: get-or-create + member increment happen under the registry
@@ -469,6 +495,8 @@ async fn handle_socket(
         "type": "join_ack",
         "room_id": room_id,
         "member_id": member_id,
+        "client_id": client_id,
+        "document_epoch": document_epoch,
         "access": if can_write { "write" } else { "read" },
         // The client seeds an empty room ONLY when the server says it won the seed
         // claim — see `may_seed` above. This is the race-proof half of the
@@ -505,9 +533,18 @@ async fn handle_socket(
                         break;
                     }
                 }
-                // A slow consumer overflowed the bounded broadcast: skip the gap
-                // and keep going (resync is a client concern).
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                    if forward_tx
+                        .send(frame_to_message(
+                            Frame::ResyncRequired { dropped },
+                            application_room,
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -647,7 +684,10 @@ async fn handle_socket(
                         // Authoritative: apply to Core's replica + persist to the
                         // append log, then rebroadcast the canonical bytes to the
                         // room (echo to sender is harmless — Yjs apply is idempotent).
-                        match state.collab.apply_remote_update(&room_id, &update) {
+                        match state
+                            .collab
+                            .apply_remote_update_at_epoch(&room_id, document_epoch, &update)
+                        {
                             Ok(rebroadcast) => {
                                 membership
                                     .handle()
@@ -821,6 +861,17 @@ fn frame_to_message(frame: Frame, include_event_name: bool) -> Message {
             Message::Text(json!({"channel": "presence", "data": value}).to_string())
         }
         Frame::DocSync(bytes) => Message::Binary(bytes),
+        Frame::ResyncRequired { dropped } => Message::Text(
+            json!({
+                "type": "resync_required",
+                "reason": "broadcast-lagged",
+                "dropped": dropped,
+            })
+            .to_string(),
+        ),
+        Frame::DocumentReset { epoch } => {
+            Message::Text(json!({ "type": "document_reset", "epoch": epoch }).to_string())
+        }
     }
 }
 
@@ -855,6 +906,7 @@ mod tests {
             org_id: org.map(str::to_owned),
             visibility: visibility.to_owned(),
             team_id: None,
+            collaborators: Vec::new(),
         }
     }
 

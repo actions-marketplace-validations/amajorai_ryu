@@ -96,6 +96,12 @@ pub const MCP_SAFE_ALLOWLIST: &[&str] = &[
     // to the RELEASE autoresearch engine on :8087 instead of the dev one on :9087.
     // `profile::apply_env_defaults` seeds it; it is a loopback URL, not a secret.
     "RYU_RESEARCH_UPSTREAM",
+    // Store-owning app MCP servers need the same resolved data directory and
+    // profile as their HTTP sidecars. Both values are non-secret routing state;
+    // keeping them here preserves the env-clear boundary without splitting a
+    // node's HTTP and stdio stores on dev/canary/beta or a relocated RYU_DIR.
+    "RYU_DIR",
+    "RYU_PROFILE",
 ];
 
 /// Whether an env KEY is secret-like (contains any [`SENSITIVE_MARKERS`] token,
@@ -250,6 +256,8 @@ mod tests {
             ("RYU_RESEARCH_UPSTREAM", "http://127.0.0.1:9087"),
             ("RYU_GHOST_OVERLAY_URL", "http://127.0.0.1:7986"),
             ("GHOST_DATA_DIR", "/home/u/.ghost"),
+            ("RYU_DIR", "/home/u/.ryu-dev"),
+            ("RYU_PROFILE", "dev"),
             // A virtual-desktop node: the X display the desktop app streams.
             ("DISPLAY", ":99"),
             ("XAUTHORITY", "/home/u/.Xauthority"),
@@ -263,6 +271,8 @@ mod tests {
         assert!(has(&out, "GHOST_DATA_DIR"));
         assert!(has(&out, "DISPLAY"), "the virtual display must reach Ghost");
         assert!(has(&out, "XAUTHORITY"));
+        assert!(has(&out, "RYU_DIR"));
+        assert!(has(&out, "RYU_PROFILE"));
         assert!(!has(&out, "RYU_GATEWAY_URL"));
     }
 

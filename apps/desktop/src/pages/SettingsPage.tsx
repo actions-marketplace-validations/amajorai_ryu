@@ -11,8 +11,9 @@ import {
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Switch } from "@ryu/ui/components/switch";
+import { Switch } from "@ryu/ui/components/switch.tsx";
 import { NavLink } from "react-router-dom";
+import { A2aSettings } from "@/src/components/settings/A2aSettings.tsx";
 import { AudioDevicesSettings } from "@/src/components/settings/AudioDevicesSettings.tsx";
 import { EditorEmbeddingSettings } from "@/src/components/settings/EditorEmbeddingSettings.tsx";
 import { TtsEngineSettings } from "@/src/components/settings/TtsEngineSettings.tsx";
@@ -143,6 +144,13 @@ export default function SettingsPage() {
 					Editor & Embeddings
 				</h2>
 				<EditorEmbeddingSettings />
+			</section>
+
+			<section className="mb-8">
+				<h2 className="mb-4 font-medium text-muted-foreground text-sm uppercase tracking-wide">
+					Agent networking
+				</h2>
+				<A2aSettings />
 			</section>
 
 			<section className="mb-8">

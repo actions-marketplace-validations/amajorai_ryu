@@ -52,6 +52,7 @@ import {
 	SettingsItem,
 	SettingsSection,
 } from "@/src/components/settings/shared/settings-items.tsx";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import {
 	ApiError,
@@ -261,6 +262,7 @@ function resetFailureReason(e: unknown): string {
 }
 
 export function DangerZoneSettings() {
+	const { canUseNativeShell } = useAppSurface();
 	const getNode = useActiveNodeGetter();
 	const queryClient = useQueryClient();
 	const [active, setActive] = useState<DangerCategory | null>(null);
@@ -499,33 +501,35 @@ export function DangerZoneSettings() {
 				</SettingsGroup>
 			</SettingsSection>
 
-			<SettingsSection
-				caption="Reset node clears this node's data folder and nothing else. Shadow captures, ghost state and the gateway config live OUTSIDE it and survive, which is why a 'reset' node can still be several gigabytes. This removes those too."
-				title="Deep clean"
-			>
-				{/* One button, and every option behind it. The scope controls used to sit
-				    inline as three sibling SettingsItems above the button, which read as
-				    unrelated node settings rather than as arguments TO the button — so
-				    people clicked "Deep clean" without ever seeing that the depth was
-				    still on its config-only default and nothing they cared about was
-				    being removed. */}
-				<SettingsGroup>
-					<SettingsItem
-						actions={
-							<Button
-								disabled={deepCleaning}
-								onClick={() => setDeepCleanOptionsOpen(true)}
-								size="sm"
-								variant="destructive"
-							>
-								{deepCleaning ? "Cleaning…" : "Deep clean…"}
-							</Button>
-						}
-						description="Choose which profiles and how much to remove, then restart into setup"
-						title="Run deep clean"
-					/>
-				</SettingsGroup>
-			</SettingsSection>
+			{canUseNativeShell ? (
+				<SettingsSection
+					caption="Reset node clears this node's data folder and nothing else. Shadow captures, ghost state and the gateway config live OUTSIDE it and survive, which is why a 'reset' node can still be several gigabytes. This removes those too."
+					title="Deep clean"
+				>
+					{/* One button, and every option behind it. The scope controls used to sit
+					    inline as three sibling SettingsItems above the button, which read as
+					    unrelated node settings rather than as arguments TO the button — so
+					    people clicked "Deep clean" without ever seeing that the depth was
+					    still on its config-only default and nothing they cared about was
+					    being removed. */}
+					<SettingsGroup>
+						<SettingsItem
+							actions={
+								<Button
+									disabled={deepCleaning}
+									onClick={() => setDeepCleanOptionsOpen(true)}
+									size="sm"
+									variant="destructive"
+								>
+									{deepCleaning ? "Cleaning…" : "Deep clean…"}
+								</Button>
+							}
+							description="Choose which profiles and how much to remove, then restart into setup"
+							title="Run deep clean"
+						/>
+					</SettingsGroup>
+				</SettingsSection>
+			) : null}
 
 			<Dialog
 				onOpenChange={(open) => {

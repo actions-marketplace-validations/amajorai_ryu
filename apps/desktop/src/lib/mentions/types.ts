@@ -1,6 +1,7 @@
 // The typed model behind the composer's "@" mention system. A Mention is a typed
-// reference the user drops into the chat composer — an agent, app, team, space,
-// skill, MCP server, project folder, connected integration, or installed plugin.
+// reference the user drops into the chat composer — an agent, app, human,
+// team, space, skill, MCP server, project folder, connected integration, or
+// installed plugin.
 
 import type { ComponentType, ReactNode } from "react";
 
@@ -18,7 +19,8 @@ export type MentionKind =
 	| "mcp"
 	| "folder"
 	| "integration"
-	| "plugin";
+	| "plugin"
+	| "user";
 
 /** A safe in-app destination carried by a resolved mention. */
 export interface MentionTarget {
@@ -78,6 +80,8 @@ export interface MentionSources {
 	skills: { id: string; name: string }[];
 	spaces: { id: string; name: string }[];
 	teams: { id: string; name: string }[];
+	/** Human members resolved by the Inbox app's node-scoped directory. */
+	users: MentionSourceItem[];
 	/** Chat-triggerable workflows (those with a root `Input` node, per Core). */
 	workflows: { id: string; name: string; description?: string | null }[];
 }

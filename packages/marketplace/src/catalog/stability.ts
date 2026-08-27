@@ -33,3 +33,36 @@ export function stabilityLabel(
 	}
 	return KNOWN[raw] ?? raw.charAt(0).toUpperCase() + raw.slice(1);
 }
+
+/** Whether a listing should be hidden by the default stable-only catalog view.
+ *
+ * Missing and explicit `stable` values are the finished-release default. Any
+ * other non-empty value is intentionally unstable, including a maturity level
+ * this client has never heard of: a future release posture must opt in rather
+ * than silently entering the safe-looking default list. */
+export function isUnstableRelease(
+	stability: string | null | undefined
+): boolean {
+	const raw = stability?.trim().toLowerCase();
+	return Boolean(raw && raw !== "stable");
+}
+
+/** Display the maturity of one historical version without inventing metadata.
+ *
+ * A readable manifest with no `stability` field is a known stable version (the
+ * manifest default). When the historical manifest could not be read, the
+ * generic release flag is the only honest fallback available. */
+export function versionStabilityLabel(
+	stability: string | null | undefined,
+	known: boolean,
+	prerelease: boolean
+): string {
+	const raw = stability?.trim().toLowerCase();
+	if (known || raw) {
+		return raw && raw !== "stable" ? (stabilityLabel(raw) ?? raw) : "Stable";
+	}
+	if (prerelease) {
+		return "Pre-release";
+	}
+	return "Stability unavailable";
+}

@@ -110,6 +110,11 @@ pub struct BeginPairingBody {
     /// asked for a working bot, and a disabled config is one the gateway never spawns.
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Optional provider-emoji to Learning feedback mapping. It is carried with
+    /// the pending pairing because the channel row is written after Telegram
+    /// creates the bot, not while this form is still open.
+    #[serde(default)]
+    pub reaction_learning: Option<Value>,
 }
 
 impl BeginPairingBody {
@@ -126,6 +131,7 @@ impl BeginPairingBody {
             proactive_opening: self.proactive_opening.unwrap_or(false),
             proactive_target: trimmed(self.proactive_target.clone()),
             enabled: self.enabled.unwrap_or(true),
+            reaction_learning: self.reaction_learning.clone(),
         }
     }
 }
@@ -602,6 +608,12 @@ mod tests {
             proactive_opening: Some(true),
             proactive_target: Some("chat-123".into()),
             enabled: Some(false),
+            reaction_learning: Some(json!({
+                "enabled": true,
+                "positiveEmoji": ["👍", "❤️"],
+                "negativeEmoji": ["👎", "💀"],
+                "allowGroup": false,
+            })),
         };
         let intent = body.intent();
         assert_eq!(intent.name.as_deref(), Some("Support bot"));
@@ -612,6 +624,13 @@ mod tests {
         assert!(intent.proactive_opening);
         assert_eq!(intent.proactive_target.as_deref(), Some("chat-123"));
         assert!(!intent.enabled, "the form's Enabled switch is honoured");
+        assert_eq!(
+            intent
+                .reaction_learning
+                .as_ref()
+                .and_then(|value| value["enabled"].as_bool()),
+            Some(true)
+        );
 
         // A caller that says nothing gets a running bot: `create a bot for me` asks
         // for one, and the gateway only spawns enabled configs.

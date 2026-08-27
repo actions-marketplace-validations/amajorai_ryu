@@ -149,6 +149,21 @@ describe("every sandboxed frame re-announces until the port arrives", () => {
 		});
 	}
 
+	it("installs wheel scrolling in both app bundle paths", () => {
+		const pathA = thirdPartyPluginSrcdoc("nonce-wheel-a", "", "com.test.a");
+		const pathB = htmlCompanionSrcdoc(
+			"nonce-wheel-b",
+			"<p>hi</p>",
+			"com.test.b"
+		);
+
+		expect(pathA).toContain("ryuInstallHorizontalWheelScrolling");
+		expect(pathB).toContain("ryuInstallHorizontalWheelScrolling");
+		expect(pathA.indexOf("ryuInstallHorizontalWheelScrolling")).toBeLessThan(
+			pathA.indexOf("atobUtf8")
+		);
+	});
+
 	it("emits the versioned envelope from the shared snippet", () => {
 		expect(handshakeAnnounceScript()).toContain("hostApiVersion:");
 	});

@@ -228,7 +228,7 @@ export function ModelHoverPreview({ insight }: { insight: ModelInsight }) {
 								className="size-3 shrink-0"
 								icon={DollarCircleIcon}
 							/>
-							<span className="font-heading tabular-nums">
+							<span className="font-mono tabular-nums">
 								{inputPrice ? (
 									<>
 										In {inputPrice}

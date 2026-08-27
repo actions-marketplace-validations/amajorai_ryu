@@ -24,6 +24,7 @@
 //! Nothing here is ever used for install: the GitHub-topic source stays
 //! descriptor-only. This is display material for the reading path.
 
+use futures_util::{stream, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -234,6 +235,7 @@ async fn fetch_manifest_at(owner: &str, repo: &str, git_ref: &str) -> Option<ser
 pub async fn version_detail(owner: &str, repo: &str, tag: &str) -> Option<serde_json::Value> {
     let manifest = fetch_manifest_at(owner, repo, tag).await?;
     let readme = fetch_readme_at(owner, repo, tag).await;
+    let (stability, stability_known) = manifest_stability(&manifest);
 
     let mut out = serde_json::Map::new();
     out.insert(
@@ -258,6 +260,11 @@ pub async fn version_detail(owner: &str, repo: &str, tag: &str) -> Option<serde_
             out.insert(key.to_string(), v.clone());
         }
     }
+    out.insert(
+        "stability".into(),
+        stability.map_or(Value::Null, Value::String),
+    );
+    out.insert("stabilityKnown".into(), Value::Bool(stability_known));
     // Names the ref this was read at, so a client can never present it as anything
     // other than a point-in-time snapshot.
     out.insert("atRef".into(), serde_json::Value::String(tag.to_string()));
@@ -428,6 +435,42 @@ fn release_to_value(release: &GithubReleaseItem) -> Option<Value> {
     }))
 }
 
+/// Read the maturity posture from a manifest that was successfully loaded at a
+/// historical ref. An omitted/empty field is the manifest's stable default; a
+/// missing manifest is different and remains unavailable to the renderer.
+fn manifest_stability(manifest: &Value) -> (Option<String>, bool) {
+    let Some(object) = manifest.as_object() else {
+        return (None, false);
+    };
+    let stability = object
+        .get("stability")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "stable".to_owned());
+    (Some(stability), true)
+}
+
+/// Add the historical maturity pair to one release/tag row. This is deliberately
+/// additive: a release with no readable manifest remains useful in the Versions
+/// tab, but the UI can say that its stability is unavailable instead of guessing.
+async fn add_version_stability(owner: &str, repo: &str, tag: &str, value: &mut Value) {
+    let manifest = fetch_manifest_at(owner, repo, tag).await;
+    let (stability, known) = manifest
+        .as_ref()
+        .map(manifest_stability)
+        .unwrap_or((None, false));
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "stability".to_owned(),
+        stability.map_or(Value::Null, Value::String),
+    );
+    object.insert("stabilityKnown".to_owned(), Value::Bool(known));
+}
+
 /// Fetch every enrichment signal for one repo and merge them into a single JSON
 /// object the detail payload spreads in. Returns an **empty object** (never an
 /// error) when GitHub is unreachable, so the caller can merge unconditionally.
@@ -475,22 +518,55 @@ async fn fetch_enrichment(
         }
     }
 
-    let mut versions: Vec<Value> = releases
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(release_to_value)
-        .collect();
+    let mut versions: Vec<Value> = Vec::new();
+    if let Some(releases) = releases.as_deref() {
+        let release_rows: Vec<(usize, Value, String)> = releases
+            .iter()
+            .enumerate()
+            .filter_map(|(index, release)| {
+                let value = release_to_value(release)?;
+                let tag = release
+                    .tag_name
+                    .as_deref()
+                    .or(release.name.as_deref())
+                    .map(str::trim)
+                    .filter(|tag| !tag.is_empty())?
+                    .to_owned();
+                Some((index, value, tag))
+            })
+            .collect();
+        let mut indexed = stream::iter(release_rows)
+            .map(|(index, mut value, tag)| async move {
+                add_version_stability(owner, repo, &tag, &mut value).await;
+                (index, value)
+            })
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
+        indexed.sort_unstable_by_key(|(index, _)| *index);
+        versions = indexed.into_iter().map(|(_, value)| value).collect();
+    }
 
     // A repo that tags without cutting releases still has a version history.
     if versions.is_empty() && releases.is_some() {
         if let Some(tags) = fetch_tags(api_base, headers, owner, repo).await {
-            versions = tags
+            let tag_rows: Vec<(usize, String)> = tags
                 .iter()
-                .filter_map(|t| {
-                    let name = t.name.as_deref().map(str::trim).filter(|n| !n.is_empty())?;
-                    Some(serde_json::json!({
-                        "version": name,
+                .enumerate()
+                .filter_map(|(index, tag)| {
+                    let name = tag
+                        .name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())?
+                        .to_owned();
+                    Some((index, name))
+                })
+                .collect();
+            let mut indexed = stream::iter(tag_rows)
+                .map(|(index, name)| async move {
+                    let mut value = serde_json::json!({
+                        "version": name.clone(),
                         "name": Value::Null,
                         "notes": Value::Null,
                         "publishedAt": Value::Null,
@@ -498,9 +574,15 @@ async fn fetch_enrichment(
                         "prerelease": false,
                         "downloads": 0,
                         "tagOnly": true,
-                    }))
+                    });
+                    add_version_stability(owner, repo, &name, &mut value).await;
+                    (index, value)
                 })
-                .collect();
+                .buffer_unordered(4)
+                .collect::<Vec<_>>()
+                .await;
+            indexed.sort_unstable_by_key(|(index, _)| *index);
+            versions = indexed.into_iter().map(|(_, value)| value).collect();
         }
     }
 
@@ -589,6 +671,19 @@ mod tests {
         assert_eq!(value["version"], "v1.2.0");
         assert_eq!(value["downloads"], 12);
         assert_eq!(value["prerelease"], false);
+    }
+
+    #[test]
+    fn manifest_stability_normalizes_known_and_default_values() {
+        assert_eq!(
+            manifest_stability(&serde_json::json!({ "stability": " Beta " })),
+            (Some("beta".to_owned()), true)
+        );
+        assert_eq!(
+            manifest_stability(&serde_json::json!({})),
+            (Some("stable".to_owned()), true)
+        );
+        assert_eq!(manifest_stability(&Value::Null), (None, false));
     }
 
     #[test]

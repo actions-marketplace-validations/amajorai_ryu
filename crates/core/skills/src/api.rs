@@ -1,7 +1,7 @@
 //! HTTP API for the Skills authoring surface (`/api/skills` + `/api/skills/:id/*`):
 //! list installed skills, read/create/update a SKILL.md from the desktop editor,
-//! toggle a skill active (the injection gate), and a bounded, undoable version
-//! history.
+//! toggle a skill active (the injection gate), and an undoable source history
+//! backed by Core's managed local Git repository.
 //!
 //! **Routing shape (why this differs from `ryu_quests`).** The `/api/skills`
 //! prefix is *shared*: this crate owns the CRUD/version/activate leaves, while the
@@ -198,7 +198,12 @@ pub async fn create_skill_handler(
         Ok(res) => {
             // A skill the user authored is active by default (injects on the
             // default route), matching the catalog-install paths.
-            crate::set_active(&res.id, true);
+            if let Err(error) = crate::try_set_active(&res.id, true) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": error.to_string() })),
+                );
+            }
             registry().reload();
             (
                 StatusCode::OK,
@@ -319,8 +324,9 @@ pub async fn get_skill_version_handler(
 }
 
 /// `POST /api/skills/:id/versions/:version_id/restore` — restore a version as the
-/// skill's current SKILL.md. The current definition is snapshotted first (as
-/// `"Before restore"`) so the restore is itself undoable.
+/// skill's current SKILL.md. The current definition is recorded as a named undo
+/// point first, so the restore is itself undoable; unlabeled identical saves stay
+/// idempotent.
 #[utoipa::path(
     post,
     path = "/api/skills/{id}/versions/{version_id}/restore",
@@ -375,7 +381,12 @@ pub struct SkillActivateBody {
 pub async fn skills_activate(
     Json(body): Json<SkillActivateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    crate::set_active(&body.id, body.active);
+    if let Err(error) = crate::try_set_active(&body.id, body.active) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error.to_string() })),
+        );
+    }
     registry().reload();
     (
         StatusCode::OK,

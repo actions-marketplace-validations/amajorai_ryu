@@ -6,7 +6,7 @@
 //   - `POST /api/workspace/new-folder` `{ name }` (the composer's "Start from
 //     scratch" flow — Core creates ~/Documents/Ryu/<name> and returns its path).
 
-import { type ApiTarget, apiUrl, makeHeaders, readJsonBody } from "./client.ts";
+import { type ApiTarget, authenticatedFetch, readJsonBody } from "./client.ts";
 
 export interface CreateFolderResult {
 	error?: string;
@@ -48,9 +48,7 @@ export async function listDirectory(
 	path?: string
 ): Promise<DirectoryListing> {
 	const query = path ? `?path=${encodeURIComponent(path)}` : "";
-	const resp = await fetch(apiUrl(target, `/api/workspace/list${query}`), {
-		headers: makeHeaders(target.token),
-	});
+	const resp = await authenticatedFetch(target, `/api/workspace/list${query}`);
 	const { data, error } = await readJsonBody<DirectoryListing>(resp, "list");
 	if (error || !data) {
 		throw new Error(error ?? `list failed: ${resp.status}`);
@@ -69,14 +67,9 @@ export async function createProjectFolder(
 	target: ApiTarget,
 	name: string
 ): Promise<CreateFolderResult> {
-	const url = apiUrl(target, "/api/workspace/new-folder");
 	try {
-		// `makeHeaders` already carries the JSON content-type; adding a second,
-		// differently-cased key made `fetch` send `application/json, application/json`
-		// and Core answered 415 with a text/plain body.
-		const resp = await fetch(url, {
+		const resp = await authenticatedFetch(target, "/api/workspace/new-folder", {
 			method: "POST",
-			headers: makeHeaders(target.token),
 			body: JSON.stringify({ name }),
 		});
 		const { data, error } = await readJsonBody<CreateFolderResult>(

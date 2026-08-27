@@ -7,83 +7,7 @@ import {
 } from "@xyflow/react";
 import { useMemo } from "react";
 import type { DocGraph } from "@/src/lib/api/spaces.ts";
-
-interface Point {
-	x: number;
-	y: number;
-}
-
-// A tiny deterministic force-directed layout (Fruchterman–Reingold). Kept in the
-// component (no extra dependency) — the graphs are modest and this reads far
-// better than a circle. Deterministic: seeded from node index, no randomness.
-const IDEAL_DISTANCE = 130;
-const SEED_RADIUS = 320;
-
-function layoutGraph(graph: DocGraph): Map<string, Point> {
-	const nodes = graph.nodes;
-	const count = nodes.length;
-	const positions: Point[] = nodes.map((_, i) => {
-		const angle = (2 * Math.PI * i) / Math.max(1, count);
-		return {
-			x: Math.cos(angle) * SEED_RADIUS,
-			y: Math.sin(angle) * SEED_RADIUS,
-		};
-	});
-	const indexOf = new Map(nodes.map((node, i) => [node.id, i]));
-	const links = graph.edges
-		.map((e) => [indexOf.get(e.src), indexOf.get(e.dst)] as const)
-		.filter((pair): pair is [number, number] =>
-			pair.every((v) => v !== undefined)
-		);
-
-	// Cap total work so a large graph never blocks the UI thread for long.
-	const iterations = Math.max(
-		60,
-		Math.min(300, Math.round(20_000 / (count + 1)))
-	);
-	const k = IDEAL_DISTANCE;
-
-	for (let iter = 0; iter < iterations; iter += 1) {
-		const disp: Point[] = positions.map(() => ({ x: 0, y: 0 }));
-		// Repulsion between every pair.
-		for (let i = 0; i < count; i += 1) {
-			for (let j = i + 1; j < count; j += 1) {
-				const dx = positions[i].x - positions[j].x;
-				const dy = positions[i].y - positions[j].y;
-				const dist = Math.hypot(dx, dy) || 0.01;
-				const force = (k * k) / dist;
-				const ux = dx / dist;
-				const uy = dy / dist;
-				disp[i].x += ux * force;
-				disp[i].y += uy * force;
-				disp[j].x -= ux * force;
-				disp[j].y -= uy * force;
-			}
-		}
-		// Attraction along edges.
-		for (const [a, b] of links) {
-			const dx = positions[a].x - positions[b].x;
-			const dy = positions[a].y - positions[b].y;
-			const dist = Math.hypot(dx, dy) || 0.01;
-			const force = (dist * dist) / k;
-			const ux = dx / dist;
-			const uy = dy / dist;
-			disp[a].x -= ux * force;
-			disp[a].y -= uy * force;
-			disp[b].x += ux * force;
-			disp[b].y += uy * force;
-		}
-		// Apply, cooling over time.
-		const temp = 12 * (1 - iter / iterations);
-		for (let i = 0; i < count; i += 1) {
-			const d = Math.hypot(disp[i].x, disp[i].y) || 0.01;
-			positions[i].x += (disp[i].x / d) * Math.min(d, temp);
-			positions[i].y += (disp[i].y / d) * Math.min(d, temp);
-		}
-	}
-
-	return new Map(nodes.map((node, i) => [node.id, positions[i]]));
-}
+import { layoutForceGraph } from "@/src/lib/force-directed-graph.ts";
 
 const EDGE_COLOR: Record<string, string> = {
 	wiki: "var(--primary)",
@@ -126,7 +50,14 @@ export function KnowledgeGraph({
 	graph: DocGraph;
 	onOpenNode: (node: DocGraph["nodes"][number]) => void;
 }) {
-	const positions = useMemo(() => layoutGraph(graph), [graph]);
+	const positions = useMemo(
+		() =>
+			layoutForceGraph(
+				graph.nodes,
+				graph.edges.map((edge) => ({ source: edge.src, target: edge.dst }))
+			),
+		[graph]
+	);
 
 	const nodes: Node[] = useMemo(
 		() =>

@@ -198,13 +198,13 @@ export const APPEARANCE_DEFAULTS = {
 	animationsEnabled: true,
 	streamAnimation: true,
 	markdownComposer: false,
-	// OFF by default: token counts, tokens/sec and first-response time are a
-	// developer readout, and most turns run against agents that report no usage at
-	// all. Must stay in step with DEFAULT_PREFS.inferenceStats in
+	// On by default: the Session Stats plugin provides token counts, speeds, cache,
+	// context, and usage details when the active provider reports them. Must stay in
+	// step with DEFAULT_PREFS.inferenceStats in
 	// packages/blocks/src/desktop/agent-elements/chat-display-prefs.tsx — two
 	// defaults that disagree means the switch and the transcript disagree until
 	// the user touches it.
-	inferenceStats: false,
+	inferenceStats: true,
 	seasonalEffects: DEFAULT_SEASONAL_EFFECTS,
 	seasonalTheme: DEFAULT_SEASONAL_THEME,
 	timezone: DEFAULT_TIMEZONE,

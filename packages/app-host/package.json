@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./app-bridge": "./src/app-bridge.ts",
+    "./standalone": "./src/standalone.ts",
+    "./companion-theme": "./src/companion-theme.ts",
     "./rpc": "./src/rpc.ts",
     "./realtime": "./src/realtime.ts",
     "./views": "./src/views.ts",
@@ -12,6 +15,7 @@
     "./third-party-plugin": "./src/third-party-plugin.ts",
     "./widget-bootstrap": "./src/widget-bootstrap.ts",
     "./widget-state-store": "./src/widget-state-store.ts",
+    "./toast-host": "./src/toast-host.ts",
     "./example-plugin": "./src/example-plugin.ts"
   },
   "scripts": {
@@ -19,6 +23,7 @@
     "test": "bun test src"
   },
   "dependencies": {
+    "@ryuhq/core-client": "workspace:*",
     "zustand": "^5"
   },
   "peerDependencies": {

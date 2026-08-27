@@ -183,6 +183,9 @@ pub async fn generate(host: &impl ImageHost, mut body: Value) -> MediaResponse {
     }
     // Cloud provider selected → route through the Gateway; else the local engine.
     if let Some(provider) = cloud_provider(&body) {
+        if provider == "openrouter" {
+            body = openrouter_image_body(body);
+        }
         return forward_to_gateway(host, "image", "/v1/images/generations", &provider, body).await;
     }
     // Lazily start the (off-by-default) image engine so text-to-image works
@@ -194,6 +197,43 @@ pub async fn generate(host: &impl ImageHost, mut body: Value) -> MediaResponse {
         tracing::debug!("sdcpp lazy start skipped: {e:#}");
     }
     proxy(&host.sd_base_url(), "/v1/images/generations", body).await
+}
+
+/// Convert the app-host image-edit field into OpenRouter's multimodal chat
+/// shape. OpenRouter generates images through `chat/completions`, so a plain
+/// `{ prompt, input_images }` request would otherwise lose the source images at
+/// the provider boundary. Other providers keep the original body because their
+/// model-specific input schemas differ and are intentionally not guessed here.
+fn openrouter_image_body(mut body: Value) -> Value {
+    let Some(images) = body
+        .get("input_images")
+        .and_then(Value::as_array)
+        .filter(|images| !images.is_empty())
+        .cloned()
+    else {
+        return body;
+    };
+    let prompt = body
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut content = vec![json!({ "type": "text", "text": prompt })];
+    for image in images {
+        if let Some(url) = image.as_str() {
+            content.push(json!({
+                "type": "image_url",
+                "image_url": { "url": url }
+            }));
+        }
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("input_images");
+        object.insert(
+            "messages".to_owned(),
+            json!([{ "role": "user", "content": content }]),
+        );
+    }
+    body
 }
 
 #[cfg(test)]
@@ -253,5 +293,25 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("not reachable"));
+    }
+
+    #[test]
+    fn openrouter_image_body_preserves_prompt_and_source_images() {
+        let body = openrouter_image_body(json!({
+            "prompt": "make it neon",
+            "input_images": ["data:image/png;base64,abc"]
+        }));
+        assert!(body.get("input_images").is_none());
+        assert_eq!(
+            body["messages"][0]["content"][0],
+            json!({ "type": "text", "text": "make it neon" })
+        );
+        assert_eq!(
+            body["messages"][0]["content"][1],
+            json!({
+                "type": "image_url",
+                "image_url": { "url": "data:image/png;base64,abc" }
+            })
+        );
     }
 }

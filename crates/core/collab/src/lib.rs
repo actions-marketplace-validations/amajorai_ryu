@@ -62,7 +62,10 @@ pub mod projection;
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+    },
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -355,7 +358,11 @@ impl CollabStore {
                  doc_id     TEXT PRIMARY KEY,
                  claimed_at INTEGER NOT NULL,
                  claimed_by TEXT NOT NULL DEFAULT ''
-             );",
+			 );
+			 CREATE TABLE IF NOT EXISTS doc_epochs (
+				 doc_id TEXT PRIMARY KEY,
+				 epoch  INTEGER NOT NULL
+			 );",
         )
         .context("initializing collab schema")?;
 
@@ -548,6 +555,55 @@ impl CollabStore {
         .context("releasing seed claim")?;
         Ok(())
     }
+
+    fn current_epoch(&self, doc_id: &str) -> Result<u64> {
+        let conn = self.lock();
+        let epoch = conn
+            .query_row(
+                "SELECT epoch FROM doc_epochs WHERE doc_id = ?1",
+                params![doc_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("loading document epoch")?
+            .unwrap_or(0);
+        Ok(epoch.max(0) as u64)
+    }
+
+    fn reset_document(&self, doc_id: &str) -> Result<u64> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().context("starting document reset")?;
+        let current = tx
+            .query_row(
+                "SELECT epoch FROM doc_epochs WHERE doc_id = ?1",
+                params![doc_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("loading reset epoch")?
+            .unwrap_or(0);
+        let next = current.saturating_add(1);
+        tx.execute(
+            "INSERT INTO doc_epochs (doc_id, epoch) VALUES (?1, ?2)
+			 ON CONFLICT(doc_id) DO UPDATE SET epoch = excluded.epoch",
+            params![doc_id, next],
+        )
+        .context("advancing document epoch")?;
+        tx.execute("DELETE FROM doc_updates WHERE doc_id = ?1", params![doc_id])
+            .context("clearing updates during document reset")?;
+        tx.execute(
+            "DELETE FROM doc_snapshots WHERE doc_id = ?1",
+            params![doc_id],
+        )
+        .context("clearing snapshot during document reset")?;
+        tx.execute(
+            "DELETE FROM doc_seed_claims WHERE doc_id = ?1",
+            params![doc_id],
+        )
+        .context("clearing seed claim during document reset")?;
+        tx.commit().context("committing document reset")?;
+        Ok(next as u64)
+    }
 }
 
 // ── Live document entry ──────────────────────────────────────────────────────
@@ -558,6 +614,7 @@ struct DocEntry {
     /// The authoritative CRDT replica. `yrs::Doc` is `Send` but not `Sync`; the
     /// `Mutex` serializes all mutation/read so the engine is one logical writer.
     doc: Mutex<Doc>,
+    epoch: AtomicU64,
     /// Updates appended since the last snapshot (drives compaction).
     updates_since_snapshot: Mutex<usize>,
 }
@@ -635,6 +692,7 @@ impl DocRegistry {
         }
         Ok(DocEntry {
             doc: Mutex::new(doc),
+            epoch: AtomicU64::new(self.store.current_epoch(doc_id)?),
             updates_since_snapshot: Mutex::new(0),
         })
     }
@@ -649,6 +707,18 @@ impl DocRegistry {
     /// already held). Apply happens FIRST; the log append + return only run if
     /// apply succeeds (a malformed update never enters the log).
     pub fn apply_remote_update(&self, doc_id: &str, update: &[u8]) -> Result<Vec<u8>> {
+        let epoch = self.epoch(doc_id)?;
+        self.apply_remote_update_at_epoch(doc_id, epoch, update)
+    }
+
+    /// Apply an update only when the connection joined the current document
+    /// epoch. A restore advances the epoch and fences every pre-restore socket.
+    pub fn apply_remote_update_at_epoch(
+        &self,
+        doc_id: &str,
+        expected_epoch: u64,
+        update: &[u8],
+    ) -> Result<Vec<u8>> {
         // Reject oversized updates before decode (amplification/OOM guard). This is
         // defense-in-depth behind the gateway's own frame cap; all DocSync updates
         // funnel through here, so every caller is covered.
@@ -666,6 +736,12 @@ impl DocRegistry {
         // delete a row that was appended after its snapshot was encoded, and two
         // concurrent applies to the same doc serialize cleanly.
         let doc = entry.doc.lock().unwrap_or_else(|e| e.into_inner());
+        let current_epoch = entry.epoch.load(Ordering::Acquire);
+        if current_epoch != expected_epoch {
+            anyhow::bail!(
+                "stale document epoch: expected {expected_epoch}, current {current_epoch}"
+            );
+        }
         {
             let decoded = Update::decode_v1(update).context("decoding remote update")?;
             let mut txn = doc.transact_mut();
@@ -696,6 +772,25 @@ impl DocRegistry {
         }
 
         Ok(update.to_vec())
+    }
+
+    pub fn epoch(&self, doc_id: &str) -> Result<u64> {
+        Ok(self.entry(doc_id)?.epoch.load(Ordering::Acquire))
+    }
+
+    /// Atomically discard the CRDT state and advance its epoch. Connections that
+    /// joined before this call can no longer apply updates.
+    pub fn reset(&self, doc_id: &str) -> Result<u64> {
+        let entry = self.entry(doc_id)?;
+        let mut doc = entry.doc.lock().unwrap_or_else(|error| error.into_inner());
+        let epoch = self.store.reset_document(doc_id)?;
+        *doc = Doc::new();
+        entry.epoch.store(epoch, Ordering::Release);
+        *entry
+            .updates_since_snapshot
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = 0;
+        Ok(epoch)
     }
 
     /// The authoritative doc's state vector (`SyncStep1` payload to a peer).
@@ -1142,6 +1237,38 @@ mod tests {
                 "late joiner converges via SV diff"
             );
         }
+    }
+
+    #[test]
+    fn reset_advances_epoch_discards_state_and_fences_stale_updates() {
+        let store = Arc::new(CollabStore::open_in_memory().unwrap());
+        let reg = DocRegistry::new(Arc::clone(&store));
+        let doc_id = "doc-reset";
+        let old_update = make_text_update("name", 0, "stale", &StateVector::default());
+
+        assert_eq!(reg.epoch(doc_id).unwrap(), 0);
+        reg.apply_remote_update_at_epoch(doc_id, 0, &old_update)
+            .unwrap();
+        assert_eq!(reg.reset(doc_id).unwrap(), 1);
+        assert_eq!(reg.epoch(doc_id).unwrap(), 1);
+        assert!(reg
+            .apply_remote_update_at_epoch(doc_id, 0, &old_update)
+            .unwrap_err()
+            .to_string()
+            .contains("stale document epoch"));
+
+        let full = reg.diff_since(doc_id, &[]).unwrap();
+        let restored = Doc::new();
+        {
+            let mut txn = restored.transact_mut();
+            txn.apply_update(Update::decode_v1(&full).unwrap()).unwrap();
+        }
+        let text = restored.get_or_insert_text("name");
+        assert_eq!(text.get_string(&restored.transact()), "");
+
+        reg.flush_and_drop(doc_id).unwrap();
+        let rehydrated = DocRegistry::new(store);
+        assert_eq!(rehydrated.epoch(doc_id).unwrap(), 1);
     }
 
     #[test]

@@ -1,6 +1,13 @@
 {
-  "tags": ["tiktok","reels","automation","slideshow","content","analytics"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": [
+    "tiktok",
+    "reels",
+    "automation",
+    "slideshow",
+    "content",
+    "analytics"
+  ],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-reelfarm",
   "homepage": "https://github.com/amajorai/ryu-reelfarm",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -9,7 +16,7 @@
   "name": "Sprout Studio",
   "version": "0.1.14",
   "stability": "experimental",
-  "description": "A Ryu-native local-first creator workspace: turn a point of view into an AI-assisted short-form project, refine every frame, schedule a queue, and read local performance signals.",
+  "description": "A catalog preview of a planned local-first creator workspace for short-form projects, schedules, and performance signals.",
   "tagline": "Shape a clear idea into a repeatable publishing system",
   "keywords": [
     "tiktok",
@@ -24,58 +31,30 @@
   "iconDither": { "from": 198, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
-    "core": { "support": "full" },
-    "desktop": { "support": "full" },
-    "island": { "support": "limited" },
-    "mobile": { "support": "limited" },
+    "core": { "support": "list" },
+    "desktop": { "support": "list" },
+    "island": { "support": "none" },
+    "mobile": { "support": "none" },
     "extension": { "support": "none" },
-    "web": { "support": "full" },
+    "web": { "support": "list" },
     "cli": { "support": "list" }
   },
   "engines": { "ryu": ">=0.1.0" },
-  "runnables": [
-    {
-      "id": "reelfarm-companion",
-      "name": "Sprout Studio",
-      "kind": "companion",
-      "config": {
-        "label": "Sprout Studio",
-        "ui_entry": "./dist/index.html",
-        "ui_format": "html"
-      }
-    }
-  ],
-  "permission_grants": [
-    "hook:side-model",
-    "media:generate",
-    "storage:kv",
-    "social:crud"
-  ],
-  "permission_levels": [
-    {
-      "id": "reelfarm.view",
-      "label": "Can view",
-      "description": "Read Sprout automations, drafts, schedules, and local performance summaries."
-    },
-    {
-      "id": "reelfarm.create",
-      "label": "Can create",
-      "description": "Ask the configured local models to draft slideshow concepts and visuals.",
-      "implies": ["reelfarm.view"]
-    },
-    {
-      "id": "reelfarm.publish",
-      "label": "Can publish",
-      "description": "Schedule or publish content locally, or send it to connected Outpost social accounts.",
-      "implies": ["reelfarm.view", "reelfarm.create"]
-    }
-  ],
-  "companion": {
-    "label": "Sprout Studio",
-    "icon": "film-01"
-  }
-,
+  "runnables": [],
+  "permission_grants": [],
   "contributes": {
- "chat_widget_templates": [{"id":"reelfarm.chat","title":"Sprout Studio widget","description":"Sprout Studio chat widget metadata is coming soon; no render tool is available yet.","triggers":["sprout studio widget"],"examples":["Show me a sprout studio widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}]
+    "chat_widget_templates": [
+      {
+        "id": "reelfarm.chat",
+        "title": "Sprout Studio widget",
+        "description": "Sprout Studio chat widget metadata is coming soon; no render tool is available yet.",
+        "triggers": ["sprout studio widget"],
+        "examples": ["Show me a sprout studio widget"],
+        "backing": {},
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "coming-soon"
+      }
+    ]
   }
 }

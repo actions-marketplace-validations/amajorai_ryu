@@ -20,7 +20,11 @@ import {
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { ViewMode } from "@ryu/blocks/desktop/view-toggle.tsx";
-import { ViewToggle } from "@ryu/blocks/desktop/view-toggle.tsx";
+import {
+	type LibraryViewMode,
+	LibraryViewToggle,
+	ViewToggle,
+} from "@ryu/blocks/desktop/view-toggle.tsx";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { Card, CardContent, CardHeader } from "@ryu/ui/components/card.tsx";
@@ -102,6 +106,7 @@ export function LibraryToolbar({
 	onSortChange = noop,
 	view,
 	onViewChange = noop,
+	showGraph = false,
 	ctaLabel,
 	ctaIcon,
 	onCta,
@@ -120,8 +125,10 @@ export function LibraryToolbar({
 	onSortChange?: (value: string) => void;
 	/** Grid/list view. Omit to hide the view toggle entirely (e.g. the Store,
 	 *  which has no list mode). */
-	view?: ViewMode;
-	onViewChange?: (mode: ViewMode) => void;
+	view?: LibraryViewMode;
+	onViewChange?: (mode: LibraryViewMode) => void;
+	/** Skills-only Library extension: show the Relations projection. */
+	showGraph?: boolean;
 	ctaLabel?: string;
 	ctaIcon?: IconSvgElement;
 	onCta?: () => void;
@@ -171,7 +178,16 @@ export function LibraryToolbar({
 					</DropdownMenuContent>
 				</DropdownMenu>
 			) : null}
-			{view ? <ViewToggle onChange={onViewChange} value={view} /> : null}
+			{view ? (
+				showGraph ? (
+					<LibraryViewToggle onChange={onViewChange} value={view} />
+				) : (
+					<ViewToggle
+						onChange={onViewChange}
+						value={view === "graph" ? "grid" : view}
+					/>
+				)
+			) : null}
 			{ctaLabel && onCta ? (
 				<Button onClick={onCta} size="sm">
 					{ctaIcon ? <HugeiconsIcon className="size-4" icon={ctaIcon} /> : null}

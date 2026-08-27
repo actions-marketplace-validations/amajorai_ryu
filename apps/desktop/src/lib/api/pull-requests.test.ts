@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
+	buildGitHubCompareUrl,
 	buildPullRequestCheckReport,
 	buildPullRequestMergeConflictReport,
 	checkBucket,
 	failingPullRequestChecks,
 	gitPullRequestStatus,
+	normalizeGitHubRepository,
 	normalizeGitPullRequest,
 	pullRequestHasMergeConflicts,
+	selectGitHubCompareBaseBranch,
 } from "./pull-requests.ts";
 
 const pullRequest = normalizeGitPullRequest({
@@ -35,6 +38,48 @@ const pullRequest = normalizeGitPullRequest({
 });
 
 describe("Pull Requests app contract", () => {
+	test("preserves normalized and legacy default-branch response shapes", () => {
+		expect(
+			normalizeGitHubRepository({
+				defaultBranch: "develop",
+				nameWithOwner: "amajorai/ryu",
+				url: "https://github.com/amajorai/ryu",
+			})?.defaultBranch
+		).toBe("develop");
+		expect(
+			normalizeGitHubRepository({
+				defaultBranchRef: { name: "trunk" },
+				nameWithOwner: "amajorai/ryu",
+				url: "https://github.com/amajorai/ryu",
+			})?.defaultBranch
+		).toBe("trunk");
+	});
+
+	test("builds a safe compare URL and omits same-branch comparisons", () => {
+		const repository = {
+			defaultBranch: "main",
+			nameWithOwner: "amajorai/ryu",
+			url: "https://github.com/amajorai/ryu",
+		};
+		expect(buildGitHubCompareUrl(repository, "feature/ui", "main")).toBe(
+			"https://github.com/amajorai/ryu/compare/main...feature%2Fui?expand=1"
+		);
+		expect(buildGitHubCompareUrl(repository, "main", "main")).toBeNull();
+	});
+
+	test("selects the configured compare base before local defaults", () => {
+		expect(selectGitHubCompareBaseBranch("release", "master", [])).toBe(
+			"release"
+		);
+		expect(selectGitHubCompareBaseBranch(null, "master", ["main"])).toBe(
+			"master"
+		);
+		expect(selectGitHubCompareBaseBranch(null, null, ["master"])).toBe(
+			"master"
+		);
+		expect(selectGitHubCompareBaseBranch(null, null, [])).toBe("main");
+	});
+
 	test("normalizes app metadata and identifies failing checks", () => {
 		expect(pullRequest).not.toBeNull();
 		expect(pullRequest?.repository).toBe("openai/codex");

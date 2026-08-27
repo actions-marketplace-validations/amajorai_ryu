@@ -2044,8 +2044,8 @@ export function AppearanceTab() {
 								}
 							/>
 						}
-						description="Use the built-in Bot mode: one toggle — Sessions ⇄ Agents — opening on the Agents tab, with messaging-style rows on. Ryu Work selects it automatically; turn it off to return to the full section list."
-						title="Bot mode"
+						description="Use the built-in Agents view: one toggle — Sessions ⇄ Agents — opening on the Agents tab, with messaging-style rows on. Ryu Work selects it automatically; turn it off to return to the full section list."
+						title="Agents view"
 					/>
 					{/* App-registered modes (`contributes.sidebar_modes`). Rendered from the
 					    same list the sidebar's own menu offers, so the two cannot disagree
@@ -2119,7 +2119,7 @@ export function AppearanceTab() {
 						}
 						description={
 							sidebarMode === "agent"
-								? "Draw each agent in the sidebar the way a messaging app does: a large round avatar spanning two lines, the agent's name and the time of its last message on the first, and a preview of that message below. Bot mode is drawing these rows regardless; this switch is what you return to when you leave it."
+								? "Draw each agent in the sidebar the way a messaging app does: a large round avatar spanning two lines, the agent's name and the time of its last message on the first, and a preview of that message below. The Agents view draws these rows regardless; this switch is what you return to when you leave it."
 								: "Draw each agent in the sidebar the way a messaging app does: a large round avatar spanning two lines, the agent's name and the time of its last message on the first, and a preview of that message below. Turn off for the compact single-line row."
 						}
 						title="Messaging-style agent rows"
@@ -2132,7 +2132,7 @@ export function AppearanceTab() {
 								onCheckedChange={setSidebarChatPreview}
 							/>
 						}
-						description="Show ordinary chat sessions as two-line rows with their latest message and current tool/run state. The text loop pauses when animations are disabled. Bot mode keeps its own two-line rows regardless of this setting."
+						description="Show ordinary chat sessions as two-line rows with their latest message and current tool/run state. The text loop pauses when animations are disabled. The Agents view keeps its own two-line rows regardless of this setting."
 						title="Show latest message / tool state in sidebar"
 					/>
 					<SettingsItem
@@ -2366,8 +2366,8 @@ export function AppearanceTab() {
 								onCheckedChange={setInferenceStats}
 							/>
 						}
-						description="Show token counts, tokens per second and the time to the first response under each reply. Off by default: the numbers are a developer readout, and many agents report no token usage at all."
-						title="Inference stats"
+						description="Show the Stats plugin under the latest reply with session turns, steps, tokens, cache efficiency, speed, context, compactions, cost, and provider usage when reported."
+						title="Session stats"
 					/>
 				</SettingsGroup>
 			</SettingsSection>

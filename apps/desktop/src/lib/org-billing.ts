@@ -32,5 +32,8 @@ export function planTierForOrg(
 	) {
 		return null;
 	}
-	return (status.plan ?? status.entitlement?.plan ?? null) as PlanId | null;
+	const plan = (status.plan ??
+		status.entitlement?.plan ??
+		null) as PlanId | null;
+	return plan === "marketplace-membership" ? null : plan;
 }

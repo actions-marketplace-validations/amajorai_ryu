@@ -10,29 +10,23 @@ import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 import { StaggerLines } from "./stagger-lines.tsx";
 
 /**
- * NOTE: this block deliberately does NOT render `GatewayMock`. That visual is
- * labelled "Ryu Gateway / Routing / PII / DLP / Tokens / Prompt injection" —
- * developer-motion vocabulary, correct on a developer surface and wrong on the
- * business front door, which is the only page this block appears on.
- *
- * The sign-off contrast, written for the partner who has to answer the client —
- * so the language here is deliberately plain. "Audit", "governance" and
- * "observability" are the words that lose this reader; "we show you exactly
- * what it did" is the same claim they will actually act on.
+ * Keep the contrast plain. A startup does not need a control-plane lecture; it
+ * needs to know what the AI saw, what it changed, what it cost, and where a
+ * person can stop it.
  */
 
 const RISKS = [
-	"No record of what was done, or who said yes to it",
-	"Client names and numbers get sent outside the firm",
+	"No record of what AI saw or changed",
+	"Company data gets sent somewhere no one approved",
 	"No spending ceiling, so nobody can promise what next month costs",
-	"Keeping it all running turns into somebody's second job",
+	"Someone has to babysit every workflow to keep it usable",
 ] as const;
 
 const DEFENSES = [
-	"Every step written down in order, readable by a partner",
-	"Client names and numbers cannot get sent out",
-	"A spending ceiling per person and per team, enforced as work runs",
-	"Anything risky waits for a person to say yes",
+	"Inputs, outputs, and decisions written down clearly",
+	"Access limited to the files and systems you choose",
+	"A spending ceiling enforced while the work runs",
+	"Anything sensitive pauses for a person to say yes",
 ] as const;
 
 function RiskCard() {
@@ -43,7 +37,7 @@ function RiskCard() {
 				Why it never ships
 			</p>
 			<h3 className="mt-2 font-medium text-foreground text-xl tracking-tight md:text-2xl">
-				It works, and still nobody will sign off
+				It looks useful, and still nobody will ship it
 			</h3>
 			<ul className="mt-6 space-y-3">
 				{RISKS.map((risk) => (
@@ -82,7 +76,7 @@ function DefenseCard() {
 					tone.title
 				)}
 			>
-				You can answer the client
+				Your team can stand behind the result
 			</h3>
 			<ul className="mt-6 space-y-3">
 				{DEFENSES.map((defense) => (
@@ -107,10 +101,10 @@ export default function SecureByDefault() {
 		<section className="container mx-auto px-4 py-20 md:py-28">
 			<div className="mx-auto max-w-5xl">
 				<StaggerLines className="max-w-2xl">
-					<SectionTitle title="We show you exactly what it did" />
+					<SectionTitle title="Your team needs to see what happened." />
 					<p className={sectionSubtitleClass}>
-						You can see what it did step by step, you set the monthly limit, and
-						your people approve anything that matters.
+						Ryu shows what the AI used, produced, changed, and cost before
+						important work moves on.
 					</p>
 				</StaggerLines>
 
@@ -129,7 +123,7 @@ export default function SecureByDefault() {
 						className="size-4 shrink-0 text-muted-foreground"
 						strokeWidth={1.5}
 					/>
-					Every job leaves a record you can hand to a client.
+					Every important AI task leaves a record your team can stand behind.
 				</p>
 			</div>
 		</section>

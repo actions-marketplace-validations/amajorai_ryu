@@ -1,16 +1,22 @@
 import { describe, expect, it } from "bun:test";
 import {
+	contributionSourceRequest,
 	groupStoreItems,
 	helloListDetail,
 	helloListDetailContribution,
 	isCoreApiPath,
+	isCoreReadPath,
 	isKnownLibraryViewKind,
 	isKnownViewKind,
+	isViewSourceHttpMethod,
 	LIBRARY_VIEW_KINDS,
 	LIBRARY_VIEW_REGISTRY,
 	libraryViewDefinition,
+	normalizeViewRefreshMs,
 	renderActionHttp,
+	renderContributionActionHttp,
 	renderTemplate,
+	type SidebarSectionSpec,
 	type StoreCatalogItem,
 	type StoreDetailGraphSpec,
 	type StoreTabSpec,
@@ -147,6 +153,38 @@ describe("library view registry", () => {
 	});
 });
 
+describe("sidebar section vocabulary", () => {
+	it("supports an app-owned navigation target for the create affordance", () => {
+		const spec = {
+			create: {
+				label: "New workflow",
+				target: "/workflows/new",
+			},
+			entity: { anchor: "workflow", idKey: "workflow_id" },
+			itemTarget: "/workflows/{{item.id}}",
+		} satisfies SidebarSectionSpec;
+
+		expect(spec.create.target).toBe("/workflows/new");
+		expect(spec.entity).toEqual({
+			anchor: "workflow",
+			idKey: "workflow_id",
+		});
+	});
+
+	it("keeps authenticated HTTP create-and-open backward compatible", () => {
+		const spec = {
+			create: {
+				http: { method: "POST", path: "/api/documents" },
+				targetFrom: "id",
+			},
+			itemTarget: "/documents/{{item.id}}",
+		} satisfies SidebarSectionSpec;
+
+		expect(spec.create.http.path).toBe("/api/documents");
+		expect(spec.create.targetFrom).toBe("id");
+	});
+});
+
 describe("action templating", () => {
 	it("interpolates form values and item keys", () => {
 		const ctx = {
@@ -199,15 +237,117 @@ describe("action templating", () => {
 
 	it("refuses non-core paths (including templated escapes)", () => {
 		expect(isCoreApiPath("/api/quests")).toBe(true);
+		expect(isCoreApiPath("/workflows")).toBe(true);
+		expect(isCoreApiPath("/workflows/wf-1")).toBe(true);
 		expect(isCoreApiPath("/etc/passwd")).toBe(false);
 		expect(isCoreApiPath("https://evil.example/api/")).toBe(false);
 		expect(isCoreApiPath("/api/../admin")).toBe(false);
+		expect(isCoreApiPath("/api/%2e%2e/admin")).toBe(false);
+		expect(isCoreApiPath("/api/x%2f..%2fadmin")).toBe(false);
+		expect(isCoreApiPath("/api/x%5c..%5cadmin")).toBe(false);
+		expect(isCoreApiPath("/workflows/../admin")).toBe(false);
+		expect(isCoreApiPath("/workflows/%2e%2e/admin")).toBe(false);
+		expect(isCoreApiPath("/workflowsprefix")).toBe(false);
 		expect(() =>
 			renderActionHttp(
 				{ method: "GET", path: "{{item.url}}" },
 				{ item: { url: "https://evil.example/" } }
 			)
 		).toThrow();
+	});
+
+	it("confines community sources and actions to the owning ext mount", () => {
+		const authority = { http_policy: "owner", plugin: "@acme/notes" };
+		expect(
+			contributionSourceRequest(authority, {
+				http: { path: "/api/ext/@acme/notes/items" },
+			})
+		).toEqual({ method: "GET", path: "/api/ext/@acme/notes/items" });
+		expect(
+			contributionSourceRequest(authority, {
+				http: { path: "/api/ext/@acme/other/items" },
+			})
+		).toBeNull();
+		expect(
+			contributionSourceRequest(authority, {
+				http: { path: "/api/preferences" },
+			})
+		).toBeNull();
+		expect(() =>
+			renderContributionActionHttp(
+				authority,
+				{ method: "DELETE", path: "/api/spaces/{{item.id}}" },
+				{ item: { id: "victim" } }
+			)
+		).toThrow("outside the owning app authority");
+	});
+
+	it("allows only GET automatic sources, even for trusted Core contributions", () => {
+		const authority = { http_policy: "core", plugin: "@ryu/workflows" };
+		const invalidSource: ViewSource = {
+			http: { path: "/api/workflows/catalog" },
+		};
+		Reflect.set(invalidSource.http, "method", "DELETE");
+		expect(contributionSourceRequest(authority, invalidSource)).toBeNull();
+		expect(
+			contributionSourceRequest(authority, {
+				http: { method: "GET", path: "/api/workflows/catalog" },
+			})
+		).toEqual({ method: "GET", path: "/api/workflows/catalog" });
+		expect(
+			renderContributionActionHttp(
+				authority,
+				{ method: "POST", path: "/api/workflows/catalog/install" },
+				{}
+			)
+		).toEqual({ method: "POST", path: "/api/workflows/catalog/install" });
+	});
+
+	it("fails closed for missing policy and rejects encoded owner-mount traversal", () => {
+		const authority = { plugin: "@acme/notes" };
+		expect(
+			contributionSourceRequest(authority, {
+				http: { path: "/api/ext/@acme/notes/%2e%2e/other" },
+			})
+		).toBeNull();
+		expect(
+			contributionSourceRequest(authority, {
+				http: { path: "/api/ext/@acme/notes/items" },
+			})
+		).toEqual({ method: "GET", path: "/api/ext/@acme/notes/items" });
+	});
+	it("allows established node-relative read routes without widening actions", () => {
+		expect(isCoreReadPath("/workflows")).toBe(true);
+		expect(isCoreReadPath("/api/workflows?limit=20")).toBe(true);
+		for (const path of [
+			"//evil.example/steal",
+			"/%2f%2fevil.example/steal",
+			"/api/../admin",
+			"/api/%2e%2e/admin",
+			"/api/%252e%252e/admin",
+			"/api\\workflows",
+			"/https://evil.example/steal",
+			"/user@example.test/private",
+			"/api/workflows\u0000",
+			"/api/%zz",
+			"/api/%3f/../../admin",
+			"/api/%25252e%25252e/admin",
+		]) {
+			expect(isCoreReadPath(path)).toBe(false);
+		}
+		// Workflow routes are an explicit action allowlist entry from the platform
+		// surface work already on main. Read sources still use the narrower GET-only
+		// contract above.
+		expect(isCoreApiPath("/workflows")).toBe(true);
+		expect(isCoreApiPath("/api/%2e%2e/admin")).toBe(false);
+		expect(isCoreApiPath("/api/%252e%252e/admin")).toBe(false);
+		expect(isCoreApiPath("/api\\admin")).toBe(false);
+		expect(isViewSourceHttpMethod("GET")).toBe(true);
+		expect(isViewSourceHttpMethod("HEAD")).toBe(false);
+		expect(isViewSourceHttpMethod("POST")).toBe(false);
+		expect(normalizeViewRefreshMs(-1)).toBeNull();
+		expect(normalizeViewRefreshMs(10)).toBe(1000);
+		expect(normalizeViewRefreshMs(Number.MAX_SAFE_INTEGER)).toBe(2_147_483_647);
 	});
 });
 
@@ -292,6 +432,14 @@ describe("source-fetched items", () => {
 				{ id: 1, title: "One" },
 			])
 		).toHaveLength(1);
+	});
+
+	it("fails closed for a malformed runtime filter shape", () => {
+		const source: ViewSource = { http: { path: "/api/items" } };
+		Reflect.set(source, "filter", "not-an-array");
+		expect(
+			sourceItemsFromResponse(source, [{ id: "1", title: "One" }])
+		).toEqual([]);
 	});
 
 	// One endpoint, several sections: `/api/runs` takes no query parameters, so a

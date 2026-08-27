@@ -6,7 +6,7 @@
 // stays the local cache.
 
 import { THEME_PREF_KEY, type ThemePrefs } from "@ryu/ui/theme/prefs";
-import { type ApiTarget, request } from "./client.ts";
+import { ApiError, type ApiTarget, request } from "./client.ts";
 import type {
 	CustomPattern,
 	CustomPatternKind,
@@ -34,7 +34,7 @@ export function subscribePreferenceChanges(
 	};
 }
 
-/** Read a raw preference value (JSON string) by key, or null if unset/unreachable. */
+/** Read a raw preference value, or null only when the key is genuinely unset. */
 export async function getPreference(
 	target: ApiTarget,
 	key: string
@@ -45,34 +45,33 @@ export async function getPreference(
 			`/api/preferences/${key}`
 		);
 		return data.value;
-	} catch {
-		return null;
+	} catch (error) {
+		if (error instanceof ApiError && error.status === 404) {
+			return null;
+		}
+		throw error;
 	}
 }
 
-/** Write a raw preference value (JSON string) by key. Returns success. */
+/** Write a raw preference value. Returns true or throws the typed request error. */
 export async function setPreference(
 	target: ApiTarget,
 	key: string,
 	value: string
 ): Promise<boolean> {
-	try {
-		await request(target, `/api/preferences/${key}`, {
-			method: "PUT",
-			body: { value },
-		});
-		for (const listener of preferenceChangeListeners) {
-			try {
-				listener(key, value);
-			} catch {
-				// A preference observer must not turn a successful save into a
-				// reported failure for the control that initiated it.
-			}
+	await request(target, `/api/preferences/${key}`, {
+		method: "PUT",
+		body: { value },
+	});
+	for (const listener of preferenceChangeListeners) {
+		try {
+			listener(key, value);
+		} catch {
+			// A preference observer must not turn a successful save into a
+			// reported failure for the control that initiated it.
 		}
-		return true;
-	} catch {
-		return false;
 	}
+	return true;
 }
 
 export const USER_PERSONALIZATION_PREF_KEY = "user-personalization";
@@ -3094,6 +3093,9 @@ export function setSupportAccessLocalExpiry(
 
 export const ENTITLEMENT_ACTIVE_PREF_KEY = "entitlement-active";
 export const MANAGED_INFERENCE_ENTITLED_PREF_KEY = "managed-inference-entitled";
+export const MARKETPLACE_APPS_ENTITLED_PREF_KEY = "marketplace-apps-entitled";
+export const MARKETPLACE_DIRECT_LICENSED_ITEMS_PREF_KEY =
+	"marketplace-direct-licensed-items";
 
 /** Push whether the node is entitled to run autonomous automations. */
 export function setEntitlementActive(
@@ -3112,6 +3114,30 @@ export function setManagedInferenceEntitled(
 		target,
 		MANAGED_INFERENCE_ENTITLED_PREF_KEY,
 		String(active)
+	);
+}
+
+/** Push the control-plane's recurring Marketplace capability to Core. */
+export function setMarketplaceAppsEntitled(
+	target: ApiTarget,
+	active: boolean
+): Promise<boolean> {
+	return setPreference(
+		target,
+		MARKETPLACE_APPS_ENTITLED_PREF_KEY,
+		String(active)
+	);
+}
+
+/** Push active direct Marketplace app licenses to Core for per-app bypass. */
+export function setMarketplaceDirectLicensedItems(
+	target: ApiTarget,
+	itemIds: string[]
+): Promise<boolean> {
+	return setPreference(
+		target,
+		MARKETPLACE_DIRECT_LICENSED_ITEMS_PREF_KEY,
+		JSON.stringify([...new Set(itemIds.filter((itemId) => itemId.trim()))])
 	);
 }
 

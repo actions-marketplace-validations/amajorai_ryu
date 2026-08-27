@@ -1,3 +1,5 @@
+mod app_update;
+mod app_icons;
 mod core;
 mod hardware;
 mod identifier_migration;
@@ -9,13 +11,12 @@ mod profile;
 mod quick_capture;
 mod secrets;
 mod shadow_auth;
+mod standalone;
 mod startup;
 mod tray;
 mod update_schedule;
 mod win_process;
-// M7 companion spike — compiled only when companion-spike feature is active.
-mod companion_spike;
-
+mod window_registry;
 use std::sync::Mutex;
 
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -39,15 +40,23 @@ use crate::core::process::RyuCoreProcess;
 /// positioner fires, so it is wired up as a plugin registered ahead of
 /// decorum (see `macos_titlebar_plugin`). `ns_window` is the raw `NSWindow`
 /// pointer from `Window::ns_window()` / `WebviewWindow::ns_window()`.
-/// Shared traffic-light inset for every window: x from the left edge, and a
-/// y chosen so decorum centers the buttons ~30.7px from the window top (it
-/// places them at y/2 + 11). That is the tab strip's natural centerline —
-/// the h-12 titlebar sits in the SidebarInset main area (m-2), so its items
-/// center at mt-2 + h-12/2 = 30.72px — shared by the back/forward/sidebar
-/// cluster (top-4 + h-8) and the sidebar node selector, so tabs, lights,
-/// cluster, and selector read as one line.
+/// Ryu's shell keeps the lights on the tab-strip centerline. A standalone app
+/// has no shell titlebar, so it uses decorum's normal macOS inset instead of
+/// placing the native controls over the app's own header.
 #[cfg(target_os = "macos")]
-const TRAFFIC_LIGHTS_INSET: (f32, f32) = (28.0, 39.4);
+const SHELL_TRAFFIC_LIGHTS_INSET: (f32, f32) = (28.0, 39.4);
+
+#[cfg(target_os = "macos")]
+const STANDALONE_TRAFFIC_LIGHTS_INSET: (f32, f32) = (12.0, 16.0);
+
+#[cfg(target_os = "macos")]
+fn traffic_lights_inset() -> (f32, f32) {
+    if standalone::enabled() {
+        STANDALONE_TRAFFIC_LIGHTS_INSET
+    } else {
+        SHELL_TRAFFIC_LIGHTS_INSET
+    }
+}
 
 #[cfg(target_os = "macos")]
 fn apply_macos_titlebar_mask(ns_window: *mut std::ffi::c_void) {
@@ -197,7 +206,7 @@ async fn start_ryu_core(state: tauri::State<'_, CoreState>) -> Result<String, St
     // (and turbo's cargo run dies with it), so when health is down we MUST
     // spawn for recovery or reset would leave the node permanently stopped.
     #[cfg(debug_assertions)]
-    {
+    if !standalone::enabled() {
         let probe = RyuCoreProcess::new(std::path::PathBuf::from("ryu-core"));
         if probe.is_already_running().await {
             return Ok("connecting".to_string());
@@ -392,152 +401,6 @@ fn get_build_profile() -> BuildProfile {
     }
 }
 
-/// Install an update from a non-stable release channel's own updater feed.
-///
-/// The JS `@tauri-apps/plugin-updater` can only read the single static endpoint
-/// baked into `tauri.conf.json` (the Stable `latest.json`). To make channel
-/// switching change *which feed the updater checks*, this rebuilds the updater at
-/// runtime pointed at `<channel>/latest.json`, checks it, and installs if an
-/// update is there. Returns `Ok(true)` when a build was installed (the caller then
-/// relaunches), `Ok(false)` when the channel feed reports nothing newer.
-#[tauri::command]
-async fn install_update_from_channel(
-    app: tauri::AppHandle,
-    channel: String,
-) -> Result<bool, String> {
-    use tauri_plugin_updater::UpdaterExt;
-
-    // Per-channel feed. `canary` and `nightly` publish to a ROLLING TAG of the
-    // same name that CI force-moves each run, and their workflows assemble
-    // `latest-<channel>.json` onto that tag from their own signed artifacts
-    // (`scripts/release/assemble-channel-feed.sh`). So the feed is addressed at
-    // `/releases/download/<channel>/…`, NOT `/releases/latest/download/…` —
-    // GitHub defines `/latest` to exclude prereleases and every rolling build is
-    // one, which is exactly why this used to resolve to the Stable release and
-    // silently offer a channel user the Stable build.
-    //
-    // `beta` has no rolling build train, so it keeps resolving to the Stable
-    // release, where the release workflow still copies Stable's feed to
-    // `latest-beta.json`. That is a deliberate fallback, not an oversight.
-    let url = if channel == "beta" {
-        "https://github.com/amajorai/ryu/releases/latest/download/latest-beta.json".to_string()
-    } else {
-        format!("https://github.com/amajorai/ryu/releases/download/{channel}/latest-{channel}.json")
-    };
-    let endpoint = url
-        .parse()
-        .map_err(|e| format!("bad channel feed url: {e}"))?;
-
-    let updater = app
-        .updater_builder()
-        .endpoints(vec![endpoint])
-        .map_err(|e| e.to_string())?
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
-        return Ok(false);
-    };
-
-    update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(true)
-}
-
-/// Is `segment` safe to interpolate into a release-download URL path?
-///
-/// `install_update_at_tag`'s tag and channel both arrive from the webview, so a
-/// caller must not be able to escape the path we intend and point the updater at
-/// another host or another asset. Empty, over-long, `.`/`-`-leading and
-/// `..`-bearing values are refused on top of each segment's own alphabet.
-fn is_safe_url_segment(segment: &str, allowed: impl Fn(char) -> bool) -> bool {
-    const MAX_SEGMENT_LEN: usize = 64;
-    !segment.is_empty()
-        && segment.len() <= MAX_SEGMENT_LEN
-        && !segment.starts_with('.')
-        && !segment.starts_with('-')
-        && !segment.contains("..")
-        && segment.chars().all(allowed)
-}
-
-/// Install a SPECIFIC published release, by tag, from that release's own updater feed.
-///
-/// The static endpoint baked into `tauri.conf.json` (line 56) always resolves to
-/// the ABSOLUTE newest release, so it cannot deliver "the newest build your
-/// lifetime updates window covers". Every signed release also carries its own
-/// feed asset — `latest.json` for stable, `latest-<channel>.json` otherwise
-/// (scripts/release/update-latest-json.mjs:33-35) — at
-/// `/releases/download/<tag>/<file>`, mirrored to the public hub with rewritten
-/// URLs by `.github/workflows/mirror-releases.yml`. So pinning is a feed swap:
-/// the same runtime-rebuilt-updater trick `install_update_from_channel` uses.
-///
-/// SIGNING IS UNAFFECTED: `updater_builder()` inherits `plugins.updater.pubkey`
-/// from tauri.conf.json and only `.endpoints(...)` is overridden, so the pinned
-/// artifact is verified against that release's own signature with the app's
-/// baked-in key.
-///
-/// Returns `Ok(false)` when that tag has no signed feed (an older release, or one
-/// cut without `TAURI_SIGNING_PRIVATE_KEY`), so the caller falls back to a manual
-/// download rather than trapping the user. NOTE: the Tauri updater refuses any
-/// version that is not NEWER than the running one, so this can pin FORWARD to an
-/// older-than-latest build but can never downgrade.
-#[tauri::command]
-async fn install_update_at_tag(
-    app: tauri::AppHandle,
-    tag: String,
-    channel: String,
-) -> Result<bool, String> {
-    use tauri_plugin_updater::UpdaterExt;
-
-    let tag_ok = is_safe_url_segment(&tag, |c| {
-        c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-')
-    });
-    let channel_ok = is_safe_url_segment(&channel, |c| c.is_ascii_lowercase());
-    if !tag_ok || !channel_ok {
-        return Err("invalid release tag or channel".to_string());
-    }
-
-    // Must stay in step with `scripts/release/update-latest-json.mjs:33-35`, which
-    // NAMES these assets at publish time — if the two ever disagree the pin 404s.
-    let file = if channel == "stable" {
-        "latest.json".to_string()
-    } else {
-        format!("latest-{channel}.json")
-    };
-    let url = format!("https://github.com/amajorai/ryu/releases/download/{tag}/{file}");
-    let endpoint = url
-        .parse()
-        .map_err(|e| format!("bad pinned feed url: {e}"))?;
-
-    let updater = app
-        .updater_builder()
-        .endpoints(vec![endpoint])
-        .map_err(|e| e.to_string())?
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let found = match updater.check().await {
-        Ok(found) => found,
-        // With exactly one endpoint configured, `ReleaseNotFound` means that single
-        // URL did not answer 200 — i.e. this tag ships no signed feed asset. That is
-        // an expected state for older or unsigned releases, not a failure, so it
-        // reports "nothing to pin" and the caller offers a manual download instead.
-        Err(tauri_plugin_updater::Error::ReleaseNotFound) => return Ok(false),
-        Err(e) => return Err(e.to_string()),
-    };
-    let Some(update) = found else {
-        return Ok(false);
-    };
-
-    update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(true)
-}
-
 // ── Data folder relocation / import (offline, runs while Core is stopped) ─────────
 
 /// Stop the Core we manage, then wait until its HTTP server is actually down.
@@ -592,28 +455,42 @@ async fn run_data_path_subcommand(
         .spawn()
         .map_err(|e| format!("failed to launch ryu-core: {e}"))?;
 
-    if let Some(stdout) = child.stdout.take() {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "ryu-core stdout was not captured".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "ryu-core stderr was not captured".to_string())?;
+    let progress_app = app.clone();
+    let read_stdout = async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(rest) = line.strip_prefix("@@PROGRESS ") {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(rest) {
-                    let _ = app.emit("data-folder-progress", value);
+                    let _ = progress_app.emit("data-folder-progress", value);
                 }
             }
         }
-    }
-
-    let status = child.wait().await.map_err(|e| e.to_string())?;
-    if status.success() {
-        return Ok(());
-    }
-    let mut err = String::new();
-    if let Some(stderr) = child.stderr.take() {
+        Ok::<(), String>(())
+    };
+    let read_stderr = async move {
+        let mut err = String::new();
         let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
             err.push_str(&line);
             err.push('\n');
         }
+        Ok::<String, String>(err)
+    };
+    let (stdout_result, stderr_result, status_result) =
+        tokio::join!(read_stdout, read_stderr, child.wait());
+    stdout_result?;
+    let err = stderr_result?;
+    let status = status_result.map_err(|e| e.to_string())?;
+    if status.success() {
+        return Ok(());
     }
     Err(if err.trim().is_empty() {
         format!("ryu-core exited with {status}")
@@ -1391,8 +1268,11 @@ fn default_shell() -> (&'static str, &'static str) {
     // `$SHELL` is the user's login-shell choice on Unix. Only accept the same
     // fixed names exposed by the settings UI; an arbitrary environment path must
     // never become an executable here.
-    let configured = std::env::var_os("SHELL")
-        .and_then(|value| std::path::Path::new(&value).file_name().map(|name| name.to_owned()));
+    let configured = std::env::var_os("SHELL").and_then(|value| {
+        std::path::Path::new(&value)
+            .file_name()
+            .map(|name| name.to_owned())
+    });
     match configured.as_deref().and_then(|name| name.to_str()) {
         Some("bash") => ("bash", "-c"),
         Some("zsh") => ("zsh", "-c"),
@@ -1464,10 +1344,7 @@ async fn shell_execute(
     // `git diff` and corrupts file contents that contain blank lines. Raw
     // events preserve stdout/stderr exactly while keeping the same async
     // process lifecycle.
-    let (mut events, _child) = cmd
-        .set_raw_out(true)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    let (mut events, _child) = cmd.set_raw_out(true).spawn().map_err(|e| e.to_string())?;
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut code = 1;
@@ -1682,7 +1559,7 @@ fn encode_param(s: &str) -> String {
     out
 }
 
-/// Open a tab in a separate OS window ("Move tab to new window", browser-style).
+/// Open a tab in a separate OS window (browser-style "open in new window").
 /// The new window loads the same app shell; the `window=tab` query seeds a single
 /// tab focused on `conversation_id` and pinned to `node` (so a tab targeting a
 /// remote node keeps targeting it). Conversation state is server-side, so the new
@@ -1691,8 +1568,10 @@ fn encode_param(s: &str) -> String {
 #[tauri::command]
 async fn open_tab_window(
     app: tauri::AppHandle,
+    registry: tauri::State<'_, window_registry::WindowRegistry>,
     path: Option<String>,
     conversation_id: Option<String>,
+    entity_key: Option<String>,
     node: Option<String>,
     title: Option<String>,
 ) -> Result<(), String> {
@@ -1752,9 +1631,30 @@ async fn open_tab_window(
         if let Ok(ns_window) = win.ns_window() {
             apply_macos_titlebar_mask(ns_window);
         }
-        win.set_traffic_lights_inset(TRAFFIC_LIGHTS_INSET.0, TRAFFIC_LIGHTS_INSET.1)
+        let (x, y) = traffic_lights_inset();
+        win.set_traffic_lights_inset(x, y)
             .map_err(|e| e.to_string())?;
     }
+
+    // Claim a seeded conversation before the renderer's first React effect. The
+    // renderer replaces this revision-1 snapshot once it has mounted; this
+    // shortens the duplicate-open race during a slow webview startup.
+    if let Some(key) = entity_key.filter(|key| !key.is_empty()) {
+        let seed_renderer_id = format!("native-seed:{label}");
+        registry.register(
+            &label,
+            &seed_renderer_id,
+            1,
+            vec![window_registry::WindowTabRegistration { active: true, key }],
+        )?;
+    }
+
+    // A newly-created WebviewWindow is not guaranteed to become the foreground
+    // window on every platform, especially when the command was invoked from a
+    // background tab renderer. Make the browser-style tear-off deterministic.
+    win.show().map_err(|e| e.to_string())?;
+    win.unminimize().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -1821,9 +1721,9 @@ async fn read_git_project_file(folder: String, path: String) -> Result<String, S
     }
     let relative = std::path::Path::new(&path);
     if relative.is_absolute()
-        || relative.components().any(|component| {
-            matches!(component, Component::ParentDir | Component::Prefix(_))
-        })
+        || relative
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
     {
         return Err("committed file path must stay inside the workspace".to_string());
     }
@@ -1847,10 +1747,65 @@ async fn write_project_file(path: String, content: String) -> Result<(), String>
     std::fs::write(&path, content).map_err(|e| format!("write {path}: {e}"))
 }
 
-/// List markdown files under a folder (bounded recursion) for the file picker.
+/// Write one Markdown file below a user-selected project folder. Memory's Git
+/// source binding uses a relative path so the renderer cannot accidentally
+/// write outside the folder it just granted to the app through the picker.
 #[tauri::command]
-async fn list_project_markdown(folder: String) -> Result<Vec<String>, String> {
-    fn walk(dir: &std::path::Path, out: &mut Vec<String>, depth: usize) {
+async fn write_project_markdown(
+    root: String,
+    relative_path: String,
+    content: String,
+) -> Result<(), String> {
+    use std::path::Component;
+
+    let root =
+        std::fs::canonicalize(&root).map_err(|e| format!("invalid project folder {root}: {e}"))?;
+    if !root.is_dir() {
+        return Err("project folder is not a directory".to_string());
+    }
+    let relative = std::path::Path::new(&relative_path);
+    if relative.is_absolute()
+        || relative_path.is_empty()
+        || relative_path
+            .chars()
+            .any(|character| character.is_control())
+        || relative
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        || !relative_path.to_ascii_lowercase().ends_with(".md")
+    {
+        return Err("relative Markdown path must stay inside the project folder".to_string());
+    }
+    let destination = root.join(relative);
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "Markdown path has no parent".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("create Markdown folder {}: {e}", parent.display()))?;
+    let canonical_parent = std::fs::canonicalize(parent)
+        .map_err(|e| format!("resolve Markdown folder {}: {e}", parent.display()))?;
+    if !canonical_parent.starts_with(&root) {
+        return Err("Markdown path resolves outside the project folder".to_string());
+    }
+    if std::fs::symlink_metadata(&destination)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err("refusing to overwrite a symlink".to_string());
+    }
+    std::fs::write(&destination, content)
+        .map_err(|e| format!("write {}: {e}", destination.display()))
+}
+
+/// List markdown files under a canonical workspace without following symlinks.
+fn collect_project_markdown(root: &std::path::Path) -> Result<Vec<String>, String> {
+    let root = std::fs::canonicalize(root)
+        .map_err(|error| format!("invalid workspace folder: {error}"))?;
+    if !root.is_dir() {
+        return Err("workspace folder is not a directory".to_string());
+    }
+
+    fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>, depth: usize) {
         if depth > 6 || out.len() >= 1000 {
             return;
         }
@@ -1859,32 +1814,97 @@ async fn list_project_markdown(folder: String) -> Result<Vec<String>, String> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name.starts_with('.') || name == "node_modules" || name == "target" || name == "dist"
             {
                 continue;
             }
-            if path.is_dir() {
-                walk(&path, out, depth + 1);
-            } else if path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+            if file_type.is_dir() {
+                walk(root, &path, out, depth + 1);
+            } else if file_type.is_file()
+                && path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                    e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown")
+                })
             {
-                if let Some(s) = path.to_str() {
-                    out.push(s.to_owned());
+                if let Ok(canonical) = std::fs::canonicalize(&path) {
+                    if canonical.starts_with(root) {
+                        if let Some(s) = canonical.to_str() {
+                            out.push(s.to_owned());
+                        }
+                    }
                 }
             }
         }
     }
     let mut out = Vec::new();
-    walk(std::path::Path::new(&folder), &mut out, 0);
+    walk(&root, &root, &mut out, 0);
     out.sort();
     Ok(out)
 }
 
+/// List markdown files under a folder (bounded recursion) for the file picker.
+#[tauri::command]
+async fn list_project_markdown(folder: String) -> Result<Vec<String>, String> {
+    collect_project_markdown(std::path::Path::new(&folder))
+}
+
+#[cfg(test)]
+mod project_markdown_tests {
+    use super::collect_project_markdown;
+
+    fn test_root(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("ryu-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn returns_only_markdown_inside_the_workspace() {
+        let root = test_root("markdown-inside");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/readme.md"), "inside\n").unwrap();
+        std::fs::write(root.join("docs/ignore.txt"), "ignore\n").unwrap();
+
+        let files = collect_project_markdown(&root).unwrap();
+
+        assert_eq!(
+            files,
+            vec![std::fs::canonicalize(root.join("docs/readme.md"))
+                .unwrap()
+                .to_string_lossy()]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_follow_a_symlinked_directory_outside_the_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let container = test_root("markdown-symlink");
+        let root = container.join("project");
+        let outside = container.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.md"), "outside\n").unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+
+        let files = collect_project_markdown(&root).unwrap();
+
+        assert!(files.is_empty());
+        std::fs::remove_dir_all(container).unwrap();
+    }
+}
+
 pub fn run() {
+    // Standalone app builds must choose their private data root and port namespace
+    // before identifier migration, node loading, or Core startup observes defaults.
+    standalone::configure_environment();
     // BEFORE the builder, deliberately: the bundle identifier keys the app-data
     // dir, so the 2026-08 rename would otherwise point a freshly-updated install
     // at an empty folder and silently sign the user out. Running here rather than
@@ -1903,6 +1923,8 @@ pub fn run() {
                 .unwrap_or_else(|_| reqwest::Client::new()),
         ))
         .manage(keep_awake::KeepAwakeState::default())
+        .manage(window_registry::WindowRegistry::default())
+        .manage(app_update::AppUpdateState::default())
         // Single-instance MUST be the first plugin. On Windows/Linux a `ryu://`
         // link spawns a second process; this forwards the URL to the live
         // instance (the deep-link plugin's `onOpenUrl` fires there) and the
@@ -1933,9 +1955,9 @@ pub fn run() {
     builder = builder
         .plugin(tauri_plugin_decorum::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        // Auto-update: tauri-plugin-updater is the install mechanism; the
-        // update *verdict* + the auto-update toggle live in Core. plugin-process
-        // provides `relaunch()` after a successful install.
+        // App updates are downloaded and signature-verified by the native
+        // prepared-update cache, then installed only after an explicit frontend
+        // action. plugin-process provides `relaunch()` after a successful install.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         // Launch at login. The registration carries `--autostart` so a
@@ -1948,6 +1970,7 @@ pub fn run() {
 
     builder.setup(|app| {
             let win = app.get_webview_window("main").unwrap();
+            standalone::configure_embedded_sidecars(app);
             // Login-launched with "start hidden" on: take the window off screen
             // before anything else runs, so there is no flash of an empty frame.
             // Deliberately first: a manual launch never takes this branch, so no
@@ -1963,7 +1986,8 @@ pub fn run() {
                 if let Ok(ns_window) = win.ns_window() {
                     apply_macos_titlebar_mask(ns_window);
                 }
-                win.set_traffic_lights_inset(TRAFFIC_LIGHTS_INSET.0, TRAFFIC_LIGHTS_INSET.1)
+                let (x, y) = traffic_lights_inset();
+                win.set_traffic_lights_inset(x, y)
                     .unwrap();
             }
 
@@ -2104,45 +2128,42 @@ pub fn run() {
                 // by Core on-demand the first time their app is *enabled* (and removed
                 // on uninstall) — see `apps/core/src/sidecar/manifest_sidecar.rs`
                 // (`ensure_local_sidecar_present`) and `plans/019-sidecar-binary-lifecycle.md`.
-                // A fresh install therefore ships only core + gateway; an app's binary
-                // arrives when the user turns the app on, not before.
+                // The Tauri layer therefore fetches only core + gateway directly;
+                // Core owns the default Shadow/Ghost/Island provisioning above.
+                // An opt-in app's binary arrives when the user turns that app on,
+                // not before.
 
-                // Island (the Electron companion overlay, loopback :7989) — install
-                // it and launch it, best-effort, in its own detached task so it never
-                // delays app open. Island is a companion, not required for the app to
-                // function, so a failure (unsupported platform, asset not published
-                // yet, launch error) is silent like the optional sidecars. Island
-                // self-guards with an Electron single-instance lock, so re-launching on
-                // a restart where it is already running self-exits. Dev is owned by
-                // turbo, same gate as the sidecars.
+                // Island (the Electron companion overlay, loopback :7989) — keep the
+                // bundle installed and current, but do not launch it yet. The install
+                // is routed through Core's global DownloadCenter, so a disabled
+                // companion still receives the same resumable/progress-visible update
+                // treatment as every other managed artifact.
                 //
                 // v1 / 0.1.0: island autostart is DISABLED to shrink the
                 // shippable surface (the Electron island is deferred out of
-                // the first release). The install+launch code below is left
-                // intact. Desktop UI entry points (NodeSelector row, Settings
-                // tab, onboarding install, tray Show/Hide Companion) are also
+                // the first release). Desktop UI entry points (NodeSelector row,
+                // Settings tab, onboarding install, tray Show/Hide Companion, and
+                // the User Nav Show/Hide Island control) are also
                 // commented with `# 0.1.0: Island disabled` — uncomment those
                 // and flip ISLAND_AUTOSTART to `true` to re-enable.
                 // TO RE-ENABLE: flip ISLAND_AUTOSTART to `true`.
                 #[cfg(not(debug_assertions))]
                 {
                     const ISLAND_AUTOSTART: bool = false;
-                    if ISLAND_AUTOSTART {
-                        let island_handle = handle.clone();
-                        tauri::async_runtime::spawn(async move {
-                            match crate::core::install::ensure_island_installed(&island_handle).await
-                            {
-                                Ok(_) => {
-                                    if let Err(e) = crate::core::install::launch_island() {
-                                        tracing::debug!("Ryu Island not launched: {}", e);
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::debug!("Ryu Island not installed (companion): {}", e)
+                    let island_handle = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match crate::core::install::ensure_island_installed(&island_handle).await {
+                            Ok(_) if ISLAND_AUTOSTART => {
+                                if let Err(error) = crate::core::install::launch_island() {
+                                    tracing::debug!("Ryu Island not launched: {}", error);
                                 }
                             }
-                        });
-                    }
+                            Ok(_) => tracing::debug!("Ryu Island installed and ready; autostart disabled"),
+                            Err(error) => {
+                                tracing::debug!("Ryu Island preinstall failed: {}", error)
+                            }
+                        }
+                    });
                 }
             });
 
@@ -2158,8 +2179,15 @@ pub fn run() {
             set_safe_mode_sentinel,
             get_ryu_core_url,
             get_build_profile,
-            install_update_from_channel,
-            install_update_at_tag,
+            standalone::get_standalone_app_bundle,
+            standalone::bootstrap_standalone_app,
+            app_icons::resolve_timeline_app_icons,
+            app_update::get_app_update_download_preference,
+            app_update::set_app_update_download_preference,
+            app_update::get_prepared_app_update,
+            app_update::prepare_app_update,
+            app_update::install_prepared_app_update,
+            app_update::clear_prepared_app_update,
             copy_data_folder_to_profile,
             deep_clean_node,
             midnight_wipe::get_midnight_wipe,
@@ -2180,8 +2208,12 @@ pub fn run() {
             close_media_pip,
             agent_browser_stream_status,
             open_tab_window,
+            window_registry::register_window_tabs,
+            window_registry::route_entity_open,
             tray::get_hide_tray_icon,
             tray::set_hide_tray_icon,
+            tray::get_island_visibility,
+            tray::set_island_visibility,
             tray::get_close_to_tray,
             tray::set_close_to_tray,
             startup::get_start_hidden,
@@ -2193,6 +2225,7 @@ pub fn run() {
             read_project_file,
             read_git_project_file,
             write_project_file,
+            write_project_markdown,
             list_project_markdown,
             hardware::get_hardware_info,
             hardware::get_system_usage,
@@ -2220,12 +2253,14 @@ pub fn run() {
             quick_capture::quick_capture_status,
             quick_capture::quick_capture_set_enabled,
             quick_capture::quick_capture_set_binding,
-            // M7 companion spike commands (return Err when feature is off)
-            companion_spike::companion_get_proactive,
-            companion_spike::companion_get_context,
-            companion_spike::companion_toggle,
         ])
         .on_window_event(|window, event| {
+            if let WindowEvent::Focused(true) = event {
+                window
+                    .app_handle()
+                    .state::<window_registry::WindowRegistry>()
+                    .touch_window(window.label());
+            }
             // decorum's swizzled windowDidResize delegate re-applies its own
             // hardcoded default pad (12, 16) on every live-resize frame,
             // yanking the traffic lights back into the window corner and off
@@ -2234,8 +2269,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if matches!(event, WindowEvent::Resized(_)) {
                 if let Some(win) = window.app_handle().get_webview_window(window.label()) {
-                    let _ = win
-                        .set_traffic_lights_inset(TRAFFIC_LIGHTS_INSET.0, TRAFFIC_LIGHTS_INSET.1);
+                    let (x, y) = traffic_lights_inset();
+                    let _ = win.set_traffic_lights_inset(x, y);
                 }
             }
             // "Stay in the tray on close": the main window hides instead of being
@@ -2256,6 +2291,10 @@ pub fn run() {
                 }
             }
             if let WindowEvent::Destroyed = event {
+                window
+                    .app_handle()
+                    .state::<window_registry::WindowRegistry>()
+                    .remove_window(window.label());
                 // Only stop Ryu Core when the main window is destroyed.
                 // Destroying the companion overlay must not kill the backend.
                 if window.label() != "main" {

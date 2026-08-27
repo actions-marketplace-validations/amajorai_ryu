@@ -5,37 +5,45 @@
 // of the shell), so this tab reads the running app's own version from Tauri
 // rather than Core's `/api/version`.
 //
-// It renders the same shared `UpdatesView` block as the Gateway tab, so both
-// read identically, and adds an explicit "install now" action: checking here
-// can actually apply the update through tauri-plugin-updater.
+// It renders the same shared `UpdatesView` block as the Gateway tab, with
+// app-specific download copy and an explicit install/restart action.
 //
-// The automatic-updates switch is deliberately the *same* preference the
-// Gateway tab writes (Core's cross-surface preferences KV) — that single toggle
-// is what `AutoUpdater.tsx` reads at launch, so a second, app-local one would be
-// a dead switch.
+// The automatic-download switch is deliberately Desktop-local: it controls
+// whether this Tauri process may stage an app artifact on this device. Gateway's
+// automatic-updates switch still governs the active node's Core binaries.
 
 import { UpdatesView } from "@ryu/blocks/desktop/updates.tsx";
 import { getVersion } from "@tauri-apps/api/app";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { sileo } from "sileo";
 import {
 	canDeferAppUpdate,
 	installUpdate,
+	prepareUpdate,
+	showDownloadUpdatePrompt,
+	showPreparedUpdatePrompt,
 } from "@/src/components/updater/AutoUpdater.tsx";
 import {
-	updateToastBody,
-	updateToastId,
-} from "@/src/components/updater/ReleaseNotes.tsx";
+	APP_UPDATE_DOWNLOAD_ARIA_LABEL,
+	APP_UPDATE_DOWNLOAD_DESCRIPTION,
+	APP_UPDATE_DOWNLOAD_TITLE,
+	APP_UPDATE_INSTALL_ACTION,
+} from "@/src/components/updater/app-update-policy.ts";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	checkForUpdate,
-	getAutoUpdateEnabled,
 	getVersionInfo,
-	setAutoUpdateEnabled,
 	type UpdateCheck,
 	updateCheckFailed,
 } from "@/src/lib/api/update.ts";
+import {
+	getAutomaticAppUpdateDownload,
+	getPreparedAppUpdate,
+	getPreparedAppUpdateSnapshot,
+	setAutomaticAppUpdateDownload,
+	subscribePreparedAppUpdate,
+} from "@/src/lib/app-update-preparation.ts";
 import {
 	clearPendingAppUpdate,
 	describePendingAppUpdate,
@@ -56,13 +64,18 @@ import { ReleaseChannelPicker } from "./UpdatesSettings.tsx";
 export function AppUpdatesSettings() {
 	const getNode = useActiveNodeGetter();
 	const [version, setVersion] = useState<string | null>(null);
-	const [autoUpdate, setAutoUpdate] = useState<boolean>(true);
+	const [automaticDownload, setAutomaticDownload] = useState(true);
 	const [checking, setChecking] = useState(false);
 	const [restricted, setRestricted] = useState(false);
 	// The release a check found, held so the "install later" row has something to
 	// book. Not derivable from the toast, which is fire-and-forget.
 	const [available, setAvailable] = useState<UpdateCheck | null>(null);
 	const [pending, setPending] = useState<PendingAppUpdate | null>(null);
+	const preparedSnapshot = useSyncExternalStore(
+		subscribePreparedAppUpdate,
+		getPreparedAppUpdateSnapshot,
+		getPreparedAppUpdateSnapshot
+	);
 
 	useEffect(() => {
 		const target = toTarget(getNode());
@@ -74,15 +87,16 @@ export function AppUpdatesSettings() {
 			const [appVersion, info, enabled, booked] = await Promise.all([
 				getVersion().catch(() => null),
 				getVersionInfo(target).catch(() => null),
-				getAutoUpdateEnabled(target).catch(() => true),
+				getAutomaticAppUpdateDownload(),
 				getPendingAppUpdate(),
 			]);
 			if (!active) {
 				return;
 			}
 			setVersion(appVersion ?? info?.ryu_version ?? null);
-			setAutoUpdate(enabled);
+			setAutomaticDownload(enabled);
 			setPending(booked);
+			await getPreparedAppUpdate().catch(() => null);
 		})();
 		return () => {
 			active = false;
@@ -90,18 +104,18 @@ export function AppUpdatesSettings() {
 	}, [getNode]);
 
 	const onToggle = async (next: boolean) => {
-		const previous = autoUpdate;
-		setAutoUpdate(next);
+		const previous = automaticDownload;
+		setAutomaticDownload(next);
 		try {
-			const ok = await setAutoUpdateEnabled(toTarget(getNode()), next);
+			const ok = await setAutomaticAppUpdateDownload(next);
 			if (ok) {
 				return;
 			}
-			setAutoUpdate(previous);
-			sileo.error({ title: "Could not save the auto-update setting" });
+			setAutomaticDownload(previous);
+			sileo.error({ title: "Could not save the automatic-download setting" });
 		} catch {
-			setAutoUpdate(previous);
-			sileo.error({ title: "Could not save the auto-update setting" });
+			setAutomaticDownload(previous);
+			sileo.error({ title: "Could not save the automatic-download setting" });
 		}
 	};
 
@@ -168,25 +182,23 @@ export function AppUpdatesSettings() {
 				sileo.success({ title: "Ryu is up to date" });
 				return;
 			}
-			// Offer the install rather than starting it unprompted — the same
-			// notify-then-install flow the launch-time updater uses when
-			// automatic updates are off.
-			sileo.info({
-				title: `Update available — v${verdict.latest}`,
-				description: updateToastBody({
-					notes: verdict.notes,
-					htmlUrl: verdict.html_url,
-					fallback: "A new version of Ryu is ready to install.",
-				}),
-				id: updateToastId(verdict.latest),
-				duration: null,
-				button: {
-					title: "Update now",
-					onClick: () => {
-						installUpdate(verdict, { node }).catch(() => undefined);
-					},
-				},
-			});
+			if (!automaticDownload) {
+				showDownloadUpdatePrompt(verdict, { node });
+				return;
+			}
+			try {
+				const prepared = await prepareUpdate(verdict, { node });
+				if (prepared) {
+					showPreparedUpdatePrompt(verdict, { node });
+				} else {
+					showDownloadUpdatePrompt(verdict, { node });
+				}
+			} catch (error) {
+				sileo.error({
+					title: "Update download failed",
+					description: error instanceof Error ? error.message : String(error),
+				});
+			}
 		} finally {
 			setChecking(false);
 		}
@@ -223,6 +235,31 @@ export function AppUpdatesSettings() {
 		sileo.info({ title: "Scheduled update cancelled", duration: 4000 });
 	};
 
+	const onInstallPrepared = async () => {
+		setChecking(true);
+		try {
+			const node = getNode();
+			const verdict = await checkForUpdate(toTarget(node), {
+				clamp: isLocalNode(node),
+			});
+			if (updateCheckFailed(verdict)) {
+				sileo.error({
+					title: "Couldn't verify the prepared update",
+					description: verdict.error ?? "Check your connection and try again.",
+				});
+				return;
+			}
+			if (!(await verdictAppliesToApp(verdict))) {
+				await getPreparedAppUpdate().catch(() => null);
+				sileo.success({ title: "Ryu is up to date" });
+				return;
+			}
+			await installUpdate(verdict, { node });
+		} finally {
+			setChecking(false);
+		}
+	};
+
 	// Read straight from storage on every render. The window is written outside
 	// React (the entitlement resolve, at launch), so there is nothing to subscribe
 	// to: the normal case is that the value is already there on mount, and the
@@ -243,11 +280,16 @@ export function AppUpdatesSettings() {
 	return (
 		<div className="space-y-6">
 			<UpdatesView
-				autoUpdate={autoUpdate}
+				automaticUpdateAriaLabel={APP_UPDATE_DOWNLOAD_ARIA_LABEL}
+				automaticUpdateDescription={APP_UPDATE_DOWNLOAD_DESCRIPTION}
+				automaticUpdateTitle={APP_UPDATE_DOWNLOAD_TITLE}
+				autoUpdate={automaticDownload}
 				checking={checking}
 				deferredInstallNotice={
 					pending ? describePendingAppUpdate(pending) : undefined
 				}
+				installPreparedDisabled={checking}
+				installPreparedLabel={APP_UPDATE_INSTALL_ACTION}
 				onCancelDeferredInstall={
 					pending
 						? () => {
@@ -268,6 +310,13 @@ export function AppUpdatesSettings() {
 							}
 						: undefined
 				}
+				onInstallPreparedUpdate={
+					preparedSnapshot.kind === "ready"
+						? () => {
+								onInstallPrepared().catch(() => undefined);
+							}
+						: undefined
+				}
 				onManageUpdates={
 					restricted
 						? () => useSettingsDialog.getState().openSettings("billing")
@@ -276,6 +325,11 @@ export function AppUpdatesSettings() {
 				onToggle={(next) => {
 					onToggle(next).catch(() => undefined);
 				}}
+				preparedUpdateNotice={
+					preparedSnapshot.kind === "ready"
+						? `v${preparedSnapshot.update.version} is downloaded and signature-verified. Install it when you're ready.`
+						: undefined
+				}
 				productName={appDisplayName(version)}
 				updatesWindowNotice={updatesWindowNotice}
 				version={version}

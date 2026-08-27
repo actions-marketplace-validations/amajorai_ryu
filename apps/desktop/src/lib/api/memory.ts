@@ -190,6 +190,21 @@ export interface MemoryQuery {
 	scopeId?: string;
 }
 
+/** A bounded commit entry from the explicitly configured memory Git source. */
+export interface MemoryGitTraceCommit {
+	author: string;
+	files: string[];
+	hash: string;
+	subject: string;
+	timestamp: string;
+}
+
+export interface MemoryGitTrace {
+	commits: MemoryGitTraceCommit[];
+	configured: boolean;
+	path: string;
+}
+
 /** A proposed memory returned by Dream before it is written to the store. */
 export interface MemoryProposal {
 	createdAt: number;
@@ -527,6 +542,24 @@ export async function deleteMemory(
 		{ method: "DELETE" }
 	);
 	return json?.removed ?? json?.success ?? false;
+}
+
+/** Read recent commits from the configured `memory/` Git source. */
+export async function getMemoryGitTrace(
+	target: ApiTarget,
+	path = "memory",
+	limit = 20
+): Promise<MemoryGitTrace> {
+	const query = new URLSearchParams({ path, limit: String(limit) });
+	const json = await request<Partial<MemoryGitTrace>>(
+		target,
+		`/api/memory/git/trace?${query.toString()}`
+	);
+	return {
+		commits: json.commits ?? [],
+		configured: json.configured ?? false,
+		path: json.path ?? path,
+	};
 }
 
 // ── Dream review ──────────────────────────────────────────────────────────────

@@ -14,10 +14,10 @@ use std::sync::Arc;
 
 use crate::agents::{AgentStore, PersonaSlot};
 use crate::registry::ProviderRegistry;
+use crate::ryu_platform::RyuResponseMode;
 use crate::server::conversations::{ConversationStore, MessageSearchHit, Tenancy};
 use crate::server::memory::{
-    MemoryCategory, MemoryScope, MemoryStore, NewMemory, DEFAULT_LONG_TERM_LIMIT,
-    DEFAULT_SHORT_TERM_LIMIT, LOCAL_USER,
+    MemoryCategory, MemoryScope, MemoryStore, NewMemory, DEFAULT_SHORT_TERM_LIMIT, LOCAL_USER,
 };
 use crate::server::retrieval::{ChunkSource, RetrievalOptions, RetrievalStore, ScoredChunk};
 use crate::sidecar::active_engine::{is_local_engine, local_engine_base_url};
@@ -478,6 +478,10 @@ pub struct ChatStreamRequest {
     ///                    and the self-fetching ACP-registry agents)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Presentation guidance for the flagship Ryu assistant. Missing values
+    /// default to everyday language; this never changes capabilities or policy.
+    #[serde(default)]
+    pub response_mode: RyuResponseMode,
     /// OpenAI-compatible model pin selected for this turn. ACP model selection
     /// uses [`Self::acp_model`] instead; keeping both fields lets the same
     /// composer target either transport without silently dropping the pin.
@@ -683,6 +687,10 @@ pub struct ChatStreamRequest {
     /// loopback (anonymous) flow, preserving current behavior.
     #[serde(skip)]
     pub author_user_id: Option<String>,
+    /// Opaque UUID shared by the realtime join and this HTTP mutation. Core
+    /// validates and stamps it only for local-echo correlation, never for auth.
+    #[serde(skip)]
+    pub client_id: Option<String>,
     /// Connector-supplied display name of the sender (e.g. a Telegram first name
     /// or Discord username) for group/channel chats. SERVER-SET ONLY
     /// (`#[serde(skip)]`) — a client body can neither set nor spoof it. Unlike
@@ -844,22 +852,22 @@ fn ui_chunk(value: &Value) -> Vec<u8> {
 }
 
 /// `start` part — opens the assistant message.
-fn ui_start() -> Vec<u8> {
+pub(crate) fn ui_start() -> Vec<u8> {
     ui_chunk(&serde_json::json!({ "type": "start" }))
 }
 
 /// `text-start` part — opens a streamed text block with a stable id.
-fn ui_text_start(id: &str) -> Vec<u8> {
+pub(crate) fn ui_text_start(id: &str) -> Vec<u8> {
     ui_chunk(&serde_json::json!({ "type": "text-start", "id": id }))
 }
 
 /// `text-delta` part — one chunk of streamed assistant text.
-fn ui_text_delta(id: &str, delta: &str) -> Vec<u8> {
+pub(crate) fn ui_text_delta(id: &str, delta: &str) -> Vec<u8> {
     ui_chunk(&serde_json::json!({ "type": "text-delta", "id": id, "delta": delta }))
 }
 
 /// `text-end` part — closes the streamed text block.
-fn ui_text_end(id: &str) -> Vec<u8> {
+pub(crate) fn ui_text_end(id: &str) -> Vec<u8> {
     ui_chunk(&serde_json::json!({ "type": "text-end", "id": id }))
 }
 
@@ -1410,7 +1418,7 @@ pub(crate) fn synthetic_assistant_frames(text: &str) -> Vec<Vec<u8>> {
     ]
 }
 
-fn ui_finish() -> Vec<u8> {
+pub(crate) fn ui_finish() -> Vec<u8> {
     ui_chunk(&serde_json::json!({ "type": "finish" }))
 }
 
@@ -1537,6 +1545,18 @@ impl PartsAccumulator {
         }));
     }
 
+    /// Append the terminal error card for a failed assistant turn. Unlike the
+    /// AI SDK's stream-level `error` frame, this reduced UIMessage part is stored
+    /// with the assistant row so the reason and recovery survive rehydration.
+    fn error(&mut self, code: &str, title: &str, message: &str) {
+        self.parts.push(serde_json::json!({
+            "type": "error",
+            "code": code,
+            "title": title,
+            "message": message,
+        }));
+    }
+
     /// Collapse every text part into ONE part carrying `text`, positioned where
     /// the first text part was (appended when the turn produced no text at all).
     ///
@@ -1598,6 +1618,27 @@ impl PartsAccumulator {
 /// interactive tool-permission prompts, and slash-command advertisements.
 fn ui_data(name: &str, data: &Value) -> Vec<u8> {
     ui_chunk(&serde_json::json!({ "type": format!("data-{name}"), "data": data }))
+}
+
+/// Stable Core message identity created by this exact assistant turn.
+///
+/// Channel connectors consume this private data part while draining the stream
+/// so provider reactions can target the row that produced their outbound
+/// message. It is deliberately emitted by the persistence site rather than
+/// recovered later with a racy "latest message" query.
+fn ui_assistant_message_id(message_id: &str) -> Vec<u8> {
+    ui_data(
+        "ryu-assistant-message-id",
+        &serde_json::json!({ "messageId": message_id }),
+    )
+}
+
+fn memory_citations_payload(citations: &[MemoryCitation]) -> Value {
+    serde_json::json!({ "citations": citations })
+}
+
+fn ui_memory_citations(citations: &[MemoryCitation]) -> Vec<u8> {
+    ui_data("ryu-memory-citations", &memory_citations_payload(citations))
 }
 
 /// The `data-ryu-failover` part announcing a reactive failover verdict — which
@@ -1688,7 +1729,12 @@ fn build_stats_part(
             .and_then(Value::as_u64)
     };
 
-    let cached_tokens = usage_nested("prompt_tokens_details", "cached_tokens");
+    let cached_tokens =
+        usage_nested("prompt_tokens_details", "cached_tokens").or_else(|| usage_u("cached_tokens"));
+    let cache_write_tokens = usage_nested("prompt_tokens_details", "cache_write_tokens")
+        .or_else(|| usage_nested("prompt_tokens_details", "cache_creation_input_tokens"))
+        .or_else(|| usage_u("cache_write_tokens"))
+        .or_else(|| usage_u("cache_creation_input_tokens"));
     let reasoning_tokens = usage_nested("completion_tokens_details", "reasoning_tokens");
 
     let prompt_tokens = timings_f("prompt_n")
@@ -1738,9 +1784,14 @@ fn build_stats_part(
     );
     if let Some(pt) = prompt_tokens {
         stats.insert("promptTokens".into(), serde_json::json!(pt));
+        stats.insert("inputTokens".into(), serde_json::json!(pt));
     }
     if let Some(ct) = cached_tokens {
         stats.insert("cachedTokens".into(), serde_json::json!(ct));
+        stats.insert("cacheReadTokens".into(), serde_json::json!(ct));
+    }
+    if let Some(cw) = cache_write_tokens {
+        stats.insert("cacheWriteTokens".into(), serde_json::json!(cw));
     }
     if let Some(rt) = reasoning_tokens {
         stats.insert("reasoningTokens".into(), serde_json::json!(rt));
@@ -1748,11 +1799,66 @@ fn build_stats_part(
     if let Some(tt) = total_tokens {
         stats.insert("totalTokens".into(), serde_json::json!(tt));
     }
+    stats.insert("outputTokens".into(), serde_json::json!(completion_tokens));
     if let Some(d) = duration_ms {
         stats.insert("durationMs".into(), serde_json::json!(d));
     }
     if let Some(ttft) = ttft_ms {
         stats.insert("ttftMs".into(), serde_json::json!(ttft));
+    }
+    if let Some(usage) = last_usage.as_ref() {
+        for key in [
+            "context_window",
+            "contextWindow",
+            "current_usage",
+            "currentUsage",
+            "cost",
+            "costAmount",
+            "costCurrency",
+            "currency",
+        ] {
+            if let Some(value) = usage.get(key) {
+                stats.insert(key.to_owned(), value.clone());
+            }
+        }
+        let cost_amount = usage
+            .get("costAmount")
+            .and_then(Value::as_f64)
+            .or_else(|| usage.get("cost_amount").and_then(Value::as_f64))
+            .or_else(|| usage.get("cost").and_then(Value::as_f64))
+            .or_else(|| {
+                usage
+                    .get("cost")
+                    .and_then(Value::as_object)
+                    .and_then(|cost| {
+                        cost.get("amount")
+                            .or_else(|| cost.get("value"))
+                            .and_then(Value::as_f64)
+                    })
+            });
+        if let Some(amount) = cost_amount {
+            stats.insert("costAmount".into(), serde_json::json!(amount));
+        }
+        if let Some(currency) = usage
+            .get("costCurrency")
+            .and_then(Value::as_str)
+            .or_else(|| usage.get("currency").and_then(Value::as_str))
+            .or_else(|| {
+                usage
+                    .get("cost")
+                    .and_then(Value::as_object)
+                    .and_then(|cost| cost.get("currency"))
+                    .and_then(Value::as_str)
+            })
+        {
+            stats.insert("costCurrency".into(), serde_json::json!(currency));
+        }
+    }
+    if let Ok(elapsed) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        stats.insert(
+            "observedAt".into(),
+            serde_json::json!(elapsed.as_millis() as u64),
+        );
     }
     Some(ui_data("ryu-stats", &Value::Object(stats)))
 }
@@ -1792,6 +1898,11 @@ enum AgentRoute {
     },
     Acp {
         spawn_cmd: String,
+    },
+    /// A trusted remote A2A v1 peer. The peer id resolves to an encrypted
+    /// credential and a discovered Agent Card at call time.
+    A2a {
+        peer_id: String,
     },
     /// Bound to a local inference engine that must be made resident (swapped to)
     /// before the request can stream. `model` is threaded into the payload.
@@ -2065,6 +2176,15 @@ fn agent_route_with_user_jwt(
     // agent id (a custom agent's record id for the `acp-exec:` path), falling back
     // to the engine when no agent id was sent.
     let route_id = agent_id.unwrap_or(engine);
+
+    if let Some(peer_id) = engine.strip_prefix("a2a:") {
+        let peer_id = peer_id.trim();
+        if !peer_id.is_empty() {
+            return Some(AgentRoute::A2a {
+                peer_id: peer_id.to_owned(),
+            });
+        }
+    }
 
     // BYO arbitrary ACP agent (zero-lock-in escape hatch): an engine of the form
     // `acp-exec:<command>` runs that literal command as an ACP subprocess. This
@@ -3188,28 +3308,57 @@ fn infer_new_memory(content: &str, project_id: Option<&str>, agent_id: Option<&s
     }
 }
 
-/// Build the long-term-memory system message from recalled entries, or `None`
-/// when memory is disabled or empty. Injected as a leading `system` message on
-/// both the OpenAI-compat and ACP paths.
-async fn assemble_long_term_system_message(
+/// A durable memory fact that Core actually included in the model context for
+/// this turn. The desktop receives this as message metadata, not as assistant
+/// prose, so it can explain the context without asking the model to self-report.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub(crate) struct MemoryCitation {
+    pub(crate) id: String,
+    pub(crate) content: String,
+}
+
+#[derive(Default)]
+struct LongTermMemoryContext {
+    system: Option<String>,
+    citations: Vec<MemoryCitation>,
+    recency_ids: Vec<String>,
+}
+
+fn dedupe_memory_citations(
+    citations: impl IntoIterator<Item = MemoryCitation>,
+) -> Vec<MemoryCitation> {
+    let mut seen = std::collections::HashSet::new();
+    let mut unique = Vec::new();
+    for citation in citations {
+        if seen.insert(citation.id.clone()) {
+            unique.push(citation);
+        }
+    }
+    unique
+}
+
+/// Build the long-term-memory system message plus the exact fact ids that were
+/// recalled. The ids are reused by auto-recall's deduplication, while the
+/// bounded snippets are emitted as the user-facing citation metadata.
+async fn assemble_long_term_context(
     memory: &MemoryStore,
     enabled: bool,
     agent_id: Option<&str>,
     limit: usize,
-) -> Option<String> {
+) -> LongTermMemoryContext {
     if !enabled {
-        return None;
+        return LongTermMemoryContext::default();
     }
     let scope = long_term_agent_scope(agent_id);
     let entries = match memory.recall(LOCAL_USER, &scope, limit).await {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!("failed to recall long-term memory: {e:#}");
-            return None;
+            return LongTermMemoryContext::default();
         }
     };
     if entries.is_empty() {
-        return None;
+        return LongTermMemoryContext::default();
     }
     // Render oldest-first so the model reads facts in the order learned.
     let mut facts = String::new();
@@ -3229,9 +3378,36 @@ async fn assemble_long_term_system_message(
     } else {
         facts
     };
-    Some(format!(
-        "The following are durable facts remembered about the user from previous sessions:\n{facts}",
-    ))
+    LongTermMemoryContext {
+        system: Some(format!(
+			"The following are durable facts remembered about the user from previous sessions:\n{facts}",
+		)),
+        citations: entries
+            .iter()
+            .rev()
+            .filter_map(|entry| {
+                let content = truncate_snippet(&entry.content);
+                (!content.is_empty()).then(|| MemoryCitation {
+                    content,
+                    id: entry.id.clone(),
+                })
+            })
+            .collect(),
+        recency_ids: entries.into_iter().map(|entry| entry.id).collect(),
+    }
+}
+
+/// Build only the legacy system-message half for callers and tests that do not
+/// need citation metadata.
+async fn assemble_long_term_system_message(
+    memory: &MemoryStore,
+    enabled: bool,
+    agent_id: Option<&str>,
+    limit: usize,
+) -> Option<String> {
+    assemble_long_term_context(memory, enabled, agent_id, limit)
+        .await
+        .system
 }
 
 /// Decide whether a via-gateway request should actually forward to the gateway
@@ -3334,21 +3510,27 @@ fn truncate_snippet(text: &str) -> String {
     format!("{truncated}…")
 }
 
-/// Pure assembly of the recall block from already-retrieved memory chunks and
-/// past-chat hits. Returns `None` when there is nothing to inject (so callers can
-/// skip merging an empty system message). `top_k` caps the TOTAL injected lines
-/// across both sources.
+#[derive(Debug, Default)]
+struct RecallContext {
+    block: String,
+    memory_citations: Vec<MemoryCitation>,
+}
+
+/// Pure assembly of the recall block and its memory citations from
+/// already-retrieved chunks and past-chat hits. Returns `None` when there is
+/// nothing to inject (so callers can skip merging an empty system message).
+/// `top_k` caps the TOTAL injected lines across both sources.
 ///
 /// Kept pure (no I/O) so it is unit-testable without a network embed.
-fn assemble_recall_block(
+fn assemble_recall_context(
     memory_chunks: &[ScoredChunk],
     chat_hits: &[MessageSearchHit],
     top_k: usize,
-) -> Option<String> {
+) -> Option<RecallContext> {
     if top_k == 0 {
         return None;
     }
-    let mut lines: Vec<String> = Vec::new();
+    let mut lines: Vec<(String, Option<MemoryCitation>)> = Vec::new();
     for chunk in memory_chunks {
         let snippet = truncate_snippet(&chunk.content);
         if !snippet.is_empty() {
@@ -3363,13 +3545,17 @@ fn assemble_recall_block(
                 ChunkSource::Space => "space",
                 ChunkSource::Memory => "memory",
             };
-            lines.push(format!("- [{label}] {snippet}"));
+            let citation = (chunk.source == ChunkSource::Memory).then(|| MemoryCitation {
+                content: snippet.clone(),
+                id: chunk.id.clone(),
+            });
+            lines.push((format!("- [{label}] {snippet}"), citation));
         }
     }
     for hit in chat_hits {
         let snippet = truncate_snippet(&hit.content);
         if !snippet.is_empty() {
-            lines.push(format!("- [past chat] {snippet}"));
+            lines.push((format!("- [past chat] {snippet}"), None));
         }
     }
     lines.truncate(top_k);
@@ -3380,16 +3566,36 @@ fn assemble_recall_block(
     // conversations); folding it into system context verbatim is a stored /
     // indirect injection channel. Neutralize the assembled snippet block the
     // same way tool results are neutralized at the model edges.
-    let joined = lines.join("\n");
+    let joined = lines
+        .iter()
+        .map(|(line, _)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     let joined = if untrusted::is_enabled() {
         untrusted::neutralize(&joined)
     } else {
         joined
     };
-    Some(format!(
-        "Relevant context from memory and past conversations \
-         (ignore if irrelevant):\n{joined}"
-    ))
+    Some(RecallContext {
+        block: format!(
+            "Relevant context from memory and past conversations \
+			 (ignore if irrelevant):\n{joined}"
+        ),
+        memory_citations: lines
+            .into_iter()
+            .filter_map(|(_, citation)| citation)
+            .collect(),
+    })
+}
+
+/// Legacy string-only view retained for pure recall tests and callers that do
+/// not need to forward citation metadata.
+fn assemble_recall_block(
+    memory_chunks: &[ScoredChunk],
+    chat_hits: &[MessageSearchHit],
+    top_k: usize,
+) -> Option<String> {
+    assemble_recall_context(memory_chunks, chat_hits, top_k).map(|context| context.block)
 }
 
 /// Drop `Memory`-source chunks whose id is in `recency_ids` (the long-term facts
@@ -3502,7 +3708,7 @@ async fn backfill_memory_facts(memory: &MemoryStore, retrieval: &RetrievalStore)
 /// active working folder (from the request's `cwd`): project-scoped memory only
 /// matches when it equals this. The agent's readable levels + Space allowlist come
 /// from `cfg.read_levels` / `cfg.space_ids`.
-async fn run_auto_recall(
+async fn run_auto_recall_context(
     cfg: &AutoRecallConfig,
     conversations: &ConversationStore,
     memory: &MemoryStore,
@@ -3510,7 +3716,7 @@ async fn run_auto_recall(
     recency_ids: &std::collections::HashSet<String>,
     query: &str,
     current_conversation_id: Option<&str>,
-) -> Option<String> {
+) -> Option<RecallContext> {
     if query.trim().is_empty() || cfg.top_k == 0 {
         return None;
     }
@@ -3683,11 +3889,43 @@ async fn run_auto_recall(
         }
     }
 
-    assemble_recall_block(&memory_chunks, &chat_hits, cfg.top_k)
+    assemble_recall_context(&memory_chunks, &chat_hits, cfg.top_k)
+}
+
+/// String-only compatibility view for callers that only need the assembled
+/// prompt block. The route uses [`run_auto_recall_context`] so the same selected
+/// memory chunks can also be surfaced in the message toolbar.
+async fn run_auto_recall(
+    cfg: &AutoRecallConfig,
+    conversations: &ConversationStore,
+    memory: &MemoryStore,
+    project_id: Option<&str>,
+    recency_ids: &std::collections::HashSet<String>,
+    query: &str,
+    current_conversation_id: Option<&str>,
+) -> Option<String> {
+    run_auto_recall_context(
+        cfg,
+        conversations,
+        memory,
+        project_id,
+        recency_ids,
+        query,
+        current_conversation_id,
+    )
+    .await
+    .map(|context| context.block)
 }
 
 /// Route a chat stream request to the correct agent sidecar and return an
 /// `axum::Response` whose body is an AI SDK v6 UIMessageStream SSE.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TextReplyResult {
+    pub reply: String,
+    pub assistant_message_id: Option<String>,
+    pub assistant_message_ids: Vec<String>,
+}
+
 /// Inner run function for non-streaming callers (channel bots, M11).
 ///
 /// Builds a [`ChatStreamRequest`] from a `(conversation_id, agent_id, text)` turn,
@@ -3724,7 +3962,7 @@ pub async fn run_reply_text(
     mcp: Arc<McpRegistry>,
     skills: SkillRegistry,
     traces: TraceStore,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<TextReplyResult> {
     crate::agent_execution::ensure_noninteractive_run_allowed(&agent_store, agent_id.as_deref())
         .await?;
     // Pre-turn: a plugin may rewrite the inbound message, fold context into it, or
@@ -3735,7 +3973,7 @@ pub async fn run_reply_text(
     let mut prompt = match pre {
         PreUserTurn::Prompt(p) => p,
         PreUserTurn::Handled(reply) => {
-            persist_handled_turn(
+            let assistant_message_id = persist_handled_turn(
                 &conversations,
                 &conversation_id,
                 &text,
@@ -3744,7 +3982,11 @@ pub async fn run_reply_text(
                 author_name.as_deref(),
             )
             .await;
-            return Ok(reply);
+            return Ok(TextReplyResult {
+                reply,
+                assistant_message_ids: assistant_message_id.clone().into_iter().collect(),
+                assistant_message_id,
+            });
         }
     };
 
@@ -3759,9 +4001,11 @@ pub async fn run_reply_text(
     // showed only the final turn would render a conversation the transcript
     // disagrees with.
     let mut delivered = String::new();
+    let mut assistant_message_id = None;
+    let mut assistant_message_ids = Vec::new();
     let mut turn: u32 = 0;
     loop {
-        let turn_result = run_text_turn(
+        let turn_result = run_text_turn_with_metadata(
             conversation_id.clone(),
             agent_id.clone(),
             prompt,
@@ -3781,8 +4025,8 @@ pub async fn run_reply_text(
             traces.clone(),
         )
         .await;
-        let reply = match turn_result {
-            Ok(reply) => reply,
+        let result = match turn_result {
+            Ok(result) => result,
             // The FIRST turn failing is the turn failing — the caller must hear
             // about it. A later turn is a hook's `continue`: the user already has a
             // real answer in hand, so a failed follow-up ends the loop rather than
@@ -3795,6 +4039,11 @@ pub async fn run_reply_text(
                 break;
             }
         };
+        let reply = result.reply;
+        if let Some(message_id) = result.assistant_message_id {
+            assistant_message_ids.push(message_id.clone());
+            assistant_message_id = Some(message_id);
+        }
         if !reply.is_empty() {
             if !delivered.is_empty() {
                 delivered.push_str("\n\n");
@@ -3811,7 +4060,11 @@ pub async fn run_reply_text(
         }
     }
 
-    Ok(delivered)
+    Ok(TextReplyResult {
+        reply: delivered,
+        assistant_message_id,
+        assistant_message_ids,
+    })
 }
 
 /// Non-streaming team reply for the channel-bot path: fan out to the team's
@@ -3843,7 +4096,7 @@ pub async fn run_team_reply_text(
     mcp: Arc<McpRegistry>,
     skills: SkillRegistry,
     traces: TraceStore,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<TextReplyResult> {
     use ryu_teams_contracts::Coordination;
 
     if team.members.is_empty() {
@@ -3877,7 +4130,7 @@ pub async fn run_team_reply_text(
     let text = match run_pre_user_turn_hooks(text, Some(&conversation_id), Some(&team.id)).await {
         PreUserTurn::Prompt(p) => p,
         PreUserTurn::Handled(reply) => {
-            persist_handled_turn(
+            let assistant_message_id = persist_handled_turn(
                 &conversations,
                 &conversation_id,
                 &inbound,
@@ -3886,7 +4139,11 @@ pub async fn run_team_reply_text(
                 author_name.as_deref(),
             )
             .await;
-            return Ok(reply);
+            return Ok(TextReplyResult {
+                reply,
+                assistant_message_ids: assistant_message_id.clone().into_iter().collect(),
+                assistant_message_id,
+            });
         }
     };
 
@@ -4025,8 +4282,8 @@ pub async fn run_team_reply_text(
     let combined = combined.trim_end().to_string();
 
     // Persist exactly one combined assistant turn attributed to the team.
-    if !combined.is_empty() {
-        if let Err(e) = conversations
+    let assistant_message_id = if !combined.is_empty() {
+        match conversations
             .append_message_as(
                 &conversation_id,
                 "assistant",
@@ -4038,11 +4295,21 @@ pub async fn run_team_reply_text(
             )
             .await
         {
-            tracing::warn!("failed to persist team channel assistant message: {e:#}");
+            Ok(message_id) => Some(message_id),
+            Err(e) => {
+                tracing::warn!("failed to persist team channel assistant message: {e:#}");
+                None
+            }
         }
-    }
+    } else {
+        None
+    };
 
-    Ok(combined)
+    Ok(TextReplyResult {
+        reply: combined,
+        assistant_message_ids: assistant_message_id.clone().into_iter().collect(),
+        assistant_message_id,
+    })
 }
 
 /// Shared core for non-streaming single-turn agent invocations.
@@ -4086,7 +4353,52 @@ pub(crate) async fn run_text_turn(
     skills: SkillRegistry,
     traces: TraceStore,
 ) -> anyhow::Result<String> {
-    run_text_turn_in(
+    run_text_turn_with_metadata(
+        conversation_id,
+        agent_id,
+        text,
+        author_name,
+        persist,
+        model,
+        max_tokens_cap,
+        registry,
+        conversations,
+        agent_store,
+        manager,
+        memory,
+        worktree_diffs,
+        mcp,
+        skills,
+        traces,
+    )
+    .await
+    .map(|result| result.reply)
+}
+
+/// Metadata-preserving sibling used by channel delivery. The public
+/// text-only primitive above stays source-compatible for workflow and hardware
+/// callers, while this path carries the exact assistant row id created during
+/// persistence.
+#[allow(clippy::too_many_arguments)]
+async fn run_text_turn_with_metadata(
+    conversation_id: String,
+    agent_id: Option<String>,
+    text: String,
+    author_name: Option<String>,
+    persist: bool,
+    model: Option<String>,
+    max_tokens_cap: Option<u32>,
+    registry: Arc<AcpAgentRegistry>,
+    conversations: ConversationStore,
+    agent_store: AgentStore,
+    manager: Arc<SidecarManager>,
+    memory: MemoryStore,
+    worktree_diffs: crate::server::WorktreeDiffStore,
+    mcp: Arc<McpRegistry>,
+    skills: SkillRegistry,
+    traces: TraceStore,
+) -> anyhow::Result<TextReplyResult> {
+    run_text_turn_in_with_metadata(
         conversation_id,
         agent_id,
         text,
@@ -4147,6 +4459,53 @@ pub(crate) async fn run_text_turn_in(
     skills: SkillRegistry,
     traces: TraceStore,
 ) -> anyhow::Result<String> {
+    run_text_turn_in_with_metadata(
+        conversation_id,
+        agent_id,
+        text,
+        author_name,
+        persist,
+        cwd,
+        worktree_isolation,
+        worktree_branch,
+        model,
+        max_tokens_cap,
+        registry,
+        conversations,
+        agent_store,
+        manager,
+        memory,
+        worktree_diffs,
+        mcp,
+        skills,
+        traces,
+    )
+    .await
+    .map(|result| result.reply)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_text_turn_in_with_metadata(
+    conversation_id: String,
+    agent_id: Option<String>,
+    text: String,
+    author_name: Option<String>,
+    persist: bool,
+    cwd: Option<String>,
+    worktree_isolation: bool,
+    worktree_branch: Option<String>,
+    model: Option<String>,
+    max_tokens_cap: Option<u32>,
+    registry: Arc<AcpAgentRegistry>,
+    conversations: ConversationStore,
+    agent_store: AgentStore,
+    manager: Arc<SidecarManager>,
+    memory: MemoryStore,
+    worktree_diffs: crate::server::WorktreeDiffStore,
+    mcp: Arc<McpRegistry>,
+    skills: SkillRegistry,
+    traces: TraceStore,
+) -> anyhow::Result<TextReplyResult> {
     let req = ChatStreamRequest {
         messages: vec![UiMessage {
             role: "user".to_owned(),
@@ -4154,8 +4513,10 @@ pub(crate) async fn run_text_turn_in(
             parts: vec![],
         }],
         agent_id,
+        response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id: Some(conversation_id),
+        client_id: None,
         referenced_conversation_ids: Vec::new(),
         enable_long_term: false,
         cwd,
@@ -4234,7 +4595,7 @@ pub(crate) async fn run_text_turn_in(
     // Drain the SSE response body, collecting all `text-delta` payloads into a
     // single String. Error frames propagate as Err. Shared with the team
     // orchestrator so both paths parse the AI SDK stream identically.
-    drain_text_reply(response).await
+    drain_text_reply_with_metadata(response).await
 }
 
 /// Produce the one-time Ryu opening without creating a synthetic user message.
@@ -4264,8 +4625,10 @@ pub async fn run_proactive_opening_text(
             parts: vec![],
         }],
         agent_id,
+        response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id: Some(conversation_id),
+        client_id: None,
         referenced_conversation_ids: Vec::new(),
         enable_long_term: false,
         cwd: None,
@@ -4362,8 +4725,10 @@ pub(crate) async fn run_text_turn_stream(
             parts: vec![],
         }],
         agent_id,
+        response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id: Some(conversation_id),
+        client_id: None,
         referenced_conversation_ids: Vec::new(),
         enable_long_term: false,
         cwd: None,
@@ -4429,12 +4794,19 @@ pub(crate) async fn run_text_turn_stream(
 /// on the SSE `\n\n` frame boundary after a full read sidesteps the cross-buffer
 /// frame-splitting hazard of incremental parsing.
 pub(crate) async fn drain_text_reply(response: Response) -> anyhow::Result<String> {
+    drain_text_reply_with_metadata(response)
+        .await
+        .map(|result| result.reply)
+}
+
+async fn drain_text_reply_with_metadata(response: Response) -> anyhow::Result<TextReplyResult> {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .map_err(|e| anyhow::anyhow!("body read error: {e}"))?;
     let raw = String::from_utf8_lossy(&bytes);
 
     let mut reply = String::new();
+    let mut assistant_message_id = None;
     let mut buf: &str = &raw;
     while let Some(rel) = buf.find("\n\n") {
         let frame = &buf[..rel];
@@ -4459,12 +4831,23 @@ pub(crate) async fn drain_text_reply(response: Response) -> anyhow::Result<Strin
                         .unwrap_or("agent error");
                     return Err(anyhow::anyhow!("{msg}"));
                 }
+                Some("data-ryu-assistant-message-id") => {
+                    assistant_message_id = json
+                        .get("data")
+                        .and_then(|data| data.get("messageId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
                 _ => {}
             }
         }
     }
 
-    Ok(reply)
+    Ok(TextReplyResult {
+        reply,
+        assistant_message_ids: assistant_message_id.clone().into_iter().collect(),
+        assistant_message_id,
+    })
 }
 
 /// Stream an AI SDK v6 UI-message-stream [`Response`] to `delta_tx` **incrementally**
@@ -4593,8 +4976,10 @@ async fn run_member_text(
     let req = ChatStreamRequest {
         messages,
         agent_id: Some(member_id.to_owned()),
+        response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id,
+        client_id: None,
         referenced_conversation_ids: Vec::new(),
         enable_long_term: false,
         cwd: None,
@@ -4789,7 +5174,7 @@ pub async fn route_team_chat_stream(
             // a turn which never opens or never closes hangs).
             if req.persist {
                 if let Some(conv_id) = req.conversation_id.as_deref() {
-                    persist_handled_turn(
+                    let _ = persist_handled_turn(
                         &conversations,
                         conv_id,
                         &inbound_text,
@@ -4830,7 +5215,7 @@ pub async fn route_team_chat_stream(
         if let Some(ref conv_id) = conversation_id {
             if !user_text.is_empty() {
                 if let Err(e) = conversations
-                    .append_message_as_with_provenance(
+                    .append_message_as_with_realtime_origin(
                         conv_id,
                         "user",
                         &user_text,
@@ -4839,6 +5224,7 @@ pub async fn route_team_chat_stream(
                         req.author_name.as_deref(),
                         Tenancy::Unattributed, // row exists; owner preserved by COALESCE
                         widget_provenance.as_ref(),
+                        req.client_id.as_deref(),
                     )
                     .await
                 {
@@ -5045,7 +5431,7 @@ pub async fn route_workflow_chat_stream(
         if let Some(ref conv_id) = req.conversation_id {
             if !user_text.is_empty() {
                 if let Err(e) = conversations
-                    .append_message_as_with_provenance(
+                    .append_message_as_with_realtime_origin(
                         conv_id,
                         "user",
                         &user_text,
@@ -5054,6 +5440,7 @@ pub async fn route_workflow_chat_stream(
                         req.author_name.as_deref(),
                         Tenancy::Unattributed,
                         widget_provenance.as_ref(),
+                        req.client_id.as_deref(),
                     )
                     .await
                 {
@@ -5885,7 +6272,7 @@ pub async fn route_chat_stream(
         if let Some(conversation_id) = req.conversation_id.clone() {
             if !user_text.is_empty() {
                 if let Err(e) = conversations
-                    .append_message_as_with_provenance(
+                    .append_message_as_with_realtime_origin(
                         &conversation_id,
                         "user",
                         &user_text,
@@ -5903,6 +6290,7 @@ pub async fn route_chat_stream(
                         // `Unattributed` here preserves that owner and never wipes it.
                         Tenancy::Unattributed,
                         widget_provenance.as_ref(),
+                        req.client_id.as_deref(),
                     )
                     .await
                 {
@@ -5987,7 +6375,11 @@ pub async fn route_chat_stream(
     // so the just-sent message does not echo back to the model as a remembered
     // "fact". This keeps long-term context strictly cross-session.
     // Use effective_agent_id so multi-agent turns scope memory correctly.
-    let long_term_system = assemble_long_term_system_message(
+    let LongTermMemoryContext {
+        system: long_term_system,
+        citations: mut memory_citations,
+        recency_ids,
+    } = assemble_long_term_context(
         &memory,
         auto_recall_allowed,
         effective_agent_id.as_deref(),
@@ -6098,6 +6490,7 @@ pub async fn route_chat_stream(
     let platform_contract = crate::ryu_platform::operating_contract(
         effective_agent_id.as_deref(),
         crate::safe_mode::is_active(),
+        req.response_mode,
     );
     breakdown.add_text(
         "platform",
@@ -6106,31 +6499,15 @@ pub async fn route_chat_stream(
     );
     let long_term_system = merge_system_prompt(platform_contract, long_term_system);
 
-    // The agent scope for long-term memory facts — the SAME one the recency path
-    // (`assemble_long_term_system_message`) used, so backfill + dedup ids line up.
-    let memory_scope = long_term_agent_scope(effective_agent_id.as_deref());
-
     // The set of fact ids the RECENCY path injected this turn, so auto-recall can
     // dedup BY ID (the two blocks use different formats, so content-match would
     // silently double-inject). CRITICAL: only populate this when `enable_long_term`
     // is true — recency injects NOTHING when it's off (`assemble_long_term_system_message`
     // returns `None`), so dropping these ids then would surface them NOWHERE.
-    // This is a cheap SELECT (same `DEFAULT_LONG_TERM_LIMIT` recency used), no embed.
+    // These ids come from the same recall result that built the recency block, so
+    // citation metadata and auto-recall dedup cannot drift apart.
     let recency_fact_ids: std::collections::HashSet<String> = if auto_recall_allowed {
-        match memory
-            .recall(
-                LOCAL_USER,
-                &memory_scope,
-                memory_policy.recall_budget.long_term_limit(),
-            )
-            .await
-        {
-            Ok(entries) => entries.into_iter().map(|e| e.id).collect(),
-            Err(e) => {
-                tracing::warn!("auto-recall: reading recency fact ids failed (no dedup): {e:#}");
-                std::collections::HashSet::new()
-            }
-        }
+        recency_ids.into_iter().collect()
     } else {
         std::collections::HashSet::new()
     };
@@ -6153,7 +6530,7 @@ pub async fn route_chat_stream(
         // stalling the reply. Fail-open on both the timeout and any inner error.
         let recalled = match tokio::time::timeout(
             AUTO_RECALL_TIMEOUT,
-            run_auto_recall(
+            run_auto_recall_context(
                 cfg,
                 &conversations,
                 &memory,
@@ -6165,23 +6542,33 @@ pub async fn route_chat_stream(
         )
         .await
         {
-            Ok(block) => block,
+            Ok(context) => context,
             Err(_) => {
                 tracing::warn!("auto-recall timed out, skipping for this turn");
                 None
             }
         };
-        breakdown.add_text("recall", "Auto-recall", recalled.as_deref());
+        breakdown.add_text(
+            "recall",
+            "Auto-recall",
+            recalled.as_ref().map(|context| context.block.as_str()),
+        );
         match recalled {
-            Some(block) => match long_term_system {
-                Some(existing) if !existing.is_empty() => Some(format!("{existing}\n\n{block}")),
-                _ => Some(block),
-            },
+            Some(context) => {
+                memory_citations.extend(context.memory_citations);
+                match long_term_system {
+                    Some(existing) if !existing.is_empty() => {
+                        Some(format!("{existing}\n\n{}", context.block))
+                    }
+                    _ => Some(context.block),
+                }
+            }
             None => long_term_system,
         }
     } else {
         long_term_system
     };
+    let memory_citations = dedupe_memory_citations(memory_citations);
 
     let referenced_chats = assemble_referenced_chat_context(
         &conversations,
@@ -6486,15 +6873,29 @@ pub async fn route_chat_stream(
     // The ACP path uses incremental persistence (store + metadata passed
     // directly); non-ACP paths still use the FnOnce closure.
     let persist_store_for_acp = conversations.clone();
+    let memory_citations_for_persist = memory_citations.clone();
     let persist = {
         let conv_id = conversation_id_for_persist.clone();
         let agent_id = persist_agent_id.clone();
         move |reply: String, outcome: &'static str| {
-            persist_assistant_reply(conversations.clone(), conv_id, agent_id, reply, outcome)
+            persist_assistant_reply(
+                conversations.clone(),
+                conv_id,
+                agent_id,
+                reply,
+                outcome,
+                memory_citations_for_persist.clone(),
+            )
         }
     };
 
     match route {
+        AgentRoute::A2a { peer_id } => {
+            let persist_without_message_id = move |reply, outcome| async move {
+                let _ = persist(reply, outcome).await;
+            };
+            crate::a2a::route_peer_chat(req, peer_id, persist_without_message_id, watch).await
+        }
         AgentRoute::OpenAiCompat {
             base_url,
             model,
@@ -6551,6 +6952,7 @@ pub async fn route_chat_stream(
                         model,
                         gateway_token,
                         long_term_system,
+                        memory_citations.clone(),
                         project_instructions.clone(),
                         project_rules.clone(),
                         budget_agent_id,
@@ -6615,6 +7017,7 @@ pub async fn route_chat_stream(
                 model,
                 api_key,
                 long_term_system,
+                memory_citations.clone(),
                 project_instructions.clone(),
                 project_rules.clone(),
                 None,
@@ -6678,6 +7081,7 @@ pub async fn route_chat_stream(
                 model,
                 None,
                 long_term_system,
+                memory_citations.clone(),
                 project_instructions.clone(),
                 project_rules.clone(),
                 None,
@@ -6825,6 +7229,7 @@ pub async fn route_chat_stream(
                 requested_environment,
                 short_term,
                 long_term_system,
+                memory_citations,
                 project_instructions,
                 project_rules,
                 persist_store_for_acp,
@@ -6868,6 +7273,7 @@ pub async fn route_chat_stream(
                 model,
                 None,
                 long_term_system,
+                memory_citations.clone(),
                 project_instructions,
                 project_rules,
                 None,
@@ -7021,12 +7427,14 @@ async fn persist_assistant_reply(
     agent_id: Option<String>,
     reply: String,
     outcome: &'static str,
-) {
+    memory_citations: Vec<MemoryCitation>,
+) -> Option<String> {
     let Some(conversation_id) = conversation_id else {
-        return;
+        return None;
     };
+    let mut persisted_message_id = None;
     if !reply.is_empty() {
-        if let Err(e) = store
+        match store
             .append_message_as(
                 &conversation_id,
                 "assistant",
@@ -7038,12 +7446,30 @@ async fn persist_assistant_reply(
             )
             .await
         {
-            tracing::warn!("failed to persist assistant reply: {e:#}");
+            Ok(message_id) if !memory_citations.is_empty() => {
+                let parts = serde_json::json!([
+                    { "type": "text", "text": reply, "state": "done" },
+                    {
+                        "type": "data-ryu-memory-citations",
+                        "data": memory_citations_payload(&memory_citations),
+                    },
+                ]);
+                if let Err(e) = store
+                    .update_message_parts(&message_id, &parts.to_string())
+                    .await
+                {
+                    tracing::warn!("failed to persist memory citations: {e:#}");
+                }
+                persisted_message_id = Some(message_id);
+            }
+            Ok(message_id) => persisted_message_id = Some(message_id),
+            Err(e) => tracing::warn!("failed to persist assistant reply: {e:#}"),
         }
     }
     if let Err(e) = store.set_run_status(&conversation_id, outcome).await {
         tracing::warn!("failed to set run_status to {outcome}: {e:#}");
     }
+    persisted_message_id
 }
 
 // ── Provider prompt caching (forwarded to the gateway) ─────────────────────────
@@ -7451,6 +7877,7 @@ async fn route_openai_stream<F, Fut>(
     model: String,
     api_key: Option<String>,
     long_term_system: Option<String>,
+    memory_citations: Vec<MemoryCitation>,
     // The exact AGENTS.md / CLAUDE.md block assembled for this turn, exposed to
     // context hooks separately from the folded system prompt.
     project_instructions: Option<String>,
@@ -7520,7 +7947,7 @@ async fn route_openai_stream<F, Fut>(
 ) -> Response
 where
     F: FnOnce(String, &'static str) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
+    Fut: std::future::Future<Output = Option<String>> + Send + 'static,
 {
     // Identity of the turn, captured for the reactive failover watch before the
     // request-building code below consumes `agent_id` / `model`.
@@ -7687,6 +8114,11 @@ where
         let turn_registration = native_turn_control.map(turn_control::register);
 
         yield Ok::<_, std::convert::Infallible>(ui_start());
+        if !memory_citations.is_empty() {
+            yield Ok::<_, std::convert::Infallible>(ui_memory_citations(
+                &memory_citations,
+            ));
+        }
         if let Some(control) = agent_control_applied.as_ref() {
             yield Ok::<_, std::convert::Infallible>(ui_data(
                 "ryu-agent-control",
@@ -7738,7 +8170,7 @@ where
                     // good reply on reload.
                     if watch.retryable().is_none() {
                         if let Some(p) = persist.take() {
-                            p(std::mem::take(&mut reply_all), "failed").await;
+                            let _ = p(std::mem::take(&mut reply_all), "failed").await;
                         }
                     }
                     for line in error_ui_lines(&e) {
@@ -7791,7 +8223,7 @@ where
                 );
                 if watch.retryable().is_none() {
                     if let Some(p) = persist.take() {
-                        p(std::mem::take(&mut reply_all), "failed").await;
+                        let _ = p(std::mem::take(&mut reply_all), "failed").await;
                     }
                 }
                 for line in error_ui_lines(&detail) {
@@ -7825,7 +8257,7 @@ where
                     Err(e) => {
                         reply_all.push_str(&iter_reply);
                         if let Some(p) = persist.take() {
-                            p(std::mem::take(&mut reply_all), "failed").await;
+                            let _ = p(std::mem::take(&mut reply_all), "failed").await;
                         }
                         if text_open {
                             yield Ok::<_, std::convert::Infallible>(ui_text_end(&text_id));
@@ -7987,7 +8419,13 @@ where
                     reply_all = replacement;
                 }
                 if let Some(p) = persist.take() {
-                    p(std::mem::take(&mut reply_all), "completed").await;
+                    if let Some(message_id) =
+                        p(std::mem::take(&mut reply_all), "completed").await
+                    {
+                        yield Ok::<_, std::convert::Infallible>(ui_assistant_message_id(
+                            &message_id,
+                        ));
+                    }
                 }
                 // Hand the provider's OWN prompt-token count to the context panel,
                 // so its "Unaccounted" row shows real estimator drift instead of
@@ -8572,7 +9010,7 @@ pub(crate) async fn persist_handled_turn(
     reply: &str,
     agent_id: Option<&str>,
     author_name: Option<&str>,
-) {
+) -> Option<String> {
     if !user_text.trim().is_empty() {
         if let Err(e) = conversations
             .append_message_as(
@@ -8594,7 +9032,7 @@ pub(crate) async fn persist_handled_turn(
             tracing::warn!("plugin_host: could not persist the user turn a hook handled: {e:#}");
         }
     }
-    if let Err(e) = conversations
+    match conversations
         .append_message_as(
             conversation_id,
             "assistant",
@@ -8606,7 +9044,11 @@ pub(crate) async fn persist_handled_turn(
         )
         .await
     {
-        tracing::warn!("plugin_host: could not persist a hook-handled reply: {e:#}");
+        Ok(message_id) => Some(message_id),
+        Err(e) => {
+            tracing::warn!("plugin_host: could not persist a hook-handled reply: {e:#}");
+            None
+        }
     }
 }
 
@@ -8942,6 +9384,7 @@ async fn route_acp_stream(
     project_environment: Vec<(String, String)>,
     short_term: Option<String>,
     long_term_system: Option<String>,
+    memory_citations: Vec<MemoryCitation>,
     // The exact AGENTS.md / CLAUDE.md block assembled for this turn.
     project_instructions: Option<String>,
     // Normalized Cursor/Claude/AGENTS rule records for context plugins.
@@ -9285,6 +9728,13 @@ async fn route_acp_stream(
         let mut usage_cost: Option<(f64, String)> = None;
 
         emit!(ui_start());
+        if !memory_citations.is_empty() {
+            emit!(ui_memory_citations(&memory_citations));
+            acc.data(
+                "ryu-memory-citations",
+                &memory_citations_payload(&memory_citations),
+            );
+        }
         if let Some(control) = agent_control_applied.as_ref() {
             let data = serde_json::to_value(control).unwrap_or(Value::Null);
             emit!(ui_data("ryu-agent-control", &data,));
@@ -9297,7 +9747,7 @@ async fn route_acp_stream(
         if let Some(summary) = compaction_summary {
             emit!(ui_data(
                 "ryu-acp-compaction",
-                &serde_json::json!({ "summary": summary.trim() }),
+                &serde_json::json!({ "summary": summary.trim(), "trigger": "auto" }),
             ));
         }
 
@@ -10051,9 +10501,11 @@ async fn route_acp_stream(
                     }
                     if let Some(v) = usage_cached_read {
                         stats.insert("cachedReadTokens".into(), serde_json::json!(v));
+                        stats.insert("cacheReadTokens".into(), serde_json::json!(v));
                     }
                     if let Some(v) = usage_cached_write {
                         stats.insert("cachedWriteTokens".into(), serde_json::json!(v));
+                        stats.insert("cacheWriteTokens".into(), serde_json::json!(v));
                     }
                     if let Some(v) = usage_session_total {
                         stats.insert("sessionTotalTokens".into(), serde_json::json!(v));
@@ -10064,6 +10516,28 @@ async fn route_acp_stream(
                     }
                     if let Some(v) = tokens_per_second {
                         stats.insert("tokensPerSecond".into(), serde_json::json!(v));
+                    }
+                    for key in [
+                        "context_window",
+                        "contextWindow",
+                        "current_usage",
+                        "currentUsage",
+                        "cost",
+                        "costAmount",
+                        "costCurrency",
+                        "currency",
+                    ] {
+                        if let Some(value) = u.get(key) {
+                            stats.insert(key.to_owned(), value.clone());
+                        }
+                    }
+                    if let Ok(elapsed) =
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    {
+                        stats.insert(
+                            "observedAt".into(),
+                            serde_json::json!(elapsed.as_millis() as u64),
+                        );
                     }
                     // Time to the agent's first visible output (text OR reasoning).
                     // Absent when the turn produced neither, so the UI omits the row
@@ -10125,7 +10599,8 @@ async fn route_acp_stream(
                     ));
                     acc.tool_input(&tool_call_id, "Question", &input, false, Some(started));
                 }
-                acp::AcpEvent::Error(msg) => {
+                acp::AcpEvent::Error(failure) => {
+                    let msg = failure.message.as_str();
                     // Report the failure to the reactive failover wrapper FIRST.
                     // A vendor cap reaches this plane as an ordinary error with
                     // no typed signal, so the kind is `Other` and the wrapper
@@ -10143,6 +10618,9 @@ async fn route_acp_stream(
                     // outlive the retry and a reload would show a failure that
                     // never happened.
                     let will_retry = watch.retryable().is_some();
+                    if !will_retry {
+                        acc.error(&failure.code, &failure.title, &failure.message);
+                    }
                     // Close any still-open spans with an error on agent failure.
                     for (_tool_id, span_id) in open_spans.drain() {
                         let _ = traces.close_span(&span_id, Some("agent error")).await;
@@ -10200,7 +10678,7 @@ async fn route_acp_stream(
                             }
                         }
                     }
-                    for line in error_ui_lines(&msg) {
+                    for line in error_ui_lines(msg) {
                         emit!(line);
                     }
                     // Clean up the live stream on error exit.
@@ -10317,6 +10795,9 @@ async fn route_acp_stream(
             );
         }
 
+        if let Some(message_id) = persisted_msg_id.as_deref() {
+            emit!(ui_assistant_message_id(message_id));
+        }
         emit!(ui_finish());
         emit!(DONE_SSE_LINE.as_bytes().to_vec());
         // Clean up the live stream on normal completion.
@@ -10386,6 +10867,7 @@ pub trait AgentAdapter: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::memory::DEFAULT_LONG_TERM_LIMIT;
 
     /// The prompt-cache preference is forwarded verbatim as a header, so an
     /// unvalidated value would reach the gateway (and the provider) mid-turn.
@@ -10621,6 +11103,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drain_carries_the_exact_persisted_assistant_message_id() {
+        let mut payload = ui_start();
+        payload.extend(ui_text_start("a"));
+        payload.extend(ui_text_delta("a", "reply"));
+        payload.extend(ui_text_end("a"));
+        payload.extend(ui_assistant_message_id("assistant-from-this-turn"));
+        payload.extend(ui_finish());
+        payload.extend_from_slice(DONE_SSE_LINE.as_bytes());
+
+        let result = drain_text_reply_with_metadata(sse_response(Body::from(payload)))
+            .await
+            .unwrap();
+        assert_eq!(result.reply, "reply");
+        assert_eq!(
+            result.assistant_message_id.as_deref(),
+            Some("assistant-from-this-turn")
+        );
+    }
+
+    #[tokio::test]
     async fn drain_propagates_error_frame_not_empty_string() {
         // A member that errors must surface as Err, never silently collect to "".
         let mut p = ui_start();
@@ -10819,6 +11321,28 @@ mod tests {
         assert!(!block.contains("gateway routing"));
         // Exactly two bullet lines.
         assert_eq!(block.matches("- [").count(), 2);
+    }
+
+    #[test]
+    fn recall_context_cites_only_memory_lines_within_the_budget() {
+        let memory = vec![mem_chunk_id("memory-1", "prefers dark mode")];
+        let space = ScoredChunk {
+            id: "space-1".to_owned(),
+            source: ChunkSource::Space,
+            space_id: Some("space".to_owned()),
+            content: "The product ships on Friday".to_owned(),
+            score: 0.8,
+        };
+        let context = assemble_recall_context(&[memory[0].clone(), space], &[], 2)
+            .expect("memory and space lines should be assembled");
+
+        assert_eq!(
+            context.memory_citations,
+            vec![MemoryCitation {
+                id: "memory-1".to_owned(),
+                content: "prefers dark mode".to_owned(),
+            }]
+        );
     }
 
     /// A Space document chunk must be labelled `[space]`, not `[memory]`.
@@ -11154,7 +11678,7 @@ mod tests {
         assert!(
             merged
                 .trim_end()
-                .ends_with("rather than inventing the answer."),
+                .ends_with("unless they ask for the technical detail."),
             "the docs hint is last: {merged}"
         );
         assert!(merged.contains("https://docs.ryuhq.com/llms.txt"));
@@ -11165,7 +11689,7 @@ mod tests {
         assert!(with_skills.starts_with("## Skill: Greeter"));
         assert!(with_skills
             .trim_end()
-            .ends_with("rather than inventing the answer."));
+            .ends_with("unless they ask for the technical detail."));
     }
 
     #[test]
@@ -11867,7 +12391,7 @@ mod tests {
             ("acp.rs", acp_rs, "pi_mcp_extension_env("),
             ("mod.rs", mod_rs, "acp::pi_mcp_extension_env("),
         ] {
-            for arg in ["true, None)", "false, None)"] {
+            for arg in ["true, user_jwt)", "false, user_jwt)"] {
                 let want = format!("{call}{arg}");
                 assert!(
                     src.contains(&want),
@@ -11918,6 +12442,30 @@ mod tests {
     }
 
     #[test]
+    fn a2a_engine_binding_resolves_to_remote_peer_route() {
+        let route = agent_route(
+            Some("remote-researcher"),
+            Some("a2a:peer-123"),
+            None,
+            &acp_reg(),
+            &provider_reg(),
+        )
+        .expect("A2A route");
+        assert!(matches!(
+            route,
+            AgentRoute::A2a { ref peer_id } if peer_id == "peer-123"
+        ));
+        assert!(agent_route(
+            Some("broken-remote"),
+            Some("a2a:   "),
+            None,
+            &acp_reg(),
+            &provider_reg(),
+        )
+        .is_none());
+    }
+
+    #[test]
     fn registry_agent_still_routes() {
         let route = agent_route(
             Some("acp:claude"),
@@ -11936,6 +12484,10 @@ mod tests {
         // runs that literal command as an ACP subprocess, so ANY ACP-compatible
         // agent works without being enumerated in the registry (binary-only,
         // private, or future agents). The command is passed through verbatim.
+        let _guard = crate::agent_routing::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::agent_routing::set_from_json(r#"{"my-custom-acp": false}"#);
         let route = agent_route(
             Some("my-custom-acp"),
             Some("acp-exec:goose acp"),
@@ -11962,8 +12514,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let id = "byo-openai-agent";
-        // Off by default: verbatim, no injection.
-        crate::agent_routing::set_from_json("{}");
+        // An explicit opt-out is verbatim, with no injection.
+        crate::agent_routing::set_from_json(&format!(r#"{{"{id}": false}}"#));
         let off = agent_route(
             Some(id),
             Some("acp-exec:my-agent --acp"),
@@ -13075,6 +13627,32 @@ mod tests {
     }
 
     #[test]
+    fn memory_citations_frame_and_persisted_part_share_the_same_payload() {
+        let citations = vec![MemoryCitation {
+            id: "memory-1".to_owned(),
+            content: "Prefers dark mode".to_owned(),
+        }];
+        let frame = String::from_utf8(ui_memory_citations(&citations)).unwrap();
+        assert!(frame.contains("data-ryu-memory-citations"));
+        assert!(frame.contains("Prefers dark mode"));
+
+        let mut acc = PartsAccumulator::default();
+        acc.data(
+            "ryu-memory-citations",
+            &memory_citations_payload(&citations),
+        );
+        let round: Vec<Value> = serde_json::from_str(&acc.to_json()).unwrap();
+        assert_eq!(
+            round[0]["type"],
+            serde_json::json!("data-ryu-memory-citations")
+        );
+        assert_eq!(
+            round[0]["data"]["citations"][0]["id"],
+            serde_json::json!("memory-1")
+        );
+    }
+
+    #[test]
     fn chat_request_preserves_openai_model_pin() {
         let request: ChatStreamRequest = serde_json::from_value(serde_json::json!({
             "messages": [],
@@ -13086,9 +13664,56 @@ mod tests {
     }
 
     #[test]
+    fn chat_request_defaults_to_everyday_response_mode() {
+        let request: ChatStreamRequest = serde_json::from_value(serde_json::json!({
+            "messages": []
+        }))
+        .expect("chat request should default its response mode");
+
+        assert_eq!(
+            request.response_mode,
+            crate::ryu_platform::RyuResponseMode::Everyday
+        );
+    }
+
+    #[test]
+    fn chat_request_accepts_developer_response_mode() {
+        let request: ChatStreamRequest = serde_json::from_value(serde_json::json!({
+            "messages": [],
+            "response_mode": "developer"
+        }))
+        .expect("chat request should accept developer response mode");
+
+        assert_eq!(
+            request.response_mode,
+            crate::ryu_platform::RyuResponseMode::Developer
+        );
+    }
+
+    #[test]
     fn parts_empty_accumulator_serializes_to_empty_array() {
         let acc = PartsAccumulator::default();
         assert_eq!(acc.to_json(), "[]");
+    }
+
+    #[test]
+    fn parts_accumulator_persists_a_failed_turn_as_an_error_card() {
+        let mut acc = PartsAccumulator::default();
+        acc.error(
+            "provider_payment_required",
+            "OpenRouter credits exhausted",
+            "Add credits to your OpenRouter account, then retry.",
+        );
+        let parts: Vec<Value> = serde_json::from_str(&acc.to_json()).unwrap();
+        assert_eq!(
+            parts,
+            vec![serde_json::json!({
+                "type": "error",
+                "code": "provider_payment_required",
+                "title": "OpenRouter credits exhausted",
+                "message": "Add credits to your OpenRouter account, then retry."
+            })]
+        );
     }
 
     #[test]

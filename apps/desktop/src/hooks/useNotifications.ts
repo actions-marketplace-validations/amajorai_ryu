@@ -33,11 +33,13 @@ export interface UseNotificationsResult {
  * `useNotificationEvents` hook, which invalidates the `notifications` query on
  * each SSE ping — mirroring how `useApprovals` stays live via `useApprovalEvents`.
  *
- * The feed served is the LIVE inbox (un-archived rows). `archive` moves a row to
- * the archive; `unarchive` restores it — both invalidate the feed so the tray and
- * the Inbox page stay consistent.
+ * When `archived` is omitted, the hook serves all rows so a surface can compose
+ * status and level filters locally. Passing `false` serves the live inbox and
+ * `true` serves archived rows. `archive` moves a row to the archive;
+ * `unarchive` restores it — both invalidate the feed so the tray and Inbox page
+ * stay consistent.
  */
-export function useNotifications(): UseNotificationsResult {
+export function useNotifications(archived?: boolean): UseNotificationsResult {
 	const node = useActiveNode();
 	const target: ApiTarget = { url: node.url, token: node.token ?? null };
 	const { data: session } = useSession();
@@ -45,8 +47,9 @@ export function useNotifications(): UseNotificationsResult {
 	const qc = useQueryClient();
 
 	const listQuery = useQuery({
-		queryKey: ["notifications", target.url, meId],
-		queryFn: () => listNotifications(target, meId as string),
+		queryKey: ["notifications", target.url, meId, archived ?? "all"],
+		queryFn: () =>
+			listNotifications(target, meId as string, undefined, archived),
 		enabled: meId !== null,
 	});
 

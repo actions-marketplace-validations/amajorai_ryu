@@ -6,6 +6,7 @@ import {
 	useCallback,
 	useContext,
 	useEffect,
+	useMemo,
 	useRef,
 	useState,
 } from "react";
@@ -52,6 +53,11 @@ import {
 	swapLeaves,
 } from "@/src/lib/splitTree.ts";
 import {
+	listenForEntityActivation,
+	registerWindowTabs,
+	tabEntityKey,
+} from "@/src/lib/window-routing.ts";
+import {
 	parseWorkspaceSessionState,
 	sameWorkspaceSessionState,
 	type WorkspaceSessionState,
@@ -91,6 +97,8 @@ export interface Tab {
 	    the fresh chat tab so files picked before a conversation exists aren't lost.
 	    Runtime-only (blob data URLs) — never persisted across a session restart. */
 	initialImages?: AttachedImage[];
+	/** One-shot model selection to carry into a newly opened focused reply thread. */
+	initialModel?: string;
 	/** One-shot Core assistant opening. Unlike `initialSubmit`, this never adds
 	    a synthetic user row and waits for model readiness. Runtime-only. */
 	initialProactiveOpening?: boolean;
@@ -99,12 +107,16 @@ export interface Tab {
 	    deep link. ChatPage consumes it once on mount: the prompt PRE-FILLS the
 	    composer (never auto-sent), and the agent/project pre-select. */
 	initialPrompt?: string;
+	/** One-shot quote to carry into a newly opened focused reply thread. */
+	initialQuote?: string;
 	/** When true, the seeded `initialPrompt` (and any `initialImages`) is SENT
 	    automatically once the chat is ready, rather than only pre-filling the
 	    composer. Set ONLY for user-initiated sends (the launchpad composer) — the
 	    `ryu://chat/new` deep link and Inbox suggestions leave this unset so their
 	    attacker-/system-controllable text stays pre-fill-only. Runtime-only. */
 	initialSubmit?: boolean;
+	/** Context from an app-owned sidebar row, forwarded to that app's Companion. */
+	mountContext?: Record<string, unknown> | null;
 	/** Bumped each time this tab is navigated in place ("open in current tab").
 	    Folded into the pane's React key so a reused tab remounts its page — pages
 	    like ChatPage seed state from props once on mount, so without a remount an
@@ -303,12 +315,15 @@ interface TabsContextValue {
 			conversationId?: string;
 			forceNew?: boolean;
 			initialPrompt?: string;
+			initialQuote?: string;
+			initialModel?: string;
 			initialProactiveOpening?: boolean;
 			initialSubmit?: boolean;
 			initialImages?: AttachedImage[];
 			initialAgent?: string;
 			initialGhost?: boolean;
 			initialProject?: string;
+			mountContext?: Record<string, unknown> | null;
 			worktreeMode?: boolean;
 			/** Entity glyph to show in the tab strip (mirrors the sidebar). */
 			icon?: GlyphValue;
@@ -725,6 +740,10 @@ function normalize(tabs: Tab[]): Tab[] {
 export interface InitialTab {
 	conversationId?: string;
 	icon?: GlyphValue;
+	initialAgent?: string;
+	initialProactiveOpening?: boolean;
+	initialPrompt?: string;
+	initialSubmit?: boolean;
 	/** Pin this window's seeded tab to a specific node (carried from the source
 	    tab so a remote-targeted chat keeps targeting that node). */
 	node?: string;
@@ -1090,6 +1109,11 @@ export function TabsProvider({
 						path: initialTab.path.split("?")[0],
 						title: resolveTabTitle(initialTab.path, initialTab.title),
 						conversationId: initialTab.conversationId,
+						icon: initialTab.icon,
+						initialAgent: initialTab.initialAgent,
+						initialPrompt: initialTab.initialPrompt,
+						initialSubmit: initialTab.initialSubmit,
+						initialProactiveOpening: initialTab.initialProactiveOpening,
 					},
 				],
 				activeId: id,
@@ -1249,12 +1273,15 @@ export function TabsProvider({
 				conversationId?: string;
 				forceNew?: boolean;
 				initialPrompt?: string;
+				initialQuote?: string;
+				initialModel?: string;
 				initialProactiveOpening?: boolean;
 				initialSubmit?: boolean;
 				initialImages?: AttachedImage[];
 				initialAgent?: string;
 				initialGhost?: boolean;
 				initialProject?: string;
+				mountContext?: Record<string, unknown> | null;
 				worktreeMode?: boolean;
 				icon?: GlyphValue;
 			}
@@ -1314,15 +1341,19 @@ export function TabsProvider({
 					if (
 						existing.path !== base ||
 						existing.title !== shell.title ||
-						existing.icon !== undefined
+						existing.icon !== undefined ||
+						opts?.mountContext !== undefined
 					) {
 						const reused: Tab = {
 							...existing,
 							path: base,
 							title: resolveTabTitle(path, opts?.title),
 							icon: resolveTabGlyph(base, opts?.icon ?? existing.icon),
+							...(opts?.mountContext === undefined
+								? {}
+								: { mountContext: opts.mountContext }),
 							navToken:
-								existing.path === base
+								existing.path === base && opts?.mountContext === undefined
 									? existing.navToken
 									: (existing.navToken ?? 0) + 1,
 						};
@@ -1343,8 +1374,16 @@ export function TabsProvider({
 			if (isSingleton(base) && !opts?.forceNew) {
 				const existing = current.find((t) => t.path === base);
 				if (existing) {
-					if (opts?.icon !== undefined && existing.icon !== opts.icon) {
-						const patched = patchIcon(existing);
+					if (opts?.icon !== undefined || opts?.mountContext !== undefined) {
+						const patched: Tab = {
+							...patchIcon(existing),
+							...(opts.mountContext === undefined
+								? {}
+								: {
+										mountContext: opts.mountContext,
+										navToken: (existing.navToken ?? 0) + 1,
+									}),
+						};
 						setTabs((prev) => {
 							const next = normalize(
 								prev.map((t) => (t.id === patched.id ? patched : t))
@@ -1407,12 +1446,15 @@ export function TabsProvider({
 					icon: resolveTabGlyph(base, opts?.icon ?? activeTab.icon),
 					conversationId: opts?.conversationId,
 					initialPrompt: opts?.initialPrompt,
+					initialQuote: opts?.initialQuote,
+					initialModel: opts?.initialModel,
 					initialProactiveOpening: opts?.initialProactiveOpening,
 					initialSubmit: opts?.initialSubmit,
 					initialImages: opts?.initialImages,
 					initialAgent: opts?.initialAgent,
 					initialGhost: opts?.initialGhost,
 					initialProject: opts?.initialProject,
+					mountContext: opts?.mountContext,
 					worktreeMode: opts?.worktreeMode,
 					workspaceSession: undefined,
 					// Force a fresh mount so the page re-seeds from the new props
@@ -1448,12 +1490,15 @@ export function TabsProvider({
 				icon: resolveTabGlyph(base, opts?.icon),
 				conversationId: opts?.conversationId,
 				initialPrompt: opts?.initialPrompt,
+				initialQuote: opts?.initialQuote,
+				initialModel: opts?.initialModel,
 				initialProactiveOpening: opts?.initialProactiveOpening,
 				initialSubmit: opts?.initialSubmit,
 				initialImages: opts?.initialImages,
 				initialAgent: opts?.initialAgent,
 				initialGhost: opts?.initialGhost,
 				initialProject: opts?.initialProject,
+				mountContext: opts?.mountContext,
 				worktreeMode: opts?.worktreeMode,
 			};
 			setTabs((prev) => {
@@ -2405,6 +2450,8 @@ export function TabsProvider({
 				icon: resolveTabGlyph(base, opts?.icon ?? target.icon),
 				// One-shot seeds belong to the route being left behind.
 				initialPrompt: undefined,
+				initialQuote: undefined,
+				initialModel: undefined,
 				initialProactiveOpening: undefined,
 				initialSubmit: undefined,
 				initialImages: undefined,
@@ -2621,6 +2668,88 @@ export function TabsProvider({
 		const interval = setInterval(tick, 30_000);
 		return () => clearInterval(interval);
 	}, []);
+
+	// The native process owns cross-window entity routing, while each renderer
+	// owns its tab layout. Register only stable entity keys (currently persisted
+	// conversations); tab ids, groups, splits, and one-shot composer state remain
+	// window-local. The fingerprint guard avoids sending an IPC snapshot for
+	// runtime-only updates such as a streaming spinner or title shimmer.
+	const entityRegistration = useMemo(() => {
+		const entries: Array<{ active: boolean; key: string }> = [];
+		const entryIndexes = new Map<string, number>();
+		for (const tab of tabs) {
+			const key = tabEntityKey(tab);
+			if (!key) {
+				continue;
+			}
+			const existingIndex = entryIndexes.get(key);
+			if (existingIndex !== undefined) {
+				if (tab.id === activeTabId) {
+					entries[existingIndex].active = true;
+				}
+				continue;
+			}
+			entryIndexes.set(key, entries.length);
+			entries.push({ active: tab.id === activeTabId, key });
+		}
+		return {
+			entries,
+			fingerprint: JSON.stringify(entries),
+		};
+	}, [tabs, activeTabId]);
+	const entityRegistrationFingerprint = useRef<string | undefined>(undefined);
+	const entityRegistrationRevision = useRef(0);
+	const entityRegistrationRendererId = useRef(crypto.randomUUID());
+	useEffect(() => {
+		if (
+			entityRegistrationFingerprint.current === entityRegistration.fingerprint
+		) {
+			return;
+		}
+		entityRegistrationFingerprint.current = entityRegistration.fingerprint;
+		entityRegistrationRevision.current += 1;
+		void registerWindowTabs(
+			entityRegistrationRendererId.current,
+			entityRegistrationRevision.current,
+			entityRegistration.entries
+		);
+	}, [entityRegistration]);
+
+	// A native route focuses the destination first, then emits this event into
+	// that renderer. Using the live tab ref keeps the listener stable while tab
+	// state changes, and makes a late event a harmless no-op if the tab closed.
+	useEffect(() => {
+		let cancelled = false;
+		let unlisten: (() => void) | undefined;
+		void listenForEntityActivation(({ key, messageId }) => {
+			const tab = tabsRef.current.find(
+				(candidate) => tabEntityKey(candidate) === key
+			);
+			if (tab) {
+				activateTab(tab.id);
+				if (tab.conversationId && messageId) {
+					requestScrollToMessage(tab.conversationId, messageId);
+					window.dispatchEvent(
+						new CustomEvent("ryu:scroll-to-message", {
+							detail: { messageId },
+						})
+					);
+				}
+			}
+		})
+			.then((cleanup) => {
+				if (cancelled) {
+					cleanup();
+					return;
+				}
+				unlisten = cleanup;
+			})
+			.catch(() => undefined);
+		return () => {
+			cancelled = true;
+			unlisten?.();
+		};
+	}, [activateTab, requestScrollToMessage]);
 
 	// --- Session persistence ---------------------------------------------------
 	// Snapshot the main window's open tabs on every change so the "restore

@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { agent, app, PluginBuilder, skill, tool, workflow } from "./builder.ts";
 import { PluginManifestSchema } from "./manifest.ts";
 import { defineApp } from "./runnable/app.ts";
+import { defineTool } from "./runnable/tool.ts";
 
 // ── builder unit tests ────────────────────────────────────────────────────────
 
@@ -361,6 +362,49 @@ describe("defineApp", () => {
 		expect(manifest.contributes?.widgets[0]?.uri).toBe(
 			"ui://widget/chart-studio.html"
 		);
+	});
+
+	it("embeds an executable ToolRunnable in the widget tool", () => {
+		const renderTool = defineTool({
+			id: "support.render",
+			name: "Support answer",
+			schema: {
+				type: "object",
+				properties: { message: { type: "string" } },
+				required: ["message"],
+			},
+			run: async (input) => ({
+				content: [{ type: "text", text: input.message }],
+				structuredContent: { answer: input.message },
+			}),
+		});
+		const manifest = defineApp({
+			id: "com.example.support",
+			title: "Support",
+			version: "1.0.0",
+			slug: "support",
+			uiEntry: "src/widget.html",
+			tools: [
+				{
+					name: "render",
+					description: "Answer a support question",
+					inputSchema: renderTool.schema as unknown as Record<string, unknown>,
+					runnable: renderTool,
+				},
+			],
+		});
+		const render = manifest.runnables[0];
+
+		expect(render?.config).toMatchObject({
+			backend: "inline_deno",
+			code: renderTool.code,
+			input_schema: renderTool.schema,
+			widget: true,
+		});
+		expect(manifest.permission_grants).toEqual([
+			"widget:render",
+			"tool:execute",
+		]);
 	});
 
 	it("round-trips through PluginManifestSchema without stripping widgets", () => {
@@ -802,6 +846,31 @@ describe("contributes.message_actions", () => {
 			return;
 		}
 		expect(parsed.data.contributes?.message_actions).toEqual([action]);
+	});
+});
+
+describe("contributes.selection_actions", () => {
+	it("preserves host-owned selection dispatch args through the pack-path parse", () => {
+		const action = {
+			args: { dispatch: "side-chat.selection", intent: "explain" },
+			id: "side-chats.explain-selection",
+			kind: "button",
+			label: "Explain",
+			order: 110,
+		};
+		const parsed = PluginManifestSchema.safeParse({
+			id: "com.example.side-chats",
+			name: "Side Chats",
+			version: "1.0.0",
+			runnables: [],
+			contributes: { selection_actions: [action] },
+		});
+
+		expect(parsed.success).toBe(true);
+		if (!parsed.success) {
+			return;
+		}
+		expect(parsed.data.contributes?.selection_actions).toEqual([action]);
 	});
 });
 

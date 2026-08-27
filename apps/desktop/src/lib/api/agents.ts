@@ -25,6 +25,7 @@ export type AgentLifecycleStatus = "draft" | "trial" | "active";
 export type AgentSafetyProfile =
 	| "read_only"
 	| "approval_required"
+	| "verified_plan_only"
 	| "autonomous";
 
 function lifecycleStatus(
@@ -38,6 +39,7 @@ function lifecycleStatus(
 function safetyProfile(value: string | null | undefined): AgentSafetyProfile {
 	return value === "read_only" ||
 		value === "approval_required" ||
+		value === "verified_plan_only" ||
 		value === "autonomous"
 		? value
 		: "autonomous";
@@ -845,6 +847,89 @@ export async function updateAgent(
 		}
 	);
 	return toAgent(json.agent);
+}
+
+// ── Prompt Studio version history ───────────────────────────────────────────
+
+/** Metadata for one durable Prompt Studio snapshot. */
+export interface AgentPromptVersionMeta {
+	agentId: string;
+	createdAt: number;
+	id: string;
+	label: string | null;
+}
+
+interface AgentPromptVersionMetaWire {
+	agent_id: string;
+	created_at: number;
+	id: string;
+	label?: string | null;
+}
+
+/** List an agent's saved prompt snapshots, newest first. */
+export async function listAgentPromptVersions(
+	target: ApiTarget,
+	agentId: string
+): Promise<AgentPromptVersionMeta[]> {
+	const json = await request<{ versions?: AgentPromptVersionMetaWire[] }>(
+		target,
+		`/api/agents/${encodeURIComponent(agentId)}/prompt-versions`
+	);
+	return (json.versions ?? []).map((version) => ({
+		agentId: version.agent_id,
+		createdAt: version.created_at,
+		id: version.id,
+		label: version.label ?? null,
+	}));
+}
+
+/** Fetch one saved prompt body for the diff view. */
+export async function getAgentPromptVersion(
+	target: ApiTarget,
+	agentId: string,
+	versionId: string
+): Promise<string> {
+	const json = await request<{
+		version?: { prompt?: string; source?: string };
+	}>(
+		target,
+		`/api/agents/${encodeURIComponent(agentId)}/prompt-versions/${encodeURIComponent(versionId)}`
+	);
+	return json.version?.prompt ?? json.version?.source ?? "";
+}
+
+/** Save the current Prompt Studio draft as a durable snapshot. */
+export async function createAgentPromptVersion(
+	target: ApiTarget,
+	agentId: string,
+	prompt: string,
+	label?: string
+): Promise<void> {
+	await request(
+		target,
+		`/api/agents/${encodeURIComponent(agentId)}/prompt-versions`,
+		{
+			method: "POST",
+			body: {
+				prompt,
+				...(label?.trim() ? { label: label.trim() } : {}),
+			},
+		}
+	);
+}
+
+/** Restore a saved prompt snapshot and return the restored prompt text. */
+export async function restoreAgentPromptVersion(
+	target: ApiTarget,
+	agentId: string,
+	versionId: string
+): Promise<string> {
+	const json = await request<{ prompt?: string; source?: string }>(
+		target,
+		`/api/agents/${encodeURIComponent(agentId)}/prompt-versions/${encodeURIComponent(versionId)}/restore`,
+		{ method: "POST" }
+	);
+	return json.prompt ?? json.source ?? "";
 }
 
 /** Update only the lifecycle/safety controls without overwriting the editor's

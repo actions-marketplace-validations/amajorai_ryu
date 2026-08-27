@@ -55,25 +55,72 @@
         "mount": "/api/pull-requests",
         "public_mount": "/api/pull-requests",
         "routes": [
-          { "path": "/auth/device" },
-          { "path": "/status" },
-          { "path": "/pulls" },
-          { "path": "/pulls/branch" },
-          { "path": "/pulls/:owner/:repo/:number" },
-          { "path": "/pulls/:owner/:repo/:number/diff" },
-          { "path": "/pulls/:owner/:repo/:number/stack" },
-          { "path": "/pulls/:owner/:repo/:number/stack/add" },
-          { "path": "/pulls/:owner/:repo/:number/stack/unstack" },
-          { "path": "/pulls/:owner/:repo/:number/comment" },
-          { "path": "/pulls/:owner/:repo/:number/review" },
-          { "path": "/pulls/:owner/:repo/:number/merge" },
-          { "path": "/pulls/:owner/:repo/:number/merge-async" },
-          { "path": "/pulls/:owner/:repo/:number/merge-async/status" },
-          { "path": "/pulls/:owner/:repo/:number/ready" },
-          { "path": "/issues" },
-          { "path": "/issues/:owner/:repo/:number" },
-          { "path": "/issues/:owner/:repo/:number/comment" },
-          { "path": "/issues/:owner/:repo/:number/state" }
+          { "path": "/auth/device", "permission": "pull-requests.review" },
+          { "path": "/status", "permission": "pull-requests.view" },
+          { "path": "/repository", "permission": "pull-requests.view" },
+          {
+            "path": "/repository/create",
+            "permission": "pull-requests.review"
+          },
+          { "path": "/pulls", "permission": "pull-requests.view" },
+          { "path": "/pulls/branch", "permission": "pull-requests.view" },
+          {
+            "path": "/pulls/:owner/:repo/:number",
+            "permission": "pull-requests.view"
+          },
+          {
+            "path": "/pulls/:owner/:repo/:number/diff",
+            "permission": "pull-requests.view"
+          },
+          {
+            "path": "/pulls/:owner/:repo/:number/stack",
+            "permission": "pull-requests.review"
+          },
+          {
+            "path": "/pulls/:owner/:repo/:number/stack/add",
+            "permission": "pull-requests.review"
+          },
+          {
+            "path": "/pulls/:owner/:repo/:number/stack/unstack",
+            "permission": "pull-requests.review"
+          },
+          {
+            "path": "/pulls/:owner/:repo/:number/comment",
+            "permission": "pull-requests.review"
+          },
+          {
+            "path": "/pulls/:owner/:repo/:number/review",
+            "permission": "pull-requests.review"
+          },
+          {
+            "path": "/pulls/:owner/:repo/:number/merge",
+            "permission": "pull-requests.review"
+          },
+          {
+            "path": "/pulls/:owner/:repo/:number/merge-async",
+            "permission": "pull-requests.review"
+          },
+          {
+            "path": "/pulls/:owner/:repo/:number/merge-async/status",
+            "permission": "pull-requests.view"
+          },
+          {
+            "path": "/pulls/:owner/:repo/:number/ready",
+            "permission": "pull-requests.review"
+          },
+          { "path": "/issues", "permission": "pull-requests.view" },
+          {
+            "path": "/issues/:owner/:repo/:number",
+            "permission": "pull-requests.view"
+          },
+          {
+            "path": "/issues/:owner/:repo/:number/comment",
+            "permission": "pull-requests.review"
+          },
+          {
+            "path": "/issues/:owner/:repo/:number/state",
+            "permission": "pull-requests.review"
+          }
         ]
       }
     }

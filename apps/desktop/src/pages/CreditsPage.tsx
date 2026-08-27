@@ -24,6 +24,7 @@ import { sileo } from "sileo";
 import { FRONTEND_URL } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { OrgBillingContext } from "@/src/components/billing/OrgBillingContext.tsx";
+import { useStepUp } from "@/src/components/StepUpDialog.tsx";
 import { CreditTransferCard } from "@/src/components/settings/CreditTransferCard.tsx";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import {
@@ -105,6 +106,7 @@ export default function CreditsPage() {
 	const [busyPack, setBusyPack] = useState<CreditPack | "custom" | null>(null);
 	const [ledgerPage, setLedgerPage] = useState(0);
 	const [billingUnavailable, setBillingUnavailable] = useState(false);
+	const stepUp = useStepUp();
 
 	const totalPages = Math.max(1, Math.ceil(ledger.length / LEDGER_PAGE_SIZE));
 	const safeLedgerPage = Math.min(ledgerPage, totalPages - 1);
@@ -113,7 +115,11 @@ export default function CreditsPage() {
 		async (input: { pack?: CreditPack; amountCents?: number }) => {
 			setBusyPack(input.pack ?? "custom");
 			try {
-				const { url, quote } = await createTopup(input);
+				const topup = await stepUp.guard("billing", () => createTopup(input));
+				if (topup === null) {
+					return;
+				}
+				const { url, quote } = topup;
 				await openExternal(url);
 				const feeNote = quote
 					? ` ${formatMinorCurrency(quote.faceCents)} credited, ${formatMinorCurrency(quote.feeCents)} deposit fee (${formatMinorCurrency(quote.chargeCents)} charged).`
@@ -138,7 +144,7 @@ export default function CreditsPage() {
 				setBusyPack(null);
 			}
 		},
-		[]
+		[stepUp]
 	);
 
 	const handleCustomTopup = useCallback(() => {
@@ -270,6 +276,7 @@ export default function CreditsPage() {
 			    a transfer form needs live org membership and a mutation. Keeping it
 			    out preserves the block's "no data fetching" contract. */}
 			<CreditTransferCard />
+			{stepUp.dialog}
 		</div>
 	);
 }

@@ -1,6 +1,5 @@
-// apps/desktop/src/lib/api/monitors.ts
-//
-// Typed client for the Core website-monitoring API (`/api/monitors/*`). Field
+// Typed client and canonical wire model for the Core website-monitoring API
+// (`/api/monitors/*`). Field
 // names are snake_case to match Core's serde shapes exactly (the Rust structs
 // use no rename). The alert SSE stream uses fetch + ReadableStream rather than
 // EventSource so the bearer token can be attached.
@@ -43,7 +42,8 @@ export type CheckType =
 export type NotifyTarget =
 	| { kind: "webhook"; url: string }
 	| { kind: "telegram"; bot_token: string; chat_id: string }
-	| { kind: "expo_push"; token: string };
+	| { kind: "expo_push"; token: string }
+	| { kind: "email"; to: string };
 
 export type CheckStatus = "ok" | "triggered" | "error";
 

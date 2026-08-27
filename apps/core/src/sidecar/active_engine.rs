@@ -193,11 +193,10 @@ mod tests {
             local_engine_base_url("ollama").as_deref(),
             Some("http://127.0.0.1:11434")
         );
-        // llamacpp is profile-aware; under the (default) release profile in tests
-        // it is the original :8080.
+        // llamacpp is profile-aware and must match the active profile's spawn port.
         assert_eq!(
             local_engine_base_url("llamacpp").as_deref(),
-            Some("http://127.0.0.1:8080")
+            Some(format!("http://127.0.0.1:{}", crate::profile::port(8080)).as_str())
         );
         assert_eq!(
             local_engine_base_url("vllm").as_deref(),
@@ -207,11 +206,17 @@ mod tests {
             local_engine_base_url("sglang").as_deref(),
             Some("http://127.0.0.1:30000")
         );
-        // mlx is profile-aware; under the (default) release profile in tests it is
-        // the canonical :8086 (moved off 8082 to free the reranker's port).
+        // mlx is profile-aware; 8086 is the release-profile base port (moved off
+        // 8082 to free the reranker's port).
         assert_eq!(
             local_engine_base_url("mlx").as_deref(),
-            Some("http://127.0.0.1:8086")
+            Some(
+                format!(
+                    "http://127.0.0.1:{}",
+                    crate::sidecar::providers::mlx::process::default_port()
+                )
+                .as_str()
+            )
         );
         // Non-engines (agents/tools) have no local inference endpoint.
         assert_eq!(local_engine_base_url("zeroclaw"), None);

@@ -1,5 +1,3 @@
-import { Message01Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
 import { Loader } from "@ryu/ui/components/motion/loader";
 import { cn } from "@ryu/ui/lib/utils";
 
@@ -9,7 +7,7 @@ export interface TypingIndicatorProps {
 	label?: string;
 }
 
-/** A quiet, traditional chat bubble for a live assistant response. */
+/** A quiet loading indicator for a live assistant response. */
 export function TypingIndicator({
 	label = "Assistant is typing",
 	className,
@@ -19,18 +17,13 @@ export function TypingIndicator({
 			aria-label={label}
 			aria-live="polite"
 			className={cn(
-				"inline-flex items-center gap-2 rounded-3xl border border-transparent bg-muted px-3 py-2 text-muted-foreground",
+				"inline-flex items-center rounded-3xl border border-transparent bg-muted px-3 py-2 text-muted-foreground",
 				className
 			)}
 			data-slot="chat-typing-indicator"
 			data-testid="chat-typing-indicator"
 			role="status"
 		>
-			<HugeiconsIcon
-				aria-hidden="true"
-				className="size-4 shrink-0"
-				icon={Message01Icon}
-			/>
 			<span aria-hidden="true" data-testid="chat-typing-dots">
 				<Loader label="" size={14} speed={1.1} variant="dots" />
 			</span>

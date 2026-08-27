@@ -22,7 +22,10 @@ import { useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { InterfaceLevelMenuItem } from "../../src/components/layout/InterfaceLevelMenuItem.tsx";
 import { SIDEBAR_MODE_KEY } from "../../src/hooks/useSidebarMode.ts";
+import { responseModeForInterface } from "../../src/lib/chat-routing.ts";
 import {
+	getInterfaceLevelServerSnapshot,
+	getInterfaceLevelSnapshot,
 	INTERFACE_LEVEL_KEY,
 	subscribeInterfaceLevel,
 } from "../../src/lib/interface-level.ts";
@@ -39,10 +42,10 @@ const WATCHED = [
 
 function StoredPrefs() {
 	// Re-read on every mode change — the same store the menu item writes through.
-	useSyncExternalStore(
+	const level = useSyncExternalStore(
 		subscribeInterfaceLevel,
-		() => localStorage.getItem(INTERFACE_LEVEL_KEY) ?? "",
-		() => ""
+		getInterfaceLevelSnapshot,
+		getInterfaceLevelServerSnapshot
 	);
 	return (
 		<dl>
@@ -52,6 +55,12 @@ function StoredPrefs() {
 					<dd data-testid={key}>{localStorage.getItem(key) ?? "unset"}</dd>
 				</div>
 			))}
+			<div>
+				<dt>response_mode</dt>
+				<dd data-testid="ryu:response-mode">
+					{responseModeForInterface(level)}
+				</dd>
+			</div>
 		</dl>
 	);
 }

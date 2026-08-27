@@ -21,9 +21,19 @@
 // mount time. Reading it from the plugin's `manifest.json` grants is #443's job;
 // here we prove the gate works given a grant set.
 
+import type {
+	Alert as MonitorAlert,
+	CheckStatus as MonitorCheckStatus,
+	CheckType as MonitorCheckType,
+	MonitorInput as MonitorInputPayload,
+	NotifyTarget as MonitorNotifyTarget,
+	Monitor as MonitorRecord,
+	Snapshot as MonitorSnapshot,
+} from "@ryuhq/core-client/monitors";
 import hostApiContract from "../../../crates/core/kernel-contracts/schemas/host-api.json" with {
 	type: "json",
 };
+import type { RyuCatalogModels, RyuCatalogSnapshot } from "./app-bridge.ts";
 
 /** A request envelope a plugin sends over the bridge. `id` correlates the reply. */
 export interface RpcRequest {
@@ -69,6 +79,18 @@ export type WidgetRpcErrorCode =
 	| "over_budget"
 	| "server_error"
 	| "invalid_args";
+
+const WIDGET_RPC_ERROR_CODES = new Set<string>([
+	"denied",
+	"not_found",
+	"over_budget",
+	"server_error",
+	"invalid_args",
+] satisfies WidgetRpcErrorCode[]);
+
+function isWidgetRpcErrorCode(value: unknown): value is WidgetRpcErrorCode {
+	return typeof value === "string" && WIDGET_RPC_ERROR_CODES.has(value);
+}
 
 /** Host → widget push envelope (spec §1.2 `HostPush`). Merges the present keys of
  *  `globals` into the widget's live global store; each present key overwrites. The
@@ -118,6 +140,10 @@ export type Capability =
 	| "native.notifications"
 	| "native.liveActivities"
 	| "core.listAgents"
+	// Cross-chat broadcast (grant `chat.sendFollowUp`) — the companion receives
+	// only redacted, caller-visible conversation summaries and can post an
+	// explicitly confirmed message into selected existing chats.
+	| "chat.broadcast"
 	| "ui.render"
 	| "app.http"
 	| "app.realtime"
@@ -127,6 +153,7 @@ export type Capability =
 	// never derived from a manifest grant (decisions doc D5, spec R8).
 	| "tool.call"
 	| "ui.sendMessage"
+	| "ui.toast"
 	| "widget.state"
 	| "ui.displayMode"
 	// Assistant bridge (grant `assistant:context`) — the app describes ITS page to
@@ -266,6 +293,9 @@ export type Capability =
 	// verb. One capability gates that whole family; the inbox's quest task check-off reuses
 	// the separate `quests.crud` capability (the app declares BOTH grants).
 	| "approvals.crud"
+	// Targeted Inbox notifications (grant `notifications:send-to-user`). Core
+	// re-checks the recipient against the node's organization/team roster.
+	| "notifications.send"
 	// Meetings (grant `meetings:crud`) — the `@ryu/meetings` app renders the
 	// record → live-transcript → AI-notes surface from its sandboxed companion frame.
 	// Host-direct (the monitors pattern): the host holds the node token and calls the
@@ -316,6 +346,7 @@ export type Capability =
 	// allowlist, where an undeclared sub-path is a hard 404. No navigation verb: the
 	// companion is the whole surface and never opens a shell tab.
 	| "reasoning.check"
+	| "safe-actions.manage"
 	// Deep Read (grant `rlm:query`) — the `@ryu/rlm` app loads a corpus, browses its
 	// outline, asks questions of it and reads run traces from its sandboxed companion
 	// frame. Host-direct with ONE generic forwarder, the same shape as
@@ -367,32 +398,46 @@ export interface RouteClaim {
 	title: string;
 }
 
-// --- Monitor payload shapes (grant `monitors:crud`). Minimal INLINE aliases so
-// rpc.ts stays dependency-free; they mirror Core's `/api/monitors/*` serde JSON
-// (snake_case) verbatim. The host forwards these through unchanged; the app owns
-// the richer typed copies in `@ryu/monitors-app/types`. ---
+// --- Monitor payload shapes (grant `monitors:crud`). These aliases point at the
+// canonical Core Client wire model so the RPC boundary, Desktop, and Companion all
+// carry the same required fields and notification variants. ---
+/** Stable host vocabulary for ephemeral notifications. This is intentionally
+ * independent of the renderer's toast library. */
+export type ToastVariant =
+	| "default"
+	| "success"
+	| "info"
+	| "warning"
+	| "error"
+	| "loading";
 
-/** A website monitor as Core returns it (opaque check/notify unions kept loose so
- *  rpc.ts carries no schema — Core validates server-side). */
-export interface MonitorRecord {
+export interface ToastShowInput {
+	description?: string;
+	duration?: number;
+	title: string;
+	variant?: ToastVariant;
+}
+
+export interface ToastUpdateInput {
+	description?: string;
+	duration?: number;
 	id: string;
-	name: string;
-	url: string;
-	[key: string]: unknown;
+	title?: string;
+	variant?: ToastVariant;
 }
 
-/** The create/update payload for a monitor (forwarded verbatim to Core). */
-export interface MonitorInputPayload {
-	name: string;
-	url: string;
-	[key: string]: unknown;
+export interface ToastDismissInput {
+	id: string;
 }
 
-/** A single check snapshot (loose — Core owns the shape). */
-export type MonitorSnapshot = Record<string, unknown>;
-
-/** A monitor alert (loose — Core owns the shape). */
-export type MonitorAlert = Record<string, unknown>;
+/** Bounds are part of the host contract, not renderer-library defaults. */
+export const TOAST_LIMITS = Object.freeze({
+	descriptionChars: 500,
+	durationMaxMs: 60_000,
+	durationMinMs: 1000,
+	idChars: 128,
+	titleChars: 120,
+});
 
 // --- Quest payload shapes (grant `quests:crud`). Minimal INLINE aliases so rpc.ts
 // stays dependency-free; they mirror Core's `/api/quests/*` serde JSON (snake_case)
@@ -423,6 +468,30 @@ export type QuestJudgeResult = Record<string, unknown>;
 export interface ActivityRecord {
 	id: string;
 	[key: string]: unknown;
+}
+
+/** A redacted conversation summary for the Chat Broadcast companion. The host
+ * never forwards message bodies through this list; the send service loads the
+ * transcript privately and returns only an accepted/failed result. */
+export interface ChatConversationSummary {
+	agent_id: string | null;
+	archived?: boolean;
+	created_at: number;
+	id: string;
+	last_message?: string;
+	last_message_at?: number;
+	last_message_role?: string;
+	message_count: number;
+	run_status: string | null;
+	title: string | null;
+	updated_at: number;
+	[key: string]: unknown;
+}
+
+/** Result returned after the host has detached an accepted chat stream. */
+export interface ChatSendResult {
+	conversation_id: string;
+	status: "accepted";
 }
 
 /** A Core-visible background process. The process owner handles the stop request;
@@ -689,6 +758,8 @@ export interface RealtimeConnectPayload {
 /** The host-safe join result; it contains no node token or websocket URL. */
 export interface RealtimeConnectionInfo {
 	access: "read" | "write";
+	/** Opaque handle for publish, presence, subscribe, and close calls. */
+	connection_id: string;
 	member_id: string;
 	presence: unknown[];
 	room_id: string;
@@ -715,6 +786,13 @@ export interface RealtimePresencePayload extends RealtimeConnectionPayload {
  *  mount and validated by the same resolver — with `PUT` in place of `PATCH`, because
  *  that is the verb the sidecar's policy route actually serves. */
 export interface ReasoningRequestPayload {
+	body?: unknown;
+	method?: "DELETE" | "GET" | "POST" | "PUT";
+	path: string;
+}
+
+/** One forwarded call onto Core's `/api/tools/plans` protected mount. */
+export interface SafeActionsRequestPayload {
 	body?: unknown;
 	method?: "DELETE" | "GET" | "POST" | "PUT";
 	path: string;
@@ -1067,6 +1145,18 @@ export interface HostServices {
 	 *  Core call); fire-and-forget from the frame's view (mirrors the desktop page's
 	 *  clickable row). */
 	activityOpenSession?(input: { session_id: string }): void;
+	// --- Chat Broadcast (grant `chat.sendFollowUp`). The companion can list only
+	// conversations visible to the current verified caller. `chatSend` loads the
+	// transcript in the trusted host, posts one real user turn, and returns after
+	// Core accepts the detached stream; the sandbox never receives a node token or
+	// transcript contents. --
+	/** List visible conversation summaries, including idle chats. */
+	chatListConversations?(): Promise<ChatConversationSummary[]>;
+	/** Post one message into an existing conversation. */
+	chatSend?(input: {
+		conversationId: string;
+		text: string;
+	}): Promise<ChatSendResult>;
 	/** List Core-visible background processes, running by default. */
 	backgroundList?(input: {
 		producer?: string;
@@ -1131,6 +1221,16 @@ export interface HostServices {
 		prompts?: string[];
 		tools?: string[];
 	}): Promise<void>;
+	/** Show an ephemeral host-rendered notification. The returned id is opaque and
+	 * caller-local: implementations must not reveal the renderer's global id and
+	 * must namespace it to the owning plugin before rendering. */
+	uiToastShow?(input: ToastShowInput): Promise<string> | string;
+	/** Update one toast previously returned to this caller. Unknown ids are a no-op
+	 * at the renderer boundary; they must never reach another plugin's toast. */
+	uiToastUpdate?(input: ToastUpdateInput): Promise<void> | void;
+	/** Dismiss one toast previously returned to this caller. There is deliberately
+	 * no global clear operation. */
+	uiToastDismiss?(input: ToastDismissInput): Promise<void> | void;
 	/** List agents (`GET /api/agents`) for the New-automation picker (id+name). */
 	calendarAgents?(): Promise<CalendarAgentRecord[]>;
 	/** Create (or update) the scheduled workflow that runs an agent on a schedule,
@@ -1205,6 +1305,7 @@ export interface HostServices {
 		size?: string;
 		provider?: string;
 		model?: string;
+		input_images?: string[];
 	}): Promise<string[]>;
 	/** Generate video clip(s) from a prompt (`/api/video/generate`, polling cloud
 	 *  jobs internally). Returns `{ url, mediaType }[]` with `url` a `data:` URL. */
@@ -1258,6 +1359,10 @@ export interface HostServices {
 	/** List the agents on the active node, PROJECTED to `{id,name}` only.
 	 *  Privileged: the host holds the token; the projection never leaks it. */
 	listAgents(): Promise<unknown>;
+	/** Read the shared, secret-free provider/model/agent/app/hook catalog. */
+	catalogSnapshot?(): Promise<RyuCatalogSnapshot>;
+	/** Discover models for one provider; Core resolves credentials server-side. */
+	catalogModels?(input: { providerId: string }): Promise<RyuCatalogModels>;
 	/** List agents with the fields a per-agent model picker needs (id/name/engine/
 	 *  model/recommended) — a richer, still-secret-free projection than listAgents. */
 	listAgentsFull?(): Promise<
@@ -1349,6 +1454,7 @@ export interface HostServices {
 		prompt: string;
 		system?: string;
 		model?: string;
+		provider?: string;
 		model_pref_key?: string;
 		effort?: string;
 	}): Promise<string>;
@@ -1373,7 +1479,7 @@ export interface HostServices {
 	/** List all monitors (`GET /api/monitors`). */
 	monitorsList?(): Promise<MonitorRecord[]>;
 	/** Run one check now (`POST /api/monitors/:id/run`). Returns the check status. */
-	monitorsRun?(input: { id: string }): Promise<string>;
+	monitorsRun?(input: { id: string }): Promise<MonitorCheckStatus>;
 	/** List the selected monitor's check snapshots (`GET /api/monitors/:id/snapshots`). */
 	monitorsSnapshots?(input: {
 		id: string;
@@ -1404,6 +1510,12 @@ export interface HostServices {
 	}): Promise<NotificationRecord[]>;
 	/** Mark a notification read (`POST /api/notifications/:id/read`). */
 	notificationsMarkRead?(input: { id: string }): Promise<void>;
+	/** Deliver a notification to one verified member in the node's org/team scope. */
+	notificationsSend?(input: {
+		body?: string;
+		target_user_id: string;
+		title: string;
+	}): Promise<{ notification_id: string; target_user_id: string }>;
 	/** Restore an archived notification (`POST /api/notifications/:id/unarchive`). */
 	notificationsUnarchive?(input: { id: string }): Promise<void>;
 	/** Report the widget's intrinsic content height so the host can size the frame
@@ -1660,6 +1772,8 @@ export interface HostServices {
 	 *  check. The host validates `path` (see {@link ReasoningRequestPayload}) before
 	 *  building the URL; it never accepts a host or an absolute URL from the frame. */
 	reasoningRequest?(input: ReasoningRequestPayload): Promise<unknown>;
+	/** Forward one capability-gated call to Core's fixed Safe Actions mount. */
+	safeActionsRequest?(input: SafeActionsRequestPayload): Promise<unknown>;
 
 	// --- Deep Read (grant `rlm:query`). The `@ryu/rlm` app loads a corpus, browses
 	// its outline and asks questions of it. Host-direct through ONE forwarder, the
@@ -1705,6 +1819,25 @@ export interface HostServices {
 	// `app:<plugin_id>` — persisted in the Space, search-embedded, backlinked. `source`
 	// is a string (JSON.stringify structured content yourself, e.g. a scene). ---
 
+	/** Resolve or create a user-owned Space by name. */
+	spacesEnsureSpace?(input: {
+		name: string;
+		description?: string | null;
+	}): Promise<string>;
+	/** Search a Space through Core's semantic retrieval endpoint. */
+	spacesSearch?(input: {
+		space_id: string;
+		query: string;
+		limit?: number;
+	}): Promise<
+		{
+			chunk_id: string;
+			content: string;
+			distance: number;
+			document_id: string;
+		}[]
+	>;
+
 	/** Create an empty app-owned document in `space_id`; returns its doc id. */
 	spacesCreateDoc?(input: { space_id: string; title: string }): Promise<string>;
 	/** Delete an app-owned document (and its links/versions). */
@@ -1749,6 +1882,13 @@ export interface HostServices {
 	}): Promise<string | null>;
 	/** List the keys the app has set in a namespace, newest first (`host.storage_keys`). */
 	storageKeys?(input: { namespace?: string }): Promise<string[]>;
+	/** Atomically replace or delete a value when it still equals `expected`. */
+	storageCompareAndSet?(input: {
+		namespace?: string;
+		key: string;
+		expected?: string | null;
+		value?: string | null;
+	}): Promise<boolean>;
 	/** Upsert a durable KV value (`host.storage_set`). `value` MUST be a string. */
 	storageSet?(input: {
 		namespace?: string;
@@ -2023,6 +2163,7 @@ const LOCAL_HOST_CAPABILITIES: ReadonlySet<Capability> = new Set([
  *  greenfield app host-bridge methods opt in; the legacy paths keep string errors so
  *  their existing readers are unaffected. */
 const CODED_ERROR_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
+	"ui.toast",
 	"app.http",
 	"app.realtime",
 	"model.complete",
@@ -2043,16 +2184,19 @@ const CODED_ERROR_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 	// selected in another app, which is a wider reach than editing a todo.
 	"quests.capture",
 	"activity.read",
+	"chat.broadcast",
 	"background.control",
 	"mail.crud",
 	"calendar.crud",
 	"learning.crud",
 	"approvals.crud",
+	"notifications.send",
 	"meetings.crud",
 	"social.crud",
 	"subtitles.crud",
 	"skills.crud",
 	"reasoning.check",
+	"safe-actions.manage",
 	"rlm.query",
 	"blueprint.review",
 	"tuition.crud",
@@ -2168,21 +2312,28 @@ export class CodedRpcError extends Error {
 
 /**
  * Serialize a thrown error into the `error` field of an {@link RpcResponse}. A
- * {@link CodedRpcError} (or anything carrying a string `code`) becomes the
- * structured `{ code, message }` a widget expects (D6); everything else — notably
- * the legacy {@link CapabilityError} — stays a plain string so the existing plugin
- * bridge (which checks `typeof error === "string"`) is unaffected.
+ * {@link CodedRpcError} (or anything carrying a PUBLIC widget `code`) becomes the
+ * structured `{ code, message }` a widget expects (D6). An unknown string code is
+ * normalized to `server_error` instead of escaping the closed wire vocabulary.
+ * Everything else — notably the legacy {@link CapabilityError} — stays a plain
+ * string so the existing plugin bridge (which checks `typeof error === "string"`)
+ * is unaffected.
  */
 export function toRpcError(err: unknown): string | RpcErrorPayload {
-	if (err && typeof err === "object" && "code" in err) {
-		const coded = err as { code?: unknown; message?: unknown };
-		if (typeof coded.code === "string") {
-			return {
-				code: coded.code as WidgetRpcErrorCode,
-				message:
-					typeof coded.message === "string" ? coded.message : String(err),
-			};
-		}
+	if (
+		err &&
+		typeof err === "object" &&
+		"code" in err &&
+		typeof err.code === "string"
+	) {
+		const message =
+			"message" in err && typeof err.message === "string"
+				? err.message
+				: String(err);
+		return {
+			code: isWidgetRpcErrorCode(err.code) ? err.code : "server_error",
+			message,
+		};
 	}
 	return err instanceof Error ? err.message : String(err);
 }
@@ -2231,24 +2382,7 @@ export async function dispatchRpc(
 	granted: ReadonlySet<Capability>,
 	services: HostServices
 ): Promise<unknown> {
-	const capability = METHOD_CAPABILITY[method];
-	if (!capability) {
-		throw new CapabilityError(`Unknown method: ${method}`);
-	}
-	if (!(granted.has(capability) || LOCAL_HOST_CAPABILITIES.has(capability))) {
-		// The app host-bridge methods are greenfield (no legacy string-error reader),
-		// so a denied call gets a structured `denied` code the app can surface as a
-		// real permission message. The legacy paths keep the plain-string CapabilityError.
-		if (CODED_ERROR_CAPABILITIES.has(capability)) {
-			throw new CodedRpcError(
-				"denied",
-				`Capability not granted: ${capability} (required by ${method})`
-			);
-		}
-		throw new CapabilityError(
-			`Capability not granted: ${capability} (required by ${method})`
-		);
-	}
+	assertGranted(method, granted);
 	switch (method) {
 		case "host.capabilities":
 			if (args.length !== 0) {
@@ -2306,6 +2440,51 @@ export async function dispatchRpc(
 				throw new CapabilityError("core.listAgents is not available");
 			}
 			return await services.listAgents();
+		case "catalog.snapshot":
+			if (args.length !== 0) {
+				throw new CapabilityError("catalog.snapshot takes no arguments");
+			}
+			if (!services.catalogSnapshot) {
+				throw new CapabilityError("catalog.snapshot is not available");
+			}
+			return await services.catalogSnapshot();
+		case "catalog.models": {
+			const input = asCatalogModelsArg(args[0]);
+			if (!input || args.length !== 1) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"catalog.models requires a { providerId: string }"
+				);
+			}
+			if (!services.catalogModels) {
+				throw new CodedRpcError(
+					"server_error",
+					"catalog.models is not available"
+				);
+			}
+			return await services.catalogModels(input);
+		}
+		case "chat.list":
+			if (args.length !== 0) {
+				throw new CodedRpcError("invalid_args", "chat.list takes no arguments");
+			}
+			if (!services.chatListConversations) {
+				throw new CodedRpcError("server_error", "chat.list is not available");
+			}
+			return await services.chatListConversations();
+		case "chat.send": {
+			const input = asChatSendArg(args[0]);
+			if (!input || args.length !== 1) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"chat.send requires { conversationId: string, text: string }"
+				);
+			}
+			if (!services.chatSend) {
+				throw new CodedRpcError("server_error", "chat.send is not available");
+			}
+			return await services.chatSend(input);
+		}
 		case "ui.registerRoute": {
 			// `args[0]` is the route claim `{path,title}`. The host service is
 			// pluginId-scoped and rejects any non-own path (the anti-phishing gate).
@@ -2350,6 +2529,63 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.sendFollowUpMessage(input);
+		}
+		case "ui.toast.show": {
+			const input = asToastShowArg(args[0]);
+			if (!input || args.length !== 1) {
+				throw new CodedRpcError(
+					"invalid_args",
+					`ui.toast.show requires a bounded { title, description?, variant?, duration? }; title max ${TOAST_LIMITS.titleChars} chars`
+				);
+			}
+			if (!services.uiToastShow) {
+				throw new CodedRpcError(
+					"server_error",
+					"ui.toast.show is not available"
+				);
+			}
+			const id = await services.uiToastShow(input);
+			if (!asToastId(id)) {
+				throw new CodedRpcError(
+					"server_error",
+					"ui.toast.show returned an invalid opaque id"
+				);
+			}
+			return id;
+		}
+		case "ui.toast.update": {
+			const input = asToastUpdateArg(args[0]);
+			if (!input || args.length !== 1) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"ui.toast.update requires { id } and at least one bounded toast field"
+				);
+			}
+			if (!services.uiToastUpdate) {
+				throw new CodedRpcError(
+					"server_error",
+					"ui.toast.update is not available"
+				);
+			}
+			await services.uiToastUpdate(input);
+			return null;
+		}
+		case "ui.toast.dismiss": {
+			const input = asToastDismissArg(args[0]);
+			if (!input || args.length !== 1) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"ui.toast.dismiss requires a bounded { id: string }"
+				);
+			}
+			if (!services.uiToastDismiss) {
+				throw new CodedRpcError(
+					"server_error",
+					"ui.toast.dismiss is not available"
+				);
+			}
+			await services.uiToastDismiss(input);
+			return null;
 		}
 		case "assistant.publishContext": {
 			const input = asAssistantContextArg(args[0]);
@@ -2616,6 +2852,22 @@ export async function dispatchRpc(
 			}
 			return await services.storageKeys(input);
 		}
+		case "storage.compareAndSet": {
+			const input = asStorageCompareAndSetArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"storage.compareAndSet requires a { key: string }"
+				);
+			}
+			if (!services.storageCompareAndSet) {
+				throw new CodedRpcError(
+					"server_error",
+					"storage.compareAndSet is not available"
+				);
+			}
+			return await services.storageCompareAndSet(input);
+		}
 		case "crypto.seal": {
 			const input = asCryptoValueArg(args[0]);
 			if (!input) {
@@ -2650,6 +2902,38 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.cryptoStatus();
+		}
+		case "spaces.ensureSpace": {
+			const input = asSpacesEnsureArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"spaces.ensureSpace requires { name: string, description?: string }"
+				);
+			}
+			if (!services.spacesEnsureSpace) {
+				throw new CodedRpcError(
+					"server_error",
+					"spaces.ensureSpace is not available"
+				);
+			}
+			return await services.spacesEnsureSpace(input);
+		}
+		case "spaces.search": {
+			const input = asSpacesSearchArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"spaces.search requires { space_id: string, query: string, limit?: number }"
+				);
+			}
+			if (!services.spacesSearch) {
+				throw new CodedRpcError(
+					"server_error",
+					"spaces.search is not available"
+				);
+			}
+			return await services.spacesSearch(input);
 		}
 		case "spaces.createDoc": {
 			const input = asSpacesCreateArg(args[0]);
@@ -3986,6 +4270,22 @@ export async function dispatchRpc(
 			return await services.notificationsList(
 				args[0] as { archived?: boolean }
 			);
+		case "notifications.send": {
+			const input = asNotificationSendArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"notifications.send requires { target_user_id: string, title: string, body?: string }"
+				);
+			}
+			if (!services.notificationsSend) {
+				throw new CodedRpcError(
+					"server_error",
+					"notifications.send is not available"
+				);
+			}
+			return await services.notificationsSend(input);
+		}
 		case "notifications.markRead": {
 			const input = asQuestIdArg(args[0]);
 			if (!input) {
@@ -4395,6 +4695,22 @@ export async function dispatchRpc(
 			}
 			return await services.reasoningRequest(input);
 		}
+		case "safeActions.request": {
+			const input = asSafeActionsRequestArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"safeActions.request requires a relative { path, method? } under /api/tools/plans"
+				);
+			}
+			if (!services.safeActionsRequest) {
+				throw new CodedRpcError(
+					"server_error",
+					"safeActions.request is not available"
+				);
+			}
+			return await services.safeActionsRequest(input);
+		}
 		case "rlm.request": {
 			const input = asRlmRequestArg(args[0]);
 			if (!input) {
@@ -4619,6 +4935,165 @@ export async function dispatchRpc(
 			// Unreachable: a method in METHOD_CAPABILITY must have a case here.
 			throw new CapabilityError(`No handler for method: ${method}`);
 	}
+}
+
+const TOAST_VARIANTS: ReadonlySet<ToastVariant> = new Set([
+	"default",
+	"success",
+	"info",
+	"warning",
+	"error",
+	"loading",
+]);
+const TOAST_SHOW_KEYS: ReadonlySet<string> = new Set([
+	"title",
+	"description",
+	"variant",
+	"duration",
+]);
+const TOAST_UPDATE_KEYS: ReadonlySet<string> = new Set([
+	"id",
+	...TOAST_SHOW_KEYS,
+]);
+const TOAST_DISMISS_KEYS: ReadonlySet<string> = new Set(["id"]);
+
+function isToastDuration(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isInteger(value) &&
+		value >= TOAST_LIMITS.durationMinMs &&
+		value <= TOAST_LIMITS.durationMaxMs
+	);
+}
+
+function isToastVariant(value: unknown): value is ToastVariant {
+	return typeof value === "string" && TOAST_VARIANTS.has(value as ToastVariant);
+}
+
+function hasOnlyKeys(
+	candidate: Record<string, unknown>,
+	allowed: ReadonlySet<string>
+): boolean {
+	return Object.keys(candidate).every((key) => allowed.has(key));
+}
+
+/** Validate a caller-local opaque toast id. It is bounded but otherwise has no
+ * public structure: apps must only pass back an id returned by `show`. */
+export function asToastId(value: unknown): string | null {
+	return typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= TOAST_LIMITS.idChars
+		? value
+		: null;
+}
+
+/** Strictly validate `ui.toast.show`. Unknown fields are rejected so actions,
+ * renderer styles and placement cannot accidentally become an unofficial API. */
+export function asToastShowArg(data: unknown): ToastShowInput | null {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		return null;
+	}
+	const candidate = data as Record<string, unknown>;
+	if (
+		!hasOnlyKeys(candidate, TOAST_SHOW_KEYS) ||
+		typeof candidate.title !== "string" ||
+		candidate.title.trim().length === 0 ||
+		candidate.title.length > TOAST_LIMITS.titleChars
+	) {
+		return null;
+	}
+	if (
+		candidate.description !== undefined &&
+		(typeof candidate.description !== "string" ||
+			candidate.description.length > TOAST_LIMITS.descriptionChars)
+	) {
+		return null;
+	}
+	if (candidate.variant !== undefined && !isToastVariant(candidate.variant)) {
+		return null;
+	}
+	if (
+		candidate.duration !== undefined &&
+		!isToastDuration(candidate.duration)
+	) {
+		return null;
+	}
+	const output: ToastShowInput = { title: candidate.title };
+	if (typeof candidate.description === "string") {
+		output.description = candidate.description;
+	}
+	if (isToastVariant(candidate.variant)) {
+		output.variant = candidate.variant;
+	}
+	if (isToastDuration(candidate.duration)) {
+		output.duration = candidate.duration;
+	}
+	return output;
+}
+
+/** Strictly validate `ui.toast.update`. At least one mutable field is required;
+ * an empty description is valid and clears the existing description. */
+export function asToastUpdateArg(data: unknown): ToastUpdateInput | null {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		return null;
+	}
+	const candidate = data as Record<string, unknown>;
+	const id = asToastId(candidate.id);
+	if (!(hasOnlyKeys(candidate, TOAST_UPDATE_KEYS) && id)) {
+		return null;
+	}
+	const hasTitle = Object.hasOwn(candidate, "title");
+	const hasDescription = Object.hasOwn(candidate, "description");
+	const hasVariant = Object.hasOwn(candidate, "variant");
+	const hasDuration = Object.hasOwn(candidate, "duration");
+	if (!(hasTitle || hasDescription || hasVariant || hasDuration)) {
+		return null;
+	}
+	if (
+		hasTitle &&
+		(typeof candidate.title !== "string" ||
+			candidate.title.trim().length === 0 ||
+			candidate.title.length > TOAST_LIMITS.titleChars)
+	) {
+		return null;
+	}
+	if (
+		hasDescription &&
+		(typeof candidate.description !== "string" ||
+			candidate.description.length > TOAST_LIMITS.descriptionChars)
+	) {
+		return null;
+	}
+	if (hasVariant && !isToastVariant(candidate.variant)) {
+		return null;
+	}
+	if (hasDuration && !isToastDuration(candidate.duration)) {
+		return null;
+	}
+	const output: ToastUpdateInput = { id };
+	if (hasTitle) {
+		output.title = candidate.title as string;
+	}
+	if (hasDescription) {
+		output.description = candidate.description as string;
+	}
+	if (hasVariant) {
+		output.variant = candidate.variant as ToastVariant;
+	}
+	if (hasDuration) {
+		output.duration = candidate.duration as number;
+	}
+	return output;
+}
+
+/** Strictly validate `ui.toast.dismiss`; only one caller-local id is accepted. */
+export function asToastDismissArg(data: unknown): ToastDismissInput | null {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		return null;
+	}
+	const candidate = data as Record<string, unknown>;
+	const id = asToastId(candidate.id);
+	return id && hasOnlyKeys(candidate, TOAST_DISMISS_KEYS) ? { id } : null;
 }
 
 /** Narrow an RPC argument to a `{ prompt: string }`. Returns null for any other
@@ -4906,6 +5381,7 @@ export function asModelCompleteArg(data: unknown): {
 	prompt: string;
 	system?: string;
 	model?: string;
+	provider?: string;
 	model_pref_key?: string;
 	effort?: string;
 } | null {
@@ -4920,10 +5396,17 @@ export function asModelCompleteArg(data: unknown): {
 		prompt: string;
 		system?: string;
 		model?: string;
+		provider?: string;
 		model_pref_key?: string;
 		effort?: string;
 	} = { prompt: o.prompt };
-	for (const f of ["system", "model", "model_pref_key", "effort"] as const) {
+	for (const f of [
+		"system",
+		"model",
+		"provider",
+		"model_pref_key",
+		"effort",
+	] as const) {
 		const v = optionalString(o, f);
 		if (v === null) {
 			return null;
@@ -4933,6 +5416,45 @@ export function asModelCompleteArg(data: unknown): {
 		}
 	}
 	return out;
+}
+
+/** Narrow a shared catalog discovery request to one non-empty provider id. */
+export function asCatalogModelsArg(data: unknown): {
+	providerId: string;
+} | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const providerId = (data as Record<string, unknown>).providerId;
+	return typeof providerId === "string" && providerId.trim().length > 0
+		? { providerId: providerId.trim() }
+		: null;
+}
+
+/** Narrow a Chat Broadcast send to one existing conversation id and a bounded,
+ * non-empty user message. The host performs the ACL check again on Core; this
+ * validator only keeps malformed or oversized frame input off the transport. */
+export function asChatSendArg(data: unknown): {
+	conversationId: string;
+	text: string;
+} | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const input = data as Record<string, unknown>;
+	const conversationId = input.conversationId;
+	const text = input.text;
+	if (
+		typeof conversationId !== "string" ||
+		conversationId.trim().length === 0 ||
+		conversationId.length > 200 ||
+		typeof text !== "string" ||
+		text.trim().length === 0 ||
+		text.length > 8000
+	) {
+		return null;
+	}
+	return { conversationId: conversationId.trim(), text };
 }
 
 /** Narrow an arg to `agent.run` input: `task` required non-empty; `agent_id`/`preset`
@@ -5031,6 +5553,40 @@ export function asStorageKeysArg(data: unknown): { namespace?: string } {
 	return typeof ns === "string" ? { namespace: ns } : {};
 }
 
+/** Narrow an atomic KV update. `null` means absent for either comparison side. */
+export function asStorageCompareAndSetArg(data: unknown): {
+	namespace?: string;
+	key: string;
+	expected?: string | null;
+	value?: string | null;
+} | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	if (typeof o.key !== "string" || o.key.length === 0) {
+		return null;
+	}
+	const ns = optionalString(o, "namespace");
+	if (ns === null) {
+		return null;
+	}
+	for (const field of ["expected", "value"] as const) {
+		const value = o[field];
+		if (value !== undefined && value !== null && typeof value !== "string") {
+			return null;
+		}
+	}
+	return {
+		...(ns === undefined ? {} : { namespace: ns }),
+		key: o.key,
+		...(o.expected === undefined
+			? {}
+			: { expected: o.expected as string | null }),
+		...(o.value === undefined ? {} : { value: o.value as string | null }),
+	};
+}
+
 /** How the node holds the key its apps seal under (`host.crypto_status`).
  *  Carries no key material — only which custody rung is live. `key_beside_data`
  *  is the one an app should actually branch on: true means the key sits in a file
@@ -5069,6 +5625,64 @@ export function asSpacesCreateArg(
 		return null;
 	}
 	return { space_id: o.space_id, title: o.title };
+}
+
+/** Narrow to `{ name: string, description?: string | null }` (spaces.ensureSpace). */
+export function asSpacesEnsureArg(data: unknown): {
+	name: string;
+	description?: string | null;
+} | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	if (typeof o.name !== "string" || o.name.trim().length === 0) {
+		return null;
+	}
+	const description = o.description;
+	if (
+		description !== undefined &&
+		description !== null &&
+		typeof description !== "string"
+	) {
+		return null;
+	}
+	return {
+		name: o.name.trim(),
+		...(description === undefined ? {} : { description }),
+	};
+}
+
+/** Narrow to a bounded semantic Space query. */
+export function asSpacesSearchArg(data: unknown): {
+	space_id: string;
+	query: string;
+	limit?: number;
+} | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	if (
+		typeof o.space_id !== "string" ||
+		o.space_id.trim().length === 0 ||
+		typeof o.query !== "string" ||
+		o.query.trim().length === 0
+	) {
+		return null;
+	}
+	const limit = o.limit;
+	if (
+		limit !== undefined &&
+		(typeof limit !== "number" || !Number.isFinite(limit) || limit < 1)
+	) {
+		return null;
+	}
+	return {
+		space_id: o.space_id.trim(),
+		query: o.query.trim(),
+		...(limit === undefined ? {} : { limit: Math.min(50, Math.floor(limit)) }),
+	};
 }
 
 /** Narrow to `{ doc_id: string }` (spaces.getDoc / deleteDoc). */
@@ -5128,6 +5742,7 @@ export function asMediaImageArg(data: unknown): {
 	size?: string;
 	provider?: string;
 	model?: string;
+	input_images?: string[];
 } | null {
 	if (typeof data !== "object" || data === null) {
 		return null;
@@ -5142,6 +5757,7 @@ export function asMediaImageArg(data: unknown): {
 		size?: string;
 		provider?: string;
 		model?: string;
+		input_images?: string[];
 	} = { prompt: o.prompt };
 	const count = optionalNonNegNumber(o, "count");
 	if (count === null) {
@@ -5158,6 +5774,21 @@ export function asMediaImageArg(data: unknown): {
 		if (v !== undefined) {
 			out[f] = v;
 		}
+	}
+	if ("input_images" in o && o.input_images !== undefined) {
+		if (
+			!Array.isArray(o.input_images) ||
+			o.input_images.length > 16 ||
+			o.input_images.some(
+				(value) =>
+					typeof value !== "string" ||
+					value.length === 0 ||
+					value.length > 16 * 1024 * 1024
+			)
+		) {
+			return null;
+		}
+		out.input_images = o.input_images;
 	}
 	return out;
 }
@@ -5301,18 +5932,106 @@ export function asMonitorIdArg(data: unknown): { id: string } | null {
 	return { id: o.id };
 }
 
-/** Narrow a monitor create payload. Only the shape (`name`+`url` strings) is
- *  checked — Core validates the full check/notify unions server-side — and the
- *  whole object is forwarded verbatim so unknown fields survive. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCheckType(value: unknown): value is MonitorCheckType {
+	if (!isRecord(value) || typeof value.type !== "string") {
+		return false;
+	}
+	if (value.type === "uptime") {
+		return (
+			value.expect_status === undefined ||
+			(Array.isArray(value.expect_status) &&
+				value.expect_status.every((status) => typeof status === "number"))
+		);
+	}
+	if (value.type === "keyword") {
+		return (
+			typeof value.pattern === "string" &&
+			(value.is_regex === undefined || typeof value.is_regex === "boolean") &&
+			(value.case_sensitive === undefined ||
+				typeof value.case_sensitive === "boolean") &&
+			(value.alert_when_present === undefined ||
+				typeof value.alert_when_present === "boolean")
+		);
+	}
+	if (value.type === "content_diff") {
+		return (
+			value.region_regex === undefined ||
+			value.region_regex === null ||
+			typeof value.region_regex === "string"
+		);
+	}
+	if (value.type === "price") {
+		return (
+			typeof value.extract_regex === "string" &&
+			(value.comparator === undefined ||
+				[
+					"changed",
+					"less_than",
+					"greater_than",
+					"drops_by_pct",
+					"rises_by_pct",
+				].includes(value.comparator as string)) &&
+			(value.threshold === undefined ||
+				value.threshold === null ||
+				typeof value.threshold === "number")
+		);
+	}
+	if (value.type === "stock") {
+		return (
+			typeof value.in_stock_pattern === "string" &&
+			(value.is_regex === undefined || typeof value.is_regex === "boolean") &&
+			(value.alert_when_in_stock === undefined ||
+				typeof value.alert_when_in_stock === "boolean")
+		);
+	}
+	return false;
+}
+
+function isNotifyTarget(value: unknown): value is MonitorNotifyTarget {
+	if (!isRecord(value) || typeof value.kind !== "string") {
+		return false;
+	}
+	if (value.kind === "webhook") {
+		return typeof value.url === "string";
+	}
+	if (value.kind === "telegram") {
+		return (
+			typeof value.bot_token === "string" && typeof value.chat_id === "string"
+		);
+	}
+	if (value.kind === "expo_push") {
+		return typeof value.token === "string";
+	}
+	return value.kind === "email" && typeof value.to === "string";
+}
+
+/** Narrow a monitor create/update payload to the canonical Core wire model while
+ * preserving unknown fields for forward-compatible server validation. */
+function isMonitorInput(value: unknown): value is MonitorInputPayload {
+	if (!isRecord(value)) {
+		return false;
+	}
+	return (
+		(value.backend === "http" ||
+			value.backend === "spider" ||
+			value.backend === "agentbrowser") &&
+		typeof value.check === "object" &&
+		isCheckType(value.check) &&
+		typeof value.enabled === "boolean" &&
+		typeof value.interval === "string" &&
+		typeof value.name === "string" &&
+		Array.isArray(value.notify) &&
+		value.notify.every(isNotifyTarget) &&
+		typeof value.url === "string"
+	);
+}
+
 export function asMonitorInputArg(data: unknown): MonitorInputPayload | null {
-	if (typeof data !== "object" || data === null || Array.isArray(data)) {
-		return null;
-	}
-	const o = data as Record<string, unknown>;
-	if (typeof o.name !== "string" || typeof o.url !== "string") {
-		return null;
-	}
-	return o as MonitorInputPayload;
+	return isMonitorInput(data) ? data : null;
 }
 
 /** Narrow a monitor update arg `{ id, input }`. The nested `input` is validated
@@ -5364,6 +6083,33 @@ export function asQuestIdArg(data: unknown): { id: string } | null {
 		return null;
 	}
 	return { id: o.id };
+}
+
+/** Narrow an explicit-recipient Inbox notification payload. Core applies the
+ *  authoritative length and membership bounds after the host gate. */
+export function asNotificationSendArg(data: unknown): {
+	body?: string;
+	target_user_id: string;
+	title: string;
+} | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	if (
+		typeof o.target_user_id !== "string" ||
+		o.target_user_id.length === 0 ||
+		typeof o.title !== "string" ||
+		o.title.length === 0 ||
+		(o.body !== undefined && typeof o.body !== "string")
+	) {
+		return null;
+	}
+	return {
+		...(o.body === undefined ? {} : { body: o.body }),
+		target_user_id: o.target_user_id,
+		title: o.title,
+	};
 }
 
 /** Read an optional boolean field off a loose arg object. Anything that is not a
@@ -5951,6 +6697,49 @@ export function asReasoningRequestArg(
 		path: resolved,
 		method,
 		...(o.body === undefined ? {} : { body: o.body }),
+	};
+}
+
+const SAFE_ACTIONS_METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
+const SAFE_ACTIONS_MOUNT = "/api/tools/plans";
+
+/** Validate a frame-chosen Safe Actions sub-path with the same URL-parser
+ * containment rule used by the other fixed-mount companion bridges. */
+export function asSafeActionsRequestArg(
+	data: unknown
+): SafeActionsRequestPayload | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const value = data as Record<string, unknown>;
+	if (
+		typeof value.path !== "string" ||
+		!value.path.startsWith("/") ||
+		value.path.startsWith("//") ||
+		value.path.includes("\\") ||
+		value.path.includes("?") ||
+		value.path.includes("#")
+	) {
+		return null;
+	}
+	const path = resolveMountedRequestPath(SAFE_ACTIONS_MOUNT, value.path);
+	if (path === null) {
+		return null;
+	}
+	let method: SafeActionsRequestPayload["method"] = "GET";
+	if (value.method !== undefined) {
+		if (
+			typeof value.method !== "string" ||
+			!SAFE_ACTIONS_METHODS.has(value.method)
+		) {
+			return null;
+		}
+		method = value.method as SafeActionsRequestPayload["method"];
+	}
+	return {
+		path,
+		method,
+		...(value.body === undefined ? {} : { body: value.body }),
 	};
 }
 

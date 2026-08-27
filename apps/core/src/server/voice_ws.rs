@@ -86,8 +86,8 @@ pub async fn voice_ws(
 ) -> Response {
     // Node admittance (mirror `require_auth` / `realtime_ws`): enforce only a
     // non-empty configured token; empty/unset = loopback dev, allow.
-    if let Some(expected) = state
-        .node_token
+    let active_node_token = crate::node_token::active_token();
+    if let Some(expected) = active_node_token
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())

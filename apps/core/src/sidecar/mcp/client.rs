@@ -49,6 +49,23 @@ impl std::fmt::Display for McpHttpFailure {
 
 impl std::error::Error for McpHttpFailure {}
 
+/// Structured JSON-RPC failure preserved for protocol-aware callers. Display is
+/// intentionally compact; `data` is available only through downcasting.
+#[derive(Clone, Debug)]
+pub struct McpRpcFailure {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<Value>,
+}
+
+impl std::fmt::Display for McpRpcFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "MCP error {}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for McpRpcFailure {}
+
 /// The MCP protocol version this client offers during a **stdio** `initialize`.
 ///
 /// Deliberately left at the original revision. Every stdio server Core spawns
@@ -253,7 +270,7 @@ enum FrameVerdict {
     /// Not ours (a notification, another id, or unparseable) — keep reading.
     Skip,
     /// Ours, and it carried a JSON-RPC `error` object.
-    Failed(String),
+    Failed(McpRpcFailure),
     /// Ours: the `result` value (`null` when the server omitted it).
     Done(Value),
 }
@@ -289,7 +306,20 @@ fn classify_value(value: &Value, id: i64) -> FrameVerdict {
         return FrameVerdict::Skip;
     }
     if let Some(err) = value.get("error") {
-        return FrameVerdict::Failed(err.to_string());
+        let code = err.get("code").and_then(Value::as_i64).unwrap_or(-32603);
+        let message = err
+            .get("message")
+            .and_then(Value::as_str)
+            .filter(|message| !message.is_empty())
+            .unwrap_or("MCP request failed")
+            .chars()
+            .take(1024)
+            .collect();
+        return FrameVerdict::Failed(McpRpcFailure {
+            code,
+            message,
+            data: err.get("data").cloned(),
+        });
     }
     FrameVerdict::Done(value.get("result").cloned().unwrap_or(Value::Null))
 }
@@ -1147,7 +1177,7 @@ impl McpConnection {
                 };
                 match classify_frame(&raw, id) {
                     FrameVerdict::Skip => continue,
-                    FrameVerdict::Failed(err) => return Err(anyhow!("MCP error: {err}")),
+                    FrameVerdict::Failed(err) => return Err(anyhow!(err)),
                     FrameVerdict::Done(result) => return Ok(result),
                 }
             }
@@ -1598,7 +1628,7 @@ mod tests {
         let FrameVerdict::Failed(msg) = classify_frame(&err_frames[0], 3) else {
             panic!("an error frame with a matching id must fail the request");
         };
-        assert!(msg.contains("-32601"), "unexpected: {msg}");
+        assert_eq!(msg.code, -32601);
     }
 
     /// A stream whose last event has no trailing blank line still yields its

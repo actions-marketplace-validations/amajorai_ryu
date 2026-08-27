@@ -28,6 +28,7 @@ use crate::sidecar::active_engine::{is_local_engine, local_engine_url, ActiveEng
 const SUGGESTIONS_MODEL_PREF: &str = "chat-suggestions-model";
 /// Preference: master toggle for next-prompt suggestions. Defaults on.
 const SUGGESTIONS_ENABLED_PREF: &str = "chat-suggestions-enabled";
+const PROMPT_SUGGESTIONS_PLUGIN_ID: &str = "@ryu/prompt-suggestions";
 
 /// How many recent turns we feed the model — enough for continuity without
 /// blowing a small local context just to propose three chips.
@@ -72,6 +73,9 @@ pub async fn chat_suggestions(
 }
 
 async fn generate_suggestions(state: &ServerState, conversation_id: &str) -> Option<Vec<String>> {
+    if !prompt_suggestions_plugin_enabled(&state.app_store).await {
+        return Some(Vec::new());
+    }
     // Master toggle (default on).
     if let Ok(Some(v)) = state.preferences.get(SUGGESTIONS_ENABLED_PREF).await {
         if v.trim() == "false" {
@@ -96,6 +100,14 @@ async fn generate_suggestions(state: &ServerState, conversation_id: &str) -> Opt
 
     let raw = generate(state, &transcript).await?;
     Some(parse_suggestions(&raw))
+}
+
+async fn prompt_suggestions_plugin_enabled(store: &crate::plugins::PluginStore) -> bool {
+    store.list().await.ok().is_some_and(|records| {
+        records
+            .iter()
+            .any(|record| record.id == PROMPT_SUGGESTIONS_PLUGIN_ID && record.enabled)
+    })
 }
 
 /// Flatten recent messages into a compact role-labelled transcript, capped so a
@@ -300,7 +312,26 @@ fn clean_line(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_suggestions;
+    use super::{parse_suggestions, prompt_suggestions_plugin_enabled, PROMPT_SUGGESTIONS_PLUGIN_ID};
+    use crate::plugins::PluginStore;
+
+    #[tokio::test]
+    async fn plugin_lifecycle_gates_the_single_suggestion_generator() {
+        let store = PluginStore::open_in_memory().expect("in-memory plugin store");
+        assert!(!prompt_suggestions_plugin_enabled(&store).await);
+
+        store
+            .insert(PROMPT_SUGGESTIONS_PLUGIN_ID, "1.0.0")
+            .await
+            .expect("install disabled");
+        assert!(!prompt_suggestions_plugin_enabled(&store).await);
+
+        store
+            .set_enabled(PROMPT_SUGGESTIONS_PLUGIN_ID, &[])
+            .await
+            .expect("enable plugin");
+        assert!(prompt_suggestions_plugin_enabled(&store).await);
+    }
 
     #[test]
     fn strips_numbering_and_quotes() {

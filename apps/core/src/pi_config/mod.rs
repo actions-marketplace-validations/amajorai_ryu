@@ -878,10 +878,10 @@ pub fn plan_mode_sentinel(on: bool) -> &'static str {
 
 // `ryu-subagent.ts`, `ryu-shell.ts` and `ryu-monitor.ts` used to be (or, for
 // the monitor, would have been) embedded here and shipped unconditionally by the
-// chain above. They now live in their own packages (`plugins-store/pi-subagent`,
-// `plugins-store/pi-shell`, `plugins-store/pi-monitor`) as
+// chain above. They now live in their own packages (`plugins-store/plugins/pi-subagent`,
+// `plugins-store/plugins/pi-shell`, `plugins-store/plugins/pi-monitor`) as
 // `contributes.pi_extensions` rows, and reach the managed Pi dir through
-// [`sync_app_pi_extensions`] instead. All three are Core-tier + default-on, so
+// [`sync_app_pi_extensions`] instead. All three are Core-tier + pre-installed, so
 // the out-of-the-box agent is unchanged; what is new is that a user can turn any
 // of them off. Do NOT re-add an `ensure_pi_*_extension` for them: the plugin path
 // is the one with a removal half, and a compiled-in copy would win the file back
@@ -4074,7 +4074,7 @@ mod tests {
                          PI_*_EXTENSION_SRC include_str!, a pi_*_extension_path(), an \
                          ensure_pi_*_extension() and a chain line. Otherwise it belongs in a \
                          plugin package as a contributes.pi_extensions row — move the file to \
-                         plugins-store/<pkg>/pi-extensions/ and drop EXPECTED_ASSETS by one."
+                         plugins-store/{{plugins,lsp,external_plugins}}/<pkg>/pi-extensions/ and drop EXPECTED_ASSETS by one."
                     )
                 });
                 let asset_src = fs::read_to_string(asset).expect("read asset source");

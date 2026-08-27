@@ -6,10 +6,10 @@ import {
 	AuditSafetyMock,
 	ChatbotOnlyMock,
 	DemoDeathMock,
-	GovernedAgentMock,
 	InstallLocalMock,
 	SevenMinuteMock,
 	StillRunningMock,
+	TrustReceiptMock,
 } from "./emotional-story-mockups.tsx";
 import {
 	BentoCard,
@@ -20,51 +20,51 @@ import {
 
 const THREE_PATHS: BentoItem[] = [
 	{
-		title: "One wrong output is a liability",
+		title: "The answer still needs a second answer",
 		description:
-			"On a client file a mistake is not an inconvenience. Somebody is answerable for it.",
+			"Your team checks it, rewrites it, and carries the risk when the source is unclear or the output is wrong.",
 		visual: <DemoDeathMock />,
 	},
 	{
-		title: "Nobody can explain what it did",
+		title: "Your AI cannot reach the work",
 		description:
-			"When the client asks why, there is no answer anyone can read. So nobody signs.",
+			"The files and systems that matter stay outside the prompt, so someone copies context by hand and hopes nothing was missed.",
 		visual: <ChatbotOnlyMock />,
 	},
 	{
-		title: "The bill is a guess",
+		title: "The savings disappear in cleanup",
 		description:
-			"Finance blocks it before it starts, because nothing says what next month costs.",
+			"The model is cheap. Checking, rework, and surprise usage are what make AI expensive for a startup.",
 		visual: <AuditSafetyMock />,
 	},
 ];
 
 const RYU_PATH_ITEMS: BentoItem[] = [
 	{
-		title: "Keep the tools you already pay for",
+		title: "Keep the AI you already pay for",
 		description:
-			"ChatGPT, Claude, Gemini, or one we set up for you. We make them safe on client files instead of replacing them.",
+			"ChatGPT, Claude, Gemini, or a local model. Ryu adds the trust layer around the tools your team already knows.",
 		visual: <InstallLocalMock />,
 	},
 	{
-		title: "We show you exactly what it did",
+		title: "See why the answer is safe to use",
 		description:
-			"Every step written down as it happens: what it read, what it changed, who approved it, what it cost.",
+			"Keep the source, output, changes, review, and cost together in a record anyone on the team can read.",
 		span: "md:col-span-2",
-		visual: <GovernedAgentMock />,
+		visual: <TrustReceiptMock />,
 	},
 	{
-		title: "Start with one job you already know",
+		title: "Give AI the access it actually needs",
 		description:
-			"Pick the work eating the most hours. We set it up around your documents and your rules, then you decide whether it goes wider.",
+			"Start with one workflow, connect the approved files and systems, and decide what leaves your company data boundary.",
 		span: "md:col-span-2",
 		visual: <SevenMinuteMock />,
 		action: <DownloadMenu />,
 	},
 	{
-		title: "Nothing leaves the building",
+		title: "Set a cost you can defend",
 		description:
-			"It runs on your own machines. Or we run it for you, under the same limits, and you can move it back.",
+			"Run locally or let us run it for you. The same limits, records, and review points apply either way.",
 		visual: <StillRunningMock />,
 		action: (
 			<Link
@@ -84,10 +84,10 @@ export default function EmotionalStory() {
 		<section className="container mx-auto px-4 py-20 md:py-28">
 			<div className="mx-auto max-w-6xl">
 				<div className="mb-10 max-w-2xl">
-					<SectionTitle title="The work is done. Now somebody has to put their name on it." />
+					<SectionTitle title="AI is useful. It still needs too much checking." />
 					<p className="mt-4 max-w-xl text-muted-foreground leading-relaxed">
-						That is where it stops. The firm has no way to prove how the work
-						was done.
+						Your team checks the output, copies context between tools, and takes
+						responsibility when it is wrong.
 					</p>
 				</div>
 
@@ -99,7 +99,7 @@ export default function EmotionalStory() {
 
 				<div className="mt-12 md:mt-16">
 					<p className="mb-6 font-medium text-foreground text-sm">
-						What you get instead
+						What trusted AI looks like
 					</p>
 					<BentoGrid items={RYU_PATH_ITEMS} />
 				</div>

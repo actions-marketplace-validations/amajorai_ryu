@@ -242,13 +242,15 @@ describe("retrieval-mode wire spellings mirror Core", () => {
 		expect(cancel).toContain("cancel_retrieval_mode_rebuild");
 	});
 
-	it("pins the final graph copy to keyset pagination", () => {
+	it("pins the final graph copy to one bounded set-based statement", () => {
 		const copy = rustItemBody(
 			spacesRs,
 			SPACES_RS,
 			"fn copy_staged_graph_table("
 		);
-		expect(copy).toContain("rowid > ?2");
+		expect(copy).toContain("INSERT INTO {destination_table}");
+		expect(copy).toContain("FROM {source_table} WHERE space_id = ?1");
+		expect(copy).not.toContain("rowid >");
 		expect(copy).not.toContain("OFFSET");
 	});
 
@@ -320,6 +322,7 @@ const RETRIEVAL_TARGET = { url: "https://node.test", token: null };
 function completedRetrievalStatus(jobId: string) {
 	return {
 		job_id: jobId,
+		space_id: "space",
 		state: "completed",
 		change: {
 			mode: "graph",
@@ -366,7 +369,7 @@ describe("retrieval-mode job ownership", () => {
 					});
 				}
 				controller.abort();
-				return Response.json({ job_id: acceptedJobId });
+				return Response.json({ job_id: acceptedJobId, space_id: "space" });
 			}
 			if (method === "POST" && url.endsWith("/retrieval-mode/cancel")) {
 				return Response.json({ cancelled: true });
@@ -374,6 +377,7 @@ describe("retrieval-mode job ownership", () => {
 			if (url.includes("/retrieval-mode/status")) {
 				return Response.json({
 					job_id: acceptedJobId,
+					space_id: "space",
 					state: "cancelled",
 				});
 			}
@@ -396,7 +400,7 @@ describe("retrieval-mode job ownership", () => {
 		}
 	});
 
-	it("ignores a status snapshot belonging to another job", async () => {
+	it("rejects a status snapshot belonging to another job", async () => {
 		const originalFetch = globalThis.fetch;
 		const urls: string[] = [];
 		const acceptedJobId = "accepted-job";
@@ -405,7 +409,7 @@ describe("retrieval-mode job ownership", () => {
 			const url = String(input);
 			urls.push(url);
 			if (url.endsWith("/retrieval-mode")) {
-				return Response.json({ job_id: acceptedJobId });
+				return Response.json({ job_id: acceptedJobId, space_id: "space" });
 			}
 			if (url.includes("/retrieval-mode/status")) {
 				statusCalls += 1;
@@ -419,13 +423,10 @@ describe("retrieval-mode job ownership", () => {
 		}) as typeof globalThis.fetch;
 
 		try {
-			const result = await setSpaceRetrievalMode(
-				RETRIEVAL_TARGET,
-				"space",
-				"graph"
-			);
-			expect(result.note).toBe("done");
-			expect(statusCalls).toBe(2);
+			await expect(
+				setSpaceRetrievalMode(RETRIEVAL_TARGET, "space", "graph")
+			).rejects.toThrow("wrong retrieval-mode job");
+			expect(statusCalls).toBe(1);
 			expect(new URL(urls[1]).searchParams.get("job_id")).toBe(acceptedJobId);
 		} finally {
 			globalThis.fetch = originalFetch;
@@ -452,13 +453,20 @@ describe("retrieval-mode job ownership", () => {
 		globalThis.fetch = (async (input) => {
 			const url = String(input);
 			if (url.endsWith("/retrieval-mode")) {
-				return Response.json({ job_id: "listener-cleanup-job" });
+				return Response.json({
+					job_id: "listener-cleanup-job",
+					space_id: "space",
+				});
 			}
 			if (url.includes("/retrieval-mode/status")) {
 				statusCalls += 1;
 				return Response.json(
 					statusCalls === 1
-						? { job_id: "listener-cleanup-job", state: "running" }
+						? {
+								job_id: "listener-cleanup-job",
+								space_id: "space",
+								state: "running",
+							}
 						: completedRetrievalStatus("listener-cleanup-job")
 				);
 			}
@@ -491,7 +499,7 @@ describe("retrieval-mode job ownership", () => {
 				body: typeof init?.body === "string" ? init.body : undefined,
 			});
 			if (method === "POST" && url.endsWith("/retrieval-mode")) {
-				return Response.json({ job_id: acceptedJobId });
+				return Response.json({ job_id: acceptedJobId, space_id: "space" });
 			}
 			if (method === "POST" && url.endsWith("/retrieval-mode/cancel")) {
 				return Response.json({ cancelled: false, finalizing: true });
@@ -501,6 +509,7 @@ describe("retrieval-mode job ownership", () => {
 				if (statusCalls === 1) {
 					return Response.json({
 						job_id: acceptedJobId,
+						space_id: "space",
 						state: "running",
 						processed_chunks: 1,
 						total_chunks: 2,
@@ -544,7 +553,7 @@ describe("retrieval-mode job ownership", () => {
 			const url = String(input);
 			const method = init?.method ?? "GET";
 			if (method === "POST" && url.endsWith("/retrieval-mode")) {
-				return Response.json({ job_id: acceptedJobId });
+				return Response.json({ job_id: acceptedJobId, space_id: "space" });
 			}
 			if (method === "POST" && url.endsWith("/retrieval-mode/cancel")) {
 				return Response.json({ cancelled: true });
@@ -553,6 +562,7 @@ describe("retrieval-mode job ownership", () => {
 				statusCalls += 1;
 				return Response.json({
 					job_id: acceptedJobId,
+					space_id: "space",
 					state: statusCalls === 1 ? "cancelling" : "cancelled",
 					processed_chunks: 1,
 					total_chunks: 2,
@@ -719,12 +729,12 @@ describe("what the retrieval mode is claimed to govern", () => {
 				ragHostRs,
 				RAG_HOST_RS,
 				"impl SpaceRecall for SpacesRecall",
-				".search_ext(&space_id, query, per_space_limit, None, filter)"
+				".search_ext(&space_id, query, per_space_limit, None, filter.clone())"
 			)
 		).toBe(ANCHOR_PRESENT);
 	});
 
-	it("keeps ONE entity graph, in the Spaces store, not a copy in the RAG crate", () => {
+	it("keeps ONE term graph, in the Spaces store, not a copy in the RAG crate", () => {
 		// The invariant that survives the delegation, and the reason delegation was
 		// chosen over mirroring: two entity graphs that can disagree would be a worse
 		// defect than the one the delegate closed. The RAG crate must therefore never
@@ -1013,7 +1023,8 @@ describe("file index state mirrors Core's document.parse status", () => {
 describe("the client does not guess a file's index state", () => {
 	it("no longer derives 'not searchable' from the file kind", () => {
 		// THE regression this block was rewritten for. `create_file_indexed` awaits
-		// the builtin floor inline, so a `.txt`/`.md`/`.csv` is `indexed` by the time
+		// the shared stored-file indexer, which runs the builtin floor inline, so a
+		// `.txt`/`.md`/`.csv` is `indexed` by the time
 		// the upload response is written and a kind-based rule would be wrong about
 		// it. `isFileDocument` survives (routing and icons still need it) but must
 		// not be the source of a searchability claim.
@@ -1021,7 +1032,7 @@ describe("the client does not guess a file's index state", () => {
 			rustAnchor(
 				spaceFileIndexRs,
 				CORE_SPACE_FILE_INDEX_RS,
-				"pub async fn create_file_indexed(",
+				"async fn index_stored_file(",
 				"if document_parse::is_builtin_readable(title) {"
 			)
 		).toBe(ANCHOR_PRESENT);
@@ -1271,8 +1282,16 @@ describe("the upload ceiling this client reports", () => {
 			rustAnchor(
 				serverRs,
 				SERVER_RS,
-				"async fn create_file(",
+				"fn decode_space_file_body(",
 				"if bytes.len() > MAX_FILE_BYTES"
+			)
+		).toBe(ANCHOR_PRESENT);
+		expect(
+			rustAnchor(
+				serverRs,
+				SERVER_RS,
+				"async fn create_file(",
+				"decode_space_file_body(&body.data_base64)"
 			)
 		).toBe(ANCHOR_PRESENT);
 		// The row lives on the Storage tab. It used to be a card on a separate

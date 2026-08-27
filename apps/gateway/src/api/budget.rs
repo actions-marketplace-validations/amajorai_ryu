@@ -98,10 +98,11 @@ pub async fn get_spend(
     })))
 }
 
-/// Internal charge event emitted by Core after a Composio action executes in an
-/// ACP/MCP bridge. The caller is authenticated as a Gateway master key, a
-/// configured trusted forwarder, or a Core bearer-bound agent proof; the
-/// identity fields are therefore not a public quota-rotation mechanism.
+/// Internal charge event emitted by Core or a sidecar after an external tool
+/// executes outside the Gateway's OpenAI tool loop. The caller is authenticated
+/// as a Gateway master key, a configured trusted forwarder, or a Core
+/// bearer-bound agent proof; the identity fields are therefore not a public
+/// quota-rotation mechanism.
 #[derive(Debug, Default, Deserialize)]
 pub struct ToolChargeBody {
     #[serde(default)]
@@ -116,13 +117,44 @@ pub struct ToolChargeBody {
     pub session_id: Option<String>,
     #[serde(default)]
     pub request_id: Option<String>,
+    /// Trusted Core/master callers may attribute a charge to this organization.
+    /// Dynamic agent routes must use the org resolved from their bearer instead.
+    #[serde(default)]
+    pub org_id: Option<String>,
+    /// Provider plane. Absent preserves the legacy Composio charge path.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Provider-native endpoint/action id, recorded as the ledger model/resource.
+    #[serde(default)]
+    pub tool_id: Option<String>,
+    /// Raw provider amount in micro-USD. Treg supplies this from its response
+    /// header; Composio normally omits it and uses the configured call rate.
+    #[serde(default)]
+    pub cost_micro_usd: Option<u64>,
+    /// Treg's provider transaction id, retained as descriptive attribution while
+    /// `request_id` remains the wallet idempotency key.
+    #[serde(default)]
+    pub transaction_id: Option<String>,
+    #[serde(default)]
+    pub estimated: bool,
+    #[serde(default)]
+    pub task_label: Option<String>,
+}
+
+fn normalized_tool_provider(value: Option<&str>) -> Result<&'static str, &'static str> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("composio") => Ok("composio"),
+        Some("treg") => Ok("treg"),
+        Some(_) => Err("unsupported external tool provider"),
+    }
 }
 
 /// `POST /v1/budget/charge` — record a tool charge that was executed outside
-/// the Gateway's OpenAI tool loop. This is deliberately a narrow internal
-/// endpoint: it accepts only Composio action counts and delegates all category
-/// filtering, local counters, markup, and wallet debit behavior to the same
-/// pipeline helper used by the normal tool loop.
+/// the Gateway's OpenAI tool loop. This remains a narrow internal endpoint: it
+/// accepts the legacy Composio count shape plus the provider-neutral Treg
+/// attribution shape, and delegates category filtering, local counters, markup,
+/// idempotency, and wallet debit behavior to the same pipeline helper used by the
+/// normal tool loop.
 pub async fn charge_tool(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -156,6 +188,9 @@ pub async fn charge_tool(
         ));
     }
 
+    let provider = normalized_tool_provider(body.provider.as_deref())
+        .map_err(|message| GatewayError::BadRequest(message.to_owned()))?;
+
     let user_id = if ctx.key_config.is_none() && !ctx.is_master_key {
         ctx.user_id
     } else {
@@ -167,20 +202,34 @@ pub async fn charge_tool(
         .request_id
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(ctx.request_id);
-    crate::pipeline::spawn_tool_call_debit_for_ids(
+    let org_id = if ctx.is_master_key || trusted_forwarder {
+        body.org_id.as_deref().or(ctx.org_id.as_deref())
+    } else {
+        ctx.org_id.as_deref()
+    };
+    crate::pipeline::spawn_external_tool_debit_for_ids(
         &state,
         user_id.as_deref(),
         agent_id.as_deref(),
         session_id.as_deref(),
-        ctx.org_id.as_deref(),
+        org_id,
         &request_id,
         ctx.managed_inference,
+        provider,
+        body.tool_id.as_deref(),
+        body.cost_micro_usd,
+        body.transaction_id.as_deref(),
+        body.estimated,
+        body.task_label.as_deref(),
         body.tool_calls,
     );
 
     Ok(Json(json!({
         "accepted": true,
         "tool_calls": body.tool_calls,
+        "provider": provider,
+        "tool_id": body.tool_id,
+        "cost_micro_usd": body.cost_micro_usd,
         "currency": "USD",
         "unit": "micro_usd",
     })))
@@ -270,5 +319,21 @@ mod tests {
         m.insert("a".to_string(), 10u64);
         let none = filter_scope(m, &Some("zzz".to_string()));
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn legacy_charge_defaults_to_composio() {
+        assert_eq!(normalized_tool_provider(None), Ok("composio"));
+        assert_eq!(normalized_tool_provider(Some("  ")), Ok("composio"));
+        assert_eq!(normalized_tool_provider(Some("composio")), Ok("composio"));
+    }
+
+    #[test]
+    fn treg_charge_is_accepted_and_unknown_provider_is_rejected() {
+        assert_eq!(normalized_tool_provider(Some("treg")), Ok("treg"));
+        assert_eq!(
+            normalized_tool_provider(Some("other")),
+            Err("unsupported external tool provider")
+        );
     }
 }

@@ -266,6 +266,65 @@ async fn disable_plugin(
     crate::portable_packages::set_enabled(kind, id, false).map_err(Into::into)
 }
 
+async fn enable_space(
+    state: &ServerState,
+    kind: &str,
+    id: &str,
+    package: &crate::portable_packages::InstalledPackage,
+    files: &BTreeMap<String, Vec<u8>>,
+    owner: &crate::server::spaces::DocOwner,
+) -> Result<crate::portable_packages::InstalledPackage> {
+    if let Some(space_id) = package.runtime_ids.first() {
+        if let Some(meta) = state.spaces.space_access_meta(space_id).await? {
+            if !space_owner_matches(&meta, owner) {
+                bail!("portable Space `{id}` belongs to another owner");
+            }
+            return crate::portable_packages::set_enabled(kind, id, true).map_err(Into::into);
+        }
+    }
+    let manifest = crate::portable_packages::manifest(kind, id)?
+        .ok_or_else(|| anyhow::anyhow!("portable Space package {id} is not installed"))?;
+    let parsed = crate::server::space_portable::parse_package(&manifest, files)?;
+    let imported =
+        crate::server::space_portable::import_package(&state.spaces, &parsed, owner, None).await?;
+    if let Err(error) =
+        crate::portable_packages::set_runtime_ids(kind, id, vec![imported.space_id.clone()])
+    {
+        let _ = state.spaces.delete_space(&imported.space_id).await;
+        return Err(error);
+    }
+    crate::portable_packages::set_enabled(kind, id, true).map_err(Into::into)
+}
+
+async fn disable_space(
+    state: &ServerState,
+    kind: &str,
+    id: &str,
+    owner: &crate::server::spaces::DocOwner,
+) -> Result<crate::portable_packages::InstalledPackage> {
+    let package = crate::portable_packages::get(kind, id)?
+        .ok_or_else(|| anyhow::anyhow!("portable Space package {kind}/{id} is not installed"))?;
+    for space_id in &package.runtime_ids {
+        if let Some(meta) = state.spaces.space_access_meta(space_id).await? {
+            if !space_owner_matches(&meta, owner) {
+                bail!("portable Space `{id}` belongs to another owner");
+            }
+        }
+    }
+    for space_id in &package.runtime_ids {
+        state.spaces.delete_space(space_id).await?;
+    }
+    crate::portable_packages::set_enabled(kind, id, false).map_err(Into::into)
+}
+
+fn space_owner_matches(
+    meta: &crate::server::spaces::SpaceAccessMeta,
+    owner: &crate::server::spaces::DocOwner,
+) -> bool {
+    meta.owner_user_id.as_deref() == owner.user_id.as_deref()
+        && meta.org_id.as_deref() == owner.org_id.as_deref()
+}
+
 async fn uninstall_plugin(state: &ServerState, kind: &str, id: &str) -> Result<()> {
     let files = package_files(kind, id)?;
     let manifest = native_manifest(kind, id, &files)?;
@@ -586,6 +645,15 @@ pub(crate) async fn enable(
     kind: &str,
     id: &str,
 ) -> Result<crate::portable_packages::InstalledPackage> {
+    enable_with_owner(state, kind, id, &crate::server::spaces::background_owner()).await
+}
+
+pub(crate) async fn enable_with_owner(
+    state: &ServerState,
+    kind: &str,
+    id: &str,
+    owner: &crate::server::spaces::DocOwner,
+) -> Result<crate::portable_packages::InstalledPackage> {
     let kind = kind.trim().to_ascii_lowercase();
     let id = id.trim();
     let package = crate::portable_packages::get(&kind, id)?
@@ -597,16 +665,16 @@ pub(crate) async fn enable(
         "agent" => enable_agent(state, &kind, id, &package, &files).await,
         "workflow" => enable_workflow(&kind, id, &package, &files).await,
         "output_style" => enable_output_style(&kind, id, &files).await,
+        "space" => enable_space(state, &kind, id, &package, &files, owner).await,
         _ => bail!("portable package kind `{kind}` has no host activation path"),
     }
 }
 
-/// Disable an installed package and reverse its host projection while retaining
-/// the verified package bytes for a later re-enable.
-pub(crate) async fn disable(
+pub(crate) async fn disable_with_owner(
     state: &ServerState,
     kind: &str,
     id: &str,
+    owner: &crate::server::spaces::DocOwner,
 ) -> Result<crate::portable_packages::InstalledPackage> {
     let kind = kind.trim().to_ascii_lowercase();
     let id = id.trim();
@@ -616,12 +684,17 @@ pub(crate) async fn disable(
         "agent" => disable_agent(state, &kind, id).await,
         "workflow" => disable_workflow(&kind, id).await,
         "output_style" => disable_output_style(&kind, id).await,
+        "space" => disable_space(state, &kind, id, owner).await,
         _ => bail!("portable package kind `{kind}` has no host deactivation path"),
     }
 }
 
-/// Remove host projections before deleting the verified local package.
-pub(crate) async fn uninstall(state: &ServerState, kind: &str, id: &str) -> Result<()> {
+pub(crate) async fn uninstall_with_owner(
+    state: &ServerState,
+    kind: &str,
+    id: &str,
+    owner: &crate::server::spaces::DocOwner,
+) -> Result<()> {
     let kind = kind.trim().to_ascii_lowercase();
     let id = id.trim();
     match kind.as_str() {
@@ -646,6 +719,46 @@ pub(crate) async fn uninstall(state: &ServerState, kind: &str, id: &str) -> Resu
             let _ = disable_output_style(&kind, id).await?;
             Ok(())
         }
+        "space" => {
+            let _ = disable_space(state, &kind, id, owner).await?;
+            Ok(())
+        }
         _ => bail!("portable package kind `{kind}` has no host uninstall path"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::space_owner_matches;
+    use crate::server::spaces::{DocOwner, SpaceAccessMeta};
+
+    fn meta(user_id: Option<&str>, org_id: Option<&str>) -> SpaceAccessMeta {
+        SpaceAccessMeta {
+            owner_user_id: user_id.map(str::to_owned),
+            org_id: org_id.map(str::to_owned),
+            visibility: "private".to_owned(),
+            team_id: None,
+            system: false,
+        }
+    }
+
+    fn owner(user_id: Option<&str>, org_id: Option<&str>) -> DocOwner {
+        DocOwner::owned(user_id, org_id)
+    }
+
+    #[test]
+    fn portable_space_lifecycle_requires_the_same_user_and_org() {
+        assert!(space_owner_matches(
+            &meta(Some("alice"), Some("org1")),
+            &owner(Some("alice"), Some("org1"))
+        ));
+        assert!(!space_owner_matches(
+            &meta(Some("alice"), Some("org1")),
+            &owner(Some("bob"), Some("org1"))
+        ));
+        assert!(!space_owner_matches(
+            &meta(Some("alice"), Some("org1")),
+            &owner(Some("alice"), Some("org2"))
+        ));
     }
 }

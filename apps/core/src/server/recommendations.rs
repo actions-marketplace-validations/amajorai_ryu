@@ -218,7 +218,7 @@ fn reference_from_entry(entry: &Value, kind: &str) -> Option<CatalogReference> {
 }
 
 async fn catalog_references(state: &ServerState) -> Vec<CatalogReference> {
-    let apps = super::list_apps_catalog(State(state.clone())).await.0;
+    let apps = super::list_apps_catalog_for_surface(state, None).await.0;
     let agents = super::list_agent_catalog(
         State(state.clone()),
         Query(AgentCatalogQuery {

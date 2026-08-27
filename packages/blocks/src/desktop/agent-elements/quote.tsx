@@ -3,6 +3,7 @@
 import { cn } from "@ryu/ui/lib/utils";
 import { IconQuote, IconX } from "@tabler/icons-react";
 import {
+	Fragment,
 	type RefObject,
 	useCallback,
 	useEffect,
@@ -11,6 +12,10 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { SELECTABLE_ATTR } from "./quote-format.ts";
+import type {
+	ContributedSelectionAction,
+	SelectionActionContext,
+} from "./types.ts";
 
 /**
  * Chat message quoting (ChatGPT / assistant-ui style). Selecting text inside a
@@ -46,8 +51,15 @@ interface SelectionQuoteToolbarProps {
 	/** Only react to selections inside this scroll container (avoids bleed across
 	 * split-view chats). Omit to accept any `[data-message-selectable]`. */
 	containerRef?: RefObject<HTMLElement | null>;
+	/** Dispatches a contributed action with the selected plain text. */
+	onContributedAction?: (
+		action: ContributedSelectionAction,
+		context: SelectionActionContext
+	) => void;
 	/** Called with the selected plain text when the user clicks "Quote". */
 	onQuote?: (text: string) => void;
+	/** Declarative actions supplied by the host from enabled plugins. */
+	selectionActions?: readonly ContributedSelectionAction[];
 }
 
 /**
@@ -59,6 +71,8 @@ export function SelectionQuoteToolbar({
 	containerRef,
 	onQuote,
 	className,
+	selectionActions,
+	onContributedAction,
 }: SelectionQuoteToolbarProps) {
 	const [anchor, setAnchor] = useState<{ top: number; left: number } | null>(
 		null
@@ -125,32 +139,72 @@ export function SelectionQuoteToolbar({
 	if (!anchor) {
 		return null;
 	}
+	const actions = [...(selectionActions ?? [])]
+		.filter((action) => action.kind === "button" && action.label.trim())
+		.sort(
+			(a: ContributedSelectionAction, b: ContributedSelectionAction) =>
+				(a.order ?? Number.MAX_SAFE_INTEGER) -
+					(b.order ?? Number.MAX_SAFE_INTEGER) || a.label.localeCompare(b.label)
+		);
+	const hasQuote = Boolean(onQuote);
 
 	return createPortal(
 		<div
 			className={cn(
-				"fixed z-[60] -translate-x-1/2 -translate-y-full pb-1.5",
+				"fixed z-[60] -translate-x-1/2 -translate-y-full overflow-hidden rounded-lg border border-border bg-popover shadow-md",
 				className
 			)}
 			// Keep the underlying selection alive when the button is pressed.
 			onMouseDown={(event) => event.preventDefault()}
 			style={{ top: anchor.top, left: anchor.left }}
 		>
-			<button
-				className="flex items-center gap-1.5 rounded-lg border border-border bg-popover px-2.5 py-1.5 font-medium text-popover-foreground text-xs shadow-md transition-colors hover:bg-accent hover:text-accent-foreground"
-				onClick={() => {
-					const text = textRef.current;
-					if (text) {
-						onQuote?.(text);
-					}
-					window.getSelection()?.removeAllRanges();
-					hide();
-				}}
-				type="button"
-			>
-				<IconQuote className="size-3.5" />
-				Quote
-			</button>
+			<div className="flex items-center" data-slot="selection-toolbar">
+				{hasQuote && (
+					<button
+						className="flex items-center gap-1.5 px-2.5 py-1.5 font-medium text-popover-foreground text-xs transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:outline-none"
+						data-testid="selection-quote-action"
+						onClick={() => {
+							const text = textRef.current;
+							if (text) {
+								onQuote?.(text);
+							}
+							window.getSelection()?.removeAllRanges();
+							hide();
+						}}
+						type="button"
+					>
+						<IconQuote className="size-3.5" />
+						Quote
+					</button>
+				)}
+				{hasQuote && actions.length > 0 && (
+					<span aria-hidden="true" className="h-5 w-px bg-border" />
+				)}
+				{actions.map((action, index) => (
+					<Fragment key={action.id}>
+						{index > 0 && (
+							<span aria-hidden="true" className="h-5 w-px bg-border" />
+						)}
+						<button
+							aria-label={action.label}
+							className="whitespace-nowrap px-2.5 py-1.5 font-medium text-popover-foreground text-xs transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:outline-none"
+							data-selection-action-id={action.id}
+							onClick={() => {
+								const text = textRef.current;
+								if (text) {
+									onContributedAction?.(action, { text });
+								}
+								window.getSelection()?.removeAllRanges();
+								hide();
+							}}
+							title={action.label}
+							type="button"
+						>
+							{action.label}
+						</button>
+					</Fragment>
+				))}
+			</div>
 		</div>,
 		document.body
 	);
@@ -179,6 +233,7 @@ export function ComposerQuotePreview({
 				"mx-2.5 mt-2.5 flex items-start gap-2 rounded-md border-primary/50 border-l-2 bg-foreground/5 py-1.5 pr-1.5 pl-2.5",
 				className
 			)}
+			data-slot="composer-quote-preview"
 		>
 			<IconQuote className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
 			<p className="line-clamp-3 min-w-0 flex-1 whitespace-pre-wrap text-[13px] text-muted-foreground leading-snug">

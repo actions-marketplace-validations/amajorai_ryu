@@ -219,7 +219,10 @@ function appCategory(app: AppInfo): InstalledCategory {
 	return "plugins";
 }
 
-const LIFECYCLE_LABELS: Record<(typeof APP_LIFECYCLE_PERMISSIONS)[number], string> = {
+const LIFECYCLE_LABELS: Record<
+	(typeof APP_LIFECYCLE_PERMISSIONS)[number],
+	string
+> = {
 	"app.disable": "Disable",
 	"app.enable": "Enable",
 	"app.install": "Install",
@@ -647,8 +650,8 @@ export default function InstalledSection() {
 				<div className="flex flex-col gap-4 pt-2">
 					<LifecycleAccessCard
 						capabilities={lifecycleCapabilities.data ?? null}
-						loading={lifecycleCapabilities.isLoading}
 						error={lifecycleCapabilities.error}
+						loading={lifecycleCapabilities.isLoading}
 					/>
 					{toggleError ? (
 						<div className="flex items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-sm">
@@ -676,15 +679,16 @@ export default function InstalledSection() {
 										<StoreCatalogCard
 											action={renderAppAction(app)}
 											cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
-										contextMenu={appContextMenu(app)}
-										description={cardDescription(app)}
-										dither={app.iconDither}
-										external={app.external}
+											contextMenu={appContextMenu(app)}
+											description={cardDescription(app)}
+											dither={app.iconDither}
+											external={app.external}
 											icon={
 												<HugeiconsIcon className="size-5" icon={ComputerIcon} />
 											}
 											iconBackground={app.iconBackground ?? undefined}
 											iconId={app.icon}
+											iconPadding={app.iconPadding}
 											iconUrl={app.iconUrl}
 											key={app.id}
 											layers={app.layers}
@@ -721,12 +725,11 @@ export default function InstalledSection() {
 											return;
 										}
 										navigate("/store");
-									}
-								}
-								size="sm"
-							>
-								{query.trim() ? "Clear search" : "Browse the Store"}
-							</Button>
+									}}
+									size="sm"
+								>
+									{query.trim() ? "Clear search" : "Browse the Store"}
+								</Button>
 							</EmptyContent>
 						</Empty>
 					)}
@@ -1040,7 +1043,8 @@ function InstalledDoctorCard({
 					<div className="flex flex-wrap items-center gap-2">
 						<Badge variant="outline">{report.score}/100</Badge>
 						<span className="text-muted-foreground">
-							{formatCount(report.counts.errors) ?? "—"} errors · {formatCount(report.counts.warnings) ?? "—"} warnings
+							{formatCount(report.counts.errors) ?? "—"} errors ·{" "}
+							{formatCount(report.counts.warnings) ?? "—"} warnings
 						</span>
 					</div>
 					{report.findings.length > 0 ? (
@@ -1193,10 +1197,10 @@ function InstalledAppDetail({
 								? "Enabled"
 								: "Disabled"
 							: "Not installed",
-										app.mandatory ? "Required" : null,
-										app.runnables.some((r) => r.kind === AGENT_KIND) ? "Agent" : null,
-										...catalogLayerBadges(app.layers, app.external),
-									].filter((b): b is string => Boolean(b))}
+						app.mandatory ? "Required" : null,
+						app.runnables.some((r) => r.kind === AGENT_KIND) ? "Agent" : null,
+						...catalogLayerBadges(app.layers, app.external),
+					].filter((b): b is string => Boolean(b))}
 					cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
 					dither={app.iconDither}
 					// No `icon` node: an app with no art of its own gets the generative
@@ -1207,6 +1211,7 @@ function InstalledAppDetail({
 					iconBackground={app.iconBackground}
 					iconId={app.icon}
 					iconName={app.name}
+					iconPadding={app.iconPadding}
 					iconUrl={app.iconUrl}
 					name={app.name}
 					seedId={app.id}
@@ -1460,6 +1465,7 @@ function BuiltInAppDetail({
 					iconBackground={app.iconBackground}
 					iconId={app.icon}
 					iconName={app.name}
+					iconPadding={app.iconPadding}
 					iconUrl={app.iconUrl}
 					name={app.name}
 					seedId={app.id}

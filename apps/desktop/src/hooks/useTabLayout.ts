@@ -1,16 +1,42 @@
 import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
 import { useEffect, useState } from "react";
 
-/** Tab layout preference: the horizontal title-bar strip (default) or a vertical
-    list in the left sidebar (Zen-browser style). Window-local + reactive across
-    the TitleBar, sidebar, settings, and context menus via the same
-    localStorage + `storage`-event pattern as the other desktop UI prefs. */
-export type TabLayout = "horizontal" | "vertical";
+/** Tab layout preference: the compact title-bar strip, sidebar list, center-pane
+    scroll track, or infinite canvas. Window-local + reactive across the
+    TitleBar, sidebar, settings, and context menus via the same localStorage +
+    `storage`-event pattern as the other desktop UI prefs. */
+export const TAB_LAYOUT_VALUES = [
+	"horizontal",
+	"vertical",
+	"scroll",
+	"canvas",
+] as const;
+
+export type TabLayout = (typeof TAB_LAYOUT_VALUES)[number];
+
+export const TAB_LAYOUT_OPTIONS = [
+	{ label: "Horizontal tabs", value: "horizontal" },
+	{ label: "Vertical tabs", value: "vertical" },
+	{ label: "Scrollable tabs", value: "scroll" },
+	{ label: "Infinite canvas", value: "canvas" },
+] as const satisfies ReadonlyArray<{ label: string; value: TabLayout }>;
 
 const KEY = "ryu_tab_layout";
 
+export function parseTabLayout(value: string | null): TabLayout {
+	if (
+		value === "horizontal" ||
+		value === "vertical" ||
+		value === "scroll" ||
+		value === "canvas"
+	) {
+		return value;
+	}
+	return "horizontal";
+}
+
 function read(): TabLayout {
-	return localStorage.getItem(KEY) === "vertical" ? "vertical" : "horizontal";
+	return parseTabLayout(localStorage.getItem(KEY));
 }
 
 export function useTabLayout(): TabLayout {

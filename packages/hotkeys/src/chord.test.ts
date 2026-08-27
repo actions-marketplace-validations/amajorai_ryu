@@ -77,6 +77,13 @@ describe("eventToChord", () => {
 		);
 	});
 
+	it("preserves punctuation keys used by the settings shortcuts", () => {
+		expect(eventToChord(key({ ctrlKey: true, key: "." }))).toBe("Mod+.");
+		expect(eventToChord(key({ metaKey: true, key: "," }))).toBe("Mod+,");
+		expect(chordMatches("Mod+.", key({ ctrlKey: true, key: "." }))).toBe(true);
+		expect(chordMatches("Mod+,", key({ metaKey: true, key: "," }))).toBe(true);
+	});
+
 	it("maps the space key to Space", () => {
 		expect(eventToChord(key({ ctrlKey: true, key: " " }))).toBe("Mod+Space");
 	});

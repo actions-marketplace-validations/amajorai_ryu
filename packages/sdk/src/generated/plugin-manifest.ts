@@ -374,7 +374,7 @@ export interface PluginManifest {
 	permission_levels?: PermissionLevel[];
 	/**
 	 * **Unified, deny-by-default runtime permission set** — the single typed
-	 * grammar (`{fs, child_process, network, tool}`) Core lowers to every sandbox
+	 * grammar (`{fs, child_process, run, network, tool}`) Core lowers to every sandbox
 	 * backend (wasmtime WASI preopens, Docker `--mount`/`--network` flags, Deno
 	 * `--allow-*` flags). Absent = **deny-all** (the default for every manifest
 	 * predating this field), so an app that declares nothing keeps today's exact
@@ -578,7 +578,8 @@ export interface CompanionSurface {
  * and reference no runnable at all (`widgets`, `views`, `dock_panels`,
  * `sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,
  * `chat_features`, `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,
- * `message_actions`, `context_menu_items`, `agent_edit_panels`).
+ * `message_actions`, `selection_actions`, `context_menu_items`,
+ * `agent_edit_panels`).
  *
  * # Extending
  *
@@ -961,6 +962,16 @@ export interface Contributes {
 	 * Gateway policies the plugin contributes (referenced by runnable id).
 	 */
 	policies?: ContributionId[];
+	/**
+	 * Buttons the plugin contributes to the floating text-selection toolbar.
+	 * This is the bridge between enabled apps/plugins and shared chat blocks:
+	 * Core validates and tags the declaration, while the desktop owns the
+	 * rendered toolbar and dispatches the selected text. A selection action may
+	 * either name a granted `capability` or provide a host-owned `args.dispatch`
+	 * (for example, a first-party shell action such as Side Chat). Self-contained
+	 * + opaque for the same forward-compatibility reason as `message_actions`.
+	 */
+	selection_actions?: SelectionActionContribution[];
 	/**
 	 * Declarative settings tabs the plugin contributes (model pickers, text
 	 * fields bound to preference keys). Served + rendered the same way.
@@ -1721,6 +1732,49 @@ export interface PiExtensionContribution {
 	id: string;
 }
 /**
+ * One button a plugin contributes to the floating text-selection toolbar (see
+ * [`Contributes::selection_actions`]).
+ *
+ * `capability` is optional because a host-owned renderer can use an opaque
+ * `args.dispatch` bridge instead. The desktop never executes manifest code: it
+ * only renders this label and forwards the selected text to the owning host
+ * handler.
+ */
+export interface SelectionActionContribution {
+	/**
+	 * Static renderer/dispatch arguments. The selected text is supplied by the
+	 * host at click time and is never serialized into the manifest.
+	 */
+	args?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * Optional granted capability for a plugin-owned dispatch.
+	 */
+	capability?: string | null;
+	/**
+	 * Optional glyph id resolved by the shell's icon primitive.
+	 */
+	icon?: string | null;
+	/**
+	 * Stable id for this action within the plugin.
+	 */
+	id: string;
+	/**
+	 * Render mode. The current desktop renders `"button"`; this remains open
+	 * so newer shells can add a mode without making older cores reject it.
+	 */
+	kind: string;
+	/**
+	 * Accessible label shown in the selection toolbar.
+	 */
+	label: string;
+	/**
+	 * Sort position among contributed selection actions (ascending).
+	 */
+	order?: number | null;
+}
+/**
  * One **settings tab** a plugin contributes (see [`Contributes::settings_tabs`]).
  *
  * A tab is EITHER declarative (`fields`, rendered by the shared plugin-settings
@@ -1848,6 +1902,13 @@ export interface SettingsFieldContribution {
  * buttons (e.g. Memory) to the owning app.
  */
 export interface SidebarButtonContribution {
+	/**
+	 * Optional mount context passed to the owning Companion when the button opens it.
+	 * The host applies this only to the button's own app surface.
+	 */
+	context?: {
+		[k: string]: unknown;
+	} | null;
 	/**
 	 * Optional glyph id resolved by the shell's Icon primitive.
 	 */
@@ -2478,6 +2539,12 @@ export interface PermissionSet {
 	 */
 	network?: boolean | string[];
 	/**
+	 * Executable names sandboxed code may spawn when [`Self::child_process`] is
+	 * true. Core lowers this to Deno's scoped `--allow-run=<name,...>` list in
+	 * addition to declared capability shims. Empty grants no arbitrary binary.
+	 */
+	run?: string[];
+	/**
 	 * **Declaration-only** in v1: the registry tool ids this plugin's sandboxed
 	 * code may call through the stdio `tools.*` bridge. Tools are brokered over
 	 * stdout/stdin by Core (never an OS capability), so this does NOT lower to any
@@ -2995,9 +3062,12 @@ export interface ExternalRuntimeConfig {
  */
 export interface AssetSpec {
 	/**
-	 * Destination directory relative to `~/.ryu` (e.g. `"models/hf"`); the
- * fetched file lands at `<runtime>/assets/<dest_under_runtime>/<filename>`. Must
- * be a traversal-safe relative path (no `..`, not absolute).
+	 * Destination directory relative to the runtime's `assets/` directory
+	 * (e.g. `"models/hf"`). The fetched file lands at
+	 * `<runtime>/assets/<dest_under_runtime>/<filename>`. Must be a
+	 * traversal-safe relative path (no `..`, not absolute). The old
+	 * `dest_under_ryu` spelling is accepted as a wire alias but is never
+	 * resolved against the shared Core data directory.
 	 */
 	dest_under_runtime: string;
 	/**
@@ -3229,6 +3299,13 @@ export interface RouteSpec {
 	 * webhook whose external caller cannot hold the node token).
 	 */
 	auth?: "protected" | "public";
+	/**
+	 * Optional HTTP method selector for this path (canonical uppercase such as
+	 * `GET` or `POST`). Absent preserves the legacy behavior and matches every
+	 * method. Declare one row per method when reads and writes share a path but
+	 * require different permission levels.
+	 */
+	method?: string | null;
 	/**
 	 * Path pattern for the sub-path after `/api/ext/<plugin_id>` (must start with
 	 * `/`). Supports `:param` (matches one non-empty segment) and a trailing

@@ -16,6 +16,7 @@ import type {
 	CompanionSurface,
 	PluginManifest,
 	RunnableMeta,
+	SlashCommandContribution,
 	Surface,
 } from "./manifest.ts";
 import { PluginManifestSchema, RunnableMetaSchema } from "./manifest.ts";
@@ -325,6 +326,7 @@ export class AppBuilder {
 	private readonly _dependencies: AppDependency[] = [];
 	private readonly _requiredCapabilities: CapabilityReq[] = [];
 	private readonly _requiredGrants: string[] = [];
+	private readonly _slashCommands: SlashCommandContribution[] = [];
 	private readonly _targets: Surface[] = [];
 
 	/** Set the reverse-domain app id (e.g. `"com.example.checklist"`). */
@@ -393,6 +395,12 @@ export class AppBuilder {
 		return this;
 	}
 
+	/** Add a slash command and its optional sequential argument choices. */
+	slashCommand(command: SlashCommandContribution): this {
+		this._slashCommands.push(command);
+		return this;
+	}
+
 	/**
 	 * Declare a **plugin-to-plugin dependency** (auto-enabled, in dependency order,
 	 * before this app). `minVersion` is a MINIMUM (`"1.2.0"` = `">=1.2.0"`).
@@ -448,6 +456,7 @@ export class AppBuilder {
 			uiEntry: this._uiEntry,
 			tools: this._tools,
 			grants: this._grants,
+			slashCommands: this._slashCommands,
 			...(this._server ? { server: this._server } : {}),
 			...(this._displayMode ? { displayMode: this._displayMode } : {}),
 			...(this._mime ? { mime: this._mime } : {}),

@@ -6,6 +6,7 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
+    io::Write,
     path::{Path, PathBuf},
     sync::{OnceLock, RwLock},
     time::Duration,
@@ -23,17 +24,26 @@ use axum::{
 };
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 use x25519_dalek::{PublicKey as EncryptionPublicKey, StaticSecret};
 
 use crate::server::ServerState;
 
 const MAX_POLL_SECONDS: u64 = 25;
 const RETRY_SECONDS: u64 = 60;
+const ENROLLMENT_CLAIM_DOMAIN: &str = "ryu:fleet-enrollment:v2\n";
+const MAX_CONTROL_PLANE_URL_BYTES: usize = 2048;
+
+static ENROLLMENT_OPERATION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn enrollment_operation_lock() -> &'static tokio::sync::Mutex<()> {
+    ENROLLMENT_OPERATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,6 +75,52 @@ struct EnrollResponse {
     node_id: String,
     organization_id: String,
     signing_public_key: String,
+    #[serde(default)]
+    organization_binding: Option<EnrollmentOrganizationBinding>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnrollmentOrganizationBinding {
+    status: String,
+    acknowledgement_required: bool,
+    control_credential: String,
+    relay_credential: String,
+    managed_fleet_url: String,
+    credential_set_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingEnrollmentAttempt {
+    claim_id: String,
+    control_plane_url: String,
+    token: String,
+    token_hash: String,
+    signing_private_key: String,
+    signing_public_key: String,
+    encryption_private_key: String,
+    encryption_public_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnrolledNodeBundle {
+    claim_id: String,
+    token_hash: String,
+    fleet_identity: FleetIdentity,
+    organization_binding: EnrollmentOrganizationBinding,
+    #[serde(default)]
+    acknowledged: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnrollmentAcknowledgement {
+    acknowledged: bool,
+    status: String,
+    node_id: String,
+    organization_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -96,6 +152,14 @@ struct FleetLocalStatus {
 
 fn identity_path() -> PathBuf {
     crate::paths::ryu_dir().join("fleet-identity.json")
+}
+
+fn pending_enrollment_path() -> PathBuf {
+    crate::paths::ryu_dir().join("fleet-enrollment-pending.json")
+}
+
+fn enrolled_bundle_path() -> PathBuf {
+    crate::paths::ryu_dir().join("fleet-enrolled-node.json")
 }
 
 fn snapshot_path() -> PathBuf {
@@ -145,20 +209,131 @@ fn restrict_file(_path: &Path) -> anyhow::Result<()> {
 }
 
 fn atomic_json<T: Serialize>(path: &Path, value: &T, secret: bool) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("state path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".ryu-state-")
+        .tempfile_in(parent)?;
+    serde_json::to_writer_pretty(temporary.as_file_mut(), value)?;
+    temporary.as_file_mut().write_all(b"\n")?;
+    temporary.as_file_mut().sync_all()?;
     if secret {
-        restrict_file(&temporary)?;
+        restrict_file(temporary.path())?;
     }
-    std::fs::rename(temporary, path)?;
+    temporary
+        .persist(path)
+        .map_err(|error| anyhow::anyhow!(error.error))?;
     Ok(())
 }
 
 fn load_json<T: for<'de> Deserialize<'de>>(path: &Path) -> anyhow::Result<T> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+
+fn load_fleet_identity_from(
+    bundle_path: &Path,
+    legacy_identity_path: &Path,
+) -> anyhow::Result<FleetIdentity> {
+    if bundle_path.exists() {
+        let bundle: EnrolledNodeBundle = load_json(bundle_path)?;
+        if !bundle.acknowledged {
+            anyhow::bail!("organization enrollment is waiting for acknowledgement");
+        }
+        return Ok(bundle.fleet_identity);
+    }
+    load_json(legacy_identity_path)
+}
+
+fn load_fleet_identity() -> anyhow::Result<FleetIdentity> {
+    load_fleet_identity_from(&enrolled_bundle_path(), &identity_path())
+}
+
+fn save_fleet_identity(identity: &FleetIdentity) -> anyhow::Result<()> {
+    let bundle_path = enrolled_bundle_path();
+    if bundle_path.exists() {
+        let mut bundle: EnrolledNodeBundle = load_json(&bundle_path)?;
+        bundle.fleet_identity = identity.clone();
+        return atomic_json(&bundle_path, &bundle, true);
+    }
+    atomic_json(&identity_path(), identity, true)
+}
+
+fn load_enrolled_bundle_from(path: &Path) -> Option<EnrolledNodeBundle> {
+    read_enrolled_bundle_from(path).ok().flatten()
+}
+
+fn read_enrolled_bundle_from(path: &Path) -> anyhow::Result<Option<EnrolledNodeBundle>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bundle = load_json::<EnrolledNodeBundle>(path)?;
+    validate_enrolled_bundle(&bundle)?;
+    Ok(Some(bundle))
+}
+
+fn load_enrolled_bundle() -> Option<EnrolledNodeBundle> {
+    load_enrolled_bundle_from(&enrolled_bundle_path())
+}
+
+/// Whether Core has persisted a v2 enrollment bundle, including one still
+/// awaiting acknowledgement. Used only to protect the self-hosted local bearer
+/// during startup; credential readers still validate the file contents.
+pub fn has_enrolled_node_bundle() -> bool {
+    enrolled_bundle_path().exists()
+}
+
+/// Whether startup should wait for the Fleet reconciler to finish a saved v2
+/// enrollment before deciding this is an unbound local node.
+pub fn enrollment_recovery_pending() -> bool {
+    if pending_enrollment_path().exists() {
+        return true;
+    }
+    read_enrolled_bundle_from(&enrolled_bundle_path())
+        .map(|bundle| bundle.is_some_and(|bundle| !bundle.acknowledged))
+        .unwrap_or_else(|_| enrolled_bundle_path().exists())
+}
+
+/// The organization-scoped node-control credential from a completed v2
+/// enrollment. Environment overrides are applied by the control-plane reader,
+/// not here, so this function can never mutate the local Gateway bearer.
+pub fn enrolled_control_token() -> Option<String> {
+    enrolled_control_token_from(&enrolled_bundle_path())
+}
+
+fn enrolled_control_token_from(path: &Path) -> Option<String> {
+    load_enrolled_bundle_from(path)
+        .filter(|bundle| bundle.acknowledged)
+        .map(|bundle| bundle.organization_binding.control_credential)
+}
+
+/// The control-plane base URL saved with an acknowledged v2 enrollment.
+pub fn enrolled_control_plane_url() -> Option<String> {
+    enrolled_control_plane_url_from(&enrolled_bundle_path())
+}
+
+fn enrolled_control_plane_url_from(path: &Path) -> Option<String> {
+    load_enrolled_bundle_from(path)
+        .filter(|bundle| bundle.acknowledged)
+        .map(|bundle| bundle.fleet_identity.control_plane_url)
+}
+
+/// The hosted managed-inference coordinates from a completed v2 enrollment.
+/// The local Gateway continues to use its own URL and bearer.
+pub fn enrolled_managed_fleet() -> Option<(String, String)> {
+    enrolled_managed_fleet_from(&enrolled_bundle_path())
+}
+
+fn enrolled_managed_fleet_from(path: &Path) -> Option<(String, String)> {
+    load_enrolled_bundle_from(path)
+        .filter(|bundle| bundle.acknowledged)
+        .map(|bundle| {
+            (
+                bundle.organization_binding.managed_fleet_url,
+                bundle.organization_binding.relay_credential,
+            )
+        })
 }
 
 fn canonicalize_json(value: &Value) -> Value {
@@ -1143,43 +1318,106 @@ async fn enroll_node(
     State(state): State<ServerState>,
     Json(body): Json<EnrollBody>,
 ) -> (StatusCode, Json<Value>) {
-    let base_url = body.control_plane_url.trim().trim_end_matches('/');
-    if !(base_url.starts_with("https://") || base_url.starts_with("http://127.0.0.1")) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "controlPlaneUrl must use HTTPS (localhost HTTP is allowed)" })),
-        );
-    }
-    if !body.token.starts_with("rfe_") {
+    let _enrollment_guard = enrollment_operation_lock().lock().await;
+    let base_url = match normalized_service_url(&body.control_plane_url) {
+        Ok(url) => url,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": error.to_string() })),
+            );
+        }
+    };
+    if !valid_enrollment_token(&body.token) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "invalid enrollment token" })),
         );
     }
-    let signing_key = SigningKey::generate(&mut OsRng);
-    let public_key =
-        base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().as_bytes());
-    let encryption_secret = StaticSecret::random_from_rng(OsRng);
-    let encryption_public = EncryptionPublicKey::from(&encryption_secret);
-    let encryption_public_key =
-        base64::engine::general_purpose::STANDARD.encode(encryption_public.as_bytes());
-    let response = match state
-        .client
-        .post(format!("{base_url}/api/control-plane/nodes/enroll"))
-        .json(&json!({
-            "architecture": std::env::consts::ARCH,
-            "capabilities": ["fleet-v1", "project-mapping-v1"],
-            "coreVersion": env!("CARGO_PKG_VERSION"),
-            "encryptionPublicKey": encryption_public_key,
-            "platform": std::env::consts::OS,
-            "publicKey": public_key,
-            "token": body.token,
-        }))
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-    {
-        Ok(response) => response,
+
+    let requested_token_hash = enrollment_token_hash(&body.token);
+    let existing_bundle = match read_enrolled_bundle_from(&enrolled_bundle_path()) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("could not read enrolled node bundle: {error}") })),
+            );
+        }
+    };
+    if let Some(bundle) = existing_bundle {
+        if bundle.fleet_identity.control_plane_url != base_url
+            || bundle.token_hash != requested_token_hash
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "this node is already bound; revoke the current enrollment before binding another organization"
+                })),
+            );
+        }
+        if !bundle.acknowledged {
+            if let Err(error) =
+                acknowledge_enrollment(&state.client, &enrolled_bundle_path(), bundle.clone()).await
+            {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "error": format!("enrollment was saved but acknowledgement failed: {error}")
+                    })),
+                );
+            }
+        }
+        let active_bundle = match read_enrolled_bundle_from(&enrolled_bundle_path()) {
+            Ok(Some(bundle)) => bundle,
+            Ok(None) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({ "error": "enrolled node bundle disappeared after acknowledgement" }),
+                    ),
+                );
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({ "error": format!("could not reload enrolled node bundle: {error}") }),
+                    ),
+                );
+            }
+        };
+        if let Err(error) = refresh_enrolled_registration(&state.client, &active_bundle).await {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": format!("enrollment is active but organization registration failed: {error}")
+                })),
+            );
+        }
+        return enrollment_success(&bundle.fleet_identity);
+    }
+
+    let pending_path = pending_enrollment_path();
+    let pending = match pending_attempt_for_request(&pending_path, &base_url, &body.token) {
+        Ok(pending) => pending,
+        Err(error) => {
+            let status = if error
+                .downcast_ref::<PendingControlPlaneConflict>()
+                .is_some()
+            {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            return (
+                status,
+                Json(json!({ "error": format!("could not persist enrollment attempt: {error}") })),
+            );
+        }
+    };
+    let enrolled = match prepare_enrollment(&state.client, &pending).await {
+        Ok(enrolled) => enrolled,
         Err(error) => {
             return (
                 StatusCode::BAD_GATEWAY,
@@ -1187,15 +1425,21 @@ async fn enroll_node(
             );
         }
     };
-    if !response.status().is_success() {
-        let status = response.status();
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": format!("control plane rejected enrollment: {status}") })),
-        );
+
+    if let Ok(existing) = load_json::<FleetIdentity>(&identity_path()) {
+        if existing.organization_id != enrolled.organization_id {
+            let _ = std::fs::remove_file(&pending_path);
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "this node is already bound to another organization; revoke it before rebinding"
+                })),
+            );
+        }
     }
-    let enrolled: EnrollResponse = match response.json().await {
-        Ok(enrolled) => enrolled,
+
+    let bundle = match prepared_identity_and_bundle(&pending, enrolled) {
+        Ok(bundle) => bundle,
         Err(error) => {
             return (
                 StatusCode::BAD_GATEWAY,
@@ -1203,33 +1447,447 @@ async fn enroll_node(
             );
         }
     };
-    let identity = FleetIdentity {
-        control_plane_url: base_url.to_owned(),
-        credential: enrolled.credential,
-        node_id: enrolled.node_id.clone(),
-        organization_id: enrolled.organization_id.clone(),
-        signing_private_key: base64::engine::general_purpose::STANDARD
-            .encode(signing_key.to_bytes()),
-        signing_public_key: public_key,
-        encryption_private_key: base64::engine::general_purpose::STANDARD
-            .encode(encryption_secret.to_bytes()),
-        encryption_public_key,
-        snapshot_public_key: enrolled.signing_public_key,
-        credential_updated_at: Some(Utc::now()),
-    };
-    if let Err(error) = atomic_json(&identity_path(), &identity, true) {
+    let identity = bundle.fleet_identity.clone();
+
+    if let Err(error) = atomic_json(&enrolled_bundle_path(), &bundle, true) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("could not persist node identity: {error}") })),
+            Json(json!({ "error": format!("could not persist enrolled node bundle: {error}") })),
         );
     }
+    let _ = std::fs::remove_file(&pending_path);
+    if let Err(error) = acknowledge_enrollment(&state.client, &enrolled_bundle_path(), bundle).await
+    {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": format!("enrollment was saved but acknowledgement failed: {error}")
+            })),
+        );
+    }
+    let active_bundle = match read_enrolled_bundle_from(&enrolled_bundle_path()) {
+        Ok(Some(bundle)) => bundle,
+        Ok(None) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "enrolled node bundle disappeared after acknowledgement" })),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("could not reload enrolled node bundle: {error}") })),
+            );
+        }
+    };
+    if let Err(error) = refresh_enrolled_registration(&state.client, &active_bundle).await {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": format!("enrollment is active but organization registration failed: {error}")
+            })),
+        );
+    }
+
+    enrollment_success(&identity)
+}
+
+fn enrollment_success(identity: &FleetIdentity) -> (StatusCode, Json<Value>) {
     (
         StatusCode::CREATED,
         Json(json!({
-            "nodeId": enrolled.node_id,
-            "organizationId": enrolled.organization_id,
+            "nodeId": identity.node_id,
+            "organizationId": identity.organization_id,
         })),
     )
+}
+
+fn normalized_service_url(raw: &str) -> anyhow::Result<String> {
+    if raw.len() > MAX_CONTROL_PLANE_URL_BYTES {
+        anyhow::bail!("controlPlaneUrl must not exceed {MAX_CONTROL_PLANE_URL_BYTES} bytes");
+    }
+    let normalized = raw.trim().trim_end_matches('/');
+    let parsed = url::Url::parse(normalized)
+        .map_err(|_| anyhow::anyhow!("controlPlaneUrl must be an absolute URL"))?;
+    let secure = parsed.scheme() == "https";
+    let local_http = parsed.scheme() == "http" && parsed.host_str() == Some("127.0.0.1");
+    if !secure || parsed.host_str().is_none() {
+        if !local_http {
+            anyhow::bail!("controlPlaneUrl must use HTTPS (localhost HTTP is allowed)");
+        }
+    }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        anyhow::bail!("controlPlaneUrl must not contain credentials, a query, or a fragment");
+    }
+    if normalized.is_empty() {
+        anyhow::bail!("controlPlaneUrl must use HTTPS (localhost HTTP is allowed)")
+    }
+    Ok(normalized.to_owned())
+}
+
+fn valid_enrollment_token(token: &str) -> bool {
+    token.len() == 68
+        && token.starts_with("rfe_")
+        && token[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn enrollment_token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+fn new_pending_attempt(control_plane_url: &str, token: &str) -> PendingEnrollmentAttempt {
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let signing_public_key =
+        base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().as_bytes());
+    let encryption_secret = StaticSecret::random_from_rng(OsRng);
+    let encryption_public_key = base64::engine::general_purpose::STANDARD
+        .encode(EncryptionPublicKey::from(&encryption_secret).as_bytes());
+    PendingEnrollmentAttempt {
+        claim_id: Uuid::new_v4().to_string(),
+        control_plane_url: control_plane_url.to_owned(),
+        token: token.to_owned(),
+        token_hash: enrollment_token_hash(token),
+        signing_private_key: base64::engine::general_purpose::STANDARD
+            .encode(signing_key.to_bytes()),
+        signing_public_key,
+        encryption_private_key: base64::engine::general_purpose::STANDARD
+            .encode(encryption_secret.to_bytes()),
+        encryption_public_key,
+    }
+}
+
+fn pending_attempt_for_request(
+    path: &Path,
+    control_plane_url: &str,
+    token: &str,
+) -> anyhow::Result<PendingEnrollmentAttempt> {
+    if path.exists() {
+        let existing: PendingEnrollmentAttempt = load_json(path)?;
+        validate_pending_attempt(&existing)?;
+        if existing.control_plane_url == control_plane_url {
+            return Ok(existing);
+        }
+        return Err(anyhow::Error::new(PendingControlPlaneConflict));
+    }
+    let pending = new_pending_attempt(control_plane_url, token);
+    atomic_json(path, &pending, true)?;
+    Ok(pending)
+}
+
+#[derive(Debug)]
+struct PendingControlPlaneConflict;
+
+impl std::fmt::Display for PendingControlPlaneConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a pending enrollment already targets a different control-plane URL")
+    }
+}
+
+impl std::error::Error for PendingControlPlaneConflict {}
+
+fn decode_32_bytes(value: &str, field: &str) -> anyhow::Result<[u8; 32]> {
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|error| anyhow::anyhow!("{field} is not valid base64: {error}"))?;
+    decoded
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{field} must contain 32 bytes"))
+}
+
+fn validate_pending_attempt(pending: &PendingEnrollmentAttempt) -> anyhow::Result<()> {
+    let _ = Uuid::parse_str(&pending.claim_id)?;
+    if normalized_service_url(&pending.control_plane_url)? != pending.control_plane_url {
+        anyhow::bail!("pending control-plane URL is not canonical");
+    }
+    if !valid_enrollment_token(&pending.token)
+        || enrollment_token_hash(&pending.token) != pending.token_hash
+    {
+        anyhow::bail!("pending enrollment token does not match its digest");
+    }
+    let signing_private = decode_32_bytes(&pending.signing_private_key, "signingPrivateKey")?;
+    let signing_key = SigningKey::from_bytes(&signing_private);
+    let derived_signing_public =
+        base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().as_bytes());
+    if derived_signing_public != pending.signing_public_key {
+        anyhow::bail!("pending signing public key does not match its private key");
+    }
+    let encryption_private =
+        decode_32_bytes(&pending.encryption_private_key, "encryptionPrivateKey")?;
+    let encryption_secret = StaticSecret::from(encryption_private);
+    let derived_encryption_public = base64::engine::general_purpose::STANDARD
+        .encode(EncryptionPublicKey::from(&encryption_secret).as_bytes());
+    if derived_encryption_public != pending.encryption_public_key {
+        anyhow::bail!("pending encryption public key does not match its private key");
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnrollmentClaim<'a> {
+    claim_id: &'a str,
+    encryption_public_key: &'a str,
+    public_key: &'a str,
+    token_hash: &'a str,
+}
+
+fn enrollment_claim_bytes(pending: &PendingEnrollmentAttempt) -> anyhow::Result<Vec<u8>> {
+    let payload = serde_json::to_vec(&EnrollmentClaim {
+        claim_id: &pending.claim_id,
+        encryption_public_key: &pending.encryption_public_key,
+        public_key: &pending.signing_public_key,
+        token_hash: &pending.token_hash,
+    })?;
+    let mut message = Vec::with_capacity(ENROLLMENT_CLAIM_DOMAIN.len() + payload.len());
+    message.extend_from_slice(ENROLLMENT_CLAIM_DOMAIN.as_bytes());
+    message.extend_from_slice(&payload);
+    Ok(message)
+}
+
+fn enrollment_claim_proof(pending: &PendingEnrollmentAttempt) -> anyhow::Result<String> {
+    validate_pending_attempt(pending)?;
+    let private_key = decode_32_bytes(&pending.signing_private_key, "signingPrivateKey")?;
+    let signature = SigningKey::from_bytes(&private_key).sign(&enrollment_claim_bytes(pending)?);
+    Ok(base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()))
+}
+
+async fn prepare_enrollment(
+    client: &reqwest::Client,
+    pending: &PendingEnrollmentAttempt,
+) -> anyhow::Result<EnrollResponse> {
+    let claim_proof = enrollment_claim_proof(pending)?;
+    let response = client
+        .post(format!(
+            "{}/api/control-plane/nodes/enroll",
+            pending.control_plane_url
+        ))
+        .json(&json!({
+            "architecture": std::env::consts::ARCH,
+            "capabilities": ["fleet-v1", "project-mapping-v1"],
+            "claimId": pending.claim_id,
+            "claimProof": claim_proof,
+            "coreVersion": env!("CARGO_PKG_VERSION"),
+            "encryptionPublicKey": pending.encryption_public_key,
+            "platform": std::env::consts::OS,
+            "protocolVersion": 2,
+            "publicKey": pending.signing_public_key,
+            "token": pending.token,
+        }))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        anyhow::bail!("control plane rejected enrollment: {}", response.status());
+    }
+    Ok(response.json().await?)
+}
+
+fn prepared_identity_and_bundle(
+    pending: &PendingEnrollmentAttempt,
+    enrolled: EnrollResponse,
+) -> anyhow::Result<EnrolledNodeBundle> {
+    if !enrolled.credential.starts_with("rfn_")
+        || enrolled.node_id.trim().is_empty()
+        || enrolled.organization_id.trim().is_empty()
+    {
+        anyhow::bail!("Fleet identity response is incomplete or has an invalid credential");
+    }
+    let snapshot_public_key = decode_32_bytes(&enrolled.signing_public_key, "signingPublicKey")?;
+    let _ = VerifyingKey::from_bytes(&snapshot_public_key)?;
+    let identity = FleetIdentity {
+        control_plane_url: pending.control_plane_url.clone(),
+        credential: enrolled.credential,
+        node_id: enrolled.node_id,
+        organization_id: enrolled.organization_id,
+        signing_private_key: pending.signing_private_key.clone(),
+        signing_public_key: pending.signing_public_key.clone(),
+        encryption_private_key: pending.encryption_private_key.clone(),
+        encryption_public_key: pending.encryption_public_key.clone(),
+        snapshot_public_key: enrolled.signing_public_key,
+        credential_updated_at: Some(Utc::now()),
+    };
+    let binding = enrolled
+        .organization_binding
+        .ok_or_else(|| anyhow::anyhow!("v2 enrollment response is missing organizationBinding"))?;
+    validate_organization_binding(&binding)?;
+    let bundle = EnrolledNodeBundle {
+        claim_id: pending.claim_id.clone(),
+        token_hash: pending.token_hash.clone(),
+        fleet_identity: identity.clone(),
+        organization_binding: binding,
+        acknowledged: false,
+    };
+    validate_enrolled_bundle(&bundle)?;
+    Ok(bundle)
+}
+
+fn validate_organization_binding(binding: &EnrollmentOrganizationBinding) -> anyhow::Result<()> {
+    if binding.status != "ready" || !binding.acknowledgement_required {
+        anyhow::bail!("organization binding is not ready for acknowledgement");
+    }
+    if !binding.control_credential.starts_with("rgw_")
+        || !binding.relay_credential.starts_with("rgw_")
+        || binding.credential_set_id.trim().is_empty()
+    {
+        anyhow::bail!("organization binding credentials are incomplete");
+    }
+    if binding.control_credential == binding.relay_credential {
+        anyhow::bail!("control and relay credentials must be purpose-separated");
+    }
+    let normalized_url = normalized_service_url(&binding.managed_fleet_url).map_err(|_| {
+        anyhow::anyhow!("managedFleetUrl must use HTTPS (localhost HTTP is allowed)")
+    })?;
+    if normalized_url != binding.managed_fleet_url {
+        anyhow::bail!("managedFleetUrl is not canonical");
+    }
+    Ok(())
+}
+
+fn validate_enrolled_bundle(bundle: &EnrolledNodeBundle) -> anyhow::Result<()> {
+    let _ = Uuid::parse_str(&bundle.claim_id)?;
+    if bundle.token_hash.len() != 64
+        || !bundle
+            .token_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("enrolled token digest is invalid");
+    }
+    if bundle.fleet_identity.organization_id.trim().is_empty()
+        || bundle.fleet_identity.node_id.trim().is_empty()
+        || !bundle.fleet_identity.credential.starts_with("rfn_")
+    {
+        anyhow::bail!("enrolled Fleet identity is incomplete");
+    }
+    validate_organization_binding(&bundle.organization_binding)
+}
+
+async fn acknowledge_enrollment(
+    client: &reqwest::Client,
+    path: &Path,
+    mut bundle: EnrolledNodeBundle,
+) -> anyhow::Result<()> {
+    if bundle.acknowledged {
+        return Ok(());
+    }
+    let response = client
+        .post(format!(
+            "{}/api/control-plane/nodes/enroll/acknowledge",
+            bundle.fleet_identity.control_plane_url
+        ))
+        .bearer_auth(&bundle.fleet_identity.credential)
+        .json(&json!({ "claimId": bundle.claim_id }))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "control plane rejected acknowledgement: {}",
+            response.status()
+        );
+    }
+    let acknowledgement: EnrollmentAcknowledgement = response.json().await?;
+    if !acknowledgement.acknowledged
+        || acknowledgement.status != "active"
+        || acknowledgement.node_id != bundle.fleet_identity.node_id
+        || acknowledgement.organization_id != bundle.fleet_identity.organization_id
+    {
+        anyhow::bail!("acknowledgement did not match the persisted enrolled node");
+    }
+    bundle.acknowledged = true;
+    atomic_json(path, &bundle, true)
+}
+
+fn registration_refresh_required(
+    bundle: &EnrolledNodeBundle,
+    registered: Option<&crate::sidecar::control_plane::RegisteredNode>,
+) -> bool {
+    !bundle.acknowledged
+        || registered.is_none_or(|node| {
+            node.org.id != bundle.fleet_identity.organization_id
+                || node.node_id != bundle.fleet_identity.node_id
+        })
+}
+
+async fn refresh_enrolled_registration(
+    client: &reqwest::Client,
+    bundle: &EnrolledNodeBundle,
+) -> anyhow::Result<()> {
+    if !bundle.acknowledged {
+        anyhow::bail!("enrolled credentials cannot register before acknowledgement");
+    }
+    let registered = crate::sidecar::control_plane::registered_node();
+    if !registration_refresh_required(bundle, registered.as_ref()) {
+        return Ok(());
+    }
+    match crate::sidecar::control_plane::register_managed_node(client).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            crate::sidecar::control_plane::clear_registered_node();
+            crate::entitlement::set_managed_inference_entitled("false");
+            anyhow::bail!("acknowledged enrollment did not supply a control token");
+        }
+        Err(error) => {
+            crate::sidecar::control_plane::clear_registered_node();
+            crate::entitlement::set_managed_inference_entitled("false");
+            return Err(error);
+        }
+    }
+    let Some(registered) = crate::sidecar::control_plane::registered_node() else {
+        crate::sidecar::control_plane::clear_registered_node();
+        crate::entitlement::set_managed_inference_entitled("false");
+        anyhow::bail!("control-plane registration returned no node binding");
+    };
+    if registration_refresh_required(bundle, Some(&registered)) {
+        crate::sidecar::control_plane::clear_registered_node();
+        crate::entitlement::set_managed_inference_entitled("false");
+        anyhow::bail!(
+            "control-plane registration resolved a different organization or node than the enrolled bundle"
+        );
+    }
+    Ok(())
+}
+
+async fn recover_enrollment(client: &reqwest::Client) -> anyhow::Result<()> {
+    let _enrollment_guard = enrollment_operation_lock().lock().await;
+    let bundle_path = enrolled_bundle_path();
+    if let Some(bundle) = read_enrolled_bundle_from(&bundle_path)? {
+        if !bundle.acknowledged {
+            acknowledge_enrollment(client, &bundle_path, bundle).await?;
+        }
+        let active_bundle = read_enrolled_bundle_from(&bundle_path)?
+            .ok_or_else(|| anyhow::anyhow!("enrolled node bundle disappeared during recovery"))?;
+        refresh_enrolled_registration(client, &active_bundle).await?;
+        let _ = std::fs::remove_file(pending_enrollment_path());
+        return Ok(());
+    }
+
+    let pending_path = pending_enrollment_path();
+    if !pending_path.exists() {
+        return Ok(());
+    }
+    let pending: PendingEnrollmentAttempt = load_json(&pending_path)?;
+    validate_pending_attempt(&pending)?;
+    let enrolled = prepare_enrollment(client, &pending).await?;
+    if let Ok(existing) = load_json::<FleetIdentity>(&identity_path()) {
+        if existing.organization_id != enrolled.organization_id {
+            anyhow::bail!("pending enrollment would rebind this node to another organization");
+        }
+    }
+    let bundle = prepared_identity_and_bundle(&pending, enrolled)?;
+    atomic_json(&bundle_path, &bundle, true)?;
+    let _ = std::fs::remove_file(&pending_path);
+    acknowledge_enrollment(client, &bundle_path, bundle).await?;
+    let active_bundle = read_enrolled_bundle_from(&bundle_path)?
+        .ok_or_else(|| anyhow::anyhow!("enrolled node bundle disappeared during recovery"))?;
+    refresh_enrolled_registration(client, &active_bundle).await?;
+    Ok(())
 }
 
 async fn adopt_legacy_gateway(state: &ServerState) -> anyhow::Result<bool> {
@@ -1355,14 +2013,14 @@ async fn rotate_credential_if_due(
         .ok_or_else(|| anyhow::anyhow!("credential rotation response is missing credential"))?
         .to_owned();
     identity.credential_updated_at = Some(Utc::now());
-    atomic_json(&identity_path(), identity, true)?;
+    save_fleet_identity(identity)?;
     Ok(())
 }
 
 async fn reconcile_once(state: &ServerState) -> anyhow::Result<bool> {
     use anyhow::{anyhow, bail};
 
-    let mut identity: FleetIdentity = load_json(&identity_path())?;
+    let mut identity = load_fleet_identity()?;
     rotate_credential_if_due(&state.client, &mut identity).await?;
     let previous = load_json::<SignedSnapshot>(&snapshot_path()).ok();
     let previous_revision = previous
@@ -1498,7 +2156,7 @@ fn cached_snapshot_is_stale() -> bool {
 /// Managed command rules and authenticated node context forwarded to Gateway.
 /// Expired LKG snapshots retain only denies; managed allows/prompts disappear.
 pub fn command_scan_context() -> (Option<String>, Option<String>, Vec<Value>) {
-    let Ok(identity) = load_json::<FleetIdentity>(&identity_path()) else {
+    let Ok(identity) = load_fleet_identity() else {
         return (None, None, Vec::new());
     };
     let snapshot = load_json::<SignedSnapshot>(&snapshot_path()).ok();
@@ -1574,7 +2232,7 @@ pub fn command_scan_context() -> (Option<String>, Option<String>, Vec<Value>) {
 /// Resolved managed instruction rules for a turn, kept separate and labelled so
 /// repository files remain untouched and their provenance stays visible.
 pub fn managed_instruction_block(cwd: Option<&str>) -> Option<String> {
-    let identity = load_json::<FleetIdentity>(&identity_path()).ok()?;
+    let identity = load_fleet_identity().ok()?;
     let snapshot = load_json::<SignedSnapshot>(&snapshot_path()).ok()?;
     let project_id = cwd.and_then(|cwd| {
         load_from(&mappings_path()).ok().and_then(|mappings| {
@@ -1609,7 +2267,12 @@ pub fn managed_instruction_block(cwd: Option<&str>) -> Option<String> {
 pub fn spawn_reconciler(state: ServerState) {
     tokio::spawn(async move {
         loop {
-            if !identity_path().exists() {
+            if let Err(error) = recover_enrollment(&state.client).await {
+                tracing::warn!("fleet: enrollment recovery failed: {error}");
+                tokio::time::sleep(Duration::from_secs(RETRY_SECONDS)).await;
+                continue;
+            }
+            if !enrolled_bundle_path().exists() && !identity_path().exists() {
                 match adopt_legacy_gateway(&state).await {
                     Ok(true) => tracing::info!("fleet: adopted legacy managed-node credential"),
                     Ok(false) => {
@@ -1623,7 +2286,7 @@ pub fn spawn_reconciler(state: ServerState) {
                     }
                 }
             }
-            if identity_path().exists() {
+            if load_fleet_identity().is_ok() {
                 if let Err(error) = reconcile_once(&state).await {
                     let stale = cached_snapshot_is_stale();
                     if stale {
@@ -1707,14 +2370,27 @@ async fn expire_managed_runtime(state: &ServerState) {
 }
 
 async fn fleet_status() -> (StatusCode, Json<Value>) {
-    let identity = load_json::<FleetIdentity>(&identity_path()).ok();
+    let bundle = load_enrolled_bundle();
+    let identity = bundle
+        .as_ref()
+        .map(|value| value.fleet_identity.clone())
+        .or_else(|| load_json::<FleetIdentity>(&identity_path()).ok());
+    let organization_name = identity.as_ref().and_then(|identity| {
+        crate::sidecar::control_plane::registered_org()
+            .filter(|organization| organization.id == identity.organization_id)
+            .map(|organization| organization.name)
+    });
+    let managed_inference_ready = bundle.as_ref().is_some_and(|value| value.acknowledged)
+        && crate::entitlement::managed_inference_entitled();
     let status = load_json::<FleetLocalStatus>(&status_path()).unwrap_or_default();
     (
         StatusCode::OK,
         Json(json!({
             "enrolled": identity.is_some(),
+            "managedInferenceReady": managed_inference_ready,
             "nodeId": identity.as_ref().map(|value| &value.node_id),
             "organizationId": identity.as_ref().map(|value| &value.organization_id),
+            "organizationName": organization_name,
             "status": status,
         })),
     )
@@ -1802,14 +2478,26 @@ pub fn routes() -> Router<ServerState> {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonicalize_json, fleet_skill_dir, project_for_cwd, validate_insert, verify_snapshot,
-        FleetIdentity, ProjectMapping, SignedSnapshot,
+        atomic_json, canonicalize_json, enrolled_control_plane_url_from,
+        enrolled_control_token_from, enrolled_managed_fleet_from, enrollment_claim_bytes,
+        enrollment_claim_proof, enrollment_operation_lock, enrollment_token_hash, fleet_skill_dir,
+        load_enrolled_bundle_from, load_fleet_identity_from, normalized_service_url,
+        pending_attempt_for_request, project_for_cwd, registration_refresh_required,
+        valid_enrollment_token, validate_insert, validate_organization_binding, verify_snapshot,
+        EnrollResponse, EnrolledNodeBundle, EnrollmentOrganizationBinding, FleetIdentity,
+        ProjectMapping, SignedSnapshot, ENROLLMENT_CLAIM_DOMAIN,
     };
     use base64::Engine;
     use chrono::{Duration, Utc};
-    use ed25519_dalek::{Signer, SigningKey};
+    use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
     use serde_json::json;
     use std::path::Path;
+    use tempfile::tempdir;
+
+    const TEST_ENROLLMENT_TOKEN: &str =
+        "rfe_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OTHER_ENROLLMENT_TOKEN: &str =
+        "rfe_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn mapping(project: &str, root: &str) -> ProjectMapping {
         ProjectMapping {
@@ -1879,6 +2567,334 @@ mod tests {
                 signature: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
             },
         )
+    }
+
+    fn identity(organization_id: &str, node_id: &str) -> FleetIdentity {
+        FleetIdentity {
+            control_plane_url: "https://control.example".into(),
+            credential: "rfn_test".into(),
+            node_id: node_id.into(),
+            organization_id: organization_id.into(),
+            signing_private_key: base64::engine::general_purpose::STANDARD.encode([1; 32]),
+            signing_public_key: base64::engine::general_purpose::STANDARD.encode([2; 32]),
+            encryption_private_key: base64::engine::general_purpose::STANDARD.encode([3; 32]),
+            encryption_public_key: base64::engine::general_purpose::STANDARD.encode([4; 32]),
+            snapshot_public_key: base64::engine::general_purpose::STANDARD.encode([5; 32]),
+            credential_updated_at: None,
+        }
+    }
+
+    fn binding() -> EnrollmentOrganizationBinding {
+        EnrollmentOrganizationBinding {
+            status: "ready".into(),
+            acknowledgement_required: true,
+            control_credential: "rgw_control".into(),
+            relay_credential: "rgw_relay".into(),
+            managed_fleet_url: "https://fleet.example".into(),
+            credential_set_id: "gcs_1".into(),
+        }
+    }
+
+    fn bundle(acknowledged: bool, organization_id: &str, node_id: &str) -> EnrolledNodeBundle {
+        EnrolledNodeBundle {
+            claim_id: "ad469ef7-537c-44e8-aa14-a08f813eaad2".into(),
+            token_hash: enrollment_token_hash(TEST_ENROLLMENT_TOKEN),
+            fleet_identity: identity(organization_id, node_id),
+            organization_binding: binding(),
+            acknowledged,
+        }
+    }
+
+    #[test]
+    fn pending_attempt_is_persisted_once_and_reused_for_retry() {
+        let directory = tempdir().expect("temporary state directory");
+        let path = directory.path().join("pending.json");
+        let first =
+            pending_attempt_for_request(&path, "https://control.example", TEST_ENROLLMENT_TOKEN)
+                .expect("first pending attempt");
+        let first_proof = enrollment_claim_proof(&first).expect("first claim proof");
+        let second =
+            pending_attempt_for_request(&path, "https://control.example", TEST_ENROLLMENT_TOKEN)
+                .expect("reloaded pending attempt");
+        let second_proof = enrollment_claim_proof(&second).expect("second claim proof");
+
+        assert_eq!(second.claim_id, first.claim_id);
+        assert_eq!(second.signing_private_key, first.signing_private_key);
+        assert_eq!(second.encryption_private_key, first.encryption_private_key);
+        assert_eq!(second_proof, first_proof);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path)
+                .expect("pending metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[tokio::test]
+    async fn enrollment_operation_lock_is_exclusive() {
+        let guard = enrollment_operation_lock().lock().await;
+        assert!(enrollment_operation_lock().try_lock().is_err());
+        drop(guard);
+        assert!(enrollment_operation_lock().try_lock().is_ok());
+    }
+
+    #[test]
+    fn same_control_plane_resumes_pending_claim_even_with_a_new_token() {
+        let directory = tempdir().expect("temporary state directory");
+        let path = directory.path().join("pending.json");
+        let first =
+            pending_attempt_for_request(&path, "https://control.example", TEST_ENROLLMENT_TOKEN)
+                .expect("first pending attempt");
+        let resumed =
+            pending_attempt_for_request(&path, "https://control.example", OTHER_ENROLLMENT_TOKEN)
+                .expect("saved pending attempt resumes");
+        assert_eq!(resumed.claim_id, first.claim_id);
+        assert_eq!(resumed.token, TEST_ENROLLMENT_TOKEN);
+        assert_eq!(resumed.signing_private_key, first.signing_private_key);
+    }
+
+    #[test]
+    fn different_control_plane_cannot_replace_pending_claim() {
+        let directory = tempdir().expect("temporary state directory");
+        let path = directory.path().join("pending.json");
+        let first =
+            pending_attempt_for_request(&path, "https://control.example", TEST_ENROLLMENT_TOKEN)
+                .expect("first pending attempt");
+        let error =
+            pending_attempt_for_request(&path, "https://other.example", OTHER_ENROLLMENT_TOKEN)
+                .expect_err("different control plane conflicts");
+        assert!(error
+            .downcast_ref::<super::PendingControlPlaneConflict>()
+            .is_some());
+        let persisted: super::PendingEnrollmentAttempt =
+            super::load_json(&path).expect("original pending attempt remains");
+        assert_eq!(persisted.claim_id, first.claim_id);
+        assert_eq!(persisted.control_plane_url, "https://control.example");
+    }
+
+    #[test]
+    fn enrollment_token_requires_exact_lowercase_sha256_shape() {
+        assert!(valid_enrollment_token(TEST_ENROLLMENT_TOKEN));
+        assert!(!valid_enrollment_token("rfe_short"));
+        assert!(!valid_enrollment_token(
+            "rfe_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        ));
+        assert!(!valid_enrollment_token(
+            "rfe_gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"
+        ));
+        assert!(!valid_enrollment_token(
+            "other_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+    }
+
+    #[test]
+    fn enrollment_claim_matches_the_v2_canonical_wire_and_signature() {
+        let directory = tempdir().expect("temporary state directory");
+        let pending = pending_attempt_for_request(
+            &directory.path().join("pending.json"),
+            "https://control.example",
+            TEST_ENROLLMENT_TOKEN,
+        )
+        .expect("pending attempt");
+        let expected = format!(
+            "{ENROLLMENT_CLAIM_DOMAIN}{{\"claimId\":\"{}\",\"encryptionPublicKey\":\"{}\",\"publicKey\":\"{}\",\"tokenHash\":\"{}\"}}",
+            pending.claim_id,
+            pending.encryption_public_key,
+            pending.signing_public_key,
+            pending.token_hash,
+        );
+        let message = enrollment_claim_bytes(&pending).expect("canonical claim");
+        assert_eq!(message, expected.as_bytes());
+
+        let public_key: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(&pending.signing_public_key)
+            .expect("public key base64")
+            .try_into()
+            .expect("public key width");
+        let signature = Signature::from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .decode(enrollment_claim_proof(&pending).expect("claim proof"))
+                .expect("proof base64"),
+        )
+        .expect("Ed25519 signature");
+        SigningKey::from_bytes(
+            &base64::engine::general_purpose::STANDARD
+                .decode(&pending.signing_private_key)
+                .expect("private key base64")
+                .try_into()
+                .expect("private key width"),
+        )
+        .verifying_key()
+        .verify(&message, &signature)
+        .expect("valid signed claim");
+        assert_eq!(
+            SigningKey::from_bytes(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(&pending.signing_private_key)
+                    .expect("private key base64")
+                    .try_into()
+                    .expect("private key width"),
+            )
+            .verifying_key()
+            .as_bytes(),
+            &public_key
+        );
+    }
+
+    #[test]
+    fn enrolled_bundle_overwrites_atomically_when_acknowledgement_arrives() {
+        let directory = tempdir().expect("temporary state directory");
+        let path = directory.path().join("bundle.json");
+        let mut saved = bundle(false, "org-enrolled", "node-enrolled");
+        atomic_json(&path, &saved, true).expect("prepared bundle persisted");
+        assert!(
+            !load_enrolled_bundle_from(&path)
+                .expect("prepared bundle")
+                .acknowledged
+        );
+
+        saved.acknowledged = true;
+        atomic_json(&path, &saved, true).expect("active bundle replaced atomically");
+        let active = load_enrolled_bundle_from(&path).expect("active bundle");
+        assert!(active.acknowledged);
+        assert_eq!(
+            active.organization_binding.control_credential,
+            "rgw_control"
+        );
+        assert_eq!(active.organization_binding.relay_credential, "rgw_relay");
+    }
+
+    #[test]
+    fn enrolled_credentials_remain_hidden_until_acknowledgement_is_durable() {
+        let directory = tempdir().expect("temporary state directory");
+        let path = directory.path().join("bundle.json");
+        atomic_json(&path, &bundle(false, "org-enrolled", "node-enrolled"), true)
+            .expect("prepared bundle");
+        assert_eq!(enrolled_control_token_from(&path), None);
+        assert_eq!(enrolled_managed_fleet_from(&path), None);
+
+        atomic_json(&path, &bundle(true, "org-enrolled", "node-enrolled"), true)
+            .expect("acknowledged bundle");
+        assert_eq!(
+            enrolled_control_token_from(&path),
+            Some("rgw_control".into())
+        );
+        assert_eq!(
+            enrolled_managed_fleet_from(&path),
+            Some(("https://fleet.example".into(), "rgw_relay".into()))
+        );
+        assert_eq!(
+            enrolled_control_plane_url_from(&path),
+            Some("https://control.example".into())
+        );
+    }
+
+    #[test]
+    fn unacknowledged_bundle_cannot_supply_control_plane_url() {
+        let directory = tempdir().expect("temporary state directory");
+        let path = directory.path().join("bundle.json");
+        atomic_json(&path, &bundle(false, "org-enrolled", "node-enrolled"), true)
+            .expect("prepared bundle");
+        assert_eq!(enrolled_control_plane_url_from(&path), None);
+    }
+
+    #[test]
+    fn acknowledged_bundle_retries_registration_until_org_and_node_match() {
+        use crate::sidecar::control_plane::{NodeScope, RegisteredNode, RegisteredOrg};
+
+        let enrolled = bundle(true, "org-enrolled", "node-enrolled");
+        assert!(registration_refresh_required(&enrolled, None));
+        let matching = RegisteredNode {
+            org: RegisteredOrg {
+                id: "org-enrolled".into(),
+                name: "Acme".into(),
+                slug: Some("acme".into()),
+            },
+            node_id: "node-enrolled".into(),
+            scope: NodeScope::Org,
+            team_id: None,
+            owner_user_id: None,
+        };
+        assert!(!registration_refresh_required(&enrolled, Some(&matching)));
+        let wrong_node = RegisteredNode {
+            node_id: "node-other".into(),
+            ..matching
+        };
+        assert!(registration_refresh_required(&enrolled, Some(&wrong_node)));
+    }
+
+    #[test]
+    fn v2_prepare_rejects_missing_organization_binding() {
+        let directory = tempdir().expect("temporary state directory");
+        let pending_path = directory.path().join("pending.json");
+        let pending = pending_attempt_for_request(
+            &pending_path,
+            "https://control.example",
+            TEST_ENROLLMENT_TOKEN,
+        )
+        .expect("pending attempt");
+        let response = EnrollResponse {
+            credential: "rfn_test".into(),
+            node_id: "node-enrolled".into(),
+            organization_id: "org-enrolled".into(),
+            signing_public_key: base64::engine::general_purpose::STANDARD.encode([5; 32]),
+            organization_binding: None,
+        };
+        assert!(super::prepared_identity_and_bundle(&pending, response).is_err());
+        assert!(pending_path.exists());
+        assert!(!directory.path().join("fleet-identity.json").exists());
+    }
+
+    #[test]
+    fn acknowledged_bundle_precedes_legacy_identity_without_breaking_legacy_loading() {
+        let directory = tempdir().expect("temporary state directory");
+        let bundle_path = directory.path().join("bundle.json");
+        let legacy_path = directory.path().join("identity.json");
+        atomic_json(&legacy_path, &identity("org-legacy", "node-legacy"), true)
+            .expect("legacy identity");
+
+        let legacy = load_fleet_identity_from(&bundle_path, &legacy_path)
+            .expect("legacy identity remains loadable");
+        assert_eq!(legacy.organization_id, "org-legacy");
+
+        atomic_json(
+            &bundle_path,
+            &bundle(true, "org-enrolled", "node-enrolled"),
+            true,
+        )
+        .expect("enrolled bundle");
+        let enrolled =
+            load_fleet_identity_from(&bundle_path, &legacy_path).expect("acknowledged bundle");
+        assert_eq!(enrolled.organization_id, "org-enrolled");
+        assert_eq!(enrolled.node_id, "node-enrolled");
+
+        atomic_json(
+            &bundle_path,
+            &bundle(false, "org-enrolled", "node-enrolled"),
+            true,
+        )
+        .expect("unacknowledged bundle");
+        assert!(load_fleet_identity_from(&bundle_path, &legacy_path).is_err());
+    }
+
+    #[test]
+    fn organization_binding_rejects_shared_control_and_relay_credentials() {
+        let mut invalid = binding();
+        invalid.relay_credential = invalid.control_credential.clone();
+        assert!(validate_organization_binding(&invalid).is_err());
+    }
+
+    #[test]
+    fn enrollment_url_allows_only_https_or_exact_loopback_http() {
+        assert!(normalized_service_url("https://control.example/").is_ok());
+        assert!(normalized_service_url("http://127.0.0.1:3000").is_ok());
+        assert!(normalized_service_url("http://127.0.0.1.evil.example").is_err());
+        assert!(normalized_service_url("https://user:secret@control.example").is_err());
+        assert!(normalized_service_url(&format!("https://{}", "a".repeat(2048))).is_err());
     }
 
     #[test]

@@ -4,14 +4,14 @@
 // loads and maps, `@ryu/blocks/desktop/usage` renders. The split is what lets
 // `apps/storyboard` show the same surface with mock data.
 
-import { UsageView } from "@ryu/blocks/desktop/usage";
+import { UsageView } from "@ryu/blocks/desktop/usage.tsx";
 import type {
 	UsageAnalyticsData,
 	UsageDateRange,
 	UsageGranularity,
 	UsageScope,
-} from "@ryu/blocks/desktop/usage-analytics";
-import { useEffect, useMemo, useState } from "react";
+} from "@ryu/blocks/desktop/usage-analytics.ts";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { OrgBillingContext } from "@/src/components/billing/OrgBillingContext.tsx";
 import { useUsageStatement } from "@/src/hooks/useUsageStatement.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
@@ -84,19 +84,25 @@ export default function UsageTab() {
 	const [providerOptions, setProviderOptions] = useState<string[]>([]);
 	const [modelOptions, setModelOptions] = useState<string[]>([]);
 	const [analyticsRefreshNonce, setAnalyticsRefreshNonce] = useState(0);
+	const analyticsNodeTarget =
+		analyticsScope === "node" ? activeNodeTarget : null;
+	const analyticsNodeUrl = analyticsNodeTarget?.url ?? null;
+	const analyticsOrgId = analyticsScope === "organization" ? activeOrgId : null;
 
-	useEffect(() => {
+	useLayoutEffect(() => {
 		setAnalytics(null);
 		setAnalyticsProvider(null);
 		setAnalyticsModel(null);
 		setProviderOptions([]);
 		setModelOptions([]);
-	}, [activeNodeTarget, activeOrgId, analyticsScope]);
+	}, [analyticsNodeUrl, analyticsOrgId, analyticsScope]);
 
 	useEffect(() => {
 		let cancelled = false;
+		const controller = new AbortController();
 		setAnalyticsLoading(true);
 		setAnalyticsError(null);
+		setAnalytics(null);
 		void fetchUsageAnalytics(
 			{
 				from: analyticsRange.from,
@@ -106,10 +112,11 @@ export default function UsageTab() {
 				to: analyticsRange.to,
 			},
 			{
-				activeNode: activeNodeTarget,
-				activeOrgId,
+				activeNode: analyticsNodeTarget,
+				activeOrgId: analyticsOrgId,
 				scope: analyticsScope,
-			}
+			},
+			controller.signal
 		)
 			.then((next) => {
 				if (cancelled) {
@@ -135,10 +142,11 @@ export default function UsageTab() {
 			});
 		return () => {
 			cancelled = true;
+			controller.abort();
 		};
 	}, [
-		activeNodeTarget,
-		activeOrgId,
+		analyticsNodeTarget,
+		analyticsOrgId,
 		analyticsGranularity,
 		analyticsModel,
 		analyticsProvider,
@@ -180,6 +188,7 @@ export default function UsageTab() {
 			<UsageView
 				analyticsDashboard={{
 					analytics,
+					failed: analyticsError !== null,
 					granularity: analyticsGranularity,
 					loading: analyticsLoading,
 					model: analyticsModel,

@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use ryu_workspace::source_history::SourceHistory;
 use serde::{Deserialize, Serialize};
 
 use super::Workflow;
@@ -21,6 +22,35 @@ fn workflows_dir() -> PathBuf {
 
 fn runs_dir() -> PathBuf {
     ryu_dir().join("workflow-runs")
+}
+
+fn source_history() -> SourceHistory {
+    SourceHistory::new(ryu_dir().join("source-history"))
+}
+
+fn source_history_path(workflow_id: &str) -> String {
+    format!("workflows/{workflow_id}.json")
+}
+
+/// Record the Git audit projection without turning a successful live workflow
+/// write into a reported failure. The JSON definition is authoritative and Git
+/// history can be repaired after a transient disk or repository failure.
+fn checkpoint_source_history_best_effort(
+    relative_path: &str,
+    content: &str,
+    label: Option<&str>,
+) {
+    if let Err(error) = source_history().checkpoint(relative_path, content, label) {
+        tracing::warn!(
+            path = relative_path,
+            error = %error,
+            "workflow source-history checkpoint was not recorded"
+        );
+    }
+}
+
+fn now_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 /// Per-node execution status within a run.
@@ -168,7 +198,13 @@ pub fn save_workflow(workflow: &Workflow) -> std::io::Result<()> {
     let path = dir.join(format!("{}.json", workflow.id));
     let json = serde_json::to_string_pretty(workflow)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, json)
+    std::fs::write(path, &json)?;
+    checkpoint_source_history_best_effort(
+        &source_history_path(&workflow.id),
+        &json,
+        Some("Workflow saved"),
+    );
+    Ok(())
 }
 
 /// Load a workflow definition by id.
@@ -210,22 +246,18 @@ pub fn delete_workflow(id: &str) -> std::io::Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => return Err(e),
     };
-    // The definition is gone — its version history is dead weight; drop it too.
+    // Git history is intentionally immutable: deleting the live definition does
+    // not erase its audit trail. Remove only the legacy pre-Git snapshots.
     let _ = delete_workflow_versions(id);
     Ok(removed)
 }
 
 // ── Version history (Prompt-Studio-style snapshots) ─────────────────────────
 //
-// Each workflow keeps a bounded, immutable history of past definitions under
-// `~/.ryu/workflow-versions/<workflow_id>/<version_id>.json`. A version wraps a
-// full [`Workflow`] snapshot plus metadata. Versions are created manually
-// ("Save version") or automatically just before a restore, so a restore is
-// itself undoable.
-
-/// Maximum retained versions per workflow. Oldest beyond this are pruned on each
-/// new snapshot so history stays bounded (mirrors the pages `MAX_DOC_VERSIONS`).
-const MAX_WORKFLOW_VERSIONS: usize = 50;
+// Each workflow keeps an immutable history in the managed local Git repository
+// under `source-history/workflows/<workflow_id>.json`. The old JSON snapshot
+// directory remains readable as a migration fallback, but new versions are Git
+// commits rather than a second bespoke version store.
 
 fn versions_root() -> PathBuf {
     ryu_dir().join("workflow-versions")
@@ -263,40 +295,22 @@ pub struct WorkflowVersion {
     pub workflow: Workflow,
 }
 
-fn now_millis() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
-
-/// Snapshot a workflow definition as a new version and return its metadata.
-/// Prunes the oldest versions past [`MAX_WORKFLOW_VERSIONS`].
+/// Snapshot a workflow definition as a new Git version and return its metadata.
+/// Git history is immutable and is not pruned by the workflow store.
 pub fn save_workflow_version(
     workflow: &Workflow,
     label: Option<&str>,
 ) -> std::io::Result<WorkflowVersionMeta> {
-    let dir = workflow_versions_dir(&workflow.id)?;
-    std::fs::create_dir_all(&dir)?;
-    let version_id = format!("wv_{}", uuid::Uuid::new_v4().simple());
-    let created_at = now_millis();
-    let version = WorkflowVersion {
-        id: version_id.clone(),
-        workflow_id: workflow.id.clone(),
-        name: workflow.name.clone(),
-        label: label.map(str::to_string),
-        created_at,
-        workflow: workflow.clone(),
-    };
-    let json = serde_json::to_string_pretty(&version)
+    let json = serde_json::to_string_pretty(workflow)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(dir.join(format!("{version_id}.json")), json)?;
-
-    prune_workflow_versions(&workflow.id)?;
+    let version = source_history().checkpoint(&source_history_path(&workflow.id), &json, label)?;
 
     Ok(WorkflowVersionMeta {
-        id: version_id,
+        id: version.id,
         workflow_id: workflow.id.clone(),
         name: workflow.name.clone(),
-        label: label.map(str::to_string),
-        created_at,
+        label: version.label,
+        created_at: version.created_at,
     })
 }
 
@@ -324,18 +338,38 @@ fn read_workflow_versions(workflow_id: &str) -> std::io::Result<Vec<WorkflowVers
 
 /// List a workflow's saved versions, newest first (metadata only).
 pub fn list_workflow_versions(workflow_id: &str) -> std::io::Result<Vec<WorkflowVersionMeta>> {
-    let mut versions = read_workflow_versions(workflow_id)?;
-    versions.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
-    Ok(versions
-        .into_iter()
-        .map(|v| WorkflowVersionMeta {
-            id: v.id,
-            workflow_id: v.workflow_id,
-            name: v.name,
-            label: v.label,
-            created_at: v.created_at,
-        })
-        .collect())
+    validate_id(workflow_id)?;
+    let path = source_history_path(workflow_id);
+    let history = source_history();
+    let mut versions = Vec::new();
+    for version in history.list(&path, None)? {
+        let Some(source) = history.read(&path, &version.id)? else {
+            continue;
+        };
+        let Ok(workflow) = serde_json::from_str::<Workflow>(&source) else {
+            continue;
+        };
+        versions.push(WorkflowVersionMeta {
+            id: version.id,
+            workflow_id: workflow_id.to_owned(),
+            name: workflow.name,
+            label: version.label,
+            created_at: version.created_at,
+        });
+    }
+    versions.extend(
+        read_workflow_versions(workflow_id)?
+            .into_iter()
+            .map(|version| WorkflowVersionMeta {
+                id: version.id,
+                workflow_id: version.workflow_id,
+                name: version.name,
+                label: version.label,
+                created_at: version.created_at,
+            }),
+    );
+    versions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(versions)
 }
 
 /// Load one saved version in full (including its captured definition).
@@ -343,6 +377,33 @@ pub fn load_workflow_version(
     workflow_id: &str,
     version_id: &str,
 ) -> std::io::Result<Option<WorkflowVersion>> {
+    validate_id(workflow_id)?;
+    if is_git_version_id(version_id) {
+        let path = source_history_path(workflow_id);
+        let history = source_history();
+        if let Some(source) = history.read(&path, version_id)? {
+            let workflow = serde_json::from_str::<Workflow>(&source)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let label = history
+                .list(&path, Some(1000))?
+                .into_iter()
+                .find(|version| version.id == version_id)
+                .and_then(|version| version.label);
+            return Ok(Some(WorkflowVersion {
+                id: version_id.to_owned(),
+                workflow_id: workflow_id.to_owned(),
+                name: workflow.name.clone(),
+                label,
+                created_at: history
+                    .list(&path, Some(1000))?
+                    .into_iter()
+                    .find(|version| version.id == version_id)
+                    .map(|version| version.created_at)
+                    .unwrap_or_else(now_millis),
+                workflow,
+            }));
+        }
+    }
     validate_id(version_id)?;
     let path = workflow_versions_dir(workflow_id)?.join(format!("{version_id}.json"));
     match std::fs::read(path) {
@@ -354,9 +415,10 @@ pub fn load_workflow_version(
     }
 }
 
-/// Delete a workflow's entire version history directory. Returns `true` when a
-/// directory was removed.
+/// Delete legacy JSON snapshots for a workflow. Git source history is immutable
+/// and is intentionally not removed by this compatibility operation.
 pub fn delete_workflow_versions(workflow_id: &str) -> std::io::Result<bool> {
+    validate_id(workflow_id)?;
     let dir = workflow_versions_dir(workflow_id)?;
     match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(true),
@@ -365,19 +427,11 @@ pub fn delete_workflow_versions(workflow_id: &str) -> std::io::Result<bool> {
     }
 }
 
-/// Remove the oldest version files beyond [`MAX_WORKFLOW_VERSIONS`].
-fn prune_workflow_versions(workflow_id: &str) -> std::io::Result<()> {
-    let mut versions = read_workflow_versions(workflow_id)?;
-    if versions.len() <= MAX_WORKFLOW_VERSIONS {
-        return Ok(());
-    }
-    // Newest first, then delete the tail past the cap.
-    versions.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
-    let dir = workflow_versions_dir(workflow_id)?;
-    for v in versions.into_iter().skip(MAX_WORKFLOW_VERSIONS) {
-        let _ = std::fs::remove_file(dir.join(format!("{}.json", v.id)));
-    }
-    Ok(())
+fn is_git_version_id(version_id: &str) -> bool {
+    (7..=64).contains(&version_id.len())
+        && version_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
 }
 
 // ── Run persistence ─────────────────────────────────────────────────────────
@@ -494,19 +548,20 @@ mod version_store_tests {
             .expect("load missing")
             .is_none());
 
-        // Exceeding the cap bounds retained history to exactly MAX.
-        for i in 0..MAX_WORKFLOW_VERSIONS + 5 {
+        // Git history is not pruned by the workflow store.
+        for i in 0..55 {
             save_workflow_version(&make_wf(&wf_id, &format!("n{i}")), None).expect("save n");
         }
-        let bounded = list_workflow_versions(&wf_id).expect("list bounded");
-        assert_eq!(bounded.len(), MAX_WORKFLOW_VERSIONS);
+        let history = list_workflow_versions(&wf_id).expect("list history");
+        assert_eq!(history.len(), 56);
 
-        // Delete clears the whole history.
-        assert!(delete_workflow_versions(&wf_id).expect("delete"));
-        assert!(list_workflow_versions(&wf_id)
-            .expect("list after delete")
-            .is_empty());
-        // Deleting an absent history is a no-op, not an error.
-        assert!(!delete_workflow_versions(&wf_id).expect("delete again"));
+        // Deleting the live workflow does not erase its Git audit trail.
+        assert!(!delete_workflow_versions(&wf_id).expect("delete legacy history"));
+        assert_eq!(
+            list_workflow_versions(&wf_id)
+                .expect("list after delete")
+                .len(),
+            56
+        );
     }
 }

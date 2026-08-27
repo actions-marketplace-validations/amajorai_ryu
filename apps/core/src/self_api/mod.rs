@@ -362,7 +362,7 @@ pub fn refuse_reason_if_tenant_bound(unrestricted: bool) -> Option<String> {
 fn self_target() -> (String, Option<String>) {
     (
         crate::sidecar::gateway::core_self_url(),
-        std::env::var("RYU_TOKEN").ok().filter(|t| !t.is_empty()),
+        crate::node_token::active_token().filter(|token| !token.is_empty()),
     )
 }
 

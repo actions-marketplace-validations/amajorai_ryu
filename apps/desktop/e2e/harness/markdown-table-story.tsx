@@ -9,7 +9,7 @@ import "../../src/index.css";
 
 const CONTENT = `## Release readiness
 
-The compact view keeps the chat readable. Hover the table and open it when you need the full-width view.
+The compact view keeps the chat readable. A soft edge fade shows when more columns are available; hover the table and open it when you need the full-width view.
 
 | Workstream | Owner | Status | Q1 | Q2 | Q3 | Q4 | Notes |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |

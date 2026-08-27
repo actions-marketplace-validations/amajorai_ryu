@@ -169,7 +169,7 @@ function Proof() {
 								<ChatRow
 									botMode
 									states={["The latest agent reply is ready", "In progress"]}
-									title="Ryu · Bot mode"
+									title="Ryu · Agents view"
 								/>
 							</div>
 							<div className="mt-4 border-border/60 border-t pt-3">
@@ -183,8 +183,8 @@ function Proof() {
 									/>
 								</div>
 								<p className="mt-2 px-2 text-[11px] text-muted-foreground leading-4">
-									Bot mode keeps its two-line rows even when this native chat
-									setting is off.
+									The Agents view keeps its two-line rows even when this native
+									chat setting is off.
 								</p>
 							</div>
 						</aside>
@@ -216,8 +216,8 @@ function Proof() {
 								</div>
 								<div className="flex justify-end">
 									<div className="max-w-xl rounded-2xl bg-primary/10 px-4 py-3 text-sm leading-6">
-										Bot mode uses the same text loop, while the native preview
-										switch stays independent.
+										The Agents view uses the same text loop, while the native
+										preview switch stays independent.
 									</div>
 								</div>
 								<div className="flex flex-wrap items-center justify-between gap-3 border-border/60 border-t pt-4">

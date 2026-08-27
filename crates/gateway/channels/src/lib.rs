@@ -85,6 +85,81 @@ pub enum GroupReplyMode {
     All,
 }
 
+/// Maps a platform reaction to the shared Learning thumbs vocabulary.
+///
+/// This is deliberately part of the channel domain rather than a Telegram
+/// option: adapters receive different event shapes, but every one can feed the
+/// same `up` / `down` / clear contract into Core. Learning is disabled by
+/// default because channel reactions can be authored by more than one person.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ReactionLearningConfig {
+    /// Opt in to turning reactions on bot replies into Learning feedback.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Reactions treated as a positive label. The wire/config spelling follows
+    /// the linked Hermes issue; the plural alias is accepted for readability.
+    #[serde(
+        default = "default_positive_reaction_emojis",
+        rename = "positive_emoji",
+        alias = "positive_emojis",
+        alias = "positiveEmoji"
+    )]
+    pub positive_emojis: Vec<String>,
+    /// Reactions treated as a negative label.
+    #[serde(
+        default = "default_negative_reaction_emojis",
+        rename = "negative_emoji",
+        alias = "negative_emojis",
+        alias = "negativeEmoji"
+    )]
+    pub negative_emojis: Vec<String>,
+    /// Allow group-room reactions. Off by default because the Core feedback
+    /// sink is node-wide rather than a per-sender preference profile.
+    #[serde(default, alias = "group_reactions", alias = "allowGroup")]
+    pub allow_group: bool,
+}
+
+fn default_positive_reaction_emojis() -> Vec<String> {
+    vec!["👍".to_string()]
+}
+
+fn default_negative_reaction_emojis() -> Vec<String> {
+    vec!["👎".to_string()]
+}
+
+impl Default for ReactionLearningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            positive_emojis: default_positive_reaction_emojis(),
+            negative_emojis: default_negative_reaction_emojis(),
+            allow_group: false,
+        }
+    }
+}
+
+impl ReactionLearningConfig {
+    /// Classify one provider-normalized emoji. `None` means clear any existing
+    /// label (reaction removal or an emoji outside both configured sets).
+    pub fn classify(&self, emoji: &str) -> Option<&'static str> {
+        if self
+            .positive_emojis
+            .iter()
+            .any(|candidate| candidate == emoji)
+        {
+            Some("up")
+        } else if self
+            .negative_emojis
+            .iter()
+            .any(|candidate| candidate == emoji)
+        {
+            Some("down")
+        } else {
+            None
+        }
+    }
+}
+
 /// Behaviour shared by every channel config, independent of transport.
 ///
 /// Grouped into one struct so adding a knob (a new access policy, a voice mode)
@@ -133,6 +208,8 @@ pub struct CommonChannelConfig {
     pub proactive_target: Option<String>,
     /// Bot profile the adapter pushes at startup (name / short bio / description).
     pub profile: BotProfile,
+    /// Optional provider-reaction → Learning feedback bridge.
+    pub reaction_learning: ReactionLearningConfig,
 }
 
 impl Default for CommonChannelConfig {
@@ -156,6 +233,7 @@ impl Default for CommonChannelConfig {
             proactive_opening: false,
             proactive_target: None,
             profile: BotProfile::default(),
+            reaction_learning: ReactionLearningConfig::default(),
         }
     }
 }
@@ -480,6 +558,14 @@ pub struct ChannelRuntime {
     commands: RwLock<Vec<ChannelCommand>>,
 }
 
+/// The response metadata a Core-routed channel turn needs in addition to text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelRunResult {
+    pub reply: String,
+    pub assistant_message_id: Option<String>,
+    pub assistant_message_ids: Vec<String>,
+}
+
 impl ChannelRuntime {
     pub fn new(
         http: reqwest::Client,
@@ -514,7 +600,8 @@ impl ChannelRuntime {
             .unwrap_or_else(|| platform_target.to_owned())
     }
 
-    /// Route one turn through Core's session seam and return the reply.
+    /// Route one turn through Core's session seam and return the reply plus the
+    /// durable assistant message id that can later receive a reaction.
     ///
     /// `POST <core_url>/api/channels/run` with `conversation_id` keyed to the
     /// chat (or packed chat+thread), so multi-turn exchanges share history. Model
@@ -528,7 +615,7 @@ impl ChannelRuntime {
         conversation_id: &str,
         text: &str,
         author_name: Option<&str>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<ChannelRunResult> {
         let url = format!(
             "{}/api/channels/run",
             self.cfg.core_url.trim_end_matches('/')
@@ -555,7 +642,89 @@ impl ChannelRuntime {
                 "channel session agent binding was resolved to the default agent"
             );
         }
-        Ok(body["reply"].as_str().unwrap_or("").to_owned())
+        let assistant_message_id = body["assistantMessageId"].as_str().map(str::to_owned);
+        let assistant_message_ids = body["assistantMessageIds"]
+            .as_array()
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|ids| !ids.is_empty())
+            .unwrap_or_else(|| assistant_message_id.clone().into_iter().collect());
+        Ok(ChannelRunResult {
+            reply: body["reply"].as_str().unwrap_or("").to_owned(),
+            assistant_message_id,
+            assistant_message_ids,
+        })
+    }
+
+    /// Bind provider message ids to the Core assistant row that produced them.
+    /// Providers may split one reply into several messages, so all returned ids
+    /// receive the same Learning target.
+    pub async fn bind_sent_messages(
+        &self,
+        platform: &str,
+        platform_target: &str,
+        provider_message_ids: &[String],
+        assistant_message_ids: &[String],
+    ) {
+        if !self.cfg.reaction_learning.enabled
+            || provider_message_ids.is_empty()
+            || assistant_message_ids.is_empty()
+        {
+            return;
+        }
+        self.pairing
+            .bind_reply_messages(
+                platform,
+                &self.core_conversation_id(platform_target),
+                provider_message_ids,
+                assistant_message_ids,
+            )
+            .await;
+    }
+
+    /// Record one adapter-normalized reaction against a previously confirmed
+    /// bot reply. Returns `false` when Learning is disabled or the provider id
+    /// is not linked to a Core assistant row (for example after a restart).
+    pub async fn record_reaction_feedback(
+        &self,
+        platform: &str,
+        platform_target: &str,
+        provider_message_id: &str,
+        emoji: &str,
+    ) -> anyhow::Result<bool> {
+        if !self.cfg.reaction_learning.enabled || !self.routes_via_core() {
+            return Ok(false);
+        }
+        let conversation_id = self.core_conversation_id(platform_target);
+        let core_message_ids = self
+            .pairing
+            .reply_message(platform, &conversation_id, provider_message_id)
+            .await;
+        let Some(core_message_ids) = core_message_ids else {
+            return Ok(false);
+        };
+        for core_message_id in core_message_ids {
+            let url = format!(
+                "{}/api/conversations/{}/messages/{}/feedback",
+                self.cfg.core_url.trim_end_matches('/'),
+                encode_path_segment(&conversation_id),
+                encode_path_segment(&core_message_id)
+            );
+            self.http
+                .post(url)
+                .json(&json!({
+                    "rating": self.cfg.reaction_learning.classify(emoji),
+                    "allow_latest_fallback": false,
+                }))
+                .send()
+                .await?
+                .error_for_status()?;
+        }
+        Ok(true)
     }
 
     /// Refresh the cached command menu from Core. Returns the new list.
@@ -671,6 +840,24 @@ pub trait Channel: Send + Sync {
 
     /// Deliver an outbound reply back to the originating chat.
     async fn send_message(&self, chat_id: &str, text: &str) -> anyhow::Result<()>;
+
+    /// Deliver the assistant reply and optionally return provider message ids.
+    /// The default keeps older/text-only adapters unchanged; adapters that
+    /// receive reaction events override it so the shared runtime can bind the
+    /// reaction to the exact Core assistant row.
+    async fn send_reply(
+        &self,
+        chat_id: &str,
+        text: &str,
+        rich_text: bool,
+    ) -> anyhow::Result<Vec<String>> {
+        if rich_text && self.caps().rich_text {
+            self.send_rich(chat_id, text).await?;
+        } else {
+            self.send_message(chat_id, text).await?;
+        }
+        Ok(Vec::new())
+    }
 
     /// Run the channel's inbound loop until the process exits. Each inbound
     /// message should be passed to [`handle_turn`].
@@ -833,6 +1020,23 @@ pub fn unpack_thread(packed: &str) -> (&str, Option<&str>) {
         Some((chat, thread)) if !thread.is_empty() && !chat.is_empty() => (chat, Some(thread)),
         _ => (packed, None),
     }
+}
+
+/// Percent-encode one Core path segment without adding another dependency to
+/// the channel crate. Conversation keys contain `:` and provider ids may carry
+/// other reserved bytes, so interpolation without this guard would address a
+/// different route than the one Core authorized.
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(*byte as char)
+            }
+            other => encoded.push_str(&format!("%{other:02X}")),
+        }
+    }
+    encoded
 }
 
 // ─── Access policy from the legacy env vars ─────────────────────────────────
@@ -1193,6 +1397,7 @@ pub async fn handle_turn<C: Channel + 'static>(
     // 6. Run the turn: Core's session seam when an agent/team is bound (history
     //    persists, governance stays on path), else the legacy gateway pipeline.
     let mut run_succeeded = true;
+    let mut assistant_message_ids = Vec::new();
     let reply = if runtime.routes_via_core() {
         match runtime
             .run_via_core(
@@ -1202,8 +1407,14 @@ pub async fn handle_turn<C: Channel + 'static>(
             )
             .await
         {
-            Ok(reply) if !reply.is_empty() => reply,
-            Ok(_) => "(no response)".to_string(),
+            Ok(result) if !result.reply.is_empty() => {
+                assistant_message_ids = result.assistant_message_ids;
+                result.reply
+            }
+            Ok(result) => {
+                assistant_message_ids = result.assistant_message_ids;
+                "(no response)".to_string()
+            }
             Err(err) => {
                 run_succeeded = false;
                 warn!(channel = platform, %err, "channel Core session run failed");
@@ -1223,19 +1434,30 @@ pub async fn handle_turn<C: Channel + 'static>(
     };
 
     // 7. Deliver. Rich text when the platform and the operator both want it.
-    let sent = if runtime.cfg.rich_text && channel.caps().rich_text {
-        channel.send_rich(&platform_target, &reply).await
-    } else {
-        channel.send_message(&platform_target, &reply).await
+    let sent = channel
+        .send_reply(&platform_target, &reply, runtime.cfg.rich_text)
+        .await;
+    let provider_message_ids = match sent {
+        Ok(ids) => ids,
+        Err(err) => {
+            warn!(
+                channel = platform,
+                chat_id = %conversation_id,
+                %err,
+                "failed to deliver channel reply"
+            );
+            return;
+        }
     };
-    if let Err(err) = sent {
-        warn!(
-            channel = platform,
-            chat_id = %conversation_id,
-            %err,
-            "failed to deliver channel reply"
-        );
-        return;
+    if !assistant_message_ids.is_empty() {
+        runtime
+            .bind_sent_messages(
+                platform,
+                &platform_target,
+                &provider_message_ids,
+                &assistant_message_ids,
+            )
+            .await;
     }
 
     if runtime.cfg.lifecycle_reactions && channel.caps().reactions {
@@ -1470,6 +1692,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reaction_learning_defaults_to_safe_opt_in_and_thumb_labels() {
+        let config = ReactionLearningConfig::default();
+
+        assert!(!config.enabled);
+        assert_eq!(config.positive_emojis, vec!["👍"]);
+        assert_eq!(config.negative_emojis, vec!["👎"]);
+        assert!(!config.allow_group);
+        assert_eq!(config.classify("👍"), Some("up"));
+        assert_eq!(config.classify("👎"), Some("down"));
+        assert_eq!(config.classify("❤️"), None);
+    }
+
+    #[test]
+    fn reaction_learning_accepts_configured_emoji_aliases_and_serializes_wire_names() {
+        let config: ReactionLearningConfig = serde_json::from_value(json!({
+            "enabled": true,
+            "positive_emoji": ["❤️", "✅"],
+            "negative_emojis": ["💀"],
+            "group_reactions": true,
+        }))
+        .expect("reaction config should accept the issue's singular keys and aliases");
+
+        assert!(config.enabled);
+        assert!(config.allow_group);
+        assert_eq!(config.classify("✅"), Some("up"));
+        assert_eq!(config.classify("💀"), Some("down"));
+        assert_eq!(config.classify("🤔"), None);
+
+        let wire = serde_json::to_value(&config).expect("reaction config should serialize");
+        assert_eq!(wire["positive_emoji"], json!(["❤️", "✅"]));
+        assert_eq!(wire["negative_emoji"], json!(["💀"]));
+        assert!(wire.get("positive_emojis").is_none());
+    }
+
+    #[test]
+    fn core_path_segments_escape_channel_and_provider_separators() {
+        assert_eq!(
+            encode_path_segment("channel:bot/chat"),
+            "channel%3Abot%2Fchat"
+        );
+        assert_eq!(encode_path_segment("message_42"), "message_42");
+    }
+
     /// Build a runtime with a given access policy, for the admission tests.
     fn runtime_with(access: AccessPolicy) -> ChannelRuntime {
         ChannelRuntime::new(
@@ -1553,6 +1819,62 @@ mod tests {
         assert!(
             !runtime.already_admitted("t", &denied).await,
             "an unlisted room must not inherit the open DM policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn reaction_feedback_ignores_unbound_provider_messages() {
+        let runtime = ChannelRuntime::new(
+            reqwest::Client::new(),
+            CommonChannelConfig {
+                channel_id: Some("telegram-bot".to_owned()),
+                reaction_learning: ReactionLearningConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            PairingStore::ephemeral(),
+            None,
+        );
+
+        assert!(!runtime
+            .record_reaction_feedback("telegram", "123", "unlinked-provider-message", "👍")
+            .await
+            .expect("unlinked reactions should be ignored without a Core request"));
+    }
+
+    #[tokio::test]
+    async fn disabled_reaction_learning_does_not_persist_reply_links() {
+        let runtime = ChannelRuntime::new(
+            reqwest::Client::new(),
+            CommonChannelConfig {
+                channel_id: Some("telegram-bot".to_owned()),
+                reaction_learning: ReactionLearningConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            PairingStore::ephemeral(),
+            None,
+        );
+
+        runtime
+            .bind_sent_messages(
+                "telegram",
+                "123",
+                &["provider-42".to_owned()],
+                &["assistant-98".to_owned()],
+            )
+            .await;
+
+        assert_eq!(
+            runtime
+                .pairing
+                .reply_message("telegram", "channel:telegram-bot:123", "provider-42")
+                .await,
+            None
         );
     }
 

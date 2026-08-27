@@ -467,6 +467,19 @@ async function parseLifecycleError(
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+type AppLifecycleAction =
+	| "install"
+	| "enable"
+	| "disable"
+	| "uninstall"
+	| "update";
+
+/** Build one lifecycle endpoint from a RAW plugin id. Scoped ids contain `/`, so
+ *  the route parameter must be encoded once before it is joined to the path. */
+function appLifecyclePath(id: string, action: AppLifecycleAction): string {
+	return `/api/plugins/${encodeURIComponent(id)}/${action}`;
+}
+
 /** `GET /api/plugins` — list all app manifests merged with their lifecycle state. */
 export async function fetchApps(target: ApiTarget): Promise<AppInfo[]> {
 	const resp = await fetch(apiUrl(target, "/api/plugins"), {
@@ -514,12 +527,13 @@ export async function installApp(
 	target: ApiTarget,
 	id: string
 ): Promise<AppRecord> {
-	const resp = await fetch(apiUrl(target, `/api/plugins/${id}/install`), {
+	const path = appLifecyclePath(id, "install");
+	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token),
 	});
 	if (!resp.ok) {
-		const err = await parseLifecycleError(resp, `/api/plugins/${id}/install`);
+		const err = await parseLifecycleError(resp, path);
 		throw Object.assign(new Error(err.message), err);
 	}
 	const json = (await resp.json()) as { app: AppRecordWire };
@@ -535,12 +549,13 @@ export async function enableApp(
 	target: ApiTarget,
 	id: string
 ): Promise<AppRecord> {
-	const resp = await fetch(apiUrl(target, `/api/plugins/${id}/enable`), {
+	const path = appLifecyclePath(id, "enable");
+	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token),
 	});
 	if (!resp.ok) {
-		const err = await parseLifecycleError(resp, `/api/plugins/${id}/enable`);
+		const err = await parseLifecycleError(resp, path);
 		throw Object.assign(new Error(err.message), err);
 	}
 	const json = (await resp.json()) as { app: AppRecordWire };
@@ -558,15 +573,14 @@ export async function disableApp(
 	id: string,
 	options?: { cascade?: boolean }
 ): Promise<AppRecord> {
-	const path = options?.cascade
-		? `/api/plugins/${id}/disable?cascade=true`
-		: `/api/plugins/${id}/disable`;
+	const endpoint = appLifecyclePath(id, "disable");
+	const path = options?.cascade ? `${endpoint}?cascade=true` : endpoint;
 	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token),
 	});
 	if (!resp.ok) {
-		const err = await parseLifecycleError(resp, `/api/plugins/${id}/disable`);
+		const err = await parseLifecycleError(resp, path);
 		throw Object.assign(new Error(err.message), err);
 	}
 	const json = (await resp.json()) as { app: AppRecordWire };
@@ -607,15 +621,14 @@ export async function uninstallApp(
 	id: string,
 	options?: { cascade?: boolean }
 ): Promise<AppUninstallResult> {
-	const path = options?.cascade
-		? `/api/plugins/${id}/uninstall?cascade=true`
-		: `/api/plugins/${id}/uninstall`;
+	const endpoint = appLifecyclePath(id, "uninstall");
+	const path = options?.cascade ? `${endpoint}?cascade=true` : endpoint;
 	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token),
 	});
 	if (!resp.ok) {
-		const err = await parseLifecycleError(resp, `/api/plugins/${id}/uninstall`);
+		const err = await parseLifecycleError(resp, path);
 		throw Object.assign(new Error(err.message), err);
 	}
 	const json = (await resp.json()) as {
@@ -650,13 +663,14 @@ export async function updateApp(
 	id: string,
 	options?: { force?: boolean }
 ): Promise<AppRecord> {
-	const resp = await fetch(apiUrl(target, `/api/plugins/${id}/update`), {
+	const path = appLifecyclePath(id, "update");
+	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token),
 		body: JSON.stringify({ force: options?.force ?? false }),
 	});
 	if (!resp.ok) {
-		const err = await parseLifecycleError(resp, `/api/plugins/${id}/update`);
+		const err = await parseLifecycleError(resp, path);
 		throw Object.assign(new Error(err.message), err);
 	}
 	const json = (await resp.json()) as { app: AppRecordWire };
@@ -722,6 +736,13 @@ export interface CatalogEntry {
 	kinds: string[];
 	name: string;
 	permission_grants: string[];
+	/** Commerce metadata for hosted Marketplace listings; absent/null means free. */
+	pricing?: {
+		amountMinor?: number;
+		currency?: string;
+		kind?: string;
+		model?: string;
+	} | null;
 	source: string;
 	tags: string[];
 	version: string;

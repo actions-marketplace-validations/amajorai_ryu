@@ -12,6 +12,7 @@
 // Apps (plugins) realm
 // ---------------------------------------------------------------------------
 
+import type { VerificationDetails } from "@ryu/ui/components/verification-popover.tsx";
 import type {
 	PublisherTrustLevel,
 	PublisherTrustSource,
@@ -397,11 +398,17 @@ export function catalogLayerBadges(
 export interface CatalogVersion {
 	/** Summed download count across the release's assets; 0 when unpublished. */
 	downloads?: number | null;
+	/** Manifest-declared maturity at this exact release ref. */
+	installable?: boolean;
 	name?: string | null;
 	/** Release notes, already truncated upstream. */
 	notes?: string | null;
 	prerelease?: boolean;
 	publishedAt?: string | null;
+	/** Lowercase manifest stability value; `stable` is retained for history rows. */
+	stability?: string | null;
+	/** Whether the historical manifest was readable at this ref. */
+	stabilityKnown?: boolean;
 	/** True when this row came from a git tag with no matching release. */
 	tagOnly?: boolean;
 	url?: string | null;
@@ -426,6 +433,10 @@ export interface VersionSnapshot {
 	permissions?: unknown;
 	readme?: string | null;
 	readmeUrl?: string | null;
+	/** Lowercase manifest stability value; absent means the manifest defaulted stable. */
+	stability?: string | null;
+	/** False when the ref could not be read as a manifest-backed snapshot. */
+	stabilityKnown?: boolean;
 	surfaces?: string[] | null;
 	targets?: string[] | null;
 	/** The version the manifest declared at that tag. */
@@ -547,8 +558,8 @@ export interface CatalogEntry {
 	accent_color?: string | null;
 	author?: string | null;
 	banner?: CatalogBanner | null;
-	capabilities?: string[];
 	built_in?: boolean;
+	capabilities?: string[];
 	/** Which MARKETPLACE this row was browsed from, and how to name it in a
 	 *  heading. Stamped by Core only in the all-marketplaces view (`?source=all`),
 	 *  where the page is a concatenation of every source and the rows would
@@ -568,23 +579,15 @@ export interface CatalogEntry {
 	 *  floors as advisory `unknown`. Re-evaluate with `evaluateCompatibility` and
 	 *  the local version overlaid; that turns an advisory into a real refusal. */
 	compatibility?: CompatibilityVerdict | null;
-	/** True when the listing calls a hosted/external provider rather than a local runtime. */
-	external?: boolean;
 	description: string;
 	descriptor_only?: boolean;
 	developer?: string | null;
+	/** Relative Ryu proxy route for the signed release asset. */
+	download_url?: string | null;
 	/** Public GitHub release-asset downloads, summed across every published
 	 * release. The producer excludes signatures, manifests and text metadata so
 	 * this is a count of distributable payloads rather than release bookkeeping. */
 	downloads?: number | null;
-	/** Canonical portable package kind for GitHub-backed marketplace entries. */
-	package_kind?: string | null;
-	/** Redacted GitHub repository/release provenance. */
-	github_source?: Record<string, unknown> | null;
-	/** Relative Ryu proxy route for the signed release asset. */
-	download_url?: string | null;
-	/** SHA-256 of the immutable package release asset. */
-	package_checksum?: string | null;
 	/** Host version floors this listing declares (the manifest's `engines`), one
 	 *  semver requirement per surface. `ryu` is the CORE floor — the legacy
 	 *  spelling, kept because every manifest in the wild uses it.
@@ -593,6 +596,10 @@ export interface CatalogEntry {
 	 *  grid can grey a tile without a detail fetch per tile. */
 	engines?: HostFloors | null;
 	example_prompts?: string[];
+	/** True when the listing calls a hosted/external provider rather than a local runtime. */
+	external?: boolean;
+	/** Redacted GitHub repository/release provenance. */
+	github_source?: Record<string, unknown> | null;
 	homepage?: string | null;
 	/** Icon-primitive glyph id (Iconify `prefix:name`, bare Hugeicons name, or URL),
 	 *  masked with the current text colour. Distinct from `icon_url` (a raster logo);
@@ -633,6 +640,8 @@ export interface CatalogEntry {
 	 *  carries this key is asserting something Core never agreed to. Only trust it
 	 *  on a built-in (`source: "built-in"`) entry. */
 	mandatory?: boolean;
+	/** Server-derived label for an eligible paid app in recurring Membership. */
+	membership_included?: boolean;
 	name: string;
 	/** The PUBLISHING ORGANIZATION's identity has been verified by Ryu — the
 	 *  X/Meta-style blue check.
@@ -674,11 +683,6 @@ export interface CatalogEntry {
 	 *  thing as `origin === "community"` — that is a listing-discovery fact, this
 	 *  is an org-identity fact. Never render the bare tier word. */
 	org_verified_tier?: string | null;
-	/** Complete publisher identity mark when the serving catalog knows it.
-	 *  `dotted` is explicit disclosure; absence preserves compatibility with
-	 *  older Core catalog payloads that only carry `org_verified`. */
-	publisher_trust?: PublisherTrustLevel | null;
-	publisher_trust_source?: PublisherTrustSource | null;
 	/** Who listed this and how much vetting it had. `"community"` = discovered
 	 *  automatically from a public GitHub topic and NOT reviewed by Ryu; absent or
 	 *  null = first-party. Deliberately snake_case (it rides on the card, not the
@@ -686,6 +690,10 @@ export interface CatalogEntry {
 	 *  so a discovery source must opt in explicitly. Drives both the Community
 	 *  store section and its trust notice — see `isCommunityEntry`. */
 	origin?: "community" | "first_party" | null;
+	/** SHA-256 of the immutable package release asset. */
+	package_checksum?: string | null;
+	/** Canonical portable package kind for GitHub-backed marketplace entries. */
+	package_kind?: string | null;
 	/** Commerce disclosure for a PAID listing, as the hosted marketplace reports it.
 	 *  Absent/null = free. Present on cards in the unified first-party view, where
 	 *  free (git catalog) and paid (hosted) listings sit side by side — without it a
@@ -699,14 +707,21 @@ export interface CatalogEntry {
 	privacy_policy_url?: string | null;
 	/** Which discovery source produced the listing (e.g. `"github-topic"`). */
 	provenance?: string | null;
+	/** Complete publisher identity mark when the serving catalog knows it.
+	 *  `dotted` is explicit disclosure; absence preserves compatibility with
+	 *  older Core catalog payloads that only carry `org_verified`. */
+	publisher_trust?: PublisherTrustLevel | null;
+	publisher_trust_source?: PublisherTrustSource | null;
+	/** Public evidence behind the publisher mark, when the source provides it. */
+	publisher_verification?: VerificationDetails | null;
 	/** Denormalized rating aggregate (0–5 mean + count) so a card and the detail
 	 *  header can show stars without loading the review list. Absent = unrated. */
 	rating_average?: number | null;
 	rating_count?: number | null;
-	/** Public source/repository URL declared by the listing. */
-	repository_url?: string | null;
 	/** The repository this listing was discovered from (community listings). */
 	repo_url?: string | null;
+	/** Public source/repository URL declared by the listing. */
+	repository_url?: string | null;
 	/** Plugin-to-plugin dependencies this app needs enabled first (the manifest's
 	 *  `requires`). Emitted by Core's catalog source when non-empty; absent = none.
 	 *  Powers the "Requires these apps" section so the dependency chain is clear
@@ -722,16 +737,6 @@ export interface CatalogEntry {
 	/** The bundled sub-items this item ships (agents/workflows/tools/skills/
 	 *  companions/mcp) — the manifest runnables. Powers "What's included". */
 	runnables?: { id: string; kind: string; name?: string }[];
-	source?: string;
-	/** How finished this listing is: `"alpha"`, `"beta"`, `"rc"`, … Absent (or
-	 *  `"stable"`, which the producer strips) means finished and renders no badge.
-	 *
-	 *  Typed as a plain string, not a union: a newer index may publish a tier this
-	 *  build has never heard of, and it must render verbatim rather than be
-	 *  dropped — the same tolerance `surfaces` settled on. */
-	stability?: string | null;
-	/** Upstream popularity signal (GitHub stars) for ranking unmoderated listings. */
-	stars?: number | null;
 	/** Host surfaces this listing runs on, flattened from the manifest's `surfaces`
 	 *  map (or its older flat `targets` list) with any explicitly-unsupported
 	 *  surface already removed.
@@ -747,6 +752,16 @@ export interface CatalogEntry {
 	 *  and the card must carry it through rather than drop it. */
 	/** Screenshot gallery declared by the listing manifest. */
 	screenshots?: string[];
+	source?: string;
+	/** How finished this listing is: `"alpha"`, `"beta"`, `"rc"`, … Absent (or
+	 *  `"stable"`, which the producer strips) means finished and renders no badge.
+	 *
+	 *  Typed as a plain string, not a union: a newer index may publish a tier this
+	 *  build has never heard of, and it must render verbatim rather than be
+	 *  dropped — the same tolerance `surfaces` settled on. */
+	stability?: string | null;
+	/** Upstream popularity signal (GitHub stars) for ranking unmoderated listings. */
+	stars?: number | null;
 	surfaces?: string[];
 	tagline?: string | null;
 	tags: string[];
@@ -844,6 +859,8 @@ export interface PluginCatalogDetail {
 	manifestId?: string | null;
 	/** Where the manifest was read from (a raw repository URL). */
 	manifestUrl?: string | null;
+	/** True when this paid app is included with an active Membership plan. */
+	membershipIncluded?: boolean;
 	/** Count of open issues upstream. */
 	openIssues?: number | null;
 	/** The PUBLISHING ORGANIZATION's identity is verified. camelCase because it
@@ -861,9 +878,6 @@ export interface PluginCatalogDetail {
 	 *  "community"). Plain string on purpose — an unknown tier renders the badge
 	 *  unqualified rather than dropping it. */
 	orgVerifiedTier?: string | null;
-	/** Complete publisher identity mark when the detail source knows it. */
-	publisherTrust?: PublisherTrustLevel | null;
-	publisherTrustSource?: PublisherTrustSource | null;
 	/** Who listed this. `"community"` = automatic discovery, nobody vetted it. */
 	origin?: string | null;
 	/** Opaque permission-grant ids the plugin asks the Gateway to approve. */
@@ -871,6 +885,11 @@ export interface PluginCatalogDetail {
 	/** The typed runtime permission set Core lowers into the sandbox. */
 	permissions?: CatalogPermissions | null;
 	privacyPolicyUrl?: string | null;
+	/** Complete publisher identity mark when the detail source knows it. */
+	publisherTrust?: PublisherTrustLevel | null;
+	publisherTrustSource?: PublisherTrustSource | null;
+	/** Public evidence behind the publisher mark, when the detail source provides it. */
+	publisherVerification?: VerificationDetails | null;
 	/** Long-form documentation (markdown) read from the plugin's README. */
 	readme?: string | null;
 	readmeUrl?: string | null;
@@ -1067,6 +1086,8 @@ export interface AppsCatalogState {
 	 *  bare boolean it followed the SELECTION, so the spinner moved to whatever
 	 *  listing the user opened next. Matches `SkillsCatalogState.installing`. */
 	installing: string | null;
+	/** Install or update one exact historical version from the Versions tab. */
+	installVersion?: (id: string, version: CatalogVersion) => Promise<void>;
 	items: AppCatalogItem[];
 	lifecyclePending: boolean;
 	loading: boolean;

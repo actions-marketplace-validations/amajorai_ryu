@@ -12,10 +12,12 @@
 // handshake the host transfers a MessageChannel port into the frame and all RPC
 // runs over that point-to-point port.
 
+import { HORIZONTAL_WHEEL_SCROLL_SCRIPT } from "./horizontal-wheel-scroll-script.ts";
+import { handshakeAnnounceScript } from "./rpc.ts";
+
 /** Build the example plugin's sandboxed document, with the host nonce baked in.
  *  `nonce` MUST be host-generated (e.g. crypto.randomUUID()), never plugin- or
  *  user-controlled. It is JSON-encoded into a string literal in the script. */
-import { handshakeAnnounceScript } from "./rpc.ts";
 
 export function examplePluginSrcdoc(nonce: string): string {
 	const nonceLiteral = JSON.stringify(nonce);
@@ -63,6 +65,8 @@ export function examplePluginSrcdoc(nonce: string): string {
     var statusEl = document.getElementById("status");
     var listEl = document.getElementById("agents");
     var loadBtn = document.getElementById("load");
+
+${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
 
     function setStatus(text, isErr) {
       statusEl.textContent = text;

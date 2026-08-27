@@ -75,7 +75,13 @@ export function useFadeOverflow<
 		};
 	}, []);
 
-	return { clipped, clipRef, innerRef, ref: clipRef, title };
+	return {
+		clipped,
+		clipRef,
+		innerRef,
+		ref: clipRef,
+		...(title === undefined ? {} : { title }),
+	};
 }
 
 /**

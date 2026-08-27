@@ -17,12 +17,7 @@
 
 import { CodedRpcError, type WidgetRpcErrorCode } from "@ryu/app-host/rpc";
 import type { WidgetMessageAttribution } from "@ryu/blocks/desktop/agent-elements/types.ts";
-import {
-	type ApiTarget,
-	apiUrl,
-	identityHeaders,
-	makeHeaders,
-} from "./client.ts";
+import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 /** Map an HTTP status to a widget error code when the response body carries none
  *  (defense so the widget always sees a closed code, D6). */
@@ -85,9 +80,8 @@ async function postWidget<T>(
 	path: string,
 	body: unknown
 ): Promise<T> {
-	const resp = await fetch(apiUrl(target, path), {
+	const resp = await authenticatedFetch(target, path, {
 		method: "POST",
-		headers: { ...makeHeaders(target.token), ...identityHeaders() },
 		body: JSON.stringify(body),
 	});
 	if (!resp.ok) {

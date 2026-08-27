@@ -1,6 +1,6 @@
 @import "@ryu/ui/globals.css";
 @import "@ryu/ui/components/editor/editor.css";
-/* NOTE: @fontsource-variable/{inter,geist} are imported from the JS entrypoints
+/* NOTE: @fontsource-variable/{inter,geist,geist-mono} are imported from the JS entrypoints
    (main.tsx), NOT here. Tailwind v4's `@import` inlines a package's CSS without
    rebasing its relative `url()`s, so the fonts' `url(./files/*.woff2)` survived
    into the bundle verbatim, resolved against the OUTPUT css (/assets/files/…),
@@ -27,6 +27,7 @@
 @theme inline {
 	--font-sans: "Inter Variable", sans-serif;
 	--font-heading: "Geist Variable", sans-serif;
+	--font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, monospace;
 	--font-code:
 		ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
 		"Courier New", monospace;

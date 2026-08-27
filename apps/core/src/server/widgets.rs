@@ -376,7 +376,7 @@ pub async fn widget_call_tool(
     if !record
         .widget_accessible_tool_ids
         .iter()
-        .any(|t| t == &body.tool_id)
+        .any(|t| t == &normalized_tool_id)
     {
         return err_reply(
             StatusCode::FORBIDDEN,
@@ -392,7 +392,7 @@ pub async fn widget_call_tool(
     // separately.
     match forward_exec_tool(
         &state.client,
-        &body.tool_id,
+        &normalized_tool_id,
         body.args,
         &agent_id,
         &record.conversation_id,
@@ -803,8 +803,8 @@ pub async fn widget_state(
 //   2. the target host MUST be in that origin server's widget-resource
 //      `resource_domains` allowlist (a forged `template` can only pick another
 //      allowlist ON THE SAME SERVER — it can never widen beyond it).
-//   3. an SSRF guard rejects private/loopback/link-local/metadata targets even
-//      if an allowlist entry names one (DNS-rebinding is a documented residual).
+//   3. the shared Ryu egress primitive rejects private/loopback/link-local/metadata
+//      targets even if an allowlist entry names one, and pins the resolved address.
 //   4. a content-type allowlist (image/font/audio/video only) + size cap +
 //      timeout, and every fetch is exec-audited so the Gateway sees the egress.
 
@@ -890,117 +890,42 @@ pub async fn widget_asset(
         );
     }
 
-    // 4. SSRF guard: never proxy an internal target, even if allowlisted.
-    if host_is_blocked(&host) {
-        return err_reply(
-            StatusCode::FORBIDDEN,
-            "denied",
-            "asset host resolves to a blocked address range",
-        );
-    }
-
-    // 5. Resolve the host off-runtime and reject if ANY resolved address is
-    //    internal (this closes the DNS-rebinding residual left by the literal
-    //    `host_is_blocked` check in step 4). We then pin the client to exactly
-    //    those addresses so no re-resolution can occur between here and connect.
+    // 4. Core's shared egress primitive screens the hostname, resolves every
+    //    address, rejects internal ranges, pins the connection to those addresses,
+    //    disables redirects, and enforces the timeout/body cap.
     let started = Instant::now();
-    let port = target.port_or_known_default().unwrap_or(443);
-    let resolve_host = host.clone();
-    let resolved: Vec<std::net::SocketAddr> = match tokio::task::spawn_blocking(move || {
-        use std::net::ToSocketAddrs;
-        (resolve_host.as_str(), port)
-            .to_socket_addrs()
-            .map(|it| it.collect::<Vec<_>>())
-    })
+    let resp = match ryu_egress::guarded_request(
+        ryu_egress::GuardedRequest {
+            method: "GET".to_owned(),
+            url: target.to_string(),
+            headers: vec![(
+                header::ACCEPT.as_str().to_owned(),
+                "image/*,font/*,audio/*,video/*,*/*;q=0.1".to_owned(),
+            )],
+            body: None,
+        },
+        ryu_egress::GuardedFetchPolicy {
+            allow_http: false,
+            max_body_bytes: WIDGET_ASSET_MAX_BYTES as u64,
+            max_redirect_hops: 0,
+            timeout: WIDGET_ASSET_TIMEOUT,
+        },
+    )
     .await
     {
-        Ok(Ok(addrs)) => addrs,
-        _ => {
-            audit_asset(
-                &record,
-                &host,
-                0,
-                started,
-                Some("dns resolution failed".to_owned()),
-            )
-            .await;
-            return err_reply(
-                StatusCode::BAD_GATEWAY,
-                "server_error",
-                "asset host did not resolve",
-            );
+        Ok(response) => response,
+        Err(error) => {
+            audit_asset(&record, &host, 0, started, Some(error.clone())).await;
+            let status = if error.contains("not allowed") {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            return err_reply(status, "denied", error);
         }
     };
-    if resolved.is_empty() || resolved.iter().any(|a| ip_is_blocked(&a.ip())) {
-        audit_asset(
-            &record,
-            &host,
-            0,
-            started,
-            Some("resolves to blocked range".to_owned()),
-        )
-        .await;
-        return err_reply(
-            StatusCode::FORBIDDEN,
-            "denied",
-            "asset host resolves to a blocked address range",
-        );
-    }
-
-    // 6. Fetch server-side (the ONLY egress lane; Core/Gateway mediate it) with a
-    //    client pinned to the validated IPs AND redirects DISABLED. A remote can no
-    //    longer 3xx-bounce us to an internal host (169.254.169.254, 127.0.0.1,
-    //    a private-LAN IP) after the guards ran — a redirect returns as a 3xx
-    //    status and is rejected by the `is_success()` gate below. Mirrors the
-    //    manifest client at `server/mod.rs` (`redirect::Policy::none()`).
-    let client = match reqwest::Client::builder()
-        .timeout(WIDGET_ASSET_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(&host, &resolved)
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            audit_asset(
-                &record,
-                &host,
-                0,
-                started,
-                Some(format!("client build failed: {e}")),
-            )
-            .await;
-            return err_reply(
-                StatusCode::BAD_GATEWAY,
-                "server_error",
-                format!("asset client build failed: {e}"),
-            );
-        }
-    };
-    let resp = match client
-        .get(target.as_str())
-        .header(header::ACCEPT, "image/*,font/*,audio/*,video/*,*/*;q=0.1")
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            audit_asset(
-                &record,
-                &host,
-                0,
-                started,
-                Some(format!("fetch failed: {e}")),
-            )
-            .await;
-            return err_reply(
-                StatusCode::BAD_GATEWAY,
-                "server_error",
-                format!("asset fetch failed: {e}"),
-            );
-        }
-    };
-    if !resp.status().is_success() {
-        let status = resp.status();
+    if !(200..300).contains(&resp.status) {
+        let status = resp.status;
         audit_asset(
             &record,
             &host,
@@ -1020,10 +945,10 @@ pub async fn widget_asset(
     //    never turn this lane into a remote-code loader; script-src is nonce-only
     //    regardless, so this is belt-and-suspenders).
     let content_type = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(header::CONTENT_TYPE.as_str()))
+        .map(|(_, value)| value.clone())
         .unwrap_or_else(|| "application/octet-stream".to_owned());
     if !content_type_is_allowed(&content_type) {
         audit_asset(
@@ -1041,14 +966,8 @@ pub async fn widget_asset(
         );
     }
 
-    // 8. Size-capped streaming read.
-    let bytes = match read_capped(resp, WIDGET_ASSET_MAX_BYTES).await {
-        Ok(b) => b,
-        Err(msg) => {
-            audit_asset(&record, &host, 0, started, Some(msg.clone())).await;
-            return err_reply(StatusCode::BAD_GATEWAY, "server_error", msg);
-        }
-    };
+    // 8. The shared egress response is already bounded by the policy above.
+    let bytes = resp.body;
     let n = bytes.len();
     audit_asset(&record, &host, n, started, None).await;
 
@@ -1150,44 +1069,6 @@ fn normalize_allow_host(entry: &str) -> Option<String> {
     Some(host)
 }
 
-/// True when a host must never be proxied (SSRF guard): an internal name, or an
-/// IP literal in a private/loopback/link-local/metadata range. DNS names that
-/// *resolve* to such addresses (rebinding) are a documented residual — the
-/// allowlist is the primary boundary.
-fn host_is_blocked(host: &str) -> bool {
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return ip_is_blocked(&ip);
-    }
-    host == "localhost"
-        || host.ends_with(".localhost")
-        || host.ends_with(".internal")
-        || host.ends_with(".local")
-}
-
-fn ip_is_blocked(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.octets()[0] == 0
-        }
-        std::net::IpAddr::V6(v6) => {
-            if v6.is_loopback() || v6.is_unspecified() {
-                return true;
-            }
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return ip_is_blocked(&std::net::IpAddr::V4(mapped));
-            }
-            let seg0 = v6.segments()[0];
-            // fc00::/7 unique-local, fe80::/10 link-local.
-            (seg0 & 0xfe00) == 0xfc00 || (seg0 & 0xffc0) == 0xfe80
-        }
-    }
-}
-
 /// Passive-media content types only. `application/octet-stream` is permitted (CDNs
 /// serve fonts/images as it) — safe because the frame's `script-src` is nonce-only,
 /// so a mislabeled script can never execute regardless of what this returns.
@@ -1206,22 +1087,6 @@ fn content_type_is_allowed(ct: &str) -> bool {
         || m == "application/font-woff2"
         || m == "application/vnd.ms-fontobject"
         || m == "application/octet-stream"
-}
-
-/// Read a response body, failing closed above `max` bytes.
-async fn read_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>, String> {
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("asset read error: {e}"))?
-    {
-        if buf.len() + chunk.len() > max {
-            return Err("asset exceeds size cap".to_owned());
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    Ok(buf)
 }
 
 /// Emit a Gateway exec-audit for a proxied asset fetch so every widget egress is
@@ -1296,7 +1161,7 @@ pub async fn mcp_resources_read(
 #[cfg(test)]
 mod asset_proxy_tests {
     use super::{
-        content_type_is_allowed, host_is_blocked, normalize_allow_host, parse_resource_domains,
+        content_type_is_allowed, normalize_allow_host, parse_resource_domains,
         validate_widget_state, WIDGET_STATE_MAX_BYTES, WIDGET_STATE_MAX_DEPTH,
     };
     use serde_json::{json, Value};
@@ -1323,26 +1188,29 @@ mod asset_proxy_tests {
     }
 
     #[test]
-    fn ssrf_guard_blocks_private_loopback_linklocal_and_metadata() {
+    fn shared_egress_guard_blocks_private_loopback_linklocal_and_metadata() {
         // Metadata + private + loopback + link-local IPv4.
-        assert!(host_is_blocked("169.254.169.254")); // cloud metadata
-        assert!(host_is_blocked("127.0.0.1"));
-        assert!(host_is_blocked("10.0.0.5"));
-        assert!(host_is_blocked("192.168.1.1"));
-        assert!(host_is_blocked("172.16.0.1"));
-        assert!(host_is_blocked("0.0.0.0"));
+        for value in [
+            "169.254.169.254",
+            "127.0.0.1",
+            "10.0.0.5",
+            "192.168.1.1",
+            "172.16.0.1",
+            "0.0.0.0",
+        ] {
+            assert!(ryu_egress::is_blocked_ip(value.parse().expect("valid IP")), "{value}");
+        }
         // IPv6 loopback + ULA + link-local + IPv4-mapped private.
-        assert!(host_is_blocked("::1"));
-        assert!(host_is_blocked("fc00::1"));
-        assert!(host_is_blocked("fe80::1"));
-        assert!(host_is_blocked("::ffff:10.0.0.1"));
+        for value in ["::1", "fc00::1", "fe80::1", "::ffff:10.0.0.1"] {
+            assert!(ryu_egress::is_blocked_ip(value.parse().expect("valid IP")), "{value}");
+        }
         // Internal names.
-        assert!(host_is_blocked("localhost"));
-        assert!(host_is_blocked("db.internal"));
-        assert!(host_is_blocked("printer.local"));
+        for value in ["localhost", "db.internal", "printer.local"] {
+            assert!(ryu_egress::is_blocked_hostname(value), "{value}");
+        }
         // A real public host is NOT blocked.
-        assert!(!host_is_blocked("cdn.example.com"));
-        assert!(!host_is_blocked("8.8.8.8"));
+        assert!(!ryu_egress::is_blocked_hostname("cdn.example.com"));
+        assert!(!ryu_egress::is_blocked_ip("8.8.8.8".parse().expect("valid IP")));
     }
 
     #[test]
@@ -1384,11 +1252,10 @@ mod asset_proxy_tests {
     }
 
     use super::{
-        allow_gateway_fallback, err_reply, ip_is_blocked, VerifiedWidgetProvenance,
-        WidgetErrorCode, WidgetInstance, WidgetInstanceStore,
+        allow_gateway_fallback, err_reply, VerifiedWidgetProvenance, WidgetErrorCode,
+        WidgetInstance, WidgetInstanceStore,
     };
     use axum::http::StatusCode;
-    use std::net::IpAddr;
 
     /// Serializes the `RYU_ALLOW_GATEWAY_FALLBACK` env mutation.
     static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1501,21 +1368,17 @@ mod asset_proxy_tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
-    /// The SSRF IP guard blocks IPv4-mapped IPv6 metadata + a few ranges the host
-    /// literal check delegates to, and passes a genuine public address.
+    /// The shared SSRF IP guard blocks IPv4-mapped IPv6 metadata and carrier-grade
+    /// NAT ranges, and passes genuine public addresses.
     #[test]
     fn ip_guard_blocks_mapped_and_ula_passes_public() {
-        // IPv4-mapped cloud metadata address (the DNS-rebinding residual closer).
-        assert!(ip_is_blocked(
-            &"::ffff:169.254.169.254".parse::<IpAddr>().unwrap()
+        assert!(ryu_egress::is_blocked_ip(
+            "::ffff:169.254.169.254".parse().unwrap()
         ));
-        // CGNAT / carrier range is public-routable-but... 100.64/10 is NOT private per
-        // std, so it is NOT blocked — pin that we don't over-block.
-        assert!(!ip_is_blocked(&"100.64.0.1".parse::<IpAddr>().unwrap()));
-        // A real public v4 + v6 pass.
-        assert!(!ip_is_blocked(&"1.1.1.1".parse::<IpAddr>().unwrap()));
-        assert!(!ip_is_blocked(
-            &"2606:4700:4700::1111".parse::<IpAddr>().unwrap()
+        assert!(ryu_egress::is_blocked_ip("100.64.0.1".parse().unwrap()));
+        assert!(!ryu_egress::is_blocked_ip("1.1.1.1".parse().unwrap()));
+        assert!(!ryu_egress::is_blocked_ip(
+            "2606:4700:4700::1111".parse().unwrap()
         ));
     }
 

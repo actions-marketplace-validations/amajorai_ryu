@@ -13,7 +13,7 @@
 // SSE socket keyed by `user_id`, read with fetch + ReadableStream so the bearer
 // token can be attached (EventSource can't set headers).
 
-import { type ApiTarget, apiUrl, makeHeaders, request } from "./client.ts";
+import { type ApiTarget, authenticatedFetch, request } from "./client.ts";
 
 /** A stored inbox notification row (newest first from the list endpoint). */
 export interface AppNotification {
@@ -45,7 +45,64 @@ export interface UserNotificationEvent {
 	title: string;
 }
 
+/** A human the active node may notify, already scoped by Core to its org/team. */
+export interface MentionTargetUser {
+	email: string | null;
+	id: string;
+	image: string | null;
+	name: string;
+	role: string | null;
+}
+
 const DEFAULT_LIMIT = 50;
+
+/** Read the Inbox-gated, node-scoped human roster for the chat @ picker. */
+export async function listMentionTargetUsers(
+	target: ApiTarget
+): Promise<MentionTargetUser[]> {
+	try {
+		const json = await request<{
+			users?: Array<{
+				email?: unknown;
+				image?: unknown;
+				name?: unknown;
+				role?: unknown;
+				userId?: unknown;
+			}>;
+		}>(target, "/api/notifications/mention-targets");
+		return (json.users ?? []).flatMap((user) => {
+			const id = typeof user.userId === "string" ? user.userId.trim() : "";
+			if (!id) {
+				return [];
+			}
+			const email =
+				typeof user.email === "string" && user.email.trim()
+					? user.email.trim()
+					: null;
+			const name =
+				typeof user.name === "string" && user.name.trim()
+					? user.name.trim()
+					: (email?.split("@")[0] ?? id);
+			return [
+				{
+					email,
+					id,
+					image:
+						typeof user.image === "string" && user.image.trim()
+							? user.image.trim()
+							: null,
+					name,
+					role:
+						typeof user.role === "string" && user.role.trim()
+							? user.role.trim()
+							: null,
+				},
+			];
+		});
+	} catch {
+		return [];
+	}
+}
 
 /** List the signed-in user's inbox notifications (newest first).
  *  `archived`: `false` (default) = live inbox, `true` = archived rows only. */
@@ -146,9 +203,10 @@ export async function streamUserNotifications(
 	signal?: AbortSignal
 ): Promise<void> {
 	const params = new URLSearchParams({ user_id: userId });
-	const resp = await fetch(
-		apiUrl(target, `/api/notifications/stream?${params.toString()}`),
-		{ method: "GET", headers: makeHeaders(target.token), signal }
+	const resp = await authenticatedFetch(
+		target,
+		`/api/notifications/stream?${params.toString()}`,
+		{ method: "GET", signal }
 	);
 	if (!(resp.ok && resp.body)) {
 		throw new Error(`notification stream failed: ${resp.status}`);

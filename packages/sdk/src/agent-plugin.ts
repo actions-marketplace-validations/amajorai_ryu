@@ -29,7 +29,7 @@
  * is deliberately NOT a copy of the whole native manifest — that would be a second
  * source of truth with a stale-copy failure mode.
  *
- * Both `plugins-store/*` and `apps-store/*` use this one `PluginManifest` shape, so
+ * Both `plugins-store/{plugins,lsp,external_plugins}/*` and `apps-store/*` use this one `PluginManifest` shape, so
  * one converter covers both stores.
  */
 

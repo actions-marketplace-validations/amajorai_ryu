@@ -10,6 +10,8 @@ import { type ApiTarget, request } from "./client.ts";
 
 /** Goal state for a conversation, mirroring Core's `GoalState`. */
 export interface GoalState {
+	/** Unix milliseconds when the judge marked the goal achieved. */
+	achieved_at?: number;
 	/** The completion condition. Absent when no goal is set. */
 	goal?: string;
 	/** The judge's most recent reason for its yes/no verdict. */

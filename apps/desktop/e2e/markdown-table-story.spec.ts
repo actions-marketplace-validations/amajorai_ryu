@@ -6,6 +6,7 @@ import { expect, test } from "@playwright/test";
 test.describe.configure({ timeout: 90_000 });
 
 const STORY_URL = "/markdown-table-story.html";
+const PROOF_SCREENSHOT = "test-results/markdown-table-scrollfade-proof.png";
 
 test("expands a wide markdown table into a scrollable dialog", async ({
 	page,
@@ -16,12 +17,22 @@ test("expands a wide markdown table into a scrollable dialog", async ({
 	await expect(table).toBeVisible();
 	const inlineMetrics = await table.evaluate((element) => {
 		const wrapper = element.parentElement;
+		const style = wrapper ? getComputedStyle(wrapper) : null;
 		return {
+			animationName: style?.animationName ?? "",
 			clientWidth: wrapper?.clientWidth ?? 0,
+			className: wrapper?.className ?? "",
+			animationTimeline:
+				style?.getPropertyValue("animation-timeline").trim() ?? "",
+			maskImage: style?.maskImage ?? "",
 			scrollWidth: wrapper?.scrollWidth ?? 0,
 		};
 	});
 	expect(inlineMetrics.scrollWidth).toBeGreaterThan(inlineMetrics.clientWidth);
+	expect(inlineMetrics.className).toContain("scroll-fade-x");
+	expect(inlineMetrics.maskImage).toContain("linear-gradient");
+	expect(inlineMetrics.animationName).toContain("scroll-fade-reveal");
+	expect(inlineMetrics.animationTimeline).toContain("scroll");
 	const expand = page.getByTestId("markdown-table-expand").first();
 	await expect
 		.poll(() => expand.evaluate((el) => getComputedStyle(el).opacity))
@@ -31,6 +42,7 @@ test("expands a wide markdown table into a scrollable dialog", async ({
 	await expect
 		.poll(() => expand.evaluate((el) => getComputedStyle(el).opacity))
 		.toBe("1");
+	await page.screenshot({ fullPage: true, path: PROOF_SCREENSHOT });
 	await expand.click();
 
 	const dialog = page.locator('[data-slot="dialog-content"]');

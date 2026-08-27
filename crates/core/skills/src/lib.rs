@@ -56,9 +56,9 @@ pub static SKILLS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // ── Data-dir seam (inverts `apps/core`'s `paths::ryu_dir()`) ─────────────────────
 //
 // Skills keep three kinds of Ryu-local state OUT of the shared skills dir: the
-// activation set (`skills-active.json`), version snapshots (`skill-versions/`), and
-// the one-time legacy migration source (`~/.ryu/skills`). All of those live under
-// Ryu's own data folder, which Core owns and can relocate. Rather than depend on
+// activation set (`skills-active.json`), managed source history (`source-history/`),
+// and the one-time legacy migration source (`~/.ryu/skills`). All of those live
+// under Ryu's own data folder, which Core owns and can relocate. Rather than depend on
 // `apps/core`, the crate reads the folder from a process-global set once at startup
 // by Core (`ryu_skills::set_data_dir(paths::ryu_dir())`), mirroring how the moved
 // `ryu_quests` engine is published via a `OnceLock`. When unset (crate-isolated
@@ -671,35 +671,49 @@ fn active_set_path() -> PathBuf {
 
 /// Load the set of active skill ids (those injected on the default route).
 pub fn load_active_set() -> HashSet<String> {
-    std::fs::read_to_string(active_set_path())
-        .ok()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .map(|v| v.into_iter().collect())
-        .unwrap_or_default()
+    match ryu_json_store::read_or_default::<Vec<String>>(&active_set_path()) {
+        Ok(values) => values.into_iter().collect(),
+        Err(error) => {
+            tracing::error!(error = %error, "skill activation store is corrupt");
+            HashSet::new()
+        }
+    }
 }
 
-fn save_active_set(set: &HashSet<String>) {
+fn save_active_set(set: &HashSet<String>) -> anyhow::Result<()> {
     let path = active_set_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut list: Vec<&String> = set.iter().collect();
+    let mut list: Vec<String> = set.iter().cloned().collect();
     list.sort();
-    if let Ok(json) = serde_json::to_string_pretty(&list) {
-        let _ = std::fs::write(path, json);
-    }
+    ryu_json_store::mutate(&path, |stored: &mut Vec<String>| {
+        *stored = list;
+        Ok(())
+    })
 }
 
 /// Mark a skill active (inject on the default route) or inactive. Idempotent.
+pub fn try_set_active(id: &str, active: bool) -> anyhow::Result<bool> {
+    let path = active_set_path();
+    ryu_json_store::mutate(&path, |stored: &mut Vec<String>| {
+        let mut set: HashSet<String> = stored.drain(..).collect();
+        let changed = if active {
+            set.insert(id.to_owned())
+        } else {
+            set.remove(id)
+        };
+        let mut values: Vec<String> = set.into_iter().collect();
+        values.sort();
+        *stored = values;
+        Ok(changed)
+    })
+}
+
+/// Backward-compatible best-effort activation seam for Core integrations.
+/// Persistence failures are logged loudly and, crucially, never replace a
+/// corrupt file with an empty activation set. HTTP callers use [`try_set_active`]
+/// when they need to surface a 500 to the user.
 pub fn set_active(id: &str, active: bool) {
-    let mut set = load_active_set();
-    let changed = if active {
-        set.insert(id.to_owned())
-    } else {
-        set.remove(id)
-    };
-    if changed {
-        save_active_set(&set);
+    if let Err(error) = try_set_active(id, active) {
+        tracing::error!(skill_id = id, active, error = %error, "persisting skill activation failed");
     }
 }
 
@@ -721,7 +735,9 @@ fn ensure_active_set_seeded() {
     for found in scan_skill_dir(&legacy_skills_dir()) {
         set.insert(found.id);
     }
-    save_active_set(&set);
+    if let Err(error) = save_active_set(&set) {
+        tracing::error!(error = %error, "seeding skill activation store failed");
+    }
 }
 
 /// One-time, best-effort migration of legacy flat skills from `~/.ryu/skills/*.md`
@@ -2042,9 +2058,9 @@ Do something minimal.
 
         // Round-trip: activate + deactivate persist correctly.
         assert!(load_active_set().is_empty(), "no file yet -> empty");
-        set_active("active-one", true);
-        set_active("dormant-two", true);
-        set_active("dormant-two", false);
+        try_set_active("active-one", true).unwrap();
+        try_set_active("dormant-two", true).unwrap();
+        try_set_active("dormant-two", false).unwrap();
         let set = load_active_set();
         assert!(set.contains("active-one"));
         assert!(!set.contains("dormant-two"), "deactivated id removed");

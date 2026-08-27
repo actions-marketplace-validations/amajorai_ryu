@@ -15,7 +15,10 @@
 // `/api/plugins/catalog/browse`, and the source rides on the REQUEST (`?source=`)
 // rather than a node-global preference — see `sourceOverride` below.
 
-import { ALL_PLUGIN_SOURCES_ID } from "@ryu/marketplace/catalog/types";
+import {
+	ALL_PLUGIN_SOURCES_ID,
+	type CatalogVersion,
+} from "@ryu/marketplace/catalog/types";
 import {
 	keepPreviousData,
 	useInfiniteQuery,
@@ -45,10 +48,12 @@ import {
 	installApp,
 	installAppFromUrl,
 	installPluginFromCatalog,
+	installPluginFromCatalogAtVersion,
 	type PluginCatalogDetail,
 	type PluginCatalogSource,
 	searchPluginCatalog,
 	updateInstalledPlugin,
+	updateInstalledPluginAtVersion,
 } from "@/src/lib/api/plugins.ts";
 import { beginInstall, endInstall } from "@/src/store/useInstallStore.ts";
 import { useDebouncedValue } from "./use-debounced-value.ts";
@@ -112,6 +117,8 @@ export interface UseAppsCatalogResult {
 	 *  that need the cross-instance truth (the Store mounts this hook twice) read
 	 *  the shared install store instead — see `useInstallStore`. */
 	installing: string | null;
+	/** Install or update one exact historical version from the Versions tab. */
+	installVersion: (id: string, version: CatalogVersion) => Promise<void>;
 	items: AppCatalogItem[];
 	/** Enable/disable currently running for the selected app. */
 	lifecyclePending: boolean;
@@ -496,6 +503,60 @@ export function useAppsCatalog(
 		},
 	});
 
+	const installVersionMutation = useMutation({
+		mutationFn: async ({
+			item,
+			version,
+		}: {
+			item: AppCatalogItem;
+			version: CatalogVersion;
+		}): Promise<void> => {
+			if (item.entry.origin === "community") {
+				throw new Error(
+					"Community listings are browse-only — open the repository to review it before installing."
+				);
+			}
+			if (item.entry.descriptor_only) {
+				throw new Error(
+					"Integration descriptors are browse-only — open the link to configure."
+				);
+			}
+			if (item.entry.source === "built-in") {
+				throw new Error(
+					"Built-in plugins do not have separate version archives."
+				);
+			}
+			const portableTarget = portablePackageTarget(item.entry);
+			if (portableTarget) {
+				await installPortablePackage({ url, token }, portableTarget, {
+					update: item.installed,
+					version: version.version,
+				});
+				return;
+			}
+			if (item.installed) {
+				await updateInstalledPluginAtVersion(
+					{ url, token },
+					item.entry.id,
+					version.version
+				);
+				return;
+			}
+			await installPluginFromCatalogAtVersion(
+				{ url, token },
+				item.entry.id,
+				version.version,
+				readBuyerToken()
+			);
+		},
+		onMutate: ({ item }) => beginInstall(item.entry.id),
+		onSettled: async (_data, _error, { item }) => {
+			revalidateBrowse();
+			await revalidateInstalledState();
+			endInstall(item.entry.id);
+		},
+	});
+
 	const installUrlMutation = useMutation({
 		mutationFn: (appUrl: string) => installAppFromUrl({ url, token }, appUrl),
 		// No catalog id to key a card by — this one is driven from a URL field that
@@ -507,7 +568,8 @@ export function useAppsCatalog(
 	});
 
 	const lifecycleMutation = useMutation<
-		AppToggleResult | import("@/src/lib/api/marketplace.ts").PortablePackageState,
+		| AppToggleResult
+		| import("@/src/lib/api/marketplace.ts").PortablePackageState,
 		Error,
 		{ item: AppCatalogItem; enabled: boolean }
 	>({
@@ -583,6 +645,17 @@ export function useAppsCatalog(
 		[installUrlMutation]
 	);
 
+	const installVersion = useCallback(
+		async (id: string, version: CatalogVersion) => {
+			const item = items.find((candidate) => candidate.entry.id === id);
+			if (!item) {
+				return;
+			}
+			await installVersionMutation.mutateAsync({ item, version });
+		},
+		[installVersionMutation, items]
+	);
+
 	// Switching trains is an UPDATE of something already installed, which is why it
 	// goes through the update endpoint rather than install: Core re-resolves the
 	// listing on the requested channel, re-runs the signature + bundle-integrity +
@@ -620,6 +693,7 @@ export function useAppsCatalog(
 	const actionError =
 		errorOf(lifecycleMutation.error) ??
 		errorOf(installUrlMutation.error) ??
+		errorOf(installVersionMutation.error) ??
 		errorOf(switchChannelMutation.error) ??
 		errorOf(installMutation.error);
 
@@ -643,6 +717,7 @@ export function useAppsCatalog(
 		detailError:
 			detailQuery.error instanceof Error ? detailQuery.error.message : null,
 		install,
+		installVersion,
 		installing: installMutation.isPending
 			? (installMutation.variables?.item.entry.id ?? null)
 			: null,

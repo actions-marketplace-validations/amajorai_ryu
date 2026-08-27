@@ -340,7 +340,7 @@ unsafe fn ax_copy_string(element: AXUIElementRef, attribute: &str) -> Option<Str
 /// Restoring matters — Quick Capture must not eat whatever the user had on their
 /// clipboard just because they tapped Shift twice.
 fn copy_selection_via_clipboard() -> Option<String> {
-    let previous = pasteboard_string();
+    let previous = PasteboardSnapshot::capture();
     let before = pasteboard_change_count();
 
     SYNTHESIZING.store(true, Ordering::SeqCst);
@@ -353,14 +353,17 @@ fn copy_selection_via_clipboard() -> Option<String> {
     };
     SYNTHESIZING.store(false, Ordering::SeqCst);
 
-    // Put the user's clipboard back regardless of whether the copy produced
-    // anything — a failed capture must still be invisible.
-    if let Some(previous) = previous {
-        set_pasteboard_string(&previous);
+    // Restore only when the pasteboard still contains OUR synthetic copy. A user
+    // copy racing this worker is newer and must win.
+    if let (Some(previous), Some((_, captured_change_count))) = (previous, copied.as_ref()) {
+        if pasteboard_change_count() == *captured_change_count {
+            previous.restore();
+        }
     }
 
     copied
-        .map(|s| s.trim().to_string())
+        .and_then(|(text, _)| text)
+        .map(|text| text.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
@@ -387,12 +390,13 @@ fn post_command_c() -> bool {
     true
 }
 
-fn wait_for_pasteboard_change(before: i64) -> Option<String> {
+fn wait_for_pasteboard_change(before: i64) -> Option<(Option<String>, i64)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(COPY_WAIT_MS);
     while std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(COPY_POLL_MS));
-        if pasteboard_change_count() != before {
-            return pasteboard_string();
+        let change_count = pasteboard_change_count();
+        if change_count != before {
+            return Some((pasteboard_string(), change_count));
         }
     }
     None
@@ -420,6 +424,91 @@ fn pasteboard_change_count() -> i64 {
             return 0;
         }
         msg_send![pb, changeCount]
+    }
+}
+
+struct PasteboardSnapshot {
+    items: Vec<Vec<(String, Vec<u8>)>>,
+}
+
+impl PasteboardSnapshot {
+    fn capture() -> Option<Self> {
+        unsafe {
+            let pasteboard: *mut objc::runtime::Object =
+                msg_send![class!(NSPasteboard), generalPasteboard];
+            if pasteboard.is_null() {
+                return None;
+            }
+            let items: *mut objc::runtime::Object = msg_send![pasteboard, pasteboardItems];
+            if items.is_null() {
+                return None;
+            }
+            let item_count: usize = msg_send![items, count];
+            let mut snapshot = Vec::with_capacity(item_count);
+            for item_index in 0..item_count {
+                let item: *mut objc::runtime::Object = msg_send![items, objectAtIndex: item_index];
+                let types: *mut objc::runtime::Object = msg_send![item, types];
+                let type_count: usize = msg_send![types, count];
+                let mut values = Vec::with_capacity(type_count);
+                for type_index in 0..type_count {
+                    let pasteboard_type: *mut objc::runtime::Object =
+                        msg_send![types, objectAtIndex: type_index];
+                    let Some(type_name) = ns_string_to_rust(pasteboard_type) else {
+                        continue;
+                    };
+                    let data: *mut objc::runtime::Object =
+                        msg_send![item, dataForType: pasteboard_type];
+                    if data.is_null() {
+                        continue;
+                    }
+                    let length: usize = msg_send![data, length];
+                    let bytes: *const u8 = msg_send![data, bytes];
+                    if bytes.is_null() && length > 0 {
+                        continue;
+                    }
+                    let value = if length == 0 {
+                        Vec::new()
+                    } else {
+                        std::slice::from_raw_parts(bytes, length).to_vec()
+                    };
+                    values.push((type_name, value));
+                }
+                snapshot.push(values);
+            }
+            Some(Self { items: snapshot })
+        }
+    }
+
+    fn restore(self) {
+        unsafe {
+            let pasteboard: *mut objc::runtime::Object =
+                msg_send![class!(NSPasteboard), generalPasteboard];
+            if pasteboard.is_null() {
+                return;
+            }
+            let items = self.items;
+            let is_empty = items.is_empty();
+            let objects: *mut objc::runtime::Object = msg_send![class!(NSMutableArray), array];
+            for values in items {
+                let item: *mut objc::runtime::Object = msg_send![class!(NSPasteboardItem), alloc];
+                let item: *mut objc::runtime::Object = msg_send![item, init];
+                for (type_name, value) in values {
+                    let data: *mut objc::runtime::Object = msg_send![
+                        class!(NSData),
+                        dataWithBytes: value.as_ptr()
+                        length: value.len()
+                    ];
+                    let _: bool = msg_send![item, setData: data forType: ns_string(&type_name)];
+                }
+                let _: () = msg_send![objects, addObject: item];
+                let _: () = msg_send![item, release];
+            }
+            let _: i64 = msg_send![pasteboard, clearContents];
+            if is_empty {
+                return;
+            }
+            let _: bool = msg_send![pasteboard, writeObjects: objects];
+        }
     }
 }
 
@@ -508,6 +597,9 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static PASTEBOARD_LOCK: Mutex<()> = Mutex::new(());
 
     /// The one thing about this module that cannot be unit-tested in CI: whether
     /// the OS actually hands us a keyboard event tap. It depends on a TCC grant
@@ -544,7 +636,8 @@ mod tests {
     /// reading and writing the general pasteboard is ungated.
     #[test]
     fn pasteboard_round_trips_and_bumps_its_change_count() {
-        let original = pasteboard_string();
+        let _lock = PASTEBOARD_LOCK.lock().unwrap();
+        let original = PasteboardSnapshot::capture();
         let before = pasteboard_change_count();
 
         set_pasteboard_string("ryu-quick-capture-test");
@@ -561,7 +654,37 @@ mod tests {
         // Leave the developer's clipboard as we found it, the same contract
         // `copy_selection_via_clipboard` owes the user.
         if let Some(original) = original {
-            set_pasteboard_string(&original);
+            original.restore();
+        }
+    }
+
+    #[test]
+    fn pasteboard_snapshot_restores_non_text_items() {
+        let _lock = PASTEBOARD_LOCK.lock().unwrap();
+        let original = PasteboardSnapshot::capture();
+        let test_type = "com.ryu.quick-capture-test";
+        let test_bytes = b"binary-pasteboard-payload";
+        PasteboardSnapshot {
+            items: vec![vec![(test_type.to_string(), test_bytes.to_vec())]],
+        }
+        .restore();
+        let snapshot = PasteboardSnapshot::capture().unwrap();
+        set_pasteboard_string("replacement");
+        snapshot.restore();
+
+        unsafe {
+            let pasteboard: *mut objc::runtime::Object =
+                msg_send![class!(NSPasteboard), generalPasteboard];
+            let data: *mut objc::runtime::Object =
+                msg_send![pasteboard, dataForType: ns_string(test_type)];
+            assert!(!data.is_null());
+            let length: usize = msg_send![data, length];
+            let bytes: *const u8 = msg_send![data, bytes];
+            assert_eq!(std::slice::from_raw_parts(bytes, length), test_bytes);
+        }
+
+        if let Some(original) = original {
+            original.restore();
         }
     }
 }

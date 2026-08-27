@@ -1,6 +1,15 @@
 {
-  "tags": ["hallucination","verification","policy","formal-methods","solver","compliance","guardrails","logic"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": [
+    "hallucination",
+    "verification",
+    "policy",
+    "formal-methods",
+    "solver",
+    "compliance",
+    "guardrails",
+    "logic"
+  ],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-reasoning",
   "homepage": "https://github.com/amajorai/ryu-reasoning",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -87,41 +96,50 @@
         "public_mount": "/api/reasoning",
         "routes": [
           {
-            "path": "/policies"
+            "path": "/policies",
+            "method": "GET",
+            "permission": "reasoning.view"
           },
           {
-            "path": "/policies/draft"
+            "path": "/policies",
+            "method": "POST",
+            "permission": "reasoning.edit"
           },
           {
-            "path": "/policies/:id"
+            "path": "/policies/draft",
+            "method": "POST",
+            "permission": "reasoning.edit"
           },
           {
-            "path": "/policies/:id/analyze"
+            "path": "/policies/:id",
+            "method": "GET",
+            "permission": "reasoning.view"
           },
           {
-            "path": "/policies/:id/tests/run"
+            "path": "/policies/:id",
+            "method": "PUT",
+            "permission": "reasoning.edit"
           },
           {
-            "path": "/check"
+            "path": "/policies/:id",
+            "method": "DELETE",
+            "permission": "reasoning.edit"
           },
-          {
-            "path": "/solve"
-          }
+          { "path": "/policies/:id/analyze", "permission": "reasoning.edit" },
+          { "path": "/policies/:id/tests/run", "permission": "reasoning.edit" },
+          { "path": "/check", "permission": "reasoning.view" },
+          { "path": "/solve", "permission": "reasoning.view" }
         ]
       },
       "host_api": {
-        "grants": [
-          "hook:side-model"
-        ]
+        "grants": ["hook:side-model"]
       }
     }
   ],
   "mcp_servers": {
     "reasoning": {
       "command": "ryu-reasoning",
-      "args": [
-        "mcp"
-      ],
+      "args": ["mcp"],
       "description": "Automated reasoning checks as tools: `solve` decides claims written in the policy language with no model call at all, `check` does the same for prose, `policies` lists the vocabulary a policy declares, and `analyze` reports whether a policy's own rules are consistent. `solve` is the one to reach for inside a workflow — it is deterministic, so a branch gated on it always takes the same path for the same inputs."
     }
   },
@@ -138,7 +156,8 @@
     "reasoning:check",
     "hook:side-model",
     "hook:run-agent",
-    "mcp:reasoning"
+    "mcp:reasoning",
+    "ui:declarative-http"
   ],
   "permission_levels": [
     {
@@ -150,9 +169,7 @@
       "id": "reasoning.edit",
       "label": "Can edit",
       "description": "Create and change policies. This decides what every check on this node counts as correct, so it is the level that changes outcomes.",
-      "implies": [
-        "reasoning.view"
-      ]
+      "implies": ["reasoning.view"]
     }
   ],
   "companion": {
@@ -160,7 +177,45 @@
     "icon": "checkmark-badge-03"
   },
   "contributes": {
-  "chat_widget_templates": [{"id":"reasoning.chat","title":"Automated Reasoning widget","description":"Open Automated Reasoning data in a host-rendered chat widget.","triggers":["automated reasoning widget"],"examples":["Show me a automated reasoning widget"],"backing":{"view_id":"surface:reasoning"},"display_mode":"inline","safe_action_ids":[],"availability":"available"}],
+    "chat_widget_templates": [
+      {
+        "id": "reasoning.chat",
+        "title": "Automated Reasoning widget",
+        "description": "Open Automated Reasoning data in a host-rendered chat widget.",
+        "triggers": ["automated reasoning widget"],
+        "examples": ["Show me a automated reasoning widget"],
+        "backing": { "view_id": "surface:reasoning" },
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "available"
+      }
+    ],
+    "sidebar_sections": [
+      {
+        "id": "policies",
+        "title": "Policies",
+        "icon": "checkmark-badge-03",
+        "order": 48,
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/reasoning/policies" },
+            "items": "policies",
+            "map": {
+              "id": "id",
+              "title": "name",
+              "subtitle": "description",
+              "accessory": "version"
+            },
+            "refreshMs": 15000
+          },
+          "itemTarget": "/reasoning/{{item.id}}",
+          "emptyState": {
+            "title": "No policies yet",
+            "description": "Create a policy in the companion to check answers against it."
+          }
+        }
+      }
+    ],
     "composer_controls": [
       {
         "id": "reasoning.toggle",
@@ -215,12 +270,8 @@
           "policy_id": "refunds",
           "policy_version": 4,
           "result": "invalid",
-          "invalid_claims": [
-            "refund_amount <= order_total"
-          ],
-          "responsible_rules": [
-            "rule-3"
-          ],
+          "invalid_claims": ["refund_amount <= order_total"],
+          "responsible_rules": ["rule-3"],
           "checked_at": "2026-08-10T09:15:00Z"
         }
       }

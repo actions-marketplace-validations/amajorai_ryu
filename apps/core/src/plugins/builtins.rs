@@ -63,7 +63,7 @@ pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
     // (Spider is NO LONGER a system plugin: it became a declarative `command`
     // tool — fixtures/spider.manifest.json — that shells out to a user-installed
     // `spider` CLI via the command-tool allowlist, with no Core-managed sidecar
-    // lifecycle. It stays Core-tier + default-on via CORE_PLUGINS / CORE_DEFAULT_ON
+    // lifecycle. It stays Core-tier + pre-installed via CORE_PLUGINS / CORE_PREINSTALLED
     // so its record seeds enabled and the tool is available out of the box.)
     // Agent Browser is the default web-browsing tool: an npx-launched MCP server
     // (npm `agentbrowser`), declared under `mcp_servers` in its plugin manifest
@@ -79,8 +79,8 @@ pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
     // Browser is the workspace's real-Chromium sidecar (an Electron GUI app,
     // `browser` sidecar on :7993) that backs the workspace "Browser" tab. A core
     // built-in and therefore uninstall-protected (`is_system_plugin`), but NOT
-    // installed-by-default: no release publishes a spawnable `ryu-browser-<os>-<arch>`
-    // asset yet, so it is opt-in from the Store (see the note in `CORE_DEFAULT_ON`).
+    // pre-installed: no release publishes a spawnable `ryu-browser-<os>-<arch>`
+    // asset yet, so it is opt-in from the Store (see the note in `CORE_PREINSTALLED`).
     // Cross-platform Electron, runs locally on the node.
     SystemPlugin {
         manifest_id: BROWSER_PLUGIN_ID,
@@ -92,11 +92,17 @@ pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
 
 /// The Browser app's plugin id — the workspace's real-Chromium sidecar that backs
 /// the "Browser" workspace tab. A core built-in (see [`SYSTEM_PLUGINS`]) and so
-/// non-uninstallable, but **opt-in**: deliberately absent from [`CORE_DEFAULT_ON`]
+/// non-uninstallable, but **opt-in**: deliberately absent from [`CORE_PREINSTALLED`]
 /// until a release publishes an installable sidecar binary (the WHY is documented at
 /// that absence). While it is disabled the desktop's Browser tab keeps its sandboxed
 /// iframe fallback, which works.
 pub const BROWSER_PLUGIN_ID: &str = "@ryu/browser";
+
+/// Native workspace entry for the Gateway-owned WhatsApp Personal and WhatsApp
+/// Business channel adapters. It has no sidecar or route of its own: the enabled
+/// manifest contributes the desktop button, while the existing channel control
+/// plane remains authoritative for credentials and delivery.
+pub const WHATSAPP_PLUGIN_ID: &str = "@ryu/whatsapp";
 
 /// The first-party Composio Connect plugin id. It is a hosted remote MCP bridge,
 /// separate from the direct `composio.<action>` API-key integration.
@@ -174,8 +180,8 @@ pub const NEWS_PLUGIN_ID: &str = "@ryu/news";
 ///
 /// Same posture as [`CRM_PLUGIN_ID`] below: a governance-shell leaf with NO companion
 /// bundle (`companion: null` — its desktop surface is a native dock panel over the
-/// generic ext-proxy), so it needs no `plugins::seed` row and no
-/// `seed::NOT_PRE_INSTALLED` row. Core-tier via the [`CORE_PLUGINS`] row below so its
+/// generic ext-proxy), so it needs no companion-bundle seed row. Core-tier via the
+/// [`CORE_PLUGINS`] row below so its
 /// sidecar spawns on the auto-run path, and therefore deliberately NOT declaring
 /// `sidecar:process` — the Gateway denies that grant at enable.
 pub const SIMULATOR_PLUGIN_ID: &str = "@ryu/simulator";
@@ -188,48 +194,58 @@ pub const SIMULATOR_PLUGIN_ID: &str = "@ryu/simulator";
 /// unlike Outpost it ships no UI bundle and needs NO `plugins::seed` row.
 pub const CRM_PLUGIN_ID: &str = "@ryu/crm";
 
+/// Expenses is a local-first ledger over the `ryu-expenses` sidecar
+/// (`apps-store/expenses/`). Core-tier lets its managed sidecar and manifest-owned
+/// MCP server run through the generic lifecycle; it remains opt-in because the
+/// app owns a process and is not part of the fresh-install preinstalled set.
+pub const EXPENSES_PLUGIN_ID: &str = "@ryu/expenses";
+
+/// Backstage is an external-repository Companion app. Its editor remains owned by
+/// `amajorai/backstage`; Ryu owns the generic host lifecycle, storage, and AI
+/// bridges. Its UI carriage is supplied by the external Marketplace/standalone
+/// package rather than compiled into Core.
+pub const BACKSTAGE_PLUGIN_ID: &str = "@ryu/backstage";
+
 /// The Blueprint app's plugin id — visual plan review over the `ryu-blueprint`
 /// sidecar (`apps-store/blueprint/`). Shared by the [`CORE_PLUGINS`] row below and
 /// the `plugins::seed` companion-bundle table.
 ///
-/// Deliberately NOT added to `seed::NOT_PRE_INSTALLED`, unlike its nearest neighbour
-/// `@ryu/reasoning`. That list is a hand-maintained PRODUCT decision ("should a fresh
-/// install list this app as Installed?"), not a mechanical consequence of being
-/// opt-in — so if the answer here should be "no", the row goes there and this
-/// paragraph goes away.
+/// It is opt-in and install-on-demand like the other non-default companions. The
+/// compiled UI bundle is attached by the explicit lifecycle install path, so no
+/// disabled record is needed merely to store it.
 ///
 /// Declared HERE rather than in `plugin_manifest` (where `REASONING_PLUGIN_ID` and
 /// the older companion ids ended up) because the only thing this id decides is
-/// plugin *policy* — tier membership, seeding, pre-install — and all three of those
+/// plugin *policy* — tier membership and pre-installed behavior — and those tables
 /// tables live in `plugins::`. `plugin_manifest` owns the compiled-in bytes
 /// (`BLUEPRINT_UI_HTML`), which is a different question. Same shape as
 /// [`SOCIAL_PLUGIN_ID`] directly above.
 pub const BLUEPRINT_PLUGIN_ID: &str = "@ryu/blueprint";
 
 /// The Research app's plugin id — the `/api/research/*` proxy over the autoresearch
-/// sidecar. A governance-shell leaf: default-on, no `requires` (it owns its own
+/// sidecar. A governance-shell leaf: pre-installed, no `requires` (it owns its own
 /// sidecar), compile-out-able behind the `research` cargo feature.
 pub const RESEARCH_PLUGIN_ID: &str = "@ryu/research";
 
 /// The MarkItDown app's plugin id — the **shipped default** provider of the
 /// `document.parse` capability (`apps-store/markitdown/`, a Python sidecar wrapping
 /// Microsoft's MIT-licensed MarkItDown). The only one of the four parsing backends in
-/// [`CORE_DEFAULT_ON`], and the only one whose `provides` block carries
+/// [`CORE_PREINSTALLED`], and the only one whose `provides` block carries
 /// `"default": true` — see the block comment on its entry there for why both halves
 /// are load-bearing and why the other three stay opt-in.
 pub const MARKITDOWN_PLUGIN_ID: &str = "@ryu/markitdown";
 
 /// The Unstructured app's plugin id — a `document.parse` provider
 /// (`apps-store/unstructured/`, a Python sidecar wrapping the Apache-2.0 Unstructured
-/// library). Core-tier and governed, but **default-OFF**: it is absent from
-/// [`CORE_DEFAULT_ON`] because `unstructured[all-docs]` is a 1-2 GB pip install whose
+/// library). Core-tier and governed, but **not pre-installed**: it is absent from
+/// [`CORE_PREINSTALLED`] because `unstructured[all-docs]` is a 1-2 GB pip install whose
 /// native helpers (poppler/tesseract/libreoffice/pandoc) are not pip-installable, so
 /// it is opt-in from the Store — the same shape as `finetune`.
 pub const UNSTRUCTURED_PLUGIN_ID: &str = "@ryu/unstructured";
 
 /// The Docling app's plugin id — a `document.parse` provider (`apps-store/docling/`,
 /// a Python sidecar wrapping IBM's MIT-licensed Docling). Core-tier and governed but
-/// **default-OFF** (absent from [`CORE_DEFAULT_ON`]): it pulls a Torch stack and
+/// **not pre-installed** (absent from [`CORE_PREINSTALLED`]): it pulls a Torch stack and
 /// downloads layout/OCR models on first parse.
 ///
 /// It is also the id the `document.parse` binding falls back to if `markitdown` ever
@@ -240,32 +256,32 @@ pub const DOCLING_PLUGIN_ID: &str = "@ryu/docling";
 
 /// The MinerU app's plugin id — a `document.parse` provider (`apps-store/mineru/`, a
 /// Python sidecar driving the AGPL-licensed MinerU CLI, PDF-focused). Core-tier and
-/// governed but **default-OFF** (absent from [`CORE_DEFAULT_ON`]): heaviest of the
+/// governed but **not pre-installed** (absent from [`CORE_PREINSTALLED`]): heaviest of the
 /// four (model downloads, GPU-oriented backends), so it is opt-in from the Store.
 pub const MINERU_PLUGIN_ID: &str = "@ryu/mineru";
 
 /// The Dashboards app's plugin id — the `/api/dashboards/*` live widget-grid
-/// surface. Governance-shell leaf: default-on, no `requires` (soft HTTP loopback to
+/// surface. Governance-shell leaf: pre-installed, no `requires` (soft HTTP loopback to
 /// monitors/etc). Gate-only (deep in-crate coupling to hardware displays +
 /// `dashboard_builder`), so it is NOT behind a cargo feature.
 pub const DASHBOARDS_PLUGIN_ID: &str = "@ryu/dashboards";
 
 /// The Teams app's plugin id — the `/api/teams/*` CRUD surface over agent teams.
-/// Governance-shell leaf: default-on, no `requires` (stores agent-id strings only).
+/// Governance-shell leaf: pre-installed, no `requires` (stores agent-id strings only).
 /// Gate-only (the store also backs `@team` chat routing + `agent_builder`), so it
 /// is NOT behind a cargo feature.
 pub const TEAMS_PLUGIN_ID: &str = "@ryu/teams";
 
 /// The Clips app's plugin id — the `/api/clips/*` Core→Shadow capture proxy. It
 /// `requires` the `shadow` app (its recordings live in Shadow), so the graph
-/// refuses to disable Shadow out from under an enabled Clips. Default-on;
+/// refuses to disable Shadow out from under an enabled Clips. Pre-installed;
 /// compile-out-able behind the `clips` cargo feature.
 pub const CLIPS_PLUGIN_ID: &str = "@ryu/clips";
 
 /// The Recipes app's plugin id — the `/api/recipes/*` record→replay surface over
 /// Ghost's RecipeStore. It `requires` the `ghost` app, so the graph refuses to
-/// disable Ghost out from under an enabled Recipes. NOT default-on and not
-/// pre-installed (see `CORE_DEFAULT_ON` below and `seed::NOT_PRE_INSTALLED`): the
+/// disable Ghost out from under an enabled Recipes. NOT pre-installed and therefore
+/// install-on-demand: the
 /// whole surface is out-of-process in the `ryu-recipes` sidecar, so Core links no
 /// recipes code and there is no `recipes` cargo feature.
 pub const RECIPES_PLUGIN_ID: &str = "@ryu/recipes";
@@ -273,7 +289,7 @@ pub const RECIPES_PLUGIN_ID: &str = "@ryu/recipes";
 /// The Mail (Agent Inboxes) app's plugin id. Unlike the gate-only apps above, Mail is
 /// a **fully manifest-driven** app: its `ryu-mail` sidecar (a local sibling binary) is
 /// spawned by the generic loader and its `/api/mail/*` surface is proxied via the
-/// `public_mount` mechanism — there is no hand-coded Rust proxy. Default-on so the
+/// `public_mount` mechanism — there is no hand-coded Rust proxy. Pre-installed so the
 /// externally-committed inbound-webhook URL resolves out of the box.
 pub const MAIL_PLUGIN_ID: &str = "@ryu/mail";
 /// The Warmup app — an opt-in companion that schedules a keep-alive ping to each
@@ -283,9 +299,14 @@ pub const WARMUP_PLUGIN_ID: &str = "@ryu/warmup";
 
 /// The RAG capability app's plugin id — the default in-process embeddings+retrieval
 /// provider. Declares `provides:[rag]` + `requires:[engines]`, so the capability
-/// binding/graph resolves rag→engines for real (Track B). Default-on; a GraphRAG or
+/// binding/graph resolves rag→engines for real (Track B). Pre-installed; a GraphRAG or
 /// third-party provider app can bind the `rag` capability to swap the implementation.
 pub const RAG_PLUGIN_ID: &str = "@ryu/rag";
+
+/// The local inference-engine capability required by the built-in RAG provider.
+/// It is Core-owned and compiled into the runtime because there is no marketplace
+/// package to materialize before the first Spaces request.
+pub const ENGINES_PLUGIN_ID: &str = "@ryu/engines";
 
 /// The Message Reactions plugin id. Core supplies the persistence handlers and
 /// the desktop supplies the native picker; this id governs both through the
@@ -305,8 +326,12 @@ pub const GHOST_CHATS_PLUGIN_ID: &str = "@ryu/ghost-chats";
 /// surface; this id gates the feature contribution and its toolbar affordance.
 pub const EXPANDED_COMPOSER_PLUGIN_ID: &str = "@ryu/expanded-composer";
 
+/// The Session Stats plugin id. Core only carries the declarative contribution;
+/// the desktop host owns the safe transcript renderer and provider normalization.
+pub const STATS_PLUGIN_ID: &str = "@ryu/stats";
+
 /// The Quests app's plugin id — the `/api/quests/*` auto-detecting todo board.
-/// Governance-shell leaf: default-on, no `requires` (the scheduler is kernel infra).
+/// Governance-shell leaf: pre-installed, no `requires` (the scheduler is kernel infra).
 /// The engine + store + HTTP surface are physically extracted to `crates/ryu-quests`
 /// and mounted behind this gate; the whole capability is behind the `quests` cargo
 /// feature (in `default`), so a lean build drops it. This id stays in Core as the
@@ -314,7 +339,7 @@ pub const EXPANDED_COMPOSER_PLUGIN_ID: &str = "@ryu/expanded-composer";
 pub const QUESTS_PLUGIN_ID: &str = "@ryu/quests";
 
 /// The Approvals app's plugin id — the `/api/approvals/*` human-in-the-loop inbox.
-/// Governance-shell leaf: default-on, no `requires` (the workflow dependency is
+/// Governance-shell leaf: pre-installed, no `requires` (the workflow dependency is
 /// soft). It is a **dependency target**: Healing declares `requires.apps =
 /// [@ryu/approvals]` because it delivers proposed fixes into this inbox. Gate-only
 /// (its `ApprovalEngine` is a `ServerState` field used by the scheduler/workflow/
@@ -330,7 +355,7 @@ pub const QUESTS_PLUGIN_ID: &str = "@ryu/quests";
 pub const APPROVALS_PLUGIN_ID: &str = "@ryu/approvals";
 
 /// The Skills app's plugin id — the `/api/skills/*` + `/api/skills/catalog/*`
-/// SKILL.md discovery/authoring/catalog surface. Governance-shell leaf: default-on,
+/// SKILL.md discovery/authoring/catalog surface. Governance-shell leaf: pre-installed,
 /// no `requires`. It is a **dependency target**: Learning declares `requires.apps =
 /// [@ryu/skills]` because it writes synthesized skills. Gate-only (its
 /// `SkillRegistry` is a `ServerState` field injected into every chat turn by
@@ -339,7 +364,7 @@ pub const SKILLS_PLUGIN_ID: &str = "@ryu/skills";
 
 /// The Learning app's plugin id — the `/api/learn/*` + `/api/experience/list`
 /// continual-learning loop. `requires` the `skills` app (it writes synthesized
-/// skills), so the graph refuses to disable Skills out from under it. Default-on.
+/// skills), so the graph refuses to disable Skills out from under it. Pre-installed.
 /// Gate-only (its `ExperienceStore` is a `ServerState` field written from the chat
 /// feedback path + a `JobTarget::LearningCycle` scheduler job), so it is NOT behind
 /// a cargo feature.
@@ -355,14 +380,14 @@ pub const LEARNING_PLUGIN_ID: &str = "@ryu/learning";
 /// The Self-Healing app's plugin id — the `/api/healing/*` diagnose→propose-fix
 /// surface, now served OUT-OF-PROCESS by the `ryu-healing` sidecar (`public_mount`).
 /// `requires` the `approvals` app (it delivers fixes into that inbox), so the graph
-/// refuses to disable Approvals out from under it. Default-on; Core keeps only the
+/// refuses to disable Approvals out from under it. Pre-installed; Core keeps only the
 /// welded action side (`healing_client::CoreHealingHost`) and drives the sidecar over
 /// loopback, with the run-status bus loop spawned unconditionally in `main.rs`.
 pub const HEALING_PLUGIN_ID: &str = "@ryu/healing";
 
 /// The Monitors app's plugin id — the `/api/monitors/*` website-watch surface
 /// (price/stock/keyword/content/uptime + alerts). Now served OUT-OF-PROCESS by the
-/// `ryu-monitors` sidecar (`public_mount`, App-gated via the ext proxy). Default-on,
+/// `ryu-monitors` sidecar (`public_mount`, App-gated via the ext proxy). Pre-installed,
 /// no `requires` (the scheduler is kernel infra). Core keeps only the loopback driver
 /// (`monitors_client`: `JobTarget::Monitor` run + backing-job reconcile) and the two
 /// ext-bearer host callbacks (Spider fetch + alert fan-out); the interleaved
@@ -372,7 +397,7 @@ pub const MONITORS_PLUGIN_ID: &str = "@ryu/monitors";
 
 /// The Hardware app's plugin id — the PROTECTED `/api/hardware/devices*` device-
 /// registry CRUD (list/patch/delete + per-device dashboard config). Governance-shell
-/// leaf: default-on, no `requires`. Gate-only (the device store + `hardware_ws` are
+/// leaf: pre-installed, no `requires`. Gate-only (the device store + `hardware_ws` are
 /// `ServerState`-adjacent and the RHP link is coupled to voice/dashboards), so it is
 /// NOT behind a cargo feature. The gate covers ONLY the protected device-management
 /// routes; the PUBLIC device channel (`/api/hardware/{ws,pair,display}`) stays ungated
@@ -381,7 +406,7 @@ pub const HARDWARE_PLUGIN_ID: &str = "@ryu/hardware";
 
 /// The Workflows app's plugin id — the protected workflow surface: the DAG CRUD
 /// (`/workflows/*`, no `/api` prefix) plus the template catalog
-/// (`/api/workflows/catalog/*`). Governance-shell leaf: default-on, no `requires`.
+/// (`/api/workflows/catalog/*`). Governance-shell leaf: pre-installed, no `requires`.
 /// Gate-only (its executor is a `ServerState` engine dispatched by the scheduler
 /// `JobTarget::Workflow`, durable execution, healing, and approvals), so it is NOT
 /// behind a cargo feature — the impl must always compile. The gate covers ONLY the
@@ -392,7 +417,7 @@ pub const WORKFLOWS_PLUGIN_ID: &str = "@ryu/workflows";
 
 /// The Agents app's plugin id — the `/api/agents/*` catalog + CRUD + session-
 /// management surface (list/create/edit/delete/catalog/install, ACP config/auth/
-/// sessions, threads, usage, capabilities). Governance-shell leaf: default-on AND
+/// sessions, threads, usage, capabilities). Governance-shell leaf: pre-installed AND
 /// **load-bearing** (see [`LOAD_BEARING_PLUGINS`]) — the composer fetches the agent
 /// list on boot, so a disabled Agents app would break chat; a plain disable is
 /// refused. Gate-only (the `AgentStore` is a `ServerState` field the chat path reads
@@ -406,7 +431,7 @@ pub const AGENTS_PLUGIN_ID: &str = "@ryu/agents";
 /// The Voice app's plugin id — the PROTECTED voice data path
 /// (`/api/voice/transcribe`, `/api/voice/speak`, `/api/voice/tts-engines`,
 /// `/api/voice/tts-models`, `/api/voice/tts-models/install`). Governance-shell leaf:
-/// default-on, no `requires`. Gate-only (the `voice` module is called in-process by
+/// pre-installed, no `requires`. Gate-only (the `voice` module is called in-process by
 /// the chat/island paths), so it is NOT behind a cargo feature. The gate covers ONLY
 /// these protected routes; the PUBLIC realtime voice WS (`/api/voice/ws`) stays on the
 /// public router, ungated (a browser WS upgrade authenticates in-handler), so live
@@ -415,7 +440,7 @@ pub const VOICE_PLUGIN_ID: &str = "@ryu/voice";
 
 /// The Media-Generation app's plugin id — the generative-media PRODUCERS
 /// (`/api/images/generate`, `/api/video/generate`, `/api/video/jobs/:id`,
-/// `/api/gifs/search`). Governance-shell leaf: default-on, no `requires`. Gate-only,
+/// `/api/gifs/search`). Governance-shell leaf: pre-installed, no `requires`. Gate-only,
 /// so it is NOT behind a cargo feature. The gate covers ONLY the producers; the shared
 /// no-cloud blob store (`/api/media/:file` serve + `/api/media/upload`) stays UNGATED
 /// kernel storage because it also serves TTS audio and legacy media URLs. New user
@@ -429,7 +454,7 @@ pub const MEDIA_PLUGIN_ID: &str = "@ryu/media";
 /// The gate covers ONLY the HTTP CRUD surface; the in-process chat auto-recall path is
 /// kernel and never HTTP-loops back through `/api/memory`.
 ///
-/// Default-on for fresh installs. Existing explicit disabled records remain
+/// Pre-installed for fresh installs. Existing explicit disabled records remain
 /// respected by the lifecycle seeder, so this does not silently re-enable a
 /// user's previous choice.
 pub const MEMORY_PLUGIN_ID: &str = "@ryu/memory";
@@ -438,7 +463,7 @@ pub const MEMORY_PLUGIN_ID: &str = "@ryu/memory";
 /// capability layers. It contributes no runnables and gates no route; it exists so the
 /// `layer.<capability>.default.<arg>` preferences have a home that is not tied to any
 /// one provider (hanging them off `exa` would lose them on a swap to `tavily`).
-/// Default-on, because a settings surface the user cannot reach is not a setting.
+/// Pre-installed, because a settings surface the user cannot reach is not a setting.
 pub const LAYERS_PLUGIN_ID: &str = "@ryu/layers";
 
 /// The Webhooks app's plugin id — the inbound webhook endpoint registry surfaced by
@@ -446,7 +471,7 @@ pub const LAYERS_PLUGIN_ID: &str = "@ryu/layers";
 /// the other leaf shells this is NOT a route gate: `/api/webhooks` +
 /// `/api/webhook-ingress/status` are read-only and stay ungated on the main router
 /// (the desktop host calls them directly, monitors pattern). The manifest exists only
-/// to seed the companion's UI bundle + `webhooks:crud` grant. Default-on so the
+/// to seed the companion's UI bundle + `webhooks:crud` grant. Pre-installed so the
 /// companion is present on every fresh install (the page it replaced was always-on).
 pub const WEBHOOKS_PLUGIN_ID: &str = "@ryu/webhooks";
 
@@ -455,7 +480,7 @@ pub const WEBHOOKS_PLUGIN_ID: &str = "@ryu/webhooks";
 /// `webhooks` this is NOT a route gate: `/api/activity` (+ its `/stream`) is
 /// read-only and stays ungated on the main router (the desktop host calls it
 /// directly, monitors pattern). The manifest exists only to seed the companion's UI
-/// bundle + `activity:read` grant. Default-on so the companion is present on every
+/// bundle + `activity:read` grant. Pre-installed so the companion is present on every
 /// fresh install (the page it replaced was always-on).
 pub const ACTIVITY_PLUGIN_ID: &str = "@ryu/activity";
 
@@ -465,9 +490,25 @@ pub const ACTIVITY_PLUGIN_ID: &str = "@ryu/activity";
 /// `activity` this is NOT a route gate: the underlying `/heartbeat/jobs` +
 /// `/workflows` + `/api/agents` endpoints stay ungated on the main router (the
 /// desktop host calls them directly, monitors pattern). The manifest exists only to
-/// seed the companion's UI bundle + `calendar:crud` grant. Default-on so the
+/// seed the companion's UI bundle + `calendar:crud` grant. Pre-installed so the
 /// companion is present on every fresh install (the page it replaced was always-on).
 pub const CALENDAR_PLUGIN_ID: &str = "@ryu/calendar";
+
+/// The Help Center app's plugin id — a desktop-first support workspace backed by
+/// the app's dedicated Ryu Space. Its companion owns ticket/article projection and
+/// human-reviewed AI assistance while Core/Spaces owns persistence and tenancy.
+pub const HELP_CENTER_PLUGIN_ID: &str = "@ryu/help-center";
+
+/// The Sites app's plugin id — the first-party public-edge workspace for
+/// versioned Site projects, wildcard-managed URLs, domains, connectors, and
+/// the Help Center widget integration surface.
+pub const SITES_PLUGIN_ID: &str = "@ryu/sites";
+
+/// The Chat Broadcast app's desktop-only companion. It lists caller-visible
+/// conversations and, after an explicit confirmation in its UI, posts a real
+/// user turn to each selected chat through the trusted host bridge. No sidecar,
+/// route gate, or background process is needed, so it is safe to pre-install.
+pub const CHAT_BROADCAST_PLUGIN_ID: &str = "@ryu/chat-broadcast";
 
 /// The Timeline app's plugin id — the CapCut-style activity replay scrubber
 /// (Shadow's captured lanes + keyframe preview + Dayflow work journal) surfaced by
@@ -476,7 +517,7 @@ pub const CALENDAR_PLUGIN_ID: &str = "@ryu/calendar";
 /// `/timeline` + `/journal` + `/frame` endpoints live on the Shadow sidecar (:3030),
 /// not the Core router, and the desktop host calls them directly (the monitors
 /// pattern, but WITHOUT a node token — Shadow is machine-pinned). The manifest exists
-/// only to seed the companion's UI bundle + `timeline:read` grant. Default-on so the
+/// only to seed the companion's UI bundle + `timeline:read` grant. Pre-installed so the
 /// companion is present on every fresh install (the page it replaced was always-on).
 pub const TIMELINE_PLUGIN_ID: &str = "@ryu/timeline";
 
@@ -486,7 +527,7 @@ pub const TIMELINE_PLUGIN_ID: &str = "@ryu/timeline";
 /// `webhooks`/`activity`/`timeline` this is NOT a route gate: Core's `/api/skills`
 /// authoring endpoints stay ungated on the router and the desktop host calls them
 /// directly (the monitors pattern), so this manifest exists only to seed the
-/// companion's UI bundle + `skills:crud` grant. Default-on so the editor's
+/// companion's UI bundle + `skills:crud` grant. Pre-installed so the editor's
 /// `/skills/new` + `/skills/:id/edit` routes resolve on every fresh install.
 pub const SKILL_EDITOR_PLUGIN_ID: &str = "@ryu/skill-editor";
 
@@ -498,7 +539,7 @@ pub const SKILL_EDITOR_PLUGIN_ID: &str = "@ryu/skill-editor";
 /// points the Store at Core's own `/api/output-styles`. It is a plugin rather than a
 /// hardcoded table for the reason `Contributes::themes` gives: a contribution inherits
 /// install/enable, versioning, signing, the Store detail page and reviews for free, and
-/// it is what lets a third party ship a style at all. Default-on — see the entry in
+/// it is what lets a third party ship a style at all. Pre-installed — see the entry in
 /// [`CORE_PLUGINS`] for why that is forced by the enabled-filter rather than chosen.
 pub const OUTPUT_STYLES_PLUGIN_ID: &str = "@ryu/output-styles";
 
@@ -507,7 +548,7 @@ pub const OUTPUT_STYLES_PLUGIN_ID: &str = "@ryu/output-styles";
 /// metrics, accrued/approved/paid payouts), served OUT-OF-PROCESS by the `ryu-ugc`
 /// sidecar (`public_mount`, App-gated via the ext proxy). Core-tier so it is
 /// installable and its managed sidecar may spawn, but **opt-in** — absent from
-/// [`CORE_DEFAULT_ON`] — because a default-on sidecar app spawns a binary a normal
+/// [`CORE_PREINSTALLED`] — because a pre-installed sidecar app spawns a binary a normal
 /// install does not have. No `requires` edge. Its surface is a desktop dock panel
 /// (`contributes.dock_panels`, `panel: "native"`), not a companion, so it ships no
 /// `ui_code` and needs no `plugins::seed` row.
@@ -518,7 +559,7 @@ pub const UGC_PLUGIN_ID: &str = "@ryu/ugc";
 /// to-dos left outstanding across threads), served OUT-OF-PROCESS by the
 /// `ryu-mission-control` sidecar (`public_mount`, App-gated via the ext proxy).
 /// Core-tier so it is installable and its managed sidecar may spawn, but **opt-in**
-/// — absent from [`CORE_DEFAULT_ON`] — because a default-on sidecar app spawns a
+/// — absent from [`CORE_PREINSTALLED`] — because a pre-installed sidecar app spawns a
 /// binary a normal install does not have. No `requires` edge.
 ///
 /// Its desktop surface is an APP-SHELL PAGE (`contributes.sidebar_buttons` naming
@@ -529,11 +570,18 @@ pub const UGC_PLUGIN_ID: &str = "@ryu/ugc";
 /// installed.
 pub const MISSION_CONTROL_PLUGIN_ID: &str = "@ryu/mission-control";
 
+/// The Feedback Board app's plugin id — a public request board plus a private
+/// Ryu product workspace, served by the `ryu-feedback-board` sidecar through
+/// the generic ext-proxy/public-mount path. Core-tier and opt-in: the sidecar
+/// binary is not assumed to exist on a fresh node, so this id stays out of
+/// `CORE_PREINSTALLED`.
+pub const FEEDBACK_BOARD_PLUGIN_ID: &str = "@ryu/feedback-board";
+
 /// The Drafts app's plugin id — the `/api/drafts/*` outbox (unsent composer text,
 /// armed queue entries and their send history), served OUT-OF-PROCESS by the
 /// `ryu-drafts` sidecar (`public_mount`, App-gated via the ext proxy). Core-tier so
 /// it is installable and its managed sidecar may spawn, but **opt-in** — absent from
-/// [`CORE_DEFAULT_ON`] — because a default-on sidecar app spawns a binary a normal
+/// [`CORE_PREINSTALLED`] — because a pre-installed sidecar app spawns a binary a normal
 /// install does not have. No `requires` edge.
 ///
 /// Its desktop surface is an APP-SHELL PAGE (`contributes.sidebar_buttons` naming
@@ -555,14 +603,14 @@ pub const DRAFTS_PLUGIN_ID: &str = "@ryu/drafts";
 /// Tier is derived from *membership here*, never from a manifest field, so a
 /// plugin cannot promote itself to Core.
 ///
-/// Defaults policy:
-/// - `engines` (local llama.cpp) ships enabled (zero-setup chat on install).
-/// - `durable` (the in-process durable workflow engine) ships enabled — it runs
-///   on every platform with no extra sidecar, so it is a zero-setup default-on
+/// Pre-installed policy:
+/// - `engines` (local llama.cpp) is pre-installed and seeded enabled (zero-setup chat on install).
+/// - `durable` (the in-process durable workflow engine) is pre-installed and seeded enabled — it runs
+///   on every platform with no extra sidecar, so it is a zero-setup pre-installed
 ///   dogfood (#448) declared as an `engine` runnable.
-/// - `ghost`/`shadow`/`spider`/`agentbrowser` are the sidecar-backed default
-///   tool apps. They are Core-tier AND default-on: on a fresh install their app
-///   record is auto-seeded enabled (so they appear installed exactly like the
+/// - `ghost`/`shadow`/`spider`/`agentbrowser` are the sidecar-backed pre-installed
+///   tool apps. They are Core-tier AND pre-installed: on a fresh install their app
+///   record is seeded enabled (so they appear installed exactly like the
 ///   auto-downloaded default models), while the tool process still runs through
 ///   its own sidecar/MCP lifecycle. `ghost` and `agentbrowser` declare no runnables
 ///   (their tools come from the dedicated MCP provider); the record is the
@@ -572,7 +620,7 @@ pub const DRAFTS_PLUGIN_ID: &str = "@ryu/drafts";
 ///   the ext-proxy, because the swappable `browser.control` layer binds its verbs
 ///   to registry tool ids and a sidecar route is not one.
 /// - `firewall`/`routing`/`sandbox` are Core-tier but **opt-in** (they change
-///   gateway/sandbox behaviour), so they are NOT in [`CORE_DEFAULT_ON`].
+///   gateway/sandbox behaviour), so they are NOT in [`CORE_PREINSTALLED`].
 /// - `headroom` (egress compression) is deliberately **Community-tier**: the
 ///   compression *service* is the plugin and Core only hosts the gateway
 ///   transform, so it is install-then-enable from the marketplace exactly like a
@@ -586,9 +634,13 @@ pub const CORE_PLUGINS: &[&str] = &[
     // Ambient Elevator is a desktop-only, no-sidecar plugin. Core-tier keeps its
     // compiled manifest trusted while the desktop owns the actual audio element.
     "@ryu/ambient-elevator",
+    // Agent Status is a pure compiled manifest whose declarative shell reads the
+    // governed runs/approvals APIs. Core tier is the provenance proof that permits
+    // those reviewed Core routes; it remains opt-in (not pre-installed).
+    "@ryu/agent-status",
     // Ego Browser is an official, opt-in browser.control provider. It is Core
     // tier so a verified marketplace package can use its reviewed inline-Deno
-    // bridge, but it is not default-on because Ego lite is a separate BYO app.
+    // bridge, but it is not pre-installed because Ego lite is a separate BYO app.
     "@ryu/ego-browser",
     // Expect and Agentation are local Node MCP servers. Core-tier is required so
     // their manifest-owned stdio servers can register without the reserved
@@ -602,17 +654,17 @@ pub const CORE_PLUGINS: &[&str] = &[
     // Community path needs the approved `mcp:server` grant — which is off the
     // Gateway's default allowlist and in a reserved namespace, so operator-only.
     // A Community-tier scrapling would register nothing and be dead on arrival.
-    // Deliberately NOT in `CORE_DEFAULT_ON`: it needs a `pip install "scrapling[ai]"`
+    // Deliberately NOT in `CORE_PREINSTALLED`: it needs a `pip install "scrapling[ai]"`
     // the user must perform, so shipping it on would put a permanently unavailable
     // tool on every fresh install — the same reason the BYOK providers stay opt-in.
     "@ryu/scrapling",
     // The default `web.search` provider. Core-tier for the same reason `spider` is:
-    // it is a default TOOL app that must exist out of the box, and default-on
+    // it is a default TOOL app that must exist out of the box, and pre-installed
     // requires Core-tier. The other five search providers (tavily, brave, serper,
     // firecrawl, parallel) stay Community + opt-in, because each needs a key before
     // it can do anything useful. `parallel` is the one that could argue otherwise —
     // its public Search MCP endpoint works with no credential, exactly like exa's —
-    // but its extract half is still BYOK, and default-ON is a pick, not a listing:
+    // but its extract half is still BYOK, and pre-installed is a pick, not a listing:
     // two default providers of `web.search` would make the choice depend on
     // manifest ordering. exa keeps it; parallel is the swap you opt into.
     "@ryu/exa",
@@ -624,11 +676,11 @@ pub const CORE_PLUGINS: &[&str] = &[
     // Gateway's default allowlist and in a reserved namespace, so operator-only.
     // A Community-tier docs would register nothing and be dead on arrival.
     // Unlike `scrapling` it needs no install step: the server is REMOTE (a hosted
-    // https URL, not a spawned command), so it is also in `CORE_DEFAULT_ON`.
+    // https URL, not a spawned command), so it is also in `CORE_PREINSTALLED`.
     "@ryu/docs",
     // Composio Connect is the OAuth-backed hosted MCP alternative to the direct
     // `COMPOSIO_API_KEY` action backend. Core-tier is required for the reserved
-    // `mcp:server` + `identity.read` grants; it is default-on because it has no
+    // `mcp:server` + `identity.read` grants; it is pre-installed because it has no
     // local process or secret to provision and remains inert until the user
     // authorizes a Composio account.
     COMPOSIO_CONNECT_PLUGIN_ID,
@@ -637,7 +689,7 @@ pub const CORE_PLUGINS: &[&str] = &[
     // `scrapling` above — `pi_config::app_extensions::may_ship_pi_extensions`
     // auto-allows a manifest's `pi_extensions` only for compiled-in manifests, and
     // the Community path needs the approved `pi:extension` grant, which is
-    // operator-only. Both ARE in `CORE_DEFAULT_ON`: they were unconditional before
+    // operator-only. Both ARE in `CORE_PREINSTALLED`: they were unconditional before
     // the move, so anything else is a silent capability regression.
     "@ryu/pi-shell",
     "@ryu/pi-subagent",
@@ -646,13 +698,17 @@ pub const CORE_PLUGINS: &[&str] = &[
     // the same reason as its siblings — `may_ship_pi_extensions` auto-allows
     // only compiled-in manifests, and the Community path needs the operator-only
     // `pi:extension` grant. Unlike them it is NET-NEW rather than previously
-    // unconditional, but it still sits in `CORE_DEFAULT_ON` (see below): a
-    // default-off mirror of a first-class Claude Code tool would read as a
+    // unconditional, but it still sits in `CORE_PREINSTALLED` (see below): a
+    // not pre-installed mirror of a first-class Claude Code tool would read as a
     // regression.
     "@ryu/pi-monitor",
     // Workspace real-Chromium browser sidecar — core built-in, installable from the
-    // Store but NOT default-on (no publishable sidecar asset; see `CORE_DEFAULT_ON`).
+    // Store but NOT pre-installed (no publishable sidecar asset; see `CORE_PREINSTALLED`).
     BROWSER_PLUGIN_ID,
+    // Native workspace entry over the existing Gateway channel adapters. No
+    // sidecar, runnable or reserved grant; Core tier marks the compiled manifest
+    // as first-party and allows the pre-installed contribution to seed safely.
+    WHATSAPP_PLUGIN_ID,
     "@ryu/firewall",
     "@ryu/routing",
     "@ryu/sandbox",
@@ -661,28 +717,33 @@ pub const CORE_PLUGINS: &[&str] = &[
     // `may_run_sidecar` allows one at Community tier only against the Gateway-approved
     // `sidecar:process` grant — which the Gateway denies at enable. A Community pxpipe
     // would install and then never spawn its proxy. Deliberately NOT in
-    // `CORE_DEFAULT_ON`: it needs Node on PATH, fetches an npm package on first start,
+    // `CORE_PREINSTALLED`: it needs Node on PATH, fetches an npm package on first start,
     // and does nothing until the user points a provider at 127.0.0.1:47821 with their
     // own key (it is a transparent proxy and holds no credential — see its README).
     "@ryu/pxpipe",
     // Mail (Agent Inboxes) — manifest-driven app; its `ryu-mail` sidecar is spawned
     // by the generic loader (see MAIL_PLUGIN_ID).
     MAIL_PLUGIN_ID,
+    // Payments (MPP) — its local `ryu-mpp` sidecar also needs the Core tier so the
+    // generic loader can spawn the manifest-declared process and its reviewed host
+    // capabilities can reach Core-owned encrypted custody. It remains opt-in and
+    // is intentionally absent from CORE_PREINSTALLED.
+    "@ryu/mpp",
     // RAG capability provider (default in-process embeddings+retrieval).
     RAG_PLUGIN_ID,
-    // System-wide autocomplete. Core-tier but opt-in (NOT in CORE_DEFAULT_ON):
+    // System-wide autocomplete. Core-tier but opt-in (NOT in CORE_PREINSTALLED):
     // enabling it is the single on/off switch for the /api/predict/* brain, and it
     // sends text from arbitrary apps to a model, so it ships disabled.
     "@ryu/predict",
-    // System-wide dictation + agent-ask (Island surface). Core-tier; default-on
-    // (see CORE_DEFAULT_ON) so the previously-hardcoded Island feature keeps
+    // System-wide dictation + agent-ask (Island surface). Core-tier; pre-installed
+    // (see CORE_PREINSTALLED) so the previously-hardcoded Island feature keeps
     // working on a fresh install. Enabling the plugin is the single switch.
     "@ryu/dictation",
     // The Island companion overlay — a desktop-owned Electron sidecar the desktop
     // shell installs and launches (never a Core sidecar). Core-tier so its record
     // is installable/governed, but OPT-IN: no release auto-installs the Electron
-    // bundle, so no record is seeded (absent from `CORE_DEFAULT_ON` and carrying no
-    // companion `ui_code`, so nothing pre-seeds it). Its Island settings tab
+    // bundle, so no record is seeded (absent from `CORE_PREINSTALLED` and carrying no
+    // companion `ui_code`, so it has no lifecycle record on a fresh store). Its Island settings tab
     // registers via `contributes.settings_tabs` and appears only after the user
     // installs the app from the Store — the same posture as shadow's settings.
     "@ryu/island",
@@ -695,25 +756,26 @@ pub const CORE_PLUGINS: &[&str] = &[
     "@ryu/chat-title",
     // Chat feature extraction: the side-question, temporary-chat, and expanded
     // composer lifecycles are plugin-owned declarations over host implementations.
-    // Reactions are the adjacent message-action plugin; all four remain default-on
+    // Reactions are the adjacent message-action plugin; all four remain pre-installed
     // for parity with the previously built-in desktop experience.
     SIDE_CHATS_PLUGIN_ID,
     GHOST_CHATS_PLUGIN_ID,
     EXPANDED_COMPOSER_PLUGIN_ID,
+    STATS_PLUGIN_ID,
     REACTIONS_PLUGIN_ID,
     // End-of-turn recap + `/recap`. Installable and governed like the turn-hook
-    // plugins above it, but deliberately absent from `CORE_DEFAULT_ON`: each recap is
-    // a real side-model call on the user's budget, so it ships off and is enabled from
-    // the Store.
+    // plugins above it, but deliberately absent from `CORE_PREINSTALLED`: each recap is
+    // a real side-model call on the user's budget, so it is install-on-demand and enabled
+    // from the Store.
     "@ryu/recap",
     // End-of-turn AI-slop editor: bundles the `no-ai-slop` skill and has a
     // fresh-context reviewer edit the answer that just finished. Absent from
-    // `CORE_DEFAULT_ON` for recap's reason and then some — its hook carries no
+    // `CORE_PREINSTALLED` for recap's reason and then some — its hook carries no
     // `match` gate (every completed turn is the point), so it costs a sandbox spawn
     // per turn plus a sub-agent per answer that clears its prose floor.
     "@ryu/no-ai-slop",
     // Turns a correction into a durable rule in a Space and briefs every later chat
-    // with the list. Absent from `CORE_DEFAULT_ON` for recap's reason: the capture
+    // with the list. Absent from `CORE_PREINSTALLED` for recap's reason: the capture
     // hook has no `match` gate it could use (the pre-gate grammar cannot express
     // "this message reads like a complaint", so the cheap gate is a regex sweep
     // inside the hook), meaning a sandbox spawn per user turn plus a side-model call
@@ -740,30 +802,29 @@ pub const CORE_PLUGINS: &[&str] = &[
     // model before it is sent. Reverse-DNS id (matches its manifest + composer flag).
     "@ryu/auto-expand",
     // The Whiteboard app — a full-page Companion (`ui_format:"html"`) that owns its
-    // Space documents via `spaces:docs`. NOT default-on, and (unlike the other opt-in
-    // companions) not pre-installed either: `seed::NOT_PRE_INSTALLED` keeps a fresh
-    // store free of its record, and `lifecycle::install_app` attaches the compiled-in
-    // `ui_code` HTML blob when the user installs it from the Store, at which point
-    // `enable_app` gets its grants approved through the Gateway like any other app.
+    // Space documents via `spaces:docs`. NOT pre-installed: opt-in companions are absent
+    // from a fresh store, and `lifecycle::install_app` attaches the compiled-in
+    // `ui_code` HTML blob when the user installs one from the Store. `enable_app`
+    // then gets its grants approved through the Gateway like any other app.
     "@ryu/whiteboard",
     // The Canvas app — a full-page Companion (`ui_format:"html"`) that owns its Space
     // documents via `spaces:docs` and drives generation nodes through the window.ryu
-    // media/agent bridge. Same posture as Whiteboard above: opt-in AND
-    // not-pre-installed (`seed::NOT_PRE_INSTALLED`).
+    // media/agent bridge. Same posture as Whiteboard above: opt-in and absent from a
+    // fresh store until explicit install.
     "@ryu/canvas",
     // The Fine-tuning app — a full-page Companion (`ui_format:"html"`) that drives
     // Core's fine-tune orchestration via `finetune:runs` and owns its Unsloth Python
     // training sidecar (spawned on the Core-tier auto-run path, so it declares no
-    // `sidecar:process` grant — the Gateway denies that grant at enable). Default-on;
-    // `plugins::seed` gives it its approved grants + `ui_code` HTML blob. Replaces the
-    // built-in fine-tuning page.
+    // `sidecar:process` grant — the Gateway denies that grant at enable). Opt-in;
+    // explicit install carries its approved grants + `ui_code` HTML blob. Replaces
+    // the built-in fine-tuning page.
     "@ryu/finetune",
     // The four document-parsing apps — the providers of the `document.parse`
     // capability, each backed by a Python sidecar it owns (spawned on the Core-tier
     // auto-run path, so like `finetune` each declares NO `sidecar:process` grant — the
     // Gateway denies that grant at enable and the enable fails). All four are here so
     // they are governed and enable-able from the Store; only `markitdown` is ALSO in
-    // CORE_DEFAULT_ON (see the block there). The other three are opt-in weight, not
+    // CORE_PREINSTALLED (see the block there). The other three are opt-in weight, not
     // fresh-install weight: `unstructured[all-docs]` is a 1-2 GB pip install plus
     // native helpers (poppler/tesseract/libreoffice/pandoc) that pip cannot supply,
     // and `docling`/`mineru` each pull a Torch stack and download ML models on first
@@ -776,19 +837,19 @@ pub const CORE_PLUGINS: &[&str] = &[
     // Spaces + Meetings — the first REAL plugin→plugin dependency edge. Both are
     // governance shells: the implementation stays in-crate and the record gates it
     // (Meetings' `/api/meetings/*` routes are refused when the app is disabled —
-    // see `server::require_app_enabled`). Both default-on, so today's behaviour is
+    // see `server::require_app_enabled`). Both pre-installed, so today's behaviour is
     // unchanged on a fresh install; the dependency only bites when a user disables
     // Spaces while Meetings is still on, which the graph now refuses.
     SPACES_PLUGIN_ID,
     MEETINGS_PLUGIN_ID,
     // Five leaf-feature apps (research/dashboards/teams/clips/recipes). Core-tier —
-    // installable and enable-able from the Store — but NO LONGER default-on, and
-    // not pre-installed either (all five are in `seed::NOT_PRE_INSTALLED`). See the
-    // block where they were removed from `CORE_DEFAULT_ON` for why; the short
+    // installable and enable-able from the Store — but NO LONGER pre-installed, and
+    // absent from a fresh store until explicit install. See the
+    // block where they were removed from `CORE_PREINSTALLED` for why; the short
     // version is that each now owns an out-of-process sidecar binary that a normal
     // install does not have, so seeding them enabled shipped five apps nobody asked
     // for AND made four of them fail on first use. `clips`→`shadow` and
-    // `recipes`→`ghost` are real `requires` edges; both deps are still default-on,
+    // `recipes`→`ghost` are real `requires` edges; both deps are still pre-installed,
     // so enabling either from the Store finds its dependency already satisfied.
     RESEARCH_PLUGIN_ID,
     DASHBOARDS_PLUGIN_ID,
@@ -796,18 +857,17 @@ pub const CORE_PLUGINS: &[&str] = &[
     CLIPS_PLUGIN_ID,
     RECIPES_PLUGIN_ID,
     // Outpost — the same posture as those five, for the same reason: Core-tier and
-    // installable, but neither default-on nor pre-installed (see
-    // `seed::NOT_PRE_INSTALLED`), because its `ryu-social` sidecar binary is not on a
+    // installable, but not pre-installed, because its `ryu-social` sidecar binary is not on a
     // normal install and an app that publishes publicly under the user's accounts is
     // the last thing that should arrive switched on. No `requires` edge — it owns its
     // sidecar and its own database.
     SOCIAL_PLUGIN_ID,
     // Token Table — opt-in like Outpost: Core-tier is what allows its managed
-    // sidecar to spawn, while the absence from CORE_DEFAULT_ON keeps a normal
+    // sidecar to spawn, while the absence from CORE_PREINSTALLED keeps a normal
     // install from starting an unrequested game service.
     TOKEN_TABLE_PLUGIN_ID,
-    // Subtitles — same posture as Outpost: Core-tier and installable, neither
-    // default-on nor pre-installed (see `seed::NOT_PRE_INSTALLED`), because the
+    // Subtitles — same posture as Outpost: Core-tier and installable, not pre-installed,
+    // because the
     // `ryu-subtitles` binary is not on a normal install. Core-tier is what actually
     // spawns that sidecar; a Community-tier app with a manifest sidecar installs,
     // enables, and then silently never spawns, because `may_run_sidecar` would want
@@ -818,21 +878,25 @@ pub const CORE_PLUGINS: &[&str] = &[
     // TWO reasons rather than one: Core-tier is what spawns the `ryu-rlm` sidecar, and
     // it is also what lets the manifest's `mcp_servers` block register, which is the
     // whole agent-facing surface of this app. A Community-tier app with both would
-    // install, enable, and then silently offer neither. Neither default-on nor
-    // pre-installed (see `seed::NOT_PRE_INSTALLED`) — the binary is not on a normal
+    // install, enable, and then silently offer neither. Not pre-installed — the binary is
     // install, and an app that reads files from the user's home directory should not
     // arrive switched on. No `requires` edge; it owns its sidecar and its context store.
     RLM_PLUGIN_ID,
-    // Harbor — same posture again: Core-tier and installable, neither default-on nor
-    // pre-installed, because the `ryu-crm` binary is not on a normal install. No
+    // Harbor — same posture again: Core-tier and installable, not pre-installed, because
+    // the `ryu-crm` binary is not on a normal install. No
     // `requires` edge; it owns its sidecar and its own SQLite database. Absent from
-    // `seed::NOT_PRE_INSTALLED` on purpose — that list is for apps whose companion
-    // bundle was seeded and must be un-seeded, and a dock-panel app never had one.
     CRM_PLUGIN_ID,
+    // Expenses — same opt-in sidecar posture as Harbor, but with a companion bundle
+    // carried by the explicit install path and an MCP server for the ledger agent.
+    EXPENSES_PLUGIN_ID,
+    // Backstage — an external-repository Companion whose editor is carried by its
+    // Marketplace/standalone package and whose provider calls use generic Ryu
+    // model/media/storage bridges. Opt-in; it is not opened on a fresh node.
+    BACKSTAGE_PLUGIN_ID,
     // Wave-2 leaf-feature governance shells (quests/approvals/skills/learning/
-    // healing). All Core-tier; `skills` and `learning` are ALSO default-on (see
-    // CORE_DEFAULT_ON), quests/approvals/healing ship opt-in. `learning`→`skills` and
-    // `healing`→`approvals` are real `requires` edges; `learning`'s dep is default-on,
+    // healing). All Core-tier; `skills` and `learning` are ALSO pre-installed (see
+    // CORE_PREINSTALLED), quests/approvals/healing ship opt-in. `learning`→`skills` and
+    // `healing`→`approvals` are real `requires` edges; `learning`'s dep is pre-installed,
     // so the fail-closed seeder never skips it.
     QUESTS_PLUGIN_ID,
     APPROVALS_PLUGIN_ID,
@@ -840,19 +904,19 @@ pub const CORE_PLUGINS: &[&str] = &[
     LEARNING_PLUGIN_ID,
     HEALING_PLUGIN_ID,
     // Wave-3 leaf-feature governance shells (monitors/hardware). Core-tier AND
-    // default-on: their `/api/<feature>/*` routes were always-on before the gate, so
-    // a default-on seed keeps them reachable on every existing install. Neither
+    // pre-installed: their `/api/<feature>/*` routes were always-on before the gate, so
+    // a pre-installed seed keeps them reachable on every existing install. Neither
     // declares `requires` (the scheduler + device store are kernel infra).
     MONITORS_PLUGIN_ID,
     HARDWARE_PLUGIN_ID,
-    // The wave-4 two, default-on so their always-on routes stay reachable after
+    // The wave-4 two, pre-installed so their always-on routes stay reachable after
     // gating (see CORE_PLUGINS). Neither has a `requires` edge; `agents` is also
     // load-bearing (it can only be disabled with an explicit force override).
     WORKFLOWS_PLUGIN_ID,
     AGENTS_PLUGIN_ID,
     // W0 honest-gating baseline: three data-path governance shells whose
     // `/api/{voice,images+video+gifs,memory}/*` routes were mounted RAW before this
-    // wave. Core-tier AND default-on so the gate is transparent on every existing
+    // wave. Core-tier AND pre-installed so the gate is transparent on every existing
     // install (the routes were always-on before). Neither declares `requires`; the
     // `voice`/`media`/`memory` modules stay in-crate (gate-only, no cargo feature).
     VOICE_PLUGIN_ID,
@@ -860,41 +924,53 @@ pub const CORE_PLUGINS: &[&str] = &[
     MEMORY_PLUGIN_ID,
     LAYERS_PLUGIN_ID,
     // W7 frontend extraction: the webhooks page became a sandboxed companion app.
-    // Not a route gate (the `/api/webhooks*` reads stay ungated) — Core-tier + default-on
+    // Not a route gate (the `/api/webhooks*` reads stay ungated) — Core-tier + pre-installed
     // so the companion is present on every fresh install. No `requires` edge.
     WEBHOOKS_PLUGIN_ID,
     // W7 frontend extraction: the activity feed page became a sandboxed companion app.
     // Not a route gate (the `/api/activity` read stays ungated). Core-tier but
-    // **default-OFF** — see the `NOTE (default-off apps)` block below, which is the
-    // binding statement; this comment used to claim default-on and was simply wrong
-    // (the id is absent from [`CORE_DEFAULT_ON`]). No `requires` edge.
+    // **not pre-installed** — see the `NOTE (not pre-installed apps)` block below, which is the
+    // binding statement; this comment used to claim pre-installed and was simply wrong
+    // (the id is absent from [`CORE_PREINSTALLED`]). No `requires` edge.
     ACTIVITY_PLUGIN_ID,
     // W7 frontend extraction: the calendar page became a sandboxed companion app.
     // Not a route gate (the `/heartbeat/jobs` + `/workflows` + `/api/agents` reads stay
-    // ungated) — Core-tier + default-on so the companion is present on every fresh
+    // ungated) — Core-tier + pre-installed so the companion is present on every fresh
     // install. No `requires` edge.
     CALENDAR_PLUGIN_ID,
+    // Help Center is a Space-backed desktop companion. Core-tier keeps its
+    // first-party manifest trusted, and the pre-installed seed makes the support
+    // workspace available on a fresh install.
+    HELP_CENTER_PLUGIN_ID,
+    // Sites is the first-party public-edge companion. It is pre-installed as a
+    // control surface, while managed routing and quotas remain enforced at the
+    // control-plane/edge seam.
+    SITES_PLUGIN_ID,
+    // Chat Broadcast — a desktop-only Companion whose host bridge lists visible
+    // conversations and posts a confirmed message into selected chats. It has no
+    // sidecar or public route, so the Core-tier manifest can be pre-installed.
+    CHAT_BROADCAST_PLUGIN_ID,
     // W7 frontend extraction: the timeline page became a sandboxed companion app.
     // Not a route gate (Shadow's device-local `/timeline` + `/journal` + `/frame` live
-    // on the Shadow sidecar :3030, not the Core router). Core-tier but **default-OFF**
-    // — see the `NOTE (default-off apps)` block below; this comment used to claim
-    // default-on and was wrong (absent from [`CORE_DEFAULT_ON`]). No `requires` edge.
+    // on the Shadow sidecar :3030, not the Core router). Core-tier but **not pre-installed**
+    // — see the `NOTE (not pre-installed apps)` block below; this comment used to claim
+    // pre-installed and was wrong (absent from [`CORE_PREINSTALLED`]). No `requires` edge.
     TIMELINE_PLUGIN_ID,
     // W7 frontend extraction: the SKILL.md editor became a sandboxed companion app.
     // Not a route gate (`/api/skills` authoring endpoints stay ungated). Core-tier but
-    // **default-OFF** — see the `NOTE (default-off apps)` block below. This comment used
-    // to claim default-on *because* `/skills/new` + `/skills/:id/edit` had to resolve on
+    // **not pre-installed** — see the `NOTE (not pre-installed apps)` block below. This comment used
+    // to claim pre-installed *because* `/skills/new` + `/skills/:id/edit` had to resolve on
     // a fresh install; they do not, and the claim was never true (absent from
-    // [`CORE_DEFAULT_ON`]). The clients no longer depend on it either: the Skills catalog
+    // [`CORE_PREINSTALLED`]). The clients no longer depend on it either: the Skills catalog
     // hides its New/Edit affordances unless an enabled app answers the editor path, so
     // authoring is opt-in from the Store rather than a dead button. No `requires` edge.
     SKILL_EDITOR_PLUGIN_ID,
     // The six built-in output styles (`docs/output-styles.md`). Core-tier AND
-    // default-on, which for this one is a *reachability* decision rather than a
+    // pre-installed, which for this one is a *reachability* decision rather than a
     // product-taste one: `contributes.output_styles` is served enabled-filtered, so a
     // disabled record means the composer's style picker offers nothing but "None" and
     // the Store tab is hidden (the desktop renders a contributed tab only when its app
-    // is installed AND enabled). Default-off would have shipped a feature with no
+    // is installed AND enabled). Not pre-installed would have shipped a feature with no
     // discovery path to turn itself on.
     //
     // Affordable because the plugin is inert: no runnables, no sidecar, no hooks, no
@@ -909,7 +985,7 @@ pub const CORE_PLUGINS: &[&str] = &[
     // declares a managed sidecar, and `may_run_sidecar` permits one at Community tier
     // only against the Gateway-approved `sidecar:process` grant, which the Gateway
     // DENIES at enable. A Community-tier `@ryu/ugc` would install and then never spawn
-    // `ryu-ugc`. Deliberately NOT in `CORE_DEFAULT_ON`, for exactly the reason the five
+    // `ryu-ugc`. Deliberately NOT in `CORE_PREINSTALLED`, for exactly the reason the five
     // leaf apps (research/dashboards/teams/clips/recipes) were demoted: it owns an
     // out-of-process sidecar binary a normal install does not have, so seeding it
     // enabled would ship an app nobody asked for AND fail on first use. No `requires`
@@ -920,7 +996,7 @@ pub const CORE_PLUGINS: &[&str] = &[
     // above: it declares a managed `ryu-mission-control` sidecar, and
     // `may_run_sidecar` permits one at Community tier only against a Gateway-approved
     // `sidecar:process` grant the Gateway DENIES at enable — so tier here is what
-    // decides whether the binary ever spawns. Deliberately NOT in `CORE_DEFAULT_ON`
+    // decides whether the binary ever spawns. Deliberately NOT in `CORE_PREINSTALLED`
     // for the same reason: the binary is not on a normal install.
     //
     // Nothing in Core reads its state, so no `requires` edge. Note the asymmetry with
@@ -928,11 +1004,16 @@ pub const CORE_PLUGINS: &[&str] = &[
     // machinery — that panel derives from the live message stream client-side and is
     // unaffected by this row.
     MISSION_CONTROL_PLUGIN_ID,
+    // Feedback Board. It owns a managed sidecar and therefore needs the Core tier
+    // for its process grant. It remains opt-in because the binary is not shipped
+    // on every node and the public board should not be enabled without an operator
+    // choosing its workspace and moderation posture.
+    FEEDBACK_BOARD_PLUGIN_ID,
     // Drafts. Same posture and same REQUIREMENT as `@ryu/mission-control` directly
     // above: it declares a managed `ryu-drafts` sidecar, and `may_run_sidecar`
     // permits one at Community tier only against a Gateway-approved
     // `sidecar:process` grant the Gateway DENIES at enable — so tier here is what
-    // decides whether the binary ever spawns. Deliberately NOT in `CORE_DEFAULT_ON`
+    // decides whether the binary ever spawns. Deliberately NOT in `CORE_PREINSTALLED`
     // for the same reason: the binary is not on a normal install.
     //
     // Nothing in Core reads the outbox, so no `requires` edge — the shell fetches
@@ -954,7 +1035,7 @@ pub const CORE_PLUGINS: &[&str] = &[
     // manifest-declares-a-sidecar → CORE_PLUGINS. The app installed, enabled, and
     // then silently never spawned.
     //
-    // Deliberately NOT in `CORE_DEFAULT_ON`, for the reason the leaf apps were
+    // Deliberately NOT in `CORE_PREINSTALLED`, for the reason the leaf apps were
     // demoted: it owns an out-of-process binary a normal install does not have.
     crate::plugin_manifest::REASONING_PLUGIN_ID,
     // Pull Requests owns a managed sidecar and therefore needs the Core tier
@@ -971,7 +1052,7 @@ pub const CORE_PLUGINS: &[&str] = &[
     // installs, enables, reports itself healthy — and the binary never spawns while
     // its four MCP tools never appear, with no error anywhere to say why.
     //
-    // Deliberately NOT in `CORE_DEFAULT_ON`, for the reason the leaf apps were
+    // Deliberately NOT in `CORE_PREINSTALLED`, for the reason the leaf apps were
     // demoted: it owns an out-of-process binary a normal install does not have.
     BLUEPRINT_PLUGIN_ID,
     // Tuition and Wire — the same posture and the same REQUIREMENT as Reasoning and
@@ -991,9 +1072,8 @@ pub const CORE_PLUGINS: &[&str] = &[
     // correct fix rather than a grant: the Gateway validates and denies those two
     // reserved grants at enable, so asking for them would break the enable instead.
     //
-    // Deliberately NOT in `CORE_DEFAULT_ON`, for the reason the leaf apps were
-    // demoted: each owns an out-of-process binary a normal install does not have. Both
-    // are already in `seed::NOT_PRE_INSTALLED`, so a fresh store lists neither.
+    // Deliberately NOT in `CORE_PREINSTALLED`, for the reason the leaf apps were
+    // demoted: each owns an out-of-process binary a normal install does not have.
     TUITION_PLUGIN_ID,
     NEWS_PLUGIN_ID,
     // Simulators (iOS `simctl` + Android `adb` control). Core tier for the first half
@@ -1004,30 +1084,27 @@ pub const CORE_PLUGINS: &[&str] = &[
     // `mcp_servers`, so the MCP half does not apply; its only declared grant is
     // `simulator:control`, the capability the desktop panel drives it through.
     //
-    // Deliberately NOT in `CORE_DEFAULT_ON` — `lazy` + idle-stop keep it cold, but a
+    // Deliberately NOT in `CORE_PREINSTALLED` — `lazy` + idle-stop keep it cold, but a
     // toolchain-wrapping sidecar on a machine with no Xcode and no Android SDK is
     // exactly the app nobody asked for (availability is a RUNTIME probe of
-    // `/capabilities`, so it cannot be decided here). Absent from
-    // `seed::NOT_PRE_INSTALLED` on purpose, for Harbor's reason: that list is for apps
-    // whose companion bundle was seeded and must be un-seeded, and this is a native
-    // dock-panel app (`companion: null`) that never had one.
+    // `/capabilities`, so it cannot be decided here). This is a native dock-panel app
+    // (`companion: null`) with no companion bundle.
     SIMULATOR_PLUGIN_ID,
     // Virtual Desktop — the same posture as simulator, for the same reason: the
     // `ryu-desktop` sidecar wraps a real virtual-desktop toolchain (xvfb, a window
     // manager, tigervnc) that a normal install does not carry, so it is opt-in from
-    // the Store and its native dock panel prompts to install it. Absent from
-    // `seed::NOT_PRE_INSTALLED`: it is a native dock-panel app (`companion: null`),
-    // so there is no companion bundle to un-seed.
+    // the Store and its native dock panel prompts to install it. It is a native
+    // dock-panel app (`companion: null`), so there is no companion bundle.
     "@ryu/desktop",
 ];
 
-/// The subset of [`CORE_PLUGINS`] that should be **enabled by default** on a
-/// fresh install (seeded at startup when the install has no prior record). The
+/// The subset of [`CORE_PLUGINS`] that is **pre-installed** on a fresh install
+/// (seeded enabled at startup when the install has no prior record). The
 /// opt-in Core plugins (firewall/routing/sandbox/headroom) are deliberately
 /// excluded — they only activate when the user enables them.
 ///
 /// The chat turn-hook plugins (`goal`/`proof`/`double-check`/`chat-title`) ship
-/// default-on so their features (persistent goals, proof-of-work verification,
+/// pre-installed so their features (persistent goals, proof-of-work verification,
 /// answer review, progressive chat titles) work on **every surface** with zero
 /// setup, exactly like the built-in chat commands they replaced. This is only
 /// affordable because each declares a cheap `match` pre-gate (see
@@ -1036,7 +1113,7 @@ pub const CORE_PLUGINS: &[&str] = &[
 /// never a sandbox spawn when matched out. They stay real, swappable plugins —
 /// a user can disable any of them, and the fixture is the reference a third
 /// party can fork.
-pub const CORE_DEFAULT_ON: &[&str] = &[
+pub const CORE_PREINSTALLED: &[&str] = &[
     "@ryu/engines",
     "@ryu/durable",
     "@ryu/goal",
@@ -1047,25 +1124,30 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     SIDE_CHATS_PLUGIN_ID,
     GHOST_CHATS_PLUGIN_ID,
     EXPANDED_COMPOSER_PLUGIN_ID,
+    STATS_PLUGIN_ID,
     REACTIONS_PLUGIN_ID,
+    // WhatsApp is a zero-process workspace entry over the already-shipped channel
+    // control plane. Pre-installed makes its contributed tab visible without starting
+    // anything or requesting credentials until the user opens the setup form.
+    WHATSAPP_PLUGIN_ID,
     // Rules are configuration, not an optional side effect: a fresh node should
     // honor Ryu agent rules and compatible project rule files immediately. The
     // per-agent preference still lets users disable injection or bound its turns.
     "@ryu/rules",
-    // Background bash + sub-agents for the managed Pi agent. Default-on because
+    // Background bash + sub-agents for the managed Pi agent. Pre-installed because
     // Core shipped both unconditionally before they became plugins; the win of the
     // move is that they are now DISABLE-able, not that they are off. Turning either
     // off takes effect in a new chat (Pi reads its extensions at process start).
     "@ryu/pi-shell",
     "@ryu/pi-subagent",
-    // `monitor` for the managed Pi agent. Default-on for the same reason the
+    // `monitor` for the managed Pi agent. Pre-installed for the same reason the
     // other two are: it is a first-class capability (Claude Code's Monitor, ported
     // from scratch) that the flagship agent simply should have; a fresh install
     // that defaulted it off would quietly lack the one tool this plugin exists to
     // add. Toggling it off takes effect in a new chat (Pi reads its extensions at
     // process start), exactly like its siblings.
     "@ryu/pi-monitor",
-    // The default tool apps — auto-installed (record seeded enabled) on a fresh
+    // The pre-installed tool apps — record seeded enabled on a fresh
     // install so they show up like the auto-downloaded default models. The actual
     // process runs through its own sidecar/MCP lifecycle; enabling the record just
     // makes it a first-class, governed, disable-able App. The pure sidecar-backed
@@ -1080,7 +1162,7 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // ids to bind to — but is NOT seeded; see the note below its former entry.)
     //
     // CAVEAT this list cannot fix on its own: seeding is what surfaces those tools,
-    // so a default-on app whose PROCESS cannot start ships tools that fail on every
+    // so a pre-installed app whose PROCESS cannot start ships tools that fail on every
     // call. `ghost` and `shadow` are in that state today — neither has a public
     // release repo (see `sidecar/tools/ghost/downloader.rs`), so `computer.*` /
     // `ghost.*` / the four shadow `http` tools are offered and then die on spawn.
@@ -1098,13 +1180,13 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // Expect and Agentation launch third-party npm MCP servers. They remain
     // Core-tier and can be enabled explicitly, but must not execute mutable
     // registry code just because a node was freshly installed.
-    // `exa` is default-ON so the `web.search` toolkit has a provider out of the
+    // `exa` is pre-installed so the `web.search` toolkit has a provider out of the
     // box. Without this the capability had ZERO enabled providers on a fresh
     // install, and because the read model derives its capability list from the
     // ENABLED set, the whole toolkit vanished: no `web.search` tool for agents
     // and no row in the node selector, so nothing pointed at the Store either.
     // `web.extract` / `web.crawl` only escaped that because `spider` happens to be
-    // default-on. Declaring `"default": true` in exa's manifest does NOT fix it —
+    // pre-installed. Declaring `"default": true` in exa's manifest does NOT fix it —
     // that only breaks ties among ALREADY-ENABLED providers, it never installs
     // anything.
     //
@@ -1113,8 +1195,8 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // `RYU_EXA_API_KEY` is set (see fixtures/exa.manifest.json). Every other
     // search provider is BYOK-only and stays opt-in.
     "@ryu/exa",
-    // `docs` is default-ON so every agent can look up Ryu documentation without
-    // leaving the chat. Unlike its sibling default-on tool apps it needs no
+    // `docs` is pre-installed so every agent can look up Ryu documentation without
+    // leaving the chat. Unlike its sibling pre-installed tool apps it needs no
     // binary and no key: the MCP server is REMOTE (`https://docs.ryuhq.com/mcp`),
     // so registration never depends on a probe and the tools are simply there
     // whenever the docs site is reachable — a fail-open read of a public site,
@@ -1124,9 +1206,9 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // a fresh install, but no provider token exists until the user explicitly
     // connects an identity profile from Marketplace → Connections.
     COMPOSIO_CONNECT_PLUGIN_ID,
-    // NOTE: @ryu/browser is deliberately NOT default-on, and this is the one
+    // NOTE: @ryu/browser is deliberately NOT pre-installed, and this is the one
     // membership decision here that is driven by RELEASE reality rather than product
-    // taste. It was default-on ("so the Browser tab uses the real-Chromium sidecar out
+    // taste. It was pre-installed ("so the Browser tab uses the real-Chromium sidecar out
     // of the box, not the fallback iframe") — but no release publishes a binary the
     // sidecar loader can install. Its `local` sidecar declares `command:
     // "ryu-browser"`, which `manifest_sidecar::ensure_local_sidecar_present` resolves
@@ -1137,7 +1219,7 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // bundle. So on every fresh install the app was seeded ENABLED, the desktop's
     // `BrowserTabPanel` feature-detected it and switched off the working iframe
     // fallback, and the panel then showed "Browser sidecar unreachable (502)"
-    // permanently. Default-OFF restores the honest fallback: the tab works, and the
+    // permanently. Not pre-installed restores the honest fallback: the tab works, and the
     // Store is the one place that offers the sidecar.
     //
     // Consequences, both intentional:
@@ -1145,12 +1227,12 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     //    providers on a fresh install, so its 7 `http` tool runnables are not offered
     //    to agents. That is strictly better than offering tools whose every call dies
     //    on spawn, and agents still browse via `agentbrowser`/`spider`, which are
-    //    default-on and DO ship. This is the deliberate exception to the exa /
+    //    pre-installed and DO ship. This is the deliberate exception to the exa /
     //    markitdown argument above (seed a provider so the capability is non-empty):
     //    that argument only holds for a provider that can actually run.
     //  - Uninstall-protection is UNCHANGED: browser is in `SYSTEM_PLUGINS`, so
     //    `is_uninstall_protected` still returns true via its `is_system_plugin` branch (it
-    //    never depended on the default-on branch here).
+    //    never depended on the pre-installed branch here).
     //
     // Re-add this line the moment the release publishes an installable, spawnable
     // asset under the `platform_tag()` name. For an Electron bundle that means moving
@@ -1158,7 +1240,7 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // `binary_name` extraction), not renaming the zip — macOS cannot ship an Electron
     // app as one executable file.
     //
-    // NOTE: @ryu/mail is intentionally NOT default-on. It is sidecar-only now
+    // NOTE: @ryu/mail is intentionally NOT pre-installed. It is sidecar-only now
     // (the in-process path was deleted, Track C). The release now builds + ships the
     // `ryu-mail` binary alongside the other 10 sidecar bins (see
     // `.github/workflows/release.yml`), so the old "binary not yet shipped" blocker is
@@ -1166,17 +1248,17 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // surface on a fresh install). Stays in CORE_PLUGINS (installable/enable-able); a
     // dev build can also put it on PATH / set RYU_MAIL_BIN. See
     // docs/platform-decomposition-handoff.md.
-    // RAG — default-on so retrieval works out of the box; requires `engines`
+    // RAG — pre-installed so retrieval works out of the box; requires `engines`
     // (the embed sidecar), which the capability graph pulls in + protects.
     RAG_PLUGIN_ID,
-    // Auto-expand ships default-on so its composer toggle + `/expand` command are
+    // Auto-expand ships pre-installed so its composer toggle + `/expand` command are
     // available with zero setup; the flag/command `match` gate makes it free when
     // the toggle is off and no `/expand` is used (no sandbox spawn on idle turns).
     "@ryu/auto-expand",
-    // `markitdown` is default-ON so the `document.parse` capability has a provider out
+    // `markitdown` is pre-installed so the `document.parse` capability has a provider out
     // of the box — the same argument as `exa` above, and for the same mechanical
     // reason: the read model derives the capability's provider list from the ENABLED
-    // set, so with every parsing backend default-OFF the capability has zero providers
+    // set, so with every parsing backend not pre-installed the capability has zero providers
     // on a fresh install and `crate::document_parse` silently falls back to its
     // built-in floor (plain-text/markdown only). Every PDF, DOCX and XLSX a user
     // uploads would ingest as unreadable bytes, with nothing in the UI pointing at the
@@ -1187,12 +1269,12 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     //
     // markitdown specifically because it is the only one of the four that is cheap
     // enough to seed: a small pure-Python install with no native toolchain and no model
-    // download. `unstructured` / `docling` / `mineru` stay default-OFF (see the note
+    // download. `unstructured` / `docling` / `mineru` stay not pre-installed (see the note
     // below) — a user who wants OCR or layout-aware PDF extraction enables one from the
     // Store, and the `"default": true` flag then keeps markitdown bound unless the user
     // explicitly rebinds via `/api/documents/backends`.
     //
-    // CONSEQUENCE, deliberate (same shape as `learning` below): default-on ⇒
+    // CONSEQUENCE, deliberate (same shape as `learning` below): pre-installed ⇒
     // `is_uninstall_protected`, so the default parser can be DISABLED but never
     // uninstalled, and a user who had uninstalled it gets it back once on the next
     // boot. That is the intended posture — the capability should always have a
@@ -1204,42 +1286,37 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // the sidecar's release tarball exists — the failure, if any, surfaces as a 503
     // `provider_warming` on the first parse, never as a broken startup.
     MARKITDOWN_PLUGIN_ID,
-    // NOTE (default-off apps): whiteboard / canvas / finetune / unstructured /
+    // NOTE (not pre-installed apps): whiteboard / canvas / finetune / unstructured /
     // docling / mineru / meetings / quests / approvals / healing / monitors /
-    // workflows / activity / timeline / skill-editor are intentionally NOT default-on —
+    // workflows / activity / timeline / skill-editor are intentionally NOT pre-installed —
     // they stay installable + enable-able from the Store (still in CORE_PLUGINS), but a
     // fresh install ships them OFF so the sidebar/App surface isn't pre-loaded with
     // every feature.
     //
-    // Default-off is TWO postures, not one. The rest of that list is pre-installed
-    // (a disabled record exists on a fresh store, because it is what carries their
-    // compiled-in companion bundle), so the Store lists them under *Installed*.
-    // `whiteboard` + `canvas` go further — `seed::NOT_PRE_INSTALLED` gives them no
-    // record at all, so the Store lists them as available and an uninstall sticks.
-    // That is only possible because `lifecycle::install_app` sources the compiled-in
-    // bundle at install time; promoting another app into that posture is one line in
-    // `NOT_PRE_INSTALLED` and needs nothing else.
-    // Spaces stays default-on (it is a shared dependency, not a leaf feature).
+    // Not pre-installed has one posture: no lifecycle record is created on a fresh store.
+    // An explicit `lifecycle::install_app` carries any compiled-in companion bundle,
+    // so there is no reason to create a disabled row merely to hold build content.
+    // Spaces stays pre-installed (it is a shared dependency, not a leaf feature).
     SPACES_PLUGIN_ID,
-    // REMOVED from the default set: research / dashboards / teams / clips / recipes.
+    // REMOVED from the pre-installed set: research / dashboards / teams / clips / recipes.
     //
-    // These five were default-on for a reason that expired. They began as
+    // These five were pre-installed for a reason that expired. They began as
     // *governance shells* — the code was in-crate and always ran, and the record
     // only gated the `/api/<feature>/*` routes, so seeding them enabled preserved
     // behaviour that already existed and cost nothing. The decomposition then moved
     // every one of them OUT of process: each is now a `public_mount` sidecar
     // (`ryu-research`, `ryu-dashboards`, `ryu-teams`, `ryu-clips`, `ryu-recipes`)
-    // reached through the generic ext-proxy. Default-on stopped meaning "a route
+    // reached through the generic ext-proxy. Pre-installed stopped meaning "a route
     // that was already live stays live" and started meaning "spawn five binaries",
     // and nobody moved the membership when the mechanism moved underneath it.
     //
     // Both halves of what that produced were reported, repeatedly:
     //
     //  - **"I wiped everything and they are all installed again."** They were —
-    //    `seed_default_on` writes an ENABLED record for every id here on a store
+    //    `seed_preinstalled` writes an ENABLED record for every id here on a store
     //    with no rows, which is exactly the state a node reset leaves behind. So
     //    the reset "did nothing" for five apps the user had already uninstalled,
-    //    and `is_uninstall_protected` keys off `is_default_on`, which meant the
+    //    and `is_uninstall_protected` keys off `is_preinstalled`, which meant the
     //    Store would not let them be uninstalled in the first place.
     //  - **"app sidecar binary is not installed."** `manifest_sidecar` reports that
     //    (correctly) whenever a `local` sidecar's `<command>-<os>-<arch>` release
@@ -1249,24 +1326,21 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     //
     // This is `@ryu/browser`'s argument (see its NOTE above), reached from the
     // other direction: browser was demoted because its binary does not ship, these
-    // five because they should not have been auto-installed once they grew binaries
+    // five because they should not have been pre-installed once they grew binaries
     // at all. Nothing here is deleted — all five remain Core-tier and installable
     // in `CORE_PLUGINS`, one click from the Store, with `clips`→`shadow` and
-    // `recipes`→`ghost` still satisfied by their default-on deps.
+    // `recipes`→`ghost` still satisfied by their pre-installed deps.
     //
-    // They are ALSO in `seed::NOT_PRE_INSTALLED`, which is the difference between
-    // "off" and "absent": default-off alone still leaves a disabled record on a
-    // fresh store, so the Store keeps listing them under *Installed* and an
-    // uninstall is silently undone by the next boot. Migration v5 removes the
-    // records that the old default-on seed already wrote on existing machines —
-    // without it this change would only ever reach installs that have not booted.
-    // `skills` stays default-on (a shared capability). `quests`/`approvals`/`healing`
-    // are default-OFF (see the note above) — `healing` requires `approvals`, so it
-    // leaves the default set with its dep, never orphaned.
+    // Migration v5 removes the records that the old pre-installed seed already wrote on
+    // existing machines — without it this change would only ever reach installs
+    // that have not booted.
+    // `skills` stays pre-installed (a shared capability). `quests`/`approvals`/`healing`
+    // are not pre-installed (see the note above) — `healing` requires `approvals`, so it
+    // leaves the pre-installed set with its dep, never orphaned.
     SKILLS_PLUGIN_ID,
-    // `learning` is default-on because its manifest is the SOLE home of the two
+    // `learning` is pre-installed because its manifest is the SOLE home of the two
     // consent switches (`learning.skills-enabled` / `learning.enabled`), registered
-    // via `contributes.settings_tabs` — a default-OFF record would hide the control
+    // via `contributes.settings_tabs` — a not pre-installed record would hide the control
     // while the thing it governs kept running. The path that makes that concrete is
     // the scheduler's `JobTarget::LearningCycle`: it calls `run_skills_pass` BEFORE
     // any training check, and that pass is gated only on `learning.skills-enabled`
@@ -1276,53 +1350,63 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // half of the argument: it is record-independent too, but gated on
     // `learning.enabled` (default OFF) and reached only from the explicit
     // thumbs-up/down feedback path.
-    // Memory is default-on for fresh installs so onboarding can materialize the
+    // Memory is pre-installed for fresh installs so onboarding can materialize the
     // first user/org profile immediately. Existing explicit disabled records are
-    // still authoritative in `seed_default_on`, and the profile job enables
+    // still authoritative in `seed_preinstalled`, and the profile job enables
     // long-term memory only after the onboarding consent step.
-    // CONSEQUENCE, deliberate: default-on ⇒ `is_uninstall_protected`, so Learning can
+    // CONSEQUENCE, deliberate: pre-installed ⇒ `is_uninstall_protected`, so Learning can
     // no longer be uninstalled by anyone, and a user who HAD uninstalled it gets it
     // back once — installed and enabled — on the next boot after upgrading, because
     // uninstall removes the record and the seeder only skips ids that still have one.
     // That lands them in the posture this list intends (consent switch present), and
     // a "stay uninstalled" tombstone does not exist in the store to honor instead.
     LEARNING_PLUGIN_ID,
-    // `monitors` is default-OFF (see the note above). `hardware` stays default-on.
+    // `monitors` is not pre-installed (see the note above). `hardware` stays pre-installed.
     HARDWARE_PLUGIN_ID,
-    // `workflows` is default-OFF (see the note above). `agents` stays default-on and
+    // `workflows` is not pre-installed (see the note above). `agents` stays pre-installed and
     // is LOAD-BEARING (see `LOAD_BEARING_PLUGINS`) — chat depends on the agent list.
     AGENTS_PLUGIN_ID,
-    // The W0 data-path shells that stay default-on so their always-on routes stay
+    // The W0 data-path shells that stay pre-installed so their always-on routes stay
     // reachable after gating (see CORE_PLUGINS). Neither has a `requires` edge.
     //
-    // Memory is default-on for fresh installs so profile bootstrap can write and
-    // recall durable user/org facts immediately. `seed_default_on` still honors an
+    // Memory is pre-installed for fresh installs so profile bootstrap can write and
+    // recall durable user/org facts immediately. `seed_preinstalled` still honors an
     // existing explicit disabled record, preserving a user's previous choice.
     MEMORY_PLUGIN_ID,
     //
     // NOTE: `predict` is deliberately absent — it is in CORE_PLUGINS but stays OPT-IN
-    // (NOT default-on). Enabling the Predict plugin flips the system-wide autocomplete
+    // (NOT pre-installed). Enabling the Predict plugin flips the system-wide autocomplete
     // brain ON (`main.rs` seeds `predict::set_enabled(rec.enabled)` at boot),
     // which sends text from arbitrary apps to a model; the codebase ships it OFF by
     // design (fixture note + `predict::ENABLED = AtomicBool::new(false)`). Gating its
     // `/api/predict/*` routes on the opt-in app breaks no working install: the brain is
-    // already default-off, so any install where predict actually works already has the
-    // record enabled → the gate passes. Default-on would be a privacy regression.
+    // already not pre-installed, so any install where predict actually works already has the
+    // record enabled → the gate passes. Pre-installed would be a privacy regression.
     //
-    // Dictation is default-on: it was previously hardcoded into Island with
+    // Dictation is pre-installed: it was previously hardcoded into Island with
     // enabled-by-default prefs. Seeding the plugin enabled preserves that UX while
     // making the plugin the single switch (synced into the `dictation` pref blob).
     "@ryu/dictation",
     VOICE_PLUGIN_ID,
     MEDIA_PLUGIN_ID,
-    // W7: the webhooks companion, default-on so it is present on every fresh install
+    // W7: the webhooks companion, pre-installed so it is present on every fresh install
     // (the page it replaced was always-on). No `requires` edge; not a route gate.
     WEBHOOKS_PLUGIN_ID,
-    // W7: the calendar companion, default-on so it is present on every fresh install
+    // W7: the calendar companion, pre-installed so it is present on every fresh install
     // (the page it replaced was always-on). No `requires` edge; not a route gate.
     CALENDAR_PLUGIN_ID,
-    // `activity` / `timeline` / `skill-editor` are default-OFF (see the note above).
-    // Settings-only shell for the swappable layers. Default-on because a settings
+    // Help Center is pre-installed so the Space-backed support workspace is present
+    // on a fresh install. Its `requires` edge is satisfied by the pre-installed Spaces app.
+    HELP_CENTER_PLUGIN_ID,
+    // Sites is pre-installed as the first-party public-edge control surface. The
+    // local companion is honest about preview-only state; managed routing and
+    // quotas remain control-plane-owned.
+    SITES_PLUGIN_ID,
+    // Chat Broadcast is pre-installed because it is a zero-process desktop
+    // companion and its explicit confirmation is the user-controlled send gate.
+    CHAT_BROADCAST_PLUGIN_ID,
+    // `activity` / `timeline` / `skill-editor` are not pre-installed (see the note above).
+    // Settings-only shell for the swappable layers. Pre-installed because a settings
     // surface the user cannot reach is not a setting; it contributes no runnables,
     // gates no route, and spawns no process, so enabling it costs nothing.
     LAYERS_PLUGIN_ID,
@@ -1334,7 +1418,7 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // node default is "no style", so every turn's prompt stays byte-identical until a
     // user picks one (asserted by `no_output_style_leaves_the_acp_preamble_byte_identical`).
     //
-    // CONSEQUENCE, deliberate: default-on ⇒ `is_uninstall_protected`, so the built-in
+    // CONSEQUENCE, deliberate: pre-installed ⇒ `is_uninstall_protected`, so the built-in
     // styles can be DISABLED but not uninstalled. Correct here — they are the picker's
     // stock options, and a user-authored style lives on disk under the user root, not
     // in this package, so uninstalling would never have been how you get rid of one.
@@ -1364,7 +1448,7 @@ pub fn tier_for_manifest(
     // manifest's tier by copying its id. The exact embedded bytes or a
     // digest-bound verified marketplace install are the only manifest-aware
     // ways to earn Core tier here.
-    if CORE_PLUGINS.contains(&manifest.id.as_str())
+    if is_core_plugin_id(&manifest.id)
         && (is_exact_compiled_manifest(manifest) || is_verified_official_package(manifest))
     {
         crate::plugin_manifest::PluginTier::Core
@@ -1373,16 +1457,30 @@ pub fn tier_for_manifest(
     }
 }
 
+fn is_core_plugin_id(manifest_id: &str) -> bool {
+    if CORE_PLUGINS.contains(&manifest_id) {
+        return true;
+    }
+    #[cfg(test)]
+    {
+        // Provenance tests need ids no other parallel in-memory PluginStore can
+        // insert or clear in the process-global verified-digest registry.
+        return manifest_id.starts_with("@ryu/__test-verified-official-");
+    }
+    #[cfg(not(test))]
+    false
+}
+
 fn is_exact_compiled_manifest(manifest: &crate::plugin_manifest::PluginManifest) -> bool {
     if !is_compiled_in_manifest(&manifest.id) {
         return false;
     }
-    let digest = crate::plugins::isolation::manifest_sha256(manifest);
+    let digest = crate::plugins::isolation::manifest_sha256_for_trust(manifest);
     crate::plugin_manifest::PluginManifestLoader::load_builtins()
         .into_iter()
         .any(|builtin| {
             builtin.id == manifest.id
-                && crate::plugins::isolation::manifest_sha256(&builtin) == digest
+                && crate::plugins::isolation::manifest_sha256_for_trust(&builtin) == digest
         })
 }
 
@@ -1390,7 +1488,7 @@ pub(crate) fn record_verified_official_package(
     manifest: &crate::plugin_manifest::PluginManifest,
     provenance: &crate::plugins::isolation::PluginProvenance,
 ) {
-    if !CORE_PLUGINS.contains(&manifest.id.as_str())
+    if !is_core_plugin_id(&manifest.id)
         || provenance.builtin
         || provenance.source_id.as_deref()
             != Some(crate::plugins::isolation::OFFICIAL_MARKETPLACE_SOURCE_ID)
@@ -1414,7 +1512,7 @@ pub(crate) fn record_verified_official_digest(
     manifest_id: &str,
     provenance: &crate::plugins::isolation::PluginProvenance,
 ) {
-    if !CORE_PLUGINS.contains(&manifest_id)
+    if !is_core_plugin_id(manifest_id)
         || provenance.builtin
         || provenance.source_id.as_deref()
             != Some(crate::plugins::isolation::OFFICIAL_MARKETPLACE_SOURCE_ID)
@@ -1457,8 +1555,8 @@ static VERIFIED_OFFICIAL_PACKAGES: std::sync::OnceLock<
 pub(crate) static VERIFIED_OFFICIAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Whether a Core-tier plugin should be seeded enabled on first run.
-pub fn is_default_on(manifest_id: &str) -> bool {
-    CORE_DEFAULT_ON.contains(&manifest_id)
+pub fn is_preinstalled(manifest_id: &str) -> bool {
+    CORE_PREINSTALLED.contains(&manifest_id)
 }
 
 /// Whether `manifest_id` names a manifest that ships **inside the binary**
@@ -1494,7 +1592,7 @@ pub fn is_compiled_in_manifest(manifest_id: &str) -> bool {
 /// **Not a provenance check.** This was called `is_system_plugin`, which read as "ships
 /// in the binary" and is a different, larger set — that question is
 /// [`is_compiled_in_manifest`] (every [`BUILTIN_MANIFESTS`] entry). Nor is it a
-/// trust tier ([`tier_for`]) or an enablement default ([`is_default_on`]). Four
+/// trust tier ([`tier_for`]) or an enablement default ([`is_preinstalled`]). Four
 /// independent predicates over four different sets; the old name collided with two
 /// of them. See the App lifecycle docs for the full table.
 pub fn is_system_plugin(manifest_id: &str) -> bool {
@@ -1512,7 +1610,7 @@ pub fn find_system_plugin(manifest_id: &str) -> Option<&'static SystemPlugin> {
 /// [`crate::plugins::lifecycle::disable_app`]).
 ///
 /// This is NOT a wholly separate "protected" registry — it is the same
-/// membership-driven mechanism as [`SYSTEM_PLUGINS`]/[`CORE_DEFAULT_ON`], checked
+/// membership-driven mechanism as [`SYSTEM_PLUGINS`]/[`CORE_PREINSTALLED`], checked
 /// alongside them. Each entry is here because a runtime subsystem hard-depends on
 /// its Policy/Engine runnable:
 ///
@@ -1581,9 +1679,9 @@ pub fn is_load_bearing(manifest_id: &str) -> bool {
 /// something with nothing on disk to remove.
 ///
 /// `memory` is deliberately NOT here despite being the same tier of subsystem: it
-/// is default-on but user-disableable (see [`MEMORY_PLUGIN_ID`]), and a plugin that
+/// is pre-installed but user-disableable (see [`MEMORY_PLUGIN_ID`]), and a plugin that
 /// ships disabled cannot also be one the user may never disable. Mandatory is a strict subset of
-/// [`CORE_DEFAULT_ON`], asserted by `mandatory_plugins_are_all_default_on`.
+    /// [`CORE_PREINSTALLED`], asserted by `mandatory_plugins_are_all_preinstalled`.
 ///
 /// **The manifest's `mandatory: true` does not put anything here.** This constant
 /// is the enforcement set and it is Core-owned; the manifest field is the
@@ -1609,6 +1707,16 @@ pub fn is_mandatory(manifest_id: &str) -> bool {
     MANDATORY_PLUGINS.contains(&manifest_id)
 }
 
+/// Whether a compiled manifest is part of the minimal production runtime.
+///
+/// This set is intentionally Core-owned. A manifest cannot opt itself into the
+/// trusted runtime by declaring `mandatory: true`. Engines is included separately
+/// because it is the provider behind the mandatory RAG → Spaces dependency chain,
+/// while remaining user-disableable under the existing lifecycle policy.
+pub fn is_runtime_builtin(manifest_id: &str) -> bool {
+    is_system_plugin(manifest_id) || is_mandatory(manifest_id) || manifest_id == ENGINES_PLUGIN_ID
+}
+
 /// Whether `manifest_id` may NOT be uninstalled (it can only be disabled).
 ///
 /// A plugin is uninstall-protected when removing its lifecycle record would be
@@ -1617,25 +1725,25 @@ pub fn is_mandatory(manifest_id: &str) -> bool {
 /// - **It is a built-in system app** ([`is_system_plugin`], the sidecar-backed
 ///   ghost/shadow/spider/agentbrowser) — matching how `SystemAppCard` already
 ///   offers only enable/disable, never uninstall.
-/// - **It is default-on** ([`is_default_on`]) — this is the real correctness crux.
-///   A default-on plugin's manifest is compiled into the binary (`include_str!`),
-///   and [`crate::plugins::seed::seed_default_on`] re-adds *exactly the
-///   [`CORE_DEFAULT_ON`] set* whenever a record is missing. So removing a
-///   default-on record does not uninstall the plugin — it resurrects, enabled,
-///   on the very next boot. `is_default_on` IS the resurrection set, so refusing
+/// - **It is pre-installed** ([`is_preinstalled`]) — this is the real correctness crux.
+///   A pre-installed plugin's manifest is compiled into the binary (`include_str!`),
+///   and [`crate::plugins::seed::seed_preinstalled`] re-adds *exactly the
+///   [`CORE_PREINSTALLED`] set* whenever a record is missing. So removing a
+///   pre-installed record does not uninstall the plugin — it resurrects, enabled,
+///   on the very next boot. `is_preinstalled` IS the resurrection set, so refusing
 ///   it is what actually prevents a "removed" plugin from coming back.
 ///
 /// The two predicates are reused as-is (no parallel list): `is_system_plugin` is a
-/// strict subset of `is_default_on` here, kept in the OR as a defensive,
+/// strict subset of `is_preinstalled` here, kept in the OR as a defensive,
 /// self-documenting statement of intent.
 ///
 /// Opt-in built-ins (firewall/routing/sandbox/predict/…) are deliberately NOT
-/// protected: they are not default-on, so removing their record cannot resurrect
+/// protected: they are not pre-installed, so removing their record cannot resurrect
 /// them — it simply returns them to the install-then-enable state they started in,
 /// which is a coherent uninstall. User-installed Community plugins are never
 /// protected.
 pub fn is_uninstall_protected(manifest_id: &str) -> bool {
-    is_mandatory(manifest_id) || is_system_plugin(manifest_id) || is_default_on(manifest_id)
+    is_mandatory(manifest_id) || is_system_plugin(manifest_id) || is_preinstalled(manifest_id)
 }
 
 #[cfg(test)]
@@ -1666,26 +1774,44 @@ mod tests {
     /// both surfaces that expose a style — `contributes.output_styles` on
     /// `GET /api/plugins/contributions`, and the Store tab (which the desktop renders
     /// only when its app is installed AND enabled) — are served **enabled-filtered**.
-    /// Drop this id from `CORE_DEFAULT_ON` and nothing fails to compile and no test
+    /// Drop this id from `CORE_PREINSTALLED` and nothing fails to compile and no test
     /// about styles breaks; the composer's picker just quietly offers "None" forever,
     /// with no discovery path anywhere in the product to turn it back on.
     #[test]
     fn output_styles_ship_reachable_on_a_fresh_install() {
         assert!(
             CORE_PLUGINS.contains(&OUTPUT_STYLES_PLUGIN_ID),
-            "output-styles must be Core-tier — CORE_DEFAULT_ON is documented as a subset of CORE_PLUGINS"
+            "output-styles must be Core-tier — CORE_PREINSTALLED is documented as a subset of CORE_PLUGINS"
         );
         assert!(
-            CORE_DEFAULT_ON.contains(&OUTPUT_STYLES_PLUGIN_ID),
-            "output-styles must be default-ON or its contributions are filtered out of \
+            CORE_PREINSTALLED.contains(&OUTPUT_STYLES_PLUGIN_ID),
+            "output-styles must be pre-installed or its contributions are filtered out of \
              the composer picker and the Store tab, with no way for a user to reach it"
         );
     }
 
     #[test]
-    fn memory_is_default_on_for_fresh_installs() {
+    fn agent_status_has_reviewed_core_http_authority_but_remains_opt_in() {
+        assert!(CORE_PLUGINS.contains(&"@ryu/agent-status"));
+        assert!(!CORE_PREINSTALLED.contains(&"@ryu/agent-status"));
+        let manifest = crate::plugin_manifest::PluginManifestLoader::load()
+            .into_iter()
+            .find(|manifest| manifest.id == "@ryu/agent-status")
+            .expect("agent-status manifest is compiled in");
+        assert_eq!(
+            tier_for_manifest(&manifest),
+            crate::plugin_manifest::PluginTier::Core
+        );
+        manifest
+            .validate_declarative_http_policy(true)
+            .expect("reviewed Core reads are allowed");
+        assert!(manifest.validate_declarative_http_policy(false).is_err());
+    }
+
+    #[test]
+    fn memory_is_preinstalled_for_fresh_installs() {
         assert!(CORE_PLUGINS.contains(&MEMORY_PLUGIN_ID));
-        assert!(CORE_DEFAULT_ON.contains(&MEMORY_PLUGIN_ID));
+        assert!(CORE_PREINSTALLED.contains(&MEMORY_PLUGIN_ID));
         assert!(!MANDATORY_PLUGINS.contains(&MEMORY_PLUGIN_ID));
     }
 
@@ -1694,7 +1820,7 @@ mod tests {
         assert!(is_system_plugin("@ryu/ghost"));
         assert!(is_system_plugin("@ryu/shadow"));
         assert!(is_system_plugin("@ryu/agentbrowser"));
-        // spider is Core-tier + default-on but NOT a system plugin (no sidecar).
+        // spider is Core-tier + pre-installed but NOT a system plugin (no sidecar).
         assert!(!is_system_plugin("@ryu/spider"));
     }
 
@@ -1750,23 +1876,23 @@ mod tests {
         assert_eq!(tier_for("@ryu/sandbox"), PluginTier::Core);
         // #448 dogfood: the durable workflow engine plugin is Core-tier.
         assert_eq!(tier_for("@ryu/durable"), PluginTier::Core);
-        assert!(is_default_on("@ryu/durable"));
+        assert!(is_preinstalled("@ryu/durable"));
     }
 
-    /// The four sidecar-backed default tool apps are Core-tier AND default-on, so
+    /// The four sidecar-backed default tool apps are Core-tier AND pre-installed, so
     /// a fresh install auto-seeds their app record enabled (parity with the
     /// auto-downloaded default models). They are also system plugins (sidecar
     /// lifecycle) — the two facts coexist: the record is the governance shell, the
     /// sidecar/MCP provider is the run path.
     #[test]
-    fn default_tool_apps_are_core_and_default_on_and_system() {
+    fn default_tool_apps_are_core_and_preinstalled_and_system() {
         use crate::plugin_manifest::PluginTier;
         for id in ["@ryu/ghost", "@ryu/shadow", "@ryu/agentbrowser"] {
             assert_eq!(tier_for(id), PluginTier::Core, "{id} must be Core-tier");
-            assert!(is_default_on(id), "{id} must be default-on (auto-seeded)");
+            assert!(is_preinstalled(id), "{id} must be pre-installed (auto-seeded)");
             assert!(is_system_plugin(id), "{id} must be a system plugin");
         }
-        // Spider is Core-tier + default-on (record seeded enabled so its
+        // Spider is Core-tier + pre-installed (record seeded enabled so its
         // declarative tool works out of the box) but is NOT a system plugin — it
         // has no sidecar lifecycle.
         assert_eq!(
@@ -1774,7 +1900,7 @@ mod tests {
             PluginTier::Core,
             "spider must be Core-tier"
         );
-        assert!(is_default_on("@ryu/spider"), "spider must be default-on");
+        assert!(is_preinstalled("@ryu/spider"), "spider must be pre-installed");
         assert!(
             !is_system_plugin("@ryu/spider"),
             "spider is not a system plugin"
@@ -1793,7 +1919,9 @@ mod tests {
 
     #[test]
     fn signed_official_package_retains_core_tier() {
-        let _guard = VERIFIED_OFFICIAL_TEST_LOCK.lock().expect("test lock");
+        let _guard = VERIFIED_OFFICIAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         use crate::plugin_manifest::PluginTier;
         use crate::plugins::isolation::{
             manifest_sha256, PluginProvenance, OFFICIAL_MARKETPLACE_SOURCE_ID,
@@ -1801,7 +1929,7 @@ mod tests {
 
         let mut official: crate::plugin_manifest::PluginManifest =
             serde_json::from_value(serde_json::json!({
-                "id": "@ryu/social",
+                "id": "@ryu/__test-verified-official-signed",
                 "name": "Social",
                 "version": "1.0.0",
                 "runnables": []
@@ -1820,7 +1948,9 @@ mod tests {
 
     #[test]
     fn clearing_verified_official_digest_revokes_core_tier() {
-        let _guard = VERIFIED_OFFICIAL_TEST_LOCK.lock().expect("test lock");
+        let _guard = VERIFIED_OFFICIAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         use crate::plugin_manifest::PluginTier;
         use crate::plugins::isolation::{
             manifest_sha256, PluginProvenance, OFFICIAL_MARKETPLACE_SOURCE_ID,
@@ -1828,7 +1958,7 @@ mod tests {
 
         let manifest: crate::plugin_manifest::PluginManifest =
             serde_json::from_value(serde_json::json!({
-                "id": "@ryu/social",
+                "id": "@ryu/__test-verified-official-cleared",
                 "name": "Social",
                 "version": "1.0.0",
                 "runnables": []
@@ -1851,12 +1981,14 @@ mod tests {
 
     #[test]
     fn spoofed_official_id_does_not_retain_core_tier() {
-        let _guard = VERIFIED_OFFICIAL_TEST_LOCK.lock().expect("test lock");
+        let _guard = VERIFIED_OFFICIAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         use crate::plugin_manifest::PluginTier;
 
         let spoofed: crate::plugin_manifest::PluginManifest =
             serde_json::from_value(serde_json::json!({
-                "id": "@ryu/social",
+                "id": "@ryu/__test-verified-official-spoofed",
                 "name": "Spoofed Social",
                 "version": "9.9.9",
                 "runnables": []
@@ -1867,23 +1999,23 @@ mod tests {
     }
 
     /// #444 Community-tier gate: a non-Core plugin is Community, is therefore NOT
-    /// in `CORE_DEFAULT_ON`, and so is never auto-seeded — it must be
+    /// in `CORE_PREINSTALLED`, and so is never auto-seeded — it must be
     /// install-then-enable opt-in. This asserts the tier gate end-to-end at the
     /// membership layer (the lifecycle store enforces the install-disabled default
     /// that `install_app` tests cover).
     #[test]
-    fn community_plugin_is_opt_in_never_default_on() {
+    fn community_plugin_is_opt_in_never_preinstalled() {
         use crate::plugin_manifest::PluginTier;
         let community_id = "@example/research-assistant";
         // Tier is Community (not a manifest-asserted field — derived from membership).
         assert_eq!(tier_for(community_id), PluginTier::Community);
         // A Community plugin can never be Core-tier...
         assert!(!CORE_PLUGINS.contains(&community_id));
-        // ...and therefore can never be default-on (auto-seeded). The startup
-        // seeder iterates CORE_DEFAULT_ON only, so a Community plugin is never
+        // ...and therefore can never be pre-installed (auto-seeded). The startup
+        // seeder iterates CORE_PREINSTALLED only, so a Community plugin is never
         // touched until the user explicitly installs+enables it.
-        assert!(!CORE_DEFAULT_ON.contains(&community_id));
-        assert!(!is_default_on(community_id));
+        assert!(!CORE_PREINSTALLED.contains(&community_id));
+        assert!(!is_preinstalled(community_id));
     }
 
     // ── The Meetings → Spaces dependency edge (the first REAL one) ────────────
@@ -1921,17 +2053,17 @@ mod tests {
         );
     }
 
-    /// Mandatory ⊂ default-on. A plugin that ships DISABLED cannot also be one the
+    /// Mandatory ⊂ pre-installed. A plugin that ships DISABLED cannot also be one the
     /// user may never disable — the install would boot into a state its own rules
-    /// forbid, and nothing would ever turn it on (`seed_default_on` reseeds exactly
-    /// `CORE_DEFAULT_ON`). This is why `memory`, a subsystem of the same weight as
-    /// `rag`, is deliberately not mandatory: it is default-off.
+    /// forbid, and nothing would ever turn it on (`seed_preinstalled` reseeds exactly
+    /// `CORE_PREINSTALLED`). This is why `memory`, a subsystem of the same weight as
+    /// `rag`, is deliberately not mandatory: it is not pre-installed.
     #[test]
-    fn mandatory_plugins_are_all_default_on() {
+    fn mandatory_plugins_are_all_preinstalled() {
         for id in MANDATORY_PLUGINS {
             assert!(
-                is_default_on(id),
-                "{id} is mandatory but not in CORE_DEFAULT_ON — it would ship \
+                is_preinstalled(id),
+                "{id} is mandatory but not in CORE_PREINSTALLED — it would ship \
                  disabled and could never be enabled"
             );
         }
@@ -1998,7 +2130,7 @@ mod tests {
 
         // The declared minimum is actually satisfiable by the Spaces we ship —
         // a `requires` that no shipped version can satisfy would fail-closed the
-        // default-on seed forever.
+        // pre-installed seed forever.
         assert_eq!(spaces.version, "1.0.0");
 
         // It declares the grant it really uses (`save_notes_to_space` →
@@ -2118,34 +2250,32 @@ mod tests {
         assert!(!store.get(HEALING_PLUGIN_ID).await.unwrap().unwrap().enabled);
     }
 
-    /// The real default-on set must be fully satisfiable — every default-on plugin's
+    /// The real pre-installed set must be fully satisfiable — every pre-installed plugin's
     /// `requires` is met from within the set, so nothing is fail-closed skipped, and
-    /// Spaces (a shared dependency that stays default-on) is seeded.
+    /// Spaces (a shared dependency that stays pre-installed) is seeded.
     #[test]
-    fn real_default_on_set_is_fully_satisfiable() {
+    fn real_preinstalled_set_is_fully_satisfiable() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
-        let specs = crate::plugins::seed::default_on_specs();
+        let specs = crate::plugins::seed::preinstalled_specs();
         let (ordered, skipped) = crate::plugins::seed::seed_order(&specs, &manifests);
 
         assert!(
             skipped.is_empty(),
-            "no default-on plugin may be unsatisfiable: {skipped:?}"
+            "no pre-installed plugin may be unsatisfiable: {skipped:?}"
         );
         assert!(
             ordered.iter().any(|id| id == SPACES_PLUGIN_ID),
-            "Spaces stays default-on and must be seeded, got {ordered:?}"
+            "Spaces stays pre-installed and must be seeded, got {ordered:?}"
         );
     }
 
-    /// Spaces stays default-on; Meetings is now OPT-IN (default-off). A fresh seed
+    /// Spaces stays pre-installed; Meetings is now OPT-IN (not pre-installed). A fresh seed
     /// enables Spaces but must NOT **enable** Meetings — enabling it is a Store
     /// action.
     ///
-    /// The seed *does* write a DISABLED Meetings record carrying its compiled-in
-    /// companion `ui_code` (`seed::seed_companion_ui`), which is what makes the
-    /// Store's Enable mount a real UI instead of a blank frame. So record presence
-    /// is not the assertion — `enabled` is. Nothing spawns off a disabled record:
-    /// every `app_store.list()` consumer filters on `enabled`.
+    /// Meetings remains absent until the user explicitly installs it. Its compiled-in
+    /// companion bundle is attached by the install path, and nothing spawns from an
+    /// absent or disabled record.
     #[tokio::test]
     async fn the_real_seed_enables_spaces_but_leaves_meetings_optin() {
         use crate::plugins::PluginStore;
@@ -2153,7 +2283,7 @@ mod tests {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let store = PluginStore::open_in_memory().unwrap();
 
-        crate::plugins::seed::seed_default_on(&store, &manifests).await;
+        crate::plugins::seed::seed_preinstalled(&store, &manifests).await;
 
         let spaces = store
             .get(SPACES_PLUGIN_ID)
@@ -2162,16 +2292,15 @@ mod tests {
             .expect("the seed must install Spaces");
         assert!(spaces.enabled, "Spaces must be seeded ENABLED");
 
-        // Meetings is opt-in AND now `seed::NOT_PRE_INSTALLED`, so the seed writes no
-        // record at all rather than a disabled one. Either way the property under test
-        // is the same: seeding Spaces must not drag its dependents on with it.
+        // Meetings is opt-in, so the seed writes no record at all. Seeding Spaces must
+        // not drag its dependent on with it.
         assert!(
             store
                 .get(MEETINGS_PLUGIN_ID)
                 .await
                 .unwrap()
                 .is_none_or(|record| !record.enabled),
-            "Meetings is opt-in (default-off) — the seed must not ENABLE it"
+            "Meetings is opt-in (not pre-installed) — the seed must not ENABLE it"
         );
     }
 
@@ -2298,10 +2427,10 @@ mod tests {
 
     /// THE silent-brick guard for the new edges.
     ///
-    /// `seed::seed_order` is fail-CLOSED: a default-on plugin whose `requires` cannot
-    /// be satisfied *from within the default-on set* is SKIPPED, not enabled. So the
+    /// `seed::seed_order` is fail-CLOSED: a pre-installed plugin whose `requires` cannot
+    /// be satisfied *from within the pre-installed set* is SKIPPED, not enabled. So the
     /// moment Whiteboard/Canvas declare `requires: Spaces`, their appearing on a fresh
-    /// install depends on Spaces staying default-on. If that ever changes, both
+    /// install depends on Spaces staying pre-installed. If that ever changes, both
     /// companions go dark for 100% of users with nothing but a log line. This drives
     /// the REAL seed over the REAL manifests and asserts the end state a user gets.
     #[tokio::test]
@@ -2311,25 +2440,23 @@ mod tests {
 
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
 
-        // Nothing may be skipped, and Spaces (still default-on) must be seeded.
-        let specs = crate::plugins::seed::default_on_specs();
+        // Nothing may be skipped, and Spaces (still pre-installed) must be seeded.
+        let specs = crate::plugins::seed::preinstalled_specs();
         let (ordered, skipped) = crate::plugins::seed::seed_order(&specs, &manifests);
         assert!(
             skipped.is_empty(),
-            "no default-on plugin may be unsatisfiable: {skipped:?}"
+            "no pre-installed plugin may be unsatisfiable: {skipped:?}"
         );
         assert!(
             ordered.iter().any(|id| id == SPACES_PLUGIN_ID),
             "Spaces must be seeded, got {ordered:?}"
         );
 
-        // Spaces is enabled; its former default-on dependents (meetings/whiteboard/
-        // canvas) are now opt-in, so the seed must NOT enable them. All three get NO
-        // record at all (`seed::NOT_PRE_INSTALLED`): their bundle comes from
-        // `lifecycle::install_app` when the user installs them from the Store, so a
-        // fresh machine lists them as available rather than as "Installed (off)".
+        // Spaces is enabled; its formerly pre-installed dependents (meetings/whiteboard/
+        // canvas) are now opt-in, so the seed must not create records for them. Their
+        // bundle comes from `lifecycle::install_app` when the user installs them.
         let store = PluginStore::open_in_memory().unwrap();
-        crate::plugins::seed::seed_default_on(&store, &manifests).await;
+        crate::plugins::seed::seed_preinstalled(&store, &manifests).await;
         assert!(
             store
                 .get(SPACES_PLUGIN_ID)
@@ -2342,7 +2469,7 @@ mod tests {
         for id in [MEETINGS_PLUGIN_ID, WHITEBOARD_PLUGIN_ID, CANVAS_PLUGIN_ID] {
             assert!(
                 store.get(id).await.unwrap().is_none(),
-                "'{id}' is not-pre-installed — the seed must write no record for it, let alone \
+                "'{id}' is opt-in — the seed must write no record for it, let alone \
                  an enabled one"
             );
         }
@@ -2365,21 +2492,21 @@ mod tests {
     }
 
     /// The uninstall-protection predicate must cover the FULL resurrection set
-    /// (`is_default_on`), not just the 4 SYSTEM plugins. `goal` isolates the
-    /// `is_default_on` branch: default-on, NOT a system plugin, NOT load-bearing —
+    /// (`is_preinstalled`), not just the 4 SYSTEM plugins. `goal` isolates the
+    /// `is_preinstalled` branch: pre-installed, NOT a system plugin, NOT load-bearing —
     /// so a weak `is_system_plugin`-only predicate would wrongly allow uninstalling it,
     /// and the seed would resurrect it on the next boot.
     #[test]
-    fn uninstall_protection_covers_every_default_on_plugin_not_just_system_apps() {
-        // A default-on, non-SYSTEM plugin is protected (the crux).
+    fn uninstall_protection_covers_every_preinstalled_plugin_not_just_system_apps() {
+        // A pre-installed, non-SYSTEM plugin is protected (the crux).
         assert!(
             !is_system_plugin("@ryu/goal"),
             "goal is not a SYSTEM plugin"
         );
-        assert!(is_default_on("@ryu/goal"));
+        assert!(is_preinstalled("@ryu/goal"));
         assert!(
             is_uninstall_protected("@ryu/goal"),
-            "a default-on plugin must be uninstall-protected or the seed resurrects it"
+            "a pre-installed plugin must be uninstall-protected or the seed resurrects it"
         );
         // The SYSTEM sidecar apps are protected too.
         for id in [
@@ -2390,14 +2517,14 @@ mod tests {
         ] {
             assert!(is_uninstall_protected(id), "{id} must be protected");
         }
-        // engines/durable (default-on + load-bearing) are protected.
+        // engines/durable (pre-installed + load-bearing) are protected.
         assert!(is_uninstall_protected("@ryu/engines"));
         assert!(is_uninstall_protected("@ryu/durable"));
     }
 
     #[test]
     fn opt_in_builtins_and_community_plugins_are_not_uninstall_protected() {
-        // Opt-in built-ins are compiled-in but NOT default-on, so removing their
+        // Opt-in built-ins are compiled-in but NOT pre-installed, so removing their
         // record cannot resurrect them — uninstall is allowed.
         for id in [
             "@ryu/firewall",
@@ -2407,7 +2534,7 @@ mod tests {
         ] {
             assert!(
                 !is_uninstall_protected(id),
-                "{id} is opt-in (not default-on) and must be uninstallable"
+                "{id} is opt-in (not pre-installed) and must be uninstallable"
             );
         }
         // A user-installed Community plugin is always uninstallable.
@@ -2415,64 +2542,68 @@ mod tests {
     }
 
     #[test]
-    fn default_on_is_a_subset_of_core_and_opt_in_excluded() {
-        // Every default-on plugin must be Core-tier.
-        for id in CORE_DEFAULT_ON {
+    fn preinstalled_is_a_subset_of_core_and_opt_in_excluded() {
+        // Every pre-installed plugin must be Core-tier.
+        for id in CORE_PREINSTALLED {
             assert!(
                 CORE_PLUGINS.contains(id),
-                "default-on plugin '{id}' must be Core-tier"
+                "pre-installed plugin '{id}' must be Core-tier"
             );
-            assert!(is_default_on(id));
+            assert!(is_preinstalled(id));
         }
-        // Gateway/sandbox policy plugins are Core-tier but NOT default-on
+        // Gateway/sandbox policy plugins are Core-tier but NOT pre-installed
         // (they change gateway/sandbox behaviour, so they stay opt-in).
-        assert!(!is_default_on("@ryu/firewall"));
-        assert!(!is_default_on("@ryu/routing"));
-        assert!(!is_default_on("@ryu/sandbox"));
-        assert!(!is_default_on("@ryu/headroom"));
+        assert!(!is_preinstalled("@ryu/firewall"));
+        assert!(!is_preinstalled("@ryu/routing"));
+        assert!(!is_preinstalled("@ryu/sandbox"));
+        assert!(!is_preinstalled("@ryu/headroom"));
         // Autocomplete is Core-tier but opt-in (sends text to a model).
         assert!(CORE_PLUGINS.contains(&"@ryu/predict"));
-        assert!(!is_default_on("@ryu/predict"));
-        // Dictation is Core-tier and default-on (Island surface, previously hardcoded).
+        assert!(!is_preinstalled("@ryu/predict"));
+        // Dictation is Core-tier and pre-installed (Island surface, previously hardcoded).
         assert!(CORE_PLUGINS.contains(&"@ryu/dictation"));
-        assert!(is_default_on("@ryu/dictation"));
-        // Reactions are Core-tier and default-on so the built-in message-action
+        assert!(is_preinstalled("@ryu/dictation"));
+        // Reactions are Core-tier and pre-installed so the built-in message-action
         // contribution is present on a fresh install while remaining disableable.
         assert!(CORE_PLUGINS.contains(&"@ryu/reactions"));
-        assert!(is_default_on("@ryu/reactions"));
+        assert!(is_preinstalled("@ryu/reactions"));
         // Side chats own the `/btw` command, persisted side-chat routes, and the
         // desktop context/sidebar affordances.
         assert!(CORE_PLUGINS.contains(&SIDE_CHATS_PLUGIN_ID));
-        assert!(is_default_on(SIDE_CHATS_PLUGIN_ID));
+        assert!(is_preinstalled(SIDE_CHATS_PLUGIN_ID));
         // Temporary chats own the desktop-only privacy/lifecycle behavior. Keep
         // this separate from `@ryu/ghost`, which is the computer-control plugin.
         assert!(CORE_PLUGINS.contains(&GHOST_CHATS_PLUGIN_ID));
-        assert!(is_default_on(GHOST_CHATS_PLUGIN_ID));
+        assert!(is_preinstalled(GHOST_CHATS_PLUGIN_ID));
         assert!(CORE_PLUGINS.contains(&EXPANDED_COMPOSER_PLUGIN_ID));
-        assert!(is_default_on(EXPANDED_COMPOSER_PLUGIN_ID));
+        assert!(is_preinstalled(EXPANDED_COMPOSER_PLUGIN_ID));
+        // Session stats replace the former inference readout while remaining
+        // disableable through the plugin-owned appearance preference.
+        assert!(CORE_PLUGINS.contains(&STATS_PLUGIN_ID));
+        assert!(is_preinstalled(STATS_PLUGIN_ID));
         // The Island companion is Core-tier but OPT-IN: no release auto-installs the
         // Electron bundle, so its record must never seed enabled (a fresh store has no
         // Island settings tab until the user installs the app from the Store).
         assert!(CORE_PLUGINS.contains(&"@ryu/island"));
-        assert!(!is_default_on("@ryu/island"));
+        assert!(!is_preinstalled("@ryu/island"));
     }
 
     // ── Registration integrity: every id in a membership list must exist ──────
     //
-    // `plugins::seed::seed_order` SILENTLY DROPS a default-on spec whose manifest is
+    // `plugins::seed::seed_order` SILENTLY DROPS a pre-installed spec whose manifest is
     // not loaded ("no loaded manifest ⇒ nothing to seed"), so a typo in
-    // `CORE_DEFAULT_ON` or a missing `include_str!` in `BUILTIN_MANIFESTS` never
+    // `CORE_PREINSTALLED` or a missing `include_str!` in `BUILTIN_MANIFESTS` never
     // fails a test — the plugin just quietly never seeds. These guards close that
     // gap by asserting every membership id resolves to a real, loaded built-in.
 
     #[test]
-    fn every_core_default_on_id_resolves_to_a_loaded_builtin_manifest() {
+    fn every_core_preinstalled_id_resolves_to_a_loaded_builtin_manifest() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
-        for id in CORE_DEFAULT_ON {
+        for id in CORE_PREINSTALLED {
             assert!(
                 manifests.iter().any(|m| &m.id == id),
-                "default-on plugin '{id}' has no loaded built-in manifest — seed_order \
-                 would drop it silently (typo in CORE_DEFAULT_ON or missing fixture in \
+                "pre-installed plugin '{id}' has no loaded built-in manifest — seed_order \
+                 would drop it silently (typo in CORE_PREINSTALLED or missing fixture in \
                  BUILTIN_MANIFESTS)"
             );
         }
@@ -2486,7 +2617,7 @@ mod tests {
     /// and in a reserved namespace — so a Community-tier scrapling registers nothing
     /// and is dead on arrival, with no error anywhere to say so.
     ///
-    /// It must also stay OUT of `CORE_DEFAULT_ON`: the MCP server is a BYO
+    /// It must also stay OUT of `CORE_PREINSTALLED`: the MCP server is a BYO
     /// `pip install "scrapling[ai]"`, so seeding it enabled would put a permanently
     /// unavailable tool on every fresh install.
     #[test]
@@ -2498,7 +2629,7 @@ mod tests {
              registered and it owns no tools at all"
         );
         assert!(
-            !is_default_on("@ryu/scrapling"),
+            !is_preinstalled("@ryu/scrapling"),
             "scrapling must stay opt-in: its MCP server is a BYO pip install"
         );
 
@@ -2567,7 +2698,7 @@ mod tests {
     ///    selectable capability as user override > sole provider > declared default >
     ///    **lexicographically-lowest provider id**, so zero defaults AND two defaults
     ///    both silently elect `@ryu/docling`. Nothing errors either way.
-    /// 2. `markitdown` is in [`CORE_DEFAULT_ON`] — the flag only breaks ties among
+    /// 2. `markitdown` is in [`CORE_PREINSTALLED`] — the flag only breaks ties among
     ///    ALREADY-ENABLED providers, it never installs anything, so without the seed
     ///    the capability has zero providers on a fresh install.
     ///
@@ -2625,8 +2756,8 @@ mod tests {
         }
 
         assert!(
-            is_default_on(MARKITDOWN_PLUGIN_ID),
-            "markitdown must be default-ON: `\"default\": true` only breaks ties among \
+            is_preinstalled(MARKITDOWN_PLUGIN_ID),
+            "markitdown must be pre-installed: `\"default\": true` only breaks ties among \
              ENABLED providers, so without the seed `document.parse` has zero providers on \
              a fresh install and document_parse falls back to its text-only builtin floor"
         );
@@ -2636,9 +2767,9 @@ mod tests {
                 "'{id}' must be Core-tier so it is governed and enable-able from the Store"
             );
             assert!(
-                !is_default_on(id),
+                !is_preinstalled(id),
                 "'{id}' is a heavy opt-in backend (GB-scale installs / model downloads) and \
-                 must stay default-OFF"
+                 must stay not pre-installed"
             );
             assert!(
                 !is_load_bearing(id),
@@ -2647,7 +2778,7 @@ mod tests {
         }
         assert!(
             !is_load_bearing(MARKITDOWN_PLUGIN_ID),
-            "the default parser is still swappable: default-on, never load-bearing"
+            "the default parser is still swappable: pre-installed, never load-bearing"
         );
     }
 
@@ -2937,7 +3068,7 @@ mod tests {
     fn membership_lists_contain_no_duplicate_ids() {
         for (label, list) in [
             ("CORE_PLUGINS", CORE_PLUGINS),
-            ("CORE_DEFAULT_ON", CORE_DEFAULT_ON),
+            ("CORE_PREINSTALLED", CORE_PREINSTALLED),
         ] {
             let mut seen = std::collections::HashSet::new();
             for id in list {
@@ -2949,10 +3080,10 @@ mod tests {
     /// The Browser app must stay INSTALLABLE but never auto-seeded: no release
     /// publishes the `ryu-browser-<os>-<arch>` asset its `local` sidecar resolves, and
     /// a seeded-enabled record makes the desktop drop its working iframe fallback for
-    /// a panel that 502s forever. Re-adding it to `CORE_DEFAULT_ON` without shipping
+    /// a panel that 502s forever. Re-adding it to `CORE_PREINSTALLED` without shipping
     /// that asset re-breaks the Browser tab on every fresh install, so the invariant is
     /// pinned here. Uninstall-protection must be unaffected (it comes from
-    /// `SYSTEM_PLUGINS`/`is_system_plugin`, not from being default-on).
+    /// `SYSTEM_PLUGINS`/`is_system_plugin`, not from being pre-installed).
     #[test]
     fn browser_is_installable_but_not_seeded_until_its_sidecar_ships() {
         assert!(
@@ -2960,33 +3091,33 @@ mod tests {
             "browser must stay Core-tier + installable from the Store"
         );
         assert!(
-            !CORE_DEFAULT_ON.contains(&BROWSER_PLUGIN_ID),
-            "browser must NOT be default-on while no release publishes a spawnable \
+            !CORE_PREINSTALLED.contains(&BROWSER_PLUGIN_ID),
+            "browser must NOT be pre-installed while no release publishes a spawnable \
              ryu-browser binary — a seeded record turns the workspace Browser tab into \
              a permanent 'sidecar unreachable (502)'"
         );
-        assert!(!is_default_on(BROWSER_PLUGIN_ID));
+        assert!(!is_preinstalled(BROWSER_PLUGIN_ID));
         // Still a SYSTEM plugin, so protection is unchanged by the line removal.
         assert!(is_system_plugin(BROWSER_PLUGIN_ID));
         assert!(
             is_uninstall_protected(BROWSER_PLUGIN_ID),
-            "browser is uninstall-protected via is_system_plugin, independently of default-on"
+            "browser is uninstall-protected via is_system_plugin, independently of pre-installed"
         );
     }
 
     #[test]
-    fn default_on_is_uninstall_protected_and_never_community() {
+    fn preinstalled_is_uninstall_protected_and_never_community() {
         use crate::plugin_manifest::PluginTier;
-        for id in CORE_DEFAULT_ON {
+        for id in CORE_PREINSTALLED {
             assert!(
                 is_uninstall_protected(id),
-                "default-on '{id}' must be uninstall-protected (else the seed resurrects a \
+                "pre-installed '{id}' must be uninstall-protected (else the seed resurrects a \
                  record the user removed)"
             );
             assert_ne!(
                 tier_for(id),
                 PluginTier::Community,
-                "default-on '{id}' must not be Community-tier"
+                "pre-installed '{id}' must not be Community-tier"
             );
         }
     }

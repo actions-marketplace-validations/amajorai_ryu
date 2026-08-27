@@ -1,16 +1,25 @@
 {
-  "tags": ["long-context","recursion","retrieval","documents","citations","map-reduce","context-window","research"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": [
+    "long-context",
+    "recursion",
+    "retrieval",
+    "documents",
+    "citations",
+    "map-reduce",
+    "context-window",
+    "research"
+  ],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-rlm",
   "homepage": "https://github.com/amajorai/ryu-rlm",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
   "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/rlm",
   "name": "Recursive Language Model",
-  "version": "0.1.14",
+  "version": "0.1.16",
   "stability": "experimental",
   "category": "Productivity",
-  "description": "Answer questions about a corpus far larger than any model's context window — without putting it in a prompt. The usual options all degrade: truncate and you lose the answer, embed-and-retrieve and you get fragments without their argument, buy a bigger window and attention over the middle of it thins out anyway. This app does the other thing. Your documents are held here as a variable. A root model plans over an outline of them — chunk ids, sources, line spans, headings — and reaches the text only through operators that summarise before returning: `grep` to locate, `map` to run a cheap model over the chunks that matter in parallel and fold the answers back, `recurse` to give a sub-question its own plan over a subset. The root model never sees the corpus, so its context stays roughly the same size whether you point it at 40 KB or 40 MB, and the answer does not get worse as the input gets bigger. Every answer carries `path:line` citations read back out of the chunks it rests on, and every run keeps a full trace — each operator, each sub-call, what it cost — that you can open and replay. Depth, step, call and wall-clock budgets are hard: a run that hits one says so and returns what it had, rather than quietly shortening the answer. Agents get the same engine as tools, and `grep` and `peek` need no model at all, so a workflow can branch on a deterministic search of a 40 MB corpus.",
+  "description": "Answer questions about a corpus far larger than any model's context window — without putting it in a prompt. The usual options all degrade: truncate and you lose the answer, embed-and-retrieve and you get fragments without their argument, buy a bigger window and attention over the middle of it thins out anyway. This app does the other thing. Your documents are held here as a variable. A root model plans over an outline of them — chunk ids, sources, line spans, headings — and reaches the text only through operators that summarise before returning: `grep` to locate, `map` to run a cheap model over the chunks that matter in parallel and fold the answers back, `recurse` to give a sub-question its own plan over a subset. The root model never sees the corpus, so its context stays roughly the same size whether you point it at 40 KB or 40 MB, and the answer does not get worse as the input gets bigger. Every answer carries `path:line` citations read back out of the chunks it rests on, and every run keeps a full trace — each operator, each sub-call, what it cost — that you can open and replay. Depth, step, call and wall-clock budgets are hard: a run that hits one says so and returns what it had, rather than quietly shortening the answer. Agents get the same engine as tools, and `grep` and `peek` need no model at all, so a workflow can branch on a deterministic search of a 40 MB corpus. Capability callers may query an existing context or submit bounded inline documents that are persisted as a context and analyzed in the same recursive run.",
   "tagline": "Ask a question of more text than a model can hold",
   "keywords": [
     "long-context",
@@ -86,58 +95,56 @@
         "mount": "/api/rlm",
         "public_mount": "/api/rlm",
         "routes": [
+          { "path": "/contexts", "method": "GET", "permission": "rlm.view" },
+          { "path": "/contexts", "method": "POST", "permission": "rlm.edit" },
+          { "path": "/contexts/from-paths", "permission": "rlm.edit" },
           {
-            "path": "/contexts"
+            "path": "/contexts/:id",
+            "method": "GET",
+            "permission": "rlm.view"
           },
           {
-            "path": "/contexts/from-paths"
+            "path": "/contexts/:id",
+            "method": "DELETE",
+            "permission": "rlm.edit"
           },
           {
-            "path": "/contexts/:id"
+            "path": "/contexts/:id/outline",
+            "method": "GET",
+            "permission": "rlm.view"
           },
           {
-            "path": "/contexts/:id/outline"
+            "path": "/contexts/:id/peek",
+            "method": "POST",
+            "permission": "rlm.edit"
           },
           {
-            "path": "/contexts/:id/peek"
+            "path": "/contexts/:id/grep",
+            "method": "POST",
+            "permission": "rlm.edit"
           },
-          {
-            "path": "/contexts/:id/grep"
-          },
-          {
-            "path": "/query"
-          },
-          {
-            "path": "/runs"
-          },
-          {
-            "path": "/runs/:id"
-          },
-          {
-            "path": "/purge"
-          }
+          { "path": "/query", "method": "POST", "permission": "rlm.edit" },
+          { "path": "/runs", "method": "GET", "permission": "rlm.view" },
+          { "path": "/runs/:id", "method": "GET", "permission": "rlm.view" },
+          { "path": "/purge", "permission": "rlm.edit" }
         ]
       },
       "host_api": {
-        "grants": [
-          "hook:side-model"
-        ]
+        "grants": ["hook:side-model"]
       }
     }
   ],
   "mcp_servers": {
     "rlm": {
       "command": "ryu-rlm",
-      "args": [
-        "mcp"
-      ],
+      "args": ["mcp"],
       "description": "Read more than fits in your context. `ask` takes paths and a question and returns an answer with `path:line` citations — the files never enter this conversation, so reach for it instead of reading a large directory yourself. `load` builds a reusable context, `query` asks follow-up questions against one, and `grep` and `peek` search and read it with NO model call at all, which makes them safe to branch a workflow on."
     }
   },
   "provides": [
     {
       "capability": "rlm.query",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "sidecar": "rlm",
       "route": "/query",
       "grant": "rlm:query"
@@ -147,7 +154,8 @@
     "rlm:query",
     "hook:side-model",
     "hook:run-agent",
-    "mcp:rlm"
+    "mcp:rlm",
+    "ui:declarative-http"
   ],
   "permission_levels": [
     {
@@ -159,9 +167,7 @@
       "id": "rlm.edit",
       "label": "Can edit",
       "description": "Load and delete contexts, and run queries against them. Loading a context reads files from disk and running a query spends model calls, so this is the level that costs something.",
-      "implies": [
-        "rlm.view"
-      ]
+      "implies": ["rlm.view"]
     }
   ],
   "companion": {
@@ -169,7 +175,45 @@
     "icon": "lucide:list-tree"
   },
   "contributes": {
-  "chat_widget_templates": [{"id":"rlm.chat","title":"Recursive Language Model widget","description":"Open Recursive Language Model data in a host-rendered chat widget.","triggers":["recursive language model widget"],"examples":["Show me a recursive language model widget"],"backing":{"view_id":"surface:rlm"},"display_mode":"inline","safe_action_ids":[],"availability":"available"}],
+    "chat_widget_templates": [
+      {
+        "id": "rlm.chat",
+        "title": "Recursive Language Model widget",
+        "description": "Open Recursive Language Model data in a host-rendered chat widget.",
+        "triggers": ["recursive language model widget"],
+        "examples": ["Show me a recursive language model widget"],
+        "backing": { "view_id": "surface:rlm" },
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "available"
+      }
+    ],
+    "sidebar_sections": [
+      {
+        "id": "contexts",
+        "title": "Contexts",
+        "icon": "lucide:list-tree",
+        "order": 50,
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/rlm/contexts" },
+            "items": "contexts",
+            "map": {
+              "id": "id",
+              "title": "name",
+              "subtitle": "total_chars",
+              "accessory": "chunks"
+            },
+            "refreshMs": 15000
+          },
+          "itemTarget": "/rlm/{{item.id}}",
+          "emptyState": {
+            "title": "No contexts loaded",
+            "description": "Load files or paste text in Deep Read to create a context."
+          }
+        }
+      }
+    ],
     "composer_controls": [
       {
         "id": "rlm.toggle",

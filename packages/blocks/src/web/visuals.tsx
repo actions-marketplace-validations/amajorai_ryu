@@ -724,3 +724,155 @@ export function AgentsAsServiceVisual() {
 		</WindowFrame>
 	);
 }
+
+/** The public Ryu OS story: app windows are opened from one workspace dock. */
+export function OsVisual() {
+	const apps = ["Chat", "Spaces", "Tools", "Skills", "Apps"];
+	return (
+		<WindowFrame title="Ryu OS">
+			<div className="relative min-h-52 overflow-hidden rounded-lg bg-[#17152a] p-4 text-white">
+				<div className="absolute inset-0 bg-[radial-gradient(circle_at_75%_20%,rgba(143,123,242,0.32),transparent_38%),radial-gradient(circle_at_20%_90%,rgba(45,212,191,0.16),transparent_40%)]" />
+				<div className="relative flex items-center justify-between text-[10px] text-white/55">
+					<span>Ryu workspace</span>
+					<span>Mission Control · ⌘K</span>
+				</div>
+				<div className="relative mt-6 rounded-xl border border-white/10 bg-white/10 p-3 shadow-2xl backdrop-blur">
+					<div className="flex items-center gap-1.5">
+						<span className="size-2 rounded-full bg-[#ff6b6b]" />
+						<span className="size-2 rounded-full bg-[#ffd166]" />
+						<span className="size-2 rounded-full bg-[#6ee7b7]" />
+						<span className="ml-2 text-[10px] text-white/65">
+							Policy Summary
+						</span>
+					</div>
+					<div className="mt-5 h-2 w-2/3 rounded-full bg-white/15" />
+					<div className="mt-2 h-2 w-5/6 rounded-full bg-white/10" />
+					<div className="mt-2 h-2 w-1/2 rounded-full bg-white/10" />
+				</div>
+				<div className="relative mx-auto mt-5 flex w-fit items-center gap-1.5 rounded-2xl border border-white/15 bg-black/25 px-2 py-1.5 backdrop-blur">
+					{apps.map((app, index) => (
+						<span
+							className={cn(
+								"flex size-7 items-center justify-center rounded-lg font-medium text-[8px]",
+								index === 0 ? "bg-[#8f7bf2]" : "bg-white/15"
+							)}
+							key={app}
+						>
+							{app.slice(0, 1)}
+						</span>
+					))}
+				</div>
+			</div>
+		</WindowFrame>
+	);
+}
+
+/** A visual for the standalone tool/Skill execution gateway. */
+export function ToolGatewayVisual() {
+	return (
+		<MinimalCard>
+			<div className="space-y-3">
+				<div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2">
+					<span className="font-mono text-[11px] text-foreground/70">
+						POST /v1/exec/tool
+					</span>
+					<span className="rounded-full bg-foreground px-2 py-0.5 font-mono text-[10px] text-background">
+						200
+					</span>
+				</div>
+				<div className="flex items-center gap-2">
+					<Node>Any system</Node>
+					<Wire className="flex-1" />
+					<Node emphasis>Ryu Gateway</Node>
+					<Wire className="flex-1" delays={[0.25, 0.65]} />
+					<Node>Tool + Skill</Node>
+				</div>
+				<div className="rounded-lg border border-border bg-foreground/[0.03] px-3 py-2 font-mono text-[11px] text-muted-foreground">
+					tools.github.create_issue({"{ title }"})
+				</div>
+			</div>
+		</MinimalCard>
+	);
+}
+
+/** The isolated, persistent workspace behind a Ryu Box run. */
+export function BoxVisual() {
+	return (
+		<WindowFrame title="Ryu Box · isolated workspace">
+			<div className="space-y-3">
+				<div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2">
+					<span className="font-mono text-[11px] text-foreground/75">
+						box_7f3a
+					</span>
+					<span className="inline-flex items-center gap-1.5 text-[10px] text-foreground/55">
+						<span className="size-1.5 rounded-full bg-emerald-500" />
+						ready
+					</span>
+				</div>
+				<div className="rounded-lg border border-border bg-foreground/[0.03] p-3 font-mono text-[11px] leading-relaxed">
+					<p className="text-muted-foreground">
+						$ ryu box exec --cwd /workspace
+					</p>
+					<p className="mt-1 text-foreground/75">→ preview server listening</p>
+					<p className="text-foreground/45">→ filesystem persisted</p>
+				</div>
+				<div className="grid grid-cols-3 gap-2 text-center text-[10px] text-muted-foreground">
+					<span className="rounded-md border border-border px-2 py-1.5">
+						Files
+					</span>
+					<span className="rounded-md border border-border px-2 py-1.5">
+						Preview
+					</span>
+					<span className="rounded-md border border-border px-2 py-1.5">
+						Events
+					</span>
+				</div>
+			</div>
+		</WindowFrame>
+	);
+}
+
+/** Pay-per-run hiring: choose a specialist, see the estimate, run once. */
+export function HireVisual() {
+	const hires = [
+		{ name: "Policy analyst", cost: "18 credits", state: "Ready" },
+		{ name: "Inbox triage", cost: "6 credits", state: "Run once" },
+		{ name: "Release reviewer", cost: "12 credits", state: "Run once" },
+	];
+	return (
+		<MinimalCard>
+			<div className="space-y-2">
+				<div className="flex items-center justify-between text-[10px] text-muted-foreground">
+					<span>Specialists for the next job</span>
+					<span className="font-mono text-foreground/60">42 credits</span>
+				</div>
+				{hires.map((hire, index) => (
+					<div
+						className={cn(
+							"flex items-center gap-2 rounded-lg border px-3 py-2",
+							index === 0
+								? "border-foreground/30 bg-foreground/[0.04]"
+								: "border-border bg-muted/30"
+						)}
+						key={hire.name}
+					>
+						<span className="flex size-6 items-center justify-center rounded-md bg-foreground/10 font-mono text-[10px] text-foreground/65">
+							{hire.name.slice(0, 1)}
+						</span>
+						<span className="min-w-0 flex-1">
+							<span className="block truncate text-foreground/75 text-xs">
+								{hire.name}
+							</span>
+							<span className="block text-[10px] text-muted-foreground">
+								{hire.state}
+							</span>
+						</span>
+						<span className="font-mono text-[10px] text-foreground/60">
+							{hire.cost}
+						</span>
+					</div>
+				))}
+			</div>
+		</MinimalCard>
+	);
+}

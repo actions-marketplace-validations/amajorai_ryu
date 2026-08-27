@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import {
+	asModelCompleteArg,
 	asRpcRequest,
+	asSafeActionsRequestArg,
+	assertGranted,
 	type Capability,
 	CapabilityError,
 	dispatchRpc,
@@ -14,12 +17,66 @@ const AGENTS = [{ id: "ryu", name: "Ryu" }];
 function services(): HostServices {
 	return {
 		listAgents: () => Promise.resolve(AGENTS),
+		catalogSnapshot: () =>
+			Promise.resolve({
+				agents: [],
+				apiTypes: [],
+				current: {
+					provider: "gateway",
+					providerRouting: {},
+					routing: "gateway",
+				},
+				hookEvents: [],
+				hooks: [],
+				plugins: [],
+				providers: [],
+				thinkingLevels: [],
+				version: 1,
+			}),
+		catalogModels: (input) =>
+			Promise.resolve({
+				models: [{ id: `${input.providerId}/model` }],
+				providerId: input.providerId,
+				source: "test",
+			}),
+		chatListConversations: () =>
+			Promise.resolve([
+				{
+					agent_id: "agent-1",
+					created_at: 1,
+					id: "conversation-1",
+					message_count: 2,
+					run_status: "running",
+					title: "Build",
+					updated_at: 2,
+				},
+			]),
+		chatSend: ({ conversationId, text }) =>
+			Promise.resolve({
+				conversation_id: `${conversationId}:${text}`,
+				status: "accepted" as const,
+			}),
 		registerRoute: () => Promise.resolve(null),
 	};
 }
 
 const GRANTED = new Set<Capability>(["core.listAgents"]);
 const NONE = new Set<Capability>();
+
+function errorContract(value: unknown): {
+	code: unknown;
+	message: string;
+	name: string;
+} | null {
+	if (!(value instanceof Error)) {
+		return null;
+	}
+	return {
+		code: "code" in value ? value.code : null,
+		message: value.message,
+		name: value.name,
+	};
+}
 
 describe("dispatchRpc capability gate", () => {
 	it("dispatches a granted method to its service", async () => {
@@ -30,6 +87,45 @@ describe("dispatchRpc capability gate", () => {
 			services()
 		);
 		expect(result).toEqual(AGENTS);
+	});
+
+	it("dispatches the shared catalog through the existing read-only grant", async () => {
+		await expect(
+			dispatchRpc("catalog.snapshot", [], GRANTED, services())
+		).resolves.toMatchObject({ version: 1, providers: [], agents: [] });
+	});
+
+	it("discovers provider models through the shared catalog bridge", async () => {
+		await expect(
+			dispatchRpc(
+				"catalog.models",
+				[{ providerId: "openai" }],
+				GRANTED,
+				services()
+			)
+		).resolves.toEqual({
+			models: [{ id: "openai/model" }],
+			providerId: "openai",
+			source: "test",
+		});
+	});
+
+	it("dispatches Chat Broadcast list and send through the explicit grant", async () => {
+		const chatGrant = new Set<Capability>(["chat.broadcast"]);
+		await expect(
+			dispatchRpc("chat.list", [], chatGrant, services())
+		).resolves.toMatchObject([{ id: "conversation-1", run_status: "running" }]);
+		await expect(
+			dispatchRpc(
+				"chat.send",
+				[{ conversationId: "conversation-1", text: "Stop linting." }],
+				chatGrant,
+				services()
+			)
+		).resolves.toEqual({
+			conversation_id: "conversation-1:Stop linting.",
+			status: "accepted",
+		});
 	});
 
 	it("REJECTS a known method whose capability was not granted", async () => {
@@ -56,6 +152,114 @@ describe("dispatchRpc capability gate", () => {
 		await expect(
 			dispatchRpc("core.listAgents", [], NONE, spy)
 		).rejects.toBeInstanceOf(CapabilityError);
+		expect(called).toBe(false);
+	});
+
+	it("keeps unary dispatch denials identical to the shared streaming gate", async () => {
+		for (const [method, capability] of Object.entries(METHOD_CAPABILITY)) {
+			if (capability === "host.capabilities") {
+				continue;
+			}
+			let assertedError: unknown;
+			try {
+				assertGranted(method, NONE);
+			} catch (error) {
+				assertedError = error;
+			}
+			let dispatchedError: unknown;
+			try {
+				await dispatchRpc(method, [], NONE, services());
+			} catch (error) {
+				dispatchedError = error;
+			}
+			expect(errorContract(dispatchedError), method).toEqual(
+				errorContract(assertedError)
+			);
+		}
+	});
+});
+
+describe("model completion argument validation", () => {
+	it("preserves an explicit provider lane without accepting non-string input", () => {
+		expect(
+			asModelCompleteArg({
+				model: "gpt-5",
+				prompt: "hello",
+				provider: "openai",
+			})
+		).toEqual({ model: "gpt-5", prompt: "hello", provider: "openai" });
+		expect(
+			asModelCompleteArg({ prompt: "hello", provider: { id: "openai" } })
+		).toBeNull();
+	});
+
+	it("trims and validates shared catalog discovery arguments", async () => {
+		await expect(
+			dispatchRpc(
+				"catalog.models",
+				[{ providerId: "  openai " }],
+				GRANTED,
+				services()
+			)
+		).resolves.toMatchObject({ providerId: "openai" });
+		await expect(
+			dispatchRpc("catalog.models", [{ providerId: "" }], GRANTED, services())
+		).rejects.toMatchObject({ code: "invalid_args" });
+	});
+});
+
+describe("Safe Actions fixed-mount bridge", () => {
+	const SAFE_ACTIONS = new Set<Capability>(["safe-actions.manage"]);
+
+	it("dispatches only a validated relative request when granted", async () => {
+		let received: unknown;
+		const svc: HostServices = {
+			listAgents: () => Promise.resolve([]),
+			registerRoute: () => Promise.resolve(null),
+			safeActionsRequest: async (input) => {
+				received = input;
+				return { ok: true };
+			},
+		};
+		expect(
+			await dispatchRpc(
+				"safeActions.request",
+				[{ path: "/reviews/r-1/approve", method: "POST", body: {} }],
+				SAFE_ACTIONS,
+				svc
+			)
+		).toEqual({ ok: true });
+		expect(received).toEqual({
+			path: "/reviews/r-1/approve",
+			method: "POST",
+			body: {},
+		});
+	});
+
+	it("rejects traversal, absolute, query, and unsupported methods", () => {
+		for (const input of [
+			{ path: "/../mcp/tools" },
+			{ path: "/%2e%2e/mcp/tools" },
+			{ path: "//evil.example/x" },
+			{ path: "https://evil.example/x" },
+			{ path: "/receipts?all=1" },
+			{ path: "/policies", method: "PATCH" },
+		]) {
+			expect(asSafeActionsRequestArg(input)).toBeNull();
+		}
+	});
+
+	it("never calls the service without the capability", async () => {
+		let called = false;
+		await expect(
+			dispatchRpc("safeActions.request", [{ path: "/policies" }], NONE, {
+				listAgents: () => Promise.resolve([]),
+				registerRoute: () => Promise.resolve(null),
+				safeActionsRequest: async () => {
+					called = true;
+				},
+			})
+		).rejects.toMatchObject({ code: "denied" });
 		expect(called).toBe(false);
 	});
 });

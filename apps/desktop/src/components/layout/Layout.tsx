@@ -1,23 +1,11 @@
-import {
-	ArrowLeft01Icon,
-	ArrowRight01Icon,
-	Search01Icon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
 import { HotkeysProvider, useHotkey } from "@ryu/hotkeys/react";
-import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	SidebarInset,
 	SidebarProvider,
 	useSidebar,
 } from "@ryu/ui/components/sidebar.tsx";
 import { toast } from "@ryu/ui/components/sileo";
-import {
-	Tooltip,
-	TooltipContent,
-	TooltipProvider,
-	TooltipTrigger,
-} from "@ryu/ui/components/tooltip.tsx";
+import { TooltipProvider } from "@ryu/ui/components/tooltip.tsx";
 import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
 import {
 	clampWithRubberband,
@@ -28,17 +16,23 @@ import { haptic } from "@ryu/ui/lib/haptics.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { ChatDisplayPrefs } from "@/src/components/chat/ChatDisplayPrefsProvider.tsx";
 import { DeepLinkController } from "@/src/components/deeplink/DeepLinkController.tsx";
 import { AnimatedTitle } from "@/src/components/layout/animated-title.tsx";
 import { EmptyTabsState } from "@/src/components/layout/EmptyTabsState.tsx";
+import { InfiniteTabsCanvas } from "@/src/components/layout/InfiniteTabsCanvas.tsx";
+import { ScrollableTabsView } from "@/src/components/layout/ScrollableTabsView.tsx";
 import { DesktopReportHost } from "@/src/components/marketplace/report-host.tsx";
 import { MediaPipDock } from "@/src/components/media/MediaPip.tsx";
 import { ProjectDockHost } from "@/src/components/panels/ProjectDockHost.tsx";
 import { PrivacyDisclosure } from "@/src/components/settings/privacy-disclosure.tsx";
 import { SupportAccessBanner } from "@/src/components/settings/support-access-banner.tsx";
+import { NodeUnreachableBanner } from "@/src/components/shell/NodeUnreachableBanner.tsx";
+import { ReconnectRetryBanner } from "@/src/components/shell/ReconnectRetryBanner.tsx";
 import { SafeModeBanner } from "@/src/components/shell/SafeModeBanner.tsx";
 import { AutoUpdater } from "@/src/components/updater/AutoUpdater.tsx";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import {
 	ChatHistoryProvider,
 	useChatHistoryContext,
@@ -65,8 +59,10 @@ import {
 import { seedBuiltinRoutes } from "@/src/contributions/builtins.ts";
 import { RouteOutlet } from "@/src/contributions/RouteOutlet.tsx";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
+import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgentAmbientAudio } from "@/src/hooks/useAgentAmbientAudio.ts";
 import { useApprovalEvents } from "@/src/hooks/useApprovalEvents.ts";
+import { useConsoleAccess } from "@/src/hooks/useConsoleAccess.ts";
 import { usePluginThemeSync } from "@/src/hooks/useContributedThemes.ts";
 import { useCreditAlertEvents } from "@/src/hooks/useCreditAlertEvents.ts";
 import { useDesktopNotificationsStream } from "@/src/hooks/useDesktopNotificationsStream.ts";
@@ -81,6 +77,7 @@ import {
 	usePluginContributionTabIcons,
 } from "@/src/hooks/usePluginContributions.ts";
 import { useQuestEvents } from "@/src/hooks/useQuestEvents.ts";
+import { useReconnectRetry } from "@/src/hooks/useReconnectRetry.ts";
 import { useRegisterEditorAi } from "@/src/hooks/useRegisterEditorAi.ts";
 import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
 import { useTabLayout } from "@/src/hooks/useTabLayout.ts";
@@ -99,17 +96,21 @@ import {
 import { toggleFullscreen } from "@/src/lib/fullscreen.ts";
 import { DESKTOP_HOTKEYS } from "@/src/lib/hotkeys/actions.ts";
 import { coreKvHotkeyStorage } from "@/src/lib/hotkeys/storage.ts";
+import { onboardingInitialTab } from "@/src/lib/onboarding-navigation.ts";
+import { useProductMode } from "@/src/lib/product-mode.ts";
+import { windowChromeLayout } from "@/src/lib/window-chrome-layout.ts";
 import { useLiveActivities } from "@/src/live/useLiveActivities.ts";
 import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
 import { useChatHotkeyTargets } from "@/src/store/useChatHotkeyTargets.ts";
+import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 import { AssistantDock } from "../assistant/AssistantDock.tsx";
 import { AssistantPanel } from "../assistant/AssistantPanel.tsx";
 import {
-	IconSidebarClosed,
-	IconSidebarOpen,
-} from "../icons/SidebarToggleIcon.tsx";
+	OsDesktopSurfaceWithApps,
+	type OsWindow,
+} from "../os/OsDesktopSurface.tsx";
 import { AppSidebar, SidebarPanelContent } from "./AppSidebar.tsx";
 import { CommandPalette } from "./CommandPalette.tsx";
 import { SplitDropZones } from "./SplitDropZones.tsx";
@@ -123,6 +124,7 @@ import {
 import { TabGlyph, TitleBar, useTabBusy } from "./TitleBar.tsx";
 import { TabDndProvider } from "./tabDnd.tsx";
 import { pathScrollsUnderTitlebar } from "./titlebarScroll.ts";
+import { WindowNavigationCluster } from "./WindowNavigationCluster.tsx";
 
 // Populate the contribution registry with every built-in route BEFORE first
 // render, so `RouteOutlet` (which resolves a tab's path through the registry)
@@ -252,14 +254,22 @@ function PaneBadge({
 }
 
 interface LayoutContentProps {
+	nativeWindowChrome: boolean;
 	onSidebarWidthChange: (w: number) => void;
 	sidebarWidth: number;
 }
 
 function LayoutContent({
+	nativeWindowChrome,
 	sidebarWidth,
 	onSidebarWidthChange,
 }: LayoutContentProps) {
+	const productMode = useProductMode();
+	const botProduct = productMode === "bot";
+	const osProduct = productMode === "os";
+	const activeNode = useActiveNode();
+	const { canSwitchToConsole } = useConsoleAccess(activeNode);
+	const { canUpdateDesktopApp } = useAppSurface();
 	const {
 		activeConversationId,
 		setActiveConversationId,
@@ -308,6 +318,11 @@ function LayoutContent({
 	// live Inbox feed. Distinct from the broadcast stream above (Core filters
 	// user-targeted pings out of /api/events/all), so the two never double-toast.
 	useNotificationEvents();
+
+	// Opt-in plugin host for chats that were interrupted by a Wi-Fi/LAN or node
+	// outage. The hook stays app-wide so background tabs are included; its feature
+	// detection is driven by Core's enabled-plugin contribution feed.
+	const reconnectRetryState = useReconnectRetry();
 
 	// Point the Plate editor's media uploads at Core's local media store.
 	useEditorUploader();
@@ -382,6 +397,7 @@ function LayoutContent({
 	// in lockstep with `effectiveAutoHide` in TitleBar — or the bar slides away
 	// while the row it occupied stays reserved (a blank strip on screen).
 	const titleBarClearsContent = useTitleBarClearsContent();
+	const alternateTabView = tabLayout === "scroll" || tabLayout === "canvas";
 	const [floatOpen, setFloatOpen] = useState(false);
 	const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	// The positioned content area; SplitGutters measures it to translate drag
@@ -408,10 +424,13 @@ function LayoutContent({
 	// room for, so the focused tab takes the whole pane area and every split
 	// member stays mounted-but-hidden. The split tree itself is untouched —
 	// widening the viewport brings the layout straight back.
-	const activeSplit = isMobile ? null : findSplit(tabs, splits, activeTabId);
+	const activeSplit =
+		isMobile || alternateTabView ? null : findSplit(tabs, splits, activeTabId);
 	const splitLayout = activeSplit ? computeSplitLayout(activeSplit.root) : null;
 	let paneIds: string[] = [];
-	if (activeSplit) {
+	if (alternateTabView) {
+		paneIds = tabs.map((tab) => tab.id);
+	} else if (activeSplit) {
 		paneIds = splitPaneTabs(tabs, activeSplit).map((t) => t.id);
 	} else if (activeTabId) {
 		paneIds = [activeTabId];
@@ -441,7 +460,7 @@ function LayoutContent({
 	// Floating Ryu (Ask Ryu dock) launcher, restored. Hidden only when a chat pane
 	// is already visible (that pane IS the assistant, so the dock is redundant
 	// there — see `chatPaneVisible` above).
-	const showAssistantDock = true;
+	const showAssistantDock = !(botProduct || osProduct);
 
 	const resizingRef = useRef(false);
 	const startXRef = useRef(0);
@@ -631,8 +650,18 @@ function LayoutContent({
 	// route jumps). Everything routes through the unified hotkey registry, so all
 	// of these are rebindable in Settings → Keyboard Shortcuts.
 	const openSettings = useSettingsDialog((s) => s.openSettings);
+	const openGateway = useGatewayDialog((s) => s.openGateway);
 	useHotkey("sidebar.toggle", toggleSidebar);
-	useHotkey("settings.open", () => openSettings());
+	useHotkey("settings.open", () => {
+		if (!botProduct) {
+			openSettings();
+		}
+	});
+	useHotkey("gateway.open", () => {
+		if (!botProduct) {
+			openGateway();
+		}
+	});
 	useHotkey("chat.new", handleNewConversation);
 	// "Go home" opens whatever path the Dashboards app declares — and does nothing
 	// when no enabled app claims it, so the shortcut can't land the user on an
@@ -642,6 +671,9 @@ function LayoutContent({
 		DASHBOARDS_HOME_BUTTON_ID
 	);
 	useHotkey("nav.home", () => {
+		if (botProduct) {
+			return;
+		}
 		if (dashboardPath) {
 			openTab(dashboardPath);
 		}
@@ -652,11 +684,18 @@ function LayoutContent({
 	// the AFFORDANCE tier `use-companion-alias.ts` describes.
 	const timelineCompanion = useCompanionAlias("/timeline");
 	useHotkey("nav.timeline", () => {
+		if (botProduct) {
+			return;
+		}
 		if (timelineCompanion) {
 			openTab("/timeline");
 		}
 	});
-	useHotkey("nav.library", () => openTab("/library"));
+	useHotkey("nav.library", () => {
+		if (!botProduct) {
+			openTab("/library");
+		}
+	});
 	// Chat-owned shortcuts, bound ONCE here and dispatched to whichever chat tab
 	// is focused. They cannot be registered inside ChatPage: every chat tab stays
 	// mounted, and the registry keeps one handler per id (last-writer-wins), so a
@@ -708,19 +747,35 @@ function LayoutContent({
 		{ allowInInput: true }
 	);
 
-	// Where the fixed nav cluster sits: clear of the macOS traffic lights, at
-	// the standard 16px inset elsewhere, and tight into the corner on a phone
-	// (no native chrome to clear, and every pixel of the strip counts).
-	let navClusterPosition = "top-4 left-6";
-	if (isMobile) {
-		navClusterPosition = "top-2 left-2";
-	} else if (isMac) {
-		navClusterPosition = "top-4 left-24";
-	}
+	// Only a native Desktop window clears OS caption controls. Webapp and the
+	// extension may report the same macOS/Windows user agent, but their viewport
+	// starts at the browser content edge and must not inherit those gutters.
+	const { navClusterPosition, navClusterReserve, pageActionsMargin } =
+		windowChromeLayout({
+			isMac,
+			isMobile,
+			nativeWindowChrome,
+		});
+	const osWindows: OsWindow[] = tabs.map((tab) => ({
+		content: (
+			<IsActiveTabProvider isActive={tab.id === activeTabId}>
+				<CurrentTabIdProvider tabId={tab.id}>
+					{tab.unloaded ? null : (
+						<div className="flex size-full flex-col overflow-hidden">
+							<RouteOutlet onClose={() => closeTab(tab.id)} tab={tab} />
+						</div>
+					)}
+				</CurrentTabIdProvider>
+			</IsActiveTabProvider>
+		),
+		id: tab.id,
+		path: tab.path,
+		title: tab.title,
+	}));
 
 	return (
 		<TabDndProvider>
-			<CommandPalette />
+			{!(botProduct || osProduct) && <CommandPalette />}
 			{/* One instance for every split menu that offers "Save layout as
 			    preset" — a context menu unmounts on click, so it cannot host its
 			    own dialog. */}
@@ -728,118 +783,48 @@ function LayoutContent({
 			<DeepLinkController />
 			<MediaPipDock />
 			<PrivacyDisclosure />
-			<SupportAccessBanner />
+			{!(botProduct || osProduct) && <SupportAccessBanner />}
+			{!(botProduct || osProduct) && <NodeUnreachableBanner />}
+			{!osProduct && <ReconnectRetryBanner state={reconnectRetryState} />}
 			{/* Mounted app-wide, not per-page: Safe Mode changes what the whole node
 			    loads, and a missing app must be explained wherever the user notices
 			    it is missing. */}
-			<SafeModeBanner />
-			<AppSidebar
-				activeConversationId={activeConversationId}
-				onDeleteConversation={handleDeleteConversation}
-				onNewConversation={handleNewConversation}
-				onSelectConversation={handleSelectConversation}
-			/>
+			{!(botProduct || osProduct) && <SafeModeBanner />}
+			{!osProduct && (
+				<AppSidebar
+					activeConversationId={activeConversationId}
+					onDeleteConversation={handleDeleteConversation}
+					onNewConversation={handleNewConversation}
+					onSelectConversation={handleSelectConversation}
+				/>
+			)}
 
 			{/* Pinned navigation cluster (back / forward / sidebar toggle) at the
 			    window's top-left. Fixed so it stays put whether the sidebar is docked
-			    or collapsed, and out of the tab strip entirely. On macOS it sits just
-			    right of the traffic lights; on Windows it uses the same 16px inset as
-			    top-4 so the cluster clears the window edge and lines up with the
-			    sidebar card's inner padding. At phone widths there is no native
-			    chrome to clear and no room for four buttons, so the cluster hugs the
-			    top-left corner and drops to the two that can't be reached any other
-			    way: the sidebar (Sheet) toggle and search. Back/forward stay
-			    available on the platform's own back gesture and via the hotkeys. */}
-			<div
-				className={cn(
-					"fixed z-[60] flex flex-row items-center gap-1",
-					navClusterPosition
-				)}
-				data-tauri-drag-region={false}
-			>
-				{!isMobile && (
-					<>
-						<Tooltip>
-							<TooltipTrigger
-								render={
-									<Button
-										aria-label="Go back"
-										className="size-8"
-										disabled={!canGoBack}
-										onClick={goBack}
-										size="icon"
-										variant="ghost"
-									>
-										<HugeiconsIcon className="size-4" icon={ArrowLeft01Icon} />
-									</Button>
-								}
-							/>
-							<TooltipContent>Go back</TooltipContent>
-						</Tooltip>
-						<Tooltip>
-							<TooltipTrigger
-								render={
-									<Button
-										aria-label="Go forward"
-										className="size-8"
-										disabled={!canGoForward}
-										onClick={goForward}
-										size="icon"
-										variant="ghost"
-									>
-										<HugeiconsIcon className="size-4" icon={ArrowRight01Icon} />
-									</Button>
-								}
-							/>
-							<TooltipContent>Go forward</TooltipContent>
-						</Tooltip>
-					</>
-				)}
-				<Tooltip>
-					<TooltipTrigger
-						render={
-							<Button
-								aria-label={
-									sidebarShown ? "Close navigation" : "Open navigation"
-								}
-								className="size-8"
-								onClick={toggleSidebar}
-								size="icon"
-								variant="ghost"
-							>
-								{sidebarShown ? (
-									<IconSidebarOpen className="size-4" />
-								) : (
-									<IconSidebarClosed className="size-4" />
-								)}
-							</Button>
-						}
-					/>
-					<TooltipContent>
-						{sidebarShown ? "Hide sidebar" : "Show sidebar"}
-					</TooltipContent>
-				</Tooltip>
-				<Tooltip>
-					<TooltipTrigger
-						render={
-							<Button
-								aria-label="Search"
-								className="size-8"
-								onClick={() =>
-									window.dispatchEvent(
-										new CustomEvent("ryu:open-command-palette")
-									)
-								}
-								size="icon"
-								variant="ghost"
-							>
-								<HugeiconsIcon className="size-4" icon={Search01Icon} />
-							</Button>
-						}
-					/>
-					<TooltipContent>Search {isMac ? "⌘K" : "Ctrl K"}</TooltipContent>
-				</Tooltip>
-			</div>
+			    or collapsed, and out of the tab strip entirely. Native macOS Desktop
+			    clears the traffic lights; browser surfaces use their normal viewport
+			    inset. At phone widths there is no native chrome to clear and no room
+			    for four buttons, so the cluster hugs the top-left corner and drops to
+			    the two that cannot be reached any other way: the sidebar (Sheet)
+			    toggle and search. Back/forward stay available on the platform's own
+			    back gesture and via the hotkeys. */}
+			{!osProduct && (
+				<WindowNavigationCluster
+					canGoBack={canGoBack}
+					canGoForward={canGoForward}
+					isMac={isMac}
+					isMobile={isMobile}
+					navClusterPosition={navClusterPosition}
+					onGoBack={goBack}
+					onGoForward={goForward}
+					onSearch={() =>
+						window.dispatchEvent(new CustomEvent("ryu:open-command-palette"))
+					}
+					onToggleSidebar={toggleSidebar}
+					showSearch={!botProduct}
+					sidebarShown={sidebarShown}
+				/>
+			)}
 
 			{/* Resize handle for the docked sidebar. Pointer-only, and there is no
 			    docked sidebar to resize at phone widths. */}
@@ -905,6 +890,7 @@ function LayoutContent({
 			<SidebarInset
 				className={cn(
 					"relative flex flex-col overflow-hidden transition-[padding] duration-300 ease-out",
+					osProduct && "m-0 rounded-none border-0 bg-transparent shadow-none",
 					// Inset mode normally keeps mr-2 so the canvas clears the window
 					// edge; when the Ask Ryu rail is docked it plays the same role as
 					// the left sidebar (ml-0), so drop the right margin and let the
@@ -919,111 +905,139 @@ function LayoutContent({
 					// beside it rather than under it. Floating chrome is 380px + 8px
 					// right inset; inset chrome is a flush 380px rail. On a phone the
 					// panel goes full-width instead of docking, so skip the reservation.
-					paddingRight: assistantDockReserve,
+					paddingRight: osProduct ? 0 : assistantDockReserve,
 				}}
 			>
-				{/* Tab panels fill the entire inset and scroll UNDER the frosted
+				{osProduct ? (
+					<OsDesktopSurfaceWithApps
+						activeWindowId={activeTabId}
+						canSwitchToConsole={canSwitchToConsole}
+						onActivateWindow={focusTab}
+						onCloseWindow={closeTab}
+						onOpenApp={(app) => openTab(app.path, { title: app.label })}
+						windows={osWindows}
+					/>
+				) : (
+					<>
+						{/* Tab panels fill the entire inset and scroll UNDER the frosted
 				    titlebar (which is absolutely positioned on top). Each page wrapper
 				    is padded down by the titlebar height so its own header clears the
 				    tab strip while content reads as one continuous glass surface. */}
-				<div
-					className="relative min-h-0 flex-1 overflow-hidden"
-					ref={contentRef}
-				>
-					{tabs.length === 0 ? (
-						<EmptyTabsState />
-					) : (
-						tabs.map((tab) => {
-							// `focused` drives the titlebar and the active-pane highlight; a
-							// split also shows non-focused panes, which stay fully live.
-							const focused = tab.id === activeTabId;
-							const paneRect = splitLayout?.panes.get(tab.id);
-							const visible = paneRect
-								? true
-								: !activeSplit && tab.id === activeTabId;
-							// Panes are absolutely positioned so the tree is never reparented
-							// (reparenting would unmount it and lose state). Hidden-but-mounted
-							// tabs keep their timers/subscriptions; unloaded tabs are dropped
-							// entirely. Active split members are exempt from unloading, so a
-							// visible pane is never null.
-							let style: CSSProperties;
-							if (paneRect) {
-								style = paneRectStyle(paneRect);
-							} else if (visible) {
-								style = { position: "absolute", inset: 0 };
-							} else {
-								style = { display: "none" };
-							}
-							// Scroll-under panes (chat + the store / marketplace family)
-							// manage their own top clearance internally so their content sits
-							// UNDER the frosted titlebar. Every other page reserves the bar's
-							// height so its header sits cleanly below the solid tab bar.
-							const scrollsUnderTitlebar = pathScrollsUnderTitlebar(tab.path);
-							const needsClearance =
-								titleBarClearsContent &&
-								!scrollsUnderTitlebar &&
-								(paneRect ? paneNeedsTopClearance(paneRect) : true);
-							return (
-								<IsActiveTabProvider
-									isActive={focused}
-									key={`${tab.id}:${tab.navToken ?? 0}`}
-								>
-									<CurrentTabIdProvider tabId={tab.id}>
-										{tab.unloaded ? null : (
-											<div
-												className={cn(
-													"flex flex-col overflow-hidden",
-													needsClearance && "pt-12"
+						<div
+							className="relative min-h-0 flex-1 overflow-hidden"
+							ref={contentRef}
+						>
+							{tabs.length === 0 ? (
+								<EmptyTabsState />
+							) : tabLayout === "scroll" ? (
+								<ScrollableTabsView />
+							) : tabLayout === "canvas" ? (
+								<InfiniteTabsCanvas />
+							) : (
+								tabs.map((tab) => {
+									// `focused` drives the titlebar and the active-pane highlight; a
+									// split also shows non-focused panes, which stay fully live.
+									const focused = tab.id === activeTabId;
+									const paneRect = splitLayout?.panes.get(tab.id);
+									const visible = paneRect
+										? true
+										: !activeSplit && tab.id === activeTabId;
+									// Panes are absolutely positioned so the tree is never reparented
+									// (reparenting would unmount it and lose state). Hidden-but-mounted
+									// tabs keep their timers/subscriptions; unloaded tabs are dropped
+									// entirely. Active split members are exempt from unloading, so a
+									// visible pane is never null.
+									let style: CSSProperties;
+									if (paneRect) {
+										style = paneRectStyle(paneRect);
+									} else if (visible) {
+										style = { position: "absolute", inset: 0 };
+									} else {
+										style = { display: "none" };
+									}
+									// Scroll-under panes (chat + the store / marketplace family)
+									// manage their own top clearance internally so their content sits
+									// UNDER the frosted titlebar. Every other page reserves the bar's
+									// height so its header sits cleanly below the solid tab bar.
+									const scrollsUnderTitlebar = pathScrollsUnderTitlebar(
+										tab.path
+									);
+									const needsClearance =
+										titleBarClearsContent &&
+										!scrollsUnderTitlebar &&
+										(paneRect ? paneNeedsTopClearance(paneRect) : true);
+									return (
+										<IsActiveTabProvider
+											isActive={focused}
+											key={`${tab.id}:${tab.navToken ?? 0}`}
+										>
+											<CurrentTabIdProvider tabId={tab.id}>
+												{tab.unloaded ? null : (
+													<div
+														className={cn(
+															"flex flex-col overflow-hidden",
+															needsClearance && "pt-12"
+														)}
+														// Clicking anywhere in a non-focused pane focuses it
+														// (no nav-history entry) before the inner UI reacts.
+														onMouseDownCapture={
+															activeSplit && visible && !focused
+																? () => focusTab(tab.id)
+																: undefined
+														}
+														style={style}
+													>
+														<RouteOutlet
+															onClose={() => closeTab(tab.id)}
+															tab={tab}
+														/>
+														<PaneBadge
+															actions={focused ? titleBarActions : undefined}
+															activeSplit={!!activeSplit && visible}
+															containerRef={contentRef}
+															focused={focused}
+															tab={tab}
+														/>
+													</div>
 												)}
-												// Clicking anywhere in a non-focused pane focuses it
-												// (no nav-history entry) before the inner UI reacts.
-												onMouseDownCapture={
-													activeSplit && visible && !focused
-														? () => focusTab(tab.id)
-														: undefined
-												}
-												style={style}
-											>
-												<RouteOutlet
-													onClose={() => closeTab(tab.id)}
-													tab={tab}
-												/>
-												<PaneBadge
-													actions={focused ? titleBarActions : undefined}
-													activeSplit={!!activeSplit && visible}
-													containerRef={contentRef}
-													focused={focused}
-													tab={tab}
-												/>
-											</div>
-										)}
-									</CurrentTabIdProvider>
-								</IsActiveTabProvider>
-							);
-						})
-					)}
-					{activeSplit && (
-						<SplitGutters containerRef={contentRef} split={activeSplit} />
-					)}
-					{/* Warp-style drop zones: while a tab chip/row is dragged, hovering
+											</CurrentTabIdProvider>
+										</IsActiveTabProvider>
+									);
+								})
+							)}
+							{activeSplit && (
+								<SplitGutters containerRef={contentRef} split={activeSplit} />
+							)}
+							{/* Warp-style drop zones: while a tab chip/row is dragged, hovering
 					    a pane edge previews + creates a split there; the center swaps
 					    panes. Renders nothing outside a drag. */}
-					{!isMobile && <SplitDropZones containerRef={contentRef} />}
-				</div>
+							{!(isMobile || alternateTabView) && (
+								<SplitDropZones containerRef={contentRef} />
+							)}
+						</div>
+					</>
+				)}
 				{/* Frosted titlebar overlays the content (absolute, z-10). */}
-				<TitleBar />
+				{!osProduct && (
+					<TitleBar
+						navClusterReserve={navClusterReserve}
+						pageActionsMargin={pageActionsMargin}
+					/>
+				)}
 
 				{/* Status banners float just below the titlebar so they never push the
 				    content down or break the under-the-bar scroll. When the titlebar
 				    auto-hides, sit them at the top edge instead. */}
-				<div
-					className={cn(
-						"pointer-events-none absolute right-0 left-0 z-20 [&>*]:pointer-events-auto",
-						titleBarClearsContent ? "top-12" : "top-0"
-					)}
-				>
-					<AutoUpdater />
-				</div>
+				{!osProduct && (
+					<div
+						className={cn(
+							"pointer-events-none absolute right-0 left-0 z-20 [&>*]:pointer-events-auto",
+							titleBarClearsContent ? "top-12" : "top-0"
+						)}
+					>
+						{canUpdateDesktopApp ? <AutoUpdater /> : null}
+					</div>
+				)}
 			</SidebarInset>
 
 			{/* Global "Ask Ryu" assistant: a Notion-AI-style chat that floats over or
@@ -1075,7 +1089,21 @@ function readInitialTab(): InitialTab | undefined {
 }
 
 export default function Layout() {
-	const initialTabRef = useRef(readInitialTab());
+	const { nativeWindowChrome } = useAppSurface();
+	const location = useLocation();
+	const botProduct = useProductMode() === "bot";
+	const appRouteInitialTab =
+		location.pathname.startsWith("/plugin/") ||
+		location.pathname.startsWith("/plugin-view/")
+			? { path: location.pathname }
+			: undefined;
+	const initialTabRef = useRef(
+		botProduct
+			? { path: "/chat", title: "New chat" }
+			: (readInitialTab() ??
+					appRouteInitialTab ??
+					onboardingInitialTab(location.state))
+	);
 	const [sidebarWidth, setSidebarWidth] = useState(getSavedSidebarWidth);
 	const handleSidebarWidthChange = (w: number) => {
 		setSidebarWidth(w);
@@ -1116,6 +1144,7 @@ export default function Layout() {
 											<DesktopReportHost>
 												<ProjectDockHost>
 													<LayoutContent
+														nativeWindowChrome={nativeWindowChrome}
 														onSidebarWidthChange={handleSidebarWidthChange}
 														sidebarWidth={sidebarWidth}
 													/>

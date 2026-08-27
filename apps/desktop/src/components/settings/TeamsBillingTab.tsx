@@ -1,6 +1,7 @@
 import { Robot01Icon, Wallet01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
+	businessMonthlyPriceUsd,
 	hostedAgentIncludedCreditUsd,
 	TEAMS_AGENT_STANDARD_USD,
 	TEAMS_MAX_SEATS,
@@ -25,16 +26,18 @@ import { useEffect, useState } from "react";
 import { sileo } from "sileo";
 import { FRONTEND_URL } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
+import { useStepUp } from "@/src/components/StepUpDialog.tsx";
 import { useBillingStatusStream } from "@/src/hooks/useBillingStatusStream.ts";
 import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
 import {
-	checkoutTeams,
+	checkoutOrganizationPlan,
 	fetchOrgRole,
 	fetchSubscriptionStatus,
 	fetchTeamsSeatStatus,
 	fetchWallet,
 	type HostedAgentPlanId,
 	hasTeamsBillingAuth,
+	type OrganizationPlanId,
 	openBillingPortalUrl,
 	TeamsBillingError,
 	updateTeamsSeats,
@@ -55,7 +58,8 @@ const PLAN_LABELS: Record<string, string> = {
 	hobby: "Hobby",
 	max: "Max Plan",
 	pro: "Pro Plan",
-	teams: "For Teams",
+	teams: "Teams",
+	business: "Business",
 };
 
 function planLabel(plan: string | null | undefined): string {
@@ -88,6 +92,8 @@ function legacyPlanAmount(plan: string | null | undefined): string {
 			return "$39/mo";
 		case "teams":
 			return "$250/mo";
+		case "business":
+			return "$300/mo minimum";
 		default:
 			return "$0/mo";
 	}
@@ -107,6 +113,7 @@ function TeamsBillingTabForOrg({
 	activeOrgId: string | null;
 }) {
 	const authed = hasTeamsBillingAuth();
+	const stepUp = useStepUp();
 
 	const subQuery = useQuery({
 		enabled: authed,
@@ -153,12 +160,21 @@ function TeamsBillingTabForOrg({
 	const [busy, setBusy] = useState(false);
 
 	const seatStatus = seatQuery.data ?? null;
-	const isTeams = subQuery.data?.plan === "teams";
+	const organizationPlanId: OrganizationPlanId | null =
+		subQuery.data?.plan === "business"
+			? "business"
+			: subQuery.data?.plan === "teams"
+				? "teams"
+				: null;
+	const isOrganizationPlan = organizationPlanId !== null;
 	const seatMinimum = seatStatus?.minRequired ?? TEAMS_MIN_SEATS;
 	const previewSeatCount = normalizeTeamsSeatCount(seatText, seatMinimum);
-	const previewMonthlyPrice = TEAMS_AGENT_STANDARD_USD * previewSeatCount;
+	const previewMonthlyPrice =
+		organizationPlanId === "business"
+			? businessMonthlyPriceUsd(previewSeatCount)
+			: TEAMS_AGENT_STANDARD_USD * previewSeatCount;
 	const previewCreditPool = hostedAgentIncludedCreditUsd(
-		"teams",
+		organizationPlanId ?? "teams",
 		previewSeatCount
 	);
 
@@ -169,7 +185,7 @@ function TeamsBillingTabForOrg({
 
 	if (!authed) {
 		return (
-			<SettingsSection title="For Teams">
+			<SettingsSection title="Teams">
 				<p className="px-3 text-muted-foreground text-sm">
 					Sign in to manage your organization&apos;s Teams seats.
 				</p>
@@ -180,12 +196,12 @@ function TeamsBillingTabForOrg({
 	const noOrg = !activeOrgId;
 	if (noOrg) {
 		return (
-			<SettingsSection title="For Teams">
+			<SettingsSection title="Teams">
 				<SettingsCard>
 					<div className="flex flex-col items-start gap-3">
 						<p className="text-muted-foreground text-sm">
-							For Teams is an organization plan. Create or join an organization
-							to set up shared credits and member seats.
+							Teams is an organization plan. Create or join an organization to
+							set up shared credits and member seats.
 						</p>
 						<Button
 							onClick={() => {
@@ -208,7 +224,7 @@ function TeamsBillingTabForOrg({
 		seatQuery.isError;
 	if (loadFailed) {
 		return (
-			<SettingsSection title="For Teams">
+			<SettingsSection title="Teams">
 				<SettingsCard>
 					<div className="flex flex-col items-start gap-3">
 						<p className="text-muted-foreground text-sm">
@@ -237,13 +253,20 @@ function TeamsBillingTabForOrg({
 	const canManage = role === "owner" || role === "admin";
 	const loading =
 		subQuery.isLoading || walletQuery.isLoading || seatQuery.isLoading;
-	const currentPlanId = subQuery.data?.plan as HostedAgentPlanId | null;
+	const currentPlanId = subQuery.data?.plan as
+		| HostedAgentPlanId
+		| OrganizationPlanId
+		| null;
 	const currentSeats =
 		seatStatus?.billedSeats ?? seatStatus?.minRequired ?? TEAMS_MIN_SEATS;
-	const currentAmount = isTeams
-		? formatMonthlyUsd(TEAMS_AGENT_STANDARD_USD * currentSeats)
+	const currentAmount = organizationPlanId
+		? formatMonthlyUsd(
+				organizationPlanId === "business"
+					? businessMonthlyPriceUsd(currentSeats)
+					: TEAMS_AGENT_STANDARD_USD * currentSeats
+			)
 		: legacyPlanAmount(subQuery.data?.plan);
-	const currentDetail = isTeams
+	const currentDetail = isOrganizationPlan
 		? `${currentSeats} billed seats${seatStatus?.bonusSeats ? ` + ${seatStatus.bonusSeats} negotiated` : ""} · ${seatStatus?.memberCount ?? 0} active members · shared workspace access`
 		: subQuery.data?.plan
 			? "Existing organization plan"
@@ -253,11 +276,18 @@ function TeamsBillingTabForOrg({
 		setReviewError(null);
 		setReviewPending(true);
 		try {
-			const { url } = await checkoutTeams(
-				"monthly",
-				previewSeatCount,
-				organizationId
+			const checkout = await stepUp.guard("billing", () =>
+				checkoutOrganizationPlan(
+					organizationPlanId ?? "teams",
+					"monthly",
+					previewSeatCount,
+					organizationId
+				)
 			);
+			if (checkout === null) {
+				return;
+			}
+			const { url } = checkout;
 			await openExternal(url);
 			setReviewOpen(false);
 		} catch (error) {
@@ -281,7 +311,12 @@ function TeamsBillingTabForOrg({
 		}
 		setBusy(true);
 		try {
-			await updateTeamsSeats(previewSeatCount);
+			const updated = await stepUp.guard("billing", () =>
+				updateTeamsSeats(previewSeatCount)
+			);
+			if (updated === null) {
+				return;
+			}
 			await seatQuery.refetch();
 			sileo.success({ title: "Teams seats updated" });
 		} catch (error) {
@@ -299,7 +334,13 @@ function TeamsBillingTabForOrg({
 	const manage = async () => {
 		setBusy(true);
 		try {
-			const { url } = await openBillingPortalUrl();
+			const portal = await stepUp.guard("billing", () =>
+				openBillingPortalUrl()
+			);
+			if (portal === null) {
+				return;
+			}
+			const { url } = portal;
 			await openExternal(url);
 		} catch (error) {
 			sileo.error({
@@ -325,7 +366,7 @@ function TeamsBillingTabForOrg({
 						<SettingsItem
 							actions={
 								canManage ? (
-									isTeams ? (
+									isOrganizationPlan ? (
 										<div className="flex items-center gap-2">
 											<Input
 												aria-label="Teams seats"
@@ -373,16 +414,16 @@ function TeamsBillingTabForOrg({
 												}}
 												size="sm"
 											>
-												Review For Teams
+												Review Teams
 											</Button>
 										</div>
 									)
 								) : undefined
 							}
 							description={
-								isTeams
-									? `Your organization is on For Teams (${seatStatus?.includedSeats ?? currentSeats} member capacity: ${currentSeats} billed${seatStatus?.bonusSeats ? ` + ${seatStatus.bonusSeats} negotiated` : ""} · ${seatStatus?.memberCount ?? 0} active members).`
-									: "Subscribe your organization to For Teams for shared managed inference and member seats."
+								isOrganizationPlan
+									? `Your organization is on ${planLabel(organizationPlanId)} (${seatStatus?.includedSeats ?? currentSeats} member capacity: ${currentSeats} billed${seatStatus?.bonusSeats ? ` + ${seatStatus.bonusSeats} negotiated` : ""} · ${seatStatus?.memberCount ?? 0} active members).`
+									: "Subscribe your organization to Teams for shared managed inference and member seats."
 							}
 							title={
 								<span className="flex items-center gap-2">
@@ -390,7 +431,9 @@ function TeamsBillingTabForOrg({
 										className="size-4 text-muted-foreground"
 										icon={Robot01Icon}
 									/>
-									{isTeams ? "For Teams" : planLabel(subQuery.data?.plan)}
+									{isOrganizationPlan
+										? planLabel(organizationPlanId ?? "teams")
+										: planLabel(subQuery.data?.plan)}
 								</span>
 							}
 						/>
@@ -398,11 +441,11 @@ function TeamsBillingTabForOrg({
 				)}
 			</SettingsSection>
 
-			{isTeams && (
+			{isOrganizationPlan && (
 				<SettingsSection title="Seats">
 					<SettingsGroup>
 						<SettingsItem
-							description={`${seatStatus?.memberCount ?? 0} active members and ${seatStatus?.pendingSeatReservations ?? 0} in-flight invitation claims. Capacity is ${seatStatus?.includedSeats ?? "—"} (${currentSeats} billed${seatStatus?.bonusSeats ? ` + ${seatStatus.bonusSeats} negotiated` : ""}); the shared pool adds $50 per five billed seats.`}
+							description={`${seatStatus?.memberCount ?? 0} active members and ${seatStatus?.pendingSeatReservations ?? 0} in-flight invitation claims. Capacity is ${seatStatus?.includedSeats ?? "—"} (${currentSeats} billed${seatStatus?.bonusSeats ? ` + ${seatStatus.bonusSeats} negotiated` : ""}); the shared pool adds $${organizationPlanId === "business" ? 100 : 50} per five billed seats.`}
 							title="Member seats"
 						/>
 					</SettingsGroup>
@@ -418,7 +461,7 @@ function TeamsBillingTabForOrg({
 					<SettingsGroup>
 						<SettingsItem
 							actions={
-								<span className="font-heading font-semibold text-sm tabular-nums">
+								<span className="font-mono font-semibold text-sm tabular-nums">
 									{walletQuery.data
 										? formatMicroUsd(walletQuery.data.wallet.balanceMicroUsd)
 										: "—"}
@@ -437,7 +480,7 @@ function TeamsBillingTabForOrg({
 						/>
 						<SettingsItem
 							actions={
-								<span className="font-heading font-semibold text-sm tabular-nums">
+								<span className="font-mono font-semibold text-sm tabular-nums">
 									{(subQuery.data?.entitlement.monthlyCreditPoolMicroUsd ?? 0) >
 									0
 										? formatMicroUsd(
@@ -479,7 +522,7 @@ function TeamsBillingTabForOrg({
 							label: planLabel(currentPlanId),
 						}}
 						footer={{
-							detail: `Shared AI pool: ${formatMicroUsd(Math.round(previewCreditPool * 1_000_000))}/mo. It adds $50 per five billed seats. Each additional billed member seat is $${TEAMS_AGENT_STANDARD_USD}/mo.`,
+							detail: `Shared AI pool: ${formatMicroUsd(Math.round(previewCreditPool * 1_000_000))}/mo. It adds $${organizationPlanId === "business" ? 100 : 50} per five billed seats. Each additional billed member seat is $${TEAMS_AGENT_STANDARD_USD}/mo.`,
 							label: "New allowance",
 							value: `${previewSeatCount} member seats`,
 						}}
@@ -487,7 +530,7 @@ function TeamsBillingTabForOrg({
 							amount: formatMonthlyUsd(previewMonthlyPrice),
 							detail: `${previewSeatCount} member seats · shared workspace · pooled wallet`,
 							eyebrow: "New",
-							label: "For Teams",
+							label: planLabel(organizationPlanId ?? "teams"),
 						}}
 					/>
 					{reviewError ? (
@@ -511,6 +554,7 @@ function TeamsBillingTabForOrg({
 					</DialogFooter>
 				</DialogContent>
 			</Dialog>
+			{stepUp.dialog}
 		</div>
 	);
 }

@@ -53,6 +53,7 @@ import {
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { ToggleGroup, ToggleGroupItem } from "@ryu/ui/components/toggle-group";
+import { RealtimeConnection } from "@ryuhq/core-client/realtime";
 import {
 	CheckIcon,
 	ChevronDownIcon,
@@ -104,6 +105,7 @@ import {
 	type Widget,
 	type WidgetInput,
 } from "@/src/lib/api/dashboard.ts";
+import { getRealtimeJwt } from "@/src/lib/realtime/jwt.ts";
 
 /** Quick-add presets so the grid is usable without the AI builder. */
 const PRESETS: Array<{ label: string } & WidgetInput> = [
@@ -221,6 +223,7 @@ export default function HomePage() {
 		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
 		[activeNode.url, activeNode.token]
 	);
+	const dashboardRealtimeRef = useRef<RealtimeConnection | null>(null);
 
 	const [dashboards, setDashboards] = useState<Dashboard[]>([]);
 	const [dashboardId, setDashboardId] = useState<string | null>(null);
@@ -354,6 +357,46 @@ export default function HomePage() {
 		}
 	}, [dashboardId, reload]);
 
+	useEffect(() => {
+		if (!dashboardId) {
+			return;
+		}
+		let cancelled = false;
+		let connection: RealtimeConnection | null = null;
+		void getRealtimeJwt().then((jwt) => {
+			if (cancelled) {
+				return;
+			}
+			connection = new RealtimeConnection(target, {
+				appId: "@ryu/dashboards",
+				handlers: {
+					onNamedEvent: ({ name }) => {
+						if (name === "resource.changed") {
+							void reload(dashboardId);
+						}
+					},
+					onResyncRequired: () => {
+						void reload(dashboardId);
+					},
+				},
+				jwt,
+				kind: "application",
+				roomId: dashboardId,
+			});
+			dashboardRealtimeRef.current = connection;
+			connection.connect();
+		});
+		return () => {
+			cancelled = true;
+			dashboardRealtimeRef.current = null;
+			connection?.close();
+		};
+	}, [dashboardId, reload, target]);
+
+	const publishDashboardChanged = useCallback(() => {
+		dashboardRealtimeRef.current?.sendEvent("resource.changed", null);
+	}, []);
+
 	// Subscribe to the live SSE event stream for this dashboard.
 	useEffect(() => {
 		if (!dashboardId) {
@@ -420,11 +463,13 @@ export default function HomePage() {
 			setWidgets((p) =>
 				p.map((w) => (w.id === widgetId ? { ...w, layout: rect } : w))
 			);
-			updateWidgetLayout(target, dashboardId, widgetId, rect).catch(() => {
-				// A failed persist self-heals on the next reload.
-			});
+			updateWidgetLayout(target, dashboardId, widgetId, rect)
+				.then(publishDashboardChanged)
+				.catch(() => {
+					// A failed persist self-heals on the next reload.
+				});
 		},
-		[dashboardId, target]
+		[dashboardId, publishDashboardChanged, target]
 	);
 
 	// Persist a widget's canvas (v2) rect. Additive: never touches the grid layout,
@@ -437,11 +482,13 @@ export default function HomePage() {
 			setWidgets((p) =>
 				p.map((w) => (w.id === widgetId ? { ...w, canvas: rect } : w))
 			);
-			updateWidgetCanvas(target, dashboardId, widgetId, rect).catch(() => {
-				// A failed persist self-heals on the next reload.
-			});
+			updateWidgetCanvas(target, dashboardId, widgetId, rect)
+				.then(publishDashboardChanged)
+				.catch(() => {
+					// A failed persist self-heals on the next reload.
+				});
 		},
-		[dashboardId, target]
+		[dashboardId, publishDashboardChanged, target]
 	);
 
 	// Switch the current dashboard between grid (v1) and canvas (v2). Optimistic +
@@ -455,11 +502,13 @@ export default function HomePage() {
 			setDashboards((p) =>
 				p.map((d) => (d.id === dashboardId ? { ...d, view_mode: mode } : d))
 			);
-			setDashboardViewMode(target, dashboardId, mode).catch(() => {
-				// A failed persist self-heals on the next reload.
-			});
+			setDashboardViewMode(target, dashboardId, mode)
+				.then(publishDashboardChanged)
+				.catch(() => {
+					// A failed persist self-heals on the next reload.
+				});
 		},
-		[dashboardId, viewMode, target]
+		[dashboardId, publishDashboardChanged, viewMode, target]
 	);
 
 	const handleRefresh = useCallback(
@@ -489,11 +538,13 @@ export default function HomePage() {
 				return;
 			}
 			setWidgets((p) => p.filter((w) => w.id !== widgetId));
-			deleteWidget(target, dashboardId, widgetId).catch(() => {
-				reload(dashboardId);
-			});
+			deleteWidget(target, dashboardId, widgetId)
+				.then(publishDashboardChanged)
+				.catch(() => {
+					void reload(dashboardId);
+				});
 		},
-		[dashboardId, target, reload]
+		[dashboardId, publishDashboardChanged, target, reload]
 	);
 
 	// Create any widget (from a quick preset or the full Add-widget picker),
@@ -527,6 +578,7 @@ export default function HomePage() {
 					canvas,
 				});
 				setWidgets((p) => [...p, widget]);
+				publishDashboardChanged();
 				handleRefresh(widget.id);
 			} catch {
 				toast.error("Couldn't add widget", {
@@ -535,7 +587,15 @@ export default function HomePage() {
 				reload(dashboardId);
 			}
 		},
-		[dashboardId, target, widgets, handleRefresh, reload, viewMode]
+		[
+			dashboardId,
+			target,
+			widgets,
+			handleRefresh,
+			publishDashboardChanged,
+			reload,
+			viewMode,
+		]
 	);
 
 	// Open the AI builder and hand it a starter prompt so the local model
@@ -599,6 +659,7 @@ export default function HomePage() {
 				await renameDashboard(target, dashboardId, name);
 				setDashboardName(name);
 				await refreshList();
+				publishDashboardChanged();
 			}
 		} catch {
 			toast.error("Couldn't save dashboard", {
@@ -617,6 +678,7 @@ export default function HomePage() {
 		}
 		try {
 			await deleteDashboard(target, dashboardId);
+			publishDashboardChanged();
 			const list = await refreshList();
 			const fallback = list.find((d) => d.id !== dashboardId) ?? list[0];
 			handleSelectDashboard(fallback.id);
@@ -789,7 +851,7 @@ export default function HomePage() {
 						</DropdownMenuGroup>
 						<DropdownMenuSeparator />
 						<DropdownMenuItem onClick={() => setBuilderOpen(true)}>
-							<SparklesIcon className="size-4" /> Build with AI
+							<SparklesIcon className="size-4" /> Build a work view
 						</DropdownMenuItem>
 						<DropdownMenuSub>
 							<DropdownMenuSubTrigger>
@@ -881,10 +943,10 @@ export default function HomePage() {
 						<EmptyMedia variant="icon">
 							<Spinner />
 						</EmptyMedia>
-						<EmptyTitle>Assembling your dashboard…</EmptyTitle>
+						<EmptyTitle>Assembling your work view…</EmptyTitle>
 						<EmptyDescription>
-							Ryu is choosing widgets and arranging them for you. They'll appear
-							here as they're created — you can follow along in the chat.
+							Ryu is choosing useful widgets and arranging them for you. They'll
+							appear here as they're created — you can follow along in the chat.
 						</EmptyDescription>
 					</EmptyHeader>
 				</Empty>
@@ -896,16 +958,16 @@ export default function HomePage() {
 					<EmptyMedia variant="icon">
 						<LayoutDashboardIcon />
 					</EmptyMedia>
-					<EmptyTitle>Your dashboard is empty</EmptyTitle>
+					<EmptyTitle>Your work dashboard is empty</EmptyTitle>
 					<EmptyDescription>
-						Let Ryu build one for you from your activity, or add widgets
-						yourself.
+						Start with a view of the work that matters. Ryu can build one from
+						your activity, or you can add the pieces yourself.
 					</EmptyDescription>
 				</EmptyHeader>
 				<EmptyContent>
 					<div className="flex flex-wrap items-center justify-center gap-2">
 						<Button onClick={handleGenerateWithAi} size="sm">
-							<SparklesIcon className="size-4" /> Generate a dashboard for me
+							<SparklesIcon className="size-4" /> Build a work view for me
 						</Button>
 						<Button onClick={() => setAddOpen(true)} size="sm" variant="ghost">
 							<PlusIcon className="size-4" /> Add a widget

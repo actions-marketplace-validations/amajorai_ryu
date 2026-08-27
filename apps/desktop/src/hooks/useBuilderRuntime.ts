@@ -9,8 +9,10 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import type { ModelOption } from "@/components/agent-elements/types.ts";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import {
+	type ChatResponseMode,
 	type ChatRoutingFields,
 	modelRoutingFieldsForInterface,
+	responseModeForInterface,
 	type SimpleApprovalDefaults,
 } from "@/src/lib/chat-routing.ts";
 import { readInterfaceLevel } from "@/src/lib/interface-level.ts";
@@ -55,6 +57,7 @@ function isAcpAgent(agentId: string, agents: AgentSummary[]): boolean {
  *  by the agent's transport, matching the chat composer. */
 export interface BuilderBodyFields extends ChatRoutingFields {
 	agent_id: string;
+	response_mode: ChatResponseMode;
 }
 
 export interface BuilderRuntime {
@@ -135,13 +138,15 @@ export function useBuilderRuntime(storageKey: string): BuilderRuntime {
 	const bodyFields = useCallback((): BuilderBodyFields => {
 		const { agentId: id, effectiveModel: model, isAcp } = liveRef.current;
 		const override = model && model !== AUTO_MODEL ? model : undefined;
-		const routingFields = modelRoutingFieldsForInterface(readInterfaceLevel(), {
+		const interfaceLevel = readInterfaceLevel();
+		const routingFields = modelRoutingFieldsForInterface(interfaceLevel, {
 			model: isAcp ? null : override,
 			acpModel: isAcp ? override : null,
 			simpleApprovalDefaults: simpleApprovalDefaultsRef.current,
 		});
 		return {
 			agent_id: id,
+			response_mode: responseModeForInterface(interfaceLevel),
 			...routingFields,
 		};
 	}, []);

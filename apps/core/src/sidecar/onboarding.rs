@@ -56,6 +56,18 @@ const LLAMACPP_DERIVED_SIDECARS: &[&str] = &[
     crate::sidecar::providers::llamacpp::classify::CLASSIFY_SIDECAR_NAME,
 ];
 
+/// First-party desktop tools that are part of the default local closure. They
+/// use their own global-download-backed `start()` installers, so a fresh node
+/// must be eligible for `start_all` even before `versions.json` has a row. A
+/// failed download is still non-fatal; the next Core launch retries it.
+#[cfg(not(debug_assertions))]
+pub(crate) const PREINSTALLED_SIDECARS: &[&str] = &["shadow", "ghost"];
+
+/// Development Core is owned by the local turbo/dev processes and must not fetch
+/// production Ghost/Shadow archives into the developer's profile.
+#[cfg(debug_assertions)]
+pub(crate) const PREINSTALLED_SIDECARS: &[&str] = &[];
+
 /// Whether [`SetupManager::seed_installed_from_disk`] may mark `name` installed
 /// from a `versions.json` row.
 ///
@@ -174,8 +186,11 @@ impl SetupManager {
     /// it (e.g. the flagship `ryu` agent) hangs forever after the `start` event.
     /// Seeding from `versions.json` reproduces a clean, non-racing boot.
     ///
-    /// `names` are the sidecars to consider (the startup order). Each is marked
-    /// installed when `versions.json` records a version for it. The
+    /// `names` are the sidecars to consider (the startup order). Normal entries
+    /// are marked installed when `versions.json` records a version for them.
+    /// [`PREINSTALLED_SIDECARS`] are eligible on a fresh node as well: their
+    /// `start()` path owns the first global download and records the durable
+    /// version after it succeeds. The
     /// [`LLAMACPP_DERIVED_SIDECARS`] share the `llama-server` binary with `llamacpp`,
     /// so their presence is derived from `llamacpp` (mirroring
     /// [`Self::install_local_stack`]) — two of the three are not in `names` at all
@@ -186,6 +201,10 @@ impl SetupManager {
         let store = crate::sidecar::download_manager::VersionStore::load();
         let mut status = self.status.write().await;
         for name in names {
+            if PREINSTALLED_SIDECARS.contains(&name.as_str()) {
+                status.installed_sidecars.insert(name.clone());
+                continue;
+            }
             // The mesh daemon is seeded from the mesh pref, never from a version
             // row — see [`seeds_from_version_store`].
             if !seeds_from_version_store(name) {
@@ -1317,6 +1336,27 @@ mod onboarding_tests {
         mgr.seed_installed_from_disk(&["tailscale".to_string()])
             .await;
         assert!(!mgr.is_installed("tailscale").await);
+    }
+
+    #[test]
+    fn shadow_and_ghost_are_the_eager_preinstall_set() {
+        if cfg!(debug_assertions) {
+            assert!(PREINSTALLED_SIDECARS.is_empty());
+        } else {
+            assert_eq!(PREINSTALLED_SIDECARS, &["shadow", "ghost"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn seed_installed_from_disk_marks_preinstalled_tools_before_download() {
+        if cfg!(debug_assertions) {
+            return;
+        }
+        let mgr = SetupManager::new();
+        mgr.seed_installed_from_disk(&["shadow".to_string(), "ghost".to_string()])
+            .await;
+        assert!(mgr.is_installed("shadow").await);
+        assert!(mgr.is_installed("ghost").await);
     }
 
     #[tokio::test]

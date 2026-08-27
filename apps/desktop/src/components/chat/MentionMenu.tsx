@@ -26,6 +26,8 @@ function mentionBadge(kind: MentionItem["kind"]): string | undefined {
 			return "Page";
 		case "plugin":
 			return "Plugin";
+		case "user":
+			return "User";
 		default:
 			return undefined;
 	}

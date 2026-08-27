@@ -11,6 +11,7 @@ export type PlanTier =
 	| "pro"
 	| "max"
 	| "teams"
+	| "business"
 	| "enterprise"
 	| "desktop-license";
 
@@ -46,6 +47,12 @@ const TIER_STYLES: Record<PlanTier, TierStyle> = {
 		ink: "#ffffff",
 		gradient:
 			"linear-gradient(15deg,#6366f1 0,#3b82f6 42%,#0ea5e9 72%,#22d3ee 100%)",
+	},
+	business: {
+		label: "Business",
+		ink: "#ffffff",
+		gradient:
+			"linear-gradient(15deg,#6d28d9 0,#7c3aed 35%,#db2777 72%,#f59e0b 100%)",
 	},
 	// Enterprise is warmer and more grounded than Teams, meant for managed
 	// rollouts and governance-heavy deployments.
@@ -104,6 +111,7 @@ const TIER_BORDER_COLORS: Record<PlanTier, readonly string[]> = {
 	],
 	max: ["#c679c4", "#fa3d1d", "#ffb005", "#e1e1fe", "#0358f7"],
 	teams: ["#6366f1", "#3b82f6", "#0ea5e9", "#22d3ee"],
+	business: ["#6d28d9", "#7c3aed", "#db2777", "#f59e0b"],
 	enterprise: ["#0f766e", "#059669", "#84cc16", "#f59e0b"],
 	"desktop-license": ["#eef1f5", "#cdd5e0", "#9aa6b8"],
 };
@@ -155,6 +163,7 @@ const TIER_TITLES: Record<PlanTier, string> = {
 	pro: "Ryu Pro",
 	max: "Ryu Max",
 	teams: "Ryu Teams",
+	business: "Ryu Business",
 	enterprise: "Ryu Enterprise",
 	"desktop-license": "Ryu Desktop",
 };

@@ -8,6 +8,9 @@ describe("installer progress labels", () => {
 		expect(installerComponentLabel("bundled-defaults")).toBe(
 			"bundled models, engines, and skills"
 		);
+		expect(installerComponentLabel("shadow")).toBe("Shadow");
+		expect(installerComponentLabel("ghost")).toBe("Ghost");
+		expect(installerComponentLabel("island")).toBe("Ryu Island");
 	});
 
 	it("keeps unknown installer components visible", () => {

@@ -9,12 +9,14 @@
 // image engine generates), reached through the same node target as every other
 // Core client module (see lib/api/voice.ts for the sibling speech path).
 
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 /** Options for {@link generateImage}. */
 export interface GenerateImageOptions {
 	/** How many images to request (sd-server returns `data[]`). Defaults to 1. */
 	count?: number;
+	/** Optional source images for an edit/remix request. */
+	inputImages?: string[];
 	/** Cloud model id (required when `provider` is set), e.g.
 	 * `"black-forest-labs/flux-schnell"` (Replicate) or `"fal-ai/flux/dev"` (Fal). */
 	model?: string;
@@ -50,10 +52,12 @@ export async function generateImage(
 	if (options.model) {
 		body.model = options.model;
 	}
+	if (options.inputImages && options.inputImages.length > 0) {
+		body.input_images = options.inputImages;
+	}
 
-	const resp = await fetch(apiUrl(target, "/api/images/generate"), {
+	const resp = await authenticatedFetch(target, "/api/images/generate", {
 		method: "POST",
-		headers: makeHeaders(target.token),
 		body: JSON.stringify(body),
 	});
 

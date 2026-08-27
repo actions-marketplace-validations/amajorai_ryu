@@ -1,6 +1,6 @@
 // The Home dashboard's route used to be a frozen `exact("/home", …)` in
 // `builtins.ts` while its sidebar button was already app-registered — so the button
-// hid itself when the (default-OFF) Dashboards app was disabled and the route did
+// hid itself when the (not pre-installed) Dashboards app was disabled and the route did
 // not. These assertions are what stops that path creeping back into shell code: the
 // route must come from the app's own declaration, and must vanish with the app.
 //

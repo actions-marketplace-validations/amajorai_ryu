@@ -65,6 +65,9 @@ pub const ENV_EXT_PLUGIN_ID: &str = "RYU_EXT_PLUGIN_ID";
 /// ([`crate::sidecar::cli_shims`]) — the one definition both the HTTP callers and
 /// the shim scripts read, so the header name can never drift.
 pub(crate) const HDR_PLUGIN_ID: &str = "x-ryu-plugin-id";
+/// Internal hop header used only to carry a caller's MPP credential alongside the
+/// sidecar bearer. It is stripped from caller input and upstream responses.
+const HDR_FORWARDED_AUTHORIZATION: &str = "x-ryu-forwarded-authorization";
 
 /// Default max request body Core buffers + forwards when a sidecar's
 /// [`HttpProxySpec::max_body_bytes`] is unset (10 MiB).
@@ -155,44 +158,18 @@ pub fn sidecar_port(
 /// no token configured — the same posture [`crate::server`]'s `require_auth` accepts,
 /// where the `None` branch allows the request).
 pub fn node_token() -> Option<String> {
-    std::env::var("RYU_TOKEN")
-        .ok()
+    crate::node_token::active_token()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
 }
 
-/// The per-plugin shared secret Core injects into a sidecar and validates on the
-/// host-API callback. Derived as `sha256(node_token || plugin_id)` (a hash, NOT a
-/// concatenation Core forwards) so it is deterministic — the spawn env, the proxy
-/// re-stamp, and the host-API check all recompute the same value — yet plugin A's
-/// token can never yield plugin B's. In loopback dev with no node token a fixed
-/// `"ryu-local"` base is used so the sidecar boundary is still consistent.
-pub fn ext_token(node_token: Option<&str>, plugin_id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let base = node_token
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("ryu-local");
-    let mut hasher = Sha256::new();
-    hasher.update(base.as_bytes());
-    hasher.update(b"\x00ryu-ext\x00");
-    hasher.update(plugin_id.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-/// Constant-time byte comparison (no `subtle` dep). Both hex tokens are the same
-/// length on the happy path; a length mismatch short-circuits to `false`, which
-/// leaks only length (both are fixed-length SHA-256 hex, so it leaks nothing).
-fn ct_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+/// Return the independently random, sealed credential assigned to this plugin.
+///
+/// The legacy node-token parameter remains in the signature while callers are
+/// migrated, but it is deliberately ignored: a compromised plugin credential
+/// must reveal nothing about the node-owner token or any sibling plugin.
+pub fn ext_token(_node_token: Option<&str>, plugin_id: &str) -> String {
+    crate::sidecar::plugin_credentials::token_for(plugin_id)
 }
 
 // ── Route matching (the 404-gate security property) ───────────────────────────
@@ -335,8 +312,9 @@ fn required_permission_for(
     Some((permission, resource_id))
 }
 
-/// Find the first sidecar on `manifest` whose declared http routes match `sub_path`,
-/// returning the matched sidecar spec, its http spec, and the matched route.
+/// Find the most-specific declared route on `manifest` that matches `sub_path`,
+/// returning the matched sidecar spec, its http spec, and the matched route. Equal
+/// specificity is rejected so auth posture never depends on declaration order.
 ///
 /// The whole ROUTE comes back rather than just its auth posture: the permission gate
 /// reads the same matched entry the forward decision came from, so the two can never
@@ -344,6 +322,7 @@ fn required_permission_for(
 fn resolve_route<'a>(
     manifest: &'a crate::plugin_manifest::PluginManifest,
     sub_path: &str,
+    method: &str,
 ) -> Option<(
     &'a SidecarSpec,
     &'a HttpProxySpec,
@@ -352,15 +331,36 @@ fn resolve_route<'a>(
     if has_dot_segment(sub_path) {
         return None;
     }
+    let mut best: Option<(
+        &SidecarSpec,
+        &HttpProxySpec,
+        &crate::plugin_manifest::schema::RouteSpec,
+    )> = None;
     for spec in &manifest.sidecars {
         let Some(http) = &spec.http else { continue };
         for route in &http.routes {
-            if route_matches(&route.path, sub_path) {
-                return Some((spec, http, route));
+            let method_matches = route
+                .method
+                .as_deref()
+                .is_none_or(|declared| declared.eq_ignore_ascii_case(method));
+            if method_matches && route_matches(&route.path, sub_path) {
+                let candidate = (spec, http, route);
+                if best.is_none_or(|(_, _, current)| {
+                    crate::plugin_manifest::route_specificity(&route.path)
+                        > crate::plugin_manifest::route_specificity(&current.path)
+                }) {
+                    best = Some(candidate);
+                } else if best.is_some_and(|(_, _, current)| {
+                    crate::plugin_manifest::route_specificity(&route.path)
+                        == crate::plugin_manifest::route_specificity(&current.path)
+                }) {
+                    // A tie is ambiguous even when the manifest bypassed validation.
+                    return None;
+                }
             }
         }
     }
-    None
+    best
 }
 
 // ── Hop-by-hop header handling (mirrors mail.rs) ──────────────────────────────
@@ -384,7 +384,12 @@ fn is_browser_context(name: &str) -> bool {
 
 fn copy_headers(src: &HeaderMap, dst: &mut reqwest::header::HeaderMap) {
     for (name, value) in src.iter() {
-        if is_hop_by_hop(name.as_str()) || is_browser_context(name.as_str()) {
+        if is_hop_by_hop(name.as_str())
+            || is_browser_context(name.as_str())
+            || name
+                .as_str()
+                .eq_ignore_ascii_case(HDR_FORWARDED_AUTHORIZATION)
+        {
             continue;
         }
         if let (Ok(n), Ok(v)) = (
@@ -394,6 +399,26 @@ fn copy_headers(src: &HeaderMap, dst: &mut reqwest::header::HeaderMap) {
             dst.append(n, v);
         }
     }
+}
+
+/// Preserve an MPP credential only for a manifest-public route. Bearer tokens and
+/// every other authorization scheme remain hop-local and are never forwarded.
+fn forwarded_payment_authorization(
+    headers: &HeaderMap,
+    allow: bool,
+) -> Option<reqwest::header::HeaderValue> {
+    if !allow {
+        return None;
+    }
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let (scheme, credential) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Payment") || credential.trim().is_empty() {
+        return None;
+    }
+    reqwest::header::HeaderValue::from_str(value).ok()
 }
 
 // ── Inbound proxy (/api/ext/:plugin_id/*rest) ─────────────────────────────────
@@ -444,7 +469,7 @@ struct PublicMountPlugin(String);
 pub fn public_mount_routes(
     manifests: &[crate::plugin_manifest::PluginManifest],
     auth_token: Option<String>,
-) -> Router<ServerState> {
+) -> Result<Router<ServerState>, String> {
     let mut router = Router::new();
     let mut seen: HashSet<String> = HashSet::new();
     for manifest in manifests {
@@ -457,14 +482,13 @@ pub fn public_mount_routes(
             if mount.is_empty() {
                 continue;
             }
-            // Guard against two built-ins claiming the same public prefix (axum would
-            // panic on the duplicate route); first declaration wins, warn on the rest.
+            // Guard against two built-ins claiming the same public prefix. Choosing
+            // the first owner would silently route one app's auth/ownership policy
+            // through another app's public URL.
             if !seen.insert(mount.to_owned()) {
-                tracing::warn!(
-                    "public-mount '{mount}' declared by more than one built-in; '{}' ignored",
-                    manifest.id
-                );
-                continue;
+                return Err(format!(
+                    "public-mount '{mount}' is claimed by more than one built-in manifest"
+                ));
             }
             let plugin = PublicMountPlugin(manifest.id.clone());
             // Register BOTH the wildcard `<mount>/*rest` (sub-paths) AND the bare
@@ -481,7 +505,7 @@ pub fn public_mount_routes(
             );
         }
     }
-    router.layer(Extension(auth_token))
+    Ok(router.layer(Extension(auth_token)))
 }
 
 /// Reverse-proxy one `/api/ext/<plugin_id>/<rest>` request to the owning plugin's
@@ -597,9 +621,10 @@ async fn proxy_for_plugin(
     state: &ServerState,
     plugin_id: &str,
     sub_path: &str,
-    expected_node_token: Option<String>,
+    _startup_node_token: Option<String>,
     req: Request,
 ) -> Response {
+    let request_method = req.method().as_str().to_owned();
     // Enabled gate (secrecy: a disabled/absent plugin's proxied surface must not exist).
     match state.app_store.get(plugin_id).await {
         Ok(Some(rec)) if rec.enabled => {}
@@ -615,7 +640,7 @@ async fn proxy_for_plugin(
     let Some(manifest) = manifests.iter().find(|m| m.id == plugin_id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some((spec, http, route)) = resolve_route(manifest, sub_path) else {
+    let Some((spec, http, route)) = resolve_route(manifest, sub_path, &request_method) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let auth = route.auth;
@@ -643,7 +668,8 @@ async fn proxy_for_plugin(
     // Per-route auth: a Protected route requires the node bearer, checked exactly as
     // `require_auth` does (None ⇒ allow, for loopback dev with no token configured).
     if auth == RouteAuth::Protected {
-        if let Some(expected) = expected_node_token.as_deref() {
+        let active_node_token = crate::node_token::active_token();
+        if let Some(expected) = active_node_token.as_deref() {
             let provided = req
                 .headers()
                 .get("authorization")
@@ -806,6 +832,7 @@ async fn proxy_for_plugin(
         src_headers: &parts.headers,
         body: body_bytes.to_vec(),
         hop_plugin_id: plugin_id,
+        forward_payment_authorization: auth == RouteAuth::Public,
     })
     .await
 }
@@ -860,6 +887,9 @@ struct ForwardArgs<'a> {
     /// for the inbound proxy this is the target plugin; for the broker it is the
     /// PROVIDER (so the consumer never sees the provider's token).
     hop_plugin_id: &'a str,
+    /// Whether a caller-supplied `Authorization: Payment` credential may cross this
+    /// hop in the reserved internal header. Enabled only for manifest-public routes.
+    forward_payment_authorization: bool,
 }
 
 /// Forward one buffered request to a sidecar on loopback, re-stamping the hop
@@ -875,6 +905,7 @@ async fn forward_to_sidecar(args: ForwardArgs<'_>) -> Response {
         src_headers,
         body,
         hop_plugin_id,
+        forward_payment_authorization,
     } = args;
 
     let hop_token = ext_token(node_token().as_deref(), hop_plugin_id);
@@ -888,9 +919,14 @@ async fn forward_to_sidecar(args: ForwardArgs<'_>) -> Response {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut headers = reqwest::header::HeaderMap::new();
+    let payment_authorization =
+        forwarded_payment_authorization(src_headers, forward_payment_authorization);
     copy_headers(src_headers, &mut headers);
     if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {hop_token}")) {
         headers.insert(reqwest::header::AUTHORIZATION, val);
+    }
+    if let Some(value) = payment_authorization {
+        headers.insert(HDR_FORWARDED_AUTHORIZATION, value);
     }
 
     let upstream = client
@@ -912,7 +948,11 @@ async fn forward_to_sidecar(args: ForwardArgs<'_>) -> Response {
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut out = HeaderMap::new();
     for (name, value) in resp.headers().iter() {
-        if is_hop_by_hop(name.as_str()) {
+        if is_hop_by_hop(name.as_str())
+            || name
+                .as_str()
+                .eq_ignore_ascii_case(HDR_FORWARDED_AUTHORIZATION)
+        {
             continue;
         }
         if let (Ok(n), Ok(v)) = (
@@ -1016,7 +1056,7 @@ async fn ext_ws_tunnel(
     state: &ServerState,
     plugin_id: &str,
     sub_path: &str,
-    expected_node_token: Option<String>,
+    _startup_node_token: Option<String>,
     query: &HashMap<String, String>,
     headers: &HeaderMap,
     ws: WebSocketUpgrade,
@@ -1037,7 +1077,7 @@ async fn ext_ws_tunnel(
     let Some(manifest) = manifests.iter().find(|m| m.id == plugin_id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some((spec, http, route)) = resolve_route(manifest, sub_path) else {
+    let Some((spec, http, route)) = resolve_route(manifest, sub_path, "GET") else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let auth = route.auth;
@@ -1055,7 +1095,8 @@ async fn ext_ws_tunnel(
     // non-browser clients may use the Authorization header instead. None configured
     // (loopback dev) ⇒ allow.
     if auth == RouteAuth::Protected {
-        if let Some(expected) = expected_node_token.as_deref() {
+        let active_node_token = crate::node_token::active_token();
+        if let Some(expected) = active_node_token.as_deref() {
             let provided = query.get(WS_TOKEN_PARAM).map(String::as_str).or_else(|| {
                 headers
                     .get("authorization")
@@ -1335,20 +1376,10 @@ pub(crate) async fn authenticate_sidecar(
     // OUTSIDE — a sidecar sends whatever its manifest said when it was spawned, and
     // an older third-party sidecar still sends its legacy id.
     //
-    // `ext_token` is a hash over the id string, so the token a sidecar holds was
-    // minted from the id Core used at spawn. Accept EITHER derivation and compare
-    // both in constant time: the legacy id's token (what an un-migrated sidecar
-    // holds) and the canonical one's. Then hand the rest of the pipeline the
-    // canonical id only, so the `app_store` lookup below cannot miss.
-    //
-    // Getting this wrong is silent: the sidecar authenticates as nobody, every host
-    // callback 401s, and the app just quietly stops being able to reach Core.
+    // Credentials are minted only for canonical ids. Never mint or accept a
+    // second caller-controlled alias credential at this trust boundary.
     let plugin_id = crate::plugin_manifest::canonical_plugin_id(&presented).to_owned();
-    let expected_canonical = ext_token(node_token().as_deref(), &plugin_id);
-    let matches = ct_eq(provided, &expected_canonical)
-        || (plugin_id != presented
-            && ct_eq(provided, &ext_token(node_token().as_deref(), &presented)));
-    if !matches {
+    if !crate::sidecar::plugin_credentials::verifies(&plugin_id, provided) {
         return Err((StatusCode::UNAUTHORIZED, "bad token"));
     }
 
@@ -1575,6 +1606,40 @@ const KERNEL_CAPABILITIES: &[KernelCapability] = &[
     KernelCapability {
         cap: "notify.deliver",
         grant: None,
+    },
+    // Send through the node-owned email transport. The app supplies message facts;
+    // Core owns SMTP preferences, secret custody, timeout, and relay execution.
+    KernelCapability {
+        cap: "email.send",
+        grant: Some("mail:crud"),
+    },
+    KernelCapability {
+        cap: "email.status",
+        grant: Some("mail:crud"),
+    },
+    // Shared DNS-pinned outbound HTTP. App protocols retain their own
+    // origin/payment semantics; Core owns URL screening and network safety.
+    KernelCapability {
+        cap: "egress.fetch",
+        grant: Some("egress:http"),
+    },
+    // Record a provider-neutral external-tool charge. The handler derives the
+    // organization from the registered node and forwards the report to Gateway;
+    // a sidecar may describe work, but it cannot choose a wallet.
+    KernelCapability {
+        cap: "billing.recordToolCharge",
+        grant: None,
+    },
+    // Route an app's provider-neutral operation through Core's managed Gateway.
+    // The sidecar supplies no provider credential; Gateway resolves it from the
+    // provider vault and owns the organization-wallet debit.
+    KernelCapability {
+        cap: "providers.status",
+        grant: Some("tools.invoke"),
+    },
+    KernelCapability {
+        cap: "providers.call",
+        grant: Some("tools.invoke"),
     },
     // File a notes document into a Core-owned system Space under the background
     // owner. Core owns the `SpaceStore` + its tenancy, so a sidecar cannot do this
@@ -1970,6 +2035,45 @@ async fn dispatch_kernel_capability(
             )
             .await
         }
+        "email.send" => {
+            crate::server::app_email::host_email_send(
+                State(state),
+                headers,
+                body!(crate::server::app_email::SendBody),
+            )
+            .await
+        }
+        "email.status" => crate::server::app_email::host_email_status(State(state), headers).await,
+        "egress.fetch" => crate::server::app_egress::host_egress_fetch(
+            State(state),
+            headers,
+            body!(crate::server::app_egress::FetchBody),
+        )
+        .await,
+        "billing.recordToolCharge" => {
+            crate::server::app_tool_usage::host_tool_usage_record(
+                State(state),
+                headers,
+                body!(crate::server::app_tool_usage::ToolUsageBody),
+            )
+            .await
+        }
+        "providers.status" => {
+            crate::server::provider_router::host_provider_status(
+                State(state),
+                headers,
+                body!(crate::server::provider_router::ProviderStatusBody),
+            )
+            .await
+        }
+        "providers.call" => {
+            crate::server::provider_router::host_provider_call(
+                State(state),
+                headers,
+                body!(ryu_app_events::ManagedProviderCall),
+            )
+            .await
+        }
         "spaces.fileNotes" => {
             crate::meetings_client::host_save_notes(
                 State(state),
@@ -2239,6 +2343,7 @@ async fn host_capability(
         src_headers: &parts.headers,
         body: body_bytes,
         hop_plugin_id: &provider_id,
+        forward_payment_authorization: false,
     })
     .await
 }
@@ -2320,26 +2425,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ext_token_is_deterministic_and_per_plugin() {
+    fn ext_token_is_random_per_plugin_and_owner_token_independent() {
         let a1 = ext_token(Some("node-secret"), "com.acme.a");
         let a2 = ext_token(Some("node-secret"), "com.acme.a");
         let b = ext_token(Some("node-secret"), "com.acme.b");
-        assert_eq!(a1, a2, "same inputs ⇒ same token (spawn/proxy/host agree)");
+        assert_eq!(a1, a2, "one plugin keeps one credential");
         assert_ne!(a1, b, "plugin A's token must never equal plugin B's");
-        // Different node token ⇒ different secret.
-        assert_ne!(ext_token(Some("other"), "com.acme.a"), a1);
-        // No node token falls to the fixed dev base (still deterministic + non-empty).
-        assert_eq!(ext_token(None, "x"), ext_token(Some("  "), "x"));
-        assert_eq!(ext_token(None, "x").len(), 64); // sha256 hex
-    }
-
-    #[test]
-    fn ct_eq_matches_only_equal_strings() {
-        assert!(ct_eq("abc", "abc"));
-        assert!(!ct_eq("abc", "abd"));
-        assert!(!ct_eq("abc", "abcd"));
-        assert!(!ct_eq("", "x"));
-        assert!(ct_eq("", ""));
+        assert_eq!(ext_token(Some("other"), "com.acme.a"), a1);
+        assert!(a1.starts_with("ryux_"));
+        assert_eq!(a1.len(), 69);
     }
 
     #[test]
@@ -2359,6 +2453,59 @@ mod tests {
         // Multi-segment literal + param.
         assert!(route_matches("/inboxes/:id/send", "/inboxes/xyz/send"));
         assert!(!route_matches("/inboxes/:id/send", "/inboxes/xyz/recv"));
+    }
+
+    #[test]
+    fn route_resolution_prefers_a_specific_literal_over_a_broad_param() {
+        let mut manifest = provider_manifest(9099, None);
+        let http = manifest.sidecars[0]
+            .http
+            .as_mut()
+            .expect("the provider fixture declares http");
+        let mut broad = route("/:id", None, None);
+        broad.auth = crate::plugin_manifest::schema::RouteAuth::Public;
+        http.routes = vec![broad, route("/admin", None, None)];
+
+        let (_, _, matched) =
+            resolve_route(&manifest, "/admin", "GET").expect("a route resolves");
+        assert_eq!(matched.path, "/admin");
+        assert_eq!(matched.auth, crate::plugin_manifest::schema::RouteAuth::Protected);
+    }
+
+    #[test]
+    fn route_resolution_fails_closed_on_equal_specificity_ties() {
+        let mut manifest = provider_manifest(9099, None);
+        let http = manifest.sidecars[0]
+            .http
+            .as_mut()
+            .expect("the provider fixture declares http");
+        http.routes = vec![route("/:id", None, None), route("/:slug", None, None)];
+
+        assert!(
+            resolve_route(&manifest, "/admin", "GET").is_none(),
+            "equal-specificity routes must not fall back to declaration order"
+        );
+    }
+
+    #[test]
+    fn route_resolution_fails_closed_on_cross_sidecar_ties() {
+        let mut manifest = provider_manifest(9099, None);
+        manifest.sidecars[0]
+            .http
+            .as_mut()
+            .expect("provider http")
+            .routes = vec![route("/:id", None, None)];
+        let mut second = manifest.sidecars[0].clone();
+        second.name = "other".to_owned();
+        second.port = 9100;
+        second
+            .http
+            .as_mut()
+            .expect("provider http")
+            .routes = vec![route("/:slug", None, None)];
+        manifest.sidecars.push(second);
+
+        assert!(resolve_route(&manifest, "/admin", "GET").is_none());
     }
 
     #[test]
@@ -2413,9 +2560,24 @@ mod tests {
     ) -> crate::plugin_manifest::schema::RouteSpec {
         crate::plugin_manifest::schema::RouteSpec {
             path: path.to_owned(),
+            method: None,
             auth: Default::default(),
             permission: permission.map(str::to_owned),
             resource_param: resource_param.map(str::to_owned),
+        }
+    }
+
+    fn route_for_method(
+        path: &str,
+        method: &str,
+        permission: &str,
+    ) -> crate::plugin_manifest::schema::RouteSpec {
+        crate::plugin_manifest::schema::RouteSpec {
+            path: path.to_owned(),
+            method: Some(method.to_owned()),
+            auth: Default::default(),
+            permission: Some(permission.to_owned()),
+            resource_param: None,
         }
     }
 
@@ -2527,15 +2689,16 @@ mod tests {
             route("/tabs/:id/close", Some("tabs.close"), Some("id")),
         ];
 
-        let (_, _, health) = resolve_route(&manifest, "/health").expect("declared route resolves");
+        let (_, _, health) =
+            resolve_route(&manifest, "/health", "GET").expect("declared route resolves");
         assert_eq!(
             required_permission_for(health, "/health", &manifest.id),
             None,
             "an un-annotated route must not inherit a sibling's rule"
         );
 
-        let (_, _, close) =
-            resolve_route(&manifest, "/tabs/t-42/close").expect("declared route resolves");
+        let (_, _, close) = resolve_route(&manifest, "/tabs/t-42/close", "POST")
+            .expect("declared route resolves");
         assert_eq!(
             required_permission_for(close, "/tabs/t-42/close", &manifest.id),
             Some(("tabs.close".to_owned(), "t-42".to_owned()))
@@ -2543,7 +2706,26 @@ mod tests {
 
         // And an UNDECLARED path still resolves to nothing at all (404), which is
         // the gate that runs before any of this.
-        assert!(resolve_route(&manifest, "/tabs/t-42/steal").is_none());
+        assert!(resolve_route(&manifest, "/tabs/t-42/steal", "GET").is_none());
+    }
+
+    #[test]
+    fn one_path_resolves_different_permissions_by_http_method() {
+        let mut manifest = provider_manifest(9099, None);
+        manifest.sidecars[0]
+            .http
+            .as_mut()
+            .expect("http")
+            .routes = vec![
+            route_for_method("/items", "GET", "items.view"),
+            route_for_method("/items", "POST", "items.edit"),
+        ];
+
+        let (_, _, read) = resolve_route(&manifest, "/items", "GET").expect("GET route");
+        let (_, _, write) = resolve_route(&manifest, "/items", "POST").expect("POST route");
+        assert_eq!(read.permission.as_deref(), Some("items.view"));
+        assert_eq!(write.permission.as_deref(), Some("items.edit"));
+        assert!(resolve_route(&manifest, "/items", "DELETE").is_none());
     }
 
     /// The other half of the chain: the `(permission, resource_id)` the proxy hands
@@ -2645,6 +2827,7 @@ mod tests {
                 src_headers: &HeaderMap::new(),
                 body: Vec::new(),
                 hop_plugin_id: "com.test.app",
+                forward_payment_authorization: false,
             })
             .await
         };
@@ -2702,6 +2885,7 @@ mod tests {
             src_headers: &src_headers,
             body: Vec::new(),
             hop_plugin_id: "com.test.sse",
+            forward_payment_authorization: false,
         });
         // Headers must arrive well before the body finishes (buffering ⇒ >3s ⇒ timeout).
         let resp = tokio::time::timeout(Duration::from_secs(1), fut)
@@ -2745,6 +2929,7 @@ mod tests {
                     public_mount: None,
                     routes: vec![RouteSpec {
                         path: "/query".to_owned(),
+                        method: None,
                         auth: Default::default(),
                         permission: None,
                         resource_param: None,
@@ -2834,10 +3019,9 @@ mod tests {
     }
 
     #[test]
-    fn public_mount_routes_builds_and_dedups_duplicate_prefixes() {
-        // Two built-ins claiming the SAME public_mount must NOT panic (axum panics on
-        // a duplicate route) — the dedup guard drops the second. Build a router over
-        // both; if the guard were missing, `Router::merge` would panic here.
+    fn public_mount_routes_rejects_duplicate_prefixes() {
+        // Two built-ins claiming the SAME public_mount must fail closed rather than
+        // silently routing the later owner's URL through the first owner's policy.
         let mut a = provider_manifest(9001, Some("/api/mail"));
         a.id = "@ryu/mail".to_owned();
         if let Some(http) = a.sidecars[0].http.as_mut() {
@@ -2848,8 +3032,7 @@ mod tests {
         if let Some(http) = b.sidecars[0].http.as_mut() {
             http.public_mount = Some("/api/mail".to_owned());
         }
-        // Must not panic (the assertion IS that this line returns).
-        let _router: Router<ServerState> = public_mount_routes(&[a, b], Some("tok".to_owned()));
+        assert!(public_mount_routes(&[a, b], Some("tok".to_owned())).is_err());
     }
 
     #[test]
@@ -2867,19 +3050,21 @@ mod tests {
             // The list endpoint the sidecar serves at the mount ROOT.
             http.routes = vec![RouteSpec {
                 path: "/".to_owned(),
+                method: None,
                 auth: Default::default(),
                 permission: None,
                 resource_param: None,
             }];
         }
-        // A second built-in with the SAME mount still dedups (both the bare and the
-        // wildcard route of the duplicate are dropped by the single seen-guard).
+        // A second built-in with a different mount proves both mount roots can be
+        // registered in one router without a duplicate-route panic.
         let mut b = provider_manifest(9002, Some("/api/x"));
         b.id = "com.other.dup".to_owned();
         if let Some(http) = b.sidecars[0].http.as_mut() {
-            http.public_mount = Some("/api/x".to_owned());
+            http.public_mount = Some("/api/y".to_owned());
         }
-        let _router: Router<ServerState> = public_mount_routes(&[a, b], Some("tok".to_owned()));
+        let _router: Router<ServerState> =
+            public_mount_routes(&[a, b], Some("tok".to_owned())).expect("unique mounts");
     }
 
     #[test]
@@ -2905,7 +3090,8 @@ mod tests {
 
         // Build the actual public-mount router: these manifests must reach route
         // construction even when production BUILTIN_MANIFESTS is system-only.
-        let _router: Router<ServerState> = public_mount_routes(&manifests, Some("tok".to_owned()));
+        let _router: Router<ServerState> =
+            public_mount_routes(&manifests, Some("tok".to_owned())).expect("unique mounts");
     }
 
     /// The declared "/" route must forward to the BARE mount, never `{mount}/` —
@@ -2955,6 +3141,7 @@ mod tests {
             src_headers: &src_headers,
             body: Vec::new(),
             hop_plugin_id: "com.test.root",
+            forward_payment_authorization: false,
         })
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3088,6 +3275,10 @@ mod tests {
         src.insert("host", "127.0.0.1:9999".parse().unwrap());
         src.insert("connection", "keep-alive".parse().unwrap());
         src.insert("x-ryu-plugin-id", "com.acme.app".parse().unwrap());
+        src.insert(
+            HDR_FORWARDED_AUTHORIZATION,
+            "Payment forged".parse().unwrap(),
+        );
 
         let mut dst = reqwest::header::HeaderMap::new();
         copy_headers(&src, &mut dst);
@@ -3106,9 +3297,36 @@ mod tests {
         assert!(dst.get("referer").is_none(), "Referer must be stripped");
         assert!(dst.get("host").is_none(), "Host must be stripped");
         assert!(
+            dst.get(HDR_FORWARDED_AUTHORIZATION).is_none(),
+            "caller must not forge the reserved authorization hop header"
+        );
+        assert!(
             dst.get("connection").is_none(),
             "Connection must be stripped"
         );
+    }
+
+    #[test]
+    fn payment_authorization_is_forwarded_only_for_public_routes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Payment credential-proof".parse().unwrap(),
+        );
+
+        assert_eq!(
+            forwarded_payment_authorization(&headers, true)
+                .and_then(|value| value.to_str().ok().map(str::to_owned))
+                .as_deref(),
+            Some("Payment credential-proof")
+        );
+        assert!(forwarded_payment_authorization(&headers, false).is_none());
+
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer node-secret".parse().unwrap(),
+        );
+        assert!(forwarded_payment_authorization(&headers, true).is_none());
     }
 
     #[test]
@@ -3256,7 +3474,7 @@ mod tests {
     /// user's behalf, and read the live node facts needed to decide whether to. They
     /// are the first rows that let an out-of-process app ACT on the user's account
     /// rather than only fetch or record, which is why `chat.startTurn` carries a
-    /// firewall scan and a default-on approval gate on top of its grant.
+    /// firewall scan and an enabled-by-default approval gate on top of its grant.
     #[test]
     fn kernel_capability_table_is_pinned() {
         let names: Vec<&str> = KERNEL_CAPABILITIES.iter().map(|k| k.cap).collect();
@@ -3266,6 +3484,12 @@ mod tests {
                 "mcp.callTool",
                 "notify.fanout",
                 "notify.deliver",
+                "email.send",
+                "email.status",
+                "egress.fetch",
+                "billing.recordToolCharge",
+                "providers.status",
+                "providers.call",
                 "spaces.fileNotes",
                 "chat.startTurn",
                 "node.readings",
@@ -3331,7 +3555,7 @@ mod tests {
     /// grant without the manifests following).
     #[test]
     fn callers_declare_the_grant_their_kernel_capability_requires() {
-        let cases: [(&str, &str, &crate::plugin_manifest::PluginManifest); 3] = [
+        let cases: [(&str, &str, &crate::plugin_manifest::PluginManifest); 6] = [
             (
                 "mcp.callTool",
                 "monitors",
@@ -3350,6 +3574,21 @@ mod tests {
                 "ghost.recordStart",
                 "recipes",
                 &fixture(include_str!("../../../../apps-store/recipes/manifest.json")),
+            ),
+            (
+                "email.send",
+                "mail",
+                &fixture(include_str!("../../../../apps-store/mail/manifest.json")),
+            ),
+            (
+                "email.status",
+                "mail",
+                &fixture(include_str!("../../../../apps-store/mail/manifest.json")),
+            ),
+            (
+                "egress.fetch",
+                "mpp",
+                &fixture(include_str!("../../../../apps-store/mpp/manifest.json")),
             ),
         ];
         for (cap, app, manifest) in cases {
@@ -3372,25 +3611,25 @@ mod tests {
         }
     }
 
-    /// A **default-on** caller never goes through `enable_app` on a fresh install —
+    /// A **pre-installed** caller never goes through `enable_app` on a fresh install —
     /// `plugins::seed` writes its record directly with a hardcoded grant list. So if a
-    /// default-on app's sidecar declares a `host_api` grant, the SEED table must carry
+    /// pre-installed app's sidecar declares a `host_api` grant, the SEED table must carry
     /// that same grant, or the app ships broken out of the box: 403 on every call to
     /// its kernel capability, with no user-visible cause and nothing pointing at the
     /// seed as the reason.
     ///
-    /// Derived over `CORE_DEFAULT_ON` rather than naming an app. It used to name
-    /// `recipes`, which was the only default-on caller — and when recipes left the
+    /// Derived over `CORE_PREINSTALLED` rather than naming an app. It used to name
+    /// `recipes`, which was the only pre-installed caller — and when recipes left the
     /// default set this test failed on its `expect`, reporting a premise that had
-    /// simply expired rather than a defect. The property is about the default-on SET,
-    /// so it is now computed from it: today no default-on app declares a `host_api`
+    /// simply expired rather than a defect. The property is about the pre-installed SET,
+    /// so it is now computed from it: today no pre-installed app declares a `host_api`
     /// grant and the loop body runs zero times, which is correct and stays correct.
-    /// Promote any grant-declaring app back into `CORE_DEFAULT_ON` without adding its
+    /// Promote any grant-declaring app back into `CORE_PREINSTALLED` without adding its
     /// grants to `seed_overrides` and this turns red immediately.
     #[test]
-    fn default_on_callers_are_seeded_with_their_kernel_capability_grant() {
+    fn preinstalled_callers_are_seeded_with_their_kernel_capability_grant() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
-        for spec in crate::plugins::seed::default_on_specs() {
+        for spec in crate::plugins::seed::preinstalled_specs() {
             let Some(manifest) = manifests.iter().find(|m| m.id == spec.id) else {
                 continue;
             };
@@ -3402,8 +3641,8 @@ mod tests {
             {
                 assert!(
                     spec.grants.contains(&needed.as_str()),
-                    "'{}' is default-on and its sidecar declares host_api grant \
-                     '{needed}', but the seed writes {:?}. A default-on record is written \
+                    "'{}' is pre-installed and its sidecar declares host_api grant \
+                     '{needed}', but the seed writes {:?}. A pre-installed record is written \
                      directly by `plugins::seed` and never passes through `enable_app`, so \
                      the grant must be in `seed_overrides` — otherwise a fresh install 403s \
                      on every call to that capability",
@@ -3418,14 +3657,14 @@ mod tests {
     /// naming `recipes`: an OPT-IN app must NOT depend on the seed for its grants. It
     /// is enabled through `enable_app`, which validates against the Gateway and
     /// persists the approved set, so what it needs is the grant in its manifest's
-    /// `permission_grants` — a seed row would be inert (`default_on_specs` never looks
-    /// up an id outside `CORE_DEFAULT_ON`) and is not a substitute.
+    /// `permission_grants` — a seed row would be inert (`preinstalled_specs` never looks
+    /// up an id outside `CORE_PREINSTALLED`) and is not a substitute.
     #[test]
     fn an_opt_in_caller_carries_its_grant_in_the_manifest_not_the_seed() {
         let id = crate::plugins::builtins::RECIPES_PLUGIN_ID;
         assert!(
-            !crate::plugins::builtins::CORE_DEFAULT_ON.contains(&id),
-            "'{id}' is opt-in — if it is default-on again, this test is testing nothing \
+            !crate::plugins::builtins::CORE_PREINSTALLED.contains(&id),
+            "'{id}' is opt-in — if it is pre-installed again, this test is testing nothing \
              and the sibling above is the one that must cover it"
         );
         let grant = kernel_capability("ghost.replay")

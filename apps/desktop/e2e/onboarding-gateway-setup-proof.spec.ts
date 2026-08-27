@@ -19,6 +19,10 @@ test("shows duplicate-safe gateway onboarding and creates the default Telegram r
 	).toBeVisible();
 
 	const telegram = page.getByTestId("new-telegram-proof");
+	await telegram
+		.getByRole("button", { name: "Log in with Telegram", exact: true })
+		.click();
+	await expect(telegram).toContainText("Telegram Login opened in your browser");
 	await telegram.getByRole("button", { name: "Create a bot for me" }).click();
 	await expect(telegram).toContainText("Waiting for Telegram");
 	await expect(telegram).toContainText("@ryu_onboarding_bot", {

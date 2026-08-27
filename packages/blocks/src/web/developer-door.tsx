@@ -52,7 +52,7 @@ export default function DeveloperDoor() {
 									strokeWidth={1.75}
 								/>
 								<h3 className="mt-4 font-medium text-foreground text-xl tracking-tight">
-									I want to hire AI
+									Hire AI for your business
 								</h3>
 								<p className="mt-2 text-muted-foreground text-sm leading-relaxed">
 									You have work piling up and need it done, with a record you
@@ -83,7 +83,7 @@ export default function DeveloperDoor() {
 									strokeWidth={1.75}
 								/>
 								<h3 className="mt-4 font-medium text-foreground text-xl tracking-tight">
-									I want to build AI
+									Build your own AI agents
 								</h3>
 								<p className="mt-2 text-muted-foreground text-sm leading-relaxed">
 									You would rather run it yourself. It is open source, installs

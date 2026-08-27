@@ -720,8 +720,26 @@ interface RetrievalModeStatusWire {
 	job_id: string;
 	processed_chunks?: number;
 	requested_mode?: string;
+	space_id: string;
 	state: RetrievalModeProgress["state"];
 	total_chunks?: number;
+}
+
+const RETRIEVAL_MODE_MAX_POLLS = 7200;
+
+class RetrievalModePollingTimeout extends Error {}
+
+function isRetrievalModeWire(value: unknown): value is RetrievalMode {
+	return value === "vector" || value === "graph";
+}
+
+function isLegacyRetrievalModeChange(json: RetrievalModeChangeWire): boolean {
+	return (
+		isRetrievalModeWire(json.retrieval_mode ?? json.mode) &&
+		isRetrievalModeWire(json.previous_retrieval_mode ?? json.previous) &&
+		typeof json.changed === "boolean" &&
+		typeof json.graph_rebuilt === "boolean"
+	);
 }
 
 export interface SetRetrievalModeOptions {
@@ -810,9 +828,10 @@ export async function setSpaceRetrievalMode(
 	mode: RetrievalMode,
 	options: SetRetrievalModeOptions = {}
 ): Promise<RetrievalModeChange> {
+	const encodedSpaceId = encodeURIComponent(id);
 	const json = await request<RetrievalModeChangeWire>(
 		target,
-		`/api/spaces/${id}/retrieval-mode`,
+		`/api/spaces/${encodedSpaceId}/retrieval-mode`,
 		{
 			method: "POST",
 			body: { retrieval_mode: mode },
@@ -825,13 +844,19 @@ export async function setSpaceRetrievalMode(
 	// contract is 202 + a job id. The local Space mode is updated only after the
 	// status endpoint reports `completed` and includes the committed change.
 	if (typeof json.job_id !== "string") {
+		if (!isLegacyRetrievalModeChange(json)) {
+			throw new Error("Core returned an invalid retrieval-mode response.");
+		}
 		return toRetrievalModeChange(json);
 	}
 	const job = json as RetrievalModeJobWire;
-	const statusPath = `/api/spaces/${id}/retrieval-mode/status?job_id=${encodeURIComponent(job.job_id)}`;
-	const cancelPath = `/api/spaces/${id}/retrieval-mode/cancel`;
+	if (job.job_id.trim() === "" || job.space_id !== id) {
+		throw new Error("Core returned a retrieval-mode job for the wrong Space.");
+	}
+	const statusPath = `/api/spaces/${encodedSpaceId}/retrieval-mode/status?job_id=${encodeURIComponent(job.job_id)}`;
+	const cancelPath = `/api/spaces/${encodedSpaceId}/retrieval-mode/cancel`;
 	const poll = async (signal?: AbortSignal): Promise<RetrievalModeChange> => {
-		for (;;) {
+		for (let attempt = 0; attempt < RETRIEVAL_MODE_MAX_POLLS; attempt += 1) {
 			const status = await request<RetrievalModeStatusWire>(
 				target,
 				statusPath,
@@ -839,12 +864,18 @@ export async function setSpaceRetrievalMode(
 					signal,
 				}
 			);
-			if (status.job_id !== job.job_id) {
-				await waitForRetrievalModePoll(signal);
-				continue;
+			if (status.job_id !== job.job_id || status.space_id !== id) {
+				throw new Error(
+					"Core returned status for the wrong retrieval-mode job."
+				);
 			}
 			options.onProgress?.(toRetrievalModeProgress(status));
-			if (status.state === "completed" && status.change) {
+			if (status.state === "completed") {
+				if (!status.change) {
+					throw new Error(
+						"Core reported a completed retrieval-mode job without its committed change."
+					);
+				}
 				return toRetrievalModeChange(status.change);
 			}
 			if (status.state === "cancelled") {
@@ -856,17 +887,23 @@ export async function setSpaceRetrievalMode(
 			if (status.state === "failed") {
 				throw new Error(status.error ?? "The retrieval-mode rebuild failed.");
 			}
+			if (status.state !== "running" && status.state !== "cancelling") {
+				throw new Error("Core returned an unknown retrieval-mode job state.");
+			}
 			await waitForRetrievalModePoll(signal);
 		}
+		throw new RetrievalModePollingTimeout(
+			"Timed out waiting for the retrieval-mode rebuild."
+		);
 	};
 	try {
 		return await poll(options.signal);
 	} catch (error) {
-		if (
+		const abortedByCaller =
 			error instanceof DOMException &&
 			error.name === "AbortError" &&
-			options.signal?.aborted
-		) {
+			options.signal?.aborted;
+		if (abortedByCaller || error instanceof RetrievalModePollingTimeout) {
 			const cancellation = await request<RetrievalModeCancelWire>(
 				target,
 				cancelPath,
@@ -1161,13 +1198,13 @@ function base64Payload(dataUrl: string): string {
 	return comma === -1 ? dataUrl : dataUrl.slice(comma + 1);
 }
 
-function readAsBase64(file: File): Promise<string> {
+function readAsBase64(blob: Blob, label = "file"): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const reader = new FileReader();
 		reader.onload = () => resolve(base64Payload(String(reader.result ?? "")));
 		reader.onerror = () =>
-			reject(reader.error ?? new Error(`Couldn't read ${file.name}`));
-		reader.readAsDataURL(file);
+			reject(reader.error ?? new Error(`Couldn't read ${label}`));
+		reader.readAsDataURL(blob);
 	});
 }
 
@@ -1200,7 +1237,7 @@ export async function uploadSpaceFile(
 			`${file.name} is ${formatBytes(file.size)} — the limit is ${formatBytes(SPACE_UPLOAD_MAX_BYTES)}.`
 		);
 	}
-	const dataBase64 = await readAsBase64(file);
+	const dataBase64 = await readAsBase64(file, file.name);
 	const headers = await requestHeaders(target, {
 		"content-type": "application/json",
 	});
@@ -1267,6 +1304,57 @@ export async function uploadSpaceFile(
 	};
 }
 
+/** Download a Space file with the same node-token and verified-user identity as
+ * every JSON API call. The response is deliberately a Blob: active HTML/SVG is
+ * never inserted into the app DOM, and viewers opt into only known safe formats. */
+export async function fetchSpaceFileBlob(
+	target: ApiTarget,
+	spaceId: string,
+	documentId: string,
+	signal?: AbortSignal
+): Promise<Blob> {
+	const path = `/api/spaces/${spaceId}/documents/${documentId}/blob`;
+	const response = await fetch(apiUrl(target, path), {
+		headers: await requestHeaders(target),
+		signal,
+	});
+	if (!response.ok) {
+		throw new Error(`Could not open this file (${response.status}).`);
+	}
+	return response.blob();
+}
+
+/** Replace a Space file revision and trigger Core's content re-indexing. */
+export async function replaceSpaceFileBlob(
+	target: ApiTarget,
+	spaceId: string,
+	documentId: string,
+	blob: Blob,
+	mime: string
+): Promise<UploadedSpaceFile> {
+	if (blob.size > SPACE_UPLOAD_MAX_BYTES) {
+		throw new Error(
+			`This file is ${formatBytes(blob.size)} — the limit is ${formatBytes(SPACE_UPLOAD_MAX_BYTES)}.`
+		);
+	}
+	const dataBase64 = await readAsBase64(blob, "the edited file");
+	const wire = await request<{
+		byte_size?: number;
+		id: string;
+		index?: FileIndexWire | null;
+		mime?: string;
+	}>(target, `/api/spaces/${spaceId}/documents/${documentId}/blob`, {
+		method: "PUT",
+		body: { data_base64: dataBase64, mime },
+	});
+	return {
+		documentId: wire.id,
+		mime: wire.mime || mime,
+		byteSize: wire.byte_size ?? blob.size,
+		index: toFileIndex(wire.index),
+	};
+}
+
 /** Fetch a single document's full markdown source for editing. */
 export async function fetchDocument(
 	target: ApiTarget,
@@ -1289,12 +1377,55 @@ export async function updateDocument(
 	spaceId: string,
 	documentId: string,
 	title: string,
-	source: string
-): Promise<void> {
-	await request(target, `/api/spaces/${spaceId}/documents/${documentId}`, {
-		method: "PUT",
-		body: { title, source },
-	});
+	source: string,
+	guard?: { expectedRevision: number; operationId: string }
+): Promise<DocumentWriteReceipt> {
+	const json = await request<{ result?: DocumentWriteReceiptWire }>(
+		target,
+		`/api/spaces/${spaceId}/documents/${documentId}`,
+		{
+			method: "PUT",
+			body: {
+				title,
+				source,
+				...(guard
+					? {
+							expected_revision: guard.expectedRevision,
+							operation_id: guard.operationId,
+						}
+					: {}),
+			},
+		}
+	);
+	return toDocumentWriteReceipt(json.result);
+}
+
+interface DocumentWriteReceiptWire {
+	changed?: boolean;
+	duplicate?: boolean;
+	revision?: number;
+	updated_at?: number;
+	version_id?: string | null;
+}
+
+export interface DocumentWriteReceipt {
+	changed: boolean;
+	duplicate: boolean;
+	revision: number;
+	updatedAt: number;
+	versionId: string | null;
+}
+
+function toDocumentWriteReceipt(
+	value: DocumentWriteReceiptWire | undefined
+): DocumentWriteReceipt {
+	return {
+		changed: value?.changed ?? false,
+		duplicate: value?.duplicate ?? false,
+		revision: value?.revision ?? 0,
+		updatedAt: value?.updated_at ?? 0,
+		versionId: value?.version_id ?? null,
+	};
 }
 
 /** Delete a single document (page) and its chunks/vectors. */
@@ -1315,22 +1446,32 @@ export async function deleteDocument(
 
 /** Metadata for one saved version of a document. */
 export interface DocumentVersionMeta {
+	captureType: string;
 	/** Unix milliseconds. */
 	createdAt: number;
+	createdBy: string | null;
 	documentId: string;
+	granularity: string;
 	id: string;
 	kind: DocumentKind;
 	label: string | null;
+	revision: number;
 	title: string;
+	updatedAt: number;
 }
 
 interface DocumentVersionMetaWire {
+	capture_type?: string;
 	created_at: number;
+	created_by?: string | null;
 	document_id: string;
+	granularity?: string;
 	id: string;
 	kind: DocumentKind;
 	label?: string | null;
+	revision?: number;
 	title: string;
+	updated_at?: number;
 }
 
 interface DocumentVersionWire extends DocumentVersionMetaWire {
@@ -1341,12 +1482,17 @@ function toDocumentVersionMeta(
 	w: DocumentVersionMetaWire
 ): DocumentVersionMeta {
 	return {
+		captureType: w.capture_type ?? "manual",
 		createdAt: w.created_at,
+		createdBy: w.created_by ?? null,
 		documentId: w.document_id,
+		granularity: w.granularity ?? "exact",
 		id: w.id,
 		kind: w.kind,
 		label: w.label ?? null,
+		revision: w.revision ?? 0,
 		title: w.title,
+		updatedAt: w.updated_at ?? w.created_at,
 	};
 }
 
@@ -1396,13 +1542,23 @@ export async function restoreDocumentVersion(
 	target: ApiTarget,
 	spaceId: string,
 	documentId: string,
-	versionId: string
-): Promise<void> {
-	await request(
+	versionId: string,
+	guard?: { expectedRevision: number; operationId: string }
+): Promise<DocumentWriteReceipt> {
+	const json = await request<{ result?: DocumentWriteReceiptWire }>(
 		target,
 		`/api/spaces/${spaceId}/documents/${documentId}/versions/${versionId}/restore`,
-		{ method: "POST" }
+		{
+			method: "POST",
+			body: guard
+				? {
+						expected_revision: guard.expectedRevision,
+						operation_id: guard.operationId,
+					}
+				: undefined,
+		}
 	);
+	return toDocumentWriteReceipt(json.result);
 }
 
 /** Reindex progress reported by Core. */

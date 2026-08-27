@@ -20,6 +20,10 @@ use crate::workflow::delegation::{
 
 /// Grant required to call `host.sideModel`.
 const GRANT_SIDE_MODEL: &str = "hook:side-model";
+/// Grant required to read the secret-free runtime catalog. This deliberately
+/// shares the existing read-only agent-catalog grant; the projection below
+/// never contains credentials, hook code, or provider endpoints.
+const GRANT_CATALOG: &str = "core:list_agents";
 /// Grant required to call `host.storage.*`.
 const GRANT_STORAGE: &str = "storage:kv";
 /// Grant required to call `host.crypto_*` (seal/open the plugin's own data under a
@@ -54,9 +58,31 @@ const GRANT_LEARNING_SYNTHESIZE: &str = "learning:crud";
 const GRANT_RUN_SELF_HOOK: &str = "hook:run-self";
 /// Grant required to raise one bounded notification for the active user.
 const GRANT_NOTIFY: &str = "notifications:send";
+/// Grant required to raise one bounded notification for an explicitly selected
+/// member. Kept separate from the active-user-only hook notification grant.
+const GRANT_NOTIFY_TARGET: &str = "notifications:send-to-user";
 
 const MAX_NOTIFICATION_TITLE_CHARS: usize = 120;
 const MAX_NOTIFICATION_BODY_CHARS: usize = 2000;
+const MAX_NOTIFICATION_TARGET_CHARS: usize = 256;
+
+fn project_catalog_provider(provider: &Value) -> Value {
+    json!({
+        "id": provider.get("id").cloned().unwrap_or(Value::Null),
+        "label": provider.get("label").cloned().unwrap_or(Value::Null),
+        "api": provider.get("api").cloned().unwrap_or(Value::Null),
+        "authKind": provider.get("authKind").cloned().unwrap_or(Value::Null),
+        "routing": provider.get("routing").cloned().unwrap_or(Value::Null),
+        "routingLocked": provider.get("routingLocked").cloned().unwrap_or(Value::Bool(false)),
+        "managed": provider.get("managed").cloned().unwrap_or(Value::Bool(false)),
+        "configured": provider.get("configured").cloned().unwrap_or(Value::Bool(false)),
+        "active": provider.get("active").cloned().unwrap_or(Value::Bool(false)),
+        "custom": provider.get("custom").cloned().unwrap_or(Value::Bool(false)),
+        "suggestedModels": provider.get("suggestedModels").cloned().unwrap_or_else(|| json!([])),
+        "supportsDiscovery": provider.get("supportsDiscovery").cloned().unwrap_or(Value::Bool(false)),
+        "modelOverrides": provider.get("modelOverrides").cloned().unwrap_or_else(|| json!({})),
+    })
+}
 
 /// Map a kernel-contracts host-API method name (dotted, e.g. `"model.complete"`,
 /// `"storage.get"`, `"spaces.createDoc"`) to the closed `host.<...>` path
@@ -71,6 +97,8 @@ const MAX_NOTIFICATION_BODY_CHARS: usize = 2000;
 /// path here.
 pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
     Some(match method {
+        "catalog.snapshot" => "host.catalogSnapshot",
+        "catalog.models" => "host.catalogModels",
         "model.complete" => "host.sideModel",
         "agent.run" => "host.runAgent",
         "agent.runFanout" => "host.runFanout",
@@ -78,6 +106,7 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
         "storage.set" => "host.storage_set",
         "storage.delete" => "host.storage_delete",
         "storage.keys" => "host.storage_keys",
+        "storage.compareAndSet" => "host.storage_compare_and_set",
         "crypto.seal" => "host.crypto_seal",
         "crypto.open" => "host.crypto_open",
         "crypto.status" => "host.crypto_status",
@@ -102,6 +131,7 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
         "learning.recordFeedback" => "host.recordFeedback",
         "learning.synthesizeSkill" => "host.synthesizeSkill",
         "hooks.run" => "host.runHook",
+        "notifications.send" => "host.notifications_send",
         _ => return None,
     })
 }
@@ -141,6 +171,7 @@ pub struct PluginHookBridge {
     state: ServerState,
     verified_caller: Option<crate::identity_verify::VerifiedCaller>,
     authorized_conversation_id: Option<String>,
+    storage_tenant: Option<String>,
 }
 
 impl PluginHookBridge {
@@ -161,17 +192,38 @@ impl PluginHookBridge {
             state,
             verified_caller,
             authorized_conversation_id,
+            storage_tenant: None,
         }
+    }
+
+    /// Construct a bridge for an authenticated tool dispatch that has a
+    /// verified user id but no full JWT caller object. The tenant is used only
+    /// to partition plugin KV; it never grants resource access.
+    pub fn new_with_tenant(
+        plugin_id: String,
+        grants: HashSet<String>,
+        state: ServerState,
+        tenant: Option<String>,
+    ) -> Self {
+        let mut bridge = Self::new(plugin_id, grants, state);
+        bridge.storage_tenant = tenant;
+        bridge
     }
 
     async fn handle_inner(&self, path: String, args: Value) -> InvokeOutcome {
         // The sandbox proxy delivers `host.<method>` as the path.
         let method = path.strip_prefix("host.").unwrap_or(&path);
         match method {
+            "catalogSnapshot" => self.catalog_snapshot(args).await,
+            "catalogModels" => self.catalog_models(args).await,
             "sideModel" => self.side_model(args).await,
             "runAgent" => self.run_agent(args).await,
             "runFanout" => self.run_fanout(args).await,
-            "storage_get" | "storage_set" | "storage_delete" | "storage_keys" => {
+            "storage_get"
+            | "storage_set"
+            | "storage_delete"
+            | "storage_keys"
+            | "storage_compare_and_set" => {
                 self.storage(method, args).await
             }
             "crypto_seal" | "crypto_open" | "crypto_status" => self.crypto(method, args).await,
@@ -197,9 +249,262 @@ impl PluginHookBridge {
             "synthesizeSkill" => self.synthesize_skill(args).await,
             "runHook" => self.run_own_hook(args).await,
             "notify" => self.notify(args).await,
+            "notifications_send" => self.notifications_send(args).await,
             "navigate" => self.navigate(args),
             other => err(format!("unknown host capability '{other}'")),
         }
+    }
+
+    /// Return the Ryu-owned runtime catalog used by Companion pickers.
+    ///
+    /// This is intentionally a projection rather than a serialization of Core's
+    /// config. Provider rows keep auth kind, routing, and configuration state,
+    /// but drop auth environment names and every
+    /// credential. Agent rows drop prompts and persona payloads. Hook rows expose
+    /// declarations only — never code or grants — so an app can discover the
+    /// shared ecosystem without becoming a privileged plugin host.
+    async fn catalog_snapshot(&self, _args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_CATALOG) {
+            return err(format!(
+                "capability '{GRANT_CATALOG}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+
+        let raw_catalog = crate::pi_config::catalog();
+        let providers = raw_catalog
+            .get("providers")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .map(project_catalog_provider)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let current = crate::pi_config::current();
+        let current = json!({
+            "provider": current.provider,
+            "model": current.model,
+            "thinkingLevel": current.thinking_level,
+            "routing": current.routing,
+            "providerRouting": current.provider_routing,
+        });
+
+        let registry = crate::registry::ProviderRegistry::load();
+        let agents = self
+            .state
+            .agents
+            .list_infos_with_default(&registry.default_agent_id)
+            .into_iter()
+            .map(|agent| {
+                json!({
+                    "id": agent.id,
+                    "name": agent.name,
+                    "title": agent.title,
+                    "description": agent.description,
+                    "installHint": agent.install_hint,
+                    "installed": agent.installed,
+                    "model": agent.model,
+                    "engine": agent.engine,
+                    "transport": agent.transport,
+                    "recommended": agent.recommended,
+                    "version": agent.version,
+                    "latestVersion": agent.latest_version,
+                    "versionStatus": agent.version_status,
+                    "locked": agent.locked,
+                    "enabled": agent.enabled,
+                    "gatewayBypass": agent.gateway_bypass,
+                    "lifecycleStatus": agent.lifecycle_status,
+                    "safetyProfile": agent.safety_profile,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let records = match self.state.app_store.list().await {
+            Ok(records) => records,
+            Err(error) => return err(format!("host.catalogSnapshot could not list apps: {error}")),
+        };
+        let enabled_ids: HashSet<String> = records
+            .iter()
+            .filter(|record| record.enabled)
+            .map(|record| record.id.clone())
+            .collect();
+
+        let plugins = {
+            let manifests = self.state.app_manifests.read().await;
+            manifests
+                .iter()
+                .map(|manifest| {
+                    let contributes = manifest.contributes.as_ref();
+                    json!({
+                        "id": manifest.id,
+                        "name": manifest.name,
+                        "version": manifest.version,
+                        "enabled": enabled_ids.contains(&manifest.id),
+                        "compatible": true,
+                        "hasCompanion": manifest.companion.is_some(),
+                        "runnableCount": manifest.runnables.len(),
+                        "hookCount": contributes.map_or(0, |value| value.turn_hooks.len()),
+                        "hookEventCount": contributes.map_or(0, |value| value.hook_events.len()),
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let plugins = {
+            let incompatible = self.state.incompatible_manifests.read().await;
+            let mut plugins = plugins;
+            plugins.extend(incompatible.iter().map(|entry| {
+                let manifest = entry.for_catalog();
+                let contributes = manifest.contributes.as_ref();
+                json!({
+                    "id": manifest.id,
+                    "name": manifest.name,
+                    "version": manifest.version,
+                    "enabled": false,
+                    "compatible": false,
+                    "compatibility": entry.verdict(),
+                    "source": entry.source(),
+                    "hasCompanion": manifest.companion.is_some(),
+                    "runnableCount": manifest.runnables.len(),
+                    "hookCount": contributes.map_or(0, |value| value.turn_hooks.len()),
+                    "hookEventCount": contributes.map_or(0, |value| value.hook_events.len()),
+                })
+            }));
+            plugins
+        };
+
+        let (hooks, hook_events) = {
+            let manifests = self.state.app_manifests.read().await;
+            let mut hooks = Vec::new();
+            let mut hook_events = Vec::new();
+            for manifest in manifests.iter() {
+                let enabled = enabled_ids.contains(&manifest.id);
+                let Some(contributes) = manifest.contributes.as_ref() else {
+                    continue;
+                };
+                hooks.extend(contributes.turn_hooks.iter().map(|hook| {
+                    json!({
+                        "pluginId": manifest.id,
+                        "hookId": hook.id,
+                        "on": hook.on,
+                        "priority": hook.priority,
+                        "enabled": enabled,
+                    })
+                }));
+                hook_events.extend(contributes.hook_events.iter().map(|event| {
+                    json!({
+                        "pluginId": manifest.id,
+                        "id": event.id,
+                        "title": event.title,
+                        "description": event.description,
+                        "payloadExample": event.payload_example,
+                        "enabled": enabled,
+                    })
+                }));
+            }
+
+            let incompatible = self.state.incompatible_manifests.read().await;
+            for entry in incompatible.iter() {
+                let manifest = entry.for_catalog();
+                let Some(contributes) = manifest.contributes.as_ref() else {
+                    continue;
+                };
+                hooks.extend(contributes.turn_hooks.iter().map(|hook| {
+                    json!({
+                        "pluginId": manifest.id,
+                        "hookId": hook.id,
+                        "on": hook.on,
+                        "priority": hook.priority,
+                        "enabled": false,
+                    })
+                }));
+                hook_events.extend(contributes.hook_events.iter().map(|event| {
+                    json!({
+                        "pluginId": manifest.id,
+                        "id": event.id,
+                        "title": event.title,
+                        "description": event.description,
+                        "payloadExample": event.payload_example,
+                        "enabled": false,
+                    })
+                }));
+            }
+            (hooks, hook_events)
+        };
+
+        ok(json!({
+            "version": 1,
+            "current": current,
+            "providers": providers,
+            "agents": agents,
+            "plugins": plugins,
+            "hooks": hooks,
+            "hookEvents": hook_events,
+            "thinkingLevels": raw_catalog.get("thinkingLevels").cloned().unwrap_or_else(|| json!([])),
+            "apiTypes": raw_catalog.get("apiTypes").cloned().unwrap_or_else(|| json!([])),
+        }))
+    }
+
+    /// Discover models for one provider through Core's existing server-side
+    /// resolver. BYOK keys and subscription OAuth material stay in Core; only
+    /// model ids/labels cross the app boundary.
+    async fn catalog_models(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_CATALOG) {
+            return err(format!(
+                "capability '{GRANT_CATALOG}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let Some(provider_id) = args
+            .get("providerId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return err("host.catalogModels requires a non-empty 'providerId'".to_string());
+        };
+
+        let result = crate::pi_config::discover_models(crate::pi_config::DiscoverInput {
+            provider: Some(provider_id.to_owned()),
+            base_url: None,
+            api_key: None,
+            api: None,
+        })
+        .await;
+        let source = result
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("fallback");
+        let models = result
+            .get("models")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let id = row.get("id").and_then(Value::as_str)?.trim();
+                        if id.is_empty() {
+                            return None;
+                        }
+                        let name = row
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty());
+                        Some(match name {
+                            Some(name) => json!({ "id": id, "name": name }),
+                            None => json!({ "id": id }),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        ok(json!({
+            "providerId": provider_id,
+            "models": models,
+            "source": source,
+        }))
     }
 
     /// `host.background.list({ running_only?, producer? })` — return the shared
@@ -364,9 +669,9 @@ impl PluginHookBridge {
 
     /// `host.recordFeedback({ conversation_id, message_id, rating })` — record a
     /// thumbs vote on an assistant turn. `rating` is `"up"` / `"down"` or `null`
-    /// (clear). Wraps `crate::learning::apply_message_feedback` (learning reward +
-    /// RAG-memory sinks), the same logic the `/api/conversations/.../feedback`
-    /// route uses — one implementation, reached by the message-action seam.
+    /// (clear). Persists the durable message state, then wraps Core's shared
+    /// `crate::learning::apply_message_feedback` fan-out (learning reward +
+    /// RAG-memory sinks), the same sink used by the HTTP feedback route.
     async fn record_feedback(&self, args: Value) -> InvokeOutcome {
         if !self.grants.contains(GRANT_LEARNING_FEEDBACK) {
             return err(format!(
@@ -399,6 +704,24 @@ impl PluginHookBridge {
                     "host.recordFeedback rating must be 'up', 'down' or null, got '{other}'"
                 ))
             }
+        }
+        let updated = match self
+            .state
+            .conversations
+            .set_message_feedback(conversation_id, message_id, rating)
+            .await
+        {
+            Ok(updated) => updated,
+            Err(error) => {
+                return err(format!(
+                    "host.recordFeedback could not persist vote: {error}"
+                ))
+            }
+        };
+        if !updated {
+            return err(format!(
+                "host.recordFeedback message '{message_id}' was not found in conversation '{conversation_id}'"
+            ));
         }
         let outcome = crate::learning::apply_message_feedback(
             &self.state,
@@ -677,7 +1000,12 @@ impl PluginHookBridge {
             inline: None,
         };
         // depth = 1: a top-level delegation launched from the chat path.
-        match run_fanout(vec![spec], caps, 1, None).await {
+        let result = if preset.allows_mutation() {
+            run_fanout(vec![spec], caps, 1, None).await
+        } else {
+            crate::workflow::delegation::run_read_only_fanout(vec![spec], caps, 1, None).await
+        };
+        match result {
             Ok(mut results) => match results.pop() {
                 Some(res) => match res.output {
                     Some(out) => ok(json!(out)),
@@ -747,7 +1075,13 @@ impl PluginHookBridge {
         caps.max_concurrent = caps.effective_concurrency();
         caps.wall_time_secs = caps.wall_time_secs.clamp(5, 600);
         caps.max_tokens = caps.effective_max_tokens();
-        match run_fanout(delegates, caps, 1, None).await {
+        let read_only = delegates.iter().all(|delegate| !delegate.preset.allows_mutation());
+        let result = if read_only {
+            crate::workflow::delegation::run_read_only_fanout(delegates, caps, 1, None).await
+        } else {
+            run_fanout(delegates, caps, 1, None).await
+        };
+        match result {
             Ok(results) => ok(json!({
                 "ok": true,
                 "count": results.len(),
@@ -782,7 +1116,14 @@ impl PluginHookBridge {
         let Some(store) = crate::notify::global_store() else {
             return err("host.notify unavailable: notification store is not ready".to_string());
         };
-        let Some(user_id) = crate::auth::load_accounts().active_user_id else {
+        let active_user_id = crate::auth::load_accounts().active_user_id;
+        let user_id = self
+            .verified_caller
+            .as_ref()
+            .map(|caller| caller.user_id.clone())
+            .or_else(|| self.storage_tenant.clone())
+            .or(active_user_id);
+        let Some(user_id) = user_id else {
             return err("host.notify unavailable: no active user".to_string());
         };
         match crate::notify::deliver_app_notification(
@@ -799,6 +1140,87 @@ impl PluginHookBridge {
                 ok(json!({ "queued": true, "notification_id": notification_id }))
             }
             Err(error) => err(format!("host.notify failed: {error}")),
+        }
+    }
+
+    /// `host.notifications_send({ target_user_id, title, body })` — deliver one
+    /// bounded informational notification to a member in the node's resolved
+    /// organization/team scope. This is the Inbox app's explicit-recipient
+    /// bridge; the older `host.notify` path remains active-user-only.
+    async fn notifications_send(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_NOTIFY_TARGET) {
+            return err(format!(
+                "capability '{GRANT_NOTIFY_TARGET}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        if self
+            .verified_caller
+            .as_ref()
+            .and_then(|caller| caller.org_id.as_ref())
+            .is_none()
+        {
+            return err(
+                "targeted notifications require a verified organization caller".to_string(),
+            );
+        }
+        let target_user_id = bounded_notification_text(
+            args.get("target_user_id").and_then(Value::as_str),
+            MAX_NOTIFICATION_TARGET_CHARS,
+        );
+        if target_user_id.is_empty() {
+            return err("host.notifications_send requires a usable 'target_user_id'".to_string());
+        }
+        let title = bounded_notification_text(
+            args.get("title").and_then(Value::as_str),
+            MAX_NOTIFICATION_TITLE_CHARS,
+        );
+        if title.is_empty() {
+            return err("host.notifications_send requires a usable 'title'".to_string());
+        }
+        let body = bounded_notification_text(
+            args.get("body").and_then(Value::as_str),
+            MAX_NOTIFICATION_BODY_CHARS,
+        );
+        let members =
+            match crate::sidecar::control_plane::resolve_notify_targets(&self.state.client, None)
+                .await
+            {
+                Ok(members) => members,
+                Err(error) => {
+                    return err(format!(
+                        "host.notifications_send could not resolve the recipient roster: {error}"
+                    ));
+                }
+            };
+        if !members
+            .iter()
+            .any(|member| member.user_id == target_user_id)
+        {
+            return err(
+                "notification recipient is not in the resolved organization/team".to_string(),
+            );
+        }
+        let Some(store) = crate::notify::global_store() else {
+            return err(
+                "host.notifications_send unavailable: notification store is not ready".to_string(),
+            );
+        };
+        match crate::notify::deliver_app_notification(
+            &store,
+            &self.plugin_id,
+            &target_user_id,
+            &title,
+            &body,
+            "info",
+        )
+        .await
+        {
+            Ok(notification_id) => ok(json!({
+                "notification_id": notification_id,
+                "target_user_id": target_user_id,
+            })),
+            Err(error) => err(format!("host.notifications_send failed: {error}")),
         }
     }
 
@@ -821,6 +1243,11 @@ impl PluginHookBridge {
             .and_then(Value::as_str)
             .unwrap_or("You are a careful assistant.");
         let explicit = args.get("model").and_then(Value::as_str);
+        let provider = args
+            .get("provider")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let pref_key = args.get("model_pref_key").and_then(Value::as_str);
         let effort = args.get("effort").and_then(Value::as_str).unwrap_or("");
         let (model, selection_effort) = self.resolve_model(pref_key, explicit).await;
@@ -832,7 +1259,16 @@ impl PluginHookBridge {
         } else {
             effort
         };
-        match crate::server::call_side_model(&self.state, &model, effort, system, prompt).await {
+        match crate::server::call_side_model_with_provider(
+            &self.state,
+            &model,
+            provider,
+            effort,
+            system,
+            prompt,
+        )
+        .await
+        {
             Ok(text) => ok(json!(text)),
             Err(e) => err(e),
         }
@@ -853,10 +1289,11 @@ impl PluginHookBridge {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .unwrap_or("default");
+        let namespace = self.storage_namespace(namespace);
         let key = args.get("key").and_then(Value::as_str).unwrap_or_default();
 
         match method {
-            "storage_get" => match store.get(&self.plugin_id, namespace, key).await {
+            "storage_get" => match store.get(&self.plugin_id, &namespace, key).await {
                 Ok(Some(v)) => ok(json!(v)),
                 Ok(None) => ok(Value::Null),
                 Err(e) => err(e.to_string()),
@@ -869,21 +1306,40 @@ impl PluginHookBridge {
                 if key.is_empty() {
                     return err("host.storage.set requires a non-empty key".to_string());
                 }
-                match store.set(&self.plugin_id, namespace, key, value).await {
+                match store.set(&self.plugin_id, &namespace, key, value).await {
                     Ok(()) => ok(json!(true)),
                     Err(e) => err(e.to_string()),
                 }
             }
-            "storage_delete" => match store.delete(&self.plugin_id, namespace, key).await {
+            "storage_delete" => match store.delete(&self.plugin_id, &namespace, key).await {
                 Ok(()) => ok(json!(true)),
                 Err(e) => err(e.to_string()),
             },
-            "storage_keys" => match store.keys(&self.plugin_id, namespace).await {
+            "storage_keys" => match store.keys(&self.plugin_id, &namespace).await {
                 Ok(keys) => ok(json!(keys)),
                 Err(e) => err(e.to_string()),
             },
+            "storage_compare_and_set" => {
+                let expected = args.get("expected").and_then(Value::as_str);
+                let value = args.get("value").and_then(Value::as_str);
+                match store
+                    .compare_and_set(&self.plugin_id, &namespace, key, expected, value)
+                    .await
+                {
+                    Ok(changed) => ok(json!(changed)),
+                    Err(e) => err(e.to_string()),
+                }
+            }
             _ => err(format!("unknown storage method '{method}'")),
         }
+    }
+
+    fn storage_namespace(&self, namespace: &str) -> String {
+        let tenant = self
+            .storage_tenant
+            .as_deref()
+            .or_else(|| self.verified_caller.as_ref().map(|caller| caller.user_id.as_str()));
+        super::storage_namespace_for_tenant(tenant, namespace)
     }
 
     /// `host.crypto_*` — the **sealing primitive**. A plugin encrypts and decrypts
@@ -987,6 +1443,14 @@ impl PluginHookBridge {
             ));
         }
         let store = &self.state.spaces;
+        let owner = self.verified_caller.as_ref().map_or_else(
+            crate::server::spaces::background_owner,
+            |_| {
+                crate::server::spaces::owner_of(&crate::server::caller_tenancy(
+                    &self.verified_caller,
+                ))
+            },
+        );
         let space_id = args
             .get("space_id")
             .and_then(Value::as_str)
@@ -1021,14 +1485,7 @@ impl PluginHookBridge {
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|s| !s.is_empty());
-                match store
-                    .ensure_named_space(
-                        name,
-                        description,
-                        &crate::server::spaces::background_owner(),
-                    )
-                    .await
-                {
+                match store.ensure_named_space(name, description, &owner).await {
                     Ok(id) => ok(json!(id)),
                     Err(e) => err(e.to_string()),
                 }
@@ -1044,12 +1501,7 @@ impl PluginHookBridge {
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Untitled");
                 match store
-                    .app_create_doc(
-                        &self.plugin_id,
-                        space_id,
-                        title,
-                        &crate::server::spaces::background_owner(),
-                    )
+                    .app_create_doc(&self.plugin_id, space_id, title, &owner)
                     .await
                 {
                     Ok(id) => ok(json!(id)),
@@ -1291,6 +1743,7 @@ mod tests {
     // full async path is covered by the live double-check verification (M7).
     #[test]
     fn grant_constants_are_stable() {
+        assert_eq!(GRANT_CATALOG, "core:list_agents");
         assert_eq!(GRANT_SIDE_MODEL, "hook:side-model");
         assert_eq!(GRANT_STORAGE, "storage:kv");
         assert_eq!(GRANT_RUN_AGENT, "hook:run-agent");
@@ -1300,6 +1753,25 @@ mod tests {
         assert_eq!(GRANT_PREFERENCES_READ, "preferences:read");
         assert_eq!(GRANT_BACKGROUND_CONTROL, "background:control");
         assert_eq!(GRANT_NOTIFY, "notifications:send");
+        assert_eq!(GRANT_NOTIFY_TARGET, "notifications:send-to-user");
+    }
+
+    #[test]
+    fn catalog_provider_projection_never_exposes_account_identity() {
+        let projected = project_catalog_provider(&json!({
+            "id": "openai",
+            "label": "OpenAI",
+            "accounts": [{
+                "accountId": "personal",
+                "label": "person@example.com",
+                "kind": "oauth",
+                "active": true,
+                "updatedAt": 123,
+            }],
+        }));
+        assert_eq!(projected.get("id").and_then(Value::as_str), Some("openai"));
+        assert!(projected.get("accounts").is_none());
+        assert!(!projected.to_string().contains("person@example.com"));
     }
 
     #[test]
@@ -1321,6 +1793,8 @@ mod tests {
     #[test]
     fn grant_constants_match_kernel_contracts_table() {
         use ryu_kernel_contracts::host_api::grant_for;
+        assert_eq!(grant_for("catalog.snapshot"), Some(GRANT_CATALOG));
+        assert_eq!(grant_for("catalog.models"), Some(GRANT_CATALOG));
         assert_eq!(grant_for("model.complete"), Some(GRANT_SIDE_MODEL));
         assert_eq!(grant_for("agent.run"), Some(GRANT_RUN_AGENT));
         assert_eq!(grant_for("storage.get"), Some(GRANT_STORAGE));
@@ -1329,6 +1803,7 @@ mod tests {
         assert_eq!(grant_for("conversation.setTitle"), Some(GRANT_SET_TITLE));
         assert_eq!(grant_for("preferences.get"), Some(GRANT_PREFERENCES_READ));
         assert_eq!(grant_for("background.list"), Some(GRANT_BACKGROUND_CONTROL));
+        assert_eq!(grant_for("notifications.send"), Some(GRANT_NOTIFY_TARGET));
     }
 
     /// Every method `dispatch_path_for` maps MUST (a) carry a grant in the
@@ -1367,6 +1842,8 @@ mod tests {
     #[test]
     fn dispatch_path_covers_every_bridge_family() {
         for method in [
+            "catalog.snapshot",
+            "catalog.models",
             "model.complete",
             "agent.run",
             "agent.runFanout",
@@ -1390,13 +1867,16 @@ mod tests {
     fn handled_method(m: &str) -> bool {
         matches!(
             m,
-            "sideModel"
+            "catalogSnapshot"
+                | "catalogModels"
+                | "sideModel"
                 | "runAgent"
                 | "runFanout"
                 | "storage_get"
                 | "storage_set"
                 | "storage_delete"
                 | "storage_keys"
+                | "storage_compare_and_set"
                 | "crypto_seal"
                 | "crypto_open"
                 | "crypto_status"
@@ -1422,6 +1902,7 @@ mod tests {
                 | "synthesizeSkill"
                 | "runHook"
                 | "notify"
+                | "notifications_send"
                 | "navigate"
         )
     }
@@ -1480,12 +1961,27 @@ mod tests {
     }
 
     #[test]
-    fn notification_grant_is_independent_from_rpc_dispatch_table() {
+    fn notification_grants_keep_active_and_targeted_paths_separate() {
         let g = grants(&["hook:run-agent"]);
         assert!(!g.contains(GRANT_NOTIFY));
         let g = grants(&[GRANT_NOTIFY]);
         assert!(g.contains(GRANT_NOTIFY));
-        assert_eq!(dispatch_path_for("notifications.send"), None);
+        assert!(!g.contains(GRANT_NOTIFY_TARGET));
+        let g = grants(&[GRANT_NOTIFY_TARGET]);
+        assert!(g.contains(GRANT_NOTIFY_TARGET));
+        assert!(!g.contains(GRANT_NOTIFY));
+        assert_eq!(
+            dispatch_path_for("notifications.send"),
+            Some("host.notifications_send")
+        );
+    }
+
+    #[test]
+    fn targeted_notification_has_a_dedicated_dispatch_path() {
+        assert_eq!(
+            dispatch_path_for("notifications.send"),
+            Some("host.notifications_send")
+        );
     }
 
     /// The sealing key is derived from the CANONICAL plugin id, so canonicalization

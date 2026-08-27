@@ -18,6 +18,7 @@ pub mod manifest_sidecar;
 pub mod mcp;
 pub mod onboarding;
 pub mod path_manager;
+pub mod plugin_credentials;
 pub mod process;
 pub mod providers;
 pub mod resources;

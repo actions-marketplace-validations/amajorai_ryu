@@ -5,9 +5,10 @@ const STORY_URL = "http://127.0.0.1:5182/";
 export default defineConfig({
 	testDir: ".",
 	testMatch: /turn-end-cards-proof\.spec\.ts$/,
-	fullyParallel: true,
+	fullyParallel: false,
 	forbidOnly: !!process.env.CI,
 	retries: process.env.CI ? 1 : 0,
+	workers: 1,
 	reporter: process.env.CI ? "github" : "list",
 	use: {
 		baseURL: STORY_URL,

@@ -3,7 +3,7 @@
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";
 import { ArrowRight01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { renderMorphingDropdownPopup } from "@ryu/ui/components/dropdown-menu-motion.tsx";
+import { renderDropdownPopup } from "@ryu/ui/components/dropdown-menu-motion.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
 import { FadeOverflowTextChildren } from "./fade-overflow-text.tsx";
@@ -67,7 +67,7 @@ function DropdownMenuContent({
 					)}
 					data-slot="dropdown-menu-content"
 					{...props}
-					render={renderMorphingDropdownPopup}
+					render={renderDropdownPopup}
 				/>
 			</MenuPrimitive.Positioner>
 		</MenuPrimitive.Portal>

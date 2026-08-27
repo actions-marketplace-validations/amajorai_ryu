@@ -166,7 +166,7 @@ const ADAPTER_TEMPLATE = (
 //
 // This file is a FRAGMENT, not an ES module: Core splices it into an async IIFE
 // and it \`return\`s the canonical result. That is why a top-level \`return\` is
-// correct here, and why plugins-store/*/adapters is excluded from Biome.
+// correct here, and why plugins-store/{plugins,lsp,external_plugins}/*/adapters is excluded from Biome.
 //
 // It must be a PURE function of \`input\`/\`defaults\` and the provider's answers:
 // the ONLY nondeterminism a verified adapter may contain is the provider call
@@ -324,7 +324,7 @@ function scaffold(flags) {
 	);
 	// Computed, not hardcoded: `--out` can put the package anywhere (a satellite
 	// checkout, `~/.ryu/plugins/<id>` for a tool an agent made at runtime), and a
-	// specifier that only resolves from `plugins-store/<name>/` would make every
+	// specifier that only resolves from `plugins-store/{plugins,lsp,external_plugins}/<name>/` would make every
 	// other location silently SKIP its cases — a green run that tested nothing.
 	const harnessSpecifier = relative(outDir, join(HERE, "harness.mjs"))
 		.split(sep)

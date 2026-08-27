@@ -26,7 +26,7 @@
 // divides once. No currency arithmetic happens in floats.
 
 import type { ApiTarget } from "@/src/lib/api/client.ts";
-import { apiUrl, makeHeaders } from "@/src/lib/api/client.ts";
+import { authenticatedFetch, makeHeaders } from "@/src/lib/api/client.ts";
 
 /** The app that owns this surface. Feature detection keys off it. */
 export const CRM_PLUGIN_ID = "@ryu/crm";
@@ -395,7 +395,7 @@ async function send<T>(
 	if (init?.raw !== undefined) {
 		headers["Content-Type"] = "text/csv";
 	}
-	const response = await fetch(apiUrl(target, `${CRM_BASE}${path}`), {
+	const response = await authenticatedFetch(target, `${CRM_BASE}${path}`, {
 		body:
 			init?.raw ??
 			(init?.body === undefined ? undefined : JSON.stringify(init.body)),
@@ -699,9 +699,9 @@ export function createCrmClient(target: ApiTarget) {
 
 		/** CSV of a view's current result set. Raw text, not JSON. */
 		exportView: async (viewId: string): Promise<string> => {
-			const response = await fetch(
-				apiUrl(target, `${CRM_BASE}/exports/views/${enc(viewId)}`),
-				{ headers: makeHeaders(target.token) }
+			const response = await authenticatedFetch(
+				target,
+				`${CRM_BASE}/exports/views/${enc(viewId)}`
 			);
 			if (!response.ok) {
 				throw new CrmError(response.status, response.statusText);

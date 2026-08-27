@@ -2,12 +2,9 @@ import { ditherAvatarSeed } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import { Logo as OrbLogo } from "@ryu/ui/components/logo.tsx";
 import { Toaster, toast } from "@ryu/ui/components/sileo.tsx";
 import { DEFAULT_THEME_MODE } from "@ryu/ui/theme/prefs.ts";
-import {
-	type QuestEventSurface,
-	recordQuestEvent,
-} from "@ryuhq/core-client/quest-events";
+import { recordQuestEvent } from "@ryuhq/core-client/quest-events";
 import { ThemeProvider } from "next-themes";
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "@/contexts/auth-context.tsx";
 import {
@@ -25,6 +22,11 @@ import {
 	shouldNudgeLocalMissing,
 } from "@/lib/prefer-local-node.ts";
 import { getRyuStatus, startRyuCore } from "@/lib/tauri-bridge.ts";
+import {
+	type AppSurface,
+	AppSurfaceProvider,
+	useAppSurface,
+} from "@/src/contexts/app-surface-context.tsx";
 import { EntitlementProvider } from "@/src/contexts/entitlement-context.tsx";
 import { initAnalytics } from "@/src/lib/analytics.ts";
 import { fetchWaitlistMe } from "@/src/lib/api/waitlist.ts";
@@ -38,6 +40,7 @@ import { startSettingsSync } from "@/src/lib/settings-sync/engine.ts";
 import { listenWhenReady, withTauri } from "@/src/lib/tauri-ready.ts";
 import { AgentationToolbar } from "./components/AgentationToolbar.tsx";
 import { BotTerminologyProvider } from "./components/BotTerminologyProvider.tsx";
+import { BotManagedEntry } from "./components/bot/BotManagedEntry.tsx";
 import { CrashBoundary } from "./components/CrashBoundary.tsx";
 import Layout from "./components/layout/Layout.tsx";
 import { PageWrapper } from "./components/layout/PageWrapper.tsx";
@@ -45,8 +48,11 @@ import { MediaPipWindow } from "./components/media/MediaPip.tsx";
 import { GlobalContextMenu } from "./components/shell/GlobalContextMenu.tsx";
 import { DesktopStartupChooser } from "./components/startup/DesktopStartupChooser.tsx";
 import { useAcpKeepAwake } from "./hooks/useAcpKeepAwake.ts";
+import { useActiveNode } from "./hooks/useActiveNode.ts";
 import { initBackgroundCustomization } from "./hooks/useBackgroundCustomization.ts";
 import { initChromeShadows } from "./hooks/useChromeShadows.ts";
+import { useConsoleAccess } from "./hooks/useConsoleAccess.ts";
+import { useCreditsWallet } from "./hooks/useCreditsWallet.ts";
 import { initInvertedBackgrounds } from "./hooks/useInvertedBackgrounds.ts";
 import { initPointerCursor } from "./hooks/usePointerCursor.ts";
 import { initTheme, useThemePreset } from "./hooks/useThemePreset.ts";
@@ -55,7 +61,19 @@ import {
 	type InstallerProgress,
 	installerComponentLabel,
 } from "./lib/installer-progress.ts";
+import { setInterfaceLevel } from "./lib/interface-level.ts";
 import { isOnboardingActive } from "./lib/onboarding-active.ts";
+import {
+	isRyuBot,
+	isRyuStandaloneApp,
+	STANDALONE_APP_ID,
+	STANDALONE_APP_NAME,
+} from "./lib/product.ts";
+import {
+	setProductMode,
+	useProductMode,
+	useProductModeStore,
+} from "./lib/product-mode.ts";
 import { useReleaseChannel } from "./lib/release-channel.ts";
 import {
 	readStartupSelectionPreferences,
@@ -65,6 +83,7 @@ import CompanionPage from "./pages/CompanionPage.tsx";
 import LoginPage from "./pages/LoginPage.tsx";
 import OnboardingPage from "./pages/OnboardingPage.tsx";
 import { PreflightPage } from "./pages/PreflightPage.tsx";
+import StandaloneAppEntry from "./pages/StandaloneAppEntry.tsx";
 import WaitlistPage from "./pages/WaitlistPage.tsx";
 import { useAppStore } from "./store/useAppStore.ts";
 import {
@@ -100,25 +119,27 @@ function ignoreSubscribeFailure(error: unknown): void {
 const WAITLIST_APPROVED_KEY = "ryu_waitlist_approved";
 
 export interface DesktopAppProps {
-	/** The product surface reporting shared waitlist referral activity. */
-	surface?: QuestEventSurface;
+	/** The product shell hosting this shared React tree. */
+	hostSurface: AppSurface;
 }
 
-export default function App({ surface = "desktop" }: DesktopAppProps = {}) {
+export default function App({ hostSurface }: DesktopAppProps) {
 	// Companion overlay is a completely separate surface — no auth, no layout.
 	// Wrap both surfaces in the crash boundary so an unhandled render error is
 	// caught (recoverable fallback, not a white screen) and reported when the user
 	// consented to crash reports.
 	return (
-		<CrashBoundary>
-			{WINDOW_LABEL === "companion" ? (
-				<CompanionOverlay />
-			) : WINDOW_LABEL === "media-pip" ? (
-				<MediaPipOverlay />
-			) : (
-				<MainApp surface={surface} />
-			)}
-		</CrashBoundary>
+		<AppSurfaceProvider surface={hostSurface}>
+			<CrashBoundary>
+				{WINDOW_LABEL === "companion" ? (
+					<CompanionOverlay />
+				) : WINDOW_LABEL === "media-pip" ? (
+					<MediaPipOverlay />
+				) : (
+					<MainApp hostSurface={hostSurface} />
+				)}
+			</CrashBoundary>
+		</AppSurfaceProvider>
 	);
 }
 
@@ -158,10 +179,90 @@ function ThemeWatcher() {
 	return null;
 }
 
+/** Syncs the server-backed Console gate and the existing surface preferences. */
+function ProductModeAccessSync({ children }: { children: ReactNode }) {
+	const activeNode = useActiveNode();
+	const { canSwitchToConsole, consoleOnly } = useConsoleAccess(activeNode);
+	const cloudNodes = useNodeStore((state) => state.cloudNodes);
+	const hydrateCloudNodes = useNodeStore((state) => state.hydrateCloudNodes);
+	const { entitlement, loading: entitlementLoading } = useCreditsWallet();
+	const productMode = useProductMode();
+	const requestedProductMode = useProductModeStore(
+		(state) => state.requestedMode
+	);
+	const setConsoleAccess = useProductModeStore(
+		(state) => state.setConsoleAccess
+	);
+	const [cloudNodesSettled, setCloudNodesSettled] = useState(false);
+
+	useEffect(() => {
+		hydrateCloudNodes()
+			.catch(() => undefined)
+			.finally(() => setCloudNodesSettled(true));
+	}, [hydrateCloudNodes]);
+
+	useEffect(() => {
+		if (entitlementLoading || !cloudNodesSettled) {
+			return;
+		}
+		if (isRyuBot()) {
+			setConsoleAccess(false);
+			return;
+		}
+		const managedProductAvailable =
+			activeNode.managed === true ||
+			cloudNodes.some((node) => node.managed) ||
+			entitlement?.managedInference === true;
+		if (
+			!managedProductAvailable &&
+			consoleOnly &&
+			requestedProductMode !== "os"
+		) {
+			setConsoleAccess(true);
+			if (productMode !== "console") {
+				setProductMode("console");
+			}
+			return;
+		}
+		setConsoleAccess(canSwitchToConsole);
+	}, [
+		activeNode.managed,
+		canSwitchToConsole,
+		cloudNodes,
+		cloudNodesSettled,
+		consoleOnly,
+		entitlement?.managedInference,
+		entitlementLoading,
+		productMode,
+		requestedProductMode,
+		setConsoleAccess,
+	]);
+
+	useEffect(() => {
+		setInterfaceLevel(productMode === "bot" ? "simple" : "expert");
+	}, [productMode]);
+
+	if (entitlementLoading || !cloudNodesSettled) {
+		return (
+			<div
+				className="flex size-full items-center justify-center"
+				data-tauri-drag-region
+			>
+				<OrbLogo size="56px" variant="shimmer" />
+			</div>
+		);
+	}
+	return children;
+}
+
 /** Syncs the macOS dock / Windows taskbar label with the release channel. */
 function WindowTitleManager() {
 	const { dev } = useBuildProfile();
 	const [channel] = useReleaseChannel();
+	const productMode = useProductMode();
+	const botProduct = productMode === "bot";
+	const osProduct = productMode === "os";
+	const standaloneApp = isRyuStandaloneApp();
 
 	useEffect(() => {
 		const suffix = dev
@@ -174,7 +275,18 @@ function WindowTitleManager() {
 						? "Beta"
 						: null;
 
-		const title = suffix ? `Ryu (Research Preview ${suffix})` : "Ryu";
+		const productTitle = botProduct
+			? "Ryu Bot"
+			: osProduct
+				? "Ryu OS"
+				: "Ryu Console";
+		const title = standaloneApp
+			? STANDALONE_APP_NAME || "Ryu App"
+			: botProduct || osProduct
+				? `${productTitle}${suffix ? ` ${suffix}` : ""}`
+				: suffix
+					? `${productTitle} (Research Preview ${suffix})`
+					: productTitle;
 
 		// `getCurrentWindow()` reads the bridge's metadata, so this effect fires
 		// inside the same cold-start race. Through the gate it retries once the
@@ -185,12 +297,15 @@ function WindowTitleManager() {
 		}).catch(() => {
 			// Setting the window title is cosmetic — never worth surfacing.
 		});
-	}, [dev, channel]);
+	}, [botProduct, channel, dev, osProduct, standaloneApp]);
 
 	return null;
 }
 
-function MainApp({ surface }: { surface: QuestEventSurface }) {
+function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
+	const productMode = useProductMode();
+	const botProduct = productMode === "bot";
+	const standaloneApp = isRyuStandaloneApp();
 	useAcpKeepAwake();
 	const setCoreStatus = useAppStore((state) => state.setCoreStatus);
 	const coreStatus = useAppStore((state) => state.coreStatus);
@@ -278,6 +393,9 @@ function MainApp({ surface }: { surface: QuestEventSurface }) {
 	}, [initNodes]);
 
 	useEffect(() => {
+		if (botProduct) {
+			return;
+		}
 		let cancelled = false;
 
 		async function init() {
@@ -325,9 +443,12 @@ function MainApp({ surface }: { surface: QuestEventSurface }) {
 		return () => {
 			cancelled = true;
 		};
-	}, [setCoreStatus]);
+	}, [botProduct, setCoreStatus]);
 
 	useEffect(() => {
+		if (botProduct) {
+			return;
+		}
 		// Surface the same versioned installer stream used inline by onboarding. A
 		// no-op in onboarding avoids stacking a toast over the progress card; outside
 		// the wizard this keeps background setup visible too.
@@ -393,7 +514,7 @@ function MainApp({ surface }: { surface: QuestEventSurface }) {
 				fn();
 			}
 		};
-	}, []);
+	}, [botProduct]);
 
 	useEffect(() => {
 		// Quick Capture (double-tap Shift). The gesture happens while another app is
@@ -547,29 +668,30 @@ function MainApp({ surface }: { surface: QuestEventSurface }) {
 	// or a recovered server — through without a restart.
 	const authed = !!session || isAuthenticated;
 	const reportedQuestEventKeys = useRef(new Set<string>());
+	const questSurface = hostSurface === "web" ? null : hostSurface;
 
 	useEffect(() => {
-		if (!(authed && vaultReady)) {
+		if (!(authed && vaultReady && questSurface)) {
 			return;
 		}
 		const token = localStorage.getItem(TOKEN_KEY);
 		if (!token) {
 			return;
 		}
-		const eventKey = `${surface}:${session?.user?.id ?? "active-session"}`;
+		const eventKey = `${questSurface}:${session?.user?.id ?? "active-session"}`;
 		if (reportedQuestEventKeys.current.has(eventKey)) {
 			return;
 		}
 		reportedQuestEventKeys.current.add(eventKey);
 		const target = { token, url: BACKEND_URL };
 		const events = [
-			recordQuestEvent(target, "referral_sync", surface),
-			...(surface === "desktop"
-				? [recordQuestEvent(target, "desktop_app_opened", surface)]
+			recordQuestEvent(target, "referral_sync", questSurface),
+			...(questSurface === "desktop"
+				? [recordQuestEvent(target, "desktop_app_opened", questSurface)]
 				: []),
 		];
 		void Promise.allSettled(events);
-	}, [authed, session?.user?.id, surface, vaultReady]);
+	}, [authed, questSurface, session?.user?.id, vaultReady]);
 
 	const startupAccounts = vaultReady ? listAccounts() : [];
 	const startupPreferences = readStartupSelectionPreferences();
@@ -580,6 +702,10 @@ function MainApp({ surface }: { surface: QuestEventSurface }) {
 
 	useEffect(() => {
 		if (!authed) {
+			setStartupSelectionStatus("ready");
+			return;
+		}
+		if (botProduct) {
 			setStartupSelectionStatus("ready");
 			return;
 		}
@@ -604,6 +730,7 @@ function MainApp({ surface }: { surface: QuestEventSurface }) {
 		startupPreferences.defaultNodeName,
 		startupPreferences.mode,
 		vaultReady,
+		botProduct,
 	]);
 	const [waitlistGate, setWaitlistGate] = useState<
 		"loading" | "approved" | "pending"
@@ -771,18 +898,24 @@ function MainApp({ surface }: { surface: QuestEventSurface }) {
 		nodes.find((n) => n.name === defaultNodeName) ?? LOCAL_FALLBACK
 	);
 	const showPreflight =
+		!(botProduct || standaloneApp) &&
+		hostSurface === "desktop" &&
 		coreStatus === "stopped" &&
 		activeNodeIsLocal &&
 		localStorage.getItem("ryu_onboarding_complete") === "true";
 
-	const showApp = authed;
+	const showApp = standaloneApp || authed;
 	// Hold the app behind the waitlist check while it resolves, so we never flash
 	// the app and then bounce a pending user to the queue screen.
-	const waitlistResolving = showApp && waitlistGate === "loading";
-	const waitlisted = showApp && waitlistGate === "pending";
+	const waitlistResolving =
+		!standaloneApp && showApp && waitlistGate === "loading";
+	const waitlisted = !standaloneApp && showApp && waitlistGate === "pending";
 	const startupSelectionLoading =
-		authed && startupSelectionStatus === "loading";
-	const startupChooserVisible = authed && startupSelectionStatus === "show";
+		!standaloneApp && authed && startupSelectionStatus === "loading";
+	const startupChooserVisible =
+		!(botProduct || standaloneApp) &&
+		authed &&
+		startupSelectionStatus === "show";
 
 	return (
 		<ThemeProvider
@@ -796,7 +929,7 @@ function MainApp({ surface }: { surface: QuestEventSurface }) {
 				<WindowTitleManager />
 				<Toaster position="bottom-right" theme="system" />
 				<AgentationToolbar />
-				<GlobalContextMenu>
+				<HostContextMenu>
 					{startupSelectionLoading ? (
 						<PageWrapper>
 							<div
@@ -814,7 +947,8 @@ function MainApp({ surface }: { surface: QuestEventSurface }) {
 						<PageWrapper>
 							<PreflightPage />
 						</PageWrapper>
-					) : (isPending && !sessionSettledOnce) || waitlistResolving ? (
+					) : (!standaloneApp && isPending && !sessionSettledOnce) ||
+						waitlistResolving ? (
 						<PageWrapper>
 							<div
 								className="flex h-full w-full items-center justify-center"
@@ -840,18 +974,30 @@ function MainApp({ surface }: { surface: QuestEventSurface }) {
 						<AuthProvider>
 							<PageWrapper>
 								<EntitlementProvider>
-									<MemoryRouter
-										initialEntries={[
-											localStorage.getItem("ryu_onboarding_complete") === "true"
-												? "/chat"
-												: "/onboarding",
-										]}
-									>
-										<Routes>
-											<Route element={<OnboardingPage />} path="/onboarding" />
-											<Route element={<Layout />} path="/*" />
-										</Routes>
-									</MemoryRouter>
+									<ProductModeAccessSync>
+										{standaloneApp ? (
+											<StandaloneAppEntry appId={STANDALONE_APP_ID} />
+										) : botProduct ? (
+											<BotManagedEntry />
+										) : (
+											<MemoryRouter
+												initialEntries={[
+													localStorage.getItem("ryu_onboarding_complete") ===
+													"true"
+														? "/chat"
+														: "/onboarding",
+												]}
+											>
+												<Routes>
+													<Route
+														element={<OnboardingPage />}
+														path="/onboarding"
+													/>
+													<Route element={<Layout />} path="/*" />
+												</Routes>
+											</MemoryRouter>
+										)}
+									</ProductModeAccessSync>
 								</EntitlementProvider>
 							</PageWrapper>
 						</AuthProvider>
@@ -860,8 +1006,16 @@ function MainApp({ surface }: { surface: QuestEventSurface }) {
 							<LoginPage />
 						</PageWrapper>
 					)}
-				</GlobalContextMenu>
+				</HostContextMenu>
 			</BotTerminologyProvider>
 		</ThemeProvider>
+	);
+}
+
+function HostContextMenu({ children }: { children: ReactNode }) {
+	return useAppSurface().isDesktop ? (
+		<GlobalContextMenu>{children}</GlobalContextMenu>
+	) : (
+		children
 	);
 }

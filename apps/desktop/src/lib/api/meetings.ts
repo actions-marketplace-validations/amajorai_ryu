@@ -5,13 +5,7 @@
 // fetch + ReadableStream (not EventSource) so the bearer token can be attached —
 // same approach as the monitors alert stream.
 
-import {
-	type ApiTarget,
-	apiUrl,
-	identityHeaders,
-	makeHeaders,
-	request,
-} from "./client.ts";
+import { type ApiTarget, authenticatedFetch, request } from "./client.ts";
 
 export type MeetingStatus = "detected" | "recording" | "processing" | "done";
 export type MeetingSource = "manual" | "auto";
@@ -224,15 +218,9 @@ export async function importMeeting(
 	if (data.title) {
 		form.append("title", data.title);
 	}
-	// Auth + identity headers, but NOT Content-Type — the browser sets the
-	// multipart boundary itself when we pass a FormData body.
-	const headers: Record<string, string> = { ...identityHeaders() };
-	if (target.token) {
-		headers.Authorization = `Bearer ${target.token}`;
-	}
-	const resp = await fetch(apiUrl(target, "/api/meetings/import"), {
+	const resp = await authenticatedFetch(target, "/api/meetings/import", {
 		method: "POST",
-		headers,
+		headers: { "Content-Type": null },
 		body: form,
 	});
 	if (!resp.ok) {
@@ -293,9 +281,9 @@ export async function streamMeetingEvents(
 	onEvent: (event: MeetingEvent) => void,
 	signal?: AbortSignal
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, "/api/meetings/stream"), {
+	const resp = await authenticatedFetch(target, "/api/meetings/stream", {
 		method: "GET",
-		headers: { ...makeHeaders(target.token), Accept: "text/event-stream" },
+		headers: { Accept: "text/event-stream" },
 		signal,
 	});
 	if (!(resp.ok && resp.body)) {

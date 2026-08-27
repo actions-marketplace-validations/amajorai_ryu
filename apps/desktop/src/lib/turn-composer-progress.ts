@@ -6,7 +6,7 @@ import type {
 	MissionStreamMessage,
 	MissionStreamPart,
 } from "@/src/lib/mission-control/turn-groups.ts";
-import { toolNameOf } from "@/src/lib/mission-control/turn-groups.ts";
+import { deriveTodoProgress } from "@/src/lib/todo-progress.ts";
 
 export type TurnChangedFile = EditedFile;
 
@@ -48,64 +48,15 @@ function partsWithInspectableInFlightEdits(
 }
 
 function readTodos(parts: MissionStreamPart[]): TurnTodoProgress | undefined {
-	for (let index = parts.length - 1; index >= 0; index -= 1) {
-		const part = parts[index];
-		if (!part) {
-			continue;
-		}
-		const tool = toolNameOf(part);
-		if (tool !== "TodoWrite") {
-			continue;
-		}
-		const input = isRecord(part.input) ? part.input : {};
-		const output = isRecord(part.output) ? part.output : {};
-		const raw = input.todos ?? output.newTodos;
-		if (!Array.isArray(raw)) {
-			continue;
-		}
-		const items = raw.flatMap((item) => {
-			if (!isRecord(item)) {
-				return [];
-			}
-			const label =
-				typeof item.content === "string" ? item.content.trim() : null;
-			const status = item.status;
-			if (
-				!label ||
-				(status !== "completed" &&
-					status !== "in_progress" &&
-					status !== "pending")
-			) {
-				return [];
-			}
-			return [
-				{
-					label,
-					status: status as "completed" | "in_progress" | "pending",
-				},
-			];
-		});
-		if (items.length === 0) {
-			// A valid empty snapshot clears the previous todo list. Do not fall back
-			// to an older TodoWrite from this same turn and show stale progress.
-			return undefined;
-		}
-		const activeIndex = items.findIndex(
-			(item) => item.status === "in_progress"
-		);
-		const pendingIndex = items.findIndex((item) => item.status === "pending");
-		return {
-			items,
-			current:
-				activeIndex >= 0
-					? activeIndex + 1
-					: pendingIndex >= 0
-						? pendingIndex + 1
-						: items.length,
-			total: items.length,
-		};
+	const snapshot = deriveTodoProgress([{ parts }]);
+	if (!snapshot) {
+		return undefined;
 	}
-	return undefined;
+	return {
+		current: snapshot.current,
+		items: snapshot.items,
+		total: snapshot.total,
+	};
 }
 
 /** Derive the live todo list and file edits made after the latest user message. */

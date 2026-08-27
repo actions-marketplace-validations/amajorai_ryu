@@ -200,7 +200,12 @@ export default function SpaceDocEditorPage({
 	const cursorUser = useMemo(() => {
 		const name = oidcUser?.name || oidcUser?.email || "Anonymous";
 		const seed = oidcUser?.email || oidcUser?.name || "anonymous";
-		return { color: cursorColorFor(seed), name };
+		return {
+			avatarUrl: oidcUser?.picture,
+			color: cursorColorFor(seed),
+			id: seed,
+			name,
+		};
 	}, [oidcUser]);
 
 	// Flip the persistence model when the room becomes (or stops being) live.
@@ -208,6 +213,19 @@ export default function SpaceDocEditorPage({
 		collaborativeRef.current = synced;
 		setCollaborative(synced);
 	}, []);
+	const handleRemoteReset = useCallback(async () => {
+		if (timerRef.current) {
+			clearTimeout(timerRef.current);
+			timerRef.current = null;
+		}
+		const restored = await getDocument(spaceId, documentId);
+		setDoc(restored);
+		setTitle(restored.title);
+		titleRef.current = restored.title;
+		markdownRef.current = restored.source;
+		setReloadNonce((value) => value + 1);
+		setSaveState("saved");
+	}, [documentId, getDocument, spaceId]);
 
 	const collab = useMemo<MarkdownCollab | undefined>(() => {
 		if (!(collabReady && doc)) {
@@ -216,6 +234,9 @@ export default function SpaceDocEditorPage({
 		return {
 			documentId,
 			jwt,
+			onReset: () => {
+				void handleRemoteReset();
+			},
 			onSyncedChange: handleSyncedChange,
 			target: { token: nodeToken, url: nodeUrl },
 			user: cursorUser,
@@ -229,6 +250,7 @@ export default function SpaceDocEditorPage({
 		nodeUrl,
 		cursorUser,
 		handleSyncedChange,
+		handleRemoteReset,
 	]);
 
 	const flush = useCallback(async () => {
@@ -288,12 +310,11 @@ export default function SpaceDocEditorPage({
 	const handleMarkdownChange = useCallback(
 		(markdown: string) => {
 			// Always track the latest body so the title save (and the offline
-			// fallback) writes a CRDT-consistent snapshot. Once collaborative, the
-			// CRDT persists the body in Core, so the markdown PUT is skipped.
+			// fallback) writes a CRDT-consistent projection for search, backlinks, and
+			// version history. Yjs remains the merge authority; this is its readable
+			// materialization.
 			markdownRef.current = markdown;
-			if (!collaborativeRef.current) {
-				scheduleSave();
-			}
+			scheduleSave();
 		},
 		[scheduleSave]
 	);

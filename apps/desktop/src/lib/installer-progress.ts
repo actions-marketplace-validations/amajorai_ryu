@@ -10,9 +10,12 @@ export interface InstallerProgress {
 
 const COMPONENT_LABELS: Record<string, string> = {
 	"bundled-defaults": "bundled models, engines, and skills",
+	ghost: "Ghost",
+	island: "Ryu Island",
 	"ryu-cli": "Ryu CLI",
 	"ryu-core": "Ryu Core",
 	"ryu-gateway": "the model gateway",
+	shadow: "Shadow",
 };
 
 export function installerComponentLabel(component: string): string {

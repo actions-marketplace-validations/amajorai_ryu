@@ -46,6 +46,27 @@ use schema::validate_runnable;
 // `PluginManifestLoader`, `core_version`, the built-in fixtures, and UI consts.
 pub use ryu_kernel_contracts::manifest::*;
 
+/// Read a package-owned file after resolving symlinks and proving the resolved
+/// target remains inside the package root. Lexical allowlists reject `..`, but a
+/// symlink at an allowed path can still point anywhere on the author or node host.
+pub(crate) fn read_contained_package_file(base: &Path, rel: &str) -> Result<String, String> {
+    let canonical_base = std::fs::canonicalize(base)
+        .map_err(|e| format!("{}: cannot resolve package root: {e}", base.display()))?;
+    let joined = base.join(rel);
+    let canonical_target = std::fs::canonicalize(&joined)
+        .map_err(|e| format!("{}: {e}", joined.display()))?;
+    if !canonical_target.starts_with(&canonical_base) {
+        return Err(format!(
+            "{}: resolved target '{}' escapes package root '{}'",
+            joined.display(),
+            canonical_target.display(),
+            canonical_base.display()
+        ));
+    }
+    std::fs::read_to_string(&canonical_target)
+        .map_err(|e| format!("{}: {e}", canonical_target.display()))
+}
+
 /// Resolve every path a manifest references into its inline wire form — `code_file`
 /// → `code` and `output_styles[].file` → `source` — from the one source that can
 /// actually hold the file for this manifest's provenance.
@@ -58,9 +79,9 @@ pub use ryu_kernel_contracts::manifest::*;
 /// - **`code_base: Some(dir)` — a manifest read off disk** (`~/.ryu/plugins/<id>/`,
 ///   a satellite checkout, a dev tree). Its files are right there next to it, so
 ///   they are read directly. [`validate_code_file_path`] /
-///   [`validate_output_style_path`] have already constrained the path to
-///   `<hooks|adapters>/<name>.js` / `output-styles/<name>.md` with no traversal, so
-///   the join stays inside the plugin directory.
+///   [`validate_output_style_path`] constrain the lexical path, and
+///   [`read_contained_package_file`] additionally rejects symlinks whose resolved
+///   target escapes the plugin directory.
 ///
 /// # Why both carriage paths run from ONE function
 ///
@@ -76,8 +97,7 @@ pub fn hydrate_manifest_code_files(
 ) -> Result<(), String> {
     let plugin_id = manifest.id.clone();
     manifest.hydrate_code_files(|rel| match code_base {
-        Some(dir) => std::fs::read_to_string(dir.join(rel))
-            .map_err(|e| format!("{}: {e}", dir.join(rel).display())),
+        Some(dir) => read_contained_package_file(dir, rel),
         None => builtin_code::lookup(&plugin_id, rel)
             .map(str::to_owned)
             .ok_or_else(|| {
@@ -88,8 +108,7 @@ pub fn hydrate_manifest_code_files(
             }),
     })?;
     manifest.hydrate_output_style_files(|rel| match code_base {
-        Some(dir) => std::fs::read_to_string(dir.join(rel))
-            .map_err(|e| format!("{}: {e}", dir.join(rel).display())),
+        Some(dir) => read_contained_package_file(dir, rel),
         None => builtin_code::lookup_output_style(&plugin_id, rel)
             .map(str::to_owned)
             .ok_or_else(|| {
@@ -173,7 +192,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 /// (`sample.manifest.json` — the Research Assistant demo — is kept as a test-only
 /// fixture and is deliberately NOT shipped as a built-in.)
 /// - `spider.manifest.json` — Spider web crawler tool. A fully declarative
-///   `command` plugin (Core-tier, default-on): its single runnable IS the crawl
+///   `command` plugin (Core-tier, pre-installed): its single runnable IS the crawl
 ///   tool, backed by a BYO `spider` CLI reached through the command-tool
 ///   allowlist. The native `sidecar/mcp/spider.rs` provider was deleted, so the
 ///   fixture is the SOLE owner of the tool (see the exception note below).
@@ -185,7 +204,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///      `scrapling mcp`, so the verb binds `web.extract` to `scrapling.get`
 ///      exactly as `agentbrowser` binds `browser.*`. Capability providers are not
 ///      required to be manifest runnables; nothing in `resolve_verbs` reads them.
-///   2. It is **Core-tier but NOT in `CORE_DEFAULT_ON`**. Core-tier is a
+///   2. It is **Core-tier but NOT in `CORE_PREINSTALLED`**. Core-tier is a
 ///      requirement, not a promotion: `may_register_mcp_servers` auto-allows
 ///      manifest `mcp_servers` for Core-tier packages, while a Community-tier
 ///      plugin needs the approved `mcp:server` grant — off the Gateway's default
@@ -285,8 +304,8 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 /// - `firewall.manifest.json` — Gateway firewall on/off Policy plugin (#447, Core-tier, opt-in).
 /// - `routing.manifest.json` — Smart (classifier) routing on/off Policy plugin (#447, Core-tier, opt-in).
 /// - `sandbox.manifest.json` — Wasmtime ephemeral sandbox on/off Policy plugin (#448, Core-tier, opt-in).
-/// - `engines.manifest.json` — Local engine bindings (llama.cpp + embeddings) as a default-on Core plugin (#448).
-/// - `durable.manifest.json` — Durable workflow execution engine as a default-on Core plugin (#448 dogfood).
+/// - `engines.manifest.json` — Local engine bindings (llama.cpp + embeddings) as a pre-installed Core plugin (#448).
+/// - `durable.manifest.json` — Durable workflow execution engine as a pre-installed Core plugin (#448 dogfood).
 /// - `predict.manifest.json` — System-wide predictive typing on/off (a `predict` Policy runnable; Core-tier, opt-in). The plugin is the single switch for the `/api/predict/*` brain.
 /// - `firecrawl.manifest.json` — Firecrawl search+scrape tool plugin (BYOK, v2 API).
 ///   A third provider of `web.search` and `web.extract`, claiming `default` on
@@ -326,7 +345,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   but sits in two different places, because Mem0's own API does: INSIDE `filters`
 ///   for search (a top-level `user_id` is rejected with 400) and TOP-LEVEL for add.
 ///   Copying the search shape onto add would drop the entity and the write would be
-///   rejected — see `plugins-store/mem0/README.md`.
+///   rejected — see `plugins-store/plugins/mem0/README.md`.
 /// - `honcho.manifest.json` — Honcho hosted memory tool plugin (BYOK, `api.honcho.dev`
 ///   v3 REST API). The FIRST provider of `memory.context`, which is why it exists:
 ///   `memory_provider::context` and the `memory.provider-context` setting had no
@@ -370,7 +389,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   the tool's `body_defaults` pin `minimal` (the kernel abandons a memory provider
 ///   after `PROVIDER_TIMEOUT`, 4s, and a deeper Dialectic pass routinely costs more),
 ///   and the optional `honcho.reasoning-level` preference overrides it because
-///   `body_defaults` merge UNDER the args — see `plugins-store/honcho/README.md`.
+///   `body_defaults` merge UNDER the args — see `plugins-store/plugins/honcho/README.md`.
 /// - `bytebot.manifest.json` — the SECOND provider of `computer.control`, which until
 ///   now had only `ghost` and so could not be swapped at all. It binds Bytebot's
 ///   `bytebotd` daemon (https://github.com/bytebot-ai/bytebot), a documented local
@@ -422,58 +441,74 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   report "nothing happened" in the one place a caller must be told it failed.
 // Test-only catalog fixtures keep the manifest invariants hermetic without
 // putting the entire first-party catalog into production Core binaries.
+// Safe Actions is a shipped satellite, so its manifest is part of both the
+// hermetic validation catalog and the production system set.
+const SAFE_ACTIONS_MANIFEST: &str =
+    include_str!("../../../../apps-store/safe-actions/manifest.json");
+
 #[cfg(test)]
 const BUILTIN_MANIFESTS: &[&str] = &[
-    include_str!("../../../../plugins-store/spider/manifest.json"),
-    include_str!("../../../../plugins-store/scrapling/manifest.json"),
-    include_str!("../../../../plugins-store/agentbrowser/manifest.json"),
+    SAFE_ACTIONS_MANIFEST,
+    // Backstage is a Core-tier satellite, so the hermetic test catalog must
+    // carry the same manifest identity as the production runtime set. Keeping
+    // it here makes CORE_PLUGINS -> manifest and seed grant checks exercise the
+    // external-repository Companion instead of passing only in release builds.
+    include_str!("../../../../apps-store/backstage/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/spider/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/scrapling/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/agentbrowser/manifest.json"),
     // Ego Browser is the opt-in inline-Deno browser.control provider. Its
     // manifest is compiled into test catalogs so the Core tier and capability
     // binding invariants cover the same package that the marketplace ships.
-    include_str!("../../../../plugins-store/ego-browser/manifest.json"),
-    include_str!("../../../../plugins-store/expect/manifest.json"),
-    include_str!("../../../../plugins-store/agentation/manifest.json"),
-    include_str!("../../../../plugins-store/exa/manifest.json"),
-    include_str!("../../../../plugins-store/tavily/manifest.json"),
-    include_str!("../../../../plugins-store/brave/manifest.json"),
-    include_str!("../../../../plugins-store/serper/manifest.json"),
-    include_str!("../../../../plugins-store/parallel/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/ego-browser/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/expect/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/agentation/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/exa/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/tavily/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/brave/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/serper/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/parallel/manifest.json"),
     // `docs` is the read-only docs MCP plugin: it declares a REMOTE HTTP server
     // (`docs` → https://docs.ryuhq.com/mcp) serving search + page content from
     // the docs site itself — the same content /llms.txt exposes, as MCP tools.
     // Nothing to spawn, nothing to install: Core-tier so the server registers
-    // (see the `CORE_PLUGINS` row), default-on so every agent can look up docs.
-    include_str!("../../../../plugins-store/docs/manifest.json"),
+    // (see the `CORE_PLUGINS` row), pre-installed so every agent can look up docs.
+    include_str!("../../../../plugins-store/plugins/docs/manifest.json"),
     // Composio Connect is a hosted OAuth MCP bridge. Keep the fixture in the
     // hermetic catalog so its remote transport, OAuth declaration, and reserved
     // governance grants are validated with every built-in manifest.
-    include_str!("../../../../plugins-store/composio-connect/manifest.json"),
+    include_str!("../../../../plugins-store/external_plugins/composio-connect/manifest.json"),
     // Generic workflow fan-out tool. Core owns the host bridge and delegation
     // engine; the plugin contributes only the validated inline tool surface.
-    include_str!("../../../../plugins-store/dynamic-workflows/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/dynamic-workflows/manifest.json"),
     // Declarative message reactions: the desktop owns the safe native renderer
     // while this manifest owns whether the action is contributed at all.
-    include_str!("../../../../plugins-store/reactions/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/reactions/manifest.json"),
     // Side questions and temporary chats are host-rendered chat features. Their
     // manifests own discoverability and lifecycle even though Core keeps the
     // side-model bridge and the desktop chat implementation.
-    include_str!("../../../../plugins-store/side-chats/manifest.json"),
-    include_str!("../../../../plugins-store/ghost-chats/manifest.json"),
-    include_str!("../../../../plugins-store/expanded-composer/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/side-chats/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/ghost-chats/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/expanded-composer/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/stats/manifest.json"),
+    // Reconnect Retry contributes a bounded desktop host feature. Its retry
+    // authorization remains Core-owned; this fixture keeps the package in the
+    // hermetic manifest/catalog validation set without making it pre-installed.
+    include_str!("../../../../plugins-store/plugins/reconnect-retry/manifest.json"),
     include_str!("fixtures/layers.manifest.json"),
-    include_str!("../../../../plugins-store/ghost/manifest.json"),
-    include_str!("../../../../plugins-store/shadow/manifest.json"),
-    include_str!("../../../../plugins-store/headroom/manifest.json"),
-    include_str!("../../../../plugins-store/usage-pacer/manifest.json"),
-    include_str!("../../../../plugins-store/effort-escalator/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/ghost/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/shadow/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/headroom/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/usage-pacer/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/effort-escalator/manifest.json"),
     // The other cost-reduction plugin, and the other shape: `headroom` compresses
     // gateway-routed messages through a Core-hosted transform, while `pxpipe` is a
     // loopback proxy the user points a provider at, imaging the static half of a
     // request so it bills as vision tokens. Core-tier (its managed sidecar would be
-    // refused at Community — see the plugin's README), never default-on: it needs
+    // refused at Community — see the plugin's README), never pre-installed: it needs
     // Node on PATH and a hand-configured provider before it does anything.
-    include_str!("../../../../plugins-store/pxpipe/manifest.json"),
-    include_str!("../../../../plugins-store/firewall/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/pxpipe/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/firewall/manifest.json"),
     include_str!("fixtures/routing.manifest.json"),
     include_str!("fixtures/sandbox.manifest.json"),
     include_str!("fixtures/engines.manifest.json"),
@@ -482,14 +517,14 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // firewall/routing/sandbox: enabling the plugin is the single switch for the
     // /api/predict/* brain — there is no separate config toggle.
     include_str!("../../../../apps-store/predict/manifest.json"),
-    // System-wide dictation + agent-ask (Policy-gated, Core-local). Default-on:
+    // System-wide dictation + agent-ask (Policy-gated, Core-local). Pre-installed:
     // Island hosts the OS surface; enabling the plugin is the single switch.
     // Formerly hardcoded into Island — extracted as an apps-store app so settings
     // register via contributes.settings_tabs like predict.
     include_str!("../../../../apps-store/dictation/manifest.json"),
     // The Island companion overlay itself — a desktop-owned Electron sidecar the
     // shell installs and launches (never a Core sidecar), so its record is a pure
-    // settings governance shell: opt-in and NOT pre-seeded (`CORE_PLUGINS` only),
+    // settings governance shell: opt-in and install-on-demand (`CORE_PLUGINS` only),
     // and its Island settings tab registers via contributes.settings_tabs the same
     // way every other app does, appearing only once the record is installed.
     include_str!("../../../../apps/island/manifest.json"),
@@ -497,31 +532,31 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // as built-in fixtures but are built exactly like a third-party plugin would
     // be: a manifest + an inline JS hook reaching Core only through the
     // capability-gated plugin host. `goal`/`proof`/`double-check`/`chat-title`
-    // are Core-tier and default-on (see `plugins::builtins::CORE_DEFAULT_ON`) so
+    // are Core-tier and pre-installed (see `plugins::builtins::CORE_PREINSTALLED`) so
     // their features work on every surface with zero setup, gated cheaply by each
     // hook's `match` block (or preference read for chat-title); `advisor` stays
     // Community (install-then-enable).
-    include_str!("../../../../plugins-store/double-check/manifest.json"),
-    include_str!("../../../../plugins-store/goal/manifest.json"),
-    include_str!("../../../../plugins-store/chat-title/manifest.json"),
-    include_str!("../../../../plugins-store/advisor/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/double-check/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/goal/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/chat-title/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/advisor/manifest.json"),
     // `proof` is `goal`'s stronger sibling: instead of a one-line transcript
     // judge, each round spawns an INDEPENDENT verifier sub-agent (grant
     // `hook:run-agent`) that gathers real evidence with tools before deciding.
-    include_str!("../../../../plugins-store/proof/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/proof/manifest.json"),
     // `receipts` is `proof`'s VISUAL sibling: the verifier sub-agent judges a
     // captured screenshot or screen recording instead of re-reading the workspace,
     // so a round leaves behind an artifact a human can look at afterwards. The hook
     // has no capture capability of its own (no HTTP, no callTool in the sandbox),
     // so the artifact arrives as an absolute path printed in the turn text.
-    include_str!("../../../../plugins-store/receipts/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/receipts/manifest.json"),
     // `recap` is the read-side counterpart to those three: instead of steering the
     // turn, it summarizes the one that just finished (`post_assistant_turn` → a
     // `note`), and owns `/recap` on the `pre_user_turn` phase — returning `handled`,
     // so the command is answered by the side model without a main-model turn. Not in
-    // `CORE_DEFAULT_ON`: unlike the `match`-gated hooks above, a recap is a real
+    // `CORE_PREINSTALLED`: unlike the `match`-gated hooks above, a recap is a real
     // model call per long turn, so it has to be a thing the user asked for.
-    include_str!("../../../../plugins-store/recap/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/recap/manifest.json"),
     // `no-more-mistakes` is the memory counterpart to those: instead of steering or
     // summarizing a turn, it mines the moment the user CORRECTS one. A `pre_user_turn`
     // hook turns the correction into one durable rule and files it as a document in a
@@ -533,7 +568,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // capture hook cannot be `match`-gated — the pre-gate grammar has no "this message
     // reads like a complaint" — so it costs a sandbox spawn per user turn, `recap`'s
     // reason exactly.
-    include_str!("../../../../plugins-store/no-more-mistakes/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/no-more-mistakes/manifest.json"),
     // `no-ai-slop` bundles the editing skill of the same name and runs it on the
     // turn that just finished. It is the one turn hook here with NO `match` gate:
     // "every completed answer" is the feature, so it cannot pre-gate on a flag or a
@@ -543,9 +578,9 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // marker), a clean verdict from the reviewer, and Core's `MAX_CONTINUE_TURNS` —
     // and the hook clamps its pass setting well under that cap so a large value
     // degrades to fewer passes instead of a loop that stops mid-rewrite. Not in
-    // `CORE_DEFAULT_ON` for `recap`'s reason, doubled: a sandbox spawn per turn AND
+    // `CORE_PREINSTALLED` for `recap`'s reason, doubled: a sandbox spawn per turn AND
     // a sub-agent per reviewed answer, on the user's budget.
-    include_str!("../../../../plugins-store/no-ai-slop/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/no-ai-slop/manifest.json"),
     // `agent-comms` is the agent-to-agent mailbox: `agents.directory` /
     // `agents.send` / `agents.thread`, shipped as ordinary
     // registry tools so EVERY agent gets them (Pi through its MCP extension, an
@@ -563,40 +598,40 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // message and re-read from the conversation (or, inside a delegated run, the
     // agent) that received it; a `busy` marker on BOTH ends of an `ask` so A→B→A
     // is refused rather than deadlocked; and the refusal that an agent cannot
-    // address itself. Not in `CORE_DEFAULT_ON` for `no-ai-slop`'s reason: the
+    // address itself. Not in `CORE_PREINSTALLED` for `no-ai-slop`'s reason: the
     // delivery hook has no `match` gate (the inbox is keyed by agent, and
     // `stateful` matches on the conversation), so it costs a sandbox spawn per
     // turn.
-    include_str!("../../../../plugins-store/agent-comms/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/agent-comms/manifest.json"),
     // `rules` discovers Cursor- and Claude-style project rules and exposes the
     // agent-edit panel contract. Its context hook injects normalized project
     // rules plus per-agent base rules into the outbound context, deduplicating
     // stale blocks for both OpenAI messages and ACP prompts.
-    include_str!("../../../../plugins-store/rules/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/rules/manifest.json"),
     // `agents-md-tail` is an experimental, opt-in context hook. It repeats the
     // current project instructions at the outbound tail while keeping the
     // chat-visible transcript unchanged; ACP requests a fresh session so old
     // hidden tails cannot accumulate in the agent's private history. Rules runs
     // first when both are enabled because context rewrites are first-writer-wins.
-    include_str!("../../../../plugins-store/agents-md-tail/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/agents-md-tail/manifest.json"),
     // `plan-continue` keeps a plan moving while the composer's plan-mode pill is
     // on, by injecting its own follow-up turn when one finishes. Community and
-    // NOT in `CORE_DEFAULT_ON` for the reason the others are on: this one spends
+    // NOT in `CORE_PREINSTALLED` for the reason the others are on: this one spends
     // the user's tokens unattended, so it has to be a thing they asked for. Its
     // hook still pre-gates on `match.flag`, and the flag is the completeness
     // signal too — an approved `ExitPlanMode` writes it back off.
-    include_str!("../../../../plugins-store/plan-continue/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/plan-continue/manifest.json"),
     // `auto-continue` is `plan-continue`'s general sibling: instead of keying on
     // the plan-mode pill, its hook arms per-conversation via `/auto-continue` and
     // asks a LOCAL scanner sub-agent (`hook:run-agent`, `code_read` preset) to read
     // the reply AND the real workspace, then continues only when the scanner
     // explicitly reports work another turn could finish now. Community and NOT in
-    // `CORE_DEFAULT_ON` for `plan-continue`'s reason and then some: a scanner agent
+    // `CORE_PREINSTALLED` for `plan-continue`'s reason and then some: a scanner agent
     // run per turn spends the user's tokens unattended, so it has to be a thing
     // they asked for. Its `match.stateful` gate is the arming switch — presence of
     // the KV record — so an unarmed conversation costs one KV read, not a sandbox
     // spawn, and the loop is off by default.
-    include_str!("../../../../plugins-store/auto-continue/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/auto-continue/manifest.json"),
     // The two Pi capabilities Core used to hardcode into every managed-Pi spawn,
     // now plugins the user can turn off: `pi-shell` (background bash) and
     // `pi-subagent` (the `Task` tool). Each ships ONE `contributes.pi_extensions`
@@ -609,11 +644,11 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Community-tier plugin needs the approved `pi:extension` grant — off the
     // Gateway's default allowlist and in a reserved namespace, so operator-only. A
     // Community-tier version of either would materialize nothing and be dead on
-    // arrival. Both are also in `CORE_DEFAULT_ON`, because they were unconditional
-    // before this move and default-off would silently strip background bash and
+    // arrival. Both are also in `CORE_PREINSTALLED`, because they were unconditional
+    // before this move and not pre-installed would silently strip background bash and
     // sub-agents from the flagship agent on every fresh install.
-    include_str!("../../../../plugins-store/pi-shell/manifest.json"),
-    include_str!("../../../../plugins-store/pi-subagent/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/pi-shell/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/pi-subagent/manifest.json"),
     // `pi-monitor` is the third Pi capability: a from-scratch `monitor` tool
     // (the same idea as Claude Code's `Monitor`) for the managed Pi agent —
     // watch a command or WebSocket, stream every line, and end on an `until`
@@ -622,9 +657,9 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // package, materialized by `pi_config::app_extensions` into
     // `~/.ryu/pi-agent/extensions/` for the next Pi process. Core-tier (a
     // Community-tier plugin needs the operator-only `pi:extension` grant) and
-    // in `CORE_DEFAULT_ON` like the other two, because a default-off capability
+    // in `CORE_PREINSTALLED` like the other two, because a not pre-installed capability
     // that mirrors a first-class Claude Code tool would read as a regression.
-    include_str!("../../../../plugins-store/pi-monitor/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/pi-monitor/manifest.json"),
     // `rtk` surfaces the built-in RTK (Rust Token Killer) command-wrapping tool
     // (`rtk.run`) as an installable plugin. Like `spider`, it is a fully
     // declarative `command`-backend tool: the fixture CARRIES its runnable (the
@@ -633,19 +668,19 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // through the command-tool allowlist. The fixture also contributes the Phase-2
     // auto-wrap settings that drive `crate::rtk_config` (NOT a tool). Community-tier,
     // opt-in.
-    include_str!("../../../../plugins-store/rtk/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/rtk/manifest.json"),
     // `security-guidance` ports Anthropic's security-guidance Claude Code plugin
     // onto Ryu's turn-hook substrate: a flag-gated `post_assistant_turn` hook that
     // (1) runs a ~22-rule regex pattern scan over the last answer and (2) does a
     // second-model diff review via `host.sideModel` (grant `hook:side-model`),
     // surfacing findings as an out-of-band note. Toggle + `/security` command +
     // reviewer-model picker mirror `double-check`. Community-tier, opt-in.
-    include_str!("../../../../plugins-store/security-guidance/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/security-guidance/manifest.json"),
     // security-scanner is a model-agnostic, read-only security workbench:
     // independent architecture, hunt, configuration, and attack-path delegates;
     // report synthesis; diff mode; finding verification; and patch proposals
     // that never apply a change. No vendor-specific model is embedded.
-    include_str!("../../../../plugins-store/security-scanner/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/security-scanner/manifest.json"),
     // `bitwarden` surfaces the Bitwarden Secrets Manager CLI (`bws`) as four
     // declarative `command`-backend tools (`bitwarden.status` / `__projects` /
     // `__list` / `__get`). Faithful to Hermes's Bitwarden Secrets Manager feature:
@@ -657,12 +692,12 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // through the command-tool allowlist (seeded at `~/.ryu/bin/bws`). The optional
     // `BWS_SERVER_URL` env mirrors Hermes's `secrets.bitwarden.server_url` region
     // knob. Community-tier, opt-in.
-    include_str!("../../../../plugins-store/bitwarden/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/bitwarden/manifest.json"),
     // `auto-expand` is the first `pre_user_turn` hook: before a message is sent it
     // calls a configurable model (`hook:side-model`) to rewrite the prompt into a
     // clearer form and returns a `replace` directive, so the improved prompt is
     // what gets sent and persisted. Composer toggle (auto-expand every message) +
-    // `/expand` command (one-off). Core-tier, default-on; the flag/command `match`
+    // `/expand` command (one-off). Core-tier, pre-installed; the flag/command `match`
     // keeps it free when idle.
     include_str!("fixtures/auto-expand.manifest.json"),
     // `session-context` is a reference `session_start` hook: on the first turn of a
@@ -674,7 +709,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // reference fixtures (`tool-firewall`, `hook-observers`) are deliberately NOT
     // registered here so those hot paths (esp. per tool call) stay lookup-free
     // until a user installs a plugin that actually uses them.
-    include_str!("../../../../plugins-store/hook-session-context/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/hook-session-context/manifest.json"),
     // RAG capability: the default in-process embeddings+retrieval provider. Declares
     // `provides: [rag]` + `requires: [engines]` so the capability graph resolves
     // rag→engines for real (disable-safety: engines can't be disabled out from under
@@ -683,21 +718,22 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Mail (Agent Inboxes): a built-in app whose out-of-process `ryu-mail` sidecar
     // Core spawns (local sibling binary) and proxies `/api/mail/*` to via the
     // generic ext-proxy `public_mount` mechanism — the acceptance test proving the
-    // generic loader replaces the retired hand-coded `sidecar/mail.rs`. Default-on,
+    // generic loader replaces the retired hand-coded `sidecar/mail.rs`. Pre-installed,
     // so the externally-committed inbound-webhook URL resolves out of the box.
     include_str!("../../../../apps-store/mail/manifest.json"),
     // Browser (W9): a real-Chromium Electron browser Core runs as a `local` sidecar
     // and exposes as the grant-gated `browser.control` capability (list/open/navigate
     // tabs, screenshot, read titles, privileged JS eval). CORE built-in — listed in
-    // `SYSTEM_PLUGINS` + `CORE_DEFAULT_ON`, so it is seeded enabled on a fresh install
+    // `SYSTEM_PLUGINS` + `CORE_PREINSTALLED`, so it is seeded enabled on a fresh install
     // and uninstall-protected (the workspace "Browser" tab uses this sidecar instead of
     // the fallback iframe). `lazy` + idle-stop keep the Electron GUI cold until the
     // desktop Browser panel first calls it through the ext-proxy — it does not spawn on
     // boot, only on first use.
     include_str!("../../../../apps-store/browser/manifest.json"),
+    include_str!("../../../../apps-store/whatsapp/manifest.json"),
     // Simulators: iOS Simulator (`simctl`, macOS + Xcode) + Android Emulator (`adb`)
     // control Core runs as a dependency-free `local` sidecar, exposing the grant-gated
-    // `simulator.control` capability. OPT-IN like the browser — NOT in `CORE_DEFAULT_ON`,
+    // `simulator.control` capability. OPT-IN like the browser — NOT in `CORE_PREINSTALLED`,
     // so the toolchain-wrapping sidecar never spawns unless a user enables it. `lazy` +
     // idle-stop keep it cold until the desktop Simulator panel calls it through the
     // ext-proxy. Availability is a RUNTIME probe (`/capabilities`): iOS shows only on a
@@ -710,7 +746,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // get a live, driveable desktop with no new firewall port. Ghost drives the SAME
     // `DISPLAY` (Core passes it through the MCP env allowlist), so agents and the human
     // watch/control one screen. OPT-IN like the browser/simulator — NOT in
-    // `CORE_DEFAULT_ON`, because the virtual-desktop toolchain (xvfb/tigervnc) is not
+    // `CORE_PREINSTALLED`, because the virtual-desktop toolchain (xvfb/tigervnc) is not
     // on a normal install; the panel prompts to enable + install it.
     include_str!("../../../../apps-store/desktop/manifest.json"),
     // UGC: a creator-marketing campaign tracker (campaign briefs + budgets, a creator
@@ -720,7 +756,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // out-of-process in the `ryu-ugc` sidecar (a `local` sibling binary) and Core reaches
     // `/api/ugc/*` through the generic ext-proxy `public_mount` — there is no hand-coded
     // Rust proxy and no Core-side UGC code. OPT-IN like the browser/simulator — NOT in
-    // `CORE_DEFAULT_ON`, so the sidecar binary a normal install does not carry is never
+    // `CORE_PREINSTALLED`, so the sidecar binary a normal install does not carry is never
     // spawned unless a user enables the app. Its client surface is a desktop DOCK PANEL
     // (`contributes.dock_panels`, `panel: "native"`), not a companion, so it ships no UI
     // bundle and needs no `plugins::seed` row.
@@ -734,13 +770,13 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // crate does not even path-depend on `apps/core`. Unlike UGC its client surface IS a
     // full-page Companion (`ui_format:"html"`, Path B) driving the sidecar through the
     // `social:crud` bridge forwarder, so it ships a UI bundle and DOES need a
-    // `plugins::seed` row. OPT-IN: not in `CORE_DEFAULT_ON`, so a normal install never
+    // `plugins::seed` row. OPT-IN: not in `CORE_PREINSTALLED`, so a normal install never
     // spawns the sidecar unless a user enables the app.
     include_str!("../../../../apps-store/social/manifest.json"),
-    // ReelFarm Studio — a local-first short-form content Companion. It owns no
+    // Content — a local-first short-form content app. It owns no
     // sidecar; its frame talks only through the generic model/media/storage bridges
     // and can optionally hand captions to Outpost through `social:crud`.
-    include_str!("../../../../apps-store/reelfarm/manifest.json"),
+    include_str!("../../../../apps-store/content/manifest.json"),
     // Token Table — a cosmetic six-seat Hold'em Companion over the generic
     // `app:http` + `app:realtime` bridges. Its authoritative SQLite game state
     // lives in the standalone `ryu-token-table` sidecar; Core only loads the
@@ -754,7 +790,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // work rather than adding it: a dock panel fetches `/api/ext/@ryu/crm/*` over the
     // generic ext-proxy directly, so there is no `ui_code` bundle, no `plugins::seed`
     // row, and none of the per-app bridge rows in `rpc.ts`/`host_api.rs` that a
-    // CSP-sandboxed companion would have forced. OPT-IN: not in `CORE_DEFAULT_ON`.
+    // CSP-sandboxed companion would have forced. OPT-IN: not in `CORE_PREINSTALLED`.
     include_str!("../../../../apps-store/crm/manifest.json"),
     // Deep Read — Recursive Language Models over the `ryu-rlm` sidecar (a `local`
     // sibling binary on 8014). Same zero-coupling posture as Outpost: Core links no
@@ -763,12 +799,12 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Its client surface IS a full-page Companion (`ui_format:"html"`, Path B) driving
     // the sidecar through the `rlm:query` bridge forwarder, so it ships a UI bundle
     // and DOES need a `plugins::seed` row. It also contributes a `post_assistant_turn`
-    // hook, so it has a `builtin_code` row. OPT-IN: not in `CORE_DEFAULT_ON`, so a
+    // hook, so it has a `builtin_code` row. OPT-IN: not in `CORE_PREINSTALLED`, so a
     // normal install never spawns the sidecar unless a user enables the app.
     include_str!("../../../../apps-store/rlm/manifest.json"),
     // The Whiteboard app — a full-page Companion (`ui_format:"html"`, Path B) that
-    // OWNS its Space documents via `spaces:docs`. Ships default-on with a UI bundle
-    // + host-bridge grants seeded in `main.rs` (the generic CORE_DEFAULT_ON loop
+    // OWNS its Space documents via `spaces:docs`. Ships pre-installed with a UI bundle
+    // + host-bridge grants seeded in `main.rs` (the generic CORE_PREINSTALLED loop
     // seeds neither, so it has a dedicated seed block). Replaces the built-in
     // whiteboard editor.
     include_str!("../../../../apps-store/whiteboard/manifest.json"),
@@ -776,15 +812,19 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // its Space documents via `spaces:docs` and runs generation nodes through the
     // window.ryu media/agent bridge (`media:generate` / `media:transcribe` /
     // `hook:run-agent` / `hook:side-model`) + reads catalogs via `core:list_agents`.
-    // Ships default-on with a UI bundle + those grants seeded in `main.rs`. Replaces
+    // Ships pre-installed with a UI bundle + those grants seeded in `main.rs`. Replaces
     // the built-in creative-canvas board.
     include_str!("../../../../apps-store/canvas/manifest.json"),
+    // Slides — an opt-in full-page Companion for local visual slide and thumbnail
+    // editing. It has no sidecar: persistence, upload, model, and media work use
+    // the generic host bridges, and the bundled UI is seeded on explicit install.
+    include_str!("../../../../apps-store/slides/manifest.json"),
     // The Fine-tuning app — a full-page Companion (`ui_format:"html"`, Path B) that
     // drives Core's fine-tune orchestration + durable job store via the
     // `finetune:runs` bridge and OWNS its Unsloth training sidecar (a
     // manifest-declared Python process spawned on the Core-tier auto-run path, so it
     // declares no `sidecar:process` grant — the Gateway denies that grant at enable).
-    // Ships default-on with a UI bundle + those grants seeded in `main.rs`. Replaces
+    // Ships pre-installed with a UI bundle + those grants seeded in `main.rs`. Replaces
     // the built-in fine-tuning page.
     include_str!("../../../../apps-store/finetune/manifest.json"),
     // Spaces + Meetings — the first REAL plugin→plugin dependency edge.
@@ -811,14 +851,14 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Each serves its own `/api/<feature>/*` surface OUT-OF-PROCESS via a `public_mount`
     // sidecar bin + the generic ext-proxy loader; no in-process routes remain. The
     // plugin record governs install/enable/disable (toggle via the plugin lifecycle).
-    // All five are default-on (see `plugins::builtins`) so the surface is reachable on a
-    // fresh install — the routes were always-on before, so only a default-on seed keeps
+    // All five are pre-installed (see `plugins::builtins`) so the surface is reachable on a
+    // fresh install — the routes were always-on before, so only a pre-installed seed keeps
     // them reachable (identical to the Meetings/Spaces edge).
     //
     // `research`/`dashboards`/`teams` declare NO `requires`. `clips` requires the
     // `shadow` capture app (it is a Core→Shadow proxy) and `recipes` requires the
     // `ghost` automation app (Ghost owns the RecipeStore) — both real, satisfiable
-    // edges (shadow/ghost are default-on), so the graph refuses to disable the
+    // edges (shadow/ghost are pre-installed), so the graph refuses to disable the
     // dependency out from under them.
     include_str!("../../../../apps-store/research/manifest.json"),
     include_str!("../../../../apps-store/dashboards/manifest.json"),
@@ -830,18 +870,18 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `public_mount` sidecar + the generic ext-proxy loader; `approvals`/`skills`/`learning`
     // remain IN-PROCESS governance shells that gate their own route surface via
     // `require_app_enabled` (`learning` is the Outcome-B in-process exception). All
-    // default-on so the surface is reachable on a fresh install (the routes were always-on
+    // pre-installed so the surface is reachable on a fresh install (the routes were always-on
     // before).
     //
     // `quests`/`approvals`/`skills` declare NO `requires`. `learning` requires the
     // `skills` app (it writes synthesized skills) and `healing` requires the
     // `approvals` app (it delivers proposed fixes into that inbox) — both real,
-    // satisfiable edges (skills/approvals are default-on), so the graph refuses to
+    // satisfiable edges (skills/approvals are pre-installed), so the graph refuses to
     // disable the dependency out from under them.
     //
     // These manifests are registered UNCONDITIONALLY (no cfg). Only `healing`'s HTTP
     // surface compiles out behind the `healing` cargo feature; its manifest + id must
-    // always be present so the default-on seed never references a missing manifest —
+    // always be present so the pre-installed seed never references a missing manifest —
     // exactly like `research`/clips/recipes (feature-gated module, always-on fixture).
     include_str!("../../../../apps-store/quests/manifest.json"),
     include_str!("../../../../apps-store/approvals/manifest.json"),
@@ -851,7 +891,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Wave-3: two more leaf features turned into Apps (toggle via the plugin lifecycle).
     // `monitors` now serves `/api/monitors/*` OUT-OF-PROCESS via a `public_mount` sidecar
     // + the generic ext-proxy loader; `hardware` stays IN-PROCESS and gates its route
-    // surface via `require_app_enabled`. Both default-on so the surface is reachable on a
+    // surface via `require_app_enabled`. Both pre-installed so the surface is reachable on a
     // fresh install (the routes were always-on before).
     //
     // Both declare NO `requires`. `monitors` owns ONLY its `/api/monitors/*` surface
@@ -863,7 +903,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../apps-store/monitors/manifest.json"),
     include_str!("fixtures/hardware.manifest.json"),
     // Wave-4: two more leaf features turned into governance-shell Apps (toggle via
-    // the plugin lifecycle + route gate; impl stays in-crate). Both default-on so the
+    // the plugin lifecycle + route gate; impl stays in-crate). Both pre-installed so the
     // gate is transparent on a fresh install (the routes were always-on before).
     //
     // Both declare NO `requires`. `workflows` gates ONLY the PROTECTED workflow
@@ -882,7 +922,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // W0 honest-gating baseline: three data-path governance shells whose
     // `/api/{voice,images+video+gifs,memory}/*` routes were mounted RAW before this
     // wave. Each gates its own protected route surface via `require_app_enabled`; the
-    // impl stays in-crate (no cargo feature). All three default-on (see
+    // impl stays in-crate (no cargo feature). All three pre-installed (see
     // `plugins::builtins`) so the gate is transparent on a fresh install.
     //
     // `voice` gates ONLY the protected voice data path; the PUBLIC realtime voice WS
@@ -895,31 +935,47 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("fixtures/media.manifest.json"),
     include_str!("fixtures/memory.manifest.json"),
     // W7 frontend extraction: the webhooks page moved to a sandboxed companion app
-    // (`apps-store/webhooks/ui`). Default-on, no `requires` — its `/api/webhooks` +
+    // (`apps-store/webhooks/ui`). Pre-installed, no `requires` — its `/api/webhooks` +
     // `/api/webhook-ingress/status` reads stay ungated on the main router (the host
     // calls them directly, monitors pattern), so this manifest exists only to seed
     // the companion's UI bundle + `webhooks:crud` grant, not to gate a route surface.
     include_str!("../../../../apps-store/webhooks/manifest.json"),
     // W7 frontend extraction: the activity-feed page moved to a sandboxed companion
-    // app (`apps-store/activity/ui`). Default-on, no `requires` — its read-only
+    // app (`apps-store/activity/ui`). Pre-installed, no `requires` — its read-only
     // `/api/activity` stays ungated on the main router (the host calls it directly,
     // monitors pattern), so this manifest exists only to seed the companion's UI
     // bundle + `activity:read` grant, not to gate a route surface.
     include_str!("../../../../apps-store/activity/manifest.json"),
+    // Help Center is a first-party Space-backed desktop companion. Its manifest is
+    // compiled into the catalog so the pre-installed seed can resolve its identity.
+    include_str!("../../../../apps-store/help-center/manifest.json"),
+    // Sites is the first-party public-edge workspace. Its companion owns the
+    // project/deployment/domain/connector control surface; the future managed
+    // edge remains a generic RyuRelay/control-plane seam rather than app-specific
+    // Core routing.
+    include_str!("../../../../apps-store/sites/manifest.json"),
+    // Bookmarks is an extension contribution that owns app-scoped Space documents.
+    // It intentionally declares no Companion until the satellite ships a packed UI
+    // payload; Core owns the RAG index, visibility, and tenancy checks.
+    include_str!("../../../../apps-store/bookmarks/manifest.json"),
     // W7 frontend extraction: the timeline page moved to a sandboxed companion app
-    // (`apps-store/timeline/ui`). Default-on, no `requires` — Shadow's device-local
+    // (`apps-store/timeline/ui`). Pre-installed, no `requires` — Shadow's device-local
     // `/timeline` + `/journal` + `/frame` live on the Shadow sidecar (:3030), not the
     // Core router, and the desktop host calls them directly (monitors pattern), so this
     // manifest exists only to seed the companion's UI bundle + `timeline:read` grant,
     // not to gate a route surface.
     include_str!("../../../../apps-store/timeline/manifest.json"),
     // The Calendar app — a sandboxed companion (`ui_format:"html"`). It was already
-    // in the default-on seed set (`plugins::seed` maps CALENDAR_UI_HTML) and routed
+    // in the pre-installed seed set (`plugins::seed` maps CALENDAR_UI_HTML) and routed
     // in the desktop (`/calendar`), but its MANIFEST was never registered here, so
     // the record seeded with no manifest and calendar could not appear in
     // `/api/plugins`, plugin contributions, or the marketplace Apps catalog. Register
     // it so it loads like every other companion.
     include_str!("../../../../apps-store/calendar/manifest.json"),
+    // Chat Broadcast is a desktop-only companion. Core embeds its manifest so the
+    // pre-installed host bridge and sidebar contribution are available before the
+    // marketplace is reachable.
+    include_str!("../../../../apps-store/chat-broadcast/manifest.json"),
     // The Warmup app — a sandboxed companion (`ui_format:"html"`) that schedules a
     // keep-alive ping to each subscription agent so its rolling usage window is
     // already open when the user starts work. Opt-in (seeded DISABLED): it spends
@@ -929,7 +985,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // manifest exists to seed the companion's UI bundle + `warmup:crud` grant.
     include_str!("../../../../apps-store/warmup/manifest.json"),
     // W7 frontend extraction: the SKILL.md authoring editor moved to a sandboxed
-    // companion app (`apps-store/skill-editor/ui`). Default-on, no `requires` — the
+    // companion app (`apps-store/skill-editor/ui`). Pre-installed, no `requires` — the
     // `/api/skills` authoring endpoints stay ungated on the Core router (the desktop host
     // calls them directly, monitors pattern), so this manifest exists only to seed the
     // companion's UI bundle + `skills:crud` grant, not to gate a route surface.
@@ -938,35 +994,37 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // over runs and pending approvals. Opt-in, and the leanest shape an app can
     // have: PURE MANIFEST. No runnables, no sidecar, no UI bundle and no route
     // surface of its own — every row is a declarative `sidebar_sections[].spec`
-    // the desktop shell fetches through its own authenticated seam, so nothing
-    // about it exists in Core beyond this registration. It is the reference for
-    // "an app that only rearranges what the shell already knows".
+    // the desktop shell fetches through its own authenticated seam. It is Core-tier
+    // (but still opt-in) because those reviewed declarations read governed Core
+    // routes rather than an owner ext mount; a Community manifest may not do that.
+    // It remains the reference for "an app that only rearranges what the shell
+    // already knows".
     include_str!("../../../../apps-store/agent-status/manifest.json"),
     // Ambient Elevator — a desktop-only declarative audio contribution. The
     // desktop consumes its opaque live-activity spec and owns the singleton
     // player; Core only forwards the manifest contract.
-    include_str!("../../../../plugins-store/ambient-elevator/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/ambient-elevator/manifest.json"),
     // The Drafts app — a durable outbox. Owns one `sidebar_sections` entry over its
     // own store and one app-shell page, and its state lives OUT-OF-PROCESS in the
     // `ryu-drafts` sidecar (`public_mount` at `/api/drafts`, App-gated via the ext
-    // proxy), which is why — unlike `agent-status` directly above — it is Core-tier:
-    // a managed sidecar only spawns for a `CORE_PLUGINS` member. Opt-in (absent from
-    // `CORE_DEFAULT_ON`) because a default-on sidecar app spawns a binary a normal
+    // proxy). Like `agent-status` directly above it is Core-tier, but for a different
+    // reason: a managed sidecar only spawns for a `CORE_PLUGINS` member. Opt-in (absent from
+    // `CORE_PREINSTALLED`) because a pre-installed sidecar app spawns a binary a normal
     // install does not have. Nothing about drafts exists in Core beyond this
     // registration: the shell's dispatcher does the sending, because a manifest
     // sidecar is deliberately spawned without `RYU_TOKEN`.
     include_str!("../../../../apps-store/drafts/manifest.json"),
     // `sample-widget` — the REFERENCE third-party MCP widget plugin (a dev
-    // template; source lives at `plugins-store/sample-widget/`). It declares a
+    // template; source lives at `plugins-store/plugins/sample-widget/`). It declares a
     // local Node MCP server (`node server.mjs`) whose `render` tool advertises
     // `_meta.openai/outputTemplate = ui://widget/sample.html` and serves that
     // resource, plus a `contributes.widgets` entry binding `sample_widget.render`
     // to it and the `widget:render` grant. Registered so it parses/loads like every
     // built-in and shows up as an installable example, but deliberately OPT-IN — it
-    // is NOT in `plugins::builtins::CORE_DEFAULT_ON`, so it never seeds enabled and
+    // is NOT in `plugins::builtins::CORE_PREINSTALLED`, so it never seeds enabled and
     // its `node` server is never spawned unless a developer installs it. The
     // canonical copy under `plugins-store/` and this fixture are byte-identical.
-    include_str!("../../../../plugins-store/sample-widget/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/sample-widget/manifest.json"),
     // The six built-in output styles (ELI5, I have ADHD, Explanatory, Learning,
     // Proactive, Plain text). Zero runnables and zero `permission_grants`: a style
     // body is inert prose appended to (or replacing) the agent's base instructions
@@ -983,9 +1041,9 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Pre-installed but INERT: the node default is "no style" and none of the six
     // sets `force-for-plugin`, so registering it changes no prompt until a user
     // picks one in the composer or the Store's Output Styles tab.
-    include_str!("../../../../plugins-store/output-styles/manifest.json"),
-    include_str!("../../../../plugins-store/firecrawl/manifest.json"),
-    include_str!("../../../../plugins-store/mem0/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/output-styles/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/firecrawl/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/mem0/manifest.json"),
     // `spidercloud` is the SECOND `web.crawl` provider, which is what finally makes
     // that layer swappable rather than merely marked selectable: the local `spider`
     // CLI stays the declared default, and this one runs the same engine hosted, so a
@@ -998,9 +1056,9 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `depth: 0` as "no limit will be applied", the inverse of the canonical "0 = the
     // start page only", and a clamp would hide a semantic inversion instead of
     // declaring the argument unsupported.
-    include_str!("../../../../plugins-store/spidercloud/manifest.json"),
-    include_str!("../../../../plugins-store/honcho/manifest.json"),
-    include_str!("../../../../plugins-store/bytebot/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/spidercloud/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/honcho/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/bytebot/manifest.json"),
     // The four `document.parse` providers. Each is an apps-store satellite
     // (`apps-store/{markitdown,unstructured,docling,mineru}/`) wrapping a different
     // extraction library in its own Python sidecar, registered exactly like
@@ -1020,10 +1078,10 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // second default, and never drop markitdown's.
     //
     // The flag is dormant on a stock install. Only `markitdown` is in
-    // `plugins::builtins::CORE_DEFAULT_ON`, so it is the sole ENABLED provider and
+    // `plugins::builtins::CORE_PREINSTALLED`, so it is the sole ENABLED provider and
     // binding resolves it by "single provider" without ever consulting the flag; the
     // default only decides anything once a user enables a second backend from the
-    // Store. The other three are deliberately default-OFF because they are heavy —
+    // Store. The other three are deliberately not pre-installed because they are heavy —
     // `unstructured[all-docs]` is a 1-2 GB pip install whose native helpers
     // (poppler/tesseract/libreoffice/pandoc) pip cannot supply, and `docling`/`mineru`
     // download ML models on first parse. markitdown is the one small pure-Python
@@ -1042,7 +1100,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // written policy, using a decision procedure rather than a second model's
     // opinion (`apps-store/reasoning/backend`: exact rational arithmetic, a
     // finite-domain search over booleans/enums, Fourier–Motzkin over linear
-    // arithmetic, branch-and-bound for integers). Opt-in and NOT pre-installed: it
+    // arithmetic, branch-and-bound for integers). Opt-in and install-on-demand: it
     // is a leaf feature that does nothing until someone writes a policy.
     //
     // Three seams, all generic, none of them Core knowing this app exists beyond
@@ -1065,7 +1123,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // manifest-driven like UGC: the whole surface is out-of-process in the
     // `ryu-mission-control` sidecar (a `local` sibling binary) and Core reaches
     // `/api/mission-control/*` through the generic ext-proxy `public_mount`. OPT-IN —
-    // NOT in `CORE_DEFAULT_ON`, so the sidecar binary a normal install does not carry
+    // NOT in `CORE_PREINSTALLED`, so the sidecar binary a normal install does not carry
     // is never spawned unless a user enables the app.
     //
     // The app stores digests it does not compute, and that inversion is forced rather
@@ -1081,15 +1139,25 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // buys only the optional narrative summary: every number the dashboard shows is an
     // indexed fact, so a node with no model still gets a working page.
     include_str!("../../../../apps-store/mission-control/manifest.json"),
+    // Feedback Board — public customer requests plus a private product workspace
+    // that connects request triage to Ryu Spaces, Blueprint, and configurable
+    // workflow execution. The public board is served through the app's manifest
+    // public_mount; Core owns only this manifest registration and generic proxy.
+    include_str!("../../../../apps-store/feedback-board/manifest.json"),
     // Pull Requests — a GitHub-first review inbox. The app-owned Bun sidecar invokes
     // the user's authenticated `gh` CLI and is reached only through the generic
     // ext-proxy; Core owns no GitHub client, route, port or provider behavior.
     include_str!("../../../../apps-store/pull-requests/manifest.json"),
+    include_str!("../../../../apps-store/mpp/manifest.json"),
+    // Checks — a local-first verification workspace. Its companion owns the
+    // project, exploration, check, report, list, and schedule surfaces; Core owns
+    // no external provider client, route, port, or remote execution behavior.
+    include_str!("../../../../apps-store/checks/manifest.json"),
     // Blueprint — visual plan review. An agent publishes its plan over the app's own
     // MCP server (`blueprint.plan_publish`), a human reads it as rendered markdown
     // blocks plus a dependency graph derived from `steps[].depends_on`, annotates it,
     // and approves or requests changes; the agent reads the verdict back as
-    // deterministic text (`blueprint.plan_status`). Opt-in — outside `CORE_DEFAULT_ON`,
+    // deterministic text (`blueprint.plan_status`). Opt-in — outside `CORE_PREINSTALLED`,
     // like Reasoning, because it owns an out-of-process binary a normal install does
     // not have, and because it is inert until an agent publishes something.
     //
@@ -1123,6 +1191,11 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // work to each other through Core's own KV. One grant without the other 403s at
     // runtime with nothing at parse time to say why.
     include_str!("../../../../apps-store/tuition/manifest.json"),
+    // Expenses — the local-first ledger app. Its agent and companion share the
+    // `ryu-expenses` sidecar through the generic `app:http` bridge; the agent-facing
+    // tool surface is the manifest-owned `expenses` MCP server. It is opt-in and
+    // carries no Core-specific route or client implementation.
+    include_str!("../../../../apps-store/expenses/manifest.json"),
     // Wire — a personal newsroom. Pulls feeds in on a schedule, collapses the same
     // story across every outlet covering it, writes a brief from those clusters, and
     // fires watches on a burst it can explain. Ingest, dedupe (URL canonicalization
@@ -1154,7 +1227,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Its client surface IS a full-page Companion (`ui_format:"html"`, Path B)
     // driving the sidecar through the `subtitles:crud` bridge forwarder, so it ships
     // a UI bundle and DOES need a `plugins::seed` row. OPT-IN: not in
-    // `CORE_DEFAULT_ON`, so a normal install never spawns the sidecar unless a user
+    // `CORE_PREINSTALLED`, so a normal install never spawns the sidecar unless a user
     // enables the app.
     include_str!("../../../../apps-store/subtitles/manifest.json"),
     // ── Language-server plugins: one per language, mirroring Claude Code ──────
@@ -1168,39 +1241,123 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `ryu-lsp.json`, which is what activates the `ryu-lsp.ts` binding's tools.
     //
     // Community-tier and OPT-IN — deliberately absent from `CORE_PLUGINS` and
-    // `CORE_DEFAULT_ON`. An enabled LSP plugin puts its server into the managed
+    // `CORE_PREINSTALLED`. An enabled LSP plugin puts its server into the managed
     // Pi's config (spawned lazily on the first touched file), so seeding all
     // twelve on a fresh install would write a twelve-server table nobody asked
     // for. The user enables the one language they actually use.
-    include_str!("../../../../plugins-store/clangd-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/csharp-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/gopls-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/jdtls-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/kotlin-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lua-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/php-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/pyright-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/ruby-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/rust-analyzer-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/swift-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/typescript-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/clangd-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/csharp-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/gopls-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/jdtls-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/kotlin-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/lua-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/php-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/pyright-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/ruby-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/rust-analyzer-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/swift-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lsp/typescript-lsp/manifest.json"),
 ];
 
-// Production Core embeds only the small, uninstall-protected system set. Every
-// other official package is resolved, signature-checked, and installed from
-// the marketplace at runtime.
-#[cfg(not(test))]
-const BUILTIN_MANIFESTS: &[&str] = &[
-    include_str!("../../../../plugins-store/ghost/manifest.json"),
-    include_str!("../../../../plugins-store/shadow/manifest.json"),
-    include_str!("../../../../plugins-store/agentbrowser/manifest.json"),
-    include_str!("../../../../plugins-store/ambient-elevator/manifest.json"),
+// Production Core embeds the small first-party set needed before the
+// marketplace is available, plus the Core-only runtime substrate. The latter
+// has no marketplace package to materialize: engines → RAG → Spaces and the
+// mandatory capability peers must be present before app seeding and dependency
+// resolution run.
+const CORE_RUNTIME_BUILTIN_MANIFESTS: &[&str] = &[
+    SAFE_ACTIONS_MANIFEST,
+    include_str!("../../../../plugins-store/plugins/ghost/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/shadow/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/agentbrowser/manifest.json"),
+    include_str!("../../../../plugins-store/plugins/ambient-elevator/manifest.json"),
     include_str!("../../../../apps-store/browser/manifest.json"),
+    // WhatsApp has no process: the manifest contributes a native workspace entry
+    // over the existing Gateway channel adapters.
+    include_str!("../../../../apps-store/whatsapp/manifest.json"),
+    // Chat Broadcast has no process or sidecar: its desktop companion uses the
+    // trusted host bridge to list visible conversations and enqueue real user turns.
+    include_str!("../../../../apps-store/chat-broadcast/manifest.json"),
+    // Every apps-store satellite is also a valid standalone-app carriage. Keeping
+    // its manifest in the generic production registry lets the standalone host
+    // use the normal built-in lifecycle path (and therefore preserve Core-tier
+    // sidecar/MCP authority) without adding an app-specific Core route, client, or
+    // port. The satellite still owns its sidecar and UI; this list only establishes
+    // the compiled manifest identity used by the generic loader.
+    include_str!("../../../../apps-store/agent-status/manifest.json"),
+    include_str!("../../../../apps-store/approvals/manifest.json"),
+    // Backstage is authored in its own repository, but its exact manifest is
+    // compiled here so Marketplace installs and standalone bundles retain the
+    // same first-party identity without adding an app-specific Core route.
+    include_str!("../../../../apps-store/backstage/manifest.json"),
+    include_str!("../../../../apps-store/blueprint/manifest.json"),
+    include_str!("../../../../apps-store/bookmarks/manifest.json"),
+    include_str!("../../../../apps-store/calendar/manifest.json"),
+    include_str!("../../../../apps-store/canvas/manifest.json"),
+    include_str!("../../../../apps-store/checks/manifest.json"),
+    include_str!("../../../../apps-store/clips/manifest.json"),
+    include_str!("../../../../apps-store/content/manifest.json"),
+    include_str!("../../../../apps-store/crm/manifest.json"),
+    include_str!("../../../../apps-store/dashboards/manifest.json"),
+    include_str!("../../../../apps-store/dictation/manifest.json"),
+    include_str!("../../../../apps-store/docling/manifest.json"),
+    include_str!("../../../../apps-store/drafts/manifest.json"),
+    include_str!("../../../../apps-store/desktop/manifest.json"),
+    include_str!("../../../../apps-store/expenses/manifest.json"),
+    include_str!("../../../../apps-store/feedback-board/manifest.json"),
+    include_str!("../../../../apps-store/finetune/manifest.json"),
+    include_str!("../../../../apps-store/healing/manifest.json"),
+    include_str!("../../../../apps-store/help-center/manifest.json"),
+    include_str!("../../../../apps-store/learning/manifest.json"),
+    include_str!("../../../../apps-store/mail/manifest.json"),
+    include_str!("../../../../apps-store/markitdown/manifest.json"),
+    include_str!("../../../../apps-store/mineru/manifest.json"),
+    include_str!("../../../../apps-store/mission-control/manifest.json"),
+    include_str!("../../../../apps-store/monitors/manifest.json"),
+    include_str!("../../../../apps-store/mpp/manifest.json"),
+    include_str!("../../../../apps-store/news/manifest.json"),
+    include_str!("../../../../apps-store/predict/manifest.json"),
+    include_str!("../../../../apps-store/pull-requests/manifest.json"),
+    include_str!("../../../../apps-store/quests/manifest.json"),
+    include_str!("../../../../apps-store/reasoning/manifest.json"),
+    include_str!("../../../../apps-store/reelfarm/manifest.json"),
+    include_str!("../../../../apps-store/research/manifest.json"),
+    include_str!("../../../../apps-store/rlm/manifest.json"),
+    include_str!("../../../../apps-store/recipes/manifest.json"),
+    include_str!("../../../../apps-store/simulator/manifest.json"),
+    include_str!("../../../../apps-store/sites/manifest.json"),
+    include_str!("../../../../apps-store/slides/manifest.json"),
+    include_str!("../../../../apps-store/social/manifest.json"),
+    include_str!("../../../../apps-store/subtitles/manifest.json"),
+    include_str!("../../../../apps-store/teams/manifest.json"),
+    include_str!("../../../../apps-store/timeline/manifest.json"),
+    include_str!("../../../../apps-store/token-table/manifest.json"),
+    include_str!("../../../../apps-store/tuition/manifest.json"),
+    include_str!("../../../../apps-store/ugc/manifest.json"),
+    include_str!("../../../../apps-store/unstructured/manifest.json"),
+    include_str!("../../../../apps-store/voice/manifest.json"),
+    include_str!("../../../../apps-store/warmup/manifest.json"),
+    include_str!("../../../../apps-store/webhooks/manifest.json"),
+    include_str!("../../../../apps-store/whiteboard/manifest.json"),
+    include_str!("../../../../apps-store/workflows/manifest.json"),
+    include_str!("fixtures/engines.manifest.json"),
+    include_str!("fixtures/hardware.manifest.json"),
+    include_str!("fixtures/layers.manifest.json"),
+    include_str!("fixtures/media.manifest.json"),
+    // Memory is a Core-local governance shell. Keep its compiled fixture in the
+    // production runtime set so the pre-installed seed can make the authenticated
+    // Memory Library routes reachable before Marketplace materialization completes.
+    include_str!("fixtures/memory.manifest.json"),
+    include_str!("fixtures/rag.manifest.json"),
+    include_str!("fixtures/skills.manifest.json"),
+    include_str!("fixtures/spaces.manifest.json"),
 ];
+
+#[cfg(not(test))]
+const BUILTIN_MANIFESTS: &[&str] = CORE_RUNTIME_BUILTIN_MANIFESTS;
 
 // Core constructs loopback clients before the default marketplace packages are
 // materialized. Keep the sidecar declarations needed for those clients available
-// during bootstrap without making the packages runtime-installed or default-on.
+// during bootstrap without making the packages runtime-installed or pre-installed.
 const BOOTSTRAP_MANIFESTS: &[&str] = &[
     include_str!("../../../../apps-store/finetune/manifest.json"),
     include_str!("../../../../apps-store/meetings/manifest.json"),
@@ -1224,7 +1381,7 @@ pub(crate) fn compiled_manifest_ids() -> HashSet<String> {
 }
 
 /// The Canvas app's plugin id (its Space documents are `kind = app:<this>`). Shared
-/// by the default-on seed (`main.rs`), the legacy file-store migration
+/// by the pre-installed seed (`main.rs`), the legacy file-store migration
 /// (`server/canvas_migrate.rs`), and the desktop create/route flow.
 pub const CANVAS_PLUGIN_ID: &str = "@ryu/canvas";
 
@@ -1234,42 +1391,47 @@ pub const CANVAS_PLUGIN_ID: &str = "@ryu/canvas";
 /// build` and copy `dist/index.html` to `fixtures/canvas.ui.html` to refresh it.
 pub const CANVAS_UI_HTML: &str = include_str!("fixtures/canvas.ui.html");
 
+/// The Slides app's prebuilt, self-contained UI bundle. Seeded for explicit app
+/// installs through the same compiled-in companion table as the other Path B apps.
+pub const SLIDES_PLUGIN_ID: &str = "@ryu/slides";
+pub const SLIDES_UI_HTML: &str = include_str!("fixtures/slides.ui.html");
+
 /// The Whiteboard app's plugin id (its Space documents are `kind = app:<this>`).
-/// Shared by the default-on seed (`main.rs`), the legacy-kind migration
+/// Shared by the pre-installed seed (`main.rs`), the legacy-kind migration
 /// (`server/spaces.rs`), and the desktop create/route flow.
 pub const WHITEBOARD_PLUGIN_ID: &str = "@ryu/whiteboard";
 
 /// The Whiteboard app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `packages/whiteboard-app`, all JS/CSS/fonts
-/// inlined). Seeded as the plugin's `ui_code` on a fresh install so the default-on
+/// inlined). Seeded as the plugin's `ui_code` on a fresh install so the pre-installed
 /// companion has a UI without going through `ryu pack` / install-bundle. Rebuild
 /// with `bun run --cwd packages/whiteboard-app build` and copy `dist/index.html`
 /// to `fixtures/whiteboard.ui.html` to refresh it.
 pub const WHITEBOARD_UI_HTML: &str = include_str!("fixtures/whiteboard.ui.html");
 
-/// The Fine-tuning app's plugin id. Shared by the default-on seed (`main.rs`), the
+/// The Fine-tuning app's plugin id. Shared by the pre-installed seed (`main.rs`), the
 /// manifest-sidecar ensure in `server/finetune.rs`, and the desktop "Fine-tune this
 /// model" open path.
 pub const FINETUNE_PLUGIN_ID: &str = "@ryu/finetune";
 
 /// The Fine-tuning app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `packages/finetune-app`, all JS/CSS inlined).
-/// Seeded as the plugin's `ui_code` on a fresh install so the default-on companion
+/// Seeded as the plugin's `ui_code` on a fresh install so the pre-installed companion
 /// has a UI without going through `ryu pack`. Rebuild with `bun run --cwd
 /// packages/finetune-app build` and copy `dist/index.html` to
 /// `fixtures/finetune.ui.html` to refresh it.
 pub const FINETUNE_UI_HTML: &str = include_str!("fixtures/finetune.ui.html");
 
 /// The Monitors app's prebuilt, self-contained UI bundle (a
-/// `vite-plugin-singlefile` build of `packages/monitors-app`, all JS/CSS inlined).
-/// Seeded as the plugin's `ui_code` on a fresh install so the default-on companion
+/// `vite-plugin-singlefile` build of `apps-store/monitors/ui`, all JS/CSS inlined).
+/// Seeded as the plugin's `ui_code` on a fresh install so the pre-installed companion
 /// has a UI without going through `ryu pack`. Rebuild with `bun run --cwd
-/// packages/monitors-app build` and copy `dist/index.html` to
+/// apps-store/monitors/ui build` and copy `dist/index.html` to
 /// `fixtures/monitors.ui.html` to refresh it.
 pub const MONITORS_UI_HTML: &str = include_str!("fixtures/monitors.ui.html");
 
 /// The Automated Reasoning app's plugin id. Shared by the seed table and the
-/// not-pre-installed list.
+/// companion UI bundle table.
 pub const REASONING_PLUGIN_ID: &str = "@ryu/reasoning";
 
 /// The Automated Reasoning app's prebuilt, self-contained UI bundle (a
@@ -1286,6 +1448,11 @@ pub const REASONING_UI_HTML: &str = include_str!("fixtures/reasoning.ui.html");
 /// install_app` sources it at install time via `compiled_in_ui_code`. Refresh with
 /// `scripts/sync-app-fixtures.sh tuition`.
 pub const TUITION_UI_HTML: &str = include_str!("fixtures/tuition.ui.html");
+
+/// The Expenses app's prebuilt, self-contained companion. Its frame reaches the
+/// local ledger through the generic own-app `app:http` bridge; refresh with
+/// `scripts/sync-app-fixtures.sh expenses`.
+pub const EXPENSES_UI_HTML: &str = include_str!("fixtures/expenses.ui.html");
 
 /// The Wire app's prebuilt, self-contained UI bundle. Same carriage as
 /// [`TUITION_UI_HTML`]; refresh with `scripts/sync-app-fixtures.sh news`.
@@ -1319,7 +1486,7 @@ pub const WORKFLOWS_PLUGIN_ID: &str = crate::plugins::builtins::WORKFLOWS_PLUGIN
 /// The Workflows app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `packages/workflows-app`, React Flow + all
 /// JS/CSS inlined). Seeded as the plugin's `ui_code` on a fresh install so the
-/// default-on companion has a UI without going through `ryu pack`. Rebuild with
+/// pre-installed companion has a UI without going through `ryu pack`. Rebuild with
 /// `bun run --cwd packages/workflows-app build` and copy `dist/index.html` to
 /// `fixtures/workflows.ui.html` to refresh it.
 pub const WORKFLOWS_UI_HTML: &str = include_str!("fixtures/workflows.ui.html");
@@ -1327,7 +1494,7 @@ pub const WORKFLOWS_UI_HTML: &str = include_str!("fixtures/workflows.ui.html");
 /// The Webhooks app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `apps-store/webhooks/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
 /// components — inlined). Seeded as the plugin's `ui_code` on a fresh install so the
-/// default-on companion has a UI without going through `ryu pack`. Rebuild with
+/// pre-installed companion has a UI without going through `ryu pack`. Rebuild with
 /// `bun run --cwd apps-store/webhooks/ui build` (or `scripts/sync-app-fixtures.sh
 /// webhooks`) and copy `dist/index.html` to `fixtures/webhooks.ui.html` to refresh it.
 pub const WEBHOOKS_UI_HTML: &str = include_str!("fixtures/webhooks.ui.html");
@@ -1335,7 +1502,7 @@ pub const WEBHOOKS_UI_HTML: &str = include_str!("fixtures/webhooks.ui.html");
 /// The Quests app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `apps-store/quests/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
 /// components — inlined). Seeded as the plugin's `ui_code` on a fresh install so the
-/// default-on companion has a UI without going through `ryu pack`. Rebuild with
+/// pre-installed companion has a UI without going through `ryu pack`. Rebuild with
 /// `bun run --cwd apps-store/quests/ui build` (or `scripts/sync-app-fixtures.sh
 /// quests`) and copy `dist/index.html` to `fixtures/quests.ui.html` to refresh it.
 pub const QUESTS_UI_HTML: &str = include_str!("fixtures/quests.ui.html");
@@ -1343,7 +1510,7 @@ pub const QUESTS_UI_HTML: &str = include_str!("fixtures/quests.ui.html");
 /// The Activity app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `apps-store/activity/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
 /// components — inlined). Seeded as the plugin's `ui_code` on a fresh install so the
-/// default-on companion has a UI without going through `ryu pack`. Rebuild with
+/// pre-installed companion has a UI without going through `ryu pack`. Rebuild with
 /// `bun run --cwd apps-store/activity/ui build` (or `scripts/sync-app-fixtures.sh
 /// activity`) and copy `dist/index.html` to `fixtures/activity.ui.html` to refresh it.
 pub const ACTIVITY_UI_HTML: &str = include_str!("fixtures/activity.ui.html");
@@ -1351,7 +1518,7 @@ pub const ACTIVITY_UI_HTML: &str = include_str!("fixtures/activity.ui.html");
 /// The Timeline app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `apps-store/timeline/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
 /// components — inlined). Seeded as the plugin's `ui_code` on a fresh install so the
-/// default-on companion has a UI without going through `ryu pack`. Rebuild with
+/// pre-installed companion has a UI without going through `ryu pack`. Rebuild with
 /// `bun run --cwd apps-store/timeline/ui build` (or `scripts/sync-app-fixtures.sh
 /// timeline`) and copy `dist/index.html` to `fixtures/timeline.ui.html` to refresh it.
 pub const TIMELINE_UI_HTML: &str = include_str!("fixtures/timeline.ui.html");
@@ -1359,7 +1526,7 @@ pub const TIMELINE_UI_HTML: &str = include_str!("fixtures/timeline.ui.html");
 /// The Skill Editor app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `apps-store/skill-editor/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
 /// components — inlined). Seeded as the plugin's `ui_code` on a fresh install so the
-/// default-on companion has a UI without going through `ryu pack`. Rebuild with
+/// pre-installed companion has a UI without going through `ryu pack`. Rebuild with
 /// `bun run --cwd apps-store/skill-editor/ui build` (or `scripts/sync-app-fixtures.sh
 /// skill-editor`) and copy `dist/index.html` to `fixtures/skill-editor.ui.html` to
 /// refresh it.
@@ -1377,11 +1544,34 @@ pub const MAIL_UI_HTML: &str = include_str!("fixtures/mail.ui.html");
 /// The Calendar app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `apps-store/calendar/ui`, all JS/CSS — incl.
 /// the tree-shaken `@ryu/ui` components — inlined). Seeded as the plugin's `ui_code`
-/// (default-on companion) so the `/calendar` route mounts the sandboxed companion.
+/// (pre-installed companion) so the `/calendar` route mounts the sandboxed companion.
 /// Rebuild with `bun run --cwd apps-store/calendar/ui build` (or
 /// `scripts/sync-app-fixtures.sh calendar`) and copy `dist/index.html` to
 /// `fixtures/calendar.ui.html` to refresh it.
 pub const CALENDAR_UI_HTML: &str = include_str!("fixtures/calendar.ui.html");
+
+/// The Help Center app's prebuilt, self-contained UI bundle (a
+/// `vite-plugin-singlefile` build of `apps-store/help-center/ui`, all JS/CSS inlined).
+/// Seeded as the pre-installed companion so its Space-backed support workspace is
+/// available on a fresh install. Rebuild with `bun run --cwd apps-store/help-center/ui
+/// build` (or `scripts/sync-app-fixtures.sh help-center`) and copy `dist/index.html` to
+/// `fixtures/help-center.ui.html` to refresh it.
+pub const HELP_CENTER_UI_HTML: &str = include_str!("fixtures/help-center.ui.html");
+/// Sites prebuilt, self-contained UI bundle (a
+/// `vite-plugin-singlefile` build of `apps-store/sites/ui`, all JS/CSS inlined).
+/// Seeded as the first-party companion so the wildcard public-edge control
+/// surface is available on a fresh install. Rebuild with
+/// `bun run --cwd apps-store/sites/ui build` (or
+/// `scripts/sync-app-fixtures.sh sites`) and copy `dist/index.html` to
+/// `fixtures/sites.ui.html` to refresh it.
+pub const SITES_UI_HTML: &str = include_str!("fixtures/sites.ui.html");
+
+/// The Chat Broadcast app's prebuilt, self-contained UI bundle. The app is
+/// desktop-only and sends through the trusted host bridge; it has no sidecar or
+/// public HTTP surface. Rebuild with `bun run --cwd apps-store/chat-broadcast/ui
+/// build` and copy `dist/index.html` to `ui/companion.html` to refresh it.
+pub const CHAT_BROADCAST_UI_HTML: &str =
+    include_str!("../../../../apps-store/chat-broadcast/ui/companion.html");
 
 /// The Warmup app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `apps-store/warmup/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
@@ -1394,7 +1584,7 @@ pub const WARMUP_UI_HTML: &str = include_str!("fixtures/warmup.ui.html");
 
 /// The Learning app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `apps-store/learning/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
-/// components — inlined). Seeded as the plugin's `ui_code` (default-on companion) so
+/// components — inlined). Seeded as the plugin's `ui_code` (pre-installed companion) so
 /// the `/learning` route mounts the sandboxed companion. The `@ryu/learning`
 /// manifest was a wave-2 route-gate governance shell (gating `/api/learn/*` +
 /// `/api/experience/*`); the W7 frontend extraction upgrades it in place to ALSO
@@ -1405,7 +1595,7 @@ pub const LEARNING_UI_HTML: &str = include_str!("fixtures/learning.ui.html");
 
 /// The Meetings app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `apps-store/meetings/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
-/// components — inlined). Seeded as the plugin's `ui_code` (default-on companion) so
+/// components — inlined). Seeded as the plugin's `ui_code` (pre-installed companion) so
 /// the `/meetings` + `/meetings/:id` routes mount the sandboxed companion (record →
 /// live transcript → AI notes + audio import). The `@ryu/meetings` manifest was a
 /// wave-2 route-gate governance shell (gating `/api/meetings/*`) that `requires` the
@@ -1455,7 +1645,7 @@ pub const SUBTITLES_UI_HTML: &str = include_str!("fixtures/subtitles.ui.html");
 /// The Inbox (Approvals) app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `apps-store/approvals/ui`, all JS/CSS — incl. the
 /// tree-shaken `@ryu/ui` components — inlined). Seeded as the plugin's `ui_code`
-/// (default-on companion) so the `/inbox` + `/approvals` routes mount the sandboxed
+/// (pre-installed companion) so the `/inbox` + `/approvals` routes mount the sandboxed
 /// companion. The `@ryu/approvals` manifest was a wave-2 gate-only governance shell
 /// (gating `/api/approvals/*`); the W7 frontend extraction upgrades it in place to ALSO
 /// carry the companion runnable — the unified Inbox page (approvals + notifications +
@@ -1672,9 +1862,9 @@ impl PluginManifestLoader {
 
     /// Load the manifests that are allowed to run in the active runtime.
     ///
-    /// Runtime consumers receive only explicit system manifests plus packages
-    /// present in the user's plugin directory. Official marketplace listings
-    /// are catalog metadata, not runtime registrations.
+    /// Runtime consumers receive explicit system manifests, Core-mandatory
+    /// manifests, and packages present in the user's plugin directory. Official
+    /// marketplace listings are catalog metadata, not runtime registrations.
     pub fn load_runtime() -> Vec<PluginManifest> {
         Self::load_runtime_from(&Self::plugins_dir())
     }
@@ -1683,8 +1873,14 @@ impl PluginManifestLoader {
         let mut manifests = Vec::new();
         let mut seen_ids = HashSet::new();
 
-        // Only the explicit system set is compiled into the runtime.
-        for manifest in Self::load_system_builtins() {
+        // System sidecars and mandatory in-process capabilities must exist before
+        // marketplace materialization. In particular, Spaces is a Core-owned
+        // fixture with no satellite package; excluding mandatory manifests here
+        // leaves its route gate permanently disabled on a fresh node.
+        for manifest in Self::load_builtins()
+            .into_iter()
+            .filter(|manifest| crate::plugins::builtins::is_runtime_builtin(&manifest.id))
+        {
             seen_ids.insert(manifest.id.clone());
             manifests.push(manifest);
         }
@@ -1854,6 +2050,19 @@ impl PluginManifestLoader {
             .collect()
     }
 
+    /// Parse the production runtime fixture set even in test builds. This keeps
+    /// seed-order tests honest: the hermetic test catalog intentionally has more
+    /// fixtures than a release Core binary, while pre-installed reachability
+    /// depends on the smaller production set.
+    #[cfg(test)]
+    pub(crate) fn load_runtime_builtins_for_test() -> Vec<PluginManifest> {
+        let mut seen_ids: HashSet<String> = HashSet::new();
+        CORE_RUNTIME_BUILTIN_MANIFESTS
+            .iter()
+            .filter_map(|raw| Self::parse_and_validate(raw, "<built-in>", None, &mut seen_ids).ok())
+            .collect()
+    }
+
     /// Return only the Core-owned manifests from the compiled index.
     pub(crate) fn load_system_builtins() -> Vec<PluginManifest> {
         Self::load_builtins()
@@ -1868,8 +2077,12 @@ impl PluginManifestLoader {
         let mut seen_ids = HashSet::new();
         BOOTSTRAP_MANIFESTS
             .iter()
-            .filter_map(|raw| {
-                Self::parse_and_validate(raw, "<bootstrap>", None, &mut seen_ids).ok()
+            .filter_map(|raw| match Self::parse_and_validate(raw, "<bootstrap>", None, &mut seen_ids) {
+                Ok(manifest) => Some(manifest),
+                Err(error) => {
+                    tracing::warn!(%error, "bootstrap manifest skipped");
+                    None
+                }
             })
             .collect()
     }
@@ -2130,6 +2343,15 @@ impl PluginManifestLoader {
             }
         }
 
+        // Universal declarative-HTTP gate. Provenance is not available at this
+        // first load seam (the plugin store rehydrates it later), so ownership is
+        // enforced at install + contributions serialization. What is decidable
+        // here is still security-critical: safe Core-relative paths, known action
+        // methods, and GET-only automatic sources.
+        manifest
+            .validate_declarative_http_policy(true)
+            .map_err(|e| format!("{e} (source: {source})"))?;
+
         // Settings + tool-filter schema gate — the manifest equivalent of parsing a
         // config through a schema at import instead of trusting it at use.
         //
@@ -2187,11 +2409,48 @@ mod tests {
     use super::*;
     use crate::runnable::RunnableKind;
 
-    const SAMPLE_JSON: &str = include_str!("../../../../plugins-store/sample/manifest.json");
+    const SAMPLE_JSON: &str =
+        include_str!("../../../../plugins-store/plugins/sample/manifest.json");
 
     /// The multi-kind fixture lives in `apps/core/tests/manifest_fixtures/` so it
     /// doubles as the integration-test input and the in-module round-trip fixture.
     const MULTI_KIND_JSON: &str = include_str!("../../tests/manifest_fixtures/multi_kind.ryu.json");
+
+    #[cfg(unix)]
+    #[test]
+    fn package_file_reader_rejects_symlink_escapes_for_every_file_carriage() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let package = temp.path().join("plugin");
+        for dir in ["hooks", "adapters", "output-styles", "pi-extensions", "real"] {
+            std::fs::create_dir_all(package.join(dir)).expect("create package dir");
+        }
+        let external = temp.path().join("outside.txt");
+        std::fs::write(&external, "private host data").expect("write external file");
+
+        for rel in [
+            "hooks/leak.js",
+            "adapters/leak.js",
+            "output-styles/leak.md",
+            "pi-extensions/leak.ts",
+        ] {
+            symlink(&external, package.join(rel)).expect("create external symlink");
+            let error = read_contained_package_file(&package, rel)
+                .expect_err("external symlink must be rejected");
+            assert!(error.contains("escapes package root"), "{rel}: {error}");
+        }
+
+        std::fs::write(package.join("real/body.js"), "return { kind: 'none' };")
+            .expect("write in-root body");
+        symlink("../real/body.js", package.join("hooks/inside.js"))
+            .expect("create in-root symlink");
+        assert_eq!(
+            read_contained_package_file(&package, "hooks/inside.js")
+                .expect("in-root symlink is allowed"),
+            "return { kind: 'none' };"
+        );
+    }
 
     /// Core-owned port bases — the ports Core's own substrate binds (llama.cpp and
     /// friends, whisper, TTS, sd.cpp, restate, the SDK adapter). A manifest sidecar
@@ -2224,6 +2483,42 @@ mod tests {
         // opt-in and rarely resident at the same time.
         ("@ryu/finetune", 8086),
     ];
+
+    /// Return every packaged manifest directory with its root-qualified path.
+    /// Ordinary apps live directly under `apps-store`; plugins are grouped by
+    /// manifest category under `plugins-store/{plugins,lsp,external_plugins}`.
+    fn packaged_dirs(repo_root: &std::path::Path, root: &str) -> Vec<(String, std::path::PathBuf)> {
+        let categories: Vec<(String, std::path::PathBuf)> = if root == "plugins-store" {
+            ["plugins", "lsp", "external_plugins"]
+                .into_iter()
+                .map(|category| {
+                    (
+                        format!("{root}/{category}"),
+                        repo_root.join(root).join(category),
+                    )
+                })
+                .collect()
+        } else {
+            vec![(root.to_owned(), repo_root.join(root))]
+        };
+
+        let mut dirs = Vec::new();
+        for (qualified_root, category_dir) in categories {
+            let Ok(entries) = std::fs::read_dir(category_dir) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let dir = entry.path();
+                if !dir.join("manifest.json").is_file() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                dirs.push((format!("{qualified_root}/{name}"), dir));
+            }
+        }
+        dirs.sort_by(|left, right| left.0.cmp(&right.0));
+        dirs
+    }
 
     /// Two built-in manifests must never declare the same sidecar port, and a built-in
     /// must never squat a port Core itself binds.
@@ -2264,6 +2559,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn feedback_board_is_compiled_in_but_opt_in() {
+        let manifest = PluginManifestLoader::load_builtins()
+            .into_iter()
+            .find(|manifest| manifest.id == "@ryu/feedback-board")
+            .expect("Feedback Board manifest must be registered");
+        let http = manifest.sidecars[0]
+            .http
+            .as_ref()
+            .expect("Feedback Board must declare an HTTP surface");
+        assert_eq!(http.public_mount.as_deref(), Some("/feedback"));
+        assert_eq!(manifest.sidecars[0].port, 8076);
+        assert!(!crate::plugins::builtins::CORE_PREINSTALLED.contains(&"@ryu/feedback-board"));
     }
 
     #[test]
@@ -2315,6 +2625,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn runtime_loading_keeps_every_mandatory_core_manifest_without_disk_packages() {
+        let root = tempfile::tempdir().expect("create empty plugin directory");
+        let runtime = PluginManifestLoader::load_runtime_from(root.path());
+
+        for id in crate::plugins::builtins::MANDATORY_PLUGINS {
+            assert!(
+                runtime.iter().any(|manifest| manifest.id == *id),
+                "mandatory Core manifest '{id}' must be available before marketplace materialization"
+            );
+        }
+
+        assert!(
+            runtime
+                .iter()
+                .any(|manifest| manifest.id == crate::plugins::builtins::ENGINES_PLUGIN_ID),
+            "the engines provider must accompany the mandatory RAG runtime"
+        );
+    }
+
+    #[test]
+    fn production_runtime_manifest_set_contains_the_core_owned_substrate() {
+        let ids: HashSet<String> = CORE_RUNTIME_BUILTIN_MANIFESTS
+            .iter()
+            .map(|raw| {
+                serde_json::from_str::<PluginManifest>(raw)
+                    .expect("production runtime manifest must parse")
+                    .id
+            })
+            .collect();
+
+        for id in crate::plugins::builtins::MANDATORY_PLUGINS
+            .iter()
+            .copied()
+            .chain(std::iter::once(crate::plugins::builtins::ENGINES_PLUGIN_ID))
+        {
+            assert!(
+                ids.contains(id),
+                "production Core must embed runtime manifest '{id}'"
+            );
+        }
+    }
+
     /// Every packaged app/plugin manifest has exactly ONE home — its package
     /// directory (`<root>/<x>/manifest.json`, what the owning team edits). Only
     /// the small Core system set is embedded; ordinary official packages are
@@ -2362,63 +2715,55 @@ mod tests {
             .collect();
 
         let mut checked = 0;
-        for root in ["apps-store", "plugins-store"] {
-            let root_dir = repo_root.join(root);
-            let Ok(entries) = std::fs::read_dir(&root_dir) else {
-                continue; // OSS mirror: this root is not shipped.
-            };
-            // `read_dir` order is arbitrary; sort so a failure names the same package
-            // every run.
-            let mut names: Vec<String> = entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().join("manifest.json").is_file())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect();
-            names.sort();
-
-            for name in names {
-                // A resurrected duplicate is the regression this guards against: two
-                // copies again means a dead-edit trap, and the fixture one would WIN
-                // for any `include_str!` still pointing at `fixtures/`.
-                let stale = fixtures.join(format!("{name}.manifest.json"));
-                assert!(
-                    !stale.exists(),
-                    "{} is a duplicate of {}/{name}/manifest.json. Packaged manifests have ONE \
+        for (package_root, pkg_path) in packaged_dirs(&repo_root, "apps-store")
+            .into_iter()
+            .chain(packaged_dirs(&repo_root, "plugins-store"))
+        {
+            let name = pkg_path
+                .file_name()
+                .expect("package dir has a name")
+                .to_string_lossy()
+                .into_owned();
+            // A resurrected duplicate is the regression this guards against: two
+            // copies again means a dead-edit trap, and the fixture one would WIN
+            // for any `include_str!` still pointing at `fixtures/`.
+            let stale = fixtures.join(format!("{name}.manifest.json"));
+            assert!(
+                !stale.exists(),
+                "{} is a duplicate of {package_root}/manifest.json. Packaged manifests have ONE \
                      home — the package directory — and Core includes them from there. Delete \
                      the fixture copy.",
-                    stale.display(),
-                    root
+                stale.display(),
+            );
+
+            // The manifest must parse where it lives; `include_str!` embeds bytes
+            // without validating them, so a malformed package manifest would
+            // otherwise compile and only fail at runtime.
+            let manifest_path = pkg_path.join("manifest.json");
+            let pkg_json = std::fs::read_to_string(&manifest_path)
+                .unwrap_or_else(|e| panic!("{} unreadable: {e}", pkg_path.display()));
+            serde_json::from_str::<PluginManifest>(&pkg_json).unwrap_or_else(|e| {
+                panic!("{} is not a valid manifest: {e}", manifest_path.display())
+            });
+
+            let system = name == "ghost"
+                || name == "shadow"
+                || name == "agentbrowser"
+                || (package_root == "apps-store/browser" && name == "browser");
+            if system && !UNREGISTERED_BY_DESIGN.contains(&name.as_str()) {
+                // The exact relative path, not just the file name: a wrong number of
+                // `..` segments is a compile error, but a path pointing at the WRONG
+                // package root would silently compile in someone else's manifest.
+                let expected =
+                    format!("include_str!(\"../../../../{package_root}/manifest.json\")");
+                let multiline = format!("\"../../../../{package_root}/manifest.json\"");
+                assert!(
+                    sources.contains(&expected) || sources.contains(&multiline),
+                    "system package {package_root} is not embedded in Core — no `include_str!` \
+                         names `../../../../{package_root}/manifest.json`"
                 );
-
-                // The manifest must parse where it lives; `include_str!` embeds bytes
-                // without validating them, so a malformed package manifest would
-                // otherwise compile and only fail at runtime.
-                let pkg_path = root_dir.join(&name).join("manifest.json");
-                let pkg_json = std::fs::read_to_string(&pkg_path)
-                    .unwrap_or_else(|e| panic!("{} unreadable: {e}", pkg_path.display()));
-                serde_json::from_str::<PluginManifest>(&pkg_json).unwrap_or_else(|e| {
-                    panic!("{} is not a valid manifest: {e}", pkg_path.display())
-                });
-
-                let system = name == "ghost"
-                    || name == "shadow"
-                    || name == "agentbrowser"
-                    || (root == "apps-store" && name == "browser");
-                if system && !UNREGISTERED_BY_DESIGN.contains(&name.as_str()) {
-                    // The exact relative path, not just the file name: a wrong number of
-                    // `..` segments is a compile error, but a path pointing at the WRONG
-                    // package root would silently compile in someone else's manifest.
-                    let expected =
-                        format!("include_str!(\"../../../../{root}/{name}/manifest.json\")");
-                    let multiline = format!("\"../../../../{root}/{name}/manifest.json\"");
-                    assert!(
-                        sources.contains(&expected) || sources.contains(&multiline),
-                        "system package {root}/{name} is not embedded in Core — no `include_str!` \
-                         names `../../../../{root}/{name}/manifest.json`"
-                    );
-                }
-                checked += 1;
             }
+            checked += 1;
         }
 
         // Gate the zero-escape on the DIRECTORIES being absent, not on reads failing:
@@ -2541,7 +2886,7 @@ mod tests {
     /// package dir, code_file)` for every sandboxed-JS file a package manifest
     /// references.
     ///
-    /// The dir is root-qualified (`plugins-store/advisor`, `apps-store/reasoning`)
+    /// The dir is root-qualified (`plugins-store/plugins/advisor`, `apps-store/reasoning`)
     /// because both roots may carry `code_file` refs, and the failure message below
     /// hands the author an `include_str!` line to paste — one naming the wrong root
     /// would not resolve.
@@ -2554,32 +2899,18 @@ mod tests {
             .join("..")
             .join("..");
         let mut refs = Vec::new();
-        for root in ["apps-store", "plugins-store"] {
-            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
-                continue; // OSS mirror: this root is not shipped.
-            };
-            let mut dirs: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.join("manifest.json").is_file())
-                .collect();
-            dirs.sort();
-            for dir in dirs {
-                let path = dir.join("manifest.json");
-                let raw = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
-                let manifest: PluginManifest = serde_json::from_str(&raw)
-                    .unwrap_or_else(|e| panic!("{} is not a valid manifest: {e}", path.display()));
-                let name = format!(
-                    "{root}/{}",
-                    dir.file_name()
-                        .expect("package dir has a name")
-                        .to_string_lossy()
-                );
-                if crate::plugins::builtins::is_system_plugin(&manifest.id) {
-                    for rel in manifest.code_file_refs() {
-                        refs.push((manifest.id.clone(), name.clone(), rel));
-                    }
+        for (package_root, dir) in packaged_dirs(&repo_root, "apps-store")
+            .into_iter()
+            .chain(packaged_dirs(&repo_root, "plugins-store"))
+        {
+            let path = dir.join("manifest.json");
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
+            let manifest: PluginManifest = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("{} is not a valid manifest: {e}", path.display()));
+            if crate::plugins::builtins::is_system_plugin(&manifest.id) {
+                for rel in manifest.code_file_refs() {
+                    refs.push((manifest.id.clone(), package_root.clone(), rel));
                 }
             }
         }
@@ -2657,30 +2988,17 @@ mod tests {
             .join("..")
             .join("..");
         let mut refs = Vec::new();
-        for root in ["apps-store", "plugins-store"] {
-            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
-                continue; // OSS mirror: this root is not shipped.
-            };
-            let mut dirs: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.join("manifest.json").is_file())
-                .collect();
-            dirs.sort();
-            for dir in dirs {
-                let path = dir.join("manifest.json");
-                let raw = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
-                let manifest: PluginManifest = serde_json::from_str(&raw)
-                    .unwrap_or_else(|e| panic!("{} is not a valid manifest: {e}", path.display()));
-                let name = dir
-                    .file_name()
-                    .expect("package dir has a name")
-                    .to_string_lossy()
-                    .into_owned();
-                for rel in manifest.pi_extension_refs() {
-                    refs.push((manifest.id.clone(), name.clone(), rel));
-                }
+        for (package_root, dir) in packaged_dirs(&repo_root, "apps-store")
+            .into_iter()
+            .chain(packaged_dirs(&repo_root, "plugins-store"))
+        {
+            let path = dir.join("manifest.json");
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
+            let manifest: PluginManifest = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("{} is not a valid manifest: {e}", path.display()));
+            for rel in manifest.pi_extension_refs() {
+                refs.push((manifest.id.clone(), package_root.clone(), rel));
             }
         }
         refs
@@ -2751,30 +3069,17 @@ mod tests {
             .join("..")
             .join("..");
         let mut refs = Vec::new();
-        for root in ["apps-store", "plugins-store"] {
-            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
-                continue; // OSS mirror: this root is not shipped.
-            };
-            let mut dirs: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.join("manifest.json").is_file())
-                .collect();
-            dirs.sort();
-            for dir in dirs {
-                let path = dir.join("manifest.json");
-                let raw = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
-                let manifest: PluginManifest = serde_json::from_str(&raw)
-                    .unwrap_or_else(|e| panic!("{} is not a valid manifest: {e}", path.display()));
-                let name = dir
-                    .file_name()
-                    .expect("package dir has a name")
-                    .to_string_lossy()
-                    .into_owned();
-                for rel in manifest.output_style_refs() {
-                    refs.push((manifest.id.clone(), name.clone(), rel));
-                }
+        for (package_root, dir) in packaged_dirs(&repo_root, "apps-store")
+            .into_iter()
+            .chain(packaged_dirs(&repo_root, "plugins-store"))
+        {
+            let path = dir.join("manifest.json");
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
+            let manifest: PluginManifest = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("{} is not a valid manifest: {e}", path.display()));
+            for rel in manifest.output_style_refs() {
+                refs.push((manifest.id.clone(), package_root.clone(), rel));
             }
         }
         refs
@@ -2863,45 +3168,32 @@ mod tests {
         let mut checked = 0;
         let mut offenders: Vec<String> = Vec::new();
 
-        for root in ["apps-store", "plugins-store"] {
-            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
-                continue; // OSS mirror: this root is not shipped.
-            };
-            let mut dirs: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.join("manifest.json").is_file())
-                .collect();
-            dirs.sort();
-            for dir in dirs {
-                let path = dir.join("manifest.json");
-                let raw = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
-                let json: serde_json::Value = serde_json::from_str(&raw)
-                    .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()));
-                let name = dir
-                    .file_name()
-                    .expect("dir name")
-                    .to_string_lossy()
-                    .into_owned();
+        for (package_root, dir) in packaged_dirs(&repo_root, "apps-store")
+            .into_iter()
+            .chain(packaged_dirs(&repo_root, "plugins-store"))
+        {
+            let path = dir.join("manifest.json");
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
+            let json: serde_json::Value = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()));
 
-                let styles = json
-                    .get("contributes")
-                    .and_then(|c| c.get("output_styles"))
-                    .and_then(serde_json::Value::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-                for style in styles {
-                    if style.get("source").is_some() {
-                        let id = style
-                            .get("id")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("?");
-                        offenders.push(format!("{root}/{name}: output style '{id}'"));
-                    }
+            let styles = json
+                .get("contributes")
+                .and_then(|c| c.get("output_styles"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            for style in styles {
+                if style.get("source").is_some() {
+                    let id = style
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("?");
+                    offenders.push(format!("{package_root}: output style '{id}'"));
                 }
-                checked += 1;
             }
+            checked += 1;
         }
 
         assert!(
@@ -2938,32 +3230,24 @@ mod tests {
             .map(|(_, dir, rel)| (dir, rel))
             .collect();
 
-        for root in ["apps-store", "plugins-store"] {
-            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
-                continue; // OSS mirror: this root is not shipped.
+        for (package_root, pkg) in packaged_dirs(&repo_root, "apps-store")
+            .into_iter()
+            .chain(packaged_dirs(&repo_root, "plugins-store"))
+        {
+            let Ok(files) = std::fs::read_dir(pkg.join(OUTPUT_STYLE_DIR)) else {
+                continue;
             };
-            for entry in entries.filter_map(Result::ok) {
-                let pkg = entry.path();
-                let Ok(files) = std::fs::read_dir(pkg.join(OUTPUT_STYLE_DIR)) else {
+            for file in files.filter_map(Result::ok) {
+                let name = file.file_name().to_string_lossy().into_owned();
+                if !name.ends_with(".md") {
                     continue;
-                };
-                let dir_name = pkg
-                    .file_name()
-                    .expect("package dir has a name")
-                    .to_string_lossy()
-                    .into_owned();
-                for file in files.filter_map(Result::ok) {
-                    let name = file.file_name().to_string_lossy().into_owned();
-                    if !name.ends_with(".md") {
-                        continue;
-                    }
-                    let rel = format!("{OUTPUT_STYLE_DIR}/{name}");
-                    assert!(
-                        declared.contains(&(dir_name.clone(), rel.clone())),
-                        "{root}/{dir_name}/{rel} exists but {dir_name}/manifest.json declares no \
-                         contributes.output_styles entry for it — it would never reach a prompt"
-                    );
                 }
+                let rel = format!("{OUTPUT_STYLE_DIR}/{name}");
+                assert!(
+                    declared.contains(&(package_root.clone(), rel.clone())),
+                    "{package_root}/{rel} exists but {package_root}/manifest.json declares no \
+                         contributes.output_styles entry for it — it would never reach a prompt"
+                );
             }
         }
     }
@@ -2986,33 +3270,25 @@ mod tests {
             .map(|(_, dir, rel)| (dir, rel))
             .collect();
 
-        for root in ["apps-store", "plugins-store"] {
-            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
-                continue; // OSS mirror: this root is not shipped.
+        for (package_root, pkg) in packaged_dirs(&repo_root, "apps-store")
+            .into_iter()
+            .chain(packaged_dirs(&repo_root, "plugins-store"))
+        {
+            let Ok(files) = std::fs::read_dir(pkg.join(PI_EXTENSION_DIR)) else {
+                continue;
             };
-            for entry in entries.filter_map(Result::ok) {
-                let pkg = entry.path();
-                let Ok(files) = std::fs::read_dir(pkg.join(PI_EXTENSION_DIR)) else {
+            for file in files.filter_map(Result::ok) {
+                let name = file.file_name().to_string_lossy().into_owned();
+                if !name.ends_with(".ts") {
                     continue;
-                };
-                let dir_name = pkg
-                    .file_name()
-                    .expect("package dir has a name")
-                    .to_string_lossy()
-                    .into_owned();
-                for file in files.filter_map(Result::ok) {
-                    let name = file.file_name().to_string_lossy().into_owned();
-                    if !name.ends_with(".ts") {
-                        continue;
-                    }
-                    let rel = format!("{PI_EXTENSION_DIR}/{name}");
-                    assert!(
-                        declared.contains(&(dir_name.clone(), rel.clone())),
-                        "{root}/{dir_name}/{rel} exists but {dir_name}/manifest.json declares \
+                }
+                let rel = format!("{PI_EXTENSION_DIR}/{name}");
+                assert!(
+                    declared.contains(&(package_root.clone(), rel.clone())),
+                    "{package_root}/{rel} exists but {package_root}/manifest.json declares \
                          no contributes.pi_extensions entry for it — it would never reach the \
                          managed Pi agent"
-                    );
-                }
+                );
             }
         }
     }
@@ -3038,61 +3314,48 @@ mod tests {
         let mut checked = 0;
         let mut offenders: Vec<String> = Vec::new();
 
-        for root in ["apps-store", "plugins-store"] {
-            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
-                continue; // OSS mirror: this root is not shipped.
-            };
-            let mut dirs: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.join("manifest.json").is_file())
-                .collect();
-            dirs.sort();
-            for dir in dirs {
-                let path = dir.join("manifest.json");
-                let raw = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
-                // Deserialise into the RAW json, not `PluginManifest`: hydration
-                // clears `code_file`, and this check is about the on-disk form.
-                let json: serde_json::Value = serde_json::from_str(&raw)
-                    .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()));
-                let name = dir
-                    .file_name()
-                    .expect("dir name")
-                    .to_string_lossy()
-                    .into_owned();
+        for (package_root, dir) in packaged_dirs(&repo_root, "apps-store")
+            .into_iter()
+            .chain(packaged_dirs(&repo_root, "plugins-store"))
+        {
+            let path = dir.join("manifest.json");
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
+            // Deserialise into the RAW json, not `PluginManifest`: hydration
+            // clears `code_file`, and this check is about the on-disk form.
+            let json: serde_json::Value = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()));
 
-                let hooks = json
-                    .get("contributes")
-                    .and_then(|c| c.get("turn_hooks"))
-                    .and_then(serde_json::Value::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-                for hook in hooks {
-                    if hook.get("code").is_some() {
-                        let id = hook
-                            .get("id")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("?");
-                        offenders.push(format!("{root}/{name}: turn hook '{id}'"));
-                    }
+            let hooks = json
+                .get("contributes")
+                .and_then(|c| c.get("turn_hooks"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            for hook in hooks {
+                if hook.get("code").is_some() {
+                    let id = hook
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("?");
+                    offenders.push(format!("{package_root}: turn hook '{id}'"));
                 }
-
-                let provides = json
-                    .get("provides")
-                    .and_then(serde_json::Value::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-                for entry in provides {
-                    let tools = entry.get("tools").and_then(serde_json::Value::as_object);
-                    for (verb, binding) in tools.into_iter().flatten() {
-                        if binding.get("adapter").and_then(|a| a.get("code")).is_some() {
-                            offenders.push(format!("{root}/{name}: adapter '{verb}'"));
-                        }
-                    }
-                }
-                checked += 1;
             }
+
+            let provides = json
+                .get("provides")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            for entry in provides {
+                let tools = entry.get("tools").and_then(serde_json::Value::as_object);
+                for (verb, binding) in tools.into_iter().flatten() {
+                    if binding.get("adapter").and_then(|a| a.get("code")).is_some() {
+                        offenders.push(format!("{package_root}: adapter '{verb}'"));
+                    }
+                }
+            }
+            checked += 1;
         }
 
         assert!(
@@ -3646,7 +3909,7 @@ mod tests {
         // load AND validate as a companion whose config carries `ui_entry` + the
         // Path B `ui_format:"html"` discriminator. `cargo check` compiles the
         // `include_str!` but never RUNS this loader, so without this a fixture that
-        // fails `parse_and_validate` would be silently dropped → the default-on seed
+        // fails `parse_and_validate` would be silently dropped → the pre-installed seed
         // finds no version → the whole feature is inert while every check stays green.
         let whiteboard = manifests
             .iter()
@@ -4313,15 +4576,18 @@ mod tests {
     /// notice the one that did not survive.
     #[test]
     fn every_compiled_in_manifest_parses_and_none_is_silently_dropped() {
-        let manifests = PluginManifestLoader::load_builtins();
-        assert_eq!(
-            manifests.len(),
-            BUILTIN_MANIFESTS.len(),
-            "{} of {} built-in manifests were dropped by parse/validate — run \
-             `PluginManifestLoader::load()` with tracing on to see which",
-            BUILTIN_MANIFESTS.len() - manifests.len(),
-            BUILTIN_MANIFESTS.len()
-        );
+        let mut seen_ids = HashSet::new();
+        let manifests = BUILTIN_MANIFESTS
+            .iter()
+            .map(|raw| {
+                let id = serde_json::from_str::<serde_json::Value>(raw)
+                    .ok()
+                    .and_then(|value| value.get("id")?.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "<unknown built-in>".to_owned());
+                PluginManifestLoader::parse_and_validate(raw, "<built-in>", None, &mut seen_ids)
+                    .unwrap_or_else(|error| panic!("built-in manifest '{id}' was dropped: {error}"))
+            })
+            .collect::<Vec<_>>();
 
         // A declared MCP server that names NEITHER a spawnable command nor a remote
         // url clears no gate and reaches nothing: `mcp_server_is_present` rejects
@@ -4699,7 +4965,8 @@ mod tests {
     /// Every built-in manifest in this tree, from BOTH homes.
     ///
     /// Manifests used to live only in `plugin_manifest/fixtures/`. The packaged ones
-    /// now live in `apps-store/<x>/manifest.json` / `plugins-store/<x>/manifest.json`
+    /// now live in `apps-store/<x>/manifest.json` /
+    /// `plugins-store/{plugins,lsp,external_plugins}/<x>/manifest.json`
     /// and Core `include_str!`s them directly — the duplicate fixture copies are gone.
     /// Only the ~13 Core-only manifests (no package home: `layers`, `memory`, `rag`,
     /// …) still sit in `fixtures/`.
@@ -4724,17 +4991,12 @@ mod tests {
         }
 
         // 2. The packaged manifests Core compiles in from the package roots.
-        for root in ["apps-store", "plugins-store"] {
-            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
-                continue; // not shipped in this tree
-            };
-            paths.extend(
-                entries
-                    .flatten()
-                    .map(|e| e.path().join("manifest.json"))
-                    .filter(|p| p.is_file()),
-            );
-        }
+        paths.extend(
+            packaged_dirs(&repo_root, "apps-store")
+                .into_iter()
+                .chain(packaged_dirs(&repo_root, "plugins-store"))
+                .map(|(_, dir)| dir.join("manifest.json")),
+        );
 
         paths.sort();
         paths

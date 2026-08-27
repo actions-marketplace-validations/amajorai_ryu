@@ -170,13 +170,12 @@ export interface ComposerAgentControlsConfig {
 	 */
 	atConversationStart?: boolean;
 	/**
-	 * Denser composer (used once a chat has history). It is a DENSITY flag, not a
-	 * layout one: the control cluster is left-aligned in the stacked controls row
-	 * on every surface, exactly as the launchpad renders it, so compact and full
-	 * cannot drift into two arrangements. What compact still changes is size —
-	 * the settings-menu trigger shortens to `[logo] agent [usage] ⌄` (it implies
-	 * {@link compactTrigger}) and the subscription usage meters fold INTO that
-	 * trigger as trailing rather than sitting beside it as a standalone chip.
+	 * Responsive compact composer (used once a chat has history). The control
+	 * cluster stays on the leading side of the textarea while it fits on one line,
+	 * then becomes the left side of the normal controls row below when the textarea
+	 * wraps. The settings-menu trigger shortens to `[logo] agent [usage] ⌄` (it
+	 * implies {@link compactTrigger}) and the subscription usage meters fold INTO
+	 * that trigger rather than sitting beside it as a standalone chip.
 	 */
 	compact?: boolean;
 	/**
@@ -194,6 +193,8 @@ export interface ComposerAgentControlsConfig {
 	extraSections?: ComposerSettingsSection[];
 	/** Keep the model control visible on setup surfaces at every interface level. */
 	forceModelPicker?: boolean;
+	/** Hide all target/model/provider controls for the managed Bot product. */
+	managedProduct?: boolean;
 	/** Currently selected model id (used when `modelSection` is omitted). */
 	model: string | null;
 	/** Map a model's display name (e.g. friendly mode). Ignored with `modelSection`. */
@@ -297,6 +298,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		onModelChange,
 		modelSection,
 		forceModelPicker = false,
+		managedProduct = false,
 		modelLabel,
 		extraSections = [],
 		compact = false,
@@ -473,9 +475,11 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// Auto selects an agent per turn, not a model. Its placeholder model has the
 	// same label, so surfacing it would make the trigger read "Auto · Auto".
 	const showModelSection =
+		!managedProduct &&
 		(forceModelPicker || showsModelPicker(interfaceLevel)) &&
 		agentId !== AUTO_AGENT_ID;
-	const showTuningSections = showsComposerTuning(interfaceLevel);
+	const showTuningSections =
+		!managedProduct && showsComposerTuning(interfaceLevel);
 	// Output style is NOT gated with the tuning sections, deliberately.
 	//
 	// The others (approval mode, thinking budget, agent config) are knobs on how
@@ -518,16 +522,19 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// The summary has to describe the popover it opens, so it is filtered by the
 	// same level: a trigger reading `Ryu · Sonnet` above a body with no model row
 	// is worse than either half alone.
-	const sectionsForLevel = (extras: ComposerSettingsSection[]) => [
-		agentSection,
-		...(showModelSection ? [modelSectionResolved] : []),
-		...(showTuningSections ? extras : []),
-		// Ungated, matching `bodySections` above. `sections` is also what the
-		// composer's keyboard shortcuts cycle, so leaving the style out here would
-		// make it reachable by mouse and not by keyboard — and the trigger summary
-		// would describe a popover that has a row the summary never mentions.
-		outputStyleSection,
-	];
+	const sectionsForLevel = (extras: ComposerSettingsSection[]) =>
+		managedProduct
+			? []
+			: [
+					agentSection,
+					...(showModelSection ? [modelSectionResolved] : []),
+					...(showTuningSections ? extras : []),
+					// Ungated, matching `bodySections` above. `sections` is also what the
+					// composer's keyboard shortcuts cycle, so leaving the style out here would
+					// make it reachable by mouse and not by keyboard — and the trigger summary
+					// would describe a popover that has a row the summary never mentions.
+					outputStyleSection,
+				];
 	/** Every composed section — the shortcut targets, and the list any surface
 	 *  rendering these as ROWS must use. */
 	const sections = sectionsForLevel(extraSections);
@@ -584,7 +591,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// Compact trigger: `[logo] agent [usage] ⌄` — model/approval stay inside the
 	// dropdown. Shared by the dense chat-with-history composer and the narrow-panel
 	// (Ask Ryu) one; both keep the cluster left-aligned in the stacked controls row.
-	const settingsMenu = (
+	const settingsMenu = managedProduct ? null : (
 		<>
 			<ComposerSettingsMenu
 				compact={compact || compactTrigger}
@@ -603,25 +610,27 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 					) : undefined
 				}
 			/>
-			<ProviderCommandDialog
-				renderBody={(close) => renderBody(close, "models")}
-				trigger={
-					<button
-						aria-label="Choose provider and model"
-						className="composer-model-trigger max-w-44 truncate rounded-md px-2 py-1 text-muted-foreground text-xs hover:bg-muted/50 hover:text-foreground"
-						title={activeModelName}
-						type="button"
-					>
-						<IconCpu
-							aria-hidden="true"
-							className="composer-model-icon size-3.5 shrink-0"
-						/>
-						<span className="composer-model-name truncate">
-							{activeModelName}
-						</span>
-					</button>
-				}
-			/>
+			{showModelSection && (
+				<ProviderCommandDialog
+					renderBody={(close) => renderBody(close, "models")}
+					trigger={
+						<button
+							aria-label="Choose provider and model"
+							className="composer-model-trigger max-w-44 truncate rounded-md px-2 py-1 text-muted-foreground text-xs hover:bg-muted/50 hover:text-foreground"
+							title={activeModelName}
+							type="button"
+						>
+							<IconCpu
+								aria-hidden="true"
+								className="composer-model-icon size-3.5 shrink-0"
+							/>
+							<span className="composer-model-name truncate">
+								{activeModelName}
+							</span>
+						</button>
+					}
+				/>
+			)}
 		</>
 	);
 	const picker = (
@@ -637,12 +646,11 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		</div>
 	);
 
-	// ONE cluster, one place: the settings menu, the badges and (full trigger only)
-	// the usage chip, left-aligned in the composer's stacked controls row. Compact
-	// used to return a second arrangement here — cluster on the RIGHT, `leftActions`
-	// null — which made the chat page and the launchpad two different composers
-	// behind one flag. Compact is a density now, so there is nothing left to fork.
-	const leftActions = (
+	// ONE leading cluster: the settings menu, badges and (full trigger only) usage
+	// chip. InputBar places it before a one-line compact textarea or at the left of
+	// the full controls row after that textarea wraps; this hook does not fork a
+	// second right-aligned arrangement.
+	const leftActions = managedProduct ? null : (
 		<div className="flex min-w-0 items-center gap-0.5">
 			{placement === "composer" ? picker : null}
 			{/* Read-only capability badges (tools / thinking / vision) — local

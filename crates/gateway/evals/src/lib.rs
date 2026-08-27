@@ -428,15 +428,164 @@ impl EvalsRegistry {
 ///   {"kind":"regex","value":"^foo.*"}
 ///   {"kind":"json_valid"}
 ///   {"kind":"llm_judge","rubric":"The answer must be polite and correct."}
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AssertionOptions {
+    /// Per-assertion pass threshold. When absent, the case threshold applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f32>,
+    /// Relative weight in the case assertion score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f32>,
+    /// Optional provider/model override for model-graded assertions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Promptfoo-compatible custom rubric prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rubric_prompt: Option<String>,
+    /// Promptfoo-compatible output transform. Execution is deliberately
+    /// sandbox-owned; this field is retained in the wire contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<String>,
+    /// Optional metric name retained for result/export parity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<String>,
+    /// Provider-specific assertion configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<Value>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Assertion {
-    Contains { value: String },
-    NotContains { value: String },
-    Equals { value: String },
-    Regex { value: String },
-    JsonValid,
-    LlmJudge { rubric: String },
+    Contains {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    NotContains {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Equals {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Regex {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Icontains {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    StartsWith {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    ContainsAny {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    ContainsAll {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    IcontainsAny {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    IcontainsAll {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    ContainsJson {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    IsHtml {
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    IsXml {
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    IsSql {
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    IsRefusal {
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Moderation {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Javascript {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Python {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Ruby {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Webhook {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    IsJson {
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    JsonValid {
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    LlmJudge {
+        rubric: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    LlmRubric {
+        rubric: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Factuality {
+        rubric: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    ContextFaithfulness {
+        rubric: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    AnswerRelevance {
+        rubric: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
 }
 
 /// Result of evaluating a single assertion against a response.
@@ -499,10 +648,18 @@ pub struct EvalCase {
     /// synthesized as an extra `contains` assertion. Absent => scalar omitted.
     #[serde(default)]
     pub expected: Option<String>,
+    /// Optional Promptfoo-style pass threshold for the mean assertion score.
+    /// Defaults to `1.0`, which requires every assertion to pass.
+    #[serde(default)]
+    pub threshold: Option<f32>,
     /// Per-case variables. Substituted into {{name}} in the case prompt, the
     /// run-level system_prompt, and every assertion's value/rubric.
     #[serde(default)]
-    pub vars: std::collections::HashMap<String, String>,
+    pub vars: std::collections::HashMap<String, Value>,
+    /// Optional Promptfoo chat prompt. When non-empty, messages are replayed in
+    /// order and `prompt` remains the backward-compatible single-turn fallback.
+    #[serde(default)]
+    pub messages: Vec<EvalMessage>,
     /// Assertions to evaluate against this case's response text.
     #[serde(default)]
     pub assertions: Vec<Assertion>,
@@ -510,6 +667,13 @@ pub struct EvalCase {
     /// to any run-level ids. Empty by default => today's assertion-only behavior.
     #[serde(default)]
     pub evaluators: Vec<String>,
+}
+
+/// One ordered chat turn in a Promptfoo-style prompt.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EvalMessage {
+    pub content: String,
+    pub role: String,
 }
 
 /// Per-case scores returned by the dataset runner.
@@ -533,6 +697,8 @@ pub struct CaseScore {
     pub overall: f32,
     /// NEW: per-assertion results (always present; [] when no assertions).
     pub assertions: Vec<AssertionResult>,
+    /// Mean assertion score in [0, 1].
+    pub assertion_score: f32,
     /// NEW: true iff every assertion in `assertions` passed (vacuously true for []).
     pub assertions_pass: bool,
     /// NEW (P2): per-evaluator scores for the registry evaluators requested for
@@ -631,6 +797,7 @@ pub fn score_case(
         // fields after calling score_case (assertions are evaluated in evals.rs,
         // where the pipeline state/ctx for llm_judge is in scope).
         assertions: Vec::new(),
+        assertion_score: 1.0,
         assertions_pass: true,
         // NEW (P2) — evaluator scores are attached by the api runner after
         // score_evaluators runs (it needs pipeline state for llm_judge).
@@ -640,35 +807,237 @@ pub fn score_case(
 
 // ─── Assertion + variable-substitution helpers ───────────────────────────────
 
-/// Compiled `{{name}}` placeholder regex, built once.
-fn placeholder_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}").expect("valid placeholder regex")
-    })
+/// Render Promptfoo-compatible prompt expressions using typed variables.
+///
+/// The renderer intentionally stays deterministic and bounded. It supports the
+/// editor's portable subset of Nunjucks: dotted lookup, `upper`, `lower`,
+/// `default`, `join`, `length`, `if/else`, and `for` blocks. Unknown expressions
+/// remain literal so a typo cannot silently erase prompt text.
+pub fn render_template(template: &str, vars: &std::collections::HashMap<String, Value>) -> String {
+    render_template_scope(template, vars, 0)
 }
 
-/// Substitute `{{name}}` occurrences in `template` using `vars`.
-/// Unfilled placeholders are left literal (`{{name}}`), matching the desktop
-/// renderPrompt semantics. Uses a top-level compiled regex — no per-call compile.
-pub fn substitute_vars(template: &str, vars: &std::collections::HashMap<String, String>) -> String {
-    placeholder_regex()
-        .replace_all(template, |caps: &regex::Captures| {
-            let name = &caps[1];
-            match vars.get(name) {
-                Some(v) => v.clone(),
-                None => caps[0].to_string(),
+/// Backward-compatible name used by existing Gateway call sites.
+pub fn substitute_vars(template: &str, vars: &std::collections::HashMap<String, Value>) -> String {
+    render_template(template, vars)
+}
+
+const MAX_RENDERED_TEMPLATE_CHARS: usize = 262_144;
+
+fn render_template_scope(
+    template: &str,
+    vars: &std::collections::HashMap<String, Value>,
+    depth: usize,
+) -> String {
+    if depth > 12 {
+        return template.to_owned();
+    }
+    let mut body = template.to_owned();
+    body = render_for_blocks(&body, vars, depth);
+    body = render_if_blocks(&body, vars, depth);
+    let mut rendered = String::with_capacity(body.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = body[cursor..].find("{{") {
+        let start = cursor + relative_start;
+        rendered.push_str(&body[cursor..start]);
+        let Some(relative_end) = body[start + 2..].find("}}") else {
+            rendered.push_str(&body[start..]);
+            cursor = body.len();
+            break;
+        };
+        let end = start + 2 + relative_end;
+        let expression = body[start + 2..end].trim();
+        rendered.push_str(
+            &render_expression(expression, vars).unwrap_or_else(|| body[start..end + 2].to_owned()),
+        );
+        cursor = end + 2;
+        if rendered.chars().count() >= MAX_RENDERED_TEMPLATE_CHARS {
+            return rendered.chars().take(MAX_RENDERED_TEMPLATE_CHARS).collect();
+        }
+    }
+    if cursor < body.len() {
+        rendered.push_str(&body[cursor..]);
+    }
+    rendered.chars().take(MAX_RENDERED_TEMPLATE_CHARS).collect()
+}
+
+fn render_for_blocks(
+    template: &str,
+    vars: &std::collections::HashMap<String, Value>,
+    depth: usize,
+) -> String {
+    let Some(start) = template.find("{% for ") else {
+        return template.to_owned();
+    };
+    let Some(open_end_relative) = template[start..].find("%}") else {
+        return template.to_owned();
+    };
+    let open_end = start + open_end_relative + 2;
+    let header = template[start + 7..open_end - 2].trim();
+    let Some((item, collection)) = header.split_once(" in ") else {
+        return template.to_owned();
+    };
+    let Some(close_relative) = template[open_end..].find("{% endfor %}") else {
+        return template.to_owned();
+    };
+    let close_start = open_end + close_relative;
+    let inner = &template[open_end..close_start];
+    let mut replacement = String::new();
+    if let Some(Value::Array(values)) = lookup_value(vars, collection.trim()) {
+        for value in values {
+            let mut scoped = vars.clone();
+            scoped.insert(item.trim().to_owned(), value.clone());
+            replacement.push_str(&render_template_scope(inner, &scoped, depth + 1));
+        }
+    }
+    let suffix_start = close_start + "{% endfor %}".len();
+    let mut result = String::with_capacity(template.len());
+    result.push_str(&template[..start]);
+    result.push_str(&replacement);
+    result.push_str(&render_for_blocks(&template[suffix_start..], vars, depth));
+    result
+}
+
+fn render_if_blocks(
+    template: &str,
+    vars: &std::collections::HashMap<String, Value>,
+    depth: usize,
+) -> String {
+    let Some(start) = template.find("{% if ") else {
+        return template.to_owned();
+    };
+    let Some(open_end_relative) = template[start..].find("%}") else {
+        return template.to_owned();
+    };
+    let open_end = start + open_end_relative + 2;
+    let condition = template[start + 6..open_end - 2].trim();
+    let Some(close_relative) = template[open_end..].find("{% endif %}") else {
+        return template.to_owned();
+    };
+    let close_start = open_end + close_relative;
+    let inner = &template[open_end..close_start];
+    let (when_true, when_false) = inner
+        .split_once("{% else %}")
+        .map_or((inner, ""), |parts| parts);
+    let chosen = if eval_condition(condition, vars) {
+        when_true
+    } else {
+        when_false
+    };
+    let replacement = render_template_scope(chosen, vars, depth + 1);
+    let suffix_start = close_start + "{% endif %}".len();
+    let mut result = String::with_capacity(template.len());
+    result.push_str(&template[..start]);
+    result.push_str(&replacement);
+    result.push_str(&render_if_blocks(&template[suffix_start..], vars, depth));
+    result
+}
+
+fn eval_condition(expression: &str, vars: &std::collections::HashMap<String, Value>) -> bool {
+    let expression = expression.trim();
+    if let Some(negated) = expression.strip_prefix("not ") {
+        return !eval_condition(negated, vars);
+    }
+    for operator in ["==", "!="] {
+        if let Some((left, right)) = expression.split_once(operator) {
+            let left = lookup_value(vars, left.trim());
+            let right = parse_literal(right.trim()).or_else(|| lookup_value(vars, right.trim()));
+            let equal = left.is_some() && left == right;
+            return if operator == "==" { equal } else { !equal };
+        }
+    }
+    lookup_value(vars, expression).is_some_and(|value| is_truthy(&value))
+}
+
+fn render_expression(
+    expression: &str,
+    vars: &std::collections::HashMap<String, Value>,
+) -> Option<String> {
+    let mut parts = expression.split('|').map(str::trim);
+    let first = parts.next()?.trim();
+    let mut value = lookup_value(vars, first)?;
+    for filter in parts {
+        let (name, argument) = filter
+            .split_once('(')
+            .map_or((filter, None), |(name, rest)| {
+                (name.trim(), Some(rest.trim_end_matches(')').trim()))
+            });
+        value = match name {
+            "upper" => Value::String(stringify_value(&value).to_uppercase()),
+            "lower" => Value::String(stringify_value(&value).to_lowercase()),
+            "default" => {
+                if is_truthy(&value) {
+                    value
+                } else {
+                    Value::String(argument.unwrap_or("").trim_matches(['\"', '\'']).to_owned())
+                }
             }
-        })
-        .into_owned()
+            "join" => {
+                let separator = argument.unwrap_or(", ").trim_matches(['\"', '\'']);
+                let Value::Array(items) = value else {
+                    return None;
+                };
+                Value::String(
+                    items
+                        .iter()
+                        .map(stringify_value)
+                        .collect::<Vec<_>>()
+                        .join(separator),
+                )
+            }
+            "length" => match value {
+                Value::Array(items) => Value::Number((items.len() as u64).into()),
+                Value::Object(items) => Value::Number((items.len() as u64).into()),
+                Value::String(text) => Value::Number((text.chars().count() as u64).into()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+    }
+    Some(stringify_value(&value))
 }
 
-/// Evaluate one DETERMINISTIC assertion (everything except `LlmJudge`) against
+fn lookup_value(vars: &std::collections::HashMap<String, Value>, path: &str) -> Option<Value> {
+    let mut segments = path.trim().split('.');
+    let mut value = vars.get(segments.next()?)?.clone();
+    for segment in segments {
+        value = value.get(segment)?.clone();
+    }
+    Some(value)
+}
+
+fn parse_literal(value: &str) -> Option<Value> {
+    let value = value.trim();
+    if value.starts_with(['\"', '\'']) && value.ends_with(['\"', '\'']) {
+        return Some(Value::String(value[1..value.len() - 1].to_owned()));
+    }
+    serde_json::from_str(value).ok()
+}
+
+fn stringify_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(items) => !items.is_empty(),
+    }
+}
+/// Evaluate one DETERMINISTIC assertion (everything except `LlmJudge`/`LlmRubric`) against
 /// `response_text`. `vars` is already applied to the assertion before this call.
 /// Returns the `AssertionResult`.
 pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) -> AssertionResult {
     let (kind, pass, detail): (&str, bool, String) = match assertion {
-        Assertion::Contains { value } => {
+        Assertion::Contains { value, .. } => {
             let pass = response_text.to_lowercase().contains(&value.to_lowercase());
             let detail = if pass {
                 format!("found \"{value}\"")
@@ -677,7 +1046,7 @@ pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) 
             };
             ("contains", pass, detail)
         }
-        Assertion::NotContains { value } => {
+        Assertion::NotContains { value, .. } => {
             let present = response_text.to_lowercase().contains(&value.to_lowercase());
             let pass = !present;
             let detail = if pass {
@@ -687,7 +1056,7 @@ pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) 
             };
             ("not_contains", pass, detail)
         }
-        Assertion::Equals { value } => {
+        Assertion::Equals { value, .. } => {
             let pass = response_text.trim() == value.trim();
             let detail = if pass {
                 "exact match".to_string()
@@ -696,7 +1065,7 @@ pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) 
             };
             ("equals", pass, detail)
         }
-        Assertion::Regex { value } => match Regex::new(value) {
+        Assertion::Regex { value, .. } => match Regex::new(value) {
             Ok(re) => {
                 let pass = re.is_match(response_text);
                 let detail = if pass {
@@ -708,22 +1077,213 @@ pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) 
             }
             Err(e) => ("regex", false, format!("invalid regex: {e}")),
         },
-        Assertion::JsonValid => {
+        Assertion::Icontains { value, .. } => {
+            let pass = response_text.to_lowercase().contains(&value.to_lowercase());
+            let detail = if pass {
+                format!("found \"{value}\" (case insensitive)")
+            } else {
+                format!("missing \"{value}\" (case insensitive)")
+            };
+            ("icontains", pass, detail)
+        }
+        Assertion::StartsWith { value, .. } => {
+            let pass = response_text.trim_start().starts_with(value.trim());
+            let detail = if pass {
+                format!("starts with \"{}\"", value.trim())
+            } else {
+                format!("does not start with \"{}\"", value.trim())
+            };
+            ("starts_with", pass, detail)
+        }
+        Assertion::ContainsAny { value, .. } => {
+            let values = comma_values(value);
+            let matched = values
+                .iter()
+                .find(|candidate| response_text.contains(*candidate));
+            let pass = matched.is_some();
+            let detail = match matched {
+                Some(candidate) => format!("found one of the values: \"{candidate}\""),
+                None => format!("none of the values were found: {value}"),
+            };
+            ("contains_any", pass, detail)
+        }
+        Assertion::ContainsAll { value, .. } => {
+            let values = comma_values(value);
+            let missing: Vec<&str> = values
+                .iter()
+                .filter(|candidate| !response_text.contains(*candidate))
+                .copied()
+                .collect();
+            let pass = missing.is_empty();
+            let detail = if pass {
+                "found all expected values".to_string()
+            } else {
+                format!("missing values: {}", missing.join(", "))
+            };
+            ("contains_all", pass, detail)
+        }
+        Assertion::IcontainsAny { value, .. } => {
+            let lower = response_text.to_lowercase();
+            let matched = comma_values(value)
+                .into_iter()
+                .find(|candidate| lower.contains(&candidate.to_lowercase()));
+            let pass = matched.is_some();
+            let detail = match matched {
+                Some(candidate) => format!("found one of the values: \"{candidate}\""),
+                None => format!("none of the values were found: {value}"),
+            };
+            ("icontains_any", pass, detail)
+        }
+        Assertion::IcontainsAll { value, .. } => {
+            let lower = response_text.to_lowercase();
+            let values = comma_values(value);
+            let missing: Vec<&str> = values
+                .iter()
+                .filter(|candidate| !lower.contains(&candidate.to_lowercase()))
+                .copied()
+                .collect();
+            let pass = missing.is_empty();
+            let detail = if pass {
+                "found all expected values (case insensitive)".to_string()
+            } else {
+                format!("missing values: {}", missing.join(", "))
+            };
+            ("icontains_all", pass, detail)
+        }
+        Assertion::ContainsJson { value, .. } => {
+            let expected = value.trim();
+            let pass = !expected.is_empty()
+                && serde_json::from_str::<Value>(expected).is_ok()
+                && response_text.contains(expected);
+            let detail = if pass {
+                "found the expected JSON value".to_string()
+            } else {
+                "expected JSON value was not found".to_string()
+            };
+            ("contains_json", pass, detail)
+        }
+        Assertion::IsHtml { .. } => {
+            let trimmed = response_text.trim();
+            let pass = Regex::new(r"(?is)<[a-z][^>]*>.*</[a-z][^>]*>")
+                .is_ok_and(|re| re.is_match(trimmed));
+            let detail = if pass {
+                "HTML-like document"
+            } else {
+                "not HTML-like"
+            };
+            ("is_html", pass, detail.to_owned())
+        }
+        Assertion::IsXml { .. } => {
+            let trimmed = response_text.trim();
+            let pass = Regex::new(r"(?s)^<[A-Za-z_][\w:.-]*(?:\s[^>]*)?>.*</[A-Za-z_][\w:.-]*>$")
+                .is_ok_and(|re| re.is_match(trimmed));
+            let detail = if pass {
+                "XML-like document"
+            } else {
+                "not XML-like"
+            };
+            ("is_xml", pass, detail.to_owned())
+        }
+        Assertion::IsSql { .. } => {
+            let upper = response_text.trim_start().to_uppercase();
+            let pass = [
+                "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "WITH ", "CREATE ", "ALTER ", "DROP ",
+            ]
+            .iter()
+            .any(|prefix| upper.starts_with(prefix));
+            let detail = if pass {
+                "SQL-like statement"
+            } else {
+                "not SQL-like"
+            };
+            ("is_sql", pass, detail.to_owned())
+        }
+        Assertion::IsRefusal { .. } => {
+            let lower = response_text.to_lowercase();
+            let pass = [
+                "i can't",
+                "i cannot",
+                "i’m unable",
+                "i'm unable",
+                "i refuse",
+                "not able to",
+                "cannot help",
+            ]
+            .iter()
+            .any(|phrase| lower.contains(phrase));
+            let detail = if pass {
+                "refusal detected"
+            } else {
+                "no refusal detected"
+            };
+            ("is_refusal", pass, detail.to_owned())
+        }
+        Assertion::Moderation { value, .. } => {
+            let lower = response_text.to_lowercase();
+            let values = comma_values(value);
+            let flagged = values
+                .iter()
+                .find(|term| lower.contains(&term.to_lowercase()));
+            let pass = flagged.is_none();
+            let detail = match flagged {
+                Some(term) => format!("moderation term found: {term}"),
+                None => "no configured moderation term found".to_owned(),
+            };
+            ("moderation", pass, detail)
+        }
+        Assertion::Javascript { .. }
+        | Assertion::Python { .. }
+        | Assertion::Ruby { .. }
+        | Assertion::Webhook { .. } => {
+            let kind = match assertion {
+                Assertion::Javascript { .. } => "javascript",
+                Assertion::Python { .. } => "python",
+                Assertion::Ruby { .. } => "ruby",
+                Assertion::Webhook { .. } => "webhook",
+                _ => unreachable!(),
+            };
+            (
+                kind,
+                false,
+                format!("{kind} assertion requires its sandbox/runtime adapter"),
+            )
+        }
+        Assertion::IsJson { .. } | Assertion::JsonValid { .. } => {
             let pass = serde_json::from_str::<Value>(response_text.trim()).is_ok();
             let detail = if pass {
                 "valid JSON".to_string()
             } else {
                 "not valid JSON".to_string()
             };
-            ("json_valid", pass, detail)
+            let kind = if matches!(assertion, Assertion::IsJson { .. }) {
+                "is_json"
+            } else {
+                "json_valid"
+            };
+            (kind, pass, detail)
         }
-        Assertion::LlmJudge { .. } => {
-            // Caller must route llm_judge through the async judge path; this is a
-            // defensive guard so a misrouted judge never silently passes.
+        Assertion::LlmJudge { .. }
+        | Assertion::LlmRubric { .. }
+        | Assertion::Factuality { .. }
+        | Assertion::ContextFaithfulness { .. }
+        | Assertion::AnswerRelevance { .. } => {
+            // Caller must route model-graded checks through the async judge path;
+            // this defensive guard must never silently pass.
+            let kind = if matches!(assertion, Assertion::LlmRubric { .. }) {
+                "llm_rubric"
+            } else if matches!(assertion, Assertion::Factuality { .. }) {
+                "factuality"
+            } else if matches!(assertion, Assertion::ContextFaithfulness { .. }) {
+                "context_faithfulness"
+            } else if matches!(assertion, Assertion::AnswerRelevance { .. }) {
+                "answer_relevance"
+            } else {
+                "llm_judge"
+            };
             (
-                "llm_judge",
+                kind,
                 false,
-                "llm_judge must be evaluated via the judge path".to_string(),
+                "model-graded assertion must use the judge path".to_string(),
             )
         }
     };
@@ -737,6 +1297,13 @@ pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) 
     }
 }
 
+fn comma_values(value: &str) -> Vec<&str> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .collect()
+}
 /// Build the judge prompt embedding the rubric + the model output under test.
 pub fn build_judge_prompt(rubric: &str, output: &str) -> String {
     format!(
@@ -908,6 +1475,8 @@ pub fn builtin_dataset() -> Vec<EvalCase> {
         EvalCase {
             prompt: "Say hello in one word.".to_string(),
             expected: Some("hello".to_string()),
+            threshold: None,
+            messages: Vec::new(),
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
@@ -915,6 +1484,8 @@ pub fn builtin_dataset() -> Vec<EvalCase> {
         EvalCase {
             prompt: "What is 2 + 2? Answer with just the number.".to_string(),
             expected: Some("4".to_string()),
+            threshold: None,
+            messages: Vec::new(),
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
@@ -922,6 +1493,8 @@ pub fn builtin_dataset() -> Vec<EvalCase> {
         EvalCase {
             prompt: "Name one primary color.".to_string(),
             expected: None,
+            threshold: None,
+            messages: Vec::new(),
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
@@ -1034,6 +1607,8 @@ mod tests {
         let case = EvalCase {
             prompt: "ping".to_string(),
             expected: None,
+            threshold: None,
+            messages: Vec::new(),
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
@@ -1050,6 +1625,8 @@ mod tests {
         let case = EvalCase {
             prompt: "say hello".to_string(),
             expected: Some("hello".to_string()),
+            threshold: None,
+            messages: Vec::new(),
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
@@ -1065,6 +1642,8 @@ mod tests {
         let case = EvalCase {
             prompt: "say hello".to_string(),
             expected: Some("hello".to_string()),
+            threshold: None,
+            messages: Vec::new(),
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
@@ -1080,6 +1659,8 @@ mod tests {
             EvalCase {
                 prompt: "Say hello".to_string(),
                 expected: Some("hello".to_string()),
+                threshold: None,
+                messages: Vec::new(),
                 vars: std::collections::HashMap::new(),
                 assertions: Vec::new(),
                 evaluators: Vec::new(),
@@ -1087,6 +1668,8 @@ mod tests {
             EvalCase {
                 prompt: "What is 2+2?".to_string(),
                 expected: Some("4".to_string()),
+                threshold: None,
+                messages: Vec::new(),
                 vars: std::collections::HashMap::new(),
                 assertions: Vec::new(),
                 evaluators: Vec::new(),
@@ -1094,6 +1677,8 @@ mod tests {
             EvalCase {
                 prompt: "Name a color.".to_string(),
                 expected: None,
+                threshold: None,
+                messages: Vec::new(),
                 vars: std::collections::HashMap::new(),
                 assertions: Vec::new(),
                 evaluators: Vec::new(),
@@ -1125,6 +1710,8 @@ mod tests {
         let cases = vec![EvalCase {
             prompt: "ping".to_string(),
             expected: None,
+            threshold: None,
+            messages: Vec::new(),
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
@@ -1151,7 +1738,7 @@ mod tests {
     #[test]
     fn substitute_vars_replaces_known_and_leaves_unknown() {
         let mut vars = std::collections::HashMap::new();
-        vars.insert("name".to_string(), "Sam".to_string());
+        vars.insert("name".to_string(), Value::String("Sam".to_string()));
         let out = substitute_vars("Hi {{name}}, meet {{other}}", &vars);
         assert_eq!(out, "Hi Sam, meet {{other}}");
     }
@@ -1162,12 +1749,42 @@ mod tests {
         assert_eq!(substitute_vars("plain text", &vars), "plain text");
     }
 
+    #[test]
+    fn render_template_supports_typed_values_and_common_filters() {
+        let vars = serde_json::from_value::<std::collections::HashMap<String, Value>>(json!({
+            "name": "Sam",
+            "premium": true,
+            "items": ["one", "two"],
+            "profile": {"team": "Ryu"}
+        }))
+        .unwrap();
+        assert_eq!(
+            render_template(
+                "Hello {{name | upper}} from {{profile.team}} ({{items | join(' / ')}})",
+                &vars
+            ),
+            "Hello SAM from Ryu (one / two)"
+        );
+        assert_eq!(
+            render_template(
+                "{% if premium %}Priority{% else %}Standard{% endif %}",
+                &vars
+            ),
+            "Priority"
+        );
+        assert_eq!(
+            render_template("{% for item in items %}[{{item}}]{% endfor %}", &vars),
+            "[one][two]"
+        );
+    }
+
     // ── Deterministic assertion evaluation ───────────────────────────────────
 
     #[test]
     fn assertion_contains_case_insensitive() {
         let a = Assertion::Contains {
             value: "Hello".to_string(),
+            options: AssertionOptions::default(),
         };
         let r = eval_assertion_deterministic(&a, "well, hello there");
         assert!(r.pass);
@@ -1179,6 +1796,7 @@ mod tests {
     fn assertion_not_contains() {
         let a = Assertion::NotContains {
             value: "error".to_string(),
+            options: AssertionOptions::default(),
         };
         assert!(eval_assertion_deterministic(&a, "all good").pass);
         assert!(!eval_assertion_deterministic(&a, "an error occurred").pass);
@@ -1188,6 +1806,7 @@ mod tests {
     fn assertion_equals_trims_and_is_case_sensitive() {
         let a = Assertion::Equals {
             value: "42".to_string(),
+            options: AssertionOptions::default(),
         };
         assert!(eval_assertion_deterministic(&a, "  42 ").pass);
         assert!(!eval_assertion_deterministic(&a, "forty-two").pass);
@@ -1197,12 +1816,14 @@ mod tests {
     fn assertion_regex_valid_and_invalid() {
         let ok = Assertion::Regex {
             value: "^foo".to_string(),
+            options: AssertionOptions::default(),
         };
         assert!(eval_assertion_deterministic(&ok, "foobar").pass);
         assert!(!eval_assertion_deterministic(&ok, "barfoo").pass);
 
         let bad = Assertion::Regex {
             value: "(".to_string(),
+            options: AssertionOptions::default(),
         };
         let r = eval_assertion_deterministic(&bad, "anything");
         assert!(!r.pass);
@@ -1211,9 +1832,115 @@ mod tests {
 
     #[test]
     fn assertion_json_valid() {
-        let a = Assertion::JsonValid;
+        let a = Assertion::JsonValid {
+            options: AssertionOptions::default(),
+        };
         assert!(eval_assertion_deterministic(&a, "{\"k\": 1}").pass);
         assert!(!eval_assertion_deterministic(&a, "not json").pass);
+    }
+
+    #[test]
+    fn promptfoo_common_deterministic_assertions() {
+        assert!(
+            eval_assertion_deterministic(
+                &Assertion::Icontains {
+                    value: "hello".into(),
+                    options: AssertionOptions::default(),
+                },
+                "Hello there"
+            )
+            .pass
+        );
+        assert!(
+            eval_assertion_deterministic(
+                &Assertion::StartsWith {
+                    value: "Hello".into(),
+                    options: AssertionOptions::default(),
+                },
+                "  Hello there"
+            )
+            .pass
+        );
+        assert!(
+            eval_assertion_deterministic(
+                &Assertion::ContainsAny {
+                    value: "Paris,London".into(),
+                    options: AssertionOptions::default(),
+                },
+                "The answer is London"
+            )
+            .pass
+        );
+        assert!(
+            !eval_assertion_deterministic(
+                &Assertion::ContainsAll {
+                    value: "Paris,France".into(),
+                    options: AssertionOptions::default(),
+                },
+                "The answer is Paris"
+            )
+            .pass
+        );
+        assert!(
+            eval_assertion_deterministic(
+                &Assertion::IcontainsAll {
+                    value: "paris,france".into(),
+                    options: AssertionOptions::default(),
+                },
+                "Paris is in France"
+            )
+            .pass
+        );
+        assert!(
+            eval_assertion_deterministic(
+                &Assertion::ContainsJson {
+                    value: "{\"ok\":true}".into(),
+                    options: AssertionOptions::default(),
+                },
+                "Result: {\"ok\":true}"
+            )
+            .pass
+        );
+    }
+
+    #[test]
+    fn promptfoo_assertion_options_round_trip_and_format_checks() {
+        let parsed: Assertion = serde_json::from_value(json!({
+            "kind": "contains",
+            "value": "safe",
+            "threshold": 0.8,
+            "weight": 2.0,
+            "metric": "quality"
+        }))
+        .unwrap();
+        match &parsed {
+            Assertion::Contains { options, .. } => {
+                assert_eq!(options.threshold, Some(0.8));
+                assert_eq!(options.weight, Some(2.0));
+                assert_eq!(options.metric.as_deref(), Some("quality"));
+            }
+            _ => panic!("expected contains assertion"),
+        }
+        let wire = serde_json::to_value(&parsed).unwrap();
+        assert!((wire["threshold"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+        assert!(
+            eval_assertion_deterministic(
+                &Assertion::IsHtml {
+                    options: AssertionOptions::default()
+                },
+                "<p>ok</p>"
+            )
+            .pass
+        );
+        assert!(
+            eval_assertion_deterministic(
+                &Assertion::IsSql {
+                    options: AssertionOptions::default()
+                },
+                "SELECT 1"
+            )
+            .pass
+        );
     }
 
     // ── Judge verdict parsing ────────────────────────────────────────────────

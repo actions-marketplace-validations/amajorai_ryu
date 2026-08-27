@@ -6,7 +6,7 @@
 // companion to `agent-threads.ts`. Scan a folder Core can read, preview what it
 // found, then import the selected items into Ryu's own stores.
 
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 export type ImportItemKind =
 	| "instructions"
@@ -108,12 +108,8 @@ export async function scanImportFolder(
 	target: ApiTarget,
 	path: string
 ): Promise<ScanResult> {
-	const resp = await fetch(apiUrl(target, "/api/import/scan"), {
+	const resp = await authenticatedFetch(target, "/api/import/scan", {
 		method: "POST",
-		headers: {
-			...makeHeaders(target.token),
-			"Content-Type": "application/json",
-		},
 		body: JSON.stringify({ path }),
 	});
 	if (!resp.ok) {
@@ -169,12 +165,8 @@ export async function runImport(
 	path: string,
 	items: ImportSelection[]
 ): Promise<RunImportResult> {
-	const resp = await fetch(apiUrl(target, "/api/import/run"), {
+	const resp = await authenticatedFetch(target, "/api/import/run", {
 		method: "POST",
-		headers: {
-			...makeHeaders(target.token),
-			"Content-Type": "application/json",
-		},
 		body: JSON.stringify({ path, items }),
 	});
 	if (!resp.ok) {

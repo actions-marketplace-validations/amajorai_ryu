@@ -86,6 +86,8 @@ const sidecarBins = [
 	"mission-control",
 	"crm",
 	"drafts",
+	"feedback-board",
+	"expenses",
 	"subtitles",
 ];
 

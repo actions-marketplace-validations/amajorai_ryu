@@ -12,17 +12,13 @@
 //! it at `<ryu_dir>/core.token` (0600), so a fresh install is authenticated by
 //! default with no operator action.
 //!
-//! ## Why this EXPORTS into the environment
+//! ## Startup export and live rotation
 //!
-//! Nine call sites across two crates read `std::env::var("RYU_TOKEN")` directly —
-//! the gateway child's `CORE_TOKEN`, the ACP adapter's two spawns, `ext_proxy`,
-//! `self_api`, the hardware crate's shared-token fallback, and `main` itself.
-//! Rather than rewrite each (and silently miss one at runtime, since none of them
-//! fail at compile time), [`resolve_and_export`] runs FIRST in `main` and writes
-//! the resolved value back into the process environment. Every existing reader —
-//! including spawned children, which inherit it — then observes the same token
-//! with no change. Core is edition 2021, where `set_var` is safe, and this runs
-//! before any sidecar or server thread exists.
+//! [`resolve_and_export`] runs before threads exist and exports the initial token
+//! for compatibility with startup-only consumers. Security-sensitive live callers
+//! use [`active_token`] instead. Runtime rotation can therefore atomically replace
+//! the in-memory verifier without mutating a multithreaded process environment or
+//! leaving freshly spawned Core-owned children on the previous bearer.
 //!
 //! ## Provenance is load-bearing, not bookkeeping
 //!
@@ -33,7 +29,7 @@
 //! bearer every peer rejects. So [`TokenSource`] is tracked and callers that mean
 //! "the shared fleet secret" ask for [`shared_fleet_token`], not just any token.
 
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 /// Where the active node token came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +51,20 @@ pub struct ResolvedToken {
     pub source: TokenSource,
 }
 
-static RESOLVED: OnceLock<Option<ResolvedToken>> = OnceLock::new();
+static RESOLVED: OnceLock<RwLock<Option<ResolvedToken>>> = OnceLock::new();
+
+fn resolved_state() -> &'static RwLock<Option<ResolvedToken>> {
+    RESOLVED.get_or_init(|| {
+        let resolved = resolve_uncached();
+        if let Some(token) = &resolved {
+            // Startup happens before sidecar/server threads exist. Runtime rotation
+            // deliberately does not mutate the process environment; live callers
+            // read this state instead (see `active_token`).
+            std::env::set_var("RYU_TOKEN", &token.token);
+        }
+        RwLock::new(resolved)
+    })
+}
 
 /// The file the minted token is persisted to.
 ///
@@ -72,7 +81,7 @@ pub fn token_path() -> std::path::PathBuf {
 ///
 /// Precedence: an operator's `RYU_TOKEN` always wins (including on a machine that
 /// also has a minted file, so provisioning a fleet secret is never fought by a
-/// leftover local mint). Otherwise the persisted `core.token` is reused, and only
+/// leftover local mint). Otherwise the persisted `node-auth.token` is reused, and only
 /// when neither exists is a fresh one minted.
 ///
 /// Returns `None` only when no token could be established AND none could be
@@ -81,16 +90,9 @@ pub fn token_path() -> std::path::PathBuf {
 /// existed, and the caller logs it. Refusing to start because a token file could
 /// not be written would turn a hardening improvement into an outage.
 pub fn resolve_and_export() -> Option<ResolvedToken> {
-    RESOLVED
-        .get_or_init(|| {
-            let resolved = resolve_uncached();
-            if let Some(r) = &resolved {
-                // Export so the ~9 direct `env::var("RYU_TOKEN")` readers and every
-                // spawned child (gateway, ACP agents, sidecars) see the same value.
-                std::env::set_var("RYU_TOKEN", &r.token);
-            }
-            resolved
-        })
+    resolved_state()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
 }
 
@@ -115,7 +117,7 @@ fn resolve_uncached() -> Option<ResolvedToken> {
     // 2. A token this machine minted earlier.
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let trimmed = existing.trim();
-        if !trimmed.is_empty() && !ryu_mesh::is_insecure_auth_token_placeholder(trimmed) {
+        if is_valid_minted_token(trimmed) {
             return Some(ResolvedToken {
                 token: trimmed.to_owned(),
                 source: TokenSource::File,
@@ -160,10 +162,14 @@ fn mint_token() -> String {
     format!("ryu_{hex}")
 }
 
-/// Write the token 0600, creating `<ryu_dir>` 0700. Uses `create_new` semantics
-/// via a truncating open guarded by the caller's read-first check — a concurrent
-/// second Core loses the race harmlessly because both write to the same path and
-/// whichever value survives is read back by everyone through the same file.
+fn is_valid_minted_token(token: &str) -> bool {
+    token.len() == 68
+        && token.starts_with("ryu_")
+        && token[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Atomically write the token 0600, creating `<ryu_dir>` 0700. A crash can leave
+/// either the old or the new complete token, never a truncated live credential.
 fn write_token_file(path: &std::path::Path, token: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -174,24 +180,23 @@ fn write_token_file(path: &std::path::Path, token: &str) -> std::io::Result<()> 
         }
     }
 
+    use std::io::Write;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "token path has no parent")
+    })?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     #[cfg(unix)]
     {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(token.as_bytes())?;
-        file.sync_all()?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o600))?;
     }
-
-    #[cfg(not(unix))]
+    temporary.as_file_mut().write_all(token.as_bytes())?;
+    temporary.as_file_mut().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
     {
-        std::fs::write(path, token)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
 
     Ok(())
@@ -200,7 +205,15 @@ fn write_token_file(path: &std::path::Path, token: &str) -> std::io::Result<()> 
 /// The active token, whatever its provenance. This is what `require_auth`
 /// compares against.
 pub fn active_token() -> Option<String> {
-    resolve_and_export().map(|r| r.token)
+    active_from(resolved_state())
+}
+
+fn active_from(state: &RwLock<Option<ResolvedToken>>) -> Option<String> {
+    state
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|resolved| resolved.token.clone())
 }
 
 /// The active token ONLY when it can serve as a shared fleet secret — i.e. an
@@ -216,20 +229,28 @@ pub fn shared_fleet_token() -> Option<String> {
         .map(|r| r.token)
 }
 
-/// Rotate the node token: mint a fresh one and persist it.
-///
-/// Deliberately does NOT touch the process environment or the resolved
-/// `OnceLock`. A half-applied rotation is worse than none: the running Core would
-/// keep authenticating the OLD token while `env::var("RYU_TOKEN")` handed the NEW
-/// one to freshly-spawned children, so which token worked would depend on which
-/// reader answered. Writing only the file keeps the process wholly on the old
-/// token until it restarts, and wholly on the new one after.
+/// Rotate the node token: mint a fresh one, persist it atomically, then swap the
+/// in-memory verifier before returning. Once this succeeds, the old bearer is dead
+/// and the returned bearer works immediately on every live Core auth surface.
 ///
 /// Errors when the active token came from the environment: `RYU_TOKEN` takes
 /// precedence over the file, so rotating the file would be invisible — the
 /// operator has to change their own env var.
 pub fn rotate() -> std::io::Result<String> {
-    if let Some(active) = resolve_and_export() {
+    rotate_at(resolved_state(), &token_path())
+}
+
+fn rotate_at(
+    state: &RwLock<Option<ResolvedToken>>,
+    path: &std::path::Path,
+) -> std::io::Result<String> {
+    // Hold the exclusive guard across persistence and replacement. This makes
+    // concurrent rotations linearizable: the file and live verifier can never
+    // end up containing different successful rotations.
+    let mut active = state
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(active) = active.as_ref() {
         if active.source == TokenSource::Env {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -240,7 +261,11 @@ pub fn rotate() -> std::io::Result<String> {
         }
     }
     let token = mint_token();
-    write_token_file(&token_path(), &token)?;
+    write_token_file(path, &token)?;
+    *active = Some(ResolvedToken {
+        token: token.clone(),
+        source: TokenSource::File,
+    });
     Ok(token)
 }
 
@@ -265,6 +290,14 @@ mod tests {
         // A mint that the shared placeholder predicate rejected would be refused
         // by `enforce_remote_auth` on a non-loopback bind.
         assert!(!ryu_mesh::is_insecure_auth_token_placeholder(&mint_token()));
+    }
+
+    #[test]
+    fn only_complete_minted_file_tokens_are_accepted() {
+        assert!(is_valid_minted_token(&mint_token()));
+        assert!(!is_valid_minted_token("r"));
+        assert!(!is_valid_minted_token("ryu_abc"));
+        assert!(!is_valid_minted_token(&format!("ryu_{}", "g".repeat(64))));
     }
 
     #[test]
@@ -306,5 +339,61 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn rotation_persists_and_swaps_the_live_token_before_returning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node-auth.token");
+        let state = RwLock::new(Some(ResolvedToken {
+            token: mint_token(),
+            source: TokenSource::File,
+        }));
+        let old = state.read().unwrap().as_ref().unwrap().token.clone();
+
+        let new = rotate_at(&state, &path).unwrap();
+
+        assert_ne!(new, old);
+        assert_eq!(active_from(&state).as_deref(), Some(new.as_str()));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), new);
+    }
+
+    #[test]
+    fn rotation_refuses_operator_owned_environment_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node-auth.token");
+        let state = RwLock::new(Some(ResolvedToken {
+            token: "operator-secret".to_owned(),
+            source: TokenSource::Env,
+        }));
+
+        let error = rotate_at(&state, &path).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(active_from(&state).as_deref(), Some("operator-secret"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn concurrent_rotations_keep_disk_and_live_verifier_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node-auth.token");
+        let state = std::sync::Arc::new(RwLock::new(Some(ResolvedToken {
+            token: mint_token(),
+            source: TokenSource::File,
+        })));
+        let rotate_once = |state: std::sync::Arc<RwLock<Option<ResolvedToken>>>| {
+            let path = path.clone();
+            std::thread::spawn(move || rotate_at(&state, &path).unwrap())
+        };
+
+        let first_handle = rotate_once(state.clone());
+        let second_handle = rotate_once(state.clone());
+        let first = first_handle.join().unwrap();
+        let second = second_handle.join().unwrap();
+        let live = active_from(&state).unwrap();
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), live);
+        assert!(live == first || live == second);
     }
 }

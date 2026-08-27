@@ -27,10 +27,12 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
+	writeSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
 	AGENT_PLUGIN_MANIFEST_FILE,
 	AGENT_PLUGIN_MCP_FILE,
@@ -70,7 +72,7 @@ function printUsage(): void {
 }
 
 function exitError(message: string): never {
-	process.stderr.write(`error: ${message}\n`);
+	writeSync(process.stderr.fd, `error: ${message}\n`);
 	process.exit(1);
 }
 
@@ -148,6 +150,28 @@ function loadManifest(dir: string): LoadedManifest {
 const CODE_FILE_DIRS = ["hooks", "adapters"];
 const CODE_FILE_PATH = /^(hooks|adapters)\/[A-Za-z0-9_][A-Za-z0-9._-]*\.m?js$/;
 
+function containedPackageFile(dir: string, rel: string, label: string): string {
+	let realRoot: string;
+	let realTarget: string;
+	try {
+		realRoot = realpathSync(dir);
+		realTarget = realpathSync(join(dir, rel));
+	} catch (error) {
+		exitError(`${label}: could not resolve '${rel}': ${String(error)}`);
+	}
+	const fromRoot = relative(realRoot, realTarget);
+	if (
+		fromRoot === ".." ||
+		fromRoot.startsWith(`..${sep}`) ||
+		isAbsolute(fromRoot)
+	) {
+		exitError(
+			`${label}: '${rel}' resolves outside the plugin package (${realTarget})`
+		);
+	}
+	return realTarget;
+}
+
 /**
  * Read one `code_file` and return its contents, or exit with a clear error.
  *
@@ -161,7 +185,7 @@ function readCodeFile(dir: string, rel: string, label: string): string {
 			`${label}: code_file '${rel}' must be exactly '<${CODE_FILE_DIRS.join("|")}>/<name>.js' with no traversal`
 		);
 	}
-	const path = join(dir, rel);
+	const path = containedPackageFile(dir, rel, label);
 	let body: string;
 	try {
 		body = readFileSync(path, "utf8");
@@ -275,7 +299,7 @@ function inlineOutputStyleFiles(
 		}
 		let body: string;
 		try {
-			body = readFileSync(join(dir, rel), "utf8");
+			body = readFileSync(containedPackageFile(dir, rel, label), "utf8");
 		} catch (err) {
 			exitError(`${label}: could not read file '${rel}': ${String(err)}`);
 		}
@@ -324,12 +348,12 @@ function resolveUiEntry(manifest: LoadedManifest): string | null {
 	return null;
 }
 
-// Resolve a companion's `ui_format` discriminator. `"html"` (Path B) means the
-// `ui_entry` file is ALREADY a self-contained HTML document (a
-// vite-plugin-singlefile build for a heavy app like the whiteboard) and must be
-// shipped VERBATIM as `ui_code` — NOT run through `Bun.build`, which would try to
-// bundle an HTML file as an ESM entry and fail. Anything else (absent / `"js"`) is
-// the default: `ui_entry` is an ESM module `Bun.build` bundles into `ui_code`.
+// Resolve a UI entry's format. `"html"` means the `ui_entry` file is ALREADY a
+// self-contained HTML document (a vite-plugin-singlefile build for a heavy
+// companion, or a hand-authored widget) and must be shipped VERBATIM as
+// `ui_code` — NOT run through `Bun.build`, which would try to bundle an HTML
+// file as an ESM entry and fail. Anything else (absent / `"js"`) is the default:
+// `ui_entry` is an ESM module `Bun.build` bundles into `ui_code`.
 function resolveUiFormat(manifest: LoadedManifest): "html" | "js" {
 	for (const runnable of manifest.runnables) {
 		if (runnable.kind !== "companion") {
@@ -338,6 +362,15 @@ function resolveUiFormat(manifest: LoadedManifest): "html" | "js" {
 		const fmt = (runnable.config as Record<string, unknown> | undefined)
 			?.ui_format;
 		if (typeof fmt === "string" && fmt.trim().toLowerCase() === "html") {
+			return "html";
+		}
+	}
+	for (const widget of manifest.contributes?.widgets ?? []) {
+		const entry = widget.ui_entry;
+		if (
+			typeof entry === "string" &&
+			entry.trim().toLowerCase().endsWith(".html")
+		) {
 			return "html";
 		}
 	}

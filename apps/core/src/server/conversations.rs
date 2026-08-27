@@ -44,6 +44,12 @@ const TENANCY_VISIBLE_PREDICATE: &str = "(
         :bound = 0
         OR (:uid IS NOT NULL AND c.owner_user_id = :uid)
         OR (:uid IS NOT NULL AND :org IS NOT NULL AND c.org_id = :org
+            AND EXISTS (
+                SELECT 1 FROM conversation_collaborators collaborator
+                WHERE collaborator.conversation_id = c.id
+                  AND collaborator.user_id = :uid
+            ))
+        OR (:uid IS NOT NULL AND :org IS NOT NULL AND c.org_id = :org
             AND (
                 c.visibility = 'org'
                 OR (c.visibility = 'team' AND c.team_id IS NOT NULL
@@ -68,6 +74,12 @@ struct TenancyFilter<'a> {
     /// JSON array of verified team ids, narrowed to the caller's node org. Kept
     /// as JSON so SQLite can evaluate membership inside the same SQL predicate.
     team_ids_json: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationCollaborator {
+    pub user_id: String,
+    pub role: String,
 }
 
 impl TenancyFilter<'_> {
@@ -194,6 +206,12 @@ enum Touch {
     Max,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConversationConflict {
+    Merge,
+    Ignore,
+}
+
 /// The non-tenancy columns a creation path may seed. Every field is EXISTING-WINS
 /// on conflict (except `agent_id`, which is NEW-wins, matching the pre-choke-point
 /// upserts), so a caller that leaves one `None` can never clobber a value another
@@ -203,6 +221,8 @@ struct ConvRow<'a> {
     /// Already SEALED by the caller (`seal_opt`) — the choke point does no crypto.
     title: Option<&'a str>,
     agent_id: Option<&'a str>,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
     folder_path: Option<&'a str>,
     branch: Option<&'a str>,
     worktree_path: Option<&'a str>,
@@ -246,25 +266,35 @@ fn upsert_conversation_row(
     row: &ConvRow<'_>,
     touch: Touch,
 ) -> Result<()> {
+    insert_conversation_row(
+        conn,
+        conversation_id,
+        now,
+        tenancy,
+        row,
+        touch,
+        ConversationConflict::Merge,
+    )
+}
+
+fn insert_conversation_row(
+    conn: &Connection,
+    conversation_id: &str,
+    now: i64,
+    tenancy: &Tenancy,
+    row: &ConvRow<'_>,
+    touch: Touch,
+    conflict: ConversationConflict,
+) -> Result<()> {
     let (owner_user_id, org_id) = tenancy.parts();
     let touch_flag: i64 = match touch {
         Touch::Keep => 0,
         Touch::Set => 1,
         Touch::Max => 2,
     };
-    conn.execute(
-        "INSERT INTO conversations
-            (id, title, agent_id, created_at, updated_at,
-             folder_path, branch, worktree_path, participants,
-             channel_id, visibility, owner_user_id, org_id)
-         VALUES (:id, :title, :agent_id, :now, :now,
-                 :folder_path, :branch, :worktree_path,
-                 -- `participants` is NOT NULL DEFAULT '[]'; the choke point names it
-                 -- explicitly (so `fork` can carry the source's list), which bypasses
-                 -- the column default — restore it here for the callers that pass none.
-                 COALESCE(:participants, '[]'),
-                 :channel_id, COALESCE(:visibility, 'private'), :owner, :org)
-         ON CONFLICT(id) DO UPDATE SET
+    let conflict_clause = match conflict {
+        ConversationConflict::Merge => {
+            "ON CONFLICT(id) DO UPDATE SET
              title         = COALESCE(conversations.title, excluded.title),
              agent_id      = COALESCE(excluded.agent_id, conversations.agent_id),
              updated_at    = CASE :touch
@@ -279,11 +309,34 @@ fn upsert_conversation_row(
              channel_id    = COALESCE(conversations.channel_id, excluded.channel_id),
              visibility    = COALESCE(conversations.visibility, excluded.visibility),
              owner_user_id = COALESCE(conversations.owner_user_id, excluded.owner_user_id),
-             org_id        = COALESCE(conversations.org_id, excluded.org_id)",
+             org_id        = COALESCE(conversations.org_id, excluded.org_id)"
+        }
+        ConversationConflict::Ignore => "ON CONFLICT(id) DO NOTHING",
+    };
+    let statement = format!(
+        "INSERT INTO conversations
+            (id, title, agent_id, created_at, updated_at,
+             folder_path, branch, worktree_path, participants,
+             channel_id, visibility, owner_user_id, org_id)
+         VALUES (:id, :title, :agent_id,
+                 COALESCE(:created_at, :now + (:touch * 0)),
+                 COALESCE(:updated_at, :now + (:touch * 0)),
+                 :folder_path, :branch, :worktree_path,
+                 -- `participants` is NOT NULL DEFAULT '[]'; the choke point names it
+                 -- explicitly (so `fork` can carry the source's list), which bypasses
+                 -- the column default — restore it here for the callers that pass none.
+                 COALESCE(:participants, '[]'),
+                 :channel_id, COALESCE(:visibility, 'private'), :owner, :org)
+         {conflict_clause}"
+    );
+    conn.execute(
+        &statement,
         named_params! {
             ":id": conversation_id,
             ":title": row.title,
             ":agent_id": row.agent_id,
+            ":created_at": row.created_at,
+            ":updated_at": row.updated_at,
             ":now": now,
             ":folder_path": row.folder_path,
             ":branch": row.branch,
@@ -296,7 +349,7 @@ fn upsert_conversation_row(
             ":touch": touch_flag,
         },
     )
-    .context("upserting conversation row (choke point)")?;
+    .context("inserting conversation row (choke point)")?;
     Ok(())
 }
 
@@ -1088,6 +1141,16 @@ impl ConversationStore {
                  created_at  INTEGER NOT NULL,
                  updated_at  INTEGER NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS conversation_collaborators (
+                 conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                 user_id         TEXT NOT NULL,
+                 role            TEXT NOT NULL CHECK (role IN ('viewer', 'participant')),
+                 created_at      INTEGER NOT NULL,
+                 updated_at      INTEGER NOT NULL,
+                 PRIMARY KEY (conversation_id, user_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_conversation_collaborators_user
+                 ON conversation_collaborators(user_id, conversation_id);
              CREATE TABLE IF NOT EXISTS agent_controls (
                  conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
                  requested_by    TEXT NOT NULL,
@@ -1434,6 +1497,39 @@ impl ConversationStore {
         )
     }
 
+    /// Insert a conversation received through a continuity/sync boundary without
+    /// mutating an existing row. Metadata convergence is handled separately by
+    /// `update_metadata_if_newer`; keeping conflict handling insert-only prevents
+    /// a stale payload from replacing the active agent before its timestamp is
+    /// considered.
+    pub async fn ensure_sync_conversation(
+        &self,
+        conversation_id: &str,
+        agent_id: Option<&str>,
+        title: Option<&str>,
+        created_at: i64,
+        updated_at: i64,
+        tenancy: Tenancy,
+    ) -> Result<()> {
+        let title = self.seal_opt(title)?;
+        let conn = self.conn.lock().await;
+        insert_conversation_row(
+            &conn,
+            conversation_id,
+            updated_at,
+            &tenancy,
+            &ConvRow {
+                title: title.as_deref(),
+                agent_id,
+                created_at: Some(created_at),
+                updated_at: Some(updated_at),
+                ..ConvRow::default()
+            },
+            Touch::Keep,
+            ConversationConflict::Ignore,
+        )
+    }
+
     /// Ensure a channel-originated conversation exists with stable source
     /// metadata. On an org-bound node the row is shared with the organization
     /// without assigning it to a human owner; on an unbound node it preserves
@@ -1712,6 +1808,43 @@ impl ConversationStore {
         Ok(())
     }
 
+    /// Load one run summary for a caller that has already passed the conversation
+    /// ACL. This keeps retry and other lifecycle endpoints from having to scan the
+    /// entire run list just to inspect one conversation.
+    pub async fn get_run_summary(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationSummary>> {
+        self.run_summary(conversation_id).await
+    }
+
+    /// Atomically claim a terminal run for one bounded reconnect retry.
+    ///
+    /// The caller must perform the conversation ACL before invoking this method.
+    /// The conditional update is the duplicate-work guard: two desktop windows
+    /// reconnecting at the same time can race, but only the first one changes the
+    /// terminal status to `running` and receives `true`.
+    pub async fn claim_terminal_run_for_retry(&self, conversation_id: &str) -> Result<bool> {
+        let now = now_millis();
+        let claimed = {
+            let conn = self.conn.lock().await;
+            conn.execute(
+                "UPDATE conversations
+                 SET run_status = 'running', updated_at = ?1
+                 WHERE id = ?2 AND run_status IN ('failed', 'interrupted')",
+                params![now, conversation_id],
+            )? == 1
+        };
+        if claimed {
+            // A publish with no listeners is harmless; the status write remains the
+            // source of truth if a client subscribes after this point.
+            if let Ok(Some(run)) = self.run_summary(conversation_id).await {
+                let _ = run_events_sender().send(RunStatusEvent { run });
+            }
+        }
+        Ok(claimed)
+    }
+
     /// Load a single conversation's run summary by id. Used to publish a complete
     /// [`RunStatusEvent`] on every status change. Returns `None` if the row is gone.
     async fn run_summary(&self, conversation_id: &str) -> Result<Option<ConversationSummary>> {
@@ -1916,6 +2049,30 @@ impl ConversationStore {
         Ok(())
     }
 
+    /// Set or clear the workspace folder used to group a conversation.
+    ///
+    /// Clearing the value detaches the chat from its project without deleting
+    /// either the conversation or the folder on disk.
+    pub async fn set_folder_path(
+        &self,
+        conversation_id: &str,
+        folder_path: Option<&str>,
+    ) -> Result<bool> {
+        let now = now_millis();
+        let normalized = folder_path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(normalize_folder_path);
+        let conn = self.conn.lock().await;
+        let updated = conn
+            .execute(
+                "UPDATE conversations SET folder_path = ?1, updated_at = ?2 WHERE id = ?3",
+                params![normalized, now, conversation_id],
+            )
+            .context("setting conversation folder")?;
+        Ok(updated > 0)
+    }
+
     /// Set or clear a conversation's Notion-style glyph. `None` clears it.
     pub async fn set_icon(
         &self,
@@ -1978,6 +2135,117 @@ impl ConversationStore {
         Ok(updated > 0)
     }
 
+    /// Replace a conversation's direct grants and general visibility atomically.
+    pub async fn set_access(
+        &self,
+        conversation_id: &str,
+        visibility: &str,
+        team_id: Option<&str>,
+        collaborators: &[ConversationCollaborator],
+        manager_authorized: bool,
+    ) -> Result<bool> {
+        if !matches!(visibility, "private" | "org" | "team") {
+            anyhow::bail!(
+                "unknown visibility {visibility:?}: expected \"private\", \"org\", or \"team\""
+            );
+        }
+        if visibility == "team" && team_id.is_none() {
+            anyhow::bail!("team visibility requires team_id");
+        }
+        if collaborators.len() > 100 {
+            anyhow::bail!("a conversation can have at most 100 collaborators");
+        }
+        let mut user_ids = std::collections::HashSet::new();
+        for collaborator in collaborators {
+            if collaborator.user_id.is_empty()
+                || collaborator.user_id.len() > 256
+                || collaborator.user_id.chars().any(char::is_control)
+            {
+                anyhow::bail!("collaborator user_id must be 1-256 printable characters");
+            }
+            if !matches!(collaborator.role.as_str(), "viewer" | "participant") {
+                anyhow::bail!("collaborator role must be \"viewer\" or \"participant\"");
+            }
+            if !user_ids.insert(collaborator.user_id.as_str()) {
+                anyhow::bail!("duplicate collaborator user_id");
+            }
+        }
+
+        let now = now_millis();
+        let mut conn = self.conn.lock().await;
+        let transaction = conn
+            .transaction()
+            .context("starting conversation access update")?;
+        if visibility == "private" {
+            let current: Option<String> = transaction
+                .query_row(
+                    "SELECT visibility FROM conversations WHERE id = ?1",
+                    params![conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("reading current conversation visibility")?;
+            if matches!(current.as_deref(), Some("org" | "team")) && !manager_authorized {
+                anyhow::bail!(
+                    "only owners and organization admins can make shared conversations private"
+                );
+            }
+        }
+        let updated = transaction
+            .execute(
+                "UPDATE conversations SET visibility = ?1, team_id = ?2, updated_at = ?3 WHERE id = ?4",
+                params![visibility, team_id, now, conversation_id],
+            )
+            .context("setting conversation access")?;
+        if updated == 0 {
+            return Ok(false);
+        }
+        transaction
+            .execute(
+                "DELETE FROM conversation_collaborators WHERE conversation_id = ?1",
+                params![conversation_id],
+            )
+            .context("replacing conversation collaborators")?;
+        for collaborator in collaborators {
+            transaction
+                .execute(
+                    "INSERT INTO conversation_collaborators
+                        (conversation_id, user_id, role, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)",
+                    params![
+                        conversation_id,
+                        collaborator.user_id,
+                        collaborator.role,
+                        now
+                    ],
+                )
+                .context("adding conversation collaborator")?;
+        }
+        transaction
+            .commit()
+            .context("committing conversation access update")?;
+        Ok(true)
+    }
+
+    pub async fn list_collaborators(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ConversationCollaborator>> {
+        let conn = self.conn.lock().await;
+        let mut statement = conn.prepare(
+            "SELECT user_id, role FROM conversation_collaborators
+             WHERE conversation_id = ?1 ORDER BY user_id",
+        )?;
+        let rows = statement.query_map(params![conversation_id], |row| {
+            Ok(ConversationCollaborator {
+                user_id: row.get(0)?,
+                role: row.get(1)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("listing conversation collaborators")
+    }
+
     /// Append a message and bump the conversation's `updated_at`. Returns the new
     /// message id. **Creates the conversation if it does not exist yet** — which is
     /// why it takes a [`Tenancy`]: an append that mints a row on an org-bound node
@@ -2035,6 +2303,38 @@ impl ConversationStore {
             tenancy,
             None,
             provenance,
+            None,
+        )
+        .await
+    }
+
+    /// Append a message and correlate its live event with the concrete client
+    /// that submitted the HTTP mutation. The id is event metadata only and is not
+    /// persisted or used for authorization.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append_message_as_with_realtime_origin(
+        &self,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        agent_id: Option<&str>,
+        author_user_id: Option<&str>,
+        author_name: Option<&str>,
+        tenancy: Tenancy,
+        provenance: Option<&MessageProvenance>,
+        client_id: Option<&str>,
+    ) -> Result<String> {
+        self.append_message_at_with_provenance(
+            conversation_id,
+            role,
+            content,
+            agent_id,
+            author_user_id,
+            author_name,
+            tenancy,
+            None,
+            provenance,
+            client_id,
         )
         .await
     }
@@ -2070,6 +2370,7 @@ impl ConversationStore {
             tenancy,
             created_at,
             None,
+            None,
         )
         .await
     }
@@ -2086,6 +2387,7 @@ impl ConversationStore {
         tenancy: Tenancy,
         created_at: Option<i64>,
         provenance: Option<&MessageProvenance>,
+        client_id: Option<&str>,
     ) -> Result<String> {
         let now = created_at.unwrap_or_else(now_millis);
         let message_id = uuid::Uuid::new_v4().to_string();
@@ -2270,6 +2572,7 @@ impl ConversationStore {
                         "role": role,
                         "content": content,
                         "author_user_id": author_user_id,
+                        "client_id": client_id,
                         "author_name": author_name,
                         "source": provenance.map(|p| p.source.as_str()),
                         "widget_instance_id": provenance.map(|p| p.widget_instance_id.as_str()),
@@ -3440,6 +3743,39 @@ impl ConversationStore {
         Ok(())
     }
 
+    /// Insert one replayed message after `ensure_sync_conversation` established
+    /// the row and tenancy. Unlike `append_message_with_id`, this does not touch
+    /// conversation metadata, so replay order cannot replace a newer active agent
+    /// or timestamp before LWW metadata resolution runs.
+    pub async fn append_sync_message_with_id(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        role: &str,
+        content: &str,
+        agent_id: Option<&str>,
+        created_at_ms: i64,
+    ) -> Result<bool> {
+        let sealed = self.cipher.seal(content)?;
+        let conn = self.conn.lock().await;
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO messages
+                    (id, conversation_id, role, content, agent_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    message_id,
+                    conversation_id,
+                    role,
+                    sealed,
+                    agent_id,
+                    created_at_ms
+                ],
+            )
+            .context("inserting sync message with explicit id")?;
+        Ok(inserted == 1)
+    }
+
     /// Fetch full conversation detail including messages and participants.
     pub async fn get_conversation_detail(
         &self,
@@ -3765,6 +4101,7 @@ impl ConversationStore {
                 participants: Some(participants_json.as_str()),
                 channel_id: None,
                 visibility: None,
+                ..ConvRow::default()
             },
             Touch::Keep,
         )
@@ -4365,12 +4702,35 @@ impl ConversationStore {
                         // NOT NULL DEFAULT 'private' in the schema, so always present.
                         visibility: row.get(2)?,
                         team_id: row.get(3)?,
+                        collaborators: Vec::new(),
                     })
                 },
             )
             .optional()
             .context("reading conversation access metadata")?;
-        Ok(meta)
+        let Some(mut meta) = meta else {
+            return Ok(None);
+        };
+        let mut statement = conn.prepare(
+            "SELECT user_id, role FROM conversation_collaborators
+             WHERE conversation_id = ?1 ORDER BY user_id",
+        )?;
+        let rows = statement.query_map(params![conversation_id], |row| {
+            let role: String = row.get(1)?;
+            let access = if role == "participant" {
+                crate::identity_verify::Access::Write
+            } else {
+                crate::identity_verify::Access::Read
+            };
+            Ok(crate::identity_verify::ResourceCollaborator {
+                user_id: row.get(0)?,
+                access,
+            })
+        })?;
+        meta.collaborators = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading conversation collaborators")?;
+        Ok(Some(meta))
     }
 
     /// Whether a conversation was created by a registered channel bot. This is
@@ -4416,6 +4776,10 @@ impl ConversationStore {
         // id can suppress its first greeting forever.
         conn.execute(
             "DELETE FROM proactive_openings WHERE conversation_id = ?1",
+            params![conversation_id],
+        )?;
+        conn.execute(
+            "DELETE FROM conversation_collaborators WHERE conversation_id = ?1",
             params![conversation_id],
         )?;
         let removed = conn.execute(
@@ -4600,6 +4964,7 @@ impl ConversationStore {
         conn.execute("DELETE FROM sessions", [])?;
         conn.execute("DELETE FROM btw_entries", [])?;
         conn.execute("DELETE FROM proactive_openings", [])?;
+        conn.execute("DELETE FROM conversation_collaborators", [])?;
         let removed = conn.execute("DELETE FROM conversations", [])?;
         Ok(removed as u64)
     }
@@ -4629,6 +4994,10 @@ impl ConversationStore {
         )?;
         conn.execute(
             &format!("DELETE FROM proactive_openings WHERE conversation_id IN ({owned})"),
+            params![owner_user_id],
+        )?;
+        conn.execute(
+            &format!("DELETE FROM conversation_collaborators WHERE conversation_id IN ({owned})"),
             params![owner_user_id],
         )?;
         let removed = conn.execute(
@@ -5128,6 +5497,84 @@ mod tests {
             .set_visibility("alice-chat", "team", None, true)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_conversation_grants_are_atomic_and_org_scoped() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .claim_tenancy("direct-chat", "alice", Some("org1"))
+            .await
+            .unwrap();
+        store
+            .append_message(
+                "direct-chat",
+                "user",
+                "private roadmap",
+                None,
+                Some("alice"),
+                None,
+            )
+            .await
+            .unwrap();
+        let collaborators = vec![
+            ConversationCollaborator {
+                user_id: "bob".to_owned(),
+                role: "viewer".to_owned(),
+            },
+            ConversationCollaborator {
+                user_id: "carol".to_owned(),
+                role: "participant".to_owned(),
+            },
+        ];
+        assert!(store
+            .set_access("direct-chat", "private", None, &collaborators, true)
+            .await
+            .unwrap());
+
+        let bob_visible = store
+            .list_conversations_visible(Some("bob"), Some("org1"), true)
+            .await
+            .unwrap();
+        assert_eq!(bob_visible.len(), 1);
+        assert!(store
+            .list_conversations_visible(Some("bob"), Some("org2"), true)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store.list_collaborators("direct-chat").await.unwrap(),
+            collaborators
+        );
+        let meta = store.get_access_meta("direct-chat").await.unwrap().unwrap();
+        assert_eq!(meta.collaborators.len(), 2);
+        assert_eq!(
+            meta.collaborators[0].access,
+            crate::identity_verify::Access::Read
+        );
+        assert_eq!(
+            meta.collaborators[1].access,
+            crate::identity_verify::Access::Write
+        );
+
+        let duplicates = vec![collaborators[0].clone(), collaborators[0].clone()];
+        assert!(store
+            .set_access("direct-chat", "org", None, &duplicates, true)
+            .await
+            .is_err());
+        assert_eq!(
+            store.list_collaborators("direct-chat").await.unwrap(),
+            collaborators
+        );
+        assert_eq!(
+            store
+                .get_access_meta("direct-chat")
+                .await
+                .unwrap()
+                .unwrap()
+                .visibility,
+            "private"
+        );
     }
 
     #[tokio::test]
@@ -6518,6 +6965,40 @@ mod tests {
         assert_eq!(list[0].run_status, None);
     }
 
+    #[tokio::test]
+    async fn terminal_run_retry_claim_is_atomic_and_bounded() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .append_message(
+                "conv-retry",
+                "user",
+                "continue this",
+                Some("agent-1"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        store.set_run_status("conv-retry", "failed").await.unwrap();
+
+        assert!(store
+            .claim_terminal_run_for_retry("conv-retry")
+            .await
+            .unwrap());
+        assert!(!store
+            .claim_terminal_run_for_retry("conv-retry")
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .get_run_summary("conv-retry")
+                .await
+                .unwrap()
+                .and_then(|summary| summary.run_status),
+            Some("running".to_owned())
+        );
+    }
+
     // ── Multi-agent participants (#414) ───────────────────────────────────────
 
     #[tokio::test]
@@ -7136,6 +7617,42 @@ mod tests {
             .expect("row");
         assert_eq!(meta.owner_user_id.as_deref(), Some("bob"));
         assert_eq!(meta.org_id.as_deref(), Some("org1"));
+    }
+
+    #[tokio::test]
+    async fn conversation_folder_can_be_cleared_without_deleting_the_chat() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .ensure_conversation(
+                "project-chat",
+                None,
+                Some("Project chat"),
+                Tenancy::Unattributed,
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .set_folder_path("project-chat", Some(r"C:\Code\ryu\"))
+            .await
+            .unwrap());
+        let grouped = store
+            .list_conversations()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|conversation| conversation.id == "project-chat")
+            .expect("conversation summary");
+        assert_eq!(grouped.folder_path.as_deref(), Some(r"C:\Code\ryu"));
+
+        assert!(store.set_folder_path("project-chat", None).await.unwrap());
+        let detached = store
+            .list_conversations()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|conversation| conversation.id == "project-chat")
+            .expect("conversation remains");
+        assert_eq!(detached.folder_path, None);
     }
 
     // ══════════════════════════════════════════════════════════════════════════

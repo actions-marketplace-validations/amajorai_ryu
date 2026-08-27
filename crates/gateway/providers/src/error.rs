@@ -21,6 +21,11 @@ pub enum ProviderError {
     /// `GatewayError::ProviderError`.
     Provider(String),
 
+    /// The upstream provider returned HTTP 402. This is an account/payment
+    /// condition, not a provider outage: callers must preserve it so the chat
+    /// surface can tell a user to refill or switch the selected provider.
+    PaymentRequired { provider: String, message: String },
+
     /// The upstream provider returned HTTP 429. A capacity signal, not a fault:
     /// maps to `GatewayError::ProviderRateLimited` so the pipeline demotes down
     /// the cost-tier fallback chain and rotates accounts WITHOUT tripping the
@@ -37,6 +42,9 @@ impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProviderError::Provider(msg) => write!(f, "Provider error: {msg}"),
+            ProviderError::PaymentRequired { provider, message } => {
+                write!(f, "Provider payment required: {provider}: {message}")
+            }
             ProviderError::RateLimited { provider, .. } => {
                 write!(f, "Provider rate limited: {provider}")
             }

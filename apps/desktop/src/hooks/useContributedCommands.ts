@@ -9,12 +9,12 @@
 // lists in the sidebar is searchable in the palette with zero extra wiring.
 
 import {
-	isCoreApiPath,
+	contributionSourceRequest,
 	type SourceItem,
 	sourceItemsFromResponse,
 } from "@ryu/app-host/views";
 import { useQueries } from "@tanstack/react-query";
-import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
+import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 import { usePluginContributions } from "./usePluginContributions.ts";
 
@@ -46,27 +46,26 @@ export function useContributedSectionItems(
 	// Only sections whose declarative source points at a Core API path are
 	// fetchable here (the same guard the sidebar applies); the rest carry no
 	// listable items and are skipped.
-	const fetchable = sections.filter((section) => {
-		const path = section.spec?.source?.http?.path;
-		return Boolean(path && isCoreApiPath(path));
+	const fetchable = sections.flatMap((section) => {
+		const source = section.spec?.source;
+		const sourceRequest = contributionSourceRequest(section, source);
+		return source && sourceRequest ? [{ section, source, sourceRequest }] : [];
 	});
 
 	const results = useQueries({
-		queries: fetchable.map((section) => ({
+		queries: fetchable.map(({ section, source, sourceRequest }) => ({
 			queryKey: [
 				"command-section-items",
 				target.url,
+				target.token,
 				section.plugin,
 				section.id,
+				sourceRequest.path,
 			],
 			queryFn: async (): Promise<SourceItem[]> => {
-				const source = section.spec?.source;
-				if (!source) {
-					return [];
-				}
-				const resp = await fetch(apiUrl(target, source.http.path), {
-					method: source.http.method ?? "GET",
-					headers: makeHeaders(target.token),
+				const resp = await fetch(apiUrl(target, sourceRequest.path), {
+					method: sourceRequest.method,
+					headers: await requestHeaders(target),
 				});
 				if (!resp.ok) {
 					return [];
@@ -78,7 +77,7 @@ export function useContributedSectionItems(
 		})),
 	});
 
-	return fetchable.map((section, index) => ({
+	return fetchable.map(({ section }, index) => ({
 		sectionId: section.id,
 		plugin: section.plugin,
 		title: section.title,

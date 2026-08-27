@@ -59,4 +59,25 @@ describe("AppIcon theme preview", () => {
 		// The avatar is a seeded canvas, not a colour swatch.
 		expect(html).toContain("<canvas");
 	});
+
+	test("paints a seeded plate behind glyph art when requested", () => {
+		const html = renderToStaticMarkup(
+			<AppIcon iconId="chat-01" name="Chat" seedId="@ryu/chat" seedPlate />
+		);
+
+		expect(html).toContain("<canvas");
+		expect(html).toContain("mask-image");
+	});
+
+	test("applies manifest padding to raster logo art", () => {
+		const html = renderToStaticMarkup(
+			<AppIcon
+				iconPadding="md"
+				iconUrl="https://cdn.example.test/logo.png"
+				name="Padded logo"
+			/>
+		);
+
+		expect(html).toContain("object-contain p-1.5");
+	});
 });

@@ -13,14 +13,13 @@
 // `system_prompt` (the server substitutes {{vars}} per case and prepends it as a
 // system message), the cases as `dataset` (with per-case vars + assertions), and
 // the selected model(s). Results are rendered as a per-case × per-model matrix
-// with per-assertion pass/fail chips. Client-side prompt version history is kept
-// in localStorage keyed by agentId.
+// with per-assertion pass/fail chips. Prompt history is stored by Core so it is
+// durable and shared across desktop sessions.
 
 import { useChat } from "@ai-sdk/react";
 import {
 	Add01Icon,
 	Cancel01Icon,
-	Clock01Icon,
 	Delete02Icon,
 	LockedIcon,
 	PlayIcon,
@@ -44,19 +43,49 @@ import {
 import { DefaultChatTransport } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MarkdownEditor } from "@/src/components/editor/MarkdownEditor.tsx";
+import { VersionHistory } from "@/src/components/versioning/VersionHistory.tsx";
+import {
+	createAgentPromptVersion,
+	getAgentPromptVersion,
+	listAgentPromptVersions,
+	restoreAgentPromptVersion,
+} from "@/src/lib/api/agents.ts";
 import { chatHeaders, chatStreamUrl } from "@/src/lib/api/chat.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	type Assertion,
+	type AssertionOptions,
 	type AssertionResult,
 	type EvalCaseScore,
 	type EvalDatasetCase,
+	type EvalMessage,
 	type EvalRunResult,
 	type ModelEvalResult,
 	runGatewayEvals,
 } from "@/src/lib/api/gateway.ts";
+import {
+	createPromptSuite,
+	getPromptRun,
+	listPromptRuns,
+	listPromptSuites,
+	listPromptSuiteVersions,
+	type PromptRunMeta,
+	type PromptSuiteRecord,
+	type PromptSuiteVersionMeta,
+	restorePromptSuiteVersion,
+	savePromptReview,
+	savePromptRun,
+	updatePromptSuite,
+} from "@/src/lib/api/prompt-suites.ts";
 import { instrumentedFetch } from "@/src/lib/dev-metrics.ts";
-import { formatDateTime } from "@/src/lib/timezone.ts";
+import {
+	normalizePromptfooConfig,
+	type PromptfooConfig,
+	type PromptfooPrompt,
+	type PromptfooTest,
+	parsePromptfooFile,
+	serializePromptfooConfig,
+} from "@/src/lib/promptfoo.ts";
 
 // ── Variable placeholder detection ────────────────────────────────────────────
 // Named placeholders in {{variable_name}} syntax. A top-level regex (not created
@@ -66,8 +95,6 @@ const PLACEHOLDER_RE = /\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g;
 // Large-matrix warning threshold (models × cases). Multi-model × llm_judge fans
 // out to sequential provider calls under Core's 120s proxy timeout.
 const LARGE_MATRIX_THRESHOLD = 12;
-// Cap on stored client-side prompt snapshots; oldest are dropped.
-const MAX_SNAPSHOTS = 20;
 
 function extractPlaceholders(prompt: string): string[] {
 	const seen = new Set<string>();
@@ -89,6 +116,28 @@ function renderPrompt(prompt: string, vars: Record<string, string>): string {
 	);
 }
 
+function displayVariable(value: unknown): string {
+	if (typeof value === "string") {
+		return value;
+	}
+	if (value === undefined) {
+		return "";
+	}
+	return JSON.stringify(value);
+}
+
+function parseVariable(value: string): unknown {
+	const trimmed = value.trim();
+	if (!trimmed) {
+		return "";
+	}
+	try {
+		return JSON.parse(trimmed) as unknown;
+	} catch {
+		return value;
+	}
+}
+
 function pct(value: number): string {
 	return `${Math.round(value * 100)}%`;
 }
@@ -103,6 +152,14 @@ function scoreTone(score: number): string {
 	return "text-destructive";
 }
 
+function parseThreshold(value: string): number | undefined {
+	if (!value.trim()) {
+		return undefined;
+	}
+	const parsed = Number.parseFloat(value);
+	return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : undefined;
+}
+
 // ── Assertion kinds (UI metadata) ──────────────────────────────────────────────
 
 const ASSERTION_KINDS = [
@@ -110,8 +167,29 @@ const ASSERTION_KINDS = [
 	"not_contains",
 	"equals",
 	"regex",
+	"icontains",
+	"starts_with",
+	"contains_any",
+	"contains_all",
+	"icontains_any",
+	"icontains_all",
+	"contains_json",
+	"is_html",
+	"is_xml",
+	"is_sql",
+	"is_refusal",
+	"moderation",
+	"javascript",
+	"python",
+	"ruby",
+	"webhook",
+	"is_json",
 	"json_valid",
 	"llm_judge",
+	"llm_rubric",
+	"factuality",
+	"context_faithfulness",
+	"answer_relevance",
 ] as const;
 
 type AssertionKind = (typeof ASSERTION_KINDS)[number];
@@ -121,41 +199,121 @@ const ASSERTION_LABELS: Record<AssertionKind, string> = {
 	not_contains: "Not contains",
 	equals: "Equals",
 	regex: "Regex",
+	icontains: "Contains (case-insensitive)",
+	starts_with: "Starts with",
+	contains_any: "Contains any",
+	contains_all: "Contains all",
+	icontains_any: "Contains any (case-insensitive)",
+	icontains_all: "Contains all (case-insensitive)",
+	contains_json: "Contains JSON",
+	is_html: "HTML",
+	is_xml: "XML",
+	is_sql: "SQL",
+	is_refusal: "Refusal",
+	moderation: "Moderation",
+	javascript: "JavaScript",
+	python: "Python",
+	ruby: "Ruby",
+	webhook: "Webhook",
+	is_json: "Valid JSON",
 	json_valid: "Valid JSON",
 	llm_judge: "LLM judge",
+	llm_rubric: "LLM rubric",
+	factuality: "Factuality",
+	context_faithfulness: "Context faithfulness",
+	answer_relevance: "Answer relevance",
 };
 
 /** Build a default assertion object for a given kind. */
 function defaultAssertion(kind: AssertionKind): Assertion {
-	if (kind === "json_valid") {
-		return { kind: "json_valid" };
+	if (
+		[
+			"json_valid",
+			"is_json",
+			"is_html",
+			"is_xml",
+			"is_sql",
+			"is_refusal",
+		].includes(kind)
+	) {
+		return { kind } as Assertion;
 	}
-	if (kind === "llm_judge") {
-		return { kind: "llm_judge", rubric: "" };
+	if (
+		[
+			"llm_judge",
+			"llm_rubric",
+			"factuality",
+			"context_faithfulness",
+			"answer_relevance",
+		].includes(kind)
+	) {
+		return { kind, rubric: "" } as Assertion;
 	}
-	return { kind, value: "" };
+	return { kind, value: "" } as Assertion;
 }
 
 /** The editable text payload of an assertion (value or rubric), if any. */
 function assertionText(a: Assertion): string {
-	if (a.kind === "json_valid") {
+	if (
+		[
+			"json_valid",
+			"is_json",
+			"is_html",
+			"is_xml",
+			"is_sql",
+			"is_refusal",
+		].includes(a.kind)
+	) {
 		return "";
 	}
-	if (a.kind === "llm_judge") {
-		return a.rubric;
+	if (
+		[
+			"llm_judge",
+			"llm_rubric",
+			"factuality",
+			"context_faithfulness",
+			"answer_relevance",
+		].includes(a.kind)
+	) {
+		return "rubric" in a ? a.rubric : "";
 	}
-	return a.value;
+	return "value" in a ? a.value : "";
 }
 
 /** Set the editable text payload of an assertion, preserving kind. */
 function withAssertionText(a: Assertion, text: string): Assertion {
-	if (a.kind === "json_valid") {
+	if (
+		[
+			"json_valid",
+			"is_json",
+			"is_html",
+			"is_xml",
+			"is_sql",
+			"is_refusal",
+		].includes(a.kind)
+	) {
 		return a;
 	}
-	if (a.kind === "llm_judge") {
-		return { kind: "llm_judge", rubric: text };
+	if (
+		[
+			"llm_judge",
+			"llm_rubric",
+			"factuality",
+			"context_faithfulness",
+			"answer_relevance",
+		].includes(a.kind)
+	) {
+		return { kind: a.kind, options: a.options, rubric: text } as Assertion;
 	}
-	return { kind: a.kind, value: text };
+	return { kind: a.kind, options: a.options, value: text } as Assertion;
+}
+
+/** The Gateway wire contract flattens Promptfoo assertion options next to kind/value. */
+function gatewayAssertion(assertion: Assertion): Assertion {
+	const { options, ...base } = assertion as Assertion & {
+		options?: AssertionOptions;
+	};
+	return { ...base, ...(options ?? {}) } as Assertion;
 }
 
 // ── Test-case rows ─────────────────────────────────────────────────────────────
@@ -167,8 +325,15 @@ interface TestCaseRow {
 	id: string;
 	/** User message; may contain {{vars}}. */
 	input: string;
+	/** Ordered Promptfoo chat messages, when this case is multi-turn. */
+	messages?: EvalMessage[];
+	metadata: Record<string, unknown>;
 	name: string;
-	vars: Record<string, string>;
+	options: Record<string, unknown>;
+	providers: string[];
+	/** Promptfoo-style mean assertion pass threshold, entered as 0..1. */
+	threshold: string;
+	vars: Record<string, unknown>;
 }
 
 function newTestCaseRow(): TestCaseRow {
@@ -176,46 +341,148 @@ function newTestCaseRow(): TestCaseRow {
 		id: crypto.randomUUID(),
 		name: "",
 		input: "",
+		metadata: {},
+		options: {},
+		providers: [],
 		vars: {},
 		expected: "",
+		threshold: "",
 		assertions: [],
 	};
 }
 
-// ── Client-side prompt version history (localStorage, keyed by agentId) ─────────
-
-interface PromptSnapshot {
-	id: string;
-	ts: number;
-	value: string;
-	version: string;
+interface PromptTestSuiteSnapshot {
+	evaluatorIds: string[];
+	extraModels: string[];
+	judgeModel: string;
+	rows: TestCaseRow[];
 }
 
-function historyKey(agentId: string): string {
-	return `prompt-studio-versions:${agentId}`;
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
 }
 
-function loadSnapshots(agentId: string | null): PromptSnapshot[] {
-	if (agentId === null) {
-		return [];
+function isPersistedAssertion(value: unknown): value is Assertion {
+	if (!isRecord(value) || typeof value.kind !== "string") {
+		return false;
+	}
+	if (
+		[
+			"json_valid",
+			"is_json",
+			"is_html",
+			"is_xml",
+			"is_sql",
+			"is_refusal",
+		].includes(value.kind)
+	) {
+		return true;
+	}
+	if (
+		[
+			"llm_judge",
+			"llm_rubric",
+			"factuality",
+			"context_faithfulness",
+			"answer_relevance",
+		].includes(value.kind)
+	) {
+		return typeof value.rubric === "string";
+	}
+	return (
+		ASSERTION_KINDS.includes(value.kind as AssertionKind) &&
+		typeof value.value === "string"
+	);
+}
+
+function isPersistedRow(value: unknown): value is TestCaseRow {
+	if (!isRecord(value)) {
+		return false;
+	}
+	if (
+		typeof value.id !== "string" ||
+		typeof value.name !== "string" ||
+		typeof value.input !== "string" ||
+		typeof value.expected !== "string" ||
+		typeof value.threshold !== "string" ||
+		!isRecord(value.vars) ||
+		!Array.isArray(value.assertions)
+	) {
+		return false;
+	}
+	return (
+		value.assertions.every(isPersistedAssertion) &&
+		(value.messages === undefined || Array.isArray(value.messages)) &&
+		(value.metadata === undefined || isRecord(value.metadata)) &&
+		(value.options === undefined || isRecord(value.options)) &&
+		(value.providers === undefined || Array.isArray(value.providers))
+	);
+}
+
+function normalizeTestCaseRow(row: TestCaseRow): TestCaseRow {
+	return {
+		...newTestCaseRow(),
+		...row,
+		metadata: row.metadata ?? {},
+		options: row.options ?? {},
+		providers: row.providers ?? [],
+		vars: row.vars ?? {},
+	};
+}
+
+function testSuiteKey(agentId: string): string {
+	return `prompt-studio-tests:${agentId}`;
+}
+
+function loadTestSuite(agentId: string | null): PromptTestSuiteSnapshot {
+	if (!agentId || typeof window === "undefined") {
+		return { evaluatorIds: [], extraModels: [], judgeModel: "", rows: [] };
 	}
 	try {
-		const raw = localStorage.getItem(historyKey(agentId));
+		const raw = window.localStorage.getItem(testSuiteKey(agentId));
 		if (!raw) {
-			return [];
+			return { evaluatorIds: [], extraModels: [], judgeModel: "", rows: [] };
 		}
-		const parsed = JSON.parse(raw) as PromptSnapshot[];
-		return Array.isArray(parsed) ? parsed : [];
+		const parsed: unknown = JSON.parse(raw);
+		if (!isRecord(parsed)) {
+			return { evaluatorIds: [], extraModels: [], judgeModel: "", rows: [] };
+		}
+		return {
+			evaluatorIds: Array.isArray(parsed.evaluatorIds)
+				? parsed.evaluatorIds.filter(
+						(value): value is string => typeof value === "string"
+					)
+				: [],
+			extraModels: Array.isArray(parsed.extraModels)
+				? parsed.extraModels.filter(
+						(model): model is string => typeof model === "string"
+					)
+				: [],
+			judgeModel:
+				typeof parsed.judgeModel === "string" ? parsed.judgeModel : "",
+			rows: Array.isArray(parsed.rows)
+				? parsed.rows.filter(isPersistedRow).map(normalizeTestCaseRow)
+				: [],
+		};
 	} catch {
-		return [];
+		return { evaluatorIds: [], extraModels: [], judgeModel: "", rows: [] };
 	}
 }
 
-function persistSnapshots(agentId: string, snapshots: PromptSnapshot[]): void {
+function persistTestSuite(
+	agentId: string,
+	snapshot: PromptTestSuiteSnapshot
+): void {
+	if (typeof window === "undefined") {
+		return;
+	}
 	try {
-		localStorage.setItem(historyKey(agentId), JSON.stringify(snapshots));
+		window.localStorage.setItem(
+			testSuiteKey(agentId),
+			JSON.stringify(snapshot)
+		);
 	} catch {
-		// localStorage may be unavailable/full — history is best-effort.
+		// Test drafts remain usable when browser storage is unavailable or full.
 	}
 }
 
@@ -224,14 +491,12 @@ function persistSnapshots(agentId: string, snapshots: PromptSnapshot[]): void {
 export interface PromptStudioProps {
 	/** The agent id used to send the preview chat request. */
 	agentId: string | null;
+	/** The execution engine. ACP engines bypass the Gateway eval route. */
+	engine?: string;
 	/** When true, all editing is disabled. Shows a locked affordance. */
 	locked: boolean;
 	/**
-	 * The agent's chatModel — the model used for eval/test runs. Defaults to "".
-	 *
-	 * NOTE: until the call site (AgentEditPage) wires `model={chatModel}`, this is
-	 * "" and the Test-cases Run button is disabled. That one-line wire is a
-	 * separate task and is intentionally not done here.
+	 * The agent's selected gateway model used for eval/test runs. Defaults to "".
 	 */
 	model?: string;
 	/** Called when the user edits the prompt text. */
@@ -254,6 +519,7 @@ export function PromptStudio({
 	target,
 	version,
 	model = "",
+	engine = "",
 }: PromptStudioProps) {
 	// Variable values entered by the user for the preview substitution.
 	const [varValues, setVarValues] = useState<Record<string, string>>({});
@@ -264,6 +530,30 @@ export function PromptStudio({
 	const previewConvIdRef = useRef<string>(`preview-${crypto.randomUUID()}`);
 
 	const placeholders = useMemo(() => extractPlaceholders(value), [value]);
+	const promptVersionSource = useMemo(() => {
+		if (!agentId) {
+			return null;
+		}
+		return {
+			getValue: (versionId: string) =>
+				getAgentPromptVersion(target, agentId, versionId),
+			list: async () =>
+				(await listAgentPromptVersions(target, agentId)).map((saved) => ({
+					createdAt: saved.createdAt,
+					id: saved.id,
+					label: saved.label,
+				})),
+			restore: async (versionId: string) => {
+				const restored = await restoreAgentPromptVersion(
+					target,
+					agentId,
+					versionId
+				);
+				onChange(restored);
+			},
+			snapshot: () => createAgentPromptVersion(target, agentId, value),
+		};
+	}, [agentId, onChange, target, value]);
 
 	// Reset unknown var values when the placeholder set changes — avoid stale keys
 	// polluting the rendered prompt.
@@ -300,13 +590,13 @@ export function PromptStudio({
 					v{version}
 				</Badge>
 				<div className="ml-auto flex items-center gap-2">
-					<PromptHistory
-						agentId={agentId}
-						currentValue={value}
-						locked={locked}
-						onRestore={onChange}
-						version={version}
-					/>
+					{promptVersionSource ? (
+						<VersionHistory
+							currentValue={value}
+							disabled={locked}
+							source={promptVersionSource}
+						/>
+					) : null}
 					{locked ? (
 						<Badge className="gap-1" variant="secondary">
 							<HugeiconsIcon className="size-3" icon={LockedIcon} />
@@ -373,8 +663,10 @@ export function PromptStudio({
 									{name}
 								</Label>
 								<Input
+									autoComplete="off"
 									className="h-8 text-xs"
 									id={`var-${name}`}
+									name={`preview-variable-${name}`}
 									onChange={(e) => handleVarChange(name, e.target.value)}
 									placeholder={`Value for {{${name}}}`}
 									value={varValues[name] ?? ""}
@@ -388,8 +680,10 @@ export function PromptStudio({
 			{/* Test-cases runner (gateway-backed, system-prompt-aware) */}
 			<PromptTestCases
 				agentId={agentId}
+				engine={engine}
 				locked={locked}
 				model={model}
+				onPromptChange={onChange}
 				promptDraft={value}
 				target={target}
 			/>
@@ -426,211 +720,98 @@ export function PromptStudio({
 	);
 }
 
-// ── Prompt version history (localStorage) ───────────────────────────────────────
-
-interface PromptHistoryProps {
-	agentId: string | null;
-	currentValue: string;
-	locked: boolean;
-	onRestore: (value: string) => void;
-	version: string;
-}
-
-function PromptHistory({
-	agentId,
-	currentValue,
-	version,
-	locked,
-	onRestore,
-}: PromptHistoryProps) {
-	const [open, setOpen] = useState(false);
-	const [snapshots, setSnapshots] = useState<PromptSnapshot[]>(() =>
-		loadSnapshots(agentId)
-	);
-	const [diffId, setDiffId] = useState<string | null>(null);
-
-	// Reload snapshots when the agent changes (history is per-agent).
-	useEffect(() => {
-		setSnapshots(loadSnapshots(agentId));
-		setDiffId(null);
-	}, [agentId]);
-
-	const handleSnapshot = useCallback(() => {
-		if (agentId === null) {
-			return;
-		}
-		const snap: PromptSnapshot = {
-			id: crypto.randomUUID(),
-			ts: Date.now(),
-			version,
-			value: currentValue,
-		};
-		setSnapshots((prev) => {
-			const next = [snap, ...prev].slice(0, MAX_SNAPSHOTS);
-			persistSnapshots(agentId, next);
-			return next;
-		});
-	}, [agentId, currentValue, version]);
-
-	const handleRestore = useCallback(
-		(snap: PromptSnapshot) => {
-			onRestore(snap.value);
-			setOpen(false);
-		},
-		[onRestore]
-	);
-
-	const handleToggleDiff = useCallback((id: string) => {
-		setDiffId((prev) => (prev === id ? null : id));
-	}, []);
-
-	if (agentId === null) {
-		return null;
-	}
-
-	return (
-		<div className="relative">
-			<div className="flex items-center gap-1">
-				{locked ? null : (
-					<Button
-						className="text-xs"
-						onClick={handleSnapshot}
-						size="sm"
-						variant="ghost"
-					>
-						Save snapshot
-					</Button>
-				)}
-				<Button
-					className="text-xs"
-					onClick={() => setOpen((p) => !p)}
-					size="sm"
-					variant="ghost"
-				>
-					<HugeiconsIcon className="size-3" icon={Clock01Icon} />
-					History
-					{snapshots.length > 0 ? (
-						<Badge className="ml-1 text-[10px]" variant="secondary">
-							{snapshots.length}
-						</Badge>
-					) : null}
-				</Button>
-			</div>
-
-			{open ? (
-				<div className="absolute right-0 z-20 mt-1 max-h-96 w-80 overflow-auto rounded-lg bg-popover p-2 shadow-md">
-					{snapshots.length === 0 ? (
-						<p className="p-2 text-muted-foreground text-xs">
-							No snapshots yet. Save one to keep a history of this prompt.
-						</p>
-					) : (
-						<ul className="flex flex-col gap-1">
-							{snapshots.map((snap) => (
-								<li
-									className="flex flex-col gap-1 rounded-md border p-2"
-									key={snap.id}
-								>
-									<div className="flex items-center gap-2">
-										<Badge className="text-[10px]" variant="secondary">
-											v{snap.version}
-										</Badge>
-										<span className="text-muted-foreground text-xs">
-											{formatDateTime(snap.ts)}
-										</span>
-										<div className="ml-auto flex items-center gap-1">
-											<Button
-												className="text-[11px]"
-												onClick={() => handleToggleDiff(snap.id)}
-												size="sm"
-												variant="ghost"
-											>
-												Diff
-											</Button>
-											{locked ? null : (
-												<Button
-													className="text-[11px]"
-													onClick={() => handleRestore(snap)}
-													size="sm"
-													variant="ghost"
-												>
-													Restore
-												</Button>
-											)}
-										</div>
-									</div>
-									{diffId === snap.id ? (
-										<SnapshotDiff
-											current={currentValue}
-											snapshot={snap.value}
-										/>
-									) : null}
-								</li>
-							))}
-						</ul>
-					)}
-				</div>
-			) : null}
-		</div>
-	);
-}
-
-/** A simple per-line diff view between a snapshot and the current draft. */
-function SnapshotDiff({
-	snapshot,
-	current,
-}: {
-	snapshot: string;
-	current: string;
-}) {
-	const snapLines = snapshot.split("\n");
-	const curLines = current.split("\n");
-	const max = Math.max(snapLines.length, curLines.length);
-	const rows: { id: string; tone: string; text: string }[] = [];
-	for (let i = 0; i < max; i++) {
-		const s = snapLines[i];
-		const c = curLines[i];
-		if (s === c) {
-			rows.push({
-				id: `eq-${i}`,
-				tone: "text-muted-foreground",
-				text: ` ${s ?? ""}`,
-			});
-		} else {
-			if (s !== undefined) {
-				rows.push({
-					id: `del-${i}`,
-					tone: "text-destructive",
-					text: `- ${s}`,
-				});
-			}
-			if (c !== undefined) {
-				rows.push({
-					id: `add-${i}`,
-					tone: "text-success dark:text-success",
-					text: `+ ${c}`,
-				});
-			}
-		}
-	}
-	return (
-		<pre className="max-h-48 overflow-auto rounded bg-muted/40 p-2 font-mono text-[11px] leading-relaxed">
-			{rows.map((r) => (
-				<div className={r.tone} key={r.id}>
-					{r.text}
-				</div>
-			))}
-		</pre>
-	);
-}
-
 // ── Test-cases runner ──────────────────────────────────────────────────────────
 
 interface PromptTestCasesProps {
 	agentId: string | null;
+	engine: string;
 	locked: boolean;
 	model: string;
+	onPromptChange: (value: string) => void;
 	promptDraft: string;
 	target: ApiTarget;
+}
+
+interface PromptVariantRow {
+	content: string;
+	id: string;
+	messages: EvalMessage[];
+	name: string;
+	type: "chat" | "text";
+}
+
+interface PromptVariantRun {
+	promptId: string;
+	promptName: string;
+	result: EvalRunResult;
+}
+
+function promptVariantFromConfig(prompt: PromptfooPrompt): PromptVariantRow {
+	return {
+		content: prompt.content,
+		id: prompt.id,
+		messages: prompt.messages,
+		name: prompt.name,
+		type: prompt.type,
+	};
+}
+
+function promptfooTestToRow(test: PromptfooTest, index: number): TestCaseRow {
+	return {
+		assertions: test.assertions,
+		expected: test.expected ?? "",
+		id: crypto.randomUUID(),
+		input: test.prompt ?? "",
+		messages: test.messages,
+		metadata: test.metadata,
+		name: test.description || `Case ${index + 1}`,
+		options: test.options,
+		providers: test.providers,
+		threshold: test.threshold === undefined ? "" : String(test.threshold),
+		vars: test.vars,
+	};
+}
+
+function rowToPromptfooTest(row: TestCaseRow): PromptfooTest {
+	return {
+		assertions: row.assertions,
+		description: row.name,
+		expected: row.expected.trim() || undefined,
+		messages: row.messages,
+		metadata: row.metadata,
+		options: row.options,
+		prompt: row.input || undefined,
+		providers: row.providers,
+		threshold: parseThreshold(row.threshold),
+		vars: row.vars,
+	};
+}
+
+function suiteConfigFromEditor(
+	promptDraft: string,
+	variants: PromptVariantRow[],
+	rows: TestCaseRow[],
+	providers: string[],
+	judgeModel: string,
+	evaluators: string[]
+): PromptfooConfig {
+	const prompts: PromptfooPrompt[] = [
+		{
+			content: promptDraft,
+			id: "primary",
+			messages: [],
+			name: "Primary",
+			type: "text",
+		},
+		...variants,
+	];
+	return normalizePromptfooConfig({
+		evaluators,
+		judge_model: judgeModel.trim() || undefined,
+		prompts,
+		providers,
+		tests: rows.map(rowToPromptfooTest),
+	});
 }
 
 function PromptTestCases({
@@ -638,27 +819,159 @@ function PromptTestCases({
 	agentId,
 	target,
 	model,
+	engine,
 	locked,
+	onPromptChange,
 }: PromptTestCasesProps) {
-	const [rows, setRows] = useState<TestCaseRow[]>([]);
-	const [extraModels, setExtraModels] = useState<string[]>([]);
+	const localSuite = useMemo(() => loadTestSuite(agentId), [agentId]);
+	const [rows, setRows] = useState<TestCaseRow[]>(() => localSuite.rows);
+	const [extraModels, setExtraModels] = useState<string[]>(
+		() => localSuite.extraModels
+	);
 	const [newModel, setNewModel] = useState("");
-	const [judgeModel, setJudgeModel] = useState("");
+	const [judgeModel, setJudgeModel] = useState(() => localSuite.judgeModel);
+	const [evaluatorIds, setEvaluatorIds] = useState<string[]>(
+		() => localSuite.evaluatorIds
+	);
+	const [suite, setSuite] = useState<PromptSuiteRecord | null>(null);
+	const [suiteName, setSuiteName] = useState("Promptfoo regression suite");
+	const [suiteVersions, setSuiteVersions] = useState<PromptSuiteVersionMeta[]>(
+		[]
+	);
+	const [suiteRuns, setSuiteRuns] = useState<PromptRunMeta[]>([]);
+	const [suiteLoading, setSuiteLoading] = useState(false);
+	const [suiteSaving, setSuiteSaving] = useState(false);
+	const [suiteError, setSuiteError] = useState<string | null>(null);
+	const [saveLabel, setSaveLabel] = useState("");
+	const [exportFormat, setExportFormat] = useState<
+		"csv" | "json" | "jsonl" | "yaml"
+	>("yaml");
+	const [variants, setVariants] = useState<PromptVariantRow[]>([]);
 	const [running, setRunning] = useState(false);
-	const [result, setResult] = useState<EvalRunResult | null>(null);
+	const [results, setResults] = useState<PromptVariantRun[] | null>(null);
+	const [activeRunId, setActiveRunId] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const abortRef = useRef<AbortController | null>(null);
+	const loadedSuiteAgentRef = useRef<string | null>(null);
 
 	useEffect(() => () => abortRef.current?.abort(), []);
+
+	useEffect(() => {
+		let cancelled = false;
+		const load = async () => {
+			loadedSuiteAgentRef.current = null;
+			setSuiteLoading(true);
+			setSuiteError(null);
+			setResults(null);
+			setActiveRunId(null);
+			try {
+				if (!agentId) {
+					return;
+				}
+				const suites = await listPromptSuites(target, agentId);
+				if (cancelled) {
+					return;
+				}
+				const nextSuite = suites[0];
+				if (!nextSuite) {
+					const local = loadTestSuite(agentId);
+					setSuite(null);
+					setSuiteName("Promptfoo regression suite");
+					setRows(local.rows);
+					setExtraModels(local.extraModels);
+					setJudgeModel(local.judgeModel);
+					setEvaluatorIds(local.evaluatorIds);
+					setVariants([]);
+					setSuiteVersions([]);
+					setSuiteRuns([]);
+					return;
+				}
+				const config = normalizePromptfooConfig(nextSuite.config);
+				setSuite(nextSuite);
+				setSuiteName(nextSuite.name);
+				setRows(config.tests.map(promptfooTestToRow));
+				setExtraModels(config.providers);
+				setJudgeModel(
+					typeof config.judge_model === "string" ? config.judge_model : ""
+				);
+				setEvaluatorIds(
+					Array.isArray(config.evaluators)
+						? config.evaluators.filter(
+								(value): value is string => typeof value === "string"
+							)
+						: []
+				);
+				setVariants(config.prompts.slice(1).map(promptVariantFromConfig));
+				if (config.prompts[0]?.content) {
+					onPromptChange(config.prompts[0].content);
+				}
+				const [versions, runs] = await Promise.all([
+					listPromptSuiteVersions(target, nextSuite.id),
+					listPromptRuns(target, nextSuite.id),
+				]);
+				if (!cancelled) {
+					setSuiteVersions(versions);
+					setSuiteRuns(runs);
+				}
+			} catch (loadError) {
+				if (!cancelled) {
+					// Core may be on an older build while the editor is being upgraded;
+					// preserve the local draft and surface the durable-sync state.
+					const local = agentId ? loadTestSuite(agentId) : null;
+					if (local) {
+						setRows(local.rows);
+						setExtraModels(local.extraModels);
+						setJudgeModel(local.judgeModel);
+						setEvaluatorIds(local.evaluatorIds);
+					}
+					setSuiteError(
+						loadError instanceof Error
+							? `Durable suite unavailable: ${loadError.message}`
+							: "Durable suite unavailable"
+					);
+				}
+			} finally {
+				if (!cancelled) {
+					setSuiteLoading(false);
+					loadedSuiteAgentRef.current = agentId;
+				}
+			}
+		};
+		load().catch(() => undefined);
+		return () => {
+			cancelled = true;
+		};
+	}, [agentId, onPromptChange, target]);
+
+	useEffect(() => {
+		if (!agentId || loadedSuiteAgentRef.current !== agentId) {
+			return;
+		}
+		persistTestSuite(agentId, { evaluatorIds, extraModels, judgeModel, rows });
+	}, [agentId, evaluatorIds, extraModels, judgeModel, rows]);
 
 	// The full model list for this run: the agent's model plus any extras.
 	const selectedModels = useMemo(() => {
 		const all = [model, ...extraModels].map((m) => m.trim()).filter(Boolean);
 		return Array.from(new Set(all));
 	}, [model, extraModels]);
+	const promptVariants = useMemo<PromptVariantRow[]>(
+		() => [
+			{
+				content: promptDraft,
+				id: "primary",
+				messages: [],
+				name: "Primary",
+				type: "text",
+			},
+			...variants,
+		],
+		[promptDraft, variants]
+	);
 
-	const isAcp = model.startsWith("acp:");
-	const matrixSize = selectedModels.length * Math.max(rows.length, 1);
+	const isAcp = engine.startsWith("acp:");
+	const matrixSize =
+		selectedModels.length * Math.max(rows.length, 1) * promptVariants.length;
 	const largeMatrix = matrixSize > LARGE_MATRIX_THRESHOLD;
 
 	const runDisabled = running || !agentId || !model.trim() || isAcp || locked;
@@ -675,6 +988,34 @@ function PromptTestCases({
 		setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
 	}, []);
 
+	const addVariant = useCallback(() => {
+		setVariants((prev) => [
+			...prev,
+			{
+				content: promptDraft,
+				id: `prompt-${crypto.randomUUID()}`,
+				messages: [],
+				name: `Variant ${prev.length + 1}`,
+				type: "text",
+			},
+		]);
+	}, [promptDraft]);
+
+	const updateVariant = useCallback(
+		(id: string, patch: Partial<PromptVariantRow>) => {
+			setVariants((prev) =>
+				prev.map((variant) =>
+					variant.id === id ? { ...variant, ...patch } : variant
+				)
+			);
+		},
+		[]
+	);
+
+	const removeVariant = useCallback((id: string) => {
+		setVariants((prev) => prev.filter((variant) => variant.id !== id));
+	}, []);
+
 	const addExtraModel = useCallback(() => {
 		const m = newModel.trim();
 		if (!m) {
@@ -688,6 +1029,169 @@ function PromptTestCases({
 		setExtraModels((prev) => prev.filter((x) => x !== m));
 	}, []);
 
+	const applyConfig = useCallback(
+		(config: PromptfooConfig) => {
+			setRows(config.tests.map(promptfooTestToRow));
+			setExtraModels(config.providers);
+			setJudgeModel(
+				typeof config.judge_model === "string" ? config.judge_model : ""
+			);
+			setEvaluatorIds(
+				Array.isArray(config.evaluators)
+					? config.evaluators.filter(
+							(value): value is string => typeof value === "string"
+						)
+					: []
+			);
+			setVariants(config.prompts.slice(1).map(promptVariantFromConfig));
+			if (config.prompts[0]?.content !== undefined) {
+				onPromptChange(config.prompts[0].content);
+			}
+		},
+		[onPromptChange]
+	);
+
+	const importFile = useCallback(
+		async (event: React.ChangeEvent<HTMLInputElement>) => {
+			const file = event.target.files?.[0];
+			event.target.value = "";
+			if (!file) {
+				return;
+			}
+			try {
+				const parsed = parsePromptfooFile(await file.text(), file.name);
+				applyConfig(parsed.config);
+				setSuiteName(file.name.replace(/\.[^.]+$/, "") || "Imported suite");
+				setSuite(null);
+				setSuiteVersions([]);
+				setSuiteRuns([]);
+				setSuiteError(null);
+			} catch (importError) {
+				setSuiteError(
+					importError instanceof Error
+						? `Import failed: ${importError.message}`
+						: "Import failed"
+				);
+			}
+		},
+		[applyConfig]
+	);
+
+	const saveSuite = useCallback(async () => {
+		if (!agentId || locked) {
+			return;
+		}
+		setSuiteSaving(true);
+		setSuiteError(null);
+		try {
+			const config = suiteConfigFromEditor(
+				promptDraft,
+				variants,
+				rows,
+				extraModels,
+				judgeModel,
+				evaluatorIds
+			);
+			const response = suite
+				? await updatePromptSuite(target, suite.id, {
+						config,
+						label: saveLabel,
+						name: suiteName,
+					})
+				: await createPromptSuite(target, {
+						agentId,
+						config,
+						label: saveLabel,
+						name: suiteName,
+					});
+			setSuite(response.suite);
+			if (response.version) {
+				setSuiteVersions((prev) => [
+					response.version as PromptSuiteVersionMeta,
+					...prev,
+				]);
+			}
+			setSaveLabel("");
+			setSuiteRuns(await listPromptRuns(target, response.suite.id));
+		} catch (saveError) {
+			setSuiteError(
+				saveError instanceof Error ? saveError.message : "Failed to save suite"
+			);
+		} finally {
+			setSuiteSaving(false);
+		}
+	}, [
+		agentId,
+		extraModels,
+		judgeModel,
+		evaluatorIds,
+		locked,
+		promptDraft,
+		rows,
+		saveLabel,
+		suite,
+		suiteName,
+		target,
+		variants,
+	]);
+
+	const restoreSuiteVersion = useCallback(
+		async (versionId: string) => {
+			if (!suite || locked) {
+				return;
+			}
+			try {
+				const restored = await restorePromptSuiteVersion(
+					target,
+					suite.id,
+					versionId
+				);
+				setSuite(restored);
+				applyConfig(normalizePromptfooConfig(restored.config));
+				setSuiteVersions(await listPromptSuiteVersions(target, suite.id));
+			} catch (restoreError) {
+				setSuiteError(
+					restoreError instanceof Error
+						? restoreError.message
+						: "Failed to restore suite version"
+				);
+			}
+		},
+		[applyConfig, locked, suite, target]
+	);
+
+	const exportConfig = useCallback(
+		(format: "csv" | "json" | "jsonl" | "yaml") => {
+			const config = suiteConfigFromEditor(
+				promptDraft,
+				variants,
+				rows,
+				extraModels,
+				judgeModel,
+				evaluatorIds
+			);
+			const text = serializePromptfooConfig(config, format);
+			const link = document.createElement("a");
+			link.href = URL.createObjectURL(
+				new Blob([text], {
+					type: format === "yaml" ? "text/yaml" : "application/json",
+				})
+			);
+			link.download = `${suiteName.trim() || "promptfoo-suite"}.${format}`;
+			link.click();
+			URL.revokeObjectURL(link.href);
+		},
+		[
+			extraModels,
+			evaluatorIds,
+			judgeModel,
+			promptDraft,
+			rows,
+			suiteName,
+			variants,
+		]
+	);
+
 	const stop = useCallback(() => {
 		abortRef.current?.abort();
 	}, []);
@@ -700,25 +1204,55 @@ function PromptTestCases({
 		setError(null);
 		try {
 			const dataset: EvalDatasetCase[] = rows.map((r) => ({
+				messages: r.messages,
 				prompt: r.input,
 				vars: r.vars,
-				assertions: r.assertions,
+				assertions: r.assertions.map(gatewayAssertion),
 				expected: r.expected.trim() ? r.expected : undefined,
+				threshold: parseThreshold(r.threshold),
 			}));
-			const multi = selectedModels.length > 1;
-			const res = await runGatewayEvals(
-				target,
-				{
-					agent_id: agentId,
-					model,
-					models: multi ? selectedModels : undefined,
-					system_prompt: promptDraft,
-					judge_model: judgeModel.trim() || undefined,
-					dataset,
-				},
-				controller.signal
-			);
-			setResult(res);
+			const runResults: PromptVariantRun[] = [];
+			for (const variant of promptVariants) {
+				if (controller.signal.aborted) {
+					return;
+				}
+				const multi = selectedModels.length > 1;
+				const res = await runGatewayEvals(
+					target,
+					{
+						agent_id: agentId,
+						model,
+						models: multi ? selectedModels : undefined,
+						system_prompt: variant.content,
+						system_messages:
+							variant.type === "chat" ? variant.messages : undefined,
+						judge_model: judgeModel.trim() || undefined,
+						evaluators: evaluatorIds,
+						dataset,
+					},
+					controller.signal
+				);
+				runResults.push({
+					promptId: variant.id,
+					promptName: variant.name,
+					result: res,
+				});
+			}
+			setResults(runResults);
+			if (suite) {
+				const saved = await savePromptRun(target, suite.id, {
+					name: `${suiteName} · ${new Date().toLocaleString()}`,
+					request: {
+						dataset,
+						judge_model: judgeModel,
+						models: selectedModels,
+						prompts: promptVariants,
+					},
+					result: { variants: runResults },
+				});
+				setActiveRunId(saved.id);
+				setSuiteRuns((prev) => [saved, ...prev]);
+			}
 		} catch (e) {
 			if (!controller.signal.aborted) {
 				setError(e instanceof Error ? e.message : String(e));
@@ -726,7 +1260,18 @@ function PromptTestCases({
 		} finally {
 			setRunning(false);
 		}
-	}, [rows, selectedModels, target, agentId, model, promptDraft, judgeModel]);
+	}, [
+		agentId,
+		judgeModel,
+		evaluatorIds,
+		model,
+		promptVariants,
+		rows,
+		selectedModels,
+		suite,
+		suiteName,
+		target,
+	]);
 
 	const handleRun = useCallback(() => {
 		run().catch(() => {
@@ -737,11 +1282,117 @@ function PromptTestCases({
 	return (
 		<section className="flex flex-col gap-3 rounded-xl border p-4">
 			<div className="flex items-center gap-2">
-				<span className="font-semibold text-base">Test cases</span>
+				<span className="font-semibold text-base">Promptfoo suite</span>
+				{suite ? (
+					<Badge variant="secondary">{suiteVersions.length} versions</Badge>
+				) : null}
 				<span className="text-muted-foreground text-xs">
-					Runs the draft prompt as a system prompt against your cases
+					{suiteLoading
+						? "Loading durable suite…"
+						: "Prompts, providers, tests, assertions, runs, and reviews"}
 				</span>
 			</div>
+
+			<div className="flex flex-wrap items-end gap-2 rounded-lg bg-muted/20 p-3">
+				<div className="flex min-w-56 flex-1 flex-col gap-1">
+					<Label className="text-[11px]" htmlFor="promptfoo-suite-name">
+						Suite name
+					</Label>
+					<Input
+						className="h-8 text-xs"
+						disabled={locked}
+						id="promptfoo-suite-name"
+						onChange={(event) => setSuiteName(event.target.value)}
+						value={suiteName}
+					/>
+				</div>
+				<div className="flex min-w-44 flex-col gap-1">
+					<Label className="text-[11px]" htmlFor="promptfoo-save-label">
+						Version label (optional)
+					</Label>
+					<Input
+						className="h-8 text-xs"
+						disabled={locked}
+						id="promptfoo-save-label"
+						onChange={(event) => setSaveLabel(event.target.value)}
+						placeholder="Baseline, stricter rubric…"
+						value={saveLabel}
+					/>
+				</div>
+				<Button
+					disabled={locked || suiteSaving || suiteLoading}
+					loading={suiteSaving}
+					onClick={() => saveSuite().catch(() => undefined)}
+					size="sm"
+				>
+					Save suite
+				</Button>
+				{suiteVersions.length > 0 ? (
+					<NativeSelect
+						aria-label="Restore suite version"
+						className="h-8 max-w-44 text-xs"
+						disabled={locked}
+						onChange={(event) => {
+							if (event.target.value) {
+								restoreSuiteVersion(event.target.value).catch(() => undefined);
+							}
+						}}
+						value=""
+					>
+						<NativeSelectOption value="">Restore version…</NativeSelectOption>
+						{suiteVersions.map((version) => (
+							<NativeSelectOption key={version.id} value={version.id}>
+								{version.label || new Date(version.createdAt).toLocaleString()}
+							</NativeSelectOption>
+						))}
+					</NativeSelect>
+				) : null}
+				<label className="inline-flex cursor-pointer items-center">
+					<span className="sr-only">Import Promptfoo config</span>
+					<Input
+						accept=".csv,.json,.jsonl,.md,.txt,.yaml,.yml,.j2"
+						className="hidden"
+						disabled={locked}
+						onChange={(event) => importFile(event).catch(() => undefined)}
+						type="file"
+					/>
+					<span className="rounded-md border px-2 py-1.5 text-xs hover:bg-muted">
+						Import
+					</span>
+				</label>
+				<NativeSelect
+					aria-label="Export format"
+					className="h-8 w-24 text-xs"
+					onChange={(event) =>
+						setExportFormat(event.target.value as typeof exportFormat)
+					}
+					value={exportFormat}
+				>
+					<NativeSelectOption value="yaml">YAML</NativeSelectOption>
+					<NativeSelectOption value="json">JSON</NativeSelectOption>
+					<NativeSelectOption value="jsonl">JSONL</NativeSelectOption>
+					<NativeSelectOption value="csv">CSV</NativeSelectOption>
+				</NativeSelect>
+				<Button
+					onClick={() => exportConfig(exportFormat)}
+					size="sm"
+					variant="outline"
+				>
+					Export
+				</Button>
+			</div>
+
+			{suiteError ? (
+				<p className="text-destructive text-xs">{suiteError}</p>
+			) : null}
+
+			<PromptVariantsEditor
+				locked={locked}
+				onAdd={addVariant}
+				onRemove={removeVariant}
+				onUpdate={updateVariant}
+				variants={variants}
+			/>
 
 			{/* Test-case table */}
 			<TestCaseTable
@@ -762,10 +1413,38 @@ function PromptTestCases({
 				onRemoveModel={removeExtraModel}
 				primaryModel={model}
 			/>
+			<div className="flex flex-col gap-1 rounded-lg bg-muted/20 p-3">
+				<Label className="text-[11px]" htmlFor="promptfoo-evaluators">
+					Registry evaluators (optional, comma-separated)
+				</Label>
+				<Input
+					className="h-7 text-xs"
+					id="promptfoo-evaluators"
+					onChange={(event) =>
+						setEvaluatorIds(
+							event.target.value
+								.split(",")
+								.map((id) => id.trim())
+								.filter(Boolean)
+						)
+					}
+					placeholder="assertions, exact_match, pii_detector…"
+					value={evaluatorIds.join(", ")}
+				/>
+				<p className="text-[10px] text-muted-foreground">
+					Uses the shared Gateway evaluator catalog in addition to inline
+					assertions.
+				</p>
+			</div>
 
 			{/* Run controls */}
 			<div className="flex flex-wrap items-center gap-2">
-				<Button disabled={runDisabled} loading={running} onClick={handleRun} size="sm">
+				<Button
+					disabled={runDisabled}
+					loading={running}
+					onClick={handleRun}
+					size="sm"
+				>
 					<HugeiconsIcon className="size-3" icon={PlayIcon} />
 					{running ? "Running…" : "Run test cases"}
 				</Button>
@@ -784,11 +1463,189 @@ function PromptTestCases({
 
 			{error ? <p className="text-destructive text-xs">{error}</p> : null}
 
+			<PromptRunHistory
+				onSelect={async (runId) => {
+					if (!suite) {
+						return;
+					}
+					try {
+						const saved = await getPromptRun(target, suite.id, runId);
+						const savedResults = saved.result.variants;
+						if (Array.isArray(savedResults)) {
+							setResults(savedResults as PromptVariantRun[]);
+							setActiveRunId(runId);
+						}
+					} catch (loadError) {
+						setError(
+							loadError instanceof Error
+								? loadError.message
+								: "Failed to load run"
+						);
+					}
+				}}
+				runs={suiteRuns}
+				selectedRunId={activeRunId}
+			/>
+
 			{/* Results matrix */}
-			{result ? (
-				<ResultsMatrix model={model} result={result} rows={rows} />
+			{results ? (
+				<ResultsMatrix
+					model={model}
+					results={results}
+					rows={rows}
+					runId={activeRunId}
+					suiteId={suite?.id ?? null}
+					target={target}
+				/>
 			) : null}
 		</section>
+	);
+}
+
+function PromptVariantsEditor({
+	locked,
+	onAdd,
+	onRemove,
+	onUpdate,
+	variants,
+}: {
+	locked: boolean;
+	onAdd: () => void;
+	onRemove: (id: string) => void;
+	onUpdate: (id: string, patch: Partial<PromptVariantRow>) => void;
+	variants: PromptVariantRow[];
+}) {
+	return (
+		<div className="flex flex-col gap-2 rounded-lg bg-muted/20 p-3">
+			<div className="flex items-center gap-2">
+				<span className="font-medium text-xs">Prompt variants</span>
+				<span className="text-[11px] text-muted-foreground">
+					Run text or multi-turn prompt variants through the same test matrix.
+				</span>
+				<Button disabled={locked} onClick={onAdd} size="sm" variant="ghost">
+					<HugeiconsIcon className="size-3" icon={Add01Icon} />
+					Add variant
+				</Button>
+			</div>
+			{variants.length === 0 ? (
+				<p className="text-[11px] text-muted-foreground">
+					The agent prompt above is the primary variant. Add another to compare
+					prompt revisions side by side.
+				</p>
+			) : null}
+			{variants.map((variant, index) => (
+				<div
+					className="flex flex-col gap-2 rounded-md border p-2"
+					key={variant.id}
+				>
+					<div className="flex items-center gap-2">
+						<Input
+							className="h-7 max-w-48 text-xs"
+							disabled={locked}
+							onChange={(event) =>
+								onUpdate(variant.id, { name: event.target.value })
+							}
+							value={variant.name || `Variant ${index + 1}`}
+						/>
+						<NativeSelect
+							aria-label={`Prompt variant ${index + 1} type`}
+							className="h-7 w-24 text-xs"
+							disabled={locked}
+							onChange={(event) =>
+								onUpdate(variant.id, {
+									messages:
+										event.target.value === "chat" ? variant.messages : [],
+									type: event.target.value as PromptVariantRow["type"],
+								})
+							}
+							value={variant.type}
+						>
+							<NativeSelectOption value="text">Text</NativeSelectOption>
+							<NativeSelectOption value="chat">Chat</NativeSelectOption>
+						</NativeSelect>
+						<Button
+							aria-label={`Remove ${variant.name || `variant ${index + 1}`}`}
+							disabled={locked}
+							onClick={() => onRemove(variant.id)}
+							size="icon-sm"
+							variant="ghost"
+						>
+							<HugeiconsIcon className="size-3" icon={Delete02Icon} />
+						</Button>
+					</div>
+					{variant.type === "chat" ? (
+						<Textarea
+							className="min-h-20 font-mono text-xs"
+							disabled={locked}
+							onChange={(event) => {
+								try {
+									const parsed: unknown = JSON.parse(event.target.value);
+									if (!Array.isArray(parsed)) {
+										return;
+									}
+									onUpdate(variant.id, {
+										messages: parsed.filter(
+											(message): message is EvalMessage =>
+												typeof message === "object" &&
+												message !== null &&
+												["assistant", "system", "user"].includes(
+													(message as { role?: unknown }).role as string
+												) &&
+												typeof (message as { content?: unknown }).content ===
+													"string"
+										),
+									});
+								} catch {
+									// Keep the last valid message list until the JSON is complete.
+								}
+							}}
+							placeholder='[{"role":"user","content":"Hello {{name}}"}]'
+							value={JSON.stringify(variant.messages, null, 2)}
+						/>
+					) : (
+						<Textarea
+							className="min-h-20 font-mono text-xs"
+							disabled={locked}
+							onChange={(event) =>
+								onUpdate(variant.id, { content: event.target.value })
+							}
+							placeholder="A second system prompt variant. {{vars}} are rendered per case."
+							value={variant.content}
+						/>
+					)}
+				</div>
+			))}
+		</div>
+	);
+}
+
+function PromptRunHistory({
+	onSelect,
+	runs,
+	selectedRunId,
+}: {
+	onSelect: (runId: string) => void;
+	runs: PromptRunMeta[];
+	selectedRunId: string | null;
+}) {
+	if (runs.length === 0) {
+		return null;
+	}
+	return (
+		<div className="flex flex-wrap items-center gap-1.5 rounded-lg bg-muted/20 p-2">
+			<span className="mr-1 font-medium text-[11px]">Runs</span>
+			{runs.slice(0, 8).map((run) => (
+				<Button
+					className="h-7 text-[11px]"
+					key={run.id}
+					onClick={() => onSelect(run.id)}
+					size="sm"
+					variant={selectedRunId === run.id ? "secondary" : "ghost"}
+				>
+					{run.name}
+				</Button>
+			))}
+		</div>
 	);
 }
 
@@ -855,7 +1712,7 @@ function TestCaseRowEditor({
 
 	const handleVarChange = useCallback(
 		(name: string, val: string) => {
-			onUpdate(row.id, { vars: { ...row.vars, [name]: val } });
+			onUpdate(row.id, { vars: { ...row.vars, [name]: parseVariable(val) } });
 		},
 		[onUpdate, row.id, row.vars]
 	);
@@ -891,12 +1748,15 @@ function TestCaseRowEditor({
 					Case {index + 1}
 				</span>
 				<Input
+					autoComplete="off"
 					className="h-7 max-w-48 text-xs"
+					name={`test-case-name-${row.id}`}
 					onChange={(e) => onUpdate(row.id, { name: e.target.value })}
 					placeholder="Name (optional)"
 					value={row.name}
 				/>
 				<Button
+					aria-label={`Remove test case ${index + 1}`}
 					className="ml-auto"
 					onClick={() => onRemove(row.id)}
 					size="icon-sm"
@@ -907,9 +1767,13 @@ function TestCaseRowEditor({
 			</div>
 
 			<div className="flex flex-col gap-1">
-				<Label className="text-xs">User message</Label>
+				<Label className="text-xs" htmlFor={`test-input-${row.id}`}>
+					User message
+				</Label>
 				<Textarea
 					className="min-h-16 font-mono text-xs"
+					id={`test-input-${row.id}`}
+					name={`test-input-${row.id}`}
 					onChange={(e) => onUpdate(row.id, { input: e.target.value })}
 					placeholder="The user message. {{vars}} allowed."
 					value={row.input}
@@ -922,10 +1786,12 @@ function TestCaseRowEditor({
 						<div className="flex flex-col gap-1" key={name}>
 							<Label className="text-[11px]">{name}</Label>
 							<Input
+								autoComplete="off"
 								className="h-7 text-xs"
+								name={`test-variable-${row.id}-${name}`}
 								onChange={(e) => handleVarChange(name, e.target.value)}
 								placeholder={`Value for {{${name}}}`}
-								value={row.vars[name] ?? ""}
+								value={displayVariable(row.vars[name])}
 							/>
 						</div>
 					))}
@@ -933,13 +1799,113 @@ function TestCaseRowEditor({
 			) : null}
 
 			<div className="flex flex-col gap-1">
-				<Label className="text-xs">Expected (optional substring)</Label>
+				<Label className="text-xs" htmlFor={`test-messages-${row.id}`}>
+					Chat messages (optional JSON)
+				</Label>
+				<Textarea
+					className="min-h-16 font-mono text-xs"
+					id={`test-messages-${row.id}`}
+					onChange={(event) => {
+						try {
+							const parsed: unknown = JSON.parse(event.target.value);
+							if (!Array.isArray(parsed)) {
+								return;
+							}
+							onUpdate(row.id, {
+								messages: parsed.filter(
+									(message): message is EvalMessage =>
+										typeof message === "object" &&
+										message !== null &&
+										["assistant", "system", "user"].includes(
+											(message as { role?: unknown }).role as string
+										) &&
+										typeof (message as { content?: unknown }).content ===
+											"string"
+								),
+							});
+						} catch {
+							// Keep the last valid list while the user edits JSON.
+						}
+					}}
+					placeholder='[{"role":"user","content":"Question for {{name}}"}]'
+					value={JSON.stringify(row.messages ?? [], null, 2)}
+				/>
+			</div>
+
+			<div className="flex flex-col gap-1">
+				<Label className="text-xs" htmlFor={`test-expected-${row.id}`}>
+					Expected (optional substring)
+				</Label>
 				<Input
 					className="h-7 text-xs"
+					id={`test-expected-${row.id}`}
+					name={`test-expected-${row.id}`}
 					onChange={(e) => onUpdate(row.id, { expected: e.target.value })}
 					placeholder="Substring the response should contain"
 					value={row.expected}
 				/>
+			</div>
+
+			<div className="flex flex-col gap-1">
+				<Label className="text-xs" htmlFor={`test-threshold-${row.id}`}>
+					Assertion threshold (optional)
+				</Label>
+				<Input
+					className="h-7 text-xs"
+					id={`test-threshold-${row.id}`}
+					inputMode="decimal"
+					max="1"
+					min="0"
+					name={`test-threshold-${row.id}`}
+					onChange={(e) => onUpdate(row.id, { threshold: e.target.value })}
+					placeholder="1.0 means every assertion must pass"
+					step="0.05"
+					type="number"
+					value={row.threshold}
+				/>
+			</div>
+
+			<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+				<div className="flex flex-col gap-1">
+					<Label className="text-[11px]" htmlFor={`test-providers-${row.id}`}>
+						Providers (optional, comma-separated)
+					</Label>
+					<Input
+						className="h-7 text-xs"
+						id={`test-providers-${row.id}`}
+						onChange={(event) =>
+							onUpdate(row.id, {
+								providers: event.target.value
+									.split(",")
+									.map((provider) => provider.trim())
+									.filter(Boolean),
+							})
+						}
+						placeholder="openai:gpt-4o, anthropic:claude…"
+						value={row.providers.join(", ")}
+					/>
+				</div>
+				<div className="flex flex-col gap-1">
+					<Label className="text-[11px]" htmlFor={`test-metadata-${row.id}`}>
+						Metadata JSON
+					</Label>
+					<Input
+						className="h-7 font-mono text-xs"
+						id={`test-metadata-${row.id}`}
+						onChange={(event) => {
+							try {
+								const parsed: unknown = JSON.parse(event.target.value);
+								if (isRecord(parsed)) {
+									onUpdate(row.id, { metadata: parsed });
+								}
+							} catch {
+								// Keep the last valid object while editing.
+							}
+						}}
+						placeholder='{"team":"support"}'
+						value={JSON.stringify(row.metadata)}
+					/>
+				</div>
 			</div>
 
 			<div className="flex flex-col gap-2">
@@ -975,15 +1941,33 @@ function AssertionEditor({
 	onUpdate,
 	onRemove,
 }: AssertionEditorProps) {
-	const needsText = assertion.kind !== "json_valid";
-	const isJudge = assertion.kind === "llm_judge";
+	const needsText = ![
+		"json_valid",
+		"is_json",
+		"is_html",
+		"is_xml",
+		"is_sql",
+		"is_refusal",
+	].includes(assertion.kind);
+	const isJudge = [
+		"llm_judge",
+		"llm_rubric",
+		"factuality",
+		"context_faithfulness",
+		"answer_relevance",
+	].includes(assertion.kind);
 
 	const handleKindChange = useCallback(
 		(kind: AssertionKind) => {
 			// Preserve the existing text payload where the new kind supports one.
 			const text = assertionText(assertion);
 			const base = defaultAssertion(kind);
-			onUpdate(withAssertionText(base, text));
+			onUpdate(
+				withAssertionText(
+					assertion.options ? { ...base, options: assertion.options } : base,
+					text
+				)
+			);
 		},
 		[assertion, onUpdate]
 	);
@@ -995,41 +1979,121 @@ function AssertionEditor({
 		[assertion, onUpdate]
 	);
 
+	const updateOptions = useCallback(
+		(patch: Partial<AssertionOptions>) => {
+			onUpdate({
+				...assertion,
+				options: { ...assertion.options, ...patch },
+			} as Assertion);
+		},
+		[assertion, onUpdate]
+	);
+
 	let placeholder = "Value";
 	if (isJudge) {
 		placeholder = "Rubric: what the answer must satisfy";
 	} else if (assertion.kind === "regex") {
 		placeholder = "Regular expression";
+	} else if (
+		["javascript", "python", "ruby", "webhook"].includes(assertion.kind)
+	) {
+		placeholder = "Runtime expression or endpoint configuration";
+	} else if (
+		assertion.kind === "contains_any" ||
+		assertion.kind === "contains_all" ||
+		assertion.kind === "icontains_any" ||
+		assertion.kind === "icontains_all"
+	) {
+		placeholder = "Comma-separated values";
 	}
 
 	return (
-		<div className="flex items-center gap-2">
-			<NativeSelect
-				className="h-7 w-36 text-xs"
-				onChange={(e) => handleKindChange(e.target.value as AssertionKind)}
-				value={assertion.kind}
-			>
-				{ASSERTION_KINDS.map((k) => (
-					<NativeSelectOption key={k} value={k}>
-						{ASSERTION_LABELS[k]}
-					</NativeSelectOption>
-				))}
-			</NativeSelect>
-			{needsText ? (
+		<div className="flex flex-col gap-1">
+			<div className="flex items-center gap-2">
+				<NativeSelect
+					aria-label="Assertion type"
+					className="h-7 w-36 text-xs"
+					onChange={(e) => handleKindChange(e.target.value as AssertionKind)}
+					value={assertion.kind}
+				>
+					{ASSERTION_KINDS.map((k) => (
+						<NativeSelectOption key={k} value={k}>
+							{ASSERTION_LABELS[k]}
+						</NativeSelectOption>
+					))}
+				</NativeSelect>
+				{needsText ? (
+					<Input
+						aria-label="Assertion value"
+						className="h-7 flex-1 text-xs"
+						onChange={(e) => handleTextChange(e.target.value)}
+						placeholder={placeholder}
+						value={assertionText(assertion)}
+					/>
+				) : (
+					<span className="flex-1 text-muted-foreground text-xs">
+						Passes when the response is valid JSON.
+					</span>
+				)}
+				<Button
+					aria-label="Remove assertion"
+					onClick={onRemove}
+					size="icon-sm"
+					variant="ghost"
+				>
+					<HugeiconsIcon className="size-3" icon={Cancel01Icon} />
+				</Button>
+			</div>
+			<div className="grid grid-cols-2 gap-1 sm:grid-cols-4">
 				<Input
-					className="h-7 flex-1 text-xs"
-					onChange={(e) => handleTextChange(e.target.value)}
-					placeholder={placeholder}
-					value={assertionText(assertion)}
+					aria-label="Assertion threshold"
+					className="h-6 text-[10px]"
+					inputMode="decimal"
+					max="1"
+					min="0"
+					onChange={(event) =>
+						updateOptions({ threshold: parseThreshold(event.target.value) })
+					}
+					placeholder="Threshold"
+					step="0.05"
+					type="number"
+					value={assertion.options?.threshold ?? ""}
 				/>
-			) : (
-				<span className="flex-1 text-muted-foreground text-xs">
-					Passes when the response is valid JSON.
-				</span>
-			)}
-			<Button onClick={onRemove} size="icon-sm" variant="ghost">
-				<HugeiconsIcon className="size-3" icon={Cancel01Icon} />
-			</Button>
+				<Input
+					aria-label="Assertion weight"
+					className="h-6 text-[10px]"
+					inputMode="decimal"
+					min="0"
+					onChange={(event) => {
+						const parsed = Number.parseFloat(event.target.value);
+						updateOptions({
+							weight: Number.isFinite(parsed) ? parsed : undefined,
+						});
+					}}
+					placeholder="Weight"
+					step="0.1"
+					type="number"
+					value={assertion.options?.weight ?? ""}
+				/>
+				<Input
+					aria-label="Assertion provider"
+					className="h-6 text-[10px]"
+					onChange={(event) =>
+						updateOptions({ provider: event.target.value || undefined })
+					}
+					placeholder="Judge model/provider"
+					value={assertion.options?.provider ?? ""}
+				/>
+				<Input
+					aria-label="Assertion transform"
+					className="h-6 text-[10px]"
+					onChange={(event) =>
+						updateOptions({ transform: event.target.value || undefined })
+					}
+					placeholder="Transform (exported)"
+					value={assertion.options?.transform ?? ""}
+				/>
+			</div>
 		</div>
 	);
 }
@@ -1076,6 +2140,7 @@ function ModelControls({
 					<Badge className="gap-1 pr-1" key={m} variant="outline">
 						{m}
 						<Button
+							aria-label={`Remove model ${m}`}
 							className="size-4"
 							onClick={() => onRemoveModel(m)}
 							size="icon-sm"
@@ -1100,7 +2165,12 @@ function ModelControls({
 							placeholder="e.g. claude-3-5-haiku"
 							value={newModel}
 						/>
-						<Button onClick={onAddModel} size="icon-sm" variant="ghost">
+						<Button
+							aria-label="Add model"
+							onClick={onAddModel}
+							size="icon-sm"
+							variant="ghost"
+						>
 							<HugeiconsIcon className="size-3" icon={Add01Icon} />
 						</Button>
 					</div>
@@ -1159,61 +2229,177 @@ function RunHint({
 
 interface ResultsMatrixProps {
 	model: string;
-	result: EvalRunResult;
+	results: PromptVariantRun[];
 	rows: TestCaseRow[];
+	runId: string | null;
+	suiteId: string | null;
+	target: ApiTarget;
 }
 
-function ResultsMatrix({ result, rows, model }: ResultsMatrixProps) {
-	// Back-compat read path: single-model responses have no `models` key, so
-	// synthesize one entry from the top-level cases/aggregate.
-	const models: ModelEvalResult[] = result.models ?? [
-		{ model, cases: result.cases, aggregate: result.aggregate },
+function resultCsv(
+	results: PromptVariantRun[],
+	model: string,
+	rows: TestCaseRow[]
+): string {
+	const cell = (value: unknown): string => {
+		const text =
+			typeof value === "string" ? value : JSON.stringify(value ?? "");
+		return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+	};
+	const output = [
+		"prompt,model,case,overall,assertion_score,assertions_pass,response",
 	];
+	for (const promptResult of results) {
+		const models = promptResult.result.models ?? [
+			{
+				model,
+				cases: promptResult.result.cases,
+				aggregate: promptResult.result.aggregate,
+			},
+		];
+		for (const entry of models) {
+			entry.cases.forEach((score, index) => {
+				output.push(
+					[
+						promptResult.promptName,
+						entry.model,
+						rows[index]?.name || `Case ${index + 1}`,
+						score.overall,
+						score.assertion_score,
+						score.assertions_pass,
+						score.response_text,
+					]
+						.map(cell)
+						.join(",")
+				);
+			});
+		}
+	}
+	return output.join("\n");
+}
 
-	const caseCount = Math.max(rows.length, ...models.map((m) => m.cases.length));
-	const caseIndices = Array.from({ length: caseCount }, (_, i) => i);
-
+function ResultsMatrix({
+	model,
+	results,
+	rows,
+	runId,
+	suiteId,
+	target,
+}: ResultsMatrixProps) {
+	const downloadResults = (format: "csv" | "json") => {
+		const text =
+			format === "csv"
+				? resultCsv(results, model, rows)
+				: JSON.stringify(results, null, 2);
+		const link = document.createElement("a");
+		link.href = URL.createObjectURL(
+			new Blob([text], {
+				type: format === "csv" ? "text/csv" : "application/json",
+			})
+		);
+		link.download = `promptfoo-results.${format}`;
+		link.click();
+		URL.revokeObjectURL(link.href);
+	};
 	return (
 		<div className="flex flex-col gap-3">
-			{/* Per-model aggregate stat cards */}
-			<div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-				{models.map((m) => (
-					<ModelStatCard key={m.model} result={m} />
-				))}
+			<div className="flex items-center gap-2">
+				<span className="font-medium text-xs">Results</span>
+				<span className="text-[10px] text-muted-foreground">
+					Download a reviewable report or reopen this run from history.
+				</span>
+				<div className="ml-auto flex items-center gap-1">
+					<Button
+						onClick={() => downloadResults("json")}
+						size="sm"
+						variant="ghost"
+					>
+						JSON
+					</Button>
+					<Button
+						onClick={() => downloadResults("csv")}
+						size="sm"
+						variant="ghost"
+					>
+						CSV
+					</Button>
+				</div>
 			</div>
-
-			{/* Case × model matrix */}
-			<div className="overflow-auto rounded-lg border">
-				<table className="w-full text-left text-xs">
-					<thead className="bg-muted/50 text-muted-foreground">
-						<tr>
-							<th className="px-2 py-1.5 font-medium">Case</th>
-							{models.map((m) => (
-								<th className="px-2 py-1.5 font-medium" key={m.model}>
-									{m.model}
-								</th>
+			{results.map((promptResult) => {
+				// Back-compat read path: single-model responses have no `models` key.
+				const models: ModelEvalResult[] = promptResult.result.models ?? [
+					{
+						model,
+						cases: promptResult.result.cases,
+						aggregate: promptResult.result.aggregate,
+					},
+				];
+				const caseCount = Math.max(
+					rows.length,
+					...models.map((entry) => entry.cases.length)
+				);
+				const caseIndices = Array.from({ length: caseCount }, (_, i) => i);
+				return (
+					<div
+						className="flex flex-col gap-3 rounded-lg border p-3"
+						key={promptResult.promptId}
+					>
+						<div className="flex items-center gap-2">
+							<span className="font-medium text-xs">
+								{promptResult.promptName}
+							</span>
+							<Badge variant="outline">
+								{models.length} model{models.length === 1 ? "" : "s"}
+							</Badge>
+						</div>
+						<div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+							{models.map((entry) => (
+								<ModelStatCard key={entry.model} result={entry} />
 							))}
-						</tr>
-					</thead>
-					<tbody>
-						{caseIndices.map((idx) => (
-							<tr className="border-t align-top" key={`case-${idx}`}>
-								<td className="max-w-40 px-2 py-1.5">
-									<CaseLabel
-										fallback={models[0]?.cases[idx]?.prompt}
-										row={rows[idx]}
-									/>
-								</td>
-								{models.map((m) => (
-									<td className="min-w-48 max-w-72 px-2 py-1.5" key={m.model}>
-										<MatrixCell score={m.cases[idx]} />
-									</td>
-								))}
-							</tr>
-						))}
-					</tbody>
-				</table>
-			</div>
+						</div>
+						<div className="overflow-auto rounded-lg border">
+							<table className="w-full text-left text-xs">
+								<thead className="bg-muted/50 text-muted-foreground">
+									<tr>
+										<th className="px-2 py-1.5 font-medium">Case</th>
+										{models.map((entry) => (
+											<th className="px-2 py-1.5 font-medium" key={entry.model}>
+												{entry.model}
+											</th>
+										))}
+									</tr>
+								</thead>
+								<tbody>
+									{caseIndices.map((idx) => (
+										<tr className="border-t align-top" key={`case-${idx}`}>
+											<td className="max-w-40 px-2 py-1.5">
+												<CaseLabel
+													fallback={models[0]?.cases[idx]?.prompt}
+													row={rows[idx]}
+												/>
+											</td>
+											{models.map((entry) => (
+												<td
+													className="min-w-48 max-w-72 px-2 py-1.5"
+													key={entry.model}
+												>
+													<MatrixCell
+														resultKey={`${promptResult.promptId}:${entry.model}:${idx}`}
+														runId={runId}
+														score={entry.cases[idx]}
+														suiteId={suiteId}
+														target={target}
+													/>
+												</td>
+											))}
+										</tr>
+									))}
+								</tbody>
+							</table>
+						</div>
+					</div>
+				);
+			})}
 		</div>
 	);
 }
@@ -1276,10 +2462,47 @@ function StatCell({
 	);
 }
 
-function MatrixCell({ score }: { score: EvalCaseScore | undefined }) {
+function MatrixCell({
+	resultKey,
+	runId,
+	score,
+	suiteId,
+	target,
+}: {
+	resultKey: string;
+	runId: string | null;
+	score: EvalCaseScore | undefined;
+	suiteId: string | null;
+	target: ApiTarget;
+}) {
+	const [reviewSaving, setReviewSaving] = useState(false);
+	const [reviewed, setReviewed] = useState<boolean | null>(null);
+	const [reviewComment, setReviewComment] = useState("");
+	const [reviewHighlighted, setReviewHighlighted] = useState(false);
 	if (!score) {
 		return <span className="text-muted-foreground">—</span>;
 	}
+	const review = async (
+		pass: boolean,
+		options: { highlighted?: boolean } = {}
+	) => {
+		if (!(runId && suiteId)) {
+			return;
+		}
+		setReviewSaving(true);
+		try {
+			await savePromptReview(target, suiteId, runId, {
+				comment: reviewComment.trim() || undefined,
+				highlighted: options.highlighted ?? reviewHighlighted,
+				pass,
+				resultKey,
+				score: score.overall,
+			});
+			setReviewed(pass);
+		} finally {
+			setReviewSaving(false);
+		}
+	};
 	return (
 		<div className="flex flex-col gap-1.5">
 			<div className="flex flex-wrap items-center gap-1">
@@ -1294,9 +2517,79 @@ function MatrixCell({ score }: { score: EvalCaseScore | undefined }) {
 				</span>
 			</div>
 			<AssertionChips assertions={score.assertions} />
+			{score.evaluators && score.evaluators.length > 0 ? (
+				<div className="flex flex-wrap gap-1">
+					{score.evaluators.map((evaluator) => (
+						<span
+							className={`rounded px-1 py-0.5 text-[10px] ${evaluator.pass ? "bg-success/15 text-success dark:text-success" : "bg-warning/15 text-warning dark:text-warning"}`}
+							key={evaluator.id}
+						>
+							{evaluator.id}:{" "}
+							{evaluator.executed ? pct(evaluator.score) : "skipped"}
+						</span>
+					))}
+				</div>
+			) : null}
 			<p className="line-clamp-4 whitespace-pre-wrap break-words text-muted-foreground">
 				{score.response_text}
 			</p>
+			{runId && suiteId ? (
+				<div className="flex items-center gap-1">
+					<span className="mr-1 text-[10px] text-muted-foreground">Review</span>
+					<Button
+						className="h-6 px-1.5 text-[10px]"
+						disabled={reviewSaving}
+						onClick={() => review(true).catch(() => undefined)}
+						size="sm"
+						variant={reviewed === true ? "secondary" : "ghost"}
+					>
+						Pass
+					</Button>
+					<Button
+						className="h-6 px-1.5 text-[10px]"
+						disabled={reviewSaving}
+						onClick={() => review(false).catch(() => undefined)}
+						size="sm"
+						variant={reviewed === false ? "destructive" : "ghost"}
+					>
+						Fail
+					</Button>
+					<Button
+						className="h-6 px-1.5 text-[10px]"
+						disabled={reviewSaving}
+						onClick={() => {
+							const next = !reviewHighlighted;
+							setReviewHighlighted(next);
+							review(reviewed ?? score.assertions_pass, {
+								highlighted: next,
+							}).catch(() => undefined);
+						}}
+						size="sm"
+						variant={reviewHighlighted ? "secondary" : "ghost"}
+					>
+						{reviewHighlighted ? "Highlighted" : "Highlight"}
+					</Button>
+					<Input
+						aria-label="Human review comment"
+						className="h-6 text-[10px]"
+						disabled={reviewSaving}
+						onChange={(event) => setReviewComment(event.target.value)}
+						placeholder="Add a review comment…"
+						value={reviewComment}
+					/>
+					<Button
+						className="h-6 self-start px-1.5 text-[10px]"
+						disabled={reviewSaving || !reviewComment.trim()}
+						onClick={() =>
+							review(reviewed ?? score.assertions_pass).catch(() => undefined)
+						}
+						size="sm"
+						variant="ghost"
+					>
+						Save comment
+					</Button>
+				</div>
+			) : null}
 		</div>
 	);
 }
@@ -1357,6 +2650,7 @@ function PreviewPanel({ prompt, agentId, target, convId }: PreviewPanelProps) {
 			headers: (): Record<string, string> => chatHeaders(target),
 			body: () => ({
 				agent_id: agentId,
+				response_mode: "developer",
 				conversation_id: convId,
 				enable_long_term: false,
 			}),

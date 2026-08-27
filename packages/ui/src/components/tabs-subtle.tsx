@@ -77,6 +77,17 @@ const TabsSubtle = forwardRef<HTMLDivElement, TabsSubtleProps>(
 	) => {
 		const containerRef = useRef<HTMLDivElement>(null);
 		const isMouseInside = useRef(false);
+		const setContainerRef = useCallback(
+			(node: HTMLDivElement | null) => {
+				containerRef.current = node;
+				if (typeof ref === "function") {
+					ref(node);
+				} else if (ref) {
+					ref.current = node;
+				}
+			},
+			[ref]
+		);
 
 		const {
 			activeIndex: hoveredIndex,
@@ -194,16 +205,7 @@ const TabsSubtle = forwardRef<HTMLDivElement, TabsSubtleProps>(
 							}}
 							onMouseLeave={handleMouseLeave}
 							onMouseMove={handleMouseMove}
-							ref={(node: HTMLDivElement | null) => {
-								containerRef.current = node;
-								if (typeof ref === "function") {
-									ref(node);
-								} else if (ref) {
-									(
-										ref as React.MutableRefObject<HTMLDivElement | null>
-									).current = node;
-								}
-							}}
+							ref={setContainerRef}
 							{...props}
 						>
 							{/* Selected pill */}
@@ -320,6 +322,18 @@ const TabsSubtleItem = forwardRef<HTMLButtonElement, TabsSubtleItemProps>(
 		const internalRef = useRef<HTMLButtonElement | null>(null);
 		const { registerTab, hoveredIndex, selectedIndex, idPrefix, activeLabel } =
 			useTabsSubtle();
+		const setInternalRef = useCallback(
+			(node: HTMLElement | null) => {
+				const button = node as HTMLButtonElement | null;
+				internalRef.current = button;
+				if (typeof ref === "function") {
+					ref(button);
+				} else if (ref) {
+					ref.current = button;
+				}
+			},
+			[ref]
+		);
 
 		useEffect(() => {
 			registerTab(index, internalRef.current);
@@ -376,16 +390,7 @@ const TabsSubtleItem = forwardRef<HTMLButtonElement, TabsSubtleItemProps>(
 				)}
 				data-proximity-index={index}
 				id={idPrefix ? `${idPrefix}-tab-${index}` : undefined}
-				ref={(node: HTMLElement | null) => {
-					const button = node as HTMLButtonElement | null;
-					internalRef.current = button;
-					if (typeof ref === "function") {
-						ref(button);
-					} else if (ref) {
-						(ref as React.MutableRefObject<HTMLButtonElement | null>).current =
-							button;
-					}
-				}}
+				ref={setInternalRef}
 				value={index}
 				{...props}
 			>

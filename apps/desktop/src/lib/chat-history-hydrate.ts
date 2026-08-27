@@ -1,3 +1,6 @@
+import type { UIMessage } from "ai";
+import type { Message } from "@/types/chat.ts";
+
 /**
  * Turning a persisted history row into the message the chat surface renders.
  *
@@ -22,26 +25,16 @@ const STALE_THRESHOLD_MS = 30_000;
 // pattern-matched back out when the turn resumes.
 
 /** The subset of a loaded history message this mapper reads. */
-export interface HistoryRow {
-	content: string;
-	id: string;
+export interface HistoryRow extends Omit<Message, "timestamp"> {
 	/** Server-stamped: Core's boot reconciliation found this turn's run had never
 	 * finished, so its text/parts are only what had been flushed. */
 	interrupted?: boolean;
-	originServer?: string;
-	parts?: unknown[];
-	role: "assistant" | "user";
-	source?: string;
 	timestamp?: number;
-	widgetInstanceId?: string;
 }
 
-export interface HydratedMessage {
+export interface HydratedMessage extends UIMessage {
 	_interrupted?: boolean;
-	id: string;
 	originServer?: string;
-	parts: unknown[];
-	role: "assistant" | "user";
 	source?: string;
 	widgetInstanceId?: string;
 }
@@ -79,7 +72,7 @@ export function hydrateHistoryMessage(
 	const interrupted = m.interrupted === true || legacyStaleRunning;
 
 	const body = hasParts
-		? (m.parts as unknown[])
+		? (m.parts ?? [])
 		: [{ type: "text" as const, text: m.content }];
 	if (!interrupted) {
 		return {

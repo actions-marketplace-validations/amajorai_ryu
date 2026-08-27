@@ -35,6 +35,7 @@ function sources(): MentionSources {
 		pages: [],
 		outputStyles: [],
 		teams: [],
+		users: [],
 		workflows: [
 			{
 				id: "wf_plan",
@@ -47,6 +48,36 @@ function sources(): MentionSources {
 }
 
 describe("buildMentionGroups", () => {
+	test("filters the picker to approved capability and user kinds", () => {
+		const groups = buildMentionGroups(
+			{
+				...sources(),
+				users: [
+					{
+						description: "ada@example.test",
+						id: "user-ada",
+						name: "Ada Lovelace",
+						visualIcon: "avatar",
+					},
+				],
+			} as MentionSources,
+			"",
+			["agent", "app", "plugin", "workflow", "user"]
+		);
+		expect(groups.map((group) => group.label)).toEqual([
+			"Agents",
+			"Workflows",
+			"Users",
+		]);
+		expect(groups.find((group) => group.kind === "user")?.items[0]).toEqual({
+			description: "ada@example.test",
+			id: "user-ada",
+			kind: "user",
+			label: "Ada Lovelace",
+			visualIcon: "avatar",
+		});
+	});
+
 	test("offers installed agents as target mentions", () => {
 		const groups = buildMentionGroups(sources(), "ryu");
 		expect(groups.find((group) => group.kind === "agent")?.items).toEqual([
@@ -165,17 +196,19 @@ describe("buildMentionGroups", () => {
 			"Space pages",
 			"Output styles",
 		]);
-		expect(groups.find((group) => group.kind === "app-item")?.items[0]).toEqual({
-			kind: "app-item",
-			description: "Canvas · Product brief",
-			id: "com.ryu.canvas:canvas:brief",
-			label: "Product brief",
-			target: { path: "/spaces/space-1/app/canvas/brief" },
-			icon: expect.anything(),
-		});
-		expect(groups.find((group) => group.kind === "page")?.items[0].target).toEqual(
-			{ path: "/spaces/space-1/doc/page-1" }
+		expect(groups.find((group) => group.kind === "app-item")?.items[0]).toEqual(
+			{
+				kind: "app-item",
+				description: "Canvas · Product brief",
+				id: "com.ryu.canvas:canvas:brief",
+				label: "Product brief",
+				target: { path: "/spaces/space-1/app/canvas/brief" },
+				icon: expect.anything(),
+			}
 		);
+		expect(
+			groups.find((group) => group.kind === "page")?.items[0].target
+		).toEqual({ path: "/spaces/space-1/doc/page-1" });
 	});
 
 	test("offers connected integrations and filters them by toolkit metadata", () => {

@@ -23,8 +23,13 @@ import {
 	validatePluginRoute,
 } from "@ryu/app-host/rpc";
 import { htmlCompanionSrcdoc } from "@ryu/app-host/third-party-plugin";
+import { Toaster, toast } from "@ryu/ui/components/sileo.tsx";
 import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import {
+	createScopedToastHost,
+	createSileoToastRenderer,
+} from "../../../../packages/app-host/src/toast-host.ts";
 
 interface MountOptions {
 	/** The app's self-contained HTML bundle (a real fixture's bytes). */
@@ -49,6 +54,10 @@ const announced: string[] = [];
 let connected = false;
 let lastSrcdoc = "";
 let root: Root | null = null;
+let toastHost = createScopedToastHost({
+	renderer: createSileoToastRenderer(toast),
+	sourceId: "@ryu/companion-host-story",
+});
 
 // Record EVERY inbound window message, not just the accepted one: a `ready` that
 // arrives and is rejected (nonce mismatch) is a completely different bug from a
@@ -61,6 +70,11 @@ window.addEventListener("message", (event: MessageEvent) => {
 });
 
 function mount(options: MountOptions): void {
+	toastHost.dispose();
+	toastHost = createScopedToastHost({
+		renderer: createSileoToastRenderer(toast),
+		sourceId: options.pluginId,
+	});
 	announced.length = 0;
 	connected = false;
 	const nonce =
@@ -76,6 +90,9 @@ function mount(options: MountOptions): void {
 	// live port, exactly as it would in the shell.
 	const services: HostServices = {
 		listAgents: () => Promise.resolve([]),
+		uiToastDismiss: (input) => toastHost.dismiss(input),
+		uiToastShow: (input) => toastHost.show(input),
+		uiToastUpdate: (input) => toastHost.update(input),
 		registerRoute: (claim) =>
 			validatePluginRoute(options.pluginId, claim)
 				? Promise.resolve({ path: claim.path })
@@ -95,16 +112,21 @@ function mount(options: MountOptions): void {
 	}
 	root = createRoot(container);
 	root.render(
-		createElement(ExtensionHost, {
-			srcdoc: lastSrcdoc,
-			nonce,
-			granted,
-			services,
-			onConnected: () => {
-				connected = true;
-			},
-			title: "Companion cert",
-		})
+		createElement(
+			"div",
+			{ style: { minHeight: 360, padding: 24 } },
+			createElement(ExtensionHost, {
+				srcdoc: lastSrcdoc,
+				nonce,
+				granted,
+				services,
+				onConnected: () => {
+					connected = true;
+				},
+				title: "Companion cert",
+			}),
+			createElement(Toaster, { position: "bottom-right" })
+		)
 	);
 }
 

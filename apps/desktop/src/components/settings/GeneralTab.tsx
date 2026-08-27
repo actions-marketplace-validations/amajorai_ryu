@@ -26,6 +26,7 @@ import {
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { listAccounts } from "@/lib/auth-client.ts";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import { TAB_UNLOAD_MINUTES_KEY } from "@/src/contexts/TabsContext.tsx";
 import { useAutoHideTitleBar } from "@/src/hooks/useAutoHideTitleBar.ts";
 import { useAutoImportThreads } from "@/src/hooks/useAutoImportThreads.ts";
@@ -34,6 +35,11 @@ import {
 	type ComposerSelectionApplyMode,
 	useComposerSelectionApplyMode,
 } from "@/src/hooks/useComposerSelectionApplyMode.ts";
+import {
+	COMPOSER_SEND_SHORTCUT_OPTIONS,
+	type ComposerSendShortcut,
+	useComposerSendShortcut,
+} from "@/src/hooks/useComposerSendShortcut.ts";
 import { useFloatingTabs } from "@/src/hooks/useFloatingTabs.ts";
 import {
 	setNodeTabOverride,
@@ -52,7 +58,12 @@ import {
 	useStartupBehavior,
 } from "@/src/hooks/useStartupBehavior.ts";
 import { useStartupSelection } from "@/src/hooks/useStartupSelection.ts";
-import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
+import {
+	setTabLayout,
+	TAB_LAYOUT_OPTIONS,
+	type TabLayout,
+	useTabLayout,
+} from "@/src/hooks/useTabLayout.ts";
 import {
 	setTabOpenBehavior,
 	useTabOpenBehavior,
@@ -160,6 +171,7 @@ const TAB_SWITCH_OPTIONS: { value: TabSwitchBehavior; label: string }[] = [
 ];
 
 export function GeneralTab() {
+	const { canManageDesktopLifecycle, canUseNativeShell } = useAppSurface();
 	// Which sub-page a settings-search hit lives on, so the reveal has something
 	// to find — a row on a closed page is not in the DOM.
 	const pendingSubpage = usePendingSubpage("general");
@@ -192,6 +204,8 @@ export function GeneralTab() {
 		? (startupSelection.defaultNodeName ?? NO_STARTUP_DEFAULT)
 		: NO_STARTUP_DEFAULT;
 	const queueDrainMode = useQueueDrainMode();
+	const [composerSendShortcut, setComposerSendShortcut] =
+		useComposerSendShortcut();
 	const [composerSelectionApplyMode, setComposerSelectionApplyModeSetting] =
 		useComposerSelectionApplyMode();
 	const terminalShell = useWorkspaceStore((s) => s.terminalShell);
@@ -214,6 +228,9 @@ export function GeneralTab() {
 	// for a frame would flash the toggle off on every open.
 	const [closeToTray, setCloseToTray] = useState(true);
 	useEffect(() => {
+		if (!canManageDesktopLifecycle) {
+			return;
+		}
 		invoke<boolean>("get_hide_tray_icon")
 			.then(setHideTrayIcon)
 			.catch(() => {
@@ -224,7 +241,7 @@ export function GeneralTab() {
 			.catch(() => {
 				// Non-Tauri context or command unavailable: keep the default.
 			});
-	}, []);
+	}, [canManageDesktopLifecycle]);
 
 	// "Launch at login" is an OS registration (macOS LaunchAgent, Windows Run key,
 	// Linux ~/.config/autostart), so the OS — not a local mirror — is the source
@@ -234,6 +251,9 @@ export function GeneralTab() {
 	const [launchAtLogin, setLaunchAtLogin] = useState(false);
 	const [startHidden, setStartHidden] = useState(false);
 	useEffect(() => {
+		if (!canManageDesktopLifecycle) {
+			return;
+		}
 		isAutostartEnabled()
 			.then(setLaunchAtLogin)
 			.catch(() => {
@@ -244,7 +264,7 @@ export function GeneralTab() {
 			.catch(() => {
 				// Non-Tauri context or command unavailable: keep the default.
 			});
-	}, []);
+	}, [canManageDesktopLifecycle]);
 
 	const handleLaunchAtLogin = async (enabled: boolean) => {
 		setLaunchAtLogin(enabled);
@@ -534,16 +554,28 @@ export function GeneralTab() {
 					/>
 					<SettingsItem
 						actions={
-							<Switch
-								checked={tabLayout === "vertical"}
-								id="vertical-tabs-toggle"
-								onCheckedChange={(checked) =>
-									setTabLayout(checked ? "vertical" : "horizontal")
-								}
-							/>
+							<Select
+								items={TAB_LAYOUT_OPTIONS}
+								onValueChange={(value) => setTabLayout(value as TabLayout)}
+								value={tabLayout}
+							>
+								<SelectTrigger
+									className="h-8 w-52 flex-shrink-0 text-sm"
+									id="tab-layout-select"
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{TAB_LAYOUT_OPTIONS.map((option) => (
+										<SelectItem key={option.value} value={option.value}>
+											{option.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
 						}
-						description="Show open tabs as a collapsible list in the left sidebar (Zen-browser style) instead of a horizontal bar at the top."
-						title="Vertical tabs"
+						description="Choose how open tabs appear: a compact top strip, a sidebar list, a center-pane scroll track, or an infinite canvas."
+						title="Tab layout"
 					/>
 					<SettingsItem
 						actions={
@@ -654,6 +686,42 @@ export function GeneralTab() {
 						}
 						description="Automatically import agent setup instructions (AGENTS.md / CLAUDE.md) from your Claude Code, Cursor, and Codex config folders, so imported projects stay in sync. Only instructions are auto-imported — skills, MCP servers, and plugins are always imported explicitly from the Import setup dialog."
 						title="Auto-import agent setup"
+					/>
+					<SettingsItem
+						actions={
+							<Select
+								items={COMPOSER_SEND_SHORTCUT_OPTIONS}
+								onValueChange={(value) => {
+									if (
+										value === "enter" ||
+										value === "shift-enter" ||
+										value === "command-enter"
+									) {
+										setComposerSendShortcut(value);
+									}
+								}}
+								value={composerSendShortcut}
+							>
+								<SelectTrigger
+									className="h-8 w-56 flex-shrink-0 text-sm"
+									id="composer-send-shortcut-select"
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{COMPOSER_SEND_SHORTCUT_OPTIONS.map((option) => (
+										<SelectItem
+											key={option.value}
+											value={option.value satisfies ComposerSendShortcut}
+										>
+											{option.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						}
+						description="Choose which key sends a prompt from the chat composer."
+						title="Send shortcut"
 					/>
 					<SettingsItem
 						actions={
@@ -902,30 +970,38 @@ export function GeneralTab() {
 					tint: "teal",
 					content: chatsPage,
 				},
-				{
-					id: "terminal",
-					title: "Terminal",
-					hint: "How the built-in terminal and git actions run commands.",
-					icon: CommandLineIcon,
-					tint: "gray",
-					content: terminalPage,
-				},
-				{
-					id: "files",
-					title: "Files",
-					hint: "How the workspace file tree opens files and folders.",
-					icon: FolderOpenIcon,
-					tint: "purple",
-					content: filesPage,
-				},
-				{
-					id: "system",
-					title: "System & tray",
-					hint: "How Ryu appears in the system tray and runs in the background.",
-					icon: ComputerIcon,
-					tint: "indigo",
-					content: systemPage,
-				},
+				...(canUseNativeShell
+					? [
+							{
+								id: "terminal",
+								title: "Terminal",
+								hint: "How the built-in terminal and git actions run commands.",
+								icon: CommandLineIcon,
+								tint: "gray" as const,
+								content: terminalPage,
+							},
+							{
+								id: "files",
+								title: "Files",
+								hint: "How the workspace file tree opens files and folders.",
+								icon: FolderOpenIcon,
+								tint: "purple" as const,
+								content: filesPage,
+							},
+						]
+					: []),
+				...(canManageDesktopLifecycle
+					? [
+							{
+								id: "system",
+								title: "System & tray",
+								hint: "How Ryu appears in the system tray and runs in the background.",
+								icon: ComputerIcon,
+								tint: "indigo" as const,
+								content: systemPage,
+							},
+						]
+					: []),
 				{
 					id: "setup",
 					title: "Setup & recovery",

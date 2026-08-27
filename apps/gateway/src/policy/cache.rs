@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use super::{resolve_token, ResolvedOrg};
+use super::{resolve_token, CredentialUse, ResolvedOrg};
 
 /// Env var with the control-plane base URL (no trailing `/api`). Same source as
 /// [`super::PolicySource`] so the startup and dynamic paths reach one endpoint.
@@ -103,7 +103,14 @@ impl ResolveCache {
 
         // Miss or stale: hit the control plane. On failure, store a short-lived
         // negative entry so a flood of the same bad bearer doesn't hammer it.
-        match resolve_token(&self.control_plane_url, &self.http, token).await {
+        match resolve_token(
+            &self.control_plane_url,
+            &self.http,
+            token,
+            CredentialUse::GatewayRelay,
+        )
+        .await
+        {
             Ok(org) => {
                 let arc = Arc::new(org);
                 self.entries.insert(

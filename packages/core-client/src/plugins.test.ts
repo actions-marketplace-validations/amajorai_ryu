@@ -10,8 +10,21 @@
 // path would escape the plugin's proxy scope and hit an arbitrary internal route
 // with the full node bearer. These vectors keep that closed.
 
-import { expect, test } from "bun:test";
-import { isSafeCommandPath } from "./plugins.ts";
+import { afterEach, expect, test } from "bun:test";
+import type { ApiTarget } from "./client.ts";
+import {
+	disableApp,
+	enableApp,
+	installApp,
+	isSafeCommandPath,
+	uninstallApp,
+	updateApp,
+} from "./plugins.ts";
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+	globalThis.fetch = realFetch;
+});
 
 test("isSafeCommandPath accepts plain absolute sub-paths", () => {
 	for (const ok of ["/status", "/inboxes/send", "/a-b_c/1", "/x?y=1", "/"]) {
@@ -33,5 +46,59 @@ test("isSafeCommandPath rejects path-traversal and escape forms", () => {
 		"", // empty
 	]) {
 		expect(isSafeCommandPath(bad)).toBe(false);
+	}
+});
+
+test("lifecycle routes encode a scoped plugin id exactly once", async () => {
+	const urls: string[] = [];
+	globalThis.fetch = Object.assign(
+		(input: RequestInfo | URL) => {
+			const url = String(input);
+			urls.push(url);
+			if (url.includes("/uninstall")) {
+				return Promise.resolve(
+					Response.json({
+						disabled: ["@ryu/mail"],
+						removed: "@ryu/mail",
+						success: true,
+					})
+				);
+			}
+			return Promise.resolve(
+				Response.json({
+					app: {
+						approved_grants: [],
+						created_at: null,
+						enabled: true,
+						id: "@ryu/mail",
+						updated_at: null,
+						version: "1.0.0",
+					},
+				})
+			);
+		},
+		{ preconnect: realFetch.preconnect }
+	);
+	const target: ApiTarget = {
+		token: "node-token",
+		url: "http://127.0.0.1:7980",
+	};
+	const scopedId = "@ryu/mail";
+
+	await installApp(target, scopedId);
+	await enableApp(target, scopedId);
+	await disableApp(target, scopedId, { cascade: true });
+	await uninstallApp(target, scopedId, { cascade: true });
+	await updateApp(target, scopedId, { force: true });
+
+	expect(urls).toEqual([
+		"http://127.0.0.1:7980/api/plugins/%40ryu%2Fmail/install",
+		"http://127.0.0.1:7980/api/plugins/%40ryu%2Fmail/enable",
+		"http://127.0.0.1:7980/api/plugins/%40ryu%2Fmail/disable?cascade=true",
+		"http://127.0.0.1:7980/api/plugins/%40ryu%2Fmail/uninstall?cascade=true",
+		"http://127.0.0.1:7980/api/plugins/%40ryu%2Fmail/update",
+	]);
+	for (const url of urls) {
+		expect(url).not.toContain("%2540ryu%252Fmail");
 	}
 });

@@ -599,6 +599,7 @@ const host = {{
     set: (k, v, ns) => tools.host.storage_set({{ key: String(k), value: typeof v === "string" ? v : JSON.stringify(v), namespace: ns }}),
     delete: (k, ns) => tools.host.storage_delete({{ key: String(k), namespace: ns }}),
     keys: (ns) => tools.host.storage_keys({{ namespace: ns }}),
+    compareAndSet: (k, expected, v, ns) => tools.host.storage_compare_and_set({{ key: String(k), expected: expected == null ? null : String(expected), value: v == null ? null : (typeof v === "string" ? v : JSON.stringify(v)), namespace: ns }}),
   }},
   log: (...a) => console.log(...a),
 }};

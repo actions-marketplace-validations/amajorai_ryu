@@ -120,7 +120,7 @@ pub struct CatalogEntry {
     //
     // A listing's NAME and ICON are declared by its manifest, never invented by
     // whoever is serving the feed. `tools/generate-registry.mjs` projects these
-    // out of `plugins-store/*/manifest.json` + `apps-store/*/manifest.json` with
+    // out of `plugins-store/{plugins,lsp,external_plugins}/*/manifest.json` + `apps-store/*/manifest.json` with
     // the same mapping Core's own `plugin_manifest_to_entry` uses, so the remote
     // feed and the local browse surface cannot disagree about one plugin.
     //

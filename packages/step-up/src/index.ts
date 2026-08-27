@@ -20,6 +20,7 @@ export type StepUpScope =
 	| "org.delete"
 	| "org.members"
 	| "node.destroy"
+	| "billing"
 	| "platform.admin";
 
 /** How a code can be proven: authenticator app, emailed code, backup code. */
@@ -42,6 +43,11 @@ export interface StepUpStatus {
 
 /** The `error`/`code` value a gated endpoint returns when a step-up is missing. */
 export const STEP_UP_REQUIRED = "STEP_UP_REQUIRED";
+
+/** Whether a step-up scope must keep its confirmation dialog open. */
+export function isStepUpBlocking(scope: StepUpScope): boolean {
+	return scope === "billing";
+}
 
 export interface StepUpClientOptions {
 	/** API origin, no trailing slash — e.g. `https://api.ryuhq.com`. */

@@ -1,6 +1,15 @@
 {
-  "tags": ["study","revision","spaced-repetition","mastery","flashcards","exam","tutor","learning"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": [
+    "study",
+    "revision",
+    "spaced-repetition",
+    "mastery",
+    "flashcards",
+    "exam",
+    "tutor",
+    "learning"
+  ],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-tuition",
   "homepage": "https://github.com/amajorai/ryu-tuition",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -87,93 +96,174 @@
         "public_mount": "/api/tuition",
         "routes": [
           {
-            "path": "/subjects"
+            "path": "/subjects",
+            "method": "GET",
+            "permission": "tuition.view"
           },
           {
-            "path": "/subjects/:id"
+            "path": "/subjects",
+            "method": "POST",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/sources"
+            "path": "/subjects/:id",
+            "method": "GET",
+            "permission": "tuition.view"
           },
           {
-            "path": "/sources/:id"
+            "path": "/subjects/:id",
+            "method": "PATCH",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/skills"
+            "path": "/subjects/:id",
+            "method": "DELETE",
+            "permission": "tuition.edit"
+          },
+          { "path": "/sources", "method": "GET", "permission": "tuition.view" },
+          {
+            "path": "/sources",
+            "method": "POST",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/skills/:id"
+            "path": "/sources/:id",
+            "method": "GET",
+            "permission": "tuition.view"
           },
           {
-            "path": "/skills/:id/prereqs"
+            "path": "/sources/:id",
+            "method": "DELETE",
+            "permission": "tuition.edit"
+          },
+          { "path": "/skills", "method": "GET", "permission": "tuition.view" },
+          { "path": "/skills", "method": "POST", "permission": "tuition.edit" },
+          {
+            "path": "/skills/:id",
+            "method": "GET",
+            "permission": "tuition.view"
           },
           {
-            "path": "/items"
+            "path": "/skills/:id",
+            "method": "PATCH",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/items/generate"
+            "path": "/skills/:id",
+            "method": "DELETE",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/items/:id"
+            "path": "/skills/:id/prereqs",
+            "method": "GET",
+            "permission": "tuition.view"
           },
           {
-            "path": "/sessions"
+            "path": "/skills/:id/prereqs",
+            "method": "POST",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/sessions/plan"
+            "path": "/skills/:id/prereqs",
+            "method": "DELETE",
+            "permission": "tuition.edit"
+          },
+          { "path": "/items", "method": "GET", "permission": "tuition.view" },
+          { "path": "/items", "method": "POST", "permission": "tuition.edit" },
+          {
+            "path": "/items/generate",
+            "method": "POST",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/sessions/:id"
+            "path": "/items/:id",
+            "method": "GET",
+            "permission": "tuition.view"
           },
           {
-            "path": "/sessions/:id/next"
+            "path": "/items/:id",
+            "method": "PATCH",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/sessions/:id/answer"
+            "path": "/items/:id",
+            "method": "DELETE",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/sessions/:id/finish"
+            "path": "/sessions",
+            "method": "GET",
+            "permission": "tuition.view"
           },
           {
-            "path": "/attempts"
+            "path": "/sessions/plan",
+            "method": "POST",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/mastery"
+            "path": "/sessions/:id",
+            "method": "GET",
+            "permission": "tuition.view"
           },
           {
-            "path": "/due"
+            "path": "/sessions/:id/next",
+            "method": "GET",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/trajectory"
+            "path": "/sessions/:id/answer",
+            "method": "POST",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/candidates"
+            "path": "/sessions/:id/finish",
+            "method": "POST",
+            "permission": "tuition.edit"
           },
           {
-            "path": "/candidates/:id/accept"
+            "path": "/attempts",
+            "method": "GET",
+            "permission": "tuition.view"
+          },
+          { "path": "/mastery", "method": "GET", "permission": "tuition.view" },
+          { "path": "/due", "method": "GET", "permission": "tuition.view" },
+          {
+            "path": "/trajectory",
+            "method": "GET",
+            "permission": "tuition.view"
           },
           {
-            "path": "/candidates/:id/reject"
+            "path": "/candidates",
+            "method": "GET",
+            "permission": "tuition.view"
           },
           {
-            "path": "/settings"
-          }
+            "path": "/candidates/:id/accept",
+            "method": "POST",
+            "permission": "tuition.edit"
+          },
+          {
+            "path": "/candidates/:id/reject",
+            "method": "POST",
+            "permission": "tuition.edit"
+          },
+          {
+            "path": "/settings",
+            "method": "GET",
+            "permission": "tuition.view"
+          },
+          { "path": "/settings", "method": "PUT", "permission": "tuition.edit" }
         ]
       },
       "host_api": {
-        "grants": [
-          "hook:side-model",
-          "storage:kv"
-        ]
+        "grants": ["hook:side-model", "storage:kv"]
       }
     }
   ],
   "mcp_servers": {
     "tuition": {
       "command": "ryu-tuition",
-      "args": [
-        "mcp"
-      ],
+      "args": ["mcp"],
       "description": "Your own mastery model as tools, so any agent or workflow can tutor you and record what happened: `due` lists the skills whose review is owed and why, `quiz` hands back stored practice items for a skill, `grade` marks an answer (by comparison for objective kinds, against the written rubric for free response), `log` records an attempt so the posterior and the schedule actually move, and `mastery` reports the current posterior per skill with the projection of how many more correct answers reach the target. `due`, `quiz` and `mastery` are pure reads of computed state — a workflow branching on them takes the same path for the same data."
     }
   },
@@ -189,7 +279,8 @@
     "tuition:crud",
     "hook:side-model",
     "storage:kv",
-    "mcp:tuition"
+    "mcp:tuition",
+    "ui:declarative-http"
   ],
   "permission_levels": [
     {
@@ -201,9 +292,7 @@
       "id": "tuition.edit",
       "label": "Can edit",
       "description": "Add material, edit skills and prerequisites, accept review candidates and record attempts. Attempts move the mastery posterior and the review schedule, so this is the level that changes what the app says you know.",
-      "implies": [
-        "tuition.view"
-      ]
+      "implies": ["tuition.view"]
     }
   ],
   "companion": {
@@ -211,7 +300,19 @@
     "icon": "mortarboard-01"
   },
   "contributes": {
-  "chat_widget_templates": [{"id":"tuition.chat","title":"Tuition widget","description":"Open Tuition data in a host-rendered chat widget.","triggers":["tuition widget"],"examples":["Show me a tuition widget"],"backing":{"view_id":"surface:tuition"},"display_mode":"inline","safe_action_ids":[],"availability":"available"}],
+    "chat_widget_templates": [
+      {
+        "id": "tuition.chat",
+        "title": "Tuition widget",
+        "description": "Open Tuition data in a host-rendered chat widget.",
+        "triggers": ["tuition widget"],
+        "examples": ["Show me a tuition widget"],
+        "backing": { "view_id": "surface:tuition" },
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "available"
+      }
+    ],
     "composer_controls": [
       {
         "id": "tuition.toggle",
@@ -307,9 +408,7 @@
           "ready_threshold": 0.8,
           "attempt_id": "01J8Z9M2N3P4Q5R6S7T8U9V0W1",
           "graded_by": "deterministic",
-          "unblocked_skills": [
-            "01J8Z9K4M5N6P7Q8R9S0T1U2V3"
-          ],
+          "unblocked_skills": ["01J8Z9K4M5N6P7Q8R9S0T1U2V3"],
           "at": "2026-08-10T18:22:07Z"
         }
       },

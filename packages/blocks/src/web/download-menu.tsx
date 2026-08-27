@@ -34,6 +34,7 @@ export function DownloadMenu({
 	label = "Download",
 	showChevron = true,
 	showPlatform = false,
+	separatorClassName,
 	size = "default",
 	variant = "default",
 }: {
@@ -43,6 +44,7 @@ export function DownloadMenu({
 	showChevron?: boolean;
 	/** Use the longer OS-aware label reserved for the dedicated download page. */
 	showPlatform?: boolean;
+	separatorClassName?: string;
 	size?: "default" | "lg" | "sm";
 	variant?: "default" | "ghost" | "outline";
 }) {
@@ -108,7 +110,7 @@ export function DownloadMenu({
 				) : null}
 				{primaryLabel}
 			</Button>
-			<ButtonGroupSeparator />
+			<ButtonGroupSeparator className={separatorClassName} />
 			<DropdownMenu>
 				<DropdownMenuTrigger
 					render={

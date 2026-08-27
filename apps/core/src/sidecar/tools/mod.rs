@@ -1,4 +1,5 @@
 pub mod ghost;
+pub mod island;
 pub mod llmfit;
 pub mod research;
 pub mod restate;

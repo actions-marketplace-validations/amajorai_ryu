@@ -50,11 +50,22 @@ export function useComposioToolkits(enabled: boolean) {
 }
 
 /** List a toolkit's actions (only when a toolkit is selected). */
-export function useComposioActions(toolkit: string | null, query = "") {
+export function useComposioActions(
+	toolkit: string | null,
+	query = "",
+	tags: readonly string[] = []
+) {
 	const target = useTarget();
 	return useQuery<ComposioAction[]>({
-		queryKey: ["composio", "actions", target.url, toolkit ?? "", query],
-		queryFn: () => fetchComposioActions(target, toolkit ?? "", query),
+		queryKey: [
+			"composio",
+			"actions",
+			target.url,
+			toolkit ?? "",
+			query,
+			tags.join(","),
+		],
+		queryFn: () => fetchComposioActions(target, toolkit ?? "", query, tags),
 		enabled: Boolean(toolkit),
 		staleTime: 5 * 60_000,
 	});

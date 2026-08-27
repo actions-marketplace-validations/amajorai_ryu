@@ -29,12 +29,14 @@ mod quota;
 mod rate_limit;
 mod reporter;
 mod router;
+mod ryu_analytics;
 mod semantic_cache;
 mod skills;
 mod state;
 mod telemetry;
 mod tools;
 mod traffic;
+mod treg;
 mod untrusted;
 mod wasm_policy;
 

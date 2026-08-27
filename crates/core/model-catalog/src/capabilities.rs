@@ -28,7 +28,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -226,10 +225,6 @@ fn config_option_is_reasoning(opt: &serde_json::Value) -> bool {
 
 // ── Override store (`~/.ryu/agent-capability-overrides.json`) ─────────────────
 
-/// Serializes writes to the override file to avoid clobbering on concurrent
-/// edits (mirrors the installed-models store's lock discipline).
-static LOCK: Mutex<()> = Mutex::new(());
-
 fn store_path() -> PathBuf {
     crate::ryu_dir().join("agent-capability-overrides.json")
 }
@@ -241,41 +236,33 @@ struct OverridesFile {
     overrides: HashMap<String, CapabilityOverrides>,
 }
 
-fn read_file() -> OverridesFile {
-    std::fs::read_to_string(store_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+fn read_file() -> anyhow::Result<OverridesFile> {
+    ryu_json_store::read_or_default(&store_path())
 }
 
 /// Load the stored overrides for an agent (all-`None` when none recorded).
 pub fn load_override(agent_id: &str) -> CapabilityOverrides {
-    read_file()
-        .overrides
-        .get(agent_id)
-        .copied()
-        .unwrap_or_default()
+    match read_file() {
+        Ok(file) => file.overrides.get(agent_id).copied().unwrap_or_default(),
+        Err(error) => {
+            tracing::error!(error = %error, "agent capability override store is corrupt");
+            CapabilityOverrides::default()
+        }
+    }
 }
 
 /// Persist an agent's overrides. An all-`None` override deletes the record (so
 /// "reset to auto" leaves no residue). Atomic write (temp + rename).
 pub fn save_override(agent_id: &str, ov: &CapabilityOverrides) -> anyhow::Result<()> {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = store_path();
-    let mut file = read_file();
-    if ov.is_empty() {
-        file.overrides.remove(agent_id);
-    } else {
-        file.overrides.insert(agent_id.to_string(), *ov);
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string_pretty(&file)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    ryu_json_store::mutate(&path, |file: &mut OverridesFile| {
+        if ov.is_empty() {
+            file.overrides.remove(agent_id);
+        } else {
+            file.overrides.insert(agent_id.to_string(), *ov);
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@
 // (App*, fetchApps, etc.) are kept stable to limit churn across importers.
 
 import type { LiveActivityContribution } from "@ryu/app-host/live-activity";
+import type { StandaloneAppBundle } from "@ryu/app-host/standalone";
 import type {
 	DockPanelSpec,
 	SidebarSectionSpec,
@@ -25,7 +26,7 @@ import type {
 } from "@ryu/marketplace/catalog/types";
 import {
 	type ApiTarget,
-	apiUrl,
+	authenticatedFetch,
 	identityHeaders,
 	makeHeaders,
 	request,
@@ -86,6 +87,8 @@ interface AppManifestWire {
 	iconBackground?: string | null;
 	/** Dithered-gradient background for the icon square (`iconDither`). */
 	iconDither?: CardDither | null;
+	/** Inset and letterbox treatment for the icon art (`iconPadding`). */
+	iconPadding?: string | null;
 	/** Raster logo (contract key `iconUrl`). */
 	iconUrl?: string | null;
 	id: string;
@@ -192,6 +195,8 @@ export interface AppPresentation {
 	iconBackground: string | null;
 	/** Dithered-gradient background for the icon square. */
 	iconDither: CardDither | null;
+	/** Inset and letterbox treatment for icon art (`iconPadding`). */
+	iconPadding: string | null;
 	/** Raster logo URL. */
 	iconUrl: string | null;
 	layers: CatalogLayer[];
@@ -208,6 +213,8 @@ export interface AppInfo extends AppPresentation {
 	 *  The permissions editor checks its switches against this, never against the
 	 *  manifest's declaration, which is only what the app asked for. */
 	approvedGrants: string[];
+	/** Whether the package is embedded/owned by the Ryu distribution. This is
+	 *  provenance, not an installation or enabled-state flag. */
 	builtIn: boolean;
 	/** The release train this install FOLLOWS — `stable`, `beta`, `nightly`, … —
 	 *  which is what the next update resolves on. Not derivable from the version:
@@ -223,8 +230,9 @@ export interface AppInfo extends AppPresentation {
 	id: string;
 	installed: boolean;
 	/** The version the lifecycle record actually holds — what is ON THIS MACHINE.
-	 *  `null` for a built-in (no record) and for anything not installed; `version`
-	 *  is the MANIFEST's version, which for an out-of-date install is the newer one.
+	 *  `null` for an uninstalled app, including an install-on-demand built-in;
+	 *  pre-installed built-ins have a seeded lifecycle record. `version` is the
+	 *  MANIFEST's version, which for an out-of-date install is the newer one.
 	 *  Render `installedVersion ?? version`, never `version` alone. */
 	installedVersion: string | null;
 	localOnly: boolean;
@@ -407,6 +415,8 @@ export interface AppLifecycleError {
 	grantsDenied: boolean;
 	/** Human-readable reason suitable for display in a UI primitive. */
 	message: string;
+	/** HTTP status from Core, used for narrow built-in-vs-bundle fallback. */
+	status: number;
 }
 
 /** Render a {@link DependencyError} as an ACTIONABLE sentence.
@@ -478,6 +488,7 @@ function toAppInfo(w: AppManifestWire): AppInfo {
 		icon: w.icon ?? null,
 		iconBackground: w.iconBackground ?? null,
 		iconDither: w.iconDither ?? null,
+		iconPadding: w.iconPadding ?? null,
 		iconUrl: w.iconUrl ?? null,
 		id: w.id,
 		channel: w.channel ?? null,
@@ -589,7 +600,7 @@ async function parseLifecycleError(
 		message = `Gateway unreachable (fail-closed): ${reason}`;
 	}
 
-	return { message, grantsDenied, gatewayUnreachable, dependencyError };
+	return { message, grantsDenied, gatewayUnreachable, dependencyError, status };
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -598,10 +609,14 @@ async function parseLifecycleError(
  *  Sends `identityHeaders()` (which carries `X-Ryu-Surface: desktop`) so Core
  *  filters the list to plugins that target this surface — the direct-fetch path
  *  otherwise omits it, leaving `targets` inert. */
-export async function fetchApps(target: ApiTarget): Promise<AppInfo[]> {
-	const resp = await fetch(apiUrl(target, "/api/plugins"), {
+export async function fetchApps(
+	target: ApiTarget,
+	options: { skipUserJwt?: boolean } = {}
+): Promise<AppInfo[]> {
+	const resp = await authenticatedFetch(target, "/api/plugins", {
 		method: "GET",
 		headers: { ...makeHeaders(target.token), ...identityHeaders() },
+		skipUserJwt: options.skipUserJwt,
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/plugins failed: ${resp.status}`);
@@ -628,10 +643,14 @@ export async function fetchPluginDoctor(
 	id?: string
 ): Promise<PluginDoctorReport> {
 	const suffix = id ? `?id=${encodeURIComponent(id)}` : "";
-	const resp = await fetch(apiUrl(target, `/api/plugins/doctor${suffix}`), {
-		method: "GET",
-		headers: { ...makeHeaders(target.token), ...identityHeaders() },
-	});
+	const resp = await authenticatedFetch(
+		target,
+		`/api/plugins/doctor${suffix}`,
+		{
+			method: "GET",
+			headers: { ...makeHeaders(target.token), ...identityHeaders() },
+		}
+	);
 	if (!resp.ok) {
 		throw new Error(`/api/plugins/doctor failed: ${resp.status}`);
 	}
@@ -727,7 +746,7 @@ export interface PluginContributions {
 	hook_events: PluginHookEvent[];
 	/** Live activities contributed by enabled plugins (`contributes.live_activities`),
 	 *  tagged with `plugin`. Each is a {@link LiveActivityContribution} the desktop's
-	 *  "Dynamic Island" dock renders from a declared Core `/api/` path. */
+	 *  "Dynamic Island" dock renders from a declared safe Core-relative path. */
 	live_activities: PluginLiveActivity[];
 	/** Per-message toolbar actions enabled plugins contribute
 	 *  (`contributes.message_actions`), tagged with `plugin`. */
@@ -737,6 +756,9 @@ export interface PluginContributions {
 	 *  from `GET /api/output-styles`, so this family is provenance, not the picker's
 	 *  data source. */
 	output_styles: PluginOutputStyle[];
+	/** Floating text-selection toolbar actions enabled plugins contribute
+	 *  (`contributes.selection_actions`), tagged with `plugin`. */
+	selection_actions: PluginSelectionAction[];
 	settings_tabs: Record<string, unknown>[];
 	/** App-registered sidebar buttons (single nav rows), tagged with `plugin`. */
 	sidebar_buttons: PluginSidebarButton[];
@@ -778,6 +800,10 @@ export interface PluginAgentEditPanel {
 /** An app-registered sidebar SECTION as served by Core (`contributes.sidebar_sections[]`),
  *  tagged with its owning `plugin`. The `spec` is the shared {@link SidebarSectionSpec}. */
 export interface PluginSidebarSection {
+	/** Gateway-approved grants for the owning enabled app, added by Core. */
+	approved_grants?: string[];
+	/** Core-stamped declarative HTTP authority. */
+	http_policy?: unknown;
 	icon?: string;
 	id: string;
 	order?: number;
@@ -867,8 +893,8 @@ export interface PluginOutputStyle {
  *  tagged with its owning `plugin` plus that app's install/enable state.
  *
  *  Unlike every sibling family here, store tabs are served for apps that are NOT
- *  installed or NOT enabled — the Store is where an app gets installed, and the
- *  built-in feature apps ship un-pre-installed, so an enabled-gated tab would be
+ *  installed or NOT enabled — the Store is where an app gets installed, and
+ *  install-on-demand feature apps have no fresh-install record, so an enabled-gated tab would be
  *  missing exactly when it is needed. `app_installed` / `app_enabled` are what the
  *  renderer switches on to show an enable prompt instead of an empty catalog. */
 export interface PluginStoreTab {
@@ -878,6 +904,8 @@ export interface PluginStoreTab {
 	app_installed: boolean;
 	/** Nav cluster key (`discover` | `catalog` | `community` | `manage` | `account`). */
 	group?: string;
+	/** Core-stamped declarative HTTP authority. */
+	http_policy?: unknown;
 	icon?: string;
 	id: string;
 	order?: number;
@@ -893,6 +921,8 @@ export interface PluginStoreTab {
 /** An app-registered sidebar BUTTON as served by Core (`contributes.sidebar_buttons[]`),
  *  tagged with its owning `plugin`. A single nav row that opens `target`. */
 export interface PluginSidebarButton {
+	/** Optional app context passed when the button opens the owning Companion. */
+	context?: Record<string, unknown>;
 	icon?: string;
 	id: string;
 	order?: number;
@@ -982,6 +1012,8 @@ export interface PluginComposerControl {
 	 *  bool, a `select` writes the chosen option `value`, a `chip` exposes (and clears)
 	 *  its live value, and an `action` marks its dispatch so the turn hook sees it. */
 	flag: string;
+	/** Core-stamped declarative HTTP authority. */
+	http_policy?: unknown;
 	icon?: string;
 	id: string;
 	label: string;
@@ -1019,6 +1051,8 @@ export interface PluginMessageAction {
 	/** Capability the shell invokes when the action fires, through the owning
 	 *  plugin's granted capability seam (never inline code). */
 	capability?: string;
+	/** Core-stamped declarative HTTP authority. */
+	http_policy?: unknown;
 	icon?: string;
 	id: string;
 	kind: string;
@@ -1037,6 +1071,21 @@ export interface PluginMessageAction {
 		value: string;
 	}[];
 	target: string;
+}
+
+/** A text-selection toolbar action an enabled plugin contributes
+ * (`contributes.selection_actions`), tagged with its owning `plugin`. */
+export interface PluginSelectionAction {
+	args?: Record<string, unknown>;
+	/** Optional capability for plugin-owned dispatch. Host-owned actions may use
+	 * an opaque `args.dispatch` bridge instead. */
+	capability?: string;
+	icon?: string;
+	id: string;
+	kind: string;
+	label: string;
+	order?: number;
+	plugin: string;
 }
 
 /** A context-menu row an enabled plugin contributes
@@ -1113,6 +1162,8 @@ export interface PluginCompanion {
 	icon?: string;
 	id: string;
 	label: string;
+	/** Whether the official Marketplace listing requires active Membership access. */
+	membershipRequired: boolean;
 	name: string;
 	/** The owning plugin's manifest id (the PluginStore key). The UI bundle is
 	 *  keyed by this, NOT by the companion id (`app__<runnable id>`). */
@@ -1131,6 +1182,7 @@ interface PluginCompanionWire {
 	icon?: string;
 	id: string;
 	label: string;
+	membership_required?: boolean;
 	name: string;
 	plugin_id?: string;
 	shortcut?: string;
@@ -1146,6 +1198,7 @@ function toPluginCompanion(w: PluginCompanionWire): PluginCompanion {
 		pluginId: w.plugin_id ?? "",
 		approvedGrants: w.approved_grants ?? [],
 		hasUi: w.has_ui ?? false,
+		membershipRequired: w.membership_required ?? false,
 		csp: w.csp
 			? {
 					connectDomains: w.csp.connect_domains ?? [],
@@ -1158,7 +1211,7 @@ function toPluginCompanion(w: PluginCompanionWire): PluginCompanion {
 export async function getPluginContributions(
 	target: ApiTarget
 ): Promise<PluginContributions> {
-	const resp = await fetch(apiUrl(target, "/api/plugins/contributions"), {
+	const resp = await authenticatedFetch(target, "/api/plugins/contributions", {
 		method: "GET",
 		headers: { ...makeHeaders(target.token), ...identityHeaders() },
 	});
@@ -1175,6 +1228,7 @@ export async function getPluginContributions(
 		chat_widget_templates: json.chat_widget_templates ?? [],
 		settings_tabs: json.settings_tabs ?? [],
 		message_actions: json.message_actions ?? [],
+		selection_actions: json.selection_actions ?? [],
 		output_styles: json.output_styles ?? [],
 		context_menu_items: json.context_menu_items ?? [],
 		create_actions: json.create_actions ?? [],
@@ -1209,8 +1263,9 @@ export async function fetchPluginUiBundle(
 	target: ApiTarget,
 	id: string
 ): Promise<string | null> {
-	const resp = await fetch(
-		apiUrl(target, `/api/plugins/${encodeURIComponent(id)}/ui-bundle`),
+	const resp = await authenticatedFetch(
+		target,
+		`/api/plugins/${encodeURIComponent(id)}/ui-bundle`,
 		{ method: "GET", headers: makeHeaders(target.token) }
 	);
 	if (resp.status === 404) {
@@ -1279,8 +1334,9 @@ export async function pluginHostInvoke(
 ): Promise<unknown> {
 	let resp: Response;
 	try {
-		resp = await fetch(
-			apiUrl(target, `/api/plugins/${encodeURIComponent(pluginId)}/host`),
+		resp = await authenticatedFetch(
+			target,
+			`/api/plugins/${encodeURIComponent(pluginId)}/host`,
 			{
 				method: "POST",
 				headers: makeHeaders(target.token),
@@ -1333,11 +1389,9 @@ export async function pluginHostInvokeStream(
 ): Promise<void> {
 	let resp: Response;
 	try {
-		resp = await fetch(
-			apiUrl(
-				target,
-				`/api/plugins/${encodeURIComponent(pluginId)}/host/stream`
-			),
+		resp = await authenticatedFetch(
+			target,
+			`/api/plugins/${encodeURIComponent(pluginId)}/host/stream`,
 			{
 				method: "POST",
 				headers: makeHeaders(target.token),
@@ -1412,11 +1466,9 @@ export async function pluginFinetuneStream(
 ): Promise<void> {
 	let resp: Response;
 	try {
-		resp = await fetch(
-			apiUrl(
-				target,
-				`/api/plugins/${encodeURIComponent(pluginId)}/host/stream`
-			),
+		resp = await authenticatedFetch(
+			target,
+			`/api/plugins/${encodeURIComponent(pluginId)}/host/stream`,
 			{
 				method: "POST",
 				headers: makeHeaders(target.token),
@@ -1477,11 +1529,15 @@ export async function fireActivationEvent(
 	target: ApiTarget,
 	commandId: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, "/api/plugins/activation-event"), {
-		method: "POST",
-		headers: makeHeaders(target.token),
-		body: JSON.stringify({ event: `onCommand:${commandId}` }),
-	});
+	const resp = await authenticatedFetch(
+		target,
+		"/api/plugins/activation-event",
+		{
+			method: "POST",
+			headers: makeHeaders(target.token),
+			body: JSON.stringify({ event: `onCommand:${commandId}` }),
+		}
+	);
 	if (!resp.ok) {
 		throw new Error(`/api/plugins/activation-event failed: ${resp.status}`);
 	}
@@ -1490,18 +1546,87 @@ export async function fireActivationEvent(
 /** `POST /api/plugins/:id/install` — record the app as installed (disabled). */
 export async function installApp(
 	target: ApiTarget,
-	id: string
+	id: string,
+	options: { skipUserJwt?: boolean } = {}
 ): Promise<AppRecord> {
-	const resp = await fetch(apiUrl(target, `/api/plugins/${id}/install`), {
-		method: "POST",
-		headers: makeHeaders(target.token),
-	});
+	const encodedId = encodeURIComponent(id);
+	const resp = await authenticatedFetch(
+		target,
+		`/api/plugins/${encodedId}/install`,
+		{
+			method: "POST",
+			headers: makeHeaders(target.token),
+			skipUserJwt: options.skipUserJwt,
+		}
+	);
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, `/api/plugins/${id}/install`);
 		throw Object.assign(new Error(err.message), err);
 	}
 	const json = (await resp.json()) as { app: AppRecordWire };
 	return toAppRecord(json.app);
+}
+
+/** Install a standalone app's local manifest/UI carriage through Core's
+ * validated install-bundle sink. The app id and UI hash are still validated by
+ * Core; the host never writes plugin files directly. */
+export async function installStandaloneAppBundle(
+	target: ApiTarget,
+	bundle: StandaloneAppBundle,
+	options: { skipUserJwt?: boolean } = {}
+): Promise<void> {
+	const manifest = {
+		...bundle.manifest,
+		...(bundle.uiCode === null ? {} : { ui_code: bundle.uiCode }),
+	};
+	const resp = await authenticatedFetch(target, "/api/plugins/install-bundle", {
+		method: "POST",
+		headers: makeHeaders(target.token),
+		body: JSON.stringify(manifest),
+		skipUserJwt: options.skipUserJwt,
+	});
+	if (!resp.ok) {
+		const err = await parseLifecycleError(resp, "/api/plugins/install-bundle");
+		throw Object.assign(new Error(err.message), err);
+	}
+}
+
+/** Install a standalone app through Core's trusted built-in path when available.
+ * Built-in manifests retain Core-tier sidecar/MCP authority and their compiled UI
+ * seed. A genuinely external app falls back to the local bundle sink instead. */
+export async function installStandaloneApp(
+	target: ApiTarget,
+	id: string,
+	bundle: StandaloneAppBundle,
+	options: { skipUserJwt?: boolean } = {}
+): Promise<AppInfo> {
+	try {
+		await installApp(target, id, options);
+		const installed = (await fetchApps(target, options)).find(
+			(app) => app.id === id
+		);
+		if (installed) {
+			return installed;
+		}
+		throw new Error(`Ryu Core did not register ${id} after built-in install.`);
+	} catch (cause) {
+		const status =
+			cause instanceof Error && "status" in cause
+				? (cause as Error & { status?: unknown }).status
+				: undefined;
+		if (status !== 404) {
+			throw cause;
+		}
+	}
+
+	await installStandaloneAppBundle(target, bundle, options);
+	const installed = (await fetchApps(target, options)).find(
+		(app) => app.id === id
+	);
+	if (!installed) {
+		throw new Error(`Ryu Core did not register ${id} after bundle install.`);
+	}
+	return installed;
 }
 
 /** `POST /api/plugins/:id/update` — reinstall an installed plugin at the newest
@@ -1518,11 +1643,42 @@ export async function updateInstalledPlugin(
 	 *  reports the version delta back on `channel_switch`. */
 	channel?: string | null
 ): Promise<AppRecord> {
-	const resp = await fetch(apiUrl(target, `/api/plugins/${id}/update`), {
-		method: "POST",
-		headers: makeHeaders(target.token),
-		body: JSON.stringify(channel ? { channel } : {}),
-	});
+	const encodedId = encodeURIComponent(id);
+	const resp = await authenticatedFetch(
+		target,
+		`/api/plugins/${encodedId}/update`,
+		{
+			method: "POST",
+			headers: makeHeaders(target.token),
+			body: JSON.stringify(channel ? { channel } : {}),
+		}
+	);
+	if (!resp.ok) {
+		const err = await parseLifecycleError(resp, `/api/plugins/${id}/update`);
+		throw Object.assign(new Error(err.message), err);
+	}
+	const json = (await resp.json()) as { app: AppRecordWire };
+	return toAppRecord(json.app);
+}
+
+/** Reinstall one exact historical Marketplace version. The explicit `force`
+ *  authority is scoped to this user-selected version so Core can safely allow a
+ *  downgrade without changing ordinary update semantics. */
+export async function updateInstalledPluginAtVersion(
+	target: ApiTarget,
+	id: string,
+	version: string
+): Promise<AppRecord> {
+	const encodedId = encodeURIComponent(id);
+	const resp = await authenticatedFetch(
+		target,
+		`/api/plugins/${encodedId}/update`,
+		{
+			method: "POST",
+			headers: makeHeaders(target.token),
+			body: JSON.stringify({ force: true, version }),
+		}
+	);
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, `/api/plugins/${id}/update`);
 		throw Object.assign(new Error(err.message), err);
@@ -1538,12 +1694,19 @@ export async function updateInstalledPlugin(
  *  unsatisfiable — nothing is enabled in that case. */
 export async function enableApp(
 	target: ApiTarget,
-	id: string
+	id: string,
+	options: { skipUserJwt?: boolean } = {}
 ): Promise<AppToggleResult> {
-	const resp = await fetch(apiUrl(target, `/api/plugins/${id}/enable`), {
-		method: "POST",
-		headers: makeHeaders(target.token),
-	});
+	const encodedId = encodeURIComponent(id);
+	const resp = await authenticatedFetch(
+		target,
+		`/api/plugins/${encodedId}/enable`,
+		{
+			method: "POST",
+			headers: makeHeaders(target.token),
+			skipUserJwt: options.skipUserJwt,
+		}
+	);
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, `/api/plugins/${id}/enable`);
 		throw Object.assign(new Error(err.message), err);
@@ -1569,11 +1732,16 @@ export async function setPluginGrants(
 	id: string,
 	grants: string[]
 ): Promise<string[]> {
-	const resp = await fetch(apiUrl(target, `/api/plugins/${id}/grants`), {
-		method: "POST",
-		headers: makeHeaders(target.token),
-		body: JSON.stringify({ grants }),
-	});
+	const encodedId = encodeURIComponent(id);
+	const resp = await authenticatedFetch(
+		target,
+		`/api/plugins/${encodedId}/grants`,
+		{
+			method: "POST",
+			headers: makeHeaders(target.token),
+			body: JSON.stringify({ grants }),
+		}
+	);
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, `/api/plugins/${id}/grants`);
 		throw Object.assign(new Error(err.message), err);
@@ -1593,10 +1761,11 @@ export async function disableApp(
 	id: string,
 	options?: { cascade?: boolean }
 ): Promise<AppToggleResult> {
+	const encodedId = encodeURIComponent(id);
 	const path = options?.cascade
-		? `/api/plugins/${id}/disable?cascade=true`
-		: `/api/plugins/${id}/disable`;
-	const resp = await fetch(apiUrl(target, path), {
+		? `/api/plugins/${encodedId}/disable?cascade=true`
+		: `/api/plugins/${encodedId}/disable`;
+	const resp = await authenticatedFetch(target, path, {
 		method: "POST",
 		headers: makeHeaders(target.token),
 	});
@@ -1629,10 +1798,11 @@ export async function uninstallApp(
 	id: string,
 	options?: { cascade?: boolean }
 ): Promise<AppUninstallResult> {
+	const encodedId = encodeURIComponent(id);
 	const path = options?.cascade
-		? `/api/plugins/${id}/uninstall?cascade=true`
-		: `/api/plugins/${id}/uninstall`;
-	const resp = await fetch(apiUrl(target, path), {
+		? `/api/plugins/${encodedId}/uninstall?cascade=true`
+		: `/api/plugins/${encodedId}/uninstall`;
+	const resp = await authenticatedFetch(target, path, {
 		method: "POST",
 		headers: makeHeaders(target.token),
 	});
@@ -2080,7 +2250,7 @@ export async function installAppFromUrl(
 	target: ApiTarget,
 	url: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, "/api/plugins/install"), {
+	const resp = await authenticatedFetch(target, "/api/plugins/install", {
 		method: "POST",
 		headers: makeHeaders(target.token),
 		body: JSON.stringify({ url }),
@@ -2116,11 +2286,43 @@ export async function installPluginFromCatalog(
 	if (buyerToken) {
 		headers["x-ryu-buyer-token"] = buyerToken;
 	}
-	const resp = await fetch(apiUrl(target, "/api/plugins/catalog/install"), {
-		method: "POST",
-		headers,
-		body: JSON.stringify(channel ? { id, channel } : { id }),
-	});
+	const resp = await authenticatedFetch(
+		target,
+		"/api/plugins/catalog/install",
+		{
+			method: "POST",
+			headers,
+			body: JSON.stringify(channel ? { id, channel } : { id }),
+		}
+	);
+	if (!resp.ok) {
+		const err = await parseLifecycleError(resp, "/api/plugins/catalog/install");
+		throw Object.assign(new Error(err.message), err);
+	}
+}
+
+/** Install one exact historical Marketplace version through Core's signed
+ * catalog resolver. This intentionally has a separate name so ordinary channel
+ * installs cannot accidentally start carrying a one-off version pin. */
+export async function installPluginFromCatalogAtVersion(
+	target: ApiTarget,
+	id: string,
+	version: string,
+	buyerToken?: string | null
+): Promise<void> {
+	const headers = makeHeaders(target.token);
+	if (buyerToken) {
+		headers["x-ryu-buyer-token"] = buyerToken;
+	}
+	const resp = await authenticatedFetch(
+		target,
+		"/api/plugins/catalog/install",
+		{
+			method: "POST",
+			headers,
+			body: JSON.stringify({ id, version }),
+		}
+	);
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, "/api/plugins/catalog/install");
 		throw Object.assign(new Error(err.message), err);
@@ -2134,7 +2336,7 @@ export async function installPluginFromCatalog(
 export async function fetchSidecarStatus(
 	target: ApiTarget
 ): Promise<Record<string, boolean>> {
-	const resp = await fetch(apiUrl(target, "/api/sidecar/status"), {
+	const resp = await authenticatedFetch(target, "/api/sidecar/status", {
 		method: "GET",
 		headers: makeHeaders(target.token),
 	});
@@ -2168,7 +2370,7 @@ export interface SidecarDetail {
 export async function fetchSidecarDetails(
 	target: ApiTarget
 ): Promise<Record<string, SidecarDetail>> {
-	const resp = await fetch(apiUrl(target, "/api/sidecar/status"), {
+	const resp = await authenticatedFetch(target, "/api/sidecar/status", {
 		method: "GET",
 		headers: makeHeaders(target.token),
 	});
@@ -2217,7 +2419,7 @@ export interface EngineConcurrency {
 export async function fetchEngineConcurrency(
 	target: ApiTarget
 ): Promise<EngineConcurrency | null> {
-	const resp = await fetch(apiUrl(target, "/api/engine/concurrency"), {
+	const resp = await authenticatedFetch(target, "/api/engine/concurrency", {
 		method: "GET",
 		headers: makeHeaders(target.token),
 	});
@@ -2256,7 +2458,7 @@ export async function installSidecar(
 	target: ApiTarget,
 	name: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, `/api/setup/${name}/install`), {
+	const resp = await authenticatedFetch(target, `/api/setup/${name}/install`, {
 		method: "POST",
 		headers: makeHeaders(target.token),
 	});
@@ -2270,7 +2472,7 @@ export async function startSidecar(
 	target: ApiTarget,
 	name: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, `/api/sidecar/${name}/start`), {
+	const resp = await authenticatedFetch(target, `/api/sidecar/${name}/start`, {
 		method: "POST",
 		headers: makeHeaders(target.token),
 	});
@@ -2284,7 +2486,7 @@ export async function stopSidecar(
 	target: ApiTarget,
 	name: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, `/api/sidecar/${name}/stop`), {
+	const resp = await authenticatedFetch(target, `/api/sidecar/${name}/stop`, {
 		method: "POST",
 		headers: makeHeaders(target.token),
 	});

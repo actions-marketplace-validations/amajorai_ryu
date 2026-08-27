@@ -18,6 +18,7 @@ import type {
 	SourceItem,
 	ViewAction,
 	ViewActionContext,
+	ViewActionHttpMethod,
 	ViewBadge,
 	ViewField,
 	ViewItem,
@@ -83,7 +84,7 @@ export type ViewActionHandler = (
 /** The host's authenticated Core fetch seam a source-carrying view uses at mount.
  *  Resolves parsed JSON; rejects on a non-2xx. The spec never sees a token. */
 export type ViewSourceFetcher = (
-	method: string,
+	method: ViewActionHttpMethod,
 	path: string
 ) => Promise<unknown>;
 

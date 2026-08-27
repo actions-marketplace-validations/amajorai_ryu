@@ -13,9 +13,8 @@
 // id is written by an agent calling `plan_publish`, not by a human. Prompt-injected
 // text that reaches an agent reaches this string.
 //
-// Mirrors `social.test.ts` case-for-case on purpose. The two functions are deliberate
-// duplicates (each mount validates its own paths), so their tests being the same
-// shape is what makes a divergence visible in review.
+// The shared traversal corpus in `app-request.test.ts` keeps every mounted resolver
+// aligned; this suite retains the Blueprint-specific plan-id and normalization cases.
 
 import { describe, expect, it } from "bun:test";
 

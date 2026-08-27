@@ -29,7 +29,7 @@
 //
 // That is also why this badge is deliberately UNLIKE the community notice: the
 // notice is a full-width amber alert placed in the reading path before any
-// install control, this is a small inline publisher-trust chip beside the name.
+// install control, this is a small inline publisher-trust mark beside the name.
 // Different shape, different colour, different placement — they can sit on the
 // same card without reading as a contradiction.
 //
@@ -41,23 +41,15 @@
 // claim it makes.
 
 import {
-	Tooltip,
-	TooltipContent,
-	TooltipProvider,
-	TooltipTrigger,
-} from "@ryu/ui/components/tooltip.tsx";
+	type VerificationDetails,
+	VerificationPopover,
+} from "@ryu/ui/components/verification-popover.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import {
 	type PublisherTrustLevel,
 	publisherTrustLabel,
 	publisherTrustTooltip,
 } from "@ryuhq/protocol/publisher-trust";
-import { Badge, Check } from "lucide-react";
-
-/** Chip geometry, matching `BASE_CHIP` in catalog-badges.tsx so the check lines
- *  up with the token/size badges it sits beside. */
-const BASE_CHIP =
-	"inline-flex h-5 w-fit shrink-0 items-center gap-1 rounded-3xl px-1.5 py-0.5 font-medium text-[11px] whitespace-nowrap";
 
 /** Human label per verification tier.
  *
@@ -75,7 +67,7 @@ const TIER_LABEL: Record<string, string> = {
 };
 
 /**
- * The badge's accessible name and tooltip text for a tier.
+ * The badge's accessible name and fallback description for a tier.
  *
  * An UNKNOWN tier degrades to the unqualified "Verified organization" rather
  * than dropping the badge or printing the raw token: `org_verified_tier` is a
@@ -106,6 +98,7 @@ export function trustLabel(level: PublisherTrustLevel): string {
 export default function VerifiedBadge({
 	orgVerified,
 	publisherTrust,
+	verificationDetails,
 	tier,
 	tone = "card",
 	className,
@@ -119,16 +112,17 @@ export default function VerifiedBadge({
 	/** The complete publisher identity mark. When present, dotted is intentional
 	 * and renders for an allowed-but-not-verified community publisher. */
 	publisherTrust?: PublisherTrustLevel | null;
+	/** Server-derived evidence for the publisher mark. */
+	verificationDetails?: VerificationDetails | null;
 	/** The org's verification tier, when known. Only a qualifier — see
 	 *  {@link verifiedLabel}; an unrecognized value still renders the check. */
 	tier?: string | null;
-	/** Which surface the badge is painted on.
+	/** Which surface the icon is painted on.
 	 *
-	 *  `"card"` sits on the page's own background and gets the themed info tint.
+	 *  `"card"` sits on the page's own background and gets the themed info colour.
 	 *  `"hero"` sits on the detail hero's author-supplied dither wash under a
-	 *  black scrim, where every foreground is fixed white — a themed
-	 *  themed-on-tint chip is illegible there, so it gets the hero's own
-	 *  translucent chip treatment instead (the same one the hero badges use). */
+	 *  black scrim, where every foreground is fixed white, so it gets the hero's
+	 *  high-contrast icon colour instead. */
 	tone?: "card" | "hero";
 }) {
 	// New catalog payloads carry the complete publisher mark. Older Core-facing
@@ -152,78 +146,36 @@ export default function VerifiedBadge({
 	const tooltip = hasExplicitPublisherTrust
 		? publisherTrustTooltip(level)
 		: label;
+	const details =
+		verificationDetails ??
+		(level === "dotted"
+			? { methods: [] }
+			: {
+					methods: [
+						{
+							kind: level === "gold" ? "organization" : "identity",
+							label: tooltip,
+						},
+					],
+				});
+	const iconTone =
+		level === "gold"
+			? tone === "hero"
+				? "text-yellow-100 drop-shadow-[0_0_4px_rgba(250,200,0,0.75)]"
+				: "text-yellow-500 drop-shadow-[0_0_3px_rgba(250,200,0,0.7)] dark:text-yellow-300"
+			: level === "blue"
+				? tone === "hero"
+					? "text-sky-100"
+					: "text-info"
+				: "text-muted-foreground/70 opacity-50 transition-opacity focus-within:opacity-100 hover:opacity-100";
 	return (
-		// Self-contained Provider rather than assuming an ancestor: this badge
-		// renders on both hosts, and web mounts no global TooltipProvider (desktop
-		// does). Nesting one inside an existing provider is harmless.
-		<TooltipProvider delay={0}>
-			<Tooltip>
-				<TooltipTrigger
-					render={
-						// A <span>, never a <button>: on the grid card this sits INSIDE the
-						// row's own <button>, and a nested button is a DOM error that takes
-						// the card down.
-						//
-						// `role="img"` + `aria-label` give the glyph a real accessible name
-						// — the tooltip cannot, because TooltipContent is portaled and so
-						// reaches neither a screen reader following the card's own
-						// accessible name nor the static-markup tests.
-						<span
-							aria-label={label}
-							className={cn(
-								BASE_CHIP,
-								level === "gold"
-									? tone === "hero"
-										? "relative overflow-hidden bg-[linear-gradient(135deg,rgba(255,240,133,0.38),rgba(250,200,0,0.28),rgba(237,178,0,0.32))] text-yellow-50 backdrop-blur-sm"
-										: "relative overflow-hidden bg-[linear-gradient(135deg,#fff085_0%,#fac800_52%,#edb200_100%)] text-yellow-700 shadow-[0_0_8px_rgba(250,200,0,0.28)] dark:text-yellow-300"
-									: level === "blue"
-										? tone === "hero"
-											? "bg-sky-200/20 text-sky-100 backdrop-blur-sm"
-											: "bg-info/12 text-info"
-										: "border border-muted-foreground/40 border-dashed bg-muted/20 text-muted-foreground/70 opacity-50 transition-opacity focus-within:opacity-100 hover:opacity-100",
-								className
-							)}
-							role="img"
-						>
-							{level === "gold" ? (
-								<>
-									<span
-										aria-hidden="true"
-										className="t-plan-badge-sheen pointer-events-none"
-									/>
-									<span
-										aria-hidden="true"
-										className="t-plan-badge-border pointer-events-none"
-									/>
-								</>
-							) : null}
-							<span
-								className={cn(
-									"relative z-10 inline-flex size-3 items-center justify-center",
-									level === "gold" &&
-										"drop-shadow-[0_0_3px_rgba(250,200,0,0.7)]"
-								)}
-							>
-								<Badge
-									aria-hidden="true"
-									className={cn(
-										"absolute inset-0 size-3",
-										level === "gold" && "text-yellow-700 dark:text-yellow-300"
-									)}
-									fill="currentColor"
-									strokeWidth={1.5}
-								/>
-								<Check
-									aria-hidden="true"
-									className="relative size-2 text-background"
-									strokeWidth={3}
-								/>
-							</span>
-						</span>
-					}
-				/>
-				<TooltipContent>{tooltip}</TooltipContent>
-			</Tooltip>
-		</TooltipProvider>
+		<VerificationPopover
+			className={cn(iconTone, className)}
+			description={tooltip}
+			details={details}
+			label={label}
+			title={label}
+			variant="badge"
+		/>
 	);
 }

@@ -24,6 +24,7 @@
 //   • the global search sits ABOVE the tabs, in the flow, and is bare (no
 //     border, ring or shadow).
 
+import path from "node:path";
 import { expect, type Page, test } from "@playwright/test";
 
 // The story pulls the blocks + ui module graphs; vite compiles them on first
@@ -31,6 +32,7 @@ import { expect, type Page, test } from "@playwright/test";
 test.describe.configure({ timeout: 90_000 });
 
 const STORY_URL = "/store-chrome-story.html";
+const PROOF_ROOT = path.resolve(import.meta.dirname, "../test-results");
 
 const narrowScroller = (page: Page) =>
 	page.locator(
@@ -49,6 +51,40 @@ const globalSearch = (page: Page, shell: string) =>
 	);
 
 test.describe("store section tabs — pills, edges, and the global search", () => {
+	test("opens the apps and plugins explainer from the help button", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		const shell = page.getByTestId("page-shell");
+		const help = shell.getByRole("button", {
+			name: "About apps and plugins",
+		});
+
+		await expect(help).toBeVisible();
+		await page.screenshot({
+			path: `${PROOF_ROOT}/marketplace-help-trigger.png`,
+		});
+		await help.click();
+
+		const dialog = page.getByRole("dialog", { name: "Apps & plugins" });
+		await expect(dialog).toBeVisible();
+		await expect(
+			dialog.locator('[data-slot="announcement-visual"]')
+		).toBeVisible();
+		await expect(
+			dialog.locator('[data-slot="marketplace-help-visual"]')
+		).toBeVisible();
+		await expect(dialog).toContainText(
+			"Apps are complete experiences you use inside Ryu"
+		);
+		await expect(dialog).toContainText("What do you want to use Ryu for?");
+		await expect(dialog).toContainText("What do you want Ryu to do?");
+
+		await page.screenshot({
+			path: `${PROOF_ROOT}/marketplace-apps-plugins-help.png`,
+		});
+	});
+
 	test("renders the shared pill tabs, not hand-rolled buttons", async ({
 		page,
 	}) => {

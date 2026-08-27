@@ -1,6 +1,6 @@
 {
-  "tags": ["learning","skills","memory","improvement"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": ["learning", "skills", "memory", "improvement"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-learning",
   "homepage": "https://github.com/amajorai/ryu-learning",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -67,7 +67,44 @@
     "icon": "mortarboard-01"
   },
   "contributes": {
-  "chat_widget_templates": [{"id":"learning.chat","title":"Learning widget","description":"Learning chat widget metadata is coming soon; no render tool is available yet.","triggers":["learning widget"],"examples":["Show me a learning widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}],
+    "chat_widget_templates": [
+      {
+        "id": "learning.chat",
+        "title": "Learning widget",
+        "description": "Learning chat widget metadata is coming soon; no render tool is available yet.",
+        "triggers": ["learning widget"],
+        "examples": ["Show me a learning widget"],
+        "backing": {},
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "coming-soon"
+      }
+    ],
+    "message_actions": [
+      {
+        "id": "learning.feedback",
+        "label": "Rate response",
+        "icon": "tabler:thumb-up",
+        "target": "assistant",
+        "kind": "toggle-group",
+        "states": [
+          {
+            "value": "up",
+            "label": "Good response",
+            "icon": "tabler:thumb-up",
+            "active_icon": "tabler:thumb-up"
+          },
+          {
+            "value": "down",
+            "label": "Bad response",
+            "icon": "tabler:thumb-down",
+            "active_icon": "tabler:thumb-down"
+          }
+        ],
+        "capability": "learning.recordFeedback",
+        "order": 10
+      }
+    ],
     "settings_tabs": [
       {
         "id": "learning.settings",

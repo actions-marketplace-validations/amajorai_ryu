@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { formatChatTranscript } from "./copy-chat-transcript.ts";
+import {
+	formatChatTranscript,
+	formatChatTranscriptAsMarkdown,
+} from "./copy-chat-transcript.ts";
 
 describe("formatChatTranscript", () => {
 	it("joins user and assistant text turns", () => {
@@ -73,5 +76,42 @@ describe("formatChatTranscript", () => {
 			defaultUserName: "jiawei",
 		});
 		expect(text).toBe("jiawei:\nHello");
+	});
+});
+
+describe("formatChatTranscriptAsMarkdown", () => {
+	it("adds the chat title and role headings", () => {
+		const text = formatChatTranscriptAsMarkdown(
+			[
+				{ role: "user", content: "**Keep** this formatting." },
+				{ role: "assistant", content: "Done." },
+			],
+			{ title: "Release notes" }
+		);
+		expect(text).toBe(
+			"# Release notes\n\n## User\n\n**Keep** this formatting.\n\n## Assistant\n\nDone."
+		);
+	});
+
+	it("flattens untrusted heading text without changing message Markdown", () => {
+		const text = formatChatTranscriptAsMarkdown(
+			[
+				{
+					role: "user",
+					content: "- one\n- two",
+					metadata: { author: { name: "Line one\nLine two" } },
+				},
+			],
+			{ title: "Title\ncontinued" }
+		);
+		expect(text).toBe(
+			"# Title continued\n\n## Line one Line two\n\n- one\n- two"
+		);
+	});
+
+	it("returns an empty string when no title or chat turns exist", () => {
+		expect(
+			formatChatTranscriptAsMarkdown([{ role: "system", content: "ignore" }])
+		).toBe("");
 	});
 });

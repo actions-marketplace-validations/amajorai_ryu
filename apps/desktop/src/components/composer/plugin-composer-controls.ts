@@ -18,6 +18,7 @@
 // Nothing here forks the composer: all three seams are props of the ONE InputBar
 // slot, so every surface that mounts it inherits the controls.
 
+import { contributionSourceRequest } from "@ryu/app-host/views";
 import type {
 	PluginComposerControl,
 	PluginComposerControlOption,
@@ -85,10 +86,7 @@ export function isKnownComposerControl(
 		return isNonEmptyString(control.capability);
 	}
 	if (control.type === "chip") {
-		const path = control.source?.http?.path;
-		return (
-			isNonEmptyString(path) && (path === "/api" || path.startsWith("/api/"))
-		);
+		return contributionSourceRequest(control, control.source) !== null;
 	}
 	return true;
 }

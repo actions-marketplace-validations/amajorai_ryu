@@ -37,6 +37,9 @@ describe("grantLabel — known grants", () => {
 		expect(grantLabel("warmup:crud")).toBe("Schedule keep-alive pings");
 		expect(grantLabel("calendar:crud")).toBe("Access your calendar");
 		expect(grantLabel("chat.sendFollowUp")).toBe("Send follow-up messages");
+		expect(grantLabel("notifications:send-to-user")).toBe(
+			"Notify organization members"
+		);
 	});
 
 	it("maps the coarse OS-style grants", () => {
@@ -75,6 +78,9 @@ describe("grantDescription", () => {
 		);
 		expect(grantDescription("SHELL")).toBe(
 			"Execute shell commands on this device."
+		);
+		expect(grantDescription("notifications:send-to-user")).toBe(
+			"Deliver Inbox notifications to people in your organization or team."
 		);
 	});
 

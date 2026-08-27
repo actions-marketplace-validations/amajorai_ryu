@@ -189,6 +189,29 @@ describe("parseRyuDeepLink", () => {
 			project: null,
 		});
 	});
+
+	it("parses an RNP handoff without accepting credentials in the source URL", () => {
+		expect(
+			parseRyuDeepLink(
+				"ryu://handoff/conv-abc-123?source=https%3A%2F%2Fnode.example.com%3A7980%2F&v=0"
+			)
+		).toEqual({
+			kind: "handoff",
+			version: 0,
+			conversationId: "conv-abc-123",
+			sourceNodeUrl: "https://node.example.com:7980",
+		});
+		expect(
+			parseRyuDeepLink(
+				"ryu://handoff/conv-abc-123?source=https%3A%2F%2Fuser%3Asecret%40node.example.com&v=0"
+			)
+		).toBeNull();
+		expect(
+			parseRyuDeepLink(
+				"ryu://handoff/conv-abc-123?source=https%3A%2F%2Fnode.example.com&v=0&token=secret"
+			)
+		).toBeNull();
+	});
 });
 
 describe("buildRyuDeepLink round-trips with parseRyuDeepLink", () => {
@@ -231,6 +254,12 @@ describe("buildRyuDeepLink round-trips with parseRyuDeepLink", () => {
 			token: null,
 		},
 		{ kind: "page", page: "marketplace" },
+		{
+			kind: "handoff",
+			version: 0,
+			conversationId: "conv-abc-123",
+			sourceNodeUrl: "https://node.example.com:7980",
+		},
 		{
 			kind: "chat",
 			conversationId: null,

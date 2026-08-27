@@ -7,16 +7,23 @@
 
 import { expect, test } from "bun:test";
 import {
+	createRealtimeClientId,
 	DOC_SYNC_AWARENESS,
 	DOC_SYNC_STEP1,
 	DOC_SYNC_STEP2,
 	DOC_SYNC_UPDATE,
 	decodeDocSync,
 	decodeRealtimeEvent,
-	encodeRealtimeEvent,
 	encodeDocSync,
+	encodeRealtimeEvent,
 	realtimeWsUrl,
 } from "./realtime.ts";
+
+test("client correlation ids are UUIDs on every supported runtime", () => {
+	expect(createRealtimeClientId()).toMatch(
+		/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+	);
+});
 
 test("application event codec round-trips and ignores other frames", () => {
 	const wire = encodeRealtimeEvent({

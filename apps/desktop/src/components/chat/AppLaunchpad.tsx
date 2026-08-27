@@ -8,7 +8,7 @@
 // WHAT IS LISTED. The source is `usePluginContributions().companions` — the
 // full-page surfaces of ENABLED apps, already enabled-filtered server-side —
 // narrowed further to `hasUi`. It is deliberately NOT the apps catalog: most
-// feature apps ship default-OFF, and a sidecar-only app (`@ryu/social`) has no UI
+// feature apps are install-on-demand, and a sidecar-only app (`@ryu/social`) has no UI
 // at all, so gridding the catalog would paint a dozen tiles that do nothing when
 // clicked. If it has a tile here, it opens. Same list, same order, same launch
 // call as the sidebar's Apps section — this is a second door onto that surface,
@@ -63,6 +63,8 @@ export interface LaunchpadItem {
 	iconBackground?: string | null;
 	/** Icon-primitive id: the companion's own glyph, else the app's manifest art. */
 	iconId?: string | null;
+	/** Manifest-declared inset and letterbox treatment for icon art. */
+	iconPadding?: string | null;
 	iconUrl?: string | null;
 	/** The companion id — what {@link pluginCompanionPath} routes to. */
 	id: string;
@@ -207,6 +209,7 @@ export function AppLaunchpadGrid({
 									dither={item.dither}
 									iconBackground={item.iconBackground}
 									iconId={item.iconId}
+									iconPadding={item.iconPadding}
 									iconUrl={item.iconUrl}
 									name={item.label}
 									seedId={item.seedId}
@@ -272,6 +275,7 @@ export function AppLaunchpad({ className }: AppLaunchpadProps) {
 						dither: owner?.iconDither,
 						iconBackground: owner?.iconBackground,
 						iconId: c.icon ?? owner?.icon,
+						iconPadding: owner?.iconPadding,
 						iconUrl: owner?.iconUrl,
 						id: c.id,
 						label: c.label || c.name,

@@ -9,7 +9,9 @@ test("renders edited files and agent result cards at the end of a turn", async (
 }) => {
 	await page.goto(STORY_URL);
 
-	const fileCard = page.locator('[data-slot="turn-file-edits-card"]');
+	const fileCard = page.locator(
+		'[data-slot="turn-file-edits-card"][data-layout="multiple"]'
+	);
 	await expect(fileCard).toBeVisible();
 	await expect(
 		fileCard.getByRole("heading", { name: "Edited 4 files" })
@@ -22,6 +24,8 @@ test("renders edited files and agent result cards at the end of a turn", async (
 		"packages/blocks/src/desktop/agent-elements/message-list.tsx"
 	);
 	await expect(fileCard).toContainText("Show 1 more file");
+	await expect(fileCard.getByRole("button", { name: "Review" })).toBeVisible();
+	await expect(fileCard.getByRole("button", { name: /Undo/ })).toBeVisible();
 
 	await expect(page.locator('[data-slot="turn-json-render-card"]')).toHaveCount(
 		2
@@ -48,11 +52,46 @@ test("renders edited files and agent result cards at the end of a turn", async (
 	await expect(page.getByRole("button", { name: "Open in tab" })).toBeVisible();
 });
 
+test("renders the compact single-file card and confirms undo", async ({
+	page,
+}) => {
+	await page.goto(STORY_URL);
+	const fileCard = page.locator(
+		'[data-slot="turn-file-edits-card"][data-layout="single"]'
+	);
+	await expect(fileCard).toBeVisible();
+	await expect(
+		fileCard.getByRole("heading", { name: "Edited .env" })
+	).toBeVisible();
+	await expect(fileCard).toContainText("+1");
+	await expect(fileCard).toContainText("-0");
+
+	await fileCard.getByRole("button", { name: "Review" }).click();
+	await expect(page.getByTestId("action-state")).toHaveText(
+		"Reviewing Last turn"
+	);
+
+	await fileCard.getByRole("button", { name: /Undo/ }).click();
+	const dialog = page.getByRole("alertdialog");
+	await expect(
+		dialog.getByRole("heading", { name: "Undo changes to .env?" })
+	).toBeVisible();
+	await expect(dialog).toContainText(
+		"affected text changed afterward or is staged"
+	);
+	await dialog.getByRole("button", { name: "Undo changes" }).click();
+	await expect(page.getByTestId("action-state")).toHaveText("Undid .env");
+	const undoneButton = fileCard.locator("button").filter({ hasText: "Undone" });
+	await expect(undoneButton).toBeDisabled();
+});
+
 test("expands the full file list and keeps file actions wired", async ({
 	page,
 }) => {
 	await page.goto(STORY_URL);
-	const fileCard = page.locator('[data-slot="turn-file-edits-card"]');
+	const fileCard = page.locator(
+		'[data-slot="turn-file-edits-card"][data-layout="multiple"]'
+	);
 
 	await fileCard.getByRole("button", { name: "Show 1 more file" }).click();
 	await expect(fileCard).toContainText("apps/core/src/sidecar/mcp/README.md");
@@ -73,7 +112,9 @@ test("expands the full file list and keeps file actions wired", async ({
 
 test("captures the completed product proof", async ({ page }) => {
 	await page.goto(STORY_URL);
-	await expect(page.locator('[data-slot="turn-end-cards"]')).toBeVisible();
+	await expect(
+		page.locator('[data-slot="turn-end-cards"]').first()
+	).toBeVisible();
 	await page.screenshot({
 		fullPage: true,
 		path: "test-results/turn-end-cards-proof.png",

@@ -9,10 +9,16 @@ import {
 	ArchiveRestoreIcon,
 	ArrowDown01Icon,
 	ArrowUpRight01Icon,
+	Calendar04Icon,
 	ClipboardIcon,
+	Copy01Icon,
 	Delete01Icon,
+	Folder01Icon,
+	FolderTreeIcon,
 	GitBranchIcon,
 	ImageAdd01Icon,
+	LaptopIcon,
+	LinkSquare02Icon,
 	Mail01Icon,
 	MessageQuestionIcon,
 	MoreHorizontalIcon,
@@ -39,6 +45,9 @@ import {
 	ContextMenuContent,
 	ContextMenuItem,
 	ContextMenuSeparator,
+	ContextMenuSub,
+	ContextMenuSubContent,
+	ContextMenuSubTrigger,
 	ContextMenuTrigger,
 } from "@ryu/ui/components/context-menu.tsx";
 import {
@@ -46,6 +55,9 @@ import {
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuSeparator,
+	DropdownMenuSub,
+	DropdownMenuSubContent,
+	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu.tsx";
 import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
@@ -55,6 +67,8 @@ import { SidebarMenu, SidebarMenuItem } from "@ryu/ui/components/sidebar.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
+import { resolveRnpNode } from "@ryuhq/protocol/continuity";
+import { buildRyuDeepLink } from "@ryuhq/protocol/deep-link";
 import {
 	type DragEvent as ReactDragEvent,
 	useCallback,
@@ -63,10 +77,13 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { ContinueOnNodeDialog } from "@/src/components/chat/ContinueOnNodeDialog.tsx";
+import type { ForkDestination } from "@/src/components/chat/ForkDialog.tsx";
 import {
 	GitPullRequestStatusIcon,
 	GitPullRequestSummary,
 } from "@/src/components/panels/GitPullRequestSummary.tsx";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useGitPullRequest } from "@/src/hooks/useGitPullRequest.ts";
 import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
@@ -94,7 +111,7 @@ import {
 	pluginHostInvoke,
 } from "@/src/lib/api/plugins.ts";
 import { conversationRunStatusMeta } from "@/src/lib/conversation-run-status.ts";
-import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
+import { copyChatTranscriptAsMarkdown } from "@/src/lib/copy-chat-transcript.ts";
 import {
 	RESOURCE_VISIBILITY_DND_MIME,
 	type ResourceVisibility,
@@ -105,10 +122,16 @@ import {
 } from "@/src/lib/resource-visibility.ts";
 import { buildSidebarConversationPreviewStates } from "@/src/lib/sidebar-conversation-preview.ts";
 import { compactAge } from "@/src/lib/time.ts";
+import { type Node, useNodeStore } from "@/src/store/useNodeStore.ts";
 import type { Conversation, Message } from "@/types/chat.ts";
 import { EntityIconDialog } from "./EntityIconDialog.tsx";
+import {
+	OpenInNewWindowContextMenuItem,
+	OpenInNewWindowDropdownMenuItem,
+} from "./OpenInNewWindowMenuItem.tsx";
 import { FadeLabel, OverflowTooltip } from "./overflow-tooltip.tsx";
 import { ResourceVisibilityIndicator } from "./ResourceVisibilityIndicator.tsx";
+import { SidebarTodoProgress } from "./SidebarTodoProgress.tsx";
 import {
 	ChatRowSubAccordion,
 	SidebarChatMessages,
@@ -123,6 +146,15 @@ import {
 
 const PATH_SEP_RE = /[\\/]/;
 
+async function copyChatValue(value: string, success: string): Promise<void> {
+	try {
+		await navigator.clipboard.writeText(value);
+		toast.success(success);
+	} catch {
+		toast.error("Couldn't copy to clipboard");
+	}
+}
+
 export interface ChatRowHandlers {
 	activeConversationId: string | null;
 	agents: AgentSummary[];
@@ -130,13 +162,19 @@ export interface ChatRowHandlers {
 	/** UI courtesy; Core remains the authority for this admin-only transition. */
 	canMakePrivate: boolean;
 	loadMessages: (id: string) => Promise<Message[]>;
+	onAddScheduledTask: (id: string) => void;
 	onDeleteConversation: (id: string) => void;
+	onForkConversation: (id: string, destination: ForkDestination) => void;
 	onJumpToMessage: (conversationId: string, messageId: string) => void;
 	onMarkRead: (id: string) => void;
 	onMarkUnread: (id: string) => void;
 	onOpenInNewTab: (id: string) => void;
+	onOpenInNewWindow: (id: string) => void;
+	/** Open an empty side chat composer for this conversation. */
+	onOpenNewSideChat: (conversationId: string) => void;
 	/** Open a persisted side chat: select the thread + surface it in the overlay. */
 	onOpenSideChat: (conversationId: string, entry: BtwEntry) => void;
+	onRemoveFromProject: (id: string) => void;
 	onRenameConversation: (id: string, title: string) => void;
 	/** Open the confirmation flow for an owner-only/team visibility change. */
 	onRequestConversationVisibility: (request: VisibilityChangeRequest) => void;
@@ -146,8 +184,11 @@ export interface ChatRowHandlers {
 	onToggleArchive: (id: string) => void;
 	onTogglePin: (id: string) => void;
 	pinnedIds: Set<string>;
+	projectNameForFolder: (folderPath: string) => string;
 	/** Whether the app-owned GitHub provider can answer PR/check lookups. */
 	pullRequestsEnabled?: boolean;
+	/** Whether the Calendar app owns the scheduled-task affordance. */
+	schedulingEnabled?: boolean;
 	/** Whether the Side Chats plugin owns the nested side-chat affordance. */
 	sideChatsEnabled?: boolean;
 	/** Node target for lazily listing a conversation's side chats. */
@@ -433,6 +474,11 @@ export function ChatRow({
 	conv: Conversation;
 	handlers: ChatRowHandlers;
 }) {
+	const { openTab } = useTabsContext();
+	const resolveConfiguredNodes = useCallback(
+		() => useNodeStore.getState().nodes,
+		[]
+	);
 	const {
 		activeConversationId,
 		agents,
@@ -440,18 +486,25 @@ export function ChatRow({
 		pinnedIds,
 		unreadIds,
 		loadMessages,
+		onAddScheduledTask,
 		onDeleteConversation,
+		onForkConversation,
 		onJumpToMessage,
 		onMarkRead,
 		onMarkUnread,
 		onOpenInNewTab,
+		onOpenInNewWindow,
+		onOpenNewSideChat,
 		onOpenSideChat,
 		onRenameConversation,
+		onRemoveFromProject,
 		onSelectConversation,
 		onSetConversationIcon,
 		onToggleArchive,
 		onTogglePin,
+		projectNameForFolder,
 		pullRequestsEnabled = false,
+		schedulingEnabled = true,
 		target,
 		sideChatsEnabled = true,
 	} = handlers;
@@ -609,6 +662,20 @@ export function ChatRow({
 	// actions open a confirmation dialog rather than wiping the thread outright.
 	const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
 	const [iconDialogOpen, setIconDialogOpen] = useState(false);
+	const [handoff, setHandoff] = useState<{
+		nodes: Node[];
+		sourceNode: Node;
+	} | null>(null);
+
+	const openHandoff = () => {
+		const nodes = useNodeStore.getState().nodes;
+		const source = resolveRnpNode(target.url, nodes);
+		if (source.kind === "blocked") {
+			toast.error("This chat's source is not a configured node");
+			return;
+		}
+		setHandoff({ nodes, sourceNode: source.node });
+	};
 
 	const startEditing = () => {
 		setDraftTitle(conv.title);
@@ -638,6 +705,12 @@ export function ChatRow({
 	// only place the user can see which of two same-named folders a chat belongs
 	// to (and the only way to tell an imported thread's folder from a native one).
 	const folderPath = conv.folderPath || null;
+	const workingDirectory = conv.worktreePath || folderPath;
+	const projectName = folderPath ? projectNameForFolder(folderPath) : null;
+	const chatDeepLink = buildRyuDeepLink({
+		kind: "chat",
+		conversationId: conv.id,
+	});
 	const codeSession = Boolean(folderPath && conv.branch);
 	const worktreeLeaf = conv.worktreePath
 		? (conv.worktreePath.split(PATH_SEP_RE).pop() ?? conv.worktreePath)
@@ -707,7 +780,7 @@ export function ChatRow({
 				<ContextMenuTrigger>
 					{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
 					<div
-						className={`group/row flex cursor-grab items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted active:cursor-grabbing ${showSidebarChatPreview ? "min-h-11 py-1" : "h-8"} ${isActive ? "bg-muted" : ""}`}
+						className={`group/row relative flex cursor-grab items-center gap-2 overflow-hidden rounded-md px-2 transition-colors hover:bg-muted active:cursor-grabbing ${showSidebarChatPreview ? "min-h-11 py-1" : "h-8"} ${isActive ? "bg-muted" : ""}`}
 						draggable
 						onAuxClick={(e) => {
 							// Middle-click opens the chat in a new tab.
@@ -726,6 +799,12 @@ export function ChatRow({
 						role="button"
 						tabIndex={0}
 					>
+						<SidebarTodoProgress
+							celebrate={isUnread}
+							conversation={conv}
+							loadMessages={loadMessages}
+							nodeUrl={target.url}
+						/>
 						<button
 							aria-label={
 								rowExpanded ? "Collapse chat details" : "Expand chat details"
@@ -967,41 +1046,11 @@ export function ChatRow({
 								<DropdownMenuItem
 									onClick={(e) => {
 										e.stopPropagation();
-										onOpenInNewTab(conv.id);
+										onTogglePin(conv.id);
 									}}
 								>
-									<HugeiconsIcon
-										className="mr-2"
-										icon={ArrowUpRight01Icon}
-										size={12}
-									/>
-									Open in new tab
-								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										void copyChatTranscript(() => loadMessages(conv.id));
-									}}
-								>
-									<HugeiconsIcon
-										className="mr-2"
-										icon={ClipboardIcon}
-										size={12}
-									/>
-									Copy transcript
-								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										if (isUnread) {
-											onMarkRead(conv.id);
-										} else {
-											onMarkUnread(conv.id);
-										}
-									}}
-								>
-									<HugeiconsIcon className="mr-2" icon={Mail01Icon} size={12} />
-									{readLabel}
+									<HugeiconsIcon className="mr-2" icon={pinIcon} size={12} />
+									{pinLabel} chat
 								</DropdownMenuItem>
 								<DropdownMenuItem
 									onClick={(e) => {
@@ -1014,7 +1063,192 @@ export function ChatRow({
 										icon={PencilEdit01Icon}
 										size={12}
 									/>
-									Rename
+									Rename chat
+								</DropdownMenuItem>
+								{folderPath && projectName ? (
+									<DropdownMenuItem
+										onClick={(e) => {
+											e.stopPropagation();
+											onRemoveFromProject(conv.id);
+										}}
+									>
+										<HugeiconsIcon
+											className="mr-2"
+											icon={Folder01Icon}
+											size={12}
+										/>
+										{`Remove from ${projectName}`}
+									</DropdownMenuItem>
+								) : null}
+								<DropdownMenuItem
+									onClick={(e) => {
+										e.stopPropagation();
+										onToggleArchive(conv.id);
+									}}
+								>
+									<HugeiconsIcon
+										className="mr-2"
+										icon={archiveIcon}
+										size={12}
+									/>
+									{archiveLabel} chat
+								</DropdownMenuItem>
+								<DropdownMenuSeparator />
+								{sideChatsEnabled ? (
+									<DropdownMenuItem
+										onClick={(e) => {
+											e.stopPropagation();
+											onOpenNewSideChat(conv.id);
+										}}
+									>
+										<HugeiconsIcon
+											className="mr-2"
+											icon={MessageQuestionIcon}
+											size={12}
+										/>
+										Open side chat
+									</DropdownMenuItem>
+								) : null}
+								<DropdownMenuSub>
+									<DropdownMenuSubTrigger>
+										<HugeiconsIcon
+											className="mr-2"
+											icon={Copy01Icon}
+											size={12}
+										/>
+										Copy
+									</DropdownMenuSubTrigger>
+									<DropdownMenuSubContent>
+										<DropdownMenuItem
+											disabled={!workingDirectory}
+											onClick={() => {
+												if (workingDirectory) {
+													void copyChatValue(
+														workingDirectory,
+														"Working directory copied"
+													);
+												}
+											}}
+										>
+											<HugeiconsIcon
+												className="mr-2"
+												icon={Folder01Icon}
+												size={12}
+											/>
+											Copy working directory
+										</DropdownMenuItem>
+										<DropdownMenuItem
+											onClick={() =>
+												void copyChatValue(conv.id, "Session ID copied")
+											}
+										>
+											<HugeiconsIcon
+												className="mr-2"
+												icon={ClipboardIcon}
+												size={12}
+											/>
+											Copy session ID
+										</DropdownMenuItem>
+										<DropdownMenuItem
+											onClick={() =>
+												void copyChatValue(chatDeepLink, "Chat deeplink copied")
+											}
+										>
+											<HugeiconsIcon
+												className="mr-2"
+												icon={LinkSquare02Icon}
+												size={12}
+											/>
+											Copy deeplink
+										</DropdownMenuItem>
+										<DropdownMenuItem onClick={openHandoff}>
+											<HugeiconsIcon
+												className="mr-2"
+												icon={LaptopIcon}
+												size={12}
+											/>
+											Continue on another node
+										</DropdownMenuItem>
+										<DropdownMenuSeparator />
+										<DropdownMenuItem
+											onClick={() =>
+												void copyChatTranscriptAsMarkdown(
+													() => loadMessages(conv.id),
+													{ title: conv.title }
+												)
+											}
+										>
+											<HugeiconsIcon
+												className="mr-2"
+												icon={Copy01Icon}
+												size={12}
+											/>
+											Copy as Markdown
+										</DropdownMenuItem>
+									</DropdownMenuSubContent>
+								</DropdownMenuSub>
+								<DropdownMenuSub>
+									<DropdownMenuSubTrigger>
+										<HugeiconsIcon
+											className="mr-2"
+											icon={GitBranchIcon}
+											size={12}
+										/>
+										Fork…
+									</DropdownMenuSubTrigger>
+									<DropdownMenuSubContent>
+										<DropdownMenuItem
+											onClick={() => onForkConversation(conv.id, "workspace")}
+										>
+											<HugeiconsIcon
+												className="mr-2"
+												icon={LaptopIcon}
+												size={12}
+											/>
+											Fork in this workspace
+										</DropdownMenuItem>
+										<DropdownMenuItem
+											onClick={() => onForkConversation(conv.id, "worktree")}
+										>
+											<HugeiconsIcon
+												className="mr-2"
+												icon={FolderTreeIcon}
+												size={12}
+											/>
+											Fork in a new worktree
+										</DropdownMenuItem>
+									</DropdownMenuSubContent>
+								</DropdownMenuSub>
+								{schedulingEnabled ? (
+									<DropdownMenuItem onClick={() => onAddScheduledTask(conv.id)}>
+										<HugeiconsIcon
+											className="mr-2"
+											icon={Calendar04Icon}
+											size={12}
+										/>
+										Add scheduled task…
+									</DropdownMenuItem>
+								) : null}
+								<DropdownMenuSeparator />
+								<OpenInNewWindowDropdownMenuItem
+									iconClassName="mr-2 size-3"
+									onClick={() => onOpenInNewWindow(conv.id)}
+								/>
+								<DropdownMenuItem onClick={() => onOpenInNewTab(conv.id)}>
+									<HugeiconsIcon
+										className="mr-2"
+										icon={ArrowUpRight01Icon}
+										size={12}
+									/>
+									Open in new tab
+								</DropdownMenuItem>
+								<DropdownMenuItem
+									onClick={() =>
+										isUnread ? onMarkRead(conv.id) : onMarkUnread(conv.id)
+									}
+								>
+									<HugeiconsIcon className="mr-2" icon={Mail01Icon} size={12} />
+									{readLabel}
 								</DropdownMenuItem>
 								<DropdownMenuItem
 									onClick={(e) => {
@@ -1050,28 +1284,6 @@ export function ChatRow({
 									{shared && !handlers.canMakePrivate
 										? "Make private (admins only)"
 										: visibilityActionLabel}
-								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										onTogglePin(conv.id);
-									}}
-								>
-									<HugeiconsIcon className="mr-2" icon={pinIcon} size={12} />
-									{pinLabel}
-								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										onToggleArchive(conv.id);
-									}}
-								>
-									<HugeiconsIcon
-										className="mr-2"
-										icon={archiveIcon}
-										size={12}
-									/>
-									{archiveLabel}
 								</DropdownMenuItem>
 								<DropdownMenuItem
 									onClick={(e) => {
@@ -1127,17 +1339,122 @@ export function ChatRow({
 					</div>
 				</ContextMenuTrigger>
 				<ContextMenuContent>
+					<ContextMenuItem onClick={() => onTogglePin(conv.id)}>
+						<HugeiconsIcon className="mr-2 size-4" icon={pinIcon} />
+						{pinLabel} chat
+					</ContextMenuItem>
+					<ContextMenuItem onClick={startEditing}>
+						<HugeiconsIcon className="mr-2 size-4" icon={PencilEdit01Icon} />
+						Rename chat
+					</ContextMenuItem>
+					{folderPath && projectName ? (
+						<ContextMenuItem onClick={() => onRemoveFromProject(conv.id)}>
+							<HugeiconsIcon className="mr-2 size-4" icon={Folder01Icon} />
+							{`Remove from ${projectName}`}
+						</ContextMenuItem>
+					) : null}
+					<ContextMenuItem onClick={() => onToggleArchive(conv.id)}>
+						<HugeiconsIcon className="mr-2 size-4" icon={archiveIcon} />
+						{archiveLabel} chat
+					</ContextMenuItem>
+					<ContextMenuSeparator />
+					{sideChatsEnabled ? (
+						<ContextMenuItem onClick={() => onOpenNewSideChat(conv.id)}>
+							<HugeiconsIcon
+								className="mr-2 size-4"
+								icon={MessageQuestionIcon}
+							/>
+							Open side chat
+						</ContextMenuItem>
+					) : null}
+					<ContextMenuSub>
+						<ContextMenuSubTrigger>
+							<HugeiconsIcon className="mr-2 size-4" icon={Copy01Icon} />
+							Copy
+						</ContextMenuSubTrigger>
+						<ContextMenuSubContent>
+							<ContextMenuItem
+								disabled={!workingDirectory}
+								onClick={() => {
+									if (workingDirectory) {
+										void copyChatValue(
+											workingDirectory,
+											"Working directory copied"
+										);
+									}
+								}}
+							>
+								<HugeiconsIcon className="mr-2 size-4" icon={Folder01Icon} />
+								Copy working directory
+							</ContextMenuItem>
+							<ContextMenuItem
+								onClick={() => void copyChatValue(conv.id, "Session ID copied")}
+							>
+								<HugeiconsIcon className="mr-2 size-4" icon={ClipboardIcon} />
+								Copy session ID
+							</ContextMenuItem>
+							<ContextMenuItem
+								onClick={() =>
+									void copyChatValue(chatDeepLink, "Chat deeplink copied")
+								}
+							>
+								<HugeiconsIcon
+									className="mr-2 size-4"
+									icon={LinkSquare02Icon}
+								/>
+								Copy deeplink
+							</ContextMenuItem>
+							<ContextMenuItem onClick={openHandoff}>
+								<HugeiconsIcon className="mr-2 size-4" icon={LaptopIcon} />
+								Continue on another node
+							</ContextMenuItem>
+							<ContextMenuSeparator />
+							<ContextMenuItem
+								onClick={() =>
+									void copyChatTranscriptAsMarkdown(
+										() => loadMessages(conv.id),
+										{ title: conv.title }
+									)
+								}
+							>
+								<HugeiconsIcon className="mr-2 size-4" icon={Copy01Icon} />
+								Copy as Markdown
+							</ContextMenuItem>
+						</ContextMenuSubContent>
+					</ContextMenuSub>
+					<ContextMenuSub>
+						<ContextMenuSubTrigger>
+							<HugeiconsIcon className="mr-2 size-4" icon={GitBranchIcon} />
+							Fork…
+						</ContextMenuSubTrigger>
+						<ContextMenuSubContent>
+							<ContextMenuItem
+								onClick={() => onForkConversation(conv.id, "workspace")}
+							>
+								<HugeiconsIcon className="mr-2 size-4" icon={LaptopIcon} />
+								Fork in this workspace
+							</ContextMenuItem>
+							<ContextMenuItem
+								onClick={() => onForkConversation(conv.id, "worktree")}
+							>
+								<HugeiconsIcon className="mr-2 size-4" icon={FolderTreeIcon} />
+								Fork in a new worktree
+							</ContextMenuItem>
+						</ContextMenuSubContent>
+					</ContextMenuSub>
+					{schedulingEnabled ? (
+						<ContextMenuItem onClick={() => onAddScheduledTask(conv.id)}>
+							<HugeiconsIcon className="mr-2 size-4" icon={Calendar04Icon} />
+							Add scheduled task…
+						</ContextMenuItem>
+					) : null}
+					<ContextMenuSeparator />
+					<OpenInNewWindowContextMenuItem
+						onClick={() => onOpenInNewWindow(conv.id)}
+					/>
 					<ContextMenuItem onClick={() => onOpenInNewTab(conv.id)}>
 						<HugeiconsIcon className="mr-2 size-4" icon={ArrowUpRight01Icon} />
 						Open in new tab
-					</ContextMenuItem>
-					<ContextMenuItem
-						onClick={() => {
-							void copyChatTranscript(() => loadMessages(conv.id));
-						}}
-					>
-						<HugeiconsIcon className="mr-2 size-4" icon={ClipboardIcon} />
-						Copy transcript
 					</ContextMenuItem>
 					<ContextMenuItem
 						onClick={() =>
@@ -1146,10 +1463,6 @@ export function ChatRow({
 					>
 						<HugeiconsIcon className="mr-2 size-4" icon={Mail01Icon} />
 						{readLabel}
-					</ContextMenuItem>
-					<ContextMenuItem onClick={startEditing}>
-						<HugeiconsIcon className="mr-2 size-4" icon={PencilEdit01Icon} />
-						Rename
 					</ContextMenuItem>
 					<ContextMenuItem onClick={() => setIconDialogOpen(true)}>
 						<HugeiconsIcon className="mr-2 size-4" icon={ImageAdd01Icon} />
@@ -1174,14 +1487,6 @@ export function ChatRow({
 						{shared && !handlers.canMakePrivate
 							? "Make private (admins only)"
 							: visibilityActionLabel}
-					</ContextMenuItem>
-					<ContextMenuItem onClick={() => onTogglePin(conv.id)}>
-						<HugeiconsIcon className="mr-2 size-4" icon={pinIcon} />
-						{pinLabel}
-					</ContextMenuItem>
-					<ContextMenuItem onClick={() => onToggleArchive(conv.id)}>
-						<HugeiconsIcon className="mr-2 size-4" icon={archiveIcon} />
-						{archiveLabel}
 					</ContextMenuItem>
 					<ContextMenuItem onClick={toggleLearningExclusion}>
 						<HugeiconsIcon className="mr-2 size-4" icon={ViewOffSlashIcon} />
@@ -1247,6 +1552,27 @@ export function ChatRow({
 					)}
 				</div>
 			)}
+			{handoff ? (
+				<ContinueOnNodeDialog
+					conversationId={conv.id}
+					conversationTitle={conv.title}
+					nodes={handoff.nodes}
+					onCompleted={async (destination) => {
+						const tabId = openTab("/chat", { conversationId: conv.id });
+						useNodeStore.getState().setTabOverride(tabId, destination.name);
+						toast.success(`Continued on ${destination.name}`);
+					}}
+					onOpenChange={(open) => {
+						if (!open) {
+							setHandoff(null);
+						}
+					}}
+					open
+					resolveNodes={resolveConfiguredNodes}
+					sourceNode={handoff.sourceNode}
+					sourceUpdatedAt={conv.updatedAt}
+				/>
+			) : null}
 			<AlertDialog onOpenChange={setConfirmDeleteOpen} open={confirmDeleteOpen}>
 				<AlertDialogContent>
 					<AlertDialogHeader>

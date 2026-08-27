@@ -15,9 +15,9 @@ use tracing::warn;
 use crate::{
     evals::{
         aggregate_scores, build_judge_prompt, builtin_dataset, eval_assertion_deterministic,
-        judge_pass, parse_judge_verdict, resolve_judge_model, score_case, substitute_vars,
-        truncate_chars, Assertion, AssertionResult, CaseScore, EvalCase, EvalRunAggregate,
-        EvaluatorScore,
+        judge_pass, parse_judge_verdict, render_template, resolve_judge_model, score_case,
+        truncate_chars, Assertion, AssertionOptions, AssertionResult, CaseScore, EvalCase,
+        EvalRunAggregate, EvaluatorScore,
     },
     evaluators::{EvaluatorImpl, EvaluatorRegistry, EvaluatorTarget},
     pipeline,
@@ -85,6 +85,11 @@ pub struct RunEvalsRequest {
     /// in it are substituted per-case using that case's `vars`.
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Optional run-level multi-turn prompt variant. Rendered messages are
+    /// prepended before each case's messages; `system_prompt` remains the
+    /// backward-compatible text form and may be combined with this list.
+    #[serde(default)]
+    pub system_messages: Vec<crate::evals::EvalMessage>,
     /// Multi-model. When non-empty, the whole dataset runs against each model
     /// and the response gains a per-model `models` breakdown. `model` (singular)
     /// stays the back-compat default and seeds the top-level cases/aggregate.
@@ -210,14 +215,32 @@ pub async fn run_evals(
         let mut case_scores: Vec<CaseScore> = Vec::with_capacity(req.dataset.len());
 
         for case in &req.dataset {
-            // Render the case prompt + optional system prompt with this case's vars.
-            let rendered_prompt = substitute_vars(&case.prompt, &case.vars);
-            let mut messages: Vec<Value> = Vec::with_capacity(2);
+            // Render the case prompt/messages + optional system prompt with the
+            // case's typed vars. `prompt` remains the single-turn fallback.
+            let rendered_prompt = render_template(&case.prompt, &case.vars);
+            let mut messages: Vec<Value> = Vec::with_capacity(case.messages.len() + 2);
             if let Some(sp) = &req.system_prompt {
-                let rendered_sp = substitute_vars(sp, &case.vars);
+                let rendered_sp = render_template(sp, &case.vars);
                 messages.push(json!({"role": "system", "content": rendered_sp}));
             }
-            messages.push(json!({"role": "user", "content": rendered_prompt}));
+            if !req.system_messages.is_empty() {
+                messages.extend(req.system_messages.iter().map(|message| {
+                    json!({
+                        "role": message.role,
+                        "content": render_template(&message.content, &case.vars)
+                    })
+                }));
+            }
+            if case.messages.is_empty() {
+                messages.push(json!({"role": "user", "content": rendered_prompt}));
+            } else {
+                messages.extend(case.messages.iter().map(|message| {
+                    json!({
+                        "role": message.role,
+                        "content": render_template(&message.content, &case.vars)
+                    })
+                }));
+            }
 
             let body = json!({
                 "model": model,
@@ -259,66 +282,74 @@ pub async fn run_evals(
 
             // Assemble assertions (additive — never folded into `overall`).
             let mut assertion_results: Vec<AssertionResult> = Vec::new();
+            let mut assertion_weights: Vec<f32> = Vec::new();
 
             // Legacy `expected` synthesized as a contains assertion (the scalar
             // `substring_match` is already set by score_case).
             if let Some(exp) = &case.expected {
-                let synth = Assertion::Contains { value: exp.clone() };
+                let synth = Assertion::Contains {
+                    value: exp.clone(),
+                    options: AssertionOptions::default(),
+                };
                 assertion_results.push(eval_assertion_deterministic(&synth, &score.response_text));
+                assertion_weights.push(1.0);
             }
 
             for assertion in &case.assertions {
-                match assertion {
-                    Assertion::LlmJudge { rubric } => {
-                        let rendered_rubric = substitute_vars(rubric, &case.vars);
-                        let result = run_llm_judge(
+                let result = match assertion {
+                    Assertion::LlmJudge { rubric, .. }
+                    | Assertion::LlmRubric { rubric, .. }
+                    | Assertion::Factuality { rubric, .. }
+                    | Assertion::ContextFaithfulness { rubric, .. }
+                    | Assertion::AnswerRelevance { rubric, .. } => {
+                        let rubric_source = assertion_options(assertion)
+                            .rubric_prompt
+                            .as_deref()
+                            .unwrap_or(rubric);
+                        let rendered_rubric = render_template(rubric_source, &case.vars);
+                        let assertion_model = assertion_options(assertion)
+                            .provider
+                            .as_deref()
+                            .unwrap_or(&judge_model);
+                        run_llm_judge(
                             &rendered_rubric,
                             &score.response_text,
-                            &judge_model,
+                            assertion_model,
                             Arc::clone(&state),
                             ctx.clone(),
                         )
-                        .await;
-                        assertion_results.push(result);
+                        .await
                     }
-                    Assertion::Contains { value } => {
-                        let a = Assertion::Contains {
-                            value: substitute_vars(value, &case.vars),
-                        };
-                        assertion_results
-                            .push(eval_assertion_deterministic(&a, &score.response_text));
+                    _ => {
+                        let rendered = render_assertion_vars(assertion, &case.vars);
+                        eval_assertion_deterministic(&rendered, &score.response_text)
                     }
-                    Assertion::NotContains { value } => {
-                        let a = Assertion::NotContains {
-                            value: substitute_vars(value, &case.vars),
-                        };
-                        assertion_results
-                            .push(eval_assertion_deterministic(&a, &score.response_text));
-                    }
-                    Assertion::Equals { value } => {
-                        let a = Assertion::Equals {
-                            value: substitute_vars(value, &case.vars),
-                        };
-                        assertion_results
-                            .push(eval_assertion_deterministic(&a, &score.response_text));
-                    }
-                    Assertion::Regex { value } => {
-                        let a = Assertion::Regex {
-                            value: substitute_vars(value, &case.vars),
-                        };
-                        assertion_results
-                            .push(eval_assertion_deterministic(&a, &score.response_text));
-                    }
-                    Assertion::JsonValid => {
-                        assertion_results.push(eval_assertion_deterministic(
-                            &Assertion::JsonValid,
-                            &score.response_text,
-                        ));
-                    }
-                }
+                };
+                assertion_results.push(apply_assertion_options(
+                    result,
+                    assertion_options(assertion),
+                ));
+                assertion_weights.push(assertion_options(assertion).weight.unwrap_or(1.0).max(0.0));
             }
 
-            score.assertions_pass = assertion_results.iter().all(|r| r.pass);
+            let assertion_score = if assertion_results.is_empty() {
+                1.0
+            } else {
+                let total_weight = assertion_weights.iter().sum::<f32>();
+                if total_weight <= f32::EPSILON {
+                    0.0
+                } else {
+                    assertion_results
+                        .iter()
+                        .zip(assertion_weights.iter())
+                        .map(|(result, weight)| result.score * weight)
+                        .sum::<f32>()
+                        / total_weight
+                }
+            };
+            score.assertion_score = assertion_score;
+            score.assertions_pass =
+                assertion_score >= case.threshold.unwrap_or(1.0).clamp(0.0, 1.0);
             score.assertions = assertion_results;
 
             // Score any requested registry evaluators (union of per-case +
@@ -607,7 +638,16 @@ fn score_heuristic(
             let deterministic: Vec<&Assertion> = case
                 .assertions
                 .iter()
-                .filter(|a| !matches!(a, Assertion::LlmJudge { .. }))
+                .filter(|a| {
+                    !matches!(
+                        a,
+                        Assertion::LlmJudge { .. }
+                            | Assertion::LlmRubric { .. }
+                            | Assertion::Factuality { .. }
+                            | Assertion::ContextFaithfulness { .. }
+                            | Assertion::AnswerRelevance { .. }
+                    )
+                })
                 .collect();
             let judge_count = case.assertions.len() - deterministic.len();
 
@@ -681,7 +721,7 @@ fn score_regex(
     let rendered_prompt;
     let target_text: &str = match target {
         EvaluatorTarget::Input => {
-            rendered_prompt = substitute_vars(&case.prompt, &case.vars);
+            rendered_prompt = render_template(&case.prompt, &case.vars);
             &rendered_prompt
         }
         _ => response_text,
@@ -746,7 +786,7 @@ async fn score_llm_judge_evaluator(
         judge_ctx.request_judge_model.as_deref(),
         &judge_ctx.fallback_model,
     );
-    let rendered_rubric = substitute_vars(rubric, &case.vars);
+    let rendered_rubric = render_template(rubric, &case.vars);
 
     let result = run_llm_judge(
         &rendered_rubric,
@@ -786,26 +826,154 @@ async fn score_llm_judge_evaluator(
 
 /// Apply per-case `{{vars}}` to an assertion's value/rubric so the deterministic
 /// "assertions" evaluator honors the same substitution the assertions path does.
+fn assertion_options(assertion: &Assertion) -> &AssertionOptions {
+    match assertion {
+        Assertion::Contains { options, .. }
+        | Assertion::NotContains { options, .. }
+        | Assertion::Equals { options, .. }
+        | Assertion::Regex { options, .. }
+        | Assertion::Icontains { options, .. }
+        | Assertion::StartsWith { options, .. }
+        | Assertion::ContainsAny { options, .. }
+        | Assertion::ContainsAll { options, .. }
+        | Assertion::IcontainsAny { options, .. }
+        | Assertion::IcontainsAll { options, .. }
+        | Assertion::ContainsJson { options, .. }
+        | Assertion::IsHtml { options }
+        | Assertion::IsXml { options }
+        | Assertion::IsSql { options }
+        | Assertion::IsRefusal { options }
+        | Assertion::Moderation { options, .. }
+        | Assertion::Javascript { options, .. }
+        | Assertion::Python { options, .. }
+        | Assertion::Ruby { options, .. }
+        | Assertion::Webhook { options, .. }
+        | Assertion::IsJson { options }
+        | Assertion::JsonValid { options }
+        | Assertion::LlmJudge { options, .. }
+        | Assertion::LlmRubric { options, .. }
+        | Assertion::Factuality { options, .. }
+        | Assertion::ContextFaithfulness { options, .. }
+        | Assertion::AnswerRelevance { options, .. } => options,
+    }
+}
+
+fn apply_assertion_options(
+    mut result: AssertionResult,
+    options: &AssertionOptions,
+) -> AssertionResult {
+    if let Some(threshold) = options.threshold {
+        result.pass = result.score >= threshold.clamp(0.0, 1.0);
+    }
+    result
+}
+
 fn render_assertion_vars(
     assertion: &Assertion,
-    vars: &std::collections::HashMap<String, String>,
+    vars: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Assertion {
     match assertion {
-        Assertion::Contains { value } => Assertion::Contains {
-            value: substitute_vars(value, vars),
+        Assertion::Contains { value, options } => Assertion::Contains {
+            value: render_template(value, vars),
+            options: options.clone(),
         },
-        Assertion::NotContains { value } => Assertion::NotContains {
-            value: substitute_vars(value, vars),
+        Assertion::NotContains { value, options } => Assertion::NotContains {
+            value: render_template(value, vars),
+            options: options.clone(),
         },
-        Assertion::Equals { value } => Assertion::Equals {
-            value: substitute_vars(value, vars),
+        Assertion::Equals { value, options } => Assertion::Equals {
+            value: render_template(value, vars),
+            options: options.clone(),
         },
-        Assertion::Regex { value } => Assertion::Regex {
-            value: substitute_vars(value, vars),
+        Assertion::Regex { value, options } => Assertion::Regex {
+            value: render_template(value, vars),
+            options: options.clone(),
         },
-        Assertion::JsonValid => Assertion::JsonValid,
-        Assertion::LlmJudge { rubric } => Assertion::LlmJudge {
-            rubric: substitute_vars(rubric, vars),
+        Assertion::Icontains { value, options } => Assertion::Icontains {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::StartsWith { value, options } => Assertion::StartsWith {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::ContainsAny { value, options } => Assertion::ContainsAny {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::ContainsAll { value, options } => Assertion::ContainsAll {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::IcontainsAny { value, options } => Assertion::IcontainsAny {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::IcontainsAll { value, options } => Assertion::IcontainsAll {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::ContainsJson { value, options } => Assertion::ContainsJson {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::IsHtml { options } => Assertion::IsHtml {
+            options: options.clone(),
+        },
+        Assertion::IsXml { options } => Assertion::IsXml {
+            options: options.clone(),
+        },
+        Assertion::IsSql { options } => Assertion::IsSql {
+            options: options.clone(),
+        },
+        Assertion::IsRefusal { options } => Assertion::IsRefusal {
+            options: options.clone(),
+        },
+        Assertion::Moderation { value, options } => Assertion::Moderation {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::Javascript { value, options } => Assertion::Javascript {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::Python { value, options } => Assertion::Python {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::Ruby { value, options } => Assertion::Ruby {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::Webhook { value, options } => Assertion::Webhook {
+            value: render_template(value, vars),
+            options: options.clone(),
+        },
+        Assertion::IsJson { options } => Assertion::IsJson {
+            options: options.clone(),
+        },
+        Assertion::JsonValid { options } => Assertion::JsonValid {
+            options: options.clone(),
+        },
+        Assertion::LlmJudge { rubric, options } => Assertion::LlmJudge {
+            rubric: render_template(rubric, vars),
+            options: options.clone(),
+        },
+        Assertion::LlmRubric { rubric, options } => Assertion::LlmRubric {
+            rubric: render_template(rubric, vars),
+            options: options.clone(),
+        },
+        Assertion::Factuality { rubric, options } => Assertion::Factuality {
+            rubric: render_template(rubric, vars),
+            options: options.clone(),
+        },
+        Assertion::ContextFaithfulness { rubric, options } => Assertion::ContextFaithfulness {
+            rubric: render_template(rubric, vars),
+            options: options.clone(),
+        },
+        Assertion::AnswerRelevance { rubric, options } => Assertion::AnswerRelevance {
+            rubric: render_template(rubric, vars),
+            options: options.clone(),
         },
     }
 }
@@ -970,6 +1138,8 @@ mod tests {
         EvalCase {
             prompt: prompt.to_string(),
             expected: expected.map(str::to_string),
+            threshold: None,
+            messages: Vec::new(),
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),

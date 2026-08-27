@@ -39,8 +39,17 @@ impl WebhookIngressHost for CoreWebhookIngressHost {
         })
     }
 
-    fn verify_webhook_signature(&self, raw_body: &[u8], signature: Option<&str>) -> bool {
-        crate::composio_triggers::verify_webhook_signature(raw_body, signature)
+    fn verify_webhook_signature(
+        &self,
+        raw_body: &[u8],
+        headers: ryu_webhook_ingress::InboundWebhookHeaders<'_>,
+    ) -> bool {
+        crate::composio_triggers::verify_webhook_signature(
+            raw_body,
+            headers.webhook_id,
+            headers.webhook_timestamp,
+            headers.signature,
+        )
     }
 
     fn verify_workflow_webhook_signature(

@@ -12,11 +12,12 @@
 ## What it provides
 
 - **Agent rules format** (`agent-rules.ts`): `composeRules` / split helpers that fold an agent's editable "Rules" list into and out of its single stored `systemPrompt`, using HTML-comment-delimited markers so the round-trip is unambiguous. Rules genuinely become part of the prompt, honored on every route (ACP and openai-compat alike).
+- **Ryu Node Protocol continuity** (`continuity.ts`): the bounded RNP v0 conversation bundle, strict parser, configured-node resolver, and portable context contract used for explicit node-to-node chat handoff. See [`RNP.md`](./RNP.md).
 - **`ryu://` deep links** (`deep-link.ts`): the canonical parser/builder for the scheme that opens the app from a link, covering navigation intents (`ryu://open/<page>`, `ryu://chat/new`) and confirm-gated action intents (`ryu://models/…`, `ryu://skills/…`, `ryu://nodes/connect`). A dedicated host per intent keeps navigation unambiguous with side-effecting actions.
 
 ## Role
 
-Security: this module only **parses/builds**, so it never installs, connects, or sends. Deep-link actions go through each surface's confirm dialog (the security boundary); a `chat` prompt only pre-seeds the composer and is never auto-sent. Both modules ship with tests (`agent-rules.test.ts`, `deep-link.test.ts`). Consumed by `apps/desktop`, `apps/web`, and `apps/native`.
+Security: this package only validates and builds wire data; it never installs, connects, or sends by itself. Deep-link actions and RNP transfers go through explicit review surfaces. RNP excludes credentials, files, hidden prompts, workspace paths, and live agent state. Consumed by `apps/desktop`, `apps/web`, and `apps/native`.
 
 ## License
 

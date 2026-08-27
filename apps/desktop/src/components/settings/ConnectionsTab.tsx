@@ -15,6 +15,7 @@ import {
 	AlertDialogTitle,
 	AlertDialogTrigger,
 } from "@ryu/ui/components/alert-dialog";
+import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
@@ -26,7 +27,15 @@ import { authClient } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { ConnectDeviceQR } from "@/src/components/devices/ConnectDeviceQR.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
-import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
+import {
+	type ApiTarget,
+	currentClientId,
+	toTarget,
+} from "@/src/lib/api/client.ts";
+import {
+	type ConnectedClient,
+	fetchConnections,
+} from "@/src/lib/api/connections.ts";
 import {
 	getNodeAuthState,
 	type NodeAuthState,
@@ -36,6 +45,10 @@ import {
 	getCloudSyncEnabled,
 	setCloudSyncEnabled,
 } from "@/src/lib/api/preferences.ts";
+import {
+	connectionDisplayName,
+	connectionSurfaceMeta,
+} from "@/src/lib/connection-surface.ts";
 import {
 	SettingsGroup,
 	SettingsItem,
@@ -109,18 +122,18 @@ function CloudSyncSection() {
 	const signedOut = nodeAuth === "signed-out";
 	const description = signedOut
 		? "Sign in on this node to sync across devices. Until then, syncing stays paused even when this is on."
-		: "Off by default. When on, this node pushes your conversations to your Ryu account so your other devices can pick them up. Takes effect within a minute, with no restart.";
+		: "Off by default. When on, this node mirrors your chats and editable Spaces documents to your Ryu account so your other devices can pick them up. Binary file attachments stay local. Takes effect within a minute, with no restart.";
 
 	return (
 		<SettingsSection
-			caption="Keep your conversations in step across the devices signed in to your account. Everything stays on this device until you turn this on."
+			caption="Keep chats and Spaces documents in step across the devices signed in to your account. Everything stays on this device until you turn this on."
 			title="Cross-device sync"
 		>
 			<SettingsGroup>
 				<SettingsItem
 					actions={
 						<Switch
-							aria-label="Sync my conversations across devices"
+							aria-label="Sync my chats and Spaces across devices"
 							checked={enabled}
 							disabled={!loaded || signedOut}
 							id="cloud-sync-enabled"
@@ -128,9 +141,109 @@ function CloudSyncSection() {
 						/>
 					}
 					description={description}
-					title="Sync my conversations across devices"
+					title="Sync my chats and Spaces across devices"
 				/>
 			</SettingsGroup>
+		</SettingsSection>
+	);
+}
+
+function relativeLastSeen(lastSeen: number): string {
+	const seconds = Math.max(0, Math.floor(Date.now() / 1000) - lastSeen);
+	if (seconds < 10) {
+		return "Active now";
+	}
+	if (seconds < 60) {
+		return `Active ${seconds}s ago`;
+	}
+	return `Active ${Math.floor(seconds / 60)}m ago`;
+}
+
+function ConnectedDeviceRow({
+	client,
+	self,
+}: {
+	client: ConnectedClient;
+	self: boolean;
+}) {
+	const surface = connectionSurfaceMeta(client.surface);
+	return (
+		<SettingsItem
+			actions={self ? <Badge variant="secondary">This device</Badge> : null}
+			description={
+				<span className="flex items-center gap-1.5">
+					<span>{surface.label}</span>
+					<span aria-hidden>·</span>
+					<span>{relativeLastSeen(client.lastSeen)}</span>
+				</span>
+			}
+			key={client.clientId}
+			title={
+				<span className="flex min-w-0 items-center gap-3">
+					<span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-background">
+						<HugeiconsIcon className="size-4" icon={surface.icon} />
+					</span>
+					<span className="min-w-0 flex-1">
+						<span className="block truncate">
+							{connectionDisplayName(client)}
+						</span>
+						<span className="mt-0.5 block truncate text-muted-foreground text-xs">
+							{surface.label} · {relativeLastSeen(client.lastSeen)}
+						</span>
+					</span>
+				</span>
+			}
+		/>
+	);
+}
+
+export function ConnectedDevicesSection() {
+	const activeNode = useActiveNode();
+	const target: ApiTarget = useMemo(
+		() => toTarget(activeNode),
+		[activeNode.url, activeNode.token]
+	);
+	const query = useQuery({
+		queryKey: ["node-connections-settings", target.url, target.token],
+		queryFn: ({ signal }) => fetchConnections(target, signal),
+		enabled: Boolean(target.url),
+		refetchInterval: 15_000,
+		retry: false,
+	});
+	const selfClientId = currentClientId();
+
+	return (
+		<SettingsSection
+			caption="Presence is a short-lived view of clients that recently talked to this node. It identifies the calling surface, not who is authorized to access data."
+			title="Connected devices"
+		>
+			{query.isLoading ? (
+				<div className="flex items-center gap-2 px-3 text-muted-foreground text-sm">
+					<Spinner className="size-4" />
+					Checking connected devices…
+				</div>
+			) : null}
+			{query.error ? (
+				<p className="px-3 text-muted-foreground text-sm">
+					Connected-device presence is unavailable on this node.
+				</p>
+			) : null}
+			{query.data && query.data.clients.length === 0 ? (
+				<p className="px-3 text-muted-foreground text-sm">
+					No other devices have connected recently.
+				</p>
+			) : null}
+			{query.data && query.data.clients.length > 0 ? (
+				<SettingsGroup>
+					{query.data.clients.map((client) => (
+						<ConnectedDeviceRow
+							client={client}
+							key={client.clientId}
+							self={client.clientId === selfClientId}
+						/>
+					))}
+				</SettingsGroup>
+			) : null}
 		</SettingsSection>
 	);
 }
@@ -230,6 +343,7 @@ export function ConnectionsTab() {
 
 	return (
 		<div className="space-y-6">
+			<ConnectedDevicesSection />
 			<SettingsSection
 				caption="Connect third-party accounts to sign in faster."
 				title="Linked accounts"

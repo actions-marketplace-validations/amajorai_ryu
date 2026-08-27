@@ -24,20 +24,31 @@
 //! (`ryu-browser` is an Electron bundle, never a single-file spawnable, and still
 //! resolves only when already on PATH via `RYU_BROWSER_BIN`.)
 
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Stdio;
 
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use crate::win_process::NoWindow;
+
 const RELEASE_BASE: &str = "https://github.com/amajorai/ryu/releases/latest/download";
 const INSTALL_EVENT_PREFIX: &str = "RYU_INSTALL_EVENT:";
+const DESKTOP_INSTALLER_START_CORE: &str = "0";
 
-fn install_script_url() -> &'static str {
+/// The canonical installers are compiled into the signed Desktop bundle.
+///
+/// Fetching `main/install.{sh,ps1}` and executing it made a mutable branch an
+/// unsigned remote-code path. `include_bytes!` pins the exact reviewed script to
+/// this build; the normal Tauri updater signature authenticates the bundle that
+/// carries it. Headless users still download the public mirror, while Desktop
+/// executes only the copy shipped with itself.
+fn bundled_install_script() -> &'static [u8] {
     if cfg!(windows) {
-        "https://raw.githubusercontent.com/amajorai/ryu/main/install.ps1"
+        include_bytes!("../../../../../mirror/overlay/install.ps1")
     } else {
-        "https://raw.githubusercontent.com/amajorai/ryu/main/install.sh"
+        include_bytes!("../../../../../mirror/overlay/install.sh")
     }
 }
 
@@ -174,15 +185,15 @@ fn install_path(bin_name: &str) -> Option<PathBuf> {
 /// (env override → `~/.ryu/bin/<bin>` → bare name on PATH). Used to skip a redundant
 /// download on every launch. `~/.ryu/bin` is on the PATH Core builds, so the
 /// `~/.ryu/bin` and PATH checks usually coincide; both are kept for env-less setups.
-fn is_installed(spec: &SidecarBinary, expected_version: &str) -> bool {
+fn resolved_installed_path(spec: &SidecarBinary, expected_version: &str) -> Option<PathBuf> {
     // 1. Explicit env override pointing at an existing file — user-managed, so we
     //    respect it regardless of version.
-    if std::env::var(spec.env_var)
+    if let Some(path) = std::env::var(spec.env_var)
         .ok()
         .map(PathBuf::from)
-        .is_some_and(|p| p.exists())
+        .filter(|path| path.is_file())
     {
-        return true;
+        return Some(path);
     }
     // 2. Our install target under ~/.ryu/bin. Only "installed" when its version
     //    marker matches the running app: a binary left over from an older app
@@ -190,7 +201,7 @@ fn is_installed(spec: &SidecarBinary, expected_version: &str) -> bool {
     //    the PATH check below, since ~/.ryu/bin is on PATH — this branch returns).
     if let Some(p) = install_path(spec.bin_name) {
         if p.exists() {
-            return installed_version_matches(spec.bin_name, expected_version);
+            return installed_version_matches(spec.bin_name, expected_version).then_some(p);
         }
     }
     // 3. Anywhere else on PATH — an external install we don't manage; respect it.
@@ -199,7 +210,13 @@ fn is_installed(spec: &SidecarBinary, expected_version: &str) -> bool {
     //    dev profile with no `ryu-core` of its own (and silently running the release
     //    one against `~/.ryu-dev`). Treat it as absent so it gets downloaded — this
     //    must stay in lockstep with the same rejection in `resolve_core_binary`.
-    which::which(spec.bin_name).is_ok_and(|hit| !crate::profile::is_foreign_profile_bin(&hit))
+    which::which(spec.bin_name)
+        .ok()
+        .filter(|hit| !crate::profile::is_foreign_profile_bin(hit))
+}
+
+fn is_installed(spec: &SidecarBinary, expected_version: &str) -> bool {
+    resolved_installed_path(spec, expected_version).is_some()
 }
 
 /// Forward one machine-readable line from the canonical one-line installer to
@@ -219,43 +236,28 @@ fn forward_installer_event(app: &AppHandle, line: &str) {
     }
 }
 
-/// Run the same public one-line installer used by headless users. The script is
-/// downloaded to a private temporary file before execution so its stdout can be
-/// streamed safely and the shell/powershell process can be supervised. The
-/// script owns Core, Gateway, CLI, and the start of Core's bundled defaults;
-/// Desktop keeps ownership of agent detection and its own preferences.
+/// Run the same canonical installer used by headless users from the copy pinned
+/// inside this signed bundle. A private temporary file lets the shell process be
+/// supervised and its stdout streamed without introducing a mutable network
+/// script. The installer owns Core, Gateway, and CLI installation; Desktop starts
+/// Core itself afterwards so it retains the child handle and owns shutdown.
 async fn run_unified_installer(app: &AppHandle) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .read_timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("create installer client: {e}"))?;
-    let response = client
-        .get(install_script_url())
-        .send()
-        .await
-        .map_err(|e| format!("download installer script: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "download installer script: HTTP {}",
-            response.status()
-        ));
-    }
-    let script = response
-        .bytes()
-        .await
-        .map_err(|e| format!("read installer script: {e}"))?;
-    let script_path = std::env::temp_dir().join(format!(
-        "ryu-installer-{}-{}{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default(),
-        if cfg!(windows) { ".ps1" } else { ".sh" }
-    ));
-    std::fs::write(&script_path, &script)
+    let suffix = if cfg!(windows) { ".ps1" } else { ".sh" };
+    let mut script_file = tempfile::Builder::new()
+        .prefix("ryu-installer-")
+        .suffix(suffix)
+        .tempfile()
+        .map_err(|e| format!("create temporary installer script: {e}"))?;
+    script_file
+        .write_all(bundled_install_script())
         .map_err(|e| format!("write temporary installer script: {e}"))?;
+    script_file
+        .as_file()
+        .sync_all()
+        .map_err(|e| format!("sync temporary installer script: {e}"))?;
+    // Close the write handle before PowerShell/sh opens it, while retaining a
+    // TempPath guard that removes the file on every return path.
+    let script_path = script_file.into_temp_path();
 
     let mut command = if cfg!(windows) {
         let shell = which::which("pwsh")
@@ -269,11 +271,11 @@ async fn run_unified_installer(app: &AppHandle) -> Result<(), String> {
             "Bypass",
             "-File",
         ]);
-        command.arg(&script_path);
+        command.arg(script_path.as_os_str());
         command
     } else {
         let mut command = tokio::process::Command::new("sh");
-        command.arg(&script_path);
+        command.arg(script_path.as_os_str());
         command
     };
 
@@ -289,11 +291,14 @@ async fn run_unified_installer(app: &AppHandle) -> Result<(), String> {
         .env("RYU_NO_MODIFY_PATH", "1")
         .env("RYU_PROGRESS_FORMAT", "json")
         .env("RYU_INSTALL_MARKER", app_version(app))
-        .env("RYU_START_CORE", "1")
+        // Desktop must own the Core child. If the installer starts it detached,
+        // RyuCoreProcess observes a healthy port but has no handle to stop on Quit.
+        .env("RYU_START_CORE", DESKTOP_INSTALLER_START_CORE)
         .env("RYU_CORE_BIND", core_bind)
         .env("RYU_CORE_URL", core_url)
         .env("RYU_CORE_LOG", core_log)
-        .env("RYU_PROFILE", crate::profile::name());
+        .env("RYU_PROFILE", crate::profile::name())
+        .no_window();
 
     let mut child = command
         .spawn()
@@ -340,7 +345,6 @@ async fn run_unified_installer(app: &AppHandle) -> Result<(), String> {
         .wait()
         .await
         .map_err(|e| format!("wait for canonical installer: {e}"))?;
-    let _ = std::fs::remove_file(&script_path);
     if !status.success() {
         let error = format!("canonical installer exited with {status}");
         let _ = app.emit(
@@ -361,8 +365,9 @@ async fn run_unified_installer(app: &AppHandle) -> Result<(), String> {
 
 /// Ensure the managed Core/Gateway/CLI stack through the canonical public
 /// installer. A matching managed pair is already standardized and needs no
-/// network round trip; otherwise the script is the only binary installer used
-/// by Desktop. The script also starts Core, which kicks off the default stack.
+/// installer run; otherwise the bundled script is the only binary installer used
+/// by Desktop. Core is deliberately started later by `RyuCoreProcess`, which owns
+/// its handle and shutdown lifecycle.
 pub async fn ensure_unified_installed(app: &AppHandle) -> Result<PathBuf, String> {
     let expected = app_version(app);
     if !is_installed(&CORE, &expected) || !is_installed(&GATEWAY, &expected) {
@@ -378,7 +383,16 @@ pub async fn ensure_unified_installed(app: &AppHandle) -> Result<PathBuf, String
         );
         run_unified_installer(app).await?;
     }
-    install_path(CORE.bin_name).ok_or_else(|| "could not resolve home directory".to_string())
+    // Return the path that actually satisfied resolution. An operator-provided
+    // RYU_CORE_BIN or external PATH hit must not be rewritten to a nonexistent
+    // managed ~/.ryu/bin path.
+    let core = resolved_installed_path(&CORE, &expected).ok_or_else(|| {
+        "the installer completed without a resolvable ryu-core binary".to_string()
+    })?;
+    resolved_installed_path(&GATEWAY, &expected).ok_or_else(|| {
+        "the installer completed without a resolvable ryu-gateway binary".to_string()
+    })?;
+    Ok(core)
 }
 
 /// Download `asset` from the release hub into `~/.ryu/bin/<dest_file>` and return
@@ -574,23 +588,6 @@ pub async fn ensure_gateway_installed(app: &AppHandle) -> Result<PathBuf, String
 // `apps/island/src/main/index.ts`), so a redundant `launch_island` on a restart
 // where island is already up self-exits — the launch path can stay unconditional.
 
-/// The Island release-asset name for the running platform, or `None` on an
-/// unsupported one. These names come straight from `apps/island/electron-builder.yml`
-/// (`ryu-island-${os}-${arch}[-portable].${ext}`, with electron-builder's `os`/`arch`
-/// spellings — `win`/`mac`, `x64`/`arm64`/`x86_64`), which differ from the sidecar
-/// slug (`windows-x86_64`, `macos-aarch64`, bare `.exe`), so [`platform_asset`] would
-/// resolve a URL that 404s. Windows uses the *portable* single-exe target (it
-/// self-extracts on launch, no installer step); Linux the AppImage; macOS the `.zip`
-/// carrying `Ryu Island.app` (electron-updater needs the zip, not just the dmg).
-fn island_asset() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("windows", "x86_64") => Some("ryu-island-win-x64-portable.exe"),
-        ("linux", "x86_64") => Some("ryu-island-linux-x86_64.AppImage"),
-        ("macos", "aarch64") => Some("ryu-island-mac-arm64.zip"),
-        _ => None,
-    }
-}
-
 /// The dedicated install directory for Island: `~/.ryu/island/`. Separate from the
 /// `~/.ryu/bin/` sidecars because the Electron bundle is more than one file (a whole
 /// `.app` tree on macOS) and should not clutter the flat command-binary dir.
@@ -640,110 +637,80 @@ fn is_island_installed(expected: &str) -> bool {
     }
 }
 
-/// Download the macOS Island `.zip` into `~/.ryu/island/`, extract it, and return the
-/// extracted `.app` bundle path. `ditto -x -k` is the macOS-native unarchiver (it
-/// preserves the bundle's resource-fork / code-signing metadata better than `unzip`);
-/// `unzip -o` is the fallback. Only compiled on macOS — the single-file Win/Linux
-/// artifacts never take this path.
-#[cfg(target_os = "macos")]
-async fn install_island_macos(
-    app: &AppHandle,
-    asset: &str,
-    dir: &std::path::Path,
-    event: &str,
-) -> Result<PathBuf, String> {
-    // Download the archive itself (NOT the final launch target) via the shared
-    // helper: its temp-then-rename keeps a partial download from ever looking
-    // complete, and the `0o755` it stamps on the `.zip` is harmless.
-    let zip = dir.join("ryu-island.zip");
-    download_release_binary(app, asset, zip.clone(), event).await?;
-
-    let _ = app.emit(event, serde_json::json!({ "phase": "installing" }));
-    let extracted_ok = std::process::Command::new("ditto")
-        .arg("-x")
-        .arg("-k")
-        .arg(&zip)
-        .arg(dir)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-        || std::process::Command::new("unzip")
-            .arg("-o")
-            .arg(&zip)
-            .arg("-d")
-            .arg(dir)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-    if !extracted_ok {
-        let err = "failed to extract Ryu Island .zip".to_string();
-        let _ = app.emit(event, serde_json::json!({ "phase": "error", "error": err }));
-        return Err(err);
+/// Ask the local Core to install Island through its global DownloadCenter. The
+/// response waits for extraction so this function never reports a path before the
+/// bundle is launchable. Current Desktop/Core releases always take this path.
+async fn ensure_island_via_core(expected: &str) -> Result<PathBuf, String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(30 * 60))
+        .build()
+        .map_err(|error| format!("create Island installer client: {error}"))?;
+    let mut url = reqwest::Url::parse(&format!(
+        "{}/api/setup/island/install",
+        crate::profile::core_base_url()
+    ))
+    .map_err(|error| format!("build Island install URL: {error}"))?;
+    url.query_pairs_mut()
+        .append_pair("wait", "true")
+        .append_pair("version", expected);
+    let mut request = client.post(url);
+    if let Some(token) = std::env::var("RYU_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(crate::nodes::read_local_node_token)
+    {
+        request = request.bearer_auth(token);
     }
-    // The archive is only a staging artifact; drop it once extracted.
-    let _ = std::fs::remove_file(&zip);
-
-    // Locate the extracted `.app`: prefer the canonical `Ryu Island.app`, else the
-    // first `*.app` in the dir (in case the archive's top-level name ever drifts).
-    let bundle = island_install_path()
-        .filter(|p| p.exists())
-        .or_else(|| {
-            std::fs::read_dir(dir).ok().and_then(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .find(|p| p.extension().and_then(|x| x.to_str()) == Some("app"))
-            })
-        })
-        .ok_or("no .app found in extracted Ryu Island archive")?;
-    let _ = app.emit(
-        event,
-        serde_json::json!({ "phase": "done", "path": bundle.to_string_lossy() }),
-    );
-    Ok(bundle)
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("request Island install through Core: {error}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(
+            "the running Core does not support the verified Island installer; update Core and retry"
+                .to_owned(),
+        );
+    }
+    let status = response.status();
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("read Island install response: {error}"))?;
+    if !status.is_success() || body.get("success").and_then(|value| value.as_bool()) != Some(true) {
+        let error = body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Core could not install Ryu Island");
+        return Err(format!("{error} (HTTP {status})"));
+    }
+    let path = body
+        .get("path")
+        .and_then(|value| value.as_str())
+        .map(PathBuf::from)
+        .or_else(island_install_path)
+        .ok_or_else(|| "Core installed Island but returned no launch path".to_string())?;
+    if !path.exists() || !is_island_installed(expected) {
+        return Err(
+            "Core reported Island installed, but its version marker is missing".to_string(),
+        );
+    }
+    Ok(path)
 }
 
-/// Ensure the Island companion is installed under `~/.ryu/island/`, downloading (and,
-/// on macOS, extracting) it if absent or stale. Skips when the version marker already
-/// matches the running app. Emits `island-install-progress` events (same `phase`
-/// vocabulary as the sidecars). Errors on an unsupported platform or a failed
-/// download/extract so the caller can decide the miss is non-fatal.
+/// Ensure the Island companion is installed under `~/.ryu/island/`. Current Core
+/// handles the artifact through the global DownloadCenter (#456), including resume,
+/// verification, progress, and atomic materialization. Desktop deliberately has no
+/// second downloader: a missing endpoint is an actionable compatibility error rather
+/// than an integrity downgrade.
 pub async fn ensure_island_installed(app: &AppHandle) -> Result<PathBuf, String> {
     let expected = app_version(app);
     if is_island_installed(&expected) {
         return island_install_path().ok_or("could not resolve home directory".to_string());
     }
 
-    let asset = island_asset().ok_or_else(|| {
-        format!(
-            "no prebuilt Ryu Island for {}-{}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        )
-    })?;
-    let dir = island_dir().ok_or("could not resolve home directory")?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-
-    let event = "island-install-progress";
-    // macOS ships a `.zip` (extract + locate the `.app`); Windows/Linux are single-file
-    // spawnables that download straight to the launch target (`download_release_binary`
-    // chmod +x's the AppImage on unix), exactly like `ryu-core`. cfg on the `let`
-    // statement (not on a tail block expr, which is unstable) so only the platform's
-    // branch compiles.
-    #[cfg(target_os = "macos")]
-    let installed = install_island_macos(app, asset, &dir, event).await?;
-    #[cfg(not(target_os = "macos"))]
-    let installed = {
-        let dest = island_install_path().ok_or("could not resolve home directory")?;
-        download_release_binary(app, asset, dest, event).await?
-    };
-
-    // Stamp the version so a later launch can detect a stale bundle after the app
-    // self-updates. Best-effort, like the sidecar markers.
-    if let Some(marker) = island_version_marker() {
-        let _ = std::fs::write(marker, &expected);
-    }
-    Ok(installed)
+    ensure_island_via_core(&expected).await
 }
 
 /// Launch the installed Island companion DETACHED, so it runs as an independent
@@ -777,4 +744,68 @@ pub fn launch_island() -> Result<(), String> {
             .map_err(|e| format!("launch Ryu Island: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvRestore {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_executes_the_canonical_script_bundled_with_the_signed_app() {
+        let script = std::str::from_utf8(bundled_install_script()).expect("installer is UTF-8");
+        assert!(script.contains("RYU_INSTALL_EVENT:"));
+        assert!(script.contains("RYU_START_CORE"));
+        assert!(script.len() > 1_000, "a truncated installer must not ship");
+    }
+
+    #[test]
+    fn desktop_installer_leaves_core_startup_to_the_process_manager() {
+        assert_eq!(DESKTOP_INSTALLER_START_CORE, "0");
+    }
+
+    #[test]
+    fn explicit_core_override_is_the_path_returned_to_the_caller() {
+        let _lock = ENV_LOCK.lock().expect("environment lock");
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let override_path = directory.path().join(if cfg!(windows) {
+            "custom-core.exe"
+        } else {
+            "custom-core"
+        });
+        std::fs::write(&override_path, b"test executable").expect("override file");
+        let _restore = EnvRestore::set(CORE.env_var, &override_path);
+
+        assert_eq!(
+            resolved_installed_path(&CORE, "does-not-matter"),
+            Some(override_path)
+        );
+    }
 }

@@ -45,6 +45,7 @@ import {
 	ContextMenuTrigger,
 } from "@ryu/ui/components/context-menu.tsx";
 import { UNAVAILABLE_ROW_CLASS } from "@ryu/ui/components/status-badge.tsx";
+import type { VerificationDetails } from "@ryu/ui/components/verification-popover.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { PublisherTrustLevel } from "@ryuhq/protocol/publisher-trust";
 import { createContext, type ReactNode, useContext } from "react";
@@ -104,9 +105,11 @@ export default function StoreCatalogCard({
 	external = false,
 	layers,
 	stability,
+	membershipIncluded = false,
 	orgVerified,
 	orgVerifiedTier,
 	publisherTrust,
+	publisherVerification,
 	selected = false,
 	dimmed = false,
 	href,
@@ -166,6 +169,8 @@ export default function StoreCatalogCard({
 	/** How finished this listing is ("alpha", "beta", …). Absent/stable renders
 	 *  nothing — a finished listing must not sprout a badge. */
 	stability?: string | null;
+	/** The server says this paid app is included with recurring Membership. */
+	membershipIncluded?: boolean;
 	/** The PUBLISHING ORGANIZATION is identity-verified — the blue check beside the
 	 *  name. One of THREE separate axes, never to be merged: `reviewed` is "did Ryu
 	 *  vet this listing's CODE" (the amber "Not reviewed by Ryu" notice),
@@ -183,6 +188,8 @@ export default function StoreCatalogCard({
 	/** Complete publisher identity mark. When present, dotted is rendered as an
 	 * intentional community disclosure rather than hidden. */
 	publisherTrust?: PublisherTrustLevel | null;
+	/** Public evidence behind the publisher mark, when the catalog provides it. */
+	publisherVerification?: VerificationDetails | null;
 	selected?: boolean;
 	/** Dim the whole row — the listing exists but cannot be installed here (wrong
 	 *  platform, unmet requirement).
@@ -302,10 +309,16 @@ export default function StoreCatalogCard({
 						orgVerified={orgVerified}
 						publisherTrust={publisherTrust}
 						tier={orgVerifiedTier}
+						verificationDetails={publisherVerification}
 					/>
 					{stabilityLabel(stability) ? (
 						<span className="shrink-0 rounded-sm border border-amber-500/40 px-1 py-px text-[10px] text-amber-600 leading-tight">
 							{stabilityLabel(stability)}
+						</span>
+					) : null}
+					{membershipIncluded ? (
+						<span className="shrink-0 rounded-sm border border-primary/30 bg-primary/5 px-1 py-px text-[10px] text-primary leading-tight">
+							Included with Membership
 						</span>
 					) : null}
 					{layerBadges.slice(0, 2).map((label, index) => (

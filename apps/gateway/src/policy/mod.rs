@@ -112,6 +112,8 @@ struct ResolveResponse {
     #[serde(default)]
     organization: ResolveOrganization,
     #[serde(default)]
+    credential: ResolveCredential,
+    #[serde(default)]
     policy: ResolvePolicy,
     /// Whether this org bills through managed inference (credit wallet).
     #[serde(default)]
@@ -150,6 +152,37 @@ struct ResolveResponse {
     agent_overlays: std::collections::HashMap<String, crate::config::FirewallOverlay>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveCredential {
+    #[serde(default)]
+    purpose: String,
+    #[serde(default)]
+    allowed_operations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialUse {
+    NodeControl,
+    GatewayRelay,
+}
+
+impl CredentialUse {
+    fn purpose(self) -> &'static str {
+        match self {
+            Self::NodeControl => "node_control",
+            Self::GatewayRelay => "gateway_relay",
+        }
+    }
+
+    fn operation(self) -> &'static str {
+        match self {
+            Self::NodeControl => "node.resolve",
+            Self::GatewayRelay => "gateway.inference",
+        }
+    }
+}
+
 /// The `organization` field of the resolve response. We only need the id.
 #[derive(Debug, Default, Deserialize)]
 struct ResolveOrganization {
@@ -159,8 +192,22 @@ struct ResolveOrganization {
 
 impl ResolveResponse {
     /// Map the parsed response into a [`ResolvedOrg`], moving the policy rules out.
-    fn into_resolved(self) -> ResolvedOrg {
-        ResolvedOrg {
+    fn into_resolved(self, credential_use: CredentialUse) -> anyhow::Result<ResolvedOrg> {
+        let purpose_matches = self.credential.purpose == credential_use.purpose()
+            || self.credential.purpose == "legacy_dual";
+        if !purpose_matches
+            || !self
+                .credential
+                .allowed_operations
+                .iter()
+                .any(|operation| operation == credential_use.operation())
+        {
+            anyhow::bail!(
+                "control plane returned a credential without {} authority",
+                credential_use.operation()
+            );
+        }
+        Ok(ResolvedOrg {
             org_id: self.organization.id,
             managed_inference: self.managed_inference,
             remaining_budget_micro_usd: self.remaining_budget_micro_usd,
@@ -173,7 +220,7 @@ impl ResolveResponse {
                 firewall: self.firewall,
                 agent_overlays: self.agent_overlays,
             },
-        }
+        })
     }
 }
 
@@ -224,7 +271,13 @@ impl PolicySource {
     /// [`resolve_token`] mapping so the single-org startup path and the dynamic
     /// per-token path stay in sync.
     pub async fn fetch(&self, http: &reqwest::Client) -> anyhow::Result<EffectivePolicy> {
-        let resolved = resolve_token(&self.control_plane_url, http, &self.gateway_key).await?;
+        let resolved = resolve_token(
+            &self.control_plane_url,
+            http,
+            &self.gateway_key,
+            CredentialUse::NodeControl,
+        )
+        .await?;
         Ok(resolved.policy)
     }
 }
@@ -241,6 +294,7 @@ pub async fn resolve_token(
     control_plane_url: &str,
     http: &reqwest::Client,
     token: &str,
+    credential_use: CredentialUse,
 ) -> anyhow::Result<ResolvedOrg> {
     let endpoint = format!(
         "{}/api/control-plane/gateway/resolve",
@@ -263,7 +317,7 @@ pub async fn resolve_token(
         anyhow::bail!("control plane returned HTTP {}", resp.status());
     }
     let parsed: ResolveResponse = resp.json().await?;
-    Ok(parsed.into_resolved())
+    parsed.into_resolved(credential_use)
 }
 
 /// This machine's IANA time zone, or `UTC` when it cannot be determined.
@@ -400,7 +454,12 @@ mod tests {
     fn parses_resolve_response_shape() {
         let body = serde_json::json!({
             "organization": { "id": "o1", "name": "Acme", "slug": "acme" },
-            "credential": { "id": "cred_1", "keyPrefix": "rgw_abc" },
+            "credential": {
+                "id": "cred_1",
+                "keyPrefix": "rgw_abc",
+                "purpose": "gateway_relay",
+                "allowedOperations": ["gateway.inference"]
+            },
             "policy": {
                 "rules": {
                     "lockedGuardrails": ["pii", "secrets"],
@@ -419,7 +478,7 @@ mod tests {
         assert_eq!(parsed.policy.rules.allowed_regions, vec!["eu"]);
 
         // The previously-dropped fields are now read into the ResolvedOrg.
-        let resolved = parsed.into_resolved();
+        let resolved = parsed.into_resolved(CredentialUse::GatewayRelay).unwrap();
         assert_eq!(resolved.org_id, "o1");
         assert!(resolved.managed_inference);
         assert_eq!(resolved.remaining_budget_micro_usd, Some(1_250_000));
@@ -431,12 +490,17 @@ mod tests {
         // A BYOK/self-hosted org: no managed inference, uncapped budget (null).
         let body = serde_json::json!({
             "organization": { "id": "o2" },
+            "credential": {
+                "purpose": "node_control",
+                "allowedOperations": ["node.resolve"]
+            },
             "policy": { "rules": {} },
             "remainingBudgetMicroUsd": null
         });
         let resolved: ResolvedOrg = serde_json::from_value::<ResolveResponse>(body)
             .unwrap()
-            .into_resolved();
+            .into_resolved(CredentialUse::NodeControl)
+            .unwrap();
         assert_eq!(resolved.org_id, "o2");
         assert!(!resolved.managed_inference);
         assert_eq!(resolved.remaining_budget_micro_usd, None);
@@ -453,6 +517,10 @@ mod tests {
         // decomposition plus per-pool restricted grant remainders.
         let body = serde_json::json!({
             "organization": { "id": "o3" },
+            "credential": {
+                "purpose": "gateway_relay",
+                "allowedOperations": ["gateway.inference"]
+            },
             "policy": { "rules": {} },
             "managedInference": true,
             "remainingBudgetMicroUsd": 52_000_000,
@@ -461,7 +529,8 @@ mod tests {
         });
         let resolved: ResolvedOrg = serde_json::from_value::<ResolveResponse>(body)
             .unwrap()
-            .into_resolved();
+            .into_resolved(CredentialUse::GatewayRelay)
+            .unwrap();
         assert_eq!(resolved.remaining_budget_micro_usd, Some(52_000_000));
         assert_eq!(resolved.unrestricted_budget_micro_usd, Some(2_000_000));
         // Map KEYS survive `rename_all = "camelCase"` verbatim — that rename
@@ -490,13 +559,32 @@ mod tests {
         // bricking fresh nodes. This test fails loudly if that regression lands.
         let body = serde_json::json!({
             "organization": { "id": "o3", "name": "Acme" },
+            "credential": {
+                "purpose": "gateway_relay",
+                "allowedOperations": ["gateway.inference"]
+            },
             "policy": { "rules": {} },
             "credentialRotation": { "token": "rgw_durable_should_be_ignored" }
         });
         let resolved = serde_json::from_value::<ResolveResponse>(body)
             .expect("fleet ResolveResponse must tolerate an unknown credentialRotation field")
-            .into_resolved();
+            .into_resolved(CredentialUse::GatewayRelay)
+            .unwrap();
         assert_eq!(resolved.org_id, "o3");
+    }
+
+    #[test]
+    fn relay_resolution_rejects_node_control_credentials() {
+        let body = serde_json::json!({
+            "organization": { "id": "o3" },
+            "credential": {
+                "purpose": "node_control",
+                "allowedOperations": ["node.resolve"]
+            },
+            "policy": { "rules": {} }
+        });
+        let parsed = serde_json::from_value::<ResolveResponse>(body).unwrap();
+        assert!(parsed.into_resolved(CredentialUse::GatewayRelay).is_err());
     }
 
     #[test]

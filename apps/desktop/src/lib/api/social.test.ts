@@ -86,7 +86,9 @@ describe("resolveSocialPath", () => {
 		// A climb that stays inside the mount is legal — but what comes back is what
 		// the parser resolved, never the frame's raw string. Handing the raw string
 		// downstream is what let the two layers disagree in the first place.
-		expect(resolveSocialPath("/posts/%2e%2e/drafts")).toBe("/api/social/drafts");
+		expect(resolveSocialPath("/posts/%2e%2e/drafts")).toBe(
+			"/api/social/drafts"
+		);
 		expect(resolveSocialPath("/a/b/../../queue?limit=5")).toBe(
 			"/api/social/queue?limit=5"
 		);

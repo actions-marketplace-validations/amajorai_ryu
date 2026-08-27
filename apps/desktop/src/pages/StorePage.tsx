@@ -6,6 +6,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { StoreComingSoon } from "@ryu/blocks/desktop/store";
+import MarketplaceHelpDialog from "@ryu/marketplace/catalog/chrome/marketplace-help-dialog";
 import {
 	MARKETPLACE_SECTION_TABS,
 	MARKETPLACE_SECTION_VALUES,
@@ -383,6 +384,7 @@ export default function StorePage({
 											Create a time-limited private package code
 										</TooltipContent>
 									</Tooltip>
+									<MarketplaceHelpDialog />
 								</>
 							}
 						>

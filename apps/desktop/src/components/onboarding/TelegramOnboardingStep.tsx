@@ -74,18 +74,52 @@ function ContinueRow({
 	);
 }
 
+function TelegramLoginOption({
+	onOpen,
+	opened,
+}: {
+	onOpen: () => void;
+	opened: boolean;
+}) {
+	return (
+		<div className="space-y-2 border-t pt-3">
+			<div>
+				<p className="font-medium text-sm">Want fewer setup steps?</p>
+				<p className="mt-1 text-muted-foreground text-xs">
+					Use Ryu's hosted bot instead. Log in with Telegram and allow Ryu to
+					message you directly — no new bot to create. This uses Ryu Cloud and
+					does not add a local Gateway channel.
+				</p>
+			</div>
+			<Button onClick={onOpen} size="sm" variant="outline">
+				Log in with Telegram
+			</Button>
+			{opened ? (
+				<p className="text-muted-foreground text-xs" role="status">
+					Telegram Login opened in your browser. Finish there, then open Ryu's
+					bot when it is ready.
+				</p>
+			) : null}
+		</div>
+	);
+}
+
 export function TelegramOnboardingStep({
 	existingChannelCount,
 	onContinue,
 	onSkip,
+	onUseTelegramLogin,
 }: {
 	/** `null` means the duplicate check failed; fail closed and do not create one. */
 	existingChannelCount: number | null;
 	onContinue: () => void;
 	onSkip: () => void;
+	/** Open the hosted-bot Telegram Login hand-off in the user's browser. */
+	onUseTelegramLogin: () => void;
 }) {
 	const [ready, setReady] = useState(false);
 	const [unsupported, setUnsupported] = useState<string | null>(null);
+	const [telegramLoginOpened, setTelegramLoginOpened] = useState(false);
 
 	if (existingChannelCount === null) {
 		return (
@@ -183,6 +217,13 @@ export function TelegramOnboardingStep({
 					<p className="text-muted-foreground text-sm">
 						You can add a Telegram bot later from Gateway → Channels.
 					</p>
+					<TelegramLoginOption
+						onOpen={() => {
+							onUseTelegramLogin();
+							setTelegramLoginOpened(true);
+						}}
+						opened={telegramLoginOpened}
+					/>
 					<ContinueRow
 						continueLabel="Continue"
 						onContinue={onContinue}
@@ -215,6 +256,13 @@ export function TelegramOnboardingStep({
 					form={TELEGRAM_FORM}
 					onReady={() => setReady(true)}
 					onUnsupported={setUnsupported}
+				/>
+				<TelegramLoginOption
+					onOpen={() => {
+						onUseTelegramLogin();
+						setTelegramLoginOpened(true);
+					}}
+					opened={telegramLoginOpened}
 				/>
 				<ContinueRow continueLabel="Skip for now" onContinue={onSkip} />
 			</SettingsCard>

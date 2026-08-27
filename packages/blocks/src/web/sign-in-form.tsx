@@ -2,6 +2,12 @@
 
 import { ViewIcon, ViewOffSlashIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import {
+	Accordion,
+	AccordionContent,
+	AccordionItem,
+	AccordionTrigger,
+} from "@ryu/ui/components/accordion.tsx";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -290,29 +296,6 @@ export default function SignInForm({
 				</form>
 
 				<div className="flex flex-col gap-4 text-center">
-					{onPasskey ? (
-						<div className="relative">
-							<Button
-								className="w-full gap-3"
-								disabled={submitting}
-								onClick={onPasskey}
-								size="lg"
-								variant="secondary"
-							>
-								<Fingerprint className="h-5 w-5" />
-								{passkeyLoading ? "Checking passkey..." : "Use a passkey"}
-							</Button>
-							{lastUsedMethod === "passkey" ? (
-								<Badge
-									className="absolute -top-2 -right-2 text-[10px]"
-									variant="secondary"
-								>
-									Last used
-								</Badge>
-							) : null}
-						</div>
-					) : null}
-
 					<div className="relative">
 						<Button
 							className="w-full gap-3"
@@ -334,23 +317,76 @@ export default function SignInForm({
 						) : null}
 					</div>
 
-					{onSSO ? (
-						<Button
-							className="w-full gap-3"
-							disabled={submitting}
-							onClick={() => onSSO(email)}
-							size="lg"
-							variant="secondary"
-						>
-							{ssoLoading
-								? "Redirecting to your identity provider..."
-								: "Continue with SSO"}
-						</Button>
-					) : null}
+					<Accordion defaultValue={[]}>
+						<AccordionItem value="more-options">
+							<AccordionTrigger>More options</AccordionTrigger>
+							<AccordionContent>
+								<div className="flex flex-col gap-4">
+									{onPasskey ? (
+										<div className="relative">
+											<Button
+												className="w-full gap-3"
+												disabled={submitting}
+												onClick={onPasskey}
+												size="lg"
+												variant="secondary"
+											>
+												<Fingerprint className="h-5 w-5" />
+												{passkeyLoading
+													? "Checking passkey..."
+													: "Use a passkey"}
+											</Button>
+											{lastUsedMethod === "passkey" ? (
+												<Badge
+													className="absolute -top-2 -right-2 text-[10px]"
+													variant="secondary"
+												>
+													Last used
+												</Badge>
+											) : null}
+										</div>
+									) : null}
 
-					<Button onClick={onToggleMagicLink} size="lg" variant="secondary">
-						{useMagicLink ? "Use password instead" : "Send me a link"}
-					</Button>
+									{onSSO ? (
+										<Button
+											className="w-full gap-3"
+											disabled={submitting}
+											onClick={() => onSSO(email)}
+											size="lg"
+											variant="secondary"
+										>
+											{ssoLoading
+												? "Redirecting to your identity provider..."
+												: "Continue with SSO"}
+										</Button>
+									) : null}
+
+									<Button
+										onClick={onToggleMagicLink}
+										size="lg"
+										variant="secondary"
+									>
+										{useMagicLink ? "Use password instead" : "Send me a link"}
+									</Button>
+
+									{!useMagicLink && showForgotPassword ? (
+										<>
+											<FieldSeparator className="*:data-[slot=field-separator-content]:bg-background">
+												Or
+											</FieldSeparator>
+											<Button
+												className="mx-auto text-muted-foreground"
+												onClick={onForgotPassword}
+												variant="ghost"
+											>
+												Forgot your password?
+											</Button>
+										</>
+									) : null}
+								</div>
+							</AccordionContent>
+						</AccordionItem>
+					</Accordion>
 
 					<Button
 						className="mx-auto text-muted-foreground"
@@ -359,21 +395,6 @@ export default function SignInForm({
 					>
 						Don&apos;t have an account? Create one
 					</Button>
-
-					{!useMagicLink && showForgotPassword ? (
-						<>
-							<FieldSeparator className="*:data-[slot=field-separator-content]:bg-background">
-								Or
-							</FieldSeparator>
-							<Button
-								className="mx-auto text-muted-foreground"
-								onClick={onForgotPassword}
-								variant="ghost"
-							>
-								Forgot your password?
-							</Button>
-						</>
-					) : null}
 				</div>
 
 				<div className="text-center text-muted-foreground text-sm">

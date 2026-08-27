@@ -460,7 +460,7 @@ function TabsLayoutMenuContent({
 	}, [open]);
 
 	return (
-		<Command className="min-h-0 w-full" shouldFilter>
+		<Command className="min-h-0 w-full p-0" shouldFilter>
 			<CommandInput
 				aria-label="Search tabs"
 				autoFocus
@@ -485,8 +485,9 @@ function TabsLayoutMenuContent({
 								aria-current={isActive ? "page" : undefined}
 								className={cn(
 									"relative min-h-8 gap-1.5",
-									isHidden && "text-muted-foreground"
+									isHidden && "text-muted-foreground opacity-50"
 								)}
+								data-tabs-menu-hidden={isHidden ? "true" : "false"}
 								data-tabs-menu-key={key}
 								key={key}
 								onDragOver={(event) => {
@@ -545,6 +546,15 @@ function TabsLayoutMenuContent({
 									/>
 								</button>
 								<span className="min-w-0 flex-1 truncate">{item.label}</span>
+								{isHidden && (
+									<HugeiconsIcon
+										aria-hidden
+										className="size-3.5 shrink-0"
+										data-tabs-menu-hidden-indicator="true"
+										icon={ViewOffSlashIcon}
+										strokeWidth={2}
+									/>
+								)}
 								{isActive && <span className="sr-only">Active</span>}
 								<DropdownMenu>
 									<DropdownMenuTrigger
@@ -641,26 +651,23 @@ function TabsMoreMenu({
 		<DropdownMenu onOpenChange={(nextOpen) => setOpen(nextOpen)} open={open}>
 			<DropdownMenuTrigger
 				aria-hidden={!showTrigger}
-				aria-label="Show all tabs"
+				aria-label={
+					moreCount > 0 ? `Show ${moreCount} more tabs` : "Show more tabs"
+				}
 				className={cn(
-					"inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-transparent px-2.5 font-medium text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/30",
+					tabsTriggerClassName,
+					"flex-initial shrink-0 text-muted-foreground!",
 					!showTrigger && "pointer-events-none invisible absolute"
 				)}
 				data-tabs-more-trigger="true"
 				data-tabs-more-visible={showTrigger ? "true" : "false"}
 				tabIndex={showTrigger ? undefined : -1}
 			>
-				<HugeiconsIcon
-					aria-hidden
-					className="size-3.5"
-					icon={MoreHorizontalIcon}
-					strokeWidth={2}
-				/>
 				<span className="max-w-24 truncate">
-					{moreCount > 0 ? `${moreCount} more…` : "More"}
+					{moreCount > 0 ? `${moreCount} more` : "More"}
 				</span>
 			</DropdownMenuTrigger>
-			<DropdownMenuContent align="end" className="w-80 p-1">
+			<DropdownMenuContent align="end" className="w-80 rounded-xl p-0">
 				<TabsLayoutMenuContent
 					activeKey={activeKey}
 					drag={drag}
@@ -771,7 +778,7 @@ function ManagedTabTrigger({
 	return (
 		<ContextMenu onOpenChange={(nextOpen) => setOpen(nextOpen)} open={open}>
 			<ContextMenuTrigger render={managedTrigger} />
-			<ContextMenuContent className="w-80 p-1">
+			<ContextMenuContent className="w-80 p-0">
 				<TabsLayoutMenuContent
 					activeKey={activeKey}
 					drag={drag}
@@ -1450,62 +1457,43 @@ const TabsList = forwardRef<HTMLDivElement, TabsListProps>(function TabsList(
 function TabsTrigger({ className, ...props }: TabsPrimitive.Tab.Props) {
 	return (
 		<TabsPrimitive.Tab
-			className={cn(
-				"relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-full border border-transparent! px-3 py-1 font-medium text-foreground/60 text-sm transition-all hover:text-foreground focus-visible:border-ring focus-visible:outline-1 focus-visible:outline-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2 aria-disabled:pointer-events-none aria-disabled:opacity-50 group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start group-data-vertical/tabs:rounded-2xl group-data-vertical/tabs:px-3 group-data-vertical/tabs:py-1.5 dark:text-muted-foreground dark:hover:text-foreground [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
-				"group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:data-active:bg-transparent dark:group-data-[variant=line]/tabs-list:data-active:border-transparent dark:group-data-[variant=line]/tabs-list:data-active:bg-transparent",
-				// The rule is the trigger's own `::before`, so the label sits under it
-				// with no extra element. `whitespace-normal` because a three-word step
-				// clipped to "Reserve your han…" in a narrow column loses the one
-				// instruction it exists to give — the rules are what align the strip,
-				// so a second line only makes it taller.
-				"group-data-[variant=stepper]/tabs-list:h-auto group-data-[variant=stepper]/tabs-list:flex-col group-data-[variant=stepper]/tabs-list:items-start group-data-[variant=stepper]/tabs-list:gap-2 group-data-[variant=stepper]/tabs-list:whitespace-normal group-data-[variant=stepper]/tabs-list:rounded-sm group-data-[variant=stepper]/tabs-list:px-0 group-data-[variant=stepper]/tabs-list:py-0 group-data-[variant=stepper]/tabs-list:text-left group-data-[variant=stepper]/tabs-list:text-muted-foreground/60 group-data-[variant=stepper]/tabs-list:text-xs",
-				"group-data-[variant=stepper]/tabs-list:before:h-1 group-data-[variant=stepper]/tabs-list:before:w-full group-data-[variant=stepper]/tabs-list:before:rounded-full group-data-[variant=stepper]/tabs-list:before:bg-border group-data-[variant=stepper]/tabs-list:before:transition-colors group-data-[variant=stepper]/tabs-list:before:content-['']",
-				"group-data-[variant=stepper]/tabs-list:data-active:bg-transparent! group-data-[variant=stepper]/tabs-list:data-active:text-foreground group-data-[variant=stepper]/tabs-list:data-active:after:opacity-0 group-data-[variant=stepper]/tabs-list:data-active:before:bg-foreground",
-				// Copied from the original repo's `pills` trigger, minus the outline:
-				// `rounded-full px-4 py-2 text-sm`, a hover wash, and a filled black
-				// pill for the active tab. An inactive pill is a label and its padding,
-				// nothing else — the base trigger above pins `border-transparent!`, so
-				// leaving the border undeclared here is what keeps it invisible.
-				//
-				// `pills-lg` deliberately resolves to the SAME box. It used to fork the
-				// size (`h-14!`, then wider sides), and every attempt to make the large
-				// one look right made it look like a blob instead. The prefix match
-				// covers both names so the two cannot drift again.
-				"group-data-[variant^=pills]/tabs-list:h-auto group-data-[variant^=pills]/tabs-list:flex-initial group-data-[variant^=pills]/tabs-list:gap-2 group-data-[variant^=pills]/tabs-list:rounded-full group-data-[variant^=pills]/tabs-list:px-4 group-data-[variant^=pills]/tabs-list:py-2 group-data-[variant^=pills]/tabs-list:text-foreground group-data-[variant^=pills]/tabs-list:text-sm group-data-[variant^=pills]/tabs-list:hover:bg-black/5 group-data-[variant^=pills]/tabs-list:hover:text-foreground dark:group-data-[variant^=pills]/tabs-list:text-foreground dark:group-data-[variant^=pills]/tabs-list:hover:bg-white/10",
-				// `text-white!` / `text-black!` rather than plain: the unguarded
-				// `data-active:text-foreground` on the line below outranks them in
-				// Tailwind's output order, which painted a pills list's active label
-				// near-black on its own black pill — unreadable. The neighbouring
-				// background rules already carry `!` for the same reason.
-				"group-data-[variant^=pills]/tabs-list:data-active:border-transparent! group-data-[variant^=pills]/tabs-list:data-active:bg-black! group-data-[variant^=pills]/tabs-list:data-active:text-white! dark:group-data-[variant^=pills]/tabs-list:data-active:bg-white! dark:group-data-[variant^=pills]/tabs-list:data-active:text-black!",
-				"group-data-[variant=text]/tabs-list:h-auto group-data-[variant=text]/tabs-list:flex-initial group-data-[variant=text]/tabs-list:gap-1 group-data-[variant=text]/tabs-list:rounded-none group-data-[variant=text]/tabs-list:bg-transparent! group-data-[variant=text]/tabs-list:px-0 group-data-[variant=text]/tabs-list:py-0 group-data-[variant=text]/tabs-list:text-base group-data-[variant=text]/tabs-list:text-muted-foreground group-data-[variant=text]/tabs-list:hover:bg-transparent! group-data-[variant=text]/tabs-list:hover:text-foreground dark:group-data-[variant=text]/tabs-list:text-muted-foreground dark:group-data-[variant=text]/tabs-list:hover:text-foreground",
-				"group-data-[variant=text]/tabs-list:data-active:border-transparent! group-data-[variant=text]/tabs-list:data-active:bg-transparent! group-data-[variant=text]/tabs-list:data-active:text-foreground! dark:group-data-[variant=text]/tabs-list:data-active:bg-transparent! dark:group-data-[variant=text]/tabs-list:data-active:text-foreground!",
-				"group-data-[variant=muted-pills]/tabs-list:h-auto group-data-[variant=muted-pills]/tabs-list:flex-initial group-data-[variant=muted-pills]/tabs-list:gap-1 group-data-[variant=muted-pills]/tabs-list:rounded-full group-data-[variant=muted-pills]/tabs-list:px-1 group-data-[variant=muted-pills]/tabs-list:py-1 group-data-[variant=muted-pills]/tabs-list:text-muted-foreground group-data-[variant=muted-pills]/tabs-list:text-xs group-data-[variant=muted-pills]/tabs-list:hover:bg-muted/60 group-data-[variant=muted-pills]/tabs-list:hover:text-foreground",
-				"group-data-[variant=muted-pills]/tabs-list:data-active:border-transparent! group-data-[variant=muted-pills]/tabs-list:data-active:bg-muted! group-data-[variant=muted-pills]/tabs-list:data-active:text-foreground! dark:group-data-[variant=muted-pills]/tabs-list:data-active:bg-muted!",
-				"data-active:bg-background data-active:text-foreground dark:data-active:border-input dark:data-active:bg-input/30 dark:data-active:text-foreground",
-				// Segmented: the sliding TabsIndicator owns the active background, so the
-				// trigger itself stays transparent and only animates its text colour. It
-				// sits above the indicator (z-10) so the label reads on top of the pill.
-				"group-data-[variant=segmented]/tabs-list:z-10 group-data-[variant=segmented]/tabs-list:bg-transparent! group-data-[variant=segmented]/tabs-list:text-foreground/60 group-data-[variant=segmented]/tabs-list:data-active:border-transparent! group-data-[variant=segmented]/tabs-list:data-active:bg-transparent! group-data-[variant=segmented]/tabs-list:data-active:text-foreground group-data-[variant=segmented]/tabs-list:hover:text-foreground dark:group-data-[variant=segmented]/tabs-list:data-active:bg-transparent!",
-				"after:absolute after:bg-foreground after:opacity-0 after:transition-opacity group-data-horizontal/tabs:after:inset-x-0 group-data-vertical/tabs:after:inset-y-0 group-data-vertical/tabs:after:-right-1 group-data-horizontal/tabs:after:bottom-[-5px] group-data-horizontal/tabs:after:h-0.5 group-data-vertical/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-active:after:opacity-100",
-				// When a sliding TabsIndicator is present in the list, hand the active
-				// visual (background / border / underline) over to it and keep the
-				// trigger's own only its text colour. The `:has()` here outranks the
-				// per-variant active-bg rules above, so it wins even against their `!`.
-				//
-				// `z-10` for the same reason `segmented` carries it, and it belongs
-				// here rather than on that one variant: the indicator is absolutely
-				// positioned and the trigger is not, so the indicator paints OVER the
-				// label whatever the DOM order — a `pills` list with an indicator drew
-				// its active tab as unreadable dark-on-black.
-				"group-has-[[data-slot=tabs-indicator]]/tabs-list:z-10 group-has-[[data-slot=tabs-indicator]]/tabs-list:data-active:border-transparent! group-has-[[data-slot=tabs-indicator]]/tabs-list:data-active:bg-transparent! group-has-[[data-slot=tabs-indicator]]/tabs-list:data-active:hover:bg-transparent! group-has-[[data-slot=tabs-indicator]]/tabs-list:data-active:after:opacity-0",
-				className
-			)}
+			className={cn(tabsTriggerClassName, className)}
 			data-slot="tabs-trigger"
 			{...props}
 		/>
 	);
 }
+
+const tabsTriggerClassName = cn(
+	"relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-full border border-transparent! px-3 py-1 font-medium text-foreground/60 text-sm transition-all hover:text-foreground focus-visible:border-ring focus-visible:outline-1 focus-visible:outline-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2 aria-disabled:pointer-events-none aria-disabled:opacity-50 group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start group-data-vertical/tabs:rounded-2xl group-data-vertical/tabs:px-3 group-data-vertical/tabs:py-1.5 dark:text-muted-foreground dark:hover:text-foreground [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+	"group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:data-active:bg-transparent dark:group-data-[variant=line]/tabs-list:data-active:border-transparent dark:group-data-[variant=line]/tabs-list:data-active:bg-transparent",
+	// The rule is the trigger's own `::before`, so the label sits under it
+	// with no extra element. `whitespace-normal` because a three-word step
+	// clipped to "Reserve your han…" in a narrow column loses the one
+	// instruction it exists to give — the rules are what align the strip,
+	// so a second line only makes it taller.
+	"group-data-[variant=stepper]/tabs-list:h-auto group-data-[variant=stepper]/tabs-list:flex-col group-data-[variant=stepper]/tabs-list:items-start group-data-[variant=stepper]/tabs-list:gap-2 group-data-[variant=stepper]/tabs-list:whitespace-normal group-data-[variant=stepper]/tabs-list:rounded-sm group-data-[variant=stepper]/tabs-list:px-0 group-data-[variant=stepper]/tabs-list:py-0 group-data-[variant=stepper]/tabs-list:text-left group-data-[variant=stepper]/tabs-list:text-muted-foreground/60 group-data-[variant=stepper]/tabs-list:text-xs",
+	"group-data-[variant=stepper]/tabs-list:before:h-1 group-data-[variant=stepper]/tabs-list:before:w-full group-data-[variant=stepper]/tabs-list:before:rounded-full group-data-[variant=stepper]/tabs-list:before:bg-border group-data-[variant=stepper]/tabs-list:before:transition-colors group-data-[variant=stepper]/tabs-list:before:content-['']",
+	"group-data-[variant=stepper]/tabs-list:data-active:bg-transparent! group-data-[variant=stepper]/tabs-list:data-active:text-foreground group-data-[variant=stepper]/tabs-list:data-active:after:opacity-0 group-data-[variant=stepper]/tabs-list:data-active:before:bg-foreground",
+	// `pills-lg` deliberately resolves to the same box as `pills`. The prefix
+	// match covers both names so the two cannot drift again.
+	"group-data-[variant^=pills]/tabs-list:h-auto group-data-[variant^=pills]/tabs-list:flex-initial group-data-[variant^=pills]/tabs-list:gap-2 group-data-[variant^=pills]/tabs-list:rounded-full group-data-[variant^=pills]/tabs-list:px-4 group-data-[variant^=pills]/tabs-list:py-2 group-data-[variant^=pills]/tabs-list:text-foreground group-data-[variant^=pills]/tabs-list:text-sm group-data-[variant^=pills]/tabs-list:hover:bg-black/5 group-data-[variant^=pills]/tabs-list:hover:text-foreground dark:group-data-[variant^=pills]/tabs-list:text-foreground dark:group-data-[variant^=pills]/tabs-list:hover:bg-white/10",
+	"group-data-[variant^=pills]/tabs-list:data-active:border-transparent! group-data-[variant^=pills]/tabs-list:data-active:bg-black! group-data-[variant^=pills]/tabs-list:data-active:text-white! dark:group-data-[variant^=pills]/tabs-list:data-active:bg-white! dark:group-data-[variant^=pills]/tabs-list:data-active:text-black!",
+	"group-data-[variant=text]/tabs-list:h-auto group-data-[variant=text]/tabs-list:flex-initial group-data-[variant=text]/tabs-list:gap-1 group-data-[variant=text]/tabs-list:rounded-none group-data-[variant=text]/tabs-list:bg-transparent! group-data-[variant=text]/tabs-list:px-0 group-data-[variant=text]/tabs-list:py-0 group-data-[variant=text]/tabs-list:text-base group-data-[variant=text]/tabs-list:text-muted-foreground group-data-[variant=text]/tabs-list:hover:bg-transparent! group-data-[variant=text]/tabs-list:hover:text-foreground dark:group-data-[variant=text]/tabs-list:text-muted-foreground dark:group-data-[variant=text]/tabs-list:hover:text-foreground",
+	"group-data-[variant=text]/tabs-list:data-active:border-transparent! group-data-[variant=text]/tabs-list:data-active:bg-transparent! group-data-[variant=text]/tabs-list:data-active:text-foreground! dark:group-data-[variant=text]/tabs-list:data-active:bg-transparent! dark:group-data-[variant=text]/tabs-list:data-active:text-foreground!",
+	"group-data-[variant=muted-pills]/tabs-list:h-auto group-data-[variant=muted-pills]/tabs-list:flex-initial group-data-[variant=muted-pills]/tabs-list:gap-1 group-data-[variant=muted-pills]/tabs-list:rounded-full group-data-[variant=muted-pills]/tabs-list:px-1 group-data-[variant=muted-pills]/tabs-list:py-1 group-data-[variant=muted-pills]/tabs-list:text-muted-foreground group-data-[variant=muted-pills]/tabs-list:text-xs group-data-[variant=muted-pills]/tabs-list:hover:bg-muted/60 group-data-[variant=muted-pills]/tabs-list:hover:text-foreground",
+	"group-data-[variant=muted-pills]/tabs-list:data-active:border-transparent! group-data-[variant=muted-pills]/tabs-list:data-active:bg-muted! group-data-[variant=muted-pills]/tabs-list:data-active:text-foreground! dark:group-data-[variant=muted-pills]/tabs-list:data-active:bg-muted!",
+	"data-active:bg-background data-active:text-foreground dark:data-active:border-input dark:data-active:bg-input/30 dark:data-active:text-foreground",
+	// Segmented: the sliding TabsIndicator owns the active background, so the
+	// trigger itself stays transparent and only animates its text colour. It
+	// sits above the indicator (z-10) so the label reads on top of the pill.
+	"group-data-[variant=segmented]/tabs-list:z-10 group-data-[variant=segmented]/tabs-list:bg-transparent! group-data-[variant=segmented]/tabs-list:text-foreground/60 group-data-[variant=segmented]/tabs-list:data-active:border-transparent! group-data-[variant=segmented]/tabs-list:data-active:bg-transparent! group-data-[variant=segmented]/tabs-list:data-active:text-foreground group-data-[variant=segmented]/tabs-list:hover:text-foreground dark:group-data-[variant=segmented]/tabs-list:data-active:bg-transparent!",
+	"after:absolute after:bg-foreground after:opacity-0 after:transition-opacity group-data-horizontal/tabs:after:inset-x-0 group-data-vertical/tabs:after:inset-y-0 group-data-vertical/tabs:after:-right-1 group-data-horizontal/tabs:after:bottom-[-5px] group-data-horizontal/tabs:after:h-0.5 group-data-vertical/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-active:after:opacity-100",
+	// When a sliding TabsIndicator is present in the list, hand the active
+	// visual (background / border / underline) over to it and keep the
+	// trigger's own only its text colour.
+	"group-has-[[data-slot=tabs-indicator]]/tabs-list:z-10 group-has-[[data-slot=tabs-indicator]]/tabs-list:data-active:border-transparent! group-has-[[data-slot=tabs-indicator]]/tabs-list:data-active:bg-transparent! group-has-[[data-slot=tabs-indicator]]/tabs-list:data-active:hover:bg-transparent! group-has-[[data-slot=tabs-indicator]]/tabs-list:data-active:after:opacity-0"
+);
 
 /**
  * Sliding active-tab indicator (transitions.dev "tabs sliding", 16). Base UI

@@ -34,6 +34,7 @@ import {
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ImageLightbox } from "@ryu/blocks/desktop/agent-elements/image-lightbox";
+import VerifiedBadge from "@ryu/marketplace/catalog/chrome/verified-badge";
 import {
 	ListingAsideCard,
 	ListingDetailShell,
@@ -267,6 +268,15 @@ function DetailBody({
 					)}
 					icon={<DetailLogo iconUrl={iconUrl} name={name} />}
 					name={name}
+					nameBadge={
+						<VerifiedBadge
+							orgVerified={detail?.orgVerified}
+							publisherTrust={detail?.publisherTrust}
+							tier={detail?.orgVerifiedTier}
+							tone="hero"
+							verificationDetails={detail?.publisherVerification}
+						/>
+					}
 					tagline={detail?.tagline}
 				/>
 			}

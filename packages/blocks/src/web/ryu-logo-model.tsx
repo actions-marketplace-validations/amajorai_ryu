@@ -3,6 +3,7 @@
 
 import { OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
+import { Logo } from "@ryu/ui/components/logo.tsx";
 import { cn } from "@ryu/ui/lib/utils";
 import { useEffect, useMemo, useState } from "react";
 import * as THREE from "three";
@@ -10,28 +11,52 @@ import * as THREE from "three";
 import "./ryu-logo-model.css";
 
 const RYU_MODEL_SCALE = 0.22;
-const RYU_BODY_DEPTH = 1.45;
+const RYU_MASK_SIZE = 512;
+const RYU_MASK_PADDING = 0.1;
+const RYU_CURVE_SEGMENTS = 64;
+const RYU_MODEL_COLOR = "#929292";
+const RYU_EYE_CENTER_Y = 10;
+const RYU_EYE_RADIUS_X = 1.5;
+const RYU_EYE_RADIUS_Y = 3;
 
 /**
  * The same Ryu outline used by the shared logo, mapped into Three's Y-up
- * coordinate system. The eye paths are holes in the extrusion, so the
+ * coordinate system. The eye paths are holes in the volume, so the
  * background really passes through them instead of being painted over.
  */
 function createRyuShape() {
 	const shape = new THREE.Shape();
 
-	shape.moveTo(12, 0);
-	shape.bezierCurveTo(21.2, 0, 24.9, 4.8, 24.4, 14.6);
-	shape.bezierCurveTo(24.1, 23.7, 12.8, 27.7, 8.8, 18.6);
-	shape.bezierCurveTo(6.6, 12.9, 9.9, 10.7, 5.9, 6);
-	shape.bezierCurveTo(5, 4.9, 4.1, 4, 3.2, 2.9);
-	shape.bezierCurveTo(2, 1.6, 3.9, 0.7, 5.1, 0.7);
-	shape.bezierCurveTo(7.4, 0.7, 9.7, 0, 12, 0);
+	shape.moveTo(12, 24);
+	shape.bezierCurveTo(21.2, 24, 24.9, 19.2, 24.4, 9.4);
+	shape.bezierCurveTo(24.1, 0.3, 12.8, -3.7, 8.8, 5.4);
+	shape.bezierCurveTo(6.6, 11.1, 9.9, 13.3, 5.9, 18);
+	shape.bezierCurveTo(5, 19.1, 4.1, 20, 3.2, 21.1);
+	shape.bezierCurveTo(2, 22.4, 3.9, 23.3, 5.1, 23.3);
+	shape.bezierCurveTo(7.4, 23.3, 9.7, 24, 12, 24);
 
 	const leftEye = new THREE.Path();
-	leftEye.absellipse(15, 14, 1.5, 3, 0, Math.PI * 2, true, 0);
+	leftEye.absellipse(
+		15,
+		RYU_EYE_CENTER_Y,
+		RYU_EYE_RADIUS_X,
+		RYU_EYE_RADIUS_Y,
+		0,
+		Math.PI * 2,
+		true,
+		0
+	);
 	const rightEye = new THREE.Path();
-	rightEye.absellipse(19, 14, 1.5, 3, 0, Math.PI * 2, true, 0);
+	rightEye.absellipse(
+		19,
+		RYU_EYE_CENTER_Y,
+		RYU_EYE_RADIUS_X,
+		RYU_EYE_RADIUS_Y,
+		0,
+		Math.PI * 2,
+		true,
+		0
+	);
 	shape.holes.push(leftEye, rightEye);
 
 	return shape;
@@ -39,44 +64,206 @@ function createRyuShape() {
 
 const RYU_SHAPE = createRyuShape();
 
-function RyuLogoMesh({ isDark }: { isDark: boolean }) {
-	const geometry = useMemo(() => {
-		const extruded = new THREE.ExtrudeGeometry(RYU_SHAPE, {
-			bevelEnabled: true,
-			bevelSegments: 4,
-			bevelSize: 0.16,
-			bevelThickness: 0.2,
-			curveSegments: 32,
-			depth: RYU_BODY_DEPTH,
-		});
-		extruded.center();
-		extruded.computeVertexNormals();
-		return extruded;
-	}, []);
+function isPointInsidePolygon(
+	x: number,
+	y: number,
+	polygon: readonly THREE.Vector2[]
+) {
+	let inside = false;
 
-	useEffect(() => () => geometry.dispose(), [geometry]);
+	for (
+		let index = 0, previous = polygon.length - 1;
+		index < polygon.length;
+		previous = index++
+	) {
+		const currentPoint = polygon[index];
+		const previousPoint = polygon[previous];
+		const crossesScanline =
+			currentPoint.y > y !== previousPoint.y > y &&
+			x <
+				((previousPoint.x - currentPoint.x) * (y - currentPoint.y)) /
+					(previousPoint.y - currentPoint.y) +
+					currentPoint.x;
+
+		if (crossesScanline) {
+			inside = !inside;
+		}
+	}
+
+	return inside;
+}
+
+function createRyuMaskTexture() {
+	const { holes, shape } = RYU_SHAPE.extractPoints(RYU_CURVE_SEGMENTS);
+	const shapeBounds = new THREE.Box2().setFromPoints(shape);
+	const shapeWidth = shapeBounds.max.x - shapeBounds.min.x;
+	const shapeHeight = shapeBounds.max.y - shapeBounds.min.y;
+	const padding = Math.max(shapeWidth, shapeHeight) * RYU_MASK_PADDING;
+	const bounds = new THREE.Box2(
+		new THREE.Vector2(shapeBounds.min.x - padding, shapeBounds.min.y - padding),
+		new THREE.Vector2(shapeBounds.max.x + padding, shapeBounds.max.y + padding)
+	);
+	const width = bounds.max.x - bounds.min.x;
+	const height = bounds.max.y - bounds.min.y;
+	const data = new Uint8Array(RYU_MASK_SIZE * RYU_MASK_SIZE * 4);
+
+	for (let y = 0; y < RYU_MASK_SIZE; y += 1) {
+		const pointY = bounds.max.y - ((y + 0.5) / RYU_MASK_SIZE) * height;
+
+		for (let x = 0; x < RYU_MASK_SIZE; x += 1) {
+			const pointX = bounds.min.x + ((x + 0.5) / RYU_MASK_SIZE) * width;
+			const visible =
+				isPointInsidePolygon(pointX, pointY, shape) &&
+				!holes.some((hole) => isPointInsidePolygon(pointX, pointY, hole));
+			const value = visible ? 255 : 0;
+			const offset = (y * RYU_MASK_SIZE + x) * 4;
+
+			data[offset] = value;
+			data[offset + 1] = value;
+			data[offset + 2] = value;
+			data[offset + 3] = value;
+		}
+	}
+
+	const texture = new THREE.DataTexture(
+		data,
+		RYU_MASK_SIZE,
+		RYU_MASK_SIZE,
+		THREE.RGBAFormat
+	);
+	texture.magFilter = THREE.LinearFilter;
+	texture.minFilter = THREE.LinearFilter;
+	texture.needsUpdate = true;
+	texture.wrapS = THREE.ClampToEdgeWrapping;
+	texture.wrapT = THREE.ClampToEdgeWrapping;
+
+	return { bounds, texture };
+}
+
+function RyuLogoMesh() {
+	const geometry = useMemo(() => new THREE.SphereGeometry(1, 96, 64), []);
+	const eyeRingGeometry = useMemo(
+		() => new THREE.TorusGeometry(1, 0.045, 12, 64),
+		[]
+	);
+	const { bounds, texture } = useMemo(createRyuMaskTexture, []);
+	const material = useMemo(() => {
+		const modelMaterial = new THREE.MeshPhysicalMaterial({
+			clearcoat: 0.16,
+			clearcoatRoughness: 0.38,
+			color: RYU_MODEL_COLOR,
+			metalness: 0,
+			roughness: 0.5,
+		});
+
+		modelMaterial.onBeforeCompile = (shader) => {
+			shader.uniforms.uRyuMask = { value: texture };
+			shader.vertexShader = shader.vertexShader
+				.replace(
+					"#include <common>",
+					"#include <common>\nvarying vec2 vRyuMaskUv;"
+				)
+				.replace(
+					"#include <begin_vertex>",
+					"#include <begin_vertex>\nvRyuMaskUv = position.xy * 0.5 + 0.5;"
+				);
+			shader.fragmentShader = shader.fragmentShader
+				.replace(
+					"#include <common>",
+					"#include <common>\nvarying vec2 vRyuMaskUv;\nuniform sampler2D uRyuMask;"
+				)
+				.replace(
+					"void main() {",
+					"void main() {\n\tif (texture2D(uRyuMask, vRyuMaskUv).r < 0.5) discard;"
+				);
+		};
+		modelMaterial.customProgramCacheKey = () => "ryu-spherical-mask";
+		return modelMaterial;
+	}, [texture]);
+	const eyeMaterial = useMemo(
+		() =>
+			new THREE.MeshPhysicalMaterial({
+				clearcoat: 0.16,
+				clearcoatRoughness: 0.38,
+				color: RYU_MODEL_COLOR,
+				metalness: 0,
+				roughness: 0.5,
+			}),
+		[]
+	);
+	const scale = useMemo(() => {
+		const width = bounds.max.x - bounds.min.x;
+		const height = bounds.max.y - bounds.min.y;
+		const depth = Math.max(width, height);
+
+		return [
+			(width / 2) * RYU_MODEL_SCALE,
+			(height / 2) * RYU_MODEL_SCALE,
+			(depth / 2) * RYU_MODEL_SCALE,
+		] as const;
+	}, [bounds]);
+	const eyes = useMemo(() => {
+		const width = bounds.max.x - bounds.min.x;
+		const height = bounds.max.y - bounds.min.y;
+		const normalizedEye = (x: number, y: number) => {
+			const positionX = ((x - bounds.min.x) / width) * 2 - 1;
+			const positionY = ((bounds.max.y - y) / height) * 2 - 1;
+			const positionZ = Math.sqrt(
+				Math.max(0.2, 1 - positionX ** 2 - positionY ** 2)
+			);
+
+			return {
+				position: [positionX, positionY, positionZ - 0.03] as const,
+				scale: [
+					(RYU_EYE_RADIUS_X / width) * 2,
+					(RYU_EYE_RADIUS_Y / height) * 2,
+					1,
+				] as const,
+			};
+		};
+
+		return [
+			normalizedEye(15, RYU_EYE_CENTER_Y),
+			normalizedEye(19, RYU_EYE_CENTER_Y),
+		];
+	}, [bounds]);
+
+	useEffect(
+		() => () => {
+			geometry.dispose();
+			eyeRingGeometry.dispose();
+			material.dispose();
+			eyeMaterial.dispose();
+			texture.dispose();
+		},
+		[eyeMaterial, eyeRingGeometry, geometry, material, texture]
+	);
 
 	return (
-		<mesh castShadow geometry={geometry} receiveShadow scale={RYU_MODEL_SCALE}>
-			<meshPhysicalMaterial
-				clearcoat={0.48}
-				clearcoatRoughness={0.22}
-				color={isDark ? "#f1f1ef" : "#17181b"}
-				metalness={0.22}
-				roughness={0.24}
-			/>
-		</mesh>
+		<group scale={scale}>
+			<mesh castShadow geometry={geometry} material={material} receiveShadow />
+			{eyes.map(({ position, scale: eyeScale }, index) => (
+				<mesh
+					castShadow
+					geometry={eyeRingGeometry}
+					key={`eye-ring-${index}`}
+					material={eyeMaterial}
+					position={position}
+					scale={eyeScale}
+				/>
+			))}
+		</group>
 	);
 }
 
 function RyuLogoScene({
-	isDark,
+	decorative,
 	isDragging,
 	onDragEnd,
 	onDragStart,
 	reducedMotion,
 }: {
-	isDark: boolean;
+	decorative: boolean;
 	isDragging: boolean;
 	onDragEnd: () => void;
 	onDragStart: () => void;
@@ -84,37 +271,22 @@ function RyuLogoScene({
 }) {
 	return (
 		<>
-			<ambientLight intensity={1.2} />
-			<hemisphereLight
-				args={[
-					isDark ? "#ffffff" : "#d7d7dc",
-					isDark ? "#151519" : "#8d8d96",
-					1.5,
-				]}
-			/>
+			<ambientLight intensity={1.4} />
+			<hemisphereLight args={["#ffffff", "#999999", 1.1]} />
 			<directionalLight
 				castShadow
 				color="#ffffff"
-				intensity={3.4}
+				intensity={2.8}
 				position={[4, 6, 8]}
 			/>
-			<pointLight
-				color={isDark ? "#bfd8ff" : "#ffffff"}
-				intensity={18}
-				position={[-4, 1, 5]}
-			/>
-			<pointLight
-				color={isDark ? "#d9b9ff" : "#dfe5ff"}
-				intensity={12}
-				position={[4, -2, -4]}
-			/>
+			<pointLight color="#ffffff" intensity={7} position={[-4, 1, 5]} />
 
-			<group rotation={[0.06, -0.24, 0]}>
-				<RyuLogoMesh isDark={isDark} />
+			<group rotation={[0.02, -0.14, 0]}>
+				<RyuLogoMesh />
 			</group>
 
 			<OrbitControls
-				autoRotate={!(reducedMotion || isDragging)}
+				autoRotate={!(decorative || reducedMotion || isDragging)}
 				autoRotateSpeed={0.7}
 				dampingFactor={0.08}
 				enableDamping
@@ -128,21 +300,6 @@ function RyuLogoScene({
 			/>
 		</>
 	);
-}
-
-function useThemeIsDark() {
-	const [isDark, setIsDark] = useState(false);
-
-	useEffect(() => {
-		const root = document.documentElement;
-		const update = () => setIsDark(root.classList.contains("dark"));
-		const observer = new MutationObserver(update);
-		update();
-		observer.observe(root, { attributes: true, attributeFilter: ["class"] });
-		return () => observer.disconnect();
-	}, []);
-
-	return isDark;
 }
 
 function useReducedMotion() {
@@ -159,17 +316,47 @@ function useReducedMotion() {
 	return reducedMotion;
 }
 
-interface RyuLogoModelProps {
-	className?: string;
+type WebGLCanvas = Pick<HTMLCanvasElement, "getContext">;
+
+export function supportsWebGL(
+	createCanvas: () => WebGLCanvas = () => document.createElement("canvas")
+): boolean {
+	try {
+		const canvas = createCanvas();
+		return Boolean(canvas.getContext("webgl2") ?? canvas.getContext("webgl"));
+	} catch {
+		return false;
+	}
 }
 
-export default function RyuLogoModel({ className }: RyuLogoModelProps) {
-	const isDark = useThemeIsDark();
+function useWebGLSupport() {
+	const [supported, setSupported] = useState(false);
+
+	useEffect(() => {
+		setSupported(supportsWebGL());
+	}, []);
+
+	return supported;
+}
+
+interface RyuLogoModelProps {
+	className?: string;
+	decorative?: boolean;
+}
+
+export default function RyuLogoModel({
+	className,
+	decorative = false,
+}: RyuLogoModelProps) {
 	const reducedMotion = useReducedMotion();
+	const webGLSupported = useWebGLSupport();
 	const [isDragging, setIsDragging] = useState(false);
 
 	return (
-		<figure className={cn("ryu-logo-model", className)}>
+		<figure
+			aria-hidden={decorative ? true : undefined}
+			className={cn("ryu-logo-model", className)}
+		>
 			<div
 				aria-label="Interactive three-dimensional filled Ryu logo with transparent eyes"
 				className="ryu-logo-model__stage"
@@ -178,74 +365,55 @@ export default function RyuLogoModel({ className }: RyuLogoModelProps) {
 			>
 				<div aria-hidden="true" className="ryu-logo-model__atmosphere" />
 				<div aria-hidden="true" className="ryu-logo-model__orbit" />
-				<Canvas
-					camera={{ fov: 36, position: [0, 0, 11] }}
-					className="ryu-logo-model__canvas"
-					dpr={[1, 2]}
-					gl={{ alpha: true, antialias: true }}
-					shadows
-				>
-					<RyuLogoScene
-						isDark={isDark}
-						isDragging={isDragging}
-						onDragEnd={() => setIsDragging(false)}
-						onDragStart={() => setIsDragging(true)}
-						reducedMotion={reducedMotion}
+				{webGLSupported ? (
+					<Canvas
+						camera={{ fov: 36, position: [0, 0, 11] }}
+						className="ryu-logo-model__canvas"
+						dpr={[1, 2]}
+						gl={{ alpha: true, antialias: true }}
+						shadows
+					>
+						<RyuLogoScene
+							decorative={decorative}
+							isDragging={isDragging}
+							onDragEnd={() => setIsDragging(false)}
+							onDragStart={() => setIsDragging(true)}
+							reducedMotion={reducedMotion}
+						/>
+					</Canvas>
+				) : (
+					<Logo
+						animated={false}
+						className="ryu-logo-model__fallback"
+						size="100%"
+						variant="filled"
 					/>
-				</Canvas>
+				)}
 				<div aria-hidden="true" className="ryu-logo-model__shadow" />
 			</div>
-			<figcaption className="ryu-logo-model__caption">
-				<span>
-					<strong>Ryu / Filled form</strong>
-					<br />
-					Body solid · eyes transparent
-				</span>
-				<span className="ryu-logo-model__hint">
-					{isDragging ? "Release to let it drift" : "Drag to rotate"}
-				</span>
-			</figcaption>
-			<p className="sr-only">
-				This is a real 3D model. Drag the logo to rotate it and inspect the
-				transparent eye cutouts.
-			</p>
+			{decorative ? null : (
+				<>
+					<figcaption className="ryu-logo-model__caption">
+						<span>
+							<strong>Ryu / Filled form</strong>
+							<br />
+							Body solid · eyes transparent
+						</span>
+						<span className="ryu-logo-model__hint">
+							{webGLSupported
+								? isDragging
+									? "Release to let it drift"
+									: "Drag to rotate"
+								: "Static preview"}
+						</span>
+					</figcaption>
+					<p className="sr-only">
+						{webGLSupported
+							? "This is a real 3D model. Drag the logo to rotate it and inspect the transparent eye cutouts."
+							: "This browser cannot display the interactive 3D model, so a static Ryu logo is shown instead."}
+					</p>
+				</>
+			)}
 		</figure>
-	);
-}
-
-export function RyuLogoSection() {
-	return (
-		<section
-			aria-labelledby="ryu-logo-form-title"
-			className="container mx-auto w-full px-4"
-		>
-			<div className="mx-auto grid max-w-6xl items-center gap-8 border-border/60 border-t pt-16 md:grid-cols-[minmax(0,0.82fr)_minmax(22rem,1.18fr)] md:gap-12 md:pt-20">
-				<div className="max-w-md space-y-5">
-					<p className="font-mono text-muted-foreground text-xs uppercase tracking-[0.18em]">
-						The filled mark
-					</p>
-					<h2
-						className="text-balance font-medium text-2xl tracking-tight md:text-3xl"
-						id="ryu-logo-form-title"
-					>
-						A solid body. Open eyes.
-					</h2>
-					<p className="text-muted-foreground text-sm leading-6">
-						The filled Ryu form gives the mark weight while the transparent eyes
-						keep it alive against any surface. Drag the model to see the depth
-						and open cutouts from every angle.
-					</p>
-					<div className="flex flex-wrap gap-2 font-mono text-[11px] text-muted-foreground uppercase tracking-[0.14em]">
-						<span className="rounded-full border border-border/70 px-3 py-1.5">
-							3D form
-						</span>
-						<span className="rounded-full border border-border/70 px-3 py-1.5">
-							Drag enabled
-						</span>
-					</div>
-				</div>
-				<RyuLogoModel />
-			</div>
-		</section>
 	);
 }

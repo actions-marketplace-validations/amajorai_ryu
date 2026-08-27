@@ -33,6 +33,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Avatar, AvatarFallback } from "@ryu/ui/components/avatar";
+import { EntityAvatar } from "@ryu/ui/components/entity-avatar.tsx";
 import { Logo as RyuLogo } from "@ryu/ui/components/logo";
 import {
 	Sidebar,
@@ -47,7 +48,8 @@ import {
 	SidebarMenuItem,
 	SidebarProvider,
 } from "@ryu/ui/components/sidebar";
-import type { ReactNode } from "react";
+import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs";
+import { type ReactNode, useState } from "react";
 
 const RECENT_CHATS = [
 	"Refactor the auth flow",
@@ -64,6 +66,62 @@ const MEETINGS: { name: string; recording?: boolean }[] = [
 	{ name: "Design review" },
 ];
 const WORKFLOWS = ["Daily digest"];
+
+const BOT_MODE_AGENTS = [
+	{
+		id: "ryu",
+		name: "Ryu",
+		preview: "Follow-up draft is ready",
+		stamp: "9:41 AM",
+	},
+	{
+		id: "claude-code",
+		name: "Claude Code",
+		preview: "Reviewed the launch checklist",
+		stamp: "Yesterday",
+	},
+	{
+		id: "codex",
+		name: "Codex",
+		preview: "Found two files to update",
+		stamp: "Mon",
+	},
+] as const;
+
+const BOT_MODE_SESSIONS = [
+	"Refactor the auth flow",
+	"Summarize the Q3 report",
+	"Debug the SSE stream",
+	"Plan the launch checklist",
+] as const;
+
+const TRUST_MODE_AI = [
+	{
+		id: "chatgpt",
+		name: "ChatGPT",
+		preview: "Subscription connected",
+		stamp: "Now",
+	},
+	{
+		id: "claude",
+		name: "Claude",
+		preview: "Context protected",
+		stamp: "Now",
+	},
+	{
+		id: "local",
+		name: "Ryu local",
+		preview: "Private fallback",
+		stamp: "Local",
+	},
+] as const;
+
+const TRUST_MODE_HISTORY = [
+	"Acme follow-up",
+	"Inbox review",
+	"Weekly update",
+	"Expense report",
+] as const;
 
 /** A reorderable header nav button, mirroring the live sidebar's chrome row. */
 function NavButton({
@@ -172,6 +230,196 @@ function MeetingRow({
 	);
 }
 
+function BotModeAgentRow({
+	id,
+	name,
+	preview,
+	stamp,
+}: (typeof BOT_MODE_AGENTS)[number]) {
+	return (
+		<SidebarMenuItem>
+			<button
+				aria-label={`Chat with ${name}`}
+				className="group/agent-row flex min-h-14 w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+				data-testid={`hero-bot-agent-${id}`}
+				type="button"
+			>
+				<EntityAvatar className="size-9 shrink-0" name={name} />
+				<span className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
+					<span className="flex min-w-0 items-center gap-2">
+						<span className="min-w-0 flex-1 truncate text-sm">{name}</span>
+						<span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+							{stamp}
+						</span>
+					</span>
+					<span className="truncate text-muted-foreground text-xs">
+						{preview}
+					</span>
+				</span>
+			</button>
+		</SidebarMenuItem>
+	);
+}
+
+function BotModeSessionRow({ title }: { title: string }) {
+	return (
+		<SidebarMenuItem>
+			<SidebarMenuButton className="h-10">
+				<span className="min-w-0 truncate text-sidebar-foreground/85">
+					{title}
+				</span>
+			</SidebarMenuButton>
+		</SidebarMenuItem>
+	);
+}
+
+function TrustModeAiRow({
+	id,
+	name,
+	preview,
+	stamp,
+}: (typeof TRUST_MODE_AI)[number]) {
+	return (
+		<SidebarMenuItem>
+			<button
+				aria-label={`Use ${name}`}
+				className="group/ai-row flex min-h-14 w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+				data-testid={`hero-trust-ai-${id}`}
+				type="button"
+			>
+				<EntityAvatar className="size-9 shrink-0" name={name} />
+				<span className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
+					<span className="flex min-w-0 items-center gap-2">
+						<span className="min-w-0 flex-1 truncate text-sm">{name}</span>
+						<span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+							{stamp}
+						</span>
+					</span>
+					<span className="truncate text-muted-foreground text-xs">
+						{preview}
+					</span>
+				</span>
+			</button>
+		</SidebarMenuItem>
+	);
+}
+
+function TrustModeHistoryRow({ title }: { title: string }) {
+	return (
+		<SidebarMenuItem>
+			<SidebarMenuButton className="h-10">
+				<span className="min-w-0 truncate text-sidebar-foreground/85">
+					{title}
+				</span>
+			</SidebarMenuButton>
+		</SidebarMenuItem>
+	);
+}
+
+function TrustModeSidebarContent() {
+	const [activeTab, setActiveTab] = useState<"ai" | "history">("ai");
+
+	return (
+		<div
+			className="flex min-h-0 flex-1 flex-col"
+			data-testid="hero-trust-mode-sidebar"
+		>
+			<Tabs
+				className="min-h-0 flex-1"
+				onValueChange={(value) => {
+					if (value === "ai" || value === "history") {
+						setActiveTab(value);
+					}
+				}}
+				value={activeTab}
+			>
+				<div className="px-2 pt-1">
+					<TabsList className="w-full" manageLayout={false}>
+						<TabsTrigger className="flex-1" value="ai">
+							AI tools
+						</TabsTrigger>
+						<TabsTrigger className="flex-1" value="history">
+							History
+						</TabsTrigger>
+					</TabsList>
+				</div>
+
+				<div className="scroll-fade no-scrollbar min-h-0 flex-1 overflow-auto px-2 pt-2">
+					{activeTab === "ai" ? (
+						<SidebarMenu className="gap-0.5">
+							{TRUST_MODE_AI.map((item) => (
+								<TrustModeAiRow key={item.id} {...item} />
+							))}
+						</SidebarMenu>
+					) : (
+						<SidebarMenu className="gap-0.5">
+							{TRUST_MODE_HISTORY.map((title) => (
+								<TrustModeHistoryRow key={title} title={title} />
+							))}
+						</SidebarMenu>
+					)}
+				</div>
+			</Tabs>
+		</div>
+	);
+}
+
+function BotModeSidebarContent() {
+	const [activeTab, setActiveTab] = useState<"agents" | "sessions">("agents");
+
+	return (
+		<div
+			className="flex min-h-0 flex-1 flex-col"
+			data-testid="hero-bot-mode-sidebar"
+		>
+			<Tabs
+				className="min-h-0 flex-1"
+				onValueChange={(value) => {
+					if (value === "agents" || value === "sessions") {
+						setActiveTab(value);
+					}
+				}}
+				value={activeTab}
+			>
+				<div className="px-2 pt-1">
+					<TabsList className="w-full" manageLayout={false}>
+						<TabsTrigger
+							className="flex-1"
+							data-testid="hero-bot-mode-agents-tab"
+							value="agents"
+						>
+							Agents
+						</TabsTrigger>
+						<TabsTrigger
+							className="flex-1"
+							data-testid="hero-bot-mode-sessions-tab"
+							value="sessions"
+						>
+							Sessions
+						</TabsTrigger>
+					</TabsList>
+				</div>
+
+				<div className="scroll-fade no-scrollbar min-h-0 flex-1 overflow-auto px-2 pt-2">
+					{activeTab === "agents" ? (
+						<SidebarMenu className="gap-0.5">
+							{BOT_MODE_AGENTS.map((agent) => (
+								<BotModeAgentRow key={agent.name} {...agent} />
+							))}
+						</SidebarMenu>
+					) : (
+						<SidebarMenu className="gap-0.5">
+							{BOT_MODE_SESSIONS.map((title) => (
+								<BotModeSessionRow key={title} title={title} />
+							))}
+						</SidebarMenu>
+					)}
+				</div>
+			</Tabs>
+		</div>
+	);
+}
+
 /** The compact node-selector pill shown in the live header's top row
  *  (`NodeSelector mode="compact-dropdown"`): a status dot + node name + chevron. */
 function NodeSelectorPill() {
@@ -199,6 +447,7 @@ export interface ShellNavItem {
 export function DesktopShell({
 	children,
 	showChats = true,
+	sidebarMode = "default",
 	navItems,
 	activeNav,
 	onNavSelect,
@@ -206,6 +455,7 @@ export function DesktopShell({
 	children: ReactNode;
 	/** Kept for call-site compatibility; the real sidebar has no flat-nav highlight. */
 	active?: string;
+	sidebarMode?: "default" | "bot" | "trust";
 	showChats?: boolean;
 	/** Override the header nav rows (the showcase uses this to drive view switching). */
 	navItems?: ShellNavItem[];
@@ -253,48 +503,60 @@ export function DesktopShell({
 					</SidebarHeader>
 
 					<SidebarContent className="scroll-fade pt-2">
-						<Section label="Agents">
-							{AGENTS.map((name) => (
-								<LogoRow key={name} name={name} />
-							))}
-						</Section>
-						<Section label="Teams">
-							{TEAMS.map((name) => (
-								<IconRow icon={UserMultiple02Icon} key={name} name={name} />
-							))}
-						</Section>
-						<Section label="Spaces">
-							{SPACES.map((name) => (
-								<IconRow icon={LibraryIcon} key={name} name={name} />
-							))}
-						</Section>
-						<Section label="Meetings">
-							{MEETINGS.map((m) => (
-								<MeetingRow
-									key={m.name}
-									name={m.name}
-									recording={m.recording}
-								/>
-							))}
-						</Section>
-						<Section label="Workflows">
-							{WORKFLOWS.map((name) => (
-								<IconRow icon={WorkflowCircle06Icon} key={name} name={name} />
-							))}
-						</Section>
-						{showChats ? (
-							<Section label="Chats">
-								{RECENT_CHATS.map((c) => (
-									<SidebarMenuItem key={c}>
-										<SidebarMenuButton className="h-8">
-											<span className="truncate text-sidebar-foreground/80">
-												{c}
-											</span>
-										</SidebarMenuButton>
-									</SidebarMenuItem>
-								))}
-							</Section>
-						) : null}
+						{sidebarMode === "bot" ? (
+							<BotModeSidebarContent />
+						) : sidebarMode === "trust" ? (
+							<TrustModeSidebarContent />
+						) : (
+							<>
+								<Section label="Agents">
+									{AGENTS.map((name) => (
+										<LogoRow key={name} name={name} />
+									))}
+								</Section>
+								<Section label="Teams">
+									{TEAMS.map((name) => (
+										<IconRow icon={UserMultiple02Icon} key={name} name={name} />
+									))}
+								</Section>
+								<Section label="Spaces">
+									{SPACES.map((name) => (
+										<IconRow icon={LibraryIcon} key={name} name={name} />
+									))}
+								</Section>
+								<Section label="Meetings">
+									{MEETINGS.map((m) => (
+										<MeetingRow
+											key={m.name}
+											name={m.name}
+											recording={m.recording}
+										/>
+									))}
+								</Section>
+								<Section label="Workflows">
+									{WORKFLOWS.map((name) => (
+										<IconRow
+											icon={WorkflowCircle06Icon}
+											key={name}
+											name={name}
+										/>
+									))}
+								</Section>
+								{showChats ? (
+									<Section label="Chats">
+										{RECENT_CHATS.map((c) => (
+											<SidebarMenuItem key={c}>
+												<SidebarMenuButton className="h-8">
+													<span className="truncate text-sidebar-foreground/80">
+														{c}
+													</span>
+												</SidebarMenuButton>
+											</SidebarMenuItem>
+										))}
+									</Section>
+								) : null}
+							</>
+						)}
 					</SidebarContent>
 
 					<SidebarFooter>

@@ -93,6 +93,41 @@ fn workspaces_dir() -> std::path::PathBuf {
     crate::paths::ryu_dir().join("research-workspaces")
 }
 
+/// Owner-only credential for the private Rust/MCP -> Python engine hop. It is
+/// intentionally distinct from every Core/app bearer and lives beside the
+/// research database so separately spawned Research processes can read the same
+/// value without inheriting privileged Core environment variables.
+fn engine_token_path() -> std::path::PathBuf {
+    workspaces_dir().join(".engine-token")
+}
+
+fn ensure_engine_token() -> anyhow::Result<String> {
+    let path = engine_token_path();
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let existing = existing.trim();
+        if !existing.is_empty() {
+            return Ok(existing.to_owned());
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("creating the research workspace directory")?;
+    }
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    std::fs::write(&path, &token).context("persisting the research engine token")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .context("securing the research engine token")?;
+    }
+    Ok(token)
+}
+
 // NOTE: the `is_installed()` helper that used to live here is gone. Its only caller
 // was the hardcoded `research` row in `sidecar::mcp::server_summaries`, deleted with
 // the rest of that Core-side provider. The app's own binary keeps an equivalent
@@ -216,6 +251,11 @@ impl Sidecar for ResearchManager {
             let research_port = crate::profile::port(ENGINE_PORT);
             let research_addr = format!("127.0.0.1:{research_port}");
 
+            // Mint/read the private engine credential before the adoption probe.
+            // A standalone engine without an env override can pick this file up
+            // dynamically, while a Core-owned child receives the same value below.
+            let engine_token = ensure_engine_token()?;
+
             // Adopt an already-running sidecar (e.g. `python -m ryu_research`)
             // instead of spawning a competitor that would fail to bind the port.
             if Self::server_reachable(&client).await {
@@ -268,6 +308,7 @@ impl Sidecar for ResearchManager {
                     "RESEARCH_WORKSPACES".into(),
                     workspaces.to_string_lossy().to_string(),
                 ),
+                ("RYU_RESEARCH_ENGINE_TOKEN".into(), engine_token),
             ];
             let args: Vec<String> = vec!["-m".into(), "ryu_research".into()];
             process

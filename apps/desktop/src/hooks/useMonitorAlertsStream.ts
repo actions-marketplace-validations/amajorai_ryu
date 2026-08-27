@@ -5,8 +5,6 @@ import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { type Alert, streamMonitorAlerts } from "@/src/lib/api/monitors.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
-const RECONNECT_DELAY_MS = 2000;
-
 /** Raise a native OS notification (best-effort; requests permission once). */
 function osNotify(alert: Alert): void {
 	if (typeof Notification === "undefined") {
@@ -49,8 +47,6 @@ export function useMonitorAlertsStream(): void {
 	const qc = useQueryClient();
 
 	useEffect(() => {
-		let cancelled = false;
-		let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 		const controller = new AbortController();
 		const target: ApiTarget = { url, token };
 
@@ -62,29 +58,13 @@ export function useMonitorAlertsStream(): void {
 			);
 		};
 
-		const run = async () => {
-			while (!cancelled) {
-				try {
-					await streamMonitorAlerts(target, onAlert, controller.signal);
-				} catch {
-					// Connect/transient failure — fall through to the reconnect delay.
-				}
-				if (cancelled) {
-					break;
-				}
-				await new Promise<void>((resolve) => {
-					reconnectTimer = setTimeout(resolve, RECONNECT_DELAY_MS);
-				});
-			}
-		};
-		run().catch(() => undefined);
+		// The shared event multiplexer owns reconnect/backoff for this channel.
+		streamMonitorAlerts(target, onAlert, controller.signal).catch(
+			() => undefined
+		);
 
 		return () => {
-			cancelled = true;
 			controller.abort();
-			if (reconnectTimer) {
-				clearTimeout(reconnectTimer);
-			}
 		};
 	}, [url, token, qc]);
 }

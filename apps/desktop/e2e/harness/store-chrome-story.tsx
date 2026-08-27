@@ -30,6 +30,7 @@ import {
 	type StoreSectionTab,
 	StoreSectionTabs,
 } from "@ryu/blocks/desktop/store";
+import MarketplaceHelpDialog from "@ryu/marketplace/catalog/chrome/marketplace-help-dialog";
 import { REALM_ICONS } from "@ryu/marketplace/catalog/realm-icons";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useState } from "react";
@@ -252,6 +253,7 @@ function PageShell({ testid, width }: { testid: string; width: number }) {
 					<StoreGlobalSearch
 						onChange={setQuery}
 						placeholder="Search the whole marketplace…"
+						trailing={<MarketplaceHelpDialog />}
 						value={query}
 					/>
 					<StoreSectionTabs

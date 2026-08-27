@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { aggregateUsageEvents } from "./usage-analytics.ts";
+import {
+	aggregateUsageEvents,
+	compactUsageTrendPoints,
+} from "./usage-analytics.ts";
 
 const RANGE = {
 	from: new Date("2026-08-17T00:00:00.000Z"),
@@ -127,5 +130,230 @@ describe("aggregateUsageEvents", () => {
 		expect(data.totals.requests).toBe(0);
 		expect(data.totals.spendMicroUsd).toBe(500);
 		expect(data.buckets[0]?.spendMicroUsd).toBe(500);
+	});
+
+	it("combines partial errors and weighted latency from canonical rollups", () => {
+		const data = aggregateUsageEvents({
+			caption: "Canonical rollups",
+			events: [
+				{
+					agentSeconds: 12,
+					costMicroUsd: null,
+					errorCount: 1,
+					inputTokens: 80,
+					latencySamples: 3,
+					latencyTotalMs: 600,
+					outputTokens: 20,
+					requestCount: 4,
+					timestamp: "2026-08-17T09:00:00.000Z",
+				},
+				{
+					agentSeconds: 8,
+					costMicroUsd: 0,
+					errorCount: 2,
+					inputTokens: 40,
+					latencySamples: 1,
+					latencyTotalMs: 900,
+					outputTokens: 10,
+					requestCount: 2,
+					timestamp: "2026-08-17T09:15:00.000Z",
+				},
+			],
+			from: RANGE.from,
+			granularity: "hourly",
+			scope: "node",
+			scopeLabel: "This node",
+			to: RANGE.to,
+		});
+
+		expect(data.totals).toMatchObject({
+			agentSeconds: 20,
+			averageLatencyMs: 375,
+			errors: 3,
+			inputTokens: 120,
+			outputTokens: 30,
+			requests: 6,
+			spendMicroUsd: 0,
+		});
+		expect(data.buckets.find((bucket) => bucket.requests > 0)).toMatchObject({
+			averageLatencyMs: 375,
+			errors: 3,
+			requests: 6,
+		});
+	});
+
+	it("keeps legacy raw latency and error fields compatible", () => {
+		const data = aggregateUsageEvents({
+			caption: "Legacy audit rows",
+			events: [
+				{
+					durationMs: 100,
+					error: false,
+					timestamp: "2026-08-17T09:00:00.000Z",
+				},
+				{
+					durationMs: 300,
+					error: true,
+					timestamp: "2026-08-17T09:01:00.000Z",
+				},
+			],
+			from: RANGE.from,
+			granularity: "hourly",
+			scope: "node",
+			scopeLabel: "This node",
+			to: RANGE.to,
+		});
+
+		expect(data.totals).toMatchObject({
+			averageLatencyMs: 200,
+			errors: 1,
+			requests: 2,
+		});
+	});
+
+	it("treats fallback duration as one observation for a counted row", () => {
+		const data = aggregateUsageEvents({
+			caption: "Legacy counted row",
+			events: [
+				{
+					durationMs: 120,
+					requestCount: 4,
+					timestamp: "2026-08-17T09:00:00.000Z",
+				},
+			],
+			from: RANGE.from,
+			granularity: "hourly",
+			scope: "node",
+			scopeLabel: "This node",
+			to: RANGE.to,
+		});
+
+		expect(data.totals.averageLatencyMs).toBe(120);
+		expect(data.totals.requests).toBe(4);
+	});
+
+	it.each([
+		{
+			expected: [
+				["2026-08-17T09:00:00.000Z", 2],
+				["2026-08-17T10:00:00.000Z", 1],
+			],
+			from: "2026-08-17T09:00:00.000Z",
+			granularity: "hourly" as const,
+			timestamps: [
+				"2026-08-17T09:14:00.000Z",
+				"2026-08-17T09:59:00.000Z",
+				"2026-08-17T10:00:00.000Z",
+			],
+			to: "2026-08-17T11:00:00.000Z",
+		},
+		{
+			expected: [
+				["2026-08-17T00:00:00.000Z", 2],
+				["2026-08-18T00:00:00.000Z", 1],
+			],
+			from: "2026-08-17T00:00:00.000Z",
+			granularity: "daily" as const,
+			timestamps: [
+				"2026-08-17T00:01:00.000Z",
+				"2026-08-17T23:59:00.000Z",
+				"2026-08-18T00:00:00.000Z",
+			],
+			to: "2026-08-19T00:00:00.000Z",
+		},
+		{
+			expected: [
+				["2026-08-17T00:00:00.000Z", 2],
+				["2026-08-24T00:00:00.000Z", 1],
+			],
+			from: "2026-08-17T00:00:00.000Z",
+			granularity: "weekly" as const,
+			timestamps: [
+				"2026-08-17T00:00:00.000Z",
+				"2026-08-23T23:59:00.000Z",
+				"2026-08-24T00:00:00.000Z",
+			],
+			to: "2026-08-31T00:00:00.000Z",
+		},
+		{
+			expected: [
+				["2026-08-01T00:00:00.000Z", 2],
+				["2026-09-01T00:00:00.000Z", 1],
+			],
+			from: "2026-08-01T00:00:00.000Z",
+			granularity: "monthly" as const,
+			timestamps: [
+				"2026-08-01T00:00:00.000Z",
+				"2026-08-31T23:59:00.000Z",
+				"2026-09-01T00:00:00.000Z",
+			],
+			to: "2026-10-01T00:00:00.000Z",
+		},
+	])("groups events into $granularity buckets", (testCase) => {
+		const data = aggregateUsageEvents({
+			caption: "Grouped rows",
+			events: testCase.timestamps.map((timestamp) => ({ timestamp })),
+			from: new Date(testCase.from),
+			granularity: testCase.granularity,
+			scope: "node",
+			scopeLabel: "This node",
+			to: new Date(testCase.to),
+		});
+
+		expect(
+			data.buckets
+				.filter((bucket) => bucket.requests > 0)
+				.map((bucket) => [bucket.start, bucket.requests])
+		).toEqual(testCase.expected);
+	});
+});
+
+describe("compactUsageTrendPoints", () => {
+	it("bounds long-range chart work without changing metric totals", () => {
+		const points = Array.from({ length: 38_400 }, (_, index) => ({
+			errors: index % 2,
+			label: `Bucket ${index}`,
+			requests: 1,
+			spend: index % 3 === 0 ? 2 : null,
+			tokens: 3,
+		}));
+		const compacted = compactUsageTrendPoints(points);
+
+		expect(compacted.length).toBeLessThanOrEqual(1000);
+		expect(compacted.reduce((total, point) => total + point.requests, 0)).toBe(
+			38_400
+		);
+		expect(compacted.reduce((total, point) => total + point.tokens, 0)).toBe(
+			115_200
+		);
+		expect(
+			compacted.reduce((total, point) => total + (point.spend ?? 0), 0)
+		).toBe(25_600);
+	});
+
+	it("keeps the first canonical bucket when a range begins mid-bucket", () => {
+		const data = aggregateUsageEvents({
+			caption: "Canonical rollups",
+			events: [
+				{
+					bucketSeconds: 900,
+					requestCount: 2,
+					timestamp: "2026-08-17T09:00:00.000Z",
+				},
+				{
+					bucketSeconds: 900,
+					requestCount: 99,
+					timestamp: "2026-08-17T08:45:00.000Z",
+				},
+			],
+			from: new Date("2026-08-17T09:07:00.000Z"),
+			granularity: "15m",
+			scope: "organization",
+			scopeLabel: "Organization",
+			to: new Date("2026-08-17T09:30:00.000Z"),
+		});
+
+		expect(data.totals.requests).toBe(2);
+		expect(data.buckets[0]?.requests).toBe(2);
 	});
 });

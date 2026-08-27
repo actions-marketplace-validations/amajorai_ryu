@@ -75,12 +75,12 @@ export function AuditSafetyMock() {
 	);
 }
 
-/** One-click install — local model, no keys. */
+/** Keep the models a startup already uses, with a local option when needed. */
 export function InstallLocalMock() {
-	const agents = [
-		{ name: "Ryu", sub: "Pi + Gateway · default", installed: true },
-		{ name: "Claude Code", sub: "opt-in catalog", installed: false },
-		{ name: "Codex", sub: "opt-in catalog", installed: false },
+	const models = [
+		{ name: "ChatGPT", sub: "existing subscription", installed: true },
+		{ name: "Claude", sub: "existing subscription", installed: false },
+		{ name: "Ryu local", sub: "private fallback", installed: false },
 	];
 	return (
 		<MinimalCard contentClassName="space-y-3">
@@ -93,26 +93,26 @@ export function InstallLocalMock() {
 				</span>
 			</div>
 			<div className="space-y-2">
-				{agents.map((agent) => (
+				{models.map((model) => (
 					<div
 						className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2.5"
-						key={agent.name}
+						key={model.name}
 					>
 						<div>
 							<p className="font-medium text-foreground text-xs">
-								{agent.name}
+								{model.name}
 							</p>
-							<p className="text-[10px] text-muted-foreground">{agent.sub}</p>
+							<p className="text-[10px] text-muted-foreground">{model.sub}</p>
 						</div>
 						<span
 							className={cn(
 								"rounded-md px-2 py-1 font-medium text-[10px]",
-								agent.installed
+								model.installed
 									? "bg-foreground text-background"
 									: "border border-border text-foreground/60"
 							)}
 						>
-							{agent.installed ? "Installed" : "Add"}
+							{model.installed ? "Connected" : "Connect"}
 						</span>
 					</div>
 				))}
@@ -129,7 +129,7 @@ export function DemoDeathMock() {
 		"Who maintains it?",
 	];
 	return (
-		<AppShell active="Chat" nav={["Chat", "Agents", "Runs", "Spaces"]}>
+		<AppShell active="Chat" nav={["Chat", "Trust", "Runs", "Spaces"]}>
 			<div className="space-y-3">
 				<div className="max-w-[90%] rounded-2xl rounded-tl-sm border border-border bg-card px-3 py-2 text-[11px] text-foreground/80">
 					Refactored auth. Tests pass on my machine.
@@ -162,15 +162,15 @@ export function DemoDeathMock() {
 	);
 }
 
-/** Governed agent — the controls a real deployment needs. */
-export function GovernedAgentMock() {
+/** Trust receipt — the controls a startup needs before it ships the output. */
+export function TrustReceiptMock() {
 	return (
 		<MinimalCard contentClassName="space-y-4">
 			<div className="grid gap-4 sm:grid-cols-2">
 				<div className="space-y-3">
 					<div className="flex items-center gap-2">
 						<ScrollText className="size-4 text-muted-foreground" />
-						<p className="font-medium text-foreground text-xs">Audit</p>
+						<p className="font-medium text-foreground text-xs">What happened</p>
 					</div>
 					<p className="font-mono text-[10px] text-muted-foreground">
 						req_8f2a · logged · allowed
@@ -185,7 +185,7 @@ export function GovernedAgentMock() {
 				<div className="space-y-3">
 					<div className="flex items-center gap-2">
 						<CircleDollarSign className="size-4 text-muted-foreground" />
-						<p className="font-medium text-foreground text-xs">Budget</p>
+						<p className="font-medium text-foreground text-xs">Cost</p>
 					</div>
 					<p className="text-[11px] text-muted-foreground tabular-nums">
 						$48 / $200
@@ -197,21 +197,21 @@ export function GovernedAgentMock() {
 				</div>
 			</div>
 			<p className="text-center font-medium text-[11px] text-foreground">
-				Ready for review and rollout
+				Ready for your team to review
 			</p>
 		</MinimalCard>
 	);
 }
 
-/** First-run path — install → agent → first real task. */
+/** First-run path — connect context → review → first real task. */
 export function SevenMinuteMock() {
 	const steps = [
-		{ label: "Download Ryu", done: true },
-		{ label: "Pick agent from catalog", done: true },
-		{ label: "Send first real task", done: true },
+		{ label: "Connect approved context", done: true },
+		{ label: "Set the review points", done: true },
+		{ label: "Run the first real task", done: true },
 	];
 	return (
-		<AppShell active="Chat" nav={["Chat", "Agents", "Runs", "Gateway"]}>
+		<AppShell active="Chat" nav={["Chat", "Context", "History", "Access"]}>
 			<div className="space-y-3">
 				<div className="flex items-center justify-between rounded-lg bg-foreground px-3 py-2 text-background">
 					<span className="font-medium text-[11px]">first run complete</span>
@@ -244,7 +244,7 @@ export function SevenMinuteMock() {
 /** Still running Monday — the win that sticks. */
 export function StillRunningMock() {
 	return (
-		<AppShell active="Runs" nav={["Chat", "Agents", "Runs", "Audit"]}>
+		<AppShell active="Runs" nav={["Chat", "Context", "History", "Audit"]}>
 			<div className="space-y-3">
 				<div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2">
 					<div>

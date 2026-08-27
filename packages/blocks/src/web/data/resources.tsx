@@ -1,6 +1,8 @@
 import {
+	BadgeCheck,
 	BookOpen,
 	GitCommitHorizontal,
+	GraduationCap,
 	KeyRound,
 	LifeBuoy,
 	MessageCircle,
@@ -46,6 +48,20 @@ export interface Resource {
 
 export const resources: Resource[] = [
 	/* ============================== LEARN =========================== */
+	{
+		category: "Learn",
+		label: "Academy",
+		description: "Role-based paths, focused lessons, and knowledge checks.",
+		href: "/academy",
+		Icon: GraduationCap,
+	},
+	{
+		category: "Learn",
+		label: "Certifications",
+		description: "Prepare, take an exam, and earn a verifiable credential.",
+		href: "/certifications",
+		Icon: BadgeCheck,
+	},
 	{
 		category: "Learn",
 		label: "Docs",

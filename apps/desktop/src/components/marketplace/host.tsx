@@ -13,9 +13,12 @@ import {
 	type MarketplaceReviewsService,
 } from "@ryu/marketplace/host";
 import type { ReactNode } from "react";
+import { useMemo } from "react";
 import { sileo } from "sileo";
 import { FRONTEND_URL, getActiveUserId } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
+import { useStepUp } from "@/src/components/StepUpDialog.tsx";
+import { useMarketplaceMembershipReport } from "@/src/hooks/useMarketplaceMembershipReport.ts";
 import { useMyLicenses } from "@/src/hooks/useMyLicenses.ts";
 import { useSellerReports } from "@/src/hooks/useSellerReports.ts";
 import { useSellerStatus } from "@/src/hooks/useSellerStatus.ts";
@@ -100,15 +103,24 @@ const desktopMarketplaceHost: MarketplaceHost = {
 	reviews: desktopReviews,
 	startPurchase,
 	useLicenses: useMyLicenses,
+	useMembershipReport: useMarketplaceMembershipReport,
 	useSellerStatus,
 	useSellerReports,
 };
 
 /** Mount once above every store surface that renders the shared money layer. */
 export function DesktopMarketplaceHost({ children }: { children: ReactNode }) {
+	const stepUp = useStepUp();
+	const host = useMemo(
+		() => ({
+			...desktopMarketplaceHost,
+			guardPurchase: <T,>(action: () => Promise<T>) =>
+				stepUp.guard("billing", action),
+			purchaseDialog: stepUp.dialog,
+		}),
+		[stepUp.dialog, stepUp.guard]
+	);
 	return (
-		<MarketplaceHostProvider host={desktopMarketplaceHost}>
-			{children}
-		</MarketplaceHostProvider>
+		<MarketplaceHostProvider host={host}>{children}</MarketplaceHostProvider>
 	);
 }

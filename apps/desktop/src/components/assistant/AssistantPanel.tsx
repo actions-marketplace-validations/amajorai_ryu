@@ -41,6 +41,7 @@ import {
 	sidebarFloatingChrome,
 	useSidebarVariant,
 } from "@/src/hooks/useSidebarVariant.ts";
+import { useSpeechPlayback } from "@/src/hooks/useSpeechPlayback.ts";
 import { useTitleBarClearsContent } from "@/src/hooks/useTitleBarClearsContent.ts";
 import { engineForAgent } from "@/src/lib/agent-logos.tsx";
 import { respondPermission } from "@/src/lib/api/acp.ts";
@@ -596,42 +597,22 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	// button re-enables mid-playback). A missing TTS sidecar throws; the message
 	// toolbar's speak button swallows it (silent no-op), so the surface degrades
 	// gracefully — the same posture as STT, which has no capability probe to gate on.
-	const speakingAudioRef = useRef<HTMLAudioElement | null>(null);
-	const speakingTextRef = useRef<string | null>(null);
+	const { play: playSpeech } = useSpeechPlayback();
 	const handleSpeak = useCallback(
 		async (text: string) => {
 			const trimmed = text.trim();
 			if (!trimmed) {
 				return;
 			}
-			if (speakingAudioRef.current) {
-				const wasSameTurn = speakingTextRef.current === trimmed;
-				speakingAudioRef.current.pause();
-				speakingAudioRef.current = null;
-				speakingTextRef.current = null;
-				if (wasSameTurn) {
-					return;
-				}
-			}
-			const prefs = getDesktopTtsPrefs();
-			const blob = await speakText(chatTarget, trimmed, {
-				engine: prefs.engine,
-				voice: prefs.voice || undefined,
+			await playSpeech(trimmed, () => {
+				const prefs = getDesktopTtsPrefs();
+				return speakText(chatTarget, trimmed, {
+					engine: prefs.engine,
+					voice: prefs.voice || undefined,
+				});
 			});
-			const url = URL.createObjectURL(blob);
-			const audio = new Audio(url);
-			speakingAudioRef.current = audio;
-			speakingTextRef.current = trimmed;
-			audio.addEventListener("ended", () => {
-				URL.revokeObjectURL(url);
-				if (speakingAudioRef.current === audio) {
-					speakingAudioRef.current = null;
-					speakingTextRef.current = null;
-				}
-			});
-			await audio.play();
 		},
-		[chatTarget]
+		[chatTarget, playSpeech]
 	);
 
 	// The full chat composer — the SAME one the main chat page renders (Agent ·
@@ -763,10 +744,10 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 						content: (
 							<PermissionPrompt
 								embedded
-										onRespond={handleRespondPermission}
-										permission={activePermission}
-										showTechnicalDetails={interfaceLevel !== "simple"}
-									/>
+								onRespond={handleRespondPermission}
+								permission={activePermission}
+								showTechnicalDetails={interfaceLevel !== "simple"}
+							/>
 						),
 						id: `permission:${activePermission.requestId}`,
 					}
@@ -1069,8 +1050,8 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 					emptyStatePosition="center"
 					error={error ?? undefined}
 					key={`${activeNode.url}-${activeConvId}`}
-					messages={messages}
 					mentionItems={activeComposer.mentionItems}
+					messages={messages}
 					onAgentUiSubmit={handleAgentUiSubmit}
 					onComposerMenuSelect={activeComposer.onComposerMenuSelect}
 					onRetryGeneration={handleRetryGeneration}

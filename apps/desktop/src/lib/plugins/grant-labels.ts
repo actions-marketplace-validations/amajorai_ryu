@@ -36,6 +36,16 @@ const GRANT_META: Record<string, GrantMeta> = {
 		description:
 			"Save its own settings and state locally, isolated to this app.",
 	},
+	"ui:toast": {
+		label: "Show temporary messages",
+		description:
+			"Show short status or result messages in Ryu while you are using the app.",
+	},
+	"ui:declarative-http": {
+		label: "Load app data in Ryu views",
+		description:
+			"Let Ryu load and change this app's declared records through the selected node.",
+	},
 	"crypto:seal": {
 		label: "Encrypt its own data",
 		description:
@@ -64,6 +74,11 @@ const GRANT_META: Record<string, GrantMeta> = {
 	notifications: {
 		label: "Show notifications",
 		description: "Send you desktop notifications.",
+	},
+	"notifications:send-to-user": {
+		label: "Notify organization members",
+		description:
+			"Deliver Inbox notifications to people in your organization or team.",
 	},
 	shell: {
 		label: "Run commands on your computer",

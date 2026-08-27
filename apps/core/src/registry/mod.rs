@@ -262,9 +262,9 @@ pub const DEFAULT_LLM_MODEL: &str = "gpt-4o-mini";
 /// name one — see [`ProviderRegistry::resolve_rag_strategy`] for why the node-wide
 /// default is a creation-time input and not a query-time fallback.
 pub const DEFAULT_RAG_STRATEGY: &str = "vector";
-/// Last-resort fallback: graph entity-extraction model id. The built-in
-/// deterministic extractor needs no model, but this config hook exists so
-/// operators can point it at a remote LLM extractor without a recompile.
+/// Supported graph-extraction implementation id. Core currently ships the
+/// deterministic offline `local-cooccurrence` extractor. Any other configured id
+/// is rejected when the Spaces store opens instead of being silently ignored.
 pub const DEFAULT_GRAPH_EXTRACTION_MODEL: &str = "local-cooccurrence";
 
 /// Default local chat model id (storage key + filename stem in `~/.ryu/models/`).
@@ -668,18 +668,10 @@ pub struct ProviderRegistry {
     /// set. One of `"vector"` or `"graph"`. Defaults to `"vector"`.
     /// File-backed (`rag_strategy`) and live — `server::create_space` uses [`load`].
     pub rag_strategy: String,
-    /// Graph entity-extraction model id.
-    ///
-    /// **Recorded, not yet consumed.** The value is read from the file and carried
-    /// into `SpaceStore`, but nothing branches on it: `extract_entities` takes only
-    /// `&str` and always runs the built-in offline co-occurrence extractor, and
-    /// `SpaceStore::graph_extraction_model_id()` has no production caller. Setting
-    /// this to a remote model id does **not** switch extraction to an LLM — that is
-    /// a future hook, and the field on `SpaceStore` says the same.
-    ///
-    /// Reaching the struct is not the same as taking effect. Do not describe this as
-    /// live until something reads it; a settable value that changes no behaviour is
-    /// the defect this module's per-field audit exists to prevent.
+    /// Graph-extraction implementation id. The value is read from env or
+    /// `registry.json`, passed to `SpaceStore`, and validated before the Spaces
+    /// database opens. Only `local-cooccurrence` is supported today; other ids fail
+    /// startup with an actionable error rather than pretending to select a model.
     pub graph_extraction_model: String,
 
     // ── Local inference stack ─────────────────────────────────────────────────
@@ -1011,7 +1003,8 @@ impl ProviderRegistry {
         reg
     }
 
-    /// Returns the graph extraction model id from this registry.
+    /// Returns the configured graph extraction implementation id. `SpaceStore`
+    /// validates support before using it.
     pub fn graph_extraction_model_id(&self) -> &str {
         self.graph_extraction_model.as_str()
     }
@@ -1704,10 +1697,11 @@ mod tests {
         );
     }
 
-    /// `graph_extraction_model` is file-backed and live: `server::spaces::open_default`
-    /// reads it once through `retrieval_registry()` and hands it to `SpaceStore`.
-    /// Until this round the `crates/core/spaces` module header advertised the
-    /// `registry.json` key while the only consumer built with `from_env()`.
+    /// `graph_extraction_model` is file-backed and enforced:
+    /// `server::spaces::open_default` reads it through `retrieval_registry()` and
+    /// hands it to `SpaceStore`, which accepts the shipped local id and rejects
+    /// unsupported values. This test proves the file layer only; `ryu-spaces`
+    /// separately proves the support boundary.
     #[test]
     fn graph_extraction_model_reads_registry_file_via_load() {
         let _lock = lock_registry_env();

@@ -55,6 +55,8 @@ const MAX_CONCURRENT_RUN_AGENT_PER_PLUGIN: usize = 2;
 /// caller can never forward a verbatim path into a different capability namespace.
 fn bridge_path_for(method: &str) -> Option<&'static str> {
     match method {
+        "catalog.snapshot" => Some("host.catalogSnapshot"),
+        "catalog.models" => Some("host.catalogModels"),
         "model.complete" => Some("host.sideModel"),
         "agent.run" => Some("host.runAgent"),
         "agent.runFanout" => Some("host.runFanout"),
@@ -62,9 +64,11 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "storage.set" => Some("host.storage_set"),
         "storage.delete" => Some("host.storage_delete"),
         "storage.keys" => Some("host.storage_keys"),
+        "storage.compareAndSet" => Some("host.storage_compare_and_set"),
         "crypto.seal" => Some("host.crypto_seal"),
         "crypto.open" => Some("host.crypto_open"),
         "crypto.status" => Some("host.crypto_status"),
+        "spaces.ensureSpace" => Some("host.spaces_ensure_space"),
         "spaces.createDoc" => Some("host.spaces_create_doc"),
         "spaces.getDoc" => Some("host.spaces_get_doc"),
         "spaces.updateDoc" => Some("host.spaces_update_doc"),
@@ -545,6 +549,14 @@ mod tests {
 
     #[test]
     fn method_allowlist_is_closed() {
+        assert_eq!(
+            bridge_path_for("catalog.snapshot"),
+            Some("host.catalogSnapshot")
+        );
+        assert_eq!(
+            bridge_path_for("catalog.models"),
+            Some("host.catalogModels")
+        );
         assert_eq!(bridge_path_for("model.complete"), Some("host.sideModel"));
         assert_eq!(bridge_path_for("agent.run"), Some("host.runAgent"));
         assert_eq!(bridge_path_for("agent.runFanout"), Some("host.runFanout"));
@@ -555,6 +567,10 @@ mod tests {
             Some("host.storage_delete")
         );
         assert_eq!(bridge_path_for("storage.keys"), Some("host.storage_keys"));
+        assert_eq!(
+            bridge_path_for("spaces.ensureSpace"),
+            Some("host.spaces_ensure_space")
+        );
         assert_eq!(
             bridge_path_for("spaces.createDoc"),
             Some("host.spaces_create_doc")
@@ -623,6 +639,10 @@ mod tests {
         assert_eq!(required_grant_for("agent.run"), Some("hook:run-agent"));
         assert_eq!(required_grant_for("storage.get"), Some("storage:kv"));
         assert_eq!(required_grant_for("storage.keys"), Some("storage:kv"));
+        assert_eq!(
+            required_grant_for("storage.compareAndSet"),
+            Some("storage:kv")
+        );
         assert_eq!(required_grant_for("crypto.seal"), Some("crypto:seal"));
         assert_eq!(required_grant_for("crypto.open"), Some("crypto:seal"));
         assert_eq!(required_grant_for("crypto.status"), Some("crypto:seal"));

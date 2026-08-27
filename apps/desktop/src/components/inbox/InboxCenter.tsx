@@ -5,7 +5,9 @@
 // footer, with an "Open inbox" action that jumps to the full Inbox tab.
 //
 // It ALSO previews the per-user notification feed (`useNotifications`) — the
-// unread rows that apps and workflows push to the user. Each notification row
+// notification rows that apps and workflows push to the user. The tray defaults
+// to unread rows, and the pills can switch it to all, archived, or a level.
+// Each notification row
 // shows the SENDING APP'S icon (resolved from the app catalog by
 // `source_app_id`, so a monitor alert reads as the Monitors app, a reply as
 // Outpost), and carries an archive action. Clicking the row marks it read and
@@ -24,6 +26,7 @@
 
 import {
 	Archive01Icon,
+	ArchiveRestoreIcon,
 	Calendar04Icon,
 	Cancel01Icon,
 	CheckListIcon,
@@ -41,6 +44,14 @@ import {
 	NotificationStack,
 	type NotificationStackItem,
 } from "@ryu/ui/components/notification-stack";
+import {
+	filterNotifications,
+	isArchivedNotification,
+	isUnreadNotification,
+	type NotificationFilter,
+	NotificationFilterTabs,
+	notificationFilterLabel,
+} from "@ryu/ui/lib/notification-filters.tsx";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { openExternal } from "@/lib/tauri-bridge.ts";
@@ -208,10 +219,12 @@ function SuggestionRow({
  */
 function NotificationTrayRow({
 	appsById,
+	archived,
 	notification,
 	notifications,
 	onOpen,
 }: {
+	archived: boolean;
 	appsById: Map<string, AppInfo>;
 	notification: AppNotification;
 	notifications: ReturnType<typeof useNotifications>;
@@ -224,10 +237,13 @@ function NotificationTrayRow({
 		<TrayRow
 			actions={
 				<TrayIconAction
-					icon={Archive01Icon}
-					label="Archive"
+					icon={archived ? ArchiveRestoreIcon : Archive01Icon}
+					label={archived ? "Restore to inbox" : "Archive"}
 					onClick={() => {
-						notifications.archive(notification.id).catch(() => undefined);
+						const action = archived
+							? notifications.unarchive(notification.id)
+							: notifications.archive(notification.id);
+						action.catch(() => undefined);
 					}}
 				/>
 			}
@@ -240,6 +256,7 @@ function NotificationTrayRow({
 							dither={app.iconDither}
 							iconBackground={app.iconBackground ?? undefined}
 							iconId={app.icon}
+							iconPadding={app.iconPadding}
 							iconUrl={app.iconUrl}
 							name={app.name}
 							seedId={app.id}
@@ -289,6 +306,8 @@ export function InboxCenter({
 	const { data: apps } = useQuery(installedAppsQuery(target));
 	const appsById = new Map((apps ?? []).map((a) => [a.id, a]));
 	const [open, setOpen] = useState(false);
+	const [notificationFilter, setNotificationFilter] =
+		useState<NotificationFilter>("unread");
 	// useQuests exposes no pending flag for accept/dismissSuggestion (only for
 	// judge/delete), so the row's spinner state is tracked here.
 	const [decidingQuest, setDecidingQuest] = useState<string | null>(null);
@@ -302,41 +321,56 @@ export function InboxCenter({
 			);
 	};
 
-	const pending = showInbox
+	const activeNotificationFilter = showInbox ? notificationFilter : "all";
+	const includeInboxDecisionItems =
+		activeNotificationFilter === "all" || activeNotificationFilter === "unread";
+	const allPending = showInbox
 		? approvals.approvals.filter((a) => a.status === "pending")
 		: [];
 	// Open quests carrying a pending check-off suggestion (mirrors InboxPage).
-	const taskSuggestions = showInbox
+	const allTaskSuggestions = showInbox
 		? quests.quests.filter((q) => q.status === "open" && q.suggestion)
 		: [];
-	// Unread app-inbox notifications (what needs a look), newest first.
-	const unreadNotifications = showInbox
-		? notifications.notifications
-				.filter((n) => !n.read_at)
-				.slice(0, PREVIEW_LIMIT)
+	const pending = includeInboxDecisionItems ? allPending : [];
+	const taskSuggestions = includeInboxDecisionItems ? allTaskSuggestions : [];
+	const filteredNotifications = showInbox
+		? filterNotifications(notifications.notifications, activeNotificationFilter)
 		: [];
+	const previewNotifications = filteredNotifications.slice(0, PREVIEW_LIMIT);
 	const pendingCount = pending.length + taskSuggestions.length;
 	const unreadCount = showInbox
-		? notifications.notifications.filter((n) => !n.read_at).length
+		? notifications.notifications.filter(isUnreadNotification).length
 		: 0;
-	const riskyCount = pending.filter((a) => a.risk_tags.length > 0).length;
+	const filteredNotificationCount = filteredNotifications.length;
+	const riskyCount = allPending.filter((a) => a.risk_tags.length > 0).length;
 	const hiddenApprovals = Math.max(0, pending.length - PREVIEW_LIMIT);
 	const hiddenTasks = Math.max(0, taskSuggestions.length - PREVIEW_LIMIT);
-	const hiddenNotifications = Math.max(0, unreadCount - PREVIEW_LIMIT);
-	const visibleAnnouncements = showAnnouncements
-		? [...systemAnnouncements, ...announcementsFeed.announcements]
+	const hiddenNotifications = Math.max(
+		0,
+		filteredNotificationCount - PREVIEW_LIMIT
+	);
+	const announcementCandidates =
+		activeNotificationFilter === "unread"
+			? announcementsFeed.announcements.filter(
+					(announcement) => !announcement.read
+				)
+			: announcementsFeed.announcements;
+	const includeAnnouncements = showAnnouncements && includeInboxDecisionItems;
+	const visibleAnnouncements = includeAnnouncements
+		? [...systemAnnouncements, ...announcementCandidates]
 		: [];
 	const announcementCount = visibleAnnouncements.length;
-	const unreadAnnouncementCount = showAnnouncements
+	const allUnreadAnnouncementCount = showAnnouncements
 		? announcementsFeed.unreadCount
 		: 0;
 	const hiddenAnnouncements = Math.max(0, announcementCount - PREVIEW_LIMIT);
 	const hidden =
 		hiddenApprovals + hiddenTasks + hiddenNotifications + hiddenAnnouncements;
 	const totalCount =
-		pendingCount +
+		allPending.length +
+		allTaskSuggestions.length +
 		unreadCount +
-		unreadAnnouncementCount +
+		allUnreadAnnouncementCount +
 		systemAnnouncements.length;
 
 	const openInbox = () => {
@@ -374,9 +408,9 @@ export function InboxCenter({
 		}
 	};
 
-	const announcementStackItems = showAnnouncements
+	const announcementStackItems = includeAnnouncements
 		? buildAnnouncementStackItems({
-				announcements: announcementsFeed.announcements,
+				announcements: announcementCandidates,
 				dismiss: (id) => {
 					announcementsFeed.dismiss(id).catch(() => undefined);
 				},
@@ -449,7 +483,8 @@ export function InboxCenter({
 		}));
 
 	const notificationStackItems: NotificationStackItem[] =
-		unreadNotifications.map((notification) => {
+		previewNotifications.map((notification) => {
+			const archived = isArchivedNotification(notification);
 			const app = notification.source_app_id
 				? (appsById.get(notification.source_app_id) ?? null)
 				: null;
@@ -457,10 +492,13 @@ export function InboxCenter({
 				actions: (
 					<span className="relative z-20">
 						<TrayIconAction
-							icon={Archive01Icon}
-							label="Archive"
+							icon={archived ? ArchiveRestoreIcon : Archive01Icon}
+							label={archived ? "Restore to inbox" : "Archive"}
 							onClick={() => {
-								notifications.archive(notification.id).catch(() => undefined);
+								const action = archived
+									? notifications.unarchive(notification.id)
+									: notifications.archive(notification.id);
+								action.catch(() => undefined);
 							}}
 						/>
 					</span>
@@ -478,6 +516,7 @@ export function InboxCenter({
 						dither={app.iconDither}
 						iconBackground={app.iconBackground ?? undefined}
 						iconId={app.icon}
+						iconPadding={app.iconPadding}
 						iconUrl={app.iconUrl}
 						name={app.name}
 						seedId={app.id}
@@ -489,20 +528,24 @@ export function InboxCenter({
 				onActivate: () => openNotification(notification),
 				title: notification.title,
 				trailing: shortAgo(notification.created_at),
-				unread: true,
+				unread: isUnreadNotification(notification),
 			};
 		});
 	const stackItems = [
-		...approvalStackItems,
-		...taskStackItems,
-		...announcementStackItems,
+		...(includeInboxDecisionItems ? approvalStackItems : []),
+		...(includeInboxDecisionItems ? taskStackItems : []),
+		...(includeAnnouncements ? announcementStackItems : []),
 		...notificationStackItems,
 	];
+	const emptyFilterTitle =
+		activeNotificationFilter === "all" || activeNotificationFilter === "unread"
+			? "You're all caught up"
+			: `No ${notificationFilterLabel(activeNotificationFilter).toLowerCase()} notifications`;
 
 	let status: string | undefined;
 	if (riskyCount > 0) {
 		status = `${riskyCount} flagged risky`;
-	} else if (pendingCount > 0) {
+	} else if (allPending.length + allTaskSuggestions.length > 0) {
 		status = "Waiting on you";
 	} else if (totalCount > 0) {
 		status = `${totalCount} new`;
@@ -518,6 +561,16 @@ export function InboxCenter({
 					onOpenChange={setOpen}
 					open={open}
 				>
+					{showInbox ? (
+						<NotificationFilterTabs
+							ariaLabel="Filter inbox notifications"
+							className="mb-2 w-full"
+							items={notifications.notifications}
+							onValueChange={setNotificationFilter}
+							showCounts={false}
+							value={notificationFilter}
+						/>
+					) : null}
 					<NotificationStack
 						className="max-w-none"
 						collapsedLabel="Notifications"
@@ -557,8 +610,18 @@ export function InboxCenter({
 					status={status}
 					title={showAnnouncements ? "Notifications" : "Inbox"}
 				/>
+				{showInbox ? (
+					<NotificationFilterTabs
+						ariaLabel="Filter inbox notifications"
+						className="mb-2 w-full"
+						items={notifications.notifications}
+						onValueChange={setNotificationFilter}
+						showCounts={false}
+						value={notificationFilter}
+					/>
+				) : null}
 				{pendingCount > 0 ||
-				unreadNotifications.length > 0 ||
+				previewNotifications.length > 0 ||
 				announcementCount > 0 ? (
 					<TrayScroll onRefresh={() => queryClient.invalidateQueries()}>
 						{pending.length > 0 && (
@@ -603,14 +666,15 @@ export function InboxCenter({
 								))}
 							</>
 						)}
-						{unreadNotifications.length > 0 && (
+						{previewNotifications.length > 0 && (
 							<>
-								<TraySectionLabel count={unreadCount}>
+								<TraySectionLabel count={filteredNotificationCount}>
 									Notifications
 								</TraySectionLabel>
-								{unreadNotifications.map((notification) => (
+								{previewNotifications.map((notification) => (
 									<NotificationTrayRow
 										appsById={appsById}
+										archived={isArchivedNotification(notification)}
 										key={notification.id}
 										notification={notification}
 										notifications={notifications}
@@ -647,12 +711,17 @@ export function InboxCenter({
 				) : (
 					<TrayEmpty
 						description={
-							showAnnouncements
-								? "Approvals, tasks, app notifications, and announcements share this space."
-								: "Approvals, task check-offs, and app notifications land here when Ryu needs a decision."
+							activeNotificationFilter === "archived"
+								? "Rows you archive will stay here until you restore them."
+								: activeNotificationFilter !== "all" &&
+										activeNotificationFilter !== "unread"
+									? `No ${notificationFilterLabel(activeNotificationFilter).toLowerCase()} notifications yet.`
+									: showAnnouncements
+										? "Approvals, tasks, app notifications, and announcements share this space."
+										: "Approvals, task check-offs, and app notifications land here when Ryu needs a decision."
 						}
 						icon={showAnnouncements ? Notification01Icon : InboxIcon}
-						title="You're all caught up"
+						title={emptyFilterTitle}
 					/>
 				)}
 				{showInbox && <TrayFooter label="Open inbox" onClick={openInbox} />}

@@ -1,4 +1,6 @@
 import { apiKey } from "@better-auth/api-key";
+import { cimd } from "@better-auth/cimd";
+import { fetchClientMetadataResource } from "@better-auth/cimd/node";
 import { expo } from "@better-auth/expo";
 import { mcp } from "@better-auth/mcp";
 import { passkey } from "@better-auth/passkey";
@@ -62,7 +64,7 @@ import {
 import { admin } from "better-auth/plugins/admin";
 import { jwt } from "better-auth/plugins/jwt";
 import { POLAR_PRODUCTS } from "./lib/constants.ts";
-import { TAURI_DESKTOP_ORIGINS } from "./lib/cors-origins.ts";
+import { resolveRyuCorsOrigins } from "./lib/cors-origins.ts";
 import {
 	businessEmailDecision,
 	businessEmailDomainDecision,
@@ -92,7 +94,12 @@ import {
 	polarClient,
 	syncPolarCustomer,
 } from "./lib/payments.ts";
-import { PLANS, resolveProductId } from "./lib/plans.ts";
+import {
+	ORGANIZATION_PLAN_IDS,
+	PLANS,
+	planByProductId,
+	resolveProductId,
+} from "./lib/plans.ts";
 import { runRefereeGrantHook } from "./lib/referral-grant-hook.ts";
 import { providerIdFromSsoCallbackPath } from "./lib/sso-organization.ts";
 import { encryptedMongoAdapter } from "./lib/sso-provider-encryption.ts";
@@ -139,14 +146,16 @@ const polarPageItems = <T>(page: unknown): readonly T[] => {
 	return value.result?.items ?? value.items ?? [];
 };
 
-const TEAMS_PRODUCT_IDS = (): Set<string> =>
+const ORGANIZATION_PRODUCT_IDS = (): Set<string> =>
 	new Set(
-		Object.values(PLANS.teams.bindings)
-			.filter((binding): binding is NonNullable<typeof binding> =>
-				Boolean(binding)
-			)
-			.map((binding) => resolveProductId(binding))
-			.filter((productId) => !productId.startsWith("polar_product_"))
+		ORGANIZATION_PLAN_IDS.flatMap((planId) =>
+			Object.values(PLANS[planId].bindings)
+				.filter((binding): binding is NonNullable<typeof binding> =>
+					Boolean(binding)
+				)
+				.map((binding) => resolveProductId(binding))
+				.filter((productId) => !productId.startsWith("polar_product_"))
+		)
 	);
 
 /** The same deterministic org billing identity used by the billing router. */
@@ -201,10 +210,10 @@ async function activeTeamsSeatCount(
 		const subscriptions = await polarClient.subscriptions.list({
 			customerId,
 			// Keep invitation authorization aligned with the billing router's
-			// Teams subscription resolver; old records must not hide a live plan.
+			// organization subscription resolver; old records must not hide a live plan.
 			limit: 100,
 		});
-		const productIds = TEAMS_PRODUCT_IDS();
+		const productIds = ORGANIZATION_PRODUCT_IDS();
 		for await (const page of subscriptions) {
 			const active = polarPageItems<{
 				product?: { id?: string | null } | null;
@@ -222,10 +231,14 @@ async function activeTeamsSeatCount(
 				);
 			});
 			if (active) {
+				const productId = active.productId ?? active.product?.id ?? null;
+				const activePlan = productId
+					? planByProductId().get(productId)?.plan
+					: null;
 				const requested = Number(active.seats ?? active.quantity);
 				const minimum =
-					PLANS.teams.seatModel.kind === "per_seat"
-						? PLANS.teams.seatModel.minSeats
+					activePlan?.seatModel.kind === "per_seat"
+						? activePlan.seatModel.minSeats
 						: 1;
 				const billedSeats = Number.isFinite(requested)
 					? Math.max(Math.floor(requested), minimum)
@@ -236,9 +249,10 @@ async function activeTeamsSeatCount(
 		}
 		return null;
 	} catch (error) {
-		console.error("Failed to verify Teams seat capacity:", error);
+		console.error("Failed to verify organization seat capacity:", error);
 		throw new APIError("INTERNAL_SERVER_ERROR", {
-			message: "We could not verify the organization’s Teams seats. Try again.",
+			message:
+				"We could not verify the organization’s seat capacity. Try again.",
 		});
 	}
 }
@@ -469,7 +483,7 @@ async function reserveOrganizationInvitationPolicy(input: {
 }
 
 const PERSONAL_WORKSPACE_MESSAGE =
-	"Personal workspaces are for one person. Upgrade this workspace to For Teams to invite teammates and share access.";
+	"Personal workspaces are for one person. Upgrade this workspace to Teams to invite teammates and share access.";
 
 interface OrganizationPolicyUser {
 	email?: string | null;
@@ -805,10 +819,6 @@ configureContactIdSaver(saveContactIdToUser);
 // /api/auth/device/* are rejected by Better Auth's origin/CSRF check. The
 // desktop never needed this because Core calls these endpoints server-side
 // (reqwest) with no Origin header.
-const EXTENSION_ORIGIN =
-	process.env.EXTENSION_ORIGIN ||
-	"chrome-extension://eahmgoelihpjlbejliklmfcohjhpgeml";
-
 const LOCAL_DEV_HOSTS = new Set(["localhost", "127.0.0.1"]);
 
 function frontendOrigin(): string | undefined {
@@ -882,68 +892,13 @@ function resolveAuthCookieDomain(): string | undefined {
 	return undefined;
 }
 
-function mergeOrigins(
-	origins: string[],
-	extra: Array<string | undefined>
-): string[] {
-	const merged = [...origins];
-	for (const origin of extra) {
-		if (origin && !merged.includes(origin)) {
-			merged.push(origin);
-		}
-	}
-	return merged;
-}
-
 function parseCorsOrigins(): string[] {
-	const corsOrigin = process.env.CORS_ORIGIN || "";
-	const webappOrigin = env.WEBAPP_URL || "https://app.ryuhq.com";
-	const defaultOrigins = mergeOrigins(
-		[
-			"http://localhost:3001",
-			"http://localhost:1420",
-			"http://localhost:5173",
-			"http://localhost:5175",
-			"http://127.0.0.1:3001",
-			"mybettertapp://",
-			"exp://",
-			"ryu://",
-			...TAURI_DESKTOP_ORIGINS,
-			EXTENSION_ORIGIN,
-		],
-		[frontendOrigin(), webappOrigin]
-	);
-
-	if (!corsOrigin.trim()) {
-		return defaultOrigins;
-	}
-
-	const origins = mergeOrigins(
-		corsOrigin
-			.split(",")
-			.map((origin) => origin.trim())
-			.filter(Boolean),
-		[frontendOrigin(), webappOrigin]
-	);
-
-	// Always-trusted non-web origins (mobile schemes, desktop webview, extension)
-	// regardless of CORS_ORIGIN — release desktop builds must work even when ops
-	// forgets to list tauri.localhost in the env var.
-	const alwaysTrusted = [
-		"mybettertapp://",
-		"exp://",
-		"ryu://",
-		...TAURI_DESKTOP_ORIGINS,
-		EXTENSION_ORIGIN,
-		webappOrigin,
-	];
-	for (const scheme of alwaysTrusted) {
-		if (!origins.includes(scheme)) {
-			origins.push(scheme);
-		}
-	}
-
-	return origins;
+	return resolveRyuCorsOrigins({
+		corsOrigin: process.env.CORS_ORIGIN,
+		extensionOrigin: process.env.EXTENSION_ORIGIN,
+		frontendUrl: frontendOrigin(),
+		webappUrl: env.WEBAPP_URL || "https://app.ryuhq.com",
+	});
 }
 
 function parseCsvEnv(value: string | undefined): string[] {
@@ -1261,6 +1216,23 @@ export const auth = betterAuth({
 				throw error;
 			}
 		},
+		// Better Auth owns the emailVerified boolean. Keep the timestamp in
+		// Ryu's read-compatible Mongoose mirror so public profiles can show
+		// when the email signal was established without exposing the address.
+		afterEmailVerification: async (user: { id: string }) => {
+			try {
+				await User.updateOne(
+					{ _id: user.id },
+					{
+						$set: { emailVerifiedAt: new Date() },
+					}
+				);
+			} catch (error) {
+				// A display timestamp must never turn a successful mailbox verification
+				// into a failed sign-in. The boolean remains Better Auth's authority.
+				console.error("Failed to record email verification timestamp:", error);
+			}
+		},
 	},
 	user: {
 		additionalFields: {
@@ -1270,6 +1242,10 @@ export const auth = betterAuth({
 			},
 			resendContactId: {
 				type: "string",
+				input: false,
+			},
+			emailVerifiedAt: {
+				type: "date",
 				input: false,
 			},
 			lastEmailSentAt: {
@@ -1541,6 +1517,7 @@ export const auth = betterAuth({
 					id: string;
 					email: string;
 					name?: string;
+					emailVerified?: boolean;
 					isAnonymous?: boolean;
 					role?: string;
 					referralCode?: string;
@@ -1589,7 +1566,14 @@ export const auth = betterAuth({
 					try {
 						await User.updateOne(
 							{ _id: user.id },
-							{ $set: { role: resolvedRole } }
+							{
+								$set: {
+									role: resolvedRole,
+									...(user.emailVerified
+										? { emailVerifiedAt: new Date() }
+										: {}),
+								},
+							}
 						);
 						await User.updateOne(
 							{ _id: user.id, referralCode: { $in: [null, undefined, ""] } },
@@ -2011,6 +1995,20 @@ export const auth = betterAuth({
 			allowDynamicClientRegistration: true,
 			allowUnauthenticatedClientRegistration: true,
 			accessTokenExpiresIn: 3600,
+			// Hosted MCP access tokens must be revocable immediately. Better Auth's
+			// JWT access tokens are intentionally self-contained and its revocation
+			// endpoint cannot revoke them, while opaque tokens are checked against the
+			// oauthAccessToken row on every protected-resource request.
+			disableJwtPlugin: true,
+			storeTokens: "hashed",
+		}),
+		// MCP 2026 clients identify themselves with a Client ID Metadata
+		// Document. The Node transport resolves DNS once, rejects special-use IPs,
+		// pins the approved address, and refuses redirects. DCR above remains
+		// enabled only for compatibility with older MCP clients.
+		cimd({
+			fetchClientMetadataResource,
+			metadataProfile: "mcp-2026-07-28",
 		}),
 		// Enterprise inbound identity. Provider registration and SCIM token
 		// management are exposed through the org-scoped API router, which applies

@@ -856,6 +856,53 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	--shimmer-highlight: var(--foreground);
 }
 
+/* Transitions.dev — Menu dropdown */
+.t-dropdown {
+	pointer-events: none;
+	opacity: 0;
+	transform: scale(var(--dropdown-pre-scale));
+	transform-origin: top left;
+	transition:
+		transform var(--dropdown-open-dur) var(--dropdown-ease),
+		opacity var(--dropdown-open-dur) var(--dropdown-ease);
+	will-change: transform, opacity;
+}
+.t-dropdown[data-origin="top-right"] {
+	transform-origin: top right;
+}
+.t-dropdown[data-origin="top-center"] {
+	transform-origin: top center;
+}
+.t-dropdown[data-origin="bottom-left"] {
+	transform-origin: bottom left;
+}
+.t-dropdown[data-origin="bottom-center"] {
+	transform-origin: bottom center;
+}
+.t-dropdown[data-origin="bottom-right"] {
+	transform-origin: bottom right;
+}
+
+.t-dropdown.is-open {
+	pointer-events: auto;
+	opacity: 1;
+	transform: scale(1);
+}
+.t-dropdown.is-closing {
+	pointer-events: none;
+	opacity: 0;
+	transform: scale(var(--dropdown-closing-scale));
+	transition:
+		transform var(--dropdown-close-dur) var(--dropdown-ease),
+		opacity var(--dropdown-close-dur) var(--dropdown-ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.t-dropdown {
+		transition: none !important;
+	}
+}
+
 /* --- Switch toggle bounce --- */
 .t-toggle {
 	transition:

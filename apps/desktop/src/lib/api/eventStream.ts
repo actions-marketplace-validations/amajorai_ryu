@@ -12,10 +12,11 @@
 // subscribers. The connection is reference-counted: it opens on the first
 // subscriber and closes when the last one leaves, and reconnects with backoff.
 
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 /** The channels Core's `/api/events/all` tags events with (the SSE `event:`). */
 export type EventChannel =
+	| "activity"
 	| "notifications"
 	| "quests"
 	| "monitors"
@@ -89,9 +90,9 @@ function dispatchFrame(mux: MuxConnection, frame: string): void {
 
 /** Read the unified stream until it ends, dispatching frames as they arrive. */
 async function pump(target: ApiTarget, mux: MuxConnection): Promise<void> {
-	const resp = await fetch(apiUrl(target, "/api/events/all"), {
+	const resp = await authenticatedFetch(target, "/api/events/all", {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: { Accept: "text/event-stream" },
 		signal: mux.controller.signal,
 	});
 	if (!(resp.ok && resp.body)) {

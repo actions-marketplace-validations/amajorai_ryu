@@ -1,10 +1,5 @@
 {
-  "tags": [
-    "browser",
-    "chromium",
-    "automation",
-    "web"
-  ],
+  "tags": ["browser", "chromium", "automation", "web"],
   "author": {
     "name": "Ryu",
     "url": "https://ryuhq.com"
@@ -17,13 +12,8 @@
   "name": "Browser",
   "version": "0.1.15",
   "system": true,
-  "description": "A real-Chromium browser (Electron) Ryu runs as a local sidecar and exposes as the grant-gated `browser.control` capability: control tabs, capture screenshots and accessibility snapshots, inspect DOM context, attach frozen-frame annotations, and drive pages with element or coordinate mouse/keyboard input. Core spawns the sidecar lazily and idle-stops it; the desktop Browser panel drives it through the ext-proxy.",
-  "keywords": [
-    "browser",
-    "chromium",
-    "automation",
-    "web"
-  ],
+  "description": "A real-Chromium browser (Electron) exposed as the grant-gated `browser.control` capability. Local nodes can share one embedded session with the user; managed cloud nodes give each Bot a hidden tab lane inside one persistent managed-Bot Chromium context, so cookies and logins are shared while active tabs stay separate. Core routes the desktop Browser panel and agent tools through its authenticated ext-proxy.",
+  "keywords": ["browser", "chromium", "automation", "web"],
   "icon": "browser",
   "iconDither": {
     "from": 351,
@@ -69,6 +59,7 @@
       "config": {
         "slug": "chromium.list_tabs",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "GET",
         "url": "core:/api/ext/@ryu/browser/tabs",
         "secret_headers": {
@@ -90,6 +81,7 @@
       "config": {
         "slug": "chromium.open_tab",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/tabs",
         "secret_headers": {
@@ -106,9 +98,7 @@
               "description": "URL to load in the new tab (the sidecar defaults to about:blank when omitted)."
             }
           },
-          "required": [
-            "url"
-          ]
+          "required": ["url"]
         }
       }
     },
@@ -119,6 +109,7 @@
       "config": {
         "slug": "chromium.tab_detail",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "GET",
         "url": "core:/api/ext/@ryu/browser/tabs/{id}",
         "secret_headers": {
@@ -135,9 +126,7 @@
               "description": "Tab id, as returned by chromium.list_tabs or chromium.open_tab."
             }
           },
-          "required": [
-            "id"
-          ]
+          "required": ["id"]
         }
       }
     },
@@ -148,6 +137,7 @@
       "config": {
         "slug": "chromium.navigate_tab",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/tabs/{id}/navigate",
         "secret_headers": {
@@ -168,10 +158,7 @@
               "description": "URL to load in that tab."
             }
           },
-          "required": [
-            "id",
-            "url"
-          ]
+          "required": ["id", "url"]
         }
       }
     },
@@ -182,6 +169,7 @@
       "config": {
         "slug": "chromium.screenshot_tab",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/tabs/{id}/screenshot",
         "secret_headers": {
@@ -198,9 +186,7 @@
               "description": "Tab id to capture."
             }
           },
-          "required": [
-            "id"
-          ]
+          "required": ["id"]
         }
       }
     },
@@ -211,6 +197,7 @@
       "config": {
         "slug": "chromium.tab_title",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "GET",
         "url": "core:/api/ext/@ryu/browser/tabs/{id}/title",
         "secret_headers": {
@@ -227,9 +214,7 @@
               "description": "Tab id whose title to read."
             }
           },
-          "required": [
-            "id"
-          ]
+          "required": ["id"]
         }
       }
     },
@@ -240,6 +225,7 @@
       "config": {
         "slug": "chromium.snapshot_tab",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/tabs/{id}/snapshot",
         "secret_headers": {
@@ -256,9 +242,7 @@
               "description": "Tab id to snapshot, as returned by chromium.list_tabs or chromium.open_tab."
             }
           },
-          "required": [
-            "id"
-          ]
+          "required": ["id"]
         }
       }
     },
@@ -269,6 +253,7 @@
       "config": {
         "slug": "chromium.click",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/click",
         "secret_headers": {
@@ -289,9 +274,7 @@
               "description": "Tab to act on. Omit for the tab the browser is currently showing (a snapshot focuses the tab it reads)."
             }
           },
-          "required": [
-            "ref"
-          ]
+          "required": ["ref"]
         }
       }
     },
@@ -302,6 +285,7 @@
       "config": {
         "slug": "chromium.type",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/type",
         "secret_headers": {
@@ -334,10 +318,7 @@
               "description": "Tab to act on. Omit for the tab the browser is currently showing."
             }
           },
-          "required": [
-            "ref",
-            "text"
-          ]
+          "required": ["ref", "text"]
         }
       }
     },
@@ -348,6 +329,7 @@
       "config": {
         "slug": "chromium.scroll",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/scroll",
         "secret_headers": {
@@ -361,12 +343,7 @@
           "properties": {
             "direction": {
               "type": "string",
-              "enum": [
-                "up",
-                "down",
-                "left",
-                "right"
-              ],
+              "enum": ["up", "down", "left", "right"],
               "description": "Direction to scroll the page in."
             },
             "amount": {
@@ -378,9 +355,7 @@
               "description": "Tab to act on. Omit for the tab the browser is currently showing."
             }
           },
-          "required": [
-            "direction"
-          ]
+          "required": ["direction"]
         }
       }
     },
@@ -391,6 +366,7 @@
       "config": {
         "slug": "chromium.close_tab",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "DELETE",
         "url": "core:/api/ext/@ryu/browser/tabs/{id}",
         "secret_headers": {
@@ -407,9 +383,7 @@
               "description": "Tab id to close."
             }
           },
-          "required": [
-            "id"
-          ]
+          "required": ["id"]
         }
       }
     },
@@ -420,17 +394,21 @@
       "config": {
         "slug": "chromium.context",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/tabs/{id}/context",
         "secret_headers": { "Authorization": "Bearer env:RYU_TOKEN" },
         "fail_open": true,
         "unwrap_body": true,
-        "description": "Return a live page context bundle: URL/title, viewport, accessibility snapshot, saved annotations, and a PNG screenshot. Optionally pass CSS-pixel selection rectangles to retrieve DOM identity (tag, selector, XPath, attributes, computed styles, component hint, and text) for the pointed elements.",
+        "description": "Return a live page context bundle: URL/title, viewport, accessibility snapshot, saved annotations, a bounded list of page-declared WebMCP tools, and a PNG screenshot. Optionally pass CSS-pixel selection rectangles to retrieve DOM identity (tag, selector, XPath, attributes, computed styles, component hint, and text) for the pointed elements.",
         "input_schema": {
           "type": "object",
           "properties": {
             "id": { "type": "string", "description": "Tab id." },
-            "include_screenshot": { "type": "boolean", "description": "Set false for a text-only context refresh." },
+            "include_screenshot": {
+              "type": "boolean",
+              "description": "Set false for a text-only context refresh."
+            },
             "selections": {
               "type": "array",
               "maxItems": 8,
@@ -451,12 +429,67 @@
       }
     },
     {
+      "id": "tool-browser-list-webmcp-tools",
+      "name": "List WebMCP Tools",
+      "kind": "tool",
+      "config": {
+        "slug": "chromium.list_webmcp_tools",
+        "backend": "http",
+        "caller_agent_query": "agent_id",
+        "method": "GET",
+        "url": "core:/api/ext/@ryu/browser/tabs/{id}/webmcp",
+        "secret_headers": { "Authorization": "Bearer env:RYU_TOKEN" },
+        "fail_open": true,
+        "unwrap_body": true,
+        "description": "List the structured WebMCP tools currently registered by the page in one browser tab. Each tool includes its name, description, JSON input schema, origin, and read-only or untrusted-output hints. Call this before chromium.execute_webmcp_tool.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Tab id." }
+          },
+          "required": ["id"]
+        }
+      }
+    },
+    {
+      "id": "tool-browser-execute-webmcp-tool",
+      "name": "Execute WebMCP Tool",
+      "kind": "tool",
+      "config": {
+        "slug": "chromium.execute_webmcp_tool",
+        "backend": "http",
+        "caller_agent_query": "agent_id",
+        "method": "POST",
+        "url": "core:/api/ext/@ryu/browser/tabs/{id}/webmcp/execute",
+        "secret_headers": { "Authorization": "Bearer env:RYU_TOKEN" },
+        "fail_open": true,
+        "unwrap_body": true,
+        "description": "Execute one WebMCP tool registered by the page in a browser tab. Use the exact tool_name and arguments from chromium.list_webmcp_tools. This runs page JavaScript visibly in the user's signed-in tab and can cause external effects, so follow normal browser confirmation policy.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Tab id." },
+            "tool_name": {
+              "type": "string",
+              "description": "Exact WebMCP name returned by the list operation."
+            },
+            "arguments": {
+              "type": "object",
+              "description": "JSON object matching the tool's input_schema."
+            }
+          },
+          "required": ["id", "tool_name"]
+        }
+      }
+    },
+    {
       "id": "tool-browser-annotate",
       "name": "Annotate Browser",
       "kind": "tool",
       "config": {
         "slug": "chromium.annotate",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/tabs/{id}/annotations",
         "secret_headers": { "Authorization": "Bearer env:RYU_TOKEN" },
@@ -467,15 +500,42 @@
           "type": "object",
           "properties": {
             "id": { "type": "string" },
-            "kind": { "type": "string", "enum": ["area", "element", "elements"] },
+            "kind": {
+              "type": "string",
+              "enum": ["area", "element", "elements"]
+            },
             "rect": {
               "type": "object",
-              "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "width": { "type": "number", "minimum": 0 }, "height": { "type": "number", "minimum": 0 } },
+              "properties": {
+                "x": { "type": "number" },
+                "y": { "type": "number" },
+                "width": { "type": "number", "minimum": 0 },
+                "height": { "type": "number", "minimum": 0 }
+              },
               "required": ["x", "y"]
             },
-            "selections": { "type": "array", "maxItems": 8, "items": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "width": { "type": "number", "minimum": 0 }, "height": { "type": "number", "minimum": 0 } }, "required": ["x", "y"] } },
-            "comment": { "type": "string", "description": "Specific change request." },
-            "style": { "type": "object", "description": "Optional safe style feedback such as font_size, color, letter_spacing, padding, or margin." }
+            "selections": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "x": { "type": "number" },
+                  "y": { "type": "number" },
+                  "width": { "type": "number", "minimum": 0 },
+                  "height": { "type": "number", "minimum": 0 }
+                },
+                "required": ["x", "y"]
+              }
+            },
+            "comment": {
+              "type": "string",
+              "description": "Specific change request."
+            },
+            "style": {
+              "type": "object",
+              "description": "Optional safe style feedback such as font_size, color, letter_spacing, padding, or margin."
+            }
           },
           "required": ["id", "kind", "rect", "comment"]
         }
@@ -488,13 +548,18 @@
       "config": {
         "slug": "chromium.clear_annotations",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "DELETE",
         "url": "core:/api/ext/@ryu/browser/tabs/{id}/annotations",
         "secret_headers": { "Authorization": "Bearer env:RYU_TOKEN" },
         "fail_open": true,
         "unwrap_body": true,
         "description": "Clear all saved visual annotations from one browser tab.",
-        "input_schema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }
+        "input_schema": {
+          "type": "object",
+          "properties": { "id": { "type": "string" } },
+          "required": ["id"]
+        }
       }
     },
     {
@@ -504,13 +569,21 @@
       "config": {
         "slug": "chromium.hover",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/hover",
         "secret_headers": { "Authorization": "Bearer env:RYU_TOKEN" },
         "fail_open": true,
         "unwrap_body": true,
         "description": "Move the real pointer over a snapshot element without clicking it, useful for menus and hover states.",
-        "input_schema": { "type": "object", "properties": { "ref": { "type": "string" }, "tab_id": { "type": "string" } }, "required": ["ref"] }
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ref": { "type": "string" },
+            "tab_id": { "type": "string" }
+          },
+          "required": ["ref"]
+        }
       }
     },
     {
@@ -520,13 +593,24 @@
       "config": {
         "slug": "chromium.click_at",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/click-at",
         "secret_headers": { "Authorization": "Bearer env:RYU_TOKEN" },
         "fail_open": true,
         "unwrap_body": true,
         "description": "Click a CSS-pixel viewport coordinate for canvas and custom controls when no accessibility ref exists.",
-        "input_schema": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "button": { "type": "string", "enum": ["left", "middle", "right"] }, "count": { "type": "integer", "minimum": 1, "maximum": 3 }, "tab_id": { "type": "string" } }, "required": ["x", "y"] }
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "button": { "type": "string", "enum": ["left", "middle", "right"] },
+            "count": { "type": "integer", "minimum": 1, "maximum": 3 },
+            "tab_id": { "type": "string" }
+          },
+          "required": ["x", "y"]
+        }
       }
     },
     {
@@ -536,13 +620,21 @@
       "config": {
         "slug": "chromium.key",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/key",
         "secret_headers": { "Authorization": "Bearer env:RYU_TOKEN" },
         "fail_open": true,
         "unwrap_body": true,
         "description": "Press a browser key or chord at the current focus, such as [\"cmd\", \"l\"] or [\"Escape\"].",
-        "input_schema": { "type": "object", "properties": { "keys": { "type": "array", "items": { "type": "string" } }, "tab_id": { "type": "string" } }, "required": ["keys"] }
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "keys": { "type": "array", "items": { "type": "string" } },
+            "tab_id": { "type": "string" }
+          },
+          "required": ["keys"]
+        }
       }
     },
     {
@@ -552,13 +644,36 @@
       "config": {
         "slug": "chromium.drag",
         "backend": "http",
+        "caller_agent_query": "agent_id",
         "method": "POST",
         "url": "core:/api/ext/@ryu/browser/drag",
         "secret_headers": { "Authorization": "Bearer env:RYU_TOKEN" },
         "fail_open": true,
         "unwrap_body": true,
         "description": "Drag the real browser pointer between two CSS-pixel viewport coordinates.",
-        "input_schema": { "type": "object", "properties": { "from": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["x", "y"] }, "to": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["x", "y"] }, "tab_id": { "type": "string" } }, "required": ["from", "to"] }
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "object",
+              "properties": {
+                "x": { "type": "number" },
+                "y": { "type": "number" }
+              },
+              "required": ["x", "y"]
+            },
+            "to": {
+              "type": "object",
+              "properties": {
+                "x": { "type": "number" },
+                "y": { "type": "number" }
+              },
+              "required": ["x", "y"]
+            },
+            "tab_id": { "type": "string" }
+          },
+          "required": ["from", "to"]
+        }
       }
     }
   ],
@@ -577,68 +692,68 @@
       "idle_stop_secs": 300,
       "http": {
         "routes": [
-          {
-            "path": "/"
-          },
+          { "path": "/", "permission": "browser.view" },
           {
             "path": "/health"
           },
+          { "path": "/tabs", "method": "GET", "permission": "browser.view" },
           {
-            "path": "/tabs"
+            "path": "/tabs",
+            "method": "POST",
+            "permission": "browser.control"
           },
           {
-            "path": "/tabs/:id"
+            "path": "/tabs/:id",
+            "method": "GET",
+            "permission": "browser.view"
           },
           {
-            "path": "/tabs/:id/navigate"
+            "path": "/tabs/:id",
+            "method": "DELETE",
+            "permission": "browser.control"
+          },
+          { "path": "/tabs/:id/navigate", "permission": "browser.control" },
+          { "path": "/tabs/:id/screenshot", "permission": "browser.view" },
+          { "path": "/tabs/:id/eval", "permission": "browser.control" },
+          { "path": "/tabs/:id/snapshot", "permission": "browser.view" },
+          { "path": "/tabs/:id/title", "permission": "browser.view" },
+          { "path": "/tabs/:id/context", "permission": "browser.view" },
+          {
+            "path": "/tabs/:id/webmcp",
+            "method": "GET",
+            "permission": "browser.view"
           },
           {
-            "path": "/tabs/:id/screenshot"
+            "path": "/tabs/:id/webmcp/execute",
+            "method": "POST",
+            "permission": "browser.control"
           },
+          { "path": "/tabs/:id/annotations", "permission": "browser.control" },
           {
-            "path": "/tabs/:id/eval"
+            "path": "/tabs/:id/annotations/:annotation_id",
+            "permission": "browser.control"
           },
-          {
-            "path": "/tabs/:id/snapshot"
-          },
-          {
-            "path": "/tabs/:id/title"
-          },
-          {
-            "path": "/tabs/:id/context"
-          },
-          {
-            "path": "/tabs/:id/annotations"
-          },
-          {
-            "path": "/tabs/:id/annotations/:annotation_id"
-          },
-          {
-            "path": "/click"
-          },
-          {
-            "path": "/type"
-          },
-          {
-            "path": "/scroll"
-          },
-          {
-            "path": "/hover"
-          },
-          {
-            "path": "/click-at"
-          },
-          {
-            "path": "/key"
-          },
-          {
-            "path": "/drag"
-          }
+          { "path": "/click", "permission": "browser.control" },
+          { "path": "/type", "permission": "browser.control" },
+          { "path": "/scroll", "permission": "browser.control" },
+          { "path": "/hover", "permission": "browser.control" },
+          { "path": "/click-at", "permission": "browser.control" },
+          { "path": "/key", "permission": "browser.control" },
+          { "path": "/drag", "permission": "browser.control" }
         ]
       }
     }
   ],
   "provides": [
+    {
+      "capability": "browser.session",
+      "version": "1.0.0",
+      "title": "Browser session",
+      "sidecar": "browser",
+      "route": "/",
+      "grant": "browser:control",
+      "target": "local-machine"
+    },
     {
       "capability": "browser.control",
       "version": "1.0.0",
@@ -710,10 +825,7 @@
       }
     }
   ],
-  "permission_grants": [
-    "browser:control",
-    "tool:http-egress:127.0.0.1"
-  ],
+  "permission_grants": ["browser:control", "tool:http-egress:127.0.0.1"],
   "permission_levels": [
     {
       "id": "browser.view",
@@ -724,9 +836,7 @@
       "id": "browser.control",
       "label": "Can control",
       "description": "Open, navigate, and close tabs and drive pages with synthetic clicks, typing, and scrolling, using whatever the browser is already signed in to.",
-      "implies": [
-        "browser.view"
-      ]
+      "implies": ["browser.view"]
     }
   ],
   "contributes": {
@@ -739,10 +849,7 @@
         "panel": "native",
         "spec": {
           "linkHandler": {
-            "schemes": [
-              "http",
-              "https"
-            ],
+            "schemes": ["http", "https"],
             "method": "POST",
             "path": "/api/ext/@ryu/browser/tabs",
             "bodyKey": "url"
@@ -755,12 +862,8 @@
         "id": "browser.chat",
         "title": "Browser widget",
         "description": "Browser chat widget metadata is coming soon; no render tool is available yet.",
-        "triggers": [
-          "browser widget"
-        ],
-        "examples": [
-          "Show me a browser widget"
-        ],
+        "triggers": ["browser widget"],
+        "examples": ["Show me a browser widget"],
         "backing": {},
         "display_mode": "inline",
         "safe_action_ids": [],

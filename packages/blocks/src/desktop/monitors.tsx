@@ -1,12 +1,8 @@
 "use client";
 
-// Presentational layer of the desktop Monitors view. The live Monitors UI was
-// extracted into the sandboxed `@ryu/monitors` companion app
-// (`packages/monitors-app`), which owns selection/editing state + data fetching
-// over the `window.ryu.monitors.*` bridge; the shell `MonitorsPage`/`useMonitors`
-// were deleted in that cutover. This block's only remaining consumer is the
-// internal storyboard (mock data, no-op handlers). One source of truth, so editing this block changes the
-// real desktop too.
+// Presentational layer of the desktop Monitors view. The live Monitors UI is
+// shared with the sandboxed `@ryu/monitors` Companion app, which owns selection,
+// editing state, and data fetching over the `window.ryu.monitors.*` bridge.
 //
 // Selection and edit/new mode are controlled by the container (it needs the
 // selection to fetch snapshots/alerts). The only local state here is the create/
@@ -35,88 +31,30 @@ import {
 } from "@ryu/ui/components/native-select";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
+import type {
+	Alert,
+	CheckStatus,
+	CheckType,
+	FetchBackend,
+	Monitor,
+	MonitorInput,
+	NotifyTarget,
+	NumComparator,
+	Snapshot,
+} from "@ryuhq/core-client/monitors";
 import { useEffect, useState } from "react";
 
-// ── Monitor model (mirrors apps/desktop/src/lib/api/monitors.ts) ──────────────
-
-export type FetchBackend = "http" | "spider" | "agentbrowser";
-
-export type NumComparator =
-	| "changed"
-	| "less_than"
-	| "greater_than"
-	| "drops_by_pct"
-	| "rises_by_pct";
-
-export type CheckType =
-	| { type: "uptime"; expect_status?: number[] }
-	| {
-			type: "keyword";
-			pattern: string;
-			is_regex?: boolean;
-			case_sensitive?: boolean;
-			alert_when_present?: boolean;
-	  }
-	| { type: "content_diff"; region_regex?: string | null }
-	| {
-			type: "price";
-			extract_regex: string;
-			comparator?: NumComparator;
-			threshold?: number | null;
-	  }
-	| {
-			type: "stock";
-			in_stock_pattern: string;
-			is_regex?: boolean;
-			alert_when_in_stock?: boolean;
-	  };
-
-export type NotifyTarget =
-	| { kind: "webhook"; url: string }
-	| { kind: "telegram"; bot_token: string; chat_id: string }
-	| { kind: "expo_push"; token: string };
-
-export type CheckStatus = "ok" | "triggered" | "error";
-
-export interface Monitor {
-	backend: FetchBackend;
-	check: CheckType;
-	enabled: boolean;
-	id: string;
-	interval: string;
-	last_status?: CheckStatus | null;
-	last_value?: string | null;
-	name: string;
-	notify: NotifyTarget[];
-	url: string;
-}
-
-export interface Snapshot {
-	checked_at: string;
-	http_status?: number | null;
-	id: number;
-	latency_ms?: number | null;
-	note?: string | null;
-	status: CheckStatus;
-	value?: string | null;
-}
-
-export interface Alert {
-	created_at: string;
-	id: number;
-	message: string;
-	title: string;
-}
-
-export interface MonitorInput {
-	backend: FetchBackend;
-	check: CheckType;
-	enabled: boolean;
-	interval: string;
-	name: string;
-	notify: NotifyTarget[];
-	url: string;
-}
+export type {
+	Alert,
+	CheckStatus,
+	CheckType,
+	FetchBackend,
+	Monitor,
+	MonitorInput,
+	NotifyTarget,
+	NumComparator,
+	Snapshot,
+} from "./monitor-types";
 
 type CheckKind = CheckType["type"];
 
@@ -422,6 +360,7 @@ function NotifyEditor({
 	const addWebhook = () => update([...notify, { kind: "webhook", url: "" }]);
 	const addTelegram = () =>
 		update([...notify, { kind: "telegram", bot_token: "", chat_id: "" }]);
+	const addEmail = () => update([...notify, { kind: "email", to: "" }]);
 	const removeAt = (i: number) => update(notify.filter((_, idx) => idx !== i));
 	const patchAt = (i: number, p: Partial<NotifyTarget>) =>
 		update(
@@ -458,6 +397,14 @@ function NotifyEditor({
 							/>
 						</>
 					) : null}
+					{t.kind === "email" ? (
+						<Input
+							className="flex-1"
+							onChange={(e) => patchAt(i, { to: e.target.value })}
+							placeholder="Email recipient"
+							value={t.to}
+						/>
+					) : null}
 					<Button
 						onClick={() => removeAt(i)}
 						size="sm"
@@ -474,6 +421,9 @@ function NotifyEditor({
 				</Button>
 				<Button onClick={addTelegram} size="sm" type="button" variant="outline">
 					+ Telegram
+				</Button>
+				<Button onClick={addEmail} size="sm" type="button" variant="outline">
+					+ Email
 				</Button>
 			</div>
 		</div>

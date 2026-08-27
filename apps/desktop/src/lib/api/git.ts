@@ -2,11 +2,131 @@
 //
 // Typed client for Core's git endpoints:
 //   - `GET /api/git/status?cwd=<path>` (consumed by WorkspacePicker)
+//   - `POST /api/git/init` (consumed by Ryu Work's non-repo entry point)
 //   - `POST /api/git/pull` and `/api/git/sync` (consumed by PinnedSummaryPanel)
 //   - `GET /api/worktree/:run_id/diff` (consumed by DiffReviewPane)
 //   - `POST /api/worktree/:run_id/apply` (consumed by DiffReviewPane)
 
-import { type ApiTarget, apiUrl, makeHeaders, readJsonBody } from "./client.ts";
+import type { FileEditUndoPlan } from "@ryu/blocks/desktop/agent-elements/turn-end-cards";
+import {
+	type ApiTarget,
+	apiUrl,
+	authenticatedFetch,
+	makeHeaders,
+	readJsonBody,
+} from "./client.ts";
+
+export interface GitFileDiffResult {
+	patch: string;
+	paths: string[];
+}
+
+export type ReverseEditsConflictReason =
+	| "changed_since_turn"
+	| "staged_changes"
+	| "unsupported_file";
+
+export type ReverseEditsResult =
+	| { kind: "applied"; paths: string[] }
+	| {
+			kind: "conflict";
+			paths: string[];
+			reason: ReverseEditsConflictReason;
+	  };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function stringArray(value: unknown): string[] | undefined {
+	return Array.isArray(value) && value.every((item) => typeof item === "string")
+		? value
+		: undefined;
+}
+
+function parseFileDiff(value: unknown): GitFileDiffResult | undefined {
+	if (!isRecord(value) || typeof value.patch !== "string") {
+		return undefined;
+	}
+	const paths = stringArray(value.paths);
+	return paths ? { patch: value.patch, paths } : undefined;
+}
+
+function parseReverseEditsResult(
+	value: unknown
+): ReverseEditsResult | undefined {
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const paths = stringArray(value.paths);
+	if (!paths) {
+		return undefined;
+	}
+	if (value.kind === "applied") {
+		return { kind: "applied", paths };
+	}
+	if (
+		value.kind === "conflict" &&
+		(value.reason === "changed_since_turn" ||
+			value.reason === "staged_changes" ||
+			value.reason === "unsupported_file")
+	) {
+		return { kind: "conflict", paths, reason: value.reason };
+	}
+	return undefined;
+}
+
+export async function fetchGitFileDiff(
+	target: ApiTarget,
+	cwd: string,
+	paths: string[],
+	signal?: AbortSignal
+): Promise<GitFileDiffResult> {
+	const response = await fetch(apiUrl(target, "/api/git/file-diff"), {
+		body: JSON.stringify({ cwd, paths }),
+		headers: makeHeaders(target.token),
+		method: "POST",
+		signal,
+	});
+	const { data, error } = await readJsonBody<unknown>(response, "file diff");
+	if (error) {
+		throw new Error(error);
+	}
+	const parsed = parseFileDiff(data);
+	if (!parsed) {
+		throw new Error("invalid file diff response");
+	}
+	return parsed;
+}
+
+export async function reverseGitEdits(
+	target: ApiTarget,
+	cwd: string,
+	plan: FileEditUndoPlan,
+	signal?: AbortSignal
+): Promise<ReverseEditsResult> {
+	const response = await fetch(apiUrl(target, "/api/git/reverse-edits"), {
+		body: JSON.stringify({ cwd, plan }),
+		headers: makeHeaders(target.token),
+		method: "POST",
+		signal,
+	});
+	const { data, error, status } = await readJsonBody<unknown>(
+		response,
+		"reverse edits"
+	);
+	const parsed = parseReverseEditsResult(data);
+	if (status === 409 && parsed?.kind === "conflict") {
+		return parsed;
+	}
+	if (error) {
+		throw new Error(error);
+	}
+	if (parsed?.kind !== "applied") {
+		throw new Error("invalid reverse edits response");
+	}
+	return parsed;
+}
 
 export interface GitStatus {
 	ahead: number;
@@ -30,6 +150,45 @@ const NOT_REPO: GitStatus = {
 	deletions: 0,
 };
 
+export interface GitInitResult {
+	branch?: string | null;
+	error?: string;
+	initialized?: boolean;
+	success: boolean;
+}
+
+/** Initialize a local repository without staging or committing its files. */
+export async function initializeGit(
+	target: ApiTarget,
+	cwd: string,
+	signal?: AbortSignal
+): Promise<GitInitResult> {
+	try {
+		const resp = await authenticatedFetch(target, "/api/git/init", {
+			method: "POST",
+			body: JSON.stringify({ cwd }),
+			signal,
+		});
+		const { data, error } = await readJsonBody<Partial<GitInitResult>>(
+			resp,
+			"git init"
+		);
+		if (error) {
+			return { success: false, error };
+		}
+		return {
+			branch: data?.branch ?? null,
+			initialized: data?.initialized ?? false,
+			success: true,
+		};
+	} catch (error) {
+		return {
+			success: false,
+			error: error instanceof Error ? error.message : "git init failed",
+		};
+	}
+}
+
 /**
  * Fetch git status for `cwd` from Core. Returns `{is_repo:false}` when the
  * folder is not a git repo or when Core is unreachable — callers should treat
@@ -40,11 +199,10 @@ export async function fetchGitStatus(
 	cwd: string,
 	signal?: AbortSignal
 ): Promise<GitStatus> {
-	const url = `${apiUrl(target, "/api/git/status")}?cwd=${encodeURIComponent(cwd)}`;
+	const path = `/api/git/status?cwd=${encodeURIComponent(cwd)}`;
 	try {
-		const resp = await fetch(url, {
+		const resp = await authenticatedFetch(target, path, {
 			method: "GET",
-			headers: makeHeaders(target.token),
 			signal,
 		});
 		if (!resp.ok) {
@@ -90,11 +248,10 @@ export async function fetchGitBranches(
 	cwd: string,
 	signal?: AbortSignal
 ): Promise<GitBranches> {
-	const url = `${apiUrl(target, "/api/git/branches")}?cwd=${encodeURIComponent(cwd)}`;
+	const path = `/api/git/branches?cwd=${encodeURIComponent(cwd)}`;
 	try {
-		const resp = await fetch(url, {
+		const resp = await authenticatedFetch(target, path, {
 			method: "GET",
-			headers: makeHeaders(target.token),
 			signal,
 		});
 		if (!resp.ok) {
@@ -128,15 +285,9 @@ export async function checkoutBranch(
 	branch: string,
 	signal?: AbortSignal
 ): Promise<CheckoutResult> {
-	const url = apiUrl(target, "/api/git/checkout");
 	try {
-		// `makeHeaders` ALREADY sets `Content-Type: application/json`. Re-adding a
-		// lowercase `content-type` key here produced TWO record entries, which
-		// `fetch` combines into `application/json, application/json` — a value
-		// axum's `Json` extractor rejects with a 415 and a text/plain body.
-		const resp = await fetch(url, {
+		const resp = await authenticatedFetch(target, "/api/git/checkout", {
 			method: "POST",
-			headers: makeHeaders(target.token),
 			body: JSON.stringify({ cwd, branch }),
 			signal,
 		});
@@ -168,11 +319,9 @@ export async function createBranch(
 	branch: string,
 	signal?: AbortSignal
 ): Promise<CheckoutResult> {
-	const url = apiUrl(target, "/api/git/create-branch");
 	try {
-		const resp = await fetch(url, {
+		const resp = await authenticatedFetch(target, "/api/git/create-branch", {
 			method: "POST",
-			headers: makeHeaders(target.token),
 			body: JSON.stringify({ cwd, branch }),
 			signal,
 		});
@@ -228,11 +377,9 @@ export async function commitPush(
 	action: GitCommitAction = "commit-push",
 	includeUnstaged = true
 ): Promise<CommitPushResult> {
-	const url = apiUrl(target, "/api/git/commit-push");
 	try {
-		const resp = await fetch(url, {
+		const resp = await authenticatedFetch(target, "/api/git/commit-push", {
 			method: "POST",
-			headers: makeHeaders(target.token),
 			body: JSON.stringify({
 				cwd,
 				message,
@@ -278,11 +425,9 @@ async function runGitRemoteAction(
 	action: GitRemoteAction,
 	signal?: AbortSignal
 ): Promise<GitRemoteResult> {
-	const url = apiUrl(target, `/api/git/${action}`);
 	try {
-		const resp = await fetch(url, {
+		const resp = await authenticatedFetch(target, `/api/git/${action}`, {
 			method: "POST",
-			headers: makeHeaders(target.token),
 			body: JSON.stringify({ cwd }),
 			signal,
 		});
@@ -359,11 +504,9 @@ export async function createPullRequest(
 	opts: PullRequestOptions,
 	signal?: AbortSignal
 ): Promise<PullRequestResult> {
-	const url = apiUrl(target, "/api/git/pull-request");
 	try {
-		const resp = await fetch(url, {
+		const resp = await authenticatedFetch(target, "/api/git/pull-request", {
 			method: "POST",
-			headers: makeHeaders(target.token),
 			body: JSON.stringify({
 				base: opts.base,
 				body: opts.body,
@@ -459,16 +602,15 @@ export async function fetchWorktreeStatus(
 	runId: string,
 	signal?: AbortSignal
 ): Promise<WorktreeStatus> {
-	const url = apiUrl(
-		target,
-		`/api/worktree/${encodeURIComponent(runId)}/status`
-	);
 	try {
-		const resp = await fetch(url, {
-			method: "GET",
-			headers: makeHeaders(target.token),
-			signal,
-		});
+		const resp = await authenticatedFetch(
+			target,
+			`/api/worktree/${encodeURIComponent(runId)}/status`,
+			{
+				method: "GET",
+				signal,
+			}
+		);
 		if (!resp.ok) {
 			return NO_WORKTREE;
 		}
@@ -520,16 +662,15 @@ export async function applyWorktree(
 	opts: ApplyOptions,
 	signal?: AbortSignal
 ): Promise<ApplyResult> {
-	const url = apiUrl(
+	const resp = await authenticatedFetch(
 		target,
-		`/api/worktree/${encodeURIComponent(runId)}/apply`
+		`/api/worktree/${encodeURIComponent(runId)}/apply`,
+		{
+			method: "POST",
+			body: JSON.stringify(opts),
+			signal,
+		}
 	);
-	const resp = await fetch(url, {
-		method: "POST",
-		headers: makeHeaders(target.token),
-		body: JSON.stringify(opts),
-		signal,
-	});
 	// This one still THROWS on failure by contract (DiffReviewPane catches), but
 	// the throw must carry the server's reason — never a raw `SyntaxError` from
 	// parsing a text/plain rejection body.
@@ -569,13 +710,15 @@ export async function fetchWorktreeDiff(
 	runId: string,
 	signal?: AbortSignal
 ): Promise<WorktreeDiff> {
-	const url = apiUrl(target, `/api/worktree/${encodeURIComponent(runId)}/diff`);
 	try {
-		const resp = await fetch(url, {
-			method: "GET",
-			headers: makeHeaders(target.token),
-			signal,
-		});
+		const resp = await authenticatedFetch(
+			target,
+			`/api/worktree/${encodeURIComponent(runId)}/diff`,
+			{
+				method: "GET",
+				signal,
+			}
+		);
 		if (!resp.ok) {
 			return EMPTY_DIFF;
 		}

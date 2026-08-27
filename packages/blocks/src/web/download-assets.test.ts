@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	classifyDownloadArch,
 	type DownloadArch,
 	type DownloadOS,
 	findChannelRelease,
@@ -16,6 +17,23 @@ import {
 	resolveDownloadState,
 	stableReleases,
 } from "./download-assets.ts";
+
+describe("classifyDownloadArch", () => {
+	it("uses Chromium's explicit Apple-silicon signal over its MacIntel user agent", () => {
+		expect(
+			classifyDownloadArch(
+				"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+				"arm"
+			)
+		).toBe("arm");
+	});
+
+	it("keeps Intel as the fallback when no ARM signal is present", () => {
+		expect(classifyDownloadArch("Mozilla/5.0 (X11; Linux x86_64)")).toBe(
+			"intel"
+		);
+	});
+});
 
 // Verbatim asset names from the real v0.1.1 release of amajorai/ryu, in the
 // order the GitHub API returns them. The ordering matters to the regression:

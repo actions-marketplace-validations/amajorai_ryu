@@ -8,6 +8,7 @@ import {
 	SIDEBAR_OVERFLOW_POPOVER_KEY,
 	SidebarListAppearanceMenuItems,
 	TabBarAppearanceMenuItems,
+	TabLayoutMenuItems,
 } from "../../src/components/layout/appearance-context-menu.tsx";
 import {
 	setAgentRowStyle,
@@ -19,6 +20,7 @@ import { usePersistedToggle } from "../../src/hooks/usePersistedToggle.ts";
 import { useSidebarChatPreview } from "../../src/hooks/useSidebarChatPreview.ts";
 import { useSidebarGroupedNav } from "../../src/hooks/useSidebarGroupedNav.ts";
 import { useTabDropdown } from "../../src/hooks/useTabDropdown.ts";
+import { setTabLayout, useTabLayout } from "../../src/hooks/useTabLayout.ts";
 import { useTabSearchButton } from "../../src/hooks/useTabSearchButton.ts";
 import "../../src/index.css";
 
@@ -27,6 +29,7 @@ if (sessionStorage.getItem(PROOF_RESET_KEY) !== "true") {
 	localStorage.removeItem("ryu:tab-dropdown");
 	localStorage.removeItem("ryu:tab-search-button");
 	localStorage.removeItem("ryu:floating-tabs");
+	localStorage.removeItem("ryu_tab_layout");
 	localStorage.removeItem("ryu:chat-date-grouping");
 	localStorage.removeItem("ryu:sidebar-grouped-nav");
 	localStorage.removeItem("ryu:sidebar-chat-preview");
@@ -39,6 +42,7 @@ function Story() {
 	const [tabDropdownEnabled, setTabDropdownEnabled] = useTabDropdown();
 	const [tabSearchButtonVisible, setTabSearchButtonVisible] =
 		useTabSearchButton();
+	const tabLayout = useTabLayout();
 	const [floatingTabs, setFloatingTabs] = useFloatingTabs();
 	const [groupByDate, setGroupByDate] = useChatDateGrouping();
 	const [groupedNav, setGroupedNav] = useSidebarGroupedNav();
@@ -94,6 +98,7 @@ function Story() {
 								showSidebarChatPreview={showSidebarChatPreview}
 								sidebarOverflowPopover={sidebarOverflowPopover}
 							/>
+							<TabLayoutMenuItems onChange={setTabLayout} value={tabLayout} />
 						</ContextMenuContent>
 					</ContextMenu>
 
@@ -123,6 +128,7 @@ function Story() {
 								tabDropdownEnabled={tabDropdownEnabled}
 								tabSearchButtonVisible={tabSearchButtonVisible}
 							/>
+							<TabLayoutMenuItems onChange={setTabLayout} value={tabLayout} />
 						</ContextMenuContent>
 					</ContextMenu>
 				</div>
@@ -136,6 +142,7 @@ function Story() {
 						Tabs: {tabDropdownEnabled ? "dropdown" : "full strip"} ·{" "}
 						{tabSearchButtonVisible ? "search shown" : "search hidden"}
 					</p>
+					<p data-testid="tab-layout-state">Layout: {tabLayout}</p>
 				</div>
 			</div>
 		</main>

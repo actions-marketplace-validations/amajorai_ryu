@@ -8,14 +8,15 @@
 // not failed: some rows are readouts, not settings, and forcing every one of them
 // into the index would make the search list worse, not better.
 
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "bun:test";
 import {
 	SETTINGS_ENTRIES,
 	searchSettings,
 	sectionLabel,
+	visibleSettingsEntries,
 } from "./settings-index.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -56,6 +57,10 @@ const SECTION_SOURCES: Record<string, string[]> = {
 	network: ["NetworkSettings.tsx"],
 	integrations: ["IntegrationsTab.tsx"],
 	connections: ["ConnectionsTab.tsx"],
+	hooks: ["../gateway/HooksSection.tsx"],
+	git: ["../gateway/GitSettingsSection.tsx"],
+	worktrees: ["../gateway/WorktreesSection.tsx"],
+	environments: ["../gateway/EnvironmentsSection.tsx"],
 	runtime: ["../gateway/AcpRuntimeSection.tsx"],
 };
 
@@ -82,6 +87,10 @@ const UNANCHORED_SECTIONS = new Set([
 	"health",
 	"routing",
 	"budgets",
+	"hooks",
+	"git",
+	"worktrees",
+	"environments",
 ]);
 
 const readSection = (section: string): string | null => {
@@ -141,6 +150,11 @@ describe("searchSettings", () => {
 		expect(ids).toContain("appearance.theme.color-theme");
 	});
 
+	it("finds the send shortcut setting from its visible title", () => {
+		const ids = searchSettings("send shortcut").map((entry) => entry.id);
+		expect(ids).toContain("general.chats.send-shortcut");
+	});
+
 	it("ANDs the tokens instead of ORing them", () => {
 		const both = searchSettings("diff line");
 		expect(both.length).toBeGreaterThan(0);
@@ -160,5 +174,39 @@ describe("searchSettings", () => {
 
 	it("respects the result cap", () => {
 		expect(searchSettings("e", 5).length).toBeLessThanOrEqual(5);
+	});
+
+	it("removes desktop-only results from browser surfaces", () => {
+		const desktopResults = visibleSettingsEntries(
+			searchSettings("start ryu startup"),
+			true
+		);
+		const browserResults = visibleSettingsEntries(
+			searchSettings("start ryu startup"),
+			false
+		);
+
+		expect(desktopResults.map((entry) => entry.id)).toContain(
+			"general.system.start-ryu-on-startup"
+		);
+		expect(browserResults).toEqual([]);
+	});
+
+	it("keeps the send shortcut setting out of browser surfaces", () => {
+		const desktopResults = visibleSettingsEntries(
+			searchSettings("send shortcut"),
+			true
+		);
+		const browserResults = visibleSettingsEntries(
+			searchSettings("send shortcut"),
+			false
+		);
+
+		expect(desktopResults.map((entry) => entry.id)).toContain(
+			"general.chats.send-shortcut"
+		);
+		expect(browserResults.map((entry) => entry.id)).not.toContain(
+			"general.chats.send-shortcut"
+		);
 	});
 });

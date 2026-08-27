@@ -8,7 +8,7 @@
 //      (the sidebar footer's Inbox tray). This is the one that used to be missing:
 //      the route already blanked out for a disabled app, but the button that led
 //      there was hardcoded shell chrome, so a fresh install (most apps ship
-//      default-OFF) showed an Inbox button whose only outcome was "App not enabled".
+//      not pre-installed) showed an Inbox button whose only outcome was "App not enabled".
 //   3. DEEP LINK — an OS notification click choosing a target, which must do nothing
 //      rather than open a dead tab.
 //

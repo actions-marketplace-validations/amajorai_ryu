@@ -73,10 +73,10 @@ function CommandInput({
 }: React.ComponentProps<typeof CommandPrimitive.Input>) {
 	return (
 		<div data-slot="command-input-wrapper">
-			<InputGroup className="sticky top-0 z-20 h-9 border-0 border-b bg-popover/95 bg-transparent backdrop-blur supports-backdrop-filter:bg-popover/80">
+			<InputGroup className="sticky top-0 z-20 h-9 border-0 border-b bg-transparent! shadow-none! backdrop-blur supports-backdrop-filter:bg-transparent!">
 				<CommandPrimitive.Input
 					className={cn(
-						"w-full text-sm outline-hidden disabled:cursor-not-allowed disabled:opacity-50",
+						"w-full bg-transparent! text-sm shadow-none! outline-hidden disabled:cursor-not-allowed disabled:opacity-50",
 						className
 					)}
 					data-slot="command-input"
@@ -131,7 +131,7 @@ function CommandGroup({
 		<CommandPrimitive.Group
 			className={cn(
 				"overflow-hidden p-1 text-foreground **:[[cmdk-group-heading]]:px-1.5 **:[[cmdk-group-heading]]:py-1.5 **:[[cmdk-group-heading]]:font-medium **:[[cmdk-group-heading]]:text-muted-foreground **:[[cmdk-group-heading]]:text-xs",
-				"**:[[cmdk-group-heading]]:sticky **:[[cmdk-group-heading]]:top-0 **:[[cmdk-group-heading]]:z-10 **:[[cmdk-group-heading]]:bg-popover/95 **:[[cmdk-group-heading]]:backdrop-blur",
+				"**:[[cmdk-group-heading]]:sticky **:[[cmdk-group-heading]]:top-0 **:[[cmdk-group-heading]]:z-10 **:[[cmdk-group-heading]]:bg-transparent! **:[[cmdk-group-heading]]:backdrop-blur",
 				className
 			)}
 			data-slot="command-group"

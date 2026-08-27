@@ -58,13 +58,57 @@ fn json_rejection_response(rejection: &JsonRejection) -> Response {
 // The git engine (everything that shells `git`) lives in the `ryu-workspace`
 // crate; these handlers are the thin axum surface over it.
 use ryu_workspace::git::{
-    checkout_branch, create_branch, create_pull_request, list_branches, query_git_state,
-    run_git_action, run_git_remote_action,
+    checkout_branch, create_branch, create_pull_request, initialize_repository, list_branches,
+    query_file_diff, query_git_state, reverse_text_edits, run_git_action, run_git_remote_action,
+    ReverseEditsOutcome, TextReplacement,
 };
+
+const MAX_FILE_REVIEW_PATHS: usize = 64;
+const MAX_REVERSE_EDITS: usize = 256;
+const MAX_REVERSE_EDIT_TEXT_BYTES: usize = 256 * 1024;
+const MAX_REVERSE_EDIT_TOTAL_BYTES: usize = 1024 * 1024;
+const MAX_REVERSE_PATH_BYTES: usize = 4096;
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GitFileDiffBody {
+    cwd: String,
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields, tag = "kind")]
+pub enum ReverseEditBody {
+    #[serde(rename = "replace")]
+    Replace {
+        after: String,
+        before: String,
+        path: String,
+    },
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields, tag = "kind")]
+pub enum ReverseEditPlanBody {
+    #[serde(rename = "text-replacements")]
+    TextReplacements { edits: Vec<ReverseEditBody> },
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GitReverseEditsBody {
+    cwd: String,
+    plan: ReverseEditPlanBody,
+}
 
 #[derive(Deserialize)]
 pub struct GitStatusQuery {
     cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct GitInitBody {
+    cwd: String,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +138,293 @@ pub struct GitRemoteBody {
 
 fn default_include_unstaged() -> bool {
     true
+}
+
+/// `POST /api/git/init` `{ cwd }`
+///
+/// Initializes a folder as a local repository with `main` as its initial
+/// branch. It deliberately does not stage or commit files; the normal commit
+/// action remains the explicit next step before a provider publish.
+#[utoipa::path(
+    post,
+    path = "/api/git/init",
+    tag = "Git",
+    summary = "{ cwd }",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn git_init(JsonBody(body): JsonBody<GitInitBody>) -> axum::response::Response {
+    if body.cwd.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "cwd is required" })),
+        )
+            .into_response();
+    }
+
+    let path = Path::new(&body.cwd);
+    if !path.is_dir() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "cwd is not a directory" })),
+        )
+            .into_response();
+    }
+
+    let cwd = match canonical_remote_workspace(&body.cwd) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "success": false, "error": error })),
+            )
+                .into_response();
+        }
+    };
+    let result = tokio::task::spawn_blocking(move || initialize_repository(&cwd)).await;
+
+    match result {
+        Ok(Ok(outcome)) => Json(json!(outcome)).into_response(),
+        Ok(Err(msg)) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "success": false, "error": msg })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!("git_init: join error: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "internal error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub(crate) async fn git_init_authorized(
+    State(state): State<crate::server::ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    JsonBody(body): JsonBody<GitInitBody>,
+) -> axum::response::Response {
+    if crate::server::enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": "insufficient permissions: agent.edit"
+            })),
+        )
+            .into_response();
+    }
+    git_init(JsonBody(body)).await
+}
+
+fn validate_review_paths(paths: &[String]) -> Result<(), &'static str> {
+    if paths.is_empty() || paths.len() > MAX_FILE_REVIEW_PATHS {
+        return Err("paths must contain between 1 and 64 files");
+    }
+    if paths
+        .iter()
+        .any(|path| path.is_empty() || path.len() > MAX_REVERSE_PATH_BYTES)
+    {
+        return Err("each path must contain between 1 and 4096 bytes");
+    }
+    Ok(())
+}
+
+fn validated_replacements(plan: ReverseEditPlanBody) -> Result<Vec<TextReplacement>, &'static str> {
+    let ReverseEditPlanBody::TextReplacements { edits } = plan;
+    if edits.is_empty() || edits.len() > MAX_REVERSE_EDITS {
+        return Err("plan edits must contain between 1 and 256 replacements");
+    }
+    let mut total_bytes = 0usize;
+    let mut replacements = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let ReverseEditBody::Replace {
+            after,
+            before,
+            path,
+        } = edit;
+        if path.is_empty() || path.len() > MAX_REVERSE_PATH_BYTES {
+            return Err("each path must contain between 1 and 4096 bytes");
+        }
+        if after.is_empty()
+            || after == before
+            || after.len() > MAX_REVERSE_EDIT_TEXT_BYTES
+            || before.len() > MAX_REVERSE_EDIT_TEXT_BYTES
+        {
+            return Err("each replacement must contain bounded, changed text");
+        }
+        total_bytes = total_bytes
+            .saturating_add(path.len())
+            .saturating_add(after.len())
+            .saturating_add(before.len());
+        replacements.push(TextReplacement {
+            after,
+            before,
+            path,
+        });
+    }
+    if total_bytes > MAX_REVERSE_EDIT_TOTAL_BYTES {
+        return Err("the reverse-edit plan exceeds the 1 MiB limit");
+    }
+    Ok(replacements)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/git/file-diff",
+    tag = "Git",
+    summary = "Read the current diff for selected files",
+    request_body = GitFileDiffBody,
+    responses(
+        (status = 200, description = "Selected file diff", body = serde_json::Value),
+        (status = 400, description = "Invalid repository or paths", body = serde_json::Value)
+    )
+)]
+pub async fn git_file_diff(JsonBody(body): JsonBody<GitFileDiffBody>) -> Response {
+    if body.cwd.is_empty() || !Path::new(&body.cwd).is_dir() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "cwd must be a directory" })),
+        )
+            .into_response();
+    }
+    if let Err(error) = validate_review_paths(&body.paths) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": error })),
+        )
+            .into_response();
+    }
+    let GitFileDiffBody { cwd, paths } = body;
+    match tokio::task::spawn_blocking(move || query_file_diff(&cwd, &paths)).await {
+        Ok(Ok(diff)) => Json(json!(diff)).into_response(),
+        Ok(Err(error)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": error })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!("git_file_diff: join error: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "internal error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub(crate) async fn git_file_diff_authorized(
+    State(state): State<crate::server::ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    JsonBody(body): JsonBody<GitFileDiffBody>,
+) -> Response {
+    if crate::server::enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": "insufficient permissions: agent.view"
+            })),
+        )
+            .into_response();
+    }
+    git_file_diff(JsonBody(body)).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/git/reverse-edits",
+    tag = "Git",
+    summary = "Reverse exact text edits from one assistant turn",
+    request_body = GitReverseEditsBody,
+    responses(
+        (status = 200, description = "Edits reversed", body = serde_json::Value),
+        (status = 400, description = "Invalid plan", body = serde_json::Value),
+        (status = 409, description = "Files changed since the turn", body = serde_json::Value)
+    )
+)]
+pub async fn git_reverse_edits(JsonBody(body): JsonBody<GitReverseEditsBody>) -> Response {
+    if body.cwd.is_empty() || !Path::new(&body.cwd).is_dir() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "cwd must be a directory" })),
+        )
+            .into_response();
+    }
+    let replacements = match validated_replacements(body.plan) {
+        Ok(replacements) => replacements,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "success": false, "error": error })),
+            )
+                .into_response()
+        }
+    };
+    let cwd = body.cwd;
+    match tokio::task::spawn_blocking(move || reverse_text_edits(&cwd, &replacements)).await {
+        Ok(Ok(outcome @ ReverseEditsOutcome::Applied { .. })) => {
+            Json(json!(outcome)).into_response()
+        }
+        Ok(Ok(outcome @ ReverseEditsOutcome::Conflict { .. })) => {
+            (StatusCode::CONFLICT, Json(json!(outcome))).into_response()
+        }
+        Ok(Err(error)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": error })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!("git_reverse_edits: join error: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "internal error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub(crate) async fn git_reverse_edits_authorized(
+    State(state): State<crate::server::ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    JsonBody(body): JsonBody<GitReverseEditsBody>,
+) -> Response {
+    if crate::server::enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": "insufficient permissions: agent.edit"
+            })),
+        )
+            .into_response();
+    }
+    git_reverse_edits(JsonBody(body)).await
 }
 
 #[derive(Deserialize)]
@@ -252,6 +583,31 @@ pub async fn git_checkout(JsonBody(body): JsonBody<GitCheckoutBody>) -> axum::re
     }
 }
 
+pub(crate) async fn git_checkout_authorized(
+    State(state): State<crate::server::ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    JsonBody(body): JsonBody<GitCheckoutBody>,
+) -> axum::response::Response {
+    if crate::server::enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": "insufficient permissions: agent.edit"
+            })),
+        )
+            .into_response();
+    }
+    git_checkout(JsonBody(body)).await
+}
+
 /// `POST /api/git/create-branch` `{ cwd, branch }`
 ///
 /// Create a new branch off the current HEAD and switch to it (`git switch -c`).
@@ -306,6 +662,31 @@ pub async fn git_create_branch(
                 .into_response()
         }
     }
+}
+
+pub(crate) async fn git_create_branch_authorized(
+    State(state): State<crate::server::ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    JsonBody(body): JsonBody<GitCheckoutBody>,
+) -> axum::response::Response {
+    if crate::server::enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": "insufficient permissions: agent.edit"
+            })),
+        )
+            .into_response();
+    }
+    git_create_branch(JsonBody(body)).await
 }
 
 /// `POST /api/git/commit-push` `{ cwd, message?, action?, include_unstaged? }`
@@ -382,6 +763,31 @@ pub async fn git_commit_push(
                 .into_response()
         }
     }
+}
+
+pub(crate) async fn git_commit_push_authorized(
+    State(state): State<crate::server::ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    JsonBody(body): JsonBody<GitCommitPushBody>,
+) -> axum::response::Response {
+    if crate::server::enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": "insufficient permissions: agent.edit"
+            })),
+        )
+            .into_response();
+    }
+    git_commit_push(JsonBody(body)).await
 }
 
 async fn git_remote(
@@ -1176,6 +1582,25 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"].as_str().unwrap(), "invalid git action");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn turn_file_endpoints_bound_requests_before_git() {
+        let diff = GitFileDiffBody {
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            paths: Vec::new(),
+        };
+        let (status, json) = body_json(git_file_diff(JsonBody(diff)).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("between 1 and 64"));
+
+        let reverse = GitReverseEditsBody {
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            plan: ReverseEditPlanBody::TextReplacements { edits: Vec::new() },
+        };
+        let (status, json) = body_json(git_reverse_edits(JsonBody(reverse)).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("between 1 and 256"));
     }
 
     #[tokio::test]

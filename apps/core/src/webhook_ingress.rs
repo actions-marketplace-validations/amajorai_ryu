@@ -272,6 +272,54 @@ pub async fn ensure_relay_started_after_save() {
     }
 }
 
+/// Ensure Composio can deliver trigger events to this node, then persist the
+/// project subscription's signing secret in Core's encrypted plugin-secret
+/// store. This runs before any trigger-instance upsert so a successful local
+/// subscription is never paired with a missing remote delivery destination.
+pub async fn reconcile_composio_subscription(
+    store: &crate::composio_triggers::ComposioTriggerStore,
+) -> anyhow::Result<()> {
+    let preferences = PreferencesStore::open_default()
+        .map_err(|error| anyhow::anyhow!("opening webhook ingress preferences: {error}"))?;
+    if configured_kind(&preferences).await == IngressKind::RyuRelay {
+        ryu_webhook_ingress::ensure_relay_started()
+            .await
+            .map_err(|error| anyhow::anyhow!("starting managed webhook relay: {error}"))?;
+    }
+    let public_url = ryu_webhook_ingress::public_url().ok_or_else(|| {
+        anyhow::anyhow!(
+            "webhook ingress has no public URL; configure or restart the selected ingress backend"
+        )
+    })?;
+    let secret = store.reconcile_webhook_subscription(&public_url).await?;
+
+    // Persist the provider-owned value before checking an environment override.
+    // If Composio created or rotated the project secret, this preserves the only
+    // copy returned by the API and prevents a stale env value from being trusted
+    // on the next reconcile.
+    let secret_store = crate::plugin_secrets::global()
+        .ok_or_else(|| anyhow::anyhow!("encrypted plugin-secret store unavailable"))?;
+    secret_store
+        .set(
+            crate::composio_triggers::WEBHOOK_SECRET_STORE_OWNER,
+            crate::composio_triggers::WEBHOOK_SECRET_STORE_KEY,
+            &secret,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("persisting Composio webhook secret: {error}"))?;
+    crate::composio_triggers::set_stored_webhook_secret(Some(secret.clone()));
+
+    if let Some(environment_secret) = crate::composio_triggers::env_webhook_secret() {
+        if environment_secret != secret {
+            anyhow::bail!(
+                "Composio returned a different webhook signing secret; the current value was saved securely, so remove the stale COMPOSIO_WEBHOOK_SECRET override before subscribing"
+            );
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     //! The real-wiring canary for the extraction: exercises the crate's unified
@@ -321,7 +369,12 @@ mod tests {
 
         // Deliver through the SAME path router the relay dispatches to, against the
         // real Core host.
-        let outcome = ryu_webhook_ingress::deliver_inbound(&path, body, Some(&sig)).await;
+        let outcome = ryu_webhook_ingress::deliver_inbound(
+            &path,
+            body,
+            ryu_webhook_ingress::InboundWebhookHeaders::signature(Some(&sig)),
+        )
+        .await;
         match &outcome {
             ryu_webhook_ingress::InboundOutcome::Delivered { detail } => {
                 assert!(
@@ -337,9 +390,12 @@ mod tests {
         );
 
         // A tampered body (signature no longer matches) is rejected fail-closed.
-        let rejected =
-            ryu_webhook_ingress::deliver_inbound(&path, br#"{"event":"tampered"}"#, Some(&sig))
-                .await;
+        let rejected = ryu_webhook_ingress::deliver_inbound(
+            &path,
+            br#"{"event":"tampered"}"#,
+            ryu_webhook_ingress::InboundWebhookHeaders::signature(Some(&sig)),
+        )
+        .await;
         assert!(matches!(
             rejected,
             ryu_webhook_ingress::InboundOutcome::Rejected(_)

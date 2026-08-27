@@ -116,7 +116,7 @@ describe("resolveSidebarMode", () => {
 describe("built-in modes", () => {
 	it("expresses Bot mode with the same fields a contributed mode gets", () => {
 		const agent = BUILTIN_SIDEBAR_MODES.find((m) => m.key === "agent");
-		expect(agent?.title).toBe("Bot mode");
+		expect(agent?.title).toBe("Agents view");
 		expect(agent?.sections).toEqual(["agents", "chats"]);
 		// Agents is primary, Sessions is secondary, and the mode opens on the
 		// roster — the opinion that makes it a mode rather than a filter.

@@ -33,6 +33,7 @@ import {
 } from "@tabler/icons-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useId, useState } from "react";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	type ClipContext,
@@ -63,6 +64,7 @@ export function AttachVideoControl({
 	className,
 	onIngested,
 }: AttachVideoControlProps) {
+	const { canUseNativeShell } = useAppSurface();
 	const node = useNodeStore((s) => s.getActiveNode());
 	const urlFieldId = useId();
 
@@ -130,10 +132,18 @@ export function AttachVideoControl({
 			<PopoverTrigger
 				render={
 					<Button
-						aria-label="Attach video (URL or file)"
+						aria-label={
+							canUseNativeShell
+								? "Attach video (URL or file)"
+								: "Attach video URL"
+						}
 						className={cn("size-7 rounded-full", className)}
 						size="icon"
-						title="Attach video (URL or file)"
+						title={
+							canUseNativeShell
+								? "Attach video (URL or file)"
+								: "Attach video URL"
+						}
 						type="button"
 						variant="ghost"
 					/>
@@ -165,20 +175,22 @@ export function AttachVideoControl({
 					/>
 				</div>
 
-				<div className="flex items-center gap-2">
-					<span className="text-muted-foreground text-xs">or</span>
-					<Button
-						className="gap-1.5"
-						disabled={busy}
-						onClick={handleChooseFile}
-						size="sm"
-						type="button"
-						variant="ghost"
-					>
-						<IconFolder className="size-4" />
-						Choose file
-					</Button>
-				</div>
+				{canUseNativeShell ? (
+					<div className="flex items-center gap-2">
+						<span className="text-muted-foreground text-xs">or</span>
+						<Button
+							className="gap-1.5"
+							disabled={busy}
+							onClick={handleChooseFile}
+							size="sm"
+							type="button"
+							variant="ghost"
+						>
+							<IconFolder className="size-4" />
+							Choose file
+						</Button>
+					</div>
+				) : null}
 				{filePath ? (
 					<p
 						className="truncate text-muted-foreground text-xs"

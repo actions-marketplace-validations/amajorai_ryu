@@ -5,7 +5,7 @@
 //! callback. Token bundles are serialized only long enough to enter the encrypted
 //! Identity Vault and are never returned through the API.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -176,10 +176,61 @@ struct PendingFlow {
     require_issuer_parameter: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BindingKey {
+    owner_user_id: String,
+    profile_id: String,
+    plugin_id: String,
+    server_name: String,
+}
+
+impl BindingKey {
+    fn new(owner_user_id: &str, profile_id: &str, plugin_id: &str, server_name: &str) -> Self {
+        Self {
+            owner_user_id: owner_user_id.to_owned(),
+            profile_id: profile_id.to_owned(),
+            plugin_id: plugin_id.to_owned(),
+            server_name: server_name.to_owned(),
+        }
+    }
+
+    fn from_flow(flow: &PendingFlow) -> Self {
+        Self::new(
+            &flow.owner_user_id,
+            &flow.view.profile_id,
+            &flow.view.plugin_id,
+            &flow.view.server_name,
+        )
+    }
+
+    fn from_connection(connection: &McpOAuthConnectionRecord) -> Self {
+        Self::new(
+            &connection.owner_user_id,
+            &connection.profile_id,
+            &connection.plugin_id,
+            &connection.server_name,
+        )
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.owner_user_id, self.profile_id, self.server_name
+        )
+    }
+}
+
 #[derive(Default)]
 pub struct McpOAuthManager {
     flows: RwLock<HashMap<String, PendingFlow>>,
-    refresh_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Serializes every vault mutation for one logical binding. Entries are
+    /// intentionally retained for the manager lifetime so an old waiter can
+    /// never race a newly-created lock for the same binding (the ABA problem).
+    lifecycle_locks: Mutex<HashMap<BindingKey, Arc<Mutex<()>>>>,
+    /// Normal binding operations take a read guard. Plugin uninstall takes the
+    /// write guard so no callback, refresh, disconnect, or new flow can cross
+    /// the cleanup boundary.
+    plugin_locks: Mutex<HashMap<String, Arc<RwLock<()>>>>,
 }
 
 static MANAGER: OnceLock<McpOAuthManager> = OnceLock::new();
@@ -205,7 +256,33 @@ pub fn default_profile_id() -> &'static str {
 }
 
 impl McpOAuthManager {
+    async fn lifecycle_lock(&self, binding: &BindingKey) -> Arc<Mutex<()>> {
+        let mut locks = self.lifecycle_locks.lock().await;
+        locks
+            .entry(binding.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    async fn plugin_lock(&self, plugin_id: &str) -> Arc<RwLock<()>> {
+        let mut locks = self.plugin_locks.lock().await;
+        locks
+            .entry(plugin_id.to_owned())
+            .or_insert_with(|| Arc::new(RwLock::new(())))
+            .clone()
+    }
+
     pub async fn start_connect(&'static self, spec: ConnectSpec) -> Result<ConnectStarted> {
+        let binding = BindingKey::new(
+            &spec.owner_user_id,
+            &spec.profile_id,
+            &spec.plugin_id,
+            &spec.server_name,
+        );
+        let plugin_lock = self.plugin_lock(&binding.plugin_id).await;
+        let _plugin_guard = plugin_lock.read().await;
+        let lifecycle_lock = self.lifecycle_lock(&binding).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
         let now = chrono::Utc::now().timestamp();
         if let Some(existing) = self.flows.read().await.values().find(|flow| {
             flow.owner_user_id == spec.owner_user_id
@@ -454,28 +531,39 @@ impl McpOAuthManager {
         let pending = self
             .claim_callback(flow_id, returned_state.as_deref())
             .await?;
-        if chrono::Utc::now().timestamp() > pending.view.expires_at {
-            return self.fail_flow(flow_id, "OAuth flow expired").await;
+        let completion = self
+            .complete_claimed_callback(flow_id, pending, code, returned_issuer, oauth_error)
+            .await;
+        if let Err(error) = completion {
+            self.mark_flow_failed(flow_id, &error.to_string()).await;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn complete_claimed_callback(
+        &self,
+        flow_id: &str,
+        pending: PendingFlow,
+        code: Option<String>,
+        returned_issuer: Option<String>,
+        oauth_error: Option<String>,
+    ) -> Result<()> {
+        if chrono::Utc::now().timestamp() >= pending.view.expires_at {
+            bail!("OAuth flow expired");
         }
         if let Some(error) = oauth_error {
-            return self
-                .fail_flow(
-                    flow_id,
-                    &format!(
-                        "authorization failed: {}",
-                        sanitize_oauth_error_code(&error)
-                    ),
-                )
-                .await;
+            bail!(
+                "authorization failed: {}",
+                sanitize_oauth_error_code(&error)
+            );
         }
         if let Some(returned_issuer) = returned_issuer.as_deref() {
             if trim_trailing_slash(returned_issuer) != trim_trailing_slash(&pending.issuer) {
-                return self.fail_flow(flow_id, "OAuth issuer did not match").await;
+                bail!("OAuth issuer did not match");
             }
         } else if pending.require_issuer_parameter {
-            return self
-                .fail_flow(flow_id, "OAuth callback omitted the required issuer")
-                .await;
+            bail!("OAuth callback omitted the required issuer");
         }
         let code = code.context("OAuth callback did not contain a code")?;
         let mut form = vec![
@@ -491,15 +579,10 @@ impl McpOAuthManager {
         }
         let response = post_token_form(&pending.token_endpoint, &form).await?;
         if let Some(error) = response.error {
-            return self
-                .fail_flow(
-                    flow_id,
-                    &format!(
-                        "token exchange failed: {}",
-                        sanitize_oauth_error_code(&error)
-                    ),
-                )
-                .await;
+            bail!(
+                "token exchange failed: {}",
+                sanitize_oauth_error_code(&error)
+            );
         }
         if !response
             .token_type
@@ -507,14 +590,10 @@ impl McpOAuthManager {
             .unwrap_or("Bearer")
             .eq_ignore_ascii_case("bearer")
         {
-            return self
-                .fail_flow(flow_id, "token endpoint returned a non-Bearer token")
-                .await;
+            bail!("token endpoint returned a non-Bearer token");
         }
         if response.access_token.is_empty() {
-            return self
-                .fail_flow(flow_id, "token endpoint returned no access token")
-                .await;
+            bail!("token endpoint returned no access token");
         }
         let expires_at = response
             .expires_in
@@ -524,6 +603,7 @@ impl McpOAuthManager {
             .as_deref()
             .map(split_scopes)
             .unwrap_or_else(|| pending.view.scopes.clone());
+        let binding = BindingKey::from_flow(&pending);
         let bundle = TokenBundle {
             access_token: response.access_token,
             refresh_token: response.refresh_token,
@@ -539,6 +619,11 @@ impl McpOAuthManager {
             declared_client_id: pending.declared_client_id,
         };
         let plaintext = serde_json::to_string(&bundle).context("serializing OAuth token bundle")?;
+        let plugin_lock = self.plugin_lock(&binding.plugin_id).await;
+        let _plugin_guard = plugin_lock.read().await;
+        let lifecycle_lock = self.lifecycle_lock(&binding).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
+        self.ensure_flow_can_connect(flow_id, &binding).await?;
         let store = crate::identity::global().context("identity store not initialized")?;
         store
             .upsert_mcp_oauth_connection(
@@ -554,12 +639,29 @@ impl McpOAuthManager {
                 &SecretState::new(plaintext),
             )
             .await?;
-        if let Some(flow) = self.flows.write().await.get_mut(flow_id) {
-            flow.view.status = FlowState::Connected;
-            flow.view.error = None;
-            flow.verifier.clear();
-            flow.state.clear();
-            flow.client_secret = None;
+        let mut flows = self.flows.write().await;
+        let flow = flows
+            .get_mut(flow_id)
+            .context("OAuth flow was cancelled before it could connect")?;
+        flow.view.status = FlowState::Connected;
+        flow.view.error = None;
+        scrub_flow_secrets(flow);
+        Ok(())
+    }
+
+    async fn ensure_flow_can_connect(&self, flow_id: &str, binding: &BindingKey) -> Result<()> {
+        let flows = self.flows.read().await;
+        let flow = flows
+            .get(flow_id)
+            .context("OAuth flow was cancelled before it could connect")?;
+        if BindingKey::from_flow(flow) != *binding
+            || flow.view.status != FlowState::Pending
+            || !flow.callback_claimed
+        {
+            bail!("OAuth flow is no longer pending");
+        }
+        if chrono::Utc::now().timestamp() >= flow.view.expires_at {
+            bail!("OAuth flow expired");
         }
         Ok(())
     }
@@ -582,24 +684,39 @@ impl McpOAuthManager {
     }
 
     async fn fail_flow(&self, flow_id: &str, message: &str) -> Result<()> {
-        if let Some(flow) = self.flows.write().await.get_mut(flow_id) {
-            flow.view.status = FlowState::Failed;
-            flow.view.error = Some(message.to_owned());
-            flow.verifier.clear();
-            flow.state.clear();
-            flow.client_secret = None;
-        }
+        self.mark_flow_failed(flow_id, message).await;
         bail!(message.to_owned())
     }
 
+    async fn mark_flow_failed(&self, flow_id: &str, message: &str) {
+        if let Some(flow) = self.flows.write().await.get_mut(flow_id) {
+            if flow.view.status == FlowState::Pending {
+                flow.view.status = FlowState::Failed;
+                flow.view.error = Some(message.to_owned());
+                scrub_flow_secrets(flow);
+            }
+        }
+    }
+
     async fn expire_flow(&self, flow_id: &str) {
+        let Some(binding) = self
+            .flows
+            .read()
+            .await
+            .get(flow_id)
+            .map(BindingKey::from_flow)
+        else {
+            return;
+        };
+        let plugin_lock = self.plugin_lock(&binding.plugin_id).await;
+        let _plugin_guard = plugin_lock.read().await;
+        let lifecycle_lock = self.lifecycle_lock(&binding).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
         if let Some(flow) = self.flows.write().await.get_mut(flow_id) {
             if flow.view.status == FlowState::Pending {
                 flow.view.status = FlowState::Failed;
                 flow.view.error = Some("OAuth flow expired".to_owned());
-                flow.verifier.clear();
-                flow.state.clear();
-                flow.client_secret = None;
+                scrub_flow_secrets(flow);
             }
         }
     }
@@ -617,6 +734,11 @@ impl McpOAuthManager {
         force_refresh: bool,
         session_id: Option<String>,
     ) -> Result<String> {
+        let binding = BindingKey::new(owner_user_id, profile_id, plugin_id, server_name);
+        let plugin_lock = self.plugin_lock(plugin_id).await;
+        let _plugin_guard = plugin_lock.read().await;
+        let lifecycle_lock = self.lifecycle_lock(&binding).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
         let store = crate::identity::global().context("identity store not initialized")?;
         let connection = store
             .find_mcp_oauth_connection(owner_user_id, profile_id, plugin_id, server_name)
@@ -641,19 +763,22 @@ impl McpOAuthManager {
         if !refresh_needed {
             return Ok(stored_bundle.access_token);
         }
-        let lock = {
-            let mut locks = self.refresh_locks.lock().await;
-            locks
-                .entry(connection.id.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-        let _guard = lock.lock().await;
         let current = store
             .find_mcp_oauth_connection(owner_user_id, profile_id, plugin_id, server_name)
             .await?
             .context("MCP authentication required")?;
+        if current.status != McpOAuthConnectionStatus::Connected {
+            bail!("MCP authentication required");
+        }
         let bundle = open_bundle(store, &current).await?;
+        let binding_changed = bundle.mcp_server_url.is_empty()
+            || validate_oauth_url(&bundle.mcp_server_url, true)?
+                != validate_oauth_url(expected_resource, true)?
+            || bundle.declared_client_id.as_deref() != expected_client_id;
+        if binding_changed {
+            store.mark_mcp_oauth_reauth_required(&current.id).await?;
+            bail!("the MCP OAuth binding changed; reconnect required");
+        }
         let another_caller_refreshed = current.updated_at != connection.updated_at;
         let current_is_fresh = current
             .expires_at
@@ -724,15 +849,29 @@ impl McpOAuthManager {
         plugin_id: &str,
         server_name: &str,
     ) -> Result<(bool, bool)> {
+        let binding = BindingKey::new(owner_user_id, profile_id, plugin_id, server_name);
+        let plugin_lock = self.plugin_lock(plugin_id).await;
+        let _plugin_guard = plugin_lock.read().await;
+        self.disconnect_binding(&binding).await
+    }
+
+    async fn disconnect_binding(&self, binding: &BindingKey) -> Result<(bool, bool)> {
+        let lifecycle_lock = self.lifecycle_lock(binding).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
         self.flows.write().await.retain(|_, flow| {
-            !(flow.owner_user_id == owner_user_id
-                && flow.view.profile_id == profile_id
-                && flow.view.plugin_id == plugin_id
-                && flow.view.server_name == server_name)
+            !(flow.owner_user_id == binding.owner_user_id
+                && flow.view.profile_id == binding.profile_id
+                && flow.view.plugin_id == binding.plugin_id
+                && flow.view.server_name == binding.server_name)
         });
         let store = crate::identity::global().context("identity store not initialized")?;
         let Some(connection) = store
-            .find_mcp_oauth_connection(owner_user_id, profile_id, plugin_id, server_name)
+            .find_mcp_oauth_connection(
+                &binding.owner_user_id,
+                &binding.profile_id,
+                &binding.plugin_id,
+                &binding.server_name,
+            )
             .await?
         else {
             return Ok((false, false));
@@ -753,7 +892,12 @@ impl McpOAuthManager {
             }
         }
         let deleted = store
-            .delete_mcp_oauth_connection(owner_user_id, profile_id, plugin_id, server_name)
+            .delete_mcp_oauth_connection(
+                &binding.owner_user_id,
+                &binding.profile_id,
+                &binding.plugin_id,
+                &binding.server_name,
+            )
             .await?;
         Ok((deleted, revocation_confirmed))
     }
@@ -762,33 +906,57 @@ impl McpOAuthManager {
     /// plugin is removed even when an upstream revocation endpoint is unavailable.
     /// The return value names bindings whose remote revocation was not confirmed.
     pub async fn disconnect_plugin(&self, plugin_id: &str) -> Result<Vec<String>> {
+        let plugin_lock = self.plugin_lock(plugin_id).await;
+        let _plugin_guard = plugin_lock.write().await;
         let store = crate::identity::global().context("identity store not initialized")?;
         let connections = store
             .list_mcp_oauth_connections_for_plugin(plugin_id)
             .await?;
+        let connection_bindings: HashSet<BindingKey> = connections
+            .iter()
+            .map(BindingKey::from_connection)
+            .collect();
+        let mut bindings = connection_bindings.clone();
+        bindings.extend(
+            self.flows
+                .read()
+                .await
+                .values()
+                .filter(|flow| flow.view.plugin_id == plugin_id)
+                .map(BindingKey::from_flow),
+        );
         let mut unconfirmed = Vec::new();
-        for connection in connections {
-            let (_, confirmed) = self
-                .disconnect(
-                    &connection.owner_user_id,
-                    &connection.profile_id,
-                    &connection.plugin_id,
-                    &connection.server_name,
-                )
-                .await?;
-            if !confirmed {
-                unconfirmed.push(format!(
-                    "{}:{}:{}",
-                    connection.owner_user_id, connection.profile_id, connection.server_name
-                ));
+        let mut failures = Vec::new();
+        for binding in bindings {
+            match self.disconnect_binding(&binding).await {
+                Ok((_, true)) => {}
+                Ok((_, false)) if connection_bindings.contains(&binding) => {
+                    unconfirmed.push(binding.label());
+                }
+                Ok((_, false)) => {}
+                Err(error) => failures.push(format!("{}: {error:#}", binding.label())),
             }
         }
         self.flows
             .write()
             .await
             .retain(|_, flow| flow.view.plugin_id != plugin_id);
+        unconfirmed.sort();
+        failures.sort();
+        if !failures.is_empty() {
+            bail!(
+                "failed to clean up one or more MCP OAuth bindings after attempting all of them: {}",
+                failures.join("; ")
+            );
+        }
         Ok(unconfirmed)
     }
+}
+
+fn scrub_flow_secrets(flow: &mut PendingFlow) {
+    flow.verifier.clear();
+    flow.state.clear();
+    flow.client_secret = None;
 }
 
 async fn open_bundle(
@@ -1187,6 +1355,37 @@ pub fn hosted_redirect_uri() -> Option<String> {
 mod tests {
     use super::*;
 
+    fn pending_flow(flow_id: &str) -> PendingFlow {
+        PendingFlow {
+            view: FlowView {
+                flow_id: flow_id.to_owned(),
+                plugin_id: "com.example.mail".to_owned(),
+                server_name: "mail".to_owned(),
+                profile_id: "personal".to_owned(),
+                callback_mode: CallbackMode::Hosted,
+                scopes: vec!["email.send".to_owned()],
+                status: FlowState::Pending,
+                expires_at: i64::MAX,
+                error: None,
+            },
+            authorization_url: "https://auth.example/authorize".to_owned(),
+            owner_user_id: "user".to_owned(),
+            resource: "https://mcp.example".to_owned(),
+            mcp_server_url: "https://mcp.example/mcp".to_owned(),
+            declared_client_id: None,
+            issuer: "https://auth.example".to_owned(),
+            token_endpoint: "https://auth.example/token".to_owned(),
+            revocation_endpoint: None,
+            client_id: "client".to_owned(),
+            client_secret: Some("client-secret".to_owned()),
+            redirect_uri: "https://node.example/api/mcp/oauth/callback".to_owned(),
+            verifier: "verifier".to_owned(),
+            state: "one-time-state".to_owned(),
+            callback_claimed: false,
+            require_issuer_parameter: false,
+        }
+    }
+
     #[test]
     fn challenge_parameters_and_metadata_urls_are_strict() {
         let challenge = r#"Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource", scope="email.send domains.read""#;
@@ -1241,37 +1440,11 @@ mod tests {
     async fn callback_state_is_claimed_exactly_once() {
         let manager = McpOAuthManager::default();
         let flow_id = "flow".to_owned();
-        manager.flows.write().await.insert(
-            flow_id.clone(),
-            PendingFlow {
-                view: FlowView {
-                    flow_id: flow_id.clone(),
-                    plugin_id: "com.example.mail".to_owned(),
-                    server_name: "mail".to_owned(),
-                    profile_id: "personal".to_owned(),
-                    callback_mode: CallbackMode::Hosted,
-                    scopes: vec!["email.send".to_owned()],
-                    status: FlowState::Pending,
-                    expires_at: i64::MAX,
-                    error: None,
-                },
-                authorization_url: "https://auth.example/authorize".to_owned(),
-                owner_user_id: "user".to_owned(),
-                resource: "https://mcp.example".to_owned(),
-                mcp_server_url: "https://mcp.example/mcp".to_owned(),
-                declared_client_id: None,
-                issuer: "https://auth.example".to_owned(),
-                token_endpoint: "https://auth.example/token".to_owned(),
-                revocation_endpoint: None,
-                client_id: "client".to_owned(),
-                client_secret: None,
-                redirect_uri: "https://node.example/api/mcp/oauth/callback".to_owned(),
-                verifier: "verifier".to_owned(),
-                state: "one-time-state".to_owned(),
-                callback_claimed: false,
-                require_issuer_parameter: false,
-            },
-        );
+        manager
+            .flows
+            .write()
+            .await
+            .insert(flow_id.clone(), pending_flow(&flow_id));
 
         manager
             .claim_callback(&flow_id, Some("one-time-state"))
@@ -1279,6 +1452,82 @@ mod tests {
             .expect("first callback claims the state");
         assert!(manager
             .claim_callback(&flow_id, Some("one-time-state"))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn every_error_after_callback_claim_fails_and_scrubs_the_flow() {
+        let manager = McpOAuthManager::default();
+        let flow_id = "post-claim-error".to_owned();
+        manager
+            .flows
+            .write()
+            .await
+            .insert(flow_id.clone(), pending_flow(&flow_id));
+
+        let error = manager
+            .complete_callback(
+                &flow_id,
+                None,
+                Some("one-time-state".to_owned()),
+                None,
+                None,
+            )
+            .await
+            .expect_err("a callback without a code must fail");
+        assert!(error.to_string().contains("did not contain a code"));
+
+        let flows = manager.flows.read().await;
+        let flow = flows.get(&flow_id).expect("failed flow is retained for UI");
+        assert_eq!(flow.view.status, FlowState::Failed);
+        assert!(flow
+            .view
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("did not contain a code")));
+        assert!(flow.verifier.is_empty());
+        assert!(flow.state.is_empty());
+        assert!(flow.client_secret.is_none());
+    }
+
+    #[tokio::test]
+    async fn connected_transition_rechecks_current_state_and_expiry() {
+        let manager = McpOAuthManager::default();
+        let flow_id = "stale-callback".to_owned();
+        let mut flow = pending_flow(&flow_id);
+        flow.callback_claimed = true;
+        let binding = BindingKey::from_flow(&flow);
+        manager.flows.write().await.insert(flow_id.clone(), flow);
+
+        manager
+            .ensure_flow_can_connect(&flow_id, &binding)
+            .await
+            .expect("a live claimed flow may connect");
+        manager
+            .flows
+            .write()
+            .await
+            .get_mut(&flow_id)
+            .expect("flow exists")
+            .view
+            .status = FlowState::Failed;
+        assert!(manager
+            .ensure_flow_can_connect(&flow_id, &binding)
+            .await
+            .is_err());
+
+        let mut expired = pending_flow("expired-callback");
+        expired.callback_claimed = true;
+        expired.view.expires_at = chrono::Utc::now().timestamp();
+        let expired_binding = BindingKey::from_flow(&expired);
+        manager
+            .flows
+            .write()
+            .await
+            .insert("expired-callback".to_owned(), expired);
+        assert!(manager
+            .ensure_flow_can_connect("expired-callback", &expired_binding)
             .await
             .is_err());
     }

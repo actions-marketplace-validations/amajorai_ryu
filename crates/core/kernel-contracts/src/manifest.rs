@@ -100,7 +100,7 @@ fn canonical_provider_tool_id(id: &str) -> String {
 /// sandboxed JS Core splices into a Deno IIFE, whereas a file under here is
 /// TypeScript loaded by the managed Pi process with full host privilege. Same
 /// flatness requirement for the same reason — `tools/mirror-public.sh` vendors
-/// these with a literal `plugins-store/*/pi-extensions/*.ts` glob, and a nested
+/// these with a literal `plugins-store/*/*/pi-extensions/*.ts` glob, and a nested
 /// layout would make that glob accidentally rather than provably sufficient.
 pub const PI_EXTENSION_DIR: &str = "pi-extensions";
 
@@ -181,7 +181,7 @@ pub const MAX_OUTPUT_STYLE_BYTES: usize = 64 * 1024;
 /// `PathBuf::join`.
 ///
 /// Flatness is load-bearing beyond safety: `tools/mirror-public.sh` step 1c vendors
-/// these into the published tree with a literal `plugins-store/*/output-styles/*.md`
+/// these into the published tree with a literal `plugins-store/*/*/output-styles/*.md`
 /// glob, and a nested layout would make that glob accidentally rather than provably
 /// sufficient — a miss that first surfaces as a public-tree build failure *after*
 /// publication.
@@ -622,7 +622,7 @@ pub struct PluginManifest {
     pub permission_levels: Vec<PermissionLevel>,
 
     /// **Unified, deny-by-default runtime permission set** — the single typed
-    /// grammar (`{fs, child_process, network, tool}`) Core lowers to every sandbox
+    /// grammar (`{fs, child_process, run, network, tool}`) Core lowers to every sandbox
     /// backend (wasmtime WASI preopens, Docker `--mount`/`--network` flags, Deno
     /// `--allow-*` flags). Absent = **deny-all** (the default for every manifest
     /// predating this field), so an app that declares nothing keeps today's exact
@@ -1396,6 +1396,10 @@ impl PluginManifest {
         self.validate_surface_commands()?;
         self.validate_mcp_oauth()?;
         self.validate_code_sources()?;
+        // Portable validation cannot know whether Core loaded these exact bytes as
+        // a trusted built-in, but it can still enforce the universal half of the
+        // contract: safe Core-relative paths and GET-only automatic sources.
+        self.validate_declarative_http_policy(true)?;
         if let Some(contributes) = &self.contributes {
             contributes
                 .validate_settings_contributions()
@@ -1424,6 +1428,26 @@ impl PluginManifest {
         validate_route_permissions(&self.sidecars, &self.permission_levels)
             .map_err(|e| format!("plugin '{}': {e}", self.id))?;
         Ok(())
+    }
+
+    /// Validate every renderer-executed declarative HTTP declaration.
+    ///
+    /// `allow_core_routes` is a Core-owned provenance decision. `true` is reserved
+    /// for an exact compiled/verified Core-tier manifest; `false` confines every
+    /// source/action to this plugin's generic `/api/ext/<id>` owner mount.
+    pub fn validate_declarative_http_policy(
+        &self,
+        allow_core_routes: bool,
+    ) -> Result<(), String> {
+        let Some(contributes) = &self.contributes else {
+            return Ok(());
+        };
+        validate_declarative_http_contributions(
+            &self.id,
+            contributes,
+            allow_core_routes,
+        )
+        .map_err(|error| format!("plugin '{}': {error}", self.id))
     }
 
     /// Validate the publisher-controlled half of remote MCP OAuth.
@@ -1846,7 +1870,8 @@ pub struct CompanionSurface {
 /// and reference no runnable at all (`widgets`, `views`, `dock_panels`,
 /// `sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,
 /// `chat_features`, `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,
-/// `message_actions`, `context_menu_items`, `agent_edit_panels`).
+/// `message_actions`, `selection_actions`, `context_menu_items`,
+/// `agent_edit_panels`).
 ///
 /// # Extending
 ///
@@ -2231,6 +2256,17 @@ pub struct Contributes {
     #[serde(default)]
     #[schemars(with = "Vec<MessageActionContribution>")]
     pub message_actions: Vec<serde_json::Value>,
+
+    /// Buttons the plugin contributes to the floating text-selection toolbar.
+    /// This is the bridge between enabled apps/plugins and shared chat blocks:
+    /// Core validates and tags the declaration, while the desktop owns the
+    /// rendered toolbar and dispatches the selected text. A selection action may
+    /// either name a granted `capability` or provide a host-owned `args.dispatch`
+    /// (for example, a first-party shell action such as Side Chat). Self-contained
+    /// + opaque for the same forward-compatibility reason as `message_actions`.
+    #[serde(default)]
+    #[schemars(with = "Vec<SelectionActionContribution>")]
+    pub selection_actions: Vec<serde_json::Value>,
 
     /// Context-menu rows the plugin contributes to a shell entity menu (the
     /// conversation-row dropdown, a message right-click, a space row). Lets an app
@@ -3087,6 +3123,11 @@ pub struct SidebarButtonContribution {
 
     /// The client route this button opens (e.g. `"/library/memory"`).
     pub target: String,
+
+    /// Optional mount context passed to the owning Companion when the button opens it.
+    /// The host applies this only to the button's own app surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Map<String, serde_json::Value>>,
 
     /// Optional placement hint among the sidebar buttons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4027,6 +4068,43 @@ pub struct MessageActionContribution {
     pub order: Option<i32>,
 }
 
+/// One button a plugin contributes to the floating text-selection toolbar (see
+/// [`Contributes::selection_actions`]).
+///
+/// `capability` is optional because a host-owned renderer can use an opaque
+/// `args.dispatch` bridge instead. The desktop never executes manifest code: it
+/// only renders this label and forwards the selected text to the owning host
+/// handler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SelectionActionContribution {
+    /// Stable id for this action within the plugin.
+    pub id: String,
+
+    /// Accessible label shown in the selection toolbar.
+    pub label: String,
+
+    /// Optional glyph id resolved by the shell's icon primitive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
+    /// Render mode. The current desktop renders `"button"`; this remains open
+    /// so newer shells can add a mode without making older cores reject it.
+    pub kind: String,
+
+    /// Optional granted capability for a plugin-owned dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+
+    /// Static renderer/dispatch arguments. The selected text is supplied by the
+    /// host at click time and is never serialized into the manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+
+    /// Sort position among contributed selection actions (ascending).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+}
+
 /// One context-menu row a plugin contributes (see
 /// [`Contributes::context_menu_items`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -4115,6 +4193,45 @@ pub fn validate_message_action(action: &MessageActionContribution) -> Result<(),
     if action.capability.trim().is_empty() {
         return Err(format!(
             "message action '{}' declares no 'capability'; a message action dispatches through the host-capability seam",
+            action.id
+        ));
+    }
+    Ok(())
+}
+
+/// Validate one [`SelectionActionContribution`]. A selection action must have a
+/// real dispatch path: either a granted capability or a non-empty host dispatch
+/// tag in its static args.
+pub fn validate_selection_action(action: &SelectionActionContribution) -> Result<(), String> {
+    if action.id.trim().is_empty() {
+        return Err("selection action has an empty 'id'".to_string());
+    }
+    if action.label.trim().is_empty() {
+        return Err(format!(
+            "selection action '{}' has an empty 'label'",
+            action.id
+        ));
+    }
+    if action.kind.trim().is_empty() {
+        return Err(format!(
+            "selection action '{}' has an empty 'kind'",
+            action.id
+        ));
+    }
+    let has_capability = action
+        .capability
+        .as_deref()
+        .is_some_and(|capability| !capability.trim().is_empty());
+    let has_dispatch = action
+        .args
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|args| args.get("dispatch"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|dispatch| !dispatch.trim().is_empty());
+    if !(has_capability || has_dispatch) {
+        return Err(format!(
+            "selection action '{}' declares neither a non-empty 'capability' nor an 'args.dispatch' bridge",
             action.id
         ));
     }
@@ -4503,7 +4620,7 @@ impl Contributes {
             }
         }
 
-        // `message_actions` and `context_menu_items` are stored raw (see their
+        // `message_actions`, `selection_actions`, and `context_menu_items` are stored raw (see their
         // field doc comments) so the contributions endpoint can tag and forward each
         // entry verbatim; this is where they are actually parsed as their typed
         // contracts, exactly like `settings_tabs` above.
@@ -4521,6 +4638,23 @@ impl Contributes {
         for action in &actions {
             if !seen_action_ids.insert(action.id.as_str()) {
                 return Err(format!("duplicate message action id '{}'", action.id));
+            }
+        }
+
+        let mut selection_actions: Vec<SelectionActionContribution> =
+            Vec::with_capacity(self.selection_actions.len());
+        for (index, raw) in self.selection_actions.iter().enumerate() {
+            let action: SelectionActionContribution =
+                serde_json::from_value(raw.clone()).map_err(|e| {
+                    format!("selection action #{index} is not a valid selection action: {e}")
+                })?;
+            validate_selection_action(&action)?;
+            selection_actions.push(action);
+        }
+        let mut seen_selection_ids: BTreeSet<&str> = BTreeSet::new();
+        for action in &selection_actions {
+            if !seen_selection_ids.insert(action.id.as_str()) {
+                return Err(format!("duplicate selection action id '{}'", action.id));
             }
         }
 
@@ -5485,6 +5619,173 @@ pub fn validate_cli_command_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclarativeHttpUse {
+    Action,
+    Source,
+}
+
+const DECLARATIVE_ACTION_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE"];
+
+/// Validate the shared opaque contribution vocabulary without turning it into a
+/// second lossy schema. The walk recognizes the two executable seams (`source` /
+/// `state_source` and `http`) and deliberately skips request bodies/opaque args so
+/// data that happens to contain an `http` key is never mistaken for executable
+/// configuration.
+fn validate_declarative_http_contributions(
+    plugin_id: &str,
+    contributes: &Contributes,
+    allow_core_routes: bool,
+) -> Result<(), String> {
+    let mut roots: Vec<(String, &serde_json::Value)> = Vec::new();
+    for (index, value) in contributes.composer_controls.iter().enumerate() {
+        roots.push((format!("composer_controls[{index}]"), value));
+    }
+    for (index, view) in contributes.views.iter().enumerate() {
+        if let Some(spec) = view.spec.as_ref() {
+            roots.push((format!("views[{index}].spec"), spec));
+        }
+    }
+    for (index, section) in contributes.sidebar_sections.iter().enumerate() {
+        if let Some(spec) = section.spec.as_ref() {
+            roots.push((format!("sidebar_sections[{index}].spec"), spec));
+        }
+    }
+    for (index, tab) in contributes.store_tabs.iter().enumerate() {
+        if let Some(spec) = tab.spec.as_ref() {
+            roots.push((format!("store_tabs[{index}].spec"), spec));
+        }
+    }
+    for (index, activity) in contributes.live_activities.iter().enumerate() {
+        if let Some(spec) = activity.spec.as_ref() {
+            roots.push((format!("live_activities[{index}].spec"), spec));
+        }
+    }
+    for (index, value) in contributes.message_actions.iter().enumerate() {
+        roots.push((format!("message_actions[{index}]"), value));
+    }
+
+    for (label, value) in roots {
+        validate_declarative_http_value(
+            plugin_id,
+            value,
+            DeclarativeHttpUse::Action,
+            allow_core_routes,
+            &label,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_declarative_http_value(
+    plugin_id: &str,
+    value: &serde_json::Value,
+    usage: DeclarativeHttpUse,
+    allow_core_routes: bool,
+    label: &str,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                validate_declarative_http_value(
+                    plugin_id,
+                    child,
+                    usage,
+                    allow_core_routes,
+                    &format!("{label}[{index}]"),
+                )?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(http) = object.get("http") {
+                validate_declarative_http_request(
+                    plugin_id,
+                    http,
+                    usage,
+                    allow_core_routes,
+                    &format!("{label}.http"),
+                )?;
+            }
+            for (key, child) in object {
+                if matches!(key.as_str(), "http" | "body" | "args" | "payload" | "map" | "filter" | "cells") {
+                    continue;
+                }
+                let child_usage = if matches!(key.as_str(), "source" | "state_source") {
+                    DeclarativeHttpUse::Source
+                } else {
+                    DeclarativeHttpUse::Action
+                };
+                validate_declarative_http_value(
+                    plugin_id,
+                    child,
+                    child_usage,
+                    allow_core_routes,
+                    &format!("{label}.{key}"),
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_declarative_http_request(
+    plugin_id: &str,
+    value: &serde_json::Value,
+    usage: DeclarativeHttpUse,
+    allow_core_routes: bool,
+    label: &str,
+) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{label} must be an object"))?;
+    let path = object
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("{label}.path must be a string"))?;
+    let method = object
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("GET");
+    match usage {
+        DeclarativeHttpUse::Source if method != "GET" => {
+            return Err(format!(
+                "{label} automatic sources must use GET, got '{method}'"
+            ));
+        }
+        DeclarativeHttpUse::Action if !DECLARATIVE_ACTION_METHODS.contains(&method) => {
+            return Err(format!("{label} uses unsupported method '{method}'"));
+        }
+        _ => {}
+    }
+
+    validate_declarative_core_path(path).map_err(|error| format!("{label}.path {error}"))?;
+    if allow_core_routes {
+        return Ok(());
+    }
+    let pathname = path.split(['?', '#']).next().unwrap_or(path);
+    let owner_mount = format!("/api/ext/{plugin_id}");
+    if pathname != owner_mount && !pathname.starts_with(&format!("{owner_mount}/")) {
+        return Err(format!(
+            "{label}.path '{path}' is outside the owning app mount '{owner_mount}'"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_declarative_core_path(path: &str) -> Result<(), String> {
+    if path.starts_with("//") {
+        return Err("must not be protocol-relative".to_string());
+    }
+    let pathname = path.split(['?', '#']).next().unwrap_or(path);
+    validate_cli_command_path(pathname)?;
+    let is_workflow = pathname == "/workflows" || pathname.starts_with("/workflows/");
+    if !pathname.starts_with("/api/") && !is_workflow {
+        return Err("must be a Core-relative /api/ or /workflows path".to_string());
+    }
+    Ok(())
+}
+
 /// A single plugin-to-plugin dependency edge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AppDependency {
@@ -5689,6 +5990,12 @@ pub struct PermissionSet {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub child_process: bool,
 
+    /// Executable names sandboxed code may spawn when [`Self::child_process`] is
+    /// true. Core lowers this to Deno's scoped `--allow-run=<name,...>` list in
+    /// addition to declared capability shims. Empty grants no arbitrary binary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run: Vec<String>,
+
     /// Outbound network permission. `false`/absent (default) = no network; `true` =
     /// all hosts; a list of `host[:port]` entries = only those hosts (the shape
     /// Deno's `--allow-net` supports). See [`NetworkPermission`].
@@ -5719,6 +6026,25 @@ impl PermissionSet {
                         "permissions.{label} path '{path}' must not contain a '..' traversal segment"
                     ));
                 }
+            }
+        }
+        if !self.run.is_empty() && !self.child_process {
+            return Err("permissions.run requires permissions.child_process=true".to_string());
+        }
+        for executable in &self.run {
+            let trimmed = executable.trim();
+            if trimmed.is_empty()
+                || trimmed != executable
+                || executable.chars().any(char::is_whitespace)
+                || executable.contains('/')
+                || executable.contains('\\')
+                || executable.contains(',')
+                || executable == "."
+                || executable == ".."
+            {
+                return Err(format!(
+                    "permissions.run executable '{executable}' must be one bare program name"
+                ));
             }
         }
         if let NetworkPermission::Hosts(hosts) = &self.network {
@@ -5989,6 +6315,72 @@ pub fn validate_permission_level_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether two route patterns can match at least one same path. Route patterns use
+/// literal segments, one-segment `:params`, and trailing `*rest` wildcards. This is
+/// intentionally conservative: a manifest with ambiguous auth postures must fail
+/// validation instead of relying on declaration order at the proxy.
+fn route_segments(path: &str) -> Vec<&str> {
+    let path = path.trim_matches('/');
+    if path.is_empty() {
+        Vec::new()
+    } else {
+        path.split('/').collect()
+    }
+}
+
+fn route_patterns_overlap(left: &str, right: &str) -> bool {
+    let left = route_segments(left);
+    let right = route_segments(right);
+    let common_len = left.len().min(right.len());
+
+    for index in 0..common_len {
+        let left_segment = left[index];
+        let right_segment = right[index];
+        if left_segment.starts_with('*') || right_segment.starts_with('*') {
+            return true;
+        }
+        if left_segment.starts_with(':')
+            || right_segment.starts_with(':')
+            || left_segment == right_segment
+        {
+            continue;
+        }
+        return false;
+    }
+
+    if left.len() == right.len() {
+        return true;
+    }
+    let remaining = if left.len() > common_len {
+        left[common_len]
+    } else {
+        right[common_len]
+    };
+    remaining.starts_with('*')
+}
+
+/// Rank a route using the same precedence as Core's sidecar proxy: non-wildcard
+/// routes first, then more literal segments, then more segments. Equal-specificity
+/// overlaps are rejected, so declaration order never decides an auth posture.
+pub fn route_specificity(path: &str) -> (bool, usize, usize) {
+    let mut literals = 0;
+    let mut segment_count = 0;
+    let mut has_wildcard = false;
+    for segment in route_segments(path) {
+        segment_count += 1;
+        if segment.starts_with('*') {
+            has_wildcard = true;
+        } else if !segment.starts_with(':') {
+            literals += 1;
+        }
+    }
+    (!has_wildcard, literals, segment_count)
+}
+
+fn earlier_route_wins(left: &str, right: &str) -> bool {
+    route_specificity(left) > route_specificity(right)
+}
+
 /// Validate every proxied route's permission annotation against the vocabulary the
 /// SAME manifest declares.
 ///
@@ -6001,15 +6393,55 @@ pub fn validate_route_permissions(
     sidecars: &[crate::schema::SidecarSpec],
     levels: &[PermissionLevel],
 ) -> Result<(), String> {
+    let routes: Vec<&crate::schema::RouteSpec> = sidecars
+        .iter()
+        .filter_map(|sidecar| sidecar.http.as_ref())
+        .flat_map(|http| http.routes.iter())
+        .collect();
+    for (route_index, route) in routes.iter().enumerate() {
+        for other in routes.iter().skip(route_index + 1) {
+            let methods_overlap =
+                route.method.is_none() || other.method.is_none() || route.method == other.method;
+            if methods_overlap
+                && route_patterns_overlap(&route.path, &other.path)
+                && !earlier_route_wins(&route.path, &other.path)
+            {
+                return Err(format!(
+                    "route patterns '{}' and '{}' overlap for methods {:?} and {:?}; the earlier route must be strictly more specific",
+                    route.path, other.path, route.method, other.method
+                ));
+            }
+        }
+    }
+
     for sidecar in sidecars {
         let Some(http) = &sidecar.http else { continue };
         for route in &http.routes {
+            if let Some(method) = route.method.as_deref() {
+                const SUPPORTED_METHODS: &[&str] =
+                    &["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"];
+                if !SUPPORTED_METHODS.contains(&method) {
+                    return Err(format!(
+                        "route '{}' declares unsupported or non-canonical method '{method}'",
+                        route.path
+                    ));
+                }
+            }
             let Some(permission) = route.permission.as_deref() else {
                 // A resource param with nothing to gate is dead weight that reads
                 // like a rule, so it is refused rather than ignored.
                 if route.resource_param.is_some() {
                     return Err(format!(
                         "route '{}' declares resource_param without a permission",
+                        route.path
+                    ));
+                }
+                if !levels.is_empty()
+                    && matches!(route.auth, crate::schema::RouteAuth::Protected)
+                    && route.path != sidecar.health_path
+                {
+                    return Err(format!(
+                        "route '{}' has no permission even though this manifest declares permission_levels",
                         route.path
                     ));
                 }
@@ -6616,6 +7048,48 @@ mod tests {
             "id": "x.new", "label": "New thing", "capability": "x.create"
         }))
         .is_ok());
+    }
+
+    #[test]
+    fn selection_actions_accept_host_dispatch_or_plugin_capability() {
+        let host_action = Contributes {
+            selection_actions: vec![serde_json::json!({
+                "id": "side-chats.explain-selection",
+                "label": "Explain",
+                "kind": "button",
+                "args": { "dispatch": "side-chat.selection", "intent": "explain" }
+            })],
+            ..Default::default()
+        };
+        assert!(host_action.validate_settings_contributions().is_ok());
+
+        let plugin_action = Contributes {
+            selection_actions: vec![serde_json::json!({
+                "id": "example.lookup",
+                "label": "Look up",
+                "kind": "button",
+                "capability": "example.lookup"
+            })],
+            ..Default::default()
+        };
+        assert!(plugin_action.validate_settings_contributions().is_ok());
+    }
+
+    #[test]
+    fn selection_actions_without_a_dispatch_path_are_rejected() {
+        let contributes = Contributes {
+            selection_actions: vec![serde_json::json!({
+                "id": "example.broken",
+                "label": "Broken",
+                "kind": "button"
+            })],
+            ..Default::default()
+        };
+        let error = contributes.validate_settings_contributions().unwrap_err();
+        assert!(
+            error.contains("neither a non-empty 'capability'"),
+            "got: {error}"
+        );
     }
 
     /// `target` is an in-app route, not a link. Accepting a scheme here would turn
@@ -7403,6 +7877,109 @@ mod tests {
         assert!(err.contains("pwn"), "names the offending command: {err}");
     }
 
+    fn declarative_http_manifest(contributes: serde_json::Value) -> PluginManifest {
+        serde_json::from_value(serde_json::json!({
+            "id": "@acme/notes",
+            "name": "Notes",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": contributes,
+        }))
+        .expect("manifest shape")
+    }
+
+    #[test]
+    fn declarative_automatic_sources_are_get_only() {
+        let manifest = declarative_http_manifest(serde_json::json!({
+            "sidebar_sections": [{
+                "id": "notes",
+                "title": "Notes",
+                "spec": {
+                    "source": {
+                        "http": {
+                            "method": "DELETE",
+                            "path": "/api/ext/@acme/notes/items"
+                        }
+                    }
+                }
+            }]
+        }));
+        let error = manifest
+            .validate_declarative_http_policy(false)
+            .expect_err("automatic DELETE must be rejected");
+        assert!(error.contains("automatic sources must use GET"), "{error}");
+    }
+
+    #[test]
+    fn community_declarative_http_is_confined_to_its_owner_mount() {
+        let valid = declarative_http_manifest(serde_json::json!({
+            "views": [{
+                "id": "notes",
+                "view": "list-detail",
+                "spec": {
+                    "view": "list-detail",
+                    "items": [],
+                    "source": { "http": { "path": "/api/ext/@acme/notes/items" } },
+                    "actions": [{
+                        "id": "create",
+                        "label": "Create",
+                        "http": {
+                            "method": "POST",
+                            "path": "/api/ext/@acme/notes/items"
+                        }
+                    }]
+                }
+            }]
+        }));
+        valid
+            .validate_declarative_http_policy(false)
+            .expect("owner source and action are allowed");
+
+        for path in [
+            "/api/preferences",
+            "/api/ext/@acme/other/items",
+            "/api/ext/@acme/notes/%2e%2e/other/items",
+            "/api/ext/@acme/notes/x%2f..%2fother",
+        ] {
+            let hostile = declarative_http_manifest(serde_json::json!({
+                "composer_controls": [{
+                    "id": "status",
+                    "type": "chip",
+                    "label": "Status",
+                    "flag": "status",
+                    "source": { "http": { "path": path } }
+                }]
+            }));
+            assert!(
+                hostile.validate_declarative_http_policy(false).is_err(),
+                "community path must be rejected: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_core_declarative_actions_keep_governed_core_routes() {
+        let manifest = declarative_http_manifest(serde_json::json!({
+            "store_tabs": [{
+                "id": "templates",
+                "title": "Templates",
+                "spec": {
+                    "source": { "http": { "path": "/api/workflows/catalog" } },
+                    "install": {
+                        "http": {
+                            "method": "POST",
+                            "path": "/api/workflows/catalog/install"
+                        }
+                    }
+                }
+            }]
+        }));
+        manifest
+            .validate_declarative_http_policy(true)
+            .expect("trusted Core route is allowed");
+        assert!(manifest.validate_declarative_http_policy(false).is_err());
+    }
+
     #[test]
     fn surfaces_entry_omits_empty_commands_key() {
         // A surface entry with no commands must NOT serialize a `commands` key
@@ -8029,6 +8606,7 @@ mod tests {
         assert!(p.fs.read.is_empty());
         assert!(p.fs.write.is_empty());
         assert!(!p.child_process);
+        assert!(p.run.is_empty());
         assert!(p.network.is_deny(), "default network denies all");
         assert!(!p.network.is_allowed());
         assert!(p.tool.is_empty());
@@ -8067,6 +8645,7 @@ mod tests {
             "permissions": {
                 "fs": { "read": ["/data/in"], "write": ["/data/out"] },
                 "child_process": true,
+                "run": ["ego-browser"],
                 "network": ["api.example.com:443", "cdn.example.com"],
                 "tool": ["web_search"]
             }
@@ -8076,6 +8655,7 @@ mod tests {
         assert_eq!(p.fs.read, vec!["/data/in".to_string()]);
         assert_eq!(p.fs.write, vec!["/data/out".to_string()]);
         assert!(p.child_process);
+        assert_eq!(p.run, vec!["ego-browser".to_string()]);
         assert!(matches!(&p.network, NetworkPermission::Hosts(h) if h.len() == 2));
         assert!(p.network.is_allowed());
         assert_eq!(p.tool, vec!["web_search".to_string()]);
@@ -8125,6 +8705,27 @@ mod tests {
         let mut bad = PermissionSet::default();
         bad.fs.write.push(String::new());
         assert!(bad.validate().is_err(), "empty path must be rejected");
+    }
+
+    #[test]
+    fn permission_run_requires_child_process_and_bare_names() {
+        let mut no_child = PermissionSet::default();
+        no_child.run.push("ego-browser".to_owned());
+        assert!(no_child.validate().unwrap_err().contains("child_process"));
+
+        let mut path = PermissionSet {
+            child_process: true,
+            ..Default::default()
+        };
+        path.run.push("bin/ego-browser".to_owned());
+        assert!(path.validate().unwrap_err().contains("bare program"));
+
+        let mut comma = PermissionSet {
+            child_process: true,
+            ..Default::default()
+        };
+        comma.run.push("ego-browser,other".to_owned());
+        assert!(comma.validate().unwrap_err().contains("bare program"));
     }
 
     #[test]
@@ -8372,6 +8973,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn route_permissions_can_distinguish_http_methods_on_one_path() {
+        let raw = r#"{
+            "id": "com.example.method-gated",
+            "name": "Method gated",
+            "version": "1.0.0",
+            "runnables": [],
+            "permission_levels": [
+                { "id": "items.view", "label": "Can view", "description": "View items." },
+                { "id": "items.edit", "label": "Can edit", "description": "Edit items.", "implies": ["items.view"] }
+            ],
+            "sidecars": [{
+                "name": "api",
+                "process": { "kind": "local", "command": "items-api" },
+                "port": 9111,
+                "http": { "routes": [
+                    { "path": "/items", "method": "GET", "permission": "items.view" },
+                    { "path": "/items", "method": "POST", "permission": "items.edit" }
+                ] }
+            }]
+        }"#;
+        let manifest = PluginManifest::parse_and_validate(raw).expect("method ACLs must load");
+        let routes = &manifest.sidecars[0].http.as_ref().expect("http").routes;
+        assert_eq!(routes[0].method.as_deref(), Some("GET"));
+        assert_eq!(routes[1].method.as_deref(), Some("POST"));
+    }
+
+    #[test]
+    fn permission_vocabulary_requires_every_protected_non_health_route_to_be_gated() {
+        let raw = r#"{
+            "id": "com.example.incomplete-gates",
+            "name": "Incomplete gates",
+            "version": "1.0.0",
+            "runnables": [],
+            "permission_levels": [
+                { "id": "items.view", "label": "Can view", "description": "View items." }
+            ],
+            "sidecars": [{
+                "name": "api",
+                "process": { "kind": "local", "command": "items-api" },
+                "port": 9111,
+                "health_path": "/health",
+                "http": { "routes": [
+                    { "path": "/health" },
+                    { "path": "/items" }
+                ] }
+            }]
+        }"#;
+        let error = PluginManifest::parse_and_validate(raw)
+            .expect_err("a protected data route cannot bypass the declared vocabulary");
+        assert!(error.contains("route '/items' has no permission"), "got: {error}");
+    }
+
     /// Two levels with one id make a grant ambiguous: whichever the reader
     /// de-duplicates to decides what the grant means.
     #[test]
@@ -8537,6 +9191,41 @@ mod tests {
             "must name the plugin: {err}"
         );
         assert!(err.contains("implies 'read'"), "got: {err}");
+    }
+
+    #[test]
+    fn route_patterns_reject_ambiguous_auth_postures() {
+        assert!(route_patterns_overlap("/:id", "/admin"));
+        assert!(route_patterns_overlap("/files/*rest", "/files/:id"));
+        assert!(!route_patterns_overlap("/items/:id", "/items/:id/details"));
+        assert!(!route_patterns_overlap("/health", "/admin"));
+        assert!(earlier_route_wins("/admin", "/:id"));
+        assert!(!earlier_route_wins(
+            "/requests/:requestId",
+            "/:boardSlug/requests"
+        ));
+        assert!(!earlier_route_wins("/:id", "/admin"));
+
+        let raw = r#"
+        {
+            "id": "com.example.ambiguous",
+            "name": "Ambiguous",
+            "version": "1.0.0",
+            "runnables": [],
+            "sidecars": [{
+                "name": "api",
+                "process": { "kind": "local", "command": "ambiguous-api" },
+                "port": 9111,
+                "http": { "routes": [
+                    { "path": "/:id", "auth": "public" },
+                    { "path": "/admin" }
+                ] }
+            }]
+        }
+        "#;
+        let err = PluginManifest::parse_and_validate(raw)
+            .expect_err("overlapping public and protected routes must fail validation");
+        assert!(err.contains("overlap"), "got: {err}");
     }
 
     // ── route permissions (the vocabulary's consumers) ────────────────────────

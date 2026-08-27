@@ -21,7 +21,26 @@ import { expect, type Page, test } from "@playwright/test";
 test.describe.configure({ timeout: 90_000 });
 
 const STORY_URL = "/chat-row-menus-story.html";
+const BROWSER_SURFACES = ["web", "extension", "mobile"] as const;
 const ROW_TITLE = "Fix the flaky auth test";
+const SESSION_ACTIONS = [
+	"Pin chat",
+	"Rename chat",
+	"Remove from ryu",
+	"Archive chat",
+	"Open side chat",
+	"Copy",
+	"Fork…",
+	"Add scheduled task…",
+	"Open in new window",
+];
+const COPY_ACTIONS = [
+	"Copy working directory",
+	"Copy session ID",
+	"Copy deeplink",
+	"Continue on another node",
+	"Copy as Markdown",
+];
 
 /** The row itself (the context-menu trigger), not the title span inside it. */
 function row(page: Page) {
@@ -103,17 +122,120 @@ test.describe("sidebar chat row — contributed rows on both menus", () => {
 		const labels = await menuLabels(page, "dropdown-menu");
 		expect(labels).toContain("Make a skill from this chat");
 		expect(labels).toContain("Summarize this chat");
+		expect(labels).toContain("Open in new window");
 	});
 
-	test("right-click lists the same app-contributed rows", async ({ page }) => {
+	test("both menus expose the complete chat-session action set", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		await openDropdown(page);
+		const dropdownLabels = await menuLabels(page, "dropdown-menu");
+		for (const label of SESSION_ACTIONS) {
+			expect(dropdownLabels).toContain(label);
+		}
+		expect(dropdownLabels).toEqual([...new Set(dropdownLabels)]);
+		await page.keyboard.press("Escape");
+
+		await openContextMenu(page);
+		const contextLabels = await menuLabels(page, "context-menu");
+		for (const label of SESSION_ACTIONS) {
+			expect(contextLabels).toContain(label);
+		}
+		expect(contextLabels).toEqual([...new Set(contextLabels)]);
+	});
+
+	test("both Copy submenus expose session metadata and Markdown", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		await openDropdown(page);
+		await page
+			.locator('[data-slot="dropdown-menu-content"] [role="menuitem"]', {
+				hasText: "Copy",
+			})
+			.first()
+			.hover();
+		const dropdownCopy = page.locator(
+			'[data-slot="dropdown-menu-sub-content"] [role="menuitem"]'
+		);
+		await expect(dropdownCopy.first()).toBeVisible();
+		expect(
+			(await dropdownCopy.allInnerTexts()).map((text) => text.trim())
+		).toEqual(COPY_ACTIONS);
+		await page.keyboard.press("Escape");
+
+		await openContextMenu(page);
+		await page
+			.locator('[data-slot="context-menu-content"] [role="menuitem"]', {
+				hasText: "Copy",
+			})
+			.first()
+			.hover();
+		const contextCopy = page.locator(
+			'[data-slot="context-menu-sub-content"] [role="menuitem"]'
+		);
+		await expect(contextCopy.first()).toBeVisible();
+		expect(
+			(await contextCopy.allInnerTexts()).map((text) => text.trim())
+		).toEqual(COPY_ACTIONS);
+	});
+
+	test("a built-in session action dispatches from the right-click menu", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		await openContextMenu(page);
+		await page
+			.locator('[data-slot="context-menu-content"] [role="menuitem"]', {
+				hasText: "Open side chat",
+			})
+			.click();
+		await expect(page.getByTestId("action")).toHaveText("side-chat:conv-alpha");
+	});
+
+	test("right-click lists the same app-contributed rows", async ({
+		page,
+	}, testInfo) => {
 		await page.goto(STORY_URL);
 		await openContextMenu(page);
 		const labels = await menuLabels(page, "context-menu");
 		expect(labels).toContain("Make a skill from this chat");
 		expect(labels).toContain("Summarize this chat");
+		expect(labels).toContain("Open in new window");
 		// Anchored: a `space` contribution must not reach a conversation menu.
 		expect(labels).not.toContain("Space-only row");
+		await page.screenshot({
+			fullPage: true,
+			path: testInfo.outputPath("multi-window-sidebar-proof.png"),
+		});
 	});
+
+	for (const surface of BROWSER_SURFACES) {
+		test(`${surface} hides native window actions from both menus`, async ({
+			page,
+		}, testInfo) => {
+			await page.goto(`${STORY_URL}?surface=${surface}`);
+
+			await openDropdown(page);
+			const dropdownLabels = await menuLabels(page, "dropdown-menu");
+			expect(dropdownLabels).toContain("Open in new tab");
+			expect(dropdownLabels).not.toContain("Open in new window");
+			await page.keyboard.press("Escape");
+
+			await openContextMenu(page);
+			const contextLabels = await menuLabels(page, "context-menu");
+			expect(contextLabels).toContain("Open in new tab");
+			expect(contextLabels).not.toContain("Open in new window");
+
+			if (surface === "web") {
+				await page.screenshot({
+					fullPage: true,
+					path: testInfo.outputPath("web-menu-without-desktop-actions.png"),
+				});
+			}
+		});
+	}
 
 	test("both menus agree on contributed rows and their order", async ({
 		page,

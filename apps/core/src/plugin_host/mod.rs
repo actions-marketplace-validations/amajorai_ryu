@@ -18,7 +18,7 @@
 //!   the real chat path (its own engine, tools, MCP, Gateway routing), so it can
 //!   gather actual evidence instead of judging from the transcript. This is the
 //!   "proof of work" primitive that the `proof` plugin builds on.
-//! - `host.storage.{get,set,delete,keys}(key, value?)` → the plugin's own
+//! - `host.storage.{get,set,delete,keys,compareAndSet}(key, value?)` → the plugin's own
 //!   namespaced KV ([`crate::plugin_storage`]), grant `storage:kv`.
 //! - `host.spaces.{ensureSpace,createDoc,getDoc,updateDoc,listDocs,deleteDoc}` →
 //!   the plugin's OWN Space documents (`kind = app:<plugin id>`, so it can never
@@ -91,6 +91,11 @@ pub struct HookContext {
     /// The agent that produced the turn.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Verified user principal for this turn, when the request came from an
+    /// authenticated interactive caller. Plugins use it only for tenant-scoped
+    /// storage and notifications; it is never model-supplied.
+    #[serde(default)]
+    pub caller_user_id: Option<String>,
     /// Recent transcript (oldest → newest), so a hook can review the last answer.
     #[serde(default)]
     pub transcript: Vec<HookMessage>,
@@ -156,6 +161,24 @@ pub struct HookContext {
     /// [`HookDirective::Replace`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped: Option<Vec<HookMessage>>,
+}
+
+/// Resolve the storage namespace used by both sandbox bridges and Core-owned
+/// projections of plugin state. An authenticated caller gets a private tenant
+/// prefix; an agent-less flow with no active account keeps the historical
+/// node-wide namespace. The active local account is the fallback when the request
+/// transport cannot carry a verified user JWT (for example the desktop's local
+/// node bearer).
+pub(crate) fn storage_namespace_for_tenant(tenant: Option<&str>, namespace: &str) -> String {
+    let active_user_id = crate::auth::load_accounts().active_user_id;
+    let tenant = tenant
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| active_user_id.as_deref());
+    match tenant {
+        Some(user_id) => format!("tenant:{user_id}:{namespace}"),
+        None => namespace.to_owned(),
+    }
 }
 
 /// What a hook asks the chat path to do after the assistant turn.
@@ -658,6 +681,17 @@ pub fn phase_matches(hook_on: &str, phase: &str) -> bool {
 /// enforces this; exported here so the cap lives in one place.
 pub const MAX_CONTINUE_TURNS: u32 = 25;
 
+pub(crate) fn hook_policy_allows(
+    policy: Option<&crate::governance::HookPolicyOverride>,
+    trusted_by_default: bool,
+) -> bool {
+    let enabled = policy.and_then(|value| value.enabled).unwrap_or(true);
+    let trusted = policy
+        .and_then(|value| value.trusted)
+        .unwrap_or(trusted_by_default);
+    enabled && trusted
+}
+
 /// Collect every hook from currently **enabled** plugins. Read live (cheap, once
 /// per assistant turn) so an enable/disable takes effect immediately without a
 /// refresh dance. Returns an empty vec when no plugins contribute hooks.
@@ -676,6 +710,13 @@ pub async fn collect_enabled_hooks(state: &ServerState) -> Vec<HookPlugin> {
     if enabled_ids.is_empty() {
         return Vec::new();
     }
+    let hook_overrides = match state.app_store.effective_hook_overrides().await {
+        Ok(overrides) => overrides,
+        Err(error) => {
+            tracing::warn!("plugin_host: could not read hook policy: {error}");
+            return Vec::new();
+        }
+    };
 
     // Read from the already-loaded, hot-updated manifest set (no disk re-read).
     let manifests = state.app_manifests.read().await;
@@ -692,6 +733,12 @@ pub async fn collect_enabled_hooks(state: &ServerState) -> Vec<HookPlugin> {
         }
         let grants: HashSet<String> = manifest.permission_grants.iter().cloned().collect();
         for hook in &contributes.turn_hooks {
+            let hook_key = format!("{}::{}", manifest.id, hook.id);
+            let trusted_by_default =
+                crate::plugins::builtins::is_compiled_in_manifest(&manifest.id);
+            if !hook_policy_allows(hook_overrides.get(&hook_key), trusted_by_default) {
+                continue;
+            }
             hooks.push(HookPlugin {
                 plugin_id: manifest.id.clone(),
                 hook_id: hook.id.clone(),
@@ -818,8 +865,8 @@ pub trait HookDispatch: Send + Sync {
 static GLOBAL: std::sync::OnceLock<Arc<dyn HookDispatch>> = std::sync::OnceLock::new();
 
 /// Install the global dispatcher (idempotent; first writer wins).
-pub fn set_global(dispatcher: Arc<dyn HookDispatch>) {
-    let _ = GLOBAL.set(dispatcher);
+pub fn set_global(dispatcher: Arc<dyn HookDispatch>) -> bool {
+    GLOBAL.set(dispatcher).is_ok()
 }
 
 /// Fire the hooks for `phase` through the global dispatcher. Returns an empty vec
@@ -859,7 +906,7 @@ pub async fn run_hooks(
             continue;
         }
         // Cheap pre-gate: skip the sandbox spawn when the hook provably can't act
-        // this turn. This is what makes default-on hooks free on the hot path.
+        // this turn. This is what makes pre-installed hooks free on the hot path.
         if !hook_should_run(state, hook, ctx).await {
             continue;
         }
@@ -892,7 +939,9 @@ async fn hook_should_run(state: &ServerState, hook: &HookPlugin, ctx: &HookConte
             let Some(store) = crate::plugin_storage::global() else {
                 return false;
             };
-            match store.get(&hook.plugin_id, "default", conv).await {
+            let namespace =
+                storage_namespace_for_tenant(ctx.caller_user_id.as_deref(), "default");
+            match store.get(&hook.plugin_id, &namespace, conv).await {
                 Ok(Some(_)) => true,
                 Ok(None) => false,
                 // Fail-open on a storage error: run rather than silently drop.
@@ -914,7 +963,7 @@ enum GateVerdict {
     CheckStateful,
 }
 
-fn gate_without_storage(m: &crate::plugin_manifest::HookMatch, ctx: &HookContext) -> GateVerdict {
+    fn gate_without_storage(m: &crate::plugin_manifest::HookMatch, ctx: &HookContext) -> GateVerdict {
     let mut declared = false;
 
     if let Some(flag) = m.flag.as_deref().filter(|f| !f.is_empty()) {
@@ -978,10 +1027,11 @@ fn glob_match(pattern: &str, name: &str) -> bool {
 /// [`HookDirective::None`].
 pub async fn run_hook(state: &ServerState, hook: &HookPlugin, ctx: &HookContext) -> HookDirective {
     let program = build_hook_program(ctx, &hook.code);
-    let bridge = Arc::new(PluginHookBridge::new(
+    let bridge = Arc::new(PluginHookBridge::new_with_tenant(
         hook.plugin_id.clone(),
         hook.grants.clone(),
         state.clone(),
+        ctx.caller_user_id.clone(),
     ));
     let invoker = Arc::new(SandboxToolInvoker::bridge(bridge));
     let agent_id = ctx
@@ -1052,6 +1102,7 @@ const host = {{
     set: (k, v, ns) => tools.host.storage_set({{ key: String(k), value: typeof v === "string" ? v : JSON.stringify(v), namespace: ns }}),
     delete: (k, ns) => tools.host.storage_delete({{ key: String(k), namespace: ns }}),
     keys: (ns) => tools.host.storage_keys({{ namespace: ns }}),
+    compareAndSet: (k, expected, v, ns) => tools.host.storage_compare_and_set({{ key: String(k), expected: expected == null ? null : String(expected), value: v == null ? null : (typeof v === "string" ? v : JSON.stringify(v)), namespace: ns }}),
   }},
   spaces: {{
     ensureSpace: (a) => tools.host.spaces_ensure_space(a ?? {{}}),
@@ -1078,6 +1129,37 @@ const host = {{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_policy_requires_explicit_trust_for_third_party_hooks() {
+        assert!(!hook_policy_allows(None, false));
+        assert!(hook_policy_allows(None, true));
+        assert!(hook_policy_allows(
+            Some(&crate::governance::HookPolicyOverride {
+                enabled: None,
+                trusted: Some(true),
+            }),
+            false
+        ));
+    }
+
+    #[test]
+    fn hook_policy_keeps_enable_and_trust_as_independent_gates() {
+        assert!(!hook_policy_allows(
+            Some(&crate::governance::HookPolicyOverride {
+                enabled: Some(false),
+                trusted: Some(true),
+            }),
+            true
+        ));
+        assert!(!hook_policy_allows(
+            Some(&crate::governance::HookPolicyOverride {
+                enabled: Some(true),
+                trusted: Some(false),
+            }),
+            true
+        ));
+    }
     use serde_json::json;
 
     /// An app event fires with no turn in flight, so only the directives that mean
@@ -1311,6 +1393,14 @@ mod tests {
     }
 
     #[test]
+    fn tenant_namespace_is_shared_by_bridge_and_core_projections() {
+        assert_eq!(
+            storage_namespace_for_tenant(Some("user-42"), "default"),
+            "tenant:user-42:default"
+        );
+    }
+
+    #[test]
     fn gate_flag_on_runs_off_skips() {
         let m = HookMatch {
             flag: Some("io.ryu.double-check".into()),
@@ -1512,7 +1602,7 @@ mod tests {
     /// a builtin (so e.g. the tool-firewall never makes the hot tool-dispatch path
     /// pay a lookup on installs that didn't opt in). Picks the hook by `hook_id`.
     ///
-    /// Reads `plugins-store/<plugin>/manifest.json` — the single source of truth.
+    /// Reads `plugins-store/{plugins,lsp,external_plugins}/<plugin>/manifest.json` — the single source of truth.
     /// There is no longer a `plugin_manifest/fixtures/<plugin>.manifest.json` copy to
     /// read: Core `include_str!`s the package manifests directly. Anchored at
     /// `CARGO_MANIFEST_DIR` rather than the CWD so the path does not depend on where
@@ -1524,7 +1614,7 @@ mod tests {
     /// empty `code` and the test would silently assert against nothing.
     fn fixture_hook_from_file(plugin: &str, hook_id: &str) -> String {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../plugins-store")
+            .join("../../plugins-store/plugins")
             .join(plugin);
         let path = dir.join("manifest.json");
         let display = path.display().to_string();

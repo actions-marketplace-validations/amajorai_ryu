@@ -1,6 +1,6 @@
 {
-  "tags": ["tasks","todos","productivity","tracking"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": ["tasks", "todos", "productivity", "tracking"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-quests",
   "homepage": "https://github.com/amajorai/ryu-quests",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -55,25 +55,55 @@
         "mount": "/api/quests",
         "public_mount": "/api/quests",
         "routes": [
-          { "path": "/events" },
-          { "path": "/detection-config" },
-          { "path": "/capture" },
-          { "path": "/scratchpad" },
-          { "path": "/" },
-          { "path": "/:id" },
-          { "path": "/:id/use" },
-          { "path": "/:id/pin" },
-          { "path": "/:id/judge" },
-          { "path": "/:id/complete" },
-          { "path": "/:id/dismiss" },
-          { "path": "/:id/reopen" },
-          { "path": "/:id/suggestion/accept" },
-          { "path": "/:id/suggestion/dismiss" }
+          { "path": "/events", "permission": "quests.view" },
+          {
+            "path": "/detection-config",
+            "method": "GET",
+            "permission": "quests.view"
+          },
+          {
+            "path": "/detection-config",
+            "method": "PUT",
+            "permission": "quests.edit"
+          },
+          {
+            "path": "/capture",
+            "method": "POST",
+            "permission": "quests.capture"
+          },
+          {
+            "path": "/scratchpad",
+            "method": "GET",
+            "permission": "quests.view"
+          },
+          {
+            "path": "/scratchpad",
+            "method": "PUT",
+            "permission": "quests.edit"
+          },
+          { "path": "/", "method": "GET", "permission": "quests.view" },
+          { "path": "/", "method": "POST", "permission": "quests.edit" },
+          { "path": "/:id", "method": "GET", "permission": "quests.view" },
+          { "path": "/:id", "method": "PUT", "permission": "quests.edit" },
+          { "path": "/:id", "method": "DELETE", "permission": "quests.edit" },
+          { "path": "/:id/use", "permission": "quests.edit" },
+          { "path": "/:id/pin", "permission": "quests.edit" },
+          { "path": "/:id/judge", "permission": "quests.edit" },
+          { "path": "/:id/complete", "permission": "quests.edit" },
+          { "path": "/:id/dismiss", "permission": "quests.edit" },
+          { "path": "/:id/reopen", "permission": "quests.edit" },
+          { "path": "/:id/suggestion/accept", "permission": "quests.edit" },
+          { "path": "/:id/suggestion/dismiss", "permission": "quests.edit" }
         ]
       }
     }
   ],
-  "permission_grants": ["quests:crud", "quests:capture"],
+  "permission_grants": [
+    "quests:crud",
+    "quests:capture",
+    "ui:toast",
+    "ui:declarative-http"
+  ],
   "permission_levels": [
     {
       "id": "quests.view",
@@ -98,7 +128,19 @@
     "icon": "target-02"
   },
   "contributes": {
-  "chat_widget_templates": [{"id":"quests.chat","title":"Quests widget","description":"Open Quests data in a host-rendered chat widget.","triggers":["quests widget"],"examples":["Show me a quests widget"],"backing":{"view_id":"quest-board"},"display_mode":"inline","safe_action_ids":[],"availability":"available"}],
+    "chat_widget_templates": [
+      {
+        "id": "quests.chat",
+        "title": "Quests widget",
+        "description": "Open Quests data in a host-rendered chat widget.",
+        "triggers": ["quests widget"],
+        "examples": ["Show me a quests widget"],
+        "backing": { "view_id": "quest-board" },
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "available"
+      }
+    ],
     "hook_events": [
       {
         "id": "@ryu/quests#quest.created",

@@ -115,6 +115,7 @@ function Proof() {
 							existingChannelCount={2}
 							onContinue={() => setStatus("Existing channels preserved")}
 							onSkip={() => setStatus("Existing channels preserved")}
+							onUseTelegramLogin={() => undefined}
 						/>
 					</section>
 					<section
@@ -125,6 +126,7 @@ function Proof() {
 							existingChannelCount={0}
 							onContinue={() => setStatus("Telegram setup complete")}
 							onSkip={() => setStatus("Telegram setup skipped")}
+							onUseTelegramLogin={() => undefined}
 						/>
 					</section>
 					<section

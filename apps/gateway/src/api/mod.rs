@@ -13,6 +13,7 @@ pub mod health;
 pub mod metrics;
 pub mod models;
 pub mod multimodal;
+pub mod providers;
 pub mod sandbox;
 pub mod tools;
 pub mod traffic;
@@ -130,12 +131,17 @@ pub fn router(state: SharedState) -> Router {
         // and shares the normal tool-loop debit helper so charges are not
         // double-counted.
         .route("/v1/budget/charge", post(budget::charge_tool))
+        // Core-hosted apps use this provider-neutral seam. Provider credentials
+        // stay in Gateway/vault and the route owns provider-cost wallet debits.
+        .route("/v1/providers/status", post(providers::provider_status))
+        .route("/v1/providers/call", post(providers::provider_call))
         // Remaining Ryu $ wallet balance as of the last metered call. Backs
         // Core's dollar-threshold model fallback ("under $5, use the cheap
         // model"), which has no other way to see an org-level billing figure.
         .route("/v1/wallet", get(budget::get_wallet))
         // Audit log (local query; master-key only)
         .route("/v1/audit", get(audit::query_audit))
+        .route("/v1/audit/usage", get(audit::query_audit_usage))
         // Gateway control activity ingest (admin-authenticated; no payloads).
         .route("/v1/audit/control", post(audit::record_control_change))
         // Exec audit ingest + pre-run budget gate (M6 / #192)

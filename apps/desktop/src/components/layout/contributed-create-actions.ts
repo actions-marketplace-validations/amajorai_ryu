@@ -29,15 +29,16 @@
 // mean a helper that has to ask which caller it is serving.
 
 import {
+	DECLARATIVE_HTTP_GRANT,
 	isCoreApiPath,
-	renderActionHttp,
+	renderContributionActionHttp,
 	renderTemplate,
 } from "@ryu/app-host/views";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
-import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
+import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
 import {
 	type PluginCreateAction,
 	type PluginSidebarSection,
@@ -61,6 +62,7 @@ export function useContributedCreateActions(): CreateMenuAction[] {
 	const { create_actions, sidebar_sections } = usePluginContributions();
 	const node = useActiveNode();
 	const { openTab } = useTabsContext();
+	const [pendingSection, setPendingSection] = useState<string | null>(null);
 
 	// Seam 1: a standalone create row. `target` navigates; `capability` dispatches
 	// through the owning plugin's granted host seam, the same way a contributed
@@ -87,18 +89,37 @@ export function useContributedCreateActions(): CreateMenuAction[] {
 	const run = useCallback(
 		async (section: PluginSidebarSection) => {
 			const create = section.spec?.create;
+			const sectionKey = `${section.plugin}:${section.id}`;
+			if (pendingSection === sectionKey) {
+				return;
+			}
+			const http = create && "http" in create ? create.http : undefined;
+			if (create && "target" in create && typeof create.target === "string") {
+				openTab(create.target, {
+					title: create.label ?? `New ${section.title}`,
+				});
+				return;
+			}
 			// Same guard the section list applies before it fetches: a contributed
 			// path that is not a Core `/api/` route never reaches the authenticated
 			// node seam.
-			if (!(create && isCoreApiPath(create.http.path))) {
+			if (
+				!(
+					create &&
+					http &&
+					(section.approved_grants ?? []).includes(DECLARATIVE_HTTP_GRANT) &&
+					isCoreApiPath(http.path)
+				)
+			) {
 				return;
 			}
+			setPendingSection(sectionKey);
 			try {
 				const target = toTarget(node);
-				const rendered = renderActionHttp(create.http, {});
+				const rendered = renderContributionActionHttp(section, http, {});
 				const resp = await fetch(apiUrl(target, rendered.path), {
 					method: rendered.method,
-					headers: makeHeaders(target.token),
+					headers: await requestHeaders(target),
 					body:
 						rendered.body === undefined
 							? undefined
@@ -125,9 +146,13 @@ export function useContributedCreateActions(): CreateMenuAction[] {
 			} catch {
 				// Best-effort, exactly as the section's own create button: a failed
 				// create must not take the sidebar down with it.
+			} finally {
+				setPendingSection((current) =>
+					current === sectionKey ? null : current
+				);
 			}
 		},
-		[node, openTab]
+		[node, openTab, pendingSection]
 	);
 
 	// Standalone rows first, then the section-scoped ones. Both families sort by
@@ -154,7 +179,21 @@ export function useContributedCreateActions(): CreateMenuAction[] {
 		const seen = new Set<string>();
 		return sidebar_sections
 			.filter((section) => {
-				if (!section.spec?.create) {
+				const create = section.spec?.create;
+				if (!create) {
+					return false;
+				}
+				if ("target" in create && typeof create.target === "string") {
+					return true;
+				}
+				const http = "http" in create ? create.http : undefined;
+				if (
+					!(
+						http &&
+						(section.approved_grants ?? []).includes(DECLARATIVE_HTTP_GRANT) &&
+						isCoreApiPath(http.path)
+					)
+				) {
 					return false;
 				}
 				// A plugin may contribute several sections; key on plugin + section id

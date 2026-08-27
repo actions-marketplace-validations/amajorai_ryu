@@ -22,6 +22,11 @@ export interface TranscriptOptions {
 	defaultUserName?: string;
 }
 
+export interface MarkdownTranscriptOptions extends TranscriptOptions {
+	/** Optional level-one heading placed above the transcript. */
+	title?: string;
+}
+
 function textFromMessage(message: TranscriptMessage): string {
 	if (Array.isArray(message.parts) && message.parts.length > 0) {
 		return message.parts
@@ -97,6 +102,44 @@ export function formatChatTranscript(
 	return blocks.join("\n\n");
 }
 
+function markdownHeadingText(value: string): string {
+	return value.replace(/\s+/g, " ").trim();
+}
+
+/** Format user and assistant turns as portable Markdown. */
+export function formatChatTranscriptAsMarkdown(
+	messages: TranscriptMessage[],
+	options?: MarkdownTranscriptOptions
+): string {
+	const blocks: string[] = [];
+	const title = markdownHeadingText(options?.title ?? "");
+	if (title) {
+		blocks.push(`# ${title}`);
+	}
+	for (const message of messages) {
+		if (message.role !== "user" && message.role !== "assistant") {
+			continue;
+		}
+		const text = textFromMessage(message);
+		if (!text) {
+			continue;
+		}
+		const author = markdownHeadingText(
+			getAuthorLabel(message, options?.defaultUserName)
+		);
+		const createdAt = message.createdAt
+			? new Date(message.createdAt)
+			: message.timestamp
+				? new Date(message.timestamp)
+				: null;
+		const timestamp = createdAt
+			? ` · ${formatTimestampForTranscript(createdAt)}`
+			: "";
+		blocks.push(`## ${author}${timestamp}\n\n${text}`);
+	}
+	return blocks.join("\n\n");
+}
+
 /**
  * Copy a chat transcript to the clipboard and toast the result.
  * Accepts either an already-loaded message list or an async loader.
@@ -116,5 +159,24 @@ export async function copyChatTranscript(
 		toast.success("Copied to clipboard");
 	} catch {
 		toast.error("Couldn't copy transcript");
+	}
+}
+
+/** Copy a chat transcript as Markdown and report the result. */
+export async function copyChatTranscriptAsMarkdown(
+	source: TranscriptMessage[] | (() => Promise<TranscriptMessage[]>),
+	options?: MarkdownTranscriptOptions
+): Promise<void> {
+	try {
+		const messages = typeof source === "function" ? await source() : source;
+		const transcript = formatChatTranscriptAsMarkdown(messages, options);
+		if (!transcript) {
+			toast.info("Nothing to copy");
+			return;
+		}
+		await navigator.clipboard.writeText(transcript);
+		toast.success("Copied Markdown to clipboard");
+	} catch {
+		toast.error("Couldn't copy chat as Markdown");
 	}
 }

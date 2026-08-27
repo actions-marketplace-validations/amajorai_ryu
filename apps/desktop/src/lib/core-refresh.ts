@@ -54,7 +54,7 @@ export function useCoreRefresh(reload: () => void): void {
  * Refetch just the agent roster (`GET /api/agents`). Adding or removing an agent
  * from the Store only flips Core's `installed` flag, so the always-mounted
  * surfaces that read the roster — the sidebar, the composer picker, the Library —
- * would otherwise keep showing the pre-install list until a full refresh. Scoped
+ * would otherwise keep showing the stale installed-state list until a full refresh. Scoped
  * on purpose: a Store click must not refetch the whole app.
  */
 export function triggerAgentsRefresh(): void {

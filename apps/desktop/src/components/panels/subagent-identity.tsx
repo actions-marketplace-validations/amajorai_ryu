@@ -2,8 +2,9 @@ import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ReactNode } from "react";
 
-// Deterministic, offline identity for subagents (Task/Agent spawns): a stable
-// human name and an identicon avatar derived purely from the subagent's id.
+// Deterministic, offline avatar identity for subagents (Task/Agent spawns).
+// Human-facing names come from each spawn's task description; the opaque id is
+// used only to keep the avatar stable across streaming updates and reloads.
 //
 // We render the identicon locally (a GitHub-style symmetric pixel grid, the
 // same visual language as DiceBear's "identicon" style) instead of fetching
@@ -20,64 +21,6 @@ function hashString(value: string): number {
 		hash = (Math.imul(hash, 31) + value.charCodeAt(i)) >>> 0;
 	}
 	return hash;
-}
-
-// A friendly pool of English given names. The pool only needs to be large
-// enough that collisions within a single run are rare; names are cosmetic.
-const NAMES = [
-	"Atlas",
-	"Nova",
-	"Sage",
-	"Orion",
-	"Iris",
-	"Felix",
-	"Luna",
-	"Milo",
-	"Hazel",
-	"Jasper",
-	"Ivy",
-	"Leo",
-	"Ruby",
-	"Otis",
-	"Willow",
-	"Ezra",
-	"Cleo",
-	"Silas",
-	"Wren",
-	"Arlo",
-	"Juno",
-	"Rex",
-	"Opal",
-	"Hugo",
-	"Elsie",
-	"Bruno",
-	"Maud",
-	"Cyrus",
-	"Nell",
-	"Ozzie",
-	"Greta",
-	"Dex",
-	"Pearl",
-	"Enzo",
-	"Faye",
-	"Ivo",
-	"Della",
-	"Knox",
-	"Vera",
-	"Cato",
-	"Esme",
-	"Reed",
-	"Lark",
-	"Gus",
-	"Fern",
-	"Ace",
-	"Poppy",
-	"Bo",
-] as const;
-
-/** A stable English name for a subagent, derived from its id. */
-export function subagentName(seed: string): string {
-	return NAMES[hashString(seed) % NAMES.length];
 }
 
 /**
@@ -166,6 +109,7 @@ export function SubagentAvatar({
 		// position actually overrides rather than colliding with ours (the dock tab
 		// strip passes `absolute size-3`).
 		<span
+			aria-hidden="true"
 			className={cn(
 				"flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted",
 				className

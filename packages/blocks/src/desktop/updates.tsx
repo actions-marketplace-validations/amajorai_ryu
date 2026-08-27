@@ -15,6 +15,9 @@ import { Button } from "@ryu/ui/components/button";
 import { Switch } from "@ryu/ui/components/switch";
 
 export interface UpdatesViewProps {
+	automaticUpdateAriaLabel?: string;
+	automaticUpdateDescription?: string;
+	automaticUpdateTitle?: string;
 	autoUpdate?: boolean;
 	checking?: boolean;
 	/**
@@ -27,19 +30,23 @@ export interface UpdatesViewProps {
 	 * `apps/desktop/src/lib/app-update-schedule.ts`.
 	 */
 	deferredInstallNotice?: string;
+	installPreparedDisabled?: boolean;
+	installPreparedLabel?: string;
 	/** Cancels the booked install. Renders the cancel action only when supplied. */
 	onCancelDeferredInstall?: () => void;
+	onCheck?: () => void;
 	/**
 	 * Books the update for the machine's next quiet hour. Renders the row only
 	 * when supplied — the Gateway tab governs a node's binaries, which defer
 	 * through the node's own scheduler, and leaves this off.
 	 */
 	onDeferInstall?: () => void;
-	onCheck?: () => void;
+	onInstallPreparedUpdate?: () => void;
 	/** Called when the owner asks to manage/extend their updates window. Renders
 	 *  the action button only when supplied. */
 	onManageUpdates?: () => void;
 	onToggle?: (next: boolean) => void;
+	preparedUpdateNotice?: string;
 	/**
 	 * Set only for a lifetime owner: states through when updates are included, and —
 	 * once something is actually being withheld — how to get another year. Absent
@@ -73,13 +80,20 @@ export function UpdatesView({
 	version,
 	productName,
 	autoUpdate = true,
+	automaticUpdateAriaLabel = "Toggle automatic updates",
+	automaticUpdateDescription = "Check for updates on launch and install them automatically.",
+	automaticUpdateTitle = "Automatic updates",
 	checking,
 	deferredInstallNotice,
+	installPreparedDisabled = false,
 	onToggle,
 	onCancelDeferredInstall,
 	onCheck,
 	onDeferInstall,
 	onManageUpdates,
+	onInstallPreparedUpdate,
+	installPreparedLabel = "Install and restart",
+	preparedUpdateNotice,
 	updatesWindowNotice,
 }: UpdatesViewProps) {
 	return (
@@ -92,14 +106,32 @@ export function UpdatesView({
 					<SettingsItem
 						actions={
 							<Switch
-								aria-label="Toggle automatic updates"
+								aria-label={automaticUpdateAriaLabel}
 								checked={autoUpdate}
 								onCheckedChange={onToggle}
 							/>
 						}
-						description="Check for updates on launch and install them automatically."
-						title="Automatic updates"
+						description={automaticUpdateDescription}
+						title={automaticUpdateTitle}
 					/>
+					{preparedUpdateNotice ? (
+						<SettingsItem
+							actions={
+								onInstallPreparedUpdate ? (
+									<Button
+										disabled={installPreparedDisabled}
+										onClick={onInstallPreparedUpdate}
+										size="sm"
+										variant="default"
+									>
+										{installPreparedLabel}
+									</Button>
+								) : undefined
+							}
+							description={preparedUpdateNotice}
+							title="Update ready"
+						/>
+					) : null}
 					<SettingsItem
 						actions={
 							<Button

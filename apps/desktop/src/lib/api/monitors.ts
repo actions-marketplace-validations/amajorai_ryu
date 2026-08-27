@@ -8,95 +8,25 @@
 import { type ApiTarget, request } from "./client.ts";
 import { streamChannel } from "./eventStream.ts";
 
-export type FetchBackend = "http" | "spider" | "agentbrowser";
+export type {
+	Alert,
+	CheckStatus,
+	CheckType,
+	FetchBackend,
+	Monitor,
+	MonitorInput,
+	NotifyTarget,
+	NumComparator,
+	Snapshot,
+} from "@ryuhq/core-client/monitors";
 
-export type NumComparator =
-	| "changed"
-	| "less_than"
-	| "greater_than"
-	| "drops_by_pct"
-	| "rises_by_pct";
-
-// Internally-tagged union mirroring Core's `CheckType` (`{ "type": ... }`).
-export type CheckType =
-	| { type: "uptime"; expect_status?: number[] }
-	| {
-			type: "keyword";
-			pattern: string;
-			is_regex?: boolean;
-			case_sensitive?: boolean;
-			alert_when_present?: boolean;
-	  }
-	| { type: "content_diff"; region_regex?: string | null }
-	| {
-			type: "price";
-			extract_regex: string;
-			comparator?: NumComparator;
-			threshold?: number | null;
-	  }
-	| {
-			type: "stock";
-			in_stock_pattern: string;
-			is_regex?: boolean;
-			alert_when_in_stock?: boolean;
-	  };
-
-export type NotifyTarget =
-	| { kind: "webhook"; url: string }
-	| { kind: "telegram"; bot_token: string; chat_id: string }
-	| { kind: "expo_push"; token: string };
-
-export type CheckStatus = "ok" | "triggered" | "error";
-
-export interface Monitor {
-	backend: FetchBackend;
-	check: CheckType;
-	created_at: string;
-	enabled: boolean;
-	id: string;
-	interval: string;
-	last_check_at?: string | null;
-	last_status?: CheckStatus | null;
-	last_value?: string | null;
-	name: string;
-	notify: NotifyTarget[];
-	updated_at: string;
-	url: string;
-}
-
-export interface Snapshot {
-	checked_at: string;
-	content_hash?: string | null;
-	http_status?: number | null;
-	id: number;
-	latency_ms?: number | null;
-	monitor_id: string;
-	note?: string | null;
-	status: CheckStatus;
-	value?: string | null;
-}
-
-export interface Alert {
-	acknowledged: boolean;
-	created_at: string;
-	id: number;
-	kind: string;
-	message: string;
-	monitor_id: string;
-	monitor_name: string;
-	title: string;
-}
-
-/** The fields needed to create or update a monitor. */
-export interface MonitorInput {
-	backend: FetchBackend;
-	check: CheckType;
-	enabled: boolean;
-	interval: string;
-	name: string;
-	notify: NotifyTarget[];
-	url: string;
-}
+import type {
+	Alert,
+	CheckStatus,
+	Monitor,
+	MonitorInput,
+	Snapshot,
+} from "@ryuhq/core-client/monitors";
 
 export async function listMonitors(target: ApiTarget): Promise<Monitor[]> {
 	const json = await request<{ monitors?: Monitor[] }>(target, "/api/monitors");

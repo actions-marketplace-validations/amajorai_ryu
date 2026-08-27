@@ -16,7 +16,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { RefObject } from "react";
 import { useEffect, useRef, useState } from "react";
-import { productCategories, productsByCategory } from "./data/products.tsx";
+import { PRODUCT_REALMS } from "./data/product-realms.ts";
 import {
 	DOCS_URL,
 	resourceCategories,
@@ -33,6 +33,8 @@ import { ProgressiveBlur } from "./progressive-blur.tsx";
 // for every page.
 const RESOURCE_ACTIVE_PREFIXES = [
 	"/docs",
+	"/academy",
+	"/certifications",
 	"/marketplace",
 	"/compare",
 	"/pricing",
@@ -43,14 +45,38 @@ const RESOURCE_ACTIVE_PREFIXES = [
 	"/help",
 ];
 
-const PRODUCT_SHEET = productCategories.map((category) => ({
-	title: category,
-	links: productsByCategory(category).map((product) => ({
-		label: product.navLabel,
-		href: `/products/${product.slug}`,
-		external: false,
-	})),
-}));
+const PRODUCT_SHEET = [
+	{
+		title: "Products",
+		links: [
+			...PRODUCT_REALMS.filter((realm) =>
+				["os", "bot", "console", "box", "hire"].includes(realm.id)
+			).map(({ label, href }) => ({ label, href, external: false })),
+			{
+				label: "Ryu Apps",
+				href: "/marketplace/apps",
+				external: false,
+			},
+		],
+	},
+	{
+		title: "Platform",
+		links: [
+			...PRODUCT_REALMS.filter((realm) => realm.id === "gateway").map(
+				({ label, href }) => ({ label, href, external: false })
+			),
+			{ label: "SDKs", href: "/products/sdk", external: false },
+			{ label: "Core", href: "/products/core", external: false },
+		],
+	},
+	{
+		title: "Infrastructure",
+		links: [
+			{ label: "Ryu Cloud", href: "/platform#infra", external: false },
+			{ label: "Self-hosted", href: "/platform#infra", external: false },
+		],
+	},
+] as const;
 
 const SOLUTION_SHEET = solutionCategories.map((category) => ({
 	title: category,
@@ -78,7 +104,7 @@ const SHEET_TITLES = {
 
 const SHEET_FOOTERS = {
 	products: {
-		label: "View all products →",
+		label: "Explore all products →",
 		href: "/products",
 		external: false,
 	},
@@ -105,7 +131,13 @@ function isTabActive(key: TabKey, pathname: string): boolean {
 		case "home":
 			return pathname === "/";
 		case "products":
-			return pathname.startsWith("/products");
+			return (
+				pathname === "/bot" ||
+				pathname === "/console" ||
+				pathname === "/build" ||
+				pathname === "/platform" ||
+				pathname.startsWith("/marketplace/apps")
+			);
 		case "solutions":
 			return pathname.startsWith("/for");
 		case "resources":

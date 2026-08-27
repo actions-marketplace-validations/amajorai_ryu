@@ -43,6 +43,8 @@ export const STEP_UP_SCOPES = [
 	"org.credentials",
 	/** Cloud nodes: schedule removal, transfer, or destroy live infrastructure. */
 	"node.destroy",
+	/** Card-funded billing: top-ups, plan changes, subscriptions, and purchases. */
+	"billing",
 	/** Any Ryu-staff (platform-admin) mutation, in /admin and its routers. */
 	"platform.admin",
 	/**
@@ -96,6 +98,7 @@ const WINDOW_MS: Record<StepUpScope, number> = {
 	"org.members": 10 * MINUTE_MS,
 	"org.credentials": 10 * MINUTE_MS,
 	"node.destroy": 5 * MINUTE_MS,
+	billing: 5 * MINUTE_MS,
 	"platform.admin": 30 * MINUTE_MS,
 	"account.merge": 5 * MINUTE_MS,
 };
@@ -130,6 +133,33 @@ export function stepUpMethods(user: {
 }
 
 /**
+ * The factors a particular action may accept. Billing deliberately accepts
+ * only the live authenticator code when 2FA is enabled: an emailed fallback
+ * would weaken a card-funded action back to mailbox possession.
+ */
+export function stepUpMethodsForScope(
+	user: { twoFactorEnabled?: boolean | null },
+	scope: StepUpScope
+): StepUpMethod[] {
+	if (scope === "billing") {
+		return user.twoFactorEnabled ? ["totp"] : [];
+	}
+	return stepUpMethods(user);
+}
+
+/**
+ * Billing step-up is conditional by design. Accounts without 2FA keep the
+ * existing checkout flow; accounts that enrolled 2FA must prove it before a
+ * card-funded mutation proceeds.
+ */
+export function stepUpAppliesToUser(
+	scope: StepUpScope,
+	user: { twoFactorEnabled?: boolean | null }
+): boolean {
+	return scope !== "billing" || Boolean(user.twoFactorEnabled);
+}
+
+/**
  * What the prompt (and the emailed code) calls each scope, in the second person
  * and in plain language. The email in particular has to name the action: a
  * recipient who is not the one clicking should be able to tell from the subject
@@ -140,6 +170,7 @@ const SCOPE_LABELS: Record<StepUpScope, string> = {
 	"org.delete": "delete a workspace",
 	"org.members": "change who can access a workspace",
 	"node.destroy": "remove a cloud node",
+	billing: "complete this billing action",
 	"platform.admin": "use Ryu staff powers",
 	"account.merge": "merge another account into this one",
 };
@@ -394,6 +425,11 @@ export const STEP_UP_AUTH_PATHS: Record<string, StepUpScope> = {
 	"/organization/delete": "org.delete",
 	"/organization/remove-member": "org.members",
 	"/organization/update-member-role": "org.members",
+	// Legacy Better Auth Polar checkout callers still pass through this path.
+	// Keep the server-side gate even while newer callers use the billing router.
+	"/checkout": "billing",
+	// The Polar portal can change or cancel a subscription after handoff.
+	"/customer/portal": "billing",
 };
 
 /** The scope guarding a Better Auth path, or null when it is not gated. */

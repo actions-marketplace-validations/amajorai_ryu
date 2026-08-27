@@ -219,6 +219,15 @@ function bridgeSource(
     requestClose: function(){ return call("ui.requestClose", []); },
     notifyIntrinsicHeight: function(px){ call("ui.notifyHeight", [px]).catch(function(){}); },
     openExternal: function(a){ return call("ui.openExternal", [a]); },
+    // Host-rendered ephemeral notifications (grant ui:toast). Kept under ui
+    // so widgets and full-page companions share one stable namespace.
+    ui: {
+      toast: {
+        show: function(a){ return call("ui.toast.show", [a || {}]); },
+        update: function(a){ return call("ui.toast.update", [a || {}]); },
+        dismiss: function(a){ return call("ui.toast.dismiss", [a || {}]); }
+      }
+    },
     // File methods: governed stubs. They reach the bridge (a KNOWN method) and get a
     // clean "not supported in Ryu v1" rejection, never the unknown-method deny that
     // reads like a bug. Wire minimally later without a frame change.

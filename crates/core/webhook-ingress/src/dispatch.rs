@@ -25,10 +25,11 @@
 //! arrives over the relay MUST be re-verified here with the *same*
 //! `verify_workflow_webhook_signature` the HTTP handler uses (both go through the
 //! host) — dispatching it unverified would be an auth bypass that fires real side
-//! effects. Composio, by contrast, is a trust-relay: the server verifies the
-//! global secret before fan-out, so the legacy `composio.webhook` frame path stays
-//! as-is (see [`super::ryu_relay`]). The fail-closed ladder below stays in this
-//! crate; the host only performs the leaf secret lookup + crypto + run.
+//! effects. Current Composio relay deliveries use this same raw path so Core can
+//! verify the project-specific ID/timestamp/body signature. The parsed
+//! `composio.webhook` frame remains only as a wire-compatibility reader for old
+//! in-flight relay frames. The fail-closed ladder stays in this crate; the host
+//! only performs the leaf secret lookup + crypto + run.
 //!
 //! Placement (CLAUDE.md §1): choosing which handler runs for an inbound event is
 //! *what runs* → Core. No policy here; the outbound governance the sibling
@@ -111,11 +112,24 @@ pub fn last_delivery(path: &str) -> Option<i64> {
 /// Returns true when `id` is new (dispatch) — false when already seen (skip).
 /// An empty id is always "new": deliveries without a delivery-id header are
 /// not dedupable and pass through unchanged.
+static HTTP_DELIVERIES: OnceLock<Mutex<SeenDeliveries>> = OnceLock::new();
+
+fn http_deliveries() -> &'static Mutex<SeenDeliveries> {
+    HTTP_DELIVERIES.get_or_init(|| Mutex::new(SeenDeliveries::default()))
+}
+
 pub fn first_http_delivery(id: &str) -> bool {
-    static SEEN: OnceLock<Mutex<SeenDeliveries>> = OnceLock::new();
-    let lock = SEEN.get_or_init(|| Mutex::new(SeenDeliveries::default()));
-    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = http_deliveries()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     guard.insert(id)
+}
+
+pub fn forget_http_delivery(id: &str) -> bool {
+    let mut guard = http_deliveries()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    guard.remove(id)
 }
 
 // ── Replay window (acceptance #5) ─────────────────────────────────────────────
@@ -178,13 +192,11 @@ pub enum WorkflowWebhookOutcome {
 /// handler and the relay dispatcher both call it, guaranteeing identical
 /// fail-closed semantics.
 ///
-/// `delivery_id` is checked against the process-global HTTP seen-set
-/// ([`first_http_delivery`]) immediately AFTER the signature verifies (never
-/// before — an unauthenticated caller must not be able to poison the seen-set
-/// with a forged id and suppress a later legitimate delivery) and BEFORE the
-/// run fires. An empty `delivery_id` (no id header, or a caller — such as the
-/// relay — that already deduped upstream) is always treated as new, so passing
-/// `""` is a safe no-op.
+/// `delivery_id` is checked against the process-global HTTP seen-set after the
+/// signature and body validate, but before the run fires. A failed run releases
+/// its reservation so a provider retry can recover. An empty `delivery_id` (no
+/// id header, or a caller such as the relay that already deduped upstream) is
+/// always treated as new, so passing `""` is a safe no-op.
 ///
 /// On success it records the delivery against [`workflow_webhook_path`] so the
 /// registry reflects relay-delivered firings too.
@@ -211,11 +223,6 @@ pub async fn deliver_workflow_webhook(
     if !host.verify_workflow_webhook_signature(&secret, raw_body, signature) {
         return WorkflowWebhookOutcome::BadSignature;
     }
-    // Dedup AFTER auth so an unauthenticated caller cannot poison the seen-set
-    // with a forged id and suppress a legitimate delivery.
-    if !first_http_delivery(delivery_id) {
-        return WorkflowWebhookOutcome::Duplicate;
-    }
     // The raw JSON body becomes the run's trigger payload; validate it parses so
     // a malformed body fails fast rather than seeding unusable trigger state.
     let Ok(body_str) = std::str::from_utf8(raw_body) else {
@@ -224,12 +231,20 @@ pub async fn deliver_workflow_webhook(
     if serde_json::from_str::<Value>(body_str).is_err() {
         return WorkflowWebhookOutcome::BadBody("body must be valid JSON".to_owned());
     }
+    // Reserve the id only after the request can run. Release it on a transient
+    // execution failure so the sender's retry can recover the delivery.
+    if !first_http_delivery(delivery_id) {
+        return WorkflowWebhookOutcome::Duplicate;
+    }
     match host.run_workflow_for_trigger(id, body_str).await {
         Ok(run_id) => {
             record_delivery(&workflow_webhook_path(id));
             WorkflowWebhookOutcome::Ran(run_id)
         }
-        Err(e) => WorkflowWebhookOutcome::RunError(e.to_string()),
+        Err(e) => {
+            let _ = forget_http_delivery(delivery_id);
+            WorkflowWebhookOutcome::RunError(e.to_string())
+        }
     }
 }
 
@@ -261,14 +276,15 @@ pub enum InboundOutcome {
 pub async fn deliver_inbound(
     path: &str,
     raw_body: &[u8],
-    signature: Option<&str>,
+    headers: crate::InboundWebhookHeaders<'_>,
 ) -> InboundOutcome {
     if path == WEBHOOK_PATH {
         let Ok(host) = host() else {
             return InboundOutcome::Rejected("webhook-ingress host unavailable".to_owned());
         };
-        // Composio: verify the global secret, then hand to the composio store.
-        if !host.verify_webhook_signature(raw_body, signature) {
+        // Composio: verify the project secret and all signed headers, then hand
+        // the parsed body to the composio store.
+        if !host.verify_webhook_signature(raw_body, headers) {
             return InboundOutcome::Rejected(
                 "composio webhook: invalid or missing signature".to_owned(),
             );
@@ -292,7 +308,7 @@ pub async fn deliver_inbound(
         // `Inbound` arm, and Core's real-wiring test) already deduped by the
         // frame/delivery id upstream — see `ryu_relay.rs`'s `dispatch_frame` —
         // so a second dedup here would be redundant, and "" keeps it a no-op.
-        return match deliver_workflow_webhook(&id, raw_body, signature, "").await {
+        return match deliver_workflow_webhook(&id, raw_body, headers.signature, "").await {
             WorkflowWebhookOutcome::Ran(run_id) => InboundOutcome::Delivered {
                 detail: format!("workflow '{id}' run {run_id}"),
             },
@@ -348,8 +364,14 @@ mod tests {
         fn has_webhook_trigger(&self) -> bool {
             false
         }
-        fn verify_webhook_signature(&self, _raw_body: &[u8], signature: Option<&str>) -> bool {
-            signature == Some("good")
+        fn verify_webhook_signature(
+            &self,
+            _raw_body: &[u8],
+            headers: crate::InboundWebhookHeaders<'_>,
+        ) -> bool {
+            headers.signature == Some("good")
+                && headers.webhook_id == Some("msg-good")
+                && headers.webhook_timestamp == Some("1735689600")
         }
         fn verify_workflow_webhook_signature(
             &self,
@@ -447,8 +469,32 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_path_is_unhandled() {
-        let outcome = deliver_inbound("/api/does/not/exist", b"{}", None).await;
+        let outcome = deliver_inbound(
+            "/api/does/not/exist",
+            b"{}",
+            crate::InboundWebhookHeaders::default(),
+        )
+        .await;
         assert!(matches!(outcome, InboundOutcome::Unhandled));
+    }
+
+    #[tokio::test]
+    async fn composio_path_requires_all_current_signed_headers() {
+        ensure_mock_host();
+        let valid = crate::InboundWebhookHeaders {
+            signature: Some("good"),
+            webhook_id: Some("msg-good"),
+            webhook_timestamp: Some("1735689600"),
+        };
+        let outcome = deliver_inbound(WEBHOOK_PATH, b"{}", valid).await;
+        assert!(matches!(outcome, InboundOutcome::Delivered { .. }));
+
+        let missing_id = crate::InboundWebhookHeaders {
+            webhook_id: None,
+            ..valid
+        };
+        let outcome = deliver_inbound(WEBHOOK_PATH, b"{}", missing_id).await;
+        assert!(matches!(outcome, InboundOutcome::Rejected(_)));
     }
 
     #[tokio::test]
@@ -459,7 +505,12 @@ mod tests {
         ensure_mock_host();
         let id = format!("wf-{}", uuid::Uuid::new_v4().simple());
         let path = workflow_webhook_path(&id);
-        let outcome = deliver_inbound(&path, b"{}", Some("deadbeef")).await;
+        let outcome = deliver_inbound(
+            &path,
+            b"{}",
+            crate::InboundWebhookHeaders::signature(Some("deadbeef")),
+        )
+        .await;
         match outcome {
             InboundOutcome::Rejected(msg) => {
                 assert!(
@@ -491,7 +542,12 @@ mod tests {
         let path = workflow_webhook_path(&id);
 
         // A valid signature ("good" per the mock) reaches the run.
-        let outcome = deliver_inbound(&path, body, Some("good")).await;
+        let outcome = deliver_inbound(
+            &path,
+            body,
+            crate::InboundWebhookHeaders::signature(Some("good")),
+        )
+        .await;
         match &outcome {
             InboundOutcome::Delivered { detail } => {
                 assert!(
@@ -508,7 +564,12 @@ mod tests {
         );
 
         // A bad signature is rejected fail-closed (never fires the run).
-        let rejected = deliver_inbound(&path, br#"{"event":"tampered"}"#, Some("bad")).await;
+        let rejected = deliver_inbound(
+            &path,
+            br#"{"event":"tampered"}"#,
+            crate::InboundWebhookHeaders::signature(Some("bad")),
+        )
+        .await;
         assert!(matches!(rejected, InboundOutcome::Rejected(_)));
     }
 
@@ -525,6 +586,14 @@ mod tests {
         let id = format!("http-dlv-{}", uuid::Uuid::new_v4().simple());
         assert!(first_http_delivery(&id), "first sight is new");
         assert!(!first_http_delivery(&id), "second sight is a duplicate");
+    }
+
+    #[test]
+    fn failed_http_delivery_can_be_retried() {
+        let id = format!("retry-{}", uuid::Uuid::new_v4().simple());
+        assert!(first_http_delivery(&id));
+        assert!(forget_http_delivery(&id));
+        assert!(first_http_delivery(&id));
     }
 
     #[test]

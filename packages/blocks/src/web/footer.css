@@ -1,0 +1,9 @@
+.footer-ryu-logo__mark path {
+	stroke-width: 12px;
+}
+
+.footer-ryu-logo__mark ellipse {
+	transform: scale(5.5);
+	transform-origin: center;
+	transform-box: fill-box;
+}

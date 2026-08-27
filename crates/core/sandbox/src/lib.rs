@@ -6,6 +6,7 @@
 //! - [`microsandbox`] — microVMs via the `msb` CLI (detect-only)
 //! - [`opensandbox`] — gVisor/Kata/Firecracker via the `osb` CLI (detect-only)
 //! - [`daytona`] — remote sandboxes via the Daytona REST API (token-gated)
+//! - [`box_backend`] — durable Box service over its public REST API
 //!
 //! Sandboxing is "what runs" (an execution context), so this lives in Core per
 //! the Core-vs-Gateway rule (CLAUDE.md §1). Policy over *what is allowed* inside
@@ -25,6 +26,7 @@
 //! [`select_backend`]. The only hard rule: `select_backend` never returns an
 //! unknown backend silently — it errors out so callers can surface the problem.
 
+pub mod box_backend;
 pub mod daytona;
 pub mod docker;
 pub mod heartbeat;
@@ -366,6 +368,8 @@ pub enum SandboxBackend {
     Singularity,
     /// Daytona remote sandbox backend.
     Daytona,
+    /// Ryu Box durable workspace service.
+    Box,
     /// microVM backend.
     Microsandbox,
     /// OpenSandbox backend.
@@ -386,6 +390,7 @@ impl SandboxBackend {
             "vercel_sandbox" => Ok(Self::VercelSandbox),
             "singularity" => Ok(Self::Singularity),
             "daytona" => Ok(Self::Daytona),
+            "box" => Ok(Self::Box),
             "microsandbox" => Ok(Self::Microsandbox),
             "opensandbox" => Ok(Self::Opensandbox),
             "" => Err(anyhow!("sandbox backend name must not be empty")),
@@ -404,6 +409,7 @@ impl SandboxBackend {
             Self::VercelSandbox => "vercel_sandbox",
             Self::Singularity => "singularity",
             Self::Daytona => "daytona",
+            Self::Box => "box",
             Self::Microsandbox => "microsandbox",
             Self::Opensandbox => "opensandbox",
             Self::Custom(name) => name.as_str(),
@@ -482,6 +488,7 @@ pub const KNOWN_BACKENDS: &[&str] = &[
     "microsandbox",
     "opensandbox",
     "daytona",
+    "box",
 ];
 
 /// Stable conformance vocabulary shared by Core, tools, and provider discovery.
@@ -549,6 +556,12 @@ fn backend_conformance(name: &str) -> Option<(bool, bool, &'static str, &'static
             "persistent workspaces; explicit destroy required",
             "remote provider sandbox",
         ),
+        "box" => (
+            true,
+            true,
+            "durable boxes; stop/resume/fork; explicit destroy",
+            "remote service driver boundary",
+        ),
         "microsandbox" => (
             true,
             false,
@@ -611,6 +624,7 @@ pub fn backend_display_name(name: &str) -> &str {
         "microsandbox" => "microsandbox",
         "opensandbox" => "OpenSandbox",
         "daytona" => "Daytona (remote)",
+        "box" => "Ryu Box (persistent)",
         other => other,
     }
 }
@@ -634,6 +648,10 @@ pub async fn detect_backend(name: &str) -> bool {
             opensandbox::DetectResult::Available
         ),
         "daytona" => matches!(daytona::detect().await, daytona::DetectResult::Available),
+        "box" => matches!(
+            box_backend::detect().await,
+            box_backend::DetectResult::Available
+        ),
         _ => false,
     }
 }
@@ -696,6 +714,7 @@ pub fn build_command_backend(backend: &SandboxBackend) -> Result<Box<dyn Sandbox
         SandboxBackend::Microsandbox => Ok(Box::new(microsandbox::MicrosandboxSandbox::new())),
         SandboxBackend::Opensandbox => Ok(Box::new(opensandbox::OpenSandboxSandbox::new())),
         SandboxBackend::Daytona => Ok(Box::new(daytona::DaytonaSandbox::new())),
+        SandboxBackend::Box => Ok(Box::new(box_backend::BoxSandbox::new())),
         SandboxBackend::Wasmtime => Err(anyhow!(
             "wasmtime is not a command backend — pass a WASM module via `wasm_b64`"
         )),
@@ -909,6 +928,10 @@ mod tests {
             SandboxBackend::from_name("docker").unwrap(),
             SandboxBackend::Docker
         );
+        assert_eq!(
+            SandboxBackend::from_name("box").unwrap(),
+            SandboxBackend::Box
+        );
     }
 
     #[test]
@@ -949,6 +972,7 @@ mod tests {
         for (variant, expected) in [
             (SandboxBackend::Wasmtime, "wasmtime"),
             (SandboxBackend::Docker, "docker"),
+            (SandboxBackend::Box, "box"),
         ] {
             assert_eq!(variant.as_str(), expected);
         }
@@ -1019,6 +1043,10 @@ mod tests {
                 .name(),
             "opensandbox"
         );
+        assert_eq!(
+            build_command_backend(&SandboxBackend::Box).unwrap().name(),
+            "box"
+        );
     }
 
     #[test]
@@ -1079,6 +1107,10 @@ mod tests {
         assert!(daytona.remote);
         assert!(daytona.persistence.contains("persistent"));
         assert!(!daytona.isolation.is_empty());
+        let box_backend = discovered.iter().find(|b| b.name == "box").unwrap();
+        assert!(box_backend.implemented);
+        assert!(box_backend.remote);
+        assert!(box_backend.persistence.contains("durable"));
         let modal = discovered.iter().find(|b| b.name == "modal").unwrap();
         assert!(!modal.implemented);
         assert!(!modal.available);

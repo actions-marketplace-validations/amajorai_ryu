@@ -7,10 +7,10 @@
 //   - activate a desktop license key (validated via the control plane → Polar),
 //   - buy Lifetime access or subscribe to Pro (the two headline options),
 //   - expand "Want to run ryu 24/7?" for the Max plan (+ Ryu Cloud hosting), or
-//   - expand "Other plans" for the For Teams agent plan.
+//   - expand "Other plans" for the Teams agent plan.
 //
 // Checkout runs through the control-plane's generic bearer-authed endpoint
-// (createCheckout) and opens the hosted Polar URL externally. For Teams is
+// (createCheckout) and opens the hosted Polar URL externally. Teams is
 // organization-scoped, so it opens the web pricing page for the agent contract.
 //
 // This is a deliberate departure from the open-core "never block the shell"
@@ -43,6 +43,7 @@ import { useState } from "react";
 import { sileo } from "sileo";
 import { clearSessionToken, FRONTEND_URL, signOut } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
+import { useStepUp } from "@/src/components/StepUpDialog.tsx";
 import {
 	BouncyAccordion,
 	type BouncyAccordionItem,
@@ -72,6 +73,7 @@ export function HardPaywallPage({ onApplyLicenseKey }: HardPaywallPageProps) {
 	const [key, setKey] = useState("");
 	const [validating, setValidating] = useState(false);
 	const [switchingAccount, setSwitchingAccount] = useState(false);
+	const stepUp = useStepUp();
 
 	const handleCheckout = async (slug: PricingPlanSlug) => {
 		// Teams is per-seat and refused by the generic checkout endpoint; send the
@@ -84,7 +86,13 @@ export function HardPaywallPage({ onApplyLicenseKey }: HardPaywallPageProps) {
 		}
 		setLoadingPlan(slug);
 		try {
-			const url = await createCheckout(slug);
+			const checkout = await stepUp.guard("billing", () =>
+				createCheckout(slug)
+			);
+			if (checkout === null) {
+				return;
+			}
+			const url = checkout;
 			await openExternal(url);
 		} catch (error) {
 			const message =
@@ -298,6 +306,7 @@ export function HardPaywallPage({ onApplyLicenseKey }: HardPaywallPageProps) {
 					</footer>
 				</div>
 			</div>
+			{stepUp.dialog}
 		</div>
 	);
 }

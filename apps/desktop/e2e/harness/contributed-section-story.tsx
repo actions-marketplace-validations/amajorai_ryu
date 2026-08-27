@@ -130,6 +130,7 @@ function Story() {
 						<DynamicSidebarSection
 							collapsed={false}
 							contribution={{
+								approved_grants: ["ui:declarative-http"],
 								id: "working",
 								plugin: "@ryu/agent-status",
 								title: "Working",

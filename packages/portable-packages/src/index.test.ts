@@ -9,6 +9,7 @@ import {
 	hasEncryptedSecrets,
 	type PackageTree,
 	packageDigest,
+	packageIsPublishable,
 	packPackage,
 	parseGithubPackageReference,
 	readGithubPackage,
@@ -140,6 +141,21 @@ test("redaction removes secret and private-content files", () => {
 	expect(redacted.files["credentials.json"]).toBeUndefined();
 	expect(redacted.files["content/private.md"]).toBeUndefined();
 	expect(redacted.manifest.security.containsSecrets).toBe(false);
+	expect(redacted.manifest.security.privateContent).toBe(false);
+	expect(packageIsPublishable(redacted)).toBe(true);
+
+	const retainedPrivate = redactPackageTree(encrypted, {
+		includePrivateContent: true,
+	});
+	expect(retainedPrivate.files["secrets.enc"]).toBeUndefined();
+	expect(retainedPrivate.files["credentials.json"]).toBeUndefined();
+	expect(retainedPrivate.files["content/private.md"]).toBeDefined();
+	expect(retainedPrivate.manifest.security.containsSecrets).toBe(false);
+	expect(retainedPrivate.manifest.security.privateContent).toBe(true);
+	expect(packageIsPublishable(retainedPrivate)).toBe(false);
+	expect(() => validatePublishablePackage(retainedPrivate)).toThrow(
+		"private-content packages cannot be published"
+	);
 });
 
 test("three-way JSON merge preserves local edits and accepts upstream edits", () => {

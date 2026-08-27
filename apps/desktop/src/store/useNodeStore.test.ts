@@ -9,8 +9,8 @@
 // locks that contract.
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import type { Node } from "./useNodeStore.ts";
 import type { ManagedNode } from "@/src/lib/api/managed-nodes.ts";
+import type { Node } from "./useNodeStore.ts";
 
 // The store's non-test-relevant managed-node fetcher reaches the control-plane
 // auth client. Stub that boundary and load the store dynamically afterwards, so
@@ -316,6 +316,20 @@ describe("managed cloud node credentials", () => {
 		stopCloudTokenRefresh();
 		managedNodes = [];
 		useNodeStore.setState({ cloudNodes: [], localNodes: [], nodes: [LOCAL] });
+	});
+
+	test("an unadded cloud node is available for zero-setup adoption", async () => {
+		useNodeStore.setState({ localNodes: [LOCAL], nodes: [LOCAL] });
+		managedNodes = [{ name: "prod", url: CLOUD_URL, token: "jwt-fresh" }];
+
+		await useNodeStore.getState().hydrateCloudNodes();
+
+		const cloud = useNodeStore
+			.getState()
+			.nodes.find((node) => node.url === CLOUD_URL);
+		expect(cloud?.managed).toBe(true);
+		expect(cloud?.token).toBe("jwt-fresh");
+		expect(useNodeStore.getState().suggestedCloudNodes).toHaveLength(1);
 	});
 
 	test("an added cloud node adopts the freshly minted token", async () => {

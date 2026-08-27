@@ -9,6 +9,7 @@
 import { ChatDisplayPrefsProvider } from "@ryu/blocks/desktop/agent-elements/chat-display-prefs";
 import { InputBar } from "@ryu/blocks/desktop/agent-elements/input-bar";
 import type { UIMessage } from "ai";
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { MessageList } from "../../components/agent-elements/message-list.tsx";
 import "../../src/index.css";
@@ -30,6 +31,42 @@ const MESSAGES: UIMessage[] = [
 			},
 		],
 	} as unknown as UIMessage,
+	{
+		id: "credit-user",
+		role: "user",
+		parts: [{ type: "text", text: "Continue with OpenRouter" }],
+	} as unknown as UIMessage,
+	{
+		id: "credit-assistant",
+		role: "assistant",
+		parts: [
+			{
+				type: "error",
+				code: "provider_payment_required",
+				title: "OpenRouter credits exhausted",
+				message:
+					"The OpenRouter API key on this node has no prepaid credits left. Add credits to your OpenRouter account or choose another provider, then retry.",
+			},
+		],
+	} as unknown as UIMessage,
+	{
+		id: "managed-credit-user",
+		role: "user",
+		parts: [{ type: "text", text: "Try the managed OpenRouter lane" }],
+	} as unknown as UIMessage,
+	{
+		id: "managed-credit-assistant",
+		role: "assistant",
+		parts: [
+			{
+				type: "error",
+				code: "insufficient_credits",
+				title: "Ryu credits exhausted",
+				message:
+					"Your organization's Ryu credits are exhausted. Open Settings > Credits to top up, or choose a BYOK or local model, then retry.",
+			},
+		],
+	} as unknown as UIMessage,
 ];
 
 function noop() {
@@ -37,9 +74,14 @@ function noop() {
 }
 
 function Story() {
+	const [retried, setRetried] = useState(0);
 	return (
 		<ChatDisplayPrefsProvider value={{ hideToolDetail: false }}>
-			<main className="flex h-screen flex-col bg-background p-6">
+			<main
+				className="flex h-screen flex-col bg-background p-6"
+				data-retried={String(retried)}
+				data-testid="story-state"
+			>
 				<div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
 					<section className="min-h-0 flex-1" data-testid="recovery-transcript">
 						<MessageList
@@ -60,6 +102,7 @@ function Story() {
 							]}
 							initialScrollBehavior="top"
 							messages={MESSAGES}
+							onRegenerateMessage={() => setRetried((count) => count + 1)}
 							status="ready"
 						/>
 					</section>

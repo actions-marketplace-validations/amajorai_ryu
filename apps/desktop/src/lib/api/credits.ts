@@ -61,6 +61,7 @@ export type LedgerReason =
 	| "gateway_usage"
 	| "openrouter"
 	| "composio"
+	| "treg"
 	| "subscription_offset"
 	| "adjustment"
 	| "campaign_grant"
@@ -82,6 +83,7 @@ export const LEDGER_REASON_LABELS: Record<LedgerReason, string> = {
 	gateway_usage: "Gateway usage",
 	openrouter: "OpenRouter usage",
 	composio: "Composio action",
+	treg: "Treg tool",
 	subscription_offset: "Subscription offset",
 	adjustment: "Adjustment",
 	// Campaign and referral money is POOL-RESTRICTED, but the label deliberately
@@ -110,6 +112,8 @@ export interface LedgerEntry {
 	delta: number;
 	/** Wall-clock ms the billed work took; null when not measured. */
 	durationMs: number | null;
+	/** Whether the amount came from a provider/catalog estimate. */
+	estimated: boolean | null;
 	id: string;
 	inputTokens: number | null;
 	/** Model or resource id that produced the charge. */
@@ -369,7 +373,7 @@ export interface TopupInput {
 	amountCents?: number;
 	/** A named pack (10 | 25 | 100), or omit and pass `amountCents`. */
 	pack?: CreditPack;
-	/** Where Polar returns the buyer; defaults to the web frontend's /credits. */
+	/** Where Polar returns the buyer; defaults to the web frontend's receipt page. */
 	successUrl?: string;
 }
 

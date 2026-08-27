@@ -78,17 +78,47 @@ fn focus_main<R: Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
-/// Send a control action ("toggle" | "show" | "hide" | "quit") to the island.
-/// Best-effort: the island may not be running, in which case we silently no-op.
-async fn island_control(action: &'static str) {
+/// Send a control action ("toggle" | "show" | "hide" | "quit") to the island
+/// and return the visibility reported by Island. Best-effort: the island may not
+/// be running, in which case callers receive `None`.
+async fn island_control(action: &'static str) -> Option<bool> {
     let Some(client) = control_client() else {
-        return;
+        return None;
     };
-    let _ = client
+    let response = client
         .post(island_control_url())
         .json(&serde_json::json!({ "action": action }))
         .send()
-        .await;
+        .await
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()?;
+    response.get("visible").and_then(|value| value.as_bool())
+}
+
+/// Read the device-local Island window state for a future desktop visibility
+/// control. `None` means Island is not running or is not reachable.
+#[tauri::command]
+pub async fn get_island_visibility() -> Option<bool> {
+    let client = control_client()?;
+    client
+        .get(island_control_url())
+        .send()
+        .await
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()?
+        .get("visible")
+        .and_then(|value| value.as_bool())
+}
+
+/// Show or hide the device-local Island window. This command is wired now so the
+/// future User Nav control only needs to be uncommented when Island is enabled.
+#[tauri::command]
+pub async fn set_island_visibility(visible: bool) -> Option<bool> {
+    island_control(if visible { "show" } else { "hide" }).await
 }
 
 /// Flip Shadow's capture pause state and return the new `paused` value (or `None`
@@ -243,7 +273,7 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
                 crate::stop_managed_core(app);
                 let handle = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    island_control("quit").await;
+                    let _ = island_control("quit").await;
                     handle.exit(0);
                 });
             }

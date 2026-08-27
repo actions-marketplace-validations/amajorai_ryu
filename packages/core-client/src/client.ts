@@ -16,6 +16,17 @@
 export interface ApiTarget {
 	token: string | null;
 	url: string;
+	/** Verified end-user JWT for per-user/team tenancy on an org-bound Core. */
+	userJwt?: string | null;
+}
+
+export const USER_JWT_HEADER = "x-ryu-user-jwt";
+
+let userJwtProvider: () => string | null = () => null;
+
+/** Wire a rotating end-user JWT source independently from the node bearer. */
+export function setUserJwtProvider(fn: () => string | null): void {
+	userJwtProvider = fn;
 }
 
 /**
@@ -42,12 +53,18 @@ export function setSurfaceProvider(fn: () => string | null): void {
 }
 
 /** Build request headers, attaching the bearer token and surface when present. */
-export function makeHeaders(token: string | null): Record<string, string> {
+export function makeHeaders(
+	token: string | null,
+	userJwt: string | null = userJwtProvider()
+): Record<string, string> {
 	const headers: Record<string, string> = {
 		"Content-Type": "application/json",
 	};
 	if (token) {
 		headers.Authorization = `Bearer ${token}`;
+	}
+	if (userJwt) {
+		headers[USER_JWT_HEADER] = userJwt;
 	}
 	// Every core-client call flows through here, so setting the provider once at
 	// app entry makes ALL requests (incl. the direct-fetch fetchApps) carry the
@@ -152,7 +169,10 @@ export async function request<T>(
 ): Promise<T> {
 	const resp = await fetch(apiUrl(target, path), {
 		method: options.method ?? "GET",
-		headers: { ...makeHeaders(target.token), ...options.headers },
+		headers: {
+			...makeHeaders(target.token, target.userJwt ?? userJwtProvider()),
+			...options.headers,
+		},
 		body: options.body === undefined ? undefined : JSON.stringify(options.body),
 		signal: options.signal,
 	});

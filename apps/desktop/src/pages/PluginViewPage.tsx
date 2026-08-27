@@ -19,7 +19,13 @@ import type {
 	ViewActionContext,
 	ViewSpec,
 } from "@ryu/app-host/views";
-import { isCoreApiPath, renderActionHttp } from "@ryu/app-host/views";
+import {
+	contributionSourceRequest,
+	DECLARATIVE_HTTP_GRANT,
+	isCoreReadPath,
+	isViewSourceHttpMethod,
+	renderContributionActionHttp,
+} from "@ryu/app-host/views";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
@@ -38,7 +44,7 @@ import {
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
-import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
+import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
 import { pluginHostInvoke } from "@/src/lib/api/plugins.ts";
 
 export default function PluginViewPage({
@@ -62,20 +68,48 @@ export default function PluginViewPage({
 	// Same node/token plumbing as every typed api module; the spec never sees it.
 	const fetchJson = useCallback<ViewSourceFetcher>(
 		async (method, path) => {
-			if (!isCoreApiPath(path)) {
-				throw new Error(`view source path must start with /api/: ${path}`);
+			if (
+				!(
+					(contribution?.approved_grants ?? []).includes(
+						DECLARATIVE_HTTP_GRANT
+					) &&
+					isViewSourceHttpMethod(method) &&
+					isCoreReadPath(path)
+				)
+			) {
+				throw new Error(
+					`view source path is not a safe node read path: ${path}`
+				);
+			}
+			const sourceRequest = contributionSourceRequest(
+				{
+					http_policy: contribution?.http_policy,
+					plugin: contribution?.plugin ?? pluginId,
+				},
+				{ http: { method, path } }
+			);
+			if (!sourceRequest) {
+				throw new Error(
+					`view source is outside its owning app authority: ${path}`
+				);
 			}
 			const target = toTarget(node);
-			const resp = await fetch(apiUrl(target, path), {
-				method,
-				headers: makeHeaders(target.token),
+			const resp = await fetch(apiUrl(target, sourceRequest.path), {
+				method: sourceRequest.method,
+				headers: await requestHeaders(target),
 			});
 			if (!resp.ok) {
 				throw new Error(`${path} failed: ${resp.status}`);
 			}
 			return resp.json();
 		},
-		[node]
+		[
+			node,
+			contribution?.http_policy,
+			contribution?.plugin,
+			contribution,
+			pluginId,
+		]
 	);
 
 	const handleAction = useCallback(
@@ -87,14 +121,25 @@ export default function PluginViewPage({
 			const target = toTarget(node);
 			try {
 				if (action.http) {
+					if (
+						!(contribution?.approved_grants ?? []).includes(
+							DECLARATIVE_HTTP_GRANT
+						)
+					) {
+						throw new Error("This view does not have declarative HTTP access.");
+					}
 					// Declarative CRUD tier: template + execute against Core directly.
-					const rendered = renderActionHttp(action.http, {
-						...ctx,
-						viewId,
-					});
+					const rendered = renderContributionActionHttp(
+						{
+							http_policy: contribution?.http_policy,
+							plugin: contribution?.plugin ?? pluginId,
+						},
+						action.http,
+						{ ...ctx, viewId }
+					);
 					const resp = await fetch(apiUrl(target, rendered.path), {
 						method: rendered.method,
-						headers: makeHeaders(target.token),
+						headers: await requestHeaders(target),
 						body:
 							rendered.body === undefined
 								? undefined
@@ -125,7 +170,7 @@ export default function PluginViewPage({
 				toast.error(e instanceof Error ? e.message : "Action failed");
 			}
 		},
-		[node, pluginId, viewId, queryClient]
+		[contribution, node, pluginId, queryClient, viewId]
 	);
 
 	if (!contribution?.spec) {

@@ -10,6 +10,7 @@ import {
 	Add01Icon,
 	CanvasIcon,
 	DatabaseIcon,
+	Download01Icon,
 	File01Icon,
 	LibraryIcon,
 	Search01Icon,
@@ -39,9 +40,16 @@ import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import { RadioGroup, RadioGroupItem } from "@ryu/ui/components/radio-group";
 import { Spinner } from "@ryu/ui/components/spinner";
+import {
+	Tabs,
+	TabsContent,
+	TabsList,
+	TabsTrigger,
+} from "@ryu/ui/components/tabs";
 import { Textarea } from "@ryu/ui/components/textarea";
 import { useFriendlyMode } from "@ryu/ui/hooks/use-friendly-mode.ts";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
+import { useRef } from "react";
 
 /**
  * Which retrieval algorithm a Space uses. Structurally identical to the desktop
@@ -504,6 +512,8 @@ export interface SpaceMatchRow {
 export interface SpacesDetailProps {
 	documents: SpaceDocumentRow[];
 	documentsError?: string | null;
+	/** Desktop-owned import workflow. Shared renderers omit it and keep one Content view. */
+	importPanel?: ReactNode;
 	ingestBusy?: boolean;
 	ingestContent: string;
 	ingestError?: string | null;
@@ -511,6 +521,9 @@ export interface SpacesDetailProps {
 	ingestTitle: string;
 	/** Omit (together with `space.retrievalMode`) to hide the Retrieval card. */
 	onCancelRetrievalMode?: () => void;
+	/** Portable Markdown package controls owned by the desktop container. */
+	onExportPackage?: () => void;
+	onImportPackage?: (file: File) => void;
 	onIngestContentChange?: (value: string) => void;
 	onIngestSubmit?: () => void;
 	onIngestTitleChange?: (value: string) => void;
@@ -521,6 +534,9 @@ export interface SpacesDetailProps {
 	onRetrievalModeChange?: (mode: SpaceRetrievalMode) => void;
 	onSearchQueryChange?: (value: string) => void;
 	onSearchSubmit?: () => void;
+	portableBusy?: boolean;
+	portableError?: string | null;
+	portableNotice?: string | null;
 	/** True while Core's background rebuild is running. The picker stays disabled
 	 *  while polling so a second click cannot queue another full rebuild. */
 	retrievalModeBusy?: boolean;
@@ -712,8 +728,13 @@ function SpaceDetail(props: SpacesDetailProps) {
 		onNewDatabase,
 		onNewWhiteboard,
 		onOpenDoc,
+		onExportPackage,
+		onImportPackage,
 		onRetrievalModeChange,
 		onCancelRetrievalMode,
+		portableBusy,
+		portableError,
+		portableNotice,
 		retrievalModeBusy,
 		retrievalModeError,
 		retrievalModeProgress,
@@ -733,6 +754,7 @@ function SpaceDetail(props: SpacesDetailProps) {
 	const retrievalMode = space.retrievalMode;
 	const canEditRetrieval =
 		retrievalMode !== undefined && onRetrievalModeChange !== undefined;
+	const portableInput = useRef<HTMLInputElement>(null);
 
 	const handleIngest = (e: FormEvent) => {
 		e.preventDefault();
@@ -755,6 +777,64 @@ function SpaceDetail(props: SpacesDetailProps) {
 
 	return (
 		<div className="flex flex-col gap-6 p-4">
+			{onExportPackage || onImportPackage ? (
+				<Card>
+					<CardHeader>
+						<CardTitle className="text-sm">Share this Space</CardTitle>
+						<CardDescription>
+							Pages and database rows export as Markdown with frontmatter.
+							Embeddings and binary files stay on this node.
+						</CardDescription>
+					</CardHeader>
+					<CardContent className="flex flex-col gap-3">
+						<input
+							accept=".ryupack,.zip,application/zip"
+							aria-label="Portable Space package"
+							className="sr-only"
+							onChange={(event: ChangeEvent<HTMLInputElement>) => {
+								const file = event.target.files?.[0];
+								if (file) {
+									onImportPackage?.(file);
+								}
+								event.target.value = "";
+							}}
+							ref={portableInput}
+							type="file"
+						/>
+						<div className="flex flex-wrap gap-2">
+							<Button
+								disabled={portableBusy || !onExportPackage}
+								loading={portableBusy}
+								onClick={onExportPackage}
+								size="sm"
+								type="button"
+								variant="outline"
+							>
+								{!portableBusy && (
+									<HugeiconsIcon className="size-4" icon={Download01Icon} />
+								)}
+								Export package
+							</Button>
+							<Button
+								disabled={portableBusy || !onImportPackage}
+								onClick={() => portableInput.current?.click()}
+								size="sm"
+								type="button"
+								variant="outline"
+							>
+								<HugeiconsIcon className="size-4" icon={Upload01Icon} />
+								Import package
+							</Button>
+						</div>
+						{portableError ? (
+							<p className="text-destructive text-sm">{portableError}</p>
+						) : null}
+						{portableNotice && !portableBusy ? (
+							<p className="text-muted-foreground text-xs">{portableNotice}</p>
+						) : null}
+					</CardContent>
+				</Card>
+			) : null}
 			{canEditRetrieval && retrievalMode !== undefined ? (
 				<Card>
 					<CardHeader>
@@ -1032,7 +1112,26 @@ export function SpacesView({
 			</div>
 		);
 	} else if (detail) {
-		body = (
+		body = detail.importPanel ? (
+			<Tabs className="flex min-h-0 flex-1 flex-col" defaultValue="content">
+				<div className="border-b px-4 pt-3">
+					<TabsList manageLayout={false} variant="line">
+						<TabsTrigger value="content">Content</TabsTrigger>
+						<TabsTrigger value="import">Import</TabsTrigger>
+					</TabsList>
+				</div>
+				<TabsContent className="min-h-0 flex-1 overflow-hidden" value="content">
+					<div className="scroll-fade h-full overflow-auto">
+						<SpaceDetail {...detail} />
+					</div>
+				</TabsContent>
+				<TabsContent className="min-h-0 flex-1 overflow-hidden" value="import">
+					<div className="scroll-fade h-full overflow-auto">
+						{detail.importPanel}
+					</div>
+				</TabsContent>
+			</Tabs>
+		) : (
 			<div className="scroll-fade flex-1 overflow-auto">
 				<SpaceDetail {...detail} />
 			</div>

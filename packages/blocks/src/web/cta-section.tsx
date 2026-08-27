@@ -2,7 +2,6 @@
 
 import { buttonVariants } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
-import Link from "next/link";
 import { DEMO_HREF } from "./data/resources.tsx";
 import { DownloadMenu } from "./download-menu.tsx";
 import { landingSubheadlineClass } from "./landing-typography.ts";
@@ -17,9 +16,13 @@ import { StaggerLines } from "./stagger-lines.tsx";
  * onto pages where it makes no sense.
  */
 export default function CtaSection({
+	primaryHref = DEMO_HREF,
+	primaryLabel = "Book a free consultation",
 	title = "Put the work your team hates on autopilot.",
 	subtitle = "Every action logged, every cost capped. Bring the tools you already pay for, or start with one we set up for you.",
 }: {
+	primaryHref?: string;
+	primaryLabel?: string;
 	subtitle?: string;
 	title?: string;
 } = {}) {
@@ -35,14 +38,16 @@ export default function CtaSection({
 					</p>
 				</StaggerLines>
 				<div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-					<Link
+					<a
 						className={cn(buttonVariants({ variant: "default" }))}
-						href={DEMO_HREF}
-						rel="noopener noreferrer"
-						target="_blank"
+						href={primaryHref}
+						rel={
+							primaryHref.startsWith("http") ? "noopener noreferrer" : undefined
+						}
+						target={primaryHref.startsWith("http") ? "_blank" : undefined}
 					>
-						Book a free consultation
-					</Link>
+						{primaryLabel}
+					</a>
 					<DownloadMenu variant="ghost" />
 				</div>
 			</div>

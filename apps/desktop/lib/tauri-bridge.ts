@@ -1,11 +1,25 @@
 // Every command here is called during boot (App.tsx starts Core and polls its
 // status in its first effect), which is exactly when Tauri may not have injected
 // its bridge yet — so they all go through the shared ready-gate.
+
+import type { StandaloneAppBundle } from "@ryu/app-host/standalone";
 import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
 
 export const startRyuCore = () => invokeWhenReady<string>("start_ryu_core");
 export const stopRyuCore = () => invokeWhenReady<void>("stop_ryu_core");
 export const getRyuStatus = () => invokeWhenReady<string>("get_ryu_status");
+export const getStandaloneAppBundle = () =>
+	invokeWhenReady<StandaloneAppBundle | null>("get_standalone_app_bundle");
+export interface StandaloneBootstrapResult {
+	appId: string;
+	appName: string;
+	companionId: string | null;
+	token: string;
+}
+export const bootstrapStandaloneApp = () =>
+	invokeWhenReady<StandaloneBootstrapResult>("bootstrap_standalone_app");
+export const getLocalNodeToken = () =>
+	invokeWhenReady<{ source: string; token: string | null }>("local_node_token");
 /**
  * Download the `ryu-core` binary into `~/.ryu{profile}/bin` if it is missing,
  * resolving to its path. A no-op (`"dev"`) in dev builds, where turbo owns the
@@ -67,15 +81,17 @@ export interface LinkMetadataPreview {
 export const previewLinkMetadata = (url: string) =>
 	invokeWhenReady<LinkMetadataPreview>("preview_link_metadata", { url });
 
-/** Move a tab into a separate OS window (browser-style "open in new window").
+/** Open a tab in a separate OS window (browser-style "open in new window").
  * The new window re-fetches the conversation by id and keeps targeting `node`. */
 export const openTabWindow = (opts: {
 	path?: string;
 	conversationId?: string;
+	entityKey?: string;
 	node?: string;
 	title?: string;
 }) =>
 	invokeWhenReady<void>("open_tab_window", {
+		entityKey: opts.entityKey ?? null,
 		path: opts.path ?? null,
 		conversationId: opts.conversationId ?? null,
 		node: opts.node ?? null,

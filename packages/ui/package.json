@@ -72,6 +72,7 @@
     "./components/separator": "./src/components/separator.tsx",
     "./components/sidebar": "./src/components/sidebar.tsx",
     "./components/sileo": "./src/components/sileo.tsx",
+    "./components/sandbox-toast": "./src/components/sandbox-toast.ts",
     "./components/skeleton": "./src/components/skeleton.tsx",
     "./components/slider": "./src/components/slider.tsx",
     "./components/spinner": "./src/components/spinner.tsx",
@@ -85,6 +86,8 @@
     "./components/toggle-group": "./src/components/toggle-group.tsx",
     "./components/tooltip": "./src/components/tooltip.tsx",
     "./components/wave": "./src/components/wave.tsx",
+    "./companion-theme.css": "./src/styles/companion-theme.css",
+    "./app-ui.css": "./src/styles/app-ui.css",
     "./hooks/use-hover-capable": "./src/hooks/use-hover-capable.ts",
     "./lib/app-icon-tile": "./src/lib/app-icon-tile.ts",
     "./lib/ease": "./src/lib/ease.ts",
@@ -116,6 +119,7 @@
     "test": "bun test src"
   },
   "dependencies": {
+    "@ryu/app-host": "workspace:*",
     "@ai-sdk/openai-compatible": "^3.0.0",
     "@ai-sdk/react": "4",
     "@ariakit/react": "^0.4.29",

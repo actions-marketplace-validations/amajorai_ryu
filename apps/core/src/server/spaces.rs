@@ -158,18 +158,18 @@ pub fn background_owner() -> DocOwner {
 
 /// Open (or create) the Spaces store at the default `~/.ryu/spaces.db` path using
 /// the node's model registry — the ServerState field origin. Resolves the embedder +
-/// dims + graph-extraction model + reranker through the single RAG resolver, uses
-/// the default blob root, and runs the tenancy backfill with the Core-resolved owner.
+/// dims + graph-extraction implementation + reranker through the single RAG resolver,
+/// uses the default blob root, and runs the tenancy backfill with the Core-resolved
+/// owner.
 ///
 /// Built with [`crate::rag_host::retrieval_registry`] (`ProviderRegistry::load`),
-/// not `from_env`. Two of the values this function pulls — `graph_extraction_model`
-/// and, via `reranker_local_server`, `reranker_base_url` — have live `registry.json`
-/// keys, and `from_env` opens no file, so both were inert here while the
-/// `ryu-spaces` module header advertised the extraction key as configurable. The
-/// embedder fields are unaffected either way: they have no file key (see
-/// `registry`'s module header for why the vec0 table width makes that the right
-/// answer).
+/// not `from_env`. `graph_extraction_model` and, via `reranker_local_server`,
+/// `reranker_base_url` have live `registry.json` keys. `SpaceStore::open_at`
+/// validates the extraction id and rejects anything except the shipped offline
+/// implementation. The embedder fields have no file key; see `registry`'s module
+/// header for why the vec0 table width makes that the right answer.
 pub fn open_default() -> Result<SpaceStore> {
+    ryu_spaces::set_source_history_root(crate::paths::ryu_dir().join("source-history"));
     let registry = crate::rag_host::retrieval_registry();
     let embedder = crate::rag_host::embedder_from_registry(&registry);
     let dims = embedder.dims();
@@ -198,6 +198,7 @@ pub async fn doc_access_meta(store: &SpaceStore, doc_id: &str) -> Result<Option<
             org_id: m.org_id,
             visibility: m.visibility,
             team_id: m.team_id,
+            collaborators: Vec::new(),
         }))
 }
 
@@ -219,14 +220,15 @@ pub async fn space_access_meta(
             org_id: m.org_id,
             visibility: m.visibility,
             team_id: m.team_id,
+            collaborators: Vec::new(),
         }))
 }
 
 #[cfg(test)]
 mod tests {
-    // The `ModelRegistry`-level "retrieval mode + extraction model are
-    // registry-configurable" tests live here Core-side (they moved out of the
-    // `ryu-spaces` crate with the extraction, since `ModelRegistry` is a Core type).
+    // The `ModelRegistry`-level retrieval defaults live here Core-side because
+    // `ModelRegistry` is a Core type. `ryu-spaces` tests the supported extractor-id
+    // boundary itself.
     use crate::registry::ModelRegistry;
 
     #[test]

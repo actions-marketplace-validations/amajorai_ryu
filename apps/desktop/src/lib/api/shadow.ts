@@ -133,6 +133,10 @@ const SHADOW_BASE = `${DEFAULT_CORE_URL}/api/shadow`;
 export interface TimelineEvent {
 	/** Source/app label. */
 	app_name: string | null;
+	/** Device-local executable/application path used only for icon resolution. */
+	app_path: string | null;
+	/** Native bundle identifier when the platform exposes one. */
+	bundle_id: string | null;
 	/** Event subtype (e.g. "clipboard_change", "app_switch", "git_activity"). */
 	event_type: string;
 	/** Capture lane: 1 visual, 2 input, 3 window, 4 audio, 5 AX, 6 clipboard,
@@ -158,6 +162,8 @@ export interface JournalSnapshot {
 }
 
 export interface JournalCard {
+	/** Optional for compatibility with older Shadow journal responses. */
+	apps?: JournalApp[];
 	category: string;
 	/** Reconstruction-grade recap; upgraded by the LLM narration pass. */
 	detailed_summary: string;
@@ -171,6 +177,13 @@ export interface JournalCard {
 	start_ts: number;
 	summary: string;
 	title: string;
+}
+
+/** Internal app identity used by the trusted desktop host before sanitization. */
+export interface JournalApp {
+	app_path: string | null;
+	bundle_id: string | null;
+	name: string;
 }
 
 export interface CardDistraction {

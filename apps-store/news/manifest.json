@@ -1,6 +1,15 @@
 {
-  "tags": ["news","rss","atom","feeds","briefing","monitoring","clustering","dedupe"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": [
+    "news",
+    "rss",
+    "atom",
+    "feeds",
+    "briefing",
+    "monitoring",
+    "clustering",
+    "dedupe"
+  ],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-news",
   "homepage": "https://github.com/amajorai/ryu-news",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -86,79 +95,96 @@
         "mount": "/api/news",
         "public_mount": "/api/news",
         "routes": [
+          { "path": "/sources", "method": "GET", "permission": "news.view" },
+          { "path": "/sources", "method": "POST", "permission": "news.edit" },
           {
-            "path": "/sources"
+            "path": "/sources/opml",
+            "method": "GET",
+            "permission": "news.view"
           },
           {
-            "path": "/sources/opml"
+            "path": "/sources/opml",
+            "method": "POST",
+            "permission": "news.edit"
           },
           {
-            "path": "/sources/:id"
+            "path": "/sources/:id",
+            "method": "GET",
+            "permission": "news.view"
           },
           {
-            "path": "/sources/:id/refresh"
+            "path": "/sources/:id",
+            "method": "PATCH",
+            "permission": "news.edit"
           },
           {
-            "path": "/articles"
+            "path": "/sources/:id",
+            "method": "DELETE",
+            "permission": "news.edit"
           },
           {
-            "path": "/articles/:id"
+            "path": "/sources/:id/refresh",
+            "method": "POST",
+            "permission": "news.edit"
+          },
+          { "path": "/articles", "method": "GET", "permission": "news.view" },
+          {
+            "path": "/articles/:id",
+            "method": "GET",
+            "permission": "news.view"
+          },
+          { "path": "/articles/:id/read", "permission": "news.edit" },
+          { "path": "/articles/:id/save", "permission": "news.edit" },
+          { "path": "/articles/:id/archive", "permission": "news.edit" },
+          { "path": "/stories", "method": "GET", "permission": "news.view" },
+          {
+            "path": "/stories/:id",
+            "method": "GET",
+            "permission": "news.view"
           },
           {
-            "path": "/articles/:id/read"
+            "path": "/stories/:id/follow",
+            "method": "POST",
+            "permission": "news.edit"
+          },
+          { "path": "/topics", "method": "GET", "permission": "news.view" },
+          { "path": "/topics", "method": "POST", "permission": "news.edit" },
+          { "path": "/topics/:id", "method": "GET", "permission": "news.view" },
+          {
+            "path": "/topics/:id",
+            "method": "PATCH",
+            "permission": "news.edit"
           },
           {
-            "path": "/articles/:id/save"
+            "path": "/topics/:id",
+            "method": "DELETE",
+            "permission": "news.edit"
           },
           {
-            "path": "/articles/:id/archive"
+            "path": "/topics/:id/matches",
+            "method": "GET",
+            "permission": "news.view"
           },
+          { "path": "/briefs", "method": "GET", "permission": "news.view" },
           {
-            "path": "/stories"
+            "path": "/briefs/generate",
+            "method": "POST",
+            "permission": "news.edit"
           },
-          {
-            "path": "/stories/:id"
-          },
-          {
-            "path": "/stories/:id/follow"
-          },
-          {
-            "path": "/topics"
-          },
-          {
-            "path": "/topics/:id"
-          },
-          {
-            "path": "/topics/:id/matches"
-          },
-          {
-            "path": "/briefs"
-          },
-          {
-            "path": "/briefs/generate"
-          },
-          {
-            "path": "/briefs/:id"
-          },
-          {
-            "path": "/settings"
-          }
+          { "path": "/briefs/:id", "method": "GET", "permission": "news.view" },
+          { "path": "/settings", "method": "GET", "permission": "news.view" },
+          { "path": "/settings", "method": "PUT", "permission": "news.edit" }
         ]
       },
       "host_api": {
-        "grants": [
-          "hook:side-model",
-          "storage:kv"
-        ]
+        "grants": ["hook:side-model", "storage:kv"]
       }
     }
   ],
   "mcp_servers": {
     "news": {
       "command": "ryu-news",
-      "args": [
-        "mcp"
-      ],
+      "args": ["mcp"],
       "description": "Your reviewed feed as tools. `search` queries the LOCAL corpus — the sources you added, already deduplicated and clustered — with no web call at all, so an agent answering \"what happened with X this week\" reads what you curated instead of whatever a fresh search returns. `brief` fetches a generated digest, `story` opens one cluster with every outlet covering it, and `topics` lists the saved watches and what they are currently matching."
     }
   },
@@ -174,7 +200,8 @@
     "news:crud",
     "hook:side-model",
     "storage:kv",
-    "mcp:news"
+    "mcp:news",
+    "ui:declarative-http"
   ],
   "permission_levels": [
     {
@@ -186,9 +213,7 @@
       "id": "news.edit",
       "label": "Can edit",
       "description": "Add and remove sources, import OPML, and write the boolean queries behind watches. This decides what this node ingests and what it treats as breaking, so it is the level that changes what everyone else sees.",
-      "implies": [
-        "news.view"
-      ]
+      "implies": ["news.view"]
     }
   ],
   "companion": {
@@ -196,7 +221,19 @@
     "icon": "news"
   },
   "contributes": {
-  "chat_widget_templates": [{"id":"news.chat","title":"Wire widget","description":"Open Wire data in a host-rendered chat widget.","triggers":["wire widget"],"examples":["Show me a wire widget"],"backing":{"view_id":"surface:news"},"display_mode":"inline","safe_action_ids":[],"availability":"available"}],
+    "chat_widget_templates": [
+      {
+        "id": "news.chat",
+        "title": "Wire widget",
+        "description": "Open Wire data in a host-rendered chat widget.",
+        "triggers": ["wire widget"],
+        "examples": ["Show me a wire widget"],
+        "backing": { "view_id": "surface:news" },
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "available"
+      }
+    ],
     "composer_controls": [
       {
         "id": "news.toggle",
@@ -286,11 +323,7 @@
           "trigger": "scheduled",
           "story_count": 12,
           "article_count": 47,
-          "top_story_ids": [
-            "st_9f2c",
-            "st_41ab",
-            "st_7d10"
-          ]
+          "top_story_ids": ["st_9f2c", "st_41ab", "st_7d10"]
         }
       },
       {
@@ -305,11 +338,7 @@
           "baseline_mean": 1.2,
           "baseline_stdev": 1.6,
           "hour_of_day": 14,
-          "article_ids": [
-            "ar_3311",
-            "ar_3318",
-            "ar_3324"
-          ],
+          "article_ids": ["ar_3311", "ar_3318", "ar_3324"],
           "detected_at": "2026-08-10T14:05:00Z"
         }
       },
@@ -322,16 +351,8 @@
           "title": "Regulator opens inquiry into the merger",
           "source_count": 8,
           "new_source_count": 3,
-          "new_sources": [
-            "Reuters",
-            "AP",
-            "Bloomberg"
-          ],
-          "new_article_ids": [
-            "ar_3402",
-            "ar_3407",
-            "ar_3411"
-          ],
+          "new_sources": ["Reuters", "AP", "Bloomberg"],
+          "new_article_ids": ["ar_3402", "ar_3407", "ar_3411"],
           "first_seen_at": "2026-08-09T18:40:00Z",
           "updated_at": "2026-08-10T09:12:00Z"
         }

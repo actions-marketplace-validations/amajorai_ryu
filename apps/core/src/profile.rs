@@ -30,6 +30,11 @@ use std::sync::OnceLock;
 /// Env var naming the active profile. Unset / empty ⇒ `"release"`.
 pub const RYU_PROFILE_ENV: &str = "RYU_PROFILE";
 
+/// Optional explicit port namespace used by standalone app hosts. An app host
+/// keeps `RYU_PROFILE=release` for the normal Core semantics, then supplies a
+/// deterministic app-specific offset so multiple products do not share ports.
+pub const RYU_PORT_OFFSET_ENV: &str = "RYU_PORT_OFFSET";
+
 /// The canonical release profile — the zero-offset, no-suffix default.
 pub const RELEASE_PROFILE: &str = "release";
 
@@ -158,14 +163,18 @@ pub fn is_release() -> bool {
 
 /// The active port offset (0 for release, [`DEV_PORT_OFFSET`] otherwise).
 pub fn port_offset() -> u16 {
-    port_offset_for(profile())
+    std::env::var(RYU_PORT_OFFSET_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|offset| *offset <= 50_000)
+        .unwrap_or_else(|| port_offset_for(profile()))
 }
 
 /// **The single offset source.** Every port on every side (spawn, client,
 /// env-default, gateway) computes its concrete port via this. `base` is the
 /// canonical release port (e.g. `8080`); the return is `base + offset`.
 pub fn port(base: u16) -> u16 {
-    port_for(base, profile())
+    base.saturating_add(port_offset())
 }
 
 /// The active data-dir / config-dir / keychain-account suffix.
@@ -183,7 +192,9 @@ fn default_gateway_config() -> Option<PathBuf> {
 /// Seed the profile-derived defaults into the process environment **once**, at the
 /// very top of `main`, before anything caches a path/port. Only touches an env var
 /// the user did NOT already set (explicit wins), and is a complete no-op on the
-/// release profile so release behaviour is untouched.
+/// default release namespace so release behaviour is untouched. Standalone app
+/// hosts retain the release profile name but supply an explicit port offset, so
+/// those isolated namespaces must receive the same derived defaults.
 ///
 /// These env vars are the seams the out-of-boundary client readers already honour:
 ///   - `RYU_DIR`            — data dir (`paths::resolve`), inherited by children.
@@ -201,7 +212,7 @@ fn default_gateway_config() -> Option<PathBuf> {
 /// and the research sidecar) are threaded directly through [`port`] in
 /// `sidecar/**`, so both sides shift together.
 pub fn apply_env_defaults() {
-    if is_release() {
+    if !should_apply_env_defaults(is_release(), port_offset()) {
         return;
     }
     tracing_note();
@@ -233,6 +244,10 @@ pub fn apply_env_defaults() {
         "RYU_RESEARCH_UPSTREAM",
         format!("http://127.0.0.1:{}", port(8087)),
     );
+}
+
+fn should_apply_env_defaults(active_is_release: bool, active_port_offset: u16) -> bool {
+    !active_is_release || active_port_offset != 0
 }
 
 /// Set `key` to `value` only when it is currently unset/empty (explicit wins).
@@ -384,5 +399,12 @@ mod tests {
             dev_default_if_unset(Some("   ".to_owned()), "profile-default".to_owned()),
             Some("profile-default".to_owned())
         );
+    }
+
+    #[test]
+    fn explicit_release_port_namespace_gets_derived_defaults() {
+        assert!(!should_apply_env_defaults(true, 0));
+        assert!(should_apply_env_defaults(true, 1234));
+        assert!(should_apply_env_defaults(false, 0));
     }
 }

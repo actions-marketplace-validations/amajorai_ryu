@@ -7,13 +7,14 @@ import {
 	PlugSocketIcon,
 	PotionIcon,
 	Tv01Icon,
-	UserMultiple02Icon,
-	WorkflowCircle06Icon,
 } from "@hugeicons/core-free-icons";
 import {
 	BUILTIN_SECTIONS,
 	DEFAULT_SECTION_ORDER,
 	isSectionKey,
+	LEGACY_APP_SECTION_KEYS,
+	migrateLegacySectionRecord,
+	migrateLegacySectionStorage,
 	reconcileSectionOrder,
 	SECTION_ICONS,
 	SECTION_LABELS,
@@ -25,6 +26,17 @@ import {
 // regression nobody reports. These cover the three ways a stored order drifts —
 // it IS an old default (migrate), it is customised (preserve), or it names a
 // section this build has never heard of (an app's, or a retired built-in).
+
+function isMigratedAppDefault(order: SectionKey[]): boolean {
+	return (
+		JSON.stringify(order.filter((key) => !key.startsWith("plugin:@ryu/"))) ===
+			JSON.stringify(DEFAULT_SECTION_ORDER) &&
+		order.indexOf(LEGACY_APP_SECTION_KEYS.teams) ===
+			order.indexOf("companions") + 1 &&
+		order.indexOf(LEGACY_APP_SECTION_KEYS.workflows) ===
+			order.indexOf("identities") + 1
+	);
+}
 
 describe("section vocabulary", () => {
 	it("derives label + icon for every section in the default order", () => {
@@ -45,12 +57,17 @@ describe("section vocabulary", () => {
 		expect(SECTION_ICONS.companions).toBe(Package01Icon);
 		expect(SECTION_ICONS.plugins).toBe(PlugSocketIcon);
 		expect(SECTION_ICONS.skills).toBe(PotionIcon);
-		expect(SECTION_ICONS.workflows).toBe(WorkflowCircle06Icon);
 		expect(SECTION_ICONS.chats).toBe(Chat01Icon);
-		expect(SECTION_ICONS.teams).toBe(UserMultiple02Icon);
 		expect(SECTION_ICONS.channels).toBe(Tv01Icon);
 		expect(SECTION_ICONS.identities).toBe(FingerPrintIcon);
 		expect(SECTION_ICONS.engines).toBe(LayerIcon);
+	});
+
+	it("keeps app-owned Teams and Workflows out of the compiled vocabulary", () => {
+		expect(DEFAULT_SECTION_ORDER).not.toContain("teams");
+		expect(DEFAULT_SECTION_ORDER).not.toContain("workflows");
+		expect(isSectionKey(LEGACY_APP_SECTION_KEYS.teams)).toBe(true);
+		expect(isSectionKey(LEGACY_APP_SECTION_KEYS.workflows)).toBe(true);
 	});
 });
 
@@ -77,7 +94,7 @@ describe("reconcileSectionOrder", () => {
 			"pinned",
 			"archived",
 		];
-		expect(reconcileSectionOrder(legacy)).toEqual(DEFAULT_SECTION_ORDER);
+		expect(isMigratedAppDefault(reconcileSectionOrder(legacy))).toBe(true);
 	});
 
 	it("migrates the pre-bottom-apps default (plugins/apps still in the middle)", () => {
@@ -103,7 +120,7 @@ describe("reconcileSectionOrder", () => {
 			"engines",
 			"archived",
 		];
-		expect(reconcileSectionOrder(legacy)).toEqual(DEFAULT_SECTION_ORDER);
+		expect(isMigratedAppDefault(reconcileSectionOrder(legacy))).toBe(true);
 	});
 
 	it("migrates the pre-apps-under-agents default (Apps still at the bottom)", () => {
@@ -131,7 +148,7 @@ describe("reconcileSectionOrder", () => {
 			"plugins",
 			"companions",
 		];
-		expect(reconcileSectionOrder(legacy)).toEqual(DEFAULT_SECTION_ORDER);
+		expect(isMigratedAppDefault(reconcileSectionOrder(legacy))).toBe(true);
 	});
 
 	it("puts Apps directly below Agents in the default order", () => {
@@ -178,5 +195,58 @@ describe("reconcileSectionOrder", () => {
 		];
 		const result = reconcileSectionOrder(stored);
 		expect(result).toEqual(DEFAULT_SECTION_ORDER);
+	});
+});
+
+describe("legacy app-section preferences", () => {
+	it("moves record preferences to dynamic keys and preserves newer values", () => {
+		expect(
+			migrateLegacySectionRecord({
+				teams: 10,
+				[LEGACY_APP_SECTION_KEYS.teams]: 25,
+				workflows: 50,
+			})
+		).toEqual({
+			[LEGACY_APP_SECTION_KEYS.teams]: 25,
+			[LEGACY_APP_SECTION_KEYS.workflows]: 50,
+		});
+	});
+
+	it("rewrites order, hidden, collapsed, page-size, and sort storage", () => {
+		const values = new Map<string, string>([
+			["order", JSON.stringify(["tabs", "teams", "workflows"])],
+			["hidden", JSON.stringify(["teams"])],
+			["collapsed", JSON.stringify(["workflows"])],
+			["sizes", JSON.stringify({ teams: 25 })],
+			["sorts", JSON.stringify({ workflows: "name-asc" })],
+		]);
+		migrateLegacySectionStorage(
+			{
+				getItem: (key) => values.get(key) ?? null,
+				setItem: (key, value) => values.set(key, value),
+			},
+			{
+				arrays: ["order", "hidden", "collapsed"],
+				records: ["sizes", "sorts"],
+			}
+		);
+
+		expect(JSON.parse(values.get("order") ?? "[]")).toEqual([
+			"tabs",
+			LEGACY_APP_SECTION_KEYS.teams,
+			LEGACY_APP_SECTION_KEYS.workflows,
+		]);
+		expect(JSON.parse(values.get("hidden") ?? "[]")).toEqual([
+			LEGACY_APP_SECTION_KEYS.teams,
+		]);
+		expect(JSON.parse(values.get("collapsed") ?? "[]")).toEqual([
+			LEGACY_APP_SECTION_KEYS.workflows,
+		]);
+		expect(JSON.parse(values.get("sizes") ?? "{}")).toEqual({
+			[LEGACY_APP_SECTION_KEYS.teams]: 25,
+		});
+		expect(JSON.parse(values.get("sorts") ?? "{}")).toEqual({
+			[LEGACY_APP_SECTION_KEYS.workflows]: "name-asc",
+		});
 	});
 });

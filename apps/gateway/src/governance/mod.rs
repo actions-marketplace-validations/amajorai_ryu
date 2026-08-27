@@ -144,6 +144,9 @@ fn reserved_namespaces() -> Vec<String> {
         "files",
         "identity",
         "network",
+        // Core-owned DNS-pinned HTTP for app protocols. The app may still own
+        // origin/payment semantics, but it cannot self-approve the network seam.
+        "egress",
         // Tool-plane primitives: `tool:command:<bin>` is local process exec and
         // `tool:http-egress:<host>` is network egress, so neither may ever be
         // owner-scoped; `tools.*` / `mcp:*` / `mcp.*` are the MCP tool plane.
@@ -222,7 +225,7 @@ fn reserved_namespaces() -> Vec<String> {
 /// cannot publish.
 ///
 /// **What is deliberately NOT here.** The per-app companion capabilities
-/// (`monitors:crud`, `workflows:*`, `simulator:control`, `webhooks:crud`,
+/// (`monitors:crud`, `simulator:control`, `webhooks:crud`,
 /// `activity:read`, `timeline:read`, `calendar:crud`, `learning:crud`,
 /// `approvals:crud`, `meetings:crud`, `mail:crud`, `finetune:runs`) used to be
 /// listed one-by-one, which meant every new App — including a third-party one —
@@ -240,6 +243,14 @@ fn default_grant_allowlist() -> Vec<String> {
         "mcp.tools",
         "tools.read",
         "tools.invoke",
+        // The UI host primitives are reserved as a namespace, but these two
+        // reviewed frame capabilities are intentionally shared by shipped apps.
+        "ui:toast",
+        "ui:declarative-http",
+        // Shared Core egress used by protocol apps such as MPP. This is distinct
+        // from vendor-scoped `tool:http-egress:<host>` grants: the host guard is
+        // generic, while the calling app supplies its own higher-level allowlist.
+        "egress:http",
         // Per-server MCP tool grants that the seeded system MCP-tool plugins
         // declare in their `permission_grants` (`spider`, `agentbrowser`,
         // `ghost`, `shadow`). `mcp` is a RESERVED namespace (the MCP tool plane
@@ -359,6 +370,10 @@ fn default_grant_allowlist() -> Vec<String> {
         // with an `mcp_servers` block needs a line here — the owner-scoped rule will
         // never approve a reserved namespace, however well the names match.
         "mcp:reasoning",
+        // Expenses and Research own MCP servers; the reserved `mcp` namespace
+        // means their runtime re-enable path needs reviewed server grants here.
+        "mcp:expenses",
+        "mcp:research",
         // data scopes
         "memory.read",
         "memory.write",
@@ -408,6 +423,13 @@ fn default_grant_allowlist() -> Vec<String> {
         // disable→re-enable path re-runs `/v1/grants/validate`, so a missing entry
         // shows up as GrantsDenied on re-enable. Swappable via the env override.
         "spaces:docs",
+        // Feedback Board invokes the shared Workflows and Blueprint host planes;
+        // these are cross-app capabilities, not owner-scoped `@ryu/workflows`
+        // capabilities.
+        "workflows:crud",
+        "workflows:runstate",
+        "workflows:catalogs",
+        "blueprint:review",
         "core:list_agents",
         "media:generate",
         "media:transcribe",
@@ -423,6 +445,11 @@ fn default_grant_allowlist() -> Vec<String> {
         // a plugin can be allowed to notify in-app without receiving phone or
         // browser notification authority.
         "notifications:send",
+        // Approvals sends a user-targeted notification through the Core host
+        // bridge; it is distinct from the in-app feed grant above.
+        "notifications:send-to-user",
+        // Research queries the RLM host plane as a cross-app dependency.
+        "rlm:query",
         // ReelFarm can hand captions to the Outpost social sidecar through the
         // cross-app host bridge. `social` is reserved, so this safe capability
         // needs an exact reviewed entry rather than an owner-scoped match.
@@ -854,6 +881,13 @@ mod tests {
     }
 
     #[test]
+    fn shared_egress_grant_is_reviewed() {
+        let d = validate_grants_for(Some("@ryu/mpp"), &scopes(&["egress:http"]));
+        assert!(d.all_approved());
+        assert_eq!(d.approved, vec!["egress:http".to_owned()]);
+    }
+
+    #[test]
     fn native_host_grants_are_reviewed_and_approved() {
         let d = validate_grants_for(
             Some("@ryu/tokenmaxxing"),
@@ -946,13 +980,12 @@ mod tests {
     #[test]
     fn blueprint_app_grants_are_approved() {
         // The two halves of `@ryu/blueprint`'s declared set travel through DIFFERENT
-        // rules, and asserting them together is the point: `blueprint:review` is
-        // owner-scoped (id `@ryu/blueprint` ⇒ namespace `blueprint`, not reserved) and
-        // must NOT gain an allowlist entry, while `mcp:blueprint` is in the reserved
-        // `mcp` namespace and can only ever be approved by its explicit entry. A change
-        // that "cleans up" either one breaks enable, because `enable_app` demands
-        // `all_approved` and fails the whole app on a single denial — the app installs,
-        // and then has no sidecar and no MCP tools.
+        // rules, and asserting them together is the point: `blueprint:review` is a
+        // reviewed cross-app host capability consumed by Blueprint and Feedback Board,
+        // while `mcp:blueprint` is in the reserved `mcp` namespace and can only ever be
+        // approved by its explicit entry. A change that cleans up either one breaks
+        // enable, because `enable_app` demands `all_approved` and fails the whole app
+        // on a single denial — the app installs, and then has no sidecar or MCP tools.
         let d = validate_grants_for(
             Some("@ryu/blueprint"),
             &scopes(&["blueprint:review", "mcp:blueprint"]),
@@ -960,14 +993,12 @@ mod tests {
         assert!(d.all_approved(), "denied: {:?}", d.denied);
         assert_eq!(d.approved.len(), 2);
 
-        // The other direction: the owner-scoped rule is a NAME match, not a free pass.
-        // Someone else's `mcp:blueprint` is approved (the allowlist is not scoped to a
-        // holder) but an impostor cannot reach the app's own capability.
-        let impostor = validate_grants_for(
-            Some("com.evil.notblueprint"),
+        // The capability is deliberately reusable by another first-party consumer.
+        let consumer = validate_grants_for(
+            Some("@ryu/feedback-board"),
             &scopes(&["blueprint:review"]),
         );
-        assert_eq!(impostor.denied, vec!["blueprint:review".to_string()]);
+        assert!(consumer.all_approved(), "denied: {:?}", consumer.denied);
     }
 
     // ── capability grammar, against the REAL gateway policy ──────────────────
@@ -1265,9 +1296,6 @@ mod tests {
             "monitors:crud",
             "mail:crud",
             "finetune:runs",
-            "workflows:crud",
-            "workflows:runstate",
-            "workflows:catalogs",
             "simulator:control",
             "webhooks:crud",
             "activity:read",
@@ -1319,7 +1347,8 @@ mod tests {
     #[test]
     fn every_builtin_fixture_grant_is_allowlisted() {
         // Built-in manifests live in TWO homes and BOTH must be scanned. The packaged
-        // ones moved to `apps-store/<x>/manifest.json` / `plugins-store/<x>/manifest.json`
+        // ones moved to `apps-store/<x>/manifest.json` /
+        // `plugins-store/{plugins,lsp,external_plugins}/<x>/manifest.json`
         // (Core `include_str!`s them directly; the duplicate fixture copies are gone),
         // leaving only the ~13 Core-only manifests in `fixtures/`.
         //
@@ -1358,7 +1387,7 @@ mod tests {
         let mut failures: Vec<String> = Vec::new();
 
         for path in manifest_paths {
-            // Name the OWNING package (`plugins-store/exa/manifest.json` -> `exa`), not
+            // Name the OWNING package (`plugins-store/plugins/exa/manifest.json` -> `exa`), not
             // the bare `manifest.json`, so a failure message still identifies the app.
             let name = if path.file_name().and_then(|n| n.to_str()) == Some("manifest.json") {
                 path.parent()
@@ -1401,10 +1430,7 @@ mod tests {
                 // opt-ins. Core-tier packages may still use the host gate directly.
                 if matches!(
                     denied.as_str(),
-                    "sidecar:process"
-                        | "mcp:server"
-                        | "mcp:scrapling"
-                        | "pi:extension"
+                    "sidecar:process" | "mcp:server" | "mcp:scrapling" | "pi:extension"
                 ) {
                     continue;
                 }

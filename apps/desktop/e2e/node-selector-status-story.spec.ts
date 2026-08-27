@@ -56,6 +56,12 @@ test("keeps the node icon neutral and anchors status at its bottom right", async
 	await expect(activeRow.locator('[data-slot="node-status-dot"]')).toHaveClass(
 		/border-accent/
 	);
+	const shadowRow = page.getByRole("menuitem", { name: /^Shadow/ });
+	await expect(shadowRow).toBeVisible();
+	await expect(shadowRow.locator('span[class*="size-1.5"]')).toHaveClass(
+		/bg-success/
+	);
+	await expect(page.getByRole("menuitem", { name: /Island/i })).toHaveCount(0);
 	await activeRow.scrollIntoViewIfNeeded();
 
 	await page.screenshot({

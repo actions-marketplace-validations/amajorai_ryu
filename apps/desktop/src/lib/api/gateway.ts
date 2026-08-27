@@ -2462,6 +2462,135 @@ export interface GatewayAuditFilters {
 	until?: string;
 }
 
+/** One server-owned 15-minute usage aggregate. */
+export interface GatewayUsageRollupEvent {
+	agentSeconds: number;
+	costMicroUsd: number | null;
+	errorCount: number;
+	feature: string | null;
+	inputTokens: number;
+	latencySamples: number;
+	latencyTotalMs: number;
+	memberId: string | null;
+	model: string;
+	nodeId: string | null;
+	outputTokens: number;
+	provider: string;
+	requestCount: number;
+	source: "byok" | "local" | "managed" | "self_hosted" | "unknown";
+	timestamp: string;
+}
+
+/** Validated response from Core's canonical gateway usage proxy. */
+export interface GatewayUsageRollupResponse {
+	bucketSeconds: 900;
+	events: GatewayUsageRollupEvent[];
+	kind: "rollup";
+	/** Core includes this for node requests; the organization endpoint may omit it. */
+	reachable?: boolean;
+	/** Upstream Gateway status when Core returned a fail-soft node response. */
+	status?: number;
+}
+
+/** Required range and optional dimensions for the canonical usage query. */
+export interface GatewayUsageRollupFilters {
+	/** Inclusive ISO timestamp lower bound. */
+	from: string;
+	model?: string;
+	provider?: string;
+	/** Exclusive ISO timestamp upper bound. */
+	until: string;
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNullableString(value: unknown): value is string | null {
+	return value === null || typeof value === "string";
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+	return Number.isSafeInteger(value) && typeof value === "number" && value >= 0;
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isUsageSource(
+	value: unknown
+): value is GatewayUsageRollupEvent["source"] {
+	return (
+		value === "byok" ||
+		value === "local" ||
+		value === "managed" ||
+		value === "self_hosted" ||
+		value === "unknown"
+	);
+}
+
+function isGatewayUsageRollupEvent(
+	value: unknown
+): value is GatewayUsageRollupEvent {
+	if (!isUnknownRecord(value)) {
+		return false;
+	}
+	return (
+		typeof value.timestamp === "string" &&
+		Number.isFinite(Date.parse(value.timestamp)) &&
+		typeof value.provider === "string" &&
+		typeof value.model === "string" &&
+		isNullableString(value.memberId) &&
+		isNullableString(value.nodeId) &&
+		isNullableString(value.feature) &&
+		isUsageSource(value.source) &&
+		isNonNegativeInteger(value.inputTokens) &&
+		isNonNegativeInteger(value.outputTokens) &&
+		isNonNegativeInteger(value.requestCount) &&
+		isNonNegativeInteger(value.errorCount) &&
+		isNonNegativeInteger(value.latencyTotalMs) &&
+		isNonNegativeInteger(value.latencySamples) &&
+		isNonNegativeNumber(value.agentSeconds) &&
+		(value.costMicroUsd === null || isNonNegativeInteger(value.costMicroUsd))
+	);
+}
+
+/**
+ * Parse an untrusted canonical usage response at the HTTP boundary.
+ *
+ * Exported because the control-plane organization endpoint uses the same wire
+ * contract as the local gateway endpoint.
+ */
+export function parseGatewayUsageRollupResponse(
+	value: unknown
+): GatewayUsageRollupResponse {
+	if (
+		!isUnknownRecord(value) ||
+		value.kind !== "rollup" ||
+		value.bucketSeconds !== 900 ||
+		!Array.isArray(value.events) ||
+		(value.reachable !== undefined && typeof value.reachable !== "boolean") ||
+		(value.status !== undefined && !isNonNegativeInteger(value.status))
+	) {
+		throw new Error("Gateway usage rollup response was malformed.");
+	}
+	const events: GatewayUsageRollupEvent[] = [];
+	for (const event of value.events) {
+		if (!isGatewayUsageRollupEvent(event)) {
+			throw new Error("Gateway usage rollup response was malformed.");
+		}
+		events.push(event);
+	}
+	return {
+		bucketSeconds: 900,
+		events,
+		kind: "rollup",
+		...(value.reachable === undefined ? {} : { reachable: value.reachable }),
+		...(value.status === undefined ? {} : { status: value.status }),
+	};
+}
+
 /**
  * Fetch audit log entries via Core's proxy (`GET /api/gateway/audit`).
  *
@@ -2503,6 +2632,30 @@ export async function fetchGatewayAudit(
 		entries: raw.entries ?? [],
 		count: raw.count ?? 0,
 	};
+}
+
+/** Fetch the gateway's complete server-aggregated usage range via Core. */
+export async function fetchGatewayUsageRollup(
+	target: ApiTarget,
+	filters: GatewayUsageRollupFilters,
+	signal?: AbortSignal
+): Promise<GatewayUsageRollupResponse> {
+	const query = new URLSearchParams({
+		from: filters.from,
+		until: filters.until,
+	});
+	if (filters.provider) {
+		query.set("provider", filters.provider);
+	}
+	if (filters.model) {
+		query.set("model", filters.model);
+	}
+	const value = await request<unknown>(
+		target,
+		`/api/gateway/audit/usage?${query}`,
+		{ signal }
+	);
+	return parseGatewayUsageRollupResponse(value);
 }
 
 // ── Live budget spend (M2 control-layer UX) ──────────────────────────────────
@@ -2596,14 +2749,46 @@ export async function fetchBudgetSpend(
 // plus promptfoo-style per-case assertions (deterministic + llm_judge),
 // run-level system prompts, {{var}} substitution, and multi-model compare.
 
+/** Promptfoo-compatible per-assertion controls. */
+export interface AssertionOptions {
+	config?: Record<string, unknown>;
+	metric?: string;
+	provider?: string;
+	rubric_prompt?: string;
+	threshold?: number;
+	transform?: string;
+	weight?: number;
+}
+
 /** One assertion to evaluate against a case's response (internally tagged on kind). */
 export type Assertion =
-	| { kind: "contains"; value: string }
-	| { kind: "not_contains"; value: string }
-	| { kind: "equals"; value: string }
-	| { kind: "regex"; value: string }
-	| { kind: "json_valid" }
-	| { kind: "llm_judge"; rubric: string };
+	| { kind: "contains"; options?: AssertionOptions; value: string }
+	| { kind: "not_contains"; options?: AssertionOptions; value: string }
+	| { kind: "equals"; options?: AssertionOptions; value: string }
+	| { kind: "regex"; options?: AssertionOptions; value: string }
+	| { kind: "icontains"; options?: AssertionOptions; value: string }
+	| { kind: "starts_with"; options?: AssertionOptions; value: string }
+	| { kind: "contains_any"; options?: AssertionOptions; value: string }
+	| { kind: "contains_all"; options?: AssertionOptions; value: string }
+	| { kind: "icontains_any"; options?: AssertionOptions; value: string }
+	| { kind: "icontains_all"; options?: AssertionOptions; value: string }
+	| { kind: "contains_json"; options?: AssertionOptions; value: string }
+	| { kind: "is_html"; options?: AssertionOptions }
+	| { kind: "is_xml"; options?: AssertionOptions }
+	| { kind: "is_sql"; options?: AssertionOptions }
+	| { kind: "is_refusal"; options?: AssertionOptions }
+	| { kind: "moderation"; options?: AssertionOptions; value: string }
+	| { kind: "javascript"; options?: AssertionOptions; value: string }
+	| { kind: "python"; options?: AssertionOptions; value: string }
+	| { kind: "ruby"; options?: AssertionOptions; value: string }
+	| { kind: "webhook"; options?: AssertionOptions; value: string }
+	| { kind: "is_json"; options?: AssertionOptions }
+	| { kind: "json_valid"; options?: AssertionOptions }
+	| { kind: "llm_judge"; options?: AssertionOptions; rubric: string }
+	| { kind: "llm_rubric"; options?: AssertionOptions; rubric: string }
+	| { kind: "factuality"; options?: AssertionOptions; rubric: string }
+	| { kind: "context_faithfulness"; options?: AssertionOptions; rubric: string }
+	| { kind: "answer_relevance"; options?: AssertionOptions; rubric: string };
 
 /** Result of evaluating one assertion against a response. */
 export interface AssertionResult {
@@ -2632,14 +2817,26 @@ export interface EvalDatasetCase {
 	 * When absent the scorer is omitted — no penalty for a missing expected.
 	 */
 	expected?: string | null;
-	/** The prompt to replay through the gateway pipeline. May contain {{vars}}. */
+	/** Optional ordered chat turns; when present the gateway replays these. */
+	messages?: EvalMessage[];
+	/** The single-turn prompt fallback. May contain {{vars}}. */
 	prompt: string;
+	/** Promptfoo-style threshold for the mean assertion score (0..1). */
+	threshold?: number;
 	/** Per-case {{var}} substitutions (prompt, system prompt, assertions). */
-	vars?: Record<string, string>;
+	vars?: Record<string, unknown>;
+}
+
+/** One ordered chat turn in a Promptfoo-compatible case. */
+export interface EvalMessage {
+	content: string;
+	role: "assistant" | "system" | "user";
 }
 
 /** Per-case scores returned by the gateway eval runner. */
 export interface EvalCaseScore {
+	/** Mean assertion score in [0,1], before the case threshold is applied. */
+	assertion_score: number;
 	/** NEW: per-assertion results (always present; [] when no assertions). */
 	assertions: AssertionResult[];
 	/** NEW: true iff every assertion passed (vacuously true for []). */
@@ -2746,6 +2943,8 @@ export interface RunEvalsRequest {
 	 * and the response gains a per-model `models` breakdown.
 	 */
 	models?: string[];
+	/** Run-level multi-turn prompt variant; rendered before each test case. */
+	system_messages?: EvalMessage[];
 	/**
 	 * Run-level system prompt; the server prepends it as a system message per
 	 * case and substitutes any {{vars}} using that case's `vars`.

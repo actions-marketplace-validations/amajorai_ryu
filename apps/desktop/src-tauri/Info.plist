@@ -11,8 +11,8 @@
   Only the microphone key is declared on purpose. Voice input is the single
   media capability this desktop app exercises today; camera/location/etc. are
   intentionally omitted so we never request a permission we do not use. On
-  Windows the equivalent prompt is suppressed via the window's
-  additionalBrowserArgs (--use-fake-ui-for-media-stream) in tauri.conf.json.
+  Windows the equivalent prompt remains a browser-mediated consent flow; the
+  production window does not use a fake-media flag.
 -->
 <plist version="1.0">
   <dict>

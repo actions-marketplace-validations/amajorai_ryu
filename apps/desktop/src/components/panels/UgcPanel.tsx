@@ -559,9 +559,7 @@ function StatTile({
 			<div className="text-[11px] text-muted-foreground uppercase tracking-wide">
 				{label}
 			</div>
-			<div className="font-heading font-medium text-sm tabular-nums">
-				{value}
-			</div>
+			<div className="font-medium font-mono text-sm tabular-nums">{value}</div>
 			{hint ? (
 				<div className="text-[11px] text-muted-foreground">{hint}</div>
 			) : null}
@@ -582,7 +580,7 @@ function SpendBar({
 	if (pct === null) {
 		return (
 			<span className="text-[11px] text-muted-foreground">
-				<span className="font-heading tabular-nums">
+				<span className="font-mono tabular-nums">
 					{formatCents(spentCents)}
 				</span>{" "}
 				spent · no budget cap
@@ -600,7 +598,7 @@ function SpendBar({
 					style={{ width: `${pct}%` }}
 				/>
 			</span>
-			<span className="shrink-0 font-heading text-[11px] text-muted-foreground tabular-nums">
+			<span className="shrink-0 font-mono text-[11px] text-muted-foreground tabular-nums">
 				{formatCents(spentCents)} / {formatCents(budgetCents)}
 			</span>
 		</span>
@@ -808,11 +806,11 @@ function UgcWorkspace() {
 						{formatCount(overview.campaigns)} campaigns ·{" "}
 						{formatCount(overview.creators)} creators ·{" "}
 						{formatCount(overview.submissions.pending)} pending ·{" "}
-						<span className="font-heading">
+						<span className="font-mono">
 							{formatCents(overview.accrued_cents)}
 						</span>{" "}
 						accrued ·{" "}
-						<span className="font-heading">
+						<span className="font-mono">
 							{formatCents(overview.paid_cents)}
 						</span>{" "}
 						paid
@@ -1029,7 +1027,7 @@ function CampaignsView({
 										{campaign.budget_cents > 0 ? (
 											<>
 												Budget{" "}
-												<span className="font-heading tabular-nums">
+												<span className="font-mono tabular-nums">
 													{formatCents(campaign.budget_cents)}
 												</span>
 											</>
@@ -1567,7 +1565,7 @@ function AccruedCell({
 	}
 	return (
 		<span className="flex items-center justify-end gap-1.5">
-			<span className="font-heading tabular-nums">{formatCents(cents)}</span>
+			<span className="font-mono tabular-nums">{formatCents(cents)}</span>
 			{status ? (
 				<StatusPill
 					label={status}
@@ -1797,10 +1795,10 @@ function LeaderboardTable({
 						<TableCell className="p-2 text-right tabular-nums">
 							{formatCount(row.approved_submissions)}
 						</TableCell>
-						<TableCell className="p-2 text-right font-heading tabular-nums">
+						<TableCell className="p-2 text-right font-mono tabular-nums">
 							{formatCents(row.accrued_cents)}
 						</TableCell>
-						<TableCell className="p-2 text-right font-heading tabular-nums">
+						<TableCell className="p-2 text-right font-mono tabular-nums">
 							{formatCents(row.paid_cents)}
 						</TableCell>
 					</TableRow>
@@ -1981,7 +1979,7 @@ function PayoutsTable({
 								variant={PAYOUT_STATUS_VARIANT[payout.status] ?? "outline"}
 							/>
 						</TableCell>
-						<TableCell className="p-2 text-right font-heading tabular-nums">
+						<TableCell className="p-2 text-right font-mono tabular-nums">
 							{formatCents(payout.amount_cents)}
 						</TableCell>
 						<TableCell className="p-2 text-right">
@@ -2051,7 +2049,7 @@ function ConfirmPayoutDialog({
 					<AlertDialogDescription>
 						{action ? (
 							<>
-								<span className="font-heading tabular-nums">
+								<span className="font-mono tabular-nums">
 									{formatCents(action.payout.amount_cents)}
 								</span>{" "}
 								to {creatorName(action.payout.creator_id)}.{" "}

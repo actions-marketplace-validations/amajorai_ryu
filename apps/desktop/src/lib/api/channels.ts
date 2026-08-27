@@ -51,6 +51,13 @@ export type VoiceReplyMode = (typeof VOICE_REPLY_MODES)[number];
 export type ChannelCredentialSource = "ryu_managed" | "customer";
 export type ManagedChannelProvisioningState = "ready" | "awaiting_provider";
 
+export interface ReactionLearningSettings {
+	allowGroup: boolean;
+	enabled: boolean;
+	negativeEmoji: string[];
+	positiveEmoji: string[];
+}
+
 /**
  * Per-bot behaviour settings: who may talk to it, how it behaves while working,
  * and what its profile says. Flat across every platform — a channel that cannot
@@ -73,6 +80,8 @@ export interface ChannelBehavior {
 	profileName: string | null;
 	profileShortBio: string | null;
 	publishCommands: boolean;
+	/** Optional provider emoji → Learning feedback mapping. */
+	reactionLearning?: ReactionLearningSettings;
 	richText: boolean;
 	sendReadReceipts: boolean;
 	streaming: boolean;

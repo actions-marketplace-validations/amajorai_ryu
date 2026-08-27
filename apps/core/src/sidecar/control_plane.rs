@@ -14,7 +14,10 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use serde::Deserialize;
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+
+use crate::governance::{validate_governance_values, GatewayGovernanceValues, GovernanceScope};
 
 /// Env var with the control-plane base URL (the `apps/server` Hono API, which
 /// mounts `/api/registry`). Defaults to local dev.
@@ -63,11 +66,27 @@ pub struct ResolvedTool {
 struct ResolveResponse {
     #[serde(default)]
     tools: Vec<ResolvedTool>,
+    #[serde(default)]
+    governance: Option<ResolvedGovernance>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedGovernance {
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub organization: GatewayGovernanceValues,
+    #[serde(default)]
+    pub team: GatewayGovernanceValues,
+    #[serde(default)]
+    pub user: GatewayGovernanceValues,
 }
 
 /// Resolved control-plane scope for this gateway.
 #[derive(Debug, Clone)]
 pub struct ResolvedScope {
+    pub governance: Option<ResolvedGovernance>,
     pub tools: Vec<ResolvedTool>,
 }
 
@@ -90,22 +109,77 @@ impl ResolvedScope {
             .iter()
             .any(|t| t.kind == "composio" && t.has_credential)
     }
+
+    pub async fn apply_governance(
+        &self,
+        preferences: &crate::server::preferences::PreferencesStore,
+        app_store: &crate::plugins::PluginStore,
+    ) -> Result<()> {
+        let Some(governance) = self.governance.as_ref() else {
+            return Ok(());
+        };
+        validate_governance_values(GovernanceScope::Organization, &governance.organization)
+            .map_err(|error| anyhow!(error))?;
+        validate_governance_values(GovernanceScope::Team, &governance.team)
+            .map_err(|error| anyhow!(error))?;
+        validate_governance_values(GovernanceScope::User, &governance.user)
+            .map_err(|error| anyhow!(error))?;
+        let encoded = serde_json::to_string(governance)?;
+        preferences
+            .set(crate::server::governance::MANAGED_GOVERNANCE_KEY, &encoded)
+            .await?;
+        app_store
+            .replace_managed_hook_overrides(
+                GovernanceScope::Organization,
+                &governance.organization.hooks,
+            )
+            .await?;
+        app_store
+            .replace_managed_hook_overrides(GovernanceScope::Team, &governance.team.hooks)
+            .await?;
+        app_store
+            .replace_managed_hook_overrides(GovernanceScope::User, &governance.user.hooks)
+            .await?;
+        Ok(())
+    }
 }
 
 /// Control-plane base URL Core resolves the registry against.
 fn control_plane_url() -> String {
-    std::env::var(ENV_CONTROL_PLANE_URL)
+    let environment = std::env::var(ENV_CONTROL_PLANE_URL)
         .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_CONTROL_PLANE_URL.to_owned())
+        .filter(|value| !value.trim().is_empty());
+    select_control_plane_url(
+        environment,
+        crate::fleet::enrolled_control_plane_url(),
+        DEFAULT_CONTROL_PLANE_URL,
+    )
+}
+
+fn select_control_plane_url(
+    environment: Option<String>,
+    enrolled: Option<String>,
+    default: &str,
+) -> String {
+    environment
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .or(enrolled)
+        .unwrap_or_else(|| default.to_owned())
 }
 
 /// This gateway's control-plane API key, if configured. When unset, the gateway
 /// is unmanaged (local-only) and registry resolution is skipped.
 pub fn gateway_key() -> Option<String> {
-    std::env::var(ENV_GATEWAY_KEY)
+    let environment = std::env::var(ENV_GATEWAY_KEY)
         .ok()
-        .filter(|s| !s.is_empty())
+        .filter(|value| !value.trim().is_empty());
+    select_control_token(environment, crate::fleet::enrolled_control_token())
+}
+
+fn select_control_token(environment: Option<String>, enrolled: Option<String>) -> Option<String> {
+    environment
+        .map(|value| value.trim().to_owned())
+        .or(enrolled)
 }
 
 /// This managed node's publicly-reachable base URL, if configured (A4 / #501).
@@ -138,7 +212,7 @@ pub async fn resolve_scope(client: &reqwest::Client) -> Result<Option<ResolvedSc
     );
     let mut req = client
         .get(&url)
-        .header("x-gateway-key", key)
+        .header("x-gateway-key", key.clone())
         .timeout(Duration::from_secs(10));
 
     if let Ok(team) = std::env::var(ENV_TEAM_ID) {
@@ -164,7 +238,10 @@ pub async fn resolve_scope(client: &reqwest::Client) -> Result<Option<ResolvedSc
         .json()
         .await
         .map_err(|e| anyhow!("control-plane resolve decode failed: {e}"))?;
-    Ok(Some(ResolvedScope { tools: body.tools }))
+    Ok(Some(ResolvedScope {
+        governance: body.governance,
+        tools: body.tools,
+    }))
 }
 
 // ── Notify-target resolution (member roster for NotifyUser workflow node) ─────
@@ -176,6 +253,8 @@ pub struct NotifyTargetUser {
     pub user_id: String,
     #[serde(default)]
     pub email: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
     /// Display name from the mirrored `user` row. Absent whenever the user row is
@@ -215,7 +294,7 @@ pub async fn resolve_notify_targets(
     );
     let mut req = client
         .get(&url)
-        .header("x-gateway-key", key)
+        .header("x-gateway-key", key.clone())
         .timeout(Duration::from_secs(10));
     if let Some(team) = team_id.filter(|t| !t.is_empty()) {
         req = req.query(&[("team", team)]);
@@ -407,6 +486,7 @@ use std::sync::RwLock;
 /// successful register so request authorization can bind to the exact node.
 /// `None` until registration succeeds.
 static REGISTERED_NODE: RwLock<Option<RegisteredNode>> = RwLock::new(None);
+static REGISTERED_DELEGATION_KEY: RwLock<Option<String>> = RwLock::new(None);
 
 /// The org a managed node is bound to (the registration result).
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -441,6 +521,8 @@ pub enum NodeScope {
 
 #[derive(Debug, Deserialize)]
 struct ResolveOrgResponse {
+    #[serde(rename = "delegationPublicKey")]
+    delegation_public_key: String,
     organization: ResolveOrg,
     /// The control plane's live managed-inference entitlement for this org.
     /// Core uses this server-authenticated value for paid-only profile work;
@@ -472,7 +554,13 @@ struct ResolveCredential {
 /// F7: the durable gateway token minted in exchange for a bootstrap token.
 #[derive(Debug, Deserialize)]
 struct CredentialRotation {
-    token: String,
+    #[serde(default, rename = "controlToken")]
+    control_token: Option<String>,
+    #[serde(default, rename = "relayToken")]
+    relay_token: Option<String>,
+    /// One-release wire compatibility with the former dual-purpose response.
+    #[serde(default)]
+    token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -500,28 +588,78 @@ pub fn registered_node() -> Option<RegisteredNode> {
     REGISTERED_NODE.read().ok().and_then(|g| g.clone())
 }
 
+/// Clear a registration that failed the enrolled bundle's org/node binding
+/// check. This also drops the delegation-key pin learned from that response.
+pub(crate) fn clear_registered_node() {
+    if let Ok(mut guard) = REGISTERED_NODE.write() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = REGISTERED_DELEGATION_KEY.write() {
+        *guard = None;
+    }
+    let _ = std::fs::remove_file(delegation_key_path());
+}
+
+/// The Ed25519 public key pinned by the last authenticated control-plane
+/// handshake. Falls back to the persisted pin so delegation verification can
+/// start before the first successful register call after a restart.
+pub fn registered_delegation_key() -> Option<String> {
+    if let Ok(guard) = REGISTERED_DELEGATION_KEY.read() {
+        if let Some(key) = guard.as_ref() {
+            return Some(key.clone());
+        }
+    }
+    load_durable_token_from(&delegation_key_path()).filter(|key| valid_delegation_key(key))
+}
+
 // ── F7: durable-token persistence (restart survival) ─────────────────────────
 //
 // A managed node boots with a single-use BOOTSTRAP key in `RYU_GATEWAY_KEY`
-// (from cloud-init `core.env`). `register_managed_node` exchanges it for a
-// DURABLE per-node token, which must outlive the process: the bootstrap is
-// revoked + expired the moment it is exchanged, so a restart that re-read the
-// bootstrap from `core.env` would 401. Core cannot rewrite `/etc/ryu/core.env`
+// (from cloud-init `core.env`). `register_managed_node` exchanges it for
+// separate node-control and inference-relay credentials, which must outlive the
+// process. Core acknowledges and revokes the bootstrap only after both are
+// durable. Core cannot rewrite `/etc/ryu/core.env`
 // (owned root:ryu, and `ProtectSystem=full` makes /etc read-only for the
 // service), but it CAN write its own data dir, so the durable is persisted
-// there at 0600 (same custody posture as `master.key`) and re-adopted at boot.
+// them at 0600 (same custody posture as `master.key`) and re-adopts them at boot.
 
-/// Filename of the persisted durable gateway token inside the Core data dir.
-const DURABLE_TOKEN_FILE: &str = "gateway-durable.token";
+const CONTROL_TOKEN_FILE: &str = "node-control.token";
+const RELAY_TOKEN_FILE: &str = "gateway-relay.token";
+const LEGACY_DURABLE_TOKEN_FILE: &str = "gateway-durable.token";
+const DELEGATION_PUBLIC_KEY_FILE: &str = "delegation-ed25519.pub";
+const BOOTSTRAP_ACK_TOKEN_FILE: &str = "bootstrap-ack.token";
+// Bounded compatibility for nodes upgraded from the old dual-purpose file.
+// 2026-12-01T00:00:00Z.
+const LEGACY_DURABLE_COMPAT_UNTIL_UNIX: u64 = 1_796_083_200;
 
 /// Absolute path of the persisted durable token in the active Core data dir.
-fn durable_token_path() -> std::path::PathBuf {
-    crate::paths::ryu_dir().join(DURABLE_TOKEN_FILE)
+fn control_token_path() -> std::path::PathBuf {
+    crate::paths::ryu_dir().join(CONTROL_TOKEN_FILE)
 }
 
-/// Pure: the durable token to adopt from a rotation's raw token string — trimmed,
-/// or `None` when empty (keep the presented key + warn). Unit-testable without I/O.
-fn durable_from_rotation_token(raw: &str) -> Option<String> {
+fn relay_token_path() -> std::path::PathBuf {
+    crate::paths::ryu_dir().join(RELAY_TOKEN_FILE)
+}
+
+fn legacy_durable_token_path() -> std::path::PathBuf {
+    crate::paths::ryu_dir().join(LEGACY_DURABLE_TOKEN_FILE)
+}
+
+fn delegation_key_path() -> std::path::PathBuf {
+    crate::paths::ryu_dir().join(DELEGATION_PUBLIC_KEY_FILE)
+}
+
+fn bootstrap_ack_token_path() -> std::path::PathBuf {
+    crate::paths::ryu_dir().join(BOOTSTRAP_ACK_TOKEN_FILE)
+}
+
+fn valid_delegation_key(key: &str) -> bool {
+    base64::engine::general_purpose::STANDARD
+        .decode(key.trim())
+        .is_ok_and(|bytes| bytes.len() == 32)
+}
+
+fn normalized_token(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         None
@@ -530,23 +668,26 @@ fn durable_from_rotation_token(raw: &str) -> Option<String> {
     }
 }
 
-/// Adopt a durable token for BOTH gateway roles in THIS process. The durable
-/// serves as the control-plane key (resolve/notify/permissions) AND the
-/// data-plane bearer, so both env vars point at it; setting only one strands the
-/// other on the revoked bootstrap.
-fn apply_durable_token(token: &str) {
-    std::env::set_var(ENV_GATEWAY_KEY, token);
-    std::env::set_var(ENV_GATEWAY_TOKEN, token);
+fn rotation_tokens(rotation: &CredentialRotation) -> Option<(String, String)> {
+    match (
+        rotation.control_token.as_deref().and_then(normalized_token),
+        rotation.relay_token.as_deref().and_then(normalized_token),
+    ) {
+        (Some(control), Some(relay)) => Some((control, relay)),
+        _ => rotation
+            .token
+            .as_deref()
+            .and_then(normalized_token)
+            .map(|legacy| (legacy.clone(), legacy)),
+    }
 }
 
-/// Persist `token` to [`durable_token_path`] atomically-ish at 0600. Delegates to
-/// [`persist_durable_token_at`] so tests can target a scratch path (the real
-/// [`durable_token_path`] is `OnceLock`-cached process-wide).
-fn persist_durable_token(token: &str) -> std::io::Result<()> {
-    persist_durable_token_at(&durable_token_path(), token)
+fn apply_split_tokens(control: &str, relay: &str) {
+    std::env::set_var(ENV_GATEWAY_KEY, control);
+    std::env::set_var(ENV_GATEWAY_TOKEN, relay);
 }
 
-fn persist_durable_token_at(path: &std::path::Path, token: &str) -> std::io::Result<()> {
+fn write_secret_at(path: &std::path::Path, token: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -557,6 +698,74 @@ fn persist_durable_token_at(path: &std::path::Path, token: &str) -> std::io::Res
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+fn persist_split_tokens_at(
+    control_path: &std::path::Path,
+    relay_path: &std::path::Path,
+    control: &str,
+    relay: &str,
+) -> std::io::Result<()> {
+    if load_durable_token_from(control_path).as_deref() == Some(control)
+        && load_durable_token_from(relay_path).as_deref() == Some(relay)
+    {
+        return Ok(());
+    }
+    let control_tmp = control_path.with_extension("token.tmp");
+    let relay_tmp = relay_path.with_extension("token.tmp");
+    write_secret_at(&control_tmp, control)?;
+    write_secret_at(&relay_tmp, relay)?;
+    std::fs::rename(&control_tmp, control_path)?;
+    std::fs::rename(&relay_tmp, relay_path)?;
+    Ok(())
+}
+
+fn persist_split_tokens(control: &str, relay: &str) -> std::io::Result<()> {
+    persist_split_tokens_at(&control_token_path(), &relay_token_path(), control, relay)?;
+    let _ = std::fs::remove_file(legacy_durable_token_path());
+    Ok(())
+}
+
+fn persisted_split_tokens() -> Option<(String, String)> {
+    Some((
+        load_durable_token_from(&control_token_path())?,
+        load_durable_token_from(&relay_token_path())?,
+    ))
+}
+
+async fn acknowledge_bootstrap(client: &reqwest::Client, bootstrap: &str) -> bool {
+    let ack_url = format!(
+        "{}/api/control-plane/gateway/bootstrap/ack",
+        control_plane_url().trim_end_matches('/')
+    );
+    match client
+        .post(ack_url)
+        .header("x-gateway-key", bootstrap)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(response)
+            if response.status().is_success()
+                || response.status() == reqwest::StatusCode::UNAUTHORIZED =>
+        {
+            let _ = std::fs::remove_file(bootstrap_ack_token_path());
+            true
+        }
+        Ok(response) => {
+            tracing::warn!(
+                "control-plane: bootstrap acknowledgement returned {}; retrying after restart",
+                response.status()
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                "control-plane: bootstrap acknowledgement failed ({error}); retrying after restart"
+            );
+            false
+        }
+    }
 }
 
 /// Read a persisted durable token from `path`, trimmed; `None` if absent/empty.
@@ -577,11 +786,36 @@ fn load_durable_token_from(path: &std::path::Path) -> Option<String> {
 /// (a fresh node then exchanges its bootstrap normally). MUST be called from
 /// `main.rs` ahead of the `resolve_scope` and `register_managed_node` spawns.
 pub fn load_persisted_durable_token() {
-    if let Some(token) = load_durable_token_from(&durable_token_path()) {
-        apply_durable_token(&token);
+    if !should_load_managed_cloud_tokens(
+        is_managed_node(),
+        crate::fleet::has_enrolled_node_bundle(),
+    ) {
         tracing::info!(
-            "control-plane: loaded a persisted durable gateway token (restart survival); using it for the control + data plane"
+            "control-plane: using enrolled self-hosted credentials without changing the local Gateway bearer"
         );
+        return;
+    }
+    let control = load_durable_token_from(&control_token_path());
+    let relay = load_durable_token_from(&relay_token_path());
+    if let (Some(control), Some(relay)) = (control, relay) {
+        apply_split_tokens(&control, &relay);
+        tracing::info!(
+            "control-plane: loaded separate persisted node-control and gateway-relay credentials"
+        );
+        return;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(u64::MAX);
+    if now < LEGACY_DURABLE_COMPAT_UNTIL_UNIX {
+        if let Some(legacy) = load_durable_token_from(&legacy_durable_token_path()) {
+            apply_split_tokens(&legacy, &legacy);
+            tracing::warn!(
+                "control-plane: loaded a legacy dual-purpose gateway credential; rotate before 2026-12-01"
+            );
+        }
     }
 }
 
@@ -598,7 +832,9 @@ pub fn load_persisted_durable_token() {
 /// The binding is via the `GatewayCredential` the key maps to, so this node's
 /// usage (and the credits debit) attribute to the resolved org's wallet.
 pub async fn register_managed_node(client: &reqwest::Client) -> Result<Option<RegisteredOrg>> {
-    if !is_managed_node() {
+    let enrolled_self_hosted =
+        !is_managed_node() && crate::fleet::enrolled_control_token().is_some();
+    if !should_register_node(is_managed_node(), enrolled_self_hosted) {
         return Ok(None);
     }
     let Some(key) = gateway_key() else {
@@ -611,7 +847,7 @@ pub async fn register_managed_node(client: &reqwest::Client) -> Result<Option<Re
     );
     let mut req = client
         .get(&url)
-        .header("x-gateway-key", key)
+        .header("x-gateway-key", key.clone())
         .timeout(Duration::from_secs(10));
     // Advertise where this node is reachable so the desktop NodeSelector can list
     // it. Sent on the existing resolve handshake (no new endpoint) so credits +
@@ -636,6 +872,26 @@ pub async fn register_managed_node(client: &reqwest::Client) -> Result<Option<Re
         .await
         .map_err(|e| anyhow!("managed-node register decode failed: {e}"))?;
 
+    if !valid_delegation_key(&body.delegation_public_key) {
+        return Err(anyhow!(
+            "managed-node register returned an invalid Ed25519 delegation public key"
+        ));
+    }
+    write_secret_at(&delegation_key_path(), &body.delegation_public_key)
+        .map_err(|error| anyhow!("failed to persist delegation public key: {error}"))?;
+    if let Ok(mut guard) = REGISTERED_DELEGATION_KEY.write() {
+        *guard = Some(body.delegation_public_key.clone());
+    }
+
+    // A prior exchange may have persisted both credentials but lost the ACK
+    // response. Keep retrying the saved bootstrap until the server confirms it
+    // is consumed (or reports it already invalid).
+    if persisted_split_tokens().is_some() {
+        if let Some(pending_bootstrap) = load_durable_token_from(&bootstrap_ack_token_path()) {
+            let _ = acknowledge_bootstrap(client, &pending_bootstrap).await;
+        }
+    }
+
     // A managed node gets the paid gate from the authenticated control-plane
     // handshake, not from a client preference. Local nodes still receive the
     // same flag from the desktop entitlement sync path.
@@ -645,39 +901,44 @@ pub async fn register_managed_node(client: &reqwest::Client) -> Result<Option<Re
         "false"
     });
 
-    // F7 (armed): if the control plane exchanged our single-use bootstrap KEY for a
-    // durable per-node token, adopt it for BOTH gateway roles and persist it so a
-    // restart survives.
+    // If the control plane exchanged our single-use bootstrap key, durably store
+    // the independently-scoped control and relay credentials before acknowledging
+    // consumption. A lost response is safe: the server returns this same pair until
+    // the acknowledgement succeeds.
     //
-    //  - The durable serves BOTH roles: `ENV_GATEWAY_KEY` (control plane —
-    //    resolve_scope / notify / permissions) AND `ENV_GATEWAY_TOKEN` (the
-    //    data-plane bearer `gateway::gateway_bearer()` presents to the fleet).
-    //    Setting only the TOKEN would leave the next resolve presenting the now
-    //    REVOKED bootstrap KEY → 401, so both are set. Both are read lazily on
-    //    every call, so `set_var` takes effect for all subsequent traffic in THIS
-    //    process without a restart.
-    //  - Persist to a Core-WRITABLE 0600 file (the service user cannot rewrite
+    //  - `ENV_GATEWAY_KEY` receives only node-control authority;
+    //    `ENV_GATEWAY_TOKEN` receives only inference-relay authority.
+    //  - Persist both to Core-WRITABLE 0600 files (the service user cannot rewrite
     //    `root:ryu 0640 /etc/ryu/core.env`, and the bootstrap in core.env is
     //    expired + revoked after this exchange). The boot loader
     //    (`load_persisted_durable_token`, run from `main.rs` before the register /
     //    resolve spawns) re-adopts it on the next start, so a restart never
     //    re-presents the dead bootstrap.
-    if let Some(rotation) = body.credential_rotation {
-        match durable_from_rotation_token(&rotation.token) {
-            Some(token) => {
-                apply_durable_token(&token);
-                match persist_durable_token(&token) {
-                    Ok(()) => tracing::info!(
-                        "control-plane: adopted + persisted a rotated durable gateway token (bootstrap exchanged)"
+    if !enrolled_self_hosted {
+        if let Some(rotation) = body.credential_rotation.as_ref() {
+            match rotation_tokens(rotation) {
+                Some((control, relay)) => match persist_split_tokens(&control, &relay) {
+                    Ok(()) => {
+                        write_secret_at(&bootstrap_ack_token_path(), &key).map_err(|error| {
+                            anyhow!(
+                                "failed to persist bootstrap acknowledgement marker: {error}"
+                            )
+                        })?;
+                        apply_split_tokens(&control, &relay);
+                        if acknowledge_bootstrap(client, &key).await {
+                            tracing::info!(
+                                    "control-plane: persisted separate control/relay credentials and acknowledged bootstrap consumption"
+                                );
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        "control-plane: refusing to consume bootstrap because the split credential pair could not be persisted ({error})"
                     ),
-                    Err(e) => tracing::warn!(
-                        "control-plane: adopted a rotated durable gateway token in-process but failed to persist it ({e}); it survives this process but a restart will need re-provisioning"
-                    ),
-                }
+                },
+                None => tracing::warn!(
+                    "control-plane: bootstrap exchange returned an incomplete credential pair; keeping the presented bootstrap"
+                ),
             }
-            None => tracing::warn!(
-                "control-plane: bootstrap exchange returned an empty durable token; keeping the presented token"
-            ),
         }
     }
 
@@ -686,17 +947,22 @@ pub async fn register_managed_node(client: &reqwest::Client) -> Result<Option<Re
         name: body.organization.name,
         slug: body.organization.slug,
     };
-    let (node_id, team_id, owner_user_id) = match body.credential {
-        Some(credential) => (
-            credential.node_id.unwrap_or(credential.id),
-            credential.team_id,
-            credential.owner_user_id,
-        ),
-        // The production control plane always returns a credential block. Keep
-        // old test/dev control planes usable with one deterministic legacy node
-        // identity rather than failing registration outright.
-        None => (format!("legacy:org:{}", org.id), None, None),
-    };
+    let credential = body.credential.ok_or_else(|| {
+        anyhow!("managed-node register response is missing its credential binding")
+    })?;
+    let node_id = credential.node_id.unwrap_or(credential.id);
+    if node_id.trim().is_empty() {
+        return Err(anyhow!(
+            "managed-node register response has an empty node binding"
+        ));
+    }
+    let team_id = credential.team_id;
+    let owner_user_id = credential.owner_user_id;
+    if team_id.is_some() && owner_user_id.is_some() {
+        return Err(anyhow!(
+            "managed-node register response combines team and personal bindings"
+        ));
+    }
     let scope = if owner_user_id.is_some() {
         NodeScope::Personal
     } else if team_id.is_some() {
@@ -715,6 +981,14 @@ pub async fn register_managed_node(client: &reqwest::Client) -> Result<Option<Re
         *guard = Some(node);
     }
     Ok(Some(org))
+}
+
+fn should_load_managed_cloud_tokens(managed_cloud: bool, has_enrolled_bundle: bool) -> bool {
+    managed_cloud || !has_enrolled_bundle
+}
+
+fn should_register_node(managed_cloud: bool, enrolled_self_hosted: bool) -> bool {
+    managed_cloud || enrolled_self_hosted
 }
 
 #[cfg(test)]
@@ -736,6 +1010,7 @@ mod tests {
     #[test]
     fn allowed_slugs_filters_by_kind() {
         let scope = ResolvedScope {
+            governance: None,
             tools: vec![
                 tool("mcp", "fs", false),
                 tool("mcp", "git", false),
@@ -751,12 +1026,14 @@ mod tests {
     #[test]
     fn detects_grant_scoped_composio() {
         let with = ResolvedScope {
+            governance: None,
             tools: vec![tool("composio", "github", true)],
         };
         assert!(with.has_grant_scoped_composio());
 
         // A Composio entry without a stored credential is not yet wired end-to-end.
         let without = ResolvedScope {
+            governance: None,
             tools: vec![tool("composio", "github", false)],
         };
         assert!(!without.has_grant_scoped_composio());
@@ -775,6 +1052,7 @@ mod tests {
         let parsed: ResolveResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.tools.len(), 2);
         let scope = ResolvedScope {
+            governance: parsed.governance,
             tools: parsed.tools,
         };
         assert_eq!(scope.allowed_slugs("mcp"), vec!["fs".to_owned()]);
@@ -782,10 +1060,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_additive_governance_layers_without_collapsing_false() {
+        let json = r#"{
+            "tools": [],
+            "governance": {
+                "revision": 7,
+                "organization": { "hooks": { "plugin::hook": { "trusted": true } } },
+                "team": { "hooks": { "plugin::hook": { "enabled": false } } },
+                "user": { "git": { "branchPrefix": "user/" } }
+            }
+        }"#;
+
+        let parsed: ResolveResponse = serde_json::from_str(json).expect("governance response");
+        let governance = parsed.governance.expect("additive governance block");
+        assert_eq!(governance.revision, 7);
+        assert_eq!(governance.team.hooks["plugin::hook"].enabled, Some(false));
+        assert_eq!(governance.user.git.branch_prefix.as_deref(), Some("user/"));
+    }
+
+    #[test]
     fn parses_gateway_resolve_org() {
         // Mirrors the `/api/control-plane/gateway/resolve` response shape; only
         // the `organization` block is needed for the node→org binding.
         let json = r#"{
+            "delegationPublicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "organization": { "id": "org_123", "name": "Acme", "slug": "acme" },
             "credential": { "id": "c1", "name": "node", "keyPrefix": "rgw_abc" },
             "managedInference": true,
@@ -810,6 +1108,60 @@ mod tests {
         if let Some(v) = prev {
             std::env::set_var("RYU_MANAGED_NODE", v);
         }
+    }
+
+    #[test]
+    fn control_token_precedence_keeps_environment_override_ahead_of_enrollment() {
+        assert_eq!(
+            select_control_token(
+                Some(" env-control ".into()),
+                Some("enrolled-control".into())
+            ),
+            Some("env-control".into())
+        );
+        assert_eq!(
+            select_control_token(None, Some("enrolled-control".into())),
+            Some("enrolled-control".into())
+        );
+        assert_eq!(select_control_token(None, None), None);
+    }
+
+    #[test]
+    fn control_plane_url_precedence_is_environment_then_acknowledged_enrollment_then_default() {
+        assert_eq!(
+            select_control_plane_url(
+                Some("https://env.example".into()),
+                Some("https://enrolled.example".into()),
+                "http://127.0.0.1:3000"
+            ),
+            "https://env.example"
+        );
+        assert_eq!(
+            select_control_plane_url(
+                None,
+                Some("https://enrolled.example".into()),
+                "http://127.0.0.1:3000"
+            ),
+            "https://enrolled.example"
+        );
+        assert_eq!(
+            select_control_plane_url(None, None, "http://127.0.0.1:3000"),
+            "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn enrolled_self_hosted_node_registers_without_managed_cloud_flag() {
+        assert!(should_register_node(false, true));
+        assert!(should_register_node(true, false));
+        assert!(!should_register_node(false, false));
+    }
+
+    #[test]
+    fn enrolled_self_hosted_startup_never_applies_managed_cloud_split_tokens() {
+        assert!(!should_load_managed_cloud_tokens(false, true));
+        assert!(should_load_managed_cloud_tokens(true, true));
+        assert!(should_load_managed_cloud_tokens(false, false));
     }
 
     #[test]
@@ -844,15 +1196,25 @@ mod tests {
     }
 
     #[test]
-    fn durable_from_rotation_token_trims_and_rejects_empty() {
+    fn normalized_token_trims_and_rejects_empty() {
         // Empty / whitespace-only ⇒ None (keep the presented bootstrap + warn).
-        assert_eq!(durable_from_rotation_token(""), None);
-        assert_eq!(durable_from_rotation_token("   "), None);
+        assert_eq!(normalized_token(""), None);
+        assert_eq!(normalized_token("   "), None);
         // A real token is trimmed and adopted.
         assert_eq!(
-            durable_from_rotation_token("  rgw_durable_abc  ").as_deref(),
+            normalized_token("  rgw_durable_abc  ").as_deref(),
             Some("rgw_durable_abc")
         );
+    }
+
+    #[test]
+    fn delegation_key_requires_exactly_one_ed25519_public_key() {
+        assert!(valid_delegation_key(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        ));
+        assert!(!valid_delegation_key(""));
+        assert!(!valid_delegation_key("YWJj"));
+        assert!(!valid_delegation_key("not-base64"));
     }
 
     #[test]
@@ -860,55 +1222,74 @@ mod tests {
         // A resolve that just exchanged a bootstrap carries `credentialRotation`;
         // an ordinary resolve omits it (serde default ⇒ None).
         let with = r#"{
+            "delegationPublicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "organization": { "id": "org_1", "name": "Acme" },
-            "credentialRotation": { "token": "rgw_durable_xyz" }
+            "credentialRotation": {
+                "controlToken": "rgw_control_xyz",
+                "relayToken": "rgw_relay_xyz"
+            }
         }"#;
         let parsed: ResolveOrgResponse = serde_json::from_str(with).unwrap();
-        assert_eq!(
-            parsed
-                .credential_rotation
-                .as_ref()
-                .and_then(|r| durable_from_rotation_token(&r.token))
-                .as_deref(),
-            Some("rgw_durable_xyz")
-        );
+        let pair = parsed
+            .credential_rotation
+            .as_ref()
+            .and_then(rotation_tokens)
+            .expect("split pair");
+        assert_eq!(pair.0, "rgw_control_xyz");
+        assert_eq!(pair.1, "rgw_relay_xyz");
 
-        let without = r#"{ "organization": { "id": "org_1", "name": "Acme" } }"#;
+        let without = r#"{
+            "delegationPublicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "organization": { "id": "org_1", "name": "Acme" }
+        }"#;
         let plain: ResolveOrgResponse = serde_json::from_str(without).unwrap();
         assert!(plain.credential_rotation.is_none());
     }
 
     #[test]
-    fn persist_and_load_durable_token_roundtrips_at_0600() {
+    fn persist_and_load_split_tokens_roundtrip_at_0600() {
         let dir = std::env::temp_dir().join(format!(
             "ryu-durable-test-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join(DURABLE_TOKEN_FILE);
+        let control_path = dir.join(CONTROL_TOKEN_FILE);
+        let relay_path = dir.join(RELAY_TOKEN_FILE);
 
         // Absent ⇒ None (a fresh node has no persisted durable).
-        assert_eq!(load_durable_token_from(&path), None);
+        assert_eq!(load_durable_token_from(&control_path), None);
 
-        persist_durable_token_at(&path, "rgw_durable_persisted").unwrap();
+        persist_split_tokens_at(
+            &control_path,
+            &relay_path,
+            "rgw_control_persisted",
+            "rgw_relay_persisted",
+        )
+        .unwrap();
         assert_eq!(
-            load_durable_token_from(&path).as_deref(),
-            Some("rgw_durable_persisted")
+            load_durable_token_from(&control_path).as_deref(),
+            Some("rgw_control_persisted")
+        );
+        assert_eq!(
+            load_durable_token_from(&relay_path).as_deref(),
+            Some("rgw_relay_persisted")
         );
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "durable token file must be 0600");
+            for path in [&control_path, &relay_path] {
+                let mode = std::fs::metadata(path).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "credential file must be 0600");
+            }
         }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn apply_durable_token_overrides_a_stale_bootstrap_in_env() {
+    fn apply_split_tokens_keeps_control_and_relay_separate() {
         let _lock = env_lock();
         // Simulate a RESTARTED node: core.env still carries the (now revoked)
         // bootstrap KEY, and no data-plane TOKEN yet.
@@ -916,16 +1297,16 @@ mod tests {
         std::env::remove_var(ENV_GATEWAY_TOKEN);
 
         // The boot loader / exchange adopts the durable for BOTH roles.
-        apply_durable_token("rgw_durable_new");
+        apply_split_tokens("rgw_control_new", "rgw_relay_new");
         assert_eq!(
             std::env::var(ENV_GATEWAY_KEY).unwrap(),
-            "rgw_durable_new",
-            "control-plane KEY must be overridden to the durable"
+            "rgw_control_new",
+            "control-plane KEY must use only the control credential"
         );
         assert_eq!(
             std::env::var(ENV_GATEWAY_TOKEN).unwrap(),
-            "rgw_durable_new",
-            "data-plane TOKEN must also be set to the durable (both roles)"
+            "rgw_relay_new",
+            "data-plane TOKEN must use only the relay credential"
         );
 
         std::env::remove_var(ENV_GATEWAY_KEY);

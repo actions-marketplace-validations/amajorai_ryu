@@ -20,6 +20,7 @@ export type GatewaySection =
 	| "guardrails"
 	| "budgets"
 	| "runtime"
+	| "hooks"
 	| "keys"
 	| "integrations"
 	// The node's network surface (mesh / Tailscale / Headscale), extracted from
@@ -33,6 +34,9 @@ export type GatewaySection =
 	| "api"
 	// The Ryu MCP server layer: registered servers + the tools they expose.
 	| "mcp"
+	| "git"
+	| "worktrees"
+	| "environments"
 	// Ryu-canonical import/export sync for Claude, Codex, Cursor, and portable
 	// bundles. Kept as two sections because each direction has an independent
 	// opt-in toggle and a different safety model.

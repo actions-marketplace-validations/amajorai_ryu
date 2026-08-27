@@ -12,7 +12,7 @@
 // (`{ success: false, error }`), and we want to surface that exact message —
 // the generic helper throws only the status code.
 
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 /** A single node in a workflow definition. `type` selects the node kind and
  * carries its config (Core flattens the kind onto the node). We keep the config
@@ -180,9 +180,8 @@ async function postJson<T>(
 	path: string,
 	body: unknown
 ): Promise<T> {
-	const resp = await fetch(apiUrl(target, path), {
+	const resp = await authenticatedFetch(target, path, {
 		method: "POST",
-		headers: makeHeaders(target.token),
 		body: JSON.stringify(body),
 	});
 	if (!resp.ok) {
@@ -193,9 +192,7 @@ async function postJson<T>(
 }
 
 export async function fetchWorkflows(target: ApiTarget): Promise<Workflow[]> {
-	const resp = await fetch(apiUrl(target, "/workflows"), {
-		headers: makeHeaders(target.token),
-	});
+	const resp = await authenticatedFetch(target, "/workflows");
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, "/workflows");
 	}
@@ -209,9 +206,7 @@ export async function fetchWorkflow(
 	target: ApiTarget,
 	id: string
 ): Promise<Workflow> {
-	const resp = await fetch(apiUrl(target, `/workflows/${id}`), {
-		headers: makeHeaders(target.token),
-	});
+	const resp = await authenticatedFetch(target, `/workflows/${id}`);
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/${id}`);
 	}
@@ -237,9 +232,8 @@ export async function deleteWorkflow(
 	target: ApiTarget,
 	id: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, `/workflows/${id}`), {
+	const resp = await authenticatedFetch(target, `/workflows/${id}`, {
 		method: "DELETE",
-		headers: makeHeaders(target.token),
 	});
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/${id}`);
@@ -265,9 +259,7 @@ export async function getWorkflowRun(
 	target: ApiTarget,
 	runId: string
 ): Promise<WorkflowRun> {
-	const resp = await fetch(apiUrl(target, `/workflows/runs/${runId}`), {
-		headers: makeHeaders(target.token),
-	});
+	const resp = await authenticatedFetch(target, `/workflows/runs/${runId}`);
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/runs/${runId}`);
 	}
@@ -384,9 +376,7 @@ function toTemplateMeta(w: WorkflowTemplateMetaWire): WorkflowTemplateMeta {
 export async function fetchWorkflowTemplates(
 	target: ApiTarget
 ): Promise<WorkflowTemplateMeta[]> {
-	const resp = await fetch(apiUrl(target, "/api/workflows/catalog"), {
-		headers: makeHeaders(target.token),
-	});
+	const resp = await authenticatedFetch(target, "/api/workflows/catalog");
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, "/api/workflows/catalog");
 	}
@@ -402,9 +392,7 @@ export async function fetchWorkflowTemplate(
 	id: string
 ): Promise<WorkflowTemplateDetail> {
 	const path = `/api/workflows/catalog/${id}`;
-	const resp = await fetch(apiUrl(target, path), {
-		headers: makeHeaders(target.token),
-	});
+	const resp = await authenticatedFetch(target, path);
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, path);
 	}
@@ -468,9 +456,7 @@ export async function listWorkflowVersions(
 	target: ApiTarget,
 	id: string
 ): Promise<WorkflowVersionMeta[]> {
-	const resp = await fetch(apiUrl(target, `/workflows/${id}/versions`), {
-		headers: makeHeaders(target.token),
-	});
+	const resp = await authenticatedFetch(target, `/workflows/${id}/versions`);
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/${id}/versions`);
 	}
@@ -485,9 +471,9 @@ export async function getWorkflowVersionDefinition(
 	id: string,
 	versionId: string
 ): Promise<Record<string, unknown>> {
-	const resp = await fetch(
-		apiUrl(target, `/workflows/${id}/versions/${versionId}`),
-		{ headers: makeHeaders(target.token) }
+	const resp = await authenticatedFetch(
+		target,
+		`/workflows/${id}/versions/${versionId}`
 	);
 	if (!resp.ok) {
 		throw await errorFromResponse(

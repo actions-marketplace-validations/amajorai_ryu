@@ -35,12 +35,31 @@ pub enum WorkflowWebhookSecret {
     Secret(Option<String>),
 }
 
+/// Signed headers carried with an inbound webhook. Composio covers all three
+/// values in its current signature; generic workflow webhooks use only
+/// `signature` and can leave the other fields absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InboundWebhookHeaders<'a> {
+    pub signature: Option<&'a str>,
+    pub webhook_id: Option<&'a str>,
+    pub webhook_timestamp: Option<&'a str>,
+}
+
+impl<'a> InboundWebhookHeaders<'a> {
+    pub fn signature(signature: Option<&'a str>) -> Self {
+        Self {
+            signature,
+            ..Self::default()
+        }
+    }
+}
+
 /// Every kernel coupling the webhook-ingress engine needs, inverted. `dyn`-stored
 /// (→ `async_trait`), installed once at boot. Implemented by Core; the crate's own
 /// tests install a mock.
 #[async_trait::async_trait]
 pub trait WebhookIngressHost: Send + Sync {
-    // ── Composio (the trust-relay + global-secret path) ──────────────────────
+    // ── Composio ─────────────────────────────────────────────────────────────
     /// Whether a Composio key is configured (the RyuRelay opt-in-by-use gate).
     fn composio_is_configured(&self) -> bool;
     /// Whether this node has at least one workflow declaring a `Webhook`
@@ -50,7 +69,8 @@ pub trait WebhookIngressHost: Send + Sync {
     /// subscription (the composio key is not the only legitimate use).
     fn has_webhook_trigger(&self) -> bool;
     /// Verify an inbound Composio webhook against the global Composio secret.
-    fn verify_webhook_signature(&self, raw_body: &[u8], signature: Option<&str>) -> bool;
+    fn verify_webhook_signature(&self, raw_body: &[u8], headers: InboundWebhookHeaders<'_>)
+        -> bool;
     /// Verify a per-workflow webhook against a trigger-specific secret.
     fn verify_workflow_webhook_signature(
         &self,

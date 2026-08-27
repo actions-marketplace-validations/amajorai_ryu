@@ -1,0 +1,192 @@
+@import "@ryu/ui/app-ui.css";
+
+/* This block is the Tailwind entry for News and Tuition. Scan the actual Ryu
+ * primitive implementations here so their generated rounded controls, focus
+ * rings, spacing, and variants are present when an app imports only this block. */
+@source "../../../ui/src/components/badge.tsx";
+@source "../../../ui/src/components/button.tsx";
+@source "../../../ui/src/components/fade-overflow-text.tsx";
+@source "../../../ui/src/components/input.tsx";
+@source "../../../ui/src/components/native-select.tsx";
+@source "../../../ui/src/components/radio-group.tsx";
+@source "../../../ui/src/components/spinner.tsx";
+@source "../../../ui/src/components/textarea.tsx";
+
+:root {
+	--compact-bg: var(--background);
+	--compact-fg: var(--foreground);
+	--compact-muted: var(--muted-foreground);
+	--compact-line: var(--border);
+	--compact-raised: var(--card);
+	--compact-primary: var(--primary);
+	--compact-primary-foreground: var(--primary-foreground);
+	--compact-good: var(--success);
+	--compact-warn: var(--warning);
+	--compact-bad: var(--destructive);
+	--compact-radius: var(--radius);
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	font:
+		14px / 1.5 ui-sans-serif,
+		system-ui,
+		-apple-system,
+		"Segoe UI",
+		sans-serif;
+	color: var(--compact-fg);
+	background: var(--compact-bg);
+}
+
+.shell {
+	display: flex;
+	flex-direction: column;
+	height: 100vh;
+}
+
+nav {
+	display: flex;
+	gap: 2px;
+	padding: 10px 14px 0;
+	overflow-x: auto;
+	border-bottom: 1px solid var(--compact-line);
+}
+
+nav [data-slot="button"] {
+	padding: 8px 12px 10px;
+	font: inherit;
+	color: var(--compact-muted);
+	white-space: nowrap;
+	appearance: none;
+	cursor: pointer;
+	background: none;
+	border: 0;
+	border-bottom: 2px solid transparent;
+}
+nav [data-slot="button"][aria-selected="true"] {
+	color: var(--compact-fg);
+	border-bottom-color: var(--compact-primary);
+}
+
+main {
+	flex: 1;
+	padding: 18px;
+	overflow: auto;
+}
+
+h2 {
+	margin: 0 0 10px;
+	font-size: 15px;
+}
+h3 {
+	margin: 18px 0 8px;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--compact-muted);
+}
+p {
+	margin: 0 0 10px;
+}
+
+.row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+}
+.spread {
+	display: flex;
+	gap: 12px;
+	align-items: baseline;
+	justify-content: space-between;
+}
+.muted {
+	color: var(--compact-muted);
+}
+.small {
+	font-size: 12px;
+}
+
+.card {
+	padding: 12px 14px;
+	margin-bottom: 10px;
+	background: var(--compact-raised);
+	border: 1px solid var(--compact-line);
+	border-radius: var(--compact-radius);
+}
+
+.grow {
+	flex: 1;
+}
+
+.banner {
+	padding: 8px 12px;
+	margin-bottom: 12px;
+	color: var(--compact-bad);
+	border: 1px solid var(--compact-bad);
+	border-radius: 8px;
+}
+.banner.info {
+	color: var(--compact-muted);
+	border-color: var(--compact-line);
+}
+
+/* The mastery bar. Deliberately shows the NUMBER as well as the bar: this is a
+   probability the learner is entitled to read, not a decorative progress meter. */
+.meter {
+	width: 120px;
+	height: 6px;
+	overflow: hidden;
+	background: var(--compact-line);
+	border-radius: 999px;
+}
+.meter > span {
+	display: block;
+	height: 100%;
+	background: var(--compact-primary);
+}
+.meter.good > span {
+	background: var(--compact-good);
+}
+
+.pill {
+	padding: 1px 8px;
+	font-size: 11px;
+	border: 1px solid var(--compact-line);
+	border-radius: 999px;
+}
+.pill.good {
+	color: var(--compact-good);
+	border-color: var(--compact-good);
+}
+.pill.warn {
+	color: var(--compact-warn);
+	border-color: var(--compact-warn);
+}
+.pill.bad {
+	color: var(--compact-bad);
+	border-color: var(--compact-bad);
+}
+
+.rubric {
+	padding-left: 10px;
+	margin: 8px 0 0;
+	color: var(--compact-muted);
+	white-space: pre-wrap;
+	border-left: 3px solid var(--compact-line);
+}
+
+.empty {
+	padding: 28px 0;
+	color: var(--compact-muted);
+	text-align: center;
+}
+
+:where(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+	outline: 2px solid var(--ring, var(--compact-primary));
+	outline-offset: 2px;
+}

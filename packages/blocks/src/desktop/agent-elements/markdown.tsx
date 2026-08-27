@@ -183,8 +183,10 @@ function ExpandableMarkdownTable({
 
 	return (
 		<>
-			<div className="group/an-md-table relative my-3 overflow-x-auto rounded-[var(--radius)]">
-				{table()}
+			<div className="group/an-md-table relative my-3">
+				<div className="scroll-fade-x overflow-x-auto rounded-[var(--radius)]">
+					{table()}
+				</div>
 				<Button
 					aria-label="Expand table"
 					className="absolute top-1 right-1 z-10 size-7 bg-background/90 text-muted-foreground opacity-0 shadow-sm transition-opacity focus-visible:opacity-100 group-hover/an-md-table:opacity-100"
@@ -344,7 +346,7 @@ export function Markdown({
 				const mentionContent = (
 					<MentionToken item={item}>{children}</MentionToken>
 				);
-				if (item && onOpenMention) {
+				if (item && item.kind !== "user" && onOpenMention) {
 					return (
 						<button
 							aria-label={`Open ${item.kind} ${item.label}`}
@@ -365,6 +367,8 @@ export function Markdown({
 				return (
 					<strong
 						className="inline-flex items-center gap-1 font-semibold text-primary"
+						data-mention-id={item?.id}
+						data-mention-kind={item?.kind}
 						{...props}
 					>
 						{mentionContent}

@@ -4,15 +4,12 @@
 //! `~/.claude/skills/<id>/SKILL.md` ([`SkillRegistry::skills_dir`]), the same
 //! layout Claude Code and the skills CLI read. This module adds the *write* side
 //! the catalog installer never needed: creating a brand-new SKILL.md from the
-//! desktop editor, updating an existing one, and a bounded, undoable version
-//! history.
+//! desktop editor, updating an existing one, and an undoable source history.
 //!
-//! **Version snapshots** live in Ryu's OWN directory
-//! `~/.ryu/skill-versions/<id>/<version_id>.json`, never in the shared skills dir
-//! — exactly like `workflow/store.rs` keeps its versions out of the workflows
-//! dir, so Ryu-local history never mutates files other tools own. A version wraps
-//! the **raw SKILL.md string** (not decomposed fields), so a restore is lossless
-//! and a diff surfaces front-matter changes too.
+//! **Version snapshots** are checkpoints in Ryu's managed local Git repository
+//! under `source-history/skills/<id>/SKILL.md`. The old
+//! `~/.ryu/skill-versions/` JSON files remain readable as a migration fallback,
+//! but new history is the same source Git model used by workflows and pages.
 //!
 //! Core-vs-Gateway: this is squarely Core (it decides *what a skill is*); the
 //! Gateway still governs whether the skill's instructions are *allowed* to be
@@ -20,18 +17,40 @@
 
 use std::path::PathBuf;
 
+use ryu_workspace::source_history::SourceHistory;
 use serde::{Deserialize, Serialize};
 
 use super::SkillRegistry;
-
-/// Maximum retained versions per skill. Oldest beyond this are pruned on each new
-/// snapshot so history stays bounded (mirrors `MAX_WORKFLOW_VERSIONS`).
-const MAX_SKILL_VERSIONS: usize = 50;
 
 // ── Path helpers ────────────────────────────────────────────────────────────
 
 fn versions_root() -> PathBuf {
     crate::ryu_data_dir().join("skill-versions")
+}
+
+fn source_history() -> SourceHistory {
+    SourceHistory::new(crate::ryu_data_dir().join("source-history"))
+}
+
+fn source_history_path(skill_id: &str) -> String {
+    format!("skills/{skill_id}/SKILL.md")
+}
+
+/// Record the Git audit projection without turning a successful source write
+/// into a reported failure. The SKILL.md file is authoritative and Git history
+/// can be repaired after a transient disk or repository failure.
+fn checkpoint_source_history_best_effort(
+    relative_path: &str,
+    content: &str,
+    label: Option<&str>,
+) {
+    if let Err(error) = source_history().checkpoint(relative_path, content, label) {
+        tracing::warn!(
+            path = relative_path,
+            error = %error,
+            "skill source-history checkpoint was not recorded"
+        );
+    }
 }
 
 /// Validate a skill id as a single safe path segment (no separators, no `..`),
@@ -238,6 +257,11 @@ pub fn create_skill(draft: &SkillDraft) -> Result<WriteResult, CreateError> {
         .map_err(|e| CreateError::Invalid(format!("skill did not round-trip: {e}")))?;
 
     let path = write_skill_md(&slug, &source).map_err(CreateError::Io)?;
+    checkpoint_source_history_best_effort(
+        &source_history_path(&slug),
+        &source,
+        Some("Skill saved"),
+    );
     Ok(WriteResult {
         id: slug,
         path,
@@ -254,6 +278,7 @@ pub fn update_skill(id: &str, draft: &SkillDraft) -> Result<WriteResult, CreateE
     super::parse_skill_md(id, &source)
         .map_err(|e| CreateError::Invalid(format!("skill did not round-trip: {e}")))?;
     let path = write_skill_md(id, &source).map_err(CreateError::Io)?;
+    checkpoint_source_history_best_effort(&source_history_path(id), &source, Some("Skill saved"));
     Ok(WriteResult {
         id: id.to_owned(),
         path,
@@ -294,8 +319,7 @@ fn now_millis() -> i64 {
 }
 
 /// Snapshot a skill's current on-disk SKILL.md as a new version. Returns `None`
-/// when the skill has no source on disk (nothing to snapshot). Prunes the oldest
-/// versions past [`MAX_SKILL_VERSIONS`].
+/// when the skill has no source on disk (nothing to snapshot).
 pub fn snapshot_skill(
     skill_id: &str,
     label: Option<&str>,
@@ -318,30 +342,14 @@ pub fn save_skill_version(
     source: &str,
     label: Option<&str>,
 ) -> std::io::Result<SkillVersionMeta> {
-    let dir = skill_versions_dir(skill_id)?;
-    std::fs::create_dir_all(&dir)?;
-    let version_id = format!("sv_{}", uuid::Uuid::new_v4().simple());
-    let created_at = now_millis();
-    let version = SkillVersion {
-        id: version_id.clone(),
-        skill_id: skill_id.to_owned(),
-        name: name.to_owned(),
-        label: label.map(str::to_string),
-        created_at,
-        source: source.to_owned(),
-    };
-    let json = serde_json::to_string_pretty(&version)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(dir.join(format!("{version_id}.json")), json)?;
-
-    prune_skill_versions(skill_id)?;
-
+    validate_id(skill_id)?;
+    let version = source_history().checkpoint(&source_history_path(skill_id), source, label)?;
     Ok(SkillVersionMeta {
-        id: version_id,
+        id: version.id,
         skill_id: skill_id.to_owned(),
         name: name.to_owned(),
-        label: label.map(str::to_string),
-        created_at,
+        label: version.label,
+        created_at: version.created_at,
     })
 }
 
@@ -369,18 +377,38 @@ fn read_skill_versions(skill_id: &str) -> std::io::Result<Vec<SkillVersion>> {
 
 /// List a skill's saved versions, newest first (metadata only).
 pub fn list_skill_versions(skill_id: &str) -> std::io::Result<Vec<SkillVersionMeta>> {
-    let mut versions = read_skill_versions(skill_id)?;
-    versions.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
-    Ok(versions
-        .into_iter()
-        .map(|v| SkillVersionMeta {
-            id: v.id,
-            skill_id: v.skill_id,
-            name: v.name,
-            label: v.label,
-            created_at: v.created_at,
-        })
-        .collect())
+    validate_id(skill_id)?;
+    let path = source_history_path(skill_id);
+    let history = source_history();
+    let mut versions = Vec::new();
+    for version in history.list(&path, None)? {
+        let Some(source) = history.read(&path, &version.id)? else {
+            continue;
+        };
+        let name = super::parse_skill_md(skill_id, &source)
+            .map(|record| record.name)
+            .unwrap_or_else(|_| skill_id.to_owned());
+        versions.push(SkillVersionMeta {
+            id: version.id,
+            skill_id: skill_id.to_owned(),
+            name,
+            label: version.label,
+            created_at: version.created_at,
+        });
+    }
+    versions.extend(
+        read_skill_versions(skill_id)?
+            .into_iter()
+            .map(|version| SkillVersionMeta {
+                id: version.id,
+                skill_id: version.skill_id,
+                name: version.name,
+                label: version.label,
+                created_at: version.created_at,
+            }),
+    );
+    versions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(versions)
 }
 
 /// Load one saved version in full (including its captured source).
@@ -388,6 +416,30 @@ pub fn load_skill_version(
     skill_id: &str,
     version_id: &str,
 ) -> std::io::Result<Option<SkillVersion>> {
+    validate_id(skill_id)?;
+    if is_git_version_id(version_id) {
+        let path = source_history_path(skill_id);
+        let history = source_history();
+        if let Some(source) = history.read(&path, version_id)? {
+            let name = super::parse_skill_md(skill_id, &source)
+                .map(|record| record.name)
+                .unwrap_or_else(|_| skill_id.to_owned());
+            let metadata = history
+                .list(&path, Some(1000))?
+                .into_iter()
+                .find(|version| version.id == version_id);
+            return Ok(Some(SkillVersion {
+                id: version_id.to_owned(),
+                skill_id: skill_id.to_owned(),
+                name,
+                label: metadata.as_ref().and_then(|version| version.label.clone()),
+                created_at: metadata
+                    .map(|version| version.created_at)
+                    .unwrap_or_else(now_millis),
+                source,
+            }));
+        }
+    }
     validate_id(version_id)?;
     let path = skill_versions_dir(skill_id)?.join(format!("{version_id}.json"));
     match std::fs::read(path) {
@@ -399,11 +451,18 @@ pub fn load_skill_version(
     }
 }
 
-/// Restore a saved version as the skill's current SKILL.md. Snapshots the current
-/// on-disk source first (labelled `"Before restore"`) so the restore is itself
-/// undoable, then writes the captured source back verbatim (lossless). Returns the
-/// restored source, or `None` when the version does not exist. The caller reloads
-/// the registry so the change is live.
+fn is_git_version_id(version_id: &str) -> bool {
+    (7..=64).contains(&version_id.len())
+        && version_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+}
+
+/// Restore a saved version as the skill's current SKILL.md. Records the current
+/// on-disk source as a named undo point first, so the restore is itself undoable;
+/// unlabeled identical saves remain idempotent. The captured source is then written
+/// back verbatim (lossless). Returns the restored source, or `None` when the version
+/// does not exist. The caller reloads the registry so the change is live.
 pub fn restore_skill_version(skill_id: &str, version_id: &str) -> std::io::Result<Option<String>> {
     let Some(version) = load_skill_version(skill_id, version_id)? else {
         return Ok(None);
@@ -412,11 +471,16 @@ pub fn restore_skill_version(skill_id: &str, version_id: &str) -> std::io::Resul
     // nothing to snapshot.
     let _ = snapshot_skill(skill_id, Some("Before restore"));
     write_skill_md(skill_id, &version.source)?;
+    checkpoint_source_history_best_effort(
+        &source_history_path(skill_id),
+        &version.source,
+        Some("Restore skill version"),
+    );
     Ok(Some(version.source))
 }
 
-/// Delete a skill's entire version history directory. Returns `true` when a
-/// directory was removed.
+/// Delete legacy JSON snapshots for a skill. Git source history is immutable and
+/// is intentionally not removed by this compatibility operation.
 pub fn delete_skill_versions(skill_id: &str) -> std::io::Result<bool> {
     let dir = skill_versions_dir(skill_id)?;
     match std::fs::remove_dir_all(dir) {
@@ -424,20 +488,6 @@ pub fn delete_skill_versions(skill_id: &str) -> std::io::Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
-}
-
-/// Remove the oldest version files beyond [`MAX_SKILL_VERSIONS`].
-fn prune_skill_versions(skill_id: &str) -> std::io::Result<()> {
-    let mut versions = read_skill_versions(skill_id)?;
-    if versions.len() <= MAX_SKILL_VERSIONS {
-        return Ok(());
-    }
-    versions.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
-    let dir = skill_versions_dir(skill_id)?;
-    for v in versions.into_iter().skip(MAX_SKILL_VERSIONS) {
-        let _ = std::fs::remove_file(dir.join(format!("{}.json", v.id)));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -504,7 +554,8 @@ mod tests {
             .expect("some");
         assert_eq!(full.source, src);
 
-        assert!(delete_skill_versions(&skill_id).expect("delete"));
+        // Git history is immutable; only legacy JSON snapshots are removable.
+        assert!(!delete_skill_versions(&skill_id).expect("delete legacy history"));
     }
 
     #[test]

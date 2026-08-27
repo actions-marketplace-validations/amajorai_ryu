@@ -16,6 +16,9 @@ bun run examples/agent/minimal-agent.ts "the sea at dawn"
 bun run examples/tool/calculator.ts
 bun run examples/workflow/summarize-and-rate.ts
 bun run examples/gateway/openai-compat-smoke.ts
+
+# launch the browser proof for the SDK-built support app
+bun run --cwd examples/support-widget dev
 ```
 
 ## What's here
@@ -26,6 +29,7 @@ bun run examples/gateway/openai-compat-smoke.ts
 | [`tool/calculator.ts`](./tool/calculator.ts) | `defineTool` — a typed, JSON-Schema-validated deterministic tool (no model needed) |
 | [`workflow/summarize-and-rate.ts`](./workflow/summarize-and-rate.ts) | `defineWorkflow` — compose a tool + a model call; agents/tools/workflows are peers under one `run(input, ctx)` contract |
 | [`gateway/openai-compat-smoke.ts`](./gateway/openai-compat-smoke.ts) | Hit the gateway's OpenAI-compatible `/v1/chat/completions` directly |
+| [`support-widget/`](./support-widget/) | A complete SDK-built customer-support app: executable `defineTool`, `defineApp` widget, packed HTML, and a browser preview |
 
 ## The one rule
 

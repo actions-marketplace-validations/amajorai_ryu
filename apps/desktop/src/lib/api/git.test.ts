@@ -17,8 +17,11 @@ import {
 	checkoutBranch,
 	commitPush,
 	createPullRequest,
+	fetchGitFileDiff,
+	initializeGit,
 	isPullRequestBranch,
 	pullGit,
+	reverseGitEdits,
 	syncGit,
 } from "./git.ts";
 import { createProjectFolder } from "./workspace.ts";
@@ -109,6 +112,85 @@ describe("git remote actions", () => {
 	});
 });
 
+describe("turn file review and reversal", () => {
+	it("requests a diff scoped to the selected files", async () => {
+		const captured = stubFetch(
+			new Response(
+				JSON.stringify({ patch: "diff --git a/a.ts b/a.ts", paths: ["a.ts"] }),
+				{ headers: { "content-type": "application/json" }, status: 200 }
+			)
+		);
+
+		const result = await fetchGitFileDiff(TARGET, "/repo", ["a.ts"]);
+
+		expect(captured.url).toBe("http://127.0.0.1:7980/api/git/file-diff");
+		expect(JSON.parse(String(captured.init?.body))).toEqual({
+			cwd: "/repo",
+			paths: ["a.ts"],
+		});
+		expect(result).toEqual({
+			patch: "diff --git a/a.ts b/a.ts",
+			paths: ["a.ts"],
+		});
+	});
+
+	it("returns applied and structured conflict reverse-edit results", async () => {
+		const plan = {
+			edits: [
+				{
+					after: "new",
+					before: "old",
+					kind: "replace" as const,
+					path: "a.ts",
+				},
+			],
+			kind: "text-replacements" as const,
+		};
+		const appliedRequest = stubFetch(
+			new Response(JSON.stringify({ kind: "applied", paths: ["a.ts"] }), {
+				headers: { "content-type": "application/json" },
+				status: 200,
+			})
+		);
+		expect(await reverseGitEdits(TARGET, "/repo", plan)).toEqual({
+			kind: "applied",
+			paths: ["a.ts"],
+		});
+		expect(JSON.parse(String(appliedRequest.init?.body))).toEqual({
+			cwd: "/repo",
+			plan,
+		});
+
+		stubFetch(
+			new Response(
+				JSON.stringify({
+					kind: "conflict",
+					paths: ["a.ts"],
+					reason: "changed_since_turn",
+				}),
+				{ headers: { "content-type": "application/json" }, status: 409 }
+			)
+		);
+		expect(await reverseGitEdits(TARGET, "/repo", plan)).toEqual({
+			kind: "conflict",
+			paths: ["a.ts"],
+			reason: "changed_since_turn",
+		});
+	});
+
+	it("rejects malformed success responses", async () => {
+		stubFetch(
+			new Response(JSON.stringify({ patch: 42, paths: ["a.ts"] }), {
+				headers: { "content-type": "application/json" },
+				status: 200,
+			})
+		);
+		await expect(fetchGitFileDiff(TARGET, "/repo", ["a.ts"])).rejects.toThrow(
+			"invalid file diff response"
+		);
+	});
+});
+
 /** How many times a header name appears once `fetch` has normalized the init. */
 function headerEntries(init: RequestInit | undefined, name: string): string[] {
 	const headers = new Headers(init?.headers);
@@ -119,6 +201,30 @@ function headerEntries(init: RequestInit | undefined, name: string): string[] {
 }
 
 describe("git client request headers", () => {
+	it("initializes a local repository without staging files", async () => {
+		const captured = stubFetch(
+			new Response(
+				JSON.stringify({ branch: "main", initialized: true, success: true }),
+				{
+					headers: { "content-type": "application/json" },
+					status: 200,
+				}
+			)
+		);
+		const result = await initializeGit(TARGET, "/repo");
+
+		expect(captured.url).toBe("http://127.0.0.1:7980/api/git/init");
+		expect(JSON.parse(String(captured.init?.body))).toEqual({ cwd: "/repo" });
+		expect(result).toEqual({
+			branch: "main",
+			initialized: true,
+			success: true,
+		});
+		expect(headerEntries(captured.init, "content-type")).toEqual([
+			"application/json",
+		]);
+	});
+
 	it("sends exactly one application/json content type on commit/push", async () => {
 		const captured = stubFetch(
 			new Response(JSON.stringify({ success: true }), {

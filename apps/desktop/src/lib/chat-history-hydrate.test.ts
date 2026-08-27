@@ -11,7 +11,15 @@ function textOf(parts: unknown[]): string[] {
 
 describe("hydrateHistoryMessage", () => {
 	it("prefers structured parts over flat content", () => {
-		const parts = [{ type: "tool-Read", toolCallId: "t1" }];
+		const parts = [
+			{
+				input: undefined,
+				state: "input-streaming" as const,
+				toolCallId: "t1",
+				toolName: "Read",
+				type: "dynamic-tool" as const,
+			},
+		];
 		const out = hydrateHistoryMessage(
 			{
 				id: "m1",
@@ -72,7 +80,15 @@ describe("hydrateHistoryMessage", () => {
 	});
 
 	it("keeps a cut-off turn's tool rows untouched", () => {
-		const parts = [{ type: "tool-Bash", toolCallId: "t9" }];
+		const parts = [
+			{
+				input: undefined,
+				state: "input-streaming" as const,
+				toolCallId: "t9",
+				toolName: "Bash",
+				type: "dynamic-tool" as const,
+			},
+		];
 		const out = hydrateHistoryMessage(
 			{
 				id: "m4",

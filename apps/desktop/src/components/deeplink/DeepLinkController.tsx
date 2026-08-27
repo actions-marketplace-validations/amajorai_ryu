@@ -1,16 +1,26 @@
+import { resolveRnpNode } from "@ryuhq/protocol/continuity";
 import {
 	type DeepLinkIntent,
 	parseRyuDeepLink,
 } from "@ryuhq/protocol/deep-link";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { sileo } from "sileo";
+import { ContinueOnNodeDialog } from "@/src/components/chat/ContinueOnNodeDialog.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { pageRoute } from "@/src/lib/page-routes.ts";
 import { useDeepLinkStore } from "@/src/store/useDeepLinkStore.ts";
+import { type Node, useNodeStore } from "@/src/store/useNodeStore.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 import { DeepLinkConfirmDialog } from "./DeepLinkConfirmDialog.tsx";
 
 type OpenTab = ReturnType<typeof useTabsContext>["openTab"];
+type HandoffIntent = Extract<DeepLinkIntent, { kind: "handoff" }>;
+
+interface PendingHandoff {
+	intent: HandoffIntent;
+	sourceNode: Node;
+}
 
 // The page-key → tab-route map (`ryu://open/<page>`) lives in
 // `@/src/lib/page-routes.ts`: it is the allowlist BOTH this controller and the
@@ -24,9 +34,14 @@ type OpenTab = ReturnType<typeof useTabsContext>["openTab"];
 // double-handle a single link.
 function isMainWindow(): boolean {
 	try {
-		// biome-ignore lint/suspicious/noExplicitAny: Tauri internal metadata
-		const internals = (window as any).__TAURI_INTERNALS__;
-		return (internals?.metadata?.currentWindow?.label ?? "main") === "main";
+		const tauriWindow: Window & {
+			__TAURI_INTERNALS__?: {
+				metadata?: { currentWindow?: { label?: unknown } };
+			};
+		} = window;
+		const label =
+			tauriWindow.__TAURI_INTERNALS__?.metadata?.currentWindow?.label;
+		return typeof label !== "string" || label === "main";
 	} catch {
 		return true;
 	}
@@ -81,6 +96,15 @@ function navigateForIntent(intent: DeepLinkIntent, openTab: OpenTab): boolean {
 export function DeepLinkController() {
 	const { openTab } = useTabsContext();
 	const request = useDeepLinkStore((s) => s.request);
+	const nodes = useNodeStore((s) => s.nodes);
+	const setTabNodeOverride = useNodeStore((s) => s.setTabOverride);
+	const resolveConfiguredNodes = useCallback(
+		() => useNodeStore.getState().nodes,
+		[]
+	);
+	const [pendingHandoff, setPendingHandoff] = useState<PendingHandoff | null>(
+		null
+	);
 
 	useEffect(() => {
 		if (!isMainWindow()) {
@@ -93,6 +117,20 @@ export function DeepLinkController() {
 			for (const url of urls) {
 				const intent = parseRyuDeepLink(url);
 				if (!intent) {
+					continue;
+				}
+				if (intent.kind === "handoff") {
+					const resolution = resolveRnpNode(
+						intent.sourceNodeUrl,
+						useNodeStore.getState().nodes
+					);
+					if (resolution.kind === "blocked") {
+						sileo.error({
+							title: "Handoff source is not a configured node",
+						});
+						continue;
+					}
+					setPendingHandoff({ intent, sourceNode: resolution.node });
 					continue;
 				}
 				// Navigation intents act immediately (no side effect). Action intents
@@ -143,5 +181,31 @@ export function DeepLinkController() {
 		};
 	}, [openTab, request]);
 
-	return <DeepLinkConfirmDialog />;
+	return (
+		<>
+			<DeepLinkConfirmDialog />
+			{pendingHandoff ? (
+				<ContinueOnNodeDialog
+					conversationId={pendingHandoff.intent.conversationId}
+					conversationTitle="Shared conversation"
+					nodes={nodes}
+					onCompleted={(destination) => {
+						const tabId = openTab("/chat", {
+							conversationId: pendingHandoff.intent.conversationId,
+						});
+						setTabNodeOverride(tabId, destination.name);
+						setPendingHandoff(null);
+					}}
+					onOpenChange={(open) => {
+						if (!open) {
+							setPendingHandoff(null);
+						}
+					}}
+					open
+					resolveNodes={resolveConfiguredNodes}
+					sourceNode={pendingHandoff.sourceNode}
+				/>
+			) : null}
+		</>
+	);
 }

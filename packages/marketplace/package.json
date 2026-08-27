@@ -19,6 +19,7 @@
     "./catalog/recommendations": "./src/catalog/recommendations.ts",
     "./catalog/chrome/for-you-section": "./src/catalog/chrome/for-you-section.tsx",
     "./catalog/chrome/marketplace-home": "./src/catalog/chrome/marketplace-home.tsx",
+    "./catalog/chrome/marketplace-help-dialog": "./src/catalog/chrome/marketplace-help-dialog.tsx",
     "./catalog/chrome/marketplace-sections": "./src/catalog/chrome/marketplace-sections.ts",
     "./catalog/chrome/marketplace-surface": "./src/catalog/chrome/marketplace-surface.tsx",
     "./catalog/types": "./src/catalog/types.ts",

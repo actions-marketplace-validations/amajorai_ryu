@@ -60,15 +60,55 @@ export function detectDownloadOS(): DownloadOS {
 	return "macos";
 }
 
+/** Resolve architecture signals, preferring the browser's explicit CPU value. */
+export function classifyDownloadArch(
+	userAgent: string,
+	highEntropyArchitecture?: string | null
+): DownloadArch {
+	const architecture = highEntropyArchitecture?.toLowerCase() ?? "";
+	const normalizedUserAgent = userAgent.toLowerCase();
+	return architecture.includes("arm") ||
+		normalizedUserAgent.includes("arm") ||
+		normalizedUserAgent.includes("aarch64")
+		? "arm"
+		: "intel";
+}
+
 /** Detect the visitor's processor architecture, defaulting to Intel-compatible builds. */
 export function detectDownloadArch(): DownloadArch {
 	if (typeof window === "undefined") {
 		return "intel";
 	}
-	const userAgent = window.navigator.userAgent.toLowerCase();
-	return userAgent.includes("arm") || userAgent.includes("aarch64")
-		? "arm"
-		: "intel";
+	return classifyDownloadArch(window.navigator.userAgent);
+}
+
+/**
+ * Chromium deliberately reports Apple-silicon Macs as `MacIntel` in its normal
+ * user agent. Use its high-entropy architecture signal when available, while
+ * retaining the synchronous detector as the Safari/Firefox fallback.
+ */
+export async function detectDownloadArchAsync(): Promise<DownloadArch> {
+	if (typeof window === "undefined") {
+		return "intel";
+	}
+	const browserNavigator = window.navigator as Navigator & {
+		userAgentData?: {
+			getHighEntropyValues?: (
+				hints: string[]
+			) => Promise<{ architecture?: string }>;
+		};
+	};
+	try {
+		const values = await browserNavigator.userAgentData?.getHighEntropyValues?.(
+			["architecture"]
+		);
+		return classifyDownloadArch(
+			browserNavigator.userAgent,
+			values?.architecture
+		);
+	} catch {
+		return detectDownloadArch();
+	}
 }
 
 /**

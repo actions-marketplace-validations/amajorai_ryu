@@ -93,7 +93,7 @@ export const HOSTED_AGENT_PLANS: Readonly<
 	teams: {
 		agentBundleSize: HOSTED_AGENT_BUNDLE_SIZE,
 		id: "teams",
-		name: "For Teams",
+		name: "Teams",
 		baseMonthlyPriceMicroUsd: usdToMicro(250),
 		includedAgents: 5,
 		maxOrganizationMembers: HOSTED_AGENT_PRO_MAX_ORG_MEMBERS,

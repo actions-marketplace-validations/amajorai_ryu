@@ -28,6 +28,11 @@ export function buildHeaders(
 	if (options.token) {
 		headers.Authorization = `Bearer ${options.token}`;
 	}
+	const userJwt =
+		typeof options.userJwt === "function" ? options.userJwt() : options.userJwt;
+	if (userJwt) {
+		headers["x-ryu-user-jwt"] = userJwt;
+	}
 	return headers;
 }
 

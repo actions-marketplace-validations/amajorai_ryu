@@ -658,9 +658,12 @@ pub(crate) fn may_read_env_secret(plugin_id: &str, var: &str) -> bool {
 /// manifest changes, which is the whole point of
 /// [`crate::plugin_secrets`].
 ///
-/// # Precedence: process env FIRST, store second
+/// # Precedence: live node token, then process env, then store
 ///
-/// An operator who exports a var in the service unit / shell profile expects that
+/// `RYU_TOKEN` is Core's internal self-call credential. Runtime rotation updates
+/// [`crate::node_token::active_token`] without mutating the multithreaded process
+/// environment, so that one name resolves from live state. For every other name,
+/// an operator who exports a var in the service unit / shell profile expects that
 /// value to be the one in effect, and expects `env | grep` to explain what the
 /// process is doing. If the store won, a forgotten UI entry would silently shadow
 /// the deployment's configuration and there would be nothing in the environment to
@@ -697,7 +700,15 @@ async fn resolve_env_secret_from(
         );
         return SecretToken::Absent;
     }
-    if let Some(v) = std::env::var(var).ok().filter(|v| !v.is_empty()) {
+    let live_node_token = (var == "RYU_TOKEN")
+        .then(crate::node_token::active_token)
+        .flatten();
+    let environment_value = std::env::var(var).ok();
+    if let Some(v) = resolve_process_env_value(
+        var,
+        live_node_token.as_deref(),
+        environment_value.as_deref(),
+    ) {
         return SecretToken::Value(v);
     }
     let Some(store) = store else {
@@ -713,6 +724,19 @@ async fn resolve_env_secret_from(
             SecretToken::Absent
         }
     }
+}
+
+fn resolve_process_env_value(
+    var: &str,
+    live_node_token: Option<&str>,
+    environment_value: Option<&str>,
+) -> Option<String> {
+    let value = if var == "RYU_TOKEN" {
+        live_node_token
+    } else {
+        environment_value
+    };
+    value.filter(|value| !value.is_empty()).map(str::to_owned)
 }
 
 /// Resolve a single whitespace-delimited `word` against the secret grammar.
@@ -1054,9 +1078,43 @@ pub async fn run_http_tool(
     let (result, exit_code, audit_err) = match req.send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
-            let text = resp.text().await.unwrap_or_default();
-            let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
-            finalize_http_result(fail_open, unwrap_body, Some(status), body, None)
+            if status == reqwest::StatusCode::PAYMENT_REQUIRED.as_u16() {
+                let challenge_headers: Vec<String> = resp
+                    .headers()
+                    .get_all(reqwest::header::WWW_AUTHENTICATE)
+                    .iter()
+                    .filter_map(|value| value.to_str().ok().map(str::to_owned))
+                    .collect();
+                let redacted_url = url::Url::parse(&final_url)
+                    .map(|mut url| {
+                        url.set_query(None);
+                        url.set_fragment(None);
+                        url.to_string()
+                    })
+                    .unwrap_or_else(|_| "redacted".to_owned());
+                if let Some(envelope) = crate::payment::PaymentRequiredEnvelope::from_http_headers(
+                    challenge_headers.iter().map(String::as_str),
+                    serde_json::json!({
+                        "kind": "http_tool",
+                        "method": method_upper,
+                        "url": redacted_url,
+                    }),
+                ) {
+                    (
+                        Ok(envelope.into_value()),
+                        2,
+                        Some("MPP payment required".to_owned()),
+                    )
+                } else {
+                    let text = resp.text().await.unwrap_or_default();
+                    let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+                    finalize_http_result(fail_open, unwrap_body, Some(status), body, None)
+                }
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+                finalize_http_result(fail_open, unwrap_body, Some(status), body, None)
+            }
         }
         Err(e) => finalize_http_result(
             fail_open,
@@ -2168,19 +2226,54 @@ mod tests {
     /// budget gate fails CLOSED on an unreachable gateway), and RESTORE those
     /// process-global vars on drop so the posture never leaks into sibling tests.
     /// Must be constructed while holding [`lock_gateway_env`].
-    struct CmdEnvGuard;
+    struct CmdEnvGuard {
+        previous_gateway_url: Option<String>,
+        previous_fallback: Option<String>,
+        previous_exec_mode: Option<String>,
+        previous_allowlist: Option<String>,
+    }
     impl CmdEnvGuard {
         fn armed() -> Self {
+            let previous_gateway_url = std::env::var("RYU_GATEWAY_URL").ok();
+            let previous_fallback = std::env::var("RYU_ALLOW_GATEWAY_FALLBACK").ok();
+            let previous_exec_mode = std::env::var("RYU_EXEC_APPROVAL_MODE").ok();
+            let previous_allowlist = std::env::var(ENV_COMMAND_TOOL_ALLOWLIST).ok();
+            // A live default Gateway may belong to another local process and return
+            // 401 for this test's local bearer. Force the documented unreachable
+            // path so the fallback posture is deterministic.
+            std::env::set_var("RYU_GATEWAY_URL", "http://127.0.0.1:1");
             std::env::set_var("RYU_ALLOW_GATEWAY_FALLBACK", "1");
             std::env::set_var("RYU_EXEC_APPROVAL_MODE", "off");
-            Self
+            Self {
+                previous_gateway_url,
+                previous_fallback,
+                previous_exec_mode,
+                previous_allowlist,
+            }
         }
     }
     impl Drop for CmdEnvGuard {
         fn drop(&mut self) {
-            std::env::remove_var("RYU_ALLOW_GATEWAY_FALLBACK");
-            std::env::remove_var("RYU_EXEC_APPROVAL_MODE");
-            std::env::remove_var(ENV_COMMAND_TOOL_ALLOWLIST);
+            restore_env("RYU_GATEWAY_URL", self.previous_gateway_url.take());
+            restore_env(
+                "RYU_ALLOW_GATEWAY_FALLBACK",
+                self.previous_fallback.take(),
+            );
+            restore_env(
+                "RYU_EXEC_APPROVAL_MODE",
+                self.previous_exec_mode.take(),
+            );
+            restore_env(
+                ENV_COMMAND_TOOL_ALLOWLIST,
+                self.previous_allowlist.take(),
+            );
+        }
+    }
+
+    fn restore_env(name: &str, value: Option<String>) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
         }
     }
 
@@ -3369,12 +3462,14 @@ mod tests {
     /// loopback Core with the SHARED `env:RYU_TOKEN`, which by construction fits no
     /// per-plugin prefix. Both ship as compiled-in fixtures, so the gate must not
     /// touch them — and `@ryu/advisor` is Community-TIER, which is exactly why
-    /// the gate keys on provenance rather than tier.
+    /// the gate keys on provenance rather than tier. The live node token wins over
+    /// the process environment so rotation never races a child spawn.
     #[tokio::test]
     async fn compiled_in_plugins_still_read_the_shared_ryu_token() {
         let _lock = lock_env_secret();
-        std::env::set_var("RYU_TOKEN", "core-token");
         std::env::remove_var(ENV_SECRET_ALLOWLIST);
+        let expected = crate::node_token::active_token().expect("node token is available");
+        let expected_header = format!("Bearer {expected}");
 
         for plugin_id in ["@ryu/shadow", "@ryu/advisor"] {
             let out = resolve_secret_header_source(
@@ -3388,12 +3483,10 @@ mod tests {
             .expect("core-tier read resolves");
             assert_eq!(
                 out.as_deref(),
-                Some("Bearer core-token"),
+                Some(expected_header.as_str()),
                 "{plugin_id} must keep reading the shared RYU_TOKEN"
             );
         }
-
-        std::env::remove_var("RYU_TOKEN");
     }
 
     /// The prefix is a BYOK seam of the same SHAPE first-party manifests author
@@ -3469,6 +3562,22 @@ mod tests {
         assert_eq!(out, SecretToken::Value("tvly-from-env".to_string()));
 
         std::env::remove_var("RYU_TAVILY_API_KEY");
+    }
+
+    #[test]
+    fn live_node_token_wins_over_the_startup_environment_after_rotation() {
+        assert_eq!(
+            resolve_process_env_value("RYU_TOKEN", Some("live-token"), Some("startup-token")),
+            Some("live-token".to_owned())
+        );
+        assert_eq!(
+            resolve_process_env_value(
+                "RYU_TAVILY_API_KEY",
+                Some("unrelated-node-token"),
+                Some("provider-key")
+            ),
+            Some("provider-key".to_owned())
+        );
     }
 
     /// THE LOAD-BEARING GUARD. The store is keyed by the CALLING plugin id, so

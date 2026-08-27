@@ -28,6 +28,7 @@ import {
 } from "@ryu/ui/components/alert-dialog.tsx";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
+import { Checkbox } from "@ryu/ui/components/checkbox.tsx";
 import {
 	Empty,
 	EmptyContent,
@@ -123,7 +124,7 @@ import { useInstalledOnly } from "./installed-filter.tsx";
 import { REALM_ICONS } from "./realm-icons.ts";
 import { safeHttpUrl } from "./safe-url.ts";
 import { runScorecard, type Scorecard } from "./scorecard.ts";
-import { stabilityLabel } from "./stability.ts";
+import { isUnstableRelease, stabilityLabel } from "./stability.ts";
 import { describeIncompatibility, surfaceLabel } from "./surface-labels.ts";
 import {
 	type AddMarketplaceParams,
@@ -131,6 +132,7 @@ import {
 	type AppCatalogItem,
 	type CatalogEntry,
 	type CatalogModelProvider,
+	type CatalogVersion,
 	catalogLayerBadges,
 	evaluateCompatibility,
 	type PluginCatalogDetail,
@@ -245,6 +247,16 @@ export function dedupeById(items: readonly AppCatalogItem[]): AppCatalogItem[] {
 		out.push(item);
 	}
 	return out;
+}
+
+/** Apply the Marketplace's stable-only default to an already scoped list. */
+export function filterAppsByStability(
+	items: readonly AppCatalogItem[],
+	showUnstable: boolean
+): AppCatalogItem[] {
+	return showUnstable
+		? [...items]
+		: items.filter((item) => !isUnstableRelease(item.entry.stability));
 }
 
 /** Shared predicate for the Marketplace tag filter and its focused tests. */
@@ -413,6 +425,7 @@ export default function AppsCatalogSection({
 		detailLoading,
 		detailError,
 		install,
+		installVersion,
 		installing,
 		setEnabled,
 		lifecyclePending,
@@ -456,9 +469,13 @@ export default function AppsCatalogSection({
 	// on any surface that does not mount the provider — the web marketplace, where
 	// nothing is installed — so this is safe to apply unconditionally.
 	const installedOnly = useInstalledOnly();
+	const [showUnstable, setShowUnstable] = host.usePersistedToggle(
+		"marketplace-show-unstable-releases",
+		false
+	);
 	const passesInstalledFilter = (it: AppCatalogItem) =>
 		!installedOnly || it.installed;
-	const visibleItems = dedupeById(
+	const candidateItems = dedupeById(
 		items.filter(
 			(it) =>
 				!isCommunityEntry(it) &&
@@ -466,12 +483,21 @@ export default function AppsCatalogSection({
 				passesInstalledFilter(it)
 		)
 	);
-	const communityItems = dedupeById(
+	const candidateCommunityItems = dedupeById(
 		community.items
 			.filter(isCommunityEntry)
 			.filter(splitForVariant)
 			.filter(passesInstalledFilter)
 	);
+	const visibleItems = filterAppsByStability(candidateItems, showUnstable);
+	const communityItems = filterAppsByStability(
+		candidateCommunityItems,
+		showUnstable
+	);
+	const stabilityFiltered =
+		!showUnstable &&
+		candidateItems.length + candidateCommunityItems.length > 0 &&
+		visibleItems.length + communityItems.length === 0;
 	const [selectedTag, setSelectedTag] = useState<string | null>(null);
 	const availableTags = useMemo(() => {
 		const tags = new Set<string>();
@@ -630,38 +656,49 @@ export default function AppsCatalogSection({
 		selectFirstParty(id);
 	};
 
-	const filter =
-		host.install || availableTags.length > 0
-			? {
-					label: availableTags.length > 0 ? "Filters" : "Source & install",
-					icon: Link01Icon,
-					activeCount: selectedTag ? 1 : 0,
-					panel: (
-						<div className="flex flex-col gap-4 p-4">
-							{availableTags.length > 0 ? (
-								<TagFilter
-									onChange={setSelectedTag}
-									tags={availableTags}
-									value={selectedTag}
-								/>
-							) : null}
-							{host.install ? (
-								<>
-									<PluginSourcePicker
-										activeSource={activeSource}
-										addingMarketplace={addingMarketplace}
-										addMarketplace={addMarketplace}
-										selectingSource={selectingSource}
-										selectSource={selectSource}
-										sources={sources}
-									/>
-									<InstallFromUrl install={installFromUrl} />
-								</>
-							) : null}
-						</div>
-					),
-				}
-			: undefined;
+	const filter = {
+		label: availableTags.length > 0 ? "Filters" : "Source & install",
+		icon: Link01Icon,
+		activeCount: (selectedTag ? 1 : 0) + (showUnstable ? 1 : 0),
+		panel: (
+			<div className="flex flex-col gap-4 p-4">
+				<div className="flex items-center gap-2">
+					<Checkbox
+						aria-label="Show unstable releases"
+						checked={showUnstable}
+						id="show-unstable-releases"
+						onCheckedChange={(checked) => setShowUnstable(checked === true)}
+					/>
+					<Label
+						className="cursor-pointer text-sm"
+						htmlFor="show-unstable-releases"
+					>
+						Show unstable releases
+					</Label>
+				</div>
+				{availableTags.length > 0 ? (
+					<TagFilter
+						onChange={setSelectedTag}
+						tags={availableTags}
+						value={selectedTag}
+					/>
+				) : null}
+				{host.install ? (
+					<>
+						<PluginSourcePicker
+							activeSource={activeSource}
+							addingMarketplace={addingMarketplace}
+							addMarketplace={addMarketplace}
+							selectingSource={selectingSource}
+							selectSource={selectSource}
+							sources={sources}
+						/>
+						<InstallFromUrl install={installFromUrl} />
+					</>
+				) : null}
+			</div>
+		),
+	};
 
 	return (
 		<StoreCatalogLayout
@@ -673,6 +710,7 @@ export default function AppsCatalogSection({
 					error={active ? active.error : error}
 					install={active ? active.install : install}
 					installLayer={host.install}
+					installVersion={active ? undefined : installVersion}
 					isInstalling={isInstalling}
 					item={active ? active.selectedItem : selectedItem}
 					lifecyclePending={active ? active.lifecyclePending : lifecyclePending}
@@ -718,6 +756,7 @@ export default function AppsCatalogSection({
 					searching={query.trim().length > 0}
 					selectedId={communitySelected ? null : selectedId}
 					settingsOpener={settingsOpener}
+					stabilityFiltered={stabilityFiltered}
 				/>
 			}
 			onCloseDetail={closeDetail}
@@ -993,6 +1032,7 @@ function AppList({
 	hasNextPage,
 	nounPlural,
 	fallbackIcon,
+	stabilityFiltered,
 	searching,
 	communityItems,
 	communityLoading,
@@ -1022,6 +1062,8 @@ function AppList({
 	fetchNextPage: () => void;
 	hasNextPage: boolean;
 	nounPlural: string;
+	/** True when the stable-only predicate removed every candidate row. */
+	stabilityFiltered?: boolean;
 	/** Realm glyph shown when an item has no icon of its own (apps→grid,
 	 *  plugins→plug socket), sourced from the shared REALM_ICONS so it matches the tab.
 	 */
@@ -1124,11 +1166,13 @@ function AppList({
 			// from a GitHub topic, which has no marketplace document at all,
 			// carries the same count as a published one.
 			likeNamespace={it.entry.id}
+			membershipIncluded={Boolean(it.entry.membership_included)}
 			name={it.entry.name}
 			onClick={() => onSelect(it.entry.id)}
 			orgVerified={it.entry.org_verified}
 			orgVerifiedTier={it.entry.org_verified_tier}
 			publisherTrust={it.entry.publisher_trust}
+			publisherVerification={it.entry.publisher_verification}
 			seedId={it.entry.id}
 			selected={it.entry.id === selectedId}
 			stability={it.entry.stability}
@@ -1196,8 +1240,16 @@ function AppList({
 							<EmptyMedia variant="icon">
 								<HugeiconsIcon icon={fallbackIcon} />
 							</EmptyMedia>
-							<EmptyTitle>No {nounPlural} found</EmptyTitle>
-							<EmptyDescription>Try a different search.</EmptyDescription>
+							<EmptyTitle>
+								{stabilityFiltered
+									? "No stable releases found"
+									: `No ${nounPlural} found`}
+							</EmptyTitle>
+							<EmptyDescription>
+								{stabilityFiltered
+									? "Turn on “Show unstable releases” to browse experimental versions."
+									: "Try a different search."}
+							</EmptyDescription>
 						</EmptyHeader>
 						<EmptyContent>
 							<Button onClick={onClearSearch} size="sm" variant="ghost">
@@ -1404,6 +1456,7 @@ function CommunityShelf({
 			// A community listing has no marketplace document — the namespace
 			// key is the whole reason it can be liked at all. See the model.
 			likeNamespace={it.entry.id}
+			membershipIncluded={false}
 			name={it.entry.name}
 			onClick={() => onSelect(it.entry.id)}
 			// The check rides on the COMMUNITY shelf too, and that is exactly
@@ -1416,6 +1469,7 @@ function CommunityShelf({
 			orgVerified={it.entry.org_verified}
 			orgVerifiedTier={it.entry.org_verified_tier}
 			publisherTrust={it.entry.publisher_trust}
+			publisherVerification={it.entry.publisher_verification}
 			seedId={it.entry.id}
 			// A GitHub repo rarely declares a wash, so without this its card
 			// was a bare glyph on flat `bg-muted` in a grid of painted plates.
@@ -1755,7 +1809,7 @@ function reportTargetForApp(item: AppCatalogItem) {
  *  hero-toned `StatusBadge`, so each keeps a surface the scrim cannot eat.
  *
  *  Split from {@link AppSecondaryActions} along STATE, not along layout: this half
- *  owns the pre-install train choice and the enable-grant confirmation, which are
+ *  owns the install-time train choice and the enable-grant confirmation, which are
  *  driven by these buttons; the other half owns the post-install train switch and
  *  its confirmation. The two are mutually exclusive (`installed`), so only one of
  *  them ever resolves the channel list and there is still exactly one fetch.
@@ -2215,6 +2269,7 @@ function AppDetailPanel({
 	lifecyclePending,
 	error,
 	installLayer,
+	installVersion,
 	noun,
 	renderAffordance,
 	settingsOpener,
@@ -2238,6 +2293,7 @@ function AppDetailPanel({
 	lifecyclePending: boolean;
 	error: string | null;
 	installLayer: CatalogInstall | null;
+	installVersion?: (id: string, version: CatalogVersion) => Promise<void>;
 	noun: string;
 	renderAffordance: CatalogHost["renderAffordance"];
 	/** Resolves this listing to its "open settings" action (see the host seam). */
@@ -2524,6 +2580,14 @@ function AppDetailPanel({
 					// without one there is no tag to read from.
 					hostFetchVersionDetail && versionRepo
 						? (tag: string) => hostFetchVersionDetail(versionRepo, tag)
+						: undefined
+				}
+				installVersion={
+					installVersion &&
+					installLayer &&
+					!entry.descriptor_only &&
+					!isCommunityEntry(item)
+						? (version) => installVersion(entry.id, version)
 						: undefined
 				}
 				Markdown={Markdown}
@@ -2984,6 +3048,9 @@ function AppHero({
 	const publisherTrust = detailKnowsOrgVerification
 		? detail?.publisherTrust
 		: entry.publisher_trust;
+	const publisherVerification = detailKnowsOrgVerification
+		? detail?.publisherVerification
+		: entry.publisher_verification;
 	return (
 		<ListingHero
 			actions={actions}
@@ -3017,6 +3084,7 @@ function AppHero({
 					publisherTrust={publisherTrust}
 					tier={orgVerifiedTier}
 					tone="hero"
+					verificationDetails={publisherVerification}
 				/>
 			}
 			statusIcons={statusIcons}

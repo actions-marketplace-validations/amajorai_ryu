@@ -43,7 +43,10 @@ describe("validation", () => {
 		expect(isKnownComposerControl(control({ type: "select" }))).toBe(true);
 		expect(
 			isKnownComposerControl(
-				control({ type: "chip", source: { http: { path: "/api/clips" } } })
+				control({
+					type: "chip",
+					source: { http: { path: "/api/ext/io.ryu.double-check/clips" } },
+				})
 			)
 		).toBe(true);
 		expect(
@@ -140,7 +143,9 @@ describe("partitionComposerControls", () => {
 				id: "c",
 				type: "chip",
 				flag: "clip",
-				source: { http: { path: "/api/clips" } },
+				source: {
+					http: { path: "/api/ext/io.ryu.double-check/clips" },
+				},
 			}),
 			control({
 				id: "a",

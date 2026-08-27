@@ -22,6 +22,16 @@ export interface ChatRoutingFields {
 	model?: string;
 }
 
+/** Presentation mode sent to Core for the flagship Ryu assistant. */
+export type ChatResponseMode = "everyday" | "developer";
+
+/** Map the Desktop's user-facing interface level to the chat vocabulary. */
+export function responseModeForInterface(
+	level: InterfaceLevel
+): ChatResponseMode {
+	return level === "expert" ? "developer" : "everyday";
+}
+
 /**
  * Ryu Work is intentionally agent-first: the user can choose the agent, while
  * Core owns model selection and routing. Keeping the local selections in place

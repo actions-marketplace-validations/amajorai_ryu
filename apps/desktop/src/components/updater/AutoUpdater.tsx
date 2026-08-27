@@ -2,6 +2,10 @@ import { decideUpdateEligibility } from "@ryu/auth/lib/plans";
 import { useEffect, useRef } from "react";
 import { sileo } from "sileo";
 import {
+	choosePreparedUpdateAction,
+	resolveAppUpdateSource,
+} from "@/src/components/updater/app-update-policy.ts";
+import {
 	updateToastBody,
 	updateToastId,
 } from "@/src/components/updater/ReleaseNotes.tsx";
@@ -10,10 +14,16 @@ import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
 	applyNodeUpdate,
 	checkForUpdate,
-	getAutoUpdateEnabled,
 	scheduleNodeUpdate,
 	type UpdateCheck,
 } from "@/src/lib/api/update.ts";
+import {
+	clearPreparedAppUpdate,
+	getAutomaticAppUpdateDownload,
+	getPreparedAppUpdate,
+	installPreparedAppUpdate,
+	prepareAppUpdate,
+} from "@/src/lib/app-update-preparation.ts";
 import {
 	clearPendingAppUpdate,
 	dueAppUpdate,
@@ -35,22 +45,20 @@ import { isLocalNode } from "@/src/store/useNodeStore.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 
 // Launch-time auto-updater for the desktop. On mount it asks Core whether an
-// update is available (Core is the single source of truth for the verdict and
-// the shared auto-update toggle). The actual install is performed by
-// tauri-plugin-updater — but the toast and the decision to auto-install are
-// driven by Core's verdict, so every surface behaves consistently.
+// update is available (Core remains the source of truth for the verdict). The
+// Tauri process downloads and durably verifies the artifact; the webview only
+// decides whether to download now and presents the explicit install action.
 //
-// - Auto-update ON  → download + install immediately, then relaunch.
-// - Auto-update OFF → show a persistent "update available" toast with an action.
+// - Automatic download ON  → prepare the update, then ask to install/restart.
+// - Automatic download OFF → ask before downloading, then ask to install.
 // - Lifetime owner past their updates window → Core offers the newest build the
 //   window COVERS, and that build is installed pinned to its OWN signed feed
 //   (the static feed always resolves to the absolute latest). Once the owner is
 //   already at that ceiling they get one prompt per newly-published version,
 //   rather than the silent "no update available" a bare clamp would produce.
 //
-// The Tauri plugins are imported lazily so the verdict/toast layer works even
-// when the native updater feed is unavailable (e.g. an unsigned dev build): in
-// that case we degrade to a "open downloads" toast rather than throwing.
+// A missing signed feed degrades to the existing manual-download action. No
+// launch-time branch installs or relaunches the app.
 export function AutoUpdater() {
 	const getNode = useActiveNodeGetter();
 	const ranRef = useRef(false);
@@ -112,6 +120,12 @@ export function AutoUpdater() {
 			const booked = await getPendingAppUpdate();
 			if (booked) {
 				if (booked.version === verdict.latest) {
+					// "Install later" already pins and authorizes this release. Prepare
+					// it now so the quiet-window handoff does not spend that window
+					// downloading, but do not install before the booked instant.
+					await prepareUpdate(verdict, { node, pinned: true }).catch(
+						() => undefined
+					);
 					return;
 				}
 				// A newer release superseded the booked one. Leaving the stale record
@@ -121,35 +135,49 @@ export function AutoUpdater() {
 				await clearPendingAppUpdate();
 			}
 
-			// The shared cross-surface `auto-updates` preference is the ONLY source of
-			// truth for whether we install unattended — the same key the island
-			// already honours, so the toggle means the same thing everywhere.
-			const auto = await getAutoUpdateEnabled(target);
-			if (auto) {
-				await installUpdate(verdict, { node });
-				return;
-			}
-
-			// Notify-only: persistent toast with an explicit install action.
-			sileo.info({
-				title: `Update available — v${verdict.latest}`,
-				description: updateToastBody({
-					notes: verdict.notes,
-					htmlUrl: verdict.html_url,
-					fallback: "A new version of Ryu is ready to install.",
-					footnote: verdict.cutoff_waived_for_security
-						? "This is a security update, included regardless of your updates window."
-						: undefined,
-				}),
-				id: updateToastId(verdict.latest),
-				duration: null,
-				button: {
-					title: "Update now",
-					onClick: () => {
-						installUpdate(verdict, { node }).catch(() => undefined);
-					},
-				},
+			const [automaticDownload, prepared] = await Promise.all([
+				getAutomaticAppUpdateDownload(),
+				getPreparedAppUpdate().catch(() => null),
+			]);
+			const action = choosePreparedUpdateAction({
+				automaticDownload,
+				latest: verdict.latest,
+				preparedVersion: prepared?.version ?? null,
 			});
+			switch (action.kind) {
+				case "prompt_install":
+					showPreparedUpdatePrompt(verdict, { node });
+					return;
+				case "clear_and_notify":
+					await clearPreparedAppUpdate();
+					showDownloadUpdatePrompt(verdict, { node });
+					return;
+				case "notify_download":
+					showDownloadUpdatePrompt(verdict, { node });
+					return;
+				case "replace":
+					await clearPreparedAppUpdate();
+					break;
+				case "prepare":
+					break;
+				default: {
+					const exhaustive: never = action;
+					return exhaustive;
+				}
+			}
+			try {
+				const ready = await prepareUpdate(verdict, { node });
+				if (ready) {
+					showPreparedUpdatePrompt(verdict, { node });
+				} else {
+					offerManualDownload(
+						verdict,
+						verdict.html_url ?? "https://ryuhq.com/downloads?ref=ryu-app"
+					);
+				}
+			} catch (error) {
+				showPreparationFailure(verdict, { node }, error);
+			}
 		};
 
 		run().catch(() => undefined);
@@ -190,9 +218,7 @@ export function AutoUpdater() {
  * is newest at THIS moment — a different build, with different release notes,
  * on a machine they deliberately chose not to touch during the day.
  */
-async function installDeferredUpdate(node: {
-	url: string;
-}): Promise<boolean> {
+async function installDeferredUpdate(node: { url: string }): Promise<boolean> {
 	const due = await dueAppUpdate();
 	if (!due) {
 		return false;
@@ -226,14 +252,14 @@ async function installDeferredUpdate(node: {
  * A deferral only means anything if the build that lands later is the one the
  * user agreed to now, and that requires all three:
  *
- *   * a LOCAL node answered. The verdict is replayed hours later without a
+ * - a LOCAL node answered. The verdict is replayed hours later without a
  *     re-check, so a remote node's `tag` would let it choose which signed Ryu
  *     build lands on this machine — the exposure `canPinInstall` exists to
  *     deny. The live "Update now" path is not exposed the same way: it resolves
  *     the static feed, which always yields genuine-latest whatever a node says.
- *   * a `tag`. Without one there is nothing to pin to, and the install would
+ * - a `tag`. Without one there is nothing to pin to, and the install would
  *     fall through to the static feed and deliver whatever is newest at 03:00.
- *   * a FIXED channel. `nightly` / `canary` are rolling pointers, so pinning to
+ * - a FIXED channel. `nightly` / `canary` are rolling pointers, so pinning to
  *     one installs whatever it holds at the window — the unpinned behaviour
  *     with extra steps.
  *
@@ -343,6 +369,148 @@ function notifyUpdateOutsideWindow(verdict: UpdateCheck): void {
 	});
 }
 
+interface AppUpdateOptions {
+	node?: { url: string };
+	pinned?: boolean;
+}
+
+function isEligibleForAppUpdate(verdict: UpdateCheck): boolean {
+	const releasedAtMs = verdict.published_at
+		? Date.parse(verdict.published_at)
+		: Number.NaN;
+	const eligibility = decideUpdateEligibility({
+		cutoffMs: getUpdatesCutoffMs(),
+		nowMs: Date.now(),
+		releasePublishedAtMs: Number.isFinite(releasedAtMs) ? releasedAtMs : null,
+	});
+	return eligibility.eligible || verdict.cutoff_waived_for_security === true;
+}
+
+function sourceForUpdate(verdict: UpdateCheck, options?: AppUpdateOptions) {
+	const channel = getReleaseChannel();
+	if (verdict.restricted_by_cutoff) {
+		const tag = verdict.tag ?? "";
+		return resolveAppUpdateSource({
+			channel,
+			pin: {
+				allowed: canPinInstall(verdict, tag, channel, options?.node),
+				kind: "required",
+				tag,
+			},
+		});
+	}
+	if (options?.pinned) {
+		return resolveAppUpdateSource({
+			channel,
+			pin: {
+				allowed: canDeferAppUpdate(verdict, options.node),
+				kind: "required",
+				tag: verdict.tag ?? "",
+			},
+		});
+	}
+	return resolveAppUpdateSource({ channel, pin: { kind: "none" } });
+}
+
+export async function prepareUpdate(
+	verdict: UpdateCheck,
+	options?: AppUpdateOptions
+) {
+	if (!isEligibleForAppUpdate(verdict)) {
+		notifyUpdateOutsideWindow(verdict);
+		return null;
+	}
+	const source = sourceForUpdate(verdict, options);
+	if (!source) {
+		return null;
+	}
+	return prepareAppUpdate({
+		expectedVersion: verdict.latest,
+		source,
+	});
+}
+
+export function showPreparedUpdatePrompt(
+	verdict: UpdateCheck,
+	options?: AppUpdateOptions
+): void {
+	sileo.info({
+		title: `Update ready — v${verdict.latest}`,
+		description: updateToastBody({
+			notes: verdict.notes,
+			htmlUrl: verdict.html_url,
+			fallback: "Downloaded and verified. Install when you're ready.",
+			footnote: verdict.cutoff_waived_for_security
+				? "This is a security update, included regardless of your updates window."
+				: undefined,
+		}),
+		id: updateToastId(verdict.latest),
+		duration: null,
+		button: {
+			title: "Install and restart",
+			onClick: () => {
+				installUpdate(verdict, options).catch(() => undefined);
+			},
+		},
+	});
+}
+
+export function showDownloadUpdatePrompt(
+	verdict: UpdateCheck,
+	options?: AppUpdateOptions
+): void {
+	sileo.info({
+		title: `Update available — v${verdict.latest}`,
+		description: updateToastBody({
+			notes: verdict.notes,
+			htmlUrl: verdict.html_url,
+			fallback: "Download it now and install when you're ready.",
+		}),
+		id: updateToastId(verdict.latest),
+		duration: null,
+		button: {
+			title: "Download update",
+			onClick: () => {
+				prepareUpdate(verdict, options)
+					.then((prepared) => {
+						if (prepared) {
+							showPreparedUpdatePrompt(verdict, options);
+						}
+					})
+					.catch((error: unknown) => {
+						showPreparationFailure(verdict, options, error);
+					});
+			},
+		},
+	});
+}
+
+function showPreparationFailure(
+	verdict: UpdateCheck,
+	options: AppUpdateOptions | undefined,
+	error: unknown
+): void {
+	sileo.error({
+		title: "Update download failed",
+		description: error instanceof Error ? error.message : String(error),
+		duration: null,
+		button: {
+			title: "Retry download",
+			onClick: () => {
+				prepareUpdate(verdict, options)
+					.then((prepared) => {
+						if (prepared) {
+							showPreparedUpdatePrompt(verdict, options);
+						}
+					})
+					.catch((retryError: unknown) => {
+						showPreparationFailure(verdict, options, retryError);
+					});
+			},
+		},
+	});
+}
+
 function openDownloads(url: string) {
 	window.open(url, "_blank", "noopener");
 }
@@ -437,51 +605,6 @@ export async function applyReleaseUpdate(
 }
 
 /**
- * Install the release Core clamped us to, pinned to that release's OWN signed
- * feed rather than the static build-time endpoint.
- *
- * A missing per-tag feed is EXPECTED (only signed releases carry one), so the
- * command answering `false` is not an error — it falls back to a manual
- * download, never to the unpinned JS updater.
- */
-async function installPinnedUpdate(
-	verdict: UpdateCheck,
-	tag: string,
-	channel: ReleaseChannel,
-	downloadsUrl: string
-): Promise<void> {
-	const progressId = sileo.info({
-		title: `Downloading update v${verdict.latest}…`,
-		description: "Ryu will restart once the update is installed.",
-		duration: null,
-	});
-	try {
-		const { invoke } = await import("@tauri-apps/api/core");
-		const { relaunch } = await import("@tauri-apps/plugin-process");
-		const installed = await invoke<boolean>("install_update_at_tag", {
-			tag,
-			channel,
-		});
-		sileo.dismiss(progressId);
-		if (!installed) {
-			offerManualDownload(verdict, downloadsUrl);
-			return;
-		}
-		sileo.success({
-			title: "Update installed",
-			description: "Restarting Ryu…",
-			duration: 2000,
-		});
-		setTimeout(() => {
-			relaunch().catch(() => undefined);
-		}, 1500);
-	} catch {
-		sileo.dismiss(progressId);
-		offerManualDownload(verdict, downloadsUrl);
-	}
-}
-
-/**
  * Whether a clamped verdict may be installed by pinning to `verdict.tag`.
  *
  * Every input is a fact the CLIENT owns — never a flag the node asserted.
@@ -531,193 +654,71 @@ function canPinInstall(
 	);
 }
 
-// Drive the native install through tauri-plugin-updater, surfacing progress via
-// sileo. Falls back to a manual-download toast if the native feed is absent.
-// Exported so other surfaces (e.g. the node selector's Core/Gateway update
-// action) can trigger the same single app-wide install from Core's verdict.
+// Install only through the native prepared-artifact boundary. An explicit click
+// may download first when no verified artifact exists; automatic launch checks
+// call `prepareUpdate` instead and never enter this function.
 export async function installUpdate(
 	verdict: UpdateCheck,
-	options?: {
-		node?: { url: string };
-		/**
-		 * Install exactly the release `verdict.tag` names, rather than whatever the
-		 * static feed resolves to now.
-		 *
-		 * Set ONLY by the deferred-install path, where the verdict was pinned when
-		 * the user agreed to it and re-resolving would hand over a build they never
-		 * saw.
-		 *
-		 * It does not widen who may install what. The entitlement check below runs
-		 * first and unchanged; a clamped verdict still routes through
-		 * `canPinInstall`, the updates-window guard, which is left alone; and the
-		 * pinned branch carries `canDeferAppUpdate`, which re-imposes the same
-		 * `isLocalNode` requirement `canPinInstall` makes — so a remote node still
-		 * cannot choose which signed build lands here.
-		 */
-		pinned?: boolean;
-	}
-) {
-	// Cheap sanity check against a verdict that was not clamped when it should
-	// have been — a stale cached response, or a hand-crafted one. It CANNOT cover
-	// an older Core: that Core sends no `published_at`, so the verdict is
-	// "unknown-release-date" and fails open, exactly as today. The genuine defence
-	// against a hostile node is the pinned branch below, which fails closed.
-	const releasedAtMs = verdict.published_at
-		? Date.parse(verdict.published_at)
-		: Number.NaN;
-	const eligibility = decideUpdateEligibility({
-		cutoffMs: getUpdatesCutoffMs(),
-		nowMs: Date.now(),
-		releasePublishedAtMs: Number.isFinite(releasedAtMs) ? releasedAtMs : null,
-	});
-	if (!(eligibility.eligible || verdict.cutoff_waived_for_security)) {
-		// Withhold the install, but NEVER in silence. This branch is reached for
-		// verdicts Core did not clamp — a remote node answered, or a call site that
-		// does not opt into the clamp (the Download Center, Preflight, the node
-		// selector) — so it must not borrow the launch nag's once-per-version
-		// budget, which is normally already spent on this very version by the time
-		// the user presses Update.
+	options?: AppUpdateOptions
+): Promise<void> {
+	if (!isEligibleForAppUpdate(verdict)) {
 		notifyUpdateOutsideWindow(verdict);
 		return;
 	}
 
 	const downloadsUrl =
 		verdict.html_url ?? "https://ryuhq.com/downloads?ref=ryu-app";
-	const channel = getReleaseChannel();
-
-	// A restricted verdict means `latest` is NOT the newest published build — it
-	// is the newest one the caller's window covers. The JS updater can only read
-	// the static feed baked into tauri.conf.json, which always resolves to the
-	// ABSOLUTE latest, so installing through it would hand over a build the caller
-	// is not entitled to. Pinned installs therefore go through the Rust command
-	// against that release's own signed feed.
-	//
-	// This path fails CLOSED: if any precondition is missing we show the
-	// manual-download toast and never fall through to the unclamped JS updater,
-	// which would defeat the clamp.
-	if (verdict.restricted_by_cutoff) {
-		const tag = verdict.tag ?? "";
-		if (canPinInstall(verdict, tag, channel, options?.node)) {
-			await installPinnedUpdate(verdict, tag, channel, downloadsUrl);
-		} else {
-			offerManualDownload(verdict, downloadsUrl);
+	let progressId: ReturnType<typeof sileo.info> | undefined;
+	try {
+		const prepared = await getPreparedAppUpdate().catch(() => null);
+		if (prepared?.version !== verdict.latest) {
+			if (prepared) {
+				await clearPreparedAppUpdate();
+			}
+			progressId = sileo.info({
+				title: `Downloading update v${verdict.latest}…`,
+				description: "Ryu will ask before installing and restarting.",
+				duration: null,
+			});
+			const downloaded = await prepareUpdate(verdict, options);
+			if (progressId !== undefined) {
+				sileo.dismiss(progressId);
+				progressId = undefined;
+			}
+			if (!downloaded) {
+				offerManualDownload(verdict, downloadsUrl);
+				return;
+			}
 		}
-		return;
-	}
 
-	// A deferred install on a fixed channel resolves to the tag it was booked
-	// against. The JS updater below can only read the static feed baked into
-	// tauri.conf.json, which always points at the ABSOLUTE latest — so using it
-	// here would install whatever shipped between the user agreeing and the
-	// window arriving, which is precisely the thing pinning exists to stop.
-	//
-	// A rolling pointer (`nightly` / `canary`) is excluded because it does not
-	// identify a build: pinning to it would install whatever the pointer holds
-	// now, which is the unpinned behaviour with extra steps. Those channels fall
-	// through to the channel path below, unchanged.
-	if (options?.pinned) {
-		// FAILS CLOSED, like the restricted branch above and for a sharper reason.
-		// A deferred verdict is replayed hours later with no re-check, so if the
-		// preconditions in `canDeferAppUpdate` do not hold we must NOT fall through
-		// to the JS updater: that reads the static feed, which always resolves to
-		// absolute-latest, and would quietly install a build the user never saw —
-		// the exact substitution pinning exists to prevent.
-		//
-		// The `isLocalNode` half is a trust boundary, not tidiness. `canPinInstall`
-		// documents it: a hostile or compromised node choosing among legitimately
-		// signed releases is not stopped by signature verification. The surface
-		// already refuses to OFFER a deferral in these cases, so reaching here
-		// means the record predates that check or the active node changed.
-		if (!canDeferAppUpdate(verdict, options.node)) {
-			offerManualDownload(verdict, downloadsUrl);
-			return;
-		}
-		await installPinnedUpdate(
-			verdict,
-			verdict.tag ?? "",
-			channel,
-			downloadsUrl
-		);
-		return;
-	}
-
-	// Non-stable channels route through the Rust `install_update_from_channel`
-	// command, which points the Tauri updater at that channel's own `latest.json`
-	// feed (the JS updater below can only read the static Stable endpoint baked
-	// into tauri.conf.json). The Stable path is left byte-identical below, so a
-	// release user on the default channel behaves exactly as before. If the
-	// command is unavailable (older Core-less shell) or fails, we fall through to
-	// the manual-download fallback rather than trapping the user.
-	if (channel !== "stable") {
-		const channelProgressId = sileo.info({
-			title: `Downloading ${channel} update v${verdict.latest}…`,
-			description: "Ryu will restart once the update is installed.",
+		progressId = sileo.info({
+			title: `Installing update v${verdict.latest}…`,
+			description: "Ryu will restart after the verified update is installed.",
 			duration: null,
 		});
-		try {
-			const { invoke } = await import("@tauri-apps/api/core");
-			const { relaunch } = await import("@tauri-apps/plugin-process");
-			const installed = await invoke<boolean>("install_update_from_channel", {
-				channel,
-			});
-			sileo.dismiss(channelProgressId);
-			if (installed) {
-				sileo.success({
-					title: "Update installed",
-					description: "Restarting Ryu…",
-					duration: 2000,
-				});
-				setTimeout(() => {
-					relaunch().catch(() => undefined);
-				}, 1500);
-			} else {
-				sileo.info({
-					title: `No ${channel} update found`,
-					description: "You're on the latest build for this channel.",
-					duration: 4000,
-				});
-			}
-		} catch {
-			sileo.dismiss(channelProgressId);
-			offerManualDownload(verdict, downloadsUrl);
-		}
-		return;
-	}
-
-	const progressId = sileo.info({
-		title: `Downloading update v${verdict.latest}…`,
-		description: "Ryu will restart once the update is installed.",
-		duration: null,
-	});
-
-	try {
-		const { check } = await import("@tauri-apps/plugin-updater");
-		const { relaunch } = await import("@tauri-apps/plugin-process");
-
-		const update = await check();
-		if (!update) {
-			// Core saw a release but the signed Tauri feed isn't reachable yet
-			// (typical in dev / before the release CI runs). Offer manual install.
-			sileo.dismiss(progressId);
+		const installed = await installPreparedAppUpdate();
+		sileo.dismiss(progressId);
+		progressId = undefined;
+		if (!installed) {
 			offerManualDownload(verdict, downloadsUrl);
 			return;
 		}
-
-		await update.downloadAndInstall();
-		sileo.dismiss(progressId);
 		sileo.success({
 			title: "Update installed",
 			description: "Restarting Ryu…",
 			duration: 2000,
 		});
+		const { relaunch } = await import("@tauri-apps/plugin-process");
 		setTimeout(() => {
 			relaunch().catch(() => undefined);
 		}, 1500);
-	} catch (err) {
-		sileo.dismiss(progressId);
+	} catch (error) {
+		if (progressId !== undefined) {
+			sileo.dismiss(progressId);
+		}
 		sileo.error({
 			title: "Update failed",
-			description: err instanceof Error ? err.message : String(err),
+			description: error instanceof Error ? error.message : String(error),
 			duration: null,
 			button: {
 				title: "Retry",

@@ -30,6 +30,7 @@ import {
 	SettingsGroup,
 	SettingsItem,
 } from "@/src/components/settings/shared/settings-items.tsx";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import {
 	setPointerCursor,
 	usePointerCursor,
@@ -54,6 +55,7 @@ export function PreferencesStep({
 	busy = false,
 	onContinue,
 }: PreferencesStepProps) {
+	const { canManageDesktopLifecycle } = useAppSurface();
 	const [sidebarVariant, setSidebarVariant] = useSidebarVariant();
 	const pointerCursorEnabled = usePointerCursor();
 	const [launchAtLogin, setLaunchAtLogin] = useState(false);
@@ -66,12 +68,15 @@ export function PreferencesStep({
 	// switch starts true and only ever writes when the user changes it.
 	const [closeToTray, setCloseToTray] = useState(true);
 	useEffect(() => {
+		if (!canManageDesktopLifecycle) {
+			return;
+		}
 		invoke<boolean>("get_close_to_tray")
 			.then(setCloseToTray)
 			.catch(() => {
 				// Non-Tauri context or command unavailable: keep the default.
 			});
-	}, []);
+	}, [canManageDesktopLifecycle]);
 
 	const handleCloseToTray = async (enabled: boolean) => {
 		setCloseToTray(enabled);
@@ -98,6 +103,9 @@ export function PreferencesStep({
 	// would gate nothing. The marker is written before the call, so a re-run of
 	// onboarding never silently re-enables autostart for someone who turned it off.
 	useEffect(() => {
+		if (!canManageDesktopLifecycle) {
+			return;
+		}
 		let cancelled = false;
 
 		const seedLaunchAtLogin = async () => {
@@ -139,7 +147,7 @@ export function PreferencesStep({
 		return () => {
 			cancelled = true;
 		};
-	}, []);
+	}, [canManageDesktopLifecycle]);
 
 	const handleLaunchAtLogin = async (enabled: boolean) => {
 		userTouchedLaunchAtLogin.current = true;
@@ -209,28 +217,32 @@ export function PreferencesStep({
 								description="Show a pointer cursor when hovering over interactive elements."
 								title="Pointer cursor"
 							/>
-							<SettingsItem
-								actions={
-									<Switch
-										checked={launchAtLogin}
-										id="onboarding-launch-at-login"
-										onCheckedChange={handleLaunchAtLogin}
+							{canManageDesktopLifecycle ? (
+								<>
+									<SettingsItem
+										actions={
+											<Switch
+												checked={launchAtLogin}
+												id="onboarding-launch-at-login"
+												onCheckedChange={handleLaunchAtLogin}
+											/>
+										}
+										description="Start Ryu automatically when you sign in to your computer, so your agents and background work are ready without opening it yourself."
+										title="Start Ryu on startup"
 									/>
-								}
-								description="Start Ryu automatically when you sign in to your computer, so your agents and background work are ready without opening it yourself."
-								title="Start Ryu on startup"
-							/>
-							<SettingsItem
-								actions={
-									<Switch
-										checked={closeToTray}
-										id="onboarding-close-to-tray"
-										onCheckedChange={handleCloseToTray}
+									<SettingsItem
+										actions={
+											<Switch
+												checked={closeToTray}
+												id="onboarding-close-to-tray"
+												onCheckedChange={handleCloseToTray}
+											/>
+										}
+										description="Closing the window leaves Ryu running in the tray so background agents keep going. Quit from the tray menu to stop it completely."
+										title="Stay in tray on close"
 									/>
-								}
-								description="Closing the window leaves Ryu running in the tray so background agents keep going. Quit from the tray menu to stop it completely."
-								title="Stay in tray on close"
-							/>
+								</>
+							) : null}
 						</SettingsGroup>
 
 						<div className="flex items-center justify-end">

@@ -7,7 +7,12 @@
 // are link-expanded and neurally reranked. See `SpacesAPI.search`.
 
 import { request } from "./request.ts";
-import type { RyuClientOptions, Space, SpaceMatch } from "./types.ts";
+import type {
+	RetrievalMode,
+	RyuClientOptions,
+	Space,
+	SpaceMatch,
+} from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Wire shapes (snake_case from Core)
@@ -19,6 +24,7 @@ interface SpaceWire {
 	document_count: number;
 	id: string;
 	name: string;
+	retrieval_mode?: string;
 	updated_at: number;
 }
 
@@ -27,6 +33,61 @@ interface MatchWire {
 	content: string;
 	distance: number;
 	document_id: string;
+}
+
+export interface RetrievalModeChange {
+	changed: boolean;
+	chunksScanned: number;
+	graphEdges: number;
+	graphNodes: number;
+	graphRebuilt: boolean;
+	mode: RetrievalMode;
+	previous: RetrievalMode;
+}
+
+export interface RetrievalModeJob {
+	cancelPath: string;
+	jobId: string;
+	retrievalMode: RetrievalMode;
+	spaceId: string;
+	statusPath: string;
+}
+
+interface RetrievalModeStatusBase {
+	graphEdges: number;
+	graphNodes: number;
+	jobId: string;
+	previousMode: RetrievalMode | null;
+	processedChunks: number;
+	requestedMode: RetrievalMode;
+	spaceId: string;
+	totalChunks: number;
+}
+
+export type RetrievalModeStatus =
+	| (RetrievalModeStatusBase & {
+			change: null;
+			error: null;
+			state: "cancelling" | "running";
+	  })
+	| (RetrievalModeStatusBase & {
+			change: RetrievalModeChange;
+			error: null;
+			state: "completed";
+	  })
+	| (RetrievalModeStatusBase & {
+			change: null;
+			error: string | null;
+			state: "cancelled";
+	  })
+	| (RetrievalModeStatusBase & {
+			change: null;
+			error: string;
+			state: "failed";
+	  });
+
+export interface RetrievalModeCancellation {
+	cancelled: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -41,6 +102,7 @@ function toSpace(s: SpaceWire): Space {
 		createdAt: s.created_at,
 		updatedAt: s.updated_at,
 		documentCount: s.document_count,
+		retrievalMode: toRetrievalMode(s.retrieval_mode),
 	};
 }
 
@@ -51,6 +113,194 @@ function toMatch(m: MatchWire): SpaceMatch {
 		content: m.content,
 		distance: m.distance,
 	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function invalidResponse(endpoint: string): Error {
+	return new Error(`RyuClient: Core returned an invalid ${endpoint} response`);
+}
+
+function requireRecord(
+	value: unknown,
+	endpoint: string
+): Record<string, unknown> {
+	if (!isRecord(value)) {
+		throw invalidResponse(endpoint);
+	}
+	return value;
+}
+
+function requireString(
+	record: Record<string, unknown>,
+	key: string,
+	endpoint: string
+): string {
+	const value = record[key];
+	if (typeof value !== "string" || value.trim() === "") {
+		throw invalidResponse(endpoint);
+	}
+	return value;
+}
+
+function requireCount(
+	record: Record<string, unknown>,
+	key: string,
+	endpoint: string
+): number {
+	const value = record[key];
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+		throw invalidResponse(endpoint);
+	}
+	return value;
+}
+
+function requireBoolean(
+	record: Record<string, unknown>,
+	key: string,
+	endpoint: string
+): boolean {
+	const value = record[key];
+	if (typeof value !== "boolean") {
+		throw invalidResponse(endpoint);
+	}
+	return value;
+}
+
+function parseRetrievalMode(value: unknown, endpoint: string): RetrievalMode {
+	if (value === "graph" || value === "vector") {
+		return value;
+	}
+	throw invalidResponse(endpoint);
+}
+
+function toRetrievalMode(value: unknown): RetrievalMode {
+	if (value === undefined) {
+		return "vector";
+	}
+	return parseRetrievalMode(value, "space");
+}
+
+function parseNullableMode(
+	value: unknown,
+	endpoint: string
+): RetrievalMode | null {
+	if (value === null) {
+		return null;
+	}
+	return parseRetrievalMode(value, endpoint);
+}
+
+function parseRetrievalModeChange(
+	value: unknown,
+	endpoint: string
+): RetrievalModeChange {
+	const record = requireRecord(value, endpoint);
+	return {
+		previous: parseRetrievalMode(record.previous, endpoint),
+		mode: parseRetrievalMode(record.mode, endpoint),
+		changed: requireBoolean(record, "changed", endpoint),
+		graphRebuilt: requireBoolean(record, "graph_rebuilt", endpoint),
+		chunksScanned: requireCount(record, "chunks_scanned", endpoint),
+		graphNodes: requireCount(record, "graph_nodes", endpoint),
+		graphEdges: requireCount(record, "graph_edges", endpoint),
+	};
+}
+
+function parseRetrievalModeJob(value: unknown): RetrievalModeJob {
+	const endpoint = "retrieval-mode job";
+	const record = requireRecord(value, endpoint);
+	if (record.success !== true) {
+		throw invalidResponse(endpoint);
+	}
+	return {
+		jobId: requireString(record, "job_id", endpoint),
+		spaceId: requireString(record, "space_id", endpoint),
+		retrievalMode: parseRetrievalMode(record.retrieval_mode, endpoint),
+		statusPath: requireString(record, "status", endpoint),
+		cancelPath: requireString(record, "cancel", endpoint),
+	};
+}
+
+function parseRetrievalModeStatus(value: unknown): RetrievalModeStatus {
+	const endpoint = "retrieval-mode status";
+	const record = requireRecord(value, endpoint);
+	const base: RetrievalModeStatusBase = {
+		jobId: requireString(record, "job_id", endpoint),
+		spaceId: requireString(record, "space_id", endpoint),
+		requestedMode: parseRetrievalMode(record.requested_mode, endpoint),
+		previousMode: parseNullableMode(record.previous_mode, endpoint),
+		totalChunks: requireCount(record, "total_chunks", endpoint),
+		processedChunks: requireCount(record, "processed_chunks", endpoint),
+		graphNodes: requireCount(record, "graph_nodes", endpoint),
+		graphEdges: requireCount(record, "graph_edges", endpoint),
+	};
+	if (base.processedChunks > base.totalChunks) {
+		throw invalidResponse(endpoint);
+	}
+	const state = record.state;
+	if (state === "running" || state === "cancelling") {
+		if (record.change !== null || record.error !== null) {
+			throw invalidResponse(endpoint);
+		}
+		return { ...base, state, change: null, error: null };
+	}
+	if (state === "completed") {
+		if (record.error !== null || base.previousMode === null) {
+			throw invalidResponse(endpoint);
+		}
+		const change = parseRetrievalModeChange(record.change, endpoint);
+		if (
+			base.processedChunks !== base.totalChunks ||
+			change.previous !== base.previousMode ||
+			change.mode !== base.requestedMode ||
+			change.changed !== (change.previous !== change.mode) ||
+			change.graphRebuilt !== (change.mode === "graph") ||
+			change.chunksScanned !== base.processedChunks ||
+			change.graphNodes !== base.graphNodes ||
+			change.graphEdges !== base.graphEdges
+		) {
+			throw invalidResponse(endpoint);
+		}
+		return {
+			...base,
+			state,
+			change,
+			error: null,
+		};
+	}
+	if (state === "cancelled") {
+		if (record.change !== null || record.error !== null) {
+			throw invalidResponse(endpoint);
+		}
+		return {
+			...base,
+			state,
+			change: null,
+			error: null,
+		};
+	}
+	if (state === "failed") {
+		if (
+			record.change !== null ||
+			typeof record.error !== "string" ||
+			record.error.trim() === ""
+		) {
+			throw invalidResponse(endpoint);
+		}
+		return { ...base, state, change: null, error: record.error };
+	}
+	throw invalidResponse(endpoint);
+}
+
+function parseRetrievalModeCancellation(
+	value: unknown
+): RetrievalModeCancellation {
+	const endpoint = "retrieval-mode cancellation";
+	const record = requireRecord(value, endpoint);
+	return { cancelled: requireBoolean(record, "cancelled", endpoint) };
 }
 
 // ---------------------------------------------------------------------------
@@ -66,11 +316,89 @@ export class SpacesAPI {
 
 	/** List all Spaces, most-recently-updated first. */
 	async list(): Promise<Space[]> {
-		const data = await request<{ spaces?: SpaceWire[] }>(
-			this.options,
-			"/api/spaces"
+		const data = await request<unknown>(this.options, "/api/spaces");
+		const record = requireRecord(data, "spaces list");
+		if (!Array.isArray(record.spaces)) {
+			throw invalidResponse("spaces list");
+		}
+		return (record.spaces as SpaceWire[]).map(toSpace);
+	}
+
+	/** Create a Space. Omit `retrievalMode` to use Core's configured default. */
+	async create(
+		name: string,
+		description: string | null = null,
+		retrievalMode?: RetrievalMode
+	): Promise<string> {
+		const body: Record<string, unknown> = { name, description };
+		if (retrievalMode !== undefined) {
+			body.retrieval_mode = retrievalMode;
+		}
+		const data = requireRecord(
+			await request<unknown>(this.options, "/api/spaces", {
+				method: "POST",
+				body: JSON.stringify(body),
+			}),
+			"create-space"
 		);
-		return (data.spaces ?? []).map(toSpace);
+		return requireString(data, "id", "create-space");
+	}
+
+	/** Start a retrieval-mode rebuild. Core accepts this operation with HTTP 202. */
+	async startRetrievalModeChange(
+		id: string,
+		mode: RetrievalMode
+	): Promise<RetrievalModeJob> {
+		const data = await request<unknown>(
+			this.options,
+			`/api/spaces/${encodeURIComponent(id)}/retrieval-mode`,
+			{
+				method: "POST",
+				body: JSON.stringify({ retrieval_mode: mode }),
+			}
+		);
+		const job = parseRetrievalModeJob(data);
+		const encodedId = encodeURIComponent(id);
+		if (job.spaceId !== id || job.retrievalMode !== mode) {
+			throw invalidResponse("retrieval-mode job");
+		}
+		return {
+			...job,
+			statusPath: `/api/spaces/${encodedId}/retrieval-mode/status?job_id=${encodeURIComponent(job.jobId)}`,
+			cancelPath: `/api/spaces/${encodedId}/retrieval-mode/cancel`,
+		};
+	}
+
+	/** Read the latest progress or terminal outcome for a mode-change job. */
+	async getRetrievalModeStatus(
+		id: string,
+		jobId: string
+	): Promise<RetrievalModeStatus> {
+		const data = await request<unknown>(
+			this.options,
+			`/api/spaces/${encodeURIComponent(id)}/retrieval-mode/status?job_id=${encodeURIComponent(jobId)}`
+		);
+		const status = parseRetrievalModeStatus(data);
+		if (status.spaceId !== id || status.jobId !== jobId) {
+			throw invalidResponse("retrieval-mode status");
+		}
+		return status;
+	}
+
+	/** Request cooperative cancellation of a mode-change job. */
+	async cancelRetrievalModeChange(
+		id: string,
+		jobId: string
+	): Promise<RetrievalModeCancellation> {
+		const data = await request<unknown>(
+			this.options,
+			`/api/spaces/${encodeURIComponent(id)}/retrieval-mode/cancel`,
+			{
+				method: "POST",
+				body: JSON.stringify({ job_id: jobId }),
+			}
+		);
+		return parseRetrievalModeCancellation(data);
 	}
 
 	/**
@@ -100,9 +428,9 @@ export class SpacesAPI {
 	 * read, and a bge cross-encoder reranker re-orders what survives. See
 	 * `SpaceMatch.distance` for what that does to the score field.
 	 *
-	 * This client cannot read or set the mode; it is a per-Space server-side
-	 * setting (`POST /api/spaces/:id/retrieval-mode`), so the same call can behave
-	 * either way depending on the Space it is pointed at.
+	 * Read the active mode from `Space.retrievalMode`; change it with
+	 * `startRetrievalModeChange`, then poll `getRetrievalModeStatus` until the
+	 * rebuild reaches a terminal state.
 	 *
 	 * @param id - Space id to search
 	 * @param query - Natural language query string

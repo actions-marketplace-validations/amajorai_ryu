@@ -158,6 +158,7 @@ mod tests {
                 fail_open: false,
                 unwrap_body: false,
                 body_defaults: serde_json::Value::Null,
+                caller_agent_query: None,
             }
         );
     }

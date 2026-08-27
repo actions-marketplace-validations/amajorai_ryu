@@ -11,11 +11,11 @@ import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 import { StaggerLines } from "./stagger-lines.tsx";
 
 const STORY_PARAGRAPHS = [
-	"We spent years shipping agents and kept hitting the same wall: an agent could work in a demo and still fail the first production review.",
-	"The blockers were always the same. No audit chain. Customer data leaving by default. An unforecastable bill. A runtime that needed a platform team to stay alive.",
-	"Ryu is the layer we wanted: one interface and one control layer around the agents a company already runs.",
-	"Bring Claude Code, Codex, Gemini, OpenClaw, Ollama, or your own agent. Ryu adds routing, governance, and audit without asking you to rebuild the stack.",
-	"We use Ryu to build Ryu, and we are building the layer so smaller teams can run serious agent workflows without hiring an AI platform team.",
+	"We kept using AI and still did not trust it with the work that mattered.",
+	"The model was not the only problem. We had no clear way to show what it saw, no safe path into company data, and no cost boundary we could explain to the team.",
+	"Ryu is built around that gap. It gives startups a clear record, controlled access, and a predictable way to use the AI they already chose.",
+	"Keep ChatGPT and Claude. Connect the context your work depends on. Review the result with the evidence beside it, then decide what is ready to ship.",
+	"We are building Ryu because startups should not need an AI platform team just to use AI responsibly.",
 ];
 
 export default function LandingTestimonials() {
@@ -23,10 +23,9 @@ export default function LandingTestimonials() {
 		<section className="container mx-auto px-4">
 			<div className="mx-auto max-w-3xl">
 				<StaggerLines className="mb-10 max-w-2xl">
-					<SectionTitle title="Built by people who learned this the hard way" />
+					<SectionTitle title="AI was still a solo tool." />
 					<p className={sectionSubtitleClass}>
-						The demo is easy. The control layer that lets an agent run every day
-						is the part we built.
+						We built Ryu to make it usable by a team.
 					</p>
 				</StaggerLines>
 

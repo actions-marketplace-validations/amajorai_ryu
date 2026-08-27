@@ -25,31 +25,31 @@ const TRAIL_HALF_WIDTH = 14;
 const REVEAL_START = `-${TRAIL_HALF_WIDTH}%`;
 const REVEAL_FINISH = `${100 + TRAIL_HALF_WIDTH}%`;
 
-export type ChromaticTextRevealProps = {
-	/** Sentence fragment that remains fixed while the final word changes. */
-	prefix: string;
-	/** Words revealed one after another after the fixed prefix. */
-	words: string[];
+export interface ChromaticTextRevealProps {
+	className?: string;
 	/** Colors used along the moving chromatic edge. */
 	colors?: string[];
-	/** Final text color after the sweep passes. */
-	foregroundColor?: string;
-	/** Sweep duration in seconds. */
-	duration?: number;
 	/** Delay before the first sweep, in seconds. */
 	delay?: number;
-	/** Rest after a word finishes revealing, in seconds. */
-	pauseDuration?: number;
-	/** Returns to the first word after the final word. */
-	loop?: boolean;
-	/** Starts when the text enters the viewport. */
-	startOnView?: boolean;
-	/** Only starts on the first viewport entry. */
-	once?: boolean;
+	/** Sweep duration in seconds. */
+	duration?: number;
+	/** Final text color after the sweep passes. */
+	foregroundColor?: string;
 	/** IntersectionObserver root margin used by the viewport trigger. */
 	inViewMargin?: UseInViewOptions["margin"];
-	className?: string;
-};
+	/** Returns to the first word after the final word. */
+	loop?: boolean;
+	/** Only starts on the first viewport entry. */
+	once?: boolean;
+	/** Rest after a word finishes revealing, in seconds. */
+	pauseDuration?: number;
+	/** Sentence fragment that remains fixed while the final word changes. */
+	prefix: string;
+	/** Starts when the text enters the viewport. */
+	startOnView?: boolean;
+	/** Words revealed one after another after the fixed prefix. */
+	words: string[];
+}
 
 function composeChromaticGradient(colors: string[], foregroundColor: string) {
 	const palette = colors.length > 0 ? colors : CHROMATIC_PALETTE;
@@ -132,8 +132,8 @@ export function ChromaticTextReveal({
 	useEffect(() => clearPendingWord, [clearPendingWord]);
 
 	return (
-		<span className={cn("inline-flex items-baseline", className)} ref={ref}>
-			<span className="whitespace-nowrap">
+		<span className={cn("inline align-baseline", className)} ref={ref}>
+			<span className="whitespace-normal">
 				{prefix}
 				{hasWords ? "\u00A0" : null}
 			</span>

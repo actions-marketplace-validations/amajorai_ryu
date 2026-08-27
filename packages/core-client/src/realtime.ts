@@ -122,6 +122,10 @@ export function decodeDocSync(bytes: Uint8Array): DocSyncMessage | null {
 export interface JoinAck {
 	/** Whether this connection may mutate the resource, or is a read-only viewer. */
 	access: "read" | "write";
+	/** Caller-generated correlation id echoed by Core. This is not an auth id. */
+	clientId: string;
+	/** Authoritative CRDT generation; zero for non-document rooms. */
+	documentEpoch: number;
 	/** Whether the server granted THIS connection the one-shot right to seed a
 	 * brand-new empty room from its local `source`. Exactly one client per empty
 	 * room wins this (server-arbitrated), so concurrent first-opens cannot both seed
@@ -134,11 +138,19 @@ export interface JoinAck {
 	roomId: string;
 }
 
+export interface ResyncRequired {
+	/** Number of bounded broadcast frames skipped, when Core can report it. */
+	dropped?: number;
+	reason: string;
+}
+
 /** Callbacks for the lifecycle + each inbound frame kind. All optional. */
 export interface RealtimeHandlers {
 	onClose?: (event: CloseEvent) => void;
 	/** A binary DocSync frame (document rooms). Feed this to the CRDT provider. */
 	onDocSync?: (message: DocSyncMessage) => void;
+	/** The authoritative document was restored and its old CRDT epoch is fenced. */
+	onDocumentReset?: (epoch: number) => void;
 	onError?: (event: Event) => void;
 	/** A `{ channel: "events" }` payload — e.g. a new chat message `data`. */
 	onEvent?: (data: unknown) => void;
@@ -149,15 +161,19 @@ export interface RealtimeHandlers {
 	onOpen?: () => void;
 	/** A `{ channel: "presence" }` payload — an awareness delta or leave. */
 	onPresence?: (data: unknown) => void;
+	/** The bounded room feed skipped state. Reload a snapshot or restart CRDT sync. */
+	onResyncRequired?: (notice: ResyncRequired) => void;
 }
 
 export interface RealtimeOptions {
+	/** Required when `kind` is `application`; never sent by the host bridge to the iframe. */
+	appId?: string;
+	/** Stable for this mounted client and shared with related HTTP mutations. */
+	clientId?: string;
 	handlers?: RealtimeHandlers;
 	/** The user-identity JWT (Better Auth, EdDSA). Omit for an anonymous join. */
 	jwt?: string | null;
 	kind: RealtimeKind;
-	/** Required when `kind` is `application`; never sent by the host bridge to the iframe. */
-	appId?: string;
 	roomId: string;
 }
 
@@ -194,9 +210,11 @@ export class RealtimeConnection {
 	private presenceHeartbeat: ReturnType<typeof setInterval> | null = null;
 	private readonly url: string;
 	private readonly options: RealtimeOptions;
+	readonly clientId: string;
 
 	constructor(target: ApiTarget, options: RealtimeOptions) {
 		this.options = options;
+		this.clientId = options.clientId ?? createRealtimeClientId();
 		this.url = realtimeWsUrl(target, options);
 	}
 
@@ -219,6 +237,7 @@ export class RealtimeConnection {
 				type: "join",
 				room_id: this.options.roomId,
 				kind: this.options.kind,
+				client_id: this.clientId,
 				...(this.options.kind === "application" && this.options.appId
 					? { app_id: this.options.appId }
 					: {}),
@@ -339,10 +358,34 @@ export class RealtimeConnection {
 			handlers?.onJoinAck?.({
 				access: frame.access === "write" ? "write" : "read",
 				maySeed: frame.may_seed === true,
+				clientId: String(frame.client_id ?? this.clientId),
+				documentEpoch:
+					typeof frame.document_epoch === "number" ? frame.document_epoch : 0,
 				memberId: String(frame.member_id ?? ""),
 				presence: Array.isArray(frame.presence) ? frame.presence : [],
 				roomId: String(frame.room_id ?? ""),
 			});
+			return;
+		}
+		if (frame.type === "resync_required") {
+			handlers?.onResyncRequired?.({
+				dropped:
+					typeof frame.dropped === "number" &&
+					Number.isSafeInteger(frame.dropped)
+						? frame.dropped
+						: undefined,
+				reason:
+					typeof frame.reason === "string" ? frame.reason : "room-state-gap",
+			});
+			return;
+		}
+		if (frame.type === "document_reset") {
+			if (
+				typeof frame.epoch === "number" &&
+				Number.isSafeInteger(frame.epoch)
+			) {
+				handlers?.onDocumentReset?.(frame.epoch);
+			}
 			return;
 		}
 		if (frame.channel === "events") {
@@ -373,3 +416,33 @@ export class RealtimeConnection {
 
 /** `WebSocket.OPEN` as a free constant so the class needs no instance to read it. */
 const WEBSOCKET_OPEN = 1;
+
+/** Create an opaque per-client correlation id without making it an auth input. */
+export function createRealtimeClientId(): string {
+	const randomUuid = globalThis.crypto?.randomUUID?.();
+	if (randomUuid) {
+		return randomUuid;
+	}
+	// Older React Native runtimes may not expose randomUUID. The server accepts
+	// only UUIDs, so format 16 random bytes when getRandomValues is available.
+	const bytes = new Uint8Array(16);
+	globalThis.crypto?.getRandomValues?.(bytes);
+	if (bytes.some((value) => value !== 0)) {
+		bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+		bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+		const hex = Array.from(bytes, (value) =>
+			value.toString(16).padStart(2, "0")
+		);
+		return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+	}
+	// This value is correlation metadata, never an auth input. A UUID-shaped
+	// Math.random fallback keeps older React Native runtimes on the same echo-
+	// suppression contract while the signed user JWT continues to own identity.
+	for (let index = 0; index < bytes.length; index += 1) {
+		bytes[index] = Math.floor(Math.random() * 256);
+	}
+	bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+	bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+	const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
+	return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}

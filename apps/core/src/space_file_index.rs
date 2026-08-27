@@ -857,7 +857,47 @@ pub async fn create_file_indexed(
         .spaces
         .create_file(space_id, title, bytes, mime, tenancy)
         .await?;
+    let meta = state
+        .spaces
+        .get_file_meta(&document_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("stored file '{document_id}' disappeared"))?;
+    index_stored_file(state, document_id, title, bytes, mime, &meta.sha256).await
+}
 
+/// Replace a stored file revision, then index exactly that revision.
+///
+/// The expected SHA follows the async provider job so a slower parse of an older
+/// save can never overwrite chunks or status belonging to a newer save.
+pub async fn replace_file_indexed(
+    state: &ServerState,
+    document_id: &str,
+    bytes: &[u8],
+    mime: &str,
+) -> Result<IndexedFile> {
+    let meta = state
+        .spaces
+        .replace_file_blob(document_id, bytes, mime)
+        .await?;
+    index_stored_file(
+        state,
+        document_id.to_owned(),
+        &meta.title,
+        bytes,
+        mime,
+        &meta.sha256,
+    )
+    .await
+}
+
+async fn index_stored_file(
+    state: &ServerState,
+    document_id: String,
+    title: &str,
+    bytes: &[u8],
+    mime: &str,
+    expected_sha256: &str,
+) -> Result<IndexedFile> {
     // `None` when the status db could not be opened. That degrades reporting only:
     // it must never decide whether the contents get extracted, which is the coupling
     // that used to strand a document at `pending` forever.
@@ -908,9 +948,10 @@ pub async fn create_file_indexed(
     let index = mark_pending(store, &document_id).await;
     let task_state = state.clone();
     let (doc, t, m) = (document_id.clone(), title.to_owned(), mime.to_owned());
+    let expected_sha256 = expected_sha256.to_owned();
     let size = bytes.len() as u64;
     tokio::spawn(async move {
-        index_via_provider(&task_state, store, &doc, &t, &m, size).await;
+        index_via_provider(&task_state, store, &doc, &t, &m, size, &expected_sha256).await;
     });
 
     Ok(IndexedFile { document_id, index })
@@ -1032,9 +1073,11 @@ async fn index_via_provider(
     title: &str,
     mime: &str,
     size: u64,
+    expected_sha256: &str,
 ) {
     let meta = match state.spaces.get_file_meta(doc_id).await {
-        Ok(Some(m)) => m,
+        Ok(Some(m)) if m.sha256 == expected_sha256 => m,
+        Ok(Some(_)) => return,
         Ok(None) | Err(_) => {
             let failure = ParseFailure::new(
                 ParseFailureReason::ProviderError,
@@ -1053,6 +1096,10 @@ async fn index_via_provider(
             poll_to_completion(state, &job_id, &meta.sha256).await
         }
     };
+    match state.spaces.get_file_meta(doc_id).await {
+        Ok(Some(current)) if current.sha256 == expected_sha256 => {}
+        _ => return,
+    }
     record_parse_result(store, &state.spaces, doc_id, title, mime, result).await;
 }
 

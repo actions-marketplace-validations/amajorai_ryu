@@ -555,12 +555,70 @@ fn oauth_http_failure(error: &anyhow::Error, status: reqwest::StatusCode) -> boo
     })
 }
 
+fn url_for_calling_agent(
+    url: &str,
+    query_param: Option<&str>,
+    agent_id: Option<&str>,
+) -> Result<String> {
+    let (Some(query_param), Some(agent_id)) = (query_param, agent_id) else {
+        return Ok(url.to_owned());
+    };
+    let mut parsed = url::Url::parse(url).context("invalid HTTP tool URL")?;
+    if parsed.query_pairs().any(|(name, _)| name == query_param) {
+        bail!("HTTP tool URL already contains Core-owned query parameter '{query_param}'");
+    }
+    parsed.query_pairs_mut().append_pair(query_param, agent_id);
+    Ok(parsed.into())
+}
+
 fn oauth_challenge_header(error: &anyhow::Error) -> Option<String> {
     error.chain().find_map(|cause| {
         cause
             .downcast_ref::<client::McpHttpFailure>()
             .and_then(|failure| failure.www_authenticate.clone())
     })
+}
+
+fn mpp_target(server: &str, tool: &str) -> Value {
+    serde_json::json!({ "kind": "mcp_tool", "server": server, "tool": tool })
+}
+
+fn mpp_payment_required(error: &anyhow::Error, server: &str, tool: &str) -> Option<Value> {
+    for cause in error.chain() {
+        if let Some(failure) = cause.downcast_ref::<client::McpRpcFailure>() {
+            if failure.code == crate::payment::MCP_PAYMENT_REQUIRED_CODE {
+                let data = failure.data.as_ref()?;
+                return crate::payment::PaymentRequiredEnvelope::mcp(
+                    data,
+                    mpp_target(server, tool),
+                )
+                .map(crate::payment::PaymentRequiredEnvelope::into_value);
+            }
+        }
+        if let Some(failure) = cause.downcast_ref::<client::McpHttpFailure>() {
+            if failure.status == reqwest::StatusCode::PAYMENT_REQUIRED {
+                let header = failure.www_authenticate.as_deref()?;
+                return crate::payment::PaymentRequiredEnvelope::http(
+                    header,
+                    mpp_target(server, tool),
+                )
+                .map(crate::payment::PaymentRequiredEnvelope::into_value);
+            }
+        }
+    }
+    None
+}
+
+fn mpp_payment_required_result(result: &Value, server: &str, tool: &str) -> Option<Value> {
+    let data = result
+        .get("_meta")?
+        .get("org.paymentauth/payment-required")?;
+    crate::payment::PaymentRequiredEnvelope::mcp_metadata(data, mpp_target(server, tool))
+        .map(crate::payment::PaymentRequiredEnvelope::into_value)
+}
+
+fn normalize_mpp_result(result: Value, server: &str, tool: &str) -> Value {
+    mpp_payment_required_result(&result, server, tool).unwrap_or(result)
 }
 
 fn oauth_requires_connect(error: &anyhow::Error) -> bool {
@@ -874,7 +932,7 @@ pub fn may_register_mcp_servers(
 /// Registration is what puts a server's tools into the next `tools/list`, so
 /// registering a declaration whose command does not exist hands the model a block of
 /// tools that every call ENOENTs on. `ghost` is the live instance: it is Core-tier
-/// and default-ON, so registration used to be unconditional, and Ghost's binary is
+/// and pre-installed, so registration used to be unconditional, and Ghost's binary is
 /// only ever fetched by its own downloader — whose `archive_url()` has no default, so
 /// no end user has it. Every agent on a stock node therefore carried ~29 `ghost.*`
 /// tools that could not run. A model cannot tell "this tool is broken" from "I called
@@ -1565,6 +1623,104 @@ pub struct WidgetResource {
     pub meta: Option<Value>,
 }
 
+/// Metadata recovered from an SDK-authored tool runnable. The app-tool registry
+/// keeps only the stable id/name pair, so discovery and widget emission read the
+/// richer fields back from the enabled plugin manifest.
+struct SelfBuildToolMetadata {
+    description: Option<String>,
+    input_schema: Option<Value>,
+    widget: Option<WidgetBinding>,
+}
+
+/// Find the manifest-owned metadata for one registered self-build tool.
+///
+/// `defineApp` emits the widget flags beside the executable `ToolConfig`, while
+/// `register_app_tool_tagged` intentionally stores a small registry row. Keeping
+/// this join here means the registration path remains compatible with older
+/// callers and the manifest stays the source of truth for discovery.
+fn self_build_tool_metadata(
+    manifests: &[PluginManifest],
+    tool_id: &str,
+) -> Option<SelfBuildToolMetadata> {
+    let target = canonical_tool_id(tool_id);
+    for manifest in manifests {
+        for entry in &manifest.runnables {
+            if entry.kind != crate::runnable::RunnableKind::Tool {
+                continue;
+            }
+            let Some(config) = entry.config.as_ref() else {
+                continue;
+            };
+            let Ok(tool_config) = serde_json::from_value::<
+                crate::plugin_manifest::schema::ToolConfig,
+            >(config.clone()) else {
+                continue;
+            };
+            if app_tool_registered_id(&tool_config) != target {
+                continue;
+            }
+
+            let widget = manifest
+                .contributes
+                .as_ref()
+                .and_then(|contributes| {
+                    contributes
+                        .widgets
+                        .iter()
+                        .find(|candidate| canonical_tool_id(&candidate.tool_id) == target)
+                })
+                .map(|candidate| WidgetBinding {
+                    template_uri: candidate.uri.clone(),
+                    widget_accessible: config
+                        .get("widget_accessible")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    invoking_label: config
+                        .get("invoking")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    invoked_label: config
+                        .get("invoked")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                });
+
+            return Some(SelfBuildToolMetadata {
+                description: config
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                input_schema: config.get("input_schema").cloned(),
+                widget,
+            });
+        }
+    }
+    None
+}
+
+/// Resolve the installed plugin and MIME type for a self-built widget resource.
+/// The `server` prefix is the runtime namespace (`<server>.<tool>`), not the
+/// plugin id, so apps may use an explicit MCP namespace without losing the join.
+fn self_build_widget_identity(
+    manifests: &[PluginManifest],
+    server: &str,
+    uri: &str,
+) -> Option<(String, String)> {
+    let prefix = format!("{server}.");
+    manifests.iter().find_map(|manifest| {
+        let widget = manifest
+            .contributes
+            .as_ref()?
+            .widgets
+            .iter()
+            .find(|candidate| {
+                let tool_id = canonical_tool_id(&candidate.tool_id);
+                tool_id.starts_with(&prefix) && candidate.uri == uri
+            })?;
+        Some((manifest.id.clone(), widget.mime.clone()))
+    })
+}
+
 /// Public summary of a registered server for the listing endpoint.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ServerSummary {
@@ -1922,7 +2078,7 @@ pub(crate) fn approval_gate_applies(tool_id: &str) -> bool {
 /// Core-tier keeps reading the manifest because a Core-tier manifest IS trusted
 /// input (compiled-in fixtures; the loader parses built-ins first and
 /// first-occurrence-wins, so a disk manifest can never claim a Core id) AND because
-/// its record frequently carries no grants at all: the default-on seed
+/// its record frequently carries no grants at all: the pre-installed seed
 /// (`plugins/seed.rs`) writes a fixed grant list that is EMPTY for everything
 /// outside `seed_overrides` — including `spider` (`tool:command:spider`) and
 /// `shadow` (`tool:http-egress:127.0.0.1`). Sourcing those from the record would
@@ -2384,7 +2540,7 @@ impl McpRegistry {
     /// the manifest-owned path: they are declared under `mcp_servers` in their
     /// plugin fixtures (`fixtures/{ghost,agentbrowser}.manifest.json`) and register
     /// via [`register_manifest_mcp_servers`] on plugin activation (both are
-    /// default-on, so the boot `fire_activation_event("onStartup")` loop re-adds
+    /// pre-installed, so the boot `fire_activation_event("onStartup")` loop re-adds
     /// them on every start). Ghost's profile-aware values that a static manifest
     /// can't express — the `~/.ryu{profile}/bin/ghost` binary path
     /// (`command_env: "RYU_GHOST_BIN"`), the island overlay URL, and the
@@ -2645,6 +2801,7 @@ impl McpRegistry {
             || name == orchestrator::SERVER_NAME
             || name == skills_tool::SERVER_NAME
             || name == ui_tool::SERVER_NAME
+            || name == crate::safe_actions::SERVER_NAME
             // The capability facade's reserved names (`web`, `browser`, `computer`,
             // `memory`). Reserved unconditionally, not only while a provider is
             // bound, so a plugin can never squat a name the facade may later serve.
@@ -3031,11 +3188,18 @@ impl McpRegistry {
     pub async fn widget_binding(&self, tool_id: &str) -> Option<WidgetBinding> {
         let normalized_tool_id = self.canonical_tool_id_for_registry(tool_id);
         let (_server, _tool) = self.split_registered_tool_id(&normalized_tool_id)?;
-        self.list_all_tools()
+        let listed = self
+            .list_all_tools()
             .await
             .into_iter()
             .find(|t| t.id == normalized_tool_id)
-            .and_then(|t| t.widget)
+            .and_then(|t| t.widget);
+        if listed.is_some() {
+            return listed;
+        }
+        let manifests = self.self_build_manifests.as_ref()?.read().await;
+        self_build_tool_metadata(&manifests, &normalized_tool_id)
+            .and_then(|metadata| metadata.widget)
     }
 
     /// Resolve the unified widget-promotion decision for `tool_id` (D-dedup + the
@@ -3162,9 +3326,9 @@ impl McpRegistry {
                     .iter()
                     .any(|w| canonical_tool_id(&w.tool_id) == tool_id)
                     .then(|| {
-                        let has_grant =
+                        let declares_grant =
                             m.permission_grants.iter().any(|g| g == WIDGET_RENDER_GRANT);
-                        (m.id.clone(), has_grant)
+                        (m.id.clone(), declares_grant)
                     })
             });
             let synth_owner = server.as_ref().and_then(|srv| {
@@ -3179,10 +3343,15 @@ impl McpRegistry {
         // A manifest explicitly declares this widget: honour its enabled + grant
         // state (the normal path for the 8 built-ins and any plugin that authored
         // a contributes.widgets entry).
-        if let Some((plugin_id, has_grant)) = declared {
+        if let Some((plugin_id, declares_grant)) = declared {
             return match store.get(&plugin_id).await {
                 Ok(Some(rec)) if rec.enabled => {
-                    if has_grant {
+                    if declares_grant
+                        && rec
+                            .approved_grants
+                            .iter()
+                            .any(|grant| grant == WIDGET_RENDER_GRANT)
+                    {
                         WidgetContributionState::EnabledGranted
                     } else {
                         WidgetContributionState::EnabledUngranted { plugin_id }
@@ -3231,6 +3400,47 @@ impl McpRegistry {
                 return Some(res.clone());
             }
         }
+
+        // SDK-authored widgets are stored as the installed plugin's bundled
+        // `ui_code`, not behind an MCP process. Resolve that carriage through the
+        // same enabled-plugin store used by the lifecycle gate and keep the
+        // result in the normal per-server cache.
+        if let (Some(manifests), Some(store)) = (
+            self.self_build_manifests.as_ref(),
+            self.self_build_app_store.as_ref(),
+        ) {
+            let identity = {
+                let manifests = manifests.read().await;
+                self_build_widget_identity(&manifests, server, uri)
+            };
+            if let Some((plugin_id, mime_type)) = identity {
+                let enabled = store
+                    .get(&plugin_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|record| record.enabled);
+                if !enabled {
+                    return None;
+                }
+                if let Ok(Some(html)) = store.get_ui_code(&plugin_id).await {
+                    let resource = WidgetResource {
+                        uri: uri.to_owned(),
+                        mime_type,
+                        html,
+                        meta: None,
+                    };
+                    if let Ok(mut cache) = self.resource_cache.lock() {
+                        cache
+                            .entry(server.to_owned())
+                            .or_default()
+                            .insert(uri.to_owned(), resource.clone());
+                    }
+                    return Some(resource);
+                }
+            }
+        }
+
         // Extract the command under the read lock, drop before .await.
         let cmd = {
             let servers = self.servers.read().expect("mcp servers RwLock poisoned");
@@ -3289,7 +3499,8 @@ impl McpRegistry {
     /// The fully-qualified ids of the widget-accessible (companion) tools on
     /// `server` — used to bound which tools a mounted widget may `callTool`.
     pub async fn widget_accessible_tool_ids(&self, server: &str) -> Vec<String> {
-        self.tools_for_server(server)
+        let mut ids: Vec<String> = self
+            .tools_for_server(server)
             .await
             .map(|tools| {
                 tools
@@ -3298,7 +3509,43 @@ impl McpRegistry {
                     .map(|t| t.id)
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        // Self-built Ryu Apps do not have an MCP process under `server`. Their
+        // tool rows live in `app_tools`, while the widget-accessible flags live
+        // in the app manifest. Include those rows here so `callTool` receives
+        // the same server-scoped allowlist as an MCP widget.
+        if let Some(manifests) = self.self_build_manifests.as_ref() {
+            let manifests = manifests.read().await;
+            let prefix = format!("{server}.");
+            for manifest in manifests.iter() {
+                for entry in &manifest.runnables {
+                    if entry.kind != crate::runnable::RunnableKind::Tool {
+                        continue;
+                    }
+                    let Some(config) = entry.config.as_ref() else {
+                        continue;
+                    };
+                    if config.get("widget").and_then(Value::as_bool) == Some(true) {
+                        continue;
+                    }
+                    if config.get("widget_accessible").and_then(Value::as_bool) != Some(true) {
+                        continue;
+                    }
+                    let Ok(tool_config) = serde_json::from_value::<
+                        crate::plugin_manifest::schema::ToolConfig,
+                    >(config.clone()) else {
+                        continue;
+                    };
+                    let id = app_tool_registered_id(&tool_config);
+                    if id.starts_with(&prefix) && !ids.iter().any(|candidate| candidate == &id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+
+        ids
     }
 
     /// Every tool across every enabled server. A server that fails to start is
@@ -3371,6 +3618,9 @@ impl McpRegistry {
         // widget grid. Backed by the process-global dashboard engine (no handle
         // to wire); dispatch reports unavailable in test/CLI contexts.
         all.extend(crate::runnable::dashboard_builder::tools());
+        // Core-owned typed plan boundary. These tools are the only direct tool
+        // surface exposed to agents using the `verified_plan_only` posture.
+        all.extend(crate::safe_actions::tools());
         for name in &names {
             match self.tools_for_server(name).await {
                 Ok(tools) => all.extend(tools),
@@ -3378,8 +3628,35 @@ impl McpRegistry {
             }
         }
         // Include in-memory tools registered by enabled apps (tool-as-Runnable).
-        if let Ok(app) = self.app_tools.lock() {
-            all.extend(app.iter().cloned());
+        // Enrich rows from the owning manifest so an SDK-authored tool keeps its
+        // input schema, widget binding, and description in discovery; the app
+        // registry itself intentionally stores only the stable id/name pair.
+        let app_tools = self
+            .app_tools
+            .lock()
+            .map(|app| app.clone())
+            .unwrap_or_default();
+        if let Some(manifests) = self.self_build_manifests.as_ref() {
+            let manifests = manifests.read().await;
+            for mut tool in app_tools {
+                if let Some(metadata) = self_build_tool_metadata(&manifests, &tool.id) {
+                    tool.description = metadata.description.or(tool.description);
+                    tool.input_schema = metadata.input_schema.or(tool.input_schema);
+                    tool.widget = metadata.widget.clone().or(tool.widget);
+                    tool.widget_accessible = tool
+                        .widget
+                        .as_ref()
+                        .is_some_and(|widget| widget.widget_accessible);
+                    tool.output_template = tool
+                        .widget
+                        .as_ref()
+                        .map(|widget| widget.template_uri.clone())
+                        .or(tool.output_template);
+                }
+                all.push(tool);
+            }
+        } else {
+            all.extend(app_tools);
         }
         all
     }
@@ -3460,6 +3737,130 @@ impl McpRegistry {
             }
         }
         AgentCapabilities::default()
+    }
+
+    /// Resolve the exact dispatch ids a certified Safe Actions step may traverse.
+    /// Capability facades are excluded because their provider selection is mutable
+    /// and may execute under an agent-less adapter; a certificate must bind a
+    /// concrete tool instead. App aliases are manifest-fixed and therefore safe to
+    /// include as a two-id chain.
+    pub(crate) async fn verified_dispatch_chain(&self, tool_id: &str) -> Result<Vec<String>> {
+        let normalized = self.canonical_tool_id_for_registry(tool_id);
+        let (server, _) = self
+            .split_registered_tool_id(&normalized)
+            .ok_or_else(|| anyhow!("malformed tool id '{tool_id}'"))?;
+        if capability_tools::is_server(server) {
+            return Err(anyhow!(
+                "capability facade '{tool_id}' is not certifiable; choose its concrete provider tool"
+            ));
+        }
+        let mut chain = vec![normalized.clone()];
+        if is_app_tool_id(&normalized) {
+            if let Some(resolved) = self.resolve_app_tool_backend(&normalized).await {
+                if let crate::plugin_manifest::schema::ToolBackend::Alias { target } =
+                    resolved.backend
+                {
+                    let target = self.canonical_tool_id_for_registry(&target);
+                    if target.starts_with(APP_TOOL_PREFIX) {
+                        return Err(anyhow!("nested app aliases are not certifiable"));
+                    }
+                    chain.push(target);
+                }
+            }
+        }
+        Ok(chain)
+    }
+
+    /// Hash the live implementation identity a verified-plan certificate relies
+    /// on. The public tool descriptor alone is insufficient: two app manifests can
+    /// advertise the same schema while changing inline code, URL/method/defaults,
+    /// command arguments, grants, or sandbox permissions. External MCP bindings
+    /// include their complete resolved server configuration; in-process tools are
+    /// bound to the Core ABI because their implementation ships in this binary.
+    pub(crate) async fn verified_implementation_hash(
+        &self,
+        tool: &RegistryTool,
+        dispatch_chain: &[String],
+    ) -> Result<String> {
+        let mut implementations = Vec::with_capacity(dispatch_chain.len());
+        for dispatch_id in dispatch_chain {
+            let is_registered_app_tool = self
+                .app_tools
+                .lock()
+                .map(|tools| tools.iter().any(|item| item.id == *dispatch_id))
+                .unwrap_or(false);
+            if is_registered_app_tool {
+                let resolved = self
+                    .resolve_app_tool_backend(dispatch_id)
+                    .await
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "app tool '{dispatch_id}' has no immutable live implementation binding"
+                        )
+                    })?;
+                let mut grants = resolved.grants.into_iter().collect::<Vec<_>>();
+                grants.sort();
+                implementations.push(serde_json::json!({
+                    "kind": "app_manifest_backend",
+                    "tool": dispatch_id,
+                    "plugin_id": resolved.plugin_id,
+                    "backend": resolved.backend,
+                    "grants": grants,
+                    "permissions": resolved.permissions,
+                    "timeout_secs": resolved.timeout_secs,
+                }));
+                continue;
+            }
+
+            let (server, _) = self
+                .split_registered_tool_id(dispatch_id)
+                .ok_or_else(|| anyhow!("malformed dispatch id '{dispatch_id}'"))?;
+            let config = self
+                .servers
+                .read()
+                .map_err(|_| anyhow!("MCP registry lock poisoned"))?
+                .get(server)
+                .cloned();
+            if let Some(config) = config {
+                implementations.push(serde_json::json!({
+                    "kind": "mcp_server",
+                    "tool": dispatch_id,
+                    "server": server,
+                    "owner_plugin_id": &config.owner_plugin_id,
+                    "owner_server_name": &config.owner_server_name,
+                    "config": &config,
+                }));
+            } else {
+                implementations.push(serde_json::json!({
+                    "kind": "core_in_process",
+                    "tool": dispatch_id,
+                    "server": server,
+                    "core_abi_version": env!("CARGO_PKG_VERSION"),
+                }));
+            }
+        }
+        Ok(ryu_safe_actions::sha256_canonical(&serde_json::json!({
+            "registry_tool": tool,
+            "dispatch_chain": dispatch_chain,
+            "implementations": implementations,
+            "core_abi_version": env!("CARGO_PKG_VERSION"),
+        }))?)
+    }
+
+    pub(crate) async fn verified_implementation_hash_for_id(
+        &self,
+        tool_id: &str,
+    ) -> Result<String> {
+        let normalized = self.canonical_tool_id_for_registry(tool_id);
+        let tool = self
+            .list_all_tools()
+            .await
+            .into_iter()
+            .find(|item| item.id == normalized)
+            .ok_or_else(|| anyhow!("verified tool '{tool_id}' is no longer registered"))?;
+        let dispatch_chain = self.verified_dispatch_chain(&normalized).await?;
+        self.verified_implementation_hash(&tool, &dispatch_chain)
+            .await
     }
 
     /// Invoke a registered tool by its fully-qualified id (`<server>.<tool>`),
@@ -3578,6 +3979,14 @@ impl McpRegistry {
             (Some(id), Some(store)) => store.get(id).await.ok().flatten(),
             _ => None,
         };
+        if agent_record.as_ref().is_some_and(|record| {
+            record.safety_profile == crate::agents::AgentSafetyProfile::VerifiedPlanOnly
+        }) && !tool_id.starts_with("plans.")
+        {
+            return Err(anyhow!(
+                "verified agent direct tool call denied; submit a typed plan with plans.submit"
+            ));
+        }
         let mut agent_approval_tools = agent_record
             .as_ref()
             .map(|record| record.approval_tools.clone())
@@ -3678,6 +4087,45 @@ impl McpRegistry {
             }
         }
 
+        self.call_tool_with_identity_after_approval(
+            agent_id,
+            tool_id,
+            arguments,
+            allowlist,
+            user_id,
+            profile_ids,
+            session_id,
+            host_conversation_id,
+        )
+        .await
+    }
+
+    /// Dispatch after an approval decision while preserving every plugin security
+    /// boundary around the provider call. Safe Actions and the legacy approval
+    /// engine use this entry so they skip only the duplicate human-approval gate;
+    /// they still run pre-tool firewalls, result redaction, and post-tool audit
+    /// hooks exactly like a direct governed call.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn call_tool_with_identity_after_approval(
+        &self,
+        agent_id: Option<&str>,
+        tool_id: &str,
+        arguments: Value,
+        allowlist: Option<&[String]>,
+        user_id: Option<&str>,
+        profile_ids: &[String],
+        session_id: Option<String>,
+        host_conversation_id: Option<&str>,
+    ) -> Result<Value> {
+        let normalized_tool_id = self.canonical_tool_id_for_registry(tool_id);
+        let tool_id = normalized_tool_id.as_str();
+        let normalized_allowlist = allowlist.map(|list| {
+            list.iter()
+                .map(|entry| self.canonical_tool_id_for_registry(entry))
+                .collect::<Vec<_>>()
+        });
+        let allowlist = normalized_allowlist.as_deref();
+
         // PreToolUse hooks (Claude parity): a plugin tool-firewall may block the
         // call. This is a per-agent plugin layer ON TOP of the Gateway's own tool
         // governance, not a replacement for it. Fail-open + bounded timeout +
@@ -3776,10 +4224,15 @@ impl McpRegistry {
                 .agent_store
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("agent store unavailable for governed tool call"))?;
-            let record = store
-                .get(agent_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("calling agent '{agent_id}' is no longer installed"))?;
+            let record = store.get(agent_id).await?.ok_or_else(|| {
+                anyhow::anyhow!("calling agent '{agent_id}' is no longer installed")
+            })?;
+            if record.safety_profile == crate::agents::AgentSafetyProfile::VerifiedPlanOnly
+                && !tool_id.starts_with("plans.")
+            {
+                crate::safe_actions::authorize_verified_dispatch(agent_id, tool_id, &arguments)
+                    .await?;
+            }
             let (annotations, http_method) = self.tool_effect_metadata(tool_id).await;
             crate::agent_execution::ensure_tool_allowed_for_record_with_metadata(
                 &record,
@@ -3854,6 +4307,16 @@ impl McpRegistry {
             .split_registered_tool_id(tool_id)
             .ok_or_else(|| anyhow!("malformed tool id '{tool_id}' (expected server.tool)"))?;
 
+        if server == "plans" {
+            return crate::safe_actions::dispatch_tool(
+                tool,
+                arguments,
+                agent_id,
+                host_conversation_id,
+            )
+            .await;
+        }
+
         // Core self-API provider (agents driving Ryu itself): OpenAPI-derived tools
         // dispatched by looping back over HTTP to THIS Core with its own token.
         //
@@ -3902,16 +4365,14 @@ impl McpRegistry {
         // The tempting argument for treating this plane as safer is that the
         // ext-proxy carries an app-declared per-route `permission` gate the self-API
         // loopback does not. That gate is real code (`ext_proxy::…
-        // enforce_permission_on`), but it is reached only for a route the manifest
-        // ANNOTATED — and of the packaged apps, **zero** annotate any route today
-        // (43 manifests, ~390 declared routes, 0 `permission` fields). So the branch
-        // never fires, and the derived call presents the node's own `RYU_TOKEN` to
-        // Core's protected route with no per-caller authorization behind it: byte for
-        // byte the situation the self-API refusal exists for. On an org-bound node
-        // that is a tenancy bypass — agent A reads every tenant's CRM records — so
-        // derived tools are refused unless the resolved principal is `Unrestricted`
-        // (⟺ the node is unbound/personal, where there is exactly one principal and
-        // the node token IS its boundary).
+        // enforce_permission_on`) and now covers the packaged apps' protected
+        // sidecar routes, including method-specific read/write levels. Derived tools
+        // still present the node's own `RYU_TOKEN` rather than the caller's scoped
+        // JWT, so they remain refused on org-bound nodes: otherwise agent A could
+        // use a derived CRM tool to read agent B's records before the app route
+        // permission has a caller identity to evaluate. Direct UI/proxy requests
+        // continue through the per-route gate; this refusal is only for the
+        // identity-less derived-tool loopback.
         //
         // The gate to relax when apps do start annotating is this one, and the
         // condition to relax it on is per-ROUTE (`required_permission_for` returning
@@ -3945,8 +4406,8 @@ impl McpRegistry {
                 return Err(anyhow!(
                     "app API tools are disabled on shared (org-bound) nodes: the call \
                      loops back through Core with the node's own credentials rather \
-                     than your scoped identity, and '{}' annotates no per-route \
-                     permission of its own. Use them on a personal node.",
+                     than your scoped identity, so the caller's per-route app \
+                     permission for '{}' cannot be evaluated. Use them on a personal node.",
                     route.plugin_id
                 ));
             }
@@ -4078,12 +4539,17 @@ impl McpRegistry {
                                 "inline tool '{tool_id}' unavailable: server state not initialized"
                             ));
                         };
-                        let bridge =
-                            std::sync::Arc::new(crate::plugin_host::PluginHookBridge::new(
+                        // `user_id` is the client-supplied Composio entity selector,
+                        // not an authorization identity. Never let it choose a
+                        // plugin-storage tenant; the bridge falls back to the
+                        // active local account when no verified caller is present.
+                        let bridge = std::sync::Arc::new(
+                            crate::plugin_host::PluginHookBridge::new(
                                 resolved.plugin_id.clone(),
                                 resolved.grants.clone(),
                                 state,
-                            ));
+                            ),
+                        );
                         let invoker = std::sync::Arc::new(
                             crate::tool_exec::SandboxToolInvoker::bridge(bridge),
                         );
@@ -4115,14 +4581,18 @@ impl McpRegistry {
                         // `RYU_EXT_TOKEN`/`RYU_EXT_PLUGIN_ID`. The token is layered
                         // POST-scrub inside the backend so it is delivered (not
                         // stripped by the secret-key env scrubber). Best-effort: any
-                        // failure logs and falls back to today's bare `--allow-run`
-                        // + no shim env, never blocking the tool call.
+                        // failure logs and retains only the manifest-declared
+                        // executable allowlist, never widening the tool call.
                         let augment = if resolved
                             .permissions
                             .as_ref()
                             .is_some_and(|p| p.child_process)
                         {
-                            build_cap_shim_augment(&resolved.plugin_id).await
+                            build_cap_shim_augment(
+                                &resolved.plugin_id,
+                                resolved.permissions.as_ref(),
+                            )
+                            .await
                         } else {
                             ryu_tool_exec::SandboxAugment::default()
                         };
@@ -4176,6 +4646,7 @@ impl McpRegistry {
                         fail_open,
                         unwrap_body,
                         body_defaults,
+                        caller_agent_query,
                     } => {
                         // Gateway-governed egress; the domain grant is checked first
                         // (deterministic refusal) inside `run_http_tool`. The
@@ -4184,6 +4655,8 @@ impl McpRegistry {
                         // `body_defaults` are deep-merged under the model body and
                         // `unwrap_body` shapes the 2xx result — both are declarative
                         // manifest knobs, not exa-specific code.
+                        let url =
+                            url_for_calling_agent(&url, caller_agent_query.as_deref(), agent_id)?;
                         return crate::tool_exec::run_http_tool(
                             &url,
                             &method,
@@ -4758,7 +5231,13 @@ impl McpRegistry {
         }
 
         if cfg.auth.is_none() {
-            return client::call_tool(&cfg.to_target()?, tool, arguments).await;
+            return match client::call_tool(&cfg.to_target()?, tool, arguments).await {
+                Ok(result) => Ok(normalize_mpp_result(result, server, tool)),
+                Err(error) => match mpp_payment_required(&error, server, tool) {
+                    Some(envelope) => Ok(envelope),
+                    None => Err(error),
+                },
+            };
         }
 
         let principal = match self.conversations.as_ref() {
@@ -4780,7 +5259,10 @@ impl McpRegistry {
             Err(error) => return Err(error),
         };
         match client::call_tool(&cmd, tool, arguments.clone()).await {
-            Ok(result) => Ok(result),
+            Ok(result) => Ok(normalize_mpp_result(result, server, tool)),
+            Err(error) if mpp_payment_required(&error, server, tool).is_some() => {
+                Ok(mpp_payment_required(&error, server, tool).expect("checked above"))
+            }
             Err(error) if oauth_http_failure(&error, reqwest::StatusCode::UNAUTHORIZED) => {
                 let refreshed =
                     match oauth_target(&cfg, &owner_user_id, &profile_id, true, session_id.clone())
@@ -4794,7 +5276,15 @@ impl McpRegistry {
                         Err(refresh_error) => return Err(refresh_error),
                     };
                 match client::call_tool(&refreshed, tool, arguments).await {
-                    Ok(result) => Ok(result),
+                    Ok(result) => Ok(normalize_mpp_result(result, server, tool)),
+                    Err(retry_error)
+                        if mpp_payment_required(&retry_error, server, tool).is_some() =>
+                    {
+                        Ok(
+                            mpp_payment_required(&retry_error, server, tool)
+                                .expect("checked above"),
+                        )
+                    }
                     Err(retry_error)
                         if oauth_http_failure(&retry_error, reqwest::StatusCode::UNAUTHORIZED) =>
                     {
@@ -4864,7 +5354,23 @@ impl McpRegistry {
             tools.retain(|t| t.id != id);
             tools.push(tool);
         }
+        // Self-built widgets are cached by server/URI, so an app tool update must
+        // retire the old HTML before the same URI can be served again.
+        if let Ok(mut cache) = self.resource_cache.lock() {
+            cache.clear();
+        }
         // A newly available provider tool can make a capability verb serveable.
+        capability_tools::invalidate();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_test_app_tool_descriptor(&self, mut tool: RegistryTool) {
+        tool.id = canonical_tool_id(&tool.id);
+        tool.name = canonical_tool_id(&tool.name);
+        if let Ok(mut tools) = self.app_tools.lock() {
+            tools.retain(|candidate| candidate.id != tool.id);
+            tools.push(tool);
+        }
         capability_tools::invalidate();
     }
 
@@ -4875,6 +5381,11 @@ impl McpRegistry {
         let id = canonical_tool_id(id);
         if let Ok(mut tools) = self.app_tools.lock() {
             tools.retain(|t| t.id != id);
+        }
+        // A disabled app must not leave its cached widget resource available to
+        // the resource-read endpoint, and a re-enable must not reuse old HTML.
+        if let Ok(mut cache) = self.resource_cache.lock() {
+            cache.clear();
         }
         // A removed provider tool can make a capability verb unserveable.
         capability_tools::invalidate();
@@ -5466,9 +5977,12 @@ impl McpRegistry {
 /// the host handing the child a token minted for exactly this run).
 ///
 /// Best-effort: on a materialize failure it logs and returns
-/// [`ryu_tool_exec::SandboxAugment::default`] (today's bare `--allow-run`, no shim
-/// env), never blocking the tool call.
-async fn build_cap_shim_augment(plugin_id: &str) -> ryu_tool_exec::SandboxAugment {
+/// an explicit scoped run list (with no shim env), never widening to a bare
+/// `--allow-run` permission.
+async fn build_cap_shim_augment(
+    plugin_id: &str,
+    permissions: Option<&crate::plugin_manifest::PermissionSet>,
+) -> ryu_tool_exec::SandboxAugment {
     let plugin_dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir()
         .join(crate::plugin_manifest::plugin_dir_name(plugin_id));
     // The plugin's DECLARED capability edges → convenience-alias shims + the
@@ -5484,6 +5998,12 @@ async fn build_cap_shim_augment(plugin_id: &str) -> ryu_tool_exec::SandboxAugmen
                 .collect()
         })
         .unwrap_or_default();
+    let mut run_allow = crate::sidecar::cli_shims::shim_names(&declared);
+    if let Some(permissions) = permissions {
+        run_allow.extend(permissions.run.iter().cloned());
+    }
+    run_allow.sort();
+    run_allow.dedup();
 
     match crate::sidecar::cli_shims::materialize(&plugin_dir, &declared).await {
         Ok(shim_dir) => {
@@ -5499,7 +6019,7 @@ async fn build_cap_shim_augment(plugin_id: &str) -> ryu_tool_exec::SandboxAugmen
                 plugin_id.to_owned(),
             );
             ryu_tool_exec::SandboxAugment {
-                run_allow: crate::sidecar::cli_shims::shim_names(&declared),
+                run_allow,
                 extra_env: env.into_iter().collect(),
             }
         }
@@ -5508,9 +6028,15 @@ async fn build_cap_shim_augment(plugin_id: &str) -> ryu_tool_exec::SandboxAugmen
                 plugin_id = %plugin_id,
                 error = %e,
                 "could not materialize capability CLI shims for inline tool; \
-                 running with bare --allow-run and no shim env"
+                 retaining only the manifest executable allowlist"
             );
-            ryu_tool_exec::SandboxAugment::default()
+            // Keep subprocess execution scoped even if shim materialization fails.
+            // Explicit binaries may still work from PATH; capability aliases fail
+            // closed instead of widening to a bare `--allow-run`.
+            ryu_tool_exec::SandboxAugment {
+                run_allow,
+                extra_env: Vec::new(),
+            }
         }
     }
 }
@@ -6079,7 +6605,7 @@ mod tests {
 
     /// A declaration whose command is not installed must NOT be registered: doing so
     /// puts its tools in the next `tools/list`, and every call then ENOENTs. `ghost`
-    /// is the live instance — Core-tier, default-ON, and its binary is fetched only by
+    /// is the live instance — Core-tier, pre-installed, and its binary is fetched only by
     /// a downloader whose `archive_url()` has no default, so every stock node carried
     /// ~29 `ghost.*` tools that could not spawn.
     ///
@@ -6593,6 +7119,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn calling_agent_query_is_generic_and_server_owned() {
+        assert_eq!(
+            url_for_calling_agent(
+                "core:/api/ext/com.example/tool",
+                Some("agent_id"),
+                Some("agent/a"),
+            )
+            .unwrap(),
+            "core:/api/ext/com.example/tool?agent_id=agent%2Fa"
+        );
+        assert!(url_for_calling_agent(
+            "core:/api/ext/com.example/tool?agent_id=model",
+            Some("agent_id"),
+            Some("agent/a"),
+        )
+        .is_err());
+        assert_eq!(
+            url_for_calling_agent("core:/api/ext/com.example/tool", None, Some("agent/a"),)
+                .unwrap(),
+            "core:/api/ext/com.example/tool"
+        );
+    }
+
     /// Uninstall/disable seam: deregistering a manifest's `mcp_servers` removes
     /// each declared server from the live registry.
     #[test]
@@ -6645,7 +7195,7 @@ mod tests {
     }
 
     /// Core-tier manifests are compiled-in fixtures, so they register with no grant
-    /// on the record — which is exactly the state the default-on seed leaves them
+    /// on the record — which is exactly the state the pre-installed seed leaves them
     /// in (`plugins/seed.rs` writes an EMPTY grant list for everything outside
     /// `seed_overrides`, and `ghost` is outside it).
     #[test]
@@ -6971,7 +7521,7 @@ mod tests {
             lowered.args,
             vec![
                 "-y".to_owned(),
-                "agent-browser".to_owned(),
+                "agent-browser@0.34.0".to_owned(),
                 "mcp".to_owned(),
                 "--tools".to_owned(),
                 "all".to_owned()
@@ -7580,12 +8130,19 @@ mod tests {
     async fn unregister_app_tool_makes_it_uncallable() {
         let reg = McpRegistry::empty();
         reg.register_app_tool("app.foo.bar".into(), "foo.bar".into(), None);
+        reg.seed_widget_tool_for_test("app", "foo.bar", "ui://widget/foo.html");
         reg.unregister_app_tool("app.foo.bar");
         let err = reg
             .call_tool("app.foo.bar", serde_json::json!({}), None)
             .await
             .expect_err("unregistered app tool must be uncallable");
         assert!(err.to_string().contains("unknown app tool"), "got: {err}");
+        assert!(
+            reg.widget_resource("app", "ui://widget/foo.html")
+                .await
+                .is_none(),
+            "unregistering an app tool must invalidate its cached widget"
+        );
     }
 
     // ── plugin-tools: net-new tool backends (inline_deno + http) ────────────────
@@ -7722,8 +8279,8 @@ mod tests {
     }
 
     /// First-party regression: the built-in `command`/`http` tool plugins must still
-    /// resolve their grants. `spider` and `shadow` are Core-tier AND default-on, and
-    /// the default-on seed writes an EMPTY grant list for everything outside
+    /// resolve their grants. `spider` and `shadow` are Core-tier AND pre-installed, and
+    /// the pre-installed seed writes an EMPTY grant list for everything outside
     /// `seed_overrides` — so on a fresh install their records carry no grants at
     /// all. Reading the record unconditionally would silently break both.
     #[test]
@@ -7740,7 +8297,7 @@ mod tests {
             let grants = effective_tool_grants(manifest, &[]);
             assert!(
                 grants.contains(grant),
-                "{id} must keep '{grant}' with an empty record (default-on seed writes none)"
+                "{id} must keep '{grant}' with an empty record (pre-installed seed writes none)"
             );
         }
     }
@@ -7840,6 +8397,52 @@ mod tests {
         }
         // If a real Deno backend + ServerState were present the call would succeed;
         // that path is exercised only when `tool_exec::is_available()`.
+    }
+
+    #[tokio::test]
+    async fn verified_implementation_hash_changes_with_same_schema_backend_replacement() {
+        let reg = registry_with_plugin(
+            "com.test.binding",
+            vec!["tool:execute"],
+            vec![tool_entry(
+                "weather",
+                serde_json::json!({
+                    "slug": "weather",
+                    "backend": "inline_deno",
+                    "code": "return { ok: true };",
+                    "input_schema": { "type": "object", "additionalProperties": false },
+                }),
+            )],
+        )
+        .await;
+        reg.register_app_tool("app.weather".into(), "weather".into(), None);
+        let tool = reg
+            .list_all_tools()
+            .await
+            .into_iter()
+            .find(|item| item.id == "app.weather")
+            .expect("registered app tool");
+        let chain = reg.verified_dispatch_chain(&tool.id).await.unwrap();
+        let before = reg
+            .verified_implementation_hash(&tool, &chain)
+            .await
+            .unwrap();
+
+        let manifests = reg.self_build_manifests.as_ref().unwrap();
+        let mut guard = manifests.write().await;
+        guard[0].runnables[0].config = Some(serde_json::json!({
+            "slug": "weather",
+            "backend": "inline_deno",
+            "code": "return { ok: false };",
+            "input_schema": { "type": "object", "additionalProperties": false },
+        }));
+        drop(guard);
+
+        let after = reg
+            .verified_implementation_hash(&tool, &chain)
+            .await
+            .unwrap();
+        assert_ne!(before, after, "backend code must be certificate-bound");
     }
 
     #[tokio::test]
@@ -8198,8 +8801,8 @@ mod tests {
     // ── Unified widget promotion: dedup + the `widget:render` grant gate ──────
 
     /// A plugin manifest that declares `tool_id` in `contributes.widgets` with the
-    /// given permission grants. The grant gate reads `permission_grants` (NOT the
-    /// record's approved_grants), mirroring the app-tool backend resolver.
+    /// given permission grants. Promotion also requires the persisted record to
+    /// carry the Gateway-approved grant; a declaration alone is not consent.
     fn widget_manifest(id: &str, tool_id: &str, grants: &[&str]) -> PluginManifest {
         PluginManifest {
             id: id.to_owned(),
@@ -8232,9 +8835,9 @@ mod tests {
     const WIDGET_FIXTURE_URI: &str = "ui://widget/checklist.html";
 
     /// A registry with `manifest` wired as the self-build governance context and a
-    /// lifecycle record for `record_id` in the given enabled state. The record is
-    /// enabled with EMPTY approved_grants on purpose — so a passing grant test
-    /// proves the gate reads `manifest.permission_grants`, not the record.
+    /// lifecycle record for `record_id` in the given enabled state. An enabled
+    /// widget-bearing manifest receives the matching approved grant in the fixture
+    /// record, mirroring a successful Gateway validation.
     ///
     /// The `checklist.render` widget binding is seeded too: `resolve_widget_promotion`
     /// returns `None` for a tool that renders no widget BEFORE it consults the
@@ -8251,8 +8854,17 @@ mod tests {
             .await
             .expect("insert record");
         if enabled {
+            let approved = if manifest
+                .permission_grants
+                .iter()
+                .any(|grant| grant == WIDGET_RENDER_GRANT)
+            {
+                vec![WIDGET_RENDER_GRANT.to_owned()]
+            } else {
+                Vec::new()
+            };
             store
-                .set_enabled(record_id, &[])
+                .set_enabled(record_id, &approved)
                 .await
                 .expect("enable record");
         }
@@ -8309,6 +8921,32 @@ mod tests {
             .widget_promotion_or_log("checklist.render")
             .await
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn widget_without_approved_grant_is_refused() {
+        let manifest = widget_manifest("checklist", "checklist.render", &[WIDGET_RENDER_GRANT]);
+        let store = crate::plugins::PluginStore::open_in_memory().expect("in-memory store");
+        store
+            .insert("checklist", "1.0.0")
+            .await
+            .expect("insert record");
+        store
+            .set_enabled("checklist", &[])
+            .await
+            .expect("enable record without widget grant");
+        let manifests = std::sync::Arc::new(TokioRwLock::new(vec![manifest]));
+        let reg = McpRegistry::empty().with_self_build(manifests, std::sync::Arc::new(store));
+        reg.seed_widget_tool_for_test(
+            WIDGET_FIXTURE_SERVER,
+            WIDGET_FIXTURE_TOOL,
+            WIDGET_FIXTURE_URI,
+        );
+
+        assert!(matches!(
+            reg.resolve_widget_promotion("checklist.render").await,
+            WidgetPromotion::DeniedNoGrant { .. }
+        ));
     }
 
     #[tokio::test]
@@ -8441,6 +9079,146 @@ mod tests {
             ),
             "a declared + granted + enabled MCP-server widget must promote"
         );
+    }
+
+    fn self_build_widget_manifest() -> PluginManifest {
+        PluginManifest {
+            id: "com.example.resolvedesk".to_owned(),
+            name: "ResolveDesk".to_owned(),
+            version: "0.1.0".to_owned(),
+            runnables: vec![
+                PmRunnableEntry {
+                    id: "resolvedesk.render".to_owned(),
+                    name: "render".to_owned(),
+                    kind: RunnableKind::Tool,
+                    config: Some(serde_json::json!({
+                        "slug": "resolvedesk.render",
+                        "backend": "inline_deno",
+                        "code": "return { structuredContent: { answer: 'ok' } };",
+                        "description": "Answer a support question",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": { "message": { "type": "string" } },
+                            "required": ["message"]
+                        },
+                        "widget": true,
+                        "widget_accessible": true,
+                        "invoking": "Checking…",
+                        "invoked": "Ready"
+                    })),
+                },
+                PmRunnableEntry {
+                    id: "resolvedesk.handoff".to_owned(),
+                    name: "handoff".to_owned(),
+                    kind: RunnableKind::Tool,
+                    config: Some(serde_json::json!({
+                        "slug": "resolvedesk.handoff",
+                        "backend": "inline_deno",
+                        "code": "return { isError: false };",
+                        "description": "Create a human handoff",
+                        "widget": false,
+                        "widget_accessible": true
+                    })),
+                },
+            ],
+            permission_grants: vec!["tool:execute".to_owned(), WIDGET_RENDER_GRANT.to_owned()],
+            contributes: Some(crate::plugin_manifest::Contributes {
+                widgets: vec![crate::plugin_manifest::WidgetContribution {
+                    tool_id: "resolvedesk.render".to_owned(),
+                    uri: "ui://widget/resolvedesk.html".to_owned(),
+                    ui_entry: Some("src/widget.html".to_owned()),
+                    mime: "text/html+skybridge".to_owned(),
+                    default_display_mode: "inline".to_owned(),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn self_build_widget_metadata_joins_tool_and_widget_declarations() {
+        let manifest = self_build_widget_manifest();
+        let metadata = self_build_tool_metadata(&[manifest], "resolvedesk.render")
+            .expect("the manifest tool should be discoverable");
+
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("Answer a support question")
+        );
+        assert_eq!(
+            metadata.input_schema.as_ref().map(Value::is_object),
+            Some(true)
+        );
+        let binding = metadata.widget.expect("render tool should bind a widget");
+        assert_eq!(binding.template_uri, "ui://widget/resolvedesk.html");
+        assert!(binding.widget_accessible);
+        assert_eq!(binding.invoking_label.as_deref(), Some("Checking…"));
+        assert_eq!(binding.invoked_label.as_deref(), Some("Ready"));
+    }
+
+    #[tokio::test]
+    async fn self_build_widget_reads_packed_html_from_the_plugin_store() {
+        let store = std::sync::Arc::new(crate::plugins::PluginStore::open_in_memory().unwrap());
+        store
+            .insert("com.example.resolvedesk", "0.1.0")
+            .await
+            .unwrap();
+        store
+            .set_enabled(
+                "com.example.resolvedesk",
+                &["tool:execute".to_owned(), WIDGET_RENDER_GRANT.to_owned()],
+            )
+            .await
+            .unwrap();
+        store
+            .set_ui_code(
+                "com.example.resolvedesk",
+                Some("<!doctype html><main>ResolveDesk</main>"),
+            )
+            .await
+            .unwrap();
+
+        let manifests = std::sync::Arc::new(TokioRwLock::new(vec![self_build_widget_manifest()]));
+        let registry = McpRegistry::empty().with_self_build(manifests, store);
+        registry.register_app_tool(
+            "resolvedesk.render".to_owned(),
+            "resolvedesk.render".to_owned(),
+            None,
+        );
+        registry.register_app_tool(
+            "resolvedesk.handoff".to_owned(),
+            "resolvedesk.handoff".to_owned(),
+            None,
+        );
+
+        assert_eq!(
+            registry.widget_accessible_tool_ids("resolvedesk").await,
+            vec!["resolvedesk.handoff".to_owned()]
+        );
+
+        let tools = registry.list_all_tools().await;
+        let tool = tools
+            .iter()
+            .find(|candidate| candidate.id == "resolvedesk.render")
+            .expect("enabled app tool should be listed");
+        assert_eq!(
+            tool.description.as_deref(),
+            Some("Answer a support question")
+        );
+        assert!(tool.input_schema.is_some());
+        assert!(tool.widget.is_some());
+
+        let promotion = registry
+            .resolve_widget_promotion("resolvedesk.render")
+            .await;
+        assert!(matches!(promotion, WidgetPromotion::Allow(_)));
+        let resource = registry
+            .widget_resource("resolvedesk", "ui://widget/resolvedesk.html")
+            .await
+            .expect("packed widget HTML should resolve from the plugin store");
+        assert_eq!(resource.mime_type, "text/html+skybridge");
+        assert!(resource.html.contains("ResolveDesk"));
     }
 
     // ── the approval gate never fires for a skill CATALOG id ───────────────────

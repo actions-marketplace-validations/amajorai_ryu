@@ -150,6 +150,8 @@ export interface LiveActivitySpec {
 export interface LiveActivityContribution {
 	/** Accent colour hint (any CSS color). */
 	accent?: string;
+	/** Core-stamped declarative HTTP authority. */
+	http_policy?: unknown;
 	id: string;
 	icon?: string;
 	/** Owning plugin id, added by Core's contributions endpoint. */

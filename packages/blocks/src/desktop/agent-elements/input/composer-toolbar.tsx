@@ -19,7 +19,12 @@ import { SendButton } from "./send-button.tsx";
 import { VoiceInputButton } from "./voice-input-button.tsx";
 
 export interface ComposerToolbarProps {
-	/** Use a dedicated dictation control so compact chat keeps an idle Send action. */
+	/** Textarea content placed between the control clusters in compact mode. */
+	center?: React.ReactNode;
+	/**
+	 * Single-row layout for a compact one-line composer. Also keeps dictation in a
+	 * dedicated control so the trailing action remains Send.
+	 */
 	compact?: boolean;
 	/**
 	 * Context-window usage for the persistent composer meter (a donut ring +
@@ -229,6 +234,7 @@ export function ComposerToolbar({
 	contextMeterOnOpen,
 	voiceMode,
 	compact = false,
+	center,
 }: ComposerToolbarProps) {
 	// The primary action always reflects what the user can do next: a typed
 	// message sends (and the host queues it when a turn is active), while Stop
@@ -264,7 +270,13 @@ export function ComposerToolbar({
 	);
 
 	const leftCluster = (
-		<div className="flex min-w-0 items-center gap-1">
+		<div
+			className={
+				compact
+					? "flex shrink-0 items-center gap-1"
+					: "flex min-w-0 items-center gap-1"
+			}
+		>
 			{(showPlusMenu || showDirectory) && (
 				<GoalPlusButton
 					directoryGroups={directoryGroups}
@@ -286,7 +298,11 @@ export function ComposerToolbar({
 	);
 
 	const rightCluster = (
-		<div className="flex items-center gap-1">
+		<div
+			className={
+				compact ? "flex shrink-0 items-center gap-1" : "flex items-center gap-1"
+			}
+		>
 			{/* Context-window meter sits leftmost in the trailing cluster, just
 			    before the model selector — the window is a model attribute. */}
 			{contextMeter ? (
@@ -362,14 +378,25 @@ export function ComposerToolbar({
 		</div>
 	);
 
-	// The ONE layout: controls row beneath the textarea, leading cluster left,
-	// trailing cluster right. A second, single-row arrangement used to live here
-	// (the textarea threaded in as a flexing `center` between the two clusters,
-	// selected by a `compact` prop) so the chat page and the launchpad rendered
-	// structurally different composers. Compact is a density on the textarea block
-	// now, not a topology, so this component has nothing to branch on.
+	if (compact) {
+		return (
+			<div
+				className="flex items-end gap-1.5 px-2 py-2"
+				data-composer-layout="compact"
+			>
+				{leftCluster}
+				{center}
+				{rightCluster}
+			</div>
+		);
+	}
+
+	// Full layout: leading and trailing controls share the row below the editor.
 	return (
-		<div className="flex items-center justify-between gap-2 px-2 pt-0.5 pb-2">
+		<div
+			className="flex items-center justify-between gap-2 px-2 pt-0.5 pb-2"
+			data-composer-layout="full"
+		>
 			{leftCluster}
 			{rightCluster}
 		</div>

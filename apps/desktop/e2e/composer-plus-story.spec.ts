@@ -207,13 +207,12 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		);
 	});
 
-	// The compact composer's TOPOLOGY, not its "+" menu. `compact` used to select a
-	// second layout in which the textarea sat BETWEEN the "+" and the trailing
-	// controls on one line, so once a chat had history the "+" and the agent
-	// selector jumped out of the stacked controls row and landed on opposite sides
-	// of the bar. Both spellings compile and both render; only a laid-out browser
-	// can tell them apart, which is why this is pinned here.
-	test("compact keeps the + and the agent selector in one row BELOW the textarea", async ({
+	// Compact is a responsive topology, not just tighter padding. A one-line draft
+	// shares the row with the controls; once the textarea soft-wraps, the composer
+	// must switch to the full stacked layout instead of squeezing a taller editor
+	// between those controls. Both spellings compile, so only a laid-out browser can
+	// pin this transition.
+	test("compact switches to the full stacked layout when the textarea wraps", async ({
 		page,
 	}) => {
 		await page.goto(STORY_URL);
@@ -221,42 +220,56 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		const plus = plusIn(page, "compact");
 		const agent = mount.getByTestId("agent-trigger");
 		const textarea = mount.locator("textarea");
+		const compactEditor = textarea.locator("xpath=../..");
+		const toolbar = mount.locator("[data-composer-layout]");
 
 		await expect(plus).toBeVisible();
 		await expect(agent).toBeVisible();
+		await expect(toolbar).toHaveAttribute("data-composer-layout", "compact");
 
-		const [plusBox, agentBox, textareaBox] = await Promise.all([
+		const [plusBox, agentBox, compactEditorBox] = await Promise.all([
 			plus.boundingBox(),
 			agent.boundingBox(),
-			textarea.boundingBox(),
+			compactEditor.boundingBox(),
 		]);
-		if (!(plusBox && agentBox && textareaBox)) {
+		if (!(plusBox && agentBox && compactEditorBox)) {
 			throw new Error("composer controls did not lay out");
 		}
 
-		// Same row: their vertical centres line up (the single-row layout put them
-		// on the same line as each other too, which is why the textarea test below
-		// is the one that actually distinguishes the two).
+		// The empty textarea and controls begin on the same compact row.
 		const plusCentre = plusBox.y + plusBox.height / 2;
 		const agentCentre = agentBox.y + agentBox.height / 2;
+		const textareaCentre = compactEditorBox.y + compactEditorBox.height / 2;
 		expect(Math.abs(plusCentre - agentCentre)).toBeLessThan(4);
-
-		// Stacked: the controls row starts below the textarea's bottom edge. In the
-		// deleted single-row layout the textarea shared their line, so this failed.
-		expect(plusBox.y).toBeGreaterThanOrEqual(
-			textareaBox.y + textareaBox.height
-		);
-
-		// Left-aligned, in order: "+" then the agent selector — the launchpad's
-		// arrangement, which compact used to invert (agent selector on the right).
+		expect(Math.abs(plusCentre - textareaCentre)).toBeLessThan(6);
 		expect(agentBox.x).toBeGreaterThan(plusBox.x);
 
-		await plus.click();
-		const menuBox = await page.getByRole("listbox").boundingBox();
-		if (!menuBox) {
-			throw new Error("composer menu did not lay out");
+		// No explicit newline: this is the auto-wrap regression the product uses.
+		await textarea.fill(
+			"Explain how this compact composer should grow naturally without squeezing its controls when a longer prompt wraps onto another visible line. ".repeat(
+				4
+			)
+		);
+		await expect(toolbar).toHaveAttribute("data-composer-layout", "full");
+
+		const [stackedPlusBox, stackedTextareaBox] = await Promise.all([
+			plus.boundingBox(),
+			textarea.boundingBox(),
+		]);
+		if (!(stackedPlusBox && stackedTextareaBox)) {
+			throw new Error("expanded composer controls did not lay out");
 		}
-		expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(plusBox.y);
+		expect(stackedPlusBox.y).toBeGreaterThanOrEqual(
+			stackedTextareaBox.y + stackedTextareaBox.height
+		);
+
+		// An intentional line break takes the same path as a visual soft wrap.
+		await textarea.fill("First line\nSecond line");
+		await expect(toolbar).toHaveAttribute("data-composer-layout", "full");
+
+		// Deleting back to one visual line restores the space-saving topology.
+		await textarea.fill("Short follow-up");
+		await expect(toolbar).toHaveAttribute("data-composer-layout", "compact");
 	});
 
 	test("shows current-turn progress as separate side-by-side chips", async ({

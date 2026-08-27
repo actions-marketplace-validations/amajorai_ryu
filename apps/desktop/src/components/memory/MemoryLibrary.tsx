@@ -68,6 +68,7 @@ import {
 } from "@/src/lib/api/memory.ts";
 import { MemoryDreamReview } from "./MemoryDreamReview.tsx";
 import { MemoryEditor } from "./MemoryEditor.tsx";
+import { MemoryGitSourceCard } from "./MemoryGitSourceCard.tsx";
 import { MemoryReflectDashboard } from "./MemoryReflectDashboard.tsx";
 
 const ALL = "all";
@@ -370,6 +371,11 @@ export function MemoryLibrary({
 							New memory
 						</Button>
 					</div>
+					<MemoryGitSourceCard
+						memories={memories}
+						onImported={reload}
+						target={target}
+					/>
 
 					{/* Filters */}
 					<div className="flex flex-wrap items-center gap-2">

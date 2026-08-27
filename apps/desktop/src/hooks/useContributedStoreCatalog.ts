@@ -1,12 +1,12 @@
 import {
-	isCoreApiPath,
+	contributionSourceRequest,
 	type StoreCatalogItem,
 	storeItemsFromResponse,
 	storeTotalFromResponse,
 } from "@ryu/app-host/views";
 import { useQuery } from "@tanstack/react-query";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
-import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
+import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
 import type { PluginStoreTab } from "@/src/lib/api/plugins.ts";
 
 export interface ContributedStoreCatalogData {
@@ -22,23 +22,27 @@ export function contributedStoreCatalogQuery(
 ) {
 	const spec = tab.spec;
 	const source = spec?.source;
-	const path = source?.http.path;
+	const sourceRequest = contributionSourceRequest(tab, source);
 	return {
-		enabled: enabled && Boolean(source),
-		queryKey: ["store-tab-catalog", tab.plugin, tab.id, target.url],
+		enabled: enabled && sourceRequest !== null,
+		queryKey: [
+			"store-tab-catalog",
+			tab.plugin,
+			tab.id,
+			target.url,
+			target.token,
+			sourceRequest?.path ?? "",
+		],
 		queryFn: async (): Promise<ContributedStoreCatalogData> => {
-			if (!(spec && source && path)) {
+			if (!(spec && source && sourceRequest)) {
 				return { items: [], total: null };
 			}
-			if (!isCoreApiPath(path)) {
-				throw new Error(`store tab source path must start with /api/: ${path}`);
-			}
-			const response = await fetch(apiUrl(target, path), {
-				method: source.http.method ?? "GET",
-				headers: makeHeaders(target.token),
+			const response = await fetch(apiUrl(target, sourceRequest.path), {
+				method: sourceRequest.method,
+				headers: await requestHeaders(target),
 			});
 			if (!response.ok) {
-				throw new Error(`${path} failed: ${response.status}`);
+				throw new Error(`${sourceRequest.path} failed: ${response.status}`);
 			}
 			const payload = (await response.json()) as unknown;
 			return {

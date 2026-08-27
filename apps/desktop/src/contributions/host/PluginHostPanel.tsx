@@ -18,6 +18,10 @@
 
 import { PlugSocketIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import type {
+	RyuCatalogModels,
+	RyuCatalogSnapshot,
+} from "@ryu/app-host/app-bridge";
 import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
 	type ActivityRecord,
@@ -27,6 +31,8 @@ import {
 	type CalendarJobRecord,
 	type CalendarWorkflowRecord,
 	type Capability,
+	type ChatConversationSummary,
+	type ChatSendResult,
 	type CryptoStatus,
 	capabilitiesFromGrants,
 	type HostServices,
@@ -34,7 +40,6 @@ import {
 	type MailInbox,
 	type MailMessage,
 	type MeetingRecord,
-	type MonitorRecord,
 	type NotificationRecord,
 	type ProactiveSuggestionRecord,
 	type QuestRecord,
@@ -46,6 +51,10 @@ import {
 	htmlCompanionSrcdoc,
 	thirdPartyPluginSrcdoc,
 } from "@ryu/app-host/third-party-plugin";
+import {
+	createScopedToastHost,
+	createSileoToastRenderer,
+} from "@ryu/app-host/toast-host";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
@@ -57,6 +66,7 @@ import {
 } from "@ryu/ui/components/empty";
 import { asGlyphValue } from "@ryu/ui/components/glyph.ts";
 import { iconToUrl } from "@ryu/ui/components/icon";
+import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { RealtimeConnection } from "@ryuhq/core-client/realtime";
 import { useQuery } from "@tanstack/react-query";
@@ -68,6 +78,7 @@ import {
 	useCurrentTabId,
 	useTabsContext,
 } from "@/src/contexts/TabsContext.tsx";
+import { ApplicationRealtimeQueue } from "@/src/contributions/host/application-realtime-queue.ts";
 import {
 	type CommandEntry,
 	contributionRegistry,
@@ -85,6 +96,10 @@ import {
 } from "@/src/lib/api/approvals.ts";
 import { searchGifs } from "@/src/lib/api/assets.ts";
 import { blueprintRequest } from "@/src/lib/api/blueprint.ts";
+import {
+	listChatBroadcastConversations,
+	sendChatBroadcastTurn,
+} from "@/src/lib/api/chat-broadcast.ts";
 import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
 	fetchComposioConnections,
@@ -98,7 +113,6 @@ import {
 	subscribeChannel,
 } from "@/src/lib/api/eventStream.ts";
 import { getHealingStatus } from "@/src/lib/api/healing.ts";
-import { getRealtimeJwt } from "@/src/lib/realtime/jwt.ts";
 import { generateImage as apiGenerateImage } from "@/src/lib/api/images.ts";
 import { getLearningConfig, listExperience } from "@/src/lib/api/learn.ts";
 import {
@@ -127,7 +141,6 @@ import {
 	listMonitorAlerts,
 	listMonitors,
 	listSnapshots,
-	type MonitorInput,
 	runMonitor,
 	updateMonitor,
 } from "@/src/lib/api/monitors.ts";
@@ -173,6 +186,7 @@ import {
 	stopRecording,
 } from "@/src/lib/api/recipes.ts";
 import { rlmRequest } from "@/src/lib/api/rlm.ts";
+import { safeActionsRequest } from "@/src/lib/api/safe-actions.ts";
 import { fetchJobs } from "@/src/lib/api/schedules.ts";
 import {
 	frameUrl,
@@ -192,6 +206,10 @@ import {
 	updateSkill,
 } from "@/src/lib/api/skills.ts";
 import { socialRequest } from "@/src/lib/api/social.ts";
+import {
+	type SpaceMatch as DesktopSpaceMatch,
+	searchSpace,
+} from "@/src/lib/api/spaces.ts";
 import { subtitlesRequest } from "@/src/lib/api/subtitles.ts";
 import { tuitionRequest } from "@/src/lib/api/tuition.ts";
 import { fileToDataUrl, uploadUserFile } from "@/src/lib/api/uploads.ts";
@@ -232,8 +250,15 @@ import {
 import { createScheduledAgentWorkflow } from "@/src/lib/automations.ts";
 import { PlanCapError } from "@/src/lib/gating/planCapBridge.ts";
 import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
+import { getRealtimeJwt } from "@/src/lib/realtime/jwt.ts";
+import {
+	enrichTimelineJournal,
+	sanitizeTimelineEvents,
+} from "@/src/lib/timeline-app-icons.ts";
 import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
+
+const PLUGIN_TOAST_RENDERER = createSileoToastRenderer(toast);
 
 /** Base64-encode a UTF-8 string (btoa is Latin-1 only). Used to inline the plugin
  *  bundle into the sandboxed `srcdoc` so a body containing `</script>` cannot
@@ -493,6 +518,7 @@ const COMPANION_THEME_TOKENS = [
  *  `shell:integrate`). A companion's requested set is intersected with this — an
  *  unknown channel is silently dropped. Mirrors the `EventChannel` union. */
 const SHELL_EVENT_CHANNELS: readonly EventChannel[] = [
+	"activity",
 	"notifications",
 	"quests",
 	"monitors",
@@ -534,68 +560,6 @@ const STALL_AFTER_MS = 8000;
  *  frame slower by restarting it. */
 const RETRY_COOLDOWN_MS = 15_000;
 
-type ApplicationRealtimePush =
-	| { data: unknown; name: string; type: "event" }
-	| { data: unknown; type: "presence" }
-	| { code: number; reason: string; type: "close" };
-
-class ApplicationRealtimeQueue {
-	private closed = false;
-	private readonly pending: Array<{
-		onAbort: () => void;
-		resolve: (value: ApplicationRealtimePush | null) => void;
-	}> = [];
-	private readonly values: ApplicationRealtimePush[] = [];
-
-	push(value: ApplicationRealtimePush): void {
-		if (this.closed) {
-			return;
-		}
-		const waiter = this.pending.shift();
-		if (waiter) {
-			waiter.resolve(value);
-			return;
-		}
-		this.values.push(value);
-	}
-
-	end(): void {
-		if (this.closed) {
-			return;
-		}
-		this.closed = true;
-		for (const waiter of this.pending.splice(0)) {
-			waiter.resolve(null);
-		}
-	}
-
-	take(signal: AbortSignal): Promise<ApplicationRealtimePush | null> {
-		if (this.values.length > 0) {
-			return Promise.resolve(this.values.shift() ?? null);
-		}
-		if (this.closed || signal.aborted) {
-			return Promise.resolve(null);
-		}
-		return new Promise((resolve) => {
-			const waiter = {
-				onAbort: () => {
-					const index = this.pending.indexOf(waiter);
-					if (index >= 0) {
-						this.pending.splice(index, 1);
-					}
-					resolve(null);
-				},
-				resolve: (value: ApplicationRealtimePush | null) => {
-					signal.removeEventListener("abort", waiter.onAbort);
-					resolve(value);
-				},
-			};
-			this.pending.push(waiter);
-			signal.addEventListener("abort", waiter.onAbort, { once: true });
-		});
-	}
-}
-
 interface ApplicationRealtimeSession {
 	connection: RealtimeConnection;
 	queue: ApplicationRealtimeQueue;
@@ -626,7 +590,7 @@ function PanelPlaceholder({
 			<Empty>
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
-					{busy ? <Spinner /> : <HugeiconsIcon icon={PlugSocketIcon} />}
+						{busy ? <Spinner /> : <HugeiconsIcon icon={PlugSocketIcon} />}
 					</EmptyMedia>
 					<EmptyTitle>{title}</EmptyTitle>
 					<EmptyDescription>{description}</EmptyDescription>
@@ -749,13 +713,14 @@ export function PluginHostPanel({
 	// there). The nonce is also the ExtensionHost effect's key, so the bridge
 	// listener is rebuilt in step with the document it is waiting on.
 	const [attempt, setAttempt] = useState(0);
+	const grantsKey = companion.approvedGrants.join(" ");
 	// One nonce per attempt. Host-generated, never plugin/user input.
 	const nonce = useMemo(
 		() =>
 			typeof crypto?.randomUUID === "function"
 				? crypto.randomUUID()
 				: `nonce-${attempt}-${Date.now()}-${Math.round(Math.random() * 1e9)}`,
-		[attempt]
+		[attempt, grantsKey]
 	);
 
 	// Startup progress: `stalled` flips when the bridge has not connected within
@@ -809,7 +774,6 @@ export function PluginHostPanel({
 	// equal-but-new `approvedGrants` array — would silently kill the bridge of every
 	// open app the first time the window is refocused. Same set ⇒ same Set ⇒ no
 	// teardown.
-	const grantsKey = companion.approvedGrants.join(" ");
 	// biome-ignore lint/correctness/useExhaustiveDependencies: grantsKey is the content hash of approvedGrants.
 	const granted = useMemo<ReadonlySet<Capability>>(
 		() => capabilitiesFromGrants(companion.approvedGrants),
@@ -820,6 +784,16 @@ export function PluginHostPanel({
 	// so two companions of the same app share one slice (they are one app to the
 	// user) while different apps stay isolated.
 	const assistantOwner = `plugin:${companion.pluginId}`;
+	const toastHost = useMemo(
+		() =>
+			createScopedToastHost({
+				renderer: PLUGIN_TOAST_RENDERER,
+				sourceId: `${companion.pluginId}:${companion.id}`,
+			}),
+		[companion.id, companion.pluginId]
+	);
+
+	useEffect(() => () => toastHost.dispose(), [toastHost]);
 
 	// A closed page is not "what the user is looking at". Drop this app's slice and
 	// its takeover when the panel unmounts — an app that crashed or was navigated
@@ -838,6 +812,9 @@ export function PluginHostPanel({
 	const services = useMemo<HostServices>(
 		() => ({
 			openExternal: ({ href }) => openExternal(href),
+			uiToastDismiss: (input) => toastHost.dismiss(input),
+			uiToastShow: (input) => toastHost.show(input),
+			uiToastUpdate: (input) => toastHost.update(input),
 			// ── Assistant bridge ───────────────────────────────────────────────────
 			// The app tells the ONE global "Ask Ryu" surface what its page is showing,
 			// and (optionally) lends it this page's own instructions while the page is
@@ -933,6 +910,26 @@ export function PluginHostPanel({
 					"model.complete",
 					input
 				) as Promise<string>,
+			catalogSnapshot: () =>
+				pluginHostInvoke(
+					toTarget(node),
+					companion.pluginId,
+					"catalog.snapshot",
+					{}
+				) as Promise<RyuCatalogSnapshot>,
+			catalogModels: (input) =>
+				pluginHostInvoke(
+					toTarget(node),
+					companion.pluginId,
+					"catalog.models",
+					input
+				) as Promise<RyuCatalogModels>,
+			chatListConversations: () =>
+				listChatBroadcastConversations(toTarget(node)) as Promise<
+					ChatConversationSummary[]
+				>,
+			chatSend: (input) =>
+				sendChatBroadcastTurn(toTarget(node), input) as Promise<ChatSendResult>,
 			runAgent: (input) =>
 				pluginHostInvoke(
 					toTarget(node),
@@ -1019,6 +1016,30 @@ export function PluginHostPanel({
 					onChunk: emit,
 					signal,
 				}),
+			// Creation runs through the caller-scoped app bridge; semantic retrieval
+			// remains a host-direct Core API call. The frame never receives the node
+			// token, and Core applies its normal user/organization visibility checks.
+			spacesEnsureSpace: (input) =>
+				pluginHostInvoke(
+					toTarget(node),
+					companion.pluginId,
+					"spaces.ensureSpace",
+					input
+				) as Promise<string>,
+			spacesSearch: async (input) => {
+				const matches = await searchSpace(
+					toTarget(node),
+					input.space_id,
+					input.query,
+					input.limit
+				);
+				return matches.map((match: DesktopSpaceMatch) => ({
+					chunk_id: match.chunkId,
+					content: match.content,
+					distance: match.distance,
+					document_id: match.documentId,
+				}));
+			},
 			// Spaces documents — the app owns Space docs of kind app:<pluginId>.
 			spacesCreateDoc: (input) =>
 				pluginHostInvoke(
@@ -1072,6 +1093,7 @@ export function PluginHostPanel({
 					size: input.size,
 					provider: input.provider,
 					model: input.model,
+					inputImages: input.input_images,
 				});
 				return await Promise.all(urls.map(inlineToDataUrl));
 			},
@@ -1213,10 +1235,8 @@ export function PluginHostPanel({
 			// `/api/monitors/*` orchestration. Called DIRECTLY (the media pattern), not
 			// via the PluginHookBridge: `/api/monitors/*` already exists and is gated on
 			// the same @ryu/monitors enabled bit, so no Core bridge verb is needed.
-			monitorsList: () =>
-				listMonitors(toTarget(node)) as unknown as Promise<MonitorRecord[]>,
-			monitorsGet: ({ id }) =>
-				getMonitor(toTarget(node), id) as unknown as Promise<MonitorRecord>,
+			monitorsList: () => listMonitors(toTarget(node)),
+			monitorsGet: ({ id }) => getMonitor(toTarget(node), id),
 			// The paywall gate: re-applied here because deleting `useMonitors` dropped
 			// it. Fetch the live count, then the fresh React `guard` (opens the upgrade
 			// modal in the shell + throws) — the throw crosses the bridge as a denial.
@@ -1225,29 +1245,18 @@ export function PluginHostPanel({
 				if (!guard("maxMonitors", existing.length)) {
 					throw new PlanCapError("maxMonitors", limitFor("maxMonitors"));
 				}
-				return (await createMonitor(
-					toTarget(node),
-					input as unknown as MonitorInput
-				)) as unknown as MonitorRecord;
+				return createMonitor(toTarget(node), input);
 			},
 			monitorsUpdate: ({ id, input }) =>
-				updateMonitor(
-					toTarget(node),
-					id,
-					input as unknown as MonitorInput
-				) as unknown as Promise<MonitorRecord>,
+				updateMonitor(toTarget(node), id, input),
 			monitorsDelete: async ({ id }) => {
 				await deleteMonitor(toTarget(node), id);
 			},
 			monitorsRun: ({ id }) => runMonitor(toTarget(node), id),
 			monitorsSnapshots: ({ id, limit }) =>
-				listSnapshots(toTarget(node), id, limit) as unknown as Promise<
-					Record<string, unknown>[]
-				>,
+				listSnapshots(toTarget(node), id, limit),
 			monitorsAlerts: ({ id, limit }) =>
-				listMonitorAlerts(toTarget(node), id, limit) as unknown as Promise<
-					Record<string, unknown>[]
-				>,
+				listMonitorAlerts(toTarget(node), id, limit),
 			// Workflows — the @ryu/workflows companion drives Core's DAG workflow
 			// engine + templates + node-config catalogs + ghost record→replay. Host-
 			// direct (the monitors pattern): the host holds the node token and calls
@@ -1433,15 +1442,14 @@ export function PluginHostPanel({
 			// `frame` fetches the keyframe and returns a data URL (CSP img-src data:
 			// blob:). `openReview`/`openSettings` are shell-navigation verbs mirroring the
 			// desktop page's `navigate("/review")`/`navigate("/settings")`.
-			timelineList: ({ rangeMinutes }) =>
-				getTimeline(rangeMinutes) as unknown as Promise<
-					Record<string, unknown>[] | null
-				>,
-			timelineJournal: ({ rangeMinutes, narrate }) =>
-				getJournal(rangeMinutes, { narrate }) as unknown as Promise<Record<
-					string,
-					unknown
-				> | null>,
+			timelineList: async ({ rangeMinutes }) =>
+				sanitizeTimelineEvents(await getTimeline(rangeMinutes)) as unknown as
+					| Record<string, unknown>[]
+					| null,
+			timelineJournal: async ({ rangeMinutes, narrate }) =>
+				enrichTimelineJournal(
+					await getJournal(rangeMinutes, { narrate })
+				) as unknown as Record<string, unknown> | null,
 			timelineFrame: ({ tsMicros }) => fetchFrameDataUrl(tsMicros),
 			timelineOpenReview: () => openTab("/review", { title: "Weekly review" }),
 			timelineOpenSettings: () => openTab("/settings"),
@@ -1561,6 +1569,13 @@ export function PluginHostPanel({
 				(meId
 					? listNotifications(toTarget(node), meId, undefined, archived)
 					: Promise.resolve([])) as unknown as Promise<NotificationRecord[]>,
+			notificationsSend: (input) =>
+				pluginHostInvoke(
+					toTarget(node),
+					companion.pluginId,
+					"notifications.send",
+					input
+				) as Promise<{ notification_id: string; target_user_id: string }>,
 			notificationsMarkRead: ({ id }) =>
 				markNotificationRead(toTarget(node), id),
 			notificationsAck: ({ id }) => ackNotification(toTarget(node), id),
@@ -1694,6 +1709,7 @@ export function PluginHostPanel({
 			// rules one layer earlier. There is no `open` verb because the companion is the
 			// whole surface — it never navigates the shell.
 			reasoningRequest: (input) => reasoningRequest(toTarget(node), input),
+			safeActionsRequest: (input) => safeActionsRequest(toTarget(node), input),
 			// Deep Read — the @ryu/rlm companion loads a corpus, browses its outline,
 			// asks questions of it and reads run traces. Same one-forwarder shape as
 			// Reasoning, and the same security note applies: `rlmRequest` in
@@ -1752,23 +1768,40 @@ export function PluginHostPanel({
 					rejectJoin(new Error("realtime join timed out"));
 				}, 15_000);
 				const jwt = await getRealtimeJwt();
+				const closeOnOverflow = () => {
+					connection.close();
+					realtimeSessionsRef.current.delete(connectionId);
+				};
 				connection = new RealtimeConnection(toTarget(node), {
 					appId: companion.pluginId,
 					handlers: {
 						onClose: (event) => {
-							queue.push({
+							queue.close({
 								code: event.code,
 								reason: event.reason,
 								type: "close",
 							});
-							queue.end();
-							rejectJoin(new Error(`realtime closed: ${event.reason || event.code}`));
+							rejectJoin(
+								new Error(`realtime closed: ${event.reason || event.code}`)
+							);
 							realtimeSessionsRef.current.delete(connectionId);
 						},
 						onJoinAck: (ack) => resolveJoin(ack),
-						onNamedEvent: ({ name, data }) =>
-							queue.push({ data, name, type: "event" }),
-						onPresence: (data) => queue.push({ data, type: "presence" }),
+						onNamedEvent: ({ name, data }) => {
+							if (!queue.push({ data, name, type: "event" })) {
+								closeOnOverflow();
+							}
+						},
+						onPresence: (data) => {
+							if (!queue.push({ data, type: "presence" })) {
+								closeOnOverflow();
+							}
+						},
+						onResyncRequired: ({ dropped, reason }) => {
+							if (!queue.push({ dropped, reason, type: "resync_required" })) {
+								closeOnOverflow();
+							}
+						},
 					},
 					jwt,
 					kind: "application",
@@ -1781,6 +1814,7 @@ export function PluginHostPanel({
 					window.clearTimeout(timeout);
 					return {
 						access: ack.access,
+						connection_id: connectionId,
 						member_id: ack.memberId,
 						presence: ack.presence,
 						room_id: ack.roomId,
@@ -1812,7 +1846,7 @@ export function PluginHostPanel({
 				if (!session) {
 					throw new Error("realtime connection is not available");
 				}
-			while (!signal.aborted) {
+				while (!signal.aborted) {
 					const push = await session.queue.take(signal);
 					if (push === null) {
 						return;
@@ -2102,6 +2136,7 @@ export function PluginHostPanel({
 			updateTabsIconWhere,
 			currentTabId,
 			meId,
+			toastHost,
 		]
 	);
 

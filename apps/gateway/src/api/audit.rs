@@ -7,13 +7,14 @@ use axum::{
     http::HeaderMap,
     Json,
 };
+use chrono::{DateTime, Duration as ChronoDuration};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    audit::{AuditLogger, AuditQuery},
+    audit::{AuditLogger, AuditQuery, AuditUsageQuery},
     budget::ExecBudgetResult,
     config::WidgetConfig,
     error::GatewayError,
@@ -46,6 +47,17 @@ pub struct AuditQueryParams {
     pub widget_instance_id: Option<String>,
     /// Filter by event discriminator, including `control_change`.
     pub event_type: Option<String>,
+}
+
+/// Query-string parameters accepted by `GET /v1/audit/usage`.
+#[derive(Debug, Deserialize)]
+pub struct AuditUsageQueryParams {
+    /// Inclusive RFC 3339 lower bound.
+    pub from: String,
+    /// Exclusive RFC 3339 upper bound.
+    pub until: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
 }
 
 /// Body accepted by `POST /v1/audit/control`. The gateway derives the actor
@@ -168,9 +180,10 @@ pub async fn query_audit(
         .map_err(|e| GatewayError::Internal(anyhow::anyhow!("audit query failed: {e}")))?;
 
     // Enrich managed model-call rows with the provider-reported transaction cost
-    // when one exists. OpenRouter's value is already its final discounted price,
-    // so this keeps the desktop trace viewer aligned with the wallet debit. Rows
-    // without a provider cost use the configured estimate as an explicit
+    // when one exists. The stored `provider_cost_micro_usd` remains the raw
+    // upstream amount; the usage surface exposes the charged amount after the
+    // provider-level billing policy so it stays aligned with the wallet debit.
+    // Rows without a provider cost use the configured estimate as an explicit
     // fallback. BYOK, self-hosted, and local rows deliberately stay `null`.
     let per_1k = state.config.control_plane.cost_per_1k_micro_usd;
     let entries: Vec<Value> = entries
@@ -181,7 +194,7 @@ pub async fn query_audit(
                 e.managed_inference,
                 state.config.credits.enabled && state.config.credits.internal_secret.is_some(),
             );
-            let cost_micro_usd: Option<u64> = if source != "managed" {
+            let raw_cost_micro_usd: Option<u64> = if source != "managed" {
                 None
             } else {
                 e.provider_cost_micro_usd.or_else(|| {
@@ -189,6 +202,12 @@ pub async fn query_audit(
                         .then(|| estimate_cost_micro_usd(e.input_tokens, e.output_tokens, per_1k))
                 })
             };
+            let cost_micro_usd = raw_cost_micro_usd.map(|raw| {
+                state
+                    .config
+                    .credits
+                    .debit_amount_for_provider(Some(e.provider.as_str()), raw)
+            });
             let mut v = serde_json::to_value(&e).unwrap_or_else(|_| json!({}));
             if let Value::Object(map) = &mut v {
                 map.insert("cost_micro_usd".to_string(), json!(cost_micro_usd));
@@ -201,6 +220,93 @@ pub async fn query_audit(
     Ok(Json(json!({
         "count": entries.len(),
         "entries": entries,
+    })))
+}
+
+/// Canonical local usage analytics. SQLite performs the aggregation directly,
+/// so this endpoint covers the full requested range without fetching or capping
+/// raw audit rows.
+pub async fn query_audit_usage(
+    State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(params): Query<AuditUsageQueryParams>,
+) -> Result<Json<Value>, GatewayError> {
+    let raw_key = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    let ctx = authenticate(&state, AuthInputs::with_key(raw_key)).await?;
+    crate::api::config::require_local_admin(
+        &state,
+        &peer,
+        ctx.is_master_key,
+        &headers,
+        "Audit usage access",
+    )?;
+
+    if !state.audit.is_enabled() {
+        return Err(GatewayError::Internal(anyhow::anyhow!(
+            "Audit logging is disabled on this gateway."
+        )));
+    }
+
+    let from = DateTime::parse_from_rfc3339(&params.from)
+        .map_err(|_| GatewayError::BadRequest("from must be an RFC 3339 timestamp".to_owned()))?;
+    let until = DateTime::parse_from_rfc3339(&params.until)
+        .map_err(|_| GatewayError::BadRequest("until must be an RFC 3339 timestamp".to_owned()))?;
+    if until <= from {
+        return Err(GatewayError::BadRequest(
+            "until must be later than from".to_owned(),
+        ));
+    }
+    if until.signed_duration_since(from) > ChronoDuration::days(400) {
+        return Err(GatewayError::BadRequest(
+            "usage analytics ranges cannot exceed 400 days".to_owned(),
+        ));
+    }
+
+    let query = AuditUsageQuery {
+        timestamp_from: params.from,
+        timestamp_until: params.until,
+        provider: params.provider,
+        model: params.model,
+    };
+    let mut events = state.audit.usage_rollup(&query).map_err(|error| {
+        GatewayError::Internal(anyhow::anyhow!("audit usage query failed: {error}"))
+    })?;
+
+    let managed_node =
+        state.config.credits.enabled && state.config.credits.internal_secret.is_some();
+    let per_1k = state.config.control_plane.cost_per_1k_micro_usd;
+    for event in &mut events {
+        event.source =
+            usage_source_for_provider(&event.provider, event.managed_inference, managed_node)
+                .to_owned();
+        if event.source != "managed" {
+            event.cost_micro_usd = None;
+            continue;
+        }
+        let fallback = (per_1k > 0
+            && (event.unpriced_input_tokens > 0 || event.unpriced_output_tokens > 0))
+            .then(|| {
+                estimate_cost_micro_usd(
+                    event.unpriced_input_tokens,
+                    event.unpriced_output_tokens,
+                    per_1k,
+                )
+            });
+        event.cost_micro_usd = match (event.cost_micro_usd, fallback) {
+            (Some(reported), Some(estimated)) => Some(reported.saturating_add(estimated)),
+            (Some(reported), None) => Some(reported),
+            (None, Some(estimated)) => Some(estimated),
+            (None, None) => None,
+        };
+    }
+
+    Ok(Json(json!({
+        "kind": "rollup",
+        "bucketSeconds": 900,
+        "events": events,
     })))
 }
 
@@ -588,11 +694,15 @@ pub async fn check_exec_budget(
 mod tests {
     use super::{
         check_exec_budget, estimate_cost_micro_usd, ingest_exec_audit, query_audit,
-        usage_source_for_provider, widget_call_allowed, widget_followup_allowed, AuditQueryParams,
-        ExecAuditBody, ExecBudgetCheckBody, WidgetRateLimiter,
+        query_audit_usage, usage_source_for_provider, widget_call_allowed, widget_followup_allowed,
+        AuditQueryParams, AuditUsageQueryParams, ExecAuditBody, ExecBudgetCheckBody,
+        WidgetRateLimiter,
     };
     use crate::audit::{AuditLogger, AuditRecord};
-    use crate::config::{ApiKeyConfig, AuditConfig, AuthConfig, EvalsConfig, GatewayConfig};
+    use crate::config::{
+        ApiKeyConfig, AuditConfig, AuthConfig, EvalsConfig, GatewayConfig, ProviderBillingMode,
+        ProviderBillingPolicy, ProviderId,
+    };
     use crate::error::GatewayError;
     use crate::evals::EvalsRunner;
     use crate::state::{AppState, SharedState};
@@ -972,8 +1082,150 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_audit_returns_openrouter_transaction_cost_for_managed_rows() {
+    async fn query_audit_usage_returns_exact_rollup_cost_and_counts() {
         let state = state_with_credits(true, true);
+        let mut record = AuditRecord {
+            request_id: "usage-reported".to_owned(),
+            api_key: "sk-master".to_owned(),
+            user_name: None,
+            org_id: Some("org-1".to_owned()),
+            team_id: None,
+            project_id: None,
+            provider: "openrouter".to_owned(),
+            model: "gpt-5".to_owned(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_hit: false,
+            latency_ms: 25,
+            eval_score: None,
+            error: None,
+            skill_ids: None,
+            session_id: None,
+            event_type: crate::audit::EventType::ModelCall,
+            backend: None,
+            command: None,
+            duration_ms: None,
+            exit_code: None,
+            user_id: Some("member-1".to_owned()),
+            agent_id: None,
+            feature: Some("chat".to_owned()),
+            managed_inference: true,
+            provider_cost_micro_usd: Some(1_250),
+            widget_instance_id: None,
+        };
+        state.log_audit(record.clone());
+        record.request_id = "usage-fallback".to_owned();
+        record.input_tokens = 10;
+        record.output_tokens = 5;
+        record.provider_cost_micro_usd = None;
+        record.error = Some("provider failed".to_owned());
+        state.log_audit(record);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let Json(body) = query_audit_usage(
+            State(state),
+            loopback(),
+            bearer("sk-master"),
+            Query(AuditUsageQueryParams {
+                from: (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+                until: (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                provider: Some("openrouter".to_owned()),
+                model: Some("gpt-5".to_owned()),
+            }),
+        )
+        .await
+        .expect("usage rollup");
+
+        assert_eq!(body["kind"], "rollup");
+        assert_eq!(body["bucketSeconds"], 900);
+        assert_eq!(body["events"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["events"][0]["requestCount"], 2);
+        assert_eq!(body["events"][0]["errorCount"], 1);
+        assert_eq!(body["events"][0]["latencyTotalMs"], 50);
+        assert_eq!(body["events"][0]["source"], "managed");
+        assert_eq!(body["events"][0]["costMicroUsd"], 1280);
+    }
+
+    #[tokio::test]
+    async fn query_audit_usage_rejects_ranges_over_400_days() {
+        let result = query_audit_usage(
+            State(state_with(true)),
+            loopback(),
+            bearer("sk-master"),
+            Query(AuditUsageQueryParams {
+                from: "2025-01-01T00:00:00Z".to_owned(),
+                until: "2026-03-01T00:00:00Z".to_owned(),
+                provider: None,
+                model: None,
+            }),
+        )
+        .await;
+        assert!(matches!(result, Err(GatewayError::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn query_audit_applies_global_markup_to_reported_provider_cost() {
+        let mut state = state_with_credits(true, true);
+        Arc::get_mut(&mut state)
+            .expect("test state has one owner")
+            .config
+            .credits
+            .markup_bps = 2000;
+        state.log_audit(AuditRecord {
+            request_id: "marked-up-provider".to_string(),
+            api_key: "sk-master".to_string(),
+            user_name: None,
+            org_id: Some("org-1".to_string()),
+            team_id: None,
+            project_id: None,
+            provider: "acme".to_string(),
+            model: "gpt-4o".to_string(),
+            input_tokens: 1000,
+            output_tokens: 0,
+            cache_hit: false,
+            latency_ms: 5,
+            eval_score: None,
+            error: None,
+            skill_ids: None,
+            session_id: None,
+            user_id: None,
+            agent_id: None,
+            feature: None,
+            managed_inference: true,
+            provider_cost_micro_usd: Some(1000),
+            event_type: crate::audit::EventType::ModelCall,
+            backend: None,
+            command: None,
+            duration_ms: None,
+            exit_code: None,
+            widget_instance_id: None,
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let Json(body) = query_audit(
+            State(Arc::clone(&state)),
+            loopback(),
+            bearer("sk-master"),
+            empty_params(),
+        )
+        .await
+        .expect("master key may read the audit log");
+        assert_eq!(body["entries"][0]["cost_micro_usd"], 1200);
+    }
+
+    #[tokio::test]
+    async fn query_audit_returns_openrouter_transaction_cost_for_managed_rows() {
+        let mut state = state_with_credits(true, true);
+        let gateway_config = &mut Arc::get_mut(&mut state)
+            .expect("test state has one owner")
+            .config;
+        gateway_config.credits.markup_bps = 2000;
+        gateway_config.credits.provider_billing.insert(
+            ProviderId::from("openrouter"),
+            ProviderBillingPolicy {
+                mode: ProviderBillingMode::PassThrough,
+            },
+        );
         state.log_audit(AuditRecord {
             request_id: "managed-openrouter".to_string(),
             api_key: "sk-master".to_string(),

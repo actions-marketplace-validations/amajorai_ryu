@@ -22,6 +22,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { installFetch } from "./test-fetch.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { RetrievalModeStatus } from "./index.ts";
 import { SpacesAPI } from "./spaces.ts";
 import type { RyuClientOptions } from "./types.ts";
 
@@ -32,9 +33,53 @@ afterEach(() => {
 
 const OPTIONS: RyuClientOptions = { baseUrl: "http://localhost:7980" };
 
+interface CapturedRequest {
+	init?: RequestInit;
+	url?: string;
+}
+
+function stubJson(payload: unknown, status = 200): CapturedRequest {
+	const captured: CapturedRequest = {};
+	installFetch((input, init) => {
+		captured.url = String(input);
+		captured.init = init;
+		return Promise.resolve(Response.json(payload, { status }));
+	});
+	return captured;
+}
+
+function statusWire(
+	overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+	return {
+		job_id: "job-1",
+		space_id: "space-1",
+		requested_mode: "graph",
+		previous_mode: "vector",
+		state: "running",
+		total_chunks: 4,
+		processed_chunks: 2,
+		graph_nodes: 3,
+		graph_edges: 5,
+		change: null,
+		error: null,
+		...overrides,
+	};
+}
+
+const COMPLETED_CHANGE = {
+	previous: "vector",
+	mode: "graph",
+	changed: true,
+	graph_rebuilt: true,
+	chunks_scanned: 4,
+	graph_nodes: 8,
+	graph_edges: 12,
+};
+
 describe("SpacesAPI.list", () => {
 	test("maps snake_case spaces including document_count", async () => {
-		installFetch((() =>
+		installFetch(() =>
 			Promise.resolve(
 				Response.json({
 					spaces: [
@@ -47,7 +92,8 @@ describe("SpacesAPI.list", () => {
 						},
 					],
 				})
-			)));
+			)
+		);
 		const list = await new SpacesAPI(OPTIONS).list();
 		expect(list[0]).toEqual({
 			id: "s1",
@@ -56,20 +102,245 @@ describe("SpacesAPI.list", () => {
 			createdAt: 100,
 			updatedAt: 200,
 			documentCount: 5,
+			retrievalMode: "vector",
 		});
 	});
 
-	test("returns [] when spaces is absent", async () => {
-		installFetch((() =>
-			Promise.resolve(new Response("{}"))));
-		expect(await new SpacesAPI(OPTIONS).list()).toEqual([]);
+	test("maps an explicit graph retrieval mode", async () => {
+		stubJson({
+			spaces: [
+				{
+					id: "graph-space",
+					name: "Graph docs",
+					created_at: 100,
+					updated_at: 200,
+					document_count: 2,
+					retrieval_mode: "graph",
+				},
+			],
+		});
+		expect((await new SpacesAPI(OPTIONS).list())[0]?.retrievalMode).toBe(
+			"graph"
+		);
+	});
+
+	test("rejects a list response when spaces is absent", async () => {
+		installFetch(() => Promise.resolve(new Response("{}")));
+		await expect(new SpacesAPI(OPTIONS).list()).rejects.toThrow(
+			"invalid spaces list response"
+		);
+	});
+});
+
+describe("SpacesAPI.create", () => {
+	test("serializes create with and without retrieval_mode", async () => {
+		const defaultRequest = stubJson({ id: "space-1" });
+		expect(await new SpacesAPI(OPTIONS).create("Docs", null)).toBe("space-1");
+		expect(JSON.parse(String(defaultRequest.init?.body))).toEqual({
+			name: "Docs",
+			description: null,
+		});
+
+		const graphRequest = stubJson({ id: "space-graph" });
+		await new SpacesAPI(OPTIONS).create("Graph", "Linked docs", "graph");
+		expect(JSON.parse(String(graphRequest.init?.body))).toEqual({
+			name: "Graph",
+			description: "Linked docs",
+			retrieval_mode: "graph",
+		});
+	});
+});
+
+describe("SpacesAPI retrieval-mode jobs", () => {
+	test("parses an accepted 202 job and encodes the Space id", async () => {
+		const captured = stubJson(
+			{
+				success: true,
+				job_id: "job-1",
+				space_id: "space/alpha",
+				retrieval_mode: "graph",
+				status: "/api/spaces/space/alpha/retrieval-mode/status",
+				cancel: "/api/spaces/space/alpha/retrieval-mode/cancel",
+			},
+			202
+		);
+		expect(
+			await new SpacesAPI(OPTIONS).startRetrievalModeChange(
+				"space/alpha",
+				"graph"
+			)
+		).toEqual({
+			jobId: "job-1",
+			spaceId: "space/alpha",
+			retrievalMode: "graph",
+			statusPath:
+				"/api/spaces/space%2Falpha/retrieval-mode/status?job_id=job-1",
+			cancelPath: "/api/spaces/space%2Falpha/retrieval-mode/cancel",
+		});
+		expect(captured.url).toBe(
+			"http://localhost:7980/api/spaces/space%2Falpha/retrieval-mode"
+		);
+		expect(JSON.parse(String(captured.init?.body))).toEqual({
+			retrieval_mode: "graph",
+		});
+	});
+
+	test("parses running and cancelling progress", async () => {
+		const activeStates: readonly ("cancelling" | "running")[] = [
+			"running",
+			"cancelling",
+		];
+		for (const state of activeStates) {
+			stubJson(statusWire({ state }));
+			const status: RetrievalModeStatus = await new SpacesAPI(
+				OPTIONS
+			).getRetrievalModeStatus("space-1", "job-1");
+			expect(status.state).toBe(state);
+			expect(status.change).toBeNull();
+			expect(status.error).toBeNull();
+			expect(status.processedChunks).toBe(2);
+		}
+	});
+
+	test("parses completed, failed, and cancelled states", async () => {
+		stubJson(
+			statusWire({
+				state: "completed",
+				processed_chunks: 4,
+				graph_nodes: 8,
+				graph_edges: 12,
+				change: COMPLETED_CHANGE,
+			})
+		);
+		const completed = await new SpacesAPI(OPTIONS).getRetrievalModeStatus(
+			"space-1",
+			"job-1"
+		);
+		expect(completed.change).toEqual({
+			previous: "vector",
+			mode: "graph",
+			changed: true,
+			graphRebuilt: true,
+			chunksScanned: 4,
+			graphNodes: 8,
+			graphEdges: 12,
+		});
+
+		stubJson(statusWire({ state: "failed", error: "disk full" }));
+		const failed = await new SpacesAPI(OPTIONS).getRetrievalModeStatus(
+			"space-1",
+			"job-1"
+		);
+		expect(failed.state).toBe("failed");
+		expect(failed.error).toBe("disk full");
+
+		stubJson(statusWire({ state: "cancelled" }));
+		const cancelled = await new SpacesAPI(OPTIONS).getRetrievalModeStatus(
+			"space-1",
+			"job-1"
+		);
+		expect(cancelled.state).toBe("cancelled");
+		expect(cancelled.error).toBeNull();
+	});
+
+	test("encodes status ids and parses cancellation", async () => {
+		const statusRequest = stubJson(
+			statusWire({ space_id: "space/alpha", job_id: "job?one" })
+		);
+		await new SpacesAPI(OPTIONS).getRetrievalModeStatus(
+			"space/alpha",
+			"job?one"
+		);
+		expect(statusRequest.url).toBe(
+			"http://localhost:7980/api/spaces/space%2Falpha/retrieval-mode/status?job_id=job%3Fone"
+		);
+
+		const cancelRequest = stubJson({ cancelled: true });
+		expect(
+			await new SpacesAPI(OPTIONS).cancelRetrievalModeChange(
+				"space/alpha",
+				"job?one"
+			)
+		).toEqual({ cancelled: true });
+		expect(cancelRequest.url).toBe(
+			"http://localhost:7980/api/spaces/space%2Falpha/retrieval-mode/cancel"
+		);
+		expect(JSON.parse(String(cancelRequest.init?.body))).toEqual({
+			job_id: "job?one",
+		});
+	});
+
+	test("rejects invalid wire responses", async () => {
+		const api = new SpacesAPI(OPTIONS);
+		stubJson({ id: 7 });
+		await expect(api.create("Docs")).rejects.toThrow(
+			"invalid create-space response"
+		);
+
+		stubJson({
+			success: false,
+			job_id: "job-1",
+			space_id: "space-1",
+			retrieval_mode: "graph",
+			status: "/status",
+			cancel: "/cancel",
+		});
+		await expect(
+			api.startRetrievalModeChange("space-1", "graph")
+		).rejects.toThrow("invalid retrieval-mode job response");
+
+		stubJson({
+			success: true,
+			job_id: "job-1",
+			space_id: "wrong-space",
+			retrieval_mode: "graph",
+			status: "/untrusted/status",
+			cancel: "/untrusted/cancel",
+		});
+		await expect(
+			api.startRetrievalModeChange("space-1", "graph")
+		).rejects.toThrow("invalid retrieval-mode job response");
+
+		stubJson(statusWire({ total_chunks: -1 }));
+		await expect(
+			api.getRetrievalModeStatus("space-1", "job-1")
+		).rejects.toThrow("invalid retrieval-mode status response");
+
+		stubJson(statusWire({ job_id: "wrong-job" }));
+		await expect(
+			api.getRetrievalModeStatus("space-1", "job-1")
+		).rejects.toThrow("invalid retrieval-mode status response");
+
+		stubJson(statusWire({ state: "completed", change: null }));
+		await expect(
+			api.getRetrievalModeStatus("space-1", "job-1")
+		).rejects.toThrow("invalid retrieval-mode status response");
+
+		stubJson({ cancelled: "yes" });
+		await expect(
+			api.cancelRetrievalModeChange("space-1", "job-1")
+		).rejects.toThrow("invalid retrieval-mode cancellation response");
+
+		stubJson({
+			spaces: [
+				{
+					id: "space-1",
+					name: "Docs",
+					created_at: 1,
+					updated_at: 1,
+					document_count: 0,
+					retrieval_mode: "hybrid",
+				},
+			],
+		});
+		await expect(api.list()).rejects.toThrow("invalid space response");
 	});
 });
 
 describe("SpacesAPI.search", () => {
 	test("maps matches and sends only query when limit is omitted", async () => {
 		let capturedBody: string | undefined;
-		installFetch(((_input: RequestInfo | URL, init?: RequestInit) => {
+		installFetch((_input: RequestInfo | URL, init?: RequestInit) => {
 			capturedBody = init?.body as string;
 			return Promise.resolve(
 				Response.json({
@@ -83,7 +354,7 @@ describe("SpacesAPI.search", () => {
 					],
 				})
 			);
-		}));
+		});
 		const matches = await new SpacesAPI(OPTIONS).search("s1", "hello");
 		expect(matches[0]).toEqual({
 			chunkId: "ch1",
@@ -96,17 +367,16 @@ describe("SpacesAPI.search", () => {
 
 	test("includes limit in the body when provided", async () => {
 		let capturedBody: string | undefined;
-		installFetch(((_input: RequestInfo | URL, init?: RequestInit) => {
+		installFetch((_input: RequestInfo | URL, init?: RequestInit) => {
 			capturedBody = init?.body as string;
 			return Promise.resolve(Response.json({ matches: [] }));
-		}));
+		});
 		await new SpacesAPI(OPTIONS).search("s1", "hi", 3);
 		expect(JSON.parse(capturedBody ?? "{}")).toEqual({ query: "hi", limit: 3 });
 	});
 
 	test("returns [] when matches is absent", async () => {
-		installFetch((() =>
-			Promise.resolve(new Response("{}"))));
+		installFetch(() => Promise.resolve(new Response("{}")));
 		expect(await new SpacesAPI(OPTIONS).search("s1", "q")).toEqual([]);
 	});
 });
@@ -230,8 +500,10 @@ describe("the Core behaviour those docs now claim", () => {
 		// while the published description promised a capability that was gone.
 		const body = rustFnBody(spacesRs, SPACES_RS, "pub async fn search_ext(");
 		expect(body).toContain("let mode = self.space_mode(space_id).await?;");
-		expect(body).toContain("RetrievalMode::Graph => self.graph_search(");
-		expect(body).toContain("RetrievalMode::Vector => self.vector_search(");
+		expect(body).toContain("RetrievalMode::Graph => {");
+		expect(body).toContain("self.graph_search(");
+		expect(body).toContain("RetrievalMode::Vector => {");
+		expect(body).toContain("self.vector_search(");
 	});
 
 	test("distance is still a metric in one branch and a constant in the others", () => {

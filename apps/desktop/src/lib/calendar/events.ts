@@ -176,8 +176,6 @@ function parseIntervalSeconds(interval: string): number | null {
 const HIGH_FREQUENCY_SECONDS = 3600; // sub-hourly intervals aggregate
 const MAX_OCCURRENCES_PER_JOB = 500; // hard cap so a "* * * * *" cron can't run away
 
-const MS_PER_DAY = 86_400_000;
-
 function dayKey(d: Date): string {
 	return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
@@ -214,22 +212,31 @@ function intervalOccurrences(
 	if (stepSeconds < HIGH_FREQUENCY_SECONDS) {
 		const events: CalendarEvent[] = [];
 		for (
-			let cursor = startOfLocalDay(windowStart).getTime();
-			cursor < endMs;
-			cursor += MS_PER_DAY
+			let day = startOfLocalDay(windowStart);
+			day.getTime() < endMs;
 		) {
-			const dayStart = Math.max(cursor, firstMs);
-			const dayEnd = cursor + MS_PER_DAY;
-			if (dayStart >= dayEnd) {
+			const nextDay = new Date(day);
+			nextDay.setDate(nextDay.getDate() + 1);
+			const dayStartMs = Math.max(day.getTime(), startMs);
+			const dayEndMs = Math.min(nextDay.getTime(), endMs);
+			let firstInDayMs = firstMs;
+			if (firstInDayMs < dayStartMs) {
+				firstInDayMs +=
+					Math.ceil((dayStartMs - firstInDayMs) / stepMs) * stepMs;
+			}
+			if (firstInDayMs >= dayEndMs) {
+				day = nextDay;
 				continue;
 			}
-			const count = Math.floor((dayEnd - 1 - dayStart) / stepMs) + 1;
+			const count = Math.floor((dayEndMs - 1 - firstInDayMs) / stepMs) + 1;
 			if (count <= 0) {
+				day = nextDay;
 				continue;
 			}
-			const noonOfDay = new Date(cursor + MS_PER_DAY / 2);
+			const noonOfDay = new Date(day);
+			noonOfDay.setHours(12, 0, 0, 0);
 			events.push({
-				id: `${job.id}-agg-${cursor}`,
+				id: `${job.id}-agg-${day.getTime()}`,
 				jobId: job.id,
 				jobName: job.name,
 				start: noonOfDay,
@@ -238,6 +245,7 @@ function intervalOccurrences(
 				scheduleLabel: label,
 				aggregateCount: count,
 			});
+			day = nextDay;
 		}
 		return events;
 	}

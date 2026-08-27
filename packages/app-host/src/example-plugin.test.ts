@@ -12,6 +12,7 @@ describe("examplePluginSrcdoc", () => {
 	it("bakes the exact nonce into the ready handshake and the host-port guard", () => {
 		const doc = examplePluginSrcdoc("nonce-abc123");
 		expect(doc).toStartWith("<!doctype html>");
+		expect(doc).toContain("ryuInstallHorizontalWheelScrolling");
 		// The frame announces readiness echoing the nonce…
 		expect(doc).toContain('{ kind: "ryu-plugin-ready", nonce: NONCE');
 		// …and accepts the transferred port ONLY when the message carries that nonce.

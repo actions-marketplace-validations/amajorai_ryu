@@ -42,6 +42,18 @@ export interface BrowserElementContext {
 	xpath: string;
 }
 
+export interface BrowserWebMCPTool {
+	annotations: {
+		readOnlyHint: boolean;
+		untrustedContentHint: boolean;
+	};
+	description: string;
+	input_schema: string;
+	name: string;
+	origin: string;
+	title: string;
+}
+
 export type BrowserAnnotationKind = "area" | "element" | "elements";
 
 export interface BrowserAnnotation {
@@ -81,6 +93,7 @@ export interface BrowserContextResult {
 		scroll_y: number;
 		width: number;
 	};
+	webmcp_tools?: BrowserWebMCPTool[];
 }
 
 export interface BrowserAnnotationInput {

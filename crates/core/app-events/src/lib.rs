@@ -50,6 +50,7 @@
 //! is available when a caller genuinely wants the outcome.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Env var holding Core's own loopback port. **This is the one Core actually
 /// injects into every manifest sidecar** (`inject_ext_env` sets it unconditionally,
@@ -66,6 +67,8 @@ const ENV_EXT_TOKEN: &str = "RYU_EXT_TOKEN";
 const HDR_PLUGIN_ID: &str = "x-ryu-plugin-id";
 /// The kernel capability this crate invokes.
 const CAP_EVENTS_EMIT: &str = "events.emit";
+/// The kernel capability that records a provider-neutral external-tool charge.
+const CAP_TOOL_USAGE_RECORD: &str = "billing.recordToolCharge";
 
 /// What Core reports back about a fan-out: how many subscribers it reached.
 ///
@@ -152,6 +155,114 @@ impl std::fmt::Display for EmitError {
 
 impl std::error::Error for EmitError {}
 
+/// A single provider call that may need to be charged to the hosting
+/// organization. The sidecar supplies descriptive provider facts; Core derives
+/// tenancy and Gateway applies the billing policy.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUsageReport {
+    pub provider: String,
+    pub tool_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_micro_usd: Option<u64>,
+    #[serde(default)]
+    pub estimated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<String>,
+    pub request_id: String,
+    pub tool_calls: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_label: Option<String>,
+}
+
+impl ToolUsageReport {
+    const MAX_PROVIDER_BYTES: usize = 64;
+    const MAX_TOOL_ID_BYTES: usize = 256;
+    const MAX_REQUEST_ID_BYTES: usize = 256;
+    const MAX_TRANSACTION_ID_BYTES: usize = 256;
+    const MAX_TASK_LABEL_BYTES: usize = 256;
+
+    /// Validate the caller-controlled descriptive fields before they reach Core,
+    /// Gateway logs, or a durable usage statement.
+    pub fn validate(&self) -> Result<(), UsageReportError> {
+        if self.provider.trim().is_empty() || self.provider.len() > Self::MAX_PROVIDER_BYTES {
+            return Err(UsageReportError::Invalid(
+                "provider is empty or too long".to_owned(),
+            ));
+        }
+        if self.tool_id.trim().is_empty() || self.tool_id.len() > Self::MAX_TOOL_ID_BYTES {
+            return Err(UsageReportError::Invalid(
+                "tool_id is empty or too long".to_owned(),
+            ));
+        }
+        if self.request_id.trim().is_empty() || self.request_id.len() > Self::MAX_REQUEST_ID_BYTES {
+            return Err(UsageReportError::Invalid(
+                "request_id is empty or too long".to_owned(),
+            ));
+        }
+        if self
+            .transaction_id
+            .as_deref()
+            .is_some_and(|value| value.len() > Self::MAX_TRANSACTION_ID_BYTES)
+        {
+            return Err(UsageReportError::Invalid(
+                "transaction_id is too long".to_owned(),
+            ));
+        }
+        if self
+            .task_label
+            .as_deref()
+            .is_some_and(|value| value.len() > Self::MAX_TASK_LABEL_BYTES)
+        {
+            return Err(UsageReportError::Invalid(
+                "task_label is too long".to_owned(),
+            ));
+        }
+        if self.tool_calls == 0 {
+            return Err(UsageReportError::Invalid(
+                "tool_calls must be positive".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// What Core accepted after authenticating and deriving the node's organization.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUsageAccepted {
+    #[serde(default)]
+    pub accepted: bool,
+    #[serde(default)]
+    pub billed: bool,
+    #[serde(default)]
+    pub org_id: Option<String>,
+}
+
+/// Why a provider usage report did not reach Core.
+#[derive(Debug)]
+pub enum UsageReportError {
+    NotHosted,
+    Invalid(String),
+    Transport(reqwest::Error),
+    Rejected { status: u16, body: String },
+}
+
+impl std::fmt::Display for UsageReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotHosted => write!(f, "not running as a Core-spawned sidecar"),
+            Self::Invalid(message) => write!(f, "invalid tool usage report: {message}"),
+            Self::Transport(error) => write!(f, "usage report transport failed: {error}"),
+            Self::Rejected { status, body } => {
+                write!(f, "Core rejected usage report ({status}): {body}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for UsageReportError {}
+
 /// Resolve the `events.emit` endpoint from the environment Core injects at spawn,
 /// or `None` when this process is not Core-hosted.
 ///
@@ -169,6 +280,10 @@ impl std::error::Error for EmitError {}
 ///   Core's own readers take only the port for exactly this reason
 ///   (`cli_shims::core_port_string`), and so does this.
 fn core_endpoint() -> Option<String> {
+    core_endpoint_for(CAP_EVENTS_EMIT)
+}
+
+fn core_endpoint_for(capability: &str) -> Option<String> {
     let port = std::env::var(ENV_CORE_PORT)
         .ok()
         .and_then(|p| p.trim().parse::<u16>().ok())
@@ -179,7 +294,7 @@ fn core_endpoint() -> Option<String> {
             })
         })?;
     Some(format!(
-        "http://127.0.0.1:{port}/api/host/capability/{CAP_EVENTS_EMIT}"
+        "http://127.0.0.1:{port}/api/host/capability/{capability}"
     ))
 }
 
@@ -337,6 +452,343 @@ impl EventEmitter {
     }
 }
 
+/// Reports provider usage from one sidecar to Core's billing capability.
+///
+/// This is deliberately separate from [`EventEmitter`]: usage is not a hook
+/// event, and a caller needs a typed accepted/billed result for diagnostics even
+/// though the normal provider path treats reporting as best-effort.
+#[derive(Debug, Clone)]
+pub struct UsageReporter {
+    plugin_id: String,
+    http: reqwest::Client,
+    endpoint: Option<String>,
+    token: Option<String>,
+}
+
+impl UsageReporter {
+    /// Build a reporter from the same Core-spawned environment as the event
+    /// emitter. Standalone sidecars receive `NotHosted` and remain unbilled.
+    #[must_use]
+    pub fn from_env(plugin_id: impl Into<String>) -> Self {
+        Self::with_client(plugin_id, reqwest::Client::new())
+    }
+
+    /// Reuse a sidecar's bounded client and connection pool.
+    #[must_use]
+    pub fn with_client(plugin_id: impl Into<String>, http: reqwest::Client) -> Self {
+        let endpoint = core_endpoint_for(CAP_TOOL_USAGE_RECORD);
+        let token = std::env::var(ENV_EXT_TOKEN)
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        Self {
+            plugin_id: plugin_id.into(),
+            http,
+            endpoint,
+            token,
+        }
+    }
+
+    /// Whether this reporter has the Core callback coordinates.
+    #[must_use]
+    pub fn is_hosted(&self) -> bool {
+        self.endpoint.is_some() && self.token.is_some()
+    }
+
+    /// Report a charge and return Core's tenancy/billing result.
+    pub async fn try_report(
+        &self,
+        report: &ToolUsageReport,
+    ) -> Result<ToolUsageAccepted, UsageReportError> {
+        report.validate()?;
+        let (Some(endpoint), Some(token)) = (self.endpoint.as_deref(), self.token.as_deref())
+        else {
+            return Err(UsageReportError::NotHosted);
+        };
+
+        let response = self
+            .http
+            .post(endpoint)
+            .header(HDR_PLUGIN_ID, &self.plugin_id)
+            .bearer_auth(token)
+            .json(report)
+            .send()
+            .await
+            .map_err(UsageReportError::Transport)?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let body = response.text().await.unwrap_or_default();
+            return Err(UsageReportError::Rejected { status, body });
+        }
+        response
+            .json::<ToolUsageAccepted>()
+            .await
+            .map_err(UsageReportError::Transport)
+    }
+
+    /// Best-effort wrapper for provider hot paths. A failure records a safe
+    /// diagnostic, but never turns a provider success into a publish failure.
+    pub async fn report(&self, report: ToolUsageReport) {
+        let provider = report.provider.clone();
+        let tool_id = report.tool_id.clone();
+        let request_id = report.request_id.clone();
+        match self.try_report(&report).await {
+            Ok(result) => {
+                tracing::debug!(
+                    provider,
+                    tool_id,
+                    request_id,
+                    billed = result.billed,
+                    "app usage report accepted"
+                );
+            }
+            Err(UsageReportError::NotHosted) => {}
+            Err(error) => tracing::warn!(
+                provider,
+                tool_id,
+                request_id,
+                "app usage report failed: {error}"
+            ),
+        }
+    }
+}
+
+/// A provider call requested by an out-of-process Ryu app.
+///
+/// The app supplies only the provider-neutral operation facts. Core authenticates
+/// the app and binds the request to the registered node organization; Gateway then
+/// injects the provider credential from its own managed provider configuration.
+/// No provider key crosses this structure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedProviderCall {
+    pub provider: String,
+    pub tool_id: String,
+    #[serde(default)]
+    pub operation: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    pub method: String,
+    #[serde(default)]
+    pub query: Vec<(String, String)>,
+    #[serde(default)]
+    pub body: Option<Value>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    pub request_id: String,
+    #[serde(default)]
+    pub fallback_cost_micro_usd: Option<u64>,
+    #[serde(default)]
+    pub task_label: Option<String>,
+}
+
+impl ManagedProviderCall {
+    const MAX_PROVIDER_BYTES: usize = 64;
+    const MAX_TOOL_ID_BYTES: usize = 256;
+    const MAX_METHOD_BYTES: usize = 16;
+    const MAX_REQUEST_ID_BYTES: usize = 256;
+    const MAX_TASK_LABEL_BYTES: usize = 256;
+
+    pub fn validate(&self) -> Result<(), ProviderRouterError> {
+        if self.provider.trim().is_empty() || self.provider.len() > Self::MAX_PROVIDER_BYTES {
+            return Err(ProviderRouterError::Invalid(
+                "provider is empty or too long".to_owned(),
+            ));
+        }
+        if self.tool_id.trim().is_empty() || self.tool_id.len() > Self::MAX_TOOL_ID_BYTES {
+            return Err(ProviderRouterError::Invalid(
+                "tool_id is empty or too long".to_owned(),
+            ));
+        }
+        if self.method.trim().is_empty() || self.method.len() > Self::MAX_METHOD_BYTES {
+            return Err(ProviderRouterError::Invalid(
+                "method is empty or too long".to_owned(),
+            ));
+        }
+        if self.request_id.trim().is_empty() || self.request_id.len() > Self::MAX_REQUEST_ID_BYTES {
+            return Err(ProviderRouterError::Invalid(
+                "request_id is empty or too long".to_owned(),
+            ));
+        }
+        if self
+            .idempotency_key
+            .as_deref()
+            .is_some_and(|value| value.len() > Self::MAX_REQUEST_ID_BYTES)
+        {
+            return Err(ProviderRouterError::Invalid(
+                "idempotency_key is too long".to_owned(),
+            ));
+        }
+        if self
+            .task_label
+            .as_deref()
+            .is_some_and(|value| value.len() > Self::MAX_TASK_LABEL_BYTES)
+        {
+            return Err(ProviderRouterError::Invalid(
+                "task_label is too long".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The provider response returned by Gateway after it has called the managed
+/// provider and scheduled the organization-wallet debit.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedProviderResponse {
+    pub ok: bool,
+    pub status: u16,
+    pub body: Value,
+    #[serde(default)]
+    pub cost_micro_usd: Option<u64>,
+    #[serde(default)]
+    pub call_id: Option<String>,
+}
+
+/// Whether a managed provider is configured in Gateway's provider registry.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedProviderStatus {
+    pub configured: bool,
+}
+
+#[derive(Debug)]
+pub enum ProviderRouterError {
+    NotHosted,
+    Invalid(String),
+    Transport(reqwest::Error),
+    Rejected { status: u16, body: String },
+}
+
+impl std::fmt::Display for ProviderRouterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotHosted => write!(f, "not running as a Core-hosted sidecar"),
+            Self::Invalid(message) => write!(f, "invalid managed provider call: {message}"),
+            Self::Transport(error) => write!(f, "managed provider transport failed: {error}"),
+            Self::Rejected { status, body } => {
+                write!(f, "managed provider rejected the call ({status}): {body}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProviderRouterError {}
+
+/// Provider-neutral app → Core → Gateway router.
+#[derive(Debug, Clone)]
+pub struct ProviderRouter {
+    plugin_id: String,
+    http: reqwest::Client,
+    call_endpoint: Option<String>,
+    status_endpoint: Option<String>,
+    token: Option<String>,
+}
+
+impl ProviderRouter {
+    #[must_use]
+    pub fn from_env(plugin_id: impl Into<String>) -> Self {
+        Self::with_client(plugin_id, reqwest::Client::new())
+    }
+
+    #[must_use]
+    pub fn with_client(plugin_id: impl Into<String>, http: reqwest::Client) -> Self {
+        let token = std::env::var(ENV_EXT_TOKEN)
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        Self {
+            plugin_id: plugin_id.into(),
+            http,
+            call_endpoint: core_endpoint_for("providers.call"),
+            status_endpoint: core_endpoint_for("providers.status"),
+            token,
+        }
+    }
+
+    #[must_use]
+    pub fn is_hosted(&self) -> bool {
+        self.call_endpoint.is_some() && self.status_endpoint.is_some() && self.token.is_some()
+    }
+
+    /// Construct a router against a test server. This deliberately exposes no
+    /// production configuration path; it only keeps provider adapters testable
+    /// without mutating process-global environment variables.
+    #[doc(hidden)]
+    pub fn for_test(
+        plugin_id: impl Into<String>,
+        http: reqwest::Client,
+        call_endpoint: impl Into<String>,
+        status_endpoint: impl Into<String>,
+    ) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            http,
+            call_endpoint: Some(call_endpoint.into()),
+            status_endpoint: Some(status_endpoint.into()),
+            token: Some("test-provider-router".to_owned()),
+        }
+    }
+
+    pub async fn status(&self, provider: &str) -> Result<bool, ProviderRouterError> {
+        let (Some(endpoint), Some(token)) =
+            (self.status_endpoint.as_deref(), self.token.as_deref())
+        else {
+            return Err(ProviderRouterError::NotHosted);
+        };
+        let response = self
+            .http
+            .post(endpoint)
+            .header(HDR_PLUGIN_ID, &self.plugin_id)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "provider": provider }))
+            .send()
+            .await
+            .map_err(ProviderRouterError::Transport)?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(ProviderRouterError::Rejected {
+                status,
+                body: response.text().await.unwrap_or_default(),
+            });
+        }
+        response
+            .json::<ManagedProviderStatus>()
+            .await
+            .map(|value| value.configured)
+            .map_err(ProviderRouterError::Transport)
+    }
+
+    pub async fn call(
+        &self,
+        request: ManagedProviderCall,
+    ) -> Result<ManagedProviderResponse, ProviderRouterError> {
+        request.validate()?;
+        let (Some(endpoint), Some(token)) = (self.call_endpoint.as_deref(), self.token.as_deref())
+        else {
+            return Err(ProviderRouterError::NotHosted);
+        };
+        let response = self
+            .http
+            .post(endpoint)
+            .header(HDR_PLUGIN_ID, &self.plugin_id)
+            .bearer_auth(token)
+            .json(&request)
+            .send()
+            .await
+            .map_err(ProviderRouterError::Transport)?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(ProviderRouterError::Rejected {
+                status,
+                body: response.text().await.unwrap_or_default(),
+            });
+        }
+        response
+            .json::<ManagedProviderResponse>()
+            .await
+            .map_err(ProviderRouterError::Transport)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +855,73 @@ mod tests {
         Some(format!(
             "http://127.0.0.1:{port}/api/host/capability/{CAP_EVENTS_EMIT}"
         ))
+    }
+
+    #[test]
+    fn usage_report_requires_bounded_charge_identity() {
+        let report = ToolUsageReport {
+            provider: "treg".to_owned(),
+            tool_id: "x.x.post.create".to_owned(),
+            cost_micro_usd: Some(15_000),
+            estimated: false,
+            transaction_id: Some("call-1".to_owned()),
+            request_id: "social:call-1".to_owned(),
+            tool_calls: 1,
+            task_label: Some("Outpost X post".to_owned()),
+        };
+        assert!(report.validate().is_ok());
+        let wire = serde_json::to_value(&report).expect("report serializes");
+        assert_eq!(wire["provider"], "treg");
+        assert_eq!(wire["toolId"], "x.x.post.create");
+        assert_eq!(wire["costMicroUsd"], 15_000);
+        assert!(wire.get("secret").is_none());
+    }
+
+    #[test]
+    fn usage_report_rejects_empty_or_zero_identity() {
+        let report = ToolUsageReport {
+            provider: "".to_owned(),
+            tool_id: "x".to_owned(),
+            cost_micro_usd: None,
+            estimated: true,
+            transaction_id: None,
+            request_id: "request".to_owned(),
+            tool_calls: 1,
+            task_label: None,
+        };
+        assert!(matches!(
+            report.validate(),
+            Err(UsageReportError::Invalid(message)) if message.contains("provider")
+        ));
+    }
+
+    #[test]
+    fn managed_provider_call_has_no_credential_field_and_bounds_identity() {
+        let call = ManagedProviderCall {
+            provider: "treg".to_owned(),
+            tool_id: "x.x.post.create".to_owned(),
+            operation: Some("execute".to_owned()),
+            account_id: None,
+            method: "POST".to_owned(),
+            query: Vec::new(),
+            body: Some(serde_json::json!({ "text": "hello" })),
+            idempotency_key: Some("post-segment".to_owned()),
+            request_id: "social:post-segment".to_owned(),
+            fallback_cost_micro_usd: Some(15_000),
+            task_label: Some("Outpost social publish".to_owned()),
+        };
+        assert!(call.validate().is_ok());
+        let wire = serde_json::to_value(&call).expect("call serializes");
+        assert_eq!(wire["provider"], "treg");
+        assert_eq!(wire["toolId"], "x.x.post.create");
+        assert!(wire.get("token").is_none());
+
+        let mut invalid = call;
+        invalid.request_id.clear();
+        assert!(matches!(
+            invalid.validate(),
+            Err(ProviderRouterError::Invalid(message)) if message.contains("request_id")
+        ));
     }
 
     /// The `RYU_BIND` fallback half, factored for test.

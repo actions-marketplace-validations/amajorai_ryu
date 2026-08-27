@@ -36,6 +36,7 @@ import {
 	DEFAULT_SIDEBAR_MODE,
 	setSidebarMode,
 } from "@/src/hooks/useSidebarMode.ts";
+import { isRyuBot } from "@/src/lib/product.ts";
 import { TOOL_DETAIL_PRESETS } from "@/src/lib/tool-detail-ladder.ts";
 
 export const INTERFACE_LEVEL_KEY = "ryu:interface-level";
@@ -94,6 +95,9 @@ function normalizeStoredLevel(value: string | null): InterfaceLevel | null {
 const listeners = new Set<() => void>();
 
 function readFromStorage(): InterfaceLevel {
+	if (isRyuBot()) {
+		return "simple";
+	}
 	try {
 		const raw = localStorage.getItem(INTERFACE_LEVEL_KEY);
 		return normalizeStoredLevel(raw) ?? DEFAULT_INTERFACE_LEVEL;
@@ -114,7 +118,7 @@ export function getInterfaceLevelSnapshot(): InterfaceLevel {
 }
 
 export function getInterfaceLevelServerSnapshot(): InterfaceLevel {
-	return DEFAULT_INTERFACE_LEVEL;
+	return isRyuBot() ? "simple" : DEFAULT_INTERFACE_LEVEL;
 }
 
 export function subscribeInterfaceLevel(cb: () => void): () => void {
@@ -167,14 +171,15 @@ export function setInterfaceLevel(
 	level: InterfaceLevel,
 	{ applyPrefs = true }: { applyPrefs?: boolean } = {}
 ): void {
-	cache = level;
+	const nextLevel: InterfaceLevel = isRyuBot() ? "simple" : level;
+	cache = nextLevel;
 	try {
-		localStorage.setItem(INTERFACE_LEVEL_KEY, level);
+		localStorage.setItem(INTERFACE_LEVEL_KEY, nextLevel);
 	} catch {
 		// Best-effort persistence; in-memory state still updates.
 	}
 	if (applyPrefs) {
-		applyLevelPrefs(level);
+		applyLevelPrefs(nextLevel);
 	}
 	for (const cb of listeners) {
 		cb();

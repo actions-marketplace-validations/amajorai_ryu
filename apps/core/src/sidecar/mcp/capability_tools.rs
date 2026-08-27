@@ -51,7 +51,7 @@
 //!   the allowlist, so a genuinely dangerous capability should not become a verb at
 //!   all. `browser.eval` (arbitrary JS in a page carrying the user's live session)
 //!   was left OUT of the table for exactly this reason, on an app that ships
-//!   default-on.
+//!   pre-installed.
 //! * A verb is only listed when its capability resolves over the ENABLED set AND the
 //!   bound provider declares that verb — feature detection, never a tool that errors
 //!   on first use.
@@ -1608,7 +1608,7 @@ mod tests {
             .find(|m| m.id == "@ryu/layers")
             .expect("the layers settings app must be compiled in and parseable");
         assert!(
-            crate::plugins::builtins::is_default_on("@ryu/layers"),
+            crate::plugins::builtins::is_preinstalled("@ryu/layers"),
             "a settings surface the user cannot reach is not a setting"
         );
 

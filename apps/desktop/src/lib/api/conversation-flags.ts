@@ -71,6 +71,24 @@ export async function setConversationTitle(
 	}
 }
 
+/** Assign a conversation to a workspace folder, or detach it with `null`. */
+export async function setConversationFolder(
+	target: ApiTarget,
+	id: string,
+	folderPath: string | null
+): Promise<boolean> {
+	try {
+		await request<{ ok?: boolean }>(
+			target,
+			`/api/conversations/${encodeURIComponent(id)}/folder`,
+			{ method: "POST", body: { folder_path: folderPath } }
+		);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** One past title for a conversation (`GET /api/conversations/:id/title-history`). */
 export interface TitleHistoryEntry {
 	createdAt: number;

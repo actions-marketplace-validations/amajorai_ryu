@@ -24,6 +24,7 @@ import {
 	asAssistantSurfaceArg,
 	asBlueprintRequestArg,
 	asCalendarCreateAutomationArg,
+	asChatSendArg,
 	asFinetuneIdArg,
 	asMailCreateArg,
 	asMailIdArg,
@@ -44,6 +45,7 @@ import {
 	asQuestIdArg,
 	asQuestInputArg,
 	asQuestUpdateArg,
+	asReasoningRequestArg,
 	asRecordArg,
 	asRecordStartArg,
 	asSkillDraftArg,
@@ -52,10 +54,9 @@ import {
 	asSkillTitleArg,
 	asSkillUpdateArg,
 	asSkillVersionRefArg,
-	asReasoningRequestArg,
-	asSubtitlesRequestArg,
 	asSocialRequestArg,
 	asSpacesListArg,
+	asSubtitlesRequestArg,
 	asSuggestionFeedbackArg,
 	asTemplateInstallArg,
 	asTimelineFrameArg,
@@ -66,6 +67,28 @@ import {
 	asWorkflowVersionCreateArg,
 	asWorkflowVersionGetArg,
 } from "./rpc.ts";
+
+describe("Chat Broadcast send validator", () => {
+	it("accepts bounded text and trims only the conversation id", () => {
+		expect(
+			asChatSendArg({ conversationId: "  conv-1  ", text: " Stop now " })
+		).toEqual({ conversationId: "conv-1", text: " Stop now " });
+	});
+
+	it("rejects missing, blank, oversized, and non-object input", () => {
+		expect(asChatSendArg(null)).toBeNull();
+		expect(asChatSendArg([])).toBeNull();
+		expect(asChatSendArg({ conversationId: "", text: "x" })).toBeNull();
+		expect(asChatSendArg({ conversationId: "conv", text: "   " })).toBeNull();
+		expect(asChatSendArg({ conversationId: "conv" })).toBeNull();
+		expect(
+			asChatSendArg({ conversationId: "conv", text: "x".repeat(8001) })
+		).toBeNull();
+		expect(
+			asChatSendArg({ conversationId: "x".repeat(201), text: "ok" })
+		).toBeNull();
+	});
+});
 
 // ── The `{ id: string }` (and single-required-string) family ────────────────────
 //
@@ -179,14 +202,33 @@ describe("verbatim-forwarding validators keep unknown fields and reject arrays",
 		expect(asRecordArg("s")).toBeNull();
 	});
 
-	it("asMonitorInputArg requires name+url strings and forwards extras", () => {
+	it("asMonitorInputArg validates the canonical model and forwards extras", () => {
 		const good = {
+			backend: "http" as const,
+			check: { type: "uptime" as const },
+			enabled: true,
+			interval: "10m",
 			name: "site",
+			notify: [],
 			url: "https://x.example.com",
-			check: { kind: "http" },
 			extra: 9,
 		};
 		expect(asMonitorInputArg(good)).toBe(good);
+		for (const target of [
+			{ kind: "webhook", url: "https://hooks.example" },
+			{ kind: "telegram", bot_token: "bot", chat_id: "chat" },
+			{ kind: "expo_push", token: "ExponentPushToken[x]" },
+			{ kind: "email", to: "alerts@example.com" },
+		]) {
+			expect(asMonitorInputArg({ ...good, notify: [target] })).not.toBeNull();
+		}
+		for (const notify of [
+			[{ kind: "email" }],
+			[{ kind: "telegram", bot_token: "bot" }],
+			[{ kind: "unknown", value: "x" }],
+		]) {
+			expect(asMonitorInputArg({ ...good, notify })).toBeNull();
+		}
 		expect(asMonitorInputArg({ name: "site" })).toBeNull(); // url missing
 		expect(asMonitorInputArg({ url: "https://x" })).toBeNull(); // name missing
 		expect(asMonitorInputArg({ name: 1, url: "u" })).toBeNull();
@@ -219,16 +261,23 @@ describe("verbatim-forwarding validators keep unknown fields and reject arrays",
 
 describe("nested-delegation validators reject on a bad inner payload", () => {
 	it("asMonitorUpdateArg rejects when the nested input fails asMonitorInputArg", () => {
-		expect(
-			asMonitorUpdateArg({ id: "m1", input: { name: "s", url: "u" } })
-		).toEqual({
+		const input = {
+			backend: "http" as const,
+			check: { type: "uptime" as const },
+			enabled: true,
+			interval: "10m",
+			name: "s",
+			notify: [],
+			url: "u",
+		};
+		expect(asMonitorUpdateArg({ id: "m1", input })).toEqual({
 			id: "m1",
-			input: { name: "s", url: "u" },
+			input,
 		});
-		expect(asMonitorUpdateArg({ id: "m1", input: { name: "s" } })).toBeNull(); // url missing
 		expect(
-			asMonitorUpdateArg({ id: "", input: { name: "s", url: "u" } })
-		).toBeNull();
+			asMonitorUpdateArg({ id: "m1", input: { ...input, url: undefined } })
+		).toBeNull(); // url missing
+		expect(asMonitorUpdateArg({ id: "", input })).toBeNull();
 		expect(asMonitorUpdateArg({ id: "m1" })).toBeNull(); // input missing
 	});
 
@@ -754,10 +803,12 @@ describe("assistant bridge validators", () => {
 // request that leaves the desktop is already addressed to the escaped path.
 describe("asSocialRequestArg", () => {
 	it("keeps a normal sub-path, defaults the method, forwards the body verbatim", () => {
-		expect(asSocialRequestArg({ path: "/posts?workspace_id=default" })).toEqual({
-			path: "/posts?workspace_id=default",
-			method: "GET",
-		});
+		expect(asSocialRequestArg({ path: "/posts?workspace_id=default" })).toEqual(
+			{
+				path: "/posts?workspace_id=default",
+				method: "GET",
+			}
+		);
 		expect(
 			asSocialRequestArg({ path: "/posts", method: "POST", body: { a: 1 } })
 		).toEqual({ path: "/posts", method: "POST", body: { a: 1 } });
@@ -829,7 +880,9 @@ describe("asReasoningRequestArg", () => {
 	});
 
 	it("rejects a path that is not a rooted sub-path", () => {
-		expect(asReasoningRequestArg({ path: "https://evil.example/x" })).toBeNull();
+		expect(
+			asReasoningRequestArg({ path: "https://evil.example/x" })
+		).toBeNull();
 		expect(asReasoningRequestArg({ path: "//evil.example/x" })).toBeNull();
 		expect(asReasoningRequestArg({ path: "policies" })).toBeNull();
 		expect(asReasoningRequestArg({ path: "/\\..\\settings" })).toBeNull();
@@ -862,12 +915,18 @@ describe("asReasoningRequestArg", () => {
 	});
 
 	it("serves PUT (the policy-update verb) and refuses anything outside the set", () => {
-		expect(asReasoningRequestArg({ path: "/policies/hr", method: "PUT" })).toEqual({
+		expect(
+			asReasoningRequestArg({ path: "/policies/hr", method: "PUT" })
+		).toEqual({
 			path: "/policies/hr",
 			method: "PUT",
 		});
-		expect(asReasoningRequestArg({ path: "/policies", method: "PATCH" })).toBeNull();
-		expect(asReasoningRequestArg({ path: "/policies", method: "get" })).toBeNull();
+		expect(
+			asReasoningRequestArg({ path: "/policies", method: "PATCH" })
+		).toBeNull();
+		expect(
+			asReasoningRequestArg({ path: "/policies", method: "get" })
+		).toBeNull();
 	});
 });
 
@@ -897,7 +956,9 @@ describe("asSubtitlesRequestArg", () => {
 	});
 
 	it("rejects a path that is not a rooted sub-path", () => {
-		expect(asSubtitlesRequestArg({ path: "https://evil.example/x" })).toBeNull();
+		expect(
+			asSubtitlesRequestArg({ path: "https://evil.example/x" })
+		).toBeNull();
 		expect(asSubtitlesRequestArg({ path: "//evil.example/x" })).toBeNull();
 		expect(asSubtitlesRequestArg({ path: "jobs" })).toBeNull();
 		expect(asSubtitlesRequestArg({ path: "/\\..\\settings" })).toBeNull();
@@ -930,11 +991,15 @@ describe("asSubtitlesRequestArg", () => {
 	});
 
 	it("serves PUT (the settings verb) and refuses anything outside the set", () => {
-		expect(asSubtitlesRequestArg({ path: "/settings", method: "PUT" })).toEqual({
-			path: "/settings",
-			method: "PUT",
-		});
-		expect(asSubtitlesRequestArg({ path: "/jobs", method: "PATCH" })).toBeNull();
+		expect(asSubtitlesRequestArg({ path: "/settings", method: "PUT" })).toEqual(
+			{
+				path: "/settings",
+				method: "PUT",
+			}
+		);
+		expect(
+			asSubtitlesRequestArg({ path: "/jobs", method: "PATCH" })
+		).toBeNull();
 		expect(asSubtitlesRequestArg({ path: "/jobs", method: "get" })).toBeNull();
 	});
 });
@@ -969,7 +1034,9 @@ describe("asBlueprintRequestArg", () => {
 	});
 
 	it("rejects a path that is not a rooted sub-path", () => {
-		expect(asBlueprintRequestArg({ path: "https://evil.example/x" })).toBeNull();
+		expect(
+			asBlueprintRequestArg({ path: "https://evil.example/x" })
+		).toBeNull();
 		expect(asBlueprintRequestArg({ path: "//evil.example/x" })).toBeNull();
 		expect(asBlueprintRequestArg({ path: "plans" })).toBeNull();
 		expect(asBlueprintRequestArg({ path: "/\\..\\settings" })).toBeNull();
@@ -1011,7 +1078,9 @@ describe("asBlueprintRequestArg", () => {
 			asBlueprintRequestArg({ path: "/plans/p_x", method: "DELETE" })
 		).toEqual({ path: "/plans/p_x", method: "DELETE" });
 		expect(asBlueprintRequestArg({ path: "/plans", method: "PUT" })).toBeNull();
-		expect(asBlueprintRequestArg({ path: "/plans", method: "PATCH" })).toBeNull();
+		expect(
+			asBlueprintRequestArg({ path: "/plans", method: "PATCH" })
+		).toBeNull();
 		expect(asBlueprintRequestArg({ path: "/plans", method: "get" })).toBeNull();
 	});
 });

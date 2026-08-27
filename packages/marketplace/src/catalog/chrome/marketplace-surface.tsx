@@ -25,6 +25,7 @@ export default function MarketplaceSurface({
 	onSelect,
 	query,
 	sections,
+	showSectionTabs = true,
 	trailing,
 }: {
 	active: string;
@@ -36,6 +37,10 @@ export default function MarketplaceSurface({
 	onSelect: (value: string) => void;
 	query: string;
 	sections: StoreSectionTab[];
+	/** Hide the global section strip when the active section already owns the
+	 *  canonical navigation for the same destinations (for example Browse's
+	 *  marketplace-kind tabs). */
+	showSectionTabs?: boolean;
 	trailing?: ReactNode;
 }) {
 	return (
@@ -55,12 +60,14 @@ export default function MarketplaceSurface({
 					trailing={trailing}
 					value={query}
 				/>
-				<StoreSectionTabs
-					active={active}
-					className="pt-2 pb-1"
-					onSelect={onSelect}
-					sections={sections}
-				/>
+				{showSectionTabs ? (
+					<StoreSectionTabs
+						active={active}
+						className="pt-2 pb-1"
+						onSelect={onSelect}
+						sections={sections}
+					/>
+				) : null}
 			</div>
 			<div
 				className={cn("min-h-0 min-w-0 flex-1", contentClassName)}

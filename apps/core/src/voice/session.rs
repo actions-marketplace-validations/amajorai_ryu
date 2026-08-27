@@ -309,7 +309,7 @@ pub async fn run_voice_turn(
     let (delta_tx, mut delta_rx) = mpsc::channel::<String>(64);
     let streamer = match pre {
         PreUserTurn::Handled(reply) => {
-            crate::sidecar::adapters::persist_handled_turn(
+            let _ = crate::sidecar::adapters::persist_handled_turn(
                 &deps.conversations,
                 &cfg.conversation_id,
                 &spoken,

@@ -94,10 +94,24 @@ pub fn managed_fleet() -> Option<(String, String)> {
     let env_token = std::env::var(ENV_MANAGED_FLEET_TOKEN)
         .ok()
         .filter(|s| !s.trim().is_empty());
-    if let (Some(url), Some(token)) = (env_url, env_token) {
-        return Some((url.trim().to_owned(), token.trim().to_owned()));
-    }
-    MANAGED_FLEET_PREF.read().ok()?.clone()
+    let environment = env_url.zip(env_token);
+    let enrolled = crate::fleet::enrolled_managed_fleet();
+    let preference = MANAGED_FLEET_PREF
+        .read()
+        .ok()
+        .and_then(|value| value.clone());
+    select_managed_fleet(environment, enrolled, preference)
+}
+
+fn select_managed_fleet(
+    environment: Option<(String, String)>,
+    enrolled: Option<(String, String)>,
+    preference: Option<(String, String)>,
+) -> Option<(String, String)> {
+    environment
+        .map(|(url, token)| (url.trim().to_owned(), token.trim().to_owned()))
+        .or(enrolled)
+        .or(preference)
 }
 
 /// This node's own routing PREFERENCES, as the encoded `x-ryu-node-routing`
@@ -238,10 +252,17 @@ pub fn gateway_url() -> String {
 /// Optional bearer token Core presents to the gateway (only when the gateway
 /// runs with `require_auth`). This is the gateway token slot — never a provider
 /// API key.
-pub fn gateway_token() -> Option<String> {
+pub fn gateway_relay_token() -> Option<String> {
     std::env::var(ENV_GATEWAY_TOKEN)
         .ok()
         .filter(|s| !s.is_empty())
+}
+
+/// Compatibility name used by the local-gateway call sites. On a managed
+/// remote data plane this resolves only the relay credential; node-control
+/// traffic reads `control_plane::gateway_key()` instead.
+pub fn gateway_token() -> Option<String> {
+    gateway_relay_token()
 }
 
 /// Resolve the bearer Core presents to the gateway, fail-closed on a remote data
@@ -254,7 +275,7 @@ pub fn gateway_token() -> Option<String> {
 /// error instead of silently presenting a bearer the fleet would 401 — the caller
 /// fails closed with a clear reason rather than emitting the shared literal.
 pub fn gateway_bearer() -> anyhow::Result<String> {
-    if let Some(token) = gateway_token() {
+    if let Some(token) = gateway_relay_token() {
         return Ok(token);
     }
     if remote_data_plane() {
@@ -298,8 +319,12 @@ pub async fn record_tool_charge(
     if tool_calls == 0 {
         return Ok(());
     }
-    let token = gateway_admin_key()
-        .ok_or_else(|| anyhow::anyhow!("gateway admin credential is unavailable"))?;
+    let token = if remote_data_plane() {
+        gateway_relay_token()
+    } else {
+        gateway_admin_key()
+    }
+    .ok_or_else(|| anyhow::anyhow!("gateway tool-charge credential is unavailable"))?;
     let agent_proof = agent_id.and_then(|id| gateway_agent_proof(id).ok());
     let url = format!("{}/v1/budget/charge", gateway_url().trim_end_matches('/'));
     let body = serde_json::json!({
@@ -322,6 +347,152 @@ pub async fn record_tool_charge(
     let status = response.status();
     let detail = response.text().await.unwrap_or_default();
     anyhow::bail!("gateway tool charge returned {status}: {detail}");
+}
+
+/// Descriptive provider usage reported by a sidecar. The organization is passed
+/// separately by Core after resolving the registered node, never supplied by the
+/// sidecar body.
+#[derive(Debug, Clone)]
+pub struct ExternalToolCharge {
+    pub provider: String,
+    pub tool_id: String,
+    pub cost_micro_usd: Option<u64>,
+    pub estimated: bool,
+    pub transaction_id: Option<String>,
+    pub request_id: String,
+    pub tool_calls: u64,
+    pub task_label: Option<String>,
+}
+
+/// Forward a provider-neutral sidecar charge to Gateway. Gateway owns the local
+/// charged-spend counters, markup policy, idempotency, and wallet debit; Core only
+/// binds the report to its registered organization.
+pub async fn record_external_tool_charge(
+    client: &reqwest::Client,
+    org_id: &str,
+    charge: ExternalToolCharge,
+) -> anyhow::Result<()> {
+    if charge.tool_calls == 0 {
+        return Ok(());
+    }
+    let token = if remote_data_plane() {
+        gateway_relay_token()
+    } else {
+        gateway_admin_key()
+    }
+    .ok_or_else(|| anyhow::anyhow!("gateway tool-charge credential is unavailable"))?;
+    let request_id = charge
+        .transaction_id
+        .as_deref()
+        .map(|id| format!("{}:{id}", charge.provider.trim()))
+        .unwrap_or(charge.request_id);
+    let url = format!("{}/v1/budget/charge", gateway_url().trim_end_matches('/'));
+    let body = serde_json::json!({
+        "org_id": org_id,
+        "tool_calls": charge.tool_calls,
+        "provider": charge.provider,
+        "tool_id": charge.tool_id,
+        "cost_micro_usd": charge.cost_micro_usd,
+        "estimated": charge.estimated,
+        "transaction_id": charge.transaction_id,
+        "task_label": charge.task_label,
+        "request_id": request_id,
+    });
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    let status = response.status();
+    let detail = response.text().await.unwrap_or_default();
+    anyhow::bail!("gateway external tool charge returned {status}: {detail}");
+}
+
+/// Ask the managed Gateway whether a provider is configured. Provider credentials
+/// stay in Gateway's runtime/vault; Core only carries the authenticated app request.
+pub async fn managed_provider_status(
+    client: &reqwest::Client,
+    provider: &str,
+) -> Result<bool, ryu_app_events::ProviderRouterError> {
+    let token = if remote_data_plane() {
+        gateway_relay_token()
+    } else {
+        gateway_admin_key()
+    }
+    .ok_or(ryu_app_events::ProviderRouterError::NotHosted)?;
+    let url = format!(
+        "{}/v1/providers/status",
+        gateway_url().trim_end_matches('/')
+    );
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "provider": provider }))
+        .send()
+        .await
+        .map_err(ryu_app_events::ProviderRouterError::Transport)?;
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(ryu_app_events::ProviderRouterError::Rejected { status, body });
+    }
+    let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+        ryu_app_events::ProviderRouterError::Invalid(format!(
+            "Gateway provider status returned invalid JSON: {error}"
+        ))
+    })?;
+    Ok(value
+        .get("configured")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false))
+}
+
+/// Forward one provider-neutral app operation to Gateway. Gateway injects the
+/// provider credential, executes the call, and schedules the org-wallet debit.
+pub async fn call_managed_provider(
+    client: &reqwest::Client,
+    org_id: Option<&str>,
+    call: ryu_app_events::ManagedProviderCall,
+) -> Result<serde_json::Value, ryu_app_events::ProviderRouterError> {
+    let token = if remote_data_plane() {
+        gateway_relay_token()
+    } else {
+        gateway_admin_key()
+    }
+    .ok_or(ryu_app_events::ProviderRouterError::NotHosted)?;
+    let url = format!("{}/v1/providers/call", gateway_url().trim_end_matches('/'));
+    let mut body = serde_json::to_value(call).map_err(|error| {
+        ryu_app_events::ProviderRouterError::Invalid(format!(
+            "managed provider call could not be serialized: {error}"
+        ))
+    })?;
+    if let Some(org_id) = org_id.filter(|value| !value.trim().is_empty()) {
+        body["orgId"] = serde_json::Value::String(org_id.to_owned());
+    }
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(ryu_app_events::ProviderRouterError::Transport)?;
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(ryu_app_events::ProviderRouterError::Rejected {
+            status,
+            body: text,
+        });
+    }
+    serde_json::from_str(&text).map_err(|error| {
+        ryu_app_events::ProviderRouterError::Invalid(format!(
+            "Gateway provider call returned invalid JSON: {error}"
+        ))
+    })
 }
 
 /// Env var carrying the admin credential to the spawned gateway. Sets the
@@ -363,12 +534,10 @@ pub fn gateway_admin_key() -> Option<String> {
     ADMIN_KEY
         .get_or_init(|| {
             // 0. On a remote data plane Core talks to a hosted fleet it did not
-            //    spawn, so a key minted on this machine means nothing there — the
-            //    fleet credential is the provisioned gateway token. Minting and
-            //    presenting a local key instead would 401 exactly as before, with a
-            //    more confusing reason.
+            //    spawn. Relay credentials may call inference and the narrowly
+            //    proof-bound tool-charge endpoint, but they are never admin keys.
             if remote_data_plane() {
-                return gateway_token();
+                return None;
             }
 
             // 1. Operator-provisioned. A real master key outranks a minted admin
@@ -1282,6 +1451,10 @@ pub(crate) async fn fetch_config(client: &reqwest::Client) -> anyhow::Result<ser
 /// `local` provider at the active engine. Empty when nothing is selected.
 fn gateway_spawn_env() -> Vec<(String, String)> {
     let mut env = Vec::new();
+    // Ryu-owned analytics is a typed relay, not the customer's OTLP exporter.
+    // Managed local Gateways receive only the relay URL/key and the explicit
+    // product-analytics gate; no Ryu Axiom credential is ever forwarded.
+    env.extend(crate::ryu_analytics::gateway_child_env());
     // The admin credential for THIS gateway. Sets `auth.master_key` on the child
     // without turning on `require_auth`, so the admin surface starts demanding a
     // key while every ordinary call Core and its sidecars make (chat, media,
@@ -1384,7 +1557,7 @@ fn gateway_spawn_env() -> Vec<(String, String)> {
     let core_url = core_self_url();
     tracing::info!(core_url = %core_url, "gateway: wiring unified tool catalog client");
     env.push(("CORE_URL".to_owned(), core_url));
-    if let Ok(token) = std::env::var("RYU_TOKEN") {
+    if let Some(token) = crate::node_token::active_token() {
         if !token.is_empty() {
             env.push(("CORE_TOKEN".to_owned(), token));
         }
@@ -2642,6 +2815,25 @@ pub(crate) fn lock_managed_node_env() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn managed_fleet_precedence_is_environment_then_enrollment_then_manual_preference() {
+        let environment = Some((" https://env.example ".into(), " env-token ".into()));
+        let enrolled = Some(("https://enrolled.example".into(), "enrolled-token".into()));
+        let preference = Some(("https://manual.example".into(), "manual-token".into()));
+        assert_eq!(
+            select_managed_fleet(environment, enrolled.clone(), preference.clone()),
+            Some(("https://env.example".into(), "env-token".into()))
+        );
+        assert_eq!(
+            select_managed_fleet(None, enrolled.clone(), preference.clone()),
+            enrolled
+        );
+        assert_eq!(
+            select_managed_fleet(None, None, preference.clone()),
+            preference
+        );
+    }
+
     /// One test for the whole `x-ryu-node-routing` encoder, deliberately: the
     /// slot is a process-global and cargo runs tests in one process in parallel,
     /// so splitting these would make them observe each other's writes.
@@ -2694,7 +2886,10 @@ mod tests {
     fn gateway_url_defaults_to_loopback() {
         // Without RYU_GATEWAY_URL set in this process, the default applies.
         if std::env::var(ENV_GATEWAY_URL).is_err() {
-            assert_eq!(gateway_url(), DEFAULT_GATEWAY_URL);
+            assert_eq!(
+                gateway_url(),
+                format!("http://127.0.0.1:{}", crate::profile::port(7981))
+            );
         }
     }
 

@@ -108,6 +108,8 @@ function FannedAgentLogos({
 }
 
 export interface EmptyStateHeaderProps {
+	/** Keep the managed Bot mark informative without exposing a settings menu. */
+	interactiveLogo?: boolean;
 	logo: EmptyStateLogo;
 	/**
 	 * The composer's composed Agent · Model · Approval/Thinking sections (from
@@ -122,6 +124,8 @@ export interface EmptyStateHeaderProps {
 	 */
 	renderBody?: (close: () => void) => ReactNode;
 	sections: ComposerSettingsSection[];
+	/** Build exposes project context here; Bot keeps the empty state focused. */
+	showProjectPicker?: boolean;
 	title?: string;
 }
 
@@ -129,18 +133,22 @@ export interface EmptyStateHeaderProps {
  * The chat empty state: an editable-feeling heading "What are we doing in
  * <folder>", with a clickable agent logo below that opens the same
  * Agent · Model · Thinking dropdown as the composer. The folder name is a
- * hover-revealed trigger that opens the project folder selector.
+ * dotted-underlined trigger that opens the project folder selector.
  */
 export function EmptyStateHeader({
+	interactiveLogo = true,
 	title = "What are we doing?",
 	logo,
 	sections,
 	renderBody,
+	showProjectPicker = true,
 }: EmptyStateHeaderProps) {
 	const [folderOpen, setFolderOpen] = useState(false);
 	const [hovered, setHovered] = useState(false);
 	const { folder } = useWorkspaceStore();
-	const folderName = folder ? folder.split(PATH_SEPARATOR).at(-1) : null;
+	const folderName = showProjectPicker
+		? folder?.split(PATH_SEPARATOR).at(-1)
+		: null;
 
 	// Strip a trailing "?" so "What are we doing in backstage" reads right
 	// once a folder is appended; keep it as plain title when no folder is set.
@@ -160,13 +168,13 @@ export function EmptyStateHeader({
 									<Button
 										aria-label="Select project folder"
 										className={cn(
-											"h-auto gap-0 rounded-md px-0 py-0 font-heading font-normal text-[28px] text-foreground tracking-tight hover:bg-muted",
-											folderOpen && "bg-muted"
+											"h-auto gap-0 rounded-none px-0 py-0 font-heading font-normal text-[28px] text-foreground tracking-tight underline decoration-dotted underline-offset-4 hover:bg-transparent hover:text-muted-foreground",
+											folderOpen && "text-muted-foreground"
 										)}
 										size="sm"
 										title={folder ?? undefined}
 										type="button"
-										variant="ghost"
+										variant="link"
 									/>
 								}
 							>
@@ -191,24 +199,35 @@ export function EmptyStateHeader({
 			{/* The logo opens the composer's full Agent · Model · Thinking dropdown
 			    (the shared ComposerSettingsMenu), not just an agent list — same
 			    sections, same behaviour, behind the big empty-state mark. */}
-			<ComposerSettingsMenu
-				align="center"
-				footer={(close) => <ManageModelsButton close={close} />}
-				renderBody={renderBody}
-				sections={sections}
-				side="bottom"
-				trigger={
-					<button
-						aria-label="Agent, model and mode settings"
-						className="relative top-5 z-0 flex items-center justify-center rounded-2xl p-1 transition-transform hover:scale-[1.03] active:scale-[0.97]"
-						onMouseEnter={() => setHovered(true)}
-						onMouseLeave={() => setHovered(false)}
-						type="button"
-					>
-						<EmptyStateMark hovered={hovered} logo={logo} />
-					</button>
-				}
-			/>
+			{interactiveLogo ? (
+				<ComposerSettingsMenu
+					align="center"
+					footer={(close) => <ManageModelsButton close={close} />}
+					renderBody={renderBody}
+					sections={sections}
+					side="bottom"
+					trigger={
+						<button
+							aria-label="Agent, model and mode settings"
+							className="relative top-5 z-0 flex items-center justify-center rounded-2xl p-1 transition-transform hover:scale-[1.03] active:scale-[0.97]"
+							onMouseEnter={() => setHovered(true)}
+							onMouseLeave={() => setHovered(false)}
+							type="button"
+						>
+							<EmptyStateMark hovered={hovered} logo={logo} />
+						</button>
+					}
+				/>
+			) : (
+				<div
+					aria-hidden="true"
+					className="relative top-5 z-0 flex items-center justify-center rounded-2xl p-1"
+					onMouseEnter={() => setHovered(true)}
+					onMouseLeave={() => setHovered(false)}
+				>
+					<EmptyStateMark hovered={hovered} logo={logo} />
+				</div>
+			)}
 		</div>
 	);
 }

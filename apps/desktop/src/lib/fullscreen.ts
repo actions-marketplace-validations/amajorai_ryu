@@ -20,6 +20,7 @@
 // `lib/appearance-settings.ts`, which is for saved preferences with a reset).
 
 import { useSyncExternalStore } from "react";
+import { isTauriReady } from "./tauri-ready.ts";
 
 type Listener = (value: boolean) => void;
 
@@ -28,7 +29,7 @@ let cached = false;
 let watching = false;
 
 function isTauri(): boolean {
-	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+	return isTauriReady();
 }
 
 function publish(value: boolean): void {

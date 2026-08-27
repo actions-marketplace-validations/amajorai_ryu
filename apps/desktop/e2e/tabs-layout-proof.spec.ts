@@ -7,7 +7,7 @@ const STORY_URL = "/tabs-layout-proof.html";
 
 test("verifies overflow, menu controls, context reuse, and persisted layout", async ({
 	page,
-}) => {
+}, testInfo) => {
 	await page.goto(STORY_URL);
 	await page.evaluate(
 		(storageKey) => localStorage.removeItem(storageKey),
@@ -17,10 +17,75 @@ test("verifies overflow, menu controls, context reuse, and persisted layout", as
 
 	const moreTrigger = page.locator('[data-tabs-more-trigger="true"]');
 	await expect(moreTrigger).toHaveAttribute("data-tabs-more-visible", "true");
+	const referenceTabTrigger = page
+		.locator("[data-tabs-managed-trigger]")
+		.first();
+	const mutedText = page.locator("p.text-muted-foreground").first();
+	const [moreMetrics, tabMetrics, mutedColor] = await Promise.all([
+		moreTrigger.evaluate((element) => {
+			const styles = getComputedStyle(element);
+			return {
+				borderRadius: styles.borderTopLeftRadius,
+				color: styles.color,
+				fontSize: styles.fontSize,
+				height: element.getBoundingClientRect().height,
+				paddingBottom: styles.paddingBottom,
+				paddingTop: styles.paddingTop,
+				svgCount: element.querySelectorAll("svg").length,
+				text: element.textContent?.trim() ?? "",
+			};
+		}),
+		referenceTabTrigger.evaluate((element) => {
+			const styles = getComputedStyle(element);
+			return {
+				borderRadius: styles.borderTopLeftRadius,
+				fontSize: styles.fontSize,
+				height: element.getBoundingClientRect().height,
+				paddingBottom: styles.paddingBottom,
+				paddingTop: styles.paddingTop,
+			};
+		}),
+		mutedText.evaluate((element) => getComputedStyle(element).color),
+	]);
+	expect(moreMetrics.text).toMatch(/^\d+ more$/u);
+	expect(moreMetrics.svgCount).toBe(0);
+	expect(moreMetrics.color).toBe(mutedColor);
+	expect(moreMetrics).toMatchObject(tabMetrics);
 
 	await moreTrigger.click();
 	const commandInput = page.getByRole("combobox", { name: "Search tabs" });
 	await expect(commandInput).toBeVisible();
+	const menu = page.locator('[data-slot="dropdown-menu-content"]');
+	const commandInputGroup = page.locator(
+		'[data-slot="command-input-wrapper"] [data-slot="input-group"]'
+	);
+	const commandGroupHeading = page.locator("[cmdk-group-heading]").first();
+	const command = menu.locator('[data-slot="command"]');
+	await expect(menu).toBeVisible();
+	await expect(menu).toHaveCSS("border-top-left-radius", "14px");
+	await expect(menu).toHaveCSS("padding", "0px");
+	await expect(command).toHaveCSS("padding", "0px");
+	await expect(commandInputGroup).toHaveCSS(
+		"background-color",
+		"rgba(0, 0, 0, 0)"
+	);
+	await expect(commandGroupHeading).toHaveCSS(
+		"background-color",
+		"rgba(0, 0, 0, 0)"
+	);
+	const transparentBoxShadow =
+		/^(none|rgba\(0, 0, 0, 0\) 0px 0px 0px 0px(?:, rgba\(0, 0, 0, 0\) 0px 0px 0px 0px)*)$/u;
+	const [inputGroupShadow, inputShadow] = await Promise.all([
+		commandInputGroup.evaluate(
+			(element) => getComputedStyle(element).boxShadow
+		),
+		commandInput.evaluate((element) => getComputedStyle(element).boxShadow),
+	]);
+	expect(inputGroupShadow).toMatch(transparentBoxShadow);
+	expect(inputShadow).toMatch(transparentBoxShadow);
+	await page.screenshot({
+		path: testInfo.outputPath("tabs-layout-more-proof.png"),
+	});
 	await expect(page.locator("[data-tabs-menu-key]")).toHaveCount(7);
 	await commandInput.fill("Billing");
 	await expect(
@@ -87,6 +152,17 @@ test("verifies overflow, menu controls, context reuse, and persisted layout", as
 	);
 
 	await page.locator('[data-tabs-more-trigger="true"]').click();
+	const hiddenOverview = page
+		.locator('[data-tabs-menu-hidden="true"]')
+		.filter({ hasText: "Overview" });
+	await expect(hiddenOverview).toBeVisible();
+	await expect(hiddenOverview).toHaveCSS("opacity", "0.5");
+	await expect(
+		hiddenOverview.locator('[data-tabs-menu-hidden-indicator="true"]')
+	).toHaveCount(1);
+	await page.screenshot({
+		path: testInfo.outputPath("tabs-layout-hidden-tab-proof.png"),
+	});
 	await page.getByRole("button", { name: "Reset tabs" }).click();
 	await expect(page.locator('[data-testid="hidden-keys"]')).toHaveText("none");
 	await expect(page.locator('[data-testid="stored-order"]')).not.toHaveText(

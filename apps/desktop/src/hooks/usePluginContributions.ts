@@ -40,6 +40,7 @@ const EMPTY: PluginContributions = {
 	chat_features: [],
 	settings_tabs: [],
 	message_actions: [],
+	selection_actions: [],
 	output_styles: [],
 	context_menu_items: [],
 	create_actions: [],
@@ -178,8 +179,11 @@ export function usePluginContributionRoutes(): void {
 				contributionRegistry.registerRoute({
 					kind: "exact",
 					path: pluginCompanionPath(c.id),
-					render: () =>
-						createElement(PluginCompanionPage, { companionId: c.id }),
+					render: (tab) =>
+						createElement(PluginCompanionPage, {
+							companionId: c.id,
+							mountContext: tab.mountContext,
+						}),
 				})
 			),
 			// One route per contributed declarative view, rendered natively by the

@@ -54,6 +54,22 @@ describe("workspace session snapshots", () => {
 		expect(state?.right).toEqual({ activeIndex: 0, tabs: [] });
 	});
 
+	test("migrates synthetic subagent tabs into the stable roster tab", () => {
+		const state = parseWorkspaceSessionState({
+			bottom: { activeIndex: 0, tabs: [] },
+			bottomOpen: false,
+			right: {
+				activeIndex: 0,
+				tabs: [{ kind: "subagent", label: "Atlas", uid: "legacy-agent" }],
+			},
+			rightOpen: true,
+		});
+
+		expect(state?.right.tabs).toEqual([
+			{ kind: "subagents", label: "Subagents", uid: "legacy-agent" },
+		]);
+	});
+
 	test("treats missing and empty state as distinct input shapes safely", () => {
 		const empty = emptyWorkspaceSessionState();
 		expect(parseWorkspaceSessionState(null)).toBeUndefined();

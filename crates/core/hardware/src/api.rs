@@ -42,6 +42,10 @@ use crate::store::{DeviceRecord, DeviceStore};
 pub struct HardwareCtx {
     pub hardware: DeviceStore,
     pub dashboards: Arc<dyn DashboardFeed>,
+    /// Live owner token resolver supplied by Core. Keeping this as a callback
+    /// avoids a hardware→Core dependency while ensuring runtime rotation revokes
+    /// the prior root bearer on these public, self-authenticating routes too.
+    pub node_token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
 }
 
 /// Build the PROTECTED device-registry CRUD router (relative paths, state baked in),
@@ -219,7 +223,7 @@ async fn device_authorized(ctx: &HardwareCtx, device_id: &str, headers: &HeaderM
         return false;
     };
     // A management caller (desktop) may present the node's shared token.
-    if let Ok(shared) = std::env::var("RYU_TOKEN") {
+    if let Some(shared) = (ctx.node_token)() {
         if !shared.is_empty() && token == shared {
             return true;
         }

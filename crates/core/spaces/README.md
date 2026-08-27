@@ -14,9 +14,11 @@ An extracted Core capability crate compiled in-process as a **non-optional path 
 ## What it provides
 
 - **`SpaceStore`** — ingest / chunk / embed / KNN search over `vec0`.
-- **GraphRAG mode (spec unit U046)** — per-Space `retrieval_mode` of `"vector"` (default) or `"graph"`. Graph mode extracts entities/relations into `graph_nodes` / `graph_edges` and answers via entity-matching + BFS traversal. The extractor is registry-configurable (`RYU_GRAPH_EXTRACTION_MODEL` / `graph_extraction_model`); the built-in `local-cooccurrence` extractor is deterministic and offline.
+- **GraphRAG mode (spec unit U046)** — per-Space `retrieval_mode` of `"vector"` (default) or `"graph"`. Graph mode extracts normalized terms and directed same-chunk co-occurrence pairs into `graph_nodes` / `graph_edges`, then answers through term matching and a bounded three-hop traversal. `local-cooccurrence` is the only shipped extractor and runs deterministically offline; any other configured ID fails store creation instead of silently selecting a different algorithm.
 - **`DocOwner` / `DocAccessMeta` / `DocFilter`** — tenancy via `ryu-kernel-contracts` `ResourceKey`.
 - **Idempotent migrations** — `retrieval_mode` column and graph tables added in-place on first open.
+
+Graph construction is bounded: at most 64 unique terms (128 UTF-8 bytes each) are extracted per chunk, Graph documents contain at most 256 chunks, and a Space may hold at most 2,000,000 graph node-plus-edge rows. Vector candidates, graph traversal, and link expansion apply tenancy in SQL before private rows can seed work or consume a result budget.
 
 **Swap-seam:** the injected `ryu-rag` embedder/reranker instances (the retrieval model per Space is chosen by the Core resolver, not baked in). Placement (CLAUDE.md §1): a collection and its embeddings are *what runs*, so Core.
 

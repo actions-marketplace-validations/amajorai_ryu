@@ -3,7 +3,7 @@
 // Mounts once under Layout. Keeps project dock tab content alive across chat
 // switches and portals it into the focused chat's dock slot.
 
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import { createPortal } from "react-dom";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import {
@@ -70,6 +70,9 @@ function HostedProjectTab({
 	tab: ProjectDockTab;
 }) {
 	const [fallbackEl, setFallbackEl] = useState<HTMLDivElement | null>(null);
+	const setFallbackRef = useCallback((element: HTMLDivElement | null) => {
+		setFallbackEl((previous) => (previous === element ? previous : element));
+	}, []);
 	const target = slot ?? fallbackEl;
 
 	const content = (
@@ -83,13 +86,7 @@ function HostedProjectTab({
 
 	return (
 		<>
-			<div
-				aria-hidden
-				hidden
-				ref={(el) => {
-					setFallbackEl((prev) => (prev === el ? prev : el));
-				}}
-			/>
+			<div aria-hidden hidden ref={setFallbackRef} />
 			{target ? createPortal(content, target) : null}
 		</>
 	);

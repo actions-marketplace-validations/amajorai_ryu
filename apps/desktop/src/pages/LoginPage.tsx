@@ -1,4 +1,4 @@
-import { LoginView } from "@ryu/blocks/desktop/login";
+import { type LocalCoreSetupState, LoginView } from "@ryu/blocks/desktop/login";
 import { toast } from "@ryu/ui/components/sileo";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
@@ -8,9 +8,14 @@ import {
 	BACKEND_URL,
 	storeSessionToken,
 } from "@/lib/auth-client.ts";
+import {
+	loadBrowserCoreDownload,
+	startBrowserCoreDownload,
+} from "@/lib/browser-core-setup.ts";
 import { detectBrowserDevice } from "@/lib/browser-device.ts";
 import {
 	markLocalNudgeShown,
+	preferLocalCoreIfReachable,
 	preferLocalOrCloud,
 	shouldNudgeLocalMissing,
 } from "@/lib/prefer-local-node.ts";
@@ -29,7 +34,11 @@ export default function LoginPage() {
 	const [verificationUri, setVerificationUri] = useState<string | null>(null);
 	const [polling, setPolling] = useState(false);
 	const [guestLoading, setGuestLoading] = useState(false);
+	const [localCoreSetup, setLocalCoreSetup] =
+		useState<LocalCoreSetupState | null>(null);
 	const cancelPoll = useRef<(() => void) | null>(null);
+	const pendingGuestToken = useRef<string | null>(null);
+	const coreDownloadAttempt = useRef(0);
 	const coreStatus = useAppStore((s) => s.coreStatus);
 	// Signing in is device auth against the web backend — it never touches Core.
 	// On the webapp `coreStatus` tracks the HOSTED core, so not reaching it is a
@@ -44,8 +53,71 @@ export default function LoginPage() {
 	useEffect(() => {
 		return () => {
 			cancelPoll.current?.();
+			coreDownloadAttempt.current += 1;
 		};
 	}, []);
+
+	useEffect(() => {
+		if (localCoreSetup?.phase !== "waiting") {
+			return;
+		}
+
+		let cancelled = false;
+		let timer: number | undefined;
+		const pollForCore = async () => {
+			const reachable = await preferLocalCoreIfReachable().catch(() => false);
+			if (cancelled) {
+				return;
+			}
+			if (reachable) {
+				const token = pendingGuestToken.current;
+				pendingGuestToken.current = null;
+				setLocalCoreSetup(null);
+				if (token) {
+					toast.success("Ryu Core is ready");
+					useAppStore.getState().setPendingAuthToken(token);
+				}
+				return;
+			}
+			timer = window.setTimeout(pollForCore, 1500);
+		};
+
+		timer = window.setTimeout(pollForCore, 500);
+		return () => {
+			cancelled = true;
+			if (timer !== undefined) {
+				window.clearTimeout(timer);
+			}
+		};
+	}, [localCoreSetup?.phase]);
+
+	async function beginCoreDownload() {
+		const attempt = coreDownloadAttempt.current + 1;
+		coreDownloadAttempt.current = attempt;
+		setLocalCoreSetup({ phase: "downloading" });
+		try {
+			const download = await loadBrowserCoreDownload();
+			if (coreDownloadAttempt.current !== attempt) {
+				return;
+			}
+			startBrowserCoreDownload(download);
+			setLocalCoreSetup({
+				fileName: download.fileName,
+				phase: "waiting",
+			});
+		} catch (error) {
+			if (coreDownloadAttempt.current !== attempt) {
+				return;
+			}
+			setLocalCoreSetup({
+				message:
+					error instanceof Error
+						? error.message
+						: "Ryu couldn't start the Core download.",
+				phase: "error",
+			});
+		}
+	}
 
 	async function handleSignIn() {
 		// Show the waiting panel with its spinner immediately, before
@@ -135,15 +207,52 @@ export default function LoginPage() {
 			// The bearer is stored in the existing local vault. It is never rendered
 			// or put in the URL; the app only uses it for authenticated API calls.
 			await storeSessionToken(token);
-			const pick = await preferLocalOrCloud();
-			if (pick === "local") {
-				toast.success("Connected to your local node");
+			if (browserDevice.isComputer) {
+				const localReady = await preferLocalCoreIfReachable();
+				if (localReady) {
+					toast.success("Connected to your local node");
+					useAppStore.getState().setPendingAuthToken(token);
+					return;
+				}
+				pendingGuestToken.current = token;
+				await beginCoreDownload();
+				return;
 			}
+
+			await preferLocalOrCloud();
 			useAppStore.getState().setPendingAuthToken(token);
 		} catch (err) {
 			const message =
 				err instanceof Error ? err.message : "Guest sign-in failed";
 			toast.error("Couldn't continue as guest", { description: message });
+		} finally {
+			setGuestLoading(false);
+		}
+	}
+
+	async function handleUseCloud() {
+		const token = pendingGuestToken.current;
+		coreDownloadAttempt.current += 1;
+		if (!token) {
+			setLocalCoreSetup(null);
+			return;
+		}
+
+		setGuestLoading(true);
+		try {
+			const pick = await preferLocalOrCloud();
+			pendingGuestToken.current = null;
+			setLocalCoreSetup(null);
+			if (pick === "local") {
+				toast.success("Connected to your local node");
+			}
+			useAppStore.getState().setPendingAuthToken(token);
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : "Ryu Cloud is unavailable.";
+			toast.error("Couldn't continue with Ryu Cloud", {
+				description: message,
+			});
 		} finally {
 			setGuestLoading(false);
 		}
@@ -185,10 +294,11 @@ export default function LoginPage() {
 				coreStatusLabel={coreStatusLabel}
 				guestLoading={guestLoading}
 				hasVerificationUri={verificationUri !== null}
-				isMobileBrowser={IS_WEBAPP && browserDevice.isMobile}
+				localCoreSetup={localCoreSetup}
 				onCancel={handleCancel}
 				onContinueAsGuest={IS_WEBAPP ? handleContinueAsGuest : undefined}
-				onDownloadCore={
+				onDownloadCoreAgain={IS_WEBAPP ? beginCoreDownload : undefined}
+				onOpenCoreDownloads={
 					IS_WEBAPP ? () => openExternal(`${WEB_URL}/download/core`) : undefined
 				}
 				onOpenVerification={() =>
@@ -196,8 +306,8 @@ export default function LoginPage() {
 				}
 				onRetry={handleRetry}
 				onSignIn={handleSignIn}
+				onUseCloud={IS_WEBAPP ? handleUseCloud : undefined}
 				polling={polling}
-				showLocalCoreDownload={IS_WEBAPP && browserDevice.isComputer}
 				userCode={userCode}
 				waiting={waiting}
 			/>

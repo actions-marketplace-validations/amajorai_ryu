@@ -23,6 +23,7 @@ import { Check, LogOut, Plus } from "lucide-react";
 
 const webDestinations = [
 	{ label: "Profile", path: "/u/demo-user" },
+	{ label: "Invite a friend", path: "/referrals" },
 	{ label: "Account", path: "/settings" },
 	{ label: "API keys", path: "/api-keys" },
 ] as const;
@@ -178,7 +179,8 @@ function DesktopMenuParityProof() {
 										User nav → web account
 									</h2>
 									<p className="mt-1 text-slate-400 text-sm">
-										Open the menu and choose Profile, Account, or API keys.
+										Open the menu and choose Profile, Invite a friend, Account,
+										or API keys.
 									</p>
 								</div>
 								<DropdownMenu>

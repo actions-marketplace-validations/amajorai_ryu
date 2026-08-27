@@ -9,6 +9,7 @@
 
 import { afterEach, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
+import { act } from "react";
 import {
 	useWorkspace,
 	WorkspaceProvider,
@@ -37,8 +38,11 @@ function Harness() {
 
 let testSetup: Awaited<ReturnType<typeof testRender>> | null = null;
 
-afterEach(() => {
-	testSetup?.renderer.destroy();
+afterEach(async () => {
+	await act(async () => {
+		testSetup?.renderer.destroy();
+		await Promise.resolve();
+	});
 	testSetup = null;
 	ws = null;
 });
@@ -47,7 +51,9 @@ afterEach(() => {
 // `commit` so a setState result is visible on the returned `ws` before asserting.
 async function boot(): Promise<WorkspaceContextValue> {
 	testSetup = await testRender(<Harness />, { width: 80, height: 24 });
-	await testSetup.renderOnce();
+	await act(async () => {
+		await testSetup?.renderOnce();
+	});
 	if (!ws) {
 		throw new Error("workspace not captured");
 	}
@@ -57,9 +63,10 @@ async function boot(): Promise<WorkspaceContextValue> {
 // Run a mutation, then flush the microtask + one render so the committed state is
 // readable on the (refreshed) global `ws` handle.
 async function commit(mutate: () => void): Promise<WorkspaceContextValue> {
-	mutate();
-	await new Promise((resolve) => setTimeout(resolve, 0));
-	await testSetup?.renderOnce();
+	await act(async () => {
+		mutate();
+		await testSetup?.flush();
+	});
 	if (!ws) {
 		throw new Error("workspace not captured");
 	}

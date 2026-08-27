@@ -5,12 +5,14 @@ import {
 	EditorKit,
 	type MyEditor,
 } from "@ryu/ui/components/editor/editor-kit";
+import { discussionPlugin } from "@ryu/ui/components/editor/plugins/discussion-kit";
 import { Editor, EditorContainer } from "@ryu/ui/components/editor/ui/editor";
 import { FixedToolbar } from "@ryu/ui/components/editor/ui/fixed-toolbar";
 import { FixedToolbarButtons } from "@ryu/ui/components/editor/ui/fixed-toolbar-buttons";
 import { Plate, usePlateEditor } from "platejs/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { XmlText } from "yjs";
+import { DiscussionCollabStore } from "@/src/lib/realtime/discussion-collab.ts";
 import { RyuYjsProvider } from "@/src/lib/realtime/yjs-provider.ts";
 
 type EditorKitPlugin = (typeof EditorKit)[number];
@@ -34,6 +36,8 @@ export interface MarkdownCollab {
 	documentId: string;
 	/** The user-identity JWT, or null for an anonymous (read-only) join. */
 	jwt: string | null;
+	/** Called when a server-side restore replaces the CRDT generation. */
+	onReset?: (epoch: number) => void;
 	/** Notified once the room finishes its first sync with Core (used by the
 	 * page to switch off the markdown PUT fallback). */
 	onSyncedChange?: (synced: boolean) => void;
@@ -117,6 +121,7 @@ export function MarkdownEditor({
 					setAccess(ack.access);
 				},
 				onSyncChange: (synced) => onProviderSyncRef.current(synced),
+				onReset: (epoch) => collab.onReset?.(epoch),
 			},
 		});
 		// `collab` is memoized by the caller, so this rebuilds only when the room
@@ -145,6 +150,40 @@ export function MarkdownEditor({
 							.markdown.deserialize(initialMarkdown || ""),
 				}
 	);
+
+	useEffect(() => {
+		if (!(provider && collab)) {
+			return;
+		}
+
+		const store = new DiscussionCollabStore(provider.document);
+		const applySharedState = () => {
+			editor.setOption(
+				discussionPlugin,
+				"discussions",
+				store.readDiscussions()
+			);
+			editor.setOption(discussionPlugin, "users", store.readUsers());
+		};
+		const currentUser = {
+			avatarUrl: collab.user.avatarUrl,
+			id: collab.user.id,
+			name: collab.user.name,
+		};
+
+		editor.setOption(discussionPlugin, "currentUserId", currentUser.id);
+		editor.setOption(discussionPlugin, "onDiscussionsChange", (discussions) =>
+			store.writeDiscussions(discussions)
+		);
+		store.writeUser(currentUser);
+		applySharedState();
+		const stopObserving = store.observe(applySharedState);
+
+		return () => {
+			stopObserving();
+			editor.setOption(discussionPlugin, "onDiscussionsChange", undefined);
+		};
+	}, [collab, editor, provider]);
 
 	useEffect(() => {
 		if (!provider) {

@@ -63,6 +63,18 @@ export interface RequestOptions {
 	signal?: AbortSignal;
 }
 
+/** Header overrides for authenticated raw requests. `null`/`undefined` removes
+ * a default header, which is required for FormData and binary bodies whose
+ * content type must be supplied by the browser (including its multipart boundary). */
+export type RequestHeaderOverrides = Record<string, string | null | undefined>;
+
+/** Fetch options whose body is passed through untouched instead of JSON encoded. */
+export type AuthenticatedFetchOptions = Omit<RequestInit, "headers"> & {
+	headers?: RequestHeaderOverrides;
+	/** Standalone local bootstrap has no control-plane session to exchange. */
+	skipUserJwt?: boolean;
+};
+
 /**
  * The dedicated header carrying the user's CONTROL-PLANE (Better-Auth) session
  * bearer to Core on a marketplace install, so a PAID item's entitlement check
@@ -89,7 +101,9 @@ function isLoopbackTarget(url: string): boolean {
 		const octets = hostname.split(".");
 		return (
 			octets.length === 4 &&
-			octets.every((octet) => /^(?:0|[1-9]\d{0,2})$/.test(octet) && Number(octet) <= 255) &&
+			octets.every(
+				(octet) => /^(?:0|[1-9]\d{0,2})$/.test(octet) && Number(octet) <= 255
+			) &&
 			octets[0] === "127"
 		);
 	} catch {
@@ -102,7 +116,9 @@ function isLoopbackTarget(url: string): boolean {
  * but only for a loopback Core target. A remote or malformed target gets no
  * session credential; the node token remains the only credential sent there.
  */
-export function buyerTokenHeader(target: Pick<ApiTarget, "url">): Record<string, string> {
+export function buyerTokenHeader(
+	target: Pick<ApiTarget, "url">
+): Record<string, string> {
 	if (!isLoopbackTarget(target.url)) {
 		return {};
 	}
@@ -185,6 +201,18 @@ export function identityHeaders(): Record<string, string> {
  * node token is the machine trust boundary, this names the human behind it.
  */
 export const USER_JWT_HEADER = "x-ryu-user-jwt";
+
+/** Authentication and attribution are host-owned; raw callers may add transport
+ * headers, but cannot replace or remove the identity attached by this module. */
+const PROTECTED_REQUEST_HEADERS = new Set([
+	"authorization",
+	"x-ryu-client-id",
+	"x-ryu-client-label",
+	"x-ryu-surface",
+	"x-ryu-user-id",
+	"x-ryu-user-name",
+	USER_JWT_HEADER,
+]);
 
 /**
  * Build the verified-user JWT header from the current session, minting/refreshing
@@ -376,14 +404,46 @@ export async function readJsonBody<T>(
  */
 export async function requestHeaders(
 	target: ApiTarget,
-	extra?: Record<string, string>
+	extra?: RequestHeaderOverrides,
+	options: { skipUserJwt?: boolean } = {}
 ): Promise<Record<string, string>> {
-	return {
+	const headers: Record<string, string> = {
 		...makeHeaders(target.token),
 		...identityHeaders(),
-		...(await verifiedUserHeader()),
-		...extra,
+		...(options.skipUserJwt ? {} : await verifiedUserHeader()),
 	};
+	for (const [name, value] of Object.entries(extra ?? {})) {
+		if (PROTECTED_REQUEST_HEADERS.has(name.toLowerCase())) {
+			continue;
+		}
+		const existingName = Object.keys(headers).find(
+			(candidate) => candidate.toLowerCase() === name.toLowerCase()
+		);
+		if (existingName) {
+			delete headers[existingName];
+		}
+		if (value !== null && value !== undefined) {
+			headers[name] = value;
+		}
+	}
+	return headers;
+}
+
+/**
+ * Perform a raw-body request against Core with the complete authenticated header
+ * set. Unlike {@link request}, this never serializes or parses the body: streams,
+ * blobs, FormData, and callers with custom response handling keep their semantics.
+ */
+export async function authenticatedFetch(
+	target: ApiTarget,
+	path: string,
+	options: AuthenticatedFetchOptions = {}
+): Promise<Response> {
+	const { headers: extraHeaders, skipUserJwt, ...init } = options;
+	return await fetch(apiUrl(target, path), {
+		...init,
+		headers: await requestHeaders(target, extraHeaders, { skipUserJwt }),
+	});
 }
 
 /**

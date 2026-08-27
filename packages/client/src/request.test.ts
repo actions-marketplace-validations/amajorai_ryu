@@ -47,6 +47,17 @@ describe("buildHeaders", () => {
 		expect(buildHeaders(opts()).Authorization).toBeUndefined();
 	});
 
+	test("keeps the node bearer and rotating user JWT in distinct headers", () => {
+		let jwt = "alice-jwt";
+		const options = opts({ token: "node-token", userJwt: () => jwt });
+		expect(buildHeaders(options)).toMatchObject({
+			Authorization: "Bearer node-token",
+			"x-ryu-user-jwt": "alice-jwt",
+		});
+		jwt = "rotated-jwt";
+		expect(buildHeaders(options)["x-ryu-user-jwt"]).toBe("rotated-jwt");
+	});
+
 	test("merges and lets extra headers override defaults", () => {
 		const h = buildHeaders(opts(), {
 			"X-A": "1",
@@ -61,12 +72,12 @@ describe("request", () => {
 	test("sends url + headers and parses a JSON response", async () => {
 		let capturedUrl: string | undefined;
 		let capturedInit: RequestInit | undefined;
-		installFetch(((input: RequestInfo | URL, init?: RequestInit) => {
+		installFetch((input: RequestInfo | URL, init?: RequestInit) => {
 			const url = String(input);
 			capturedUrl = url;
 			capturedInit = init;
 			return Promise.resolve(new Response('{"ok":true}', { status: 200 }));
-		}));
+		});
 
 		const data = await request<{ ok: boolean }>(opts({ token: "t" }), "/api/x");
 		expect(data).toEqual({ ok: true });
@@ -77,14 +88,12 @@ describe("request", () => {
 	});
 
 	test("returns undefined for an empty (no-content) body", async () => {
-		installFetch((() =>
-			Promise.resolve(new Response("", { status: 204 }))));
+		installFetch(() => Promise.resolve(new Response("", { status: 204 })));
 		expect(await request(opts(), "/api/x")).toBeUndefined();
 	});
 
 	test("throws with the path, status, and body text on non-2xx", async () => {
-		installFetch((() =>
-			Promise.resolve(new Response("boom", { status: 500 }))));
+		installFetch(() => Promise.resolve(new Response("boom", { status: 500 })));
 		await expect(request(opts(), "/api/x")).rejects.toThrow(
 			"RyuClient: /api/x failed (500): boom"
 		);
@@ -92,11 +101,11 @@ describe("request", () => {
 
 	test("forwards method and body from init", async () => {
 		let capturedInit: RequestInit | undefined;
-		installFetch(((input: RequestInfo | URL, init?: RequestInit) => {
+		installFetch((input: RequestInfo | URL, init?: RequestInit) => {
 			const _url = String(input);
 			capturedInit = init;
 			return Promise.resolve(new Response("{}", { status: 200 }));
-		}));
+		});
 		await request(opts(), "/api/x", {
 			method: "POST",
 			body: JSON.stringify({ a: 1 }),

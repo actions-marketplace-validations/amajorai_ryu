@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use crate::sidecar::download_manager::{
-    ProgressCallback, VersionStore, build_http_client, compute_sha256, extract_from_tar_gz,
-    extract_from_zip, fetch_sibling_sha256, ryu_dir, sha256_sibling_url,
+    build_http_client, compute_sha256, extract_from_tar_gz, extract_from_zip, fetch_sibling_sha256,
+    ryu_dir, sha256_sibling_url, ProgressCallback, VersionStore,
 };
 
 // ── Paths ──────────────────────────────────────────────────────────────────────

@@ -100,7 +100,9 @@ export const useEditor = () => useEditorRef<MyEditor>();
 
 /** Awareness metadata published for the local user's caret in a collab room. */
 export interface CollabCursor extends Record<string, unknown> {
+	avatarUrl?: string;
 	color: string;
+	id: string;
 	name: string;
 }
 

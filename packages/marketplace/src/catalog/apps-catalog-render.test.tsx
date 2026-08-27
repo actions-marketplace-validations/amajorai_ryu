@@ -506,6 +506,25 @@ describe("AppsCatalogSection — verified organizations", () => {
 		expect(html).toContain("Verified organization — Official");
 	});
 
+	test("the gold publisher mark is an icon without a badge shell", () => {
+		const html = render(
+			makeAppsState({
+				items: [
+					makeItem({
+						entry: makeEntry({
+							org_verified: true,
+							publisher_trust: "gold",
+						}),
+					}),
+				],
+			})
+		);
+
+		expect(html).toContain("Officially verified by Ryu staff");
+		expect(html).not.toContain("t-plan-badge-sheen");
+		expect(html).not.toContain("bg-[linear-gradient");
+	});
+
 	test("an unknown tier still renders the check, unqualified", () => {
 		const html = render(
 			makeAppsState({

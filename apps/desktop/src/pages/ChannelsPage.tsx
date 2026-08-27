@@ -9,6 +9,8 @@ import {
 	type ChannelConfigView,
 	type ChannelSavePayload,
 	ChannelsView,
+	type ChannelType,
+	defaultReactionLearningSettings,
 } from "@ryu/blocks/desktop/channels";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { useState } from "react";
@@ -62,6 +64,7 @@ function toView(
 		profileName: c.profileName ?? null,
 		profileShortBio: c.profileShortBio ?? null,
 		profileDescription: c.profileDescription ?? null,
+		reactionLearning: c.reactionLearning ?? defaultReactionLearningSettings(),
 		...overrides,
 	};
 }
@@ -81,6 +84,7 @@ function behaviorFields(payload: ChannelSavePayload) {
 		dmAllowlist: payload.dmAllowlist,
 		groupAllowlist: payload.groupAllowlist,
 		groupUserAllowlist: payload.groupUserAllowlist,
+		reactionLearning: payload.reactionLearning,
 		lifecycleReactions: payload.lifecycleReactions,
 		proactiveOpening: payload.proactiveOpening,
 		proactiveTarget: payload.proactiveTarget,
@@ -100,9 +104,11 @@ function behaviorFields(payload: ChannelSavePayload) {
 export default function ChannelsPage({
 	initialNew = false,
 	initialSelectedId = null,
+	initialChannelType,
 }: {
 	initialNew?: boolean;
 	initialSelectedId?: string | null;
+	initialChannelType?: ChannelType;
 }) {
 	const { channels, loading, error, authed, create, update, remove } =
 		useChannels();
@@ -214,6 +220,7 @@ export default function ChannelsPage({
 						})
 					)}
 					error={error}
+					initialChannelType={initialChannelType}
 					initialNew={initialNew}
 					initialSelectedId={initialSelectedId}
 					loading={loading}

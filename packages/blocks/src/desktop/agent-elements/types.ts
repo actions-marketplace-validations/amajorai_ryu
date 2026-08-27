@@ -1,17 +1,21 @@
 import type { ChatStatus, UIMessage } from "ai";
 import type React from "react";
 import type { AnswerNowControl } from "./answer-now.ts";
-import type { SuggestionItem } from "./input/suggestions.tsx";
+import type { GoalCompletion } from "./goal-message.ts";
 import type {
 	ComposerMenuGroup,
 	ComposerMenuItem,
 } from "./input/composer-menu.tsx";
+import type { SuggestionItem } from "./input/suggestions.tsx";
 import type { LinkPreviewResolvers } from "./link-preview.tsx";
+import type { MemoryCitation } from "./memory-citations.ts";
 import type { MessageReactionBucket } from "./message-reactions.tsx";
 import type {
 	QuestionAnswer,
 	QuestionConfig,
 } from "./question/question-prompt.tsx";
+import type { StatsUsageSnapshot } from "./stats-model.ts";
+import type { FileEditUndoPlan } from "./turn-end-cards.ts";
 
 export type InputSuggestions =
 	| SuggestionItem[]
@@ -251,15 +255,44 @@ export interface ContributedMessageAction {
 	target: string;
 }
 
+/** A button contributed to the floating text-selection toolbar by an enabled
+ * plugin (`contributes.selection_actions`). Blocks renders the declaration and
+ * forwards the selected text; the host owns dispatch. */
+export interface ContributedSelectionAction {
+	args?: Record<string, unknown>;
+	capability?: string;
+	icon?: string;
+	id: string;
+	kind: string;
+	label: string;
+	order?: number;
+	plugin: string;
+}
+
 /** The message identity and optional value a contributed action receives. */
 export interface MessageActionContext {
 	messageId: string;
 	value?: string;
 }
 
+/** The plain text a contributed selection action receives. */
+export interface SelectionActionContext {
+	text: string;
+}
+
+/** The message identity and visible turn distance behind a reply action. */
+export interface MessageReply {
+	chainLength: number;
+	messageId: string;
+	text: string;
+}
+
 /** Runtime state supplied by the host to a contributed message-action renderer. */
 export interface MessageActionRuntimeState {
+	memoryCitations?: readonly MemoryCitation[];
 	reactionBuckets?: readonly MessageReactionBucket[];
+	/** Current value for each contributed toggle-group action, keyed by action id. */
+	toggleValues?: Readonly<Record<string, string>>;
 }
 
 export interface AgentChatProps {
@@ -295,15 +328,17 @@ export interface AgentChatProps {
 
 	className?: string;
 	classNames?: Partial<ChatClassNames>;
+	/** Disable the shared composer while its host surface is unavailable. */
+	composerDisabled?: boolean;
+	/** Small host-owned action strip rendered below the shared composer. */
+	composerFooter?: React.ReactNode;
+	/** Searchable directory rows shared by the composer `+` menu and `@` tokens. */
+	composerMenuGroups?: ComposerMenuGroup[];
 	/** An active human-input card that temporarily replaces this chat's composer. */
 	composerPrompt?: {
 		content: React.ReactNode;
 		id: string;
 	};
-	/** Searchable directory rows shared by the composer `+` menu and `@` tokens. */
-	composerMenuGroups?: ComposerMenuGroup[];
-	/** Density override for narrow hosts such as the island and side-chat rail. */
-	density?: "comfortable" | "compact";
 	/**
 	 * The active model's context window in tokens. Drives the per-message
 	 * context-usage ring in each completed assistant turn's stats footer.
@@ -318,15 +353,13 @@ export interface AgentChatProps {
 		name?: string;
 		id?: string;
 	};
+	/** Density override for narrow hosts such as the island and side-chat rail. */
+	density?: "comfortable" | "compact";
 	/** Project-scoped saved drafts exposed by the host composer. */
 	draftControls?: import("./input-bar.tsx").ComposerDraftControls;
-	/** Disable the shared composer while its host surface is unavailable. */
-	composerDisabled?: boolean;
 	/** Rendered below the composer in the centered empty state (e.g. a recent
 	 * chats list, Codex-style). Ignored once the thread has messages. */
 	emptyStateFooter?: React.ReactNode;
-	/** Small host-owned action strip rendered below the shared composer. */
-	composerFooter?: React.ReactNode;
 	/** Rendered above the composer in the centered empty state (e.g. a greeting
 	 * heading on the home view). Ignored once the thread has messages. */
 	emptyStateHeader?: React.ReactNode;
@@ -335,8 +368,6 @@ export interface AgentChatProps {
 	emptySuggestionsPosition?: "top" | "bottom";
 	enableImagePreview?: boolean;
 	error?: Error;
-	/** Persisted thumbs state keyed by assistant message id (lit thumbs). */
-	feedback?: Record<string, "up" | "down">;
 	/** ChatGPT-style next-prompt chips shown between the transcript and the
 	 * composer once the assistant finishes a turn. Unlike the empty-state
 	 * `suggestions` (which only seed the draft), selecting a follow-up runs it
@@ -346,6 +377,8 @@ export interface AgentChatProps {
 		items: SuggestionItem[];
 		onSelect: (item: SuggestionItem) => void;
 	};
+	/** Completion data shown on the assistant turn that finished the goal. */
+	goalCompletion?: GoalCompletion;
 	/** True when a page older than the visible transcript is available. */
 	hasOlderMessages?: boolean;
 	/** This thread's persisted history could not be fetched — the node was
@@ -374,6 +407,8 @@ export interface AgentChatProps {
 			onClick: () => void;
 		}[];
 	};
+	/** Compact host-owned notice rendered inside the composer frame. */
+	infoBar?: import("./input-bar.tsx").InputBarInfoBar;
 	initialScrollBehavior?: "bottom" | "top";
 	/** True while the transcript is fetching the page above the current one. */
 	loadingOlderMessages?: boolean;
@@ -394,11 +429,20 @@ export interface AgentChatProps {
 	onBranch?: (messageId: string) => void;
 	/** Clear the pending composer quote (dismiss button). */
 	onClearQuote?: () => void;
+	/** Apply a selection made from the shared composer directory. */
+	onComposerMenuSelect?: (item: ComposerMenuItem) => void;
+	/** Report the shared composer's measured height to a compact host surface. */
+	onComposerResize?: (height: number) => void;
 	/** Fire a contributed message action with the message identity and optional
 	 *  selected value. The shell dispatches it through the owning plugin seam. */
 	onContributedMessageAction?: (
 		action: ContributedMessageAction,
 		context: MessageActionContext
+	) => void;
+	/** Fire a contributed text-selection action with the selected plain text. */
+	onContributedSelectionAction?: (
+		action: ContributedSelectionAction,
+		context: SelectionActionContext
 	) => void;
 	/** Notified whenever the composer's text changes, including when a send clears
 	 * it (called with `""`). Deliberately generic: the surface decides what an
@@ -411,15 +455,6 @@ export interface AgentChatProps {
 	 * branching); receives the message id and the new text. When omitted, no edit
 	 * affordance is shown. */
 	onEditMessage?: (messageId: string, newText: string) => void;
-	/** Thumbs 👍/👎 an assistant turn; receives the turn's last message id, the new
-	 * rating (`null` clears), and whether this is the latest turn (so a live reply
-	 * still under a client id can be resolved server-side). When omitted, no thumbs
-	 * buttons are shown. */
-	onFeedback?: (
-		messageId: string,
-		rating: "up" | "down" | null,
-		isLatest: boolean
-	) => void;
 	/** Request the next older message page when the viewport reaches the top. */
 	onLoadOlderMessages?: () => Promise<void>;
 
@@ -436,10 +471,6 @@ export interface AgentChatProps {
 	onOpenLink?: (url: string) => void;
 	/** Open a resolved @ mention through the host's navigation surface. */
 	onOpenMention?: (item: MentionItem) => void;
-	/** Apply a selection made from the shared composer directory. */
-	onComposerMenuSelect?: (item: ComposerMenuItem) => void;
-	/** Report the shared composer's measured height to a compact host surface. */
-	onComposerResize?: (height: number) => void;
 	/** Quote a text selection in a message. When provided, selecting message text
 	 * surfaces a floating "Quote" button; clicking it calls this with the selected
 	 * plain text (the surface stashes it as the pending `quote`). */
@@ -447,6 +478,11 @@ export interface AgentChatProps {
 	/** Regenerate an assistant reply as a new version; receives the assistant
 	 * message id. When omitted, no regenerate button is shown. */
 	onRegenerateMessage?: (messageId: string) => void;
+	/** Reply to a complete message and receive its identity plus turn distance. */
+	onReply?: (reply: MessageReply) => void;
+	/** Retry the current live request after a terminal chat error. The host clears
+	 * its transport error and re-sends the already-persisted user turn. */
+	onRetryError?: () => void;
 	/** Re-run a failed inline media generation; receives the assistant message
 	 * holding the failed part, which media surface it is, and the prompt that
 	 * produced it. Client-only generations are not persisted, so
@@ -457,6 +493,10 @@ export interface AgentChatProps {
 		kind: "image" | "video",
 		prompt: string
 	) => void;
+	/** Review current changes only in files touched by the completed turn. */
+	onReviewFileEdits?: (paths: string[]) => void;
+	/** Called after a seed has been applied so a host can clear its one-shot value. */
+	onSeedDraftConsumed?: () => void;
 	/** Switch the active version at a branch point; receives the target version's
 	 * message id. When omitted (or a turn has a single version), no pager shows. */
 	onSelectVersion?: (versionId: string) => void;
@@ -466,6 +506,8 @@ export interface AgentChatProps {
 	 * with the turn's combined text. When omitted, no speak button is shown. */
 	onSpeak?: (text: string) => void;
 	onStop: () => void;
+	/** Reverse a fully representable text-edit turn without restoring whole files. */
+	onUndoFileEdits?: (plan: FileEditUndoPlan) => Promise<void>;
 	/** Resume a workflow suspended at a human-input gate. The host owns the
 	 *  Core-backed API; blocks only renders and forwards the response payload. */
 	onWorkflowResume?: (runId: string, payload: string) => Promise<unknown>;
@@ -489,11 +531,18 @@ export interface AgentChatProps {
 	 * a `ryu://chat/new?prompt=…` deep link). Never sends — the user reviews and
 	 * submits. Subsequent user edits are not clobbered. */
 	seedDraft?: string;
-	/** Called after a seed has been applied so a host can clear its one-shot value. */
-	onSeedDraftConsumed?: () => void;
+	/** Contributed text-selection toolbar actions (resolved by the shell from
+	 * `contributes.selection_actions`) rendered in the floating selection toolbar. */
+	selectionActions?: ContributedSelectionAction[];
 
 	showCopyToolbar?: boolean;
 	slots?: Partial<ChatSlots>;
+	/** Model id used for context-window hint parsing in the stats plugin. */
+	statsModelName?: string;
+	/** Enabled-plugin gate for the host-rendered session statistics feature. */
+	statsPluginEnabled?: boolean;
+	/** Active provider's normalized subscription usage, when Core exposes it. */
+	statsUsage?: StatsUsageSnapshot | null;
 	status: ChatStatus;
 	style?: React.CSSProperties;
 	suggestions?: InputSuggestions;

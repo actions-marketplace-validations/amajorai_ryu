@@ -3,7 +3,7 @@
 // `app:@ryu/whiteboard`), so creating or opening a whiteboard routes to the
 // app's Companion instead of the removed `SpaceWhiteboardEditorPage`. Must match the
 // Core manifest id (`apps/core/src/plugin_manifest::WHITEBOARD_PLUGIN_ID`) and the
-// default-on seed.
+// pre-installed seed.
 export const WHITEBOARD_PLUGIN_ID = "@ryu/whiteboard";
 
 /** The undeletable system space that holds every whiteboard (Core seeds it). */

@@ -40,6 +40,12 @@
  * (`GATEWAY_CREDITS_COST_PER_TOOL_CALL_MICRO_USD`); builtin/MCP/app tools are free.
  */
 
+import {
+	BUSINESS_SEAT_PRICE_TIERS,
+	type PlanSeatPriceTier,
+	seatPriceMicroUsdForSeats,
+} from "./plan-seat-pricing.ts";
+
 // One micro-USD is a millionth of a dollar; the unit the credit wallet stores.
 const MICRO_USD_PER_USD = 1_000_000;
 
@@ -51,9 +57,26 @@ export const usdToMicro = (usd: number): number =>
 export const LIFETIME_LIST_PRICE_USD = 200;
 export const LIFETIME_LAUNCH_PRICE_USD = 129;
 
-/** The four plan identifiers. `none` is the un-entitled free baseline. */
-export const PLAN_IDS = ["desktop-license", "pro", "max", "teams"] as const;
+/** The plan identifiers. `none` is the un-entitled free baseline. */
+export const PLAN_IDS = [
+	"desktop-license",
+	"marketplace-membership",
+	"pro",
+	"max",
+	"teams",
+	"business",
+] as const;
 export type PlanId = (typeof PLAN_IDS)[number];
+
+/** Organization-owned recurring plans that use human member seats. */
+export const ORGANIZATION_PLAN_IDS = ["teams", "business"] as const;
+export type OrganizationPlanId = (typeof ORGANIZATION_PLAN_IDS)[number];
+
+export const isOrganizationPlanId = (
+	value: unknown
+): value is OrganizationPlanId =>
+	typeof value === "string" &&
+	(ORGANIZATION_PLAN_IDS as readonly string[]).includes(value);
 
 /** A plan's billing interval offerings. */
 export type BillingInterval = "one_time" | "monthly" | "yearly";
@@ -61,7 +84,7 @@ export type BillingInterval = "one_time" | "monthly" | "yearly";
 /** How seats are counted for a plan. */
 export type SeatModel =
 	| { kind: "single" } // one fixed entitlement per buyer; hosted member limits are separate
-	| { kind: "per_seat"; minSeats: number }; // org-scoped, billed per seat
+	| { kind: "per_seat"; minSeats: number }; // billed per user/seat
 
 /** Whether the included managed-inference pool is fixed or grows with seats. */
 export type CreditPoolModel = "fixed" | "per_seat" | "per_bundle";
@@ -71,12 +94,12 @@ export type PlanAudience = "individual" | "organization";
 
 /**
  * A Polar product binding. The product id reads from env with the documented
- * default (the existing sandbox UUIDs in `constants.ts`) as a placeholder. A
- * missing/placeholder id is still a valid string so imports never crash; the
- * checkout layer is responsible for refusing a placeholder id.
+ * fallback for the active catalog. A missing/placeholder id is still a valid
+ * string so imports never crash; the checkout layer is responsible for
+ * refusing a placeholder id.
  */
 export interface PolarBinding {
-	/** Documented default product id (a sandbox UUID where one already exists). */
+	/** Documented fallback product id for this offering. */
 	readonly productIdDefault: string;
 	/** Env var that carries the real Polar product id for this offering. */
 	readonly productIdEnv: string;
@@ -90,8 +113,12 @@ export const resolveProductId = (
 
 /** A plan in the catalog. */
 export interface Plan {
+	/** Marginal monthly price after the base seat count, when graduated. */
+	readonly additionalSeatPriceMicroUsd?: number;
 	/** The ownership boundary that the checkout and entitlement must preserve. */
 	readonly audience: PlanAudience;
+	/** Total monthly price at the plan's minimum seat count, when graduated. */
+	readonly baseMonthlyPriceMicroUsd?: number;
 	/** The Polar bindings, keyed by interval this plan offers. */
 	readonly bindings: Partial<Record<BillingInterval, PolarBinding>>;
 	/** Number of seats represented by one pool grant for a per-bundle plan. */
@@ -135,6 +162,8 @@ export interface Plan {
 	readonly id: PlanId;
 	/** Whether this plan includes Ryu-managed inference (a credit pool). */
 	readonly managedInference: boolean;
+	/** Whether this plan unlocks publisher-opted-in paid Marketplace apps. */
+	readonly marketplaceApps: boolean;
 	/**
 	 * Included monthly credit pool in micro-USD, DERIVED from the price by the
 	 * single 50%-default rule ({@link includedCreditPoolMicroUsd}); 0 for plans
@@ -156,6 +185,8 @@ export interface Plan {
 	readonly name: string;
 	/** Seat model — single entitlement vs per-seat org plan. */
 	readonly seatModel: SeatModel;
+	/** Graduated per-seat prices, when a plan has more than one seat band. */
+	readonly seatPriceTiers?: readonly PlanSeatPriceTier[];
 }
 
 /**
@@ -270,6 +301,7 @@ export const topupBreakEvenUsd = (bps: number): number =>
  */
 export const DEPOSIT_FEE_BPS_BY_PLAN: Record<PlanId, number> = {
 	"desktop-license": DEPOSIT_FEE_BPS, // 15%: Lifetime PAYG top-ups, base rate
+	"marketplace-membership": DEPOSIT_FEE_BPS,
 	pro: 1300, // 13% — the first discount a paid plan earns
 	// 12%, not the 10% originally chosen: at 10% the break-even top-up is $400
 	// (`topupBreakEvenUsd(1000)`), so every deposit under that size would LOSE
@@ -284,6 +316,7 @@ export const DEPOSIT_FEE_BPS_BY_PLAN: Record<PlanId, number> = {
 	// fails if only one of them moves.
 	max: 1200,
 	teams: 1200, // 12% (business tier, same as Max)
+	business: 1200, // 12% (business tier)
 };
 
 /** The deposit-fee rate (bps) for a buyer on `plan`, falling back to the base 15%. */
@@ -386,10 +419,14 @@ export const includedCreditPoolMicroUsd = (
  */
 export const PLAN_MONTHLY_PRICE_MICRO_USD: Record<PlanId, number> = {
 	"desktop-license": 0, // one-time list price; no recurring price
+	"marketplace-membership": usdToMicro(9.99),
 	pro: usdToMicro(39),
 	max: usdToMicro(99),
-	// Per-seat list price. Five seats therefore start at $250/mo.
+	// Per-seat list price. Five Teams seats therefore start at $250/mo.
 	teams: usdToMicro(50),
+	// Business's first graduated band is $60/seat for five seats ($300/mo);
+	// subsequent seats use the tiered price recorded below.
+	business: usdToMicro(60),
 };
 
 /* -------------------------------------------------------------------------- *
@@ -398,6 +435,10 @@ export const PLAN_MONTHLY_PRICE_MICRO_USD: Record<PlanId, number> = {
 
 /** One historical (price, pool) pairing for a plan. Append-only. */
 export interface PlanVersion {
+	/** Marginal price after the version's base seat count, when graduated. */
+	readonly additionalSeatPriceMicroUsd?: number;
+	/** Total price at the version's minimum seat count, when graduated. */
+	readonly baseMonthlyPriceMicroUsd?: number;
 	/** Bundle size for a `per_bundle` historical pool. */
 	readonly creditPoolBundleSize?: number;
 	/** Historical pool scaling, when it differs from the current plan model. */
@@ -406,6 +447,8 @@ export interface PlanVersion {
 	readonly monthlyCreditPoolMicroUsd: number;
 	/** List price when this version was sold, per month / per seat. */
 	readonly monthlyPriceMicroUsd: number;
+	/** Graduated seat prices for this historical/current version, when any. */
+	readonly seatPriceTiers?: readonly PlanSeatPriceTier[];
 	/** Monotonic; 1 is the original. */
 	readonly version: number;
 }
@@ -454,6 +497,33 @@ export const PLAN_VERSIONS: Record<PlanId, readonly PlanVersion[]> = {
 		{ version: 3, monthlyPriceMicroUsd: 0, monthlyCreditPoolMicroUsd: 0 },
 		{ version: 4, monthlyPriceMicroUsd: 0, monthlyCreditPoolMicroUsd: 0 },
 		{ version: 5, monthlyPriceMicroUsd: 0, monthlyCreditPoolMicroUsd: 0 },
+	],
+	"marketplace-membership": [
+		{
+			version: 1,
+			monthlyPriceMicroUsd: usdToMicro(9.99),
+			monthlyCreditPoolMicroUsd: 0,
+		},
+		{
+			version: 2,
+			monthlyPriceMicroUsd: usdToMicro(9.99),
+			monthlyCreditPoolMicroUsd: 0,
+		},
+		{
+			version: 3,
+			monthlyPriceMicroUsd: usdToMicro(9.99),
+			monthlyCreditPoolMicroUsd: 0,
+		},
+		{
+			version: 4,
+			monthlyPriceMicroUsd: usdToMicro(9.99),
+			monthlyCreditPoolMicroUsd: 0,
+		},
+		{
+			version: 5,
+			monthlyPriceMicroUsd: usdToMicro(9.99),
+			monthlyCreditPoolMicroUsd: 0,
+		},
 	],
 	pro: [
 		{
@@ -542,6 +612,18 @@ export const PLAN_VERSIONS: Record<PlanId, readonly PlanVersion[]> = {
 			creditPoolBundleSize: 5,
 		},
 	],
+	business: [
+		{
+			version: 1,
+			monthlyPriceMicroUsd: usdToMicro(60),
+			monthlyCreditPoolMicroUsd: usdToMicro(100),
+			creditPoolModel: "per_bundle",
+			creditPoolBundleSize: 5,
+			seatPriceTiers: BUSINESS_SEAT_PRICE_TIERS,
+			baseMonthlyPriceMicroUsd: usdToMicro(300),
+			additionalSeatPriceMicroUsd: usdToMicro(50),
+		},
+	],
 };
 
 /** The version a NEW checkout is stamped with. Bump when adding a row. */
@@ -550,9 +632,11 @@ export const CURRENT_PLAN_VERSION = 5;
 /** Current immutable pricing snapshot per recurring plan. */
 export const CURRENT_PLAN_VERSION_BY_PLAN: Record<PlanId, number> = {
 	"desktop-license": 4,
+	"marketplace-membership": 5,
 	pro: 4,
 	max: 4,
 	teams: 5,
+	business: 1,
 };
 
 export const currentPlanVersionFor = (plan: PlanId): number =>
@@ -627,6 +711,31 @@ export const monthlyCreditPoolMicroUsdForSeats = (input: {
 	);
 };
 
+/** Calculate the actual recurring price for one plan at one billed seat count. */
+export const monthlyPriceMicroUsdForSeats = (input: {
+	plan: Plan;
+	version?: PlanVersion;
+	seats: number;
+}): number => {
+	const minimum =
+		input.plan.seatModel.kind === "per_seat"
+			? input.plan.seatModel.minSeats
+			: 1;
+	const seats = Number.isFinite(input.seats)
+		? Math.max(minimum, Math.floor(input.seats))
+		: minimum;
+	const tiers = input.version?.seatPriceTiers ?? input.plan.seatPriceTiers;
+	if (tiers) {
+		return seatPriceMicroUsdForSeats(tiers, seats);
+	}
+	const monthlyPriceMicroUsd =
+		input.version?.monthlyPriceMicroUsd ?? input.plan.monthlyPriceMicroUsd;
+	if (input.plan.seatModel.kind === "per_seat") {
+		return monthlyPriceMicroUsd * seats;
+	}
+	return monthlyPriceMicroUsd;
+};
+
 /**
  * The free "base" managed cloud node (the BASE cloud tier: cx23 → 2 vCPU · 4 GB
  * · 40 GB SSD) is included with every RECURRING plan — Pro, Max and Teams. Its
@@ -660,6 +769,7 @@ export const PLANS: Record<PlanId, Plan> = {
 		id: "desktop-license",
 		name: "Ryu Desktop",
 		desktopAccess: true,
+		marketplaceApps: false,
 		managedInference: false,
 		// One-time $200 list license — no RECURRING price, so the 50% rule derives a 0
 		// monthly grant (no managed inference).
@@ -684,11 +794,36 @@ export const PLANS: Record<PlanId, Plan> = {
 		},
 		creditPoolModel: "fixed",
 	},
+	"marketplace-membership": {
+		audience: "individual",
+		id: "marketplace-membership",
+		name: "Marketplace Membership",
+		desktopAccess: false,
+		marketplaceApps: true,
+		managedInference: false,
+		monthlyPriceMicroUsd:
+			PLAN_MONTHLY_PRICE_MICRO_USD["marketplace-membership"],
+		monthlyCreditPoolMicroUsd: 0,
+		emailEnabled: false,
+		emailInboxLimit: 0,
+		emailMonthlySendLimit: 0,
+		emailStorageLimitGb: 0,
+		emailBrandingRemovable: false,
+		seatModel: { kind: "per_seat", minSeats: 1 },
+		bindings: {
+			monthly: {
+				productIdEnv: "POLAR_PRODUCT_MARKETPLACE_MEMBERSHIP_MONTHLY",
+				productIdDefault: "fc584f73-9eb9-4e2a-8a94-3f6463734ea2",
+			},
+		},
+		creditPoolModel: "fixed",
+	},
 	pro: {
 		audience: "individual",
 		id: "pro",
 		name: "Ryu Pro",
 		desktopAccess: true,
+		marketplaceApps: true,
 		managedInference: true,
 		// Ryu Pro — the original $39/mo individual plan. It is for one person's
 		// managed workspace; shared organization ownership belongs to Teams.
@@ -720,6 +855,7 @@ export const PLANS: Record<PlanId, Plan> = {
 		id: "max",
 		name: "Ryu Max",
 		desktopAccess: true,
+		marketplaceApps: true,
 		managedInference: true,
 		// Ryu Max — the original $99/mo individual power plan. The public business
 		// automation offer is Teams; Max is not a substitute for shared ownership.
@@ -753,6 +889,7 @@ export const PLANS: Record<PlanId, Plan> = {
 		id: "teams",
 		name: "Ryu Teams",
 		desktopAccess: true,
+		marketplaceApps: true,
 		managedInference: true,
 		// The public business offer is member-seat based: $50/seat/mo with a
 		// five-seat floor ($250/mo). The current credit grant is pooled at the
@@ -777,6 +914,37 @@ export const PLANS: Record<PlanId, Plan> = {
 			yearly: {
 				productIdEnv: "POLAR_PRODUCT_TEAMS_YEARLY",
 				productIdDefault: "polar_product_teams_yearly",
+			},
+		},
+	},
+	business: {
+		audience: "organization",
+		id: "business",
+		name: "Ryu Business",
+		desktopAccess: true,
+		marketplaceApps: true,
+		managedInference: true,
+		monthlyPriceMicroUsd: PLAN_MONTHLY_PRICE_MICRO_USD.business,
+		monthlyCreditPoolMicroUsd: usdToMicro(100),
+		seatPriceTiers: BUSINESS_SEAT_PRICE_TIERS,
+		baseMonthlyPriceMicroUsd: usdToMicro(300),
+		additionalSeatPriceMicroUsd: usdToMicro(50),
+		emailEnabled: true,
+		emailInboxLimit: Number.POSITIVE_INFINITY,
+		emailMonthlySendLimit: 100_000,
+		emailStorageLimitGb: 20,
+		emailBrandingRemovable: true,
+		seatModel: { kind: "per_seat", minSeats: 5 },
+		creditPoolModel: "per_bundle",
+		creditPoolBundleSize: 5,
+		bindings: {
+			monthly: {
+				productIdEnv: "POLAR_PRODUCT_BUSINESS_MONTHLY",
+				productIdDefault: "polar_product_business_monthly",
+			},
+			yearly: {
+				productIdEnv: "POLAR_PRODUCT_BUSINESS_YEARLY",
+				productIdDefault: "polar_product_business_yearly",
 			},
 		},
 	},
@@ -1118,6 +1286,8 @@ export interface LicenseView {
 export interface Entitlement {
 	readonly desktopAccess: boolean;
 	readonly managedInference: boolean;
+	/** Whether the resolved recurring plan unlocks opted-in paid Marketplace apps. */
+	readonly marketplaceApps: boolean;
 	/** Total included credit pool after the plan's fixed/per-seat model is applied. */
 	readonly monthlyCreditPoolMicroUsd: number;
 	/** The effective plan, or null when un-entitled (free baseline). */
@@ -1154,6 +1324,7 @@ const seatsFor = (plan: Plan, sub: SubscriptionView): number => {
 const ENTITLEMENT_NONE: Entitlement = {
 	plan: null,
 	desktopAccess: false,
+	marketplaceApps: false,
 	managedInference: false,
 	monthlyCreditPoolMicroUsd: 0,
 	seats: 0,
@@ -1194,6 +1365,7 @@ export const resolveEntitlement = (
 			return {
 				plan: plan.id,
 				desktopAccess: plan.desktopAccess,
+				marketplaceApps: plan.marketplaceApps,
 				managedInference: plan.managedInference,
 				monthlyCreditPoolMicroUsd: pool,
 				seats,
@@ -1207,6 +1379,7 @@ export const resolveEntitlement = (
 		return {
 			plan: desktop.id,
 			desktopAccess: desktop.desktopAccess,
+			marketplaceApps: desktop.marketplaceApps,
 			managedInference: desktop.managedInference,
 			monthlyCreditPoolMicroUsd: desktop.monthlyCreditPoolMicroUsd,
 			seats: 1,
@@ -1393,6 +1566,8 @@ export type AccessReason =
 export interface CachedEntitlement {
 	readonly cachedAtMs: number;
 	readonly managedInference: boolean;
+	/** Whether the cached recurring entitlement included Marketplace apps. */
+	readonly marketplaceApps: boolean;
 	readonly plan: PlanId | null;
 	readonly proUnlocked: boolean;
 }
@@ -1425,6 +1600,8 @@ export interface DesktopGateVerdict {
 	readonly daysLeftInTrial: number;
 	/** True when managed inference is available (sub with the pool, not trial). */
 	readonly managedInference: boolean;
+	/** Whether the resolved state can use publisher-opted-in Marketplace apps. */
+	readonly marketplaceApps: boolean;
 	/**
 	 * True when the user is on the FREE band only (no Lifetime license, no active
 	 * subscription, trial expired). Under the soft paywall this NEVER blanks the
@@ -1491,6 +1668,7 @@ export const decideDesktopAccess = (
 			liveEntitlement.plan === "desktop-license" ? "license" : "subscription";
 		return {
 			proUnlocked: true,
+			marketplaceApps: liveEntitlement.marketplaceApps,
 			managedInference: liveEntitlement.managedInference,
 			plan: liveEntitlement.plan,
 			paywalled: false,
@@ -1504,6 +1682,7 @@ export const decideDesktopAccess = (
 	if (licenseActive) {
 		return {
 			proUnlocked: true,
+			marketplaceApps: false,
 			managedInference: false,
 			plan: "desktop-license",
 			paywalled: false,
@@ -1519,6 +1698,7 @@ export const decideDesktopAccess = (
 	if (config.betaFree) {
 		return {
 			proUnlocked: true,
+			marketplaceApps: false,
 			managedInference: false,
 			plan: null,
 			paywalled: false,
@@ -1531,6 +1711,7 @@ export const decideDesktopAccess = (
 	if (inTrial(firstLaunchMs, nowMs, config.trialDays)) {
 		return {
 			proUnlocked: true,
+			marketplaceApps: false,
 			managedInference: false,
 			plan: null,
 			paywalled: false,
@@ -1548,6 +1729,7 @@ export const decideDesktopAccess = (
 	) {
 		return {
 			proUnlocked: true,
+			marketplaceApps: cached.marketplaceApps,
 			managedInference: cached.managedInference,
 			plan: cached.plan,
 			paywalled: false,
@@ -1559,6 +1741,7 @@ export const decideDesktopAccess = (
 	// 6) Locked. Free local chat stays usable; the paywall gates Pro features.
 	return {
 		proUnlocked: false,
+		marketplaceApps: false,
 		managedInference: false,
 		plan: null,
 		paywalled: true,

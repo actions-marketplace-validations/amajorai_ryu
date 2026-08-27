@@ -184,8 +184,32 @@ export interface TeamsSeatStatus {
 	plan: string | null;
 }
 
+export type OrganizationPlanId = "teams" | "business";
+
+export interface OrganizationPlanCheckout {
+	monthlyPriceMicroUsd: number;
+	plan: OrganizationPlanId;
+	seats: number;
+	url: string;
+}
+
 export function fetchTeamsSeatStatus(): Promise<TeamsSeatStatus> {
 	return get<TeamsSeatStatus>("/billing/seats");
+}
+
+/** Start a native Polar checkout for a human-seat organization plan. */
+export function checkoutOrganizationPlan(
+	planId: OrganizationPlanId,
+	interval: "monthly" | "yearly",
+	seats: number,
+	organizationId?: string | null
+): Promise<OrganizationPlanCheckout> {
+	return post("/billing/checkout/organization", {
+		interval,
+		organizationId,
+		planId,
+		seats,
+	});
 }
 
 /** Start the native Polar seat-based Teams checkout. */
@@ -199,6 +223,23 @@ export function checkoutTeams(
 		organizationId,
 		seats,
 	});
+}
+
+/** Start the one-month desktop onboarding offer at the fixed five-seat floor. */
+export interface TeamsOnboardingCheckout {
+	offer: {
+		firstMonthUsd: number;
+		interval: "monthly";
+		recurringMonthUsd: number;
+	};
+	seats: number;
+	url: string;
+}
+
+export function checkoutTeamsOnboarding(
+	organizationId?: string | null
+): Promise<TeamsOnboardingCheckout> {
+	return post("/billing/checkout/teams/onboarding", { organizationId });
 }
 
 /** Update the billed seat quantity; server-side RBAC and floors still apply. */

@@ -117,6 +117,11 @@ describe("the sync allowlist", () => {
 			expect(isSyncableKey(key)).toBe(false);
 		}
 	});
+
+	it("includes the composer send shortcut in chat sync", () => {
+		expect(isSyncableKey("ryu:composer-send-shortcut")).toBe(true);
+		expect(groupForKey("ryu:composer-send-shortcut")).toBe("chat");
+	});
 });
 
 describe("per-OS shortcut slots", () => {

@@ -5,14 +5,23 @@
 // renders the shared presentational `SpacesView` (`@ryu/blocks/desktop/spaces`) —
 // the same view the storyboard renders with mock data.
 
-import { type SpacesDetailProps, SpacesView } from "@ryu/blocks/desktop/spaces";
+import {
+	type SpacesDetailProps,
+	SpacesView,
+} from "@ryu/blocks/desktop/spaces.tsx";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppDisabledNotice } from "@/src/components/AppDisabledNotice.tsx";
+import { SpaceImportsPanel } from "@/src/components/spaces/SpaceImportsPanel.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { pluginHostInvoke } from "@/src/lib/api/plugins.ts";
+import {
+	downloadSpacePackage,
+	exportSpacePackage,
+	importSpacePackage,
+} from "@/src/lib/api/space-portable.ts";
 import {
 	describeRetrievalModeChange,
 	type RetrievalMode,
@@ -40,7 +49,7 @@ export default function SpacesPage({
 	/** When set (e.g. opening a specific Space from the Library), select this
 	 * space on mount instead of defaulting to the first one. */
 	initialSpaceId?: string;
-	}) {
+}) {
 	const {
 		appDisabled,
 		spaces,
@@ -81,6 +90,9 @@ export default function SpacesPage({
 	const [ingestContent, setIngestContent] = useState("");
 	const [ingestBusy, setIngestBusy] = useState(false);
 	const [ingestError, setIngestError] = useState<string | null>(null);
+	const [portableBusy, setPortableBusy] = useState(false);
+	const [portableError, setPortableError] = useState<string | null>(null);
+	const [portableNotice, setPortableNotice] = useState<string | null>(null);
 	const [searchQuery, setSearchQuery] = useState("");
 	const [searchResults, setSearchResults] = useState<SpaceMatch[] | null>(null);
 	const [searchBusy, setSearchBusy] = useState(false);
@@ -167,6 +179,8 @@ export default function SpacesPage({
 		setIngestTitle("");
 		setIngestContent("");
 		setIngestError(null);
+		setPortableError(null);
+		setPortableNotice(null);
 		// The retrieval notice describes ONE space's rebuild. Carrying it across a
 		// selection change would report another space's entity counts as this one's.
 		setRetrievalModeError(null);
@@ -248,8 +262,19 @@ export default function SpacesPage({
 				);
 			} else {
 				console.error("Failed to change retrieval mode", err);
+				// The POST is accepted before polling begins. A lost/expired status can
+				// therefore happen after Core committed the new mode, so refresh instead
+				// of claiming the Space is unchanged.
+				try {
+					await reload();
+				} catch (reloadError) {
+					console.error(
+						"Failed to refresh spaces after an indeterminate retrieval-mode change",
+						reloadError
+					);
+				}
 				setRetrievalModeError(
-					"We couldn't change this space's retrieval mode. It is unchanged — please try again."
+					"We couldn't confirm how the retrieval rebuild finished. Check the current mode, then try again if needed."
 				);
 			}
 		} finally {
@@ -276,6 +301,12 @@ export default function SpacesPage({
 			const pluginId = rawKind.slice("app:".length);
 			openTab(`/spaces/${selected.id}/app/${pluginId}/${docId}`, {
 				title: docTitle || "Untitled",
+			});
+			return;
+		}
+		if (rawKind === "file") {
+			openTab(`/spaces/${selected.id}/file/${docId}`, {
+				title: docTitle || "Untitled file",
 			});
 			return;
 		}
@@ -354,6 +385,70 @@ export default function SpacesPage({
 		}
 	};
 
+	const handleImportCompleted = useCallback(() => {
+		if (selected) {
+			loadDocuments(selected.id).catch(() => undefined);
+		}
+	}, [loadDocuments, selected]);
+
+	const handleExportPackage = useCallback(async () => {
+		if (!selected) {
+			return;
+		}
+		setPortableBusy(true);
+		setPortableError(null);
+		setPortableNotice(null);
+		try {
+			const exported = await exportSpacePackage(toTarget(node), selected.id);
+			downloadSpacePackage(exported);
+			setPortableNotice(
+				"Exported " +
+					exported.package.files.length +
+					" source files. Embeddings were not included."
+			);
+		} catch (error) {
+			setPortableError(
+				error instanceof Error
+					? error.message
+					: "The Space package could not be exported."
+			);
+		} finally {
+			setPortableBusy(false);
+		}
+	}, [node, selected]);
+
+	const handleImportPackage = useCallback(
+		async (file: File) => {
+			setPortableBusy(true);
+			setPortableError(null);
+			setPortableNotice(null);
+			try {
+				const imported = await importSpacePackage(
+					toTarget(node),
+					new Uint8Array(await file.arrayBuffer())
+				);
+				await reload();
+				setSelectedId(imported.spaceId);
+				setPortableNotice(
+					"Imported " +
+						imported.pageCount +
+						" pages and " +
+						imported.databaseCount +
+						" databases. Embeddings were not included; run the manual embedding re-index when you want RAG."
+				);
+			} catch (error) {
+				setPortableError(
+					error instanceof Error
+						? error.message
+						: "The Space package could not be imported."
+				);
+			} finally {
+				setPortableBusy(false);
+			}
+		},
+		[node, reload]
+	);
+
 	const detail: SpacesDetailProps | null = selected
 		? {
 				space: {
@@ -387,6 +482,26 @@ export default function SpacesPage({
 				ingestContent,
 				ingestBusy,
 				ingestError,
+				importPanel: (
+					<SpaceImportsPanel
+						onImportCompleted={handleImportCompleted}
+						onManageConnections={() => openTab("/store/connections")}
+						onOpenDocument={(document) =>
+							openCreated(document.id, document.kind, document.title)
+						}
+						spaceId={selected.id}
+						target={toTarget(node)}
+					/>
+				),
+				onExportPackage: () => {
+					handleExportPackage().catch(() => undefined);
+				},
+				onImportPackage: (file) => {
+					handleImportPackage(file).catch(() => undefined);
+				},
+				portableBusy,
+				portableError,
+				portableNotice,
 				onIngestTitleChange: setIngestTitle,
 				onIngestContentChange: setIngestContent,
 				onIngestSubmit: () => {

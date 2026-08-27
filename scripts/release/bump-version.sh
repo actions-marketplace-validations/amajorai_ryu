@@ -18,7 +18,7 @@
 #   churn, a second mechanism to keep in sync, and coupling to the public mirror's
 #   standalone `--manifest-path apps/<x>/Cargo.toml` builds. The task's inheritance
 #   precondition ("cleanly, for the excluded manifests too") is not met: the two
-#   src-tauri crates are workspace-EXCLUDED (cannot inherit) and two crates
+#   the desktop src-tauri crate is workspace-EXCLUDED (cannot inherit) and two crates
 #   (predict, sdk/uniffi) sit off-train at 0.1.0. So: script-only.
 #
 # Self-selecting by current value: every site is rewritten ONLY if it currently
@@ -108,7 +108,7 @@ while IFS= read -r f; do
     s/("\@ryu(?:hq)?\/[^"]+"\s*:\s*)"\^\Q$o\E"/$1"^$n"/g;' "$f"
 done < <(git ls-files '*package.json')
 
-# 3) tauri.conf.json — the desktop tag driver (web src-tauri is off-train at 0.1.0).
+# 3) tauri.conf.json — the desktop tag driver.
 log "tauri.conf.json (desktop tag driver)"
 while IFS= read -r f; do
   perl -0777 -pi -e 'my ($o,$n)=($ENV{OLD},$ENV{NEW}); s/"version": "\Q$o\E"/"version": "$n"/g;' "$f"

@@ -27,7 +27,7 @@
 //! A **user-installed / satellite** plugin lives on disk at
 //! `~/.ryu/plugins/<id>/`, so `<id>/skills/` is present and this materializer
 //! works directly. A **built-in** plugin ships only its compiled-in manifest
-//! fixture (`include_str!`), so `plugins-store/<x>/skills/` is NOT on the user's
+//! fixture (`include_str!`), so `plugins-store/{plugins,lsp,external_plugins}/<x>/skills/` is NOT on the user's
 //! machine; materializing built-in skills needs a compile-time embed
 //! (`include_dir!`) parallel to the fixture. That embed is a deliberate follow-up
 //! — [`plugin_skills_root`] returns `None` for a plugin with no on-disk dir and

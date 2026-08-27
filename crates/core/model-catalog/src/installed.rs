@@ -10,7 +10,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -77,10 +76,6 @@ struct InstalledModelsFile {
     models: HashMap<String, InstalledModel>,
 }
 
-/// Serializes writes to `installed-models.json` to avoid clobbering on
-/// concurrent installs (mirrors the version store's lock discipline).
-static LOCK: Mutex<()> = Mutex::new(());
-
 fn store_path() -> PathBuf {
     crate::ryu_dir().join("installed-models.json")
 }
@@ -93,11 +88,13 @@ fn models_dir() -> PathBuf {
 /// file was deleted out-of-band are silently dropped so the catalog never shows
 /// a phantom "installed".
 pub fn load_present() -> Vec<InstalledModel> {
-    let raw = match std::fs::read_to_string(store_path()) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+    let parsed: InstalledModelsFile = match ryu_json_store::read_or_default(&store_path()) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::error!(error = %error, "installed-model provenance store is corrupt");
+            return Vec::new();
+        }
     };
-    let parsed: InstalledModelsFile = serde_json::from_str(&raw).unwrap_or_default();
     parsed
         .models
         .into_values()
@@ -126,21 +123,11 @@ pub fn installed_repo_ids() -> std::collections::HashSet<String> {
 
 /// Record a freshly downloaded model file. Idempotent on `stem`.
 pub fn record(model: InstalledModel) -> anyhow::Result<()> {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = store_path();
-    let mut file: InstalledModelsFile = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    file.models.insert(model.stem.clone(), model);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string_pretty(&file)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    ryu_json_store::mutate(&path, move |file: &mut InstalledModelsFile| {
+        file.models.insert(model.stem.clone(), model);
+        Ok(())
+    })
 }
 
 /// Preferences-KV key holding the user-selected active local chat model. The
@@ -288,23 +275,11 @@ pub fn repo_for_stem(stem: &str) -> Option<String> {
 /// record is a no-op success, so uninstalling a file with no recorded origin
 /// (e.g. one dropped into the models dir by hand) still succeeds.
 pub fn remove(stem: &str) -> anyhow::Result<()> {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = store_path();
-    let mut file: InstalledModelsFile = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    if file.models.remove(stem).is_none() {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string_pretty(&file)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    ryu_json_store::mutate(&path, |file: &mut InstalledModelsFile| {
+        file.models.remove(stem);
+        Ok(())
+    })
 }
 
 #[cfg(test)]

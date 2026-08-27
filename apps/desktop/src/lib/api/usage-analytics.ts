@@ -7,9 +7,14 @@ import {
 	type UsageScope,
 } from "@ryu/blocks/desktop/usage-analytics.ts";
 import { BACKEND_URL, TOKEN_KEY } from "@/lib/auth-client.ts";
-import type { ApiTarget } from "./client.ts";
+import { ApiError, type ApiTarget } from "./client.ts";
 import { fetchUsage, type UsageStats } from "./credits.ts";
-import { fetchGatewayAudit } from "./gateway.ts";
+import {
+	fetchGatewayAudit,
+	fetchGatewayUsageRollup,
+	type GatewayUsageRollupEvent,
+	parseGatewayUsageRollupResponse,
+} from "./gateway.ts";
 import { fetchProfileStats, fetchUsageDaily } from "./profile.ts";
 
 export interface UsageAnalyticsQuery {
@@ -20,21 +25,112 @@ export interface UsageAnalyticsQuery {
 	to: Date;
 }
 
-interface OrganizationUsageResponse {
+interface LegacyOrganizationUsageEvent {
+	error: boolean;
+	inputTokens: number;
+	latencyMs: number;
+	memberId: string | null;
+	model: string;
+	nodeId: string;
+	outputTokens: number;
+	provider: string;
+	requestId?: string | null;
+	source?: UsageEvent["source"];
+	timestamp: string;
+}
+
+interface LegacyOrganizationUsageResponse {
 	capped: boolean;
-	events: Array<{
-		error: boolean;
-		inputTokens: number;
-		latencyMs: number;
-		memberId: string | null;
-		model: string;
-		nodeId: string;
-		outputTokens: number;
-		provider: string;
-		requestId?: string | null;
-		source?: UsageEvent["source"];
-		timestamp: string;
-	}>;
+	events: LegacyOrganizationUsageEvent[];
+}
+
+type OrganizationEventsResult =
+	| { events: UsageEvent[]; kind: "rollup" }
+	| {
+			capped: boolean;
+			creditLedgerCapped: boolean;
+			creditEvents: UsageEvent[];
+			creditStats: UsageStats | null;
+			events: UsageEvent[];
+			kind: "legacy";
+	  };
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNullableString(value: unknown): value is string | null {
+	return value === null || typeof value === "string";
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isUsageSource(value: unknown): value is UsageEvent["source"] {
+	return (
+		value === undefined ||
+		value === null ||
+		value === "managed" ||
+		value === "byok" ||
+		value === "self_hosted" ||
+		value === "local" ||
+		value === "unknown"
+	);
+}
+
+function isLegacyOrganizationUsageEvent(
+	value: unknown
+): value is LegacyOrganizationUsageEvent {
+	if (!isUnknownRecord(value)) {
+		return false;
+	}
+	return (
+		typeof value.timestamp === "string" &&
+		Number.isFinite(Date.parse(value.timestamp)) &&
+		typeof value.provider === "string" &&
+		typeof value.model === "string" &&
+		typeof value.nodeId === "string" &&
+		isNullableString(value.memberId) &&
+		typeof value.error === "boolean" &&
+		isNonNegativeNumber(value.inputTokens) &&
+		isNonNegativeNumber(value.outputTokens) &&
+		isNonNegativeNumber(value.latencyMs) &&
+		(value.requestId === undefined || isNullableString(value.requestId)) &&
+		isUsageSource(value.source)
+	);
+}
+
+function isLegacyOrganizationUsageResponse(
+	value: unknown
+): value is LegacyOrganizationUsageResponse {
+	return (
+		isUnknownRecord(value) &&
+		typeof value.capped === "boolean" &&
+		Array.isArray(value.events) &&
+		value.events.every(isLegacyOrganizationUsageEvent)
+	);
+}
+
+function usageEventFromRollup(event: GatewayUsageRollupEvent): UsageEvent {
+	return {
+		agentSeconds: event.agentSeconds,
+		bucketSeconds: 900,
+		costMicroUsd: event.costMicroUsd,
+		errorCount: event.errorCount,
+		feature: event.feature,
+		inputTokens: event.inputTokens,
+		latencySamples: event.latencySamples,
+		latencyTotalMs: event.latencyTotalMs,
+		memberId: event.memberId,
+		model: event.model,
+		nodeId: event.nodeId,
+		outputTokens: event.outputTokens,
+		provider: event.provider,
+		requestCount: event.requestCount,
+		source: event.source,
+		timestamp: event.timestamp,
+	};
 }
 
 function authHeaders(): Record<string, string> {
@@ -68,33 +164,38 @@ function pathForOrganization(
 
 async function fetchOrganizationEvents(
 	orgId: string,
-	query: UsageAnalyticsQuery
-): Promise<{
-	capped: boolean;
-	creditLedgerCapped: boolean;
-	creditEvents: UsageEvent[];
-	creditStats: UsageStats | null;
-	events: UsageEvent[];
-}> {
-	const [response, creditUsage] = await Promise.all([
-		fetch(pathForOrganization(orgId, query), {
-			headers: authHeaders(),
-			signal: AbortSignal.timeout(15_000),
-		}),
-		fetchUsage({
-			limit: 200,
-			model: query.model,
-			provider: query.provider,
-			since: query.from.toISOString(),
-			until: new Date(query.to.getTime() - 1).toISOString(),
-		}).catch(() => null),
-	]);
+	query: UsageAnalyticsQuery,
+	signal?: AbortSignal
+): Promise<OrganizationEventsResult> {
+	const response = await fetch(pathForOrganization(orgId, query), {
+		headers: authHeaders(),
+		signal: signal
+			? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
+			: AbortSignal.timeout(15_000),
+	});
 	if (!response.ok) {
 		throw new Error(
 			`Organization analytics request failed (${response.status})`
 		);
 	}
-	const body = (await response.json()) as OrganizationUsageResponse;
+	const body: unknown = await response.json();
+	if (isUnknownRecord(body) && body.kind === "rollup") {
+		const rollup = parseGatewayUsageRollupResponse(body);
+		return {
+			events: rollup.events.map(usageEventFromRollup),
+			kind: "rollup",
+		};
+	}
+	if (!isLegacyOrganizationUsageResponse(body)) {
+		throw new Error("Organization analytics response was malformed.");
+	}
+	const creditUsage = await fetchUsage({
+		limit: 200,
+		model: query.model,
+		provider: query.provider,
+		since: query.from.toISOString(),
+		until: new Date(query.to.getTime() - 1).toISOString(),
+	}).catch(() => null);
 	return {
 		capped: body.capped,
 		creditLedgerCapped: Boolean(creditUsage?.nextCursor),
@@ -130,6 +231,7 @@ async function fetchOrganizationEvents(
 			source: event.source,
 			timestamp: event.timestamp,
 		})),
+		kind: "legacy",
 	};
 }
 
@@ -247,18 +349,45 @@ async function fetchNodeEvents(
 	target: ApiTarget,
 	query: UsageAnalyticsQuery,
 	managed: boolean,
-	localNode: boolean
+	localNode: boolean,
+	signal?: AbortSignal
 ): Promise<{ reachable: boolean; events: UsageEvent[] }> {
+	try {
+		const response = await fetchGatewayUsageRollup(
+			target,
+			{
+				from: query.from.toISOString(),
+				model: query.model ?? undefined,
+				provider: query.provider ?? undefined,
+				until: query.to.toISOString(),
+			},
+			signal
+		);
+		if (response.reachable === undefined) {
+			throw new Error("Gateway usage rollup response was malformed.");
+		}
+		if (response.reachable === false && response.status === 404) {
+			throw new ApiError("Gateway usage rollups are unavailable.", 404);
+		}
+		return {
+			reachable: response.reachable !== false,
+			events: response.events.map(usageEventFromRollup),
+		};
+	} catch (error) {
+		if (!(error instanceof ApiError) || error.status !== 404) {
+			throw error;
+		}
+	}
+
 	const response = await fetchGatewayAudit(
 		target,
 		{
 			from: query.from.toISOString(),
-			limit: 1000,
 			model: query.model ?? undefined,
 			provider: query.provider ?? undefined,
 			until: query.to.toISOString(),
 		},
-		undefined
+		signal
 	);
 	return {
 		reachable: response.reachable,
@@ -385,7 +514,8 @@ export async function fetchUsageAnalytics(
 		activeNode: (ApiTarget & { local?: boolean; managed?: boolean }) | null;
 		activeOrgId: string | null;
 		scope: UsageScope;
-	}
+	},
+	signal?: AbortSignal
 ): Promise<UsageAnalyticsData> {
 	if (scope === "you") {
 		return fetchPersonalAnalytics(query);
@@ -400,7 +530,18 @@ export async function fetchUsageAnalytics(
 				"Select an organization to view organization analytics."
 			);
 		}
-		const result = await fetchOrganizationEvents(activeOrgId, query);
+		const result = await fetchOrganizationEvents(activeOrgId, query, signal);
+		if (result.kind === "rollup") {
+			return aggregateUsageEvents({
+				caption: "All members and nodes in the active organization.",
+				events: result.events,
+				from: query.from,
+				granularity: query.granularity,
+				scope: "organization",
+				scopeLabel: "Organization",
+				to: query.to,
+			});
+		}
 		const data = aggregateUsageEvents({
 			caption: "All members and nodes in the active organization.",
 			events: [
@@ -445,7 +586,8 @@ export async function fetchUsageAnalytics(
 		activeNode,
 		query,
 		Boolean(activeNode.managed),
-		Boolean(activeNode.local)
+		Boolean(activeNode.local),
+		signal
 	);
 	if (!result.reachable) {
 		return unavailableAnalytics(

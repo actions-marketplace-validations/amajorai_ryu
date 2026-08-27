@@ -42,4 +42,27 @@ test("recovery notices are separators and idle composer is Play by default", asy
 	await expect(
 		composer.getByRole("button", { name: "Start voice input" })
 	).toBeVisible();
+
+	const creditError = transcript.getByText("OpenRouter credits exhausted");
+	await expect(creditError).toBeVisible();
+	await expect(
+		transcript.getByText(/Add credits to your OpenRouter account/)
+	).toBeVisible();
+	await expect(transcript.getByText("Ryu credits exhausted")).toBeVisible();
+	await expect(
+		transcript.getByText(/Open Settings > Credits to top up/)
+	).toBeVisible();
+	const retryButtons = transcript.getByRole("button", { name: "Retry" });
+	await expect(retryButtons).toHaveCount(2);
+	await retryButtons.nth(0).click();
+	await retryButtons.nth(1).click();
+	await expect(page.getByTestId("story-state")).toHaveAttribute(
+		"data-retried",
+		"2"
+	);
+
+	const proofPath = process.env.RYU_OPENROUTER_CREDITS_PROOF;
+	if (proofPath) {
+		await page.screenshot({ path: proofPath, fullPage: true });
+	}
 });

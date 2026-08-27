@@ -2,7 +2,6 @@ import { cn } from "@ryu/ui/lib/utils";
 import Image from "next/image";
 
 const BLOCK71_HREF = "https://block71.co";
-const AMAJOR_HREF = "https://amajor.ai";
 
 const linkClass =
 	"inline-flex items-center gap-2 text-muted-foreground text-sm transition-colors hover:text-foreground";
@@ -30,20 +29,6 @@ export default function BackedBy({ className }: { className?: string }) {
 					width={24}
 				/>
 				<span className="font-semibold text-foreground">BLOCK71</span>
-			</a>
-			<span aria-hidden="true">&</span>
-			<a
-				className={linkClass}
-				href={AMAJOR_HREF}
-				rel="noopener noreferrer"
-				target="_blank"
-			>
-				<img
-					alt=""
-					className="size-6 shrink-0 rounded-[5px] object-cover"
-					src="/logos/amajor.png"
-				/>
-				<span className="font-semibold text-foreground">A Major</span>
 			</a>
 		</div>
 	);

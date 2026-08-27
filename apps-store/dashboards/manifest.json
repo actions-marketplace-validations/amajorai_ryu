@@ -1,6 +1,6 @@
 {
-  "tags": ["dashboards","widgets","monitoring","home"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": ["dashboards", "widgets", "monitoring", "home"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-dashboards",
   "homepage": "https://github.com/amajorai/ryu-dashboards",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -38,25 +38,69 @@
         "command_env": "RYU_DASHBOARDS_BIN",
         "port_env": "RYU_DASHBOARDS_PORT"
       },
+      "host_api": {
+        "grants": ["tools.invoke"]
+      },
       "port": 7997,
       "health_path": "/api/dashboards/catalog",
       "http": {
         "mount": "/api/dashboards",
         "public_mount": "/api/dashboards",
         "routes": [
-          { "path": "/" },
-          { "path": "/catalog" },
-          { "path": "/events" },
-          { "path": "/:id" },
-          { "path": "/:id/widgets" },
-          { "path": "/:id/widgets/:wid" },
-          { "path": "/:id/widgets/:wid/layout" },
-          { "path": "/:id/widgets/:wid/refresh" }
+          { "path": "/", "method": "GET", "permission": "dashboards.view" },
+          { "path": "/", "method": "POST", "permission": "dashboards.edit" },
+          {
+            "path": "/catalog",
+            "method": "GET",
+            "permission": "dashboards.view"
+          },
+          {
+            "path": "/events",
+            "method": "GET",
+            "permission": "dashboards.view"
+          },
+          { "path": "/:id", "method": "GET", "permission": "dashboards.view" },
+          { "path": "/:id", "method": "PUT", "permission": "dashboards.edit" },
+          {
+            "path": "/:id",
+            "method": "DELETE",
+            "permission": "dashboards.edit"
+          },
+          {
+            "path": "/:id/widgets",
+            "method": "GET",
+            "permission": "dashboards.view"
+          },
+          {
+            "path": "/:id/widgets",
+            "method": "POST",
+            "permission": "dashboards.edit"
+          },
+          {
+            "path": "/:id/widgets/:wid",
+            "method": "PUT",
+            "permission": "dashboards.edit"
+          },
+          {
+            "path": "/:id/widgets/:wid",
+            "method": "DELETE",
+            "permission": "dashboards.edit"
+          },
+          {
+            "path": "/:id/widgets/:wid/layout",
+            "method": "PUT",
+            "permission": "dashboards.edit"
+          },
+          {
+            "path": "/:id/widgets/:wid/refresh",
+            "method": "POST",
+            "permission": "dashboards.edit"
+          }
         ]
       }
     }
   ],
-  "permission_grants": [],
+  "permission_grants": ["tools.invoke", "app:realtime"],
   "permission_levels": [
     {
       "id": "dashboards.view",
@@ -71,7 +115,19 @@
     }
   ],
   "contributes": {
-  "chat_widget_templates": [{"id":"dashboards.chat","title":"Dashboards widget","description":"Dashboards chat widget metadata is coming soon; no render tool is available yet.","triggers":["dashboards widget"],"examples":["Show me a dashboards widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}],
+    "chat_widget_templates": [
+      {
+        "id": "dashboards.chat",
+        "title": "Dashboards widget",
+        "description": "Dashboards chat widget metadata is coming soon; no render tool is available yet.",
+        "triggers": ["dashboards widget"],
+        "examples": ["Show me a dashboards widget"],
+        "backing": {},
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "coming-soon"
+      }
+    ],
     "hook_events": [
       {
         "id": "@ryu/dashboards#widget.failed",

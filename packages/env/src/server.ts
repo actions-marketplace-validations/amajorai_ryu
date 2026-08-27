@@ -102,6 +102,12 @@ export const env = createEnv({
 		// Auth providers
 		GOOGLE_CLIENT_ID: z.string().optional(),
 		GOOGLE_CLIENT_SECRET: z.string().optional(),
+		// Optional Telegram Login (OIDC) shortcut for the hosted bot. The client id
+		// and secret come from the official Ryu bot's BotFather Login Widget setup;
+		// the username is public and lets the success page link back to the bot.
+		TELEGRAM_LOGIN_CLIENT_ID: z.string().optional(),
+		TELEGRAM_LOGIN_CLIENT_SECRET: z.string().optional(),
+		TELEGRAM_LOGIN_BOT_USERNAME: z.string().optional(),
 		TURNSTILE_SECRET_KEY: z.string().optional(),
 		// Storage (S3-compatible)
 		STORAGE_ACCESS_KEY_ID: z.string().optional(),
@@ -132,6 +138,7 @@ export const env = createEnv({
 		// Fixed $71 discount that turns the $200 lifetime list product into the
 		// $129 launch offer. The checkout route fails closed when it is absent.
 		POLAR_LIFETIME_LAUNCH_DISCOUNT_ID: z.string().optional(),
+		POLAR_PRODUCT_MARKETPLACE_MEMBERSHIP_MONTHLY: z.string().optional(),
 		POLAR_PRODUCT_PRO_MONTHLY: z.string().optional(),
 		POLAR_PRODUCT_PRO_YEARLY: z.string().optional(),
 		POLAR_PRODUCT_MAX_MONTHLY: z.string().optional(),
@@ -179,6 +186,7 @@ export const env = createEnv({
 		// silently stop being written), and (b) re-onboard existing sellers for the
 		// `card_payments` capability + let `account.updated` backfill chargesEnabled.
 		MARKETPLACE_DIRECT_CHARGE: z.string().optional(),
+		MARKETPLACE_MEMBERSHIP_PUBLISHER_SHARE_BPS: z.string().optional(),
 		// Secret shared with the gateway so the internal debit endpoint can be
 		// called service-to-service (the gateway debits arbitrary orgs). Optional:
 		// when unset, debit falls back to an authenticated user session.
@@ -232,6 +240,14 @@ export const env = createEnv({
 		// without observability keys runs unchanged. Standard OTLP/HTTP endpoint
 		// (e.g. https://api.axiom.co for Axiom, or any OTel Collector / Grafana
 		// host). The emitter appends the standard `/v1/logs` path itself.
+		// Ryu-owned names are authoritative for new deployments; the generic names
+		// below remain a server-only compatibility fallback for existing installs.
+		RYU_AXIOM_ENDPOINT: z.string().optional(),
+		RYU_AXIOM_TOKEN: z.string().optional(),
+		RYU_AXIOM_DATASET: z.string().optional(),
+		// Private shared secret used only by the hosted Gateway to reach the typed
+		// Ryu analytics relay. It is never sent to managed customer nodes.
+		RYU_ANALYTICS_INGEST_SECRET: z.string().optional(),
 		OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
 		// Bearer token for the OTLP endpoint (Axiom API token).
 		AXIOM_TOKEN: z.string().optional(),

@@ -4,9 +4,20 @@ import {
 	FileCodeIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "@ryu/ui/components/alert-dialog";
 import { Button } from "@ryu/ui/components/button";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
+import { Undo2Icon } from "lucide-react";
 import { useState } from "react";
 import { AgentUI } from "./agent-ui/agent-ui.tsx";
 import { useArtifactHost } from "./artifact-host-context.tsx";
@@ -15,6 +26,7 @@ import type {
 	ArtifactTurnEndCard,
 	EditedFile,
 	FileEditsTurnEndCard,
+	FileEditUndoPlan,
 	JsonRenderTurnEndCard,
 	TurnEndCard,
 } from "./turn-end-cards.ts";
@@ -38,14 +50,155 @@ function EditStats({ file }: { file: EditedFile }) {
 	);
 }
 
+function fileName(path: string): string {
+	return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+}
+
+function UndoFileEditsDialog({
+	card,
+	disabled,
+	onOpenChange,
+	onUndo,
+	open,
+}: {
+	card: FileEditsTurnEndCard;
+	disabled: boolean;
+	onOpenChange: (open: boolean) => void;
+	onUndo: (plan: FileEditUndoPlan) => Promise<void>;
+	open: boolean;
+}) {
+	const [error, setError] = useState<string | null>(null);
+	const [pending, setPending] = useState(false);
+	const singleFile = card.files.length === 1 ? card.files[0] : undefined;
+	const title = singleFile
+		? `Undo changes to ${fileName(singleFile.path)}?`
+		: `Undo changes to ${countLabel(card.files.length)} files?`;
+
+	const handleOpenChange = (nextOpen: boolean) => {
+		if (pending) {
+			return;
+		}
+		if (!nextOpen) {
+			setError(null);
+		}
+		onOpenChange(nextOpen);
+	};
+
+	const handleConfirm = async () => {
+		setPending(true);
+		setError(null);
+		try {
+			if (!card.undoPlan) {
+				throw new Error("This turn does not have a reversible text-edit plan.");
+			}
+			await onUndo(card.undoPlan);
+			onOpenChange(false);
+		} catch (caught) {
+			setError(
+				caught instanceof Error
+					? caught.message
+					: "The file edits could not be undone."
+			);
+		} finally {
+			setPending(false);
+		}
+	};
+
+	return (
+		<AlertDialog onOpenChange={handleOpenChange} open={open}>
+			<AlertDialogContent>
+				<AlertDialogHeader>
+					<AlertDialogTitle>{title}</AlertDialogTitle>
+					<AlertDialogDescription>
+						Undo only the reversible text edits from this turn. If any affected
+						text changed afterward or is staged, no files will be changed.
+					</AlertDialogDescription>
+				</AlertDialogHeader>
+				{error ? (
+					<p className="text-destructive text-sm" role="alert">
+						{error}
+					</p>
+				) : null}
+				<AlertDialogFooter>
+					<AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
+					<AlertDialogAction
+						disabled={disabled || pending}
+						onClick={(event) => {
+							event.preventDefault();
+							void handleConfirm();
+						}}
+						variant="destructive"
+					>
+						{pending ? "Undoing…" : "Undo changes"}
+					</AlertDialogAction>
+				</AlertDialogFooter>
+			</AlertDialogContent>
+		</AlertDialog>
+	);
+}
+
+function FileEditActions({
+	onReview,
+	onUndo,
+	undoUnavailable,
+	undoComplete,
+}: {
+	onReview?: () => void;
+	onUndo?: () => void;
+	undoUnavailable?: string;
+	undoComplete: boolean;
+}) {
+	if (!(onReview || onUndo || undoUnavailable)) {
+		return null;
+	}
+
+	return (
+		<div className="ml-auto flex shrink-0 items-center gap-2">
+			{onUndo || undoUnavailable ? (
+				<span title={undoUnavailable}>
+					<Button
+						aria-label={undoUnavailable ?? "Undo this turn's text edits"}
+						className="active:scale-[0.97]"
+						disabled={undoComplete || Boolean(undoUnavailable)}
+						onClick={onUndo}
+						size="sm"
+						type="button"
+						variant="ghost"
+					>
+						{undoComplete ? "Undone" : "Undo"}
+						<Undo2Icon aria-hidden className="size-3.5" />
+					</Button>
+				</span>
+			) : null}
+			{onReview ? (
+				<Button
+					className="active:scale-[0.97]"
+					onClick={onReview}
+					size="sm"
+					type="button"
+					variant="outline"
+				>
+					Review
+				</Button>
+			) : null}
+		</div>
+	);
+}
+
 function FileEditsCard({
 	card,
 	onOpenFile,
+	onReview,
+	onUndo,
 }: {
 	card: FileEditsTurnEndCard;
 	onOpenFile?: (path: string) => void;
+	onReview?: (paths: string[]) => void;
+	onUndo?: (plan: FileEditUndoPlan) => Promise<void>;
 }) {
 	const [expanded, setExpanded] = useState(false);
+	const [undoDialogOpen, setUndoDialogOpen] = useState(false);
+	const [undoComplete, setUndoComplete] = useState(false);
 	const files = expanded
 		? card.files
 		: card.files.slice(0, MAX_COLLAPSED_FILES);
@@ -59,97 +212,156 @@ function FileEditsCard({
 		0
 	);
 	const firstFile = card.files[0];
+	const isSingleFile = card.files.length === 1 && firstFile;
+	const actions = (
+		<FileEditActions
+			onReview={
+				onReview
+					? () => onReview(card.files.map((file) => file.path))
+					: undefined
+			}
+			onUndo={
+				onUndo && card.undoPlan ? () => setUndoDialogOpen(true) : undefined
+			}
+			undoComplete={undoComplete}
+			undoUnavailable={
+				onUndo && !card.undoPlan
+					? "Undo is available only when every change in the turn is an exact text replacement."
+					: undefined
+			}
+		/>
+	);
+	const undoDialog =
+		onUndo && card.undoPlan ? (
+			<UndoFileEditsDialog
+				card={card}
+				disabled={undoComplete}
+				onOpenChange={setUndoDialogOpen}
+				onUndo={async (plan) => {
+					await onUndo(plan);
+					setUndoComplete(true);
+				}}
+				open={undoDialogOpen}
+			/>
+		) : null;
+
+	if (isSingleFile) {
+		return (
+			<>
+				<section
+					className="flex items-center gap-3 rounded-2xl border border-border/80 bg-card px-4 py-3 shadow-sm"
+					data-layout="single"
+					data-slot="turn-file-edits-card"
+				>
+					<button
+						aria-label={`Open ${firstFile.path}`}
+						className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-background text-muted-foreground shadow-xs ring-1 ring-border/60 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.97]"
+						onClick={() => onOpenFile?.(firstFile.path)}
+						type="button"
+					>
+						<FileTypeIcon className="size-5" path={firstFile.path} />
+					</button>
+					<div className="min-w-0">
+						<h3 className="truncate font-medium text-sm" title={firstFile.path}>
+							Edited {fileName(firstFile.path)}
+						</h3>
+						<div className="mt-1 flex items-center gap-1 font-mono text-xs tabular-nums">
+							<span className="text-emerald-500">
+								+{countLabel(firstFile.insertions)}
+							</span>
+							<span className="text-rose-500">
+								-{countLabel(firstFile.deletions)}
+							</span>
+						</div>
+					</div>
+					{actions}
+				</section>
+				{undoDialog}
+			</>
+		);
+	}
 
 	return (
-		<section
-			className="overflow-hidden rounded-2xl border border-border/80 bg-card shadow-sm"
-			data-slot="turn-file-edits-card"
-		>
-			<header className="flex items-center gap-3 px-4 py-3">
-				<span className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-background text-muted-foreground shadow-xs ring-1 ring-border/60">
-					<HugeiconsIcon aria-hidden className="size-6" icon={FileCodeIcon} />
-				</span>
-				<div className="min-w-0">
-					<h3 className="font-medium text-base leading-tight">
-						Edited {countLabel(card.files.length)}{" "}
-						{card.files.length === 1 ? "file" : "files"}
-					</h3>
-					<div className="mt-1 flex items-center gap-2 font-mono text-sm tabular-nums">
-						<span className="text-emerald-500">
-							+{countLabel(totalInsertions)}
-						</span>
-						<span className="text-rose-500">-{countLabel(totalDeletions)}</span>
+		<>
+			<section
+				className="overflow-hidden rounded-2xl border border-border/80 bg-card shadow-sm"
+				data-layout="multiple"
+				data-slot="turn-file-edits-card"
+			>
+				<header className="flex items-center gap-3 px-4 py-3">
+					<span className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-background text-muted-foreground shadow-xs ring-1 ring-border/60">
+						<HugeiconsIcon aria-hidden className="size-6" icon={FileCodeIcon} />
+					</span>
+					<div className="min-w-0">
+						<h3 className="font-medium text-base leading-tight">
+							Edited {countLabel(card.files.length)}{" "}
+							{card.files.length === 1 ? "file" : "files"}
+						</h3>
+						<div className="mt-1 flex items-center gap-2 font-mono text-sm tabular-nums">
+							<span className="text-emerald-500">
+								+{countLabel(totalInsertions)}
+							</span>
+							<span className="text-rose-500">
+								-{countLabel(totalDeletions)}
+							</span>
+						</div>
 					</div>
-				</div>
-				{onOpenFile && firstFile ? (
-					<Button
-						className="ml-auto shrink-0"
-						onClick={() => onOpenFile(firstFile.path)}
-						size="sm"
-						type="button"
-						variant="outline"
-					>
-						Review
-						<HugeiconsIcon
-							aria-hidden
-							className="size-3.5"
-							icon={ArrowUpRight01Icon}
-						/>
-					</Button>
-				) : null}
-			</header>
-			<div className="border-border/70 border-t">
-				{files.map((file) => (
-					<button
-						className="flex w-full items-center gap-3 border-border/50 border-b px-4 py-3 text-left transition-colors last:border-b-0 hover:bg-muted/45 focus-visible:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-						key={file.path}
-						onClick={() => onOpenFile?.(file.path)}
-						type="button"
-					>
-						<FileTypeIcon className="size-4" path={file.path} />
-						<span
-							className="min-w-0 flex-1 truncate font-mono text-sm"
-							title={file.path}
+					{actions}
+				</header>
+				<div className="border-border/70 border-t">
+					{files.map((file) => (
+						<button
+							className="flex w-full items-center gap-3 border-border/50 border-b px-4 py-3 text-left transition-colors last:border-b-0 hover:bg-muted/45 focus-visible:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+							key={file.path}
+							onClick={() => onOpenFile?.(file.path)}
+							type="button"
 						>
-							{file.path}
-						</span>
-						<EditStats file={file} />
-					</button>
-				))}
-				{remaining > 0 ? (
-					<button
-						aria-expanded={expanded}
-						className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm transition-colors hover:bg-muted/45 focus-visible:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-						onClick={() => setExpanded(true)}
-						type="button"
-					>
-						<span>
-							Show {countLabel(remaining)} more{" "}
-							{remaining === 1 ? "file" : "files"}
-						</span>
-						<HugeiconsIcon
-							aria-hidden
-							className="size-4"
-							icon={ArrowDown01Icon}
-						/>
-					</button>
-				) : expanded && card.files.length > MAX_COLLAPSED_FILES ? (
-					<button
-						aria-expanded={expanded}
-						className="flex w-full items-center gap-2 px-4 py-3 text-left text-muted-foreground text-sm transition-colors hover:bg-muted/45 focus-visible:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-						onClick={() => setExpanded(false)}
-						type="button"
-					>
-						<span>Show fewer files</span>
-						<HugeiconsIcon
-							aria-hidden
-							className="size-4 rotate-180"
-							icon={ArrowDown01Icon}
-						/>
-					</button>
-				) : null}
-			</div>
-		</section>
+							<FileTypeIcon className="size-4" path={file.path} />
+							<span
+								className="min-w-0 flex-1 truncate font-mono text-sm"
+								title={file.path}
+							>
+								{file.path}
+							</span>
+							<EditStats file={file} />
+						</button>
+					))}
+					{remaining > 0 ? (
+						<button
+							aria-expanded={expanded}
+							className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm transition-colors hover:bg-muted/45 focus-visible:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+							onClick={() => setExpanded(true)}
+							type="button"
+						>
+							<span>
+								Show {countLabel(remaining)} more{" "}
+								{remaining === 1 ? "file" : "files"}
+							</span>
+							<HugeiconsIcon
+								aria-hidden
+								className="size-4"
+								icon={ArrowDown01Icon}
+							/>
+						</button>
+					) : expanded && card.files.length > MAX_COLLAPSED_FILES ? (
+						<button
+							aria-expanded={expanded}
+							className="flex w-full items-center gap-2 px-4 py-3 text-left text-muted-foreground text-sm transition-colors hover:bg-muted/45 focus-visible:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+							onClick={() => setExpanded(false)}
+							type="button"
+						>
+							<span>Show fewer files</span>
+							<HugeiconsIcon
+								aria-hidden
+								className="size-4 rotate-180"
+								icon={ArrowDown01Icon}
+							/>
+						</button>
+					) : null}
+				</div>
+			</section>
+			{undoDialog}
+		</>
 	);
 }
 
@@ -243,10 +455,14 @@ export function TurnEndCards({
 	cards,
 	onAgentUiSubmit,
 	onOpenFile,
+	onReviewFileEdits,
+	onUndoFileEdits,
 }: {
 	cards: TurnEndCard[];
 	onAgentUiSubmit?: (value: unknown) => void | Promise<void>;
 	onOpenFile?: (path: string) => void;
+	onReviewFileEdits?: (paths: string[]) => void;
+	onUndoFileEdits?: (plan: FileEditUndoPlan) => Promise<void>;
 }) {
 	if (cards.length === 0) {
 		return null;
@@ -259,7 +475,13 @@ export function TurnEndCards({
 			{cards.map((card) => {
 				if (card.kind === "file-edits") {
 					return (
-						<FileEditsCard card={card} key={card.id} onOpenFile={onOpenFile} />
+						<FileEditsCard
+							card={card}
+							key={card.id}
+							onOpenFile={onOpenFile}
+							onReview={onReviewFileEdits}
+							onUndo={onUndoFileEdits}
+						/>
 					);
 				}
 				if (card.kind === "json-render") {

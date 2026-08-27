@@ -18,6 +18,7 @@ import {
 } from "@ryu/ui/components/select";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { useSpeechPlayback } from "@/src/hooks/useSpeechPlayback.ts";
 import { useVoiceEngines } from "@/src/hooks/useVoiceEngines.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
@@ -72,6 +73,7 @@ export function TtsEngineSettings() {
 	const [testFailed, setTestFailed] = useState(false);
 	const [models, setModels] = useState<TtsModel[]>([]);
 	const [installing, setInstalling] = useState<string | null>(null);
+	const { play: playSpeech } = useSpeechPlayback();
 	// The optional multi-engine TTS sidecar ("ryutts"), installed/started right
 	// here at the point of use rather than from a separate Services page.
 	const [sidecarPending, setSidecarPending] = useState(false);
@@ -179,21 +181,24 @@ export function TtsEngineSettings() {
 		setTestFailed(false);
 		setTestState("speaking");
 		try {
-			const blob = await speakText(toTarget(node), SAMPLE_TEXT, {
-				engine: engineId,
-				voice: voice || undefined,
-			});
-			const url = URL.createObjectURL(blob);
-			const audio = new Audio(url);
-			await applyDefaultSpeaker(audio);
-			audio.addEventListener("ended", () => URL.revokeObjectURL(url));
-			await audio.play();
+			await playSpeech(
+				`${engineId}:${voice}:${SAMPLE_TEXT}`,
+				() =>
+					speakText(toTarget(node), SAMPLE_TEXT, {
+						engine: engineId,
+						voice: voice || undefined,
+					}),
+				{
+					prepareAudio: applyDefaultSpeaker,
+					toggle: false,
+				}
+			);
 		} catch {
 			setTestFailed(true);
 		} finally {
 			setTestState("idle");
 		}
-	}, [engineId, voice, node]);
+	}, [engineId, voice, node, playSpeech]);
 
 	const voices = selected?.voices ?? [];
 	// Prompt to install/start the ryutts sidecar until it is both installed and

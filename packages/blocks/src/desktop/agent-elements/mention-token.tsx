@@ -21,10 +21,7 @@ function mentionStyle(
 
 	return {
 		"--mention-accent": accent,
-		"--mention-bg": `color-mix(in srgb, ${accent} 16%, transparent)`,
-		"--mention-hover": `color-mix(in srgb, ${accent} 24%, transparent)`,
 		"--mention-ink": `color-mix(in srgb, ${accent} 68%, #111827 32%)`,
-		backgroundColor: `color-mix(in srgb, ${accent} 16%, transparent)`,
 		color: `color-mix(in srgb, ${accent} 68%, #111827 32%)`,
 	} as CSSProperties;
 }
@@ -43,10 +40,10 @@ export function MentionToken({ children, className, item }: MentionTokenProps) {
 	return (
 		<span
 			className={cn(
-				"inline-flex max-w-full items-center gap-1 rounded-md px-1.5 py-0.5 align-baseline font-medium text-[0.9em] leading-[1.2] transition-colors",
+				"inline-flex max-w-full items-center gap-1 align-baseline font-medium text-[0.9em] leading-[1.2] transition-colors",
 				hasAccent
-					? "[&_em]:!text-[color:var(--mention-ink)] [&_strong]:!text-[color:var(--mention-ink)] bg-[color:var(--mention-bg)] text-[color:var(--mention-ink)] hover:bg-[color:var(--mention-hover)]"
-					: "bg-primary/[0.08] text-primary",
+					? "[&_em]:!text-[color:var(--mention-ink)] [&_strong]:!text-[color:var(--mention-ink)] text-[color:var(--mention-ink)] hover:text-[color:var(--mention-accent)]"
+					: "text-primary",
 				className
 			)}
 			data-mention-token={item?.kind ?? "reference"}

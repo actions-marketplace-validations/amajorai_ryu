@@ -173,7 +173,7 @@ pub struct ExtApiRoute {
 ///   sidecar that is `http://127.0.0.1:<port>`).
 /// - `upstream_mount` — the sidecar's `http.mount`, i.e. the prefix the sidecar
 ///   nests its own router at. Stripped, because the ext-proxy re-adds it.
-/// - `declared` — the sidecar's declared `http.routes[].path` patterns.
+/// - `declared` — the sidecar's declared `http.routes[]` path/method patterns.
 ///
 /// **Call this once per SIDECAR, not once per manifest.** A manifest may carry
 /// several sidecars, each with its own `mount` and its own `routes`, and pairing
@@ -224,12 +224,10 @@ pub struct ExtApiRoute {
 /// manifest to a catch-all `*rest`: that would trade a compile-time-visible drop
 /// for a runtime-invisible hole.
 ///
-/// **Note that `resolve_route` ignores the HTTP method.** A declared path admits
-/// *every* verb on it, so a manifest declaring `/contacts/:id` for its GET has
-/// thereby also opened DELETE. That is what makes the method-aware approval gate
-/// ([`is_mutating`], read by `approvals::policy`) load-bearing rather than
-/// defence-in-depth: it is the only layer in this chain that can tell a derived
-/// read from a derived write.
+/// `resolve_route` matches both path and method. A legacy declaration with no
+/// method remains an intentional wildcard for backward compatibility; mixed
+/// read/write paths in current app manifests use one explicit row per method so
+/// a read level cannot authorize a write.
 ///
 /// # Ordering / determinism
 ///
@@ -241,7 +239,7 @@ pub fn lower(
     plugin_id: &str,
     api: &crate::openapi_import::ImportedApi,
     upstream_mount: &str,
-    declared: &[String],
+    declared: &[crate::plugin_manifest::schema::RouteSpec],
 ) -> (Vec<ExtApiRoute>, usize /* dropped_undeclared */) {
     let plugin_slug = slug_plugin(plugin_id);
     let base = api.base_url.trim_end_matches('/');
@@ -299,9 +297,13 @@ pub fn lower(
         }
 
         // ── 4. Intersect with the manifest's declared routes ─────────────────
-        if !declared
-            .iter()
-            .any(|pattern| crate::sidecar::ext_proxy::route_matches(pattern, &sub_path))
+        if !declared.iter().any(|route| {
+            crate::sidecar::ext_proxy::route_matches(&route.path, &sub_path)
+                && route
+                    .method
+                    .as_deref()
+                    .is_none_or(|declared| declared.eq_ignore_ascii_case(&tool.method))
+        })
         {
             dropped_undeclared += 1;
             continue;
@@ -803,8 +805,17 @@ mod tests {
         spec_to_api_with_base(spec, DEFAULT_OP_CAP, Some(BASE)).expect("spec imports")
     }
 
-    fn declared(paths: &[&str]) -> Vec<String> {
-        paths.iter().map(|p| (*p).to_owned()).collect()
+    fn declared(paths: &[&str]) -> Vec<crate::plugin_manifest::schema::RouteSpec> {
+        paths
+            .iter()
+            .map(|path| crate::plugin_manifest::schema::RouteSpec {
+                path: (*path).to_owned(),
+                method: None,
+                auth: Default::default(),
+                permission: None,
+                resource_param: None,
+            })
+            .collect()
     }
 
     /// The placeholder is the whole reason the path is sliced rather than rebuilt:

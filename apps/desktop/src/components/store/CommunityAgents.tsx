@@ -97,7 +97,7 @@ function CommunityAgentAction({
 				variant="ghost"
 			>
 				<HugeiconsIcon className="size-4" icon={ShoppingCart01Icon} />
-				<span className="font-heading tabular-nums">{priceLabel(card)}</span>
+				<span className="font-mono tabular-nums">{priceLabel(card)}</span>
 			</Button>
 		);
 	}
@@ -276,7 +276,7 @@ export function CommunityAgentDetail({
 							{
 								label: "Price",
 								value: (
-									<span className="font-heading tabular-nums">
+									<span className="font-mono tabular-nums">
 										{priceLabel(card)}
 									</span>
 								),

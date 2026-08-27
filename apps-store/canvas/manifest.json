@@ -1,6 +1,6 @@
 {
-  "tags": ["canvas","media","nodes","generative","workflow"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": ["canvas", "media", "nodes", "generative", "workflow"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-canvas",
   "homepage": "https://github.com/amajorai/ryu-canvas",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -64,7 +64,9 @@
     "media:generate",
     "media:transcribe",
     "hook:run-agent",
-    "hook:side-model"
+    "hook:side-model",
+    "app:realtime",
+    "ui:declarative-http"
   ],
   "permission_levels": [
     {
@@ -90,7 +92,19 @@
     "icon": "ai-image"
   },
   "contributes": {
-  "chat_widget_templates": [{"id":"canvas.chat","title":"Canvas widget","description":"Canvas chat widget metadata is coming soon; no render tool is available yet.","triggers":["canvas widget"],"examples":["Show me a canvas widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}],
+    "chat_widget_templates": [
+      {
+        "id": "canvas.chat",
+        "title": "Canvas widget",
+        "description": "Canvas chat widget metadata is coming soon; no render tool is available yet.",
+        "triggers": ["canvas widget"],
+        "examples": ["Show me a canvas widget"],
+        "backing": {},
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "coming-soon"
+      }
+    ],
     "sidebar_sections": [
       {
         "id": "canvas",

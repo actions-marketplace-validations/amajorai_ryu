@@ -212,7 +212,7 @@ export function Insights({
 						<div className="mb-2 flex items-baseline justify-between gap-2">
 							<h3 className="font-medium text-sm">Pipeline</h3>
 							<span className="text-muted-foreground text-xs">
-								<span className="font-heading tabular-nums">
+								<span className="font-mono tabular-nums">
 									{formatCents(
 										pipeline.total_value_cents,
 										pipeline.currency_code
@@ -246,7 +246,7 @@ export function Insights({
 												</Badge>
 											)}
 										</span>
-										<span className="shrink-0 font-heading text-muted-foreground text-xs tabular-nums">
+										<span className="shrink-0 font-mono text-muted-foreground text-xs tabular-nums">
 											{stage.record_count} ·{" "}
 											{formatCents(stage.value_cents, pipeline.currency_code)}
 										</span>

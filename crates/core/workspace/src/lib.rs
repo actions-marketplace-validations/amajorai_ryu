@@ -20,4 +20,5 @@
 mod win_process;
 
 pub mod git;
+pub mod source_history;
 pub mod worktree;

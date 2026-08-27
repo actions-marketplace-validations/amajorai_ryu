@@ -14,10 +14,13 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
 import { useEffect, useRef, useState } from "react";
+import { formatGoalElapsed, getGoalElapsedMs } from "../goal-message.ts";
 
 export interface GoalBarProps {
 	/** True once the goal has been achieved (shown as a success state). */
 	achieved?: boolean;
+	/** Unix milliseconds when the goal was achieved, if it has completed. */
+	achievedAt?: number;
 	/** True while a judge evaluation is in flight. */
 	judging?: boolean;
 	/**
@@ -38,7 +41,7 @@ export interface GoalBarProps {
 	paused?: boolean;
 	/** The judge's most recent reason for its verdict. */
 	reason?: string;
-	/** Unix milliseconds when the goal was set; drives the live elapsed timer. */
+	/** Unix milliseconds when the goal was set; drives the elapsed timer. */
 	startedAt?: number;
 	/** Open in edit mode immediately (the "Pursue goal" draft flow). */
 	startInEdit?: boolean;
@@ -46,20 +49,6 @@ export interface GoalBarProps {
 	text: string;
 	/** How many turns the judge has evaluated. */
 	turns?: number;
-}
-
-/** Format a millisecond duration as a compact "3s" / "4m" / "1h 2m" string. */
-function formatElapsed(ms: number): string {
-	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-	if (totalSeconds < 60) {
-		return `${totalSeconds}s`;
-	}
-	const minutes = Math.floor(totalSeconds / 60);
-	if (minutes < 60) {
-		return `${minutes}m`;
-	}
-	const hours = Math.floor(minutes / 60);
-	return `${hours}h ${minutes % 60}m`;
 }
 
 /**
@@ -71,6 +60,7 @@ function formatElapsed(ms: number): string {
 export function GoalBar({
 	text,
 	startedAt,
+	achievedAt,
 	reason,
 	turns,
 	judging,
@@ -90,7 +80,7 @@ export function GoalBar({
 	// Live elapsed timer: re-render every second while the goal is active.
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
-		if (achieved || paused || !startedAt) {
+		if (achieved || paused || typeof startedAt !== "number") {
 			return;
 		}
 		const id = window.setInterval(() => setNow(Date.now()), 1000);
@@ -114,7 +104,11 @@ export function GoalBar({
 		}
 	}, [editing]);
 
-	const elapsed = startedAt ? formatElapsed(now - startedAt) : null;
+	const elapsedMs =
+		startedAt === undefined
+			? null
+			: getGoalElapsedMs({ achievedAt, startedAt }, now);
+	const elapsed = elapsedMs === null ? null : formatGoalElapsed(elapsedMs);
 
 	const commit = () => {
 		const trimmed = draft.trim();

@@ -68,6 +68,49 @@ fn summary_cost_micro_usd(state: &SharedState, summary: &AuditSummary) -> u64 {
         ))
 }
 
+/// Billable cost for one audit row. BYOK/local rows deliberately stay `None`:
+/// their provider activity belongs in usage analytics, but it did not debit a
+/// Ryu-managed balance. Managed rows prefer the provider transaction price and
+/// use the configured per-model table only when the provider omitted one.
+fn audit_cost_micro_usd(entry: &AuditEntry, cp: &ControlPlaneConfig) -> Option<u64> {
+    entry.managed_inference.then(|| {
+        entry
+            .provider_cost_micro_usd
+            .unwrap_or_else(|| cp.cost_for(&entry.model, entry.input_tokens, entry.output_tokens))
+    })
+}
+
+/// Shape one local audit row for control-plane ingestion. Keeping this mapping
+/// in one function makes the analytics attribution fields hard to accidentally
+/// omit when the audit schema grows.
+fn audit_payload_entry(entry: &AuditEntry, cp: &ControlPlaneConfig) -> Value {
+    json!({
+        "id": entry.id,
+        "timestamp": entry.timestamp,
+        "requestId": entry.request_id,
+        "eventType": entry.event_type,
+        "apiKey": entry.api_key,
+        "userName": entry.user_name,
+        "backend": entry.backend,
+        "command": entry.command,
+        "actorId": entry.user_id,
+        "teamId": entry.team_id,
+        "projectId": entry.project_id,
+        "provider": entry.provider,
+        "model": entry.model,
+        "feature": entry.feature,
+        "inputTokens": entry.input_tokens,
+        "outputTokens": entry.output_tokens,
+        "managedInference": entry.managed_inference,
+        "providerCostMicroUsd": entry.provider_cost_micro_usd,
+        "costMicroUsd": audit_cost_micro_usd(entry, cp),
+        "latencyMs": entry.latency_ms,
+        "durationMs": entry.duration_ms,
+        "evalScore": entry.eval_score,
+        "error": entry.error,
+    })
+}
+
 /// Length of the leading `YYYY-MM-DD` slice of a SQLite `datetime('now')`
 /// timestamp (always UTC), used as the per-day rollup key.
 const DAY_KEY_LEN: usize = 10;
@@ -316,30 +359,7 @@ async fn push_report(state: &SharedState) -> anyhow::Result<()> {
     let report_key = format!("audit:{cursor}-{next_cursor}");
     let audit: Vec<Value> = entries
         .iter()
-        .map(|e| {
-            json!({
-                "id": e.id,
-                "timestamp": e.timestamp,
-                "requestId": e.request_id,
-                "eventType": e.event_type,
-                "apiKey": e.api_key,
-                "userName": e.user_name,
-                "backend": e.backend,
-                "command": e.command,
-                "actorId": e.user_id,
-                "teamId": e.team_id,
-                "projectId": e.project_id,
-                "provider": e.provider,
-                "model": e.model,
-                "inputTokens": e.input_tokens,
-                "outputTokens": e.output_tokens,
-                "managedInference": e.managed_inference,
-                "providerCostMicroUsd": e.provider_cost_micro_usd,
-                "latencyMs": e.latency_ms,
-                "evalScore": e.eval_score,
-                "error": e.error,
-            })
-        })
+        .map(|entry| audit_payload_entry(entry, cfg))
         .collect();
 
     // Per-user daily rollup (profiles / usage-points). Derived from the SAME
@@ -531,6 +551,34 @@ mod tests {
         entry.provider_cost_micro_usd = Some(125);
         let rows = build_user_daily(&state, &[entry]);
         assert_eq!(rows[0]["costMicroUsd"], 125);
+    }
+
+    #[test]
+    fn audit_payload_carries_rollup_dimensions_and_exact_managed_cost() {
+        let state = test_state();
+        let mut entry = base_entry();
+        entry.feature = Some("agent".to_string());
+        entry.duration_ms = Some(2_500);
+        entry.provider_cost_micro_usd = Some(125);
+
+        let payload = audit_payload_entry(&entry, &state.config.control_plane);
+
+        assert_eq!(payload["feature"], "agent");
+        assert_eq!(payload["durationMs"], 2_500);
+        assert_eq!(payload["costMicroUsd"], 125);
+    }
+
+    #[test]
+    fn audit_payload_keeps_byok_cost_null() {
+        let state = test_state();
+        let mut entry = base_entry();
+        entry.managed_inference = false;
+        entry.provider = "openrouter".to_string();
+        entry.provider_cost_micro_usd = Some(125);
+
+        let payload = audit_payload_entry(&entry, &state.config.control_plane);
+
+        assert!(payload["costMicroUsd"].is_null());
     }
 
     #[test]

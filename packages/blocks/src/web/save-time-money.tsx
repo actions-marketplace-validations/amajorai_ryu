@@ -21,27 +21,27 @@ const COLUMNS: Column[] = [
 	{
 		icon: Clock,
 		tone: "yellow",
-		eyebrow: "Take back the hours",
-		title: "Your team stops doing the paperwork.",
-		body: "The document work that fills the day gets done in the background, with your people reviewing instead of typing.",
+		eyebrow: "Less checking",
+		title: "Your team spends time on judgment, not cleanup.",
+		body: "AI handles the first pass while your people review the parts that matter, with the source and the output in the same place.",
 		points: [
-			"Set up around your document types and your rules",
-			"Your reviewers stay in the loop where it counts",
-			"The overnight queue already drafted when your team arrives",
-			"We build the first workflow sitting with the people who do it",
+			"Keep the source and answer together",
+			"Review the decisions that need judgment",
+			"Stop copying context between tools",
+			"Measure the checking time you get back",
 		],
 	},
 	{
 		icon: Wallet,
 		tone: "teal",
-		eyebrow: "Know the bill first",
-		title: "You know the bill before the work starts.",
-		body: "You set the ceiling. Routine work runs on your own machines at no per-job cost, and the expensive models get used only when the job earns it.",
+		eyebrow: "Know the cost",
+		title: "The saving is visible in the bill.",
+		body: "Use the AI subscriptions you already pay for, add a ceiling to managed work, and see what each workflow costs before it becomes routine.",
 		points: [
-			"A monthly ceiling per person and per team",
-			"See what a job cost before you quote the client",
-			"Routine work runs on your machines instead of billing per job",
-			"Keep the subscriptions you already pay for",
+			"Set a monthly ceiling per person and team",
+			"See the cost of a workflow before you scale it",
+			"Keep routine work local when that is cheaper",
+			"Keep the subscriptions your team already uses",
 		],
 	},
 ];
@@ -55,10 +55,10 @@ export default function SaveTimeMoney() {
 						suffix={
 							<span className="text-muted-foreground">
 								{" "}
-								The paperwork gets done and you get the receipts.
+								Your team gets time back when the output can be trusted.
 							</span>
 						}
-						title="You are buying the work getting done."
+						title="AI should remove work, not add review work."
 					/>
 				</div>
 

@@ -543,7 +543,7 @@ pub fn describe_capabilities(
     // exist". `web.search` hit exactly that: every one of its five providers ships
     // opt-in, so on a fresh install the toolkit was invisible and nothing pointed
     // at the Store. `web.extract` / `web.crawl` only escaped it because `spider`
-    // happens to be default-on.
+    // happens to be pre-installed.
     let mut names: Vec<String> = known
         .iter()
         .flat_map(|m| {
@@ -1315,7 +1315,7 @@ mod tests {
 
     #[test]
     fn finetune_builtin_loads_after_the_kind_tag_fix() {
-        // Regression: @ryu/finetune (default-on, a Python-sidecar app) silently
+        // Regression: @ryu/finetune (a Python-sidecar app) silently
         // never loaded — the SidecarProcess `#[serde(tag="kind")]` consumed the inner
         // ExternalRuntimeConfig.kind, so its manifest failed to parse and it was
         // absent from the built-in set. The inner kind now defaults; it must load.

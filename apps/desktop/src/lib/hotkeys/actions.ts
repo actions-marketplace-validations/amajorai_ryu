@@ -25,6 +25,12 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 		id: "settings.open",
 		label: "Open Settings",
 		category: "General",
+		defaultBinding: "Mod+.",
+	},
+	{
+		id: "gateway.open",
+		label: "Open Gateway Settings",
+		category: "General",
 		defaultBinding: "Mod+,",
 	},
 	{

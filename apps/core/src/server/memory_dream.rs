@@ -145,14 +145,17 @@ async fn run_automatic_review_tick(state: &ServerState) {
     let quiet_start = settings["quiet_hours_start"].as_u64().unwrap_or(22) as u8;
     let quiet_end = settings["quiet_hours_end"].as_u64().unwrap_or(8) as u8;
     if is_quiet_hour(hour, quiet_start, quiet_end) {
-        tracing::debug!(hour, quiet_start, quiet_end, "Dream automatic review is in quiet hours");
+        tracing::debug!(
+            hour,
+            quiet_start,
+            quiet_end,
+            "Dream automatic review is in quiet hours"
+        );
         return;
     }
     match run_dream_review_inner(state, &None, "automatic").await {
         Ok(body) => {
-            let proposal_count = body["review"]["proposals"]
-                .as_array()
-                .map_or(0, Vec::len);
+            let proposal_count = body["review"]["proposals"].as_array().map_or(0, Vec::len);
             tracing::info!(proposal_count, "Dream automatic review completed");
         }
         Err((status, message)) if status == StatusCode::CONFLICT => {
@@ -227,9 +230,9 @@ async fn run_dream_review_inner(
     }
 
     let owner = super::memory_owner_user_id(caller);
-    let sources = load_sources(state, caller).await.map_err(|error| {
-        (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-    })?;
+    let sources = load_sources(state, caller)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     if sources.is_empty() {
         return Ok(review_body(
             mode,
@@ -242,7 +245,12 @@ async fn run_dream_review_inner(
     let (system, user) = dream_prompt(&sources);
     let raw = super::call_side_model(state, &model, &effort, &system, &user)
         .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Dream model unavailable: {error}")))?;
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Dream model unavailable: {error}"),
+            )
+        })?;
     let output = parse_model_output(&raw).map_err(|error| {
         (
             StatusCode::BAD_GATEWAY,

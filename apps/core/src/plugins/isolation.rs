@@ -190,6 +190,11 @@ pub struct PluginProvenance {
     /// The marketplace blue check on the publishing ORG at install time.
     #[serde(default)]
     pub org_verified: bool,
+    /// Whether this installed app was opted into Ryu Membership at install time.
+    /// This is an access marker, not a trust signal; the desktop refreshes the
+    /// live entitlement separately and Core never treats it as a bypass.
+    #[serde(default)]
+    pub membership_required: bool,
     /// Verification tier, only meaningful alongside `org_verified`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_verified_tier: Option<String>,
@@ -216,6 +221,30 @@ pub struct PluginProvenance {
 pub fn manifest_sha256(manifest: &PluginManifest) -> String {
     use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(manifest).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Digest the capability-bearing manifest shape used for compiled first-party
+/// trust decisions.
+///
+/// Standalone bundles add `ui_code_sha256` and, for inline backends,
+/// `backend_sha256` after reading the satellite's carriage. Those fields protect
+/// the carried bytes at the install boundary, but they are not capability or
+/// lifecycle declarations. Including them in the compiled-manifest identity
+/// would make every standalone build look like a modified Community package and
+/// would disable its manifest-owned sidecar/MCP lanes. Signed marketplace
+/// provenance continues to use [`manifest_sha256`] over the exact accepted
+/// manifest bytes.
+#[must_use]
+pub fn manifest_sha256_for_trust(manifest: &PluginManifest) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut value = serde_json::to_value(manifest).unwrap_or_default();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("ui_code_sha256");
+        object.remove("backend_sha256");
+    }
+    let bytes = serde_json::to_vec(&value).unwrap_or_default();
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -431,6 +460,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn standalone_carriage_hashes_do_not_change_compiled_trust_identity() {
+        let mut manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "id": "@ryu/test-app",
+            "name": "Test App",
+            "version": "1.0.0",
+            "runnables": []
+        }))
+        .expect("minimal manifest");
+        let exact = manifest_sha256_for_trust(&manifest);
+        let exact_bytes = manifest_sha256(&manifest);
+
+        manifest.ui_code_sha256 = Some("ui-hash".to_owned());
+        manifest.backend_sha256 = Some("backend-hash".to_owned());
+
+        assert_eq!(manifest_sha256_for_trust(&manifest), exact);
+        assert_ne!(manifest_sha256(&manifest), exact_bytes);
+    }
+
     fn official(org_verified: bool) -> PluginProvenance {
         PluginProvenance {
             source_id: Some(OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
@@ -439,6 +487,21 @@ mod tests {
             signature_verified: true,
             ..PluginProvenance::default()
         }
+    }
+
+    #[test]
+    fn membership_requirement_is_persisted_and_legacy_rows_default_off() {
+        let legacy: PluginProvenance =
+            serde_json::from_str(r#"{"source_id":"ryu-marketplace","signature_verified":true}"#)
+                .expect("legacy provenance should remain readable");
+        assert!(!legacy.membership_required);
+
+        let mut membership = PluginProvenance::default();
+        membership.membership_required = true;
+        let encoded = serde_json::to_string(&membership).expect("serialize provenance");
+        let decoded: PluginProvenance =
+            serde_json::from_str(&encoded).expect("deserialize provenance");
+        assert!(decoded.membership_required);
     }
 
     #[test]

@@ -65,6 +65,12 @@ export interface UseSpacesResult {
 	) => Promise<string>;
 	/** Create a new blank whiteboard (Excalidraw); returns its document id. */
 	createWhiteboard: (spaceId: string, title: string) => Promise<string>;
+	/**
+	 * Per-Space invalidation signal for document consumers. A value changes after
+	 * each successful document mutation, including saves that do not update the
+	 * parent Space timestamp.
+	 */
+	documentRevisions: ReadonlyMap<string, number>;
 	error: string | null;
 	/** Load a single page's full markdown source for editing. */
 	getDocument: (
@@ -153,10 +159,20 @@ export function useSpaces(): UseSpacesResult {
 	const [spaces, setSpaces] = useState<Space[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
+	const [documentRevisions, setDocumentRevisions] = useState<
+		ReadonlyMap<string, number>
+	>(() => new Map());
 	const [appDisabled, setAppDisabled] = useState<{
 		app: string;
 		message: string;
 	} | null>(null);
+	const bumpDocumentRevision = useCallback((spaceId: string) => {
+		setDocumentRevisions((current) => {
+			const next = new Map(current);
+			next.set(spaceId, (current.get(spaceId) ?? 0) + 1);
+			return next;
+		});
+	}, []);
 
 	const reload = useCallback(async () => {
 		setLoading(true);
@@ -238,11 +254,12 @@ export function useSpaces(): UseSpacesResult {
 	const ingest = useCallback(
 		async (spaceId: string, title: string, content: string) => {
 			await apiIngestDocument({ url, token }, spaceId, title, content);
+			bumpDocumentRevision(spaceId);
 			// Refresh the list so the space's document count stays accurate.
 			await reload();
 			return fetchDocuments({ url, token }, spaceId);
 		},
-		[url, token, reload]
+		[url, token, bumpDocumentRevision, reload]
 	);
 
 	const search = useCallback(
@@ -254,40 +271,52 @@ export function useSpaces(): UseSpacesResult {
 	const createPage = useCallback(
 		async (spaceId: string, title: string, parentId?: string) => {
 			const id = await apiCreatePage({ url, token }, spaceId, title, parentId);
+			bumpDocumentRevision(spaceId);
 			// A parented "row page" is hidden from listings, so no reload is needed.
 			if (!parentId) {
 				await reload();
 			}
 			return id;
 		},
-		[url, token, reload]
+		[url, token, bumpDocumentRevision, reload]
 	);
 
 	const createDatabase = useCallback(
 		async (spaceId: string, title: string) => {
 			const id = await apiCreateDatabase({ url, token }, spaceId, title);
+			bumpDocumentRevision(spaceId);
 			await reload();
 			return id;
 		},
-		[url, token, reload]
+		[url, token, bumpDocumentRevision, reload]
 	);
 
 	const createWhiteboard = useCallback(
 		async (spaceId: string, title: string) => {
 			const id = await apiCreateWhiteboard({ url, token }, spaceId, title);
+			bumpDocumentRevision(spaceId);
 			await reload();
 			return id;
 		},
-		[url, token, reload]
+		[url, token, bumpDocumentRevision, reload]
 	);
 
 	const uploadFile = useCallback(
-		(
+		async (
 			spaceId: string,
 			file: File,
 			opts?: { onProgress?: (fraction: number) => void; signal?: AbortSignal }
-		) => apiUploadSpaceFile({ url, token }, spaceId, file, opts),
-		[url, token]
+		) => {
+			const uploaded = await apiUploadSpaceFile(
+				{ url, token },
+				spaceId,
+				file,
+				opts
+			);
+			bumpDocumentRevision(spaceId);
+			return uploaded;
+		},
+		[url, token, bumpDocumentRevision]
 	);
 
 	const getDocument = useCallback(
@@ -297,9 +326,22 @@ export function useSpaces(): UseSpacesResult {
 	);
 
 	const saveDocument = useCallback(
-		(spaceId: string, documentId: string, title: string, source: string) =>
-			apiUpdateDocument({ url, token }, spaceId, documentId, title, source),
-		[url, token]
+		async (
+			spaceId: string,
+			documentId: string,
+			title: string,
+			source: string
+		) => {
+			await apiUpdateDocument(
+				{ url, token },
+				spaceId,
+				documentId,
+				title,
+				source
+			);
+			bumpDocumentRevision(spaceId);
+		},
+		[url, token, bumpDocumentRevision]
 	);
 
 	const removeDocument = useCallback(
@@ -309,10 +351,13 @@ export function useSpaces(): UseSpacesResult {
 				spaceId,
 				documentId
 			);
+			if (removed) {
+				bumpDocumentRevision(spaceId);
+			}
 			await reload();
 			return removed;
 		},
-		[url, token, reload]
+		[url, token, bumpDocumentRevision, reload]
 	);
 
 	const setSpaceIcon = useCallback(
@@ -370,12 +415,14 @@ export function useSpaces(): UseSpacesResult {
 	const setDocumentIcon = useCallback(
 		async (spaceId: string, documentId: string, icon: GlyphValue) => {
 			await apiSetDocumentIcon({ url, token }, spaceId, documentId, icon);
+			bumpDocumentRevision(spaceId);
 		},
-		[url, token]
+		[url, token, bumpDocumentRevision]
 	);
 
 	return {
 		appDisabled,
+		documentRevisions,
 		spaces,
 		loading,
 		error,

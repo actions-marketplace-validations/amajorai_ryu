@@ -515,8 +515,7 @@ function buildBeats(scenario: Scenario): Beat[] {
 		{
 			id: "watch",
 			hold: 1800,
-			caption:
-				"Ryu rides on top of whatever you're doing — one pill, not another window to check.",
+			caption: "See the context, the decision, and the next step in one place.",
 			phase: "notice",
 			focus: "island",
 			island: { state: "idle", pill: "Ryu", cursor: "away" },
@@ -536,7 +535,7 @@ function buildBeats(scenario: Scenario): Beat[] {
 		{
 			id: "reach",
 			hold: 900,
-			caption: "Accept, snooze or dismiss. That is the whole decision.",
+			caption: "You see the context first, then choose what happens.",
 			phase: "accept",
 			focus: "island",
 			island: { state: "suggestion", cursor: "hover" },
@@ -557,7 +556,7 @@ function buildBeats(scenario: Scenario): Beat[] {
 			id: "handoff",
 			hold: 1400,
 			caption:
-				"The job lands in the desktop app — the surface that holds your tools, permissions and history.",
+				"The work opens with its context, permissions, and history attached.",
 			phase: "run",
 			focus: "desktop",
 			island: { state: "idle", pill: "Handing off", cursor: "away" },
@@ -569,7 +568,7 @@ function buildBeats(scenario: Scenario): Beat[] {
 			"run-intro",
 			1,
 			false,
-			"The run opens as a real thread you can read, interrupt and rerun."
+			"The work opens as a readable record you can pause and revisit."
 		),
 		...scenario.steps.map((step, index) =>
 			RUN_BEAT(
@@ -584,7 +583,7 @@ function buildBeats(scenario: Scenario): Beat[] {
 			id: "done",
 			hold: 3200,
 			caption:
-				"One accept on the Island. The full run — every tool call, every file it touched — on the desktop.",
+				"One decision. A full record — what it read, what it changed, and what it cost.",
 			phase: "done",
 			focus: "desktop",
 			island: { state: "idle", pill: "Done", cursor: "away" },
@@ -595,7 +594,7 @@ function buildBeats(scenario: Scenario): Beat[] {
 			id: "rest",
 			hold: 2000,
 			caption:
-				"Your keys, your machine, and your call on what leaves it. The Island goes quiet until the next thing worth doing.",
+				"Your data, your limits, and your call on what leaves the machine.",
 			phase: "done",
 			focus: "island",
 			island: { state: "collapsed", cursor: "away" },
@@ -897,7 +896,7 @@ function useStageScale() {
 /* ── the loop ──────────────────────────────────────────────────────────────── */
 
 const TAKEOVER_REPLY =
-	"Happy to. On the desktop I can run that end to end — tools, files and all — and the Island will ping you when it's done.";
+	"Happy to. Ryu will show the context it used, pause before anything sensitive, and leave the record behind when it is done.";
 
 function useBeatLoop(
 	paused: boolean,
@@ -987,8 +986,11 @@ export function HeroWorkflowLoop({
 	// theirs — the same "take it over" affordance the old showcase had.
 	const [takeover, setTakeover] = useState<UIMessage[] | null>(null);
 	const [takeoverStatus, setTakeoverStatus] = useState<ChatStatus>("ready");
-	const { beat, pickScenario, scenario, setIndex, stageRef, visible } =
-		useBeatLoop(takeover !== null, scenarioIndex, onScenarioChange);
+	const { beat, scenario, setIndex, stageRef, visible } = useBeatLoop(
+		takeover !== null,
+		scenarioIndex,
+		onScenarioChange
+	);
 	const { frameRef, scale } = useStageScale();
 
 	// One island on screen: stand the persistent site island down while the stage
@@ -1078,11 +1080,11 @@ export function HeroWorkflowLoop({
 			: "ready";
 
 	return (
-		<div className="mx-auto w-full max-w-6xl">
+		<div className="mx-auto w-full min-w-0 max-w-6xl overflow-x-clip">
 			{/* Static, in-repo CSS injected as a text child (no user input, no XSS surface). */}
 			<style>{ISLAND_CSS}</style>
 
-			<div className="relative">
+			<div className="relative min-w-0">
 				{/* The island is OUTSIDE the window — it sits on the hero's background
 				    image, which is standing in for the desktop wallpaper. It is scaled
 				    with the window (it lives outside the stage's own transform, so it
@@ -1111,7 +1113,7 @@ export function HeroWorkflowLoop({
 
 				<div
 					className={cn(
-						"overflow-hidden rounded-2xl shadow-2xl ring-1 transition-[box-shadow,--tw-ring-color] duration-500",
+						"w-full min-w-0 overflow-hidden rounded-2xl shadow-2xl ring-1 transition-[box-shadow,--tw-ring-color] duration-500",
 						beat.focus === "desktop" && !takeover
 							? "ring-foreground/25"
 							: "ring-border"
@@ -1121,6 +1123,9 @@ export function HeroWorkflowLoop({
 				>
 					<div
 						className="relative origin-top-left bg-background"
+						data-beat-id={beat.id}
+						data-scenario-id={scenario.id}
+						data-testid="hero-workflow-stage"
 						ref={stageRef}
 						style={{
 							width: STAGE_WIDTH,
@@ -1128,7 +1133,7 @@ export function HeroWorkflowLoop({
 							transform: `scale(${scale})`,
 						}}
 					>
-						<DesktopShell>
+						<DesktopShell sidebarMode="trust">
 							{/* No fabricated "Agent / Model / Space" top bar. The real app
 							    has no such row — those controls live in the composer
 							    (`useComposerAgentControls`), so a mock that invents one is

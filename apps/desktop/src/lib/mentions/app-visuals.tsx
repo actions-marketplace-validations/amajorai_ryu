@@ -45,6 +45,7 @@ export function appMentionVisual(
 				dither={app.iconDither}
 				iconBackground={app.iconBackground}
 				iconId={app.icon}
+				iconPadding={app.iconPadding}
 				iconUrl={app.iconUrl}
 				name={app.name}
 				seedId={app.id}

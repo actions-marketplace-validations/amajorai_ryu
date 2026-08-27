@@ -28,7 +28,7 @@ function signalIcon(signal: PublisherHealthSignal) {
 	return InformationCircleIcon;
 }
 
-/** Compact pre-install health disclosure. The score summarizes observable
+/** Compact install-time health disclosure. The score summarizes observable
  * signals and deliberately says that it is not a guarantee. */
 export function PublisherHealthCard({
 	className,

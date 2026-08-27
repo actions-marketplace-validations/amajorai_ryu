@@ -264,7 +264,61 @@ pub enum AcpEvent {
     /// re-run the turn once they are back in.
     AuthNeeded { agent_id: String, message: String },
     /// A fatal error from the session; the stream ends after this.
-    Error(String),
+    Error(AcpFailure),
+}
+
+/// Stable failed-turn information carried from the ACP boundary to Core's
+/// stream and persistence layers. Keeping the code, title, and recovery copy
+/// together prevents the live error frame and reloaded transcript from
+/// disagreeing about what failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpFailure {
+    pub code: String,
+    pub title: String,
+    pub message: String,
+}
+
+fn has_payment_required_marker(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("provider_payment_required")
+        || lower.contains("insufficient_credits")
+        || lower.contains("payment required")
+        || lower.contains("http 402")
+        || lower.contains("error 402")
+        || lower.contains("no credits")
+        || lower.contains("insufficient credit")
+        || lower.contains("credit balance exhausted")
+}
+
+/// Turn an opaque pi-acp JSON-RPC failure into the recovery the selected
+/// provider actually needs. ACP does not expose the upstream HTTP status as a
+/// typed field, so the managed Pi's Core-owned active provider supplies the
+/// missing context while stable Gateway markers confirm this is a 402.
+fn classify_prompt_failure(active_provider: Option<&str>, detail: &str) -> AcpFailure {
+    let payment_required = has_payment_required_marker(detail);
+    if active_provider == Some(crate::pi_config::MANAGED_OPENROUTER_ID) && payment_required {
+        return AcpFailure {
+            code: "insufficient_credits".to_owned(),
+            title: "Ryu credits exhausted".to_owned(),
+            message: "Your organization's Ryu credits are exhausted. Open Settings > Credits to top up, or choose a BYOK or local model, then retry."
+                .to_owned(),
+        };
+    }
+    if active_provider == Some("openrouter") && payment_required {
+        return AcpFailure {
+            code: "provider_payment_required".to_owned(),
+            title: "OpenRouter credits exhausted".to_owned(),
+            message: "The OpenRouter API key on this node has no prepaid credits left. Add credits to your OpenRouter account or choose another provider, then retry."
+                .to_owned(),
+        };
+    }
+    AcpFailure {
+        code: "agent_error".to_owned(),
+        title: "Request failed".to_owned(),
+        message: format!(
+            "The agent could not complete the turn because its model provider is unavailable or misconfigured. Check Settings > Engines, then retry. (details: {detail})"
+        ),
+    }
 }
 
 /// A snapshot of ACP's `unstable_session_usage` counters.
@@ -2431,11 +2485,15 @@ impl AgentAdapter for AcpAdapter {
                             })),
                         });
                     }
-                    AcpEvent::Error(msg) => {
+                    AcpEvent::Error(failure) => {
                         chunks.push(ChatChunk {
-                            delta: Some(msg),
+                            delta: Some(failure.message),
                             done: false,
-                            metadata: Some(serde_json::json!({ "error": true })),
+                            metadata: Some(serde_json::json!({
+                                "error": true,
+                                "errorCode": failure.code,
+                                "errorTitle": failure.title,
+                            })),
                         });
                     }
                     // Reasoning, plan snapshots, mode changes, config write-backs,
@@ -3926,22 +3984,25 @@ pub async fn run_acp_instance(
                             // would sit in streaming state with a Stop button and no
                             // way to send: a hang, which is precisely the confusion
                             // this branch exists to remove.
-                            let _ = tx.send(AcpEvent::Error(
-                                "Your agent login expired. Log in again, then re-send \
-                                 your message."
+                            let _ = tx.send(AcpEvent::Error(AcpFailure {
+                                code: "auth_required".to_owned(),
+                                title: "Agent login expired".to_owned(),
+                                message: "Your agent login expired. Log in again, then re-send your message."
                                     .to_owned(),
-                            ));
+                            }));
                             if let Ok(mut g) = sink.lock() {
                                 *g = None;
                             }
                             continue;
                         }
-                        let _ = tx.send(AcpEvent::Error(format!(
-                            "The agent could not complete the turn — no model is \
-                             configured, or the model provider is unreachable. Open \
-                             Settings > Engines to configure or download a model. \
-                             (details: {detail})"
-                        )));
+                        let active_provider = if is_managed_pi {
+                            Some(crate::pi_config::current().provider)
+                        } else {
+                            None
+                        };
+                        let failure =
+                            classify_prompt_failure(active_provider.as_deref(), &detail);
+                        let _ = tx.send(AcpEvent::Error(failure));
                         if let Ok(mut g) = sink.lock() {
                             *g = None;
                         }
@@ -3981,6 +4042,20 @@ pub async fn run_acp_instance(
                         put("cachedReadTokens", turn_delta.cached_read_tokens);
                         put("cachedWriteTokens", turn_delta.cached_write_tokens);
                         put("sessionTotalTokens", cumulative.total_tokens);
+                        for key in [
+                            "context_window",
+                            "contextWindow",
+                            "current_usage",
+                            "currentUsage",
+                            "cost",
+                            "costAmount",
+                            "costCurrency",
+                            "currency",
+                        ] {
+                            if let Some(value) = u.get(key) {
+                                usage_payload.insert(key.to_owned(), value.clone());
+                            }
+                        }
                         // Context occupancy fallback for agents that send no live
                         // `UsageUpdate`: the cumulative total is the best proxy the
                         // turn-end response offers.
@@ -4648,8 +4723,7 @@ pub fn ryu_pi_acp_cmd_for_agent(user_jwt: Option<&str>, agent_id: Option<&str>) 
     // sidecar learns `CORE_URL`/`CORE_TOKEN`.
     let core_url = crate::sidecar::gateway::core_self_url();
     let mcp_agent_id = crate::registry::DEFAULT_AGENT_ID;
-    let core_token = std::env::var("RYU_TOKEN")
-        .ok()
+    let core_token = crate::node_token::active_token()
         .map(|v| v.trim().to_owned())
         .filter(|s| !s.is_empty());
 
@@ -4782,8 +4856,7 @@ fn codex_acp_cmd_for_agent(agent_id: Option<&str>) -> String {
 pub(crate) fn pi_mcp_extension_env(windows: bool, user_jwt: Option<&str>) -> String {
     let core_url = crate::sidecar::gateway::core_self_url();
     let mcp_agent_id = crate::registry::DEFAULT_AGENT_ID;
-    let core_token = std::env::var("RYU_TOKEN")
-        .ok()
+    let core_token = crate::node_token::active_token()
         .map(|v| v.trim().to_owned())
         .filter(|s| !s.is_empty());
     let mut env = if windows {
@@ -5692,6 +5765,38 @@ impl Default for AcpAgentRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_openrouter_credit_failure_has_managed_recovery_copy() {
+        let failure = classify_prompt_failure(
+            Some(crate::pi_config::MANAGED_OPENROUTER_ID),
+            "HTTP 402: organization credit balance exhausted (insufficient_credits)",
+        );
+        assert_eq!(failure.code, "insufficient_credits");
+        assert_eq!(failure.title, "Ryu credits exhausted");
+        assert!(failure.message.contains("Settings > Credits"));
+        assert!(failure.message.contains("BYOK or local model"));
+    }
+
+    #[test]
+    fn openrouter_byok_credit_failure_has_provider_recovery_copy() {
+        let failure = classify_prompt_failure(
+            Some("openrouter"),
+            "OpenRouter API error 402: no credits (provider_payment_required)",
+        );
+        assert_eq!(failure.code, "provider_payment_required");
+        assert_eq!(failure.title, "OpenRouter credits exhausted");
+        assert!(failure.message.contains("OpenRouter account"));
+        assert!(failure.message.contains("another provider"));
+    }
+
+    #[test]
+    fn openrouter_transport_failure_is_not_mislabeled_as_credit_exhaustion() {
+        let failure = classify_prompt_failure(Some("openrouter"), "connection refused");
+        assert_eq!(failure.code, "agent_error");
+        assert_eq!(failure.title, "Request failed");
+        assert!(!failure.message.to_lowercase().contains("credits exhausted"));
+    }
 
     fn pi_acp_cmd_gated() -> String {
         pi_acp_cmd()

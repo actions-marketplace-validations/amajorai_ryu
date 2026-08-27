@@ -516,7 +516,7 @@ function MeterChip({
 					/>
 				) : null}
 				<span
-					className={cn("text-[10px] tabular-nums", isMoney && "font-heading")}
+					className={cn("text-[10px] tabular-nums", isMoney && "font-mono")}
 				>
 					{text}
 				</span>
@@ -1022,7 +1022,7 @@ export const ProviderCreditsBadge = memo(function ProviderCreditsBadge({
 				render={
 					<span
 						aria-label={`${label}: ${text} of API credit left`}
-						className="shrink-0 font-heading text-[10px] text-muted-foreground/70 tabular-nums"
+						className="shrink-0 font-mono text-[10px] text-muted-foreground/70 tabular-nums"
 					/>
 				}
 			>

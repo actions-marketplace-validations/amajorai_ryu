@@ -27,7 +27,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::RwLock;
 use tokio::sync::Mutex;
@@ -72,9 +72,9 @@ pub fn global() -> Option<&'static ComposioTriggerStore> {
 }
 
 /// Env var holding the Composio webhook signing secret. The inbound public
-/// webhook route authenticates each delivery with an HMAC-SHA256 over the raw
-/// body keyed by this secret (Composio's webhook signing secret). Nothing is
-/// hardcoded — when unset the route fails closed (rejects every request).
+/// webhook route authenticates each delivery with Composio's signed
+/// id/timestamp/raw-body tuple. Nothing is hardcoded; when unset and no
+/// encrypted value exists, the route fails closed.
 const WEBHOOK_SECRET_ENV: &str = "COMPOSIO_WEBHOOK_SECRET";
 
 /// The encrypted-at-rest secret-store slot used by the Webhooks companion when
@@ -112,16 +112,18 @@ pub fn env_webhook_secret() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn stored_webhook_secret_value() -> Option<String> {
+    stored_webhook_secret()
+        .read()
+        .ok()
+        .and_then(|current| current.clone())
+}
+
 /// The configured webhook signing secret, if any. An explicit environment value
 /// wins over the encrypted app-managed value so existing deployments retain the
 /// operator-controlled configuration contract.
 pub fn webhook_secret() -> Option<String> {
-    env_webhook_secret().or_else(|| {
-        stored_webhook_secret()
-            .read()
-            .ok()
-            .and_then(|current| current.clone())
-    })
+    env_webhook_secret().or_else(stored_webhook_secret_value)
 }
 
 /// Constant-time byte comparison (no early return on first mismatch) so the
@@ -137,73 +139,130 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Compute HMAC-SHA256(key, message) and return it lowercase-hex encoded. Uses
-/// the standard HMAC construction over `sha2::Sha256` (already a Core dep) so no
-/// new crate is pulled in.
-pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
+const COMPOSIO_TRIGGER_MESSAGE_EVENT: &str = "composio.trigger.message";
 
-    const BLOCK_SIZE: usize = 64;
-    // Keys longer than the block size are hashed down first.
-    let mut block_key = [0u8; BLOCK_SIZE];
-    if key.len() > BLOCK_SIZE {
-        let hashed = Sha256::digest(key);
-        block_key[..hashed.len()].copy_from_slice(&hashed);
-    } else {
-        block_key[..key.len()].copy_from_slice(key);
-    }
-    let mut ipad = [0x36u8; BLOCK_SIZE];
-    let mut opad = [0x5cu8; BLOCK_SIZE];
-    for i in 0..BLOCK_SIZE {
-        ipad[i] ^= block_key[i];
-        opad[i] ^= block_key[i];
-    }
-    let mut inner = Sha256::new();
-    inner.update(ipad);
-    inner.update(message);
-    let inner_digest = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(opad);
-    outer.update(inner_digest);
-    hex::encode(outer.finalize())
+#[derive(Deserialize)]
+struct WebhookSubscriptionList {
+    #[serde(default)]
+    items: Vec<WebhookSubscription>,
 }
 
-/// Verify a Composio webhook signature over the **raw** request body, FAIL
-/// CLOSED. Returns `true` only when a secret is configured AND the provided
-/// signature matches HMAC-SHA256(secret, raw_body). Composio (Svix-style) sends
-/// a `webhook-signature` header of space-separated `v1,<base64>` entries; we
-/// also accept a bare hex digest and an optional `sha256=` prefix so the check
-/// works across signing-scheme spellings. When the secret is unset, or the
-/// header is absent/empty, or no entry matches, the request is rejected.
+#[derive(Deserialize)]
+struct WebhookSubscription {
+    id: String,
+    webhook_url: String,
+    version: String,
+    #[serde(default)]
+    enabled_events: Vec<String>,
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RotatedWebhookSecret {
+    secret: String,
+}
+
+/// Compute HMAC-SHA256(key, message) through the shared crypto primitive.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let encoded = ryu_crypto::hmac_sha256_hex(key, message);
+    let decoded = hex::decode(encoded).expect("shared HMAC must be valid hex");
+    decoded
+        .try_into()
+        .expect("SHA-256 HMAC must always be 32 bytes")
+}
+
+/// Compute HMAC-SHA256(key, message) and return it lowercase-hex encoded. This is
+/// the legacy per-workflow webhook format; Composio uses base64 over a signed
+/// id/timestamp/body tuple instead.
+pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    ryu_crypto::hmac_sha256_hex(key, message)
+}
+
+const COMPOSIO_WEBHOOK_TOLERANCE_SECS: u64 = 300;
+
+/// Verify a Composio webhook signature, FAIL CLOSED. Current Composio
+/// deliveries sign `{webhook-id}.{webhook-timestamp}.{rawBody}` and send one or
+/// more space-separated `v1,<base64>` values in `webhook-signature`. All three
+/// headers are required, and timestamps outside the 300-second replay window are
+/// rejected before comparing the digest.
 ///
 /// `raw_body` MUST be the exact bytes received (not a re-serialized JSON value),
 /// otherwise the HMAC will never match.
-pub fn verify_webhook_signature(raw_body: &[u8], signature_header: Option<&str>) -> bool {
+pub fn verify_webhook_signature(
+    raw_body: &[u8],
+    webhook_id: Option<&str>,
+    webhook_timestamp: Option<&str>,
+    signature_header: Option<&str>,
+) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    verify_webhook_signature_at(
+        raw_body,
+        webhook_id,
+        webhook_timestamp,
+        signature_header,
+        now,
+    )
+}
+
+fn verify_webhook_signature_at(
+    raw_body: &[u8],
+    webhook_id: Option<&str>,
+    webhook_timestamp: Option<&str>,
+    signature_header: Option<&str>,
+    now: i64,
+) -> bool {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
     let Some(secret) = webhook_secret() else {
         return false;
     };
+    let Some(id) = webhook_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let Some(timestamp) = webhook_timestamp
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Ok(timestamp_seconds) = timestamp.parse::<i64>() else {
+        return false;
+    };
+    if timestamp_seconds < 0 || now.abs_diff(timestamp_seconds) > COMPOSIO_WEBHOOK_TOLERANCE_SECS {
+        return false;
+    }
     let Some(header) = signature_header.map(str::trim).filter(|s| !s.is_empty()) else {
         return false;
     };
-    let expected_hex = hmac_sha256_hex(secret.as_bytes(), raw_body);
-    // Each header token may be `v1,<sig>`, `sha256=<sig>`, or a bare `<sig>`.
+
+    let mut signing_message = Vec::with_capacity(id.len() + timestamp.len() + raw_body.len() + 2);
+    signing_message.extend_from_slice(id.as_bytes());
+    signing_message.push(b'.');
+    signing_message.extend_from_slice(timestamp.as_bytes());
+    signing_message.push(b'.');
+    signing_message.extend_from_slice(raw_body);
+    let expected = hmac_sha256(secret.as_bytes(), &signing_message);
+
     header.split_whitespace().any(|token| {
-        let candidate = token
-            .rsplit(',')
-            .next()
-            .unwrap_or(token)
-            .trim_start_matches("sha256=");
-        constant_time_eq(candidate.as_bytes(), expected_hex.as_bytes())
+        let Some(candidate) = token.strip_prefix("v1,") else {
+            return false;
+        };
+        let Ok(decoded) = STANDARD.decode(candidate) else {
+            return false;
+        };
+        constant_time_eq(&decoded, &expected)
     })
 }
 
 /// Verify an inbound **per-workflow** webhook POST against a trigger-specific
 /// secret (`WorkflowTrigger::Webhook.secret`), independent of the global Composio
-/// webhook secret. Same header spellings and fail-closed semantics as
-/// [`verify_webhook_signature`]: the header may carry `v1,<sig>`, `sha256=<hex>`,
-/// or a bare hex digest; an absent/empty header or a mismatch is rejected. The
-/// caller is responsible for refusing to fire when the trigger has no secret at
-/// all — this reuses the same constant-time HMAC-SHA256 check over the raw bytes.
+/// webhook secret. This legacy route accepts `v1,<hex>`, `sha256=<hex>`, or a
+/// bare hex digest over the raw body. An absent header or mismatch is rejected.
+/// The caller must also refuse to fire when the trigger has no secret.
 pub fn verify_workflow_webhook_signature(
     secret: &str,
     raw_body: &[u8],
@@ -281,6 +340,150 @@ impl ComposioTriggerStore {
             conn.execute("ALTER TABLE subscriptions ADD COLUMN workflow_id TEXT", [])?;
         }
         Ok(())
+    }
+
+    /// Create or update the authenticated Composio project's single outbound
+    /// webhook subscription. The subscription is always upgraded to V3 and
+    /// `composio.trigger.message` is added without removing event types the user
+    /// already enabled. Returns the signing secret so Core can place it in the
+    /// encrypted plugin-secret store before any trigger instance is created.
+    pub async fn reconcile_webhook_subscription(&self, webhook_url: &str) -> Result<String> {
+        let key = crate::auth::key()
+            .ok_or_else(|| anyhow!("Composio API key not set (Settings → Integrations)"))?;
+        let collection_url = format!("{}/webhook_subscriptions", crate::catalog::base_url());
+        let response = self
+            .http
+            .get(&collection_url)
+            .header("x-api-key", &key)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|error| anyhow!("listing Composio webhook subscriptions failed: {error}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!(
+                "listing Composio webhook subscriptions returned {status}"
+            ));
+        }
+        let subscriptions: WebhookSubscriptionList = response
+            .json()
+            .await
+            .context("decoding Composio webhook subscriptions response")?;
+        if subscriptions.items.len() > 1 {
+            return Err(anyhow!(
+                "Composio returned multiple project webhook subscriptions; refusing to update an ambiguous destination"
+            ));
+        }
+
+        let Some(existing) = subscriptions.items.into_iter().next() else {
+            let response = self
+                .http
+                .post(&collection_url)
+                .header("x-api-key", &key)
+                .header("content-type", "application/json")
+                .timeout(Duration::from_secs(20))
+                .json(&json!({
+                    "webhook_url": webhook_url,
+                    "enabled_events": [COMPOSIO_TRIGGER_MESSAGE_EVENT],
+                    "version": "V3",
+                }))
+                .send()
+                .await
+                .map_err(|error| {
+                    anyhow!("creating Composio webhook subscription failed: {error}")
+                })?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(anyhow!(
+                    "creating Composio webhook subscription returned {status}"
+                ));
+            }
+            let created: WebhookSubscription = response
+                .json()
+                .await
+                .context("decoding created Composio webhook subscription")?;
+            return required_webhook_secret(created.secret);
+        };
+
+        let mut enabled_events = existing.enabled_events.clone();
+        if !enabled_events
+            .iter()
+            .any(|event| event == COMPOSIO_TRIGGER_MESSAGE_EVENT)
+        {
+            enabled_events.push(COMPOSIO_TRIGGER_MESSAGE_EVENT.to_owned());
+        }
+        enabled_events.sort();
+        enabled_events.dedup();
+
+        let drifted = existing.webhook_url != webhook_url
+            || existing.version != "V3"
+            || enabled_events != existing.enabled_events;
+        // Current API responses include the secret, while migrated/older
+        // subscriptions may omit it except at creation or rotation. Reuse the
+        // already-hydrated local value in that case so adding a second trigger
+        // does not rotate a still-valid project secret.
+        let mut secret = existing
+            .secret
+            .or_else(stored_webhook_secret_value)
+            .or_else(env_webhook_secret);
+        if drifted {
+            let item_url = format!("{collection_url}/{}", existing.id);
+            let response = self
+                .http
+                .patch(&item_url)
+                .header("x-api-key", &key)
+                .header("content-type", "application/json")
+                .timeout(Duration::from_secs(20))
+                .json(&json!({
+                    "webhook_url": webhook_url,
+                    "enabled_events": enabled_events,
+                    "version": "V3",
+                }))
+                .send()
+                .await
+                .map_err(|error| {
+                    anyhow!("updating Composio webhook subscription failed: {error}")
+                })?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(anyhow!(
+                    "updating Composio webhook subscription returned {status}"
+                ));
+            }
+            let updated: WebhookSubscription = response
+                .json()
+                .await
+                .context("decoding updated Composio webhook subscription")?;
+            secret = updated.secret.or(secret);
+        }
+
+        if let Some(secret) = normalized_secret(secret) {
+            return Ok(secret);
+        }
+
+        // Some Composio API versions return a subscription's secret only when it
+        // is created or rotated. Rotate only when no usable secret was returned,
+        // otherwise a normal reconcile never changes credentials.
+        let rotate_url = format!("{collection_url}/{}/rotate_secret", existing.id);
+        let response = self
+            .http
+            .post(&rotate_url)
+            .header("x-api-key", key)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|error| anyhow!("rotating Composio webhook secret failed: {error}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!(
+                "rotating Composio webhook secret returned {status}"
+            ));
+        }
+        let rotated: RotatedWebhookSecret = response
+            .json()
+            .await
+            .context("decoding rotated Composio webhook secret")?;
+        required_webhook_secret(Some(rotated.secret))
     }
 
     /// Register a trigger instance with Composio and persist an **agent**-target
@@ -543,13 +746,30 @@ impl ComposioTriggerStore {
     /// raw event payload injected as `trigger` state. Returns how many runs were
     /// started.
     pub async fn handle_webhook(&self, payload: &Value) -> usize {
-        // Composio payloads vary; pull the trigger id / slug defensively.
+        // V3 (the current default) nests trigger identity under `metadata`.
+        // Retain the flat aliases as a fallback for existing V1/V2 subscriptions.
+        let metadata = payload.get("metadata").and_then(Value::as_object);
+        let metadata_string = |key: &str| {
+            metadata
+                .and_then(|value| value.get(key))
+                .and_then(Value::as_str)
+        };
         let trigger_id = ["trigger_id", "triggerId", "id", "nano_id"]
             .iter()
-            .find_map(|k| payload.get(*k).and_then(Value::as_str));
+            .find_map(|key| metadata_string(key))
+            .or_else(|| {
+                ["trigger_id", "triggerId", "nano_id"]
+                    .iter()
+                    .find_map(|key| payload.get(*key).and_then(Value::as_str))
+            });
         let slug = ["trigger_slug", "triggerName", "type", "trigger_name"]
             .iter()
-            .find_map(|k| payload.get(*k).and_then(Value::as_str));
+            .find_map(|key| metadata_string(key))
+            .or_else(|| {
+                ["trigger_slug", "triggerName", "type", "trigger_name"]
+                    .iter()
+                    .find_map(|key| payload.get(*key).and_then(Value::as_str))
+            });
 
         let subs = self.matching(trigger_id, slug).await;
         let mut fired = 0;
@@ -611,6 +831,17 @@ impl ComposioTriggerStore {
     }
 }
 
+fn normalized_secret(secret: Option<String>) -> Option<String> {
+    secret
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn required_webhook_secret(secret: Option<String>) -> Result<String> {
+    normalized_secret(secret)
+        .ok_or_else(|| anyhow!("Composio webhook subscription response omitted the signing secret"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,7 +874,13 @@ mod tests {
         let _lock = lock_webhook_secret();
         let prev = std::env::var(WEBHOOK_SECRET_ENV).ok();
         std::env::remove_var(WEBHOOK_SECRET_ENV);
-        assert!(!verify_webhook_signature(b"{}", Some("deadbeef")));
+        assert!(!verify_webhook_signature_at(
+            b"{}",
+            Some("msg_test"),
+            Some("1735689600"),
+            Some("v1,deadbeef"),
+            1_735_689_600,
+        ));
         match prev {
             Some(v) => std::env::set_var(WEBHOOK_SECRET_ENV, v),
             None => std::env::remove_var(WEBHOOK_SECRET_ENV),
@@ -655,21 +892,46 @@ mod tests {
         let _lock = lock_webhook_secret();
         let prev = std::env::var(WEBHOOK_SECRET_ENV).ok();
         std::env::set_var(WEBHOOK_SECRET_ENV, "shhh");
-        let body = br#"{"trigger_slug":"x"}"#;
-        let sig = hmac_sha256_hex(b"shhh", body);
-        // Bare hex, `v1,<sig>`, and `sha256=<sig>` spellings all verify.
-        assert!(verify_webhook_signature(body, Some(&sig)));
-        assert!(verify_webhook_signature(body, Some(&format!("v1,{sig}"))));
-        assert!(verify_webhook_signature(
+        let body = b"hello";
+        let id = "msg_test";
+        let timestamp = "1735689600";
+        let signature = "v1,/YUk2Hs+/BGr9UgXO4Z1HlNIb79STp+msEPmVUihovw=";
+        assert!(verify_webhook_signature_at(
             body,
-            Some(&format!("sha256={sig}"))
+            Some(id),
+            Some(timestamp),
+            Some(signature),
+            1_735_689_700,
         ));
-        // A wrong signature, an absent header, and a mutated body all reject.
-        assert!(!verify_webhook_signature(body, Some("00")));
-        assert!(!verify_webhook_signature(body, None));
-        assert!(!verify_webhook_signature(
-            br#"{"trigger_slug":"y"}"#,
-            Some(&sig)
+        // Every signed component, the v1 format, and the replay window are
+        // mandatory under Composio's current contract.
+        assert!(!verify_webhook_signature_at(
+            body,
+            Some("msg_other"),
+            Some(timestamp),
+            Some(signature),
+            1_735_689_700,
+        ));
+        assert!(!verify_webhook_signature_at(
+            body,
+            Some(id),
+            Some(timestamp),
+            Some(signature),
+            1_735_690_000,
+        ));
+        assert!(!verify_webhook_signature_at(
+            body,
+            Some(id),
+            Some(timestamp),
+            Some("/YUk2Hs+/BGr9UgXO4Z1HlNIb79STp+msEPmVUihovw="),
+            1_735_689_700,
+        ));
+        assert!(!verify_webhook_signature_at(
+            b"tampered",
+            Some(id),
+            Some(timestamp),
+            Some(signature),
+            1_735_689_700,
         ));
         match prev {
             Some(v) => std::env::set_var(WEBHOOK_SECRET_ENV, v),
@@ -820,6 +1082,46 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    fn spawn_mock_sequence(
+        responses: Vec<(&'static str, String)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("addr");
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&requests);
+        std::thread::spawn(move || {
+            for ((status_line, body), stream) in responses.into_iter().zip(listener.incoming()) {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 2048];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            request.extend_from_slice(&chunk[..read]);
+                            if request_complete(&request) {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                recorded
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(String::from_utf8_lossy(&request).into_owned());
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}"), requests)
     }
 
     /// Snapshot of the shared env this suite mutates, restored on drop-in.
@@ -1120,6 +1422,138 @@ mod tests {
             .await;
         assert_eq!(fired, 1);
         assert_eq!(host_calls()[0].0, "agent:agent-id-match");
+        restore_env(prev);
+    }
+
+    #[tokio::test]
+    async fn reconcile_webhook_subscription_creates_v3_project_subscription() {
+        let _lock = crate::auth::test_env_lock();
+        let prev = base_url_snapshot();
+        let (base, requests) = spawn_mock_sequence(vec![
+            ("200 OK", r#"{"items":[]}"#.to_string()),
+            (
+                "201 Created",
+                r#"{"id":"ws_new","webhook_url":"https://relay.example/api/composio/webhook","version":"V3","enabled_events":["composio.trigger.message"],"secret":"whsec_new"}"#.to_string(),
+            ),
+        ]);
+        crate::auth::set_key("comp_key");
+        std::env::set_var("COMPOSIO_BASE_URL", &base);
+
+        let (store, _dir) = temp_store().await;
+        let secret = store
+            .reconcile_webhook_subscription("https://relay.example/api/composio/webhook")
+            .await
+            .expect("reconcile");
+        assert_eq!(secret, "whsec_new");
+
+        let requests = requests.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(requests[0].starts_with("GET /webhook_subscriptions "));
+        assert!(requests[1].starts_with("POST /webhook_subscriptions "));
+        assert!(requests[1].contains("\"version\":\"V3\""));
+        assert!(requests[1].contains("\"enabled_events\":[\"composio.trigger.message\"]"));
+
+        restore_env(prev);
+    }
+
+    #[tokio::test]
+    async fn reconcile_webhook_subscription_updates_drift_and_preserves_events() {
+        let _lock = crate::auth::test_env_lock();
+        let prev = base_url_snapshot();
+        let (base, requests) = spawn_mock_sequence(vec![
+            (
+                "200 OK",
+                r#"{"items":[{"id":"ws_existing","webhook_url":"https://old.example/hook","version":"V1","enabled_events":["composio.connected_account.expired"],"secret":"whsec_existing"}]}"#.to_string(),
+            ),
+            (
+                "200 OK",
+                r#"{"id":"ws_existing","webhook_url":"https://relay.example/api/composio/webhook","version":"V3","enabled_events":["composio.connected_account.expired","composio.trigger.message"],"secret":"whsec_existing"}"#.to_string(),
+            ),
+        ]);
+        crate::auth::set_key("comp_key");
+        std::env::set_var("COMPOSIO_BASE_URL", &base);
+
+        let (store, _dir) = temp_store().await;
+        let secret = store
+            .reconcile_webhook_subscription("https://relay.example/api/composio/webhook")
+            .await
+            .expect("reconcile");
+        assert_eq!(secret, "whsec_existing");
+
+        let requests = requests.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(requests[1].starts_with("PATCH /webhook_subscriptions/ws_existing "));
+        assert!(requests[1].contains("composio.connected_account.expired"));
+        assert!(requests[1].contains("composio.trigger.message"));
+        assert!(requests[1].contains("\"version\":\"V3\""));
+
+        restore_env(prev);
+    }
+
+    #[tokio::test]
+    async fn reconcile_prefers_stored_secret_over_a_stale_environment_override() {
+        let _env_lock = crate::auth::test_env_lock();
+        let _lock = lock_webhook_secret();
+        let prev_base = base_url_snapshot();
+        let prev_secret = std::env::var(WEBHOOK_SECRET_ENV).ok();
+        let (base, _requests) = spawn_mock_sequence(vec![(
+            "200 OK",
+            r#"{"items":[{"id":"ws_existing","webhook_url":"https://relay.example/api/composio/webhook","version":"V3","enabled_events":["composio.trigger.message"]}]}"#.to_string(),
+        )]);
+        crate::auth::set_key("comp_key");
+        std::env::set_var("COMPOSIO_BASE_URL", &base);
+        std::env::set_var(WEBHOOK_SECRET_ENV, "stale_environment_secret");
+        set_stored_webhook_secret(Some("current_provider_secret".to_owned()));
+
+        let (store, _dir) = temp_store().await;
+        let secret = store
+            .reconcile_webhook_subscription("https://relay.example/api/composio/webhook")
+            .await
+            .expect("reconcile");
+        assert_eq!(secret, "current_provider_secret");
+
+        set_stored_webhook_secret(None);
+        match prev_secret {
+            Some(value) => std::env::set_var(WEBHOOK_SECRET_ENV, value),
+            None => std::env::remove_var(WEBHOOK_SECRET_ENV),
+        }
+        restore_env(prev_base);
+    }
+
+    #[tokio::test]
+    async fn handle_webhook_matches_v3_nested_trigger_metadata() {
+        let _lock = crate::auth::test_env_lock();
+        let prev = base_url_snapshot();
+        let base = spawn_mock("200 OK", r#"{"trigger_id":"ti_xyz789"}"#.to_string());
+        crate::auth::set_key("comp_key");
+        std::env::set_var("COMPOSIO_BASE_URL", &base);
+        crate::host::set_global_host(std::sync::Arc::new(RecordingHost));
+
+        let (store, _dir) = temp_store().await;
+        store
+            .subscribe(
+                "agent-v3",
+                "github",
+                "GITHUB_COMMIT_EVENT",
+                "ca_1",
+                json!({}),
+            )
+            .await
+            .unwrap();
+
+        clear_host_calls();
+        let fired = store
+            .handle_webhook(&json!({
+                "id": "msg_abc123",
+                "type": "composio.trigger.message",
+                "metadata": {
+                    "trigger_id": "ti_xyz789",
+                    "trigger_slug": "GITHUB_COMMIT_EVENT"
+                },
+                "data": { "message": "fix webhook handling" }
+            }))
+            .await;
+        assert_eq!(fired, 1);
+        assert_eq!(host_calls()[0].0, "agent:agent-v3");
+
         restore_env(prev);
     }
 }

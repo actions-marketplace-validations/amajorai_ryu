@@ -1,6 +1,7 @@
 "use client";
 
 import {
+	isStepUpBlocking,
 	isStepUpRequired,
 	type StepUpClient,
 	type StepUpMethod,
@@ -200,20 +201,35 @@ export function useStepUp({ client, onEnrol2fa }: UseStepUpOptions) {
 
 	const dialog = (
 		<Dialog
+			disablePointerDismissal={
+				pending ? isStepUpBlocking(pending.scope) : false
+			}
 			onOpenChange={(open) => {
 				if (!open) {
+					if (pending && isStepUpBlocking(pending.scope)) {
+						return;
+					}
 					close(false);
 				}
 			}}
 			open={pending !== null}
 		>
-			<DialogContent className="max-w-md">
+			<DialogContent
+				className="max-w-md"
+				showCloseButton={pending ? !isStepUpBlocking(pending.scope) : true}
+			>
 				<DialogHeader>
 					<DialogTitle>Confirm it&apos;s you</DialogTitle>
 					<DialogDescription>
 						{pending ? stepUpPromptLine(pending) : null}
 					</DialogDescription>
 				</DialogHeader>
+				{pending && isStepUpBlocking(pending.scope) ? (
+					<p className="text-muted-foreground text-sm">
+						This confirmation stays open until you enter the current code from
+						your authenticator app.
+					</p>
+				) : null}
 
 				{pending?.enrolmentRequired ? (
 					// Staff scopes take no emailed fallback, so there is nothing to type

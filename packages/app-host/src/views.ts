@@ -46,6 +46,27 @@ export const VIEW_ACTION_HTTP_METHODS = [
 
 export type ViewActionHttpMethod = (typeof VIEW_ACTION_HTTP_METHODS)[number];
 
+export const VIEW_SOURCE_HTTP_METHODS = ["GET"] as const;
+export type ViewSourceHttpMethod = (typeof VIEW_SOURCE_HTTP_METHODS)[number];
+export const DECLARATIVE_HTTP_GRANT = "ui:declarative-http";
+export const VIEW_SOURCE_LIMITS = Object.freeze({
+	defaultRows: 100,
+	maxRows: 200,
+	maxScanRows: 2000,
+	maxRefreshMs: 2_147_483_647,
+	minRefreshMs: 1000,
+});
+
+export function normalizeViewRefreshMs(value: unknown): number | null {
+	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+		return null;
+	}
+	return Math.min(
+		Math.max(Math.floor(value), VIEW_SOURCE_LIMITS.minRefreshMs),
+		VIEW_SOURCE_LIMITS.maxRefreshMs
+	);
+}
+
 /**
  * A **declarative HTTP handler** for a {@link ViewAction} — the CRUD tier that
  * makes actions work with NO per-app sidecar code. The shell executes the request
@@ -53,14 +74,33 @@ export type ViewActionHttpMethod = (typeof VIEW_ACTION_HTTP_METHODS)[number];
  * never sees a token). `path` and string leaves of `body` support `{{field}}`
  * templating from collected form values and `{{item.<key>}}` from the selected
  * list/table item (see {@link renderActionHttp}). Paths are Core-relative and
- * must start with `/api/` ({@link isCoreApiPath}) — a spec can never point the
- * host's credentials at an arbitrary URL.
+ * must start with `/api/` or an explicitly allowlisted built-in route
+ * ({@link isCoreApiPath}) — a spec can never point the host's credentials at an
+ * arbitrary URL.
  */
 export interface ViewActionHttp {
 	/** Optional JSON body template. A string leaf that is exactly one `{{token}}`
 	 *  substitutes the RAW value (type-preserving); mixed strings interpolate. */
 	body?: unknown;
 	method: ViewActionHttpMethod;
+	path: string;
+}
+
+/** Server-stamped authority for declarative HTTP. Missing/unknown fails closed to
+ * the owning app's generic ext-proxy mount; only Core may stamp `"core"`. */
+export type ContributionHttpPolicy = "core" | "owner";
+
+/** The provenance fields Core adds to every HTTP-capable contribution. */
+export interface ContributionHttpAuthority {
+	/** Core-stamped policy. Unknown/missing values are treated as `"owner"`. */
+	http_policy?: unknown;
+	/** Owning plugin id, stamped by Core rather than accepted from the manifest. */
+	plugin?: string;
+}
+
+/** A source request that passed the renderer's defensive policy gate. */
+export interface ContributionSourceRequest {
+	method: "GET";
 	path: string;
 }
 
@@ -191,8 +231,8 @@ export interface ViewSource {
 	filter?: ViewSourceFilter[];
 	http: {
 		/** Defaults to `GET`. */
-		method?: ViewActionHttpMethod;
-		/** Core-relative path; must start with `/api/` ({@link isCoreApiPath}). */
+		method?: ViewSourceHttpMethod;
+		/** Authenticated node-relative read path ({@link isCoreReadPath}). */
 		path: string;
 	};
 	/** Key of the row array in the response object. Absent = the response itself
@@ -391,15 +431,38 @@ export function libraryViewDefinition(
  * - `create` is the "+" action; its response id (`targetFrom`) feeds `itemTarget`
  *   to open the new row (create-and-open), else the section re-fetches its source.
  */
+/** The "+" affordance of a contributed sidebar section. A list can either create
+ * through the authenticated Core HTTP seam, or navigate to the owning app's
+ * create surface. Keeping these as a union prevents a manifest from accidentally
+ * firing a request and navigating at the same time. */
+export type SidebarSectionCreate =
+	| {
+			http: ViewActionHttp;
+			icon?: string;
+			label?: string;
+			/** Response key holding the created row's id; feeds `itemTarget` to open it.
+			 *  Absent = create then re-fetch (no auto-open). */
+			target?: never;
+			targetFrom?: string;
+	  }
+	| {
+			/** App-owned route opened through the shell's normal tab seam. */
+			target: string;
+			icon?: string;
+			label?: string;
+			http?: never;
+			targetFrom?: never;
+	  };
+
 export interface SidebarSectionSpec {
-	create?: {
-		http: ViewActionHttp;
-		icon?: string;
-		label?: string;
-		/** Response key holding the created row's id; feeds `itemTarget` to open it.
-		 *  Absent = create then re-fetch (no auto-open). */
-		targetFrom?: string;
-	};
+	/**
+	 * Mount-context fields to pass to the owning Companion when a row opens it.
+	 * Keys are the app's context names and values are keys in the raw source row.
+	 * The host only applies this map to the contribution's own Companion surface;
+	 * it never spreads arbitrary row data into another route.
+	 */
+	context?: Record<string, string>;
+	create?: SidebarSectionCreate;
 	/**
 	 * Response-row key holding each row's timestamp, so the section can honour the
 	 * user's "Group lists by date" preference (Today / Yesterday / Last week / …)
@@ -437,6 +500,12 @@ export interface SidebarSectionSpec {
 		 * empty copy, which is right for a source that cannot fail this way.
 		 */
 		unavailable?: string;
+	};
+	/** Entity identity for each mapped row. Matching `context_menu_items` are
+	 * rendered in the row menu and receive the mapped row id under `idKey`. */
+	entity?: {
+		anchor: string;
+		idKey: string;
 	};
 	/** Per-row context-menu actions (delete, rename, …). */
 	itemActions?: ViewAction[];
@@ -726,6 +795,10 @@ export type ViewSpec =
  *  owning `plugin` id server-side. `spec` carries a {@link ViewSpec} (its own `view`
  *  duplicates the envelope `view` — the renderer trusts the spec's discriminant). */
 export interface ViewContribution {
+	/** Gateway-approved grants for direct host HTTP sources/actions. */
+	approved_grants?: string[];
+	/** Core-stamped declarative HTTP authority. */
+	http_policy?: unknown;
 	id: string;
 	/** Owning plugin id, added by Core's contributions endpoint. */
 	plugin?: string;
@@ -796,13 +869,119 @@ function renderBody(body: unknown, ctx: ViewActionContext): unknown {
 }
 
 /** True when `path` is a safe Core-relative API path a declarative action or
- *  source may target: it must start with `/api/` and contain no `..` segment,
- *  so a spec can never point the host's node credentials elsewhere. */
+ *  source may target: it must start with `/api/`, or be one of the explicitly
+ *  allowlisted built-in Core routes, and contain no `..` segment, so a spec can
+ *  never point the host's node credentials elsewhere. */
 export function isCoreApiPath(path: string): boolean {
+	if (!isCoreReadPath(path)) {
+		return false;
+	}
+	const pathname = path.split(/[?#]/, 1)[0] ?? "";
 	return (
-		path.startsWith("/api/") &&
-		!path.split("/").some((segment) => segment === "..")
+		pathname.startsWith("/api/") ||
+		pathname === "/workflows" ||
+		pathname.startsWith("/workflows/")
 	);
+}
+
+/** True when a declarative data source can safely read a path on the selected
+ * node. Reads may use a node's established non-`/api` routes, but remain rooted
+ * on that node and may not traverse upward. Mutating actions deliberately keep
+ * the narrower {@link isCoreApiPath} contract. */
+export function isCoreReadPath(path: string): boolean {
+	const unpairedSurrogate =
+		/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+	const hasForbiddenCharacter = (value: string): boolean =>
+		[...value].some((character) => {
+			const code = character.charCodeAt(0);
+			return character === "\\" || code <= 0x1f || code === 0x7f;
+		});
+	if (
+		!path.startsWith("/") ||
+		path.startsWith("//") ||
+		path.length > 4096 ||
+		unpairedSurrogate.test(path) ||
+		hasForbiddenCharacter(path)
+	) {
+		return false;
+	}
+	const pathname = path.split(/[?#]/, 1)[0] ?? "";
+	let decoded = pathname;
+	try {
+		// Decode the path (not a decoded query delimiter) to a fixed point so nested
+		// encodings cannot hide traversal from a downstream URL parser.
+		for (let pass = 0; pass <= pathname.length; pass += 1) {
+			const next = decodeURIComponent(decoded);
+			if (next === decoded) {
+				break;
+			}
+			decoded = next;
+		}
+	} catch {
+		return false;
+	}
+	if (
+		decoded.startsWith("//") ||
+		hasForbiddenCharacter(decoded) ||
+		decoded.includes("://")
+	) {
+		return false;
+	}
+	const segments = decoded.split("/");
+	if (segments.some((segment) => segment === "." || segment === "..")) {
+		return false;
+	}
+	// A leading `user@host` path has credential-shaped URL authority syntax. It
+	// has no valid node-route use and is rejected even though apiUrl concatenates.
+	return !/^\/[^/]*@[^/]*(?:\/|$)/.test(decoded);
+}
+
+export function isViewSourceHttpMethod(
+	method: unknown
+): method is ViewSourceHttpMethod {
+	return (
+		typeof method === "string" &&
+		(VIEW_SOURCE_HTTP_METHODS as readonly string[]).includes(method)
+	);
+}
+
+/** Whether a server-tagged contribution may address `path` with the node bearer.
+ * Community/old-Core payloads are confined to their own generic ext mount. */
+export function isContributionHttpPathAllowed(
+	authority: ContributionHttpAuthority,
+	path: string
+): boolean {
+	if (!(authority.plugin && isCoreApiPath(path))) {
+		return false;
+	}
+	if (authority.http_policy === "core") {
+		return true;
+	}
+	const ownerMount = `/api/ext/${authority.plugin}`;
+	if (!isCoreApiPath(ownerMount)) {
+		return false;
+	}
+	const pathname = new URL(path, "http://ryu.invalid").pathname;
+	return pathname === ownerMount || pathname.startsWith(`${ownerMount}/`);
+}
+
+/** Refine an automatic declarative source to the only legal wire form: a GET
+ * under the contribution's Core-approved path authority. */
+export function contributionSourceRequest(
+	authority: ContributionHttpAuthority,
+	source: ViewSource | undefined
+): ContributionSourceRequest | null {
+	if (!source) {
+		return null;
+	}
+	const method = source.http.method ?? "GET";
+	if (
+		method !== "GET" ||
+		!isContributionHttpPathAllowed(authority, source.http.path)
+	) {
+		return null;
+	}
+	return { method, path: source.http.path };
 }
 
 /** A fully-rendered declarative HTTP action, ready for the host's fetch seam. */
@@ -815,7 +994,7 @@ export interface RenderedActionHttp {
 /**
  * Render a {@link ViewActionHttp} against the fired action's context: the path
  * templates with URI-encoding, the body templates type-preservingly. Throws when
- * the rendered path is not a Core-relative `/api/` path ({@link isCoreApiPath}).
+ * the rendered path is not a safe Core-relative path ({@link isCoreApiPath}).
  */
 export function renderActionHttp(
 	http: ViewActionHttp,
@@ -823,13 +1002,34 @@ export function renderActionHttp(
 ): RenderedActionHttp {
 	const path = renderTemplate(http.path, ctx, { uriEncode: true });
 	if (!isCoreApiPath(path)) {
-		throw new Error(`declarative action path must start with /api/: ${path}`);
+		throw new Error(`declarative action path is not allowlisted: ${path}`);
 	}
 	return {
 		method: http.method,
 		path,
 		body: http.body === undefined ? undefined : renderBody(http.body, ctx),
 	};
+}
+
+/** Render an action and then apply the owning contribution's path authority.
+ * This is the defensive client twin of Core's authoritative manifest gate. */
+export function renderContributionActionHttp(
+	authority: ContributionHttpAuthority,
+	http: ViewActionHttp,
+	ctx: ViewActionContext
+): RenderedActionHttp {
+	if (!(VIEW_ACTION_HTTP_METHODS as readonly string[]).includes(http.method)) {
+		throw new Error(
+			`declarative action method is not allowlisted: ${http.method}`
+		);
+	}
+	const rendered = renderActionHttp(http, ctx);
+	if (!isContributionHttpPathAllowed(authority, rendered.path)) {
+		throw new Error(
+			`declarative action path is outside the owning app authority: ${rendered.path}`
+		);
+	}
+	return rendered;
 }
 
 function rowText(
@@ -882,22 +1082,42 @@ function rowMatchesFilters(
 	row: Record<string, unknown>,
 	filters: ViewSourceFilter[] | undefined
 ): boolean {
-	if (!filters?.length) {
+	const candidate: unknown = filters;
+	if (candidate === undefined) {
 		return true;
 	}
-	return filters.every((filter) => {
+	if (!Array.isArray(candidate)) {
+		return false;
+	}
+	return candidate.every((filter) => {
+		if (!isRecord(filter) || typeof filter.key !== "string") {
+			return false;
+		}
 		const value = rowText(row, filter.key);
 		if (value === undefined) {
 			return false;
 		}
-		if (filter.equals !== undefined) {
+		if (typeof filter.equals === "string") {
 			return value === filter.equals;
 		}
-		if (filter.in !== undefined) {
+		if (
+			Array.isArray(filter.in) &&
+			filter.in.every((item) => typeof item === "string")
+		) {
 			return filter.in.includes(value);
 		}
-		if (filter.notIn !== undefined) {
+		if (
+			Array.isArray(filter.notIn) &&
+			filter.notIn.every((item) => typeof item === "string")
+		) {
 			return !filter.notIn.includes(value);
+		}
+		if (
+			filter.equals !== undefined ||
+			filter.in !== undefined ||
+			filter.notIn !== undefined
+		) {
+			return false;
 		}
 		// A filter naming only a key means "this field must be present".
 		return true;
@@ -928,9 +1148,13 @@ export function sourceItemsFromResponse(
 	}
 	const map = source.map ?? {};
 	const limit =
-		source.limit !== undefined && source.limit > 0 ? source.limit : undefined;
+		typeof source.limit === "number" &&
+		Number.isFinite(source.limit) &&
+		source.limit > 0
+			? Math.min(Math.floor(source.limit), VIEW_SOURCE_LIMITS.maxRows)
+			: VIEW_SOURCE_LIMITS.defaultRows;
 	const out: SourceItem[] = [];
-	for (const row of rows) {
+	for (const row of rows.slice(0, VIEW_SOURCE_LIMITS.maxScanRows)) {
 		if (!(isRecord(row) && rowMatchesFilters(row, source.filter))) {
 			continue;
 		}
@@ -956,7 +1180,7 @@ export function sourceItemsFromResponse(
 				icon: rowText(row, map.icon ?? "icon"),
 			},
 		});
-		if (limit !== undefined && out.length >= limit) {
+		if (out.length >= limit) {
 			break;
 		}
 	}

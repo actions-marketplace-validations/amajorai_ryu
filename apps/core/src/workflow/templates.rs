@@ -197,6 +197,22 @@ mod tests {
         );
     }
 
+    /// Autoresearch is published in both the built-in catalog and the portable
+    /// marketplace. They are one workflow contract, not two independently edited
+    /// examples. Comparing parsed JSON keeps formatting irrelevant while making a
+    /// stale marketplace loop fail at the source.
+    #[test]
+    fn marketplace_autoresearch_matches_the_builtin_template() {
+        let builtin: serde_json::Value =
+            serde_json::from_str(include_str!("templates/autoresearch.json"))
+                .expect("built-in autoresearch parses");
+        let marketplace: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../marketplace-store/workflows/autoresearch/workflow.json"
+        ))
+        .expect("marketplace autoresearch parses");
+        assert_eq!(marketplace, builtin);
+    }
+
     /// The catalog is ordered — the store section renders it in sequence — so the
     /// file order in `TEMPLATE_FILES` is load-bearing, not incidental.
     #[test]

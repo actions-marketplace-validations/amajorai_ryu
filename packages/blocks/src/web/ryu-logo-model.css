@@ -69,6 +69,17 @@
 	outline: none;
 }
 
+.ryu-logo-model__fallback {
+	position: relative;
+	z-index: 2;
+	width: min(58%, 18rem);
+	height: auto;
+	color: var(--foreground);
+	filter: drop-shadow(
+		0 1.5rem 2.5rem color-mix(in oklch, var(--foreground) 18%, transparent)
+	);
+}
+
 .ryu-logo-model__shadow {
 	position: absolute;
 	bottom: 12%;

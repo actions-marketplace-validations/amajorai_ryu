@@ -18,7 +18,10 @@
 //     grant-gated Core-side, so a capability the owning app was not granted is
 //     refused there. The shell never runs plugin code to fire one.
 
-import { isCoreApiPath, sourceItemsFromResponse } from "@ryu/app-host/views";
+import {
+	contributionSourceRequest,
+	sourceItemsFromResponse,
+} from "@ryu/app-host/views";
 import { Button } from "@ryu/ui/components/button";
 import { Icon } from "@ryu/ui/components/icon";
 import {
@@ -41,7 +44,7 @@ import {
 	type KnownComposerControl,
 } from "@/src/components/composer/plugin-composer-controls.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
-import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
+import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
 import { pluginHostInvoke } from "@/src/lib/api/plugins.ts";
 
 /** How often a `chip` re-reads its source. Slow enough to be free, fast enough
@@ -212,20 +215,25 @@ function PluginComposerChip({
 	const node = useActiveNode();
 	const target = toTarget(node);
 	const source = control.source;
-	const path = source?.http?.path;
-	// Only a Core-relative path is fetchable (the same guard the sidebar and the
-	// declarative views apply); anything else is not a source this host will call.
-	const fetchable = Boolean(path && isCoreApiPath(path));
+	const sourceRequest = contributionSourceRequest(control, source);
+	const fetchable = sourceRequest !== null;
 
 	const { data } = useQuery({
-		queryKey: ["plugin-composer-chip", target.url, control.plugin, control.id],
+		queryKey: [
+			"plugin-composer-chip",
+			target.url,
+			target.token,
+			control.plugin,
+			control.id,
+			sourceRequest?.path ?? "",
+		],
 		queryFn: async () => {
-			if (!(source && path)) {
+			if (!(source && sourceRequest)) {
 				return null;
 			}
-			const resp = await fetch(apiUrl(target, path), {
-				method: source.http.method ?? "GET",
-				headers: makeHeaders(target.token),
+			const resp = await fetch(apiUrl(target, sourceRequest.path), {
+				method: sourceRequest.method,
+				headers: await requestHeaders(target),
 			});
 			if (!resp.ok) {
 				return null;

@@ -16,13 +16,14 @@
 //! which starts loading — and can call `load("auth.bin")` — while `setup` is
 //! still running.
 //!
-//! Two rules make a crash mid-migration harmless:
+//! Three rules make a crash mid-migration harmless:
 //!   * **Copy, never move.** The old directory is left untouched, so an
 //!     interrupted run leaves the source intact and the next launch retries.
 //!     (`bun run wipe --legacy` is how the leftovers get cleaned up.)
 //!   * **Never overwrite.** The copy is skipped entirely once the new directory
-//!     has any content, so a user who already signed in under the new identifier
-//!     can never have that clobbered by a stale file from the old one.
+//!     already has the same file, so a newer sign-in can never be clobbered.
+//!   * **Mark only complete passes.** Missing files are retried until every legacy
+//!     entry is present; a partial destination is not mistaken for success.
 //!
 //! What this deliberately does NOT carry:
 //!   * Keychain secrets — those are keyed by service `ryu` + account, not by the
@@ -33,6 +34,8 @@
 //!     omission here.
 
 use std::path::{Path, PathBuf};
+
+const MIGRATION_COMPLETE_MARKER: &str = ".identifier-migration-complete";
 
 /// The pre-rename release identifier. Kept as a constant (not derived) because
 /// it is frozen history — it must never track a future rename.
@@ -80,19 +83,80 @@ fn app_data_dir_for(identifier: &str) -> Option<PathBuf> {
     dirs::data_dir().map(|root| root.join(identifier))
 }
 
-/// True when `dir` is absent or holds no entries — the only state into which a
-/// migration may write.
-fn is_empty_or_absent(dir: &Path) -> bool {
-    match std::fs::read_dir(dir) {
-        Ok(mut entries) => entries.next().is_none(),
-        Err(_) => true,
+/// Decide whether to migrate. Split out from the IO so the policy is testable:
+/// migrate only when the legacy directory has content and no completed pass was
+/// recorded. A nonempty destination may be a partial copy and must be retried.
+pub fn should_migrate(legacy_exists_with_content: bool, migration_complete: bool) -> bool {
+    legacy_exists_with_content && !migration_complete
+}
+
+fn migration_marker(dir: &Path) -> PathBuf {
+    dir.join(MIGRATION_COMPLETE_MARKER)
+}
+
+fn copy_without_overwrite(from: &Path, to: &Path, nonce: u128) -> std::io::Result<bool> {
+    if to.exists() {
+        return Ok(false);
+    }
+    let temp = to.with_file_name(format!(
+        ".ryu-identifier-migration-{}-{nonce}.tmp",
+        std::process::id()
+    ));
+    std::fs::copy(from, &temp)?;
+    match std::fs::rename(&temp, to) {
+        Ok(()) => Ok(true),
+        Err(_) if to.exists() => {
+            let _ = std::fs::remove_file(temp);
+            Ok(false)
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(temp);
+            Err(error)
+        }
     }
 }
 
-/// Decide whether to migrate. Split out from the IO so the policy is testable:
-/// migrate only when the legacy directory has content AND the new one does not.
-pub fn should_migrate(legacy_exists_with_content: bool, new_is_empty: bool) -> bool {
-    legacy_exists_with_content && new_is_empty
+fn migrate_between(legacy: &Path, current: &Path) -> Result<usize, String> {
+    if migration_marker(current).is_file() {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(current)
+        .map_err(|error| format!("could not create {current:?}: {error}"))?;
+    let entries =
+        std::fs::read_dir(legacy).map_err(|error| format!("could not read {legacy:?}: {error}"))?;
+    let mut copied = 0;
+    for (index, entry) in entries.enumerate() {
+        let entry = entry.map_err(|error| format!("could not read legacy entry: {error}"))?;
+        let from = entry.path();
+        if entry
+            .file_type()
+            .map_err(|error| format!("could not inspect {from:?}: {error}"))?
+            .is_dir()
+        {
+            continue;
+        }
+        let to = current.join(entry.file_name());
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+            .saturating_add(index as u128);
+        if copy_without_overwrite(&from, &to, nonce)
+            .map_err(|error| format!("could not copy {from:?}: {error}"))?
+        {
+            copied += 1;
+        }
+    }
+    let marker = migration_marker(current);
+    let marker_temp = current.join(format!(
+        ".ryu-identifier-migration-marker-{}.tmp",
+        std::process::id()
+    ));
+    std::fs::write(&marker_temp, b"complete\n")
+        .map_err(|error| format!("could not stage identifier migration marker: {error}"))?;
+    std::fs::rename(&marker_temp, marker)
+        .map_err(|error| format!("could not mark identifier migration complete: {error}"))?;
+    Ok(copied)
 }
 
 /// Copy the app-data store from the pre-rename identifier to the current one,
@@ -110,32 +174,20 @@ pub fn migrate_app_data() -> usize {
     if legacy == current {
         return 0;
     }
-    if !should_migrate(!is_empty_or_absent(&legacy), is_empty_or_absent(&current)) {
+    let legacy_has_content = std::fs::read_dir(&legacy)
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .is_some();
+    if !should_migrate(legacy_has_content, migration_marker(&current).is_file()) {
         return 0;
     }
-
-    if let Err(err) = std::fs::create_dir_all(&current) {
-        eprintln!("ryu: identifier migration could not create {current:?}: {err}");
-        return 0;
-    }
-
-    let Ok(entries) = std::fs::read_dir(&legacy) else {
-        return 0;
+    let copied = match migrate_between(&legacy, &current) {
+        Ok(copied) => copied,
+        Err(error) => {
+            eprintln!("ryu: identifier migration incomplete: {error}");
+            return 0;
+        }
     };
-    let mut copied = 0;
-    for entry in entries.flatten() {
-        let from = entry.path();
-        let to = current.join(entry.file_name());
-        // Only the plugin-store files live at this level; a nested directory is
-        // a cache we have no reason to carry, so shallow-copy is correct.
-        if from.is_dir() {
-            continue;
-        }
-        match std::fs::copy(&from, &to) {
-            Ok(_) => copied += 1,
-            Err(err) => eprintln!("ryu: identifier migration could not copy {from:?}: {err}"),
-        }
-    }
     if copied > 0 {
         eprintln!(
             "ryu: migrated {copied} file(s) from the previous bundle id ({}) to {}. \
@@ -152,14 +204,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migrates_only_when_the_legacy_dir_has_content_and_the_new_one_does_not() {
-        // The one state that may be written into.
-        assert!(should_migrate(true, true));
-        // Already signed in under the new id — never clobber it.
-        assert!(!should_migrate(true, false));
+    fn migrates_only_when_legacy_content_has_not_completed() {
+        assert!(should_migrate(true, false));
+        assert!(!should_migrate(true, true));
         // Fresh install, nothing to carry.
-        assert!(!should_migrate(false, true));
         assert!(!should_migrate(false, false));
+        assert!(!should_migrate(false, true));
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("ryu-identifier-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn retries_a_partial_copy_without_overwriting_newer_files() {
+        let container = test_root("partial");
+        let legacy = container.join("legacy");
+        let current = container.join("current");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(legacy.join("auth.bin"), b"legacy-auth").unwrap();
+        std::fs::write(legacy.join("entitlement.bin"), b"legacy-entitlement").unwrap();
+        std::fs::write(current.join("auth.bin"), b"newer-auth").unwrap();
+
+        assert_eq!(migrate_between(&legacy, &current).unwrap(), 1);
+        assert_eq!(
+            std::fs::read(current.join("auth.bin")).unwrap(),
+            b"newer-auth"
+        );
+        assert_eq!(
+            std::fs::read(current.join("entitlement.bin")).unwrap(),
+            b"legacy-entitlement"
+        );
+        assert!(migration_marker(&current).is_file());
+        assert_eq!(migrate_between(&legacy, &current).unwrap(), 0);
+        std::fs::remove_dir_all(container).unwrap();
     }
 
     #[test]

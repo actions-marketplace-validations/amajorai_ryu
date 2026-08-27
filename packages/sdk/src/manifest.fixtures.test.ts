@@ -17,7 +17,8 @@
  *
  * The set is read from Core's tree so a new shipped plugin is covered the moment it
  * lands, without touching this file. It spans BOTH homes: the packaged manifests
- * live in `apps-store/<x>/manifest.json` and `plugins-store/<x>/manifest.json` (Core
+ * live in `apps-store/<x>/manifest.json` and
+ * `plugins-store/{plugins,lsp,external_plugins}/<x>/manifest.json` (Core
  * `include_str!`s them from there), and only the ~13 Core-only ones remain under
  * `apps/core/src/plugin_manifest/fixtures/`. Reading just the fixtures dir would
  * still pass — on 13 files instead of 71 — so both roots are walked deliberately.
@@ -39,7 +40,12 @@ import {
 const REPO_ROOT = join(import.meta.dir, "../../..");
 const FIXTURES_DIR = join(REPO_ROOT, "apps/core/src/plugin_manifest/fixtures");
 /** The package roots whose `manifest.json` Core compiles in directly. */
-const PACKAGE_ROOTS = ["apps-store", "plugins-store"];
+const PACKAGE_ROOTS = [
+	"apps-store",
+	"plugins-store/plugins",
+	"plugins-store/lsp",
+	"plugins-store/external_plugins",
+];
 
 interface RawManifest {
 	companion?: { label?: unknown };
@@ -419,7 +425,7 @@ describe("PluginManifestSchema preserves turn_hook.match", () => {
 			// `tool-firewall` is a packaged plugin, so its manifest lives in its
 			// package directory — there is no fixture copy any more.
 			readFileSync(
-				join(REPO_ROOT, "plugins-store/tool-firewall/manifest.json"),
+				join(REPO_ROOT, "plugins-store/plugins/tool-firewall/manifest.json"),
 				"utf8"
 			)
 		);

@@ -233,19 +233,16 @@ impl From<anyhow::Error> for UpdateError {
 /// # Built-in companions get their compiled-in bundle here
 ///
 /// A built-in that ships a companion frame carries it as a compiled-in `*_UI_HTML`
-/// const, and the ONLY thing that ever wrote one onto a record used to be
-/// `plugins::seed` — so every opt-in companion had to be PRE-SEEDED (installed +
-/// disabled) on every fresh install just to have somewhere for its bundle to live,
-/// because `enable_app` only flips a bit and the marketplace `update_app` path needs
-/// a verified descriptor a built-in does not have. That is why the Store listed
-/// leaf-feature apps as "Installed (off)" out of the box, and why uninstalling one
-/// did not survive a reboot.
+/// const. The old seed wrote that bundle onto a disabled lifecycle record for every
+/// opt-in companion, so the Store listed leaf-feature apps as "Installed (off)" out
+/// of the box and uninstalling one did not survive a reboot. The bundle now travels
+/// with the explicit install operation instead.
 ///
 /// Sourcing the bundle at INSTALL time removes that coupling: an app can now be
 /// absent from a fresh store and still mount a real UI the moment the user installs
-/// and enables it (see `seed::NOT_PRE_INSTALLED`). Best-effort by construction — a
+/// and enables it. Best-effort by construction — a
 /// failed `set_ui_code` must not fail the install (the record is the install; the
-/// bundle is back-fillable and `seed_companion_ui`'s case-2 pass fills it on the next
+/// bundle is back-fillable and the companion backfill fills it on the next
 /// boot), and a manifest with no compiled-in bundle is the overwhelming common case
 /// and takes the `None` branch. The marketplace install sink
 /// (`persist_installed_plugin`) calls `set_ui_code` with its verified descriptor
@@ -848,7 +845,7 @@ pub enum UninstallError {
     /// The app is not installed.
     NotInstalled { id: String },
     /// The plugin may only be **disabled**, never uninstalled — it is a built-in
-    /// system app or a default-on plugin whose manifest is compiled into the
+    /// system app or a pre-installed plugin whose manifest is compiled into the
     /// binary and would be resurrected by the startup seed on the next boot. See
     /// [`crate::plugins::builtins::is_uninstall_protected`].
     Protected { id: String },
@@ -897,15 +894,15 @@ impl From<anyhow::Error> for UninstallError {
 /// # Order of operations (a refused uninstall changes nothing)
 ///
 /// 1. **Installed?** — else [`UninstallError::NotInstalled`].
-/// 2. **Protected?** — a built-in / default-on plugin is refused with
+/// 2. **Protected?** — a built-in / pre-installed plugin is refused with
 ///    [`UninstallError::Protected`] **before** anything is disabled or removed, so
 ///    a refusal never partially tears down the plugin. Built-ins can only be
 ///    disabled (their manifest is compiled in; the seed would resurrect a removed
-///    default-on record — see [`crate::plugins::builtins::is_uninstall_protected`]).
+///    pre-installed record — see [`crate::plugins::builtins::is_uninstall_protected`]).
 /// 3. **Disable** the target + (with `cascade`) its dependents via [`disable_app`].
 ///    An enabled dependent without `cascade` refuses here with the typed
 ///    `BlockedByDependents`, mapped to [`UninstallError::Dependency`]. The load-
-///    bearing plugins are all default-on, so they are already refused at step 2 and
+///    bearing plugins are all pre-installed, so they are already refused at step 2 and
 ///    never reach this disable (hence `force = false` is safe here).
 /// 4. **Remove** the target's record via [`PluginStore::remove`]. Only the target
 ///    is removed; cascaded dependents are left installed-but-disabled (a user who
@@ -932,7 +929,7 @@ pub async fn uninstall_app(
         return Err(UninstallError::NotInstalled { id: id.to_owned() });
     }
 
-    // 2. Protected? Refuse built-in / default-on plugins BEFORE any teardown, so a
+    // 2. Protected? Refuse built-in / pre-installed plugins BEFORE any teardown, so a
     // refused uninstall is never a partial one.
     if crate::plugins::builtins::is_uninstall_protected(id) {
         return Err(UninstallError::Protected { id: id.to_owned() });
@@ -940,17 +937,17 @@ pub async fn uninstall_app(
 
     // 3. Disable the target (+ dependents under cascade). Reuses disable_app for the
     // dependents refusal, cascade order, and idempotent teardown of the bits.
-    // `force = false`: any load-bearing plugin is default-on and already refused at
+    // `force = false`: any load-bearing plugin is pre-installed and already refused at
     // step 2, so this can never be a forced disable of a core subsystem.
     let disabled = match disable_app(store, id, all_manifests, cascade, false).await {
         Ok(outcome) => outcome.disabled,
         Err(DisableError::NotInstalled { id }) => return Err(UninstallError::NotInstalled { id }),
         Err(DisableError::Dependency(e)) => return Err(UninstallError::Dependency(e)),
-        // Unreachable in practice (load-bearing ⊂ default-on ⊂ protected), but map
+        // Unreachable in practice (load-bearing ⊂ pre-installed ⊂ protected), but map
         // it to Protected rather than panicking if the invariant ever changes.
         Err(DisableError::LoadBearing { id }) => return Err(UninstallError::Protected { id }),
-        // Also unreachable (mandatory ⊂ default-on ⊂ protected, asserted by
-        // `mandatory_plugins_are_all_default_on`), and mapped rather than panicked
+        // Also unreachable (mandatory ⊂ pre-installed ⊂ protected, asserted by
+        // `mandatory_plugins_are_all_preinstalled`), and mapped rather than panicked
         // on for the same reason.
         Err(DisableError::Mandatory { id }) => return Err(UninstallError::Protected { id }),
         Err(DisableError::Other(e)) => return Err(UninstallError::Other(e)),
@@ -1402,7 +1399,7 @@ mod tests {
     async fn adopted_official_provenance_survives_reload_as_core() {
         let _guard = crate::plugins::builtins::VERIFIED_OFFICIAL_TEST_LOCK
             .lock()
-            .expect("test lock");
+            .unwrap_or_else(|error| error.into_inner());
         use crate::plugin_manifest::PluginTier;
         use crate::plugins::builtins::tier_for_manifest;
         use crate::plugins::isolation::{
@@ -1410,7 +1407,11 @@ mod tests {
         };
 
         let s = store();
-        let manifest = make_manifest("@ryu/social", "1.0.0", vec![]);
+        let manifest = make_manifest(
+            "@ryu/__test-verified-official-lifecycle",
+            "1.0.0",
+            vec![],
+        );
         s.insert(&manifest.id, &manifest.version).await.unwrap();
 
         let provenance = capture_provenance(
@@ -1436,6 +1437,7 @@ mod tests {
             Some(digest.as_str())
         );
         assert_eq!(tier_for_manifest(&manifest), PluginTier::Core);
+        crate::plugins::builtins::clear_verified_official_digest(&manifest.id);
     }
 
     #[test]
@@ -2474,7 +2476,7 @@ mod tests {
     }
 
     /// Uninstalling a built-in is REFUSED so it can never be resurrected by the
-    /// startup seed. `goal` isolates the `is_default_on` branch: default-on, NOT a
+    /// startup seed. `goal` isolates the `is_preinstalled` branch: pre-installed, NOT a
     /// SYSTEM plugin, NOT load-bearing — a weak `is_system_plugin`-only guard would wrongly
     /// allow it and the seed would re-add it on the next boot.
     #[tokio::test]

@@ -65,6 +65,7 @@ import {
 // A different module from `org.ts` above: `orgs.ts` owns the SESSION's active
 // org, which `org.ts` (the org list + RBAC routes) has no accessor for.
 import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
+import { NodeOrganizationBindingCard } from "./NodeOrganizationBindingCard.tsx";
 
 /** Where members are invited / roles changed (Better Auth owns those mutations). */
 const ORGANIZATIONS_URL = `${FRONTEND_URL.replace(/\/$/, "")}/organizations`;
@@ -648,6 +649,8 @@ export function WorkspaceSection() {
 					) : null}
 				</SettingsGroup>
 			</SettingsSection>
+
+			<NodeOrganizationBindingCard organizations={orgs} />
 
 			{activeOrg && orgId ? (
 				<SettingsSection

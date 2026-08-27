@@ -131,7 +131,7 @@ fn sandbox_exec_schema() -> Value {
     })
 }
 
-// ── Persistent (Daytona-only) lifecycle tool schemas ──────────────────────────
+// ── Persistent remote workspace lifecycle tool schemas ───────────────────────
 
 fn sandbox_create_schema() -> Value {
     json!({
@@ -191,9 +191,9 @@ pub fn tools() -> Vec<RegistryTool> {
             server: SERVER_NAME.to_owned(),
             name: "sandbox_create".to_owned(),
             description: Some(
-                "Create a long-lived Daytona sandbox workspace (persistent lifecycle). \
+                "Create a long-lived remote Box or Daytona workspace (persistent lifecycle). \
                  Metered per-second until destroyed with `sandbox_destroy`; run commands \
-                 against it with `sandbox_run`. Daytona-only. Returns `run_id` and \
+                 against it with `sandbox_run`. Returns `run_id`, `workspace_id`, and backend. \
                  `workspace_id`."
                     .to_owned(),
             ),
@@ -205,7 +205,7 @@ pub fn tools() -> Vec<RegistryTool> {
             server: SERVER_NAME.to_owned(),
             name: "sandbox_run".to_owned(),
             description: Some(
-                "Run a command in an existing persistent Daytona sandbox created with \
+                "Run a command in an existing persistent Box or Daytona workspace created with \
                  `sandbox_create`. Returns stdout, stderr, and exit code."
                     .to_owned(),
             ),
@@ -217,7 +217,7 @@ pub fn tools() -> Vec<RegistryTool> {
             server: SERVER_NAME.to_owned(),
             name: "sandbox_destroy".to_owned(),
             description: Some(
-                "Destroy a persistent Daytona sandbox created with `sandbox_create`, \
+                "Destroy a persistent remote workspace created with `sandbox_create`, \
                  stopping metering. Idempotent — destroying an already-gone sandbox succeeds."
                     .to_owned(),
             ),
@@ -239,17 +239,17 @@ pub async fn dispatch(tool: &str, arguments: Value) -> Result<Value> {
     }
 }
 
-// ── Persistent (Daytona-only) lifecycle tool handlers ─────────────────────────
+// ── Persistent remote workspace lifecycle tool handlers ───────────────────────
 //
 // These are thin wrappers over the persistent workspace manager in
-// `sidecar::sandbox::session`, which is hardwired to the Daytona backend. Unlike
+// `sidecar::sandbox::session`, which selects the configured remote backend. Unlike
 // `sandbox_exec` (one-shot create+run+destroy), these keep the workspace alive:
 // `sandbox_create` provisions + registers it for per-second metering,
 // `sandbox_run` execs against it, and `sandbox_destroy` tears it down + debits
 // the residual tail. Persistent tools ignore any `backend` arg by design.
 
-/// Create a persistent Daytona sandbox. No spec is taken from the tool call, so
-/// the billed/provisioned shape is the node's configured Daytona spec.
+/// Create a persistent remote sandbox. No spec is taken from the tool call, so
+/// the billed/provisioned shape is the node's configured provider spec.
 async fn run_sandbox_create(arguments: Value) -> Result<Value> {
     use crate::sidecar::sandbox::session;
 
@@ -258,10 +258,11 @@ async fn run_sandbox_create(arguments: Value) -> Result<Value> {
     Ok(json!({
         "run_id": created.run_id,
         "workspace_id": created.workspace_id,
+        "backend": created.backend,
     }))
 }
 
-/// Run a command in an existing persistent Daytona sandbox.
+/// Run a command in an existing persistent remote sandbox.
 async fn run_sandbox_run(arguments: Value) -> Result<Value> {
     use crate::sidecar::sandbox::session;
 
@@ -288,7 +289,7 @@ async fn run_sandbox_run(arguments: Value) -> Result<Value> {
     }))
 }
 
-/// Destroy a persistent Daytona sandbox (idempotent).
+/// Destroy a persistent remote sandbox (idempotent).
 async fn run_sandbox_destroy(arguments: Value) -> Result<Value> {
     use crate::sidecar::sandbox::session;
 
@@ -768,7 +769,7 @@ mod tests {
         assert_eq!(tool.server, SERVER_NAME);
         assert!(tool.input_schema.is_some());
         assert!(tool.description.is_some());
-        // Persistent (Daytona-only) lifecycle tools live alongside the one-shot exec.
+        // Persistent remote workspace lifecycle tools live alongside the one-shot exec.
         let ids: Vec<&str> = tools.iter().map(|t| t.id.as_str()).collect();
         assert!(ids.contains(&"sandbox.sandbox_create"));
         assert!(ids.contains(&"sandbox.sandbox_run"));

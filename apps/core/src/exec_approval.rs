@@ -25,8 +25,7 @@
 /// the pref maps onto exactly the value that module checks.
 const ENV_EXEC_APPROVAL_MODE: &str = "RYU_EXEC_APPROVAL_MODE";
 
-static PREF_OWNS_ENV: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static PREF_OWNS_ENV: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Preferences key the desktop writes to enable/disable the command-approval
 /// gate. Value is the mode string forwarded to the gateway scan (`off` disarms;
@@ -68,8 +67,7 @@ pub fn seed_from_pref(value: &str) {
 pub fn apply_from_pref(value: &str) {
     let env_is_external = std::env::var(ENV_EXEC_APPROVAL_MODE)
         .map(|current| {
-            !current.trim().is_empty()
-                && !PREF_OWNS_ENV.load(std::sync::atomic::Ordering::Relaxed)
+            !current.trim().is_empty() && !PREF_OWNS_ENV.load(std::sync::atomic::Ordering::Relaxed)
         })
         .unwrap_or(false);
     if env_is_external {

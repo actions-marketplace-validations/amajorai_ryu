@@ -48,6 +48,7 @@ import {
 	Area,
 	AreaChart,
 	CartesianGrid,
+	// biome-ignore lint/suspicious/noDeprecatedImports: Recharts Pie still uses Cell for per-slice colors.
 	Cell,
 	Pie,
 	PieChart,
@@ -56,6 +57,7 @@ import {
 } from "recharts";
 import { formatMicroUsd } from "./credits.tsx";
 import {
+	compactUsageTrendPoints,
 	GRANULARITY_LABELS,
 	type UsageAnalyticsData,
 	type UsageBreakdownRow,
@@ -205,13 +207,15 @@ function MetricTile({
 }
 
 function UsageTrend({ data }: { data: UsageAnalyticsData }) {
-	const chartData = data.buckets.map((bucket) => ({
-		errors: bucket.errors,
-		label: bucket.label,
-		requests: bucket.requests,
-		spend: bucket.spendMicroUsd,
-		tokens: bucket.inputTokens + bucket.outputTokens,
-	}));
+	const chartData = compactUsageTrendPoints(
+		data.buckets.map((bucket) => ({
+			errors: bucket.errors,
+			label: bucket.label,
+			requests: bucket.requests,
+			spend: bucket.spendMicroUsd,
+			tokens: bucket.inputTokens + bucket.outputTokens,
+		}))
+	);
 	const config = {
 		errors: { color: KPI_COLORS.errors, label: "Errors" },
 		requests: { color: KPI_COLORS.requests, label: "Requests" },
@@ -817,6 +821,7 @@ function DateRangeControl({
 
 export interface UsageAnalyticsDashboardProps {
 	analytics: UsageAnalyticsData | null;
+	failed?: boolean;
 	granularity: UsageGranularity;
 	loading: boolean;
 	model: string | null;
@@ -835,6 +840,7 @@ export interface UsageAnalyticsDashboardProps {
 
 export function UsageAnalyticsDashboard({
 	analytics,
+	failed = false,
 	granularity,
 	loading,
 	model,
@@ -1115,7 +1121,7 @@ export function UsageAnalyticsDashboard({
 						<ActivityHeatmap data={analytics} />
 					</div>
 				</>
-			) : (
+			) : loading || failed ? null : (
 				<Empty>
 					<EmptyHeader>
 						<EmptyMedia variant="icon">

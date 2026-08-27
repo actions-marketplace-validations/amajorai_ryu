@@ -86,6 +86,14 @@ opensrc/
 .ryu-worktrees/
 .claude/worktrees/
 
+# Local agent/test scratch, worktrees, and proof captures
+/.codex-tmp/
+/.tmp/
+/.worktrees/
+/artifacts/
+/apps/artifacts/
+/apps/desktop/e2e/artifacts/
+
 # Tauri Python sidecar build artifacts
 apps/desktop/src-tauri/Python/
 # Playwright MCP scratch artifacts (screenshots, console logs)

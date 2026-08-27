@@ -234,13 +234,16 @@ mod tests {
             api_key: Some("raw-composio".to_owned()),
             ..ComposioConfig::default()
         };
+        config.treg.token = Some("raw-treg".to_owned());
+        config.treg.enabled = true;
 
         let applied = config.replace_provider_vault_keys(&HashMap::from([
             (String::from("openrouter"), String::from("vault-openrouter")),
             (String::from("composio"), String::from("vault-composio")),
+            (String::from("treg"), String::from("vault-treg")),
         ]));
 
-        assert_eq!(applied, vec!["openrouter", "composio"]);
+        assert_eq!(applied, vec!["openrouter", "composio", "treg"]);
         assert_eq!(
             config
                 .providers
@@ -251,5 +254,7 @@ mod tests {
         );
         assert!(config.providers.replicate.is_none());
         assert_eq!(config.composio.api_key.as_deref(), Some("vault-composio"));
+        assert_eq!(config.treg.token.as_deref(), Some("vault-treg"));
+        assert!(config.treg.enabled);
     }
 }

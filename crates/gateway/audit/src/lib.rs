@@ -195,6 +195,46 @@ pub struct AuditSummary {
     pub unpriced_output_tokens: u64,
 }
 
+/// Filters for the canonical 15-minute usage rollup. The range is half-open:
+/// `timestamp_from <= timestamp < timestamp_until`.
+#[derive(Debug, Clone)]
+pub struct AuditUsageQuery {
+    pub timestamp_from: String,
+    pub timestamp_until: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+/// One canonical 15-minute usage bucket returned to analytics consumers.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditUsageEvent {
+    pub timestamp: String,
+    pub provider: String,
+    pub model: String,
+    pub member_id: Option<String>,
+    pub node_id: Option<String>,
+    pub feature: Option<String>,
+    pub source: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub request_count: u64,
+    pub error_count: u64,
+    pub latency_total_ms: u64,
+    pub latency_samples: u64,
+    pub agent_seconds: f64,
+    pub cost_micro_usd: Option<u64>,
+    /// Used by the gateway API to price managed calls for which the provider did
+    /// not report a transaction cost. These fields are never serialized.
+    #[serde(skip)]
+    pub unpriced_input_tokens: u64,
+    #[serde(skip)]
+    pub unpriced_output_tokens: u64,
+    /// Preserves the billing attribution needed to classify a managed-node row.
+    #[serde(skip)]
+    pub managed_inference: bool,
+}
+
 /// A persisted audit entry as returned by [`AuditLogger::query`].
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEntry {
@@ -305,7 +345,7 @@ impl AuditLogger {
             std::fs::create_dir_all(parent)?;
         }
 
-        let conn = Connection::open(&config.db_path)?;
+        let mut conn = Connection::open(&config.db_path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS audit_log (
@@ -391,6 +431,45 @@ impl AuditLogger {
              CREATE INDEX IF NOT EXISTS idx_audit_widget_instance_id ON audit_log(widget_instance_id);",
         );
 
+        // Keep the lifetime summary in a singleton row. The INSERT makes the
+        // migration idempotent; the UPDATE backfills databases created by older
+        // versions. New writes update this row in the same transaction as the
+        // append-only audit row, so reads stay O(1) without sacrificing accuracy.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS audit_summary (
+                 singleton                    INTEGER PRIMARY KEY CHECK (singleton = 1),
+                 request_count                INTEGER NOT NULL DEFAULT 0,
+                 error_count                  INTEGER NOT NULL DEFAULT 0,
+                 input_tokens                 INTEGER NOT NULL DEFAULT 0,
+                 output_tokens                INTEGER NOT NULL DEFAULT 0,
+                 reported_cost_micro_usd      INTEGER NOT NULL DEFAULT 0,
+                 unpriced_input_tokens        INTEGER NOT NULL DEFAULT 0,
+                 unpriced_output_tokens       INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT OR IGNORE INTO audit_summary (singleton) VALUES (1);
+             UPDATE audit_summary SET
+                 request_count = (SELECT COUNT(*) FROM audit_log WHERE event_type != 'control_change'),
+                 error_count = (SELECT COALESCE(SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END), 0)
+                                FROM audit_log WHERE event_type != 'control_change'),
+                 input_tokens = (SELECT COALESCE(SUM(input_tokens), 0)
+                                 FROM audit_log WHERE event_type != 'control_change'),
+                 output_tokens = (SELECT COALESCE(SUM(output_tokens), 0)
+                                  FROM audit_log WHERE event_type != 'control_change'),
+                 reported_cost_micro_usd = (SELECT COALESCE(SUM(CASE
+                     WHEN event_type = 'model_call' AND managed_inference != 0
+                          AND provider_cost_micro_usd IS NOT NULL
+                     THEN provider_cost_micro_usd ELSE 0 END), 0) FROM audit_log),
+                 unpriced_input_tokens = (SELECT COALESCE(SUM(CASE
+                     WHEN event_type = 'model_call' AND managed_inference != 0
+                          AND provider_cost_micro_usd IS NULL
+                     THEN input_tokens ELSE 0 END), 0) FROM audit_log),
+                 unpriced_output_tokens = (SELECT COALESCE(SUM(CASE
+                     WHEN event_type = 'model_call' AND managed_inference != 0
+                          AND provider_cost_micro_usd IS NULL
+                     THEN output_tokens ELSE 0 END), 0) FROM audit_log)
+             WHERE singleton = 1;",
+        )?;
+
         // Load existing per-key token totals so budget enforcement survives restarts.
         let token_totals: DashMap<String, u64> = DashMap::new();
         {
@@ -417,7 +496,17 @@ impl AuditLogger {
 
         thread::spawn(move || {
             for record in receiver {
-                if let Err(e) = conn.execute(
+                let is_summary_row = record.event_type != EventType::ControlChange;
+                let is_model_call = record.event_type == EventType::ModelCall;
+                let has_error = record.error.is_some();
+                let reported_cost = record.provider_cost_micro_usd.unwrap_or(0);
+                let is_unpriced_managed = is_model_call
+                    && record.managed_inference
+                    && record.provider_cost_micro_usd.is_none();
+
+                let write_result = (|| -> rusqlite::Result<()> {
+                    let tx = conn.transaction()?;
+                    tx.execute(
                     "INSERT INTO audit_log (
                          request_id, api_key, api_key_prefix, user_name, org_id, team_id, project_id,
                          provider, model, input_tokens, output_tokens,
@@ -428,36 +517,79 @@ impl AuditLogger {
                      ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
                                ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)",
                     params![
-                        record.request_id,
+                        &record.request_id,
                         api_key_storage_key(&record.api_key),
                         redact_key(&record.api_key),
-                        record.user_name,
-                        record.org_id,
-                        record.team_id,
-                        record.project_id,
-                        record.provider,
-                        record.model,
+                        record.user_name.as_deref(),
+                        record.org_id.as_deref(),
+                        record.team_id.as_deref(),
+                        record.project_id.as_deref(),
+                        &record.provider,
+                        &record.model,
                         record.input_tokens as i64,
                         record.output_tokens as i64,
                         record.cache_hit as i32,
                         record.latency_ms as i64,
                         record.eval_score,
-                        record.error,
-                        record.skill_ids,
-                        record.session_id,
+                        record.error.as_deref(),
+                        record.skill_ids.as_deref(),
+                        record.session_id.as_deref(),
                         record.event_type.as_str(),
-                        record.backend,
-                        record.command,
+                        record.backend.as_deref(),
+                        record.command.as_deref(),
                         record.duration_ms.map(|v| v as i64),
                         record.exit_code,
-                        record.user_id,
-                        record.agent_id,
-                        record.feature,
+                        record.user_id.as_deref(),
+                        record.agent_id.as_deref(),
+                        record.feature.as_deref(),
                         record.managed_inference as i32,
                         record.provider_cost_micro_usd.map(|v| v as i64),
-                        record.widget_instance_id,
+                        record.widget_instance_id.as_deref(),
                     ],
-                ) {
+                )?;
+                    tx.execute(
+                        "UPDATE audit_summary SET
+                             request_count = request_count + ?1,
+                             error_count = error_count + ?2,
+                             input_tokens = input_tokens + ?3,
+                             output_tokens = output_tokens + ?4,
+                             reported_cost_micro_usd = reported_cost_micro_usd + ?5,
+                             unpriced_input_tokens = unpriced_input_tokens + ?6,
+                             unpriced_output_tokens = unpriced_output_tokens + ?7
+                         WHERE singleton = 1",
+                        params![
+                            i64::from(is_summary_row),
+                            i64::from(is_summary_row && has_error),
+                            if is_summary_row {
+                                record.input_tokens as i64
+                            } else {
+                                0
+                            },
+                            if is_summary_row {
+                                record.output_tokens as i64
+                            } else {
+                                0
+                            },
+                            if is_model_call && record.managed_inference {
+                                reported_cost as i64
+                            } else {
+                                0
+                            },
+                            if is_unpriced_managed {
+                                record.input_tokens as i64
+                            } else {
+                                0
+                            },
+                            if is_unpriced_managed {
+                                record.output_tokens as i64
+                            } else {
+                                0
+                            },
+                        ],
+                    )?;
+                    tx.commit()
+                })();
+                if let Err(e) = write_result {
                     error!("audit log write failed: {e}");
                 }
             }
@@ -894,20 +1026,9 @@ impl AuditLogger {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit reader mutex poisoned"))?;
         let row = conn.query_row(
-            "SELECT COUNT(*), \
-             COALESCE(SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END), 0), \
-             COALESCE(SUM(input_tokens), 0), \
-             COALESCE(SUM(output_tokens), 0), \
-             COALESCE(SUM(CASE WHEN event_type = 'model_call' AND managed_inference != 0 \
-                               AND provider_cost_micro_usd IS NOT NULL \
-                              THEN provider_cost_micro_usd ELSE 0 END), 0), \
-             COALESCE(SUM(CASE WHEN event_type = 'model_call' AND managed_inference != 0 \
-                               AND provider_cost_micro_usd IS NULL \
-                              THEN input_tokens ELSE 0 END), 0), \
-             COALESCE(SUM(CASE WHEN event_type = 'model_call' AND managed_inference != 0 \
-                               AND provider_cost_micro_usd IS NULL \
-                              THEN output_tokens ELSE 0 END), 0) \
-             FROM audit_log WHERE event_type != 'control_change'",
+            "SELECT request_count, error_count, input_tokens, output_tokens,
+                    reported_cost_micro_usd, unpriced_input_tokens, unpriced_output_tokens
+             FROM audit_summary WHERE singleton = 1",
             [],
             |row| {
                 Ok(AuditSummary {
@@ -922,6 +1043,107 @@ impl AuditLogger {
             },
         )?;
         Ok(row)
+    }
+
+    /// Return canonical 15-minute usage buckets for the requested half-open
+    /// range. This query aggregates in SQLite and is not subject to the raw audit
+    /// endpoint's row limit.
+    pub fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>> {
+        let Some(reader) = &self.reader else {
+            return Ok(Vec::new());
+        };
+        let conn = reader
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit reader mutex poisoned"))?;
+
+        let mut clauses = vec![
+            "timestamp >= datetime(?)",
+            "timestamp < datetime(?)",
+            "event_type IN ('model_call', 'exec_call')",
+        ];
+        let mut binds = vec![query.timestamp_from.clone(), query.timestamp_until.clone()];
+        if let Some(provider) = &query.provider {
+            clauses.push("provider = ?");
+            binds.push(provider.clone());
+        }
+        if let Some(model) = &query.model {
+            clauses.push("model = ?");
+            binds.push(model.clone());
+        }
+
+        let sql = format!(
+            "SELECT
+                 strftime('%Y-%m-%dT%H:%M:%SZ',
+                          (CAST(strftime('%s', timestamp) AS INTEGER) / 900) * 900,
+                          'unixepoch') AS bucket,
+                 provider,
+                 model,
+                 user_id,
+                 feature,
+                 managed_inference,
+                 COALESCE(SUM(CASE WHEN event_type = 'model_call' THEN input_tokens ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN event_type = 'model_call' THEN output_tokens ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN event_type = 'model_call' THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN event_type = 'model_call' AND error IS NOT NULL THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN event_type = 'model_call' THEN latency_ms ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN event_type = 'model_call' THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN event_type = 'exec_call' THEN duration_ms ELSE 0 END), 0),
+                 CASE WHEN SUM(CASE WHEN event_type = 'model_call'
+                                         AND managed_inference != 0
+                                         AND provider_cost_micro_usd IS NOT NULL
+                                    THEN 1 ELSE 0 END) > 0
+                      THEN SUM(CASE WHEN event_type = 'model_call' AND managed_inference != 0
+                                    THEN COALESCE(provider_cost_micro_usd, 0) ELSE 0 END)
+                      ELSE NULL END,
+                 COALESCE(SUM(CASE WHEN event_type = 'model_call' AND managed_inference != 0
+                                        AND provider_cost_micro_usd IS NULL
+                                   THEN input_tokens ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN event_type = 'model_call' AND managed_inference != 0
+                                        AND provider_cost_micro_usd IS NULL
+                                   THEN output_tokens ELSE 0 END), 0)
+             FROM audit_log
+             WHERE {}
+             GROUP BY bucket, provider, model, user_id, feature, managed_inference
+             ORDER BY bucket ASC, provider ASC, model ASC",
+            clauses.join(" AND ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+            let provider: String = row.get(1)?;
+            let managed_inference = row.get::<_, i64>(5)? != 0;
+            Ok(AuditUsageEvent {
+                timestamp: row.get(0)?,
+                source: local_usage_source(&provider, managed_inference).to_owned(),
+                provider,
+                model: row.get(2)?,
+                member_id: row.get(3)?,
+                node_id: None,
+                feature: row.get(4)?,
+                managed_inference,
+                input_tokens: row.get::<_, i64>(6)? as u64,
+                output_tokens: row.get::<_, i64>(7)? as u64,
+                request_count: row.get::<_, i64>(8)? as u64,
+                error_count: row.get::<_, i64>(9)? as u64,
+                latency_total_ms: row.get::<_, i64>(10)? as u64,
+                latency_samples: row.get::<_, i64>(11)? as u64,
+                agent_seconds: row.get::<_, i64>(12)? as f64 / 1000.0,
+                cost_micro_usd: row.get::<_, Option<i64>>(13)?.map(|value| value as u64),
+                unpriced_input_tokens: row.get::<_, i64>(14)? as u64,
+                unpriced_output_tokens: row.get::<_, i64>(15)? as u64,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+}
+
+fn local_usage_source(provider: &str, managed_inference: bool) -> &'static str {
+    match provider.split(':').next().unwrap_or(provider) {
+        "local" | "ollama" | "llamacpp" | "lmstudio" | "vllm" => "local",
+        "openrouter" if managed_inference => "managed",
+        "openrouter" | "openai" | "anthropic" | "genai" => "byok",
+        _ if managed_inference => "managed",
+        _ => "self_hosted",
     }
 }
 
@@ -962,6 +1184,8 @@ pub trait AuditBackend: Send + Sync {
     fn query(&self, query: &AuditQuery) -> anyhow::Result<Vec<AuditEntry>>;
     /// Aggregate summary over the whole store.
     fn summary(&self) -> anyhow::Result<AuditSummary>;
+    /// Canonical 15-minute usage buckets for analytics surfaces.
+    fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>>;
 }
 
 impl AuditBackend for AuditLogger {
@@ -982,6 +1206,9 @@ impl AuditBackend for AuditLogger {
     }
     fn summary(&self) -> anyhow::Result<AuditSummary> {
         AuditLogger::summary(self)
+    }
+    fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>> {
+        AuditLogger::usage_rollup(self, query)
     }
 }
 
@@ -1085,6 +1312,11 @@ impl AuditRegistry {
     /// See [`AuditBackend::summary`].
     pub fn summary(&self) -> anyhow::Result<AuditSummary> {
         self.active.summary()
+    }
+
+    /// See [`AuditBackend::usage_rollup`].
+    pub fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>> {
+        self.active.usage_rollup(query)
     }
 }
 
@@ -1224,6 +1456,8 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].api_key, "sk-leg…");
+        let summary = logger.summary().expect("backfilled summary");
+        assert_eq!(summary.request_count, 1);
 
         let conn = Connection::open(&db_path).unwrap();
         let stored: String = conn
@@ -1357,6 +1591,63 @@ mod tests {
             .expect("control query");
         assert_eq!(controls.len(), 1);
         assert_eq!(controls[0].user_name.as_deref(), Some("master-key"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn usage_rollup_uses_canonical_buckets_and_exact_event_math() {
+        let dir = std::env::temp_dir().join(format!("ryu-audit-usage-{}", unique_suffix()));
+        let db_path = dir.join("audit.db");
+        let logger = AuditLogger::new(&AuditConfig {
+            enabled: true,
+            db_path: db_path.to_str().unwrap().to_owned(),
+        })
+        .expect("logger");
+
+        let conn = Connection::open(&db_path).expect("writer connection");
+        conn.execute_batch(
+            "INSERT INTO audit_log (
+                 timestamp, request_id, api_key, provider, model, input_tokens,
+                 output_tokens, latency_ms, error, event_type, user_id, feature,
+                 managed_inference, provider_cost_micro_usd
+             ) VALUES
+                 ('2026-08-22 10:01:00', 'model-1', 'master', 'openrouter', 'gpt-5',
+                  100, 40, 250, NULL, 'model_call', 'member-1', 'chat', 1, 90),
+                 ('2026-08-22 10:14:59', 'model-2', 'master', 'openrouter', 'gpt-5',
+                  20, 10, 750, 'failed', 'model_call', 'member-1', 'chat', 1, NULL),
+                 ('2026-08-22 10:12:00', 'exec-1', 'master', 'openrouter', 'gpt-5',
+                  0, 0, 0, NULL, 'exec_call', 'member-1', 'chat', 1, NULL),
+                 ('2026-08-22 10:15:00', 'model-3', 'master', 'anthropic', 'claude',
+                  9, 3, 100, NULL, 'model_call', NULL, 'agent', 0, NULL);
+             UPDATE audit_log SET duration_ms = 2500 WHERE request_id = 'exec-1';",
+        )
+        .expect("seed usage rows");
+
+        let events = logger
+            .usage_rollup(&AuditUsageQuery {
+                timestamp_from: "2026-08-22T10:00:00Z".to_owned(),
+                timestamp_until: "2026-08-22T10:15:00Z".to_owned(),
+                provider: Some("openrouter".to_owned()),
+                model: Some("gpt-5".to_owned()),
+            })
+            .expect("usage rollup");
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.timestamp, "2026-08-22T10:00:00Z");
+        assert_eq!(event.member_id.as_deref(), Some("member-1"));
+        assert_eq!(event.feature.as_deref(), Some("chat"));
+        assert_eq!(event.source, "managed");
+        assert_eq!(event.input_tokens, 120);
+        assert_eq!(event.output_tokens, 50);
+        assert_eq!(event.request_count, 2);
+        assert_eq!(event.error_count, 1);
+        assert_eq!(event.latency_total_ms, 1000);
+        assert_eq!(event.latency_samples, 2);
+        assert_eq!(event.agent_seconds, 2.5);
+        assert_eq!(event.cost_micro_usd, Some(90));
+        assert_eq!(event.unpriced_input_tokens, 20);
+        assert_eq!(event.unpriced_output_tokens, 10);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

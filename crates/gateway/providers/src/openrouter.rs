@@ -198,7 +198,10 @@ impl Provider for OpenRouterProvider {
                     })?;
 
                 match check_response_status(resp, "openrouter", Some(&self.quota)).await {
-                    Err(e @ ProviderError::RateLimited { .. }) if attempts > 1 => {
+                    Err(
+                        e @ (ProviderError::RateLimited { .. }
+                        | ProviderError::PaymentRequired { .. }),
+                    ) if attempts > 1 => {
                         last_err = Some(e);
                         continue;
                     }
@@ -244,7 +247,10 @@ impl Provider for OpenRouterProvider {
                     })?;
 
                 match check_stream_status(resp, "openrouter", Some(&self.quota)).await {
-                    Err(e @ ProviderError::RateLimited { .. }) if attempts > 1 => {
+                    Err(
+                        e @ (ProviderError::RateLimited { .. }
+                        | ProviderError::PaymentRequired { .. }),
+                    ) if attempts > 1 => {
                         last_err = Some(e);
                         continue;
                     }
@@ -285,7 +291,10 @@ impl Provider for OpenRouterProvider {
                         ProviderError::Provider(format!("openrouter request failed: {e}"))
                     })?;
                 match check_response_status(resp, "openrouter", Some(&self.quota)).await {
-                    Err(e @ ProviderError::RateLimited { .. }) if attempts > 1 => {
+                    Err(
+                        e @ (ProviderError::RateLimited { .. }
+                        | ProviderError::PaymentRequired { .. }),
+                    ) if attempts > 1 => {
                         last_err = Some(e);
                     }
                     result => return result,
@@ -645,9 +654,47 @@ mod tests {
             .complete("m", &json!({ "messages": [] }))
             .await
             .unwrap_err();
+        match &err {
+            ProviderError::PaymentRequired { provider, message } => {
+                assert_eq!(provider, "openrouter");
+                assert_eq!(message, "no credits");
+            }
+            other => panic!("expected PaymentRequired, got {other:?}"),
+        }
         let rendered = format!("{err}{err:?}");
         assert!(!rendered.contains(SECRET), "leaked: {rendered}");
         assert!(rendered.contains("no credits"));
+    }
+
+    #[tokio::test]
+    async fn complete_rotates_to_the_next_key_after_payment_required() {
+        let server = MockServer::start(vec![
+            MockResponse::json(402, r#"{"error":{"message":"no credits"}}"#),
+            MockResponse::ok_json(r#"{"id":"served-by-second-key"}"#),
+        ])
+        .await;
+        let p = provider_with(
+            server.base_url().to_owned(),
+            vec!["sk-empty", "sk-funded"],
+            Default::default(),
+        );
+
+        let out = p
+            .complete("m", &json!({ "messages": [] }))
+            .await
+            .expect("the funded key should serve after the empty key returns 402");
+        assert_eq!(out["id"], json!("served-by-second-key"));
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].header("authorization").as_deref(),
+            Some("Bearer sk-empty")
+        );
+        assert_eq!(
+            requests[1].header("authorization").as_deref(),
+            Some("Bearer sk-funded")
+        );
     }
 
     #[tokio::test]

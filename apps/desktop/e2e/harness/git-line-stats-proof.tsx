@@ -1,3 +1,4 @@
+import "@fontsource-variable/geist-mono";
 import { formatCount, formatCurrency } from "@ryu/ui/lib/number-format.ts";
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -6,7 +7,7 @@ import "../../src/index.css";
 
 function GitLineStatsProof() {
 	const [fontFamily, setFontFamily] = useState("pending");
-	const [hasHeadingFont, setHasHeadingFont] = useState(false);
+	const [hasMonoFont, setHasMonoFont] = useState(false);
 
 	useEffect(() => {
 		const stat = document.querySelector<HTMLElement>(
@@ -17,7 +18,7 @@ function GitLineStatsProof() {
 		}
 		const readFont = () => {
 			setFontFamily(getComputedStyle(stat).fontFamily);
-			setHasHeadingFont(stat.classList.contains("font-heading"));
+			setHasMonoFont(stat.classList.contains("font-mono"));
 		};
 		readFont();
 		void document.fonts.ready.then(readFont);
@@ -42,7 +43,7 @@ function GitLineStatsProof() {
 				<section className="grid gap-3 sm:grid-cols-2">
 					<div className="rounded-2xl border bg-card p-3 shadow-sm">
 						<p className="text-muted-foreground text-xs">Website surface</p>
-						<p className="mt-2 font-heading font-semibold text-2xl tabular-nums">
+						<p className="mt-2 font-mono font-semibold text-2xl tabular-nums">
 							{formatCurrency(1_234_567)}
 						</p>
 						<p className="mt-1 text-muted-foreground text-xs">
@@ -76,7 +77,7 @@ function GitLineStatsProof() {
 							className="rounded-full bg-emerald-500/10 px-3 py-1.5 font-heading font-semibold text-emerald-600 text-xs dark:text-emerald-400"
 							data-testid="proof-status"
 						>
-							{hasHeadingFont ? "Verified" : "Checking"}
+							{hasMonoFont ? "Verified" : "Checking"}
 						</output>
 					</div>
 					<dl className="mt-3 grid gap-2 border-border/60 border-t pt-3 text-xs sm:grid-cols-2">
@@ -86,7 +87,7 @@ function GitLineStatsProof() {
 								className="mt-1 font-mono text-foreground"
 								data-testid="git-class"
 							>
-								font-heading · tabular-nums
+								font-mono · tabular-nums
 							</dd>
 						</div>
 						<div>

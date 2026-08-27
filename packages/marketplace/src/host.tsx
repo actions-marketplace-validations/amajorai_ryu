@@ -69,6 +69,28 @@ export interface SellerReportsState {
 	}) => Promise<void>;
 }
 
+/** Publisher-facing Membership revenue totals, grouped by payout currency. */
+export interface MarketplaceMembershipRevenueBucket {
+	currency: string;
+	failedMinor: number;
+	paidMinor: number;
+	pendingMinor: number;
+	usageCount: number;
+}
+
+export interface MarketplaceMembershipReport {
+	currencies: MarketplaceMembershipRevenueBucket[];
+	eligibleListingCount: number;
+}
+
+export interface MarketplaceMembershipState {
+	authed: boolean;
+	error: MarketplaceHostError | null;
+	loading: boolean;
+	refresh: () => Promise<void> | void;
+	report: MarketplaceMembershipReport | null;
+}
+
 /** One user-submitted review as the control plane returns it. */
 export interface MarketplaceReview {
 	body: string | null;
@@ -98,8 +120,6 @@ export interface MarketplaceReviewsPage {
 export interface MarketplaceReviewsService {
 	/** Whether a review write can even be attempted (a signed-in session exists). */
 	canWrite: () => boolean;
-	/** Optional surface-owned sign-in action for the empty review state. */
-	onSignIn?: () => Promise<void> | void;
 	/** A page of reviews for one item. */
 	list: (input: {
 		cursor?: string | null;
@@ -107,6 +127,8 @@ export interface MarketplaceReviewsService {
 		kind: MarketplaceKind;
 		limit?: number;
 	}) => Promise<MarketplaceReviewsPage>;
+	/** Optional surface-owned sign-in action for the empty review state. */
+	onSignIn?: () => Promise<void> | void;
 	/** Create or update the caller's review (upsert — one per user per item). */
 	post: (input: {
 		body?: string;
@@ -121,18 +143,22 @@ export interface MarketplaceReviewsService {
 
 /** The full set of services the shared store UI needs from its host surface. */
 export interface MarketplaceHost {
+	/** Optional surface-owned confirmation around card-funded purchases. */
+	guardPurchase?: <T>(action: () => Promise<T>) => Promise<T | null>;
 	/** The heart on a store card: bulk count reads plus like/unlike, keyed by the
 	 *  listing NAMESPACE. Optional for the same reason `reviews` is — a surface
 	 *  with no control-plane binding renders no heart rather than a dead one. */
 	likes?: MarketplaceLikesService;
 	/** Open an external URL (Tauri shell on desktop, navigation on web). */
 	openExternal: (url: string) => Promise<void> | void;
-	/** Open the surface's sign-in flow from an auth-gated empty state. */
-	openSignIn?: () => Promise<void> | void;
 	/** Return to the marketplace catalog from an account empty state. */
 	openMarketplace?: () => Promise<void> | void;
 	/** Open organization selection from an org-gated empty state. */
 	openOrganization?: () => Promise<void> | void;
+	/** Open the surface's sign-in flow from an auth-gated empty state. */
+	openSignIn?: () => Promise<void> | void;
+	/** Optional surface-owned confirmation dialog rendered beside the marketplace. */
+	purchaseDialog?: ReactNode;
 	/** Ratings + user-submitted reviews. Optional: a surface without it renders no
 	 *  Reviews tab at all, rather than an empty one that can never be filled. */
 	reviews?: MarketplaceReviewsService;
@@ -143,6 +169,8 @@ export interface MarketplaceHost {
 	}) => Promise<PurchaseResult>;
 	/** The surface's owned-licenses hook (called at component top level). */
 	useLicenses: () => LicensesState;
+	/** Optional publisher Membership revenue report. */
+	useMembershipReport?: () => MarketplaceMembershipState;
 	/** Optional seller-reports inbox for org admins. */
 	useSellerReports?: () => SellerReportsState;
 	/** The surface's seller-status hook (called at component top level). */
@@ -164,7 +192,10 @@ export function MarketplaceHostProvider({
 	// bulk batching work at all (sixty cards, one request).
 	return (
 		<MarketplaceHostContext.Provider value={host}>
-			<LikesProvider service={host.likes}>{children}</LikesProvider>
+			<LikesProvider service={host.likes}>
+				{children}
+				{host.purchaseDialog}
+			</LikesProvider>
 		</MarketplaceHostContext.Provider>
 	);
 }

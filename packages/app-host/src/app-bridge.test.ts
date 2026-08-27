@@ -12,7 +12,9 @@ import {
 	asAgentRunArg,
 	asFinetuneIdArg,
 	asModelCompleteArg,
+	asNotificationSendArg,
 	asRecordArg,
+	asStorageCompareAndSetArg,
 	asStorageKeyArg,
 	asStorageSetArg,
 	assertGranted,
@@ -24,7 +26,12 @@ import {
 	STREAMING_METHODS,
 } from "./rpc.ts";
 
-const ALL = new Set<Capability>(["model.complete", "agent.run", "storage.kv"]);
+const ALL = new Set<Capability>([
+	"model.complete",
+	"agent.run",
+	"storage.kv",
+	"notifications.send",
+]);
 const NONE = new Set<Capability>();
 
 describe("spaces documents capability", () => {
@@ -132,6 +139,9 @@ function services(overrides: Partial<HostServices> = {}): HostServices {
 		storageSet: () => Promise.resolve(),
 		storageDelete: () => Promise.resolve(),
 		storageKeys: () => Promise.resolve(["a", "b"]),
+		storageCompareAndSet: () => Promise.resolve(true),
+		notificationsSend: () =>
+			Promise.resolve({ notification_id: "n1", target_user_id: "user-2" }),
 		...overrides,
 	};
 }
@@ -158,6 +168,31 @@ describe("app host-bridge dispatch", () => {
 			"a",
 			"b",
 		]);
+		expect(
+			await dispatchRpc(
+				"storage.compareAndSet",
+				[{ key: "k", expected: null, value: "v" }],
+				ALL,
+				services()
+			)
+		).toBe(true);
+	});
+
+	it("dispatches targeted notifications to the Inbox service when granted", async () => {
+		expect(
+			await dispatchRpc(
+				"notifications.send",
+				[
+					{
+						body: "Review this",
+						target_user_id: "user-2",
+						title: "You were mentioned",
+					},
+				],
+				ALL,
+				services()
+			)
+		).toEqual({ notification_id: "n1", target_user_id: "user-2" });
 	});
 
 	it("REJECTS an ungranted app method with a coded `denied` error, never running the service", async () => {
@@ -184,6 +219,7 @@ describe("app host-bridge dispatch", () => {
 			["model.complete", [{ prompt: "" }]],
 			["agent.run", [{}]],
 			["storage.get", [{ key: "" }]],
+			["notifications.send", [{ title: "missing target" }]],
 		] as const) {
 			const err = await dispatchRpc(
 				method,
@@ -205,6 +241,15 @@ describe("app host-bridge dispatch", () => {
 		).catch((e) => e);
 		expect(err).toBeInstanceOf(CodedRpcError);
 		expect((err as CodedRpcError).code).toBe("invalid_args");
+	});
+
+	it("narrows compareAndSet values to strings or null", () => {
+		expect(
+			asStorageCompareAndSetArg({ key: "k", expected: null, value: "v" })
+		).toEqual({ key: "k", expected: null, value: "v" });
+		expect(
+			asStorageCompareAndSetArg({ key: "k", expected: 1, value: "v" })
+		).toBeNull();
 	});
 });
 
@@ -241,6 +286,27 @@ describe("app host-bridge arg validators", () => {
 		});
 		expect(asStorageSetArg({ key: "k", value: 1 })).toBeNull();
 		expect(asStorageSetArg({ key: "k" })).toBeNull();
+	});
+
+	it("asNotificationSendArg requires a target and title", () => {
+		expect(
+			asNotificationSendArg({
+				body: "body",
+				target_user_id: "user-2",
+				title: "Mention",
+			})
+		).toEqual({
+			body: "body",
+			target_user_id: "user-2",
+			title: "Mention",
+		});
+		expect(asNotificationSendArg({ title: "missing target" })).toBeNull();
+		expect(
+			asNotificationSendArg({ target_user_id: "user-2", title: "" })
+		).toBeNull();
+		expect(
+			asNotificationSendArg({ target_user_id: "user-2", title: "x", body: 1 })
+		).toBeNull();
 	});
 });
 

@@ -19,7 +19,6 @@ import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import { Logo as GhostOrb } from "@ryu/ui/components/logo";
 import { PageHeader } from "@ryu/ui/components/page-header";
-import { PlanBadge } from "@ryu/ui/components/plan-badge";
 import {
 	STAGGER_STEP_MS,
 	StaggerReveal,
@@ -525,11 +524,11 @@ function FeatureStep({
 	);
 }
 
-// The managed-vs-local fork (WS8). Local is the primary, always-available path
-// (BYO keys / on-device); managed (Ryu Cloud) is gated on the plan entitlement.
-// When not entitled the managed button reads as an upsell and its handler
-// deep-links to web pricing instead of proceeding. No key material is touched
-// here, and picking managed never provisions a server from the desktop.
+// The runtime-choice fork (WS8). Local is the primary, always-available path
+// (BYO keys / on-device); Ryu Cloud is gated on the plan entitlement. When not
+// entitled, its button opens web pricing instead of provisioning anything.
+// No key material is touched here, and choosing Cloud never provisions a server
+// from the desktop.
 function ChooseStep({
 	isDesktop,
 	localChecking,
@@ -562,12 +561,12 @@ function ChooseStep({
 	} else if (managedLoading) {
 		managedLabel = "Checking your plan…";
 	} else if (!managedEntitled) {
-		managedLabel = "Upgrade to unlock";
+		managedLabel = "See team plans";
 	}
-	const showProBadge = !(managedEntitled || managedLoading);
+	const isManagedUpsell = !(managedEntitled || managedLoading);
 	// On desktop the local pick installs and starts Core, so "Checking…" would
 	// understate a download that can take a while; the webapp only probes.
-	let localCta = "Continue";
+	let localCta = "Set up locally";
 	if (localChecking) {
 		localCta = isDesktop ? "Setting up…" : "Checking…";
 	}
@@ -579,7 +578,7 @@ function ChooseStep({
 	// snaps the label to the theme's foreground (black in light mode) on hover.
 	const managedButton = (
 		<Button
-			className={showProBadge ? "hover:!text-inherit w-full" : "w-full"}
+			className={isManagedUpsell ? "hover:!text-inherit w-full" : "w-full"}
 			disabled={managedBusy || managedLoading}
 			onClick={onChooseManaged}
 			size="lg"
@@ -589,24 +588,18 @@ function ChooseStep({
 		</Button>
 	);
 
-	// Cloud spans the full width on the first row; local + connect share the row
-	// below it. The three cards are borderless `bg-muted` tiles — the outline
-	// variant read as a form, and the fill separates them from the shell without
-	// one. `col-span-2` on the cloud tile is what makes it the header row, so the
-	// two cells under it must each stay exactly one column: the `localUnreachable`
-	// variants REPLACE the local card in its own cell rather than being emitted as
-	// extra siblings, which would push `connect` onto a third row.
-	const card = "rounded-4xl bg-muted p-4 text-left";
-	const cell = `${card} flex flex-col`;
+	// The choose step is a game-lobby-style fork: three equal, tall cards make the
+	// tradeoff legible at a glance and keep the managed option visually first.
+	const card = "rounded-4xl bg-muted p-5 text-left";
+	const cell = `${card} flex min-h-[360px] flex-col`;
 
 	let localCard: ReactNode;
 	if (localUnreachable && isDesktop) {
 		localCard = (
-			<div className={cell}>
-				<p className="font-semibold text-lg">Couldn't start local AI</p>
+			<div className={cell} data-testid="onboarding-local-choice">
+				<CardHeader eyebrow="On this device" title="Couldn't start local AI" />
 				<p className="mt-1 text-muted-foreground text-sm">
-					Ryu couldn't install or start the local engine on this device. Try
-					again, or use one of the other options.
+					Try again, or choose another option.
 				</p>
 				{/* The backend's own message, kept verbatim under the friendly line
 				    rather than replacing it: it is the only clue distinguishing a 404
@@ -632,11 +625,10 @@ function ChooseStep({
 		);
 	} else if (localUnreachable) {
 		localCard = (
-			<div className={cell}>
-				<p className="font-semibold text-lg">Desktop app needed</p>
+			<div className={cell} data-testid="onboarding-local-choice">
+				<CardHeader eyebrow="On this device" title="Desktop app needed" />
 				<p className="mt-1 text-muted-foreground text-sm">
-					To run AI on this device, install the Ryu desktop app first. Then come
-					back and try again.
+					Install the Ryu desktop app to run AI here.
 				</p>
 				<div className="mt-auto pt-3">
 					<Button
@@ -661,11 +653,10 @@ function ChooseStep({
 		);
 	} else {
 		localCard = (
-			<div className={cell}>
-				<p className="font-semibold text-lg">Run AI locally</p>
+			<div className={cell} data-testid="onboarding-local-choice">
+				<CardHeader eyebrow="On this device" title="Set it up yourself" />
 				<p className="mt-1 text-muted-foreground text-sm">
-					Run AI on this device, or connect your own keys. Private, free, and
-					works offline.
+					Private and offline. You manage downloads, updates, and performance.
 				</p>
 				<div className="mt-auto pt-3">
 					<Button
@@ -683,42 +674,44 @@ function ChooseStep({
 	}
 
 	return (
-		<div className="grid w-full max-w-2xl grid-cols-2 gap-3">
+		<div className="grid w-full max-w-4xl grid-cols-1 gap-4 md:grid-cols-3">
 			<StaggerReveal startDelay={ONBOARDING_CONTENT_DELAY_MS}>
-				<div className={`${card} col-span-2`}>
-					<div className="flex items-center gap-2">
-						<p className="font-semibold text-lg">Use Ryu Cloud</p>
-						{showProBadge ? <PlanBadge plan="pro" size="sm" /> : null}
-					</div>
+				<div
+					className={`${cell} border-primary/20 bg-card shadow-sm`}
+					data-testid="onboarding-cloud-choice"
+				>
+					<CardHeader eyebrow="Ryu Cloud" title="Let Ryu handle it" />
 					<p className="mt-1 text-muted-foreground text-sm">
-						We host AI for you in the cloud, always on, on your own server. More
-						secure than running it on your computer.
+						Ryu handles downloads, updates, and the server. Start working right
+						away.
 					</p>
-					{showProBadge ? (
-						<MetalFx
-							className="mt-3 w-full"
-							preset="chromatic"
-							strength={0.9}
-							theme={metalTheme}
-							variant="button"
-						>
-							{managedButton}
-						</MetalFx>
-					) : (
-						<div className="mt-3">{managedButton}</div>
-					)}
+					<div className="mt-auto pt-6">
+						{isManagedUpsell ? (
+							<MetalFx
+								className="w-full"
+								preset="chromatic"
+								strength={0.9}
+								theme={metalTheme}
+								variant="button"
+							>
+								{managedButton}
+							</MetalFx>
+						) : (
+							managedButton
+						)}
+					</div>
 				</div>
 
 				{localCard}
 
-				{/* Third path: neither install nor buy — point the app at a Core someone
-				    else already runs (a teammate's machine, a company server, a node on
-				    the mesh). Nothing is installed on this device. */}
-				<div className={cell}>
-					<p className="font-semibold text-lg">Connect to an existing node</p>
+				<div className={cell} data-testid="onboarding-existing-node-choice">
+					<CardHeader
+						eyebrow="Your team’s server"
+						title="Bring your own server"
+					/>
 					<p className="mt-1 text-muted-foreground text-sm">
-						Already have a Ryu node running on your team's server, or another
-						machine? Point this app at it. Nothing is installed here.
+						Connect to a server your team runs. Your team handles updates and
+						access.
 					</p>
 					<div className="mt-auto pt-3">
 						<Button
@@ -727,11 +720,27 @@ function ChooseStep({
 							size="lg"
 							variant="outline"
 						>
-							Connect
+							Connect a server
 						</Button>
 					</div>
 				</div>
 			</StaggerReveal>
+		</div>
+	);
+}
+
+function CardHeader({ eyebrow, title }: { eyebrow: string; title: string }) {
+	return (
+		<div className="space-y-1">
+			<p className="font-medium text-muted-foreground text-xs uppercase tracking-wider">
+				{eyebrow}
+			</p>
+			<PageHeader
+				as="h2"
+				stagger={false}
+				title={title}
+				titleClassName="font-semibold text-lg"
+			/>
 		</div>
 	);
 }

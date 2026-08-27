@@ -2,12 +2,12 @@
 // decision a new user makes (cloud / local / existing node), rendered straight
 // from `@ryu/blocks/desktop/onboarding` with mock handlers.
 //
-// WHY IT NEEDS A BROWSER. The three options are a grid, not a column: cloud spans
-// both columns on the first row, local and connect share the row under it. That
-// layout only exists once the real Tailwind utilities resolve, and the cards are
-// borderless `bg-muted` tiles — a fill that is 3% off the page background in
-// light theme and 12% in dark. Whether they read as cards at all is a fact about
-// resolved colour in each scheme, so both columns are rendered side by side.
+// WHY IT NEEDS A BROWSER. The three runtime choices are tall, equal cards in a
+// lobby-style row. That layout only exists once the real Tailwind utilities
+// resolve, and the cards are borderless `bg-muted` tiles — a fill that is 3% off
+// the page background in light theme and 12% in dark. Whether they read as cards
+// at all is a fact about resolved colour in each scheme, so both themes render
+// side by side.
 //
 // The local card is also the one that carries live install progress, so the
 // progress columns pin the component milestones emitted by the public installer
@@ -18,9 +18,9 @@ import { createRoot } from "react-dom/client";
 import "../../src/index.css";
 
 const HEADER = {
-	title: "How do you want to run Ryu?",
+	title: "Where should Ryu do the work?",
 	subtitle:
-		"Run AI on this device, in the cloud, or on a node you already have",
+		"Want the easiest setup? Start with Ryu Cloud. You can also run Ryu here or use a server your team already has.",
 };
 
 function Column({
@@ -91,38 +91,55 @@ function Progress({
 	);
 }
 
+const storyParams = new URLSearchParams(window.location.search);
+const chooseOnly = storyParams.has("choose-only");
+const singleTheme = storyParams.has("single");
+
 createRoot(document.getElementById("root") as HTMLElement).render(
-	<div className="flex min-h-screen">
-		<Column dark={false} label="Light" />
-		<Column dark label="Dark" />
-		{/* Everything after the press happens on the `installing` phase — ONE
-		    progress surface for the installer, Core boot, and local-stack wait.
-		    These are the same component milestones the Desktop listener renders. */}
-		<Progress
-			dark
-			label="Installer: Core"
-			percent={15}
-			status="Installing Ryu Core…"
-		/>
-		<Progress
-			dark
-			label="Installer: Gateway"
-			percent={30}
-			status="Installing the model gateway…"
-		/>
-		<Progress
-			dark
-			label="Installer: defaults"
-			percent={80}
-			status="Installing bundled models, engines, and skills…"
-		/>
-		{/* The failure state must stay ONE cell: emitted as a sibling it would push
-		    `connect` onto a third row and break the cloud-spans-row-one layout. */}
-		<Column
-			dark
-			label="Failed"
-			localError="download https://github.com/amajorai/ryu/releases/latest/download/ryu-core-macos-aarch64: HTTP 404"
-			localUnreachable
-		/>
-	</div>
+	chooseOnly ? (
+		singleTheme ? (
+			<div className="flex min-h-screen">
+				<Column dark label="Dark" />
+			</div>
+		) : (
+			<div className="grid min-h-screen grid-cols-2">
+				<Column dark={false} label="Light" />
+				<Column dark label="Dark" />
+			</div>
+		)
+	) : (
+		<div className="flex min-h-screen">
+			<Column dark={false} label="Light" />
+			<Column dark label="Dark" />
+			{/* Everything after the press happens on the `installing` phase — ONE
+			    progress surface for the installer, Core boot, and local-stack wait.
+			    These are the same component milestones the Desktop listener renders. */}
+			<Progress
+				dark
+				label="Installer: Core"
+				percent={15}
+				status="Installing Ryu Core…"
+			/>
+			<Progress
+				dark
+				label="Installer: Gateway"
+				percent={30}
+				status="Installing the model gateway…"
+			/>
+			<Progress
+				dark
+				label="Installer: defaults"
+				percent={80}
+				status="Installing bundled models, engines, and skills…"
+			/>
+			{/* The failure state keeps the same three-card lobby layout so the error can
+			    be compared with the healthy local choice. */}
+			<Column
+				dark
+				label="Failed"
+				localError="download https://github.com/amajorai/ryu/releases/latest/download/ryu-core-macos-aarch64: HTTP 404"
+				localUnreachable
+			/>
+		</div>
+	)
 );

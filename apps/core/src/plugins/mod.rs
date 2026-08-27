@@ -26,6 +26,7 @@ pub mod isolation;
 pub mod lifecycle;
 pub mod seed;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -34,6 +35,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::governance::{resolve_field, GovernanceScope, HookPolicyOverride, ScopedValue};
 use crate::sidecar::download_manager::ryu_dir;
 
 // ── Record types ──────────────────────────────────────────────────────────────
@@ -96,6 +98,62 @@ pub struct GrantValidationResult {
     pub denied: Vec<String>,
     /// Whether all requested grants were approved.
     pub all_approved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookOverrideRecord {
+    pub hook_key: String,
+    pub managed: bool,
+    pub policy: HookPolicyOverride,
+    pub scope: GovernanceScope,
+}
+
+fn governance_scope_key(scope: GovernanceScope) -> &'static str {
+    match scope {
+        GovernanceScope::Node => "node",
+        GovernanceScope::Organization => "organization",
+        GovernanceScope::Team => "team",
+        GovernanceScope::User => "user",
+    }
+}
+
+fn parse_governance_scope(value: &str) -> Option<GovernanceScope> {
+    match value {
+        "node" => Some(GovernanceScope::Node),
+        "organization" => Some(GovernanceScope::Organization),
+        "team" => Some(GovernanceScope::Team),
+        "user" => Some(GovernanceScope::User),
+        _ => None,
+    }
+}
+
+fn resolve_hook_override_records(
+    records: &[HookOverrideRecord],
+    hook_key: &str,
+) -> HookPolicyOverride {
+    let field = |pick: fn(&HookPolicyOverride) -> Option<bool>| {
+        resolve_field(
+            [
+                GovernanceScope::Node,
+                GovernanceScope::Organization,
+                GovernanceScope::Team,
+                GovernanceScope::User,
+            ]
+            .into_iter()
+            .map(|scope| {
+                let value = records
+                    .iter()
+                    .filter(|record| record.hook_key == hook_key && record.scope == scope)
+                    .find_map(|record| pick(&record.policy));
+                ScopedValue::new(scope, value)
+            }),
+        )
+        .map(|resolved| resolved.value)
+    };
+    HookPolicyOverride {
+        enabled: field(|policy| policy.enabled),
+        trusted: field(|policy| policy.trusted),
+    }
 }
 
 /// Resolve the plugins lifecycle DB path.
@@ -201,6 +259,18 @@ impl PluginStore {
                 return Err(e).context("adding apps.provenance column");
             }
         }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS hook_overrides (
+                scope      TEXT NOT NULL,
+                hook_key   TEXT NOT NULL,
+                enabled    INTEGER,
+                trusted    INTEGER,
+                managed    INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (scope, hook_key, managed)
+            );",
+        )
+        .context("creating hook_overrides table")?;
         Ok(())
     }
 
@@ -480,6 +550,148 @@ impl PluginStore {
         Ok(rows)
     }
 
+    pub async fn upsert_hook_override(
+        &self,
+        scope: GovernanceScope,
+        hook_key: &str,
+        policy: &HookPolicyOverride,
+        managed: bool,
+    ) -> Result<()> {
+        let hook_key = hook_key.trim();
+        if hook_key.is_empty() || hook_key.len() > 512 {
+            anyhow::bail!("hook key must be between 1 and 512 characters");
+        }
+        let conn = self.conn.lock().await;
+        if policy.enabled.is_none() && policy.trusted.is_none() {
+            conn.execute(
+                "DELETE FROM hook_overrides
+                 WHERE scope = ?1 AND hook_key = ?2 AND managed = ?3",
+                params![governance_scope_key(scope), hook_key, i64::from(managed)],
+            )?;
+            return Ok(());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO hook_overrides
+                (scope, hook_key, enabled, trusted, managed, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(scope, hook_key, managed) DO UPDATE SET
+                enabled = excluded.enabled,
+                trusted = excluded.trusted,
+                managed = excluded.managed,
+                updated_at = excluded.updated_at",
+            params![
+                governance_scope_key(scope),
+                hook_key,
+                policy.enabled.map(i64::from),
+                policy.trusted.map(i64::from),
+                i64::from(managed),
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub async fn list_hook_overrides(&self) -> Result<Vec<HookOverrideRecord>> {
+        let conn = self.conn.lock().await;
+        let mut statement = conn.prepare(
+            "SELECT scope, hook_key, enabled, trusted, managed
+             FROM hook_overrides ORDER BY hook_key, scope, managed ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let scope: String = row.get(0)?;
+            let enabled: Option<i64> = row.get(2)?;
+            let trusted: Option<i64> = row.get(3)?;
+            Ok((
+                scope,
+                row.get::<_, String>(1)?,
+                enabled,
+                trusted,
+                row.get::<_, i64>(4)? != 0,
+            ))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (scope, hook_key, enabled, trusted, managed) = row?;
+            let Some(scope) = parse_governance_scope(&scope) else {
+                continue;
+            };
+            records.push(HookOverrideRecord {
+                hook_key,
+                managed,
+                policy: HookPolicyOverride {
+                    enabled: enabled.map(|value| value != 0),
+                    trusted: trusted.map(|value| value != 0),
+                },
+                scope,
+            });
+        }
+        Ok(records)
+    }
+
+    pub async fn effective_hook_override(&self, hook_key: &str) -> Result<HookPolicyOverride> {
+        let records = self.list_hook_overrides().await?;
+        Ok(resolve_hook_override_records(&records, hook_key))
+    }
+
+    pub async fn effective_hook_overrides(&self) -> Result<BTreeMap<String, HookPolicyOverride>> {
+        let records = self.list_hook_overrides().await?;
+        let hook_keys: BTreeSet<&str> = records
+            .iter()
+            .map(|record| record.hook_key.as_str())
+            .collect();
+        Ok(hook_keys
+            .into_iter()
+            .map(|hook_key| {
+                (
+                    hook_key.to_owned(),
+                    resolve_hook_override_records(&records, hook_key),
+                )
+            })
+            .collect())
+    }
+
+    pub async fn replace_managed_hook_overrides(
+        &self,
+        scope: GovernanceScope,
+        overrides: &BTreeMap<String, HookPolicyOverride>,
+    ) -> Result<()> {
+        if scope == GovernanceScope::Node {
+            anyhow::bail!("node hook overrides are local, not managed");
+        }
+        for hook_key in overrides.keys() {
+            if hook_key.trim().is_empty() || hook_key.len() > 512 {
+                anyhow::bail!("hook key must be between 1 and 512 characters");
+            }
+        }
+        let mut conn = self.conn.lock().await;
+        let transaction = conn.transaction()?;
+        transaction.execute(
+            "DELETE FROM hook_overrides WHERE scope = ?1 AND managed = 1",
+            params![governance_scope_key(scope)],
+        )?;
+        let now = chrono::Utc::now().to_rfc3339();
+        for (hook_key, policy) in overrides {
+            if policy.enabled.is_none() && policy.trusted.is_none() {
+                continue;
+            }
+            transaction.execute(
+                "INSERT INTO hook_overrides
+                    (scope, hook_key, enabled, trusted, managed, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+                params![
+                    governance_scope_key(scope),
+                    hook_key,
+                    policy.enabled.map(i64::from),
+                    policy.trusted.map(i64::from),
+                    now,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Flip `enabled` to true and persist the approved grants.
     pub async fn set_enabled(
         &self,
@@ -650,9 +862,120 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::governance::{GovernanceScope, HookPolicyOverride};
 
     fn store() -> PluginStore {
         PluginStore::open_in_memory().unwrap()
+    }
+
+    #[tokio::test]
+    async fn hook_policy_fields_resolve_independently_by_scope() {
+        let s = store();
+        let key = "com.example.plugin::review";
+        s.upsert_hook_override(
+            GovernanceScope::Node,
+            key,
+            &HookPolicyOverride {
+                enabled: Some(true),
+                trusted: Some(false),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        s.upsert_hook_override(
+            GovernanceScope::Team,
+            key,
+            &HookPolicyOverride {
+                enabled: None,
+                trusted: Some(true),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        s.upsert_hook_override(
+            GovernanceScope::User,
+            key,
+            &HookPolicyOverride {
+                enabled: Some(false),
+                trusted: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let effective = s.effective_hook_override(key).await.unwrap();
+        assert_eq!(effective.enabled, Some(false));
+        assert_eq!(effective.trusted, Some(true));
+    }
+
+    #[tokio::test]
+    async fn replacing_managed_hook_overrides_preserves_local_choices() {
+        let s = store();
+        let key = "com.example.plugin::review";
+        s.upsert_hook_override(
+            GovernanceScope::User,
+            key,
+            &HookPolicyOverride {
+                enabled: Some(false),
+                trusted: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        s.replace_managed_hook_overrides(
+            GovernanceScope::Organization,
+            &BTreeMap::from([(
+                key.to_owned(),
+                HookPolicyOverride {
+                    enabled: Some(true),
+                    trusted: Some(true),
+                },
+            )]),
+        )
+        .await
+        .unwrap();
+
+        let effective = s.effective_hook_override(key).await.unwrap();
+        assert_eq!(effective.enabled, Some(false));
+        assert_eq!(effective.trusted, Some(true));
+    }
+
+    #[tokio::test]
+    async fn local_user_fields_override_managed_user_fields_without_erasing_them() {
+        let s = store();
+        let key = "com.example.plugin::review";
+        s.replace_managed_hook_overrides(
+            GovernanceScope::User,
+            &BTreeMap::from([(
+                key.to_owned(),
+                HookPolicyOverride {
+                    enabled: Some(true),
+                    trusted: Some(true),
+                },
+            )]),
+        )
+        .await
+        .unwrap();
+        s.upsert_hook_override(
+            GovernanceScope::User,
+            key,
+            &HookPolicyOverride {
+                enabled: Some(false),
+                trusted: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let effective = s.effective_hook_override(key).await.unwrap();
+        assert_eq!(effective.enabled, Some(false));
+        assert_eq!(effective.trusted, Some(true));
     }
 
     // ── Provenance: captured, never invented ─────────────────────────────────

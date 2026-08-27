@@ -14,79 +14,80 @@ export interface FAQItem {
 export const GENERAL_FAQ_ITEMS: FAQItem[] = [
 	{
 		id: "1",
-		title: "What does Ryu actually do for my firm?",
+		title: "What does Ryu do for a startup?",
 		content: [
-			"We take a document-heavy workflow your team is spending its week on \u2014 translation jobs, claims files, working paper prep \u2014 and set it up to run with AI, configured around your document types, your rules and your approval steps.",
-			"Your people move from typing to reviewing, and every job comes with a record of what was done.",
+			"We take one workflow your team already runs with AI and make the context, access, review points, and cost visible around it.",
+			"Your team spends less time checking and copying, while every important task leaves a record of what happened.",
 		],
 	},
 	{
 		id: "2",
-		title: "Do our client files leave the office?",
+		title: "Can we keep using ChatGPT or Claude?",
 		content: [
-			"Not unless you choose that. Ryu runs on your own machines, so the work can stay entirely inside the firm.",
-			"If a job does call an outside model, personal details are stripped out first by default, and you can see exactly which jobs did so.",
+			"Yes. Ryu works with the AI your team already uses, including ChatGPT and Claude. You do not need to replace a tool people already know.",
+			"Ryu adds the context controls, review points, and record around the work so the output is easier to trust.",
 		],
 	},
 	{
 		id: "3",
-		title: "How do we know what it did?",
+		title: "Can our company data leave?",
 		content: [
-			"Every action is written down as it happens: what it read, what it produced, who approved it and what it cost. It reads as plain steps, not developer logs.",
-			"That is the record you show a client or a regulator when they ask why the file looks the way it does.",
+			"Not unless you choose that. Ryu can run on your own machines, so the work can stay inside your company boundary.",
+			"If a workflow uses an outside model, you can see which path it took and apply the access rules you set.",
 		],
 	},
 	{
 		id: "4",
-		title: "What does it cost, and can the bill run away from us?",
+		title: "How do we know if an answer is safe to use?",
 		content: [
-			"Plans start at $39 per person per month, and you set a spending ceiling per person and per team on top of that. Work stops at the ceiling rather than quietly billing past it.",
-			"Routine work runs on your own machines at no per-job cost, so the expensive models are only used when a job genuinely needs one.",
+			"Every important task keeps a readable record of the source it used, what it produced, what changed, who reviewed it, and what it cost.",
+			"Your team can see the evidence before it sends, publishes, or updates anything important.",
 		],
 	},
 	{
 		id: "5",
-		title: "Can we get government funding for this?",
+		title: "Can AI reach the files and systems we use?",
 		content: [
-			"Singapore SMEs can apply for co-funding on this kind of deployment through the national grant schemes. Support levels, caps and eligibility are set by the administering agency, not by us.",
-			"We will walk through what your firm is likely to qualify for on the first call, before you commit to anything.",
+			"Yes, with access you choose. Ryu can connect the approved files and systems a workflow needs instead of asking someone to copy context between tools.",
+			"Permissions stay explicit, and the record shows what the work touched.",
 		],
 	},
 	{
 		id: "6",
 		title: "What happens when our rules change?",
 		content: [
-			"You update the rule in one place and both your team and the agents work off the new version from that point. Older versions are kept, so you can see what was in force on the day a job ran.",
-			"Corrections your reviewers make are kept too, which is why the work gets more accurate the longer you run it.",
+			"You update the rule in one place and new work uses the current version. Older versions stay available, so you can see what was true when an answer was made.",
+			"Corrections your reviewers make are kept too, so the work becomes more consistent over time.",
 		],
 	},
 	{
 		id: "7",
-		title: "Do we need someone technical on staff?",
+		title: "What does it cost, and can the bill run away from us?",
 		content: [
-			"No. We set up the first workflow with you, and there is nothing to configure to keep it running. If you would rather not host it at all, we can run it for you under the same limits.",
+			"Plans start at $39 per person per month, and you set a spending ceiling per person and per team on top of that. Work stops at the ceiling rather than quietly billing past it.",
+			"Routine work can run on your own machines, so expensive model calls are used only when a job genuinely needs one.",
 		],
 	},
 	{
 		id: "8",
-		title: "Can we keep using ChatGPT or Claude?",
+		title: "Do we need someone technical on staff?",
 		content: [
-			"Yes. Ryu runs any of them, plus Gemini, local models and agents you already built. We are not asking you to replace what your team likes \u2014 we make it safe to point at client files.",
+			"No. We set up the first workflow with you and keep the rules, access, and cost controls in place. If you would rather not host it, we can run it for you under the same limits.",
 		],
 	},
 	{
 		id: "9",
 		title: "Who is Ryu for?",
 		content: [
-			"Document-heavy firms in accounting, insurance, legal and translation \u2014 anywhere a person has to sign off on work built from sensitive client material.",
-			"The same app runs locally for individuals, but the product we sell and support is the firm deployment.",
+			"Startups that already use AI but still pay people to check, copy, and clean up the result — especially when company data or customer commitments are involved.",
+			"If the answer needs context, a review point, and a cost you can explain, Ryu is built for that work.",
 		],
 	},
 	{
 		id: "10",
 		title: "Which AI models does Ryu support?",
 		content: [
-			"OpenAI, Anthropic, Gemini, local models via Ollama or compatible runtimes, and 400+ models through supported providers. Switching models does not change how your workflow is set up.",
+			"OpenAI, Anthropic, Gemini, local models via Ollama or compatible runtimes, and supported provider models. Switching models does not change how your workflow is set up.",
 		],
 	},
 	{

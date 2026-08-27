@@ -1,12 +1,12 @@
 {
   "name": "core",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "scripts": {
     "dev": "node scripts/dev.js",
     "dev:watch": "cargo watch -x 'run --features sandbox-wasmtime,voice-parakeet,voice-vad'",
     "build": "cargo build --release --features sandbox-wasmtime,voice-parakeet,voice-vad",
     "check": "cargo check",
-    "generate:openapi": "cargo run --quiet -- --dump-openapi 2>/dev/null > ../fumadocs/specs/core-openapi.json && python3 ../../scripts/postprocess-core-openapi.py"
+    "generate:openapi": "python3 ../../scripts/postprocess-core-openapi.py --generate"
   }
 }

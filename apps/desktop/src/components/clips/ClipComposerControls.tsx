@@ -154,7 +154,7 @@ export function ClipComposerControls({
 	);
 
 	// Clips is an APP: only surface its composer controls (record/attach + the Pro
-	// badge) when `@ryu/clips` is installed AND enabled, so a default-off Clips
+	// badge) when `@ryu/clips` is installed AND enabled, so an install-on-demand Clips
 	// leaves the composer clean — the app owns its own presence in the shell rather
 	// than the composer hardcoding it. Hidden while the app list is still loading.
 	if (!apps.some((a) => a.id === CLIPS_PLUGIN_ID && a.enabled)) {

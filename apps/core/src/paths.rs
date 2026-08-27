@@ -414,8 +414,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_dir_ends_with_dot_ryu() {
-        assert!(default_ryu_dir().ends_with(".ryu"));
+    fn default_dir_matches_the_active_profile() {
+        let expected = format!(".ryu{}", crate::profile::suffix());
+        assert!(default_ryu_dir().ends_with(expected));
     }
 
     #[test]

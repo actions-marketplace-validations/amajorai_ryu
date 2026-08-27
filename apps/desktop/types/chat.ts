@@ -1,4 +1,5 @@
 import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
+import type { UIMessage } from "ai";
 import type { ResourceVisibility } from "@/src/lib/resource-visibility.ts";
 
 export interface Agent {
@@ -29,7 +30,7 @@ export interface Message {
 	 * for messages persisted before parts capture existed (fall back to a text part
 	 * built from `content`).
 	 */
-	parts?: unknown[];
+	parts?: UIMessage["parts"];
 	role: "user" | "assistant";
 	siblingCount?: number;
 	/** Ids of every version at this branch point in pager order (v1..vN); lets the
@@ -75,8 +76,6 @@ export interface Conversation {
 	participants?: string[];
 	/** Server-backed pin (shared with coordinator threads). */
 	pinned?: boolean;
-	/** Owner-only or shared visibility inherited from the Core conversation row. */
-	visibility?: ResourceVisibility;
 	/** Run lifecycle status: "running" | "completed" | "failed" | "interrupted" |
 	 * undefined. "interrupted" is stamped by Core's boot reconciliation on a run
 	 * the node died in the middle of; it is TERMINAL, so "is this live?" checks
@@ -84,6 +83,8 @@ export interface Conversation {
 	runStatus?: string;
 	title: string;
 	updatedAt: number;
+	/** Owner-only or shared visibility inherited from the Core conversation row. */
+	visibility?: ResourceVisibility;
 	/** Per-run worktree path, when a dedicated worktree was created (M1). */
 	worktreePath?: string;
 }

@@ -14,6 +14,7 @@ import {
 	FingerPrintIcon,
 	Folder01Icon,
 	Folder03Icon,
+	FolderAddIcon,
 	FolderOpenIcon,
 	GitBranchIcon,
 	GridIcon,
@@ -39,14 +40,17 @@ import {
 	Upload01Icon,
 	UserMultiple02Icon,
 	ViewOffSlashIcon,
-	WorkflowCircle06Icon,
 	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
-	isCoreApiPath,
-	renderActionHttp,
+	contributionSourceRequest,
+	DECLARATIVE_HTTP_GRANT,
+	isCoreReadPath,
+	isViewSourceHttpMethod,
+	normalizeViewRefreshMs,
+	renderContributionActionHttp,
 	renderTemplate,
 	type SourceItem,
 	sourceItemsFromResponse,
@@ -140,6 +144,7 @@ import {
 	useState,
 } from "react";
 import { UsageBar } from "@/components/agent-elements/input/usage-bar.tsx";
+import { NewAutomationDialog } from "@/src/components/calendar/NewAutomationDialog.tsx";
 import { AddChannelDialog } from "@/src/components/channels/AddChannelDialog.tsx";
 import { ImportSetupDialog } from "@/src/components/chat/ImportSetupDialog.tsx";
 import { ImportThreadsDialog } from "@/src/components/chat/ImportThreadsDialog.tsx";
@@ -150,6 +155,10 @@ import {
 } from "@/src/components/chat/ProjectPicker.tsx";
 import { AddIdentityDialog } from "@/src/components/identities/AddIdentityDialog.tsx";
 import { EntityIconDialog } from "@/src/components/layout/EntityIconDialog.tsx";
+import {
+	OpenInNewWindowContextMenuItem,
+	OpenInNewWindowDropdownMenuItem,
+} from "@/src/components/layout/OpenInNewWindowMenuItem.tsx";
 import {
 	ProjectGlyph,
 	ProjectIconDialog,
@@ -162,10 +171,6 @@ import { NodeSelector } from "@/src/components/shell/NodeSelector.tsx";
 import { AddToSpaceDialog } from "@/src/components/spaces/AddToSpaceDialog.tsx";
 import { CreateSpaceDialog } from "@/src/components/spaces/CreateSpaceDialog.tsx";
 import { RenameSpaceDialog } from "@/src/components/spaces/RenameSpaceDialog.tsx";
-import {
-	TeamDialog,
-	type TeamDraft,
-} from "@/src/components/teams/TeamDialog.tsx";
 import { DestructiveConfirmDialog } from "@/src/components/ui/DestructiveConfirmDialog.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
@@ -192,6 +197,11 @@ import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { useAutoSetupImport } from "@/src/hooks/useAutoSetupImport.ts";
 import { useAutoThreadImport } from "@/src/hooks/useAutoThreadImport.ts";
+import {
+	BOT_CHAT_SECTION_COLLAPSED_KEY,
+	BOT_CHAT_SECTION_ORDER_KEY,
+	useBotChatSections,
+} from "@/src/hooks/useBotChatSections.ts";
 import { useChannels } from "@/src/hooks/useChannels.ts";
 import { useChatDateGrouping } from "@/src/hooks/useChatDateGrouping.ts";
 import {
@@ -199,6 +209,7 @@ import {
 	useComposioStatus,
 	useComposioToolkits,
 } from "@/src/hooks/useComposioCatalog.ts";
+import { useConsoleAccess } from "@/src/hooks/useConsoleAccess.ts";
 import { useEngines } from "@/src/hooks/useEngines.ts";
 import { useCanManagePermission } from "@/src/hooks/useGatewayConfigurable.ts";
 import { useIdentities } from "@/src/hooks/useIdentities.ts";
@@ -208,7 +219,6 @@ import {
 	pluginCompanionPath,
 	usePluginContributions,
 } from "@/src/hooks/usePluginContributions.ts";
-import { useSchedules } from "@/src/hooks/useSchedules.ts";
 import { useSidebarChatPreview } from "@/src/hooks/useSidebarChatPreview.ts";
 import { useSidebarGroupedNav } from "@/src/hooks/useSidebarGroupedNav.ts";
 import {
@@ -224,7 +234,6 @@ import { useTimezoneRevision } from "@/src/hooks/useTimezone.ts";
 import { useUsageBarPrefs } from "@/src/hooks/useUsageBarPrefs.ts";
 import { useVisibilityAdminAccess } from "@/src/hooks/useVisibilityAdminAccess.ts";
 import { useVoiceEngines } from "@/src/hooks/useVoiceEngines.ts";
-import { useWorkflows } from "@/src/hooks/useWorkflows.ts";
 import {
 	conversationGroupKey,
 	conversationParticipantIds,
@@ -241,13 +250,19 @@ import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import type { BtwEntry } from "@/src/lib/api/btw.ts";
 import { CHANNEL_LABELS } from "@/src/lib/api/channels.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
-import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
+import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
 import type {
 	PluginSidebarButton,
 	PluginSidebarSection,
 } from "@/src/lib/api/plugins.ts";
 import { listSkills } from "@/src/lib/api/skills.ts";
 import type { Space, SpaceDocument } from "@/src/lib/api/spaces.ts";
+import {
+	type BotChatSection,
+	type BotChatSectionState,
+	conversationsForSection,
+	UNORGANIZED_SECTION_ID,
+} from "@/src/lib/bot-chat-sections.ts";
 import { conversationRunStatusMeta } from "@/src/lib/conversation-run-status.ts";
 import {
 	DEFAULT_HIDDEN_CHROME,
@@ -257,6 +272,7 @@ import {
 	loadHiddenSections,
 	persistHiddenChrome,
 	persistHiddenSections,
+	SECTION_HIDDEN_KEY,
 } from "@/src/lib/features.ts";
 import { dedupeFolders, folderKey } from "@/src/lib/folder-path.ts";
 import { useFavorites } from "@/src/lib/library.ts";
@@ -266,6 +282,8 @@ import {
 	SIDE_CHAT_FEATURE_KIND,
 	SIDE_CHATS_PLUGIN_ID,
 } from "@/src/lib/plugin-chat-features.ts";
+import { isRyuBot } from "@/src/lib/product.ts";
+import { useProductMode } from "@/src/lib/product-mode.ts";
 import {
 	parseVisibilityDragPayload,
 	RESOURCE_VISIBILITY_DND_MIME,
@@ -291,32 +309,41 @@ import { buildSidebarConversationPreviewStates } from "@/src/lib/sidebar-convers
 import { compactAge } from "@/src/lib/time.ts";
 import { formatDate, formatTime, startOfTodayMs } from "@/src/lib/timezone.ts";
 import {
-	scheduleJobFor,
-	WorkflowTriggerIcons,
-} from "@/src/lib/workflow-triggers.tsx";
-import { workspaceProjectName } from "@/src/lib/workspace-projects.ts";
+	conversationEntityKey,
+	openEntityInNewWindow,
+	routeEntityOpen,
+} from "@/src/lib/window-routing.ts";
+import {
+	findWorkspaceProject,
+	workspaceProjectName,
+} from "@/src/lib/workspace-projects.ts";
 import { useChannelSetupDialog } from "@/src/store/useChannelSetupDialog.ts";
 import { useConversationFlagsStore } from "@/src/store/useConversationFlagsStore.ts";
 import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
+import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import {
 	useWorkspaceStore,
 	type WorkspaceProject,
 } from "@/src/store/useWorkspaceStore.ts";
 import type { Conversation } from "@/types/chat.ts";
+import { BotConnectionBadge } from "../bot/BotConnectionBadge.tsx";
 import { AnnouncementsSection } from "./AnnouncementsSection.tsx";
 import { AnimatedTitle } from "./animated-title.tsx";
 import {
 	ContextMenuSectionHeading,
 	SIDEBAR_OVERFLOW_POPOVER_KEY,
 	SidebarListAppearanceMenuItems,
+	TabLayoutMenuItems,
 } from "./appearance-context-menu.tsx";
+import { BotChatSectionDialog } from "./BotChatSectionDialog.tsx";
 import { CustomizeSidebarDialog } from "./CustomizeSidebarDialog.tsx";
 import { NavUser } from "./NavUser.tsx";
 import { OverflowTooltip } from "./overflow-tooltip.tsx";
 import { PinnedAgentStage } from "./pinned-agent-stage.tsx";
 import { SidebarBrandBadge } from "./SidebarBrandBadge.tsx";
 import { SidebarSectionNav } from "./SidebarSectionNav.tsx";
+import { SidebarTodoProgress } from "./SidebarTodoProgress.tsx";
 import { SidebarConversationPreview } from "./sidebar-conversation-preview.tsx";
 import type { ChatRowHandlers } from "./sidebar-conversation-rows.tsx";
 import {
@@ -342,8 +369,10 @@ import {
 	isDynamicSectionKey,
 	isSectionKey,
 	loadSectionOrder,
+	migrateLegacySectionStorage,
 	SECTION_ICONS,
 	SECTION_LABELS,
+	SECTION_ORDER_KEY,
 	type SectionKey,
 	SURFACE_PLUGIN_OWNER,
 	saveSectionOrder,
@@ -381,10 +410,6 @@ const SECTION_PAGE_SIZE_KEY = "ryu:sidebar-section-page-sizes";
 const SECTION_SORT_KEY = "ryu:sidebar-section-sorts";
 const CHROME_ORDER_KEY = "ryu:sidebar-chrome-order";
 
-// Custom drag-data format for dragging an agent row onto a team (distinct from
-// the section-reorder drag, which uses "text/plain"). The payload is the agent id.
-const AGENT_DND_FORMAT = "application/x-ryu-agent";
-
 // Sidebar sections whose backing routes are gated by a Core App (`require_app_enabled`
 // / the ext-proxy mount, both of which refuse while the owning app is off). When that
 // App is disabled or absent the routes fail, so we hide the section rather than leave
@@ -401,27 +426,6 @@ const SECTION_PLUGIN_OWNER: Partial<Record<SectionKey, string>> = {
 	// sidebar KEY maps onto which of those surfaces; the Library states the same
 	// thing for its own keys against the same table.
 	spaces: SURFACE_PLUGIN_OWNER.spaces,
-	// Teams and Workflows are owner-gated for the same reason, arrived at the hard
-	// way. Both are entries in `BUILTIN_SECTIONS`, which is the CLOSED half of the
-	// vocabulary — "the shell's own pages, they ship compiled in" — so both rendered
-	// unconditionally, on every install, whether or not their app existed. Each one
-	// is really an app surface: `@ryu/teams` owns `/api/teams/*` (the `ryu-teams`
-	// sidecar) and `@ryu/workflows` owns the workflow store. With the apps default-off
-	// the sections stayed in the sidebar and every row inside them failed against a
-	// route the App gate refuses — which is what "I uninstalled Workflows and it is
-	// still there" describes. `sidebar-sections.ts` states the rule they were
-	// breaking: "if a new section needs a Core app to exist, it belongs in that app's
-	// manifest, not in BUILTIN_SECTIONS."
-	//
-	// This gate, not a move to `sidebar_sections` contributions, because the two
-	// sections are real compiled-in components (`TeamsSection`/`WorkflowsSection`,
-	// with their own hooks, drag-and-drop and context menus) that the generic
-	// declarative plugin-panel path cannot render. The gate buys the whole
-	// user-visible half of that move — absent app ⇒ absent section — at one line
-	// each; rehoming the UI is a separate change and can happen later without
-	// touching this.
-	teams: SURFACE_PLUGIN_OWNER.teams,
-	workflows: SURFACE_PLUGIN_OWNER.workflows,
 };
 
 // Pin/archive/unread state is local-first: persisted in localStorage rather than
@@ -550,7 +554,7 @@ export type ChromeKey = BuiltinChromeKey | DynamicChromeKey;
 // `contributions/builtins.ts`), and `AppsSection` lists every ENABLED companion
 // straight from `GET /api/plugins/contributions`. A hardcoded button here was a
 // second, dumber copy of that list — it rendered whether or not the App was
-// installed, so a fresh install (quests/timeline/activity are default-OFF) showed
+// installed, so a fresh install (quests/timeline/activity are not pre-installed) showed
 // buttons for features the user never had. The App declares itself; the shell does
 // not enumerate Apps.
 const CHROME_ORDER: ChromeKey[] = [
@@ -1855,6 +1859,7 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 		unsplit,
 	} = useTabsContext();
 	const inSplit = !!tab.splitId;
+	const tabLayout = useTabLayout();
 	const activeSplit = findSplit(tabs, splits, activeTabId);
 	const inActiveSplit = inSplit && tab.splitId === activeSplit?.id;
 	const { isDragging, showBefore, showAfter, dragHandlers } = useTabDragProps(
@@ -1862,6 +1867,15 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 		"y"
 	);
 	const busy = useTabBusy(tab);
+	const openTabInNewWindow = () => {
+		const overrideName = useNodeStore.getState().tabOverrides[tab.id];
+		void openEntityInNewWindow({
+			conversationId: tab.conversationId,
+			node: overrideName,
+			path: tab.path,
+			title: tab.title,
+		});
+	};
 	const rowState = isActive ? "bg-muted" : "hover:bg-muted/60";
 	const textState = isActive ? "text-foreground" : "text-muted-foreground";
 	const {
@@ -1999,14 +2013,20 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 					<TabEntityMenuSection tab={tab} />
 					<ContextMenuSeparator />
 					<ContextMenuItem
-						onClick={() => openTab(tab.path, { forceNew: true })}
+						onClick={() =>
+							openTab(tab.path, {
+								conversationId: tab.conversationId,
+								forceNew: true,
+								title: tab.title,
+								icon: tab.icon,
+							})
+						}
 					>
 						<HugeiconsIcon className="mr-2 size-4" icon={ArrowUpRight01Icon} />
 						Duplicate tab
 					</ContextMenuItem>
-					<ContextMenuItem onClick={() => setTabLayout("horizontal")}>
-						Use horizontal tabs
-					</ContextMenuItem>
+					<OpenInNewWindowContextMenuItem onClick={openTabInNewWindow} />
+					<TabLayoutMenuItems onChange={setTabLayout} value={tabLayout} />
 					<ContextMenuSeparator />
 					<ContextMenuItem onClick={() => closeTab(tab.id)}>
 						<HugeiconsIcon className="mr-2 size-4" icon={Cancel01Icon} />
@@ -2256,16 +2276,22 @@ function messagingRowStamp(ts: number): string {
 export function MessagingAgentRowBody({
 	agent,
 	conversation,
+	loadMessages,
+	nodeUrl,
 	onEdit,
 	onToggleThreads,
+	showEdit = true,
 	threadsExpanded,
 	threadCount,
 	usageBarVisible,
 }: {
 	agent: AgentSummary;
 	conversation: Conversation | undefined;
+	loadMessages?: ChatRowHandlers["loadMessages"];
+	nodeUrl?: string;
 	onEdit: () => void;
 	onToggleThreads: () => void;
+	showEdit?: boolean;
 	threadsExpanded: boolean;
 	threadCount: number;
 	usageBarVisible: boolean;
@@ -2286,6 +2312,13 @@ export function MessagingAgentRowBody({
 
 	return (
 		<>
+			{conversation && nodeUrl ? (
+				<SidebarTodoProgress
+					conversation={conversation}
+					loadMessages={loadMessages}
+					nodeUrl={nodeUrl}
+				/>
+			) : null}
 			<AgentAvatar
 				className="size-9 shrink-0 rounded-full object-cover"
 				engine={engineForAgent(agent)}
@@ -2337,24 +2370,26 @@ export function MessagingAgentRowBody({
 							/>
 						</button>
 					) : null}
-					<Tooltip>
-						<TooltipTrigger
-							render={
-								<button
-									aria-label={`Edit ${agent.name}`}
-									className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
-									onClick={(e) => {
-										e.stopPropagation();
-										onEdit();
-									}}
-									type="button"
-								>
-									<HugeiconsIcon icon={PencilEdit01Icon} size={14} />
-								</button>
-							}
-						/>
-						<TooltipContent>Edit agent</TooltipContent>
-					</Tooltip>
+					{showEdit && (
+						<Tooltip>
+							<TooltipTrigger
+								render={
+									<button
+										aria-label={`Edit ${agent.name}`}
+										className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
+										onClick={(e) => {
+											e.stopPropagation();
+											onEdit();
+										}}
+										type="button"
+									>
+										<HugeiconsIcon icon={PencilEdit01Icon} size={14} />
+									</button>
+								}
+							/>
+							<TooltipContent>Edit agent</TooltipContent>
+						</Tooltip>
+					)}
 				</div>
 			</div>
 		</>
@@ -2365,13 +2400,19 @@ export function MessagingAgentRowBody({
  *  ordinary Core summaries, so a new fork appears here as soon as the history
  *  context receives the fork response; no second thread registry is needed. */
 export function AgentThreadList({
+	loadMessages,
+	nodeUrl,
 	onOpen,
 	pageSize,
 	threads,
+	unreadIds,
 }: {
+	loadMessages?: ChatRowHandlers["loadMessages"];
+	nodeUrl?: string;
 	onOpen: (conversationId: string) => void;
 	pageSize: number;
 	threads: Conversation[];
+	unreadIds?: Set<string>;
 }) {
 	const paged = usePaged(threads, pageSize);
 	const renderList = (list: Conversation[]) => (
@@ -2384,10 +2425,18 @@ export function AgentThreadList({
 						<SidebarMenuItem key={thread.id}>
 							<button
 								aria-label={`Open thread: ${thread.title}`}
-								className="group/thread relative flex min-h-9 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-muted"
+								className="group/thread relative flex min-h-9 w-full items-center gap-2 overflow-hidden rounded-md px-2 py-1.5 text-left transition-colors hover:bg-muted"
 								onClick={() => onOpen(thread.id)}
 								type="button"
 							>
+								{nodeUrl ? (
+									<SidebarTodoProgress
+										celebrate={unreadIds?.has(thread.id) === true}
+										conversation={thread}
+										loadMessages={loadMessages}
+										nodeUrl={nodeUrl}
+									/>
+								) : null}
 								<span
 									aria-hidden="true"
 									className="absolute top-1/2 -left-[5px] size-2 -translate-y-1/2 rounded-full bg-sidebar-foreground/35 ring-2 ring-sidebar"
@@ -2466,7 +2515,9 @@ function AgentsSection({
 	const rowStyle = useAgentRowStyle();
 	const messaging = rowStyle === "messaging";
 	const { favorites, toggle: toggleFavorite } = useFavorites();
-	const { conversations } = useChatHistoryContext();
+	const { conversations, loadMessages } = useChatHistoryContext();
+	const activeNode = useActiveNode();
+	const unreadIds = useConversationFlagsStore((state) => state.unreadIds);
 	const pinnedAgents = useMemo(() => {
 		const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
 		return favorites
@@ -2519,6 +2570,10 @@ function AgentsSection({
 			icon:
 				agent?.avatarGlyph ?? personaToGlyph({ avatarUrl: agent?.avatarUrl }),
 		});
+	};
+
+	const openAgentInNewWindow = (id: string, name: string) => {
+		void openEntityInNewWindow({ path: `/agents/${id}/edit`, title: name });
 	};
 
 	// Start a fresh chat with this agent pre-selected (ChatPage reads initialAgent).
@@ -2575,10 +2630,9 @@ function AgentsSection({
 							<div
 								className={
 									messaging
-										? "group/row flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors hover:bg-muted"
+										? "group/row relative flex cursor-pointer items-center gap-2.5 overflow-hidden rounded-md px-2 py-1.5 transition-colors hover:bg-muted"
 										: "group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
 								}
-								draggable
 								onAuxClick={(e) => {
 									if (e.button === 1) {
 										e.preventDefault();
@@ -2586,13 +2640,6 @@ function AgentsSection({
 									}
 								}}
 								onClick={() => startChatWithAgent(agent.id)}
-								onDragStart={(e) => {
-									// Drag an agent onto a team in the Teams section to add it.
-									e.dataTransfer.effectAllowed = "copy";
-									e.dataTransfer.setData(AGENT_DND_FORMAT, agent.id);
-									// Some platforms require text/plain to start a drag.
-									e.dataTransfer.setData("text/plain", agent.name);
-								}}
 								onKeyDown={(e) => {
 									if (e.key === "Enter") {
 										startChatWithAgent(agent.id);
@@ -2605,6 +2652,8 @@ function AgentsSection({
 									<MessagingAgentRowBody
 										agent={agent}
 										conversation={latestByAgent.get(agent.id)}
+										loadMessages={loadMessages}
+										nodeUrl={activeNode.url}
 										onEdit={() => openAgent(agent.id, agent.name)}
 										onToggleThreads={() => toggleAgentThreads(agent.id)}
 										threadCount={threads.length}
@@ -2667,6 +2716,9 @@ function AgentsSection({
 								/>
 								Open in new tab
 							</ContextMenuItem>
+							<OpenInNewWindowContextMenuItem
+								onClick={() => openAgentInNewWindow(agent.id, agent.name)}
+							/>
 							<ContextMenuItem
 								onClick={() => toggleFavorite("agent", agent.id)}
 							>
@@ -2688,9 +2740,12 @@ function AgentsSection({
 					</ContextMenu>
 					{messaging && threadsExpanded ? (
 						<AgentThreadList
+							loadMessages={loadMessages}
+							nodeUrl={activeNode.url}
 							onOpen={openThread}
 							pageSize={pageSize}
 							threads={threads}
+							unreadIds={unreadIds}
 						/>
 					) : null}
 				</SidebarMenuItem>
@@ -2756,329 +2811,6 @@ function AgentsSection({
 	);
 }
 
-/** A small overlapping stack of member engine logos used as a team's glyph.
- *  Falls back to the group icon when a team has no members yet. */
-function TeamLogoStack({
-	members,
-}: {
-	members: { id: string; engine: string | null; glyph?: GlyphValue }[];
-}) {
-	if (members.length === 0) {
-		return (
-			<HugeiconsIcon
-				className="size-4 shrink-0 text-muted-foreground"
-				icon={UserMultiple02Icon}
-			/>
-		);
-	}
-	const shown = members.slice(0, 3);
-	return (
-		<div className="flex shrink-0 items-center">
-			{shown.map((member, i) => (
-				<span
-					className={`flex size-4 items-center justify-center rounded-full bg-background ring-1 ring-border ${i > 0 ? "-ml-1.5" : ""}`}
-					key={member.id}
-					style={{ zIndex: shown.length - i }}
-				>
-					<AgentAvatar
-						className="size-2.5 object-contain"
-						engine={member.engine}
-						glyph={member.glyph}
-						size="10px"
-					/>
-				</span>
-			))}
-		</div>
-	);
-}
-
-/** Teams list in the sidebar — each team is a drop target: drag an agent row
- *  from the Agents section onto a team to add it as a member. The "+" creates a
- *  team via the shared TeamDialog; rows expand to show members, and the context
- *  menu edits the team (name + coordination strategy) or removes members. */
-function TeamsSection({
-	collapsed,
-	dnd,
-	menu,
-	onToggleCollapsed,
-	pageSize,
-	sort,
-}: SectionProps) {
-	const { teams, create, update, remove, addMember, removeMember } = useTeams();
-	const { agents } = useAgents();
-	const paged = usePaged(
-		sortItems(teams, sort, NAMED_SORT_ACCESSORS),
-		pageSize
-	);
-	const [dialogOpen, setDialogOpen] = useState(false);
-	const [editing, setEditing] = useState<string | null>(null);
-	const [expanded, setExpanded] = useState<Set<string>>(new Set());
-	const [dropTarget, setDropTarget] = useState<string | null>(null);
-	// Deleting a team or removing a member is irreversible, so each opens a
-	// confirmation dialog before the destructive call actually runs.
-	const [teamToDelete, setTeamToDelete] = useState<{
-		id: string;
-		name: string;
-	} | null>(null);
-	const [memberToRemove, setMemberToRemove] = useState<{
-		memberId: string;
-		name: string;
-		teamId: string;
-	} | null>(null);
-
-	const agentName = (id: string) => agents.find((a) => a.id === id)?.name ?? id;
-	const memberAgent = (id: string) => {
-		const agent = agents.find((a) => a.id === id);
-		return agent ?? null;
-	};
-	const memberEngine = (id: string) => {
-		const agent = memberAgent(id);
-		return agent ? engineForAgent(agent) : null;
-	};
-
-	const editingTeam = teams.find((t) => t.id === editing) ?? null;
-
-	const toggleExpanded = (id: string) =>
-		setExpanded((prev) => {
-			const next = new Set(prev);
-			if (next.has(id)) {
-				next.delete(id);
-			} else {
-				next.add(id);
-			}
-			return next;
-		});
-
-	const handleSubmit = async (draft: TeamDraft) => {
-		if (editingTeam) {
-			await update(editingTeam.id, draft);
-		} else {
-			const created = await create(draft);
-			setExpanded((prev) => new Set(prev).add(created.id));
-		}
-	};
-
-	const handleDropAgent = (teamId: string, e: ReactDragEvent) => {
-		e.preventDefault();
-		setDropTarget(null);
-		const agentId = e.dataTransfer.getData(AGENT_DND_FORMAT);
-		if (agentId) {
-			addMember(teamId, agentId);
-			setExpanded((prev) => new Set(prev).add(teamId));
-		}
-	};
-
-	const renderTeamRows = (list: typeof teams) =>
-		list.map((team) => (
-			<SidebarMenuItem key={team.id}>
-				<ContextMenu>
-					<ContextMenuTrigger>
-						{/* biome-ignore lint/a11y/useKeyWithClickEvents: row is a button below */}
-						{/* biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: team row drag target */}
-						<div
-							className={`group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted ${dropTarget === team.id ? "ring-1 ring-primary" : ""}`}
-							onDragLeave={() => setDropTarget(null)}
-							onDragOver={(e) => {
-								if (e.dataTransfer.types.includes(AGENT_DND_FORMAT)) {
-									e.preventDefault();
-									e.dataTransfer.dropEffect = "copy";
-									setDropTarget(team.id);
-								}
-							}}
-							onDrop={(e) => handleDropAgent(team.id, e)}
-						>
-							<button
-								className="flex min-w-0 flex-1 items-center gap-2"
-								onClick={() => toggleExpanded(team.id)}
-								type="button"
-							>
-								<TeamLogoStack
-									members={team.members.map((id) => ({
-										engine: memberEngine(id),
-										glyph: memberAgent(id)?.avatarGlyph,
-										id,
-									}))}
-								/>
-								<OverflowTooltip
-									className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-left text-sm"
-									fade
-									text={team.name}
-								/>
-								<span className="shrink-0 text-muted-foreground text-xs">
-									{formatCount(team.members.length) ?? "—"}
-								</span>
-							</button>
-						</div>
-					</ContextMenuTrigger>
-					<ContextMenuContent>
-						<ContextMenuItem
-							onClick={() => {
-								setEditing(team.id);
-								setDialogOpen(true);
-							}}
-						>
-							<HugeiconsIcon className="mr-2 size-4" icon={PencilEdit01Icon} />
-							Edit team
-						</ContextMenuItem>
-						<ContextMenuSeparator />
-						<ContextMenuItem
-							onClick={() => setTeamToDelete({ id: team.id, name: team.name })}
-							variant="destructive"
-						>
-							<HugeiconsIcon className="mr-2 size-4" icon={Delete01Icon} />
-							Delete team
-						</ContextMenuItem>
-					</ContextMenuContent>
-				</ContextMenu>
-				{expanded.has(team.id) &&
-					team.members.map((memberId) => (
-						<ContextMenu key={memberId}>
-							<ContextMenuTrigger>
-								<div className="ml-6 flex h-7 items-center gap-2 rounded-md px-2 text-muted-foreground hover:bg-muted">
-									<AgentAvatar
-										className="size-3 shrink-0 object-contain"
-										engine={memberEngine(memberId)}
-										glyph={memberAgent(memberId)?.avatarGlyph}
-										size="12px"
-									/>
-									<span className="min-w-0 flex-1 truncate text-xs">
-										{agentName(memberId)}
-									</span>
-								</div>
-							</ContextMenuTrigger>
-							<ContextMenuContent>
-								<ContextMenuItem
-									onClick={() =>
-										setMemberToRemove({
-											memberId,
-											name: agentName(memberId),
-											teamId: team.id,
-										})
-									}
-									variant="destructive"
-								>
-									<HugeiconsIcon className="mr-2 size-4" icon={Delete01Icon} />
-									Remove from team
-								</ContextMenuItem>
-							</ContextMenuContent>
-						</ContextMenu>
-					))}
-			</SidebarMenuItem>
-		));
-
-	return (
-		<>
-			<SidebarSection
-				action={
-					<SectionAddButton
-						onClick={() => {
-							setEditing(null);
-							setDialogOpen(true);
-						}}
-						title="New team"
-					/>
-				}
-				collapsed={collapsed}
-				dnd={dnd}
-				label="Teams"
-				menu={menu}
-				onToggleCollapsed={onToggleCollapsed}
-				pageSize={pageSize}
-				sectionKey="teams"
-				sort={sort}
-			>
-				{teams.length === 0 ? (
-					<p className="px-2 py-2 text-muted-foreground text-xs">
-						No teams yet. Click + to create one and add agents.
-					</p>
-				) : (
-					<>
-						<SidebarMenu className="gap-0.5">
-							{renderTeamRows(paged.visible)}
-						</SidebarMenu>
-						<SectionPagingControls
-							overflow={{
-								getSearchText: (team) => team.name ?? "",
-								items: paged.items,
-								label: "teams",
-								renderList: (list) => (
-									<SidebarMenu className="gap-0.5">
-										{renderTeamRows(list)}
-									</SidebarMenu>
-								),
-							}}
-							paged={paged}
-						/>
-					</>
-				)}
-			</SidebarSection>
-			<TeamDialog
-				agents={agents}
-				onClose={() => setDialogOpen(false)}
-				onSubmit={handleSubmit}
-				open={dialogOpen}
-				team={editingTeam}
-			/>
-			<DestructiveConfirmDialog
-				description={
-					teamToDelete
-						? `"${teamToDelete.name}" will be permanently deleted. Its agents and channel history are not deleted.`
-						: ""
-				}
-				label={`Delete ${teamToDelete?.name ?? "this team"}`}
-				onConfirm={async () => {
-					if (!teamToDelete) {
-						return false;
-					}
-					try {
-						await remove(teamToDelete.id);
-						setTeamToDelete(null);
-						return true;
-					} catch {
-						toast.error("Couldn't delete this team");
-						return false;
-					}
-				}}
-				onOpenChange={(open) => {
-					if (!open) {
-						setTeamToDelete(null);
-					}
-				}}
-				open={teamToDelete !== null}
-				title="Delete this team?"
-			/>
-			<DestructiveConfirmDialog
-				description={
-					memberToRemove
-						? `"${memberToRemove.name}" will be removed from this team. The agent itself is not deleted.`
-						: ""
-				}
-				label={`Remove ${memberToRemove?.name ?? "this member"}`}
-				onConfirm={async () => {
-					if (!memberToRemove) {
-						return false;
-					}
-					try {
-						await removeMember(memberToRemove.teamId, memberToRemove.memberId);
-						setMemberToRemove(null);
-						return true;
-					} catch {
-						toast.error("Couldn't remove that member");
-						return false;
-					}
-				}}
-				onOpenChange={(open) => {
-					if (!open) {
-						setMemberToRemove(null);
-					}
-				}}
-				open={memberToRemove !== null}
-				title="Remove from team?"
-			/>
-		</>
-	);
-}
-
 /** A section's load-failure body: a plain-English line plus a "Try again"
  *  affordance. Shown instead of the empty-state when a fetch fails, so a failed
  *  load never masquerades as "nothing here yet". */
@@ -3121,6 +2853,7 @@ function SectionLoadError({
 export function SpacesPickerBody({
 	listDocuments,
 	onOpenDoc,
+	onOpenInNewWindow,
 	pageSize,
 	setDocumentIcon,
 	sort,
@@ -3128,6 +2861,7 @@ export function SpacesPickerBody({
 }: {
 	listDocuments: (spaceId: string) => Promise<SpaceDocument[]>;
 	onOpenDoc: (doc: SpaceDocument, forceNew?: boolean) => void;
+	onOpenInNewWindow?: (doc: SpaceDocument) => void;
 	pageSize: number;
 	setDocumentIcon: (
 		spaceId: string,
@@ -3194,6 +2928,7 @@ export function SpacesPickerBody({
 			docs={list}
 			onIconChanged={applyIcon}
 			onOpenDoc={onOpenDoc}
+			onOpenInNewWindow={onOpenInNewWindow}
 			setDocumentIcon={setDocumentIcon}
 		/>
 	);
@@ -3254,12 +2989,14 @@ function SpaceDocRows({
 	docs,
 	onIconChanged,
 	onOpenDoc,
+	onOpenInNewWindow,
 	setDocumentIcon,
 }: {
 	docs: SpaceDocument[];
 	/** Let the owner of the list apply the new icon optimistically. */
 	onIconChanged: (docId: string, icon: GlyphValue) => void;
 	onOpenDoc: (doc: SpaceDocument, forceNew?: boolean) => void;
+	onOpenInNewWindow?: (doc: SpaceDocument) => void;
 	setDocumentIcon: (
 		spaceId: string,
 		documentId: string,
@@ -3314,6 +3051,11 @@ function SpaceDocRows({
 									/>
 									Open in new tab
 								</ContextMenuItem>
+								{onOpenInNewWindow ? (
+									<OpenInNewWindowContextMenuItem
+										onClick={() => onOpenInNewWindow(doc)}
+									/>
+								) : null}
 								<ContextMenuItem onClick={() => setIconTarget(doc)}>
 									<HugeiconsIcon
 										className="mr-2 size-4"
@@ -3366,10 +3108,12 @@ function SidebarSpaceDocs({
 	spaceId,
 	listDocuments,
 	onOpenDoc,
+	onOpenInNewWindow,
 	setDocumentIcon,
 }: {
 	listDocuments: (spaceId: string) => Promise<SpaceDocument[]>;
 	onOpenDoc: (doc: SpaceDocument, forceNew?: boolean) => void;
+	onOpenInNewWindow?: (doc: SpaceDocument) => void;
 	setDocumentIcon: (
 		spaceId: string,
 		documentId: string,
@@ -3414,6 +3158,7 @@ function SidebarSpaceDocs({
 			docs={list}
 			onIconChanged={applyIcon}
 			onOpenDoc={onOpenDoc}
+			onOpenInNewWindow={onOpenInNewWindow}
 			setDocumentIcon={setDocumentIcon}
 		/>
 	);
@@ -3453,8 +3198,10 @@ export function SpaceSidebarRow({
 	listDocuments,
 	onAdd,
 	onOpen,
+	onOpenDocInNewWindow,
 	onOpenInNewTab,
 	onOpenDoc,
+	onOpenInNewWindow,
 	onRequestDelete,
 	onRename,
 	onRequestVisibilityChange,
@@ -3473,7 +3220,9 @@ export function SpaceSidebarRow({
 	onAdd: () => void;
 	onOpen: () => void;
 	onOpenDoc: (doc: SpaceDocument, forceNew?: boolean) => void;
+	onOpenDocInNewWindow: (doc: SpaceDocument) => void;
 	onOpenInNewTab: () => void;
+	onOpenInNewWindow: () => void;
 	onRequestDelete: () => void;
 	onRename: (name: string) => Promise<void>;
 	onRequestVisibilityChange: (request: VisibilityChangeRequest) => void;
@@ -3619,6 +3368,7 @@ export function SpaceSidebarRow({
 						<HugeiconsIcon className="mr-2 size-4" icon={ArrowUpRight01Icon} />
 						Open in new tab
 					</ContextMenuItem>
+					<OpenInNewWindowContextMenuItem onClick={onOpenInNewWindow} />
 					<ContextMenuItem onClick={() => setIconDialogOpen(true)}>
 						<HugeiconsIcon className="mr-2 size-4" icon={ImageAdd01Icon} />
 						Change icon…
@@ -3700,6 +3450,7 @@ export function SpaceSidebarRow({
 				<SidebarSpaceDocs
 					listDocuments={listDocuments}
 					onOpenDoc={onOpenDoc}
+					onOpenInNewWindow={onOpenDocInNewWindow}
 					setDocumentIcon={setDocumentIcon}
 					spaceId={space.id}
 				/>
@@ -3938,6 +3689,7 @@ function SpacesSection({
 								}}
 								onOpen={() => openSpace(selectedSpace)}
 								onOpenInNewTab={() => openSpace(selectedSpace, true)}
+								onOpenInNewWindow={() => openSpaceInNewWindow(selectedSpace)}
 								onRename={(name) => rename(selectedSpace.id, name)}
 								onRequestDelete={() =>
 									setPendingDelete({
@@ -3960,6 +3712,7 @@ function SpacesSection({
 				<SpacesPickerBody
 					listDocuments={listDocuments}
 					onOpenDoc={(doc, forceNew) => openDoc(doc.spaceId, doc, forceNew)}
+					onOpenInNewWindow={openDocInNewWindow}
 					pageSize={pageSize}
 					setDocumentIcon={setDocumentIcon}
 					sort={sort}
@@ -4013,14 +3766,31 @@ function SpacesSection({
 			icon: space.icon ?? null,
 		});
 
+	const openSpaceInNewWindow = (space: (typeof visibleSpaces)[number]) => {
+		void openEntityInNewWindow({
+			path: `/spaces/${space.id}`,
+			title: space.name,
+		});
+	};
+
 	// Open a document inside a space directly in its editor (databases use the
 	// data-grid route, pages the markdown route) — mirrors SpacesPage.openDoc.
 	const openDoc = (spaceId: string, doc: SpaceDocument, forceNew = false) => {
-		const segment = doc.kind === "database" ? "db" : "doc";
+		const segment =
+			doc.rawKind === "file" ? "file" : doc.kind === "database" ? "db" : "doc";
 		openTab(`/spaces/${spaceId}/${segment}/${doc.id}`, {
 			title: doc.title || "Untitled",
 			icon: doc.icon ?? null,
 			forceNew,
+		});
+	};
+
+	const openDocInNewWindow = (doc: SpaceDocument) => {
+		const segment =
+			doc.rawKind === "file" ? "file" : doc.kind === "database" ? "db" : "doc";
+		void openEntityInNewWindow({
+			path: `/spaces/${doc.spaceId}/${segment}/${doc.id}`,
+			title: doc.title || "Untitled",
 		});
 	};
 
@@ -4060,7 +3830,9 @@ function SpacesSection({
 				}}
 				onOpen={() => openSpace(space)}
 				onOpenDoc={(doc, forceNew) => openDoc(space.id, doc, forceNew)}
+				onOpenDocInNewWindow={openDocInNewWindow}
 				onOpenInNewTab={() => openSpace(space, true)}
+				onOpenInNewWindow={() => openSpaceInNewWindow(space)}
 				onRename={(name) => rename(space.id, name)}
 				onRequestDelete={() =>
 					setPendingDelete({ id: space.id, name: space.name })
@@ -4152,144 +3924,6 @@ function SpacesSection({
 				title="Delete this Space?"
 			/>
 		</>
-	);
-}
-
-/** Workflows list in the sidebar — mirrors Agents/Spaces; rows open the
- *  Workflows canvas for that workflow, "+" starts a new one. */
-function WorkflowsSection({
-	collapsed,
-	dnd,
-	menu,
-	onToggleCollapsed,
-	pageSize,
-	sort,
-}: SectionProps) {
-	const { openTab } = useTabsContext();
-	const { workflows, loading } = useWorkflows();
-	// Contributed `workflow`-anchored rows — see the note in AgentsSection.
-	const workflowContributedRows = useContributedRowsFor(
-		"workflow",
-		"workflow_id"
-	);
-	// Schedule jobs give the `every`-interval anchor (lastRunAt) for the next-run
-	// tooltip; the list is small and shared with the schedules page.
-	const { jobs } = useSchedules();
-	const paged = usePaged(
-		sortItems(workflows, sort, NAMED_SORT_ACCESSORS),
-		pageSize
-	);
-
-	const openWorkflow = (id: string, name: string, forceNew = false) =>
-		openTab(`/workflows/${id}`, { title: name, forceNew });
-
-	const emptyMessage = loading ? "Loading…" : "No workflows yet";
-
-	const renderWorkflowRows = (list: typeof workflows) =>
-		list.map((wf) => (
-			<SidebarMenuItem key={wf.id}>
-				<ContextMenu>
-					<ContextMenuTrigger>
-						{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-						<div
-							className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
-							onAuxClick={(e) => {
-								if (e.button === 1) {
-									e.preventDefault();
-									openWorkflow(wf.id, wf.name, true);
-								}
-							}}
-							onClick={() => openWorkflow(wf.id, wf.name)}
-							onKeyDown={(e) => {
-								if (e.key === "Enter") {
-									openWorkflow(wf.id, wf.name);
-								}
-							}}
-							role="button"
-							tabIndex={0}
-						>
-							<HugeiconsIcon
-								className="size-4 shrink-0 text-muted-foreground"
-								icon={WorkflowCircle06Icon}
-							/>
-							<OverflowTooltip
-								className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm"
-								fade
-								text={wf.name}
-							/>
-							<WorkflowTriggerIcons
-								className="flex shrink-0 items-center gap-1"
-								job={scheduleJobFor(wf.id, jobs)}
-								triggers={wf.triggers}
-							/>
-							<span className="shrink-0 text-muted-foreground/70 text-xs tabular-nums">
-								{formatCount(wf.nodes.length) ?? "—"}
-							</span>
-						</div>
-					</ContextMenuTrigger>
-					<ContextMenuContent>
-						<ContextMenuItem onClick={() => openWorkflow(wf.id, wf.name, true)}>
-							<HugeiconsIcon
-								className="mr-2 size-4"
-								icon={ArrowUpRight01Icon}
-							/>
-							Open in new tab
-						</ContextMenuItem>
-						{workflowContributedRows(wf.id).map((row) => (
-							<ContextMenuItem key={row.id} onClick={row.onSelect}>
-								<span className="mr-2 inline-flex">
-									<EntityRowGlyph row={row} />
-								</span>
-								{row.label}
-							</ContextMenuItem>
-						))}
-					</ContextMenuContent>
-				</ContextMenu>
-			</SidebarMenuItem>
-		));
-
-	return (
-		<SidebarSection
-			action={
-				<SectionAddButton
-					onClick={() => openTab("/workflows/new", { title: "New workflow" })}
-					title="New workflow"
-				/>
-			}
-			collapsed={collapsed}
-			dnd={dnd}
-			label="Workflows"
-			menu={menu}
-			onToggleCollapsed={onToggleCollapsed}
-			pageSize={pageSize}
-			sectionKey="workflows"
-			sort={sort}
-		>
-			{workflows.length === 0 ? (
-				<p className="px-2 py-2 text-muted-foreground text-xs">
-					{emptyMessage}
-				</p>
-			) : (
-				<>
-					<SidebarMenu className="gap-0.5">
-						{renderWorkflowRows(paged.visible)}
-					</SidebarMenu>
-					<SectionPagingControls
-						overflow={{
-							getSearchText: (wf) => wf.name ?? "",
-							items: paged.items,
-							label: "workflows",
-							renderList: (list) => (
-								<SidebarMenu className="gap-0.5">
-									{renderWorkflowRows(list)}
-								</SidebarMenu>
-							),
-						}}
-						paged={paged}
-					/>
-				</>
-			)}
-		</SidebarSection>
 	);
 }
 
@@ -4388,6 +4022,14 @@ function ChannelsSection({
 							/>
 							Open in new tab
 						</ContextMenuItem>
+						<OpenInNewWindowContextMenuItem
+							onClick={() =>
+								void openEntityInNewWindow({
+									path: `/channels/${channel.id}`,
+									title: channel.name,
+								})
+							}
+						/>
 					</ContextMenuContent>
 				</ContextMenu>
 			</SidebarMenuItem>
@@ -4714,6 +4356,14 @@ function IdentitiesSection({
 							/>
 							Open in new tab
 						</ContextMenuItem>
+						<OpenInNewWindowContextMenuItem
+							onClick={() =>
+								void openEntityInNewWindow({
+									path: `/identities/profile/${encodeURIComponent(row.id)}`,
+									title: row.name,
+								})
+							}
+						/>
 					</ContextMenuContent>
 				</ContextMenu>
 			</SidebarMenuItem>
@@ -4865,6 +4515,11 @@ function SkillsSection({
 							/>
 							Open in new tab
 						</ContextMenuItem>
+						<OpenInNewWindowContextMenuItem
+							onClick={() =>
+								void openEntityInNewWindow({ path: "/skills", title: "Skills" })
+							}
+						/>
 					</ContextMenuContent>
 				</ContextMenu>
 			</SidebarMenuItem>
@@ -4941,6 +4596,8 @@ function McpSection({
 
 	const openTools = (forceNew = false) =>
 		openTab("/tools", { title: "Tools", forceNew });
+	const openToolsInNewWindow = () =>
+		void openEntityInNewWindow({ path: "/tools", title: "Tools" });
 
 	const emptyMessage = loading ? "Loading…" : "No MCP servers";
 
@@ -4988,6 +4645,7 @@ function McpSection({
 							/>
 							Open in new tab
 						</ContextMenuItem>
+						<OpenInNewWindowContextMenuItem onClick={openToolsInNewWindow} />
 					</ContextMenuContent>
 				</ContextMenu>
 			</SidebarMenuItem>
@@ -5065,6 +4723,9 @@ function ToolsSection({
 	const openTools = (forceNew = false) =>
 		openTab("/tools", { title: "Tools", forceNew });
 
+	const openToolsInNewWindow = () =>
+		void openEntityInNewWindow({ path: "/tools", title: "Tools" });
+
 	const emptyMessage = loading ? "Loading…" : "No tools";
 
 	const renderToolRows = (list: typeof tools) =>
@@ -5108,6 +4769,7 @@ function ToolsSection({
 							/>
 							Open in new tab
 						</ContextMenuItem>
+						<OpenInNewWindowContextMenuItem onClick={openToolsInNewWindow} />
 					</ContextMenuContent>
 				</ContextMenu>
 			</SidebarMenuItem>
@@ -5185,6 +4847,9 @@ function PluginsSection({
 	const openPlugins = (forceNew = false) =>
 		openTab("/apps", { title: "Plugins", forceNew });
 
+	const openPluginsInNewWindow = () =>
+		void openEntityInNewWindow({ path: "/apps", title: "Plugins" });
+
 	const emptyMessage = loading ? "Loading…" : "No plugins installed";
 
 	const renderPluginRows = (list: typeof installed) =>
@@ -5227,6 +4892,7 @@ function PluginsSection({
 								dither={app.iconDither}
 								iconBackground={app.iconBackground ?? undefined}
 								iconId={app.companion?.icon ?? app.icon}
+								iconPadding={app.iconPadding}
 								iconUrl={app.iconUrl}
 								name={app.name}
 								seedId={app.id}
@@ -5255,6 +4921,7 @@ function PluginsSection({
 							/>
 							Open in new tab
 						</ContextMenuItem>
+						<OpenInNewWindowContextMenuItem onClick={openPluginsInNewWindow} />
 					</ContextMenuContent>
 				</ContextMenu>
 			</SidebarMenuItem>
@@ -5361,6 +5028,11 @@ function AppsSection({
 					const owner = c.pluginId ? pluginsById.get(c.pluginId) : undefined;
 					const open = (forceNew = false) =>
 						openTab(pluginCompanionPath(c.id), { title: label, forceNew });
+					const openInNewWindow = () =>
+						void openEntityInNewWindow({
+							path: pluginCompanionPath(c.id),
+							title: label,
+						});
 					const reportApp = () => {
 						report?.open({
 							id: c.pluginId || c.id,
@@ -5407,6 +5079,7 @@ function AppsSection({
 											dither={owner?.iconDither}
 											iconBackground={owner?.iconBackground}
 											iconId={c.icon ?? owner?.icon}
+											iconPadding={owner?.iconPadding}
 											iconUrl={owner?.iconUrl}
 											name={label}
 											seedId={c.pluginId || c.id}
@@ -5435,6 +5108,7 @@ function AppsSection({
 										/>
 										Open in new tab
 									</ContextMenuItem>
+									<OpenInNewWindowContextMenuItem onClick={openInNewWindow} />
 									{report ? (
 										<ContextMenuItem onClick={reportApp}>
 											Report
@@ -5454,8 +5128,9 @@ function AppsSection({
  * An app-REGISTERED sidebar section, rendered generically from a `sidebar_sections`
  * contribution (the dynamic counterpart to the hardcoded Canvas/Whiteboard/Meetings
  * sections). Its live rows come from the contribution's declared `spec.source` — a
- * Core `/api/` path the shell fetches through the authenticated node seam, mapped via
- * {@link sourceItemsFromResponse} — so nothing is hardcoded per app. Clicking a row
+ * same-origin, safe Core-relative read path the shell fetches through the
+ * authenticated node seam, mapped via {@link sourceItemsFromResponse} — so nothing
+ * is hardcoded per app. Clicking a row
  * opens `spec.itemTarget` (a `{{item.<key>}}` route template) via `openTab`. Returns
  * null when empty *unless* the spec declares an `emptyState`, mirroring
  * {@link AppsSection}, so a disabled/empty app never leaves a phantom header while a
@@ -5485,10 +5160,28 @@ export function DynamicSidebarSection({
 	const node = useActiveNode();
 	const queryClient = useQueryClient();
 	const spec = contribution.spec;
+	const canUseDeclarativeHttp = (contribution.approved_grants ?? []).includes(
+		DECLARATIVE_HTTP_GRANT
+	);
+	const [pendingAction, setPendingAction] = useState<string | null>(null);
+	const [pendingCreate, setPendingCreate] = useState(false);
+	const entityRowsFor = useContributedRowsFor(
+		spec?.entity?.anchor ?? "",
+		spec?.entity?.idKey ?? "id"
+	);
 	const source = spec?.source;
-	const sourcePath = source?.http.path;
-	const sourceMethod = source?.http.method ?? "GET";
-	const fetchable = Boolean(source && sourcePath && isCoreApiPath(sourcePath));
+	const sourceRequest = contributionSourceRequest(contribution, source);
+	const sourcePath = source?.http?.path;
+	const sourceMethod = source?.http?.method ?? "GET";
+	const refreshMs = normalizeViewRefreshMs(source?.refreshMs);
+	const fetchable = Boolean(
+		canUseDeclarativeHttp &&
+			sourceRequest &&
+			source &&
+			sourcePath &&
+			isCoreReadPath(sourcePath) &&
+			isViewSourceHttpMethod(sourceMethod)
+	);
 	const target = toTarget(node);
 	// Shared across every section reading the same endpoint on the same node. The
 	// PAYLOAD is cached, not the mapped rows, because two sections map/filter the
@@ -5498,10 +5191,10 @@ export function DynamicSidebarSection({
 			"contributed-section-source",
 			target.url,
 			target.token,
-			sourcePath ?? "",
-			sourceMethod,
+			sourceRequest?.path ?? "",
+			sourceRequest?.method ?? "",
 		],
-		[target.url, target.token, sourcePath, sourceMethod]
+		[target.url, target.token, sourceRequest]
 	);
 
 	const { data: payload } = useQuery({
@@ -5511,19 +5204,19 @@ export function DynamicSidebarSection({
 		// is an empty section, not an error state to retry into.
 		retry: false,
 		queryFn: async () => {
-			const resp = await fetch(apiUrl(target, sourcePath as string), {
-				method: sourceMethod,
-				headers: makeHeaders(target.token),
+			if (!sourceRequest) {
+				return null;
+			}
+			const resp = await fetch(apiUrl(target, sourceRequest.path), {
+				method: sourceRequest.method,
+				headers: await requestHeaders(target),
 			});
 			return resp.ok ? ((await resp.json()) as unknown) : null;
 		},
 		// Live sections declare their own cadence; the floor keeps a typo like
 		// `refreshMs: 10` from turning the sidebar into a request loop. Collapsed =
 		// nothing visible to keep fresh, so the poll stops.
-		refetchInterval:
-			source?.refreshMs && !collapsed
-				? Math.max(source.refreshMs, 1000)
-				: false,
+		refetchInterval: refreshMs !== null && !collapsed ? refreshMs : false,
 	});
 
 	const rows = useMemo(
@@ -5562,8 +5255,19 @@ export function DynamicSidebarSection({
 			const { path, options } = parseContributedTarget(
 				renderTemplate(spec.itemTarget, { item }, { uriEncode: true })
 			);
+			const mountContext = spec.context
+				? Object.fromEntries(
+						Object.entries(spec.context).flatMap(([contextKey, rowKey]) => {
+							const value = item[rowKey];
+							return value === undefined || value === null
+								? []
+								: [[contextKey, value]];
+						})
+					)
+				: undefined;
 			openTab(path, {
 				...options,
+				...(spec.context ? { mountContext: mountContext ?? null } : {}),
 				title,
 				forceNew,
 				icon: asGlyphValue(item.icon),
@@ -5571,17 +5275,44 @@ export function DynamicSidebarSection({
 		}
 	};
 
+	const openTargetInNewWindow = (
+		item: Record<string, unknown>,
+		title: string
+	) => {
+		if (!spec?.itemTarget) {
+			return;
+		}
+		const { path, options } = parseContributedTarget(
+			renderTemplate(spec.itemTarget, { item }, { uriEncode: true })
+		);
+		void openEntityInNewWindow({
+			conversationId: options.conversationId,
+			path,
+			title,
+		});
+	};
+
 	// Run a per-row `http` action (delete/…) templated with the row, then re-fetch.
 	const runAction = async (
 		http: ViewActionHttp,
 		item: Record<string, unknown>
 	) => {
+		if (!canUseDeclarativeHttp) {
+			return;
+		}
+		const actionKey = `${http.method}:${http.path}:${String(item.id ?? "")}`;
+		if (pendingAction === actionKey) {
+			return;
+		}
+		setPendingAction(actionKey);
 		try {
 			const target = toTarget(node);
-			const rendered = renderActionHttp(http, { item });
+			const rendered = renderContributionActionHttp(contribution, http, {
+				item,
+			});
 			const resp = await fetch(apiUrl(target, rendered.path), {
 				method: rendered.method,
-				headers: makeHeaders(target.token),
+				headers: await requestHeaders(target),
 				body:
 					rendered.body === undefined
 						? undefined
@@ -5592,6 +5323,8 @@ export function DynamicSidebarSection({
 			}
 		} catch {
 			// best-effort
+		} finally {
+			setPendingAction((current) => (current === actionKey ? null : current));
 		}
 	};
 
@@ -5601,12 +5334,31 @@ export function DynamicSidebarSection({
 		if (!spec?.create) {
 			return;
 		}
+		if ("target" in spec.create && typeof spec.create.target === "string") {
+			const { path, options } = parseContributedTarget(spec.create.target);
+			openTab(path, {
+				...options,
+				title: spec.create.label ?? `New ${contribution.title}`,
+			});
+			return;
+		}
+		if (!canUseDeclarativeHttp) {
+			return;
+		}
+		if (pendingCreate) {
+			return;
+		}
+		setPendingCreate(true);
 		try {
 			const target = toTarget(node);
-			const rendered = renderActionHttp(spec.create.http, {});
+			const rendered = renderContributionActionHttp(
+				contribution,
+				spec.create.http,
+				{}
+			);
 			const resp = await fetch(apiUrl(target, rendered.path), {
 				method: rendered.method,
-				headers: makeHeaders(target.token),
+				headers: await requestHeaders(target),
 				body:
 					rendered.body === undefined
 						? undefined
@@ -5629,6 +5381,8 @@ export function DynamicSidebarSection({
 			}
 		} catch {
 			// best-effort
+		} finally {
+			setPendingCreate(false);
 		}
 	};
 
@@ -5636,12 +5390,15 @@ export function DynamicSidebarSection({
 	// renders nothing (mirrors AppsSection) — no phantom header for a disabled/empty
 	// app. An `emptyState` is the opt-in that keeps the header, for a section whose
 	// emptiness is itself the answer.
-	if (rows.length === 0 && !(spec?.create || spec?.emptyState)) {
+	const canCreate = Boolean(
+		spec?.create && ("target" in spec.create || canUseDeclarativeHttp)
+	);
+	if (rows.length === 0 && !(canCreate || spec?.emptyState)) {
 		return null;
 	}
 
 	const sectionKey: SectionKey = `plugin:${contribution.plugin}:${contribution.id}`;
-	const itemActions = spec?.itemActions ?? [];
+	const itemActions = canUseDeclarativeHttp ? (spec?.itemActions ?? []) : [];
 
 	// "messaging" draws the avatar-led two-line row the shell's own Agents section
 	// draws (see MessagingAgentRowBody): a 36px round avatar, the title and a stamp
@@ -5661,6 +5418,7 @@ export function DynamicSidebarSection({
 				// mixes both still scans as one list.
 				const subtitle = row.item.subtitle;
 				const open = (forceNew = false) => openTarget(row.raw, title, forceNew);
+				const entityRows = spec?.entity ? entityRowsFor(row.item.id) : [];
 				return (
 					<SidebarMenuItem key={row.item.id}>
 						<ContextMenu>
@@ -5811,13 +5569,18 @@ export function DynamicSidebarSection({
 							</ContextMenuTrigger>
 							<ContextMenuContent>
 								{spec?.itemTarget ? (
-									<ContextMenuItem onClick={() => open(true)}>
-										<HugeiconsIcon
-											className="mr-2 size-4"
-											icon={ArrowUpRight01Icon}
+									<>
+										<ContextMenuItem onClick={() => open(true)}>
+											<HugeiconsIcon
+												className="mr-2 size-4"
+												icon={ArrowUpRight01Icon}
+											/>
+											Open in new tab
+										</ContextMenuItem>
+										<OpenInNewWindowContextMenuItem
+											onClick={() => openTargetInNewWindow(row.raw, title)}
 										/>
-										Open in new tab
-									</ContextMenuItem>
+									</>
 								) : null}
 								{itemActions.map((action) =>
 									action.http ? (
@@ -5843,6 +5606,17 @@ export function DynamicSidebarSection({
 										</ContextMenuItem>
 									) : null
 								)}
+								{entityRows.map((entityRow) => (
+									<ContextMenuItem
+										key={entityRow.id}
+										onClick={entityRow.onSelect}
+									>
+										<span className="mr-2 inline-flex">
+											<EntityRowGlyph row={entityRow} />
+										</span>
+										{entityRow.label}
+									</ContextMenuItem>
+								))}
 							</ContextMenuContent>
 						</ContextMenu>
 					</SidebarMenuItem>
@@ -5854,7 +5628,7 @@ export function DynamicSidebarSection({
 	return (
 		<SidebarSection
 			action={
-				spec?.create ? (
+				canCreate && spec?.create ? (
 					<SectionAddButton
 						onClick={runCreate}
 						title={spec.create.label ?? `New ${contribution.title}`}
@@ -6075,6 +5849,9 @@ function EnginesSection({
 	const openEngines = (forceNew = false) =>
 		openTab("/engines", { title: "Engines", forceNew });
 
+	const openEnginesInNewWindow = () =>
+		void openEntityInNewWindow({ path: "/engines", title: "Engines" });
+
 	const failed = error !== null || runAlongsideError !== null;
 	const emptyMessage =
 		loading || runAlongsideLoading ? "Loading…" : "No engines installed";
@@ -6127,6 +5904,7 @@ function EnginesSection({
 							/>
 							Open in new tab
 						</ContextMenuItem>
+						<OpenInNewWindowContextMenuItem onClick={openEnginesInNewWindow} />
 					</ContextMenuContent>
 				</ContextMenu>
 			</SidebarMenuItem>
@@ -6432,6 +6210,7 @@ export function SubSection({
 	onToggleCollapsed,
 	sectionKey,
 	size = "sm",
+	testId,
 	visibilityDrop,
 	wrapHeader,
 }: {
@@ -6446,6 +6225,7 @@ export function SubSection({
 	label: string;
 	onToggleCollapsed: (key: string) => void;
 	sectionKey: string;
+	testId?: string;
 	/**
 	 * `sm` (default) is the quiet date-bucket header inside Chats — a divider for
 	 * rows that are themselves the content. `md` matches a ChatRow exactly (h-8,
@@ -6486,6 +6266,7 @@ export function SubSection({
 		<div
 			className={`group/subsection relative ${isDragging ? "opacity-50" : ""} ${visibilityDragOver ? "rounded-md bg-primary/5 ring-1 ring-primary/60" : ""}`}
 			data-subsection-key={sectionKey}
+			data-testid={testId}
 			onDragLeave={(e) => {
 				const relatedTarget = e.relatedTarget;
 				if (
@@ -6598,14 +6379,10 @@ export function SubSection({
 									{formatCount(count) ?? "—"}
 								</span>
 							)}
-							{/* The hover action owns the right edge, so drop the collapse
-							    chevron there to avoid the two overlapping. */}
-							{!action && (
-								<HugeiconsIcon
-									className={`-ml-0.5 size-3 shrink-0 opacity-0 transition group-hover/hdr:opacity-100 ${collapsed ? "-rotate-90" : ""}`}
-									icon={ArrowDown01Icon}
-								/>
-							)}
+							<HugeiconsIcon
+								className={`-ml-0.5 size-3 shrink-0 opacity-0 transition group-hover/hdr:opacity-100 ${collapsed ? "-rotate-90" : ""}`}
+								icon={ArrowDown01Icon}
+							/>
 						</button>
 						{action && (
 							<div className="absolute top-1/2 right-1 flex -translate-y-1/2 items-center">
@@ -6816,11 +6593,138 @@ function DeleteAllChatsMenu({
 	);
 }
 
-function ChatsSection({
+function BotChatSectionMenu({
+	label,
+	onDelete,
+	onRename,
+}: {
+	label: string;
+	onDelete: () => void;
+	onRename: () => void;
+}) {
+	return (
+		<DropdownMenu>
+			<DropdownMenuTrigger
+				aria-label={`${label} options`}
+				className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/subsection:opacity-100 data-[popup-open]:opacity-100"
+				onClick={(event) => event.stopPropagation()}
+			>
+				<HugeiconsIcon icon={MoreHorizontalIcon} size={14} />
+			</DropdownMenuTrigger>
+			<DropdownMenuContent align="end">
+				<DropdownMenuItem onClick={onRename}>
+					<HugeiconsIcon className="mr-2" icon={PencilEdit01Icon} size={14} />
+					Rename section
+				</DropdownMenuItem>
+				<DropdownMenuItem onClick={onDelete} variant="destructive">
+					<HugeiconsIcon className="mr-2" icon={Delete01Icon} size={14} />
+					Delete section
+				</DropdownMenuItem>
+			</DropdownMenuContent>
+		</DropdownMenu>
+	);
+}
+
+function BotModeChatSectionsBody({
+	handlers,
+	loose,
+	onAssign,
+	onDelete,
+	onOpenRename,
+	sectionState,
+	sections,
+}: {
+	handlers: ChatRowHandlers;
+	loose: Conversation[];
+	onAssign: (conversationId: string, sectionId: string) => void;
+	onDelete: (sectionId: string) => void;
+	onOpenRename: (section: BotChatSection) => void;
+	sectionState: BotChatSectionState;
+	sections: BotChatSection[];
+}) {
+	const sectionIds = useMemo(
+		() => [UNORGANIZED_SECTION_ID, ...sections.map((section) => section.id)],
+		[sections]
+	);
+	const nested = useNestedSections(
+		BOT_CHAT_SECTION_ORDER_KEY,
+		BOT_CHAT_SECTION_COLLAPSED_KEY,
+		sectionIds,
+		false
+	);
+	const conversationIds = useMemo(
+		() => new Set(loose.map((conversation) => conversation.id)),
+		[loose]
+	);
+	const sectionsById = useMemo(
+		() => new Map(sections.map((section) => [section.id, section])),
+		[sections]
+	);
+
+	return (
+		<div className="space-y-0.5">
+			{nested.orderedKeys.map((sectionId) => {
+				const customSection = sectionsById.get(sectionId);
+				const isUnorganized = sectionId === UNORGANIZED_SECTION_ID;
+				const label = customSection?.name ?? "Unorganized";
+				const conversations = conversationsForSection(
+					loose,
+					sectionState,
+					sectionId
+				);
+
+				return (
+					<SubSection
+						action={
+							customSection ? (
+								<BotChatSectionMenu
+									label={label}
+									onDelete={() => onDelete(customSection.id)}
+									onRename={() => onOpenRename(customSection)}
+								/>
+							) : undefined
+						}
+						collapsed={nested.isCollapsed(sectionId)}
+						count={conversations.length}
+						dnd={nested.dnd}
+						icon={isUnorganized ? FolderOpenIcon : Folder01Icon}
+						key={sectionId}
+						label={label}
+						onToggleCollapsed={nested.toggle}
+						sectionKey={sectionId}
+						size="md"
+						testId={`bot-chat-section-${sectionId}`}
+						visibilityDrop={{
+							accept: "chat",
+							canDrop: (payload) => conversationIds.has(payload.id),
+							onDrop: (payload) => onAssign(payload.id, sectionId),
+						}}
+					>
+						{conversations.length > 0 ? (
+							<ChatRowList conversations={conversations} handlers={handlers} />
+						) : (
+							<p className="px-2 py-2 text-muted-foreground text-xs">
+								{isUnorganized ? "No unorganized chats" : "Drop a chat here"}
+							</p>
+						)}
+					</SubSection>
+				);
+			})}
+		</div>
+	);
+}
+
+type BotChatSectionDialogState =
+	| { id: null; initialName: string; mode: "create" }
+	| { id: string; initialName: string; mode: "rename" };
+
+export function ChatsSection({
+	botMode,
 	collapsed,
 	dnd,
 	handlers,
 	loose,
+	managedProduct = false,
 	menu,
 	onImport,
 	onImportSetup,
@@ -6829,14 +6733,26 @@ function ChatsSection({
 	pageSize,
 	sort,
 }: SectionProps & {
+	botMode: boolean;
 	handlers: ChatRowHandlers;
 	loose: Conversation[];
+	managedProduct?: boolean;
 	/** Open the "import a past agent thread" dialog (Claude Code / Codex). */
-	onImport: () => void;
+	onImport?: () => void;
 	/** Open the "import agent setup from a folder" dialog. */
-	onImportSetup: () => void;
+	onImportSetup?: () => void;
 	onNew: () => void;
 }) {
+	const botChatSections = useBotChatSections();
+	const [sectionDialog, setSectionDialog] =
+		useState<BotChatSectionDialogState | null>(null);
+	const botChatSectionState = useMemo<BotChatSectionState>(
+		() => ({
+			assignments: botChatSections.assignments,
+			sections: botChatSections.sections,
+		}),
+		[botChatSections.assignments, botChatSections.sections]
+	);
 	const [groupByDate] = useChatDateGrouping();
 	const chatsByVisibility = useMemo(
 		() =>
@@ -6939,56 +6855,113 @@ function ChatsSection({
 		(key): key is ResourceVisibilityGroup => key === "private" || key === "team"
 	);
 
+	const openCreateSection = () =>
+		setSectionDialog({ id: null, initialName: "", mode: "create" });
+	const openRenameSection = (section: BotChatSection) =>
+		setSectionDialog({
+			id: section.id,
+			initialName: section.name,
+			mode: "rename",
+		});
+	const submitSectionDialog = (name: string) => {
+		if (!sectionDialog) {
+			return;
+		}
+		if (sectionDialog.mode === "create") {
+			botChatSections.createSection(name);
+		} else {
+			botChatSections.renameSection(sectionDialog.id, name);
+		}
+	};
+
 	return (
-		<SidebarSection
-			action={
-				// Two actions, spaced exactly like every single-action section: each
-				// button carries the same `mr-1` {@link SectionAddButton} puts between
-				// itself and the overflow "…" trigger, so import → + → … are evenly
-				// pitched instead of the + hugging the import button.
-				<>
-					<span className="mr-1">
-						<SectionActionButton
-							icon={Upload01Icon}
-							onClick={onImport}
-							title="Import a past agent thread"
-						/>
-					</span>
-					<span className="mr-1">
-						<SectionActionButton
-							icon={Settings03Icon}
-							onClick={onImportSetup}
-							title="Import agent setup from a folder"
-						/>
-					</span>
-					<SectionAddButton onClick={onNew} title="New chat" />
-				</>
-			}
-			collapsed={collapsed}
-			dnd={dnd}
-			label="Chats"
-			menu={menu}
-			onToggleCollapsed={onToggleCollapsed}
-			pageSize={pageSize}
-			sectionKey="chats"
-			sort={sort}
-			wrapHeader={(header) => (
-				<DeleteAllChatsMenu
-					conversationIds={loose.map((c) => c.id)}
-					groupLabel="Chats"
-					onDelete={handlers.onDeleteConversation}
-					scope="all"
-				>
-					{header}
-				</DeleteAllChatsMenu>
-			)}
-		>
-			{loose.length === 0 ? (
-				<p className="px-2 py-2 text-muted-foreground text-xs">No chats yet</p>
-			) : (
-				orderedVisibilityGroups.map(renderVisibilityGroup)
-			)}
-		</SidebarSection>
+		<>
+			<SidebarSection
+				action={
+					// Two actions, spaced exactly like every single-action section: each
+					// button carries the same `mr-1` {@link SectionAddButton} puts between
+					// itself and the overflow "…" trigger, so import → + → … are evenly
+					// pitched instead of the + hugging the import button.
+					<>
+						{botMode && !managedProduct ? (
+							<span className="mr-1">
+								<SectionActionButton
+									icon={FolderAddIcon}
+									onClick={openCreateSection}
+									title="New section"
+								/>
+							</span>
+						) : null}
+						{onImport ? (
+							<span className="mr-1">
+								<SectionActionButton
+									icon={Upload01Icon}
+									onClick={onImport}
+									title="Import a past agent thread"
+								/>
+							</span>
+						) : null}
+						{onImportSetup ? (
+							<span className="mr-1">
+								<SectionActionButton
+									icon={Settings03Icon}
+									onClick={onImportSetup}
+									title="Import agent setup from a folder"
+								/>
+							</span>
+						) : null}
+						<SectionAddButton onClick={onNew} title="New chat" />
+					</>
+				}
+				collapsed={collapsed}
+				dnd={dnd}
+				label="Chats"
+				menu={menu}
+				onToggleCollapsed={onToggleCollapsed}
+				pageSize={pageSize}
+				sectionKey="chats"
+				sort={sort}
+				wrapHeader={(header) => (
+					<DeleteAllChatsMenu
+						conversationIds={loose.map((c) => c.id)}
+						groupLabel="Chats"
+						onDelete={handlers.onDeleteConversation}
+						scope="all"
+					>
+						{header}
+					</DeleteAllChatsMenu>
+				)}
+			>
+				{botMode ? (
+					<BotModeChatSectionsBody
+						handlers={handlers}
+						loose={loose}
+						onAssign={botChatSections.assignConversation}
+						onDelete={botChatSections.deleteSection}
+						onOpenRename={openRenameSection}
+						sectionState={botChatSectionState}
+						sections={botChatSections.sections}
+					/>
+				) : loose.length === 0 ? (
+					<p className="px-2 py-2 text-muted-foreground text-xs">
+						No chats yet
+					</p>
+				) : (
+					orderedVisibilityGroups.map(renderVisibilityGroup)
+				)}
+			</SidebarSection>
+			<BotChatSectionDialog
+				initialName={sectionDialog?.initialName}
+				mode={sectionDialog?.mode ?? "create"}
+				onOpenChange={(open) => {
+					if (!open) {
+						setSectionDialog(null);
+					}
+				}}
+				onSubmit={submitSectionDialog}
+				open={sectionDialog !== null}
+			/>
+		</>
 	);
 }
 
@@ -7347,6 +7320,7 @@ export function SpaceScopeMenu({
 	onAdd,
 	onOpen,
 	onOpenInNewTab,
+	onOpenInNewWindow,
 	onRequestDelete,
 	onRename,
 	onRequestVisibilityChange,
@@ -7359,6 +7333,7 @@ export function SpaceScopeMenu({
 	onAdd: () => void;
 	onOpen: () => void;
 	onOpenInNewTab: () => void;
+	onOpenInNewWindow: () => void;
 	onRequestDelete: () => void;
 	onRename: (name: string) => Promise<void>;
 	onRequestVisibilityChange: (request: VisibilityChangeRequest) => void;
@@ -7383,6 +7358,7 @@ export function SpaceScopeMenu({
 					<HugeiconsIcon className="mr-2 size-4" icon={ArrowUpRight01Icon} />
 					Open in new tab
 				</DropdownMenuItem>
+				<OpenInNewWindowDropdownMenuItem onClick={onOpenInNewWindow} />
 				<DropdownMenuItem onClick={() => setIconDialogOpen(true)}>
 					<HugeiconsIcon className="mr-2 size-4" icon={ImageAdd01Icon} />
 					Change icon…
@@ -8090,6 +8066,9 @@ function NavTabButton({
 }) {
 	const { openTab, tabs, activeTabId } = useTabsContext();
 	const open = (forceNew: boolean) => openTab(path, { title: label, forceNew });
+	const openInNewWindow = () => {
+		void openEntityInNewWindow({ path, title: label });
+	};
 	// Swap to the "active" glyph when the focused tab is this button's page.
 	const isActive = tabs.find((t) => t.id === activeTabId)?.path === path;
 	const displayIcon = isActive && activeIcon ? activeIcon : icon;
@@ -8115,6 +8094,7 @@ function NavTabButton({
 					<HugeiconsIcon className="mr-2 size-4" icon={ArrowUpRight01Icon} />
 					Open in new tab
 				</ContextMenuItem>
+				<OpenInNewWindowContextMenuItem onClick={openInNewWindow} />
 				<ContextMenuSeparator />
 				<ChromeMenuItems chromeKey={chromeKey} label={label} menu={menu} />
 			</ContextMenuContent>
@@ -8140,7 +8120,19 @@ function DynamicSidebarButton({
 	const { openTab } = useTabsContext();
 	const chromeKey = `plugin:${button.plugin}:${button.id}` as ChromeKey;
 	const open = (forceNew: boolean) =>
-		openTab(button.target, { title: button.title, forceNew });
+		openTab(button.target, {
+			...(button.context ? { mountContext: button.context } : {}),
+			title: button.title,
+			forceNew,
+		});
+	const openInNewWindow = () => {
+		const { path, options } = parseContributedTarget(button.target);
+		void openEntityInNewWindow({
+			conversationId: options.conversationId,
+			path,
+			title: button.title,
+		});
+	};
 	return (
 		<ContextMenu>
 			<ContextMenuTrigger>
@@ -8167,6 +8159,7 @@ function DynamicSidebarButton({
 					<HugeiconsIcon className="mr-2 size-4" icon={ArrowUpRight01Icon} />
 					Open in new tab
 				</ContextMenuItem>
+				<OpenInNewWindowContextMenuItem onClick={openInNewWindow} />
 				<ContextMenuSeparator />
 				<ChromeMenuItems
 					chromeKey={chromeKey}
@@ -8241,9 +8234,13 @@ export function SidebarPanelContent({
 	onNewConversation,
 	onDeleteConversation,
 }: AppSidebarProps) {
+	const productMode = useProductMode();
+	const botProduct = productMode === "bot";
 	const {
 		listConversations,
 		conversations,
+		forkConversation,
+		removeConversationFromProject,
 		renameConversation,
 		setConversationGlyph,
 		setConversationVisibility,
@@ -8254,6 +8251,7 @@ export function SidebarPanelContent({
 	const { openTab, updateTabsIconWhere, requestScrollToMessage } =
 		useTabsContext();
 	const activeNode = useActiveNode();
+	const { canSwitchToConsole } = useConsoleAccess(activeNode);
 	const { agents } = useAgents();
 	// Plugin enabled-state, used to hide a plugin-owned section (Meetings/Spaces)
 	// whose App the user disabled — its routes 503, so the nav entry would lead to
@@ -8266,6 +8264,9 @@ export function SidebarPanelContent({
 	const [pendingChatVisibility, setPendingChatVisibility] =
 		useState<VisibilityChangeRequest | null>(null);
 	const [changingChatVisibility, setChangingChatVisibility] = useState(false);
+	const [scheduledConversationId, setScheduledConversationId] = useState<
+		string | null
+	>(null);
 	const requestConversationVisibility = useCallback(
 		(request: VisibilityChangeRequest) => {
 			if (request.to === "private" && !canMakePrivate) {
@@ -8378,8 +8379,13 @@ export function SidebarPanelContent({
 	const markUnread = useConversationFlagsStore((s) => s.markUnread);
 	const handleTogglePin = useConversationFlagsStore((s) => s.togglePin);
 	const handleToggleArchive = useConversationFlagsStore((s) => s.toggleArchive);
-	const [sectionOrder, setSectionOrder] =
-		useState<SectionKey[]>(loadSectionOrder);
+	const [sectionOrder, setSectionOrder] = useState<SectionKey[]>(() => {
+		migrateLegacySectionStorage(localStorage, {
+			arrays: [SECTION_ORDER_KEY, SECTION_COLLAPSED_KEY, SECTION_HIDDEN_KEY],
+			records: [SECTION_PAGE_SIZE_KEY, SECTION_SORT_KEY],
+		});
+		return loadSectionOrder();
+	});
 	// App-registered sidebar sections from the contributions feed. Namespaced keys
 	// (`plugin:<pluginId>:<sectionId>`) that render via DynamicSidebarSection and are
 	// appended to the persisted order (see `effectiveOrder`). Empty when no enabled
@@ -8409,11 +8415,22 @@ export function SidebarPanelContent({
 				.map((s) => `plugin:${s.plugin}:${s.id}` as SectionKey),
 		[contributedSections]
 	);
-	const { mode: activeMode, stale: modeIsStale } = resolveSidebarMode(
+	const resolvedSidebarMode = resolveSidebarMode(
 		sidebarMode,
 		sidebarModes,
 		contributionsSettled
 	);
+	const activeMode = botProduct
+		? {
+				defaultSection: "chats" as SectionKey,
+				description: "Ryu Bot conversations",
+				key: "bot",
+				layout: "stacked" as const,
+				sections: ["chats"] as SectionKey[],
+				title: "Ryu Bot",
+			}
+		: resolvedSidebarMode.mode;
+	const modeIsStale = botProduct ? false : resolvedSidebarMode.stale;
 	// A stored mode whose app is gone is cleared, not merely fallen back from —
 	// otherwise every render re-resolves a key that will never resolve again, and
 	// re-enabling the app silently teleports the user back into its mode weeks
@@ -8542,8 +8559,15 @@ export function SidebarPanelContent({
 	const handleToggleSection = (key: SectionKey) =>
 		toggleInSet(setCollapsedSections, SECTION_COLLAPSED_KEY, key);
 
-	const handleSelectConversation = (id: string) => {
+	const openConversation = async (
+		id: string,
+		activation?: { messageId?: string }
+	) => {
 		markRead(id);
+		const action = await routeEntityOpen(conversationEntityKey(id), activation);
+		if (action === "focused") {
+			return action;
+		}
 		onSelectConversation?.(id);
 		const conv = conversations.find((c) => c.id === id);
 		openTab("/chat", {
@@ -8551,16 +8575,25 @@ export function SidebarPanelContent({
 			title: conv?.title,
 			icon: conv?.icon ?? null,
 		});
+		return action;
+	};
+
+	const handleSelectConversation = (id: string) => {
+		void openConversation(id);
 	};
 
 	const handleJumpToMessage = (conversationId: string, messageId: string) => {
-		handleSelectConversation(conversationId);
-		requestScrollToMessage(conversationId, messageId);
-		window.dispatchEvent(
-			new CustomEvent("ryu:scroll-to-message", {
-				detail: { messageId },
-			})
-		);
+		void openConversation(conversationId, { messageId }).then((action) => {
+			if (action === "focused") {
+				return;
+			}
+			requestScrollToMessage(conversationId, messageId);
+			window.dispatchEvent(
+				new CustomEvent("ryu:scroll-to-message", {
+					detail: { messageId },
+				})
+			);
+		});
 	};
 
 	// Open a persisted side chat from the sidebar: bring its thread into focus,
@@ -8568,10 +8601,23 @@ export function SidebarPanelContent({
 	// overlay). Decoupled via a window event so the sidebar never reaches into
 	// chat state directly — same pattern as the run-notification click.
 	const handleOpenSideChat = (conversationId: string, entry: BtwEntry) => {
+		void openConversation(conversationId).then((action) => {
+			if (action === "focused") {
+				return;
+			}
+			window.dispatchEvent(
+				new CustomEvent("ryu:open-side-chat", {
+					detail: { conversationId, entry },
+				})
+			);
+		});
+	};
+
+	const handleOpenNewSideChat = (conversationId: string) => {
 		handleSelectConversation(conversationId);
 		window.dispatchEvent(
 			new CustomEvent("ryu:open-side-chat", {
-				detail: { conversationId, entry },
+				detail: { conversationId },
 			})
 		);
 	};
@@ -8587,6 +8633,56 @@ export function SidebarPanelContent({
 		});
 	};
 
+	const handleOpenConversationInNewWindow = (id: string) => {
+		markRead(id);
+		const conversation = conversations.find((item) => item.id === id);
+		void openEntityInNewWindow({
+			conversationId: id,
+			node: activeNode.name,
+			path: "/chat",
+			title: conversation?.title,
+		});
+	};
+
+	const handleForkConversation: ChatRowHandlers["onForkConversation"] = (
+		id,
+		destination
+	) => {
+		void forkConversation(id)
+			.then((newId) => {
+				if (!newId) {
+					throw new Error("fork failed");
+				}
+				openTab("/chat", {
+					conversationId: newId,
+					forceNew: true,
+					worktreeMode: destination === "worktree",
+				});
+				toast.success("Chat forked");
+			})
+			.catch(() => {
+				toast.error("Couldn't fork this chat");
+			});
+	};
+
+	const handleRemoveFromProject = (id: string) => {
+		void removeConversationFromProject(id).then((success) => {
+			if (success) {
+				toast.success("Chat removed from project");
+				return;
+			}
+			toast.error("Couldn't remove this chat from the project");
+		});
+	};
+
+	const projectNameForFolder = (folderPath: string) => {
+		const project = findWorkspaceProject(workspaceProjects, folderPath);
+		if (project) {
+			return workspaceProjectName(project, projectNames);
+		}
+		const trimmed = folderPath.replace(/[\\/]+$/, "");
+		return trimmed.split(/[\\/]/).at(-1) ?? "project";
+	};
 	// Archived chats drop into a collapsed bucket (still reachable, so they can be
 	// unarchived); pinned chats float to a dedicated section above Chats. The
 	// remaining (non-pinned, non-archived) chats group by their workspace folder
@@ -8656,6 +8752,18 @@ export function SidebarPanelContent({
 		const missing = dynamicSectionKeys.filter((k) => !sectionOrder.includes(k));
 		return missing.length > 0 ? [...sectionOrder, ...missing] : sectionOrder;
 	}, [sectionOrder, dynamicSectionKeys]);
+	const liveDynamicKeys = useMemo(
+		() => new Set(dynamicSectionKeys),
+		[dynamicSectionKeys]
+	);
+	const renderOrder: SectionKey[] = botProduct
+		? ["chats"]
+		: effectiveOrder.filter(
+				(key) => !isDynamicSectionKey(key) || liveDynamicKeys.has(key)
+			);
+	const renderChromeOrder: ChromeKey[] = botProduct
+		? ["new-chat"]
+		: effectiveChromeOrder.filter((key) => !hiddenChrome.has(key));
 
 	// The single writer for section order: every reorder path (drag, the per-section
 	// move-up/down menu, and the customize dialog) funnels through here so they can
@@ -8684,9 +8792,7 @@ export function SidebarPanelContent({
 
 	// Move/hide operate relative to the visible sections, so a move never swaps a
 	// section with a hidden one (which would read as "nothing happened").
-	const visibleSectionOrder = effectiveOrder.filter(
-		(k) => !hiddenSections.has(k)
-	);
+	const visibleSectionOrder = renderOrder.filter((k) => !hiddenSections.has(k));
 
 	const canMoveSection = (key: SectionKey, dir: "up" | "down") => {
 		const idx = visibleSectionOrder.indexOf(key);
@@ -8705,7 +8811,7 @@ export function SidebarPanelContent({
 		if (!neighbor) {
 			return;
 		}
-		const next = effectiveOrder.filter((k) => k !== key);
+		const next = renderOrder.filter((k) => k !== key);
 		const neighborIdx = next.indexOf(neighbor);
 		next.splice(dir === "up" ? neighborIdx : neighborIdx + 1, 0, key);
 		reorderSections(next);
@@ -8902,7 +9008,7 @@ export function SidebarPanelContent({
 	const sectionDnd: SectionDnd = {
 		draggingKey,
 		dragOverKey,
-		order: effectiveOrder,
+		order: renderOrder,
 		onDragStart: setDraggingKey,
 		onDragEnd: () => {
 			setDraggingKey(null);
@@ -8919,13 +9025,18 @@ export function SidebarPanelContent({
 		pinnedIds,
 		unreadIds,
 		loadMessages,
+		onAddScheduledTask: setScheduledConversationId,
 		onDeleteConversation: onDeleteConversation ?? (() => undefined),
+		onForkConversation: handleForkConversation,
 		onJumpToMessage: handleJumpToMessage,
 		onMarkRead: markRead,
 		onMarkUnread: markUnread,
 		onOpenInNewTab: handleOpenConversationInNewTab,
+		onOpenInNewWindow: handleOpenConversationInNewWindow,
+		onOpenNewSideChat: handleOpenNewSideChat,
 		onOpenSideChat: handleOpenSideChat,
 		onRenameConversation: renameConversation,
+		onRemoveFromProject: handleRemoveFromProject,
 		onSelectConversation: handleSelectConversation,
 		onSetConversationIcon: (id, icon) => {
 			setConversationGlyph(id, icon);
@@ -8934,9 +9045,13 @@ export function SidebarPanelContent({
 		onRequestConversationVisibility: requestConversationVisibility,
 		onToggleArchive: handleToggleArchive,
 		onTogglePin: handleTogglePin,
+		projectNameForFolder,
 		canMakePrivate,
 		pullRequestsEnabled: pluginApps.some(
 			(app) => app.id === "@ryu/pull-requests" && app.enabled
+		),
+		schedulingEnabled: pluginApps.some(
+			(app) => app.id === "@ryu/calendar" && app.enabled
 		),
 		target: toTarget(activeNode),
 		sideChatsEnabled,
@@ -8983,7 +9098,7 @@ export function SidebarPanelContent({
 			// "search" now renders as an icon next to the node selector (see the
 			// SidebarHeader row below), not as a header button.
 			// "home" is app-registered by `@ryu/dashboards` (the Home dashboard's
-			// owning app, default-on) via a `sidebar_buttons` contribution; no hardcoded
+			// owning app, pre-installed) via a `sidebar_buttons` contribution; no hardcoded
 			// case. The key stays in BuiltinChromeKey/CHROME_LABELS for graceful
 			// filtering of any stale persisted layout.
 			case "library":
@@ -8998,7 +9113,7 @@ export function SidebarPanelContent({
 				);
 			// "memory" is no longer a hardcoded button — it is app-registered by
 			// `@ryu/memory` via a `sidebar_buttons` contribution, so it appears in
-			// the header ONLY when that app is enabled (default-off ⇒ absent). The key
+			// the header ONLY when that app is enabled (not pre-installed ⇒ absent). The key
 			// stays in BuiltinChromeKey/CHROME_LABELS so a stale persisted layout is
 			// filtered out gracefully rather than crashing.
 			case "store":
@@ -9047,7 +9162,7 @@ export function SidebarPanelContent({
 		}
 		// A plugin-owned section shows ONLY when its App is installed AND enabled.
 		// Once the plugin list has loaded (`pluginApps` non-empty), an owner that is
-		// absent (not installed — the default-off apps) or disabled hides the section,
+		// absent (not installed — the not pre-installed apps) or disabled hides the section,
 		// so Canvas/Whiteboard/Meetings don't render until their app is turned on.
 		// While the list is still loading (empty) we show it, to never flicker a
 		// working section away on a slow/failed /api/plugins fetch.
@@ -9061,7 +9176,11 @@ export function SidebarPanelContent({
 		const sectionProps: SectionProps = {
 			// In tabbed mode the selected section is always shown expanded — the bar,
 			// not a collapse toggle, decides what's visible.
-			collapsed: forceExpanded ? false : collapsedSections.has(key),
+			collapsed: botProduct
+				? false
+				: forceExpanded
+					? false
+					: collapsedSections.has(key),
 			dnd: sectionDnd,
 			icon: isDynamicSectionKey(key) ? undefined : SECTION_ICONS[key],
 			menu: sectionMenu,
@@ -9071,21 +9190,17 @@ export function SidebarPanelContent({
 		};
 		switch (key) {
 			case "tabs":
-				// The vertical tab list only exists in vertical layout; in horizontal
-				// mode the title-bar strip owns the tabs, so render nothing here.
+				// The sidebar tab list only exists in vertical layout; every other view
+				// owns its live tabs somewhere in the title bar or center pane.
 				return tabLayout === "vertical" ? (
 					<TabsSection key={key} {...sectionProps} />
 				) : null;
 			case "agents":
 				return <AgentsSection key={key} {...sectionProps} />;
-			case "teams":
-				return <TeamsSection key={key} {...sectionProps} />;
 			case "spaces":
 				return <SpacesSection key={key} {...sectionProps} />;
 			// "meetings" is app-registered (@ryu/meetings `sidebar_sections`),
 			// rendered via DynamicSidebarSection — no hardcoded case.
-			case "workflows":
-				return <WorkflowsSection key={key} {...sectionProps} />;
 			case "channels":
 				return <ChannelsSection key={key} {...sectionProps} />;
 			case "integrations":
@@ -9125,12 +9240,16 @@ export function SidebarPanelContent({
 			case "chats":
 				return (
 					<ChatsSection
+						botMode={botProduct || activeMode.key === "agent"}
 						key={key}
 						{...sectionProps}
 						handlers={chatRowHandlers}
 						loose={looseChats}
-						onImport={() => setImportOpen(true)}
-						onImportSetup={() => setSetupImportOpen(true)}
+						managedProduct={botProduct}
+						onImport={botProduct ? undefined : () => setImportOpen(true)}
+						onImportSetup={
+							botProduct ? undefined : () => setSetupImportOpen(true)
+						}
 						onNew={handleNewConversation}
 					/>
 				);
@@ -9168,7 +9287,7 @@ export function SidebarPanelContent({
 
 	// The section keys offered by the tabbed bar: every visible section, minus the
 	// Tabs section when it would render nothing (horizontal tab layout owns tabs).
-	const visibleTabbedKeys = effectiveOrder.filter(
+	const visibleTabbedKeys = renderOrder.filter(
 		(key) =>
 			!(hiddenSections.has(key) || (key === "tabs" && tabLayout !== "vertical"))
 	);
@@ -9180,7 +9299,7 @@ export function SidebarPanelContent({
 	// section hidden back when the sidebar listed fifteen of them, and a two-tab
 	// toggle missing one of its halves is just the previous mode with fewer rows.
 	const tabbedKeys = activeMode.sections
-		? orderedSidebarModeSections(activeMode, effectiveOrder)
+		? orderedSidebarModeSections(activeMode, renderOrder)
 		: visibleTabbedKeys;
 	// Keep the active tab pointed at a real, visible section. A mode's declared
 	// `defaultSection` wins over "the first tab" — Bot mode declares Agents as
@@ -9217,42 +9336,44 @@ export function SidebarPanelContent({
 		<>
 			<SidebarSectionNav items={sectionNavItems} />
 			<SidebarHeader className="pt-0 pb-0">
-				{!hiddenChrome.has("node-selector") && (
-					<div
-						// pt-2 drops this row onto the top row's shared centerline (see
-						// Layout): sidebar top pad 2 + pt-2 + h-8 centers the selector at
-						// 30.72px — the tab strip's natural line (SidebarInset m-2 +
-						// h-12/2), matched by the nav cluster and macOS traffic lights.
-						className="flex items-center gap-2 px-2 pt-2 pb-1"
-						data-tauri-drag-region
-					>
-						{/* Back/forward/sidebar-toggle/search live pinned at the window's
-						    top-left (in Layout). The node selector is right-aligned here so
-						    it never collides with that cluster. The build badge ("Dev" /
-						    channel) sits beside the account button (see NavUser). */}
-						<div
-							className="ml-auto flex items-center gap-0.5"
-							data-tauri-drag-region={false}
-						>
-							{!hiddenChrome.has("node-selector") && (
-								<NodeSelector mode="compact-dropdown" />
-							)}
-						</div>
-					</div>
-				)}
 				{!hiddenChrome.has("logo") && (
 					<SidebarBrandBadge
+						canSwitchToConsole={canSwitchToConsole}
+						canSwitchToOs={!isRyuBot()}
 						className={hiddenChrome.has("node-selector") ? "pt-2" : ""}
 					/>
 				)}
+				{botProduct ? (
+					<BotConnectionBadge />
+				) : (
+					!hiddenChrome.has("node-selector") && (
+						<div
+							// pt-2 drops this row onto the top row's shared centerline (see
+							// Layout): sidebar top pad 2 + pt-2 + h-8 centers the selector at
+							// 30.72px — the tab strip's natural line (SidebarInset m-2 +
+							// h-12/2), matched by the nav cluster and macOS traffic lights.
+							className="flex items-center gap-2 px-2 pt-2 pb-1"
+							data-tauri-drag-region
+						>
+							{/* Back/forward/sidebar-toggle/search live pinned at the window's
+						    top-left (in Layout). The node selector is right-aligned here so
+						    it never collides with that cluster. The build badge ("Dev" /
+						    channel) sits beside the account button (see NavUser). */}
+							<div
+								className="ml-auto flex items-center gap-0.5"
+								data-tauri-drag-region={false}
+							>
+								<NodeSelector mode="compact-dropdown" />
+							</div>
+						</div>
+					)
+				)}
 				<SidebarMenu>
-					{effectiveChromeOrder
-						.filter((key) => !hiddenChrome.has(key))
-						.map((key) => (
-							<ChromeButtonShell chromeKey={key} dnd={chromeDnd} key={key}>
-								{renderHeaderButton(key)}
-							</ChromeButtonShell>
-						))}
+					{renderChromeOrder.map((key) => (
+						<ChromeButtonShell chromeKey={key} dnd={chromeDnd} key={key}>
+							{renderHeaderButton(key)}
+						</ChromeButtonShell>
+					))}
 				</SidebarMenu>
 				{/* Every mode but the stacked one puts the section selectors below the
 				    header button stack as a horizontal tab strip (not menu rows); the
@@ -9276,93 +9397,83 @@ export function SidebarPanelContent({
 					render={<SidebarContent className="scroll-fade pt-2" />}
 				>
 					{activeMode.layout === "stacked"
-						? effectiveOrder.map((key) => renderSection(key))
+						? renderOrder.map((key) => renderSection(key))
 						: activeTabbedKey && renderSection(activeTabbedKey, true)}
 				</ContextMenuTrigger>
-				<ContextMenuContent>
-					<ContextMenuSectionHeading>Sidebar mode</ContextMenuSectionHeading>
-					{/* One row per mode on offer, built-in and contributed alike — the
+				{!botProduct && (
+					<ContextMenuContent>
+						<ContextMenuSectionHeading>Sidebar mode</ContextMenuSectionHeading>
+						{/* One row per mode on offer, built-in and contributed alike — the
 					    menu has no idea which is which, which is the point. */}
-					{sidebarModes.map((mode) => (
+						{sidebarModes.map((mode) => (
+							<CheckedContextMenuItem
+								checked={activeMode.key === mode.key}
+								key={mode.key}
+								onClick={() => setSidebarMode(mode.key as SidebarMode)}
+							>
+								{mode.title}
+							</CheckedContextMenuItem>
+						))}
+						<ContextMenuSeparator />
+						<ContextMenuSectionHeading>Sidebar style</ContextMenuSectionHeading>
 						<CheckedContextMenuItem
-							checked={activeMode.key === mode.key}
-							key={mode.key}
-							onClick={() => setSidebarMode(mode.key as SidebarMode)}
+							checked={sidebarVariant === "floating"}
+							onClick={() => setSidebarVariant("floating")}
 						>
-							{mode.title}
+							Floating
 						</CheckedContextMenuItem>
-					))}
-					<ContextMenuSeparator />
-					<ContextMenuSectionHeading>Sidebar style</ContextMenuSectionHeading>
-					<CheckedContextMenuItem
-						checked={sidebarVariant === "floating"}
-						onClick={() => setSidebarVariant("floating")}
-					>
-						Floating
-					</CheckedContextMenuItem>
-					<CheckedContextMenuItem
-						checked={sidebarVariant === "inset"}
-						onClick={() => setSidebarVariant("inset")}
-					>
-						Inset
-					</CheckedContextMenuItem>
-					<ContextMenuSeparator />
-					<SidebarListAppearanceMenuItems
-						activeModeKey={activeMode.key}
-						agentRowStyle={agentRowStyle}
-						groupByDate={groupByDate}
-						groupedNav={groupedNav}
-						setAgentRowStyle={setAgentRowStyle}
-						setGroupByDate={setGroupByDate}
-						setGroupedNav={setGroupedNav}
-						setShowSidebarChatPreview={setShowSidebarChatPreview}
-						setSidebarOverflowPopover={setSidebarOverflowPopover}
-						showSidebarChatPreview={showSidebarChatPreview}
-						sidebarOverflowPopover={sidebarOverflowPopover}
-					/>
-					<ContextMenuSeparator />
-					<ContextMenuSectionHeading>Tabs</ContextMenuSectionHeading>
-					<CheckedContextMenuItem
-						checked={tabLayout === "horizontal"}
-						onClick={() => setTabLayout("horizontal")}
-					>
-						Horizontal
-					</CheckedContextMenuItem>
-					<CheckedContextMenuItem
-						checked={tabLayout === "vertical"}
-						onClick={() => setTabLayout("vertical")}
-					>
-						Vertical
-					</CheckedContextMenuItem>
-					<ContextMenuSeparator />
-					<ContextMenuSectionHeading>Sections</ContextMenuSectionHeading>
-					<SidebarContextMenuItem
-						icon={ArrowDown01Icon}
-						onClick={handleExpandAll}
-					>
-						Expand all sections
-					</SidebarContextMenuItem>
-					<SidebarContextMenuItem
-						icon={ArrowUp01Icon}
-						onClick={handleCollapseAll}
-					>
-						Collapse all sections
-					</SidebarContextMenuItem>
-					<ContextMenuSeparator />
-					<ContextMenuSectionHeading>Customize</ContextMenuSectionHeading>
-					<SidebarContextMenuItem
-						icon={SlidersHorizontalIcon}
-						onClick={() => setCustomizeOpen(true)}
-					>
-						Customize sidebar
-					</SidebarContextMenuItem>
-					<SidebarContextMenuItem
-						icon={ArchiveRestoreIcon}
-						onClick={handleResetSidebar}
-					>
-						Reset sidebar layout
-					</SidebarContextMenuItem>
-				</ContextMenuContent>
+						<CheckedContextMenuItem
+							checked={sidebarVariant === "inset"}
+							onClick={() => setSidebarVariant("inset")}
+						>
+							Inset
+						</CheckedContextMenuItem>
+						<ContextMenuSeparator />
+						<SidebarListAppearanceMenuItems
+							activeModeKey={activeMode.key}
+							agentRowStyle={agentRowStyle}
+							groupByDate={groupByDate}
+							groupedNav={groupedNav}
+							setAgentRowStyle={setAgentRowStyle}
+							setGroupByDate={setGroupByDate}
+							setGroupedNav={setGroupedNav}
+							setShowSidebarChatPreview={setShowSidebarChatPreview}
+							setSidebarOverflowPopover={setSidebarOverflowPopover}
+							showSidebarChatPreview={showSidebarChatPreview}
+							sidebarOverflowPopover={sidebarOverflowPopover}
+						/>
+						<ContextMenuSeparator />
+						<TabLayoutMenuItems onChange={setTabLayout} value={tabLayout} />
+						<ContextMenuSeparator />
+						<ContextMenuSectionHeading>Sections</ContextMenuSectionHeading>
+						<SidebarContextMenuItem
+							icon={ArrowDown01Icon}
+							onClick={handleExpandAll}
+						>
+							Expand all sections
+						</SidebarContextMenuItem>
+						<SidebarContextMenuItem
+							icon={ArrowUp01Icon}
+							onClick={handleCollapseAll}
+						>
+							Collapse all sections
+						</SidebarContextMenuItem>
+						<ContextMenuSeparator />
+						<ContextMenuSectionHeading>Customize</ContextMenuSectionHeading>
+						<SidebarContextMenuItem
+							icon={SlidersHorizontalIcon}
+							onClick={() => setCustomizeOpen(true)}
+						>
+							Customize sidebar
+						</SidebarContextMenuItem>
+						<SidebarContextMenuItem
+							icon={ArchiveRestoreIcon}
+							onClick={handleResetSidebar}
+						>
+							Reset sidebar layout
+						</SidebarContextMenuItem>
+					</ContextMenuContent>
+				)}
 			</ContextMenu>
 			<ResourceVisibilityConfirmationDialog
 				canMakePrivate={canMakePrivate}
@@ -9381,9 +9492,9 @@ export function SidebarPanelContent({
 			{/* Admin-authored announcements, pinned just above the account footer
 			    (outside the scroll/reorder area). Self-hides when the feed is empty;
 			    toggleable via the Customize dialog's "Bottom buttons" group. */}
-			{notificationLayout === "split" && !hiddenChrome.has("announcements") && (
-				<AnnouncementsSection />
-			)}
+			{!botProduct &&
+				notificationLayout === "split" &&
+				!hiddenChrome.has("announcements") && <AnnouncementsSection />}
 
 			<SidebarFooter>
 				<NavUser
@@ -9393,46 +9504,62 @@ export function SidebarPanelContent({
 				/>
 			</SidebarFooter>
 
-			<CustomizeSidebarDialog
-				bottomChromeItems={CHROME_ORDER.filter(
-					(key) =>
-						FOOTER_CHROME.has(key) && (key !== "inbox" || inboxOwner !== null)
-				).map((key) => ({
-					key,
-					label: CHROME_LABELS[key as BuiltinChromeKey] ?? key,
-				}))}
-				chromeHidden={hiddenChrome}
-				fixedTopChromeItems={CHROME_ORDER.filter(
-					(key) => !(FOOTER_CHROME.has(key) || isHeaderButtonChrome(key))
-				).map((key) => ({
-					key,
-					label: CHROME_LABELS[key as BuiltinChromeKey] ?? key,
-				}))}
-				hidden={hiddenSections}
-				labels={sectionLabels}
-				onClose={() => setCustomizeOpen(false)}
-				onReorder={reorderSections}
-				onReorderChrome={reorderChrome}
-				onReset={handleResetSidebar}
-				onSetChromeItemsHidden={(keys, hidden) =>
-					setChromeItemsHidden(keys.filter(isChromeKey), hidden)
-				}
-				onSetSectionsHidden={setSectionsHidden}
-				onToggleChromeHidden={(key) =>
-					setChromeHidden(key as ChromeKey, !hiddenChrome.has(key))
-				}
-				onToggleHidden={(key) =>
-					setSectionHidden(key, !hiddenSections.has(key))
-				}
-				open={customizeOpen}
-				order={effectiveOrder}
-				topButtonItems={effectiveChromeOrder.map((key) => ({
-					key,
-					label:
-						CHROME_LABELS[key as BuiltinChromeKey] ??
-						chromeButtonLabels[key] ??
+			{!botProduct && (
+				<CustomizeSidebarDialog
+					bottomChromeItems={CHROME_ORDER.filter(
+						(key) =>
+							FOOTER_CHROME.has(key) && (key !== "inbox" || inboxOwner !== null)
+					).map((key) => ({
 						key,
-				}))}
+						label: CHROME_LABELS[key as BuiltinChromeKey] ?? key,
+					}))}
+					chromeHidden={hiddenChrome}
+					fixedTopChromeItems={CHROME_ORDER.filter(
+						(key) => !(FOOTER_CHROME.has(key) || isHeaderButtonChrome(key))
+					).map((key) => ({
+						key,
+						label: CHROME_LABELS[key as BuiltinChromeKey] ?? key,
+					}))}
+					hidden={hiddenSections}
+					labels={sectionLabels}
+					onClose={() => setCustomizeOpen(false)}
+					onReorder={reorderSections}
+					onReorderChrome={reorderChrome}
+					onReset={handleResetSidebar}
+					onSetChromeItemsHidden={(keys, hidden) =>
+						setChromeItemsHidden(keys.filter(isChromeKey), hidden)
+					}
+					onSetSectionsHidden={setSectionsHidden}
+					onToggleChromeHidden={(key) =>
+						setChromeHidden(key as ChromeKey, !hiddenChrome.has(key))
+					}
+					onToggleHidden={(key) =>
+						setSectionHidden(key, !hiddenSections.has(key))
+					}
+					open={customizeOpen}
+					order={renderOrder}
+					topButtonItems={effectiveChromeOrder.map((key) => ({
+						key,
+						label:
+							CHROME_LABELS[key as BuiltinChromeKey] ??
+							chromeButtonLabels[key] ??
+							key,
+					}))}
+				/>
+			)}
+			<NewAutomationDialog
+				defaultAgentId={
+					conversations.find((item) => item.id === scheduledConversationId)
+						?.agentId ?? undefined
+				}
+				key={scheduledConversationId ?? "closed-scheduled-chat"}
+				onCreated={() => setScheduledConversationId(null)}
+				onOpenChange={(open) => {
+					if (!open) {
+						setScheduledConversationId(null);
+					}
+				}}
+				open={scheduledConversationId !== null}
 			/>
 			<ImportThreadsDialog
 				agents={agents}

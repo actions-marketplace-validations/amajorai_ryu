@@ -2,14 +2,57 @@ import { describe, expect, it } from "bun:test";
 import {
 	defaultPermissionsForRole,
 	intersectStatements,
+	intersectOAuthScopes,
+	findUnknownOAuthScopes,
 	OIDC_STANDARD_SCOPES,
 	RYU_CAPABILITIES,
 	RYU_OAUTH_SCOPES,
 	RYU_SUPPORTED_SCOPES,
 	type RyuStatements,
 	scopesToStatements,
+	parseOAuthScopes,
 	statementsToScopes,
 } from "./scopes.ts";
+
+describe("OAuth scope boundary helpers", () => {
+	it("parses array and wire-format scope values without duplicates", () => {
+		expect(parseOAuthScopes("tools:read  tools:exec tools:read")).toEqual([
+			"tools:read",
+			"tools:exec",
+		]);
+		expect(parseOAuthScopes(["chat:read", 7, " chat:write "])).toEqual([
+			"chat:read",
+			"chat:write",
+		]);
+	});
+
+	it("identifies unknown scopes instead of silently widening", () => {
+		expect(findUnknownOAuthScopes(["openid", "tools:read", "root:all"])).toEqual([
+			"root:all",
+		]);
+	});
+
+	it("intersects requested capabilities and strips OIDC scopes", () => {
+		expect(
+			intersectOAuthScopes(
+				["openid", "tools:read", "tools:exec"],
+				["tools:exec", "files:write"]
+			)
+		).toEqual(["tools:exec"]);
+		expect(intersectOAuthScopes(["openid", "chat:read"])).toEqual([
+			"chat:read",
+		]);
+	});
+
+	it("deduplicates repeated requested capabilities", () => {
+		expect(
+			intersectOAuthScopes(
+				["tools:read", "tools:exec"],
+				["tools:read", "tools:read", "tools:exec"]
+			)
+		).toEqual(["tools:read", "tools:exec"]);
+	});
+});
 
 describe("RYU_OAUTH_SCOPES derivation", () => {
 	it("flattens every capability action into resource:action strings", () => {

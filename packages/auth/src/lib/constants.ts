@@ -18,6 +18,12 @@ const bindingFor = (binding: PolarBinding | undefined): PolarBinding => {
  */
 export const POLAR_PRODUCTS = [
 	{
+		productId: resolveProductId(
+			bindingFor(PLANS["marketplace-membership"].bindings.monthly)
+		),
+		slug: "marketplace-membership-monthly",
+	},
+	{
 		productId: resolveProductId(bindingFor(PLANS.pro.bindings.monthly)),
 		slug: "pro-monthly",
 	},
@@ -46,6 +52,14 @@ export const POLAR_PRODUCTS = [
 	{
 		productId: resolveProductId(bindingFor(PLANS.teams.bindings.yearly)),
 		slug: "teams-yearly",
+	},
+	{
+		productId: resolveProductId(bindingFor(PLANS.business.bindings.monthly)),
+		slug: "business-monthly",
+	},
+	{
+		productId: resolveProductId(bindingFor(PLANS.business.bindings.yearly)),
+		slug: "business-yearly",
 	},
 	// Ryu Cloud instances are now billed via a single ad-hoc Polar product
 	// (`POLAR_PRODUCT_CLOUD_INSTANCE`) with a per-checkout price computed live

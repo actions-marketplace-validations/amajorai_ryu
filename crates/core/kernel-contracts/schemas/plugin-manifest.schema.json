@@ -46,7 +46,7 @@
       "description": "A single asset an external runtime needs, fetched before first run. Either a\ndirect https URL or an `hf:<owner>/<repo>/<path>` reference; the destination\nis a relative directory beneath the plugin's dedicated runtime `assets/`\ndirectory — the filename is derived from the source's last path segment.",
       "properties": {
         "dest_under_runtime": {
-          "description": "Destination directory relative to the runtime's `assets/` directory (e.g. `\"models/hf\"`). The fetched file lands at `<runtime>/assets/<dest_under_runtime>/<filename>`. Must be a traversal-safe relative path (no `..`, not absolute).",
+          "description": "Destination directory relative to the runtime's `assets/` directory\n(e.g. `\"models/hf\"`). The fetched file lands at\n`<runtime>/assets/<dest_under_runtime>/<filename>`. Must be a\ntraversal-safe relative path (no `..`, not absolute). The old\n`dest_under_ryu` spelling is accepted as a wire alias but is never\nresolved against the shared Core data directory.",
           "type": "string"
         },
         "sha256": {
@@ -433,7 +433,7 @@
       "type": "object"
     },
     "Contributes": {
-      "description": "VS-Code-style **contribution points** (`contributes` in `package.json`).\n\nThe original five surfaces (`commands`/`tools`/`agents`/`workflows`/`policies`)\nare lists of [`ContributionId`] references into the manifest's `runnables`: the\nplugin *declares* that runnable `X` contributes to that surface. This is\ndeclare-by-id, not a second copy of the runnable — the loader cross-validates\nthat every referenced id exists in `runnables`, so a typo is caught at load.\n\nMost surfaces added since are **self-contained**: they carry their own payload\nand reference no runnable at all (`widgets`, `views`, `dock_panels`,\n`sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,\n`chat_features`, `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,\n`message_actions`, `context_menu_items`, `agent_edit_panels`).\n\n# Extending\n\nAdding a surface is two decisions, and getting either wrong is silent:\n\n1. **Id-reference or self-contained?** An id-reference surface is a\n   `Vec<ContributionId>` and MUST be chained into [`Contributes::referenced_ids`]\n   so the loader can catch a typo. A self-contained surface must be left OUT of\n   it — every id in it names something other than a runnable (a PATH binary, a\n   route, a tool namespace), so including it would reject every valid manifest.\n   `referenced_ids` therefore covers exactly the five original surfaces and\n   nothing else; that omission is deliberate, not an oversight to be tidied up.\n2. **Core-interpreted or client-rendered?** If Core acts on the payload\n   (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed\n   struct, because a key Core does not know is by construction a key Core cannot\n   act on. If a client shell renders it (`views`, `dock_panels`,\n   `sidebar_sections`, `settings_tabs`, `composer_controls`,\n   `agent_edit_panels`) it stays opaque\n   JSON, because deserializing into a struct here would DROP any key this Core\n   build does not know about and a newer desktop would lose exactly the fields it\n   was shipped to render.\n\nClient-rendered surfaces are then served, tagged with the owning plugin id, from\n`GET /api/plugins/contributions`. Core-interpreted ones deliberately are not —\nthey are gathered at their own consumption site instead.",
+      "description": "VS-Code-style **contribution points** (`contributes` in `package.json`).\n\nThe original five surfaces (`commands`/`tools`/`agents`/`workflows`/`policies`)\nare lists of [`ContributionId`] references into the manifest's `runnables`: the\nplugin *declares* that runnable `X` contributes to that surface. This is\ndeclare-by-id, not a second copy of the runnable — the loader cross-validates\nthat every referenced id exists in `runnables`, so a typo is caught at load.\n\nMost surfaces added since are **self-contained**: they carry their own payload\nand reference no runnable at all (`widgets`, `views`, `dock_panels`,\n`sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,\n`chat_features`, `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,\n`message_actions`, `selection_actions`, `context_menu_items`,\n`agent_edit_panels`).\n\n# Extending\n\nAdding a surface is two decisions, and getting either wrong is silent:\n\n1. **Id-reference or self-contained?** An id-reference surface is a\n   `Vec<ContributionId>` and MUST be chained into [`Contributes::referenced_ids`]\n   so the loader can catch a typo. A self-contained surface must be left OUT of\n   it — every id in it names something other than a runnable (a PATH binary, a\n   route, a tool namespace), so including it would reject every valid manifest.\n   `referenced_ids` therefore covers exactly the five original surfaces and\n   nothing else; that omission is deliberate, not an oversight to be tidied up.\n2. **Core-interpreted or client-rendered?** If Core acts on the payload\n   (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed\n   struct, because a key Core does not know is by construction a key Core cannot\n   act on. If a client shell renders it (`views`, `dock_panels`,\n   `sidebar_sections`, `settings_tabs`, `composer_controls`,\n   `agent_edit_panels`) it stays opaque\n   JSON, because deserializing into a struct here would DROP any key this Core\n   build does not know about and a newer desktop would lose exactly the fields it\n   was shipped to render.\n\nClient-rendered surfaces are then served, tagged with the owning plugin id, from\n`GET /api/plugins/contributions`. Core-interpreted ones deliberately are not —\nthey are gathered at their own consumption site instead.",
       "properties": {
         "agent_edit_panels": {
           "default": [],
@@ -561,6 +561,14 @@
           "description": "Gateway policies the plugin contributes (referenced by runnable id).",
           "items": {
             "$ref": "#/$defs/ContributionId"
+          },
+          "type": "array"
+        },
+        "selection_actions": {
+          "default": [],
+          "description": "Buttons the plugin contributes to the floating text-selection toolbar.\nThis is the bridge between enabled apps/plugins and shared chat blocks:\nCore validates and tags the declaration, while the desktop owns the\nrendered toolbar and dispatches the selected text. A selection action may\neither name a granted `capability` or provide a host-owned `args.dispatch`\n(for example, a first-party shell action such as Side Chat). Self-contained\n+ opaque for the same forward-compatibility reason as `message_actions`.",
+          "items": {
+            "$ref": "#/$defs/SelectionActionContribution"
           },
           "type": "array"
         },
@@ -1581,6 +1589,13 @@
           "$ref": "#/$defs/NetworkPermission",
           "description": "Outbound network permission. `false`/absent (default) = no network; `true` =\nall hosts; a list of `host[:port]` entries = only those hosts (the shape\nDeno's `--allow-net` supports). See [`NetworkPermission`]."
         },
+        "run": {
+          "description": "Executable names sandboxed code may spawn when [`Self::child_process`] is\ntrue. Core lowers this to Deno's scoped `--allow-run=<name,...>` list in\naddition to declared capability shims. Empty grants no arbitrary binary.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "tool": {
           "description": "**Declaration-only** in v1: the registry tool ids this plugin's sandboxed\ncode may call through the stdio `tools.*` bridge. Tools are brokered over\nstdout/stdin by Core (never an OS capability), so this does NOT lower to any\n`--allow-*` flag; it records intent and is a clean future extension for the\n`SandboxToolInvoker` allowlist. Empty (default) records no extra tool intent.",
           "items": {
@@ -1794,6 +1809,13 @@
           "default": "protected",
           "description": "Auth posture for this route. Defaults to [`RouteAuth::Protected`] (secure by\ndefault): the request must carry the node bearer exactly as any other\nprotected Core route. `public` opts a route out (e.g. an HMAC-authed inbound\nwebhook whose external caller cannot hold the node token)."
         },
+        "method": {
+          "description": "Optional HTTP method selector for this path (canonical uppercase such as\n`GET` or `POST`). Absent preserves the legacy behavior and matches every\nmethod. Declare one row per method when reads and writes share a path but\nrequire different permission levels.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "path": {
           "description": "Path pattern for the sub-path after `/api/ext/<plugin_id>` (must start with\n`/`). Supports `:param` (matches one non-empty segment) and a trailing\n`*rest` (matches the remainder), mirroring axum/matchit patterns so a\nsidecar's REST routes (`/inboxes/:id`) can be declared faithfully.",
           "type": "string"
@@ -1889,6 +1911,54 @@
           "type": "string"
         }
       ]
+    },
+    "SelectionActionContribution": {
+      "description": "One button a plugin contributes to the floating text-selection toolbar (see\n[`Contributes::selection_actions`]).\n\n`capability` is optional because a host-owned renderer can use an opaque\n`args.dispatch` bridge instead. The desktop never executes manifest code: it\nonly renders this label and forwards the selected text to the owning host\nhandler.",
+      "properties": {
+        "args": {
+          "description": "Static renderer/dispatch arguments. The selected text is supplied by the\nhost at click time and is never serialized into the manifest."
+        },
+        "capability": {
+          "description": "Optional granted capability for a plugin-owned dispatch.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "icon": {
+          "description": "Optional glyph id resolved by the shell's icon primitive.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Stable id for this action within the plugin.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Render mode. The current desktop renders `\"button\"`; this remains open\nso newer shells can add a mode without making older cores reject it.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Accessible label shown in the selection toolbar.",
+          "type": "string"
+        },
+        "order": {
+          "description": "Sort position among contributed selection actions (ascending).",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "kind"
+      ],
+      "type": "object"
     },
     "SettingsFieldContribution": {
       "description": "One configurable field inside a [`SettingsTabContribution`], bound to exactly\none preference key.\n\n`pref_key` is both the storage binding (`GET/PUT /api/preferences/:key`) **and**\nthe field's identity — the renderer keys its React elements by it — so two\nfields sharing one `pref_key` inside a tab is a bug, not a shorthand, and the\nloader rejects it.\n\nThe `default`/`required`/`min`/`max`/`min_length`/`max_length` block is\nvalidation metadata: declaring it is how a plugin gets its settings checked at\n*import* instead of discovering at runtime that a user typed `\"maybe\"` into what\nthe hook reads as a number. It is cross-checked against `type` at load, because\nvalidation metadata that is silently ignored (a `min` on a toggle) is worse than\nnone — it reads as a guarantee that was never enforced.",
@@ -2115,6 +2185,14 @@
     "SidebarButtonContribution": {
       "description": "One app-registered **sidebar button** — a single nav row (the button-shaped\nsibling of [`SidebarSectionContribution`]). No live list: just a label/icon and a\nclient route the shell opens with `openTab`. Migrates hardcoded header-chrome\nbuttons (e.g. Memory) to the owning app.",
       "properties": {
+        "context": {
+          "additionalProperties": true,
+          "description": "Optional mount context passed to the owning Companion when the button opens it.\nThe host applies this only to the button's own app surface.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "icon": {
           "description": "Optional glyph id resolved by the shell's Icon primitive.",
           "type": [
@@ -2960,7 +3038,7 @@
           "type": "null"
         }
       ],
-      "description": "**Unified, deny-by-default runtime permission set** — the single typed\ngrammar (`{fs, child_process, network, tool}`) Core lowers to every sandbox\nbackend (wasmtime WASI preopens, Docker `--mount`/`--network` flags, Deno\n`--allow-*` flags). Absent = **deny-all** (the default for every manifest\npredating this field), so an app that declares nothing keeps today's exact\nzero-permission sandbox posture.\n\n# Relationship to [`permission_grants`] and [`permission_levels`]\n\nThese are **three distinct lanes** that must not be conflated:\n- [`permission_grants`] are opaque strings the **Gateway** approves at\n  install/enable time — the *approval* lane (who is allowed to ask).\n- `permissions` is the typed set **Core** lowers into the actual sandbox at\n  spawn/exec time — the *runtime-enforcement* lane (what the code can touch).\n- [`permission_levels`] is the app's *user-facing* vocabulary an admin grants\n  to a person or team — it never reaches the sandbox at all.\n\nA grant says \"this app may use the filesystem capability\"; `permissions.fs`\nsays \"…and here are the exact read/write paths the sandbox is opened with.\"\n\n[`permission_levels`]: PluginManifest::permission_levels\n\n# Altitude (manifest-level, per-runnable override is a followup)\n\nDeclared at the manifest root because **both** current enforcement sites\nresolve their config from the owning manifest, not from a sub-entry: an\n`inline_deno` tool's backend is resolved from the manifest by\n`McpRegistry::resolve_app_tool_backend`, and a managed sidecar is spawned\nfrom the manifest by `ManifestSidecar`. A per-[`crate::schema::ToolConfig`] /\nper-[`crate::schema::SidecarSpec`] override is a clean future extension (the\nresolver would fall back to this manifest-level set) but is intentionally not\nin v1."
+      "description": "**Unified, deny-by-default runtime permission set** — the single typed\ngrammar (`{fs, child_process, run, network, tool}`) Core lowers to every sandbox\nbackend (wasmtime WASI preopens, Docker `--mount`/`--network` flags, Deno\n`--allow-*` flags). Absent = **deny-all** (the default for every manifest\npredating this field), so an app that declares nothing keeps today's exact\nzero-permission sandbox posture.\n\n# Relationship to [`permission_grants`] and [`permission_levels`]\n\nThese are **three distinct lanes** that must not be conflated:\n- [`permission_grants`] are opaque strings the **Gateway** approves at\n  install/enable time — the *approval* lane (who is allowed to ask).\n- `permissions` is the typed set **Core** lowers into the actual sandbox at\n  spawn/exec time — the *runtime-enforcement* lane (what the code can touch).\n- [`permission_levels`] is the app's *user-facing* vocabulary an admin grants\n  to a person or team — it never reaches the sandbox at all.\n\nA grant says \"this app may use the filesystem capability\"; `permissions.fs`\nsays \"…and here are the exact read/write paths the sandbox is opened with.\"\n\n[`permission_levels`]: PluginManifest::permission_levels\n\n# Altitude (manifest-level, per-runnable override is a followup)\n\nDeclared at the manifest root because **both** current enforcement sites\nresolve their config from the owning manifest, not from a sub-entry: an\n`inline_deno` tool's backend is resolved from the manifest by\n`McpRegistry::resolve_app_tool_backend`, and a managed sidecar is spawned\nfrom the manifest by `ManifestSidecar`. A per-[`crate::schema::ToolConfig`] /\nper-[`crate::schema::SidecarSpec`] override is a clean future extension (the\nresolver would fall back to this manifest-level set) but is intentionally not\nin v1."
     },
     "privacyPolicyUrl": {
       "description": "Privacy policy URL (contract key `privacyPolicyUrl`; Ryu extension).",

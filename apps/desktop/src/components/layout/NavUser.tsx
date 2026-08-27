@@ -36,6 +36,7 @@ import {
 import { SidebarMenu, SidebarMenuItem } from "@ryu/ui/components/sidebar";
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { INVITE_FRIEND_NAV_ITEM } from "@ryu/ui/lib/referral-navigation";
 import {
 	ArrowUp,
 	ArrowUpRight,
@@ -43,6 +44,7 @@ import {
 	CreditCard,
 	Database,
 	EyeOff,
+	Gift,
 	KeyRound,
 	Laptop,
 	LogOut,
@@ -70,13 +72,19 @@ import {
 	useSession,
 } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
+import { useStepUp } from "@/src/components/StepUpDialog.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { APPROVALS_ALIAS } from "@/src/contributions/companion-alias.ts";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { useOrgBillingStatus } from "@/src/hooks/useOrgBillingStatus.ts";
+// # 0.1.0: Island disabled — uncomment with the User Nav item below.
+// import { IslandVisibilityMenuItem } from "./IslandVisibilityMenuItem.tsx";
+// # 0.1.0: Capture toggle disabled — uncomment with the User Nav item below.
+// import { CaptureToggleMenuItem } from "./CaptureToggleMenuItem.tsx";
 import { formatMicroUsd } from "@/src/lib/api/credits.ts";
 import type { NotificationLayout } from "@/src/lib/notification-layout.ts";
+import { useProductMode } from "@/src/lib/product-mode.ts";
 import { formatDate as formatDateInZone } from "@/src/lib/timezone.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 // Keep the shared desktop OAuth implementation on the extension build path;
@@ -88,27 +96,46 @@ import { InboxCenter } from "../inbox/InboxCenter.tsx";
 import { SettingsDialog } from "../settings/SettingsDialog.tsx";
 import { CreateMenu } from "./CreateMenu.tsx";
 import { HelpSubmenu } from "./HelpSubmenu.tsx";
-import { InterfaceLevelMenuItem } from "./InterfaceLevelMenuItem.tsx";
 
 const TRAILING_SLASH_RE = /\/$/;
 
 type FooterChromeKey = "inbox" | "user" | "downloads" | "settings";
 
 interface DesktopWebAccountLinksProps {
+	botProduct?: boolean;
 	onOpenWeb: (path: string) => void;
 	profilePath: string;
 }
 
 /** The account links that leave the desktop shell for the web account surface. */
 export function DesktopWebAccountLinks({
+	botProduct = false,
 	onOpenWeb,
 	profilePath,
 }: DesktopWebAccountLinksProps) {
+	if (botProduct) {
+		return (
+			<>
+				<DropdownMenuItem onClick={() => onOpenWeb("/settings")}>
+					<User className="mr-2 size-4" />
+					Account
+				</DropdownMenuItem>
+				<DropdownMenuItem onClick={() => onOpenWeb("/download")}>
+					<Laptop className="mr-2 size-4" />
+					Download Ryu Build
+				</DropdownMenuItem>
+			</>
+		);
+	}
 	return (
 		<>
 			<DropdownMenuItem onClick={() => onOpenWeb(profilePath)}>
 				<User className="mr-2 size-4" />
 				Profile
+			</DropdownMenuItem>
+			<DropdownMenuItem onClick={() => onOpenWeb(INVITE_FRIEND_NAV_ITEM.path)}>
+				<Gift className="mr-2 size-4" />
+				{INVITE_FRIEND_NAV_ITEM.label}
 			</DropdownMenuItem>
 			<DropdownMenuItem onClick={() => onOpenWeb("/settings")}>
 				<Settings className="mr-2 size-4" />
@@ -153,6 +180,7 @@ export function DesktopThemeSubmenu() {
 
 const PLAN_LABELS: Record<string, string> = {
 	"desktop-license": "Ryu Desktop",
+	"marketplace-membership": "Marketplace Membership",
 	pro: "Ryu Pro",
 	max: "Ryu Max",
 	teams: "Ryu Teams",
@@ -497,7 +525,9 @@ export function NavUser({
 	notificationLayout: NotificationLayout;
 	onHideChrome: (key: FooterChromeKey) => void;
 }) {
+	const botProduct = useProductMode() === "bot";
 	const { resolvedTheme } = useTheme();
+	const stepUp = useStepUp();
 	const beamTheme = resolvedTheme === "light" ? "light" : "dark";
 	const settingsOpen = useSettingsDialog((s) => s.open);
 	const settingsSection = useSettingsDialog((s) => s.section);
@@ -510,7 +540,7 @@ export function NavUser({
 	// at `/inbox`, so with no owner it is a button that can only ever say "App not
 	// enabled". Read from the live contributions feed rather than a baked
 	// `@ryu/approvals`, so this affordance and the route it opens resolve from one
-	// source. Approvals ships default-OFF, so on a fresh install this is null.
+	// source. Approvals ships not pre-installed, so on a fresh install this is null.
 	const inboxOwner = useCompanionAlias(APPROVALS_ALIAS);
 	const { isLifetime } = useSubscription();
 	const {
@@ -563,13 +593,15 @@ export function NavUser({
 		return null;
 	}
 
-	const showInbox = !hiddenChrome.has("inbox") && inboxOwner !== null;
-	const showAnnouncements = !hiddenChrome.has("announcements");
+	const showInbox =
+		!(botProduct || hiddenChrome.has("inbox")) && inboxOwner !== null;
+	const showAnnouncements = !(botProduct || hiddenChrome.has("announcements"));
 	const showUser = !hiddenChrome.has("user");
-	const showDownloads = !hiddenChrome.has("downloads");
-	const showSettings = !hiddenChrome.has("settings");
+	const showDownloads = !(botProduct || hiddenChrome.has("downloads"));
+	const showSettings = !(botProduct || hiddenChrome.has("settings"));
 	const showNotifications =
-		showInbox || (notificationLayout !== "split" && showAnnouncements);
+		!botProduct &&
+		(showInbox || (notificationLayout !== "split" && showAnnouncements));
 	if (!(showNotifications || showUser || showDownloads || showSettings)) {
 		return null;
 	}
@@ -613,7 +645,13 @@ export function NavUser({
 	const openPricing = () => openWeb("/pricing");
 	const openLifetimeCheckout = async () => {
 		try {
-			const { url } = await settingsApi.billing.createLifetimeCheckout();
+			const checkout = await stepUp.guard("billing", () =>
+				settingsApi.billing.createLifetimeCheckout()
+			);
+			if (checkout === null) {
+				return;
+			}
+			const { url } = checkout;
 			await openExternal(url);
 		} catch {
 			toast.error({
@@ -682,7 +720,6 @@ export function NavUser({
 											side="bottom"
 											sideOffset={4}
 										>
-											<InterfaceLevelMenuItem />
 											<DropdownMenuSeparator />
 											<AccountList
 												activeUser={user}
@@ -691,13 +728,20 @@ export function NavUser({
 											<DropdownMenuSeparator />
 											<DropdownMenuGroup>
 												<DesktopWebAccountLinks
+													botProduct={botProduct}
 													onOpenWeb={openWeb}
 													profilePath={profilePath}
 												/>
-												<DropdownMenuItem onClick={() => openSettings()}>
-													<Settings className="mr-2 size-4" />
-													Settings
-												</DropdownMenuItem>
+												{!botProduct && (
+													<DropdownMenuItem onClick={() => openSettings()}>
+														<Settings className="mr-2 size-4" />
+														Settings
+													</DropdownMenuItem>
+												)}
+												{/* # 0.1.0: Island disabled — restore when the companion is enabled.
+															<IslandVisibilityMenuItem /> */}
+												{/* # 0.1.0: Capture toggle disabled — restore with the User Nav control.
+															<CaptureToggleMenuItem /> */}
 												<HelpSubmenu />
 											</DropdownMenuGroup>
 											<DesktopThemeSubmenu />
@@ -729,7 +773,7 @@ export function NavUser({
 																	<p className="text-muted-foreground text-xs">
 																		Credits left for organization
 																	</p>
-																	<p className="font-heading font-semibold text-sm tabular-nums">
+																	<p className="font-mono font-semibold text-sm tabular-nums">
 																		{creditsLeft}
 																	</p>
 																</div>
@@ -800,7 +844,7 @@ export function NavUser({
 					)}
 
 					<div className="ml-auto flex items-center gap-0.5">
-						<CreateMenu />
+						{!botProduct && <CreateMenu />}
 						{showNotifications && (
 							<ContextMenu>
 								<ContextMenuTrigger>
@@ -837,12 +881,15 @@ export function NavUser({
 						)}
 					</div>
 				</div>
-				<SettingsDialog
-					defaultSection={settingsSection}
-					onOpenChange={setSettingsOpen}
-					open={settingsOpen}
-				/>
+				{!botProduct && (
+					<SettingsDialog
+						defaultSection={settingsSection}
+						onOpenChange={setSettingsOpen}
+						open={settingsOpen}
+					/>
+				)}
 			</SidebarMenuItem>
+			{stepUp.dialog}
 		</SidebarMenu>
 	);
 }

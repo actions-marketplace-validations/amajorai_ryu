@@ -19,7 +19,14 @@ import { cn } from "@ryu/ui/lib/utils";
 import type { ChatStatus } from "ai";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { ReactNode } from "react";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import {
+	memo,
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+} from "react";
 
 /**
  * Bars in the full-width recording waveform that replaces the textarea while the
@@ -27,6 +34,49 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
  * the whole input; the recorder keeps a longer amplitude history to feed these.
  */
 const RECORDING_WAVE_BARS = 48;
+
+/**
+ * Measure the textarea at the compact row's stable width. Measuring a detached
+ * clone avoids a layout feedback loop: once the real editor moves into the wider
+ * full layout, its own `scrollHeight` can fall back to one line and otherwise
+ * make the composer bounce between layouts.
+ */
+function textareaWrapsAtWidth(
+	textarea: HTMLTextAreaElement,
+	value: string,
+	width: number
+): boolean {
+	if (!(value && width > 0)) {
+		return false;
+	}
+	const probe = textarea.cloneNode(false);
+	if (!(probe instanceof HTMLTextAreaElement)) {
+		return value.includes("\n");
+	}
+	probe.removeAttribute("id");
+	probe.removeAttribute("name");
+	probe.setAttribute("aria-hidden", "true");
+	probe.tabIndex = -1;
+	probe.style.position = "fixed";
+	probe.style.top = "0";
+	probe.style.left = "-10000px";
+	probe.style.width = `${width}px`;
+	probe.style.height = "0";
+	probe.style.minHeight = "0";
+	probe.style.maxHeight = "none";
+	probe.style.overflow = "hidden";
+	probe.style.pointerEvents = "none";
+	probe.style.visibility = "hidden";
+	probe.value = "";
+	document.body.append(probe);
+	try {
+		const singleLineHeight = probe.scrollHeight;
+		probe.value = value;
+		return probe.scrollHeight > singleLineHeight + 1;
+	} finally {
+		probe.remove();
+	}
+}
 
 interface InputConfig {
 	attachmentPreviewStyle: "thumbnail" | "chip" | "hidden";
@@ -54,6 +104,7 @@ import {
 	IconX,
 } from "@tabler/icons-react";
 import { useChatDisplayPrefs } from "./chat-display-prefs.tsx";
+import { resolveComposerKeyAction } from "./composer-send-shortcut.ts";
 import type { ContextUsage } from "./context-usage.tsx";
 import { FileTypeIcon } from "./file-type-icon.tsx";
 import { hasComposerInput } from "./input/composer-input.ts";
@@ -82,6 +133,9 @@ import { QuestionPrompt } from "./question/question-prompt.tsx";
 import { QueueBar, type QueueBarProps } from "./queue/queue-bar.tsx";
 import type { MentionItem } from "./types.ts";
 import { useVoiceRecorder } from "./useVoiceRecorder.ts";
+
+const useSafeLayoutEffect =
+	typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 export interface AttachedImage {
 	filename: string;
@@ -146,15 +200,10 @@ export interface InputBarProps {
 	className?: string;
 
 	/**
-	 * Denser composer: a tighter textarea block above the SAME stacked controls
-	 * row every surface renders (the "+" and the agent selector on the left, the
-	 * trailing mic/send on the right). Used on the chat page once a conversation
-	 * has history, where the bar should give the transcript back some height.
-	 *
-	 * It is a density flag only. It used to switch the whole bar to a single-row
-	 * layout with the textarea wedged between the two control clusters, so the
-	 * chat page and the launchpad were two structurally different composers behind
-	 * one boolean; the layout is now shared and only the padding differs.
+	 * Responsive compact composer used once a conversation has history. A plain
+	 * one-line textarea shares the row with the controls; as soon as it explicitly
+	 * or visually wraps, the textarea moves above the normal full controls row.
+	 * Rich Markdown and manually expanded composers always use the full layout.
 	 */
 	compact?: boolean;
 
@@ -512,12 +561,19 @@ export const InputBar = memo(function InputBar({
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const richEditorRef = useRef<HTMLDivElement>(null);
 	const containerRef = useRef<HTMLDivElement>(null);
+	const compactTextareaWidthRef = useRef<number | null>(null);
+	const [isCompactTextareaMultiline, setIsCompactTextareaMultiline] =
+		useState(false);
 	const [plusMenuQueryStart, setPlusMenuQueryStart] = useState<number | null>(
 		null
 	);
 	const config = DEFAULT_INPUT_CONFIG;
 	const [isExpanded, setIsExpanded] = useState(false);
-	const { animationsEnabled, markdownComposer } = useChatDisplayPrefs();
+	const { animationsEnabled, composerSendShortcut, markdownComposer } =
+		useChatDisplayPrefs();
+	const isCompactSingleRow = Boolean(
+		compact && !isCompactTextareaMultiline && !isExpanded && !markdownComposer
+	);
 	const focusComposer = useCallback(() => {
 		if (markdownComposer) {
 			richEditorRef.current?.focus();
@@ -672,8 +728,9 @@ export const InputBar = memo(function InputBar({
 	const showAttach = Boolean(onAttach);
 
 	// Auto-resize textarea
-	useEffect(() => {
+	useSafeLayoutEffect(() => {
 		if (markdownComposer) {
+			setIsCompactTextareaMultiline(false);
 			return;
 		}
 		const el = textareaRef.current;
@@ -690,6 +747,22 @@ export const InputBar = memo(function InputBar({
 		el.style.height = `${nextHeight}px`;
 		el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
 		el.style.overflowX = "hidden";
+
+		if (!compact) {
+			setIsCompactTextareaMultiline(false);
+			return;
+		}
+		const renderedWidth = el.getBoundingClientRect().width;
+		if (isCompactSingleRow && renderedWidth > 0) {
+			compactTextareaWidthRef.current = renderedWidth;
+		}
+		const compactWidth = compactTextareaWidthRef.current;
+		if (compactWidth && compactWidth > 0) {
+			const nextMultiline = textareaWrapsAtWidth(el, input, compactWidth);
+			setIsCompactTextareaMultiline((current) =>
+				current === nextMultiline ? current : nextMultiline
+			);
+		}
 		// Re-measure on every value change so the textarea grows/shrinks with its
 		// content (one row by default, expanding up to the 120px cap, or the
 		// roomier expanded cap). Without
@@ -697,7 +770,7 @@ export const InputBar = memo(function InputBar({
 		// A repo-wide lint/format sweep (9fed37659) emptied this array once already
 		// and the composer went back to a permanently one-line box — `input` is
 		// load-bearing, not a lint artefact.
-	}, [input, isExpanded, markdownComposer]);
+	}, [compact, input, isCompactSingleRow, isExpanded, markdownComposer]);
 
 	useEffect(() => {
 		if (!autoFocus) {
@@ -1000,6 +1073,13 @@ export const InputBar = memo(function InputBar({
 			if (e.defaultPrevented) {
 				return;
 			}
+			if (markdownComposer) {
+				const target = e.target;
+				const richEditor = richEditorRef.current;
+				if (!(target instanceof Node && richEditor?.contains(target))) {
+					return;
+				}
+			}
 			if (e.key === "Escape" && isExpanded) {
 				e.preventDefault();
 				setIsExpanded(false);
@@ -1046,16 +1126,24 @@ export const InputBar = memo(function InputBar({
 				setSuggestionIndex(-1);
 				return;
 			}
-			if (e.key === "Enter" && !e.shiftKey) {
+			const action = resolveComposerKeyAction(composerSendShortcut, {
+				ctrlKey: e.ctrlKey,
+				key: e.key,
+				metaKey: e.metaKey,
+				shiftKey: e.shiftKey,
+			});
+			if (action.kind === "send") {
 				e.preventDefault();
-				handleSubmit(e.ctrlKey || e.metaKey ? "opposite" : undefined);
+				handleSubmit(action.followUpMode);
 			}
 		},
 		[
+			composerSendShortcut,
 			handleSubmit,
 			input,
 			isExpanded,
 			isStreaming,
+			markdownComposer,
 			onTextareaKeyDown,
 			setInput,
 			suggestionIndex,
@@ -1200,9 +1288,9 @@ export const InputBar = memo(function InputBar({
 		[]
 	);
 
-	// The textarea (or its typing-animation stand-in). It always sits in its own
-	// padded block above the controls row; `compact` only tightens that block's
-	// padding.
+	// The textarea (or its typing-animation stand-in). A one-line compact textarea
+	// is threaded through the toolbar as its flexible centre. Once it wraps, the
+	// same node moves into the full padded block above the controls row.
 	//
 	// While recording, the textarea is REPLACED (not overlaid) by a full-width
 	// live waveform that fills the input slot — like ChatGPT. Swapping it out (vs
@@ -1229,21 +1317,22 @@ export const InputBar = memo(function InputBar({
 		);
 	} else if (markdownComposer) {
 		inputContent = (
-			<ComposerEditor
-				disabled={disabled}
-				editorRef={richEditorRef}
-				markdown={input}
-				mentionItems={mentionItems}
-				mentionRenderer={renderRichMention}
-				onChange={handleRichChange}
-				onKeyDown={handleKeyDown}
-				onPaste={onPaste}
-				placeholder={effectivePlaceholder}
-			/>
+			<div onKeyDownCapture={handleKeyDown}>
+				<ComposerEditor
+					disabled={disabled}
+					editorRef={richEditorRef}
+					markdown={input}
+					mentionItems={mentionItems}
+					mentionRenderer={renderRichMention}
+					onChange={handleRichChange}
+					onPaste={onPaste}
+					placeholder={effectivePlaceholder}
+				/>
+			</div>
 		);
 	} else {
 		inputContent = (
-			<div className="relative">
+			<div className="relative w-full">
 				{showComposerSuggestions &&
 					placeholderSuggestion &&
 					suggestionIndex < 0 && (
@@ -1299,11 +1388,18 @@ export const InputBar = memo(function InputBar({
 		);
 	}
 
-	// The controls row (the "+", agent selector, voice/image, send), identical on
-	// every surface and in both densities.
+	// The controls are inline around a single-line compact textarea, then return to
+	// the standard row below as soon as that textarea wraps.
 	const composerToolbar = (
 		<ComposerToolbar
-			compact={compact}
+			center={
+				isCompactSingleRow ? (
+					<div className="flex min-h-8 min-w-0 flex-1 items-center">
+						{inputContent}
+					</div>
+				) : undefined
+			}
+			compact={isCompactSingleRow}
 			contextMeter={contextMeter}
 			contextMeterOnOpen={contextMeterOnOpen}
 			directoryGroups={composerMenuGroups}
@@ -1543,40 +1639,42 @@ export const InputBar = memo(function InputBar({
 							</div>
 						)}
 
-						{/* Text input or typing animation text. `compact` is purely this
-			    block's density — it buys the transcript back some height once
-			    a chat has history; the controls row below is the same on
-			    every surface. */}
-						<div
-							className={
-								expanded
-									? "min-h-[320px] pt-4 pr-14 pb-3 pl-5"
-									: compact
-										? "min-h-[40px] pt-2 pr-3 pb-0.5 pl-3"
-										: "flex min-h-[56px] flex-col justify-center py-2 pr-3 pl-3.5"
-							}
-						>
-							{inputContent}
-						</div>
+						{isCompactSingleRow ? (
+							composerToolbar
+						) : (
+							<>
+								{/* Full layout: textarea above, every control below. Compact
+								    drafts arrive here automatically once they wrap. */}
+								<div
+									className={
+										expanded
+											? "min-h-[320px] pt-4 pr-14 pb-3 pl-5"
+											: "flex min-h-[56px] flex-col justify-center py-2 pr-3 pl-3.5"
+									}
+								>
+									{inputContent}
+								</div>
 
-						{/* Controls row, INSIDE the composer box (Codex-style): the "+",
-			    agent selector, voice/image, and send button all share the
-			    textarea's rounded card and background. */}
-						{(compact ||
-							leftActions ||
-							rightActions ||
-							showAttach ||
-							voice ||
-							voiceMode ||
-							onGenerateImage ||
-							onGenerateVideo ||
-							goalControls ||
-							ghostControls ||
-							pluginControls?.length ||
-							composerMenuGroups?.some((group) => group.items.length > 0) ||
-							contextMeter ||
-							expandComposer) &&
-							composerToolbar}
+								{/* Controls row, INSIDE the composer box (Codex-style): the
+								    "+", agent selector, voice/image, and send button all share
+								    the textarea's rounded card and background. */}
+								{(compact ||
+									leftActions ||
+									rightActions ||
+									showAttach ||
+									voice ||
+									voiceMode ||
+									onGenerateImage ||
+									onGenerateVideo ||
+									goalControls ||
+									ghostControls ||
+									pluginControls?.length ||
+									composerMenuGroups?.some((group) => group.items.length > 0) ||
+									contextMeter ||
+									expandComposer) &&
+									composerToolbar}
+							</>
+						)}
 					</motion.div>
 				)}
 			</AnimatePresence>

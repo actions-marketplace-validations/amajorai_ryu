@@ -25,12 +25,37 @@ test("updates appearance preferences from the relevant right-click surfaces", as
 		.click();
 	await expect(page.getByTestId("tab-state")).toContainText("search hidden");
 
+	await tabSurface.click({ button: "right" });
+	await expect(
+		tabMenu.getByRole("menuitemradio", { name: "Horizontal tabs" })
+	).toBeVisible();
+	await expect(
+		tabMenu.getByRole("menuitemradio", { name: "Vertical tabs" })
+	).toBeVisible();
+	await expect(
+		tabMenu.getByRole("menuitemradio", { name: "Scrollable tabs" })
+	).toBeVisible();
+	await expect(
+		tabMenu.getByRole("menuitemradio", { name: "Infinite canvas" })
+	).toBeVisible();
+	await tabMenu.getByRole("menuitemradio", { name: "Scrollable tabs" }).click();
+	await expect(page.getByTestId("tab-layout-state")).toContainText("scroll");
+	await page.keyboard.press("Escape");
+
+	await tabSurface.click({ button: "right" });
+	await tabMenu.getByRole("menuitemradio", { name: "Infinite canvas" }).click();
+	await expect(page.getByTestId("tab-layout-state")).toContainText("canvas");
+	await page.keyboard.press("Escape");
+
 	const sidebarSurface = page.getByTestId("sidebar-surface");
 	await sidebarSurface.click({ button: "right" });
 	const sidebarMenu = page.locator('[data-slot="context-menu-content"]');
 	await expect(sidebarMenu).toBeVisible();
 	await expect(sidebarMenu).toContainText("Group lists by date");
 	await expect(sidebarMenu).toContainText("Show latest message / tool state");
+	await expect(
+		sidebarMenu.getByRole("menuitemradio", { name: "Infinite canvas" })
+	).toBeVisible();
 	await sidebarMenu
 		.getByRole("menuitemcheckbox", { name: "Group lists by date" })
 		.click();

@@ -7,8 +7,6 @@ import {
 } from "@/src/lib/api/events.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
-const RECONNECT_DELAY_MS = 2000;
-
 /** Raise a native OS notification (best-effort; requests permission once). */
 function osNotify(n: DesktopNotification): void {
 	if (typeof Notification === "undefined") {
@@ -49,8 +47,6 @@ export function useDesktopNotificationsStream(): void {
 	const token = node.token ?? null;
 
 	useEffect(() => {
-		let cancelled = false;
-		let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 		const controller = new AbortController();
 		const target: ApiTarget = { url, token };
 
@@ -63,33 +59,13 @@ export function useDesktopNotificationsStream(): void {
 			osNotify(n);
 		};
 
-		const run = async () => {
-			while (!cancelled) {
-				try {
-					await streamDesktopNotifications(
-						target,
-						onNotification,
-						controller.signal
-					);
-				} catch {
-					// Connect/transient failure — fall through to the reconnect delay.
-				}
-				if (cancelled) {
-					break;
-				}
-				await new Promise<void>((resolve) => {
-					reconnectTimer = setTimeout(resolve, RECONNECT_DELAY_MS);
-				});
-			}
-		};
-		run().catch(() => undefined);
+		// The shared event multiplexer owns reconnect/backoff for this channel.
+		streamDesktopNotifications(target, onNotification, controller.signal).catch(
+			() => undefined
+		);
 
 		return () => {
-			cancelled = true;
 			controller.abort();
-			if (reconnectTimer) {
-				clearTimeout(reconnectTimer);
-			}
 		};
 	}, [url, token]);
 }

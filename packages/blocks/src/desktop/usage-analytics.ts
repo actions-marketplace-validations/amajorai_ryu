@@ -24,11 +24,16 @@ export interface UsageDateRange {
 
 export interface UsageEvent {
 	agentSeconds?: number;
+	/** Width of a server-owned aggregate represented by this event. */
+	bucketSeconds?: number;
 	costMicroUsd?: number | null;
 	durationMs?: number | null;
 	error?: boolean;
+	errorCount?: number;
 	feature?: string | null;
 	inputTokens?: number;
+	latencySamples?: number;
+	latencyTotalMs?: number;
 	memberId?: string | null;
 	model?: string | null;
 	nodeId?: string | null;
@@ -53,6 +58,54 @@ export interface UsageBucket {
 	requests: number;
 	spendMicroUsd: number | null;
 	start: string;
+}
+
+export interface UsageTrendPoint {
+	errors: number;
+	label: string;
+	requests: number;
+	spend: number | null;
+	tokens: number;
+}
+
+/** Bound chart work while preserving exact totals for long, detailed ranges. */
+export function compactUsageTrendPoints(
+	points: UsageTrendPoint[],
+	maximumPoints = 1000
+): UsageTrendPoint[] {
+	if (maximumPoints < 1 || points.length <= maximumPoints) {
+		return maximumPoints < 1 ? [] : points;
+	}
+	const groupSize = Math.ceil(points.length / maximumPoints);
+	const compacted: UsageTrendPoint[] = [];
+	for (let index = 0; index < points.length; index += groupSize) {
+		const group = points.slice(index, index + groupSize);
+		const first = group[0];
+		const last = group.at(-1);
+		if (!(first && last)) {
+			continue;
+		}
+		let spend: number | null = null;
+		let errors = 0;
+		let requests = 0;
+		let tokens = 0;
+		for (const point of group) {
+			errors += point.errors;
+			requests += point.requests;
+			tokens += point.tokens;
+			if (point.spend !== null) {
+				spend = (spend ?? 0) + point.spend;
+			}
+		}
+		compacted.push({
+			errors,
+			label: first === last ? first.label : `${first.label} – ${last.label}`,
+			requests,
+			spend,
+			tokens,
+		});
+	}
+	return compacted;
 }
 
 export interface UsageBreakdownRow {
@@ -248,6 +301,40 @@ function addSpend(target: MutableBucket, event: UsageEvent): void {
 	target.spendMicroUsd += numberOrZero(event.costMicroUsd);
 }
 
+function addErrors(
+	target: MutableBucket,
+	event: UsageEvent,
+	requests: number
+): void {
+	if (event.errorCount !== undefined) {
+		target.errors += Math.max(0, numberOrZero(event.errorCount));
+		return;
+	}
+	target.errors += event.error ? requests : 0;
+}
+
+function addLatency(target: MutableBucket, event: UsageEvent): void {
+	if (
+		event.latencyTotalMs !== undefined &&
+		event.latencySamples !== undefined &&
+		Number.isFinite(event.latencyTotalMs) &&
+		Number.isFinite(event.latencySamples) &&
+		event.latencySamples > 0
+	) {
+		target.latencyMs += Math.max(0, event.latencyTotalMs);
+		target.latencySamples += event.latencySamples;
+		return;
+	}
+	if (
+		event.durationMs !== null &&
+		event.durationMs !== undefined &&
+		Number.isFinite(event.durationMs)
+	) {
+		target.latencyMs += Math.max(0, event.durationMs);
+		target.latencySamples += 1;
+	}
+}
+
 export function aggregateUsageEvents({
 	events,
 	from,
@@ -295,7 +382,10 @@ export function aggregateUsageEvents({
 
 	for (const event of events) {
 		const date = new Date(event.timestamp);
-		if (!Number.isFinite(date.getTime()) || date < from || date >= to) {
+		const bucketSeconds = Math.max(0, numberOrZero(event.bucketSeconds));
+		const overlapsStart =
+			date >= from || date.getTime() + bucketSeconds * 1000 > from.getTime();
+		if (!(Number.isFinite(date.getTime()) && overlapsStart) || date >= to) {
 			continue;
 		}
 		const start = bucketStartFor(date, granularity);
@@ -315,11 +405,8 @@ export function aggregateUsageEvents({
 		bucket.inputTokens += inputTokens;
 		bucket.outputTokens += outputTokens;
 		bucket.agentSeconds += numberOrZero(event.agentSeconds);
-		bucket.errors += event.error ? requests : 0;
-		if (event.durationMs !== null && event.durationMs !== undefined) {
-			bucket.latencyMs += numberOrZero(event.durationMs) * requests;
-			bucket.latencySamples += requests;
-		}
+		addErrors(bucket, event, requests);
+		addLatency(bucket, event);
 		if (event.memberId) {
 			bucket.memberIds.add(event.memberId);
 		}

@@ -56,18 +56,15 @@ fn is_in_process(id: &str) -> bool {
 /// "does `registry.json` reach retrieval?" is decided.
 ///
 /// [`ModelRegistry::load`], not `from_env`. `from_env` is `from_file_path(None)`
-/// and `None.and_then(RegistryFile::load)` is `None`: it opens no file, ever. Built
-/// that way, `registry.json`'s `reranker_model`, `reranker_base_url` and
-/// `graph_extraction_model` were inert while this module's docs, the
-/// `ryu-spaces` module header and the registry's own field docs all said otherwise.
+/// and `None.and_then(RegistryFile::load)` is `None`: it opens no file, ever. The
+/// file-backed reranker settings and `graph_extraction_model` must reach the Spaces
+/// constructor. The latter is validated there; unsupported ids stop startup instead
+/// of silently producing graph rows with the local implementation.
 ///
-/// Those three are safe to resolve per call because none of them leaves an artifact
-/// a later read has to match: a reranker is a stateless scoring call, and the
-/// extraction model is read once and held by `SpaceStore`. The embedding fields are
-/// **not** in that category — the vector space of `spaces.db`, `retrieval.db` and
-/// `message-embeddings.db` hangs off them and `SpaceStore::open_at` does not
-/// reconcile a changed vec0 width — which is why they have no `registry.json` key at
-/// all rather than being made live here. See `registry`'s module header.
+/// Embedding fields are different: the vector space of `spaces.db`, `retrieval.db`
+/// and `message-embeddings.db` hangs off them and `SpaceStore::open_at` does not
+/// reconcile a changed vec0 width. They therefore have no `registry.json` key. See
+/// `registry`'s module header.
 ///
 /// Exists as a named function rather than an inline `load()` in each opener so the
 /// conversion has one testable point: the openers themselves touch `~/.ryu` and
@@ -382,7 +379,7 @@ impl SpaceRecall for SpacesRecall {
             Some(ids) => ids.clone(),
             None => self
                 .spaces
-                .list_spaces(filter)
+                .list_spaces(filter.clone())
                 .await?
                 .into_iter()
                 .map(|s| s.id)
@@ -398,7 +395,7 @@ impl SpaceRecall for SpacesRecall {
             // matched by the `retrieval.db` half.
             match self
                 .spaces
-                .search_ext(&space_id, query, per_space_limit, None, filter)
+                .search_ext(&space_id, query, per_space_limit, None, filter.clone())
                 .await
             {
                 Ok(matches) if matches.is_empty() => {}
@@ -436,9 +433,8 @@ mod tests {
     };
 
     /// The conversion this seam exists for: `retrieval_registry()` must open
-    /// `registry.json`, because `server::spaces::open_default` and
-    /// [`open_retrieval_store`] read `graph_extraction_model`, `reranker_model` and
-    /// `reranker_base_url` from it.
+    /// `registry.json`, because `server::spaces::open_default` reads and validates
+    /// `graph_extraction_model`, while the RAG constructors read the reranker fields.
     ///
     /// Asserted here rather than at the two openers because those touch `~/.ryu`
     /// (they create `spaces.db` / `retrieval.db`) and cannot run in a unit test. This

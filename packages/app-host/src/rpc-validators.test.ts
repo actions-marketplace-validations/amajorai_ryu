@@ -259,6 +259,13 @@ describe("toRpcError — coded vs plain serialization", () => {
 		});
 	});
 
+	test("an unknown string code is normalized to the public server_error code", () => {
+		expect(toRpcError({ code: "ENOENT", message: "missing file" })).toEqual({
+			code: "server_error",
+			message: "missing file",
+		});
+	});
+
 	test("a plain Error serializes to its message string (legacy plugin shape)", () => {
 		expect(toRpcError(new Error("boom"))).toBe("boom");
 	});

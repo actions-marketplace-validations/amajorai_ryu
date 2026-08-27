@@ -120,8 +120,7 @@ impl SmartRouter {
 
         // 1. The classifier is sticky when requested. Random and stage routers are
         // intentionally per-request; escalation has its own streak/latch state.
-        if self.config.router_type == ModelRouterType::LlmClassifier
-            && self.config.cache_by_session
+        if self.config.router_type == ModelRouterType::LlmClassifier && self.config.cache_by_session
         {
             if let Some(sid) = session_id {
                 if let Some(hit) = self.decisions.get(sid) {
@@ -150,8 +149,7 @@ impl SmartRouter {
             }
         }?;
 
-        if self.config.router_type == ModelRouterType::LlmClassifier
-            && self.config.cache_by_session
+        if self.config.router_type == ModelRouterType::LlmClassifier && self.config.cache_by_session
         {
             if let Some(sid) = session_id {
                 self.decisions.insert(sid.to_string(), chosen.clone());
@@ -267,7 +265,11 @@ impl SmartRouter {
                 .get(sid)
                 .is_some_and(|streak| *streak >= confirmations)
             {
-                debug!(session = sid, model = strong, "smart routing: escalation latched");
+                debug!(
+                    session = sid,
+                    model = strong,
+                    "smart routing: escalation latched"
+                );
                 return Some(strong.to_owned());
             }
         }
@@ -331,7 +333,11 @@ impl SmartRouter {
             1
         };
         if streak >= confirmations && (sid.is_some() || confirmations == 1) {
-            debug!(?streak, model = strong, "smart routing: escalation confirmed");
+            debug!(
+                ?streak,
+                model = strong,
+                "smart routing: escalation confirmed"
+            );
             Some(strong.to_owned())
         } else {
             Some(weak.to_owned())
@@ -343,7 +349,9 @@ impl SmartRouter {
             "You are a trajectory judge. Decide whether the current agent run is stuck, failing, or needs a stronger model. Reply with exactly ESCALATE or DECLINE.\n\nRecent transcript:\n",
         );
         if let Some(history) = messages.as_array() {
-            let start = history.len().saturating_sub(self.config.escalation_recent_message_window);
+            let start = history
+                .len()
+                .saturating_sub(self.config.escalation_recent_message_window);
             for message in &history[start..] {
                 if let Ok(serialized) = serde_json::to_string(message) {
                     prompt.push_str(truncate(&serialized, self.config.escalation_message_chars));
@@ -753,8 +761,12 @@ mod tests {
         let first_sequence: Vec<_> = (0..256).map(|_| first.classify_random()).collect();
         let second_sequence: Vec<_> = (0..256).map(|_| second.classify_random()).collect();
         assert_eq!(first_sequence, second_sequence);
-        assert!(first_sequence.iter().any(|model| model == &Some("strong-model".into())));
-        assert!(first_sequence.iter().any(|model| model == &Some("weak-model".into())));
+        assert!(first_sequence
+            .iter()
+            .any(|model| model == &Some("strong-model".into())));
+        assert!(first_sequence
+            .iter()
+            .any(|model| model == &Some("weak-model".into())));
     }
 
     #[test]

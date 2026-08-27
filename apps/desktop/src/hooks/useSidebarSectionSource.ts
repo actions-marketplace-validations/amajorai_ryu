@@ -7,7 +7,9 @@
 // second Library-specific feed just to participate in the host's collection view.
 
 import {
-	isCoreApiPath,
+	contributionSourceRequest,
+	DECLARATIVE_HTTP_GRANT,
+	normalizeViewRefreshMs,
 	type SourceItem,
 	sourceItemsFromResponse,
 	sourceTotalFromResponse,
@@ -18,7 +20,14 @@ import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
 import type { PluginSidebarSection } from "@/src/lib/api/plugins.ts";
 
-const MIN_REFRESH_MS = 1000;
+export function sectionSourceRequest(
+	section: PluginSidebarSection
+): { method: "GET"; path: string } | null {
+	if (!(section.approved_grants ?? []).includes(DECLARATIVE_HTTP_GRANT)) {
+		return null;
+	}
+	return contributionSourceRequest(section, section.spec?.source);
+}
 
 export interface SidebarSectionSourceData {
 	contribution: PluginSidebarSection;
@@ -33,29 +42,25 @@ function queryForSection(
 	target: ReturnType<typeof toTarget>
 ) {
 	const source = section.spec?.source;
-	const path = source?.http.path;
-	const method = source?.http.method ?? "GET";
-	const enabled = Boolean(source && path && isCoreApiPath(path));
-	const refetchInterval: number | false =
-		source?.refreshMs && source.refreshMs > 0
-			? Math.max(source.refreshMs, MIN_REFRESH_MS)
-			: false;
+	const sourceRequest = sectionSourceRequest(section);
+	const refreshMs = normalizeViewRefreshMs(source?.refreshMs);
+	const refetchInterval: number | false = refreshMs ?? false;
 	return {
-		enabled,
+		enabled: sourceRequest !== null,
 		queryKey: [
 			"contributed-section-source",
 			target.url,
 			target.token,
-			path ?? "",
-			method,
+			sourceRequest?.path ?? "",
+			sourceRequest?.method ?? "",
 		],
 		retry: false,
 		queryFn: async () => {
-			if (!path) {
+			if (!sourceRequest) {
 				return null;
 			}
-			const response = await fetch(apiUrl(target, path), {
-				method,
+			const response = await fetch(apiUrl(target, sourceRequest.path), {
+				method: sourceRequest.method,
 				headers: makeHeaders(target.token),
 			});
 			return response.ok ? ((await response.json()) as unknown) : null;

@@ -14,11 +14,13 @@
  *   - A **companion** tool (`accessible:true`) is a call target a mounted widget
  *     may invoke: it carries `widget_accessible:true` and gets no widget template.
  *
- * v1 boundary: this is **declarative pass-through only** — there is no `run`
- * handler. Third-party tool code execution needs the plugin runtime (out of
- * scope); the widget renders from `window.openai.toolInput`/`toolOutput` and Core
- * echoes the validated arguments as `structuredContent`. `ryu pack` bundles the
- * `uiEntry` source into the manifest's `ui_code`.
+ * A tool may also attach a `ToolRunnable`. When present, its self-contained run
+ * body is emitted as Core's grant-gated `inline_deno` backend, so the widget and
+ * the behavior ship in one bundle. Without a runnable, the tool remains the
+ * declarative pass-through form: the widget renders from
+ * `window.openai.toolInput`/`toolOutput` and Core echoes the validated arguments
+ * as `structuredContent`. `ryu pack` bundles the `uiEntry` source into the
+ * manifest's `ui_code`.
  */
 
 import type {
@@ -26,11 +28,13 @@ import type {
 	PluginManifest,
 	Requires,
 	RunnableMeta,
+	SlashCommandContribution,
 	Surface,
 	ToolAppConfig,
 	WidgetContribution,
 } from "../manifest.ts";
 import { PluginManifestSchema } from "../manifest.ts";
+import { inlineToolRunnable, type ToolRunnable } from "./tool.ts";
 
 /** The default widget MIME dialect (mirrors Core `default_widget_mime`). */
 const DEFAULT_APP_WIDGET_MIME = "text/html+skybridge";
@@ -59,6 +63,21 @@ function withWidgetRenderGrant(
 	return out;
 }
 
+/** Add the grant required for any executable inline tool body. */
+function withToolExecuteGrant(
+	grants: readonly string[],
+	tools: readonly AppToolSpec[]
+): string[] {
+	const out = [...grants];
+	if (
+		tools.some((tool) => tool.runnable !== undefined) &&
+		!out.includes("tool:execute")
+	) {
+		out.push("tool:execute");
+	}
+	return out;
+}
+
 /** One tool a Ryu App declares. */
 export interface AppToolSpec {
 	/**
@@ -76,6 +95,13 @@ export interface AppToolSpec {
 	invoking?: string;
 	/** Tool name (unqualified). The wire id is `<server>.<name>`. */
 	name: string;
+	/**
+	 * Optional executable body for this tool. Core receives it as an
+	 * `inline_deno` runnable and runs it in the deny-by-default tool sandbox.
+	 * The body must be self-contained; use the injected `host` capability surface
+	 * for governed model calls and other platform primitives.
+	 */
+	runnable?: Pick<ToolRunnable, "code" | "id" | "name" | "schema">;
 }
 
 /**
@@ -116,6 +142,8 @@ export interface DefineAppOptions {
 	requires?: DefineAppRequires;
 	/** MCP server namespace for the tool ids. Defaults to `slug`. */
 	server?: string;
+	/** Slash commands this app exposes in the chat composer. */
+	slashCommands?: SlashCommandContribution[];
 	/**
 	 * App slug — used to build the widget uri (`ui://widget/<slug>.html`) and, when
 	 * `server` is omitted, the MCP server namespace that qualifies each tool id.
@@ -182,8 +210,12 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 	for (const spec of options.tools) {
 		const isRender = spec.accessible !== true;
 		const id = appToolId(server, spec.name);
+		const executable = spec.runnable
+			? inlineToolRunnable(spec.runnable)
+			: undefined;
 
-		const config: ToolAppConfig = {
+		const config: ToolAppConfig & Record<string, unknown> = {
+			...(executable?.config ?? {}),
 			slug: id,
 			description: spec.description,
 			widget: isRender,
@@ -220,7 +252,7 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 		hook_events: [],
 		composer_controls: [],
 		settings_tabs: [],
-		slash_commands: [],
+		slash_commands: options.slashCommands ?? [],
 		sidebar_sections: [],
 		sidebar_buttons: [],
 		dock_panels: [],
@@ -238,6 +270,7 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 		pi_extensions: [],
 		output_styles: [],
 		message_actions: [],
+		selection_actions: [],
 		widgets,
 	};
 
@@ -252,15 +285,15 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 		// Core gates widget promotion on declared-AND-enabled-AND-granted, and a
 		// missing grant fails as `DeniedNoGrant` — which is an `info!` log and
 		// nothing else. The widget silently renders as plain text, with no error
-		// in the UI and nothing pointing at the manifest. Every app scaffolded
-		// through `defineApp` hit that, because the only fix was a grant string
-		// the templates never mention and the builder never added; the one
-		// working example on disk hand-writes it.
+		// in the UI and nothing pointing at the manifest.
 		//
 		// Added only when there is a widget to render, and unioned rather than
 		// overwritten so an author's own `grants` list survives and re-declaring
 		// it is not an error.
-		permission_grants: withWidgetRenderGrant(options.grants ?? [], widgets),
+		permission_grants: withToolExecuteGrant(
+			withWidgetRenderGrant(options.grants ?? [], widgets),
+			options.tools
+		),
 		activation_events: options.activationEvents ?? ["*"],
 		contributes,
 		// `targets: []` means EVERY surface, so an app that declares none is

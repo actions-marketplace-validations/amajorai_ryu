@@ -14,12 +14,16 @@
 // would be thirty-three functions with no callers, drifting out of step with a sidecar
 // whose routes are still moving.
 //
-// So this file owns the one thing the bridge genuinely needs from the desktop side:
-// the SECURITY BOUNDARY between a frame-chosen sub-path and a URL. The frame picks a
-// path under `/api/social`; this module decides whether that path is one, and builds
-// the URL from a fixed base so the frame can never name a host.
+// This file owns the fixed mount + method policy for the Outpost bridge. The shared
+// desktop-host containment check lives in `app-request.ts`; the independent
+// sandbox-side check remains in `@ryu/app-host/rpc`.
 
-import { type ApiTarget, request } from "./client.ts";
+import {
+	type AppRequestMethod,
+	mountedAppRequest,
+	resolveMountedAppPath,
+} from "./app-request.ts";
+import type { ApiTarget } from "./client.ts";
 
 /** The mount Core serves the `ryu-social` sidecar on. A CONSTANT, never a parameter:
  *  the whole point of the validation below is that the frame contributes the sub-path
@@ -28,12 +32,12 @@ const SOCIAL_MOUNT = "/api/social";
 
 /** Methods the forwarder will issue. A closed set, mirroring `SOCIAL_METHODS` in
  *  `@ryu/app-host/rpc` — the sidecar's router serves no others. */
-const ALLOWED_METHODS = new Set(["GET", "POST", "PATCH", "DELETE"]);
-
-/** A base that exists only to give `new URL()` something to resolve against. Never
- *  reaches a socket: only `pathname`/`search` are read back off the result, and the
- *  real base is applied later by `apiUrl`. */
-const PARSE_BASE = "http://social.invalid";
+const ALLOWED_METHODS: ReadonlySet<AppRequestMethod> = new Set([
+	"GET",
+	"POST",
+	"PATCH",
+	"DELETE",
+]);
 
 export type SocialMethod = "DELETE" | "GET" | "PATCH" | "POST";
 
@@ -81,27 +85,7 @@ export interface SocialRequestInput {
  * so the host and the parser can never disagree again about what was requested.
  */
 export function resolveSocialPath(path: unknown): string | null {
-	if (typeof path !== "string" || !path.startsWith("/")) {
-		return null;
-	}
-	if (path.startsWith("//") || path.includes("\\")) {
-		return null;
-	}
-	let url: URL;
-	try {
-		url = new URL(`${SOCIAL_MOUNT}${path}`, PARSE_BASE);
-	} catch {
-		return null;
-	}
-	// A resolved path that left the mount — by any encoding — is not ours. The
-	// `/`-suffixed test is what stops `/api/socialsomething` passing as a prefix.
-	if (
-		url.pathname !== SOCIAL_MOUNT &&
-		!url.pathname.startsWith(`${SOCIAL_MOUNT}/`)
-	) {
-		return null;
-	}
-	return `${url.pathname}${url.search}`;
+	return resolveMountedAppPath(SOCIAL_MOUNT, path);
 }
 
 /**
@@ -115,20 +99,12 @@ export async function socialRequest(
 	target: ApiTarget,
 	input: SocialRequestInput
 ): Promise<unknown> {
-	const path = resolveSocialPath(input.path);
-	if (!path) {
-		throw new Error(
-			`Refusing to forward "${String(input.path)}" — an Outpost request path must be a sub-path of ${SOCIAL_MOUNT} beginning with "/" and containing no ".." segment.`
-		);
-	}
-	const method = input.method ?? "GET";
-	if (!ALLOWED_METHODS.has(method)) {
-		throw new Error(
-			`Refusing to forward an Outpost request with method "${method}".`
-		);
-	}
-	return await request<unknown>(target, path, {
-		method,
-		body: input.body,
+	return await mountedAppRequest(target, input, {
+		allowedMethods: ALLOWED_METHODS,
+		invalidMethodMessage: (method) =>
+			`Refusing to forward an Outpost request with method "${method}".`,
+		invalidPathMessage: (path) =>
+			`Refusing to forward "${String(path)}" — an Outpost request path must be a sub-path of ${SOCIAL_MOUNT} beginning with "/" and containing no ".." segment.`,
+		mount: SOCIAL_MOUNT,
 	});
 }

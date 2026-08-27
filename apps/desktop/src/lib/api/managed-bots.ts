@@ -105,6 +105,13 @@ export interface ManagedBotPairingRequest {
 	proactive_opening?: boolean;
 	/** Explicit approved chat id that should receive the welcome. */
 	proactive_target?: string | null;
+	/** Provider emojis that the Telegram adapter translates into Learning feedback. */
+	reaction_learning?: {
+		allowGroup: boolean;
+		enabled: boolean;
+		negativeEmoji: string[];
+		positiveEmoji: string[];
+	};
 	/** Name Telegram pre-fills in its create-a-bot dialog (a hint, not a promise). */
 	suggested_name?: string;
 	system_prompt?: string | null;

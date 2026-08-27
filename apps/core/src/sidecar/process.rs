@@ -94,7 +94,7 @@ impl ProcessHandle {
     /// with a SCRUBBED copy of the parent env (secret-like keys dropped via
     /// [`crate::sidecar::env_scrub::scrub_child_env`]), then layers `env` on top.
     ///
-    /// Used as defense-in-depth for the gateway child on a remote data plane (WS1),
+    /// Used as defense-in-depth for gateway and manifest-owned children,
     /// where the child must never inherit provider keys from Core's own process
     /// env. `env_clear()` before seeding is load-bearing — without it the child
     /// keeps the full inherited env and the scrub is a no-op.

@@ -47,6 +47,52 @@ export const RYU_SUPPORTED_SCOPES: string[] = [
 	...RYU_OAUTH_SCOPES,
 ];
 
+const RYU_SUPPORTED_SCOPE_SET = new Set(RYU_SUPPORTED_SCOPES);
+const RYU_OAUTH_SCOPE_SET = new Set(RYU_OAUTH_SCOPES);
+
+/** Parse the OAuth `scope` value used by Better Auth's opaque token rows. */
+export function parseOAuthScopes(value: unknown): string[] {
+	const raw = Array.isArray(value)
+		? value
+		: typeof value === "string"
+			? value.split(/\s+/)
+			: [];
+	const scopes: string[] = [];
+	for (const scope of raw) {
+		if (typeof scope !== "string") {
+			continue;
+		}
+		const normalized = scope.trim();
+		if (normalized && !scopes.includes(normalized)) {
+			scopes.push(normalized);
+		}
+	}
+	return scopes;
+}
+
+export function findUnknownOAuthScopes(scopes: readonly string[]): string[] {
+	return scopes.filter((scope) => !RYU_SUPPORTED_SCOPE_SET.has(scope));
+}
+
+/**
+ * Downscope a grant for a node delegation. OIDC scopes never cross the hosted
+ * MCP boundary and an omitted request means "all granted Ryu capabilities".
+ */
+export function intersectOAuthScopes(
+	granted: readonly string[],
+	requested?: readonly string[]
+): string[] {
+	const grantedCapabilities = new Set(
+		granted.filter((scope) => RYU_OAUTH_SCOPE_SET.has(scope))
+	);
+	if (!requested) {
+		return [...grantedCapabilities];
+	}
+	return [...new Set(requested)].filter((scope) =>
+		grantedCapabilities.has(scope)
+	);
+}
+
 // RYU_CAPABILITIES is `as const`, so Object.entries yields a union of literal
 // tuples whose collapsed element type breaks `.includes`/spread. Read it back as
 // plain `readonly string[]` values for these derivations.

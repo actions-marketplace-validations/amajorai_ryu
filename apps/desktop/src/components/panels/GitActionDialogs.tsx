@@ -5,9 +5,11 @@ import {
 	CloudUploadIcon,
 	GitBranchIcon,
 	GitCommitIcon,
+	Globe02Icon,
 	Loading01Icon,
 	RefreshIcon,
 	Share08Icon,
+	SquareLock01Icon,
 	StopIcon,
 	Tick02Icon,
 } from "@hugeicons/core-free-icons";
@@ -30,18 +32,22 @@ import {
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
+import { RadioGroup, RadioGroupItem } from "@ryu/ui/components/radio-group.tsx";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { useState } from "react";
 import type { GitCommitAction } from "@/src/lib/api/git.ts";
+import type { GitHubRepositoryVisibility } from "@/src/lib/api/pull-requests.ts";
 
 export type GitProgressPhase =
 	| "generating"
+	| "initializing"
 	| "committing"
 	| "pushing"
 	| "pulling"
 	| "syncing"
-	| "creating";
+	| "creating"
+	| "creating-repository";
 
 export type PullRequestAction = "draft" | "create" | "open";
 
@@ -49,6 +55,8 @@ export function gitProgressLabel(phase: GitProgressPhase): string {
 	switch (phase) {
 		case "generating":
 			return "Generating message…";
+		case "initializing":
+			return "Creating local Git…";
 		case "committing":
 			return "Committing…";
 		case "pushing":
@@ -59,6 +67,8 @@ export function gitProgressLabel(phase: GitProgressPhase): string {
 			return "Syncing…";
 		case "creating":
 			return "Creating pull request…";
+		case "creating-repository":
+			return "Creating GitHub repository…";
 	}
 }
 
@@ -138,6 +148,150 @@ export function GitRemoteActions({
 	);
 }
 
+export interface CreateGitHubRepositoryDialogProps {
+	error?: string | null;
+	name: string;
+	onNameChange: (name: string) => void;
+	onOpenChange: (open: boolean) => void;
+	onSubmit: (visibility: GitHubRepositoryVisibility) => void;
+	onVisibilityChange: (visibility: GitHubRepositoryVisibility) => void;
+	open: boolean;
+	progress?: GitProgressPhase;
+	visibility: GitHubRepositoryVisibility;
+}
+
+/** Ask for the provider-facing repository identity only after local Git exists. */
+export function CreateGitHubRepositoryDialog({
+	error,
+	name,
+	onNameChange,
+	onOpenChange,
+	onSubmit,
+	onVisibilityChange,
+	open,
+	progress,
+	visibility,
+}: CreateGitHubRepositoryDialogProps) {
+	const busy = progress !== undefined;
+
+	return (
+		<Dialog onOpenChange={onOpenChange} open={open}>
+			<DialogContent
+				className="gap-0 rounded-[28px] border-border/80 bg-background/95 p-5 shadow-2xl backdrop-blur-xl sm:max-w-[520px]"
+				data-testid="create-github-repository-dialog"
+				showCloseButton={false}
+			>
+				<DialogHeader>
+					<DialogTitle>Create GitHub repository</DialogTitle>
+					<DialogDescription>
+						Keep this folder local, or publish it to GitHub after the initial
+						commit.
+					</DialogDescription>
+				</DialogHeader>
+				<div className="mt-5 grid gap-2">
+					<label
+						className="font-medium text-sm"
+						htmlFor="github-repository-name"
+					>
+						Repository name
+					</label>
+					<Input
+						aria-label="GitHub repository name"
+						disabled={busy}
+						id="github-repository-name"
+						onChange={(event) => onNameChange(event.target.value)}
+						placeholder="my-project"
+						value={name}
+					/>
+				</div>
+				<fieldset className="mt-5 grid gap-2">
+					<legend className="font-medium text-sm">Visibility</legend>
+					<RadioGroup
+						aria-label="Repository visibility"
+						onValueChange={(value) => {
+							if (value === "private" || value === "public") {
+								onVisibilityChange(value);
+							}
+						}}
+						value={visibility}
+					>
+						<label
+							className="flex cursor-pointer items-start gap-3 rounded-2xl border border-border/70 px-3 py-3 transition-colors hover:bg-muted/60"
+							htmlFor="github-repository-private"
+						>
+							<RadioGroupItem
+								aria-label="Private repository"
+								disabled={busy}
+								id="github-repository-private"
+								value="private"
+							/>
+							<HugeiconsIcon
+								aria-hidden
+								className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+								icon={SquareLock01Icon}
+							/>
+							<span className="min-w-0">
+								<span className="block font-medium text-sm">Private</span>
+								<span className="block text-muted-foreground text-xs">
+									Only you and collaborators can see it.
+								</span>
+							</span>
+						</label>
+						<label
+							className="flex cursor-pointer items-start gap-3 rounded-2xl border border-border/70 px-3 py-3 transition-colors hover:bg-muted/60"
+							htmlFor="github-repository-public"
+						>
+							<RadioGroupItem
+								aria-label="Public repository"
+								disabled={busy}
+								id="github-repository-public"
+								value="public"
+							/>
+							<HugeiconsIcon
+								aria-hidden
+								className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+								icon={Globe02Icon}
+							/>
+							<span className="min-w-0">
+								<span className="block font-medium text-sm">Public</span>
+								<span className="block text-muted-foreground text-xs">
+									Anyone can discover and clone it.
+								</span>
+							</span>
+						</label>
+					</RadioGroup>
+				</fieldset>
+				<p className="mt-4 text-muted-foreground text-xs leading-5">
+					Ryu commits the local folder, creates the GitHub remote, and pushes
+					the current branch. GitHub CLI handles your existing sign-in.
+				</p>
+				{error && (
+					<p className="mt-3 rounded-2xl bg-destructive/10 px-3 py-2 text-destructive text-sm">
+						{error}
+					</p>
+				)}
+				<div className="mt-5 flex justify-end gap-2">
+					<Button
+						disabled={busy}
+						onClick={() => onOpenChange(false)}
+						type="button"
+						variant="ghost"
+					>
+						Cancel
+					</Button>
+					<Button
+						disabled={busy || !name.trim()}
+						onClick={() => onSubmit(visibility)}
+						type="button"
+					>
+						{busy && progress ? gitProgressLabel(progress) : "Create and push"}
+					</Button>
+				</div>
+			</DialogContent>
+		</Dialog>
+	);
+}
+
 function DialogDiffStats({
 	deletions,
 	insertions,
@@ -149,7 +303,7 @@ function DialogDiffStats({
 		return null;
 	}
 	return (
-		<span className="flex shrink-0 items-center gap-2 font-heading font-medium text-2xl tabular-nums sm:text-[30px]">
+		<span className="flex shrink-0 items-center gap-2 font-medium font-mono text-2xl tabular-nums sm:text-[30px]">
 			{insertions > 0 && (
 				<span className="text-emerald-500">+{formatCount(insertions)}</span>
 			)}

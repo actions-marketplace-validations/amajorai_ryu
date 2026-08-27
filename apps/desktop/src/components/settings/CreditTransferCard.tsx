@@ -23,13 +23,14 @@ import { formatMicroUsd } from "@ryu/ui/lib/number-format.ts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useStepUp } from "@/src/components/StepUpDialog.tsx";
+import { MICRO_USD_PER_DOLLAR } from "@/src/lib/api/credits.ts";
 import {
 	fetchTransferable,
 	hasOrgAuth,
 	type OrgSummary,
 	transferCredits,
 } from "@/src/lib/api/orgs.ts";
-import { MICRO_USD_PER_DOLLAR } from "@/src/lib/api/credits.ts";
 import { formatDate } from "@/src/lib/timezone.ts";
 
 /**
@@ -124,6 +125,7 @@ export function CreditTransferCard() {
 	const authed = hasOrgAuth();
 	const [sourceOrgId, setSourceOrgId] = useState<string | null>(null);
 	const [destOrgId, setDestOrgId] = useState<string | null>(null);
+	const stepUp = useStepUp();
 	const [selectedGrants, setSelectedGrants] = useState<Set<string>>(new Set());
 	const [topupDollars, setTopupDollars] = useState("");
 
@@ -209,6 +211,14 @@ export function CreditTransferCard() {
 			await queryClient.invalidateQueries();
 		},
 	});
+
+	const handleTransfer = async () => {
+		try {
+			await stepUp.guard("billing", () => transferMutation.mutateAsync());
+		} catch {
+			// React Query's onError owns the user-facing failure toast.
+		}
+	};
 
 	// Nothing to move BETWEEN. A solo user has one workspace, and a transfer form
 	// whose destination list is empty is a control that can only be refused.
@@ -319,7 +329,7 @@ export function CreditTransferCard() {
 										}
 									/>
 									<span className="min-w-0 flex-1">
-										<span className="block font-heading font-medium text-sm tabular-nums">
+										<span className="block font-medium font-mono text-sm tabular-nums">
 											{formatUsd(grant.remainingMicroUsd)}
 										</span>
 										<span className="block text-muted-foreground text-xs">
@@ -336,7 +346,7 @@ export function CreditTransferCard() {
 				<div className="space-y-1.5">
 					<Label htmlFor="transfer-topup">
 						Top-up balance (
-						<span className="font-heading tabular-nums">
+						<span className="font-mono tabular-nums">
 							{formatUsd(topupAvailable)}
 						</span>{" "}
 						available)
@@ -359,7 +369,7 @@ export function CreditTransferCard() {
 					<p className="text-muted-foreground text-sm tabular-nums">
 						{nothingChosen ? "Nothing selected" : "Moving "}
 						{nothingChosen ? null : (
-							<span className="font-heading text-foreground">
+							<span className="font-mono text-foreground">
 								{formatUsd(selectedMicroUsd + topupMicroUsd)}
 							</span>
 						)}
@@ -369,7 +379,7 @@ export function CreditTransferCard() {
 							nothingChosen || overdrawn || !(destOrgId && resolvedSource)
 						}
 						loading={transferMutation.isPending}
-						onClick={() => transferMutation.mutate()}
+						onClick={() => void handleTransfer()}
 						type="button"
 					>
 						{!transferMutation.isPending && <ArrowRight className="size-4" />}
@@ -377,6 +387,7 @@ export function CreditTransferCard() {
 					</Button>
 				</div>
 			</CardContent>
+			{stepUp.dialog}
 		</Card>
 	);
 }

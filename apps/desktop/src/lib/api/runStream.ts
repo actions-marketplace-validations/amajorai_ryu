@@ -11,7 +11,7 @@
 // `apps/desktop/src/lib/api/eventStream.ts` for the shared-connection variant.
 
 import type { RunSummary } from "@/src/hooks/useRuns.ts";
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 const FRAME_SEP = "\n\n";
 const DATA_PREFIX = "data:";
@@ -64,9 +64,9 @@ export async function streamRuns(
 	onFrame: (frame: RunStreamFrame) => void,
 	signal: AbortSignal
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, "/api/runs/stream"), {
+	const resp = await authenticatedFetch(target, "/api/runs/stream", {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: { Accept: "text/event-stream" },
 		signal,
 	});
 	if (!(resp.ok && resp.body)) {

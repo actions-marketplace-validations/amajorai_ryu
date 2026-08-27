@@ -176,6 +176,54 @@ impl TelegramChannel {
         Ok(envelope.result.unwrap_or(Value::Null))
     }
 
+    async fn send_text_with_ids(&self, chat_id: &str, text: &str) -> anyhow::Result<Vec<String>> {
+        if let Some(query_id) = guest_query_of(chat_id) {
+            self.call("answerGuestQuery", guest_reply_payload(query_id, text))
+                .await?;
+            return Ok(Vec::new());
+        }
+        let (chat, thread) = target(chat_id)?;
+        let mut ids = Vec::new();
+        for chunk in split_message(text, 4096) {
+            let result = self
+                .call("sendMessage", message_payload(chat, thread, &chunk))
+                .await?;
+            if let Some(message_id) = result.get("message_id").and_then(Value::as_i64) {
+                ids.push(message_id.to_string());
+            }
+        }
+        Ok(ids)
+    }
+
+    async fn send_rich_with_ids(
+        &self,
+        chat_id: &str,
+        markdown: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        if guest_query_of(chat_id).is_some() {
+            return self.send_text_with_ids(chat_id, markdown).await;
+        }
+        let (chat, thread) = target(chat_id)?;
+        let mut ids = Vec::new();
+        for chunk in split_message(markdown, 4096) {
+            match self
+                .call("sendRichMessage", rich_payload(chat, thread, &chunk))
+                .await
+            {
+                Ok(result) => {
+                    if let Some(message_id) = result.get("message_id").and_then(Value::as_i64) {
+                        ids.push(message_id.to_string());
+                    }
+                }
+                Err(error) => {
+                    warn!(%error, "telegram sendRichMessage failed; falling back to plain text");
+                    return self.send_text_with_ids(chat_id, markdown).await;
+                }
+            }
+        }
+        Ok(ids)
+    }
+
     /// Fetch the bot's own identity (`getMe`).
     ///
     /// Beyond the id and `@username` that group-mention detection needs, this is
@@ -366,6 +414,66 @@ impl TelegramChannel {
             return;
         }
 
+        if let Some(reaction) = update.message_reaction {
+            if self.runtime.cfg.reaction_learning.enabled {
+                let channel = Arc::clone(self);
+                let bot_id = me.id;
+                tokio::spawn(async move {
+                    let Some(user) = reaction.user.as_ref() else {
+                        // Anonymous group/channel reactions carry actor_chat rather
+                        // than a person. They are intentionally not attributed to
+                        // Learning's node-wide feedback sink.
+                        return;
+                    };
+                    if user.id == bot_id {
+                        return;
+                    }
+                    let is_group = reaction.chat.chat_type != "private";
+                    if is_group && !channel.runtime.cfg.reaction_learning.allow_group {
+                        return;
+                    }
+                    let thread = reaction
+                        .message_thread_id
+                        .map(|id| format!("{TOPIC_TAG}{id}"));
+                    let target = pack_thread(&reaction.chat.id.to_string(), thread.as_deref());
+                    let emoji = reaction
+                        .new_reaction
+                        .iter()
+                        .find_map(|item| item.emoji.as_deref())
+                        .unwrap_or_default();
+                    match channel
+                        .runtime
+                        .record_reaction_feedback(
+                            "telegram",
+                            &target,
+                            &reaction.message_id.to_string(),
+                            emoji,
+                        )
+                        .await
+                    {
+                        Ok(true) => info!(
+                            chat_id = %target,
+                            message_id = reaction.message_id,
+                            user_id = user.id,
+                            "telegram reaction recorded as Learning feedback"
+                        ),
+                        Ok(false) => debug!(
+                            chat_id = %target,
+                            message_id = reaction.message_id,
+                            "telegram reaction was not linked to a Core assistant reply"
+                        ),
+                        Err(error) => warn!(
+                            chat_id = %target,
+                            message_id = reaction.message_id,
+                            %error,
+                            "telegram reaction feedback failed"
+                        ),
+                    }
+                });
+            }
+            return;
+        }
+
         let Some(message) = update.message else {
             return;
         };
@@ -441,7 +549,7 @@ impl TelegramChannel {
             json!({
                 "url": public_url,
                 "secret_token": secret,
-                "allowed_updates": ["message", "guest_message"],
+                "allowed_updates": ["message", "guest_message", "message_reaction"],
                 "drop_pending_updates": false,
             }),
         )
@@ -514,17 +622,21 @@ impl Channel for TelegramChannel {
     /// first, then hard-split a single oversized line so a long agent answer is
     /// delivered instead of being rejected as one oversized request.
     async fn send_message(&self, chat_id: &str, text: &str) -> anyhow::Result<()> {
-        if let Some(query_id) = guest_query_of(chat_id) {
-            self.call("answerGuestQuery", guest_reply_payload(query_id, text))
-                .await?;
-            return Ok(());
-        }
-        let (chat, thread) = target(chat_id)?;
-        for chunk in split_message(text, 4096) {
-            self.call("sendMessage", message_payload(chat, thread, &chunk))
-                .await?;
-        }
+        self.send_text_with_ids(chat_id, text).await?;
         Ok(())
+    }
+
+    async fn send_reply(
+        &self,
+        chat_id: &str,
+        text: &str,
+        rich_text: bool,
+    ) -> anyhow::Result<Vec<String>> {
+        if rich_text && self.caps().rich_text {
+            self.send_rich_with_ids(chat_id, text).await
+        } else {
+            self.send_text_with_ids(chat_id, text).await
+        }
     }
 
     /// Rich-text reply: `sendRichMessage` with `rich_message = { markdown }`.
@@ -534,23 +646,7 @@ impl Channel for TelegramChannel {
     /// that refuses rich messages — falls back to plain text: the reply matters
     /// more than its formatting.
     async fn send_rich(&self, chat_id: &str, markdown: &str) -> anyhow::Result<()> {
-        if guest_query_of(chat_id).is_some() {
-            // A guest reply is an inline-query result; it carries plain text.
-            return self.send_message(chat_id, markdown).await;
-        }
-        let (chat, thread) = target(chat_id)?;
-        for chunk in split_message(markdown, 4096) {
-            match self
-                .call("sendRichMessage", rich_payload(chat, thread, &chunk))
-                .await
-            {
-                Ok(_) => {}
-                Err(err) => {
-                    warn!(%err, "telegram sendRichMessage failed; falling back to plain text");
-                    return self.send_message(chat_id, markdown).await;
-                }
-            }
-        }
+        self.send_rich_with_ids(chat_id, markdown).await?;
         Ok(())
     }
 
@@ -1352,6 +1448,30 @@ struct Update {
     /// `answerGuestQuery`, keyed on `Message.guest_query_id`.
     #[serde(default)]
     guest_message: Option<Message>,
+    /// Reaction added/removed by a user on a bot message. Enabled explicitly by
+    /// the reaction-learning config and only linked after an outbound reply id
+    /// has been confirmed.
+    #[serde(default)]
+    message_reaction: Option<MessageReactionUpdated>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct MessageReactionUpdated {
+    chat: Chat,
+    #[serde(default)]
+    message_id: i64,
+    #[serde(default)]
+    user: Option<TgUser>,
+    #[serde(default)]
+    new_reaction: Vec<TelegramReaction>,
+    #[serde(default)]
+    message_thread_id: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TelegramReaction {
+    #[serde(default)]
+    emoji: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1973,6 +2093,28 @@ mod tests {
         assert!(message.message_thread_id.is_none());
         assert!(message.voice.is_none());
         assert_eq!(message.message_id, 0);
+    }
+
+    #[test]
+    fn parses_reaction_updates_without_treating_them_as_new_messages() {
+        let raw = json!({
+            "update_id": 43,
+            "message_reaction": {
+                "chat": { "id": 99, "type": "private" },
+                "message_id": 17,
+                "user": { "id": 7, "first_name": "Ada" },
+                "new_reaction": [{ "type": "emoji", "emoji": "👍" }],
+                "message_thread_id": 4
+            }
+        });
+        let parsed: Update = serde_json::from_value(raw).unwrap();
+        assert!(parsed.message.is_none());
+        let reaction = parsed.message_reaction.expect("reaction update");
+        assert_eq!(reaction.chat.id, 99);
+        assert_eq!(reaction.message_id, 17);
+        assert_eq!(reaction.user.as_ref().map(|user| user.id), Some(7));
+        assert_eq!(reaction.message_thread_id, Some(4));
+        assert_eq!(reaction.new_reaction[0].emoji.as_deref(), Some("👍"));
     }
 
     #[test]

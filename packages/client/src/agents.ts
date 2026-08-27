@@ -10,6 +10,7 @@ import type {
 	AgentSummary,
 	Message,
 	RyuClientOptions,
+	RyuResponseMode,
 	StreamChunk,
 } from "./types.ts";
 
@@ -140,6 +141,11 @@ function parseSseFrame(data: string): StreamChunk | null {
 // API class
 // ---------------------------------------------------------------------------
 
+export interface AgentRunOptions {
+	/** Use exact Ryu implementation vocabulary instead of everyday language. */
+	responseMode?: RyuResponseMode;
+}
+
 export class AgentsAPI {
 	private readonly options: RyuClientOptions;
 
@@ -169,9 +175,13 @@ export class AgentsAPI {
 	 * Send a chat turn and collect the full response as a string.
 	 * Uses the same streaming endpoint as stream() but buffers everything.
 	 */
-	async run(id: string, messages: Message[]): Promise<string> {
+	async run(
+		id: string,
+		messages: Message[],
+		options?: AgentRunOptions
+	): Promise<string> {
 		let result = "";
-		for await (const chunk of this.stream(id, messages)) {
+		for await (const chunk of this.stream(id, messages, options)) {
 			if (chunk.type === "text" && chunk.content) {
 				result += chunk.content;
 			}
@@ -196,13 +206,23 @@ export class AgentsAPI {
 	 * }
 	 * ```
 	 */
-	async *stream(id: string, messages: Message[]): AsyncGenerator<StreamChunk> {
+	async *stream(
+		id: string,
+		messages: Message[],
+		options?: AgentRunOptions
+	): AsyncGenerator<StreamChunk> {
 		const url = buildUrl(this.options, "/api/chat/stream");
 		const headers = buildHeaders(this.options);
 		const resp = await fetch(url, {
 			method: "POST",
 			headers,
-			body: JSON.stringify({ agent_id: id, messages }),
+			body: JSON.stringify({
+				agent_id: id,
+				messages,
+				...(options?.responseMode
+					? { response_mode: options.responseMode }
+					: {}),
+			}),
 		});
 
 		if (!(resp.ok && resp.body)) {

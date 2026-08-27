@@ -2,6 +2,7 @@
 	Alert02Icon,
 	ArrowDataTransferHorizontalIcon,
 	ArrowDown02Icon,
+	BookOpen02Icon,
 	InformationCircleIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -13,6 +14,7 @@ import {
 import { MessageScroller as BeuiMessageScroller } from "@ryu/ui/components/agents/message-scroller";
 import { Bubble, BubbleContent } from "@ryu/ui/components/bubble";
 import { Button } from "@ryu/ui/components/button";
+import { Icon } from "@ryu/ui/components/icon.tsx";
 import { Marker, MarkerContent, MarkerIcon } from "@ryu/ui/components/marker";
 import {
 	Message,
@@ -53,11 +55,10 @@ import {
 	IconGitBranch,
 	IconPencil,
 	IconRefresh,
-	IconThumbDown,
-	IconThumbUp,
 	IconVolume,
 } from "@tabler/icons-react";
 import type { ChatStatus, UIMessage } from "ai";
+import { Reply as ReplyIcon } from "lucide-react";
 import type React from "react";
 import {
 	Fragment,
@@ -81,12 +82,21 @@ import { DateSeparator } from "./date-separator.tsx";
 import { ErrorMessage } from "./error-message.tsx";
 import { FileTypeIcon } from "./file-type-icon.tsx";
 import { FloatingDateHeader } from "./floating-date-header.tsx";
-import { isGoalMessage } from "./goal-message.ts";
+import { GoalCompletionFooter } from "./goal-completion.tsx";
+import {
+	type GoalCompletion,
+	getGoalElapsedMs,
+	isGoalMessage,
+} from "./goal-message.ts";
 import { usePinnedUserMessage } from "./hooks/use-pinned-user-message.ts";
 import { useTranscriptAnchor } from "./hooks/use-transcript-anchor.ts";
 import type { LinkPreviewResolvers } from "./link-preview.tsx";
 import { Markdown } from "./markdown.tsx";
-import { isMessageReactionAction } from "./message-action-types.ts";
+import type { MemoryCitation } from "./memory-citations.ts";
+import {
+	isMemoryCitationsAction,
+	isMessageReactionAction,
+} from "./message-action-types.ts";
 import {
 	clearUnreadMessageState,
 	getIncomingMessageIds,
@@ -98,6 +108,8 @@ import { AcpUsageStats, MessageStats } from "./message-stats.tsx";
 import { PinnedUserMessageBar } from "./pinned-user-message-bar.tsx";
 import { shouldShowPlanning } from "./planning-visibility.ts";
 import { messageSelectableProps, SelectionQuoteToolbar } from "./quote.tsx";
+import { StatsFooter } from "./stats-footer.tsx";
+import { DEFAULT_STATS_PLUGIN_ENABLED } from "./stats-model.ts";
 import {
 	hasVisibleContentAtNoDetail,
 	isHiddenAtNoDetail,
@@ -108,6 +120,7 @@ import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer.tsx";
 import {
 	deriveEditedFiles,
 	deriveTurnEndCards,
+	type FileEditUndoPlan,
 	isEditedFilePart,
 	isTurnEndArtifactPart,
 	isTurnEndJsonRenderPart,
@@ -117,10 +130,13 @@ import {
 	type AgentMessageContext,
 	type AgentUiSubmit,
 	type ContributedMessageAction,
+	type ContributedSelectionAction,
 	type CustomToolRendererProps,
 	type MentionItem,
 	type MessageActionContext,
 	type MessageActionRuntimeState,
+	type MessageReply,
+	type SelectionActionContext,
 	widgetMessageProvenanceKey,
 } from "./types.ts";
 import { TypingIndicator } from "./typing-indicator.tsx";
@@ -190,11 +206,8 @@ export interface MessageListProps {
 	 * the fullscreen lightbox preview. Set to false to disable previews.
 	 */
 	enableImagePreview?: boolean;
-	/**
-	 * Persisted thumbs state keyed by (assistant) message id. Only ids present here
-	 * render a lit thumb; absent ids are unrated.
-	 */
-	feedback?: Record<string, "up" | "down">;
+	/** Completion data shown beside the assistant turn that finished the goal. */
+	goalCompletion?: GoalCompletion;
 	/** True when a page older than the visible transcript is available. */
 	hasOlderMessages?: boolean;
 	/**
@@ -250,6 +263,11 @@ export interface MessageListProps {
 		action: ContributedMessageAction,
 		context: MessageActionContext
 	) => void;
+	/** Fire a contributed text-selection action with the selected plain text. */
+	onContributedSelectionAction?: (
+		action: ContributedSelectionAction,
+		context: SelectionActionContext
+	) => void;
 	/**
 	 * Edit a previously-sent user message into a new version (ChatGPT/Claude-style
 	 * branching). When provided, a pencil button appears in each user message's
@@ -257,18 +275,6 @@ export interface MessageListProps {
 	 * calls this with the message id and new text.
 	 */
 	onEditMessage?: (messageId: string, newText: string) => void;
-	/**
-	 * Thumbs 👍/👎 on an assistant turn. When provided, thumbs buttons appear in
-	 * each assistant turn's hover toolbar; clicking calls this with the turn's last
-	 * message id, the new rating (`null` clears a previous vote), and whether this
-	 * is the latest turn. The lit state is driven by `feedback` (persisted
-	 * server-side).
-	 */
-	onFeedback?: (
-		messageId: string,
-		rating: "up" | "down" | null,
-		isLatest: boolean
-	) => void;
 	/** Request the next older message page when the viewport reaches the top. */
 	onLoadOlderMessages?: () => Promise<void>;
 	/**
@@ -290,6 +296,11 @@ export interface MessageListProps {
 	 * with the last assistant message's id.
 	 */
 	onRegenerateMessage?: (messageId: string) => void;
+	/** Reply to a complete message, including the source id and turn distance. */
+	onReply?: (reply: MessageReply) => void;
+	/** Retry the current client-side failed request. Persisted error rows use
+	 * `onRegenerateMessage` instead because they have a Core message id. */
+	onRetryError?: () => void;
 	/**
 	 * Re-run a failed inline media generation. Called with the assistant message
 	 * holding the failed part, which of the two media surfaces it is, and the
@@ -304,6 +315,7 @@ export interface MessageListProps {
 		kind: "image" | "video",
 		prompt: string
 	) => void;
+	onReviewFileEdits?: (paths: string[]) => void;
 	/**
 	 * Switch the active version at a branch point. When a message has more than one
 	 * version (see `versions`), a `< n / m >` pager renders; stepping it calls this
@@ -316,8 +328,12 @@ export interface MessageListProps {
 	 * this with the turn's combined text. When omitted, no speak button is shown.
 	 */
 	onSpeak?: (text: string) => void;
+	onUndoFileEdits?: (plan: FileEditUndoPlan) => Promise<void>;
 	onWorkflowResume?: (runId: string, payload: string) => Promise<unknown>;
 	previewResolvers?: LinkPreviewResolvers;
+	/** Contributed text-selection toolbar actions (see
+	 * {@link ContributedSelectionAction}), resolved and ordered by the shell. */
+	selectionActions?: ContributedSelectionAction[];
 	showCopyToolbar?: boolean;
 	slots?: {
 		UserMessage?: React.ComponentType<{
@@ -340,6 +356,12 @@ export interface MessageListProps {
 		}>;
 		ToolRenderer?: React.ComponentType<ToolRendererProps>;
 	};
+	/** Active model id used for context-window hint parsing. */
+	statsModelName?: string;
+	/** Enabled-plugin gate for the session stats footer. */
+	statsPluginEnabled?: boolean;
+	/** Normalized subscription usage passed by the desktop host. */
+	statsUsage?: import("./stats-model.ts").StatsUsageSnapshot | null;
 	status: ChatStatus;
 	suppressQuestionTool?: boolean;
 	toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
@@ -1032,6 +1054,27 @@ function CopyButton({
 	);
 }
 
+function ReplyButton({ onReply }: { onReply: () => void }) {
+	return (
+		<Button
+			aria-label="Reply to message"
+			className={cn("size-6 rounded-md opacity-50 hover:opacity-100")}
+			onClick={onReply}
+			onMouseDown={(event) => event.stopPropagation()}
+			onPointerDown={(event) => {
+				event.stopPropagation();
+			}}
+			size="icon"
+			tabIndex={-1}
+			title="Reply to message"
+			type="button"
+			variant="ghost"
+		>
+			<ReplyIcon className="h-3.5 w-3.5 text-muted-foreground" />
+		</Button>
+	);
+}
+
 // Fork a chat from this point (history up to and
 // including this message is copied), leaving the original thread intact. The
 // bookmark affordance mirrors the AI SDK "Checkpoint" element over Ryu's
@@ -1206,14 +1249,9 @@ function VersionPager({
 	);
 }
 
-// Thumbs 👍/👎 on an assistant reply. Clicking the active rating again clears it
-// (toggle); the lit state is driven by `rating` (persisted server-side), so it
-// survives reloads. The vote seeds the learning + memory sinks in Core.
-type FeedbackRating = "up" | "down";
-
 /** One state button of a contributed `toggle-group` message action. Rendered
- *  exactly like the built-in thumbs: the active state is lit by `activeValue` and
- *  clicking the active state again clears it. */
+ * exactly like a native toggle group: the active state is lit by `activeValue`
+ * and clicking the active state again clears it. */
 function ContributedToggleGroupButtons({
 	action,
 	activeValue,
@@ -1221,7 +1259,7 @@ function ContributedToggleGroupButtons({
 }: {
 	action: ContributedMessageAction;
 	activeValue?: string;
-	onSelect: (value: string) => void;
+	onSelect: (value: string | null) => void;
 }) {
 	if (!action.states || action.states.length === 0) {
 		return null;
@@ -1239,7 +1277,7 @@ function ContributedToggleGroupButtons({
 							active && "opacity-100"
 						)}
 						key={state.value}
-						onClick={() => onSelect(state.value)}
+						onClick={() => onSelect(active ? null : state.value)}
 						onMouseDown={(event) => event.stopPropagation()}
 						onPointerDown={(event) => {
 							event.stopPropagation();
@@ -1250,7 +1288,14 @@ function ContributedToggleGroupButtons({
 						type="button"
 						variant="ghost"
 					>
-						{state.label}
+						{state.icon || state.active_icon ? (
+							<Icon
+								className="size-3.5"
+								icon={active ? (state.active_icon ?? state.icon) : state.icon}
+							/>
+						) : (
+							state.label
+						)}
 					</Button>
 				);
 			})}
@@ -1258,69 +1303,52 @@ function ContributedToggleGroupButtons({
 	);
 }
 
-function FeedbackButtons({
-	rating,
-	onFeedback,
+function MemoryCitationsButton({
+	action,
+	citations,
 }: {
-	rating?: FeedbackRating;
-	onFeedback: (next: FeedbackRating | null) => void;
+	action: ContributedMessageAction;
+	citations?: readonly MemoryCitation[];
 }) {
-	const vote = (value: FeedbackRating) => {
-		onFeedback(rating === value ? null : value);
-	};
+	if (!citations || citations.length === 0) {
+		return null;
+	}
+
 	return (
-		<>
-			<Button
-				aria-label="Good response"
-				aria-pressed={rating === "up"}
-				className={cn(
-					"size-6 rounded-md opacity-50 hover:opacity-100",
-					rating === "up" && "opacity-100"
-				)}
-				onClick={() => vote("up")}
-				onMouseDown={(event) => event.stopPropagation()}
-				onPointerDown={(event) => {
-					event.stopPropagation();
-				}}
-				size="icon"
-				tabIndex={-1}
-				title="Good response"
-				type="button"
-				variant="ghost"
-			>
-				<IconThumbUp
-					className={cn(
-						"h-3.5 w-3.5 text-muted-foreground",
-						rating === "up" && "fill-current text-primary"
-					)}
+		<TooltipProvider delay={0}>
+			<Tooltip>
+				<TooltipTrigger
+					render={
+						<Button
+							aria-label={action.label}
+							className="size-6 rounded-md opacity-50 hover:opacity-100"
+							onMouseDown={(event) => event.stopPropagation()}
+							onPointerDown={(event) => event.stopPropagation()}
+							size="icon"
+							tabIndex={-1}
+							title={action.label}
+							type="button"
+							variant="ghost"
+						>
+							<HugeiconsIcon className="size-3.5" icon={BookOpen02Icon} />
+						</Button>
+					}
 				/>
-			</Button>
-			<Button
-				aria-label="Bad response"
-				aria-pressed={rating === "down"}
-				className={cn(
-					"size-6 rounded-md opacity-50 hover:opacity-100",
-					rating === "down" && "opacity-100"
-				)}
-				onClick={() => vote("down")}
-				onMouseDown={(event) => event.stopPropagation()}
-				onPointerDown={(event) => {
-					event.stopPropagation();
-				}}
-				size="icon"
-				tabIndex={-1}
-				title="Bad response"
-				type="button"
-				variant="ghost"
-			>
-				<IconThumbDown
-					className={cn(
-						"h-3.5 w-3.5 text-muted-foreground",
-						rating === "down" && "fill-current text-destructive"
-					)}
-				/>
-			</Button>
-		</>
+				<TooltipContent
+					align="start"
+					className="w-80 max-w-[min(20rem,calc(100vw-2rem))] items-start p-3"
+				>
+					<div className="min-w-0">
+						<p className="font-medium text-foreground">Memories cited</p>
+						<ul className="mt-1 list-disc space-y-1 pl-4 text-muted-foreground">
+							{citations.map((citation) => (
+								<li key={citation.id}>{citation.content}</li>
+							))}
+						</ul>
+					</div>
+				</TooltipContent>
+			</Tooltip>
+		</TooltipProvider>
 	);
 }
 
@@ -1334,11 +1362,12 @@ function MessageToolbar({
 	onBranch,
 	onEdit,
 	onRegenerate,
+	onReply,
 	onSpeak,
-	feedbackRating,
-	onFeedback,
+	actionState,
 	contributedActions,
 	onContributedAction,
+	goalCompletion,
 }: {
 	text?: string;
 	heightClass: string;
@@ -1349,9 +1378,9 @@ function MessageToolbar({
 	onBranch?: () => void;
 	onEdit?: () => void;
 	onRegenerate?: () => void;
+	onReply?: () => void;
 	onSpeak?: () => void;
-	feedbackRating?: FeedbackRating;
-	onFeedback?: (next: FeedbackRating | null) => void;
+	actionState?: MessageActionRuntimeState;
 	/** Contributed per-message actions rendered AFTER the built-ins. The shell
 	 *  resolves `contributes.message_actions` from the feed and passes them in;
 	 *  blocks never fetches. */
@@ -1360,6 +1389,8 @@ function MessageToolbar({
 		action: ContributedMessageAction,
 		value?: string
 	) => void;
+	/** Compact completion status appended to the ending-turn toolbar. */
+	goalCompletion?: React.ReactNode;
 }) {
 	return (
 		<div
@@ -1375,20 +1406,26 @@ function MessageToolbar({
 			onPointerDown={(event) => event.stopPropagation()}
 		>
 			{text && <CopyButton onCopied={onCopied} text={text} />}
+			{onReply && <ReplyButton onReply={onReply} />}
 			{onEdit && <EditButton onEdit={onEdit} />}
 			{onRegenerate && <RegenerateButton onRegenerate={onRegenerate} />}
 			{onBranch && <BranchButton onBranch={onBranch} />}
 			{onSpeak && <SpeakButton onSpeak={onSpeak} />}
-			{onFeedback && (
-				<FeedbackButtons onFeedback={onFeedback} rating={feedbackRating} />
-			)}
 			{contributedActions?.map((action) =>
-				action.kind === "toggle-group" ? (
+				isMemoryCitationsAction(action) ? (
+					<MemoryCitationsButton
+						action={action}
+						citations={actionState?.memoryCitations}
+						key={action.id}
+					/>
+				) : action.kind === "toggle-group" ? (
 					<ContributedToggleGroupButtons
 						action={action}
-						activeValue={feedbackRating}
+						activeValue={actionState?.toggleValues?.[action.id]}
 						key={action.id}
-						onSelect={(value) => onContributedAction?.(action, value)}
+						onSelect={(value) =>
+							onContributedAction?.(action, value ?? undefined)
+						}
 					/>
 				) : (
 					<Button
@@ -1410,6 +1447,7 @@ function MessageToolbar({
 					</Button>
 				)
 			)}
+			{goalCompletion ? goalCompletion : null}
 		</div>
 	);
 }
@@ -1596,9 +1634,8 @@ export const MessageList = memo(function MessageList({
 	onAgentUiSubmit,
 	onEditMessage,
 	onRegenerateMessage,
+	onRetryError,
 	onRetryGeneration,
-	onFeedback,
-	feedback,
 	historyNotice,
 	historyNotices,
 	hasOlderMessages,
@@ -1606,11 +1643,16 @@ export const MessageList = memo(function MessageList({
 	messageActions,
 	messageActionStates,
 	onContributedMessageAction,
+	selectionActions,
+	onContributedSelectionAction,
 	onSelectVersion,
 	versions,
 	onSpeak,
 	onQuote,
+	onReply,
 	onOpenFile,
+	onReviewFileEdits,
+	onUndoFileEdits,
 	onOpenLink,
 	onOpenMention,
 	onWorkflowResume,
@@ -1625,11 +1667,15 @@ export const MessageList = memo(function MessageList({
 	assistantPlanningAvatars,
 	agentMessageContext,
 	currentUser,
+	goalCompletion,
 	slots,
 	classNames,
 	toolRenderers,
 	contextSize,
 	conversationKey,
+	statsPluginEnabled = DEFAULT_STATS_PLUGIN_ENABLED,
+	statsUsage,
+	statsModelName,
 	onLoadOlderMessages,
 }: MessageListProps) {
 	const [activeCopyId, setActiveCopyId] = useState<string | null>(null);
@@ -1652,6 +1698,7 @@ export const MessageList = memo(function MessageList({
 		openAtBottom,
 		pinUserMessage,
 	} = useChatDisplayPrefs();
+	const statsEnabled = statsPluginEnabled && inferenceStats;
 	const followOutput = openAtBottom && initialScrollBehavior !== "top";
 	const followingRef = useRef(true);
 	const unreadStateRef = useRef<UnreadMessageState | null>(null);
@@ -2271,15 +2318,31 @@ export const MessageList = memo(function MessageList({
 										}
 										const userCopyKey = `user-${turn.userMsg.id}`;
 										const userCopyVisible = activeCopyId === userCopyKey;
+										const userMsgId = turn.userMsg.id;
+										const onReplyUser =
+											text && (onReply || onQuote)
+												? () => {
+														if (onReply) {
+															onReply({
+																chainLength: turns.length - turnIndex,
+																messageId: userMsgId,
+																text,
+															});
+															return;
+														}
+														onQuote?.(text);
+													}
+												: undefined;
 										const goalAnnotation = isGoalMessage(turn.userMsg) ? (
 											<GoalMessageAnnotation />
 										) : null;
 										// Only render the toolbar when it has content — copy
-										// button (gated by showCopyToolbar).
+										// or reply (both require message text).
 										// Otherwise a 28px-tall empty row inflates the gap to the
 										// assistant reply.
-										const showUserToolbar = showCopyToolbar && Boolean(text);
-										const userMsgId = turn.userMsg.id;
+										const showUserToolbar =
+											Boolean(text) &&
+											(showCopyToolbar || Boolean(onReplyUser));
 										const userActions = messageActions?.filter(
 											(a) => a.target === "user" || a.target === "any"
 										);
@@ -2339,6 +2402,7 @@ export const MessageList = memo(function MessageList({
 																				? () => setEditingId(userMsgId)
 																				: undefined
 																		}
+																		onReply={onReplyUser}
 																		text={showCopyToolbar ? text : ""}
 																	/>
 																)}
@@ -2424,13 +2488,38 @@ export const MessageList = memo(function MessageList({
 											isMounted && assistantCreatedAt
 												? new Date(assistantCreatedAt)
 												: null;
-										const showToolbar =
-											(showCopyToolbar || Boolean(onSpeak)) &&
-											hasAssistantText &&
-											!isTurnStreaming;
 										const copyKey = `assistant-${turnKey}-all`;
 										const toolbarText = showCopyToolbar ? assistantText : "";
 										const branchMsgId = turn.assistantMsgs.at(-1)?.id;
+										const isGoalCompletionTurn =
+											Boolean(goalCompletion) &&
+											!isTurnStreaming &&
+											(goalCompletion?.messageId
+												? goalCompletion.messageId === branchMsgId
+												: isLastTurn);
+										const completionEndMs =
+											typeof goalCompletion?.achievedAt === "number" &&
+											Number.isFinite(goalCompletion.achievedAt)
+												? goalCompletion.achievedAt
+												: assistantTimestamp?.getTime();
+										const goalCompletionElapsedMs =
+											isGoalCompletionTurn && goalCompletion
+												? getGoalElapsedMs(
+														goalCompletion,
+														completionEndMs ?? Date.now()
+													)
+												: null;
+										const goalCompletionNode =
+											goalCompletionElapsedMs === null ? null : (
+												<GoalCompletionFooter
+													completedAt={
+														isMounted && completionEndMs
+															? new Date(completionEndMs)
+															: null
+													}
+													elapsedMs={goalCompletionElapsedMs}
+												/>
+											);
 										const onBranchTurn =
 											onBranch && branchMsgId
 												? () => onBranch(branchMsgId)
@@ -2439,17 +2528,26 @@ export const MessageList = memo(function MessageList({
 											onSpeak && hasAssistantText
 												? () => onSpeak(assistantText)
 												: undefined;
+										const onReplyTurn =
+											hasAssistantText && (onReply || onQuote) && branchMsgId
+												? () => {
+														if (onReply) {
+															onReply({
+																chainLength: turns.length - turnIndex,
+																messageId: branchMsgId,
+																text: assistantText,
+															});
+															return;
+														}
+														onQuote?.(assistantText);
+													}
+												: undefined;
 										const onRegenerateTurn =
 											onRegenerateMessage && branchMsgId
 												? () => onRegenerateMessage(branchMsgId)
 												: undefined;
-										const onFeedbackTurn =
-											onFeedback && branchMsgId
-												? (next: FeedbackRating | null) =>
-														onFeedback(branchMsgId, next, isLastTurn)
-												: undefined;
-										const feedbackRating = branchMsgId
-											? feedback?.[branchMsgId]
+										const assistantActionState = branchMsgId
+											? messageActionStates?.get(branchMsgId)
 											: undefined;
 										// Contributed per-message actions for this assistant turn,
 										// filtered to `assistant`/`any` targets (the shell resolved the
@@ -2457,8 +2555,20 @@ export const MessageList = memo(function MessageList({
 										const assistantActions = messageActions?.filter(
 											(a) =>
 												(a.target === "assistant" || a.target === "any") &&
-												!isMessageReactionAction(a)
+												!isMessageReactionAction(a) &&
+												(!isMemoryCitationsAction(a) ||
+													Boolean(
+														assistantActionState?.memoryCitations?.length
+													))
 										);
+										const showToolbar =
+											!isTurnStreaming &&
+											(Boolean(goalCompletionNode) ||
+												((showCopyToolbar ||
+													Boolean(onSpeak) ||
+													Boolean(onReplyTurn) ||
+													Boolean(assistantActions?.length)) &&
+													hasAssistantText));
 										const onContributedActionTurn = onContributedMessageAction
 											? (action: ContributedMessageAction, value?: string) =>
 													branchMsgId &&
@@ -2550,6 +2660,11 @@ export const MessageList = memo(function MessageList({
 																		onOpenFile={onOpenFile}
 																		onOpenLink={onOpenLink}
 																		onOpenMention={onOpenMention}
+																		onRetryError={
+																			msg.id === "agent-chat-error"
+																				? onRetryError
+																				: onRegenerateTurn
+																		}
 																		onRetryGeneration={onRetryGeneration}
 																		onWorkflowResume={onWorkflowResume}
 																		previewResolvers={previewResolvers}
@@ -2566,6 +2681,8 @@ export const MessageList = memo(function MessageList({
 															cards={turnEndCards}
 															onAgentUiSubmit={onAgentUiSubmit}
 															onOpenFile={onOpenFile}
+															onReviewFileEdits={onReviewFileEdits}
+															onUndoFileEdits={onUndoFileEdits}
 														/>
 													) : null}
 													{turnInterrupted ? (
@@ -2597,37 +2714,50 @@ export const MessageList = memo(function MessageList({
 														// Gate the whole footer, not each component: an
 														// empty `MessageFooter` still renders a gapped
 														// row under every turn.
-														if (!inferenceStats) {
+														if (!statsEnabled) {
 															return null;
 														}
 														const lastAssistantMsg = turn.assistantMsgs.at(-1);
 														return lastAssistantMsg ? (
 															<MessageFooter className="gap-3">
-																{/* Local-engine (llama.cpp) finalized stats. */}
-																<MessageStats
-																	contextSize={contextSize}
-																	msg={lastAssistantMsg}
-																/>
-																{/* ACP agents: live-ticking token count while
-															    streaming, then frozen count + tok/s +
-															    duration once the frame sets done:true.
-															    `isLive` is the second brake — a turn that
-															    never got its done:true frame (crash, Stop,
-															    Core restart) would otherwise tick forever,
-															    including days later when the thread is
-															    reopened. */}
-																<AcpUsageStats
-																	isLive={isTurnStreaming}
-																	msg={lastAssistantMsg}
-																/>
+																{statsPluginEnabled && isLastTurn ? (
+																	<StatsFooter
+																		contextSize={contextSize}
+																		conversationMessages={messages}
+																		isMainChainActive={isTurnStreaming}
+																		modelName={statsModelName}
+																		usage={statsUsage}
+																	/>
+																) : (
+																	<>
+																		{/* Local-engine (llama.cpp) finalized stats. */}
+																		<MessageStats
+																			contextSize={contextSize}
+																			msg={lastAssistantMsg}
+																		/>
+																		{/* ACP agents: live-ticking token count while
+											    streaming, then frozen count + tok/s +
+											    duration once the frame sets done:true.
+											    `isLive` is the second brake — a turn that
+											    never got its done:true frame (crash, Stop,
+											    Core restart) would otherwise tick forever,
+											    including days later when the thread is
+											    reopened. */}
+																		<AcpUsageStats
+																			isLive={isTurnStreaming}
+																			msg={lastAssistantMsg}
+																		/>
+																	</>
+																)}
 															</MessageFooter>
 														) : null;
 													})()}
 													{showToolbar ? (
 														<MessageToolbar
+															actionState={assistantActionState}
 															alignClass="justify-start"
 															contributedActions={assistantActions}
-															feedbackRating={feedbackRating}
+															goalCompletion={goalCompletionNode}
 															heightClass="h-6 w-full"
 															hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
 															// Latest turn: pin the action buttons open so they
@@ -2637,24 +2767,25 @@ export const MessageList = memo(function MessageList({
 															onBranch={onBranchTurn}
 															onContributedAction={onContributedActionTurn}
 															onCopied={() => markCopied(copyKey)}
-															onFeedback={onFeedbackTurn}
 															onRegenerate={onRegenerateTurn}
+															onReply={onReplyTurn}
 															onSpeak={onSpeakTurn}
 															text={toolbarText}
 														/>
 													) : activeCopyId === copyKey ? (
 														<MessageToolbar
+															actionState={assistantActionState}
 															alignClass="justify-start"
 															contributedActions={assistantActions}
-															feedbackRating={feedbackRating}
+															goalCompletion={goalCompletionNode}
 															heightClass="h-6 w-full"
 															hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
 															isVisible={true}
 															onBranch={onBranchTurn}
 															onContributedAction={onContributedActionTurn}
 															onCopied={() => markCopied(copyKey)}
-															onFeedback={onFeedbackTurn}
 															onRegenerate={onRegenerateTurn}
+															onReply={onReplyTurn}
 															onSpeak={onSpeakTurn}
 															text={toolbarText}
 														/>
@@ -2792,8 +2923,13 @@ export const MessageList = memo(function MessageList({
 					turnIndexByAnchorId={turnIndexByAnchorId}
 				/>
 			)}
-			{onQuote && (
-				<SelectionQuoteToolbar containerRef={scrollerRef} onQuote={onQuote} />
+			{(onQuote || selectionActions?.length) && (
+				<SelectionQuoteToolbar
+					containerRef={scrollerRef}
+					onContributedAction={onContributedSelectionAction}
+					onQuote={onQuote}
+					selectionActions={selectionActions}
+				/>
 			)}
 		</div>
 	);
@@ -2823,6 +2959,7 @@ function AssistantParts({
 	mentionItems,
 	previewResolvers,
 	onRetryGeneration,
+	onRetryError,
 	onWorkflowResume,
 	onAgentUiSubmit,
 	agentMessageContext,
@@ -2841,6 +2978,7 @@ function AssistantParts({
 	mentionItems?: MentionItem[];
 	previewResolvers?: LinkPreviewResolvers;
 	onRetryGeneration?: MessageListProps["onRetryGeneration"];
+	onRetryError?: () => void;
 	onWorkflowResume?: MessageListProps["onWorkflowResume"];
 	onAgentUiSubmit?: MessageListProps["onAgentUiSubmit"];
 	deferTurnEndCards: boolean;
@@ -3129,6 +3267,7 @@ function AssistantParts({
 					<ErrorMessage
 						key={`${msg.id}-error-${i}`}
 						message={part.message}
+						onRetry={onRetryError}
 						title={part.title}
 					/>
 				);
@@ -3316,6 +3455,7 @@ function AssistantParts({
 		agentMessageContext,
 		toolRenderers,
 		onRetryGeneration,
+		onRetryError,
 		onOpenFile,
 		onOpenLink,
 		onOpenMention,

@@ -12,7 +12,7 @@
 //   - the PATH ("/home"), so moving the page meant editing shell code;
 //   - the EXISTENCE of the route, so a disabled/never-installed app still had a live
 //     route while its sidebar button was already correctly hidden (the app is
-//     default-OFF — see `plugins::builtins`' CORE_DEFAULT_ON note).
+//     not pre-installed — see `plugins::builtins`' CORE_PREINSTALLED note).
 //
 // Here both come from the live contributions feed instead: the table below names an
 // app id + button id (never a path, mirroring `WHITEBOARD_PLUGIN_ID`), and the route
@@ -43,6 +43,12 @@ import {
 	DASHBOARDS_HOME_BUTTON_ID,
 	DASHBOARDS_PLUGIN_ID,
 } from "@/src/lib/dashboards/app.ts";
+import {
+	WHATSAPP_BUTTON_ID,
+	WHATSAPP_DEFAULT_PATH,
+	WHATSAPP_PLUGIN_ID,
+} from "@/src/lib/whatsapp-app.ts";
+import ChannelsPage from "@/src/pages/ChannelsPage.tsx";
 import DraftsPage from "@/src/pages/DraftsPage.tsx";
 import HomePage from "@/src/pages/HomePage.tsx";
 import MissionControlPage from "@/src/pages/MissionControlPage.tsx";
@@ -92,6 +98,17 @@ const APP_SHELL_PAGES: readonly AppShellPage[] = [
 		fallbackPath: DRAFTS_DEFAULT_PATH,
 		label: "Drafts",
 		render: () => createElement(DraftsPage),
+	},
+	{
+		plugin: WHATSAPP_PLUGIN_ID,
+		button: WHATSAPP_BUTTON_ID,
+		fallbackPath: WHATSAPP_DEFAULT_PATH,
+		label: "WhatsApp",
+		render: () =>
+			createElement(ChannelsPage, {
+				initialChannelType: "whatsapp",
+				initialNew: true,
+			}),
 	},
 ];
 

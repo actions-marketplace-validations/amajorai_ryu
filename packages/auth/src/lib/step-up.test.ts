@@ -4,7 +4,9 @@ import {
 	STEP_UP_AUTH_PATHS,
 	STEP_UP_SCOPES,
 	stepUpActionLabel,
+	stepUpAppliesToUser,
 	stepUpMethods,
+	stepUpMethodsForScope,
 	stepUpRequiresEnrolled2fa,
 	stepUpScopeForAuthPath,
 	stepUpWindowMs,
@@ -34,6 +36,21 @@ describe("step-up scopes", () => {
 				expect(stepUpRequiresEnrolled2fa(scope)).toBe(false);
 			}
 		}
+	});
+
+	it("applies billing step-up only to accounts with 2FA", () => {
+		expect(stepUpAppliesToUser("billing", { twoFactorEnabled: true })).toBe(
+			true
+		);
+		expect(stepUpAppliesToUser("billing", { twoFactorEnabled: false })).toBe(
+			false
+		);
+		expect(
+			stepUpMethodsForScope({ twoFactorEnabled: true }, "billing")
+		).toEqual(["totp"]);
+		expect(
+			stepUpMethodsForScope({ twoFactorEnabled: false }, "billing")
+		).toEqual([]);
 	});
 });
 
@@ -87,5 +104,7 @@ describe("STEP_UP_AUTH_PATHS", () => {
 		expect(stepUpScopeForAuthPath("/organization/remove-member")).toBe(
 			"org.members"
 		);
+		expect(stepUpScopeForAuthPath("/checkout")).toBe("billing");
+		expect(stepUpScopeForAuthPath("/customer/portal")).toBe("billing");
 	});
 });

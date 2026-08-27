@@ -32,9 +32,9 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
+	contributionSourceRequest,
 	groupStoreItems,
-	isCoreApiPath,
-	renderActionHttp,
+	renderContributionActionHttp,
 	renderTemplate,
 	type StoreCatalogItem,
 	type StoreTabSpec,
@@ -80,7 +80,7 @@ import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { useContributedStoreCatalog } from "@/src/hooks/useContributedStoreCatalog.ts";
 import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
-import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
+import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
 import type { PluginStoreTab } from "@/src/lib/api/plugins.ts";
 import StoreDetailGraph from "./StoreDetailGraph.tsx";
 
@@ -318,25 +318,34 @@ function ContributedDetailGraph({
 	const node = useActiveNode();
 	const spec = tab.spec;
 	const source = spec?.detail?.source;
+	const sourceRequest =
+		source?.http.method === "GET"
+			? contributionSourceRequest(tab, {
+					http: { method: "GET", path: source.http.path },
+				})
+			: null;
 	const detail = useQuery({
-		queryKey: ["store-tab-detail", tab.plugin, tab.id, item.id, node.url],
-		enabled: Boolean(source),
+		queryKey: [
+			"store-tab-detail",
+			tab.plugin,
+			tab.id,
+			item.id,
+			node.url,
+			node.token,
+			sourceRequest?.path ?? "",
+		],
+		enabled: sourceRequest !== null,
 		queryFn: async () => {
-			if (!source) {
+			if (!(source && sourceRequest)) {
 				return null;
 			}
-			const rendered = renderActionHttp(source.http, { item: item.raw });
-			// The spec may only ever name a Core-relative `/api/` path; a rendered
-			// absolute URL would turn a catalog declaration into an egress channel.
-			if (!isCoreApiPath(rendered.path)) {
-				throw new Error(
-					`store tab detail path must start with /api/: ${rendered.path}`
-				);
-			}
+			const rendered = renderContributionActionHttp(tab, source.http, {
+				item: item.raw,
+			});
 			const target = toTarget(node);
 			const resp = await fetch(apiUrl(target, rendered.path), {
-				method: rendered.method,
-				headers: makeHeaders(target.token),
+				method: sourceRequest.method,
+				headers: await requestHeaders(target),
 			});
 			if (!resp.ok) {
 				throw new Error(`${rendered.path} failed: ${resp.status}`);
@@ -515,10 +524,12 @@ export default function ContributedStoreSection({
 				return;
 			}
 			const target = toTarget(node);
-			const rendered = renderActionHttp(action.http, { item: item.raw });
+			const rendered = renderContributionActionHttp(tab, action.http, {
+				item: item.raw,
+			});
 			const resp = await fetch(apiUrl(target, rendered.path), {
 				method: rendered.method,
-				headers: makeHeaders(target.token),
+				headers: await requestHeaders(target),
 				body:
 					rendered.body === undefined
 						? undefined
@@ -545,10 +556,12 @@ export default function ContributedStoreSection({
 			setInstallError(null);
 			try {
 				const target = toTarget(node);
-				const rendered = renderActionHttp(install.http, { item: item.raw });
+				const rendered = renderContributionActionHttp(tab, install.http, {
+					item: item.raw,
+				});
 				const resp = await fetch(apiUrl(target, rendered.path), {
 					method: rendered.method,
-					headers: makeHeaders(target.token),
+					headers: await requestHeaders(target),
 					body:
 						rendered.body === undefined
 							? undefined

@@ -22,6 +22,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 import { ChatRow } from "../../src/components/layout/AppSidebar.tsx";
+import {
+	type AppSurface,
+	AppSurfaceProvider,
+} from "../../src/contexts/app-surface-context.tsx";
+import { EntitlementProvider } from "../../src/contexts/entitlement-context.tsx";
+import { TabsProvider } from "../../src/contexts/TabsContext.tsx";
 import type { Conversation } from "../../src/types/chat.ts";
 import "../../src/index.css";
 
@@ -62,13 +68,20 @@ const CONV = {
 	id: "conv-alpha",
 	title: "Fix the flaky auth test",
 	runStatus: "idle",
-	folderPath: null,
+	folderPath: "D:\\Code\\ryu",
 	worktreePath: null,
 	branch: null,
 	participants: [],
 	agentId: null,
 	messageCount: 6,
 } as unknown as Conversation;
+
+function recordAction(value: string) {
+	const out = document.getElementById("action");
+	if (out) {
+		out.textContent = value;
+	}
+}
 
 /** Records the capability a menu row dispatched, so the spec can assert the row
  *  actually FIRES with the conversation id — not merely that it rendered. */
@@ -87,19 +100,26 @@ const handlers = {
 	pinnedIds: new Set<string>(),
 	unreadIds: new Set<string>(),
 	loadMessages: () => Promise.resolve([]),
+	onAddScheduledTask: (id: string) => recordAction(`schedule:${id}`),
 	onDeleteConversation: () => undefined,
+	onForkConversation: (id: string, destination: string) =>
+		recordAction(`fork:${destination}:${id}`),
 	onJumpToMessage: () => undefined,
 	onMarkRead: () => undefined,
 	onMarkUnread: () => undefined,
 	onOpenInNewTab: () => undefined,
+	onOpenInNewWindow: (id: string) => recordAction(`window:${id}`),
+	onOpenNewSideChat: (id: string) => recordAction(`side-chat:${id}`),
 	onOpenSideChat: () => undefined,
 	onRenameConversation: () => undefined,
+	onRemoveFromProject: (id: string) => recordAction(`remove-project:${id}`),
 	onSelectConversation: () => undefined,
 	onSetConversationIcon: () => undefined,
 	onRequestConversationVisibility: () => undefined,
 	canMakePrivate: true,
 	onToggleArchive: () => undefined,
 	onTogglePin: () => undefined,
+	projectNameForFolder: () => "ryu",
 	target: { url: "http://127.0.0.1:8980", token: null },
 	// biome-ignore lint/suspicious/noExplicitAny: the story supplies only the
 	// handlers a menu can reach; the rest of the bundle is unused here.
@@ -143,16 +163,36 @@ const queryClient = new QueryClient({
 	defaultOptions: { queries: { retry: false } },
 });
 
+function storySurface(): AppSurface {
+	switch (new URLSearchParams(window.location.search).get("surface")) {
+		case "web":
+			return "web";
+		case "extension":
+			return "extension";
+		case "mobile":
+			return "mobile";
+		default:
+			return "desktop";
+	}
+}
+
 function Story() {
 	return (
-		<QueryClientProvider client={queryClient}>
-			<div style={{ padding: 40 }}>
-				<div data-sidebar-preview-boundary="" style={{ width: 260 }}>
-					<ChatRow conv={CONV} handlers={handlers} />
-				</div>
-				<pre data-testid="invoked" id="invoked" />
-			</div>
-		</QueryClientProvider>
+		<AppSurfaceProvider surface={storySurface()}>
+			<QueryClientProvider client={queryClient}>
+				<EntitlementProvider>
+					<TabsProvider>
+						<div style={{ padding: 40 }}>
+							<div data-sidebar-preview-boundary="" style={{ width: 260 }}>
+								<ChatRow conv={CONV} handlers={handlers} />
+							</div>
+							<pre data-testid="invoked" id="invoked" />
+							<pre data-testid="action" id="action" />
+						</div>
+					</TabsProvider>
+				</EntitlementProvider>
+			</QueryClientProvider>
+		</AppSurfaceProvider>
 	);
 }
 

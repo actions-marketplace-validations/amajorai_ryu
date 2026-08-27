@@ -29,14 +29,20 @@ export interface RouteTab {
 	 *  coupling to the desktop's `AttachedImage` type; the `/chat` built-in casts
 	 *  it back at the call site (see `builtins.ts`). */
 	initialImages?: unknown[];
+	/** One-shot model selection carried into a newly opened focused reply thread. */
+	initialModel?: string;
 	/** When true, Core creates the opening as an assistant-only message after
 	 *  model readiness. */
 	initialProactiveOpening?: boolean;
 	initialProject?: string;
 	initialPrompt?: string;
+	/** One-shot quote carried into a newly opened focused reply thread. */
+	initialQuote?: string;
 	/** When true, the seeded prompt/images are sent automatically once chat is
 	 *  ready (the `/chat` built-in forwards it to `ChatPage`). */
 	initialSubmit?: boolean;
+	/** Context supplied by a Ryu-owned sidebar row to the owning Companion. */
+	mountContext?: Record<string, unknown> | null;
 	path: string;
 	/** Per-tab run-mode override for a fork chosen in a new worktree. */
 	worktreeMode?: boolean;

@@ -36,6 +36,11 @@ pub enum GatewayError {
     #[error("Provider error: {0}")]
     ProviderError(String),
 
+    /// An upstream provider rejected the configured account with HTTP 402.
+    /// Distinct from the managed Ryu wallet (`InsufficientCredits`).
+    #[error("Provider payment required: {provider}: {message}")]
+    ProviderPaymentRequired { provider: String, message: String },
+
     /// An upstream *provider* returned HTTP 429. Distinct from the gateway's own
     /// inbound [`GatewayError::RateLimited`]: this is a capacity signal the
     /// pipeline acts on — it demotes down the cost-tier fallback chain and rotates
@@ -96,6 +101,9 @@ impl From<ryu_gw_providers::ProviderError> for GatewayError {
     fn from(e: ryu_gw_providers::ProviderError) -> Self {
         match e {
             ryu_gw_providers::ProviderError::Provider(msg) => GatewayError::ProviderError(msg),
+            ryu_gw_providers::ProviderError::PaymentRequired { provider, message } => {
+                GatewayError::ProviderPaymentRequired { provider, message }
+            }
             ryu_gw_providers::ProviderError::RateLimited {
                 provider,
                 retry_after,
@@ -132,6 +140,11 @@ impl IntoResponse for GatewayError {
             GatewayError::ProviderError(msg) => {
                 (StatusCode::BAD_GATEWAY, "provider_error", msg.as_str())
             }
+            GatewayError::ProviderPaymentRequired { message, .. } => (
+                StatusCode::PAYMENT_REQUIRED,
+                "provider_payment_required",
+                message.as_str(),
+            ),
             GatewayError::ProviderRateLimited { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "provider_rate_limited",
@@ -263,6 +276,14 @@ mod tests {
                 },
                 StatusCode::TOO_MANY_REQUESTS,
                 "provider_rate_limited",
+            ),
+            (
+                GatewayError::from(ryu_gw_providers::ProviderError::PaymentRequired {
+                    provider: "openrouter".into(),
+                    message: "no credits".into(),
+                }),
+                StatusCode::PAYMENT_REQUIRED,
+                "provider_payment_required",
             ),
             (
                 GatewayError::CircuitOpen("openai".into()),

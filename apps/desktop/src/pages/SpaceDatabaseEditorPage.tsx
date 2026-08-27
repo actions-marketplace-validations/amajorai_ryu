@@ -236,6 +236,14 @@ export default function SpaceDatabaseEditorPage({
 		token: node.token ?? null,
 		getSeed,
 		onSnapshot,
+		onReset: () => {
+			if (timerRef.current) {
+				clearTimeout(timerRef.current);
+				timerRef.current = null;
+			}
+			setLoaded(false);
+			setReloadNonce((value) => value + 1);
+		},
 	});
 
 	// A read-only collaborator's edits are dropped server-side (Core's write-ACL),

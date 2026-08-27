@@ -41,6 +41,7 @@ import type {
 import {
 	AgentsAsServiceVisual,
 	AgentsVisual,
+	BoxVisual,
 	ChromeVisual,
 	CliVisual,
 	CloudVisual,
@@ -51,13 +52,16 @@ import {
 	DevicesVisual,
 	ExtensionsVisual,
 	GatewayVisual,
+	HireVisual,
 	IslandVisual,
 	MarketplaceVisual,
 	McpVisual,
 	MobileVisual,
+	OsVisual,
 	RedTeamVisual,
 	SdkVisual,
 	SkillsVisual,
+	ToolGatewayVisual,
 	WorkflowsVisual,
 } from "../visuals.tsx";
 
@@ -274,16 +278,16 @@ export const products: Product[] = [
 		navLabel: "Gateway",
 		category: "Platform",
 		tagline:
-			"Governance on every call: firewall, model routing, budgets, evals, and audit.",
+			"The governed gateway for model, tool, and Skill calls from any system.",
 		Icon: Shield,
 		hero: {
-			eyebrow: "Ryu Gateway · the control plane",
-			title: "A firewall in front of any agent.",
+			eyebrow: "Ryu Gateway · the tool and model control plane",
+			title: "Call tools from anywhere. Keep control.",
 			subtitle:
-				"One base-URL swap puts routing, PII and DLP, prompt-injection defense, budgets, evals, and audit in front of agents you already run. This is how you make agents reliable in production.",
+				"Give any product a single governed API for models, tools, and Skills. Route calls, enforce permissions, protect data, and keep an audit trail without rebuilding your agent loop.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: BOOK_DEMO,
-			visual: <GatewayVisual />,
+			visual: <ToolGatewayVisual />,
 		},
 		highlights: [
 			{
@@ -305,9 +309,9 @@ export const products: Product[] = [
 				icon: GitBranch,
 			},
 			{
-				title: "On the path today",
+				title: "Programmatic tool calls",
 				description:
-					"Already governs the default chat path in Core. Adopt it without rewiring.",
+					"Run one program that fans out across allowlisted tools and Skills, then return only the useful result.",
 				icon: Shield,
 			},
 		],
@@ -315,8 +319,14 @@ export const products: Product[] = [
 			eyebrow: "What's allowed, shared, measured & paid for",
 			title: "The control layer agents are missing.",
 			subtitle:
-				"Core decides what runs. The Gateway decides what is allowed, shared, measured, and paid for, and governs every model call.",
+				"Core decides what runs. The Gateway decides what is allowed, shared, measured, and paid for across model, tool, and Skill calls.",
 			items: [
+				{
+					title: "Tool + Skill API",
+					description:
+						"Call Ryu capabilities from your app, agent, workflow, or backend through one stable contract.",
+					icon: Plug,
+				},
 				{
 					title: "Security firewall",
 					description:
@@ -362,17 +372,18 @@ export const products: Product[] = [
 				description:
 					"The Gateway is an OpenAI-compatible proxy. Swap the base URL on an agent you already built and every call is governed, with no SDK changes and no refactor.",
 				bullets: [
+					"Call tools and Skills programmatically from any backend",
 					"Works with LangChain, Mastra, Claude Code, Codex, or your own loop",
 					"Self-hostable and air-gappable, your traffic never leaves your infra",
 					"OpenRouter sits upstream as a provider, not your control layer",
 				],
-				visual: <GatewayVisual />,
+				visual: <ToolGatewayVisual />,
 			},
 		],
 		faq: [
 			{
 				q: "Can I use the Gateway with agents I've already built?",
-				a: "Yes. It's an OpenAI-compatible proxy. Point your agent's base URL at your Gateway instance and it works immediately, no SDK changes.",
+				a: "Yes. Use the OpenAI-compatible model proxy or call the tool and Skill execution endpoints directly from your own system. The same policy and audit path applies.",
 			},
 			{
 				q: "Does my data leave my infrastructure?",
@@ -386,7 +397,7 @@ export const products: Product[] = [
 		cta: {
 			title: "Put a firewall in front of your agents.",
 			subtitle:
-				"Adopt the Gateway as a team, buy it as an enterprise. One config change, total control.",
+				"Use the Gateway as a standalone service, or put it underneath the Ryu desktop and cloud products.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: BOOK_DEMO,
 			note: "Open core · Self-hostable · Routing · DLP · Budgets · Audit",
@@ -518,6 +529,114 @@ export const products: Product[] = [
 	},
 
 	{
+		slug: "box",
+		name: "Ryu Box",
+		navLabel: "Box",
+		category: "Platform",
+		tagline: "A persistent, isolated workspace for agent runs and previews.",
+		Icon: Box,
+		hero: {
+			eyebrow: "Ryu Box · isolated execution",
+			title: "Give every run a clean room.",
+			subtitle:
+				"Create a persistent workspace for an agent, let it work with the permissions you choose, and keep its files and previews around for the next step.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			visual: <BoxVisual />,
+		},
+		highlights: [
+			{
+				title: "Persistent filesystem",
+				description:
+					"Commands, previews, and working files survive stop, resume, and fork.",
+				icon: RefreshCw,
+			},
+			{
+				title: "Isolated by default",
+				description:
+					"Give a run its own bounded workspace instead of handing an agent your machine.",
+				icon: Shield,
+			},
+			{
+				title: "API-first",
+				description:
+					"Create, run, inspect, and stop Boxes from your backend or Ryu Gateway.",
+				icon: Blocks,
+			},
+			{
+				title: "Previewable",
+				description:
+					"Keep the running result close to the agent that produced it.",
+				icon: Monitor,
+			},
+		],
+		bento: {
+			eyebrow: "The workspace behind the run",
+			title: "Give agents somewhere safe to do the work.",
+			subtitle:
+				"Box is the execution layer for code, files, previews, and long-running tasks. Ryu Gateway still controls what the run may reach.",
+			items: [
+				{
+					title: "Lifecycle API",
+					description:
+						"Create a Box, wait until it is ready, run commands, and stop or delete it with explicit lifecycle states.",
+					icon: RefreshCw,
+				},
+				{
+					title: "Files and previews",
+					description:
+						"Keep artifacts and preview links attached to the workspace that produced them.",
+					icon: Monitor,
+				},
+				{
+					title: "Scoped access",
+					description:
+						"Network, secrets, and tool access stay explicit and policy-governed.",
+					icon: Shield,
+				},
+				{
+					title: "Forkable work",
+					description:
+						"Branch a prepared workspace when an agent needs to try a different path.",
+					icon: GitBranch,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "From request to preview",
+				title: "Keep the work and the result together.",
+				description:
+					"A Box gives agents a durable place to edit, test, and preview without making your laptop the execution boundary. Pair it with Ryu Gateway when the run needs governed tools or Skills.",
+				bullets: [
+					"Persistent workspace for files and artifacts",
+					"Explicit lifecycle and stop/delete semantics",
+					"Works with Core, Gateway, and your own backend",
+				],
+				visual: <BoxVisual />,
+			},
+		],
+		faq: [
+			{
+				q: "Is Ryu Box a model provider?",
+				a: "No. Box is the execution workspace. Core orchestrates the run, Gateway governs its calls, and you choose the model or provider separately.",
+			},
+			{
+				q: "Can I use Box without the Ryu desktop app?",
+				a: "Yes. Box is API-first and can be called from your own service, an agent, or Ryu's desktop and cloud surfaces.",
+			},
+		],
+		cta: {
+			title: "Give your agents a place to work.",
+			subtitle:
+				"Use Ryu Box when a run needs its own files, commands, and previewable workspace.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			note: "Persistent · Isolated · API-first · Previewable",
+		},
+	},
+
+	{
 		slug: "agents-as-a-service",
 		name: "Agents as a Service",
 		navLabel: "Agents as a Service",
@@ -626,6 +745,114 @@ export const products: Product[] = [
 			primaryCta: BOOK_DEMO,
 			secondaryCta: EARLY_ACCESS,
 			note: "White-glove · Free build · Zero lock-in",
+		},
+	},
+
+	{
+		slug: "hire",
+		name: "Ryu Hire",
+		navLabel: "Hire",
+		category: "Platform",
+		tagline: "Recruit a specialist for one run and pay with credits.",
+		Icon: Zap,
+		hero: {
+			eyebrow: "Ryu Hire · pay per run",
+			title: "Recruit an agent for the job at hand.",
+			subtitle:
+				"Pick a specialist, give it the context you approve, and run it once. No install, no subscription, and no new workspace to maintain.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			visual: <HireVisual />,
+		},
+		highlights: [
+			{
+				title: "No install",
+				description:
+					"Open a specialist, provide the task, and start the run from the service.",
+				icon: Sparkles,
+			},
+			{
+				title: "Pay per run",
+				description:
+					"Use credits for the work you actually run instead of adding another subscription.",
+				icon: Zap,
+			},
+			{
+				title: "Specialist agents",
+				description:
+					"Choose an agent tuned for a job instead of configuring a general-purpose stack.",
+				icon: Bot,
+			},
+			{
+				title: "Governed context",
+				description:
+					"Connections, tools, and outputs still pass the same permission and audit path.",
+				icon: Shield,
+			},
+		],
+		bento: {
+			eyebrow: "Hire for the next task",
+			title: "A useful agent should be one click away.",
+			subtitle:
+				"Ryu Hire turns the catalog into an action: choose a specialist, review its access and estimate, then let it run.",
+			items: [
+				{
+					title: "Choose a specialist",
+					description:
+						"Find an agent by the outcome you need, not by the runtime it uses.",
+					icon: Bot,
+				},
+				{
+					title: "Review the estimate",
+					description:
+						"See the credit cost and requested connections before you approve the run.",
+					icon: Zap,
+				},
+				{
+					title: "Run once",
+					description:
+						"The agent works in its governed execution context and returns the result.",
+					icon: Sparkles,
+				},
+				{
+					title: "Keep the receipt",
+					description:
+						"Credits, inputs, outputs, and the final status stay attached to the run.",
+					icon: GitBranch,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "A store you do not have to install",
+				title: "Browse less. Get the job done.",
+				description:
+					"Ryu Hire is the service layer above Ryu Apps: the specialist stays managed, the run is scoped, and the payment follows the work. If you need the agent every day, bring it into Ryu OS or Console later.",
+				bullets: [
+					"One-off specialist runs",
+					"Credits instead of a product subscription",
+					"No local install or provider setup",
+				],
+				visual: <HireVisual />,
+			},
+		],
+		faq: [
+			{
+				q: "Do I need a Ryu subscription to use Hire?",
+				a: "No. Hire is designed for one-off runs paid from credits. A subscription may unlock other Ryu products, but it is not required for the Hire model.",
+			},
+			{
+				q: "Do I install the agent?",
+				a: "No. Hire runs the selected specialist as a hosted service. You provide the approved context and receive the result and a run receipt.",
+			},
+		],
+		cta: {
+			title: "Need it once? Hire it.",
+			subtitle:
+				"Use credits to bring in a specialist for the next job, without committing to another subscription or install.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			note: "Pay per run · Credits · No install · No subscription required",
 		},
 	},
 
@@ -1418,6 +1645,113 @@ export const products: Product[] = [
 	},
 
 	/* =========================== SURFACES ========================== */
+	{
+		slug: "os",
+		name: "Ryu OS",
+		navLabel: "OS",
+		category: "Surfaces",
+		tagline: "A Mac-like desktop workspace for agents, Apps, and windows.",
+		Icon: Monitor,
+		hero: {
+			eyebrow: "Ryu OS · desktop workspace",
+			title: "Your agent work, in one desktop.",
+			subtitle:
+				"Ryu OS turns the desktop into a calm workspace for agent Apps: open them from a dock, switch with Mission Control, and keep each task in its own window.",
+			primaryCta: DOWNLOAD,
+			secondaryCta: EARLY_ACCESS,
+			visual: <OsVisual />,
+		},
+		highlights: [
+			{
+				title: "Dock-first",
+				description:
+					"Keep the Apps you use most one click away, with a familiar desktop rhythm.",
+				icon: Layers,
+			},
+			{
+				title: "Windows inside Ryu",
+				description:
+					"Chat, Spaces, Tools, Skills, and Apps open as live workspace windows.",
+				icon: Monitor,
+			},
+			{
+				title: "Mission Control",
+				description:
+					"Press ⌘K to find an App or jump back to an open window immediately.",
+				icon: Zap,
+			},
+			{
+				title: "Same Ryu underneath",
+				description:
+					"The workspace is a new surface, not a new runtime or permission boundary.",
+				icon: Shield,
+			},
+		],
+		bento: {
+			eyebrow: "A desktop for agent work",
+			title: "The tools you need, arranged like a place.",
+			subtitle:
+				"Ryu OS gives the growing App ecosystem a home: windows for active work, a dock for muscle memory, and Mission Control for everything else.",
+			items: [
+				{
+					title: "Open from the dock",
+					description:
+						"Launch a Ryu App without leaving the task you are already in.",
+					icon: Layers,
+				},
+				{
+					title: "Live workspace windows",
+					description:
+						"Each open surface stays alive so switching does not restart the work.",
+					icon: Monitor,
+				},
+				{
+					title: "Find with Mission Control",
+					description: "Search Apps and open windows from one command dialog.",
+					icon: Sparkles,
+				},
+				{
+					title: "A quiet home screen",
+					description:
+						"Start with the next useful surface instead of a wall of configuration.",
+					icon: Bot,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "Made for switching",
+				title: "Open the app you need. Keep the work you started.",
+				description:
+					"Ryu OS puts the workspace model in the foreground: windows are live views into the same Core session system, while the dock and Mission Control make the next move obvious.",
+				bullets: [
+					"Dock shortcuts for the everyday Apps",
+					"⌘K / Ctrl K opens Mission Control",
+					"Uses the existing Ryu tabs, permissions, and runtime",
+				],
+				visual: <OsVisual />,
+			},
+		],
+		faq: [
+			{
+				q: "Is Ryu OS a separate operating system?",
+				a: "Ryu OS is Ryu's desktop workspace surface. It feels like a small agent-first OS, but it runs on the same Ryu desktop app, Core, and Gateway contracts.",
+			},
+			{
+				q: "What can I open in Ryu OS?",
+				a: "The dock starts with Chat, Spaces, Tools, Skills, Apps, and Review. Installed Apps can add their own surfaces to the same workspace over time.",
+			},
+		],
+		cta: {
+			title: "Make Ryu feel like a place to work.",
+			subtitle:
+				"Download the desktop workspace and open the next App from the dock or Mission Control.",
+			primaryCta: DOWNLOAD,
+			secondaryCta: BOOK_DEMO,
+			note: "Desktop workspace · Dock · Mission Control · Live windows",
+		},
+	},
+
 	{
 		slug: "desktop",
 		name: "Desktop App",

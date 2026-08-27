@@ -9,6 +9,12 @@ export interface RyuClientOptions {
 	baseUrl: string;
 	/** Optional bearer token for authenticated nodes. */
 	token?: string;
+	/**
+	 * Verified end-user JWT for an organization-bound Core. This is deliberately
+	 * separate from the node bearer token; Core uses it for per-user/team tenancy.
+	 * A provider is evaluated for every request so callers can rotate sessions.
+	 */
+	userJwt?: string | (() => string | null);
 }
 
 /** A lightweight agent summary as returned by GET /api/agents. */
@@ -53,11 +59,17 @@ export interface Message {
 	role: "user" | "assistant" | "system";
 }
 
+/** Controls the flagship Ryu assistant's explanatory vocabulary. */
+export type RyuResponseMode = "everyday" | "developer";
+
 /** A single chunk emitted by the SSE stream from /api/chat/stream. */
 export interface StreamChunk {
 	content?: string;
 	type: "text" | "done" | "error";
 }
+
+/** The retrieval algorithm Core uses for a Space. */
+export type RetrievalMode = "graph" | "vector";
 
 /** A named document collection backed by a sqlite-vec vector store. */
 export interface Space {
@@ -67,6 +79,7 @@ export interface Space {
 	documentCount: number;
 	id: string;
 	name: string;
+	retrievalMode: RetrievalMode;
 	/** Unix milliseconds. */
 	updatedAt: number;
 }

@@ -94,7 +94,7 @@ describe("RyuYjsProvider reconnect", () => {
 	test("re-opens after the socket dies", async () => {
 		const provider = makeProvider();
 		provider.connect();
-		expect(FakeSocket.instances.length).toBe(1);
+		expect(await waitFor(() => FakeSocket.instances.length === 1)).toBe(true);
 
 		FakeSocket.instances[0].open();
 		expect(provider.isConnected).toBe(true);
@@ -115,6 +115,7 @@ describe("RyuYjsProvider reconnect", () => {
 		const seen: RyuYjsStatus[] = [];
 		const provider = makeProvider((s) => seen.push(s));
 		provider.connect();
+		expect(await waitFor(() => FakeSocket.instances.length === 1)).toBe(true);
 		FakeSocket.instances[0].open();
 		FakeSocket.instances[0].die(CLOSE_POLICY);
 
@@ -129,6 +130,7 @@ describe("RyuYjsProvider reconnect", () => {
 	test("does not retry after the caller disconnects", async () => {
 		const provider = makeProvider();
 		provider.connect();
+		expect(await waitFor(() => FakeSocket.instances.length === 1)).toBe(true);
 		FakeSocket.instances[0].open();
 
 		provider.disconnect();
@@ -142,6 +144,7 @@ describe("RyuYjsProvider reconnect", () => {
 		const seen: RyuYjsStatus[] = [];
 		const provider = makeProvider((s) => seen.push(s));
 		provider.connect();
+		expect(await waitFor(() => FakeSocket.instances.length === 1)).toBe(true);
 		FakeSocket.instances[0].open();
 		expect(seen).toContain("open");
 
@@ -157,6 +160,7 @@ describe("RyuYjsProvider reconnect", () => {
 	test("does not double-send local updates after a reconnect", async () => {
 		const provider = makeProvider();
 		provider.connect();
+		expect(await waitFor(() => FakeSocket.instances.length === 1)).toBe(true);
 		FakeSocket.instances[0].open();
 		FakeSocket.instances[0].die(CLOSE_ABNORMAL);
 

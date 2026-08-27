@@ -9,7 +9,7 @@
  * Schema, and the generated types stay describing the same manifest:
  *
  * 1. a known-good repo manifest (apps-store/mail/manifest.json — the first
- *    fully manifest-driven app) parses with the zod `PluginManifestSchema`;
+ *    fully manifest-driven app) parses without losing any top-level wire field;
  * 2. every key the schema marks required exists in the schema, the generated
  *    TS, and the fixture;
  * 3. every top-level key the fixture uses is a key the wire model knows.
@@ -42,12 +42,26 @@ const schema = JSON.parse(readFileSync(SCHEMA_PATH, "utf8")) as {
 	properties: Record<string, unknown>;
 };
 const generatedSource = readFileSync(GENERATED_PATH, "utf8");
+const CORE_FIELDS_PREVIOUSLY_STRIPPED = [
+	"permission_levels",
+	"sidecars",
+	"stability",
+	"surfaces",
+] as const;
 
 describe("contracts lockstep (zod ↔ blessed JSON Schema ↔ generated TS)", () => {
-	test("the known-good mail manifest.json parses with the zod authoring schema", () => {
+	test("the known-good mail manifest survives the zod pack path without field loss", () => {
 		const parsed = PluginManifestSchema.parse(fixture);
 		expect(parsed.id).toBe("@ryu/mail");
 		expect(parsed.runnables.length).toBeGreaterThan(0);
+		for (const key of Object.keys(fixture)) {
+			expect(Object.hasOwn(parsed, key), key).toBe(true);
+		}
+		for (const key of CORE_FIELDS_PREVIOUSLY_STRIPPED) {
+			expect(schema.properties).toHaveProperty(key);
+			expect(fixture).toHaveProperty(key);
+			expect(parsed[key]).toEqual(fixture[key]);
+		}
 	});
 
 	test("blessed schema describes PluginManifest with the required identity keys", () => {

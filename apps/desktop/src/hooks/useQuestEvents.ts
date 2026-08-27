@@ -5,8 +5,6 @@ import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { type QuestEvent, streamQuestEvents } from "@/src/lib/api/quests.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
-const RECONNECT_DELAY_MS = 2000;
-
 /** Raise a native OS notification (best-effort; requests permission once). */
 function osNotify(title: string, body: string, tag: string): void {
 	if (typeof Notification === "undefined") {
@@ -47,8 +45,6 @@ export function useQuestEvents(): void {
 	const qc = useQueryClient();
 
 	useEffect(() => {
-		let cancelled = false;
-		let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 		const controller = new AbortController();
 		const target: ApiTarget = { url, token };
 
@@ -80,29 +76,13 @@ export function useQuestEvents(): void {
 			);
 		};
 
-		const run = async () => {
-			while (!cancelled) {
-				try {
-					await streamQuestEvents(target, onEvent, controller.signal);
-				} catch {
-					// Connect/transient failure — fall through to the reconnect delay.
-				}
-				if (cancelled) {
-					break;
-				}
-				await new Promise<void>((resolve) => {
-					reconnectTimer = setTimeout(resolve, RECONNECT_DELAY_MS);
-				});
-			}
-		};
-		run().catch(() => undefined);
+		// The shared event multiplexer owns reconnect/backoff for this channel.
+		streamQuestEvents(target, onEvent, controller.signal).catch(
+			() => undefined
+		);
 
 		return () => {
-			cancelled = true;
 			controller.abort();
-			if (reconnectTimer) {
-				clearTimeout(reconnectTimer);
-			}
 		};
 	}, [url, token, qc]);
 }

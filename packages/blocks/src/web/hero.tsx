@@ -7,14 +7,9 @@ import PageHeader from "@ryu/ui/components/page-header";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import { cn } from "@ryu/ui/lib/utils";
 import { Library } from "lucide-react";
-import type { Route } from "next";
 import Link from "next/link";
-import { useState } from "react";
-import { HeroAvatarSocialProof } from "./c-avatar-20.tsx";
-import { DEMO_HREF, DOCS_URL } from "./data/resources.tsx";
-import HeroWorkflowLoop, {
-	HeroUseCaseSwitcher,
-} from "./hero-workflow-loop.tsx";
+import { DEMO_HREF } from "./data/resources.tsx";
+import HeroDesktopDemo from "./hero-desktop-demo.tsx";
 import { landingHeadlineClass } from "./landing-typography.ts";
 
 const DECOSMIC_HREF = "https://decosmic.com";
@@ -31,11 +26,10 @@ const PRODUCT_HUNT_HREF = "https://www.producthunt.com/products/ryu";
 const SHOW_AWARD_BADGE = false;
 
 /**
- * Leads with the buyer's outcome and makes the trust promise part of the same
- * claim. Keep the hero as one heading with no separate subtitle.
+ * The homepage is the Bot launch page. Console and Platform stay in the product
+ * navigation; this hero only needs to make the managed Bot concrete.
  */
-const HERO_TITLE =
-	"Startups use Ryu to scale and do more at a fraction of the cost of hiring.";
+const HERO_TITLE = "Meet Ryu Bot.";
 
 /**
  * The headline gets the same chromatic sweep every section header on this page
@@ -69,14 +63,13 @@ const HERO_TITLE_LAST_WORD =
 const HERO_SWEEP_DELAY_S = 0.3;
 
 export default function Hero() {
-	// Owned here, not inside the stage, so the pills can sit above the wallpaper
-	// while the loop they drive sits inside it.
-	const [scenarioIndex, setScenarioIndex] = useState(0);
-
 	return (
-		<div className="flex flex-col items-center gap-8 pt-14 pb-0 md:pt-20">
+		<div
+			className="flex flex-col items-center gap-8 overflow-x-clip pt-14 pb-0 md:pt-20"
+			data-testid="landing-hero"
+		>
 			<div className="flex min-h-[80vh] w-screen flex-col px-4 md:flex md:items-center md:justify-center md:px-0">
-				<div className="mx-auto w-full max-w-6xl px-4 py-8 md:py-12">
+				<div className="relative z-10 mx-auto w-full max-w-6xl px-4 py-8 md:px-8 md:py-12">
 					<div className="space-y-8">
 						<StaggerReveal>
 							{/* Wrapped so StaggerReveal's cloned className/style land on a real
@@ -143,62 +136,65 @@ export default function Hero() {
 								titleClassName={landingHeadlineClass}
 							/>
 
-							{/* The two doors, stated as intents rather than as a toggle: the
-							    default reader of this page is the firm, and the developer
-							    gets one exit to the docs. Download deliberately is NOT here —
-							    a partner never downloads anything, and it already sits in the
-							    site header for the reader who wants it. */}
+							<p className="max-w-lg text-muted-foreground text-sm leading-relaxed">
+								Managed AI you can give real work to. It has its own computer,
+								works in your tools, and comes back when your approval is
+								needed.
+							</p>
+
 							<div className="flex flex-col gap-3 sm:flex-row">
 								<Link
 									className={cn(buttonVariants({ variant: "default" }))}
+									href="/download"
+								>
+									Get Ryu Bot
+								</Link>
+								<Link
+									className={cn(buttonVariants({ variant: "ghost" }))}
 									href={DEMO_HREF}
 									rel="noopener noreferrer"
 									target="_blank"
 								>
-									I want to hire AI
-								</Link>
-								<Link
-									className={cn(buttonVariants({ variant: "ghost" }))}
-									href={DOCS_URL as Route}
-									rel="noopener noreferrer"
-									target="_blank"
-								>
-									I want to build AI
+									Contact sales
 								</Link>
 							</div>
-
-							<HeroAvatarSocialProof />
 						</StaggerReveal>
 					</div>
 				</div>
 
-				{/* The real desktop app + floating Island, running one workflow on a loop.
-				    The background image is read as the DESKTOP WALLPAPER: the window is
-				    inset in it and the Island floats on it, above the window — so the
-				    padding here is the wallpaper margin, not decoration. */}
-				{/* Use-case pills ride ABOVE the wallpaper, centered. Inside the
-				    background image they read as chrome belonging to the mock app;
-				    out here they read as what they are — a menu of jobs it runs. */}
-				<div className="w-full px-4 pt-2 pb-0 md:px-8">
+				{/* The previous scripted workflow and accuracy scanner demos are parked
+				    here while the hero leads with the real desktop chat surface. */}
+				{/*
+				<div className="relative z-10 w-full px-4 pt-2 pb-0 md:px-8">
 					<div className="mx-auto max-w-6xl">
-						<HeroUseCaseSwitcher
-							current={scenarioIndex}
-							onPick={setScenarioIndex}
-						/>
+						<HeroUseCaseSwitcher current={scenarioIndex} onPick={setScenarioIndex} />
 					</div>
 				</div>
 
 				<div className="relative z-0 w-full px-4 pt-3 pb-6 md:px-8 md:pt-4 md:pb-8">
-					<div className="relative mx-auto flex min-h-[28rem] w-full max-w-7xl items-center justify-center md:min-h-[34rem]">
+					<div className="relative mx-auto flex min-h-[24rem] w-full max-w-7xl items-center justify-center md:min-h-[28rem]">
 						<div
 							aria-hidden="true"
-							className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl bg-[url('/background.png')] bg-center bg-cover opacity-80"
+							className="pointer-events-none absolute inset-0 z-10 overflow-hidden rounded-2xl bg-[url('/background.png')] bg-center bg-cover"
 						/>
 						<div className="relative z-10 w-full max-w-6xl py-8 md:py-12">
 							<HeroWorkflowLoop
 								onScenarioChange={setScenarioIndex}
 								scenarioIndex={scenarioIndex}
 							/>
+						</div>
+					</div>
+				</div>
+				*/}
+
+				<div className="relative z-0 w-full px-4 pt-3 pb-6 md:px-8 md:pt-4 md:pb-8">
+					<div className="relative mx-auto flex min-h-[24rem] w-full max-w-7xl items-center justify-center md:min-h-[28rem]">
+						<div
+							aria-hidden="true"
+							className="pointer-events-none absolute inset-0 z-0 overflow-hidden rounded-2xl bg-muted/30"
+						/>
+						<div className="relative z-10 w-full max-w-6xl py-6 md:py-8">
+							<HeroDesktopDemo />
 						</div>
 					</div>
 				</div>

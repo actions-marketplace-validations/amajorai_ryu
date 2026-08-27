@@ -6,7 +6,7 @@
 // threads Core found in the agent's native history store, then import one into a
 // fresh Ryu conversation the desktop can open like any other.
 
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 export interface NativeThread {
 	cwd?: string;
@@ -63,12 +63,9 @@ export async function listAgentThreads(
 	cwd?: string
 ): Promise<AgentThreadsResult> {
 	const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
-	const resp = await fetch(
-		apiUrl(
-			target,
-			`/api/agents/${encodeURIComponent(agentId)}/threads${query}`
-		),
-		{ headers: makeHeaders(target.token) }
+	const resp = await authenticatedFetch(
+		target,
+		`/api/agents/${encodeURIComponent(agentId)}/threads${query}`
 	);
 	if (!resp.ok) {
 		throw new Error(`Failed to load agent threads: ${resp.status}`);
@@ -112,14 +109,11 @@ export async function importAgentThread(
 	agentId: string,
 	threadId: string
 ): Promise<ImportedThreadResult> {
-	const resp = await fetch(
-		apiUrl(target, `/api/agents/${encodeURIComponent(agentId)}/threads/import`),
+	const resp = await authenticatedFetch(
+		target,
+		`/api/agents/${encodeURIComponent(agentId)}/threads/import`,
 		{
 			method: "POST",
-			headers: {
-				...makeHeaders(target.token),
-				"Content-Type": "application/json",
-			},
 			body: JSON.stringify({ thread_id: threadId }),
 		}
 	);

@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import AppsCatalogSection, {
 	AuthBridgeConsent,
+	filterAppsByStability,
 	matchesCatalogTag,
 } from "./apps-catalog-section.tsx";
 import StoreItemAction, {
@@ -130,6 +131,46 @@ function render(install: CatalogInstall | null): string {
 }
 
 describe("CatalogHost seam — Apps section", () => {
+	test("hides unstable rows by default and reveals them when opted in", () => {
+		const beta: AppCatalogItem = {
+			...SAMPLE_ITEM,
+			entry: {
+				...SAMPLE_ITEM.entry,
+				id: "com.example.beta",
+				stability: "beta",
+			},
+		};
+		const preview: AppCatalogItem = {
+			...SAMPLE_ITEM,
+			entry: {
+				...SAMPLE_ITEM.entry,
+				id: "com.example.preview",
+				stability: "preview",
+			},
+		};
+
+		expect(filterAppsByStability([SAMPLE_ITEM, beta, preview], false)).toEqual([
+			SAMPLE_ITEM,
+		]);
+		expect(filterAppsByStability([SAMPLE_ITEM, beta, preview], true)).toEqual([
+			SAMPLE_ITEM,
+			beta,
+			preview,
+		]);
+
+		const installedStableOnly = filterAppsByStability(
+			[
+				{ ...SAMPLE_ITEM, installed: true },
+				{ ...beta, installed: true },
+				{ ...preview, installed: false },
+			],
+			false
+		).filter((item) => item.installed);
+		expect(installedStableOnly.map((item) => item.entry.id)).toEqual([
+			SAMPLE_ITEM.entry.id,
+		]);
+	});
+
 	test("tag filtering matches explicit manifest tags and preserves the all-tags state", () => {
 		expect(matchesCatalogTag(SAMPLE_ITEM, null)).toBe(true);
 		expect(matchesCatalogTag(SAMPLE_ITEM, "demo")).toBe(true);

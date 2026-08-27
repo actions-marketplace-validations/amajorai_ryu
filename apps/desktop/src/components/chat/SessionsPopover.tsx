@@ -151,7 +151,7 @@ export function SessionsPopover({
 							<Tooltip>
 								<TooltipTrigger
 									render={
-										<span className="font-heading">
+										<span className="font-mono">
 											{costSummary.costMicroUsd == null
 												? "—"
 												: formatMicroUsd(costSummary.costMicroUsd)}

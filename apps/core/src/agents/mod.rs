@@ -24,6 +24,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use ryu_workspace::source_history::{SourceHistory, SourceHistoryVersion};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -102,6 +103,9 @@ impl std::str::FromStr for AgentLifecycleStatus {
 pub enum AgentSafetyProfile {
     ReadOnly,
     ApprovalRequired,
+    /// Every side-effecting operation must arrive through a Core-verified,
+    /// certificate-bound tool plan. Direct raw tool calls are denied.
+    VerifiedPlanOnly,
     Autonomous,
 }
 
@@ -110,6 +114,7 @@ impl AgentSafetyProfile {
         match self {
             Self::ReadOnly => "read_only",
             Self::ApprovalRequired => "approval_required",
+            Self::VerifiedPlanOnly => "verified_plan_only",
             Self::Autonomous => "autonomous",
         }
     }
@@ -128,6 +133,7 @@ impl std::str::FromStr for AgentSafetyProfile {
         match value {
             "read_only" => Ok(Self::ReadOnly),
             "approval_required" => Ok(Self::ApprovalRequired),
+            "verified_plan_only" => Ok(Self::VerifiedPlanOnly),
             "autonomous" => Ok(Self::Autonomous),
             other => anyhow::bail!("unknown agent safety profile '{other}'"),
         }
@@ -691,6 +697,26 @@ pub struct UpdateAgent {
     pub can_create_agents: Option<bool>,
 }
 
+/// Metadata for one saved system-prompt version. The prompt body is fetched
+/// separately so history lists stay small.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPromptVersionMeta {
+    pub agent_id: String,
+    pub created_at: i64,
+    pub id: String,
+    pub label: Option<String>,
+}
+
+/// A complete saved system-prompt version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPromptVersion {
+    pub agent_id: String,
+    pub created_at: i64,
+    pub id: String,
+    pub label: Option<String>,
+    pub prompt: String,
+}
+
 fn default_version() -> String {
     "1.0.0".to_owned()
 }
@@ -701,6 +727,78 @@ fn default_all_mcp_tools() -> Vec<String> {
 
 fn db_path() -> PathBuf {
     ryu_dir().join("agents.db")
+}
+
+fn source_history() -> SourceHistory {
+    SourceHistory::new(ryu_dir().join("source-history"))
+}
+
+fn source_history_path(agent_id: &str) -> String {
+    let key = hex::encode(agent_id.as_bytes());
+    format!("agents/{key}/system-prompt.md")
+}
+
+fn agent_config_history_path(agent_id: &str) -> String {
+    let key = hex::encode(agent_id.as_bytes());
+    format!("agents/{key}/agent.json")
+}
+
+async fn checkpoint_source_history(
+    relative_path: String,
+    content: String,
+    label: Option<String>,
+) -> Result<SourceHistoryVersion> {
+    let history = source_history();
+    tokio::task::spawn_blocking(move || {
+        history.checkpoint(&relative_path, &content, label.as_deref())
+    })
+    .await
+    .context("agent source history checkpoint task panicked")?
+    .context("checkpointing agent source history")
+}
+
+/// Record a source snapshot without turning an already-committed agent change
+/// into a reported failure. The SQLite mutation is authoritative; Git is a
+/// repairable audit projection and may be unavailable on a read-only or full
+/// data volume.
+async fn checkpoint_source_history_best_effort(
+    relative_path: String,
+    content: String,
+    label: Option<String>,
+) {
+    if let Err(error) = checkpoint_source_history(relative_path.clone(), content, label).await {
+        tracing::warn!(
+            path = %relative_path,
+            error = %error,
+            "agent source-history checkpoint was not recorded"
+        );
+    }
+}
+
+async fn list_source_history(
+    relative_path: String,
+    limit: Option<usize>,
+) -> Result<Vec<SourceHistoryVersion>> {
+    let history = source_history();
+    tokio::task::spawn_blocking(move || history.list(&relative_path, limit))
+        .await
+        .context("agent source history list task panicked")?
+        .context("listing agent source history")
+}
+
+async fn read_source_history(relative_path: String, version_id: String) -> Result<Option<String>> {
+    let history = source_history();
+    tokio::task::spawn_blocking(move || history.read(&relative_path, &version_id))
+        .await
+        .context("agent source history read task panicked")?
+        .context("reading agent source history")
+}
+
+fn is_git_version_id(version_id: &str) -> bool {
+    (7..=64).contains(&version_id.len())
+        && version_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
 }
 
 /// SQLite-backed store for agent config records. Cheap to clone (`Arc` inside).
@@ -975,6 +1073,22 @@ impl AgentStore {
                 }
             }
         }
+
+        // Step 13: legacy Prompt Studio history. Git-backed source history is now
+        // canonical; keep this table readable so nodes can migrate snapshots that
+        // predate the managed repository and older clients remain compatible.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_prompt_versions (
+                id         TEXT PRIMARY KEY,
+                agent_id   TEXT NOT NULL,
+                prompt     TEXT NOT NULL,
+                label      TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_prompt_versions_agent
+                ON agent_prompt_versions(agent_id, created_at DESC, id DESC);",
+        )
+        .context("creating agent prompt versions")?;
 
         // Published-agent installs are keyed separately from agent ids. The
         // idempotency key is client-controlled, so bind it to the server-verified
@@ -1435,7 +1549,24 @@ impl AgentStore {
     /// stable well-known id. Fails if a row with that id already exists.
     pub async fn create_with_id(&self, id: String, input: CreateAgent) -> Result<AgentRecord> {
         let conn = self.conn.lock().await;
-        Self::insert_with_id(&conn, id, input)
+        let record = Self::insert_with_id(&conn, id, input)?;
+        drop(conn);
+        match serde_json::to_string_pretty(&record) {
+            Ok(snapshot) => {
+                checkpoint_source_history_best_effort(
+                    agent_config_history_path(&record.id),
+                    snapshot,
+                    Some("Agent created".to_owned()),
+                )
+                .await;
+            }
+            Err(error) => tracing::warn!(
+                agent_id = %record.id,
+                error = %error,
+                "agent source-history snapshot could not be serialized"
+            ),
+        }
+        Ok(record)
     }
 
     fn insert_with_id(conn: &Connection, id: String, input: CreateAgent) -> Result<AgentRecord> {
@@ -1744,7 +1875,208 @@ impl AgentStore {
                 ],
             )?;
         }
-        self.get(id).await
+        let updated = self.get(id).await?;
+        if let Some(record) = &updated {
+            match serde_json::to_string_pretty(record) {
+                Ok(snapshot) => {
+                    checkpoint_source_history_best_effort(
+                        agent_config_history_path(record.id.as_str()),
+                        snapshot,
+                        Some("Agent saved".to_owned()),
+                    )
+                    .await;
+                }
+                Err(error) => tracing::warn!(
+                    agent_id = id,
+                    error = %error,
+                    "agent source-history snapshot could not be serialized"
+                ),
+            }
+        }
+        Ok(updated)
+    }
+
+    /// Snapshot an agent's current system prompt, or an editor draft supplied by
+    /// Prompt Studio. Supplying the draft is important: the editor may have
+    /// unsaved text while the user explicitly saves a version.
+    pub async fn snapshot_prompt(
+        &self,
+        agent_id: &str,
+        prompt: Option<&str>,
+        label: Option<&str>,
+    ) -> Result<Option<AgentPromptVersionMeta>> {
+        let conn = self.conn.lock().await;
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT COALESCE(system_prompt, '') FROM agents WHERE id = ?1",
+                params![agent_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(stored_prompt) = current else {
+            return Ok(None);
+        };
+        let prompt = prompt.unwrap_or(&stored_prompt).to_owned();
+        drop(conn);
+        let version = checkpoint_source_history(
+            source_history_path(agent_id),
+            prompt,
+            label.map(str::to_owned),
+        )
+        .await?;
+        Ok(Some(AgentPromptVersionMeta {
+            agent_id: agent_id.to_owned(),
+            created_at: version.created_at,
+            id: version.id,
+            label: version.label,
+        }))
+    }
+
+    /// List saved prompt versions, newest first.
+    pub async fn list_prompt_versions(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<AgentPromptVersionMeta>> {
+        let path = source_history_path(agent_id);
+        let mut versions = list_source_history(path, None)
+            .await?
+            .into_iter()
+            .map(|version| AgentPromptVersionMeta {
+                agent_id: agent_id.to_owned(),
+                created_at: version.created_at,
+                id: version.id,
+                label: version.label,
+            })
+            .collect::<Vec<_>>();
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, agent_id, label, created_at
+             FROM agent_prompt_versions
+             WHERE agent_id = ?1
+             ORDER BY created_at DESC, rowid DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![agent_id], |row| {
+                Ok(AgentPromptVersionMeta {
+                    id: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    label: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        versions.extend(rows);
+        versions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(versions)
+    }
+
+    /// Load one prompt version only when it belongs to `agent_id`.
+    pub async fn get_prompt_version(
+        &self,
+        agent_id: &str,
+        version_id: &str,
+    ) -> Result<Option<AgentPromptVersion>> {
+        if is_git_version_id(version_id) {
+            let path = source_history_path(agent_id);
+            if let Some(prompt) = read_source_history(path.clone(), version_id.to_owned()).await? {
+                let metadata = list_source_history(path, Some(1000))
+                    .await?
+                    .into_iter()
+                    .find(|version| version.id == version_id);
+                return Ok(Some(AgentPromptVersion {
+                    agent_id: agent_id.to_owned(),
+                    created_at: metadata
+                        .as_ref()
+                        .map(|version| version.created_at)
+                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
+                    id: version_id.to_owned(),
+                    label: metadata.and_then(|version| version.label),
+                    prompt,
+                }));
+            }
+        }
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT id, agent_id, prompt, label, created_at
+             FROM agent_prompt_versions
+             WHERE id = ?1 AND agent_id = ?2",
+            params![version_id, agent_id],
+            |row| {
+                Ok(AgentPromptVersion {
+                    id: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    prompt: row.get(2)?,
+                    label: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Restore a prompt version. The current prompt is recorded as a named undo
+    /// point before the target is restored; unlabeled identical saves remain
+    /// idempotent. Locked agents remain immutable.
+    pub async fn restore_prompt_version(
+        &self,
+        agent_id: &str,
+        version_id: &str,
+    ) -> Result<Option<String>> {
+        let Some(target_version) = self.get_prompt_version(agent_id, version_id).await? else {
+            return Ok(None);
+        };
+        let (locked, current_prompt) = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT locked, COALESCE(system_prompt, '') FROM agents WHERE id = ?1",
+                params![agent_id],
+                |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        }
+        .ok_or_else(|| anyhow::anyhow!("agent '{agent_id}' not found"))?;
+        if locked {
+            anyhow::bail!("cannot restore a prompt on locked agent '{agent_id}'");
+        }
+        checkpoint_source_history_best_effort(
+            source_history_path(agent_id),
+            current_prompt,
+            Some("Before restore".to_owned()),
+        )
+        .await;
+        let target_prompt = target_version.prompt.clone();
+        {
+            let conn = self.conn.lock().await;
+            conn.execute(
+                "UPDATE agents SET system_prompt = ?1, updated_at = ?2 WHERE id = ?3",
+                params![&target_prompt, chrono::Utc::now().to_rfc3339(), agent_id],
+            )?;
+        }
+        if let Some(record) = self.get(agent_id).await? {
+            match serde_json::to_string_pretty(&record) {
+                Ok(snapshot) => {
+                    checkpoint_source_history_best_effort(
+                        agent_config_history_path(agent_id),
+                        snapshot,
+                        Some("Agent saved".to_owned()),
+                    )
+                    .await;
+                }
+                Err(error) => tracing::warn!(
+                    agent_id,
+                    error = %error,
+                    "agent source-history snapshot could not be serialized"
+                ),
+            }
+        }
+        checkpoint_source_history_best_effort(
+            source_history_path(agent_id),
+            target_prompt.clone(),
+            Some("Restore prompt".to_owned()),
+        )
+        .await;
+        Ok(Some(target_prompt))
     }
 
     /// Delete a custom agent. Returns `Ok(false)` if the row doesn't exist;
@@ -1765,6 +2097,10 @@ impl AgentStore {
                 Some(true) => anyhow::bail!("cannot delete built-in agent '{id}'"),
                 Some(false) => {
                     conn.execute("DELETE FROM agents WHERE id = ?1", params![id])?;
+                    conn.execute(
+                        "DELETE FROM agent_prompt_versions WHERE agent_id = ?1",
+                        params![id],
+                    )?;
                     conn.execute(
                         "DELETE FROM published_agent_installs WHERE agent_id = ?1",
                         params![id],
@@ -2466,6 +2802,83 @@ mod tests {
 
         assert!(store.delete(&created.id).await.unwrap());
         assert!(store.get(&created.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn prompt_versions_snapshot_diff_and_restore_roundtrip() {
+        let store = store();
+        let created = store
+            .create(CreateAgent {
+                name: "Versioned prompt".into(),
+                system_prompt: Some("Be concise.".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(!source_history()
+            .list(&agent_config_history_path(&created.id), None)
+            .unwrap()
+            .is_empty());
+
+        let first = store
+            .snapshot_prompt(&created.id, Some("Be concise."), Some("Baseline"))
+            .await
+            .unwrap()
+            .expect("agent exists");
+        store
+            .update(
+                &created.id,
+                UpdateAgent {
+                    system_prompt: Some("Be concise and cite sources.".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let second = store
+            .snapshot_prompt(&created.id, None, Some("Citations"))
+            .await
+            .unwrap()
+            .expect("agent exists");
+        let versions = store.list_prompt_versions(&created.id).await.unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].id, second.id);
+        assert_eq!(versions[0].label.as_deref(), Some("Citations"));
+        assert_eq!(
+            store
+                .get_prompt_version(&created.id, &first.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .prompt,
+            "Be concise."
+        );
+
+        let restored = store
+            .restore_prompt_version(&created.id, &first.id)
+            .await
+            .unwrap()
+            .expect("version exists");
+        assert_eq!(restored, "Be concise.");
+        assert_eq!(
+            store
+                .get(&created.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .system_prompt
+                .as_deref(),
+            Some("Be concise.")
+        );
+        let restored_versions = store.list_prompt_versions(&created.id).await.unwrap();
+        assert_eq!(restored_versions.len(), 4);
+        assert!(restored_versions
+            .iter()
+            .any(|version| version.label.as_deref() == Some("Before restore")));
+        assert!(restored_versions
+            .iter()
+            .any(|version| version.label.as_deref() == Some("Restore prompt")));
     }
 
     #[tokio::test]

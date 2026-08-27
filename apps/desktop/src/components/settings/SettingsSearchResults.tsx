@@ -16,11 +16,13 @@ import {
 	SidebarMenuItem,
 } from "@ryu/ui/components/sidebar.tsx";
 import { useMemo } from "react";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import {
 	type SettingsDialogId,
 	type SettingsEntry,
 	searchSettings,
 	sectionLabel,
+	visibleSettingsEntries,
 } from "@/src/lib/settings-index.ts";
 
 interface SettingsSearchResultsProps {
@@ -79,9 +81,14 @@ export function SettingsSearchResults({
 	query,
 	showEmptyState = true,
 }: SettingsSearchResultsProps) {
+	const { isDesktop } = useAppSurface();
 	const groups = useMemo(
-		() => groupResults(searchSettings(query), currentDialog),
-		[query, currentDialog]
+		() =>
+			groupResults(
+				visibleSettingsEntries(searchSettings(query), isDesktop),
+				currentDialog
+			),
+		[query, currentDialog, isDesktop]
 	);
 
 	if (groups.length === 0) {

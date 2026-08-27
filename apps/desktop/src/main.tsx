@@ -1,3 +1,4 @@
+import { installHorizontalWheelScrolling } from "@ryu/ui/lib/horizontal-wheel-scroll";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -6,6 +7,7 @@ import App from "./App.tsx";
 // `@import`ed package's CSS without rebasing its relative url()s, which left the
 // woff2 files unemitted and the fonts 404ing in release builds. See index.css.
 import "@fontsource-variable/geist";
+import "@fontsource-variable/geist-mono";
 import "@fontsource-variable/inter";
 import "./index.css";
 import { initDialogOverlayBlur } from "./hooks/useDialogOverlayBlur.ts";
@@ -29,10 +31,12 @@ if (!root) {
 	throw new Error("Root element not found");
 }
 
+installHorizontalWheelScrolling(document);
+
 createRoot(root).render(
 	<StrictMode>
 		<QueryClientProvider client={queryClient}>
-			<App />
+			<App hostSurface="desktop" />
 		</QueryClientProvider>
 	</StrictMode>
 );

@@ -1,5 +1,5 @@
-import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
 import { AUTH_CORE_URL } from "@/lib/core-url.ts";
+import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
 import { LOCAL_FALLBACK, useNodeStore } from "@/src/store/useNodeStore.ts";
 
 const TRAILING_SLASH = /\/$/;
@@ -9,6 +9,40 @@ const CLOUD_NAME = "cloud";
 const LOCAL_NUDGE_KEY = "ryu_webapp_local_nudge";
 
 export type PreferLocalResult = "local" | "cloud" | "skipped";
+
+async function preferReachableLocalCore(): Promise<boolean> {
+	const localUrl = normalize(LOCAL_FALLBACK.url);
+	let store = useNodeStore.getState();
+	const hasLocal = store.nodes.some(
+		(n) => normalize(n.url) === localUrl || n.name === LOCAL_FALLBACK.name
+	);
+	if (!hasLocal) {
+		await store.addNode(LOCAL_FALLBACK.name, LOCAL_FALLBACK.url);
+	}
+
+	store = useNodeStore.getState();
+	const localName =
+		store.nodes.find((n) => normalize(n.url) === localUrl)?.name ??
+		LOCAL_FALLBACK.name;
+	const { online } = await invokeWhenReady<{ online: boolean }>("test_node", {
+		name: localName,
+	}).catch(() => ({ online: false }));
+
+	if (!online) {
+		return false;
+	}
+	await store.setDefault(localName);
+	await store.refresh();
+	return true;
+}
+
+/** Webapp-only local probe used while the browser setup dialog is open. */
+export async function preferLocalCoreIfReachable(): Promise<boolean> {
+	if (import.meta.env.VITE_RYU_SURFACE !== "webapp") {
+		return false;
+	}
+	return preferReachableLocalCore();
+}
 
 /**
  * Webapp-only: after sign-in (or on return visits), prefer the local Core when
@@ -24,13 +58,9 @@ export async function preferLocalOrCloud(): Promise<PreferLocalResult> {
 
 	const authUrl = normalize(AUTH_CORE_URL);
 	const localUrl = normalize(LOCAL_FALLBACK.url);
-
 	let store = useNodeStore.getState();
-	const hasLocal = store.nodes.some(
-		(n) => normalize(n.url) === localUrl || n.name === LOCAL_FALLBACK.name
-	);
-	if (!hasLocal) {
-		await store.addNode(LOCAL_FALLBACK.name, LOCAL_FALLBACK.url);
+	if (await preferReachableLocalCore()) {
+		return "local";
 	}
 
 	if (authUrl !== localUrl) {
@@ -39,21 +69,6 @@ export async function preferLocalOrCloud(): Promise<PreferLocalResult> {
 		if (!hasCloud) {
 			await store.addNode(CLOUD_NAME, AUTH_CORE_URL);
 		}
-	}
-
-	store = useNodeStore.getState();
-	const localName =
-		store.nodes.find((n) => normalize(n.url) === localUrl)?.name ??
-		LOCAL_FALLBACK.name;
-
-	const { online } = await invokeWhenReady<{ online: boolean }>("test_node", {
-		name: localName,
-	}).catch(() => ({ online: false }));
-
-	if (online) {
-		await store.setDefault(localName);
-		await store.refresh();
-		return "local";
 	}
 
 	store = useNodeStore.getState();

@@ -1,10 +1,13 @@
 "use client";
 
+import { Logo } from "@ryu/ui/components/logo.tsx";
+
 import Aurora from "./aurora.tsx";
 import BackedBy from "./backed-by.tsx";
 import FooterBuildInfo from "./footer-build-info.tsx";
 import { GitHubStars } from "./github-stars.tsx";
 import { ThemeToggle } from "./theme-toggle.tsx";
+import "./footer.css";
 
 // Cache Components requires client prerenders to be deterministic.
 const COPYRIGHT_YEAR = 2026;
@@ -23,11 +26,13 @@ export default function Footer({
 				<div className="mb-12 grid grid-cols-1 gap-12 md:grid-cols-2">
 					<div className="space-y-4">
 						<h3 className="font-medium text-2xl">
-							End-to-end infrastructure for AI agents
+							The foundation for AI agents
 						</h3>
 						<p className="max-w-md text-muted-foreground">
-							The platform for every agent to collaborate with humans. With
-							tools, security, memory, cost saving, and routing all built in.
+							An open, composable platform for agent orchestration and
+							multiplayer AI. Build plugins that extend capabilities and apps
+							that use pre-built primitives. Ryu provides the infrastructure
+							layer around agents.
 						</p>
 						<BackedBy className="pt-2" />
 					</div>
@@ -36,6 +41,12 @@ export default function Footer({
 						<div>
 							<h4 className="mb-4 font-semibold">Platform</h4>
 							<div className="space-y-2">
+								<a
+									className="block text-muted-foreground transition-colors hover:text-foreground"
+									href="/products/sdk"
+								>
+									SDK
+								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/products/core"
@@ -50,28 +61,34 @@ export default function Footer({
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
-									href="/products/agents"
+									href="/marketplace/apps"
 								>
-									Agents
+									Ryu Apps
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
-									href="/products/workflows"
+									href="/platform#infra"
 								>
-									Workflows
-								</a>
-								<a
-									className="block text-muted-foreground transition-colors hover:text-foreground"
-									href="/products"
-								>
-									All products
+									Ryu Infra
 								</a>
 							</div>
 						</div>
 
 						<div>
-							<h4 className="mb-4 font-semibold">Developers</h4>
+							<h4 className="mb-4 font-semibold">Learn</h4>
 							<div className="space-y-2">
+								<a
+									className="block text-muted-foreground transition-colors hover:text-foreground"
+									href="/academy"
+								>
+									Academy
+								</a>
+								<a
+									className="block text-muted-foreground transition-colors hover:text-foreground"
+									href="/certifications"
+								>
+									Certifications
+								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/products/cli"
@@ -112,7 +129,7 @@ export default function Footer({
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/for/agent-operators"
 								>
-									Agent operators
+									AI operators
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
@@ -191,14 +208,19 @@ export default function Footer({
 				<Aurora amplitude={0.2} blend={0.65} fan={0.65} speed={2.5} />
 			</div>
 
-			{/* Giant ryu — bottom ~25% clipped; ~3/4 of the wordmark visible */}
-			<div className="relative z-10 -mt-6 flex h-[clamp(4rem,34vw,22.5rem)] items-start justify-center overflow-hidden">
+			{/* Giant Ryu outline — only the top half rises into view; the eyes track the cursor. */}
+			<div className="relative z-10 -mt-6 flex h-[clamp(10rem,20vw,16rem)] -translate-y-20 items-start justify-center overflow-hidden sm:translate-y-0">
 				<div
 					aria-hidden="true"
-					className="select-none font-black text-foreground/10 leading-none"
-					style={{ fontSize: "clamp(5rem,45vw,30rem)" }}
+					className="pointer-events-none origin-top -translate-x-16 scale-90 select-none text-foreground/15 sm:scale-110 md:scale-125 lg:scale-150"
+					data-testid="footer-ryu-logo"
 				>
-					ryu
+					<Logo
+						animated
+						className="footer-ryu-logo__mark"
+						size="360px"
+						variant="outline"
+					/>
 				</div>
 			</div>
 		</footer>

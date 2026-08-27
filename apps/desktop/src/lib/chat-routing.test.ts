@@ -1,5 +1,18 @@
 import { describe, expect, it } from "bun:test";
-import { modelRoutingFieldsForInterface } from "./chat-routing.ts";
+import {
+	modelRoutingFieldsForInterface,
+	responseModeForInterface,
+} from "./chat-routing.ts";
+
+describe("response mode", () => {
+	it("maps Ryu Work to everyday language", () => {
+		expect(responseModeForInterface("simple")).toBe("everyday");
+	});
+
+	it("maps Code to developer language", () => {
+		expect(responseModeForInterface("expert")).toBe("developer");
+	});
+});
 
 describe("model routing fields", () => {
 	it("strips hidden model and ACP pins in Ryu Work", () => {

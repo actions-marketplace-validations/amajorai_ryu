@@ -24,6 +24,7 @@ const companion = (
 	hasUi: true,
 	id,
 	label,
+	membershipRequired: false,
 	name,
 	pluginId,
 });
@@ -134,5 +135,10 @@ describe("topLevelAlias", () => {
 		expect(topLevelAlias("/timeline/1737164000000")).toBe("/timeline");
 		expect(topLevelAlias("/meetings/abc")).toBe("/meetings");
 		expect(topLevelAlias("/workflows/new")).toBe("/workflows");
+		expect(topLevelAlias("/blueprint/plan-1")).toBe("/blueprint");
+		expect(topLevelAlias("/mail/inbox-1")).toBe("/mail");
+		expect(topLevelAlias("/monitors/monitor-1")).toBe("/monitors");
+		expect(topLevelAlias("/reasoning/policy-1")).toBe("/reasoning");
+		expect(topLevelAlias("/rlm/context-1")).toBe("/rlm");
 	});
 });

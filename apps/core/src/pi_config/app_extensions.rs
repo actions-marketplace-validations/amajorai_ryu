@@ -271,10 +271,10 @@ fn read_source(plugin_id: &str, rel: &str) -> Result<String, String> {
     if let Some(embedded) = crate::plugin_manifest::builtin_pi_extension(plugin_id, rel) {
         return Ok(embedded.to_owned());
     }
-    let dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir()
-        .join(plugin_dir_name(plugin_id))
-        .join(rel);
-    let source = std::fs::read_to_string(&dir).map_err(|e| {
+    let package_dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir()
+        .join(plugin_dir_name(plugin_id));
+    let dir = package_dir.join(rel);
+    let source = crate::plugin_manifest::read_contained_package_file(&package_dir, rel).map_err(|e| {
         format!(
             "cannot read pi extension '{rel}' for '{plugin_id}' ({}): {e} — a built-in must \
              instead carry an include_str! row in plugin_manifest::builtin_code::BUILTIN_PI_EXTENSIONS",

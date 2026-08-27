@@ -22,6 +22,31 @@ export interface PairingStart {
 	user_code: string;
 }
 
+function defineCapabilities<const Capabilities extends readonly string[]>(
+	capabilities: Capabilities
+): Capabilities {
+	return capabilities;
+}
+
+/** Capabilities a normal interactive Ryu client may request during pairing. */
+export const INTERACTIVE_PAIRING_CAPABILITIES = defineCapabilities([
+	"chat:read",
+	"chat:write",
+	"agents:read",
+	"workflows:read",
+	"workflows:run",
+	"tools:read",
+	"tools:exec",
+	"memory:read",
+	"memory:write",
+	"files:read",
+	"files:write",
+	"gateway:route",
+]);
+
+export type InteractivePairingCapability =
+	(typeof INTERACTIVE_PAIRING_CAPABILITIES)[number];
+
 /** Terminal + non-terminal outcomes of a poll, mirroring the OAuth device grant. */
 export type PairingPoll =
 	| { status: "approved"; token: string }
@@ -30,6 +55,36 @@ export type PairingPoll =
 	| { status: "expired" };
 
 const JSON_HEADERS = { "content-type": "application/json" };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parsePairingStart(value: unknown): PairingStart {
+	if (
+		!isRecord(value) ||
+		typeof value.device_code !== "string" ||
+		!/^pdc_[A-Za-z0-9_-]{16,}$/.test(value.device_code) ||
+		typeof value.user_code !== "string" ||
+		!/^[A-Z2-9]{3}-[A-Z2-9]{3}$/.test(value.user_code) ||
+		typeof value.expires_in !== "number" ||
+		!Number.isInteger(value.expires_in) ||
+		value.expires_in <= 0 ||
+		value.expires_in > 3600 ||
+		typeof value.interval !== "number" ||
+		!Number.isInteger(value.interval) ||
+		value.interval <= 0 ||
+		value.interval > 60
+	) {
+		throw new Error("Core returned an invalid pairing response");
+	}
+	return {
+		device_code: value.device_code,
+		expires_in: value.expires_in,
+		interval: value.interval,
+		user_code: value.user_code,
+	};
+}
 
 /** Strip a trailing slash so `${base}${path}` never doubles up. */
 function normalizeBase(coreUrl: string): string {
@@ -50,7 +105,11 @@ export async function startPairing(
 	const resp = await fetch(`${normalizeBase(coreUrl)}/api/pair/code`, {
 		method: "POST",
 		headers: JSON_HEADERS,
-		body: JSON.stringify({ client_name: clientName }),
+		body: JSON.stringify({
+			client_name: clientName,
+			requested_constraints: {},
+			requested_scopes: INTERACTIVE_PAIRING_CAPABILITIES,
+		}),
 		signal,
 	});
 	if (!resp.ok) {
@@ -58,7 +117,8 @@ export async function startPairing(
 			`Could not start pairing with ${coreUrl} (HTTP ${resp.status}). Is Ryu running?`
 		);
 	}
-	return (await resp.json()) as PairingStart;
+	const body: unknown = await resp.json();
+	return parsePairingStart(body);
 }
 
 /**
@@ -82,8 +142,11 @@ export async function pollPairing(
 	if (!resp.ok) {
 		throw new Error(`Pairing poll failed (HTTP ${resp.status})`);
 	}
-	const body = (await resp.json()) as { error?: string; token?: string };
-	if (body.token) {
+	const body: unknown = await resp.json();
+	if (!isRecord(body)) {
+		throw new Error("Core returned an invalid pairing poll response");
+	}
+	if (typeof body.token === "string" && body.token.length > 0) {
 		return { status: "approved", token: body.token };
 	}
 	switch (body.error) {

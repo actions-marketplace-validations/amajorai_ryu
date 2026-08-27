@@ -39,6 +39,7 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useSession } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import ResizableSettingsLayout from "@/src/components/ResizableSettingsLayout.tsx";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import {
@@ -92,6 +93,7 @@ const KEYBOARD_SHORTCUT_CONTEXT: Partial<Record<SectionValue, string>> = {
 };
 
 interface NavItem {
+	desktopOnly?: boolean;
 	/**
 	 * The tinted tile left of the label, the way iOS/macOS Settings marks a row.
 	 * Optional because the dynamic Apps/Plugins items are built elsewhere and a
@@ -156,6 +158,7 @@ const NAV_GROUPS: NavGroup[] = [
 				label: "Keyboard Shortcuts",
 				icon: KeyboardIcon,
 				tint: "indigo",
+				desktopOnly: true,
 			},
 			{ value: "voice", label: "Voice", icon: Mic01Icon, tint: "orange" },
 		],
@@ -222,6 +225,7 @@ const NAV_GROUPS: NavGroup[] = [
 				label: "Updates",
 				icon: Refresh01Icon,
 				tint: "teal",
+				desktopOnly: true,
 			},
 			{
 				value: "developer",
@@ -331,6 +335,15 @@ function SectionContent({ value }: { value: SectionValue }) {
 	}
 }
 
+function normalizeDefaultSection(
+	defaultSection: SectionValue | (string & {}) | undefined,
+	isDesktop: boolean
+): string {
+	return !isDesktop && defaultSection === "keyboard"
+		? "general"
+		: (defaultSection ?? "general");
+}
+
 interface SettingsDialogProps {
 	/** A static {@link SectionValue}, or a dynamic `app:<id>` / `plugin:<id>` entity
 	 *  value (matched by prefix at render time, like the Gateway dialog's). */
@@ -344,8 +357,9 @@ export function SettingsDialog({
 	onOpenChange,
 	defaultSection,
 }: SettingsDialogProps) {
+	const { isDesktop } = useAppSurface();
 	const [activeSection, setActiveSection] = useState<string>(
-		defaultSection ?? "general"
+		normalizeDefaultSection(defaultSection, isDesktop)
 	);
 	// The sidebar filter. Non-empty swaps the nav for search results — individual
 	// SETTINGS, not just tabs — from the shared index.
@@ -378,7 +392,10 @@ export function SettingsDialog({
 	// member legitimately lacks the field.
 	const navGroups = useMemo<NavGroup[]>(
 		() => [
-			...NAV_GROUPS,
+			...NAV_GROUPS.map((group) => ({
+				...group,
+				items: group.items.filter((item) => isDesktop || !item.desktopOnly),
+			})).filter((group) => group.items.length > 0),
 			// One stand-in tile per dynamic header, in grey: a manifest contributes a
 			// settings tab, not a glyph, so the tile says "contributed" rather than
 			// pretending to identify the app.
@@ -391,7 +408,7 @@ export function SettingsDialog({
 				})),
 			})),
 		],
-		[appEntities, pluginEntities]
+		[appEntities, isDesktop, pluginEntities]
 	);
 	const allItems = useMemo(
 		() => navGroups.flatMap((g) => g.items),
@@ -444,9 +461,9 @@ export function SettingsDialog({
 
 	useEffect(() => {
 		if (open && defaultSection) {
-			setActiveSection(defaultSection);
+			setActiveSection(normalizeDefaultSection(defaultSection, isDesktop));
 		}
-	}, [open, defaultSection]);
+	}, [open, defaultSection, isDesktop]);
 
 	// If the selected app/plugin entity disappears (disabled/uninstalled) while its
 	// now-orphaned tab is open, fall back to General so the pane never shows nothing.
@@ -456,11 +473,23 @@ export function SettingsDialog({
 		}
 	}, [activeSection, entityById]);
 
+	useEffect(() => {
+		if (
+			!(
+				isEntitySection(activeSection) ||
+				allItems.some((item) => item.value === activeSection)
+			)
+		) {
+			setActiveSection("general");
+		}
+	}, [activeSection, allItems]);
+
 	const activeLabel =
 		allItems.find((i) => i.value === activeSection)?.label ?? "";
 	const activeEntity = entityById.get(activeSection);
-	const keyboardShortcutDescription =
-		KEYBOARD_SHORTCUT_CONTEXT[activeSection as SectionValue];
+	const keyboardShortcutDescription = isDesktop
+		? KEYBOARD_SHORTCUT_CONTEXT[activeSection as SectionValue]
+		: undefined;
 
 	return (
 		<QueryClientProvider client={queryClient}>

@@ -5,7 +5,6 @@ import {
 	FolderOpenIcon,
 	ServerStack01Icon,
 	Target01Icon,
-	WorkflowCircle06Icon,
 	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
@@ -38,9 +37,7 @@ import {
 } from "@/src/hooks/usePluginContributions.ts";
 import { useSandboxBackends } from "@/src/hooks/useSandboxBackends.ts";
 import { installedSkillsQuery } from "@/src/hooks/useSkillsCatalog.ts";
-import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useVoiceEngines } from "@/src/hooks/useVoiceEngines.ts";
-import { useWorkflows } from "@/src/hooks/useWorkflows.ts";
 import { CHANNEL_LABELS } from "@/src/lib/api/channels.ts";
 import type { InstalledSkill } from "@/src/lib/api/skills.ts";
 import { basename } from "@/src/lib/files.ts";
@@ -74,8 +71,6 @@ export interface CommandSearchSection {
 const SECTION_PLUGIN_OWNER: Partial<Record<BuiltinSectionKey, string>> = {
 	agents: SURFACE_PLUGIN_OWNER.agents,
 	spaces: SURFACE_PLUGIN_OWNER.spaces,
-	teams: SURFACE_PLUGIN_OWNER.teams,
-	workflows: SURFACE_PLUGIN_OWNER.workflows,
 };
 
 function searchItem(
@@ -118,8 +113,6 @@ export function useCommandSearchSections(): {
 	const { agents } = useAgents();
 	const { apps, loading: appsLoading } = useApps();
 	const { channels } = useChannels();
-	const { teams } = useTeams();
-	const { workflows } = useWorkflows();
 	const { profiles } = useIdentities();
 	const { servers: mcpServers, tools: mcpTools } = useMcp();
 	const { engines: localEngines } = useEngines();
@@ -373,40 +366,12 @@ export function useCommandSearchSections(): {
 					subtitle: tab.path,
 				})
 			),
-			teams: teams.map((team) =>
-				searchItem(
-					team.id,
-					team.name,
-					() => openTab("/library/team", { title: "Teams" }),
-					{
-						icon: SECTION_ICONS.teams,
-						subtitle:
-							team.description ??
-							`${formatCount(team.members.length) ?? "—"} ${team.members.length === 1 ? "member" : "members"}`,
-						timestamp: toTimestamp(team.updatedAt ?? team.createdAt),
-					}
-				)
-			),
 			tools: mcpTools.map((tool) =>
 				searchItem(
 					tool.id,
 					tool.name,
 					() => openTab("/library/tools", { title: "Tools" }),
 					{ icon: Wrench01Icon, subtitle: tool.server }
-				)
-			),
-			workflows: workflows.map((workflow) =>
-				searchItem(
-					workflow.id,
-					workflow.name,
-					() => openTab(`/workflows/${workflow.id}`, { title: workflow.name }),
-					{
-						icon: WorkflowCircle06Icon,
-						subtitle:
-							workflow.description ??
-							`${formatCount(workflow.nodes.length) ?? "—"} ${workflow.nodes.length === 1 ? "node" : "nodes"}`,
-						timestamp: toTimestamp(workflow.updatedAt ?? workflow.createdAt),
-					}
 				)
 			),
 		};
@@ -462,8 +427,6 @@ export function useCommandSearchSections(): {
 		setActiveConversationId,
 		spaces,
 		tabs,
-		teams,
-		workflows,
 		installedSkills,
 	]);
 

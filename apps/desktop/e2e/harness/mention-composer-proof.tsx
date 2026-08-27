@@ -1,16 +1,29 @@
+import { ChatDisplayPrefsProvider } from "@ryu/blocks/desktop/agent-elements/chat-display-prefs";
+import { InputBar } from "@ryu/blocks/desktop/agent-elements/input-bar";
+import { MentionToken } from "@ryu/blocks/desktop/agent-elements/mention-token.tsx";
+import { Avatar, AvatarFallback } from "@ryu/ui/components/avatar.tsx";
 import { useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Markdown } from "../../components/agent-elements/markdown.tsx";
 import type { MentionItem as TranscriptMentionItem } from "../../components/agent-elements/types.ts";
 import { MentionMenu } from "../../src/components/chat/MentionMenu.tsx";
+import { SlashCommandAutocomplete } from "../../src/components/chat/SlashCommandAutocomplete.tsx";
 import {
 	buildComposioMentionSources,
 	buildMentionGroups,
+	CHAT_MENTION_KINDS,
 } from "../../src/lib/mentions/candidates.ts";
+import { selectHumanNotificationTargets } from "../../src/lib/mentions/human-notification.ts";
 import type {
 	MentionItem,
 	MentionSources,
 } from "../../src/lib/mentions/types.ts";
+import {
+	applySlashCommandOption,
+	parseSlashMenuState,
+	type SlashCommand,
+	type SlashCommandOptionSelection,
+} from "../../src/lib/slash-commands.ts";
 import "../../src/index.css";
 
 const CONNECTIONS = [
@@ -34,6 +47,20 @@ const PROOF_APP_ICON = (color: string, label: string) => (
 		style={{ backgroundColor: color }}
 	/>
 );
+
+const HUMAN_AVATAR = (
+	<Avatar aria-label="Ada Lovelace avatar" className="size-3.5 shrink-0">
+		<AvatarFallback className="text-[8px]">AL</AvatarFallback>
+	</Avatar>
+);
+
+const HUMAN_MENTION: MentionItem = {
+	description: "ada@example.com · Platform",
+	id: "user-ada",
+	kind: "user",
+	label: "Ada Lovelace",
+	visualIcon: HUMAN_AVATAR,
+};
 
 const TRANSCRIPT_MENTIONS: TranscriptMentionItem[] = [
 	{ id: "claude", kind: "agent", label: "Claude Code" },
@@ -239,6 +266,7 @@ function sources(configured: boolean): MentionSources {
 			},
 		],
 		teams: [],
+		users: [],
 		workflows: [],
 	};
 }
@@ -258,6 +286,7 @@ function MentionState({
 		() => buildMentionGroups(mentionSources, query),
 		[mentionSources, query]
 	);
+	const [menuOpen, setMenuOpen] = useState(true);
 
 	const handleSelect = (item: MentionItem) => {
 		setSelected(`@${item.label}`);
@@ -298,19 +327,24 @@ function MentionState({
 				<textarea
 					aria-label={`${label} composer`}
 					className="min-h-14 w-full resize-none rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-slate-200 outline-none ring-indigo-300/50 placeholder:text-slate-600 focus:ring-2"
-					onChange={(event) => setQuery(event.target.value.replace(/^@/, ""))}
+					onChange={(event) => {
+						setQuery(event.target.value.replace(/^@/, ""));
+						setMenuOpen(true);
+					}}
 					placeholder="Type @ to mention…"
 					ref={anchorRef}
 					value={`@${query}`}
 				/>
-				<div className="absolute top-[29rem] left-0 w-full">
-					<MentionMenu
-						anchorRef={anchorRef}
-						groups={groups}
-						onDismiss={() => undefined}
-						onSelect={handleSelect}
-					/>
-				</div>
+				{menuOpen ? (
+					<div className="absolute top-[29rem] left-0 w-full">
+						<MentionMenu
+							anchorRef={anchorRef}
+							groups={groups}
+							onDismiss={() => setMenuOpen(false)}
+							onSelect={handleSelect}
+						/>
+					</div>
+				) : null}
 			</div>
 
 			<div className="mt-4 min-h-10 rounded-xl border border-white/10 bg-black/15 px-3 py-2 text-sm">
@@ -321,6 +355,308 @@ function MentionState({
 				>
 					{selected ?? "none"}
 				</strong>
+			</div>
+		</section>
+	);
+}
+
+const DEPLOY_COMMAND: SlashCommand = {
+	args: [
+		{
+			name: "environment",
+			options: [
+				{ label: "Staging", value: "staging" },
+				{ label: "Production", value: "production" },
+			],
+		},
+		{
+			custom: { label: "Use a custom region" },
+			name: "region",
+			options: [
+				{ label: "Singapore", value: "sg" },
+				{ label: "Virginia", value: "us-east" },
+			],
+		},
+	],
+	description: "Deploy the current project",
+	name: "deploy",
+	source: "plugin",
+};
+
+const PDF_SKILL_COMMAND: SlashCommand = {
+	args: [],
+	description: "Work with PDFs",
+	hint: "PDF",
+	name: "pdf",
+	source: "skill",
+};
+
+const SLASH_COMMANDS = [DEPLOY_COMMAND, PDF_SKILL_COMMAND];
+
+function SlashCommandProof() {
+	const anchorRef = useRef<HTMLDivElement | null>(null);
+	const [value, setValue] = useState("/");
+	const menu = useMemo(
+		() => parseSlashMenuState(value, SLASH_COMMANDS),
+		[value]
+	);
+	const verified = value === "/deploy staging sg" && menu === null;
+	const selectArgument = (selection: SlashCommandOptionSelection) => {
+		if (menu?.kind !== "arguments") {
+			return;
+		}
+		const hasNextArgument = menu.argumentIndex < menu.command.args.length - 1;
+		setValue(
+			applySlashCommandOption(value, selection.option.value, hasNextArgument)
+		);
+	};
+
+	return (
+		<section
+			aria-label="Slash command argument proof"
+			className="rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl"
+			data-testid="slash-command-proof"
+		>
+			<div className="flex flex-wrap items-start justify-between gap-4">
+				<div>
+					<p className="font-semibold text-white text-xl">
+						Plugin command arguments
+					</p>
+					<p className="mt-1 max-w-3xl text-slate-400 text-sm">
+						Commands and enabled Skills have separate groups. Choose a command,
+						then one registered option at a time; the second argument includes a
+						custom-value choice.
+					</p>
+				</div>
+				<div
+					className={`rounded-full px-3 py-1 font-semibold text-xs ${verified ? "bg-emerald-400/15 text-emerald-300" : "bg-amber-400/15 text-amber-200"}`}
+					data-testid="slash-proof-status"
+				>
+					{verified ? "VERIFIED" : "Choose the registered options"}
+				</div>
+			</div>
+
+			<div className="relative mt-5" ref={anchorRef}>
+				<textarea
+					aria-label="Slash command proof composer"
+					className="min-h-14 w-full resize-none rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-slate-200 outline-none ring-indigo-300/50 placeholder:text-slate-600 focus:ring-2"
+					data-testid="slash-command-input"
+					onChange={(event) => setValue(event.target.value)}
+					value={value}
+				/>
+				{menu?.kind === "commands" ? (
+					<SlashCommandAutocomplete
+						anchorRef={anchorRef}
+						commands={SLASH_COMMANDS}
+						menu={menu}
+						mode="commands"
+						onDismiss={() => undefined}
+						onSelect={(command) => setValue(`/${command.name} `)}
+					/>
+				) : null}
+				{menu?.kind === "arguments" ? (
+					<SlashCommandAutocomplete
+						anchorRef={anchorRef}
+						menu={menu}
+						mode="arguments"
+						onDismiss={() => undefined}
+						onSelectArgument={selectArgument}
+					/>
+				) : null}
+			</div>
+			<output
+				className="mt-4 block rounded-xl border border-white/10 bg-black/15 px-3 py-2 font-mono text-indigo-200 text-sm"
+				data-testid="slash-command-value"
+			>
+				{value}
+			</output>
+		</section>
+	);
+}
+
+function humanMentionSources(inboxEnabled: boolean): MentionSources {
+	const base = sources(false);
+	return {
+		...base,
+		workflows: [
+			{
+				description: "Run a verification workflow",
+				id: "verify",
+				name: "Verify",
+			},
+		],
+		users: inboxEnabled
+			? [
+					{
+						description: HUMAN_MENTION.description,
+						id: HUMAN_MENTION.id,
+						name: HUMAN_MENTION.label,
+						visualIcon: HUMAN_MENTION.visualIcon,
+					},
+				]
+			: [],
+	};
+}
+
+function HumanMentionState({
+	inboxEnabled,
+	label,
+}: {
+	inboxEnabled: boolean;
+	label: string;
+}) {
+	const anchorRef = useRef<HTMLTextAreaElement | null>(null);
+	const [value, setValue] = useState("@");
+	const [menuOpen, setMenuOpen] = useState(true);
+	const [selected, setSelected] = useState<{ id: string; label: string }[]>([]);
+	const [notificationTargets, setNotificationTargets] = useState<string[]>([]);
+	const mentionSources = useMemo(
+		() => humanMentionSources(inboxEnabled),
+		[inboxEnabled]
+	);
+	const groups = useMemo(
+		() => buildMentionGroups(mentionSources, "", CHAT_MENTION_KINDS),
+		[mentionSources]
+	);
+	const selectedHuman = selected.at(-1);
+	const sendMentionNotification = () => {
+		const targets = selectHumanNotificationTargets({
+			content: value,
+			currentUserId: "user-current",
+			selected,
+		});
+		setNotificationTargets(targets.map((target) => target.id));
+	};
+
+	return (
+		<section
+			aria-label={label}
+			className="rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl"
+			data-testid={
+				inboxEnabled ? "inbox-enabled-state" : "inbox-disabled-state"
+			}
+		>
+			<div className="mb-4 flex items-start justify-between gap-4">
+				<div>
+					<p className="font-semibold text-white text-xl">{label}</p>
+					<p className="mt-1 text-slate-400 text-sm">
+						{inboxEnabled
+							? "Users are available from the current org/team roster"
+							: "Install and enable Inbox to show human mentions"}
+					</p>
+				</div>
+				<span className="rounded-full bg-slate-400/10 px-3 py-1 font-semibold text-slate-300 text-xs">
+					{inboxEnabled ? "INBOX ON" : "INBOX OFF"}
+				</span>
+			</div>
+
+			<div className="relative">
+				<textarea
+					aria-label={`${label} composer`}
+					className="min-h-14 w-full resize-none rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-slate-200 outline-none ring-indigo-300/50 placeholder:text-slate-600 focus:ring-2"
+					data-testid="human-mention-input"
+					onChange={(event) => {
+						setValue(event.target.value);
+						setMenuOpen(true);
+					}}
+					ref={anchorRef}
+					value={value}
+				/>
+				{menuOpen ? (
+					<div className="absolute top-20 left-0 z-10 w-full">
+						<MentionMenu
+							anchorRef={anchorRef}
+							groups={groups}
+							onDismiss={() => setMenuOpen(false)}
+							onSelect={(item) => {
+								if (item.kind !== "user") {
+									return;
+								}
+								setValue(`@${item.label}`);
+								setSelected([{ id: item.id, label: item.label }]);
+								setMenuOpen(false);
+							}}
+						/>
+					</div>
+				) : null}
+			</div>
+
+			<div className="mt-4 flex flex-wrap items-center gap-3">
+				<button
+					className="rounded-xl bg-indigo-400/15 px-3 py-2 font-medium text-indigo-200 text-sm hover:bg-indigo-400/25"
+					disabled={!selectedHuman}
+					onClick={sendMentionNotification}
+					type="button"
+				>
+					Record notifications.send
+				</button>
+				{selectedHuman ? (
+					<div data-testid="human-composer-token">
+						<MentionToken item={HUMAN_MENTION}>
+							{selectedHuman.label}
+						</MentionToken>
+					</div>
+				) : null}
+			</div>
+
+			<div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+				<div className="rounded-xl border border-white/10 bg-black/15 px-3 py-2">
+					<span className="text-slate-500">notification targets: </span>
+					<strong data-testid="notification-targets">
+						{notificationTargets.join(", ") || "none"}
+					</strong>
+				</div>
+				<div className="rounded-xl border border-white/10 bg-black/15 px-3 py-2">
+					<span className="text-slate-500">routing callbacks: </span>
+					<strong data-testid="routing-callbacks">none</strong>
+				</div>
+			</div>
+
+			<div
+				className="mt-3 rounded-xl border border-white/10 bg-black/15 px-3 py-2 text-sm"
+				data-testid="human-transcript"
+			>
+				<Markdown content={value} mentionItems={[HUMAN_MENTION]} />
+			</div>
+		</section>
+	);
+}
+
+function ComposerMentionProof() {
+	const browser = TRANSCRIPT_MENTIONS.find(
+		(item) => item.kind === "app" && item.id === "browser"
+	);
+	if (!browser) {
+		return null;
+	}
+
+	return (
+		<section
+			aria-label="Composer mention preview"
+			className="mt-6 rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl"
+			data-testid="composer-mention-proof"
+		>
+			<div className="mb-4">
+				<p className="font-semibold text-white text-xl">Composer preview</p>
+				<p className="mt-1 text-slate-400 text-sm">
+					The shared composer renderer keeps the app icon and accent-colored
+					name without a filled chip background.
+				</p>
+			</div>
+			<ChatDisplayPrefsProvider value={{}}>
+				<InputBar
+					compact
+					mentionItems={[browser]}
+					onChange={() => undefined}
+					onSend={() => undefined}
+					onStop={() => undefined}
+					status="ready"
+					value={`@${browser.label}`}
+				/>
+			</ChatDisplayPrefsProvider>
+			<div className="mt-3 flex items-center gap-2 text-slate-500 text-xs">
+				<span>Inline token:</span>
+				<MentionToken item={browser}>{browser.label}</MentionToken>
 			</div>
 		</section>
 	);
@@ -352,13 +688,13 @@ function MentionComposerProof() {
 							React verification artifact
 						</p>
 						<h1 className="mt-2 font-semibold text-4xl text-white tracking-tight">
-							Mention directory
+							Chat command and mention directory
 						</h1>
 						<p className="mt-3 max-w-2xl text-slate-400">
-							Agents, installed apps and their list items, Space pages, output
-							styles, plugins, skills, and connected integrations share one
-							searchable @ menu. Composio integrations are fail-closed until the
-							active node reports BYOK or managed subscription/proxy access.
+							The @ picker exposes Agents, Apps, Plugins, Workflows, and
+							Inbox-gated Users. The / picker keeps Commands and enabled Skills
+							in separate groups; human mentions notify Inbox without changing
+							turn routing.
 						</p>
 					</div>
 					<div
@@ -380,6 +716,14 @@ function MentionComposerProof() {
 					<MentionState configured label="Credential available" />
 					<MentionState configured={false} label="Credential unavailable" />
 				</div>
+				<div className="mt-6 grid gap-6 lg:grid-cols-2">
+					<HumanMentionState inboxEnabled label="Inbox enabled" />
+					<HumanMentionState inboxEnabled={false} label="Inbox disabled" />
+				</div>
+				<div className="mt-6">
+					<SlashCommandProof />
+				</div>
+				<ComposerMentionProof />
 				<TranscriptMentionProof />
 			</div>
 		</main>

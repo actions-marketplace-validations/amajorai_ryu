@@ -12,7 +12,7 @@ import type {
 	WidgetKind,
 	WidgetSource,
 } from "@/src/components/dashboard/widgets/schema.ts";
-import { type ApiTarget, apiUrl, makeHeaders, request } from "./client.ts";
+import { type ApiTarget, authenticatedFetch, request } from "./client.ts";
 
 // The widget contract (kinds, sources, layout, mutable input) is defined once as
 // Zod schemas in the widgets catalog; the wire types are inferred from there so
@@ -272,9 +272,9 @@ export async function streamDashboardEvents(
 	onEvent: (event: DashboardEvent) => void,
 	signal?: AbortSignal
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, "/api/dashboards/events"), {
+	const resp = await authenticatedFetch(target, "/api/dashboards/events", {
 		method: "GET",
-		headers: { ...makeHeaders(target.token), Accept: "text/event-stream" },
+		headers: { Accept: "text/event-stream" },
 		signal,
 	});
 	if (!(resp.ok && resp.body)) {

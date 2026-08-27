@@ -1,10 +1,5 @@
 {
-  "tags": [
-    "poker",
-    "texas-holdem",
-    "table",
-    "simulated-tokens"
-  ],
+  "tags": ["poker", "texas-holdem", "table", "simulated-tokens"],
   "author": {
     "name": "Ryu",
     "url": "https://ryuhq.com"
@@ -18,36 +13,31 @@
   "version": "0.1.0",
   "stability": "experimental",
   "category": "Games",
-  "description": "A cosmetic six-max no-limit Texas Hold'em table with simulated tokens, deterministic server-side dealing, and durable local state.",
+  "description": "A catalog preview of a planned cosmetic six-max Texas Hold'em table with simulated tokens.",
   "tagline": "Play a friendly hand with simulated tokens",
-  "keywords": [
-    "poker",
-    "texas-holdem",
-    "table",
-    "simulated-tokens"
-  ],
+  "keywords": ["poker", "texas-holdem", "table", "simulated-tokens"],
   "icon": "playing-card",
   "surfaces": {
     "gateway": {
       "support": "none"
     },
     "core": {
-      "support": "full"
+      "support": "list"
     },
     "desktop": {
-      "support": "full"
+      "support": "list"
     },
     "island": {
-      "support": "limited"
+      "support": "none"
     },
     "mobile": {
-      "support": "limited"
+      "support": "none"
     },
     "extension": {
       "support": "none"
     },
     "web": {
-      "support": "full"
+      "support": "list"
     },
     "cli": {
       "support": "list"
@@ -56,98 +46,16 @@
   "engines": {
     "ryu": ">=0.1.0"
   },
-  "runnables": [
-    {
-      "id": "token-table-companion",
-      "name": "Token Table",
-      "kind": "companion",
-      "config": {
-        "label": "Token Table",
-        "ui_entry": "./dist/index.html",
-        "ui_format": "html"
-      }
-    }
-  ],
-  "sidecars": [
-    {
-      "name": "ryu-token-table",
-      "process": {
-        "kind": "local",
-        "command": "ryu-token-table",
-        "command_env": "RYU_TOKEN_TABLE_BIN",
-        "port_env": "RYU_TOKEN_TABLE_PORT"
-      },
-      "port": 8017,
-      "health_path": "/health",
-      "lazy": true,
-      "idle_stop_secs": 900,
-      "http": {
-        "mount": "/api/token-table",
-        "public_mount": "/api/token-table",
-        "routes": [
-          {
-            "path": "/tables"
-          },
-          {
-            "path": "/tables/:table_id"
-          },
-          {
-            "path": "/tables/:table_id/join"
-          },
-          {
-            "path": "/tables/:table_id/seat"
-          },
-          {
-            "path": "/tables/:table_id/leave"
-          },
-          {
-            "path": "/tables/:table_id/start"
-          },
-          {
-            "path": "/tables/:table_id/action"
-          },
-          {
-            "path": "/tables/:table_id/events"
-          }
-        ]
-      }
-    }
-  ],
-  "permission_grants": [
-    "app:http",
-    "app:realtime"
-  ],
-  "permission_levels": [
-    {
-      "id": "token-table.view",
-      "label": "Can view tables",
-      "description": "Read local Token Table snapshots and realtime updates."
-    },
-    {
-      "id": "token-table.play",
-      "label": "Can play",
-      "description": "Create tables, join seats, and submit simulated-token poker actions.",
-      "implies": [
-        "token-table.view"
-      ]
-    }
-  ],
-  "companion": {
-    "label": "Token Table",
-    "icon": "playing-card"
-  },
+  "runnables": [],
+  "permission_grants": [],
   "contributes": {
     "chat_widget_templates": [
       {
         "id": "token-table.chat",
         "title": "Token Table widget",
         "description": "Token Table chat widget metadata is coming soon; no render tool is available yet.",
-        "triggers": [
-          "token table widget"
-        ],
-        "examples": [
-          "Show me a token table widget"
-        ],
+        "triggers": ["token table widget"],
+        "examples": ["Show me a token table widget"],
         "backing": {},
         "display_mode": "inline",
         "safe_action_ids": [],

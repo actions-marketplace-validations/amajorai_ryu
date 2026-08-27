@@ -45,7 +45,12 @@ import {
 	fetchCapabilityLayers,
 	setCapabilityBinding,
 } from "./capability-layers.ts";
-import { ApiError, type ApiTarget, apiUrl, identityHeaders } from "./client.ts";
+import {
+	ApiError,
+	type ApiTarget,
+	authenticatedFetch,
+	identityHeaders,
+} from "./client.ts";
 
 /** What this node can extract text from, right now. */
 export interface ParseCapability {
@@ -133,10 +138,14 @@ export async function fetchParseCapability(
 	target: ApiTarget,
 	signal?: AbortSignal
 ): Promise<ParseCapability> {
-	const res = await fetch(apiUrl(target, "/api/documents/parse/capability"), {
-		headers: headersFor(target),
-		signal,
-	});
+	const res = await authenticatedFetch(
+		target,
+		"/api/documents/parse/capability",
+		{
+			headers: headersFor(target),
+			signal,
+		}
+	);
 	if (!res.ok) {
 		throw new Error(await errorOf(res));
 	}
@@ -164,7 +173,7 @@ export async function submitParse(
 	file: File,
 	signal?: AbortSignal
 ): Promise<ParseResult> {
-	const res = await fetch(apiUrl(target, "/api/documents/parse"), {
+	const res = await authenticatedFetch(target, "/api/documents/parse", {
 		method: "POST",
 		headers: {
 			...headersFor(target),
@@ -186,8 +195,9 @@ export async function fetchParseJob(
 	jobId: string,
 	signal?: AbortSignal
 ): Promise<ParseResult> {
-	const res = await fetch(
-		apiUrl(target, `/api/documents/parse/jobs/${encodeURIComponent(jobId)}`),
+	const res = await authenticatedFetch(
+		target,
+		`/api/documents/parse/jobs/${encodeURIComponent(jobId)}`,
 		{ headers: headersFor(target), signal }
 	);
 	if (!res.ok) {

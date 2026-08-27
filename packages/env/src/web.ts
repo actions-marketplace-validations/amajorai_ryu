@@ -8,8 +8,7 @@ export const env = createEnv({
 		// Defaults to https://ryuhq.com in metadata when unset; set the real domain in prod.
 		NEXT_PUBLIC_SITE_URL: z.url().optional(),
 		// Base URL of the local Ryu Core node (:7980), the sidecar manager + chat
-		// backend. Web `/chat` proxies /api/chat/stream, /api/agents, and
-		// /api/spaces here via next.config rewrites; falls back to localhost when unset.
+		// backend. The web portal forwards approved requests through Route Handlers.
 		NEXT_PUBLIC_CORE_URL: z.url().default("http://localhost:7980"),
 		// Base URL of the docs site (separate Fumadocs app). The marketing header
 		// links here for "Docs". Defaults to the local docs dev server on :4000;

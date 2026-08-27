@@ -7,6 +7,7 @@ import {
 import {
 	hasStepUp,
 	STEP_UP_REQUIRED,
+	stepUpAppliesToUser,
 	stepUpScopeForAuthPath,
 } from "./step-up.ts";
 
@@ -34,14 +35,15 @@ const BEARER_PREFIX = /^bearer\s+/i;
 async function resolveSessionId(ctx: {
 	context: {
 		internalAdapter: {
-			findSession: (
-				token: string
-			) => Promise<{ session: { id: string } } | null>;
+			findSession: (token: string) => Promise<{
+				session: { id: string };
+				user?: { twoFactorEnabled?: boolean | null } & Record<string, unknown>;
+			} | null>;
 		};
 	};
 	headers?: Headers;
 	request?: Request;
-}): Promise<string | null> {
+}): Promise<{ id: string; twoFactorEnabled: boolean } | null> {
 	const authorization =
 		ctx.request?.headers.get("authorization") ??
 		ctx.headers?.get("authorization") ??
@@ -66,14 +68,22 @@ async function resolveSessionId(ctx: {
 		for (const candidate of candidates) {
 			const found = await ctx.context.internalAdapter.findSession(candidate);
 			if (found?.session?.id) {
-				return found.session.id;
+				return {
+					id: found.session.id,
+					twoFactorEnabled: Boolean(found.user?.twoFactorEnabled),
+				};
 			}
 		}
 	}
 	const active = await getSessionFromCtx(
 		ctx as unknown as Parameters<typeof getSessionFromCtx>[0]
 	);
-	return active?.session?.id ?? null;
+	return active?.session?.id
+		? {
+				id: active.session.id,
+				twoFactorEnabled: Boolean(active.user?.twoFactorEnabled),
+			}
+		: null;
 }
 
 /**
@@ -110,14 +120,21 @@ export function stepUpGate(): BetterAuthPlugin {
 						if (!scope) {
 							return;
 						}
-						const sessionId = await resolveSessionId(ctx);
+						const session = await resolveSessionId(ctx);
 						// Fails OPEN with no session, on purpose: there is nothing to step
 						// up FROM, and the endpoint's own auth check rejects a moment
 						// later. A 403 here would only mask that 401.
-						if (!sessionId) {
+						if (!session) {
 							return;
 						}
-						if (await hasStepUp(sessionId, scope)) {
+						if (
+							!stepUpAppliesToUser(scope, {
+								twoFactorEnabled: session.twoFactorEnabled,
+							})
+						) {
+							return;
+						}
+						if (await hasStepUp(session.id, scope)) {
 							return;
 						}
 						throw new APIError("FORBIDDEN", {

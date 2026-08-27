@@ -91,7 +91,7 @@ export const BUILTIN_SIDEBAR_MODES: SidebarModeDescriptor[] = [
 	{
 		// Keep the key stable for existing localStorage values and older builds.
 		key: "agent",
-		title: "Bot mode",
+		title: "Agents view",
 		description: "One toggle: Agents ⇄ Sessions, opening on the Agents tab.",
 		layout: "strip",
 		sections: AGENT_MODE_SECTIONS,

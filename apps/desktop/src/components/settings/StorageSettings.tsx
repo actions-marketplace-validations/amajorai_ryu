@@ -17,7 +17,6 @@ import {
 } from "@ryu/ui/components/alert-dialog";
 import { Button } from "@ryu/ui/components/button";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
@@ -28,6 +27,7 @@ import {
 	SettingsItem,
 	SettingsSection,
 } from "@/src/components/settings/shared/settings-items.tsx";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
@@ -44,6 +44,7 @@ import {
 	type ParseCapability,
 } from "@/src/lib/api/documents.ts";
 import { formatBytes, NODE_UPLOAD_MAX_BYTES } from "@/src/lib/api/spaces.ts";
+import { listenWhenReady } from "@/src/lib/tauri-ready.ts";
 
 /** Profiles a copy can target.
  *
@@ -158,6 +159,7 @@ interface ProgressState {
 }
 
 export function StorageSettings() {
+	const { canUseNativeShell } = useAppSurface();
 	const getNode = useActiveNodeGetter();
 	const [info, setInfo] = useState<DataPathInfo | null>(null);
 	const [picked, setPicked] = useState<PickedTarget | null>(null);
@@ -188,7 +190,10 @@ export function StorageSettings() {
 
 	// Stream copy/extract progress from the offline subcommand.
 	useEffect(() => {
-		const unlisten = listen<{
+		if (!canUseNativeShell) {
+			return;
+		}
+		const unlisten = listenWhenReady<{
 			phase: string;
 			copied_bytes: number;
 			total_bytes: number;
@@ -202,7 +207,7 @@ export function StorageSettings() {
 		return () => {
 			unlisten.then((fn) => fn()).catch(() => undefined);
 		};
-	}, []);
+	}, [canUseNativeShell]);
 
 	const pickFolder = useCallback(async () => {
 		const selected = await open({ directory: true, multiple: false });
@@ -461,7 +466,7 @@ export function StorageSettings() {
 							}
 							title="Size"
 						/>
-						{info?.is_custom ? (
+						{canUseNativeShell && info?.is_custom ? (
 							<SettingsItem
 								actions={
 									<Button
@@ -483,79 +488,83 @@ export function StorageSettings() {
 				)}
 			</SettingsSection>
 
-			<SettingsSection
-				caption="Pick a new folder, then choose to copy your existing data over or start fresh. The app restarts to apply."
-				title="Change location"
-			>
-				<SettingsCard className="flex flex-col gap-3">
-					{changeLocationBody}
-				</SettingsCard>
-			</SettingsSection>
+			{canUseNativeShell ? (
+				<>
+					<SettingsSection
+						caption="Pick a new folder, then choose to copy your existing data over or start fresh. The app restarts to apply."
+						title="Change location"
+					>
+						<SettingsCard className="flex flex-col gap-3">
+							{changeLocationBody}
+						</SettingsCard>
+					</SettingsSection>
 
-			<SettingsSection
-				caption="Give another profile a copy of this one's data. For example, hand canary your stable chats, spaces and agents so you can test against real state instead of rebuilding it by hand. Both profiles stay usable; nothing here changes where THIS profile reads from."
-				title="Copy to another profile"
-			>
-				<SettingsGroup>
-					{PROFILE_COPY_TARGETS.map((target) => (
-						<SettingsItem
-							actions={
-								<Button
-									disabled={busy}
-									onClick={() => setPendingProfileCopy(target)}
-									size="sm"
-									variant="ghost"
-								>
-									Copy
-								</Button>
-							}
-							description={`Copies into ~/.ryu-${target}. Refused if that profile already has data.`}
-							key={target}
-							title={`Copy to ${target}`}
-						/>
-					))}
-				</SettingsGroup>
-			</SettingsSection>
+					<SettingsSection
+						caption="Give another profile a copy of this one's data. For example, hand canary your stable chats, spaces and agents so you can test against real state instead of rebuilding it by hand. Both profiles stay usable; nothing here changes where THIS profile reads from."
+						title="Copy to another profile"
+					>
+						<SettingsGroup>
+							{PROFILE_COPY_TARGETS.map((target) => (
+								<SettingsItem
+									actions={
+										<Button
+											disabled={busy}
+											onClick={() => setPendingProfileCopy(target)}
+											size="sm"
+											variant="ghost"
+										>
+											Copy
+										</Button>
+									}
+									description={`Copies into ~/.ryu-${target}. Refused if that profile already has data.`}
+									key={target}
+									title={`Copy to ${target}`}
+								/>
+							))}
+						</SettingsGroup>
+					</SettingsSection>
 
-			<SettingsSection
-				caption="Export a zip backup of the whole data folder, or restore from one. Restoring overwrites the current data and restarts the app. The backup does NOT contain your encryption key, so it can only be restored on this machine, signed in as this user."
-				title="Backup &amp; restore"
-			>
-				<SettingsGroup>
-					<SettingsItem
-						actions={
-							<Button
-								disabled={busy}
-								onClick={() => {
-									doExport().catch(() => undefined);
-								}}
-								size="sm"
-								variant="ghost"
-							>
-								Export…
-							</Button>
-						}
-						description="Save a zip of all your Ryu data."
-						title="Export backup"
-					/>
-					<SettingsItem
-						actions={
-							<Button
-								disabled={busy}
-								onClick={() => {
-									doImport().catch(() => undefined);
-								}}
-								size="sm"
-								variant="ghost"
-							>
-								Restore…
-							</Button>
-						}
-						description="Replace current data with a backup zip."
-						title="Restore backup"
-					/>
-				</SettingsGroup>
-			</SettingsSection>
+					<SettingsSection
+						caption="Export a zip backup of the whole data folder, or restore from one. Restoring overwrites the current data and restarts the app. The backup does NOT contain your encryption key, so it can only be restored on this machine, signed in as this user."
+						title="Backup &amp; restore"
+					>
+						<SettingsGroup>
+							<SettingsItem
+								actions={
+									<Button
+										disabled={busy}
+										onClick={() => {
+											doExport().catch(() => undefined);
+										}}
+										size="sm"
+										variant="ghost"
+									>
+										Export…
+									</Button>
+								}
+								description="Save a zip of all your Ryu data."
+								title="Export backup"
+							/>
+							<SettingsItem
+								actions={
+									<Button
+										disabled={busy}
+										onClick={() => {
+											doImport().catch(() => undefined);
+										}}
+										size="sm"
+										variant="ghost"
+									>
+										Restore…
+									</Button>
+								}
+								description="Replace current data with a backup zip."
+								title="Restore backup"
+							/>
+						</SettingsGroup>
+					</SettingsSection>
+				</>
+			) : null}
 
 			<UploadCeilingSection />
 

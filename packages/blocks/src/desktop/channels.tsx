@@ -97,6 +97,22 @@ export const VOICE_REPLY_LABELS: Record<VoiceReplyMode, string> = {
 	always: "Speak every reply",
 };
 
+export interface ReactionLearningSettings {
+	allowGroup: boolean;
+	enabled: boolean;
+	negativeEmoji: string[];
+	positiveEmoji: string[];
+}
+
+export function defaultReactionLearningSettings(): ReactionLearningSettings {
+	return {
+		enabled: false,
+		positiveEmoji: ["👍"],
+		negativeEmoji: ["👎"],
+		allowGroup: false,
+	};
+}
+
 // Every platform below has a real, registered gateway adapter, so none are
 // gated. What differs is the setup each one demands — see CHANNEL_SETUP.
 //
@@ -560,6 +576,8 @@ export interface ChannelBehaviorSettings {
 	profileShortBio: string | null;
 	/** Publish Ryu's command menu where the platform has one. */
 	publishCommands: boolean;
+	/** Optional provider emoji → Learning feedback mapping. */
+	reactionLearning: ReactionLearningSettings;
 	/** Render replies as platform rich text where supported. */
 	richText: boolean;
 	/** Mark inbound messages read (WhatsApp / iMessage). */
@@ -595,6 +613,7 @@ export function defaultBehaviorSettings(): ChannelBehaviorSettings {
 		profileName: null,
 		profileShortBio: null,
 		profileDescription: null,
+		reactionLearning: defaultReactionLearningSettings(),
 	};
 }
 
@@ -609,6 +628,7 @@ export function defaultBehaviorSettings(): ChannelBehaviorSettings {
 export function supportedSettings(channelType: ChannelType): {
 	commandMenu: boolean;
 	profile: boolean;
+	reactionLearning: boolean;
 	readReceipts: boolean;
 	richText: boolean;
 	streaming: boolean;
@@ -628,6 +648,7 @@ export function supportedSettings(channelType: ChannelType): {
 		// but both have SOMETHING; iMessage needs the Private API helper.
 		typing: true,
 		profile: channelType === "telegram" || channelType === "discord",
+		reactionLearning: channelType === "telegram",
 	};
 }
 
@@ -707,6 +728,8 @@ export interface ChannelsViewProps {
 	canDelete?: boolean;
 	channels: ChannelConfigView[];
 	error?: string | null;
+	/** Platform selected when a deep-linked app opens the new-channel form. */
+	initialChannelType?: ChannelType;
 	/** Seed the "new channel" form open. */
 	initialNew?: boolean;
 	/** Seed selection for storyboard determinism (e.g. the "edit" variant). */
@@ -749,9 +772,9 @@ const DEFAULT_AGENT = "__default__";
 // distinguishable from an agent id (the two come from different id namespaces).
 const TEAM_PREFIX = "team:";
 
-function emptyForm(): FormState {
+function emptyForm(channelType: ChannelType = "telegram"): FormState {
 	return {
-		channelType: "telegram",
+		channelType,
 		name: "",
 		agentId: DEFAULT_AGENT,
 		model: "",
@@ -790,6 +813,7 @@ function behaviorFromConfig(
 		profileName: c.profileName ?? defaults.profileName,
 		profileShortBio: c.profileShortBio ?? defaults.profileShortBio,
 		profileDescription: c.profileDescription ?? defaults.profileDescription,
+		reactionLearning: c.reactionLearning ?? defaults.reactionLearning,
 	};
 }
 
@@ -885,6 +909,7 @@ export function ChannelsView({
 	saving,
 	initialSelectedId = null,
 	initialNew = false,
+	initialChannelType = "telegram",
 	canDelete = true,
 	onSignIn,
 	onSave,
@@ -895,7 +920,9 @@ export function ChannelsView({
 		initialSelectedId
 	);
 	const [isNew, setIsNew] = useState(initialNew);
-	const [form, setForm] = useState<FormState>(emptyForm);
+	const [form, setForm] = useState<FormState>(() =>
+		emptyForm(initialChannelType)
+	);
 	const [formError, setFormError] = useState<string | null>(null);
 
 	// Sidebar / deep-link navigation remounts are rare; still re-seed when the
@@ -909,12 +936,12 @@ export function ChannelsView({
 
 	useEffect(() => {
 		if (isNew) {
-			setForm(emptyForm());
+			setForm(emptyForm(initialChannelType));
 		} else if (selected) {
 			setForm(formFromConfig(selected));
 		}
 		setFormError(null);
-	}, [selected, isNew]);
+	}, [selected, isNew, initialChannelType]);
 
 	const openNew = useCallback(() => {
 		setSelectedId(null);
@@ -1642,6 +1669,103 @@ export function ChannelsView({
 								}
 							/>
 						</div>
+
+						{supported.reactionLearning ? (
+							<div className="space-y-3 rounded-md border border-dashed p-3">
+								<div className="flex items-center justify-between gap-4">
+									<div>
+										<p className="text-sm">Reaction learning</p>
+										<p className="text-muted-foreground text-xs">
+											Use reactions on Ryu's replies as Good response / Bad
+											response feedback. It is off by default and only accepts
+											exact replies.
+										</p>
+									</div>
+									<Switch
+										aria-label="Enable reaction learning"
+										checked={form.reactionLearning.enabled}
+										onCheckedChange={(v) =>
+											setForm((f) => ({
+												...f,
+												reactionLearning: {
+													...f.reactionLearning,
+													enabled: v,
+												},
+											}))
+										}
+									/>
+								</div>
+								<div className="space-y-1.5">
+									<Label htmlFor="channel-positive-emojis">
+										Good response emojis
+									</Label>
+									<Input
+										disabled={!form.reactionLearning.enabled}
+										id="channel-positive-emojis"
+										onChange={(e) =>
+											setForm((f) => ({
+												...f,
+												reactionLearning: {
+													...f.reactionLearning,
+													positiveEmoji: e.target.value
+														.split(",")
+														.map((value) => value.trim())
+														.filter(Boolean),
+												},
+											}))
+										}
+										placeholder="👍, ❤️, 🎉"
+										value={form.reactionLearning.positiveEmoji.join(", ")}
+									/>
+								</div>
+								<div className="space-y-1.5">
+									<Label htmlFor="channel-negative-emojis">
+										Bad response emojis
+									</Label>
+									<Input
+										disabled={!form.reactionLearning.enabled}
+										id="channel-negative-emojis"
+										onChange={(e) =>
+											setForm((f) => ({
+												...f,
+												reactionLearning: {
+													...f.reactionLearning,
+													negativeEmoji: e.target.value
+														.split(",")
+														.map((value) => value.trim())
+														.filter(Boolean),
+												},
+											}))
+										}
+										placeholder="👎, 💀, 😴"
+										value={form.reactionLearning.negativeEmoji.join(", ")}
+									/>
+								</div>
+								<div className="flex items-center justify-between gap-4">
+									<div>
+										<p className="text-sm">Allow group reactions</p>
+										<p className="text-muted-foreground text-xs">
+											Off by default because group feedback can represent more
+											than one person.
+										</p>
+									</div>
+									<Switch
+										aria-label="Allow group reaction learning"
+										checked={form.reactionLearning.allowGroup}
+										disabled={!form.reactionLearning.enabled}
+										onCheckedChange={(v) =>
+											setForm((f) => ({
+												...f,
+												reactionLearning: {
+													...f.reactionLearning,
+													allowGroup: v,
+												},
+											}))
+										}
+									/>
+								</div>
+							</div>
+						) : null}
 
 						{supported.commandMenu ? (
 							<div className="flex items-center justify-between gap-4">

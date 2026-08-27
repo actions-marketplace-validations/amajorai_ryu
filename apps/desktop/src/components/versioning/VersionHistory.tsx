@@ -3,9 +3,9 @@
 // A reusable, server-backed version-history control modelled on Prompt Studio's
 // snapshot/diff/restore UI, but transport-agnostic: the caller injects a
 // `VersionSource` (list / getValue / snapshot / restore) so the same control
-// drives page (Spaces document) and workflow versioning against their own Core
-// endpoints. Unlike Prompt Studio's localStorage history, versions here are
-// durable and shared across devices.
+// drives page, skill, agent-prompt, and workflow source history against their own
+// Core endpoints. The source may be Git-backed (the current Core default); the
+// control intentionally does not know or care which durable store supplies it.
 
 import { Clock01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -24,6 +24,127 @@ export interface VersionMeta {
 	label?: string | null;
 	/** Display title (page title / workflow name) captured at snapshot time. */
 	title?: string;
+	/** Last edit included in an automatic checkpoint, when Core supplies it. */
+	updatedAt?: number;
+}
+
+export interface VersionDiffRow {
+	id: string;
+	kind: "added" | "removed" | "unchanged";
+	text: string;
+}
+
+/** Build a stable line diff, with a bounded fallback for very large documents. */
+export function buildVersionDiff(
+	before: string,
+	after: string
+): VersionDiffRow[] {
+	const beforeLines = before.split("\n");
+	const afterLines = after.split("\n");
+	const rows: VersionDiffRow[] = [];
+	if (beforeLines.length * afterLines.length > 250_000) {
+		const count = Math.max(beforeLines.length, afterLines.length);
+		for (let index = 0; index < count; index += 1) {
+			if (beforeLines[index] !== undefined) {
+				rows.push({
+					id: `removed-${rows.length}`,
+					kind: "removed",
+					text: beforeLines[index],
+				});
+			}
+			if (afterLines[index] !== undefined) {
+				rows.push({
+					id: `added-${rows.length}`,
+					kind: "added",
+					text: afterLines[index],
+				});
+			}
+		}
+		return rows;
+	}
+
+	const lcs = Array.from({ length: beforeLines.length + 1 }, () =>
+		new Array<number>(afterLines.length + 1).fill(0)
+	);
+	for (
+		let beforeIndex = beforeLines.length - 1;
+		beforeIndex >= 0;
+		beforeIndex--
+	) {
+		for (
+			let afterIndex = afterLines.length - 1;
+			afterIndex >= 0;
+			afterIndex--
+		) {
+			lcs[beforeIndex][afterIndex] =
+				beforeLines[beforeIndex] === afterLines[afterIndex]
+					? 1 + lcs[beforeIndex + 1][afterIndex + 1]
+					: Math.max(
+							lcs[beforeIndex + 1][afterIndex],
+							lcs[beforeIndex][afterIndex + 1]
+						);
+		}
+	}
+	let beforeIndex = 0;
+	let afterIndex = 0;
+	while (beforeIndex < beforeLines.length || afterIndex < afterLines.length) {
+		if (
+			beforeIndex < beforeLines.length &&
+			afterIndex < afterLines.length &&
+			beforeLines[beforeIndex] === afterLines[afterIndex]
+		) {
+			rows.push({
+				id: `unchanged-${rows.length}`,
+				kind: "unchanged",
+				text: beforeLines[beforeIndex],
+			});
+			beforeIndex += 1;
+			afterIndex += 1;
+			continue;
+		}
+		const canAdd =
+			afterIndex < afterLines.length &&
+			(beforeIndex >= beforeLines.length ||
+				lcs[beforeIndex][afterIndex + 1] >= lcs[beforeIndex + 1][afterIndex]);
+		if (canAdd) {
+			rows.push({
+				id: `added-${rows.length}`,
+				kind: "added",
+				text: afterLines[afterIndex],
+			});
+			afterIndex += 1;
+		} else {
+			rows.push({
+				id: `removed-${rows.length}`,
+				kind: "removed",
+				text: beforeLines[beforeIndex],
+			});
+			beforeIndex += 1;
+		}
+	}
+	return rows;
+}
+
+export interface VersionDateGroup {
+	date: string;
+	versions: VersionMeta[];
+}
+
+export function groupVersionsByDate(
+	versions: VersionMeta[]
+): VersionDateGroup[] {
+	const groups: VersionDateGroup[] = [];
+	for (const version of versions) {
+		const timestamp = version.updatedAt ?? version.createdAt;
+		const date = new Date(timestamp).toISOString().slice(0, 10);
+		const existing = groups.find((group) => group.date === date);
+		if (existing) {
+			existing.versions.push(version);
+		} else {
+			groups.push({ date, versions: [version] });
+		}
+	}
+	return groups;
 }
 
 /** The data operations a concrete feature wires up for its versions. */
@@ -33,9 +154,9 @@ export interface VersionSource {
 	/** List versions, newest first. */
 	list: () => Promise<VersionMeta[]>;
 	/** Restore a version as the current content. */
-	restore: (versionId: string) => Promise<void>;
+	restore: (versionId: string) => Promise<unknown>;
 	/** Snapshot the current content as a new version. */
-	snapshot: (label?: string) => Promise<void>;
+	snapshot: (label?: string) => Promise<unknown>;
 }
 
 interface VersionHistoryProps {
@@ -57,32 +178,21 @@ function VersionDiff({
 	snapshot: string;
 	current: string;
 }) {
-	const snapLines = snapshot.split("\n");
-	const curLines = current.split("\n");
-	const max = Math.max(snapLines.length, curLines.length);
-	const rows: { id: string; tone: string; text: string }[] = [];
-	for (let i = 0; i < max; i++) {
-		const s = snapLines[i];
-		const c = curLines[i];
-		if (s === c) {
-			rows.push({
-				id: `eq-${i}`,
-				tone: "text-muted-foreground",
-				text: ` ${s ?? ""}`,
-			});
-		} else {
-			if (s !== undefined) {
-				rows.push({ id: `del-${i}`, tone: "text-destructive", text: `- ${s}` });
-			}
-			if (c !== undefined) {
-				rows.push({
-					id: `add-${i}`,
-					tone: "text-success dark:text-success",
-					text: `+ ${c}`,
-				});
-			}
-		}
-	}
+	const rows = buildVersionDiff(snapshot, current).map((row) => ({
+		...row,
+		tone:
+			row.kind === "added"
+				? "text-success dark:text-success"
+				: row.kind === "removed"
+					? "text-destructive"
+					: "text-muted-foreground",
+		text:
+			row.kind === "added"
+				? `+ ${row.text}`
+				: row.kind === "removed"
+					? `- ${row.text}`
+					: ` ${row.text}`,
+	}));
 	return (
 		<pre className="max-h-48 overflow-auto rounded bg-muted/40 p-2 font-mono text-[11px] leading-relaxed">
 			{rows.map((r) => (

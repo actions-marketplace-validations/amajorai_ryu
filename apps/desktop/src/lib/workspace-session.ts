@@ -47,9 +47,13 @@ function parseTab(value: unknown): WorkspaceSessionTab | null {
 	) {
 		return null;
 	}
+	// Older builds opened one `subagent` tab per selected worker and persisted its
+	// synthetic persona label (for example, "Atlas"). The unified roster owns its
+	// detail view now, so migrate both fields at the persistence boundary.
+	const legacySubagent = row.kind === "subagent";
 	return {
-		kind: row.kind as DockTabKind,
-		label: row.label,
+		kind: (legacySubagent ? "subagents" : row.kind) as DockTabKind,
+		label: legacySubagent ? "Subagents" : row.label,
 		...(row.project === true ? { project: true } : {}),
 		...(row.pinned === true ? { pinned: true } : {}),
 		...(typeof row.uid === "string" && row.uid.length > 0

@@ -2,6 +2,11 @@
 
 import { Badge } from "@ryu/ui/components/badge";
 import { buttonVariants } from "@ryu/ui/components/button";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuTrigger,
+} from "@ryu/ui/components/dropdown-menu.tsx";
 import { Logo } from "@ryu/ui/components/logo";
 import {
 	MotionNavigationMenu,
@@ -12,18 +17,19 @@ import {
 	MotionNavigationMenuTrigger,
 } from "@ryu/ui/components/motion-navigation-menu";
 import { cn } from "@ryu/ui/lib/utils";
-import { Link2 } from "lucide-react";
+import { ChevronDown } from "lucide-react";
+// import { Link2 } from "lucide-react";
 import type { Route } from "next";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
-import { type ProductCategory, productsByCategory } from "./data/products.tsx";
+import { PRODUCT_REALMS } from "./data/product-realms.ts";
 import {
 	DOCS_URL,
 	resourceCategories,
 	resourcesByCategory,
 } from "./data/resources.tsx";
-import { solutionCategories, solutionsByCategory } from "./data/solutions.ts";
+// import { solutionCategories, solutionsByCategory } from "./data/solutions.ts";
 import { ProgressiveBlur } from "./progressive-blur.tsx";
 
 interface HeaderLink {
@@ -32,36 +38,124 @@ interface HeaderLink {
 	to: string;
 }
 
-// Header stays minimal: the Products, Solutions, and Resources mega-menus are
-// the primary nav. Marketplace is the one flat link — it is the discovery
-// surface for every kind of thing an agent can run, so it stays one click from
-// the top bar rather than buried in the Resources dropdown. Docs, Compare,
-// Pricing, Blog, Changelog, and Help live inside that dropdown (and
-// the footer) to keep the top bar uncluttered.
+// Header stays minimal: the Products menu shows Ryu's mental model — workspaces
+// and standalone services on top, with the open platform and infrastructure
+// underneath. Solutions and Resources remain separate; Marketplace is the one
+// flat link for discovering everything an agent can run.
 const MARKETING_LINKS: readonly HeaderLink[] = [
 	{ to: "/marketplace", label: "Marketplace" },
 ];
 
-function ProductCategoryColumn({ category }: { category: ProductCategory }) {
+const SURFACE_LINKS = [
+	...PRODUCT_REALMS.filter((realm) =>
+		["os", "bot", "console", "box", "hire"].includes(realm.id)
+	).map(({ href, label }) => ({ href, label })),
+	{ href: "/marketplace/apps", label: "Ryu Apps" },
+];
+
+const PLATFORM_LINKS = [
+	...PRODUCT_REALMS.filter((realm) => realm.id === "gateway").map(
+		({ href, label }) => ({ href, label })
+	),
+	{
+		href: "/products/sdk",
+		label: "SDKs",
+	},
+	{
+		href: "/products/core",
+		label: "Core",
+	},
+] as const;
+
+const INFRA_LINKS = [
+	{
+		href: "/platform#infra",
+		label: "Ryu Cloud",
+	},
+	{
+		href: "/platform#infra",
+		label: "Self-hosted",
+	},
+] as const;
+
+function ProductLinkGroup({
+	links,
+	title,
+}: {
+	links: readonly { href: string; label: string }[];
+	title: string;
+}) {
 	return (
 		<div>
 			<p className="mb-2 px-3 font-medium text-muted-foreground text-sm">
-				{category}
+				{title}
 			</p>
 			<div>
-				{productsByCategory(category).map((product) => (
+				{links.map((product) => (
 					<MotionNavigationMenuLink
 						className="px-3 py-1"
-						key={product.slug}
-						render={<Link href={`/products/${product.slug}`} />}
+						key={product.label}
+						render={<Link href={product.href as Route} />}
 					>
 						<span className="font-semibold text-foreground text-xl tracking-tight transition-colors hover:text-accent-foreground">
-							{product.navLabel}
+							{product.label}
 						</span>
 					</MotionNavigationMenuLink>
 				))}
 			</div>
 		</div>
+	);
+}
+
+function PrimaryProductLinks() {
+	return (
+		<div>
+			<div className="grid w-[760px] grid-cols-3 gap-x-6 gap-y-7 p-2">
+				<ProductLinkGroup links={SURFACE_LINKS} title="Products" />
+				<ProductLinkGroup links={PLATFORM_LINKS} title="Platform" />
+				<ProductLinkGroup links={INFRA_LINKS} title="Infrastructure" />
+			</div>
+			<div className="mt-1 border-border/60 border-t px-3 pt-2.5">
+				<MotionNavigationMenuLink
+					className="px-3"
+					render={<Link href="/platform" />}
+				>
+					<span className="font-medium text-foreground text-sm">
+						Explore Ryu Platform →
+					</span>
+				</MotionNavigationMenuLink>
+			</div>
+		</div>
+	);
+}
+
+function ProductsMenu({ pathname }: { pathname: string }) {
+	return (
+		<DropdownMenu>
+			<DropdownMenuTrigger
+				className={cn(
+					buttonVariants({ variant: "ghost" }),
+					"gap-1 hover:bg-muted hover:text-foreground",
+					(pathname.startsWith("/products") ||
+						pathname === "/bot" ||
+						pathname === "/console" ||
+						pathname === "/build" ||
+						pathname === "/platform" ||
+						pathname.startsWith("/marketplace/apps")) &&
+						"bg-muted"
+				)}
+			>
+				Products
+				<ChevronDown aria-hidden="true" className="size-3.5" />
+			</DropdownMenuTrigger>
+			<DropdownMenuContent
+				align="center"
+				className="!w-[800px] rounded-2xl p-2"
+				withBackdrop={false}
+			>
+				<PrimaryProductLinks />
+			</DropdownMenuContent>
+		</DropdownMenu>
 	);
 }
 
@@ -134,39 +228,11 @@ export default function Header({
 						<MotionNavigationMenu viewportClassName="shadow-none">
 							<MotionNavigationMenuList>
 								<MotionNavigationMenuItem value="products">
-									<MotionNavigationMenuTrigger
-										className={cn(
-											pathname.startsWith("/products") &&
-												"text-accent-foreground"
-										)}
-									>
-										Products
-									</MotionNavigationMenuTrigger>
-									<MotionNavigationMenuContent>
-										<div className="grid w-[760px] grid-cols-2 gap-x-6 gap-y-7 p-2">
-											<ProductCategoryColumn category="Build" />
-											<ProductCategoryColumn category="Platform" />
-											<div className="flex flex-col gap-y-5">
-												<ProductCategoryColumn category="Developers" />
-												<ProductCategoryColumn category="Ecosystem" />
-											</div>
-											<div className="row-span-2 row-start-2 self-start">
-												<ProductCategoryColumn category="Surfaces" />
-											</div>
-										</div>
-										<div className="mt-1 border-border/60 border-t px-3 pt-2.5">
-											<MotionNavigationMenuLink
-												className="px-3"
-												render={<Link href="/products" />}
-											>
-												<span className="font-medium text-foreground text-sm">
-													View all products →
-												</span>
-											</MotionNavigationMenuLink>
-										</div>
-									</MotionNavigationMenuContent>
+									<ProductsMenu pathname={pathname} />
 								</MotionNavigationMenuItem>
 
+								{/* Solutions menu paused until the product hierarchy is settled. */}
+								{/*
 								<MotionNavigationMenuItem value="solutions">
 									<MotionNavigationMenuTrigger
 										className={cn(
@@ -213,10 +279,10 @@ export default function Header({
 												/>
 												<div className="min-w-0">
 													<p className="font-medium text-foreground text-sm">
-														Sell & operate agents
+														Run AI for clients
 													</p>
 													<p className="truncate text-muted-foreground text-xs">
-														Refer, build an agency, or host for clients
+														Help teams make AI safe and repeatable
 													</p>
 												</div>
 											</MotionNavigationMenuLink>
@@ -231,11 +297,14 @@ export default function Header({
 										</div>
 									</MotionNavigationMenuContent>
 								</MotionNavigationMenuItem>
+								*/}
 
 								<MotionNavigationMenuItem value="resources">
 									<MotionNavigationMenuTrigger
 										className={cn(
 											(pathname.startsWith("/docs") ||
+												pathname.startsWith("/academy") ||
+												pathname.startsWith("/certifications") ||
 												pathname.startsWith("/marketplace") ||
 												pathname.startsWith("/compare") ||
 												pathname.startsWith("/pricing") ||

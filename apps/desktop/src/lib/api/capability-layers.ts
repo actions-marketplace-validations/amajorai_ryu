@@ -23,18 +23,10 @@
 // map would leave an enabled consumer unbound. `request()`'s `ApiError` only
 // carries `error`, dropping `plugin` and `binding_error` — the two fields that
 // say WHICH app broke and HOW. So the write goes through a raw fetch composed of
-// the same exported helpers (`apiUrl` / `makeHeaders` / `identityHeaders`) and
-// throws a typed {@link CapabilityBindingConflictError} instead. The route is
-// node-bearer gated and never reads the verified-caller extension, so the node
-// token plus the attribution headers is the complete, correct header set.
+// the same authenticated raw-fetch seam as every other Core call and throws a
+// typed {@link CapabilityBindingConflictError} instead.
 
-import {
-	type ApiTarget,
-	apiUrl,
-	identityHeaders,
-	makeHeaders,
-	request,
-} from "./client.ts";
+import { type ApiTarget, authenticatedFetch, request } from "./client.ts";
 
 const CAPABILITIES_PATH = "/api/capabilities";
 const BINDINGS_PATH = "/api/capabilities/bindings";
@@ -354,9 +346,8 @@ async function replaceCapabilityBindings(
 	target: ApiTarget,
 	overrides: Record<string, string>
 ): Promise<Record<string, string>> {
-	const resp = await fetch(apiUrl(target, BINDINGS_PATH), {
+	const resp = await authenticatedFetch(target, BINDINGS_PATH, {
 		body: JSON.stringify({ overrides }),
-		headers: { ...makeHeaders(target.token), ...identityHeaders() },
 		method: "PUT",
 	});
 	if (!resp.ok) {

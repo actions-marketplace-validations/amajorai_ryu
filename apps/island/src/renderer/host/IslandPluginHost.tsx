@@ -17,6 +17,10 @@
 //
 // Renders nothing runnable unless the companion carries a UI bundle (`hasUi`).
 
+import type {
+	RyuCatalogModels,
+	RyuCatalogSnapshot,
+} from "@ryu/app-host/app-bridge";
 import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
 	type BackgroundProcess,
@@ -115,6 +119,18 @@ export function IslandPluginHost({
 				}
 				return result.agents.map((a) => ({ id: a.id, name: a.name }));
 			},
+			catalogSnapshot: () =>
+				pluginHostInvoke(
+					companion.pluginId,
+					"catalog.snapshot",
+					{}
+				) as Promise<RyuCatalogSnapshot>,
+			catalogModels: (input) =>
+				pluginHostInvoke(
+					companion.pluginId,
+					"catalog.models",
+					input
+				) as Promise<RyuCatalogModels>,
 			registerRoute: (claim) => {
 				if (!validatePluginRoute(companion.id, claim)) {
 					return Promise.reject(

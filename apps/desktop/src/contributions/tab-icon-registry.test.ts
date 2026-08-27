@@ -16,7 +16,7 @@ describe("tab-icon-registry", () => {
 	test("no built-in seed for an app-owned path", () => {
 		// `/meetings` belongs to the `@ryu/meetings` app, which seeds its own icon
 		// into this registry from the live contributions feed. A built-in row for it
-		// painted a glyph whether or not the (default-OFF) app was enabled.
+		// painted a glyph whether or not the (not pre-installed) app was enabled.
 		expect(resolveTabIcon("/meetings/m1")).toBeUndefined();
 	});
 

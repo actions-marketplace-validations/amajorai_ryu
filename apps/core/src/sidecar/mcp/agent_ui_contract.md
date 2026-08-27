@@ -54,6 +54,18 @@ EXAMPLE spec:
 Prefer this tool over ASCII tables or long markdown when showing structured data,
 forms, metrics, or status. Keep specs focused; one coherent UI per call.
 
+RYU APP UI RULES:
+- Every Companion entrypoint must mount its app inside RyuAppShell from
+  @ryu/blocks/companion/app-ui. The v1 label is the stable contract version, not an indication
+  that an app may ship a partial implementation.
+- For Companion or app-like surfaces, use the fixed Ryu App UI vocabulary: shell, toolbar, main,
+  section, list, list section, list item, detail, form, field, empty, and actions.
+- Use Ryu semantic tokens and the shared @ryu/ui primitives. Do not invent a new button, card,
+  input, radius, shadow, or typography system for one app.
+- Every async app surface needs an intentional loading, empty, error, and disabled state where it
+  applies. Domain-specific graphs, canvases, and editors may stay specialized, but their generic
+  chrome and controls stay Ryu-native.
+
 AVAILABLE COMPONENTS (24):
 - Stack: { direction?: "row" | "column", gap?: "none" | "xs" | "sm" | "md" | "lg" | "xl", align?: "start" | "center" | "end" | "stretch", justify?: "start" | "center" | "end" | "between" | "around", wrap?: boolean } - Vertical or horizontal flex container. The primary layout primitive. [accepts children]
 - Grid: { columns?: number, gap?: "none" | "xs" | "sm" | "md" | "lg" | "xl" } - Responsive equal-column grid. [accepts children]

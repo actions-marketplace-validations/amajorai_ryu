@@ -23,11 +23,14 @@ pub mod auto_title;
 pub mod canvas_migrate;
 pub mod catalog_scan;
 pub mod chat_suggestions;
+pub mod continuity;
 pub mod conversations;
 pub mod data_admin;
 pub mod encryption;
 pub mod gifs;
 pub mod git;
+pub mod governance;
+pub mod hooks;
 pub mod recommendations;
 // The device-registry + TRMNL display HTTP surface moved to the extracted
 // `ryu_hardware` crate (`ryu_hardware::api`); the public pairing ingress + the WS
@@ -51,6 +54,7 @@ pub mod managed_bot_api;
 pub mod mcp_oauth_api;
 pub mod media;
 pub mod memory_dream;
+pub mod memory_git;
 pub mod uploads;
 /// Re-export of the extracted [`ryu_memory`] crate under the historical
 /// `server::memory` path. The long-term memory store, scope model, and recall now
@@ -59,6 +63,10 @@ pub mod uploads;
 /// sites in Core unchanged (re-export shim, zero business logic).
 pub use ryu_memory as memory;
 pub mod app_notify;
+pub mod app_egress;
+pub mod app_email;
+pub mod app_tool_usage;
+pub mod provider_router;
 pub mod notifications_api;
 pub mod onboarding_profile;
 pub mod openapi;
@@ -69,11 +77,13 @@ pub mod preferences;
 pub mod realtime_ws;
 pub mod rules;
 pub mod shadow_proxy;
+pub mod space_portable;
 /// Re-export shim: `crate::server::retrieval` is the extracted [`ryu_rag`] crate.
 /// Provider/model selection lives in [`crate::rag_host`] (the single resolver);
 /// this alias keeps the many `retrieval::`-qualified reference sites unchanged.
 pub use ryu_rag as retrieval;
 pub mod routing_api;
+mod space_imports;
 pub mod spaces;
 pub mod sync;
 pub mod usage_api;
@@ -92,7 +102,7 @@ use crate::auth::AuthState;
 use crate::plugins::PluginStore;
 use crate::sidecar::adapters::{
     route_chat_stream, run_proactive_opening_text, run_reply_text, run_team_reply_text,
-    AcpAgentRegistry, ChatStreamRequest,
+    AcpAgentRegistry, ChatStreamRequest, UiContent, UiMessage,
 };
 use crate::sidecar::mcp::McpRegistry;
 use crate::sidecar::onboarding::SetupManager;
@@ -137,6 +147,9 @@ pub struct ServerState {
     pub auth: Arc<Mutex<AuthState>>,
     pub agents: Arc<AcpAgentRegistry>,
     pub agent_store: AgentStore,
+    /// Core-owned Safe Actions verifier, policy store, review queue, and receipt
+    /// ledger. The companion app is only a UI over this authority.
+    pub safe_actions: crate::safe_actions::SafeActionsService,
     /// Loopback client for the out-of-process `ryu-teams` sidecar, which owns
     /// `~/.ryu/teams.db` and serves `/api/teams/*`. Agent **teams** (a named,
     /// ordered collection of agents + a coordination strategy) are addressed as one
@@ -302,11 +315,9 @@ pub struct ServerState {
     /// Per-node Agent-UI template library. Templates are validated JSON over
     /// the closed catalog and resource-scoped by the HTTP handlers.
     pub agent_ui_templates: agent_ui_templates::AgentUiTemplateStore,
-    /// The configured node-admittance token (`RYU_TOKEN`), captured so the public
-    /// `GET /api/realtime/ws` handler can enforce it in-handler (the public router
-    /// has no `auth_token` request Extension, unlike the protected router's
-    /// `require_auth`). `None`/empty = loopback dev (no token configured), where
-    /// the upgrade is allowed without a token — mirrors [`require_auth`] semantics.
+    /// Startup snapshot of the configured node-admittance token (`RYU_TOKEN`). Live
+    /// auth surfaces resolve [`crate::node_token::active_token`] so rotation takes
+    /// effect immediately; this field remains for state compatibility only.
     pub node_token: Option<String>,
 }
 
@@ -417,53 +428,250 @@ fn ct_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-async fn require_auth(
-    req: Request<axum::body::Body>,
-    next: middleware::Next,
-) -> Result<axum::response::Response, StatusCode> {
-    let expected = match req.extensions().get::<Option<String>>().cloned().flatten() {
-        Some(t) => t,
-        None => return Ok(next.run(req).await),
-    };
+#[derive(Clone)]
+struct ResolvedAuthorization {
+    context: crate::authorization::AuthorizationContext,
+    bindings: crate::authorization::RequestBindings,
+    caller: Option<crate::identity_verify::VerifiedCaller>,
+    verified_user_jwt: Option<String>,
+}
 
-    let provided = req
+#[derive(Clone)]
+struct VerifiedUserJwt(Option<String>);
+
+fn path_has_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn route_policy(method: &Method, path: &str) -> crate::authorization::RoutePolicy {
+    use crate::authorization::{Capability, RoutePolicy};
+    let read = matches!(*method, Method::GET | Method::HEAD);
+    if path == "/mcp" || path_has_prefix(path, "/mcp") {
+        return RoutePolicy::Authenticated;
+    }
+    if path_has_prefix(path, "/api/pair") || path == "/api/node/token/rotate" {
+        return RoutePolicy::OwnerOnly;
+    }
+    if path_has_prefix(path, "/api/chat")
+        || path_has_prefix(path, "/api/conversations")
+        || path_has_prefix(path, "/api/proactive")
+        || path_has_prefix(path, "/api/channels/run")
+    {
+        return RoutePolicy::requires([if read {
+            Capability::ChatRead
+        } else {
+            Capability::ChatWrite
+        }]);
+    }
+    if path_has_prefix(path, "/api/agents") || path_has_prefix(path, "/api/agent-ui") {
+        return RoutePolicy::requires([if read {
+            Capability::AgentsRead
+        } else {
+            Capability::AgentsManage
+        }]);
+    }
+    if path_has_prefix(path, "/api/workflows") || path_has_prefix(path, "/api/automations") {
+        if path.ends_with("/run") || path.ends_with("/execute") {
+            return RoutePolicy::requires([Capability::WorkflowsRun]);
+        }
+        return RoutePolicy::requires([if read {
+            Capability::WorkflowsRead
+        } else {
+            Capability::WorkflowsManage
+        }]);
+    }
+    if path == "/api/mcp/tools/call" {
+        return RoutePolicy::requires([Capability::ToolsExec]);
+    }
+    if path == "/api/mcp/tools" || path_has_prefix(path, "/api/tools") {
+        return RoutePolicy::requires([if read {
+            Capability::ToolsRead
+        } else {
+            Capability::ToolsExec
+        }]);
+    }
+    if path_has_prefix(path, "/api/memory") {
+        return RoutePolicy::requires([if read {
+            Capability::MemoryRead
+        } else {
+            Capability::MemoryWrite
+        }]);
+    }
+    if path_has_prefix(path, "/api/retrieval")
+        || path_has_prefix(path, "/api/spaces")
+        || path_has_prefix(path, "/api/media")
+    {
+        return RoutePolicy::requires([if read || path.ends_with("/search") {
+            Capability::FilesRead
+        } else {
+            Capability::FilesWrite
+        }]);
+    }
+    // Audit rows contain member, model, cost, and node attribution. They are
+    // operator data, not ordinary inference routing, so delegated
+    // `gateway:route` credentials must never inherit access to them.
+    if path_has_prefix(path, "/api/gateway/audit") {
+        return RoutePolicy::OwnerOnly;
+    }
+    if path_has_prefix(path, "/api/gateway") {
+        return if read {
+            RoutePolicy::requires([Capability::GatewayRoute])
+        } else {
+            RoutePolicy::OwnerOnly
+        };
+    }
+    RoutePolicy::OwnerOnly
+}
+
+#[cfg(test)]
+mod gateway_audit_route_policy_tests {
+    use super::route_policy;
+    use crate::authorization::RoutePolicy;
+    use axum::http::Method;
+
+    #[test]
+    fn gateway_audit_reads_are_owner_only() {
+        assert_eq!(
+            route_policy(&Method::GET, "/api/gateway/audit"),
+            RoutePolicy::OwnerOnly
+        );
+        assert_eq!(
+            route_policy(&Method::GET, "/api/gateway/audit/usage"),
+            RoutePolicy::OwnerOnly
+        );
+    }
+}
+
+fn mcp_path_agent_id(path: &str) -> Option<String> {
+    let encoded = path.strip_prefix("/mcp/")?;
+    if encoded.is_empty() || encoded.contains('/') {
+        return None;
+    }
+    urlencoding::decode(encoded)
+        .ok()
+        .map(std::borrow::Cow::into_owned)
+}
+
+fn request_bindings(
+    caller: Option<&crate::identity_verify::VerifiedCaller>,
+    agent_id: Option<&str>,
+) -> crate::authorization::RequestBindings {
+    crate::authorization::RequestBindings {
+        subject_id: caller.map(|caller| caller.user_id.clone()),
+        agent_id: agent_id.map(str::to_owned),
+        ..Default::default()
+    }
+}
+
+fn bind_delegation_to_route(
+    mut signed: crate::authorization::RequestBindings,
+    path_agent_id: Option<&str>,
+) -> Option<crate::authorization::RequestBindings> {
+    if let Some(path_agent_id) = path_agent_id {
+        if signed.agent_id.as_deref() != Some(path_agent_id) {
+            return None;
+        }
+        signed.agent_id = Some(path_agent_id.to_owned());
+    }
+    Some(signed)
+}
+
+async fn verified_header_identity(
+    headers: &axum::http::HeaderMap,
+) -> (
+    Option<crate::identity_verify::VerifiedCaller>,
+    Option<String>,
+) {
+    let Some(token) = header_str(headers, USER_JWT_HEADER) else {
+        return (None, None);
+    };
+    let caller = verified_caller_from_token(&token).await;
+    let token = caller.as_ref().map(|_| token);
+    (caller, token)
+}
+
+fn denial_status(decision: crate::authorization::AuthorizationDecision) -> Option<StatusCode> {
+    use crate::authorization::{AuthorizationDecision, DenialReason};
+    match decision {
+        AuthorizationDecision::Allow => None,
+        AuthorizationDecision::Deny(
+            DenialReason::AuthenticationRequired | DenialReason::Expired,
+        ) => Some(StatusCode::UNAUTHORIZED),
+        AuthorizationDecision::Deny(_) => Some(StatusCode::FORBIDDEN),
+    }
+}
+
+async fn require_auth(
+	req: Request<axum::body::Body>,
+	next: middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+	let expected = crate::node_token::active_token().filter(|token| !token.is_empty());
+	require_auth_with_token(req, next, expected).await
+}
+
+async fn require_auth_with_token(
+	mut req: Request<axum::body::Body>,
+	next: middleware::Next,
+	expected: Option<String>,
+) -> Result<axum::response::Response, StatusCode> {
+	let provided = req
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_string);
-
-    if let Some(t) = &provided {
-        if ct_eq(t, &expected) {
-            return Ok(next.run(req).await);
+    let now = crate::pairing::now_secs();
+    let path_agent_id = mcp_path_agent_id(req.uri().path());
+    let policy = route_policy(req.method(), req.uri().path());
+    let resolved = if let Some(expected) = expected {
+        let token = provided.as_deref().ok_or(StatusCode::UNAUTHORIZED)?;
+        if ct_eq(token, &expected) {
+            let (caller, verified_user_jwt) = verified_header_identity(req.headers()).await;
+            ResolvedAuthorization {
+                bindings: request_bindings(caller.as_ref(), path_agent_id.as_deref()),
+                context: crate::authorization::AuthorizationContext::owner(now),
+                caller,
+                verified_user_jwt,
+            }
+        } else {
+            let (caller, verified_user_jwt) = verified_header_identity(req.headers()).await;
+            let bindings = request_bindings(caller.as_ref(), path_agent_id.as_deref());
+            if let Some(context) = crate::pairing::resolve_paired_token(token, &bindings) {
+                ResolvedAuthorization {
+                    context,
+                    bindings,
+                    caller,
+                    verified_user_jwt,
+                }
+            } else {
+                let verified = crate::authorization::delegation::verify(token, now)
+                    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                let bindings =
+                    bind_delegation_to_route(verified.bindings, path_agent_id.as_deref())
+                        .ok_or(StatusCode::FORBIDDEN)?;
+                ResolvedAuthorization {
+                    context: verified.context,
+                    bindings,
+                    caller: Some(verified.caller),
+                    verified_user_jwt: None,
+                }
+            }
         }
-        // Paired-client carve-out: a bearer issued by the device-code pairing
-        // flow ([`crate::pairing`]) is as good as the node token. This is how a
-        // browser surface (the hosted webapp, the extension) and a desktop on
-        // ANOTHER machine authenticate — neither can read `node-auth.token`.
-        //
-        // It does not widen who can get in: a paired token only exists because a
-        // caller that ALREADY held a valid credential approved it, and it can be
-        // revoked individually without rotating the node token.
-        if crate::pairing::is_paired_token(t) {
-            return Ok(next.run(req).await);
-        }
-    }
-
-    // JWT carve-out: a tiny allowlist of org-scoped READ endpoints may ALSO be
-    // authorized by a valid Better Auth user JWT whose verified identity belongs
-    // to THIS node's bound org. The control plane's server→node callback presents
-    // one instead of the shared `RYU_TOKEN` it does not hold. The RYU_TOKEN check
-    // above still runs first and unchanged; this only adds an alternative for the
-    // allowlisted path, so every other route stays exactly as strict (401).
-    if req.method() == axum::http::Method::GET
-        && path_allows_jwt_auth(req.uri().path())
-        && jwt_authorizes_org_read(req.headers(), provided.as_deref()).await
+    } else {
+        // Protected routes must never become owner-authorized merely because
+        // secure token persistence failed during startup.
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    if let Some(status) =
+        denial_status(resolved.context.authorize(&policy, &resolved.bindings, now))
     {
-        return Ok(next.run(req).await);
+        return Err(status);
     }
-
-    Err(StatusCode::UNAUTHORIZED)
+    req.extensions_mut().insert(resolved);
+    Ok(next.run(req).await)
 }
 
 /// The tiny, explicit allowlist of routes that a valid, org-matched Better Auth
@@ -759,15 +967,16 @@ async fn attach_verified_caller(
     mut req: Request<axum::body::Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    let caller = verified_caller_from_headers(req.headers()).await;
-    let has_verified_caller = caller.is_some();
-    let user_jwt = header_str(req.headers(), USER_JWT_HEADER);
+    let resolved = req.extensions().get::<ResolvedAuthorization>().cloned();
+    let (caller, user_jwt) = match resolved {
+        Some(resolved) => (resolved.caller, resolved.verified_user_jwt),
+        None => verified_header_identity(req.headers()).await,
+    };
     req.extensions_mut().insert(caller);
     // Keep the verified raw token available only to the server-owned ACP spawn
     // path. It is never deserialized from the request body or returned to a
     // client; an invalid token is discarded with the anonymous caller state.
-    req.extensions_mut()
-        .insert(user_jwt.filter(|_| has_verified_caller));
+    req.extensions_mut().insert(VerifiedUserJwt(user_jwt));
     next.run(req).await
 }
 
@@ -1150,6 +1359,10 @@ async fn app_lifecycle_capabilities(
 struct PortableMarketplacePackageBody {
     kind: String,
     id: String,
+    /// Exact Marketplace release tag selected from the Versions tab. When
+    /// absent, the control plane resolves the current build as before.
+    #[serde(default)]
+    version: Option<String>,
     /// Short-lived control-plane session redeemed from a private package code.
     /// It is forwarded only to the first-party Marketplace resolver and is
     /// never persisted in Core's installed-package record.
@@ -1189,6 +1402,29 @@ fn portable_package_install_session(
     Ok(session)
 }
 
+fn portable_package_version(
+    body: &PortableMarketplacePackageBody,
+) -> Result<Option<String>, axum::response::Response> {
+    let version = body
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if version.as_ref().is_some_and(|value| {
+        value.len() > 128
+            || !value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || ".-+vV".contains(character))
+    }) {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "portable package `version` must be a semver release tag".to_owned(),
+        ));
+    }
+    Ok(version)
+}
+
 /// `GET /api/marketplace/packages/installed` — local package state only.
 ///
 /// This endpoint deliberately does not consult the control plane. Once an
@@ -1208,6 +1444,8 @@ async fn install_portable_marketplace_package(
     id: &str,
     install_session: Option<String>,
     update: bool,
+    version: Option<String>,
+    owner: &crate::server::spaces::DocOwner,
 ) -> axum::response::Response {
     let buyer_token = buyer_bearer_from_headers(headers);
     let detail = match crate::catalog_source::with_install_session(
@@ -1219,6 +1457,7 @@ async fn install_portable_marketplace_package(
                 kind,
                 id,
                 update,
+                version.as_deref(),
             ),
         ),
     )
@@ -1267,7 +1506,10 @@ async fn install_portable_marketplace_package(
             .flatten()
             .is_some_and(|package| package.enabled);
     if was_enabled {
-        if let Err(error) = crate::server::portable_package_runtime::disable(state, kind, id).await
+        if let Err(error) = crate::server::portable_package_runtime::disable_with_owner(
+            state, kind, id, owner,
+        )
+        .await
         {
             return json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string());
         }
@@ -1283,7 +1525,9 @@ async fn install_portable_marketplace_package(
     );
     match installed {
         Ok(_) if was_enabled => {
-            match crate::server::portable_package_runtime::enable(state, kind, id).await {
+            match crate::server::portable_package_runtime::enable_with_owner(state, kind, id, owner)
+                .await
+            {
                 Ok(package) => Json(json!({ "success": true, "package": package })).into_response(),
                 Err(error) => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
             }
@@ -1292,7 +1536,10 @@ async fn install_portable_marketplace_package(
         Err(error) => {
             if was_enabled {
                 if let Err(restore_error) =
-                    crate::server::portable_package_runtime::enable(state, kind, id).await
+                    crate::server::portable_package_runtime::enable_with_owner(
+                        state, kind, id, owner,
+                    )
+                    .await
                 {
                     tracing::error!(
                         package_kind = kind,
@@ -1333,7 +1580,22 @@ async fn marketplace_package_install(
         Ok(session) => session,
         Err(response) => return response,
     };
-    install_portable_marketplace_package(&state, &headers, &kind, &id, install_session, false).await
+    let version = match portable_package_version(&body) {
+        Ok(version) => version,
+        Err(response) => return response,
+    };
+    let owner = spaces::owner_of(&caller_tenancy(&caller));
+    install_portable_marketplace_package(
+        &state,
+        &headers,
+        &kind,
+        &id,
+        install_session,
+        false,
+        version,
+        &owner,
+    )
+    .await
 }
 
 /// `POST /api/marketplace/packages/update { kind, id }` — entitlement is
@@ -1362,7 +1624,22 @@ async fn marketplace_package_update(
         Ok(session) => session,
         Err(response) => return response,
     };
-    install_portable_marketplace_package(&state, &headers, &kind, &id, install_session, true).await
+    let version = match portable_package_version(&body) {
+        Ok(version) => version,
+        Err(response) => return response,
+    };
+    let owner = spaces::owner_of(&caller_tenancy(&caller));
+    install_portable_marketplace_package(
+        &state,
+        &headers,
+        &kind,
+        &id,
+        install_session,
+        true,
+        version,
+        &owner,
+    )
+    .await
 }
 
 async fn marketplace_package_enable(
@@ -1379,7 +1656,15 @@ async fn marketplace_package_enable(
     {
         return response;
     }
-    match crate::server::portable_package_runtime::enable(&state, &kind, &id).await {
+    let owner = spaces::owner_of(&caller_tenancy(&caller));
+    match crate::server::portable_package_runtime::enable_with_owner(
+        &state,
+        &kind,
+        &id,
+        &owner,
+    )
+    .await
+    {
         Ok(package) => Json(json!({ "success": true, "package": package })).into_response(),
         Err(error) => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
     }
@@ -1399,7 +1684,12 @@ async fn marketplace_package_disable(
     {
         return response;
     }
-    match crate::server::portable_package_runtime::disable(&state, &kind, &id).await {
+    let owner = spaces::owner_of(&caller_tenancy(&caller));
+    match crate::server::portable_package_runtime::disable_with_owner(
+        &state, &kind, &id, &owner,
+    )
+    .await
+    {
         Ok(package) => Json(json!({ "success": true, "package": package })).into_response(),
         Err(error) => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
     }
@@ -1419,7 +1709,12 @@ async fn marketplace_package_uninstall(
     {
         return response;
     }
-    match crate::server::portable_package_runtime::uninstall(&state, &kind, &id).await {
+    let owner = spaces::owner_of(&caller_tenancy(&caller));
+    match crate::server::portable_package_runtime::uninstall_with_owner(
+        &state, &kind, &id, &owner,
+    )
+    .await
+    {
         Ok(()) => match crate::portable_packages::uninstall(&kind, &id) {
             Ok(()) => Json(json!({ "success": true, "kind": kind, "id": id })).into_response(),
             Err(error) => json_error(StatusCode::NOT_FOUND, error.to_string()),
@@ -1465,7 +1760,7 @@ async fn marketplace_package_uninstall(
 ///
 /// This node's org binding is passed IN (`node_org`) rather than read from the
 /// global, so the matrix stays a pure, unit-testable function.
-fn node_org_id() -> Option<String> {
+pub(crate) fn node_org_id() -> Option<String> {
     crate::sidecar::control_plane::registered_org().map(|o| o.id)
 }
 
@@ -1485,6 +1780,56 @@ fn visibility_admin_authorized(caller: Option<&crate::identity_verify::VerifiedC
                 .role
                 .satisfies(crate::identity_verify::OrgRole::Admin)
     })
+}
+
+fn conversation_access_manager_authorized(
+    tenancy: &crate::identity_verify::ResourceTenancy,
+    caller: Option<&crate::identity_verify::VerifiedCaller>,
+    node_org: Option<&str>,
+) -> bool {
+    if tenancy.owner_user_id.is_none() && tenancy.org_id.is_none() {
+        return node_org.is_none();
+    }
+    let Some(caller) = caller else {
+        return false;
+    };
+    if tenancy.owner_user_id.as_deref() == Some(caller.user_id.as_str()) {
+        return true;
+    }
+    caller.org_id.as_deref() == tenancy.org_id.as_deref()
+        && caller
+            .role
+            .satisfies(crate::identity_verify::OrgRole::Admin)
+}
+
+async fn require_conversation_access_manager(
+    state: &ServerState,
+    conversation_id: &str,
+    caller: Option<&crate::identity_verify::VerifiedCaller>,
+) -> Result<crate::identity_verify::ResourceTenancy, axum::response::Response> {
+    let tenancy = match state.conversations.get_access_meta(conversation_id).await {
+        Ok(Some(tenancy)) => tenancy,
+        Ok(None) => {
+            return Err(json_error(
+                StatusCode::NOT_FOUND,
+                format!("conversation '{conversation_id}' not found"),
+            ));
+        }
+        Err(error) => {
+            return Err(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            ));
+        }
+    };
+    if conversation_access_manager_authorized(&tenancy, caller, node_org_id().as_deref()) {
+        Ok(tenancy)
+    } else {
+        Err(json_error(
+            StatusCode::FORBIDDEN,
+            "forbidden: only the owner or an organization admin can manage access".to_owned(),
+        ))
+    }
 }
 
 /// Resolve a caller's access to ONE resource from its tenancy quartet, mapping a
@@ -1554,6 +1899,7 @@ fn resource_access(
                 tenancy.org_id.as_deref(),
                 &tenancy.visibility,
                 tenancy.team_id.as_deref(),
+                &tenancy.collaborators,
             ) {
                 Access::None => Err(json_error(
                     StatusCode::FORBIDDEN,
@@ -1634,6 +1980,7 @@ async fn require_space_content_write(
             org_id: meta.org_id,
             visibility: meta.visibility,
             team_id: meta.team_id,
+            collaborators: Vec::new(),
         })),
         caller.as_ref(),
         not_found,
@@ -1742,14 +2089,14 @@ fn caller_doc_filter(
 ) -> spaces::DocFilter<'_> {
     match (node_org_id().is_some(), caller.as_ref()) {
         (true, Some(c)) => {
-            // The by-id ACL checks the complete verified team set. The list/search
-            // SQL seam accepts one team id, so use a stable first membership here;
-            // rows for other teams remain hidden rather than over-shared and are
-            // still protected by the exact by-id gate.
-            spaces::DocFilter::for_caller_with_team(
+            // Keep list/search/graph visibility aligned with the by-id ACL: every
+            // verified team membership must reach the SQL predicate. Using only the
+            // first membership silently hid shared Spaces from multi-team users.
+            let team_ids = caller_team_ids(c);
+            spaces::DocFilter::for_caller_with_teams(
                 Some(c.user_id.as_str()),
                 c.org_id.as_deref(),
-                c.teams.first().map(|team| team.id.as_str()),
+                &team_ids,
                 true,
             )
         }
@@ -1758,6 +2105,10 @@ fn caller_doc_filter(
         (true, None) => spaces::DocFilter::for_caller(None, None, true),
         (false, _) => spaces::DocFilter::unrestricted(),
     }
+}
+
+fn caller_team_ids(caller: &crate::identity_verify::VerifiedCaller) -> Vec<&str> {
+    caller.teams.iter().map(|team| team.id.as_str()).collect()
 }
 
 /// The memory `user_id` an HTTP write attributes to. Bound node + verified caller →
@@ -1979,7 +2330,9 @@ fn tenancy_filter_args(
 #[cfg(test)]
 mod resource_acl_tests {
     use super::{require_resource_read_at, require_resource_write_at, resource_access};
-    use crate::identity_verify::{Access, OrgRole, ResourceTenancy, VerifiedCaller};
+    use crate::identity_verify::{
+        Access, OrgRole, ResourceTenancy, TeamMembership, VerifiedCaller,
+    };
     use axum::http::StatusCode;
 
     /// This node is bound to `org1` — a SHARED "company brain" node. This is the
@@ -2000,6 +2353,7 @@ mod resource_acl_tests {
             org_id: org.map(str::to_owned),
             visibility: visibility.to_owned(),
             team_id: None,
+            collaborators: Vec::new(),
         }))
     }
 
@@ -2011,6 +2365,25 @@ mod resource_acl_tests {
             role,
             teams: Vec::new(),
         }
+    }
+
+    #[test]
+    fn list_visibility_keeps_every_verified_team_membership() {
+        let mut member = caller("alice", Some("org1"), OrgRole::Member);
+        member.teams = vec![
+            TeamMembership {
+                id: "team-a".to_owned(),
+                org_id: "org1".to_owned(),
+                role: "member".to_owned(),
+            },
+            TeamMembership {
+                id: "team-b".to_owned(),
+                org_id: "org1".to_owned(),
+                role: "member".to_owned(),
+            },
+        ];
+
+        assert_eq!(super::caller_team_ids(&member), vec!["team-a", "team-b"]);
     }
 
     fn status(result: Result<(), axum::response::Response>) -> Option<StatusCode> {
@@ -2837,14 +3210,13 @@ pub fn create_router(
     let connections = state.connections.clone();
 
     // CORS: allow the Desktop webview (dev + prod), localhost dev servers, and
-    // the hosted web app. `apps/webapp` is local-first: even when served from
-    // https://app.ryuhq.com the browser talks DIRECTLY to the user's LOCAL Core
-    // on 127.0.0.1:7980. That is both cross-origin (origin = app.ryuhq.com) and a
-    // private-network request (public page → loopback), so we must (a) list
-    // app.ryuhq.com as an allowed origin AND (b) enable `allow_private_network`
-    // so Chrome's Private Network Access preflight succeeds. Extra origins (e.g.
-    // a staging web host) can be added without a rebuild via RYU_CORS_ORIGINS
-    // (comma-separated).
+    // the hosted browser surfaces. The web app and docs can both be used as a
+    // visitor-approved direct bridge to loopback Core: the browser sends the
+    // node token to Core, never to the Ryu control plane. This is both
+    // cross-origin and a private-network request (public page → loopback), so
+    // the exact trusted origins and `allow_private_network` are required.
+    // Extra origins (e.g. a staging web host) can be added without a rebuild via
+    // RYU_CORS_ORIGINS (comma-separated).
     let mut cors_origins: Vec<HeaderValue> = [
         "http://localhost:5173",   // desktop vite dev
         "http://localhost:5174",   // webapp vite dev
@@ -2855,6 +3227,13 @@ pub fn create_router(
         "https://tauri.localhost", // tauri prod (Windows)
         "http://tauri.localhost",  // tauri prod (Windows alt)
         "https://app.ryuhq.com",   // hosted web app → local Core
+        "http://localhost:3001",   // marketing web dev
+        "http://127.0.0.1:3001",   // marketing web dev (127 variant)
+        "http://localhost:4000",   // Fumadocs dev
+        "http://127.0.0.1:4000",   // Fumadocs dev (127 variant)
+        "https://ryuhq.com",       // hosted marketing site → local Core
+        "https://www.ryuhq.com",   // hosted marketing site (www variant)
+        "https://docs.ryuhq.com",  // hosted docs → local Core
     ]
     .into_iter()
     .filter_map(|origin| origin.parse::<HeaderValue>().ok())
@@ -2943,8 +3322,12 @@ pub fn create_router(
         // grants anything on its own — issuing a token requires a human approving
         // through the PROTECTED half below, so an unauthenticated caller can only
         // create a pending request that expires unclaimed.
-        .route("/api/pair/code", post(pair_start))
-        .route("/api/pair/token", post(pair_poll))
+        .merge(
+            Router::new()
+                .route("/api/pair/code", post(pair_start))
+                .route("/api/pair/token", post(pair_poll))
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         // External authorization servers cannot carry the node bearer. The
         // handler authenticates with the one-time PKCE flow state and returns a
         // static no-store completion page; it never returns code/token material.
@@ -2973,15 +3356,19 @@ pub fn create_router(
     // `sidecar::ext_proxy`). Registered unconditionally (no feature/env gate): the
     // proxy is inert unless an enabled plugin declares an `http`/`host_api` sidecar.
     let public = public
+        .merge(crate::a2a::public_routes())
         .merge(crate::sidecar::ext_proxy::ext_routes(auth_token.clone()))
         .merge(crate::sidecar::ext_proxy::host_routes())
         // Public-mount routes for apps that own a stable external URL prefix
         // (e.g. mail's `/api/mail/*`). Axum routers are immutable after serve,
         // so use the startup snapshot of installed and bootstrap manifests.
-        .merge(crate::sidecar::ext_proxy::public_mount_routes(
-            router_manifests,
-            auth_token.clone(),
-        ));
+        .merge(
+            crate::sidecar::ext_proxy::public_mount_routes(
+                router_manifests,
+                auth_token.clone(),
+            )
+            .expect("built-in public-mount ownership must be unambiguous"),
+        );
 
     let protected = Router::new()
         // Cloud-account auth surface. Behind `require_auth` like every other
@@ -3130,7 +3517,10 @@ pub fn create_router(
             "/api/plugins/activation-event",
             post(fire_activation_event_handler),
         )
-        .route("/api/plugins/install-bundle", post(install_app_bundle))
+        .route(
+            "/api/plugins/install-bundle",
+            post(install_app_bundle).layer(DefaultBodyLimit::max(MAX_PLUGIN_BUNDLE_BYTES)),
+        )
         .route(
             "/api/plugins/catalog/install",
             post(install_plugin_from_catalog),
@@ -3191,9 +3581,13 @@ pub fn create_router(
         )
         // App host-capability bridge (model.complete / agent.run / storage.*).
         // Protected router → inherits `require_auth`; grant-gated per enabled app.
+        // The larger scoped limit is required for app-owned binary files carried
+        // through the storage bridge as base64 (thumbnail editors are the first
+        // consumer); it does not widen any other Core JSON endpoint.
         .route(
             "/api/plugins/:id/host",
-            post(plugin_bridge_api::plugin_bridge_dispatch),
+            post(plugin_bridge_api::plugin_bridge_dispatch)
+                .layer(DefaultBodyLimit::max(MAX_PLUGIN_HOST_BODY_BYTES)),
         )
         // Streaming agent.run for full-page apps (governance-filtered SSE).
         .route(
@@ -3236,6 +3630,41 @@ pub fn create_router(
         // ACP routing/execution substrate that serves a chat turn (`agent_routing/`,
         // `sidecar/adapters/acp.rs`, `/api/chat/stream`) is kernel and is NOT here.
         .merge(agents_routes(&state.app_store))
+        // Prompt Studio's Promptfoo-compatible suites, immutable snapshots,
+        // persisted evaluation runs, and human review are Core-owned resources.
+        // The handlers resolve the suite's agent before applying the agent ACL,
+        // so a suite id cannot be used to cross an agent boundary.
+        .route(
+            "/api/prompt-suites",
+            get(list_prompt_suites).post(create_prompt_suite),
+        )
+        .route(
+            "/api/prompt-suites/:id",
+            get(get_prompt_suite)
+                .put(update_prompt_suite)
+                .delete(delete_prompt_suite),
+        )
+        .route(
+            "/api/prompt-suites/:id/versions",
+            get(list_prompt_suite_versions).post(create_prompt_suite_version),
+        )
+        .route(
+            "/api/prompt-suites/:id/versions/:version_id",
+            get(get_prompt_suite_version),
+        )
+        .route(
+            "/api/prompt-suites/:id/versions/:version_id/restore",
+            post(restore_prompt_suite_version),
+        )
+        .route(
+            "/api/prompt-suites/:id/runs",
+            get(list_prompt_runs).post(save_prompt_run),
+        )
+        .route("/api/prompt-suites/:id/runs/:run_id", get(get_prompt_run))
+        .route(
+            "/api/prompt-suites/:id/runs/:run_id/reviews",
+            get(list_prompt_reviews).post(save_prompt_review),
+        )
         // Shared, idempotent agent-root import/export ledger. The sync surface is
         // separate from `/api/import/*` so automatic reconciliation and the
         // Gateway tabs share one operation lineage and one duplicate-root guard.
@@ -3311,6 +3740,7 @@ pub fn create_router(
         // ── Programmatic tool calling sandbox (#476, P4) ──────────────────────
         .route("/api/tools/exec", post(tools_exec))
         .route("/api/tools/exec/resume", post(tools_exec_resume))
+        .merge(crate::safe_actions::routes())
         // ── Identity Vault: connection lifecycle (#520) ──────────────────────
         // Status-only responses; sealed credential state is never returned.
         .route("/api/identities", get(identity_api::list_identities))
@@ -3426,6 +3856,8 @@ pub fn create_router(
             "/api/chat/stream/resume/:conversation_id",
             get(chat_stream_resume),
         )
+        // Retry one terminal chat turn claimed by the reconnect-retry plugin.
+        .route("/api/chat/retry/:conversation_id", post(chat_retry))
         .route(
             "/api/chat/client-tool-result",
             post(chat_client_tool_result),
@@ -3452,10 +3884,10 @@ pub fn create_router(
         // `/proof` in Telegram does what `/proof` in the app does.
         .route("/api/channels/commands", get(channel_commands))
         // Retrieval (index/search over memory+space chunks) is the RAG capability's
-        // HTTP surface — gated on the (default-on) RAG app, in its own sub-router so a
+        // HTTP surface — gated on the (pre-installed) RAG app, in its own sub-router so a
         // single `route_layer` carries the gate. See `retrieval_routes`.
         .merge(retrieval_routes(&state.app_store))
-        // Long-term memory CRUD, gated on the (default-on) Memory app. See
+        // Long-term memory CRUD, gated on the (pre-installed) Memory app. See
         // `memory_routes`. The in-process chat auto-recall path is kernel and untouched.
         .merge(memory_routes(&state.app_store))
         // Message reactions are a native desktop renderer plus Core persistence;
@@ -3468,6 +3900,7 @@ pub fn create_router(
         // protected chain so node auth and verified user identity are attached
         // before its owner/admin + entitlement checks run.
         .merge(onboarding_profile::routes())
+        .merge(continuity::router())
         // ── Danger zone: irreversible bulk "delete all X" (settings) ─────────
         .route("/api/data/counts", get(data_admin::data_counts))
         .route("/api/data/clear", post(data_admin::data_clear))
@@ -3530,6 +3963,10 @@ pub fn create_router(
             "/api/conversations/:id/archived",
             post(set_conversation_archived_handler),
         )
+        .route(
+            "/api/conversations/:id/folder",
+            post(set_conversation_folder_handler),
+        )
         // Manual rename (ChatGPT/Claude-style). Marks the title user-chosen so the
         // background auto-namer leaves it alone.
         .route(
@@ -3547,6 +3984,10 @@ pub fn create_router(
         .route(
             "/api/conversations/:id/visibility",
             post(set_conversation_visibility_handler),
+        )
+        .route(
+            "/api/conversations/:id/access",
+            get(get_conversation_access_handler).put(set_conversation_access_handler),
         )
         // Goal state is owned by the goal plugin's durable KV; these narrow
         // endpoints let clients inspect and control that state without sending
@@ -3695,7 +4136,7 @@ pub fn create_router(
             get(get_active_model).post(set_active_model),
         )
         // ── Voice engine data path (STT/TTS) ─────────────────────────────────
-        // Gated on the (default-on) Voice app in its own sub-router (see
+        // Gated on the (pre-installed) Voice app in its own sub-router (see
         // `voice_routes`). The PUBLIC realtime voice WS (`/api/voice/ws`) stays on the
         // public router, ungated (browser WS, auth-in-handler).
         .merge(voice_routes(&state.app_store))
@@ -3712,7 +4153,7 @@ pub fn create_router(
         // the `ryu-healing` sidecar via `public_mount`; Core drives it over loopback
         // (`healing_client`) and keeps only the welded action side. No in-process mount.
         // ── Generative-media producers (image/video/gif) ─────────────────────
-        // Gated on the (default-on) Media app in its own sub-router (see
+        // Gated on the (pre-installed) Media app in its own sub-router (see
         // `media_routes`). The shared no-cloud blob store below (`/api/media/upload` +
         // `/api/media/:file`) stays UNGATED kernel storage — it still serves TTS audio
         // and legacy media URLs. User chat/editor uploads go to `/api/uploads`.
@@ -3745,12 +4186,28 @@ pub fn create_router(
         // route (see `@ryu/research`).
         // ── Git workspace status (read-only, Unit U009) ─────────────────────
         .route("/api/git/status", get(git::git_status))
+        .route("/api/git/file-diff", post(git::git_file_diff_authorized))
+        .route(
+            "/api/git/reverse-edits",
+            post(git::git_reverse_edits_authorized),
+        )
+        // ── Git local repository initialization (Ryu Work entry point) ─────
+        .route("/api/git/init", post(git::git_init_authorized))
         // ── Git branch list + switch (composer branch selector) ─────────────
         .route("/api/git/branches", get(git::git_branches))
-        .route("/api/git/checkout", post(git::git_checkout))
-        .route("/api/git/create-branch", post(git::git_create_branch))
+        .route(
+            "/api/git/checkout",
+            post(git::git_checkout_authorized),
+        )
+        .route(
+            "/api/git/create-branch",
+            post(git::git_create_branch_authorized),
+        )
         // ── Git commit + push (pinned-summary "commit & push" button) ───────
-        .route("/api/git/commit-push", post(git::git_commit_push))
+        .route(
+            "/api/git/commit-push",
+            post(git::git_commit_push_authorized),
+        )
         // ── Git remote actions (pinned-summary pull/sync buttons) ───────────
         .route("/api/git/pull", post(git::git_pull_authorized))
         .route("/api/git/sync", post(git::git_sync_authorized))
@@ -3776,6 +4233,16 @@ pub fn create_router(
             "/api/gateway/config",
             get(gateway_get_config).put(gateway_put_config),
         )
+        .route(
+            "/api/gateway/governance",
+            get(governance::get_gateway_governance),
+        )
+        .route(
+            "/api/gateway/governance/:kind",
+            put(governance::put_gateway_governance),
+        )
+        .route("/api/hooks/management", get(hooks::get_hook_management))
+        .route("/api/hooks/overrides", put(hooks::put_hook_override))
         .route("/api/gateway/status", get(gateway_status))
         // Structured Gateway doctor plus Core approval/agent-routing coverage.
         .route("/api/gateway/doctor", get(gateway_doctor))
@@ -3792,6 +4259,7 @@ pub fn create_router(
         .route("/api/gateway/evals/run", post(gateway_run_evals))
         // ── Gateway audit proxy (M4 / #177) ─────────────────────────────────
         .route("/api/gateway/audit", get(gateway_audit))
+        .route("/api/gateway/audit/usage", get(gateway_audit_usage))
         // ── Gateway live-traffic proxy (SSE): streams the gateway's /v1/traffic
         // feed through Core so the desktop dashboard never holds the master key.
         .route("/api/gateway/traffic", get(gateway_traffic))
@@ -3860,6 +4328,7 @@ pub fn create_router(
             "/api/notifications",
             get(notifications_api::list_notifications),
         )
+        .merge(mention_target_routes(&state.app_store))
         .route(
             "/api/notifications/:id/read",
             post(notifications_api::read_notification),
@@ -4062,6 +4531,7 @@ pub fn create_router(
     // possess. A second `CorsLayer` on the route would emit duplicate
     // `Access-Control-Allow-Origin` headers, which browsers reject outright.
     let protected = protected
+        .merge(crate::a2a::management_routes())
         .route(
             "/mcp",
             post(mcp_http_no_agent).layer(axum::extract::DefaultBodyLimit::max(MCP_MAX_BODY_BYTES)),
@@ -4119,10 +4589,16 @@ pub fn create_router(
 /// `caller_doc_filter`), so on a bound node it never leaks a private document's
 /// title or link topology cross-tenant.
 ///
-/// Spaces is default-on (`plugins::builtins::CORE_DEFAULT_ON`) and is seeded before
+/// Spaces is pre-installed (`plugins::builtins::CORE_PREINSTALLED`) and is seeded before
 /// its dependents, so on any normal install the gate is transparent.
 fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
+        .merge(space_imports::routes())
+        .route(
+            "/api/spaces/import",
+            post(import_space_package)
+                .layer(DefaultBodyLimit::max(space_portable::MAX_SPACE_PACKAGE_BODY_BYTES)),
+        )
         .route("/api/spaces", get(list_spaces).post(create_space))
         .route("/api/spaces/search", get(search_space_documents))
         .route("/api/spaces/:id", axum::routing::delete(delete_space))
@@ -4145,6 +4621,7 @@ fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
         )
         .route("/api/spaces/:id/icon", post(set_space_icon))
         .route("/api/spaces/:id/visibility", post(set_space_visibility))
+        .route("/api/spaces/:id/export", post(export_space_package))
         .route(
             "/api/spaces/:id/documents",
             get(list_documents).post(ingest_document),
@@ -4161,7 +4638,10 @@ fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
             "/api/spaces/:id/files",
             uploads::SPACE_FILE_BODY_LIMIT.apply(post(create_file)),
         )
-        .route("/api/spaces/:id/documents/:doc_id/blob", get(get_file_blob))
+        .route(
+            "/api/spaces/:id/documents/:doc_id/blob",
+            uploads::SPACE_FILE_BODY_LIMIT.apply(get(get_file_blob).put(replace_file_blob)),
+        )
         .route(
             "/api/spaces/:id/documents/:doc_id",
             get(get_document)
@@ -4237,7 +4717,7 @@ fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
 /// A governance-shell leaf: both route blocks (the skills.sh catalog + the SKILL.md
 /// CRUD/version surface) live in this one sub-router so a single `route_layer` gates
 /// them together. Skills declares no `requires`; it is the dependency *target* of
-/// Learning (`requires.apps = [@ryu/skills]`). Default-on, so the gate is
+/// Learning (`requires.apps = [@ryu/skills]`). Pre-installed, so the gate is
 /// transparent on a fresh install.
 ///
 /// Only the HTTP surface is gated — the in-process `state.skills` [`SkillRegistry`]
@@ -4442,7 +4922,7 @@ fn sync_plugin_output_styles(manifest: &crate::plugin_manifest::PluginManifest, 
 /// The `/api/agents/*` catalog + CRUD + ACP session-management surface, gated on the
 /// **Agents App** being enabled.
 ///
-/// A governance-shell leaf: no `requires`. Default-on AND **load-bearing** (see
+/// A governance-shell leaf: no `requires`. Pre-installed AND **load-bearing** (see
 /// [`crate::plugins::builtins::LOAD_BEARING_PLUGINS`]) — the composer fetches the
 /// agent list on boot, so the app can never actually be disabled and the gate is
 /// transparent. Static segments (`catalog`, `import`) are registered before the `:id`
@@ -4476,6 +4956,18 @@ fn agents_routes(app_store: &PluginStore) -> Router<ServerState> {
         .route(
             "/api/agents/:id",
             get(get_agent).put(update_agent).delete(delete_agent),
+        )
+        .route(
+            "/api/agents/:id/prompt-versions",
+            get(list_agent_prompt_versions).post(create_agent_prompt_version),
+        )
+        .route(
+            "/api/agents/:id/prompt-versions/:version_id",
+            get(get_agent_prompt_version),
+        )
+        .route(
+            "/api/agents/:id/prompt-versions/:version_id/restore",
+            post(restore_agent_prompt_version),
         )
         .route("/api/agents/:id/export", get(export_agent))
         .route("/api/agents/:id/tools", get(list_tools))
@@ -4553,7 +5045,7 @@ fn agents_routes(app_store: &PluginStore) -> Router<ServerState> {
 
 /// The PROTECTED workflow surface, gated on the **Workflows App** being enabled.
 ///
-/// A governance-shell leaf: no `requires`. Default-on, so the gate is transparent on
+/// A governance-shell leaf: no `requires`. Pre-installed, so the gate is transparent on
 /// a fresh install. This router holds ONLY the protected routes — the template
 /// catalog (`/api/workflows/catalog/*`) plus the DAG CRUD (`/workflows/*`, no `/api`
 /// prefix). The static `catalog` segments are registered before the `:id` DAG routes
@@ -4611,7 +5103,7 @@ fn workflow_routes(app_store: &PluginStore) -> Router<ServerState> {
 /// The PROTECTED `/api/hardware/devices*` device-registry CRUD, gated on the
 /// **Hardware App** being enabled.
 ///
-/// A governance-shell leaf: no `requires`. Default-on, so the gate is transparent on
+/// A governance-shell leaf: no `requires`. Pre-installed, so the gate is transparent on
 /// a fresh install. This router holds ONLY the protected device-management routes.
 ///
 /// The PUBLIC device channel — the realtime `/api/hardware/ws`, the nonce-gated
@@ -4650,6 +5142,7 @@ fn hardware_ctx(state: &ServerState) -> ryu_hardware::api::HardwareCtx {
     ryu_hardware::api::HardwareCtx {
         hardware: state.hardware.clone(),
         dashboards: std::sync::Arc::new(state.dashboards.clone()),
+        node_token: std::sync::Arc::new(crate::node_token::active_token),
     }
 }
 
@@ -4657,7 +5150,7 @@ fn hardware_ctx(state: &ServerState) -> ryu_hardware::api::HardwareCtx {
 ///
 /// A governance-shell leaf. Approvals declares no `requires` (the workflow dependency
 /// is soft); it is the dependency *target* of Healing (`requires.apps =
-/// [@ryu/approvals]`). Default-on, so the gate is transparent on a fresh install.
+/// [@ryu/approvals]`). Pre-installed, so the gate is transparent on a fresh install.
 /// Static `events`/`mode` are registered before `:id` so they match first.
 ///
 /// Only the HTTP surface is gated — the in-process `state.approvals`
@@ -4690,12 +5183,31 @@ fn approvals_routes(app_store: &PluginStore) -> Router<ServerState> {
         ))
 }
 
+/// The human mention directory is an Inbox-owned read. Keeping it in a small
+/// gated router means disabling Inbox removes both the picker data and its
+/// notification bridge without changing the ordinary notification feed routes.
+fn mention_target_routes(app_store: &PluginStore) -> Router<ServerState> {
+    Router::new()
+        .route(
+            "/api/notifications/mention-targets",
+            get(notifications_api::mention_targets),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            AppGate::new(
+                app_store,
+                crate::plugins::builtins::APPROVALS_PLUGIN_ID,
+                "Inbox",
+            ),
+            require_app_enabled,
+        ))
+}
+
 /// The `/api/learn/*` + `/api/experience/list` surface, gated on the **Learning App**
 /// being enabled.
 ///
 /// A governance-shell leaf. Learning `requires` the `skills` app because it writes
 /// synthesized skills, so the graph refuses to disable Skills out from under it.
-/// Default-on ([`crate::plugins::builtins::CORE_DEFAULT_ON`]), so on any install with
+/// Pre-installed ([`crate::plugins::builtins::CORE_PREINSTALLED`]), so on any install with
 /// no prior record — fresh or upgraded — the seed enables it and the gate is
 /// transparent. It is NOT transparent for a user who deliberately disabled the app;
 /// that is the point of the gate.
@@ -4706,7 +5218,7 @@ fn approvals_routes(app_store: &PluginStore) -> Router<ServerState> {
 /// conversations regardless of this record; the in-process `state.experience`
 /// [`ExperienceStore`] likewise keeps capturing `(user, assistant)` turns, though
 /// only on the feedback path and only under `learning.enabled` (default OFF).
-/// That asymmetry is why the app is default-on: it owns the consent switches
+/// That asymmetry is why the app is pre-installed: it owns the consent switches
 /// (`contributes.settings_tabs`), so hiding the record would hide the control while
 /// the capture it governs kept running.
 fn learning_routes(app_store: &PluginStore) -> Router<ServerState> {
@@ -4763,13 +5275,13 @@ fn learning_routes(app_store: &PluginStore) -> Router<ServerState> {
 /// The `/api/predict/*` surface, gated on the **Predict App** being enabled.
 ///
 /// A governance-shell leaf like Meetings/Spaces, but the Predict app is **opt-in**
-/// (NOT in [`crate::plugins::builtins::CORE_DEFAULT_ON`]): enabling it flips the
+/// (NOT in [`crate::plugins::builtins::CORE_PREINSTALLED`]): enabling it flips the
 /// system-wide predictive-typing brain ON (`main.rs` seeds
 /// `predict::set_enabled(rec.enabled)` at boot), which sends text from arbitrary apps
 /// to a model. The codebase ships it OFF by design, so the gate is fail-closed here —
 /// a disabled/never-installed Predict app returns 503 on the whole `/api/predict/*`
 /// surface, matching the already-off brain. This is correct AND breaks no working
-/// install: the brain is default-off, so any install where predict actually works
+/// install: the brain is not pre-installed, so any install where predict actually works
 /// already has the record enabled → the gate passes.
 ///
 /// The `predict::PREDICT_PLUGIN_ID` const is `"predict"` (its fixture id + any existing
@@ -4797,13 +5309,13 @@ fn predict_routes(state: &ServerState) -> Router<ServerState> {
     Router::new().nest_service("/api/predict", inner)
 }
 
-/// The protected `/api/voice/*` data path, gated on the (default-on) **Voice App**.
+/// The protected `/api/voice/*` data path, gated on the (pre-installed) **Voice App**.
 ///
 /// Governance-shell leaf: the `voice` module stays in-crate (the chat/island paths
 /// call it in-process). Only the protected STT/TTS routes are gated; the PUBLIC
 /// realtime voice WS (`/api/voice/ws`) stays on the public router, ungated — a browser
 /// WS upgrade authenticates in-handler, so live voice mode connects regardless of the
-/// app's enabled bit. Default-on, so the gate is transparent on a fresh install.
+/// app's enabled bit. Pre-installed, so the gate is transparent on a fresh install.
 fn voice_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
         // STT — proxies audio to whisper.cpp.
@@ -4828,7 +5340,7 @@ fn voice_routes(app_store: &PluginStore) -> Router<ServerState> {
         ))
 }
 
-/// The generative-media PRODUCERS, gated on the (default-on) **Media App**.
+/// The generative-media PRODUCERS, gated on the (pre-installed) **Media App**.
 ///
 /// Governance-shell leaf: the `media`/`gifs` modules stay in-crate. Only the producers
 /// (image/video/gif) are gated; the shared no-cloud blob store (`/api/media/upload` +
@@ -4852,12 +5364,12 @@ fn media_routes(app_store: &PluginStore) -> Router<ServerState> {
         ))
 }
 
-/// The `/api/memory/*` long-term memory CRUD surface, gated on the (default-on)
+/// The `/api/memory/*` long-term memory CRUD surface, gated on the (pre-installed)
 /// **Memory App**.
 ///
 /// Governance-shell leaf: the `MemoryStore` stays a `ServerState` field. Only the HTTP
 /// CRUD surface is gated; the in-process chat auto-recall path is kernel and never
-/// HTTP-loops back through `/api/memory`. Default-on, so the gate is transparent on a
+/// HTTP-loops back through `/api/memory`. Pre-installed, so the gate is transparent on a
 /// fresh install.
 fn memory_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
@@ -4866,6 +5378,7 @@ fn memory_routes(app_store: &PluginStore) -> Router<ServerState> {
             "/api/memory/:id",
             get(get_memory).put(update_memory).delete(delete_memory),
         )
+        .route("/api/memory/git/trace", get(memory_git::trace))
         .merge(memory_dream::routes())
         .route_layer(middleware::from_fn_with_state(
             AppGate::new(
@@ -4919,13 +5432,13 @@ fn side_chat_routes(app_store: &PluginStore) -> Router<ServerState> {
         ))
 }
 
-/// The `/api/retrieval/*` index+search surface, gated on the (default-on) **RAG App**.
+/// The `/api/retrieval/*` index+search surface, gated on the (pre-installed) **RAG App**.
 ///
 /// Retrieval is the RAG capability's HTTP surface (it operates on `state.retrieval`),
 /// so it reuses the existing `RAG_PLUGIN_ID` rather than minting a new app. The
 /// per-handler tenancy/permission gates (`retrieval/search` refuses a tokenless caller
 /// on a bound node) are unchanged — this adds only the plugin-enabled precondition.
-/// Default-on, so the gate is transparent on a fresh install.
+/// Pre-installed, so the gate is transparent on a fresh install.
 fn retrieval_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
         .route("/api/retrieval/index", post(index_retrieval_chunk))
@@ -5325,6 +5838,15 @@ async fn set_preference(
 ) -> axum::response::Response {
     match state.preferences.set(&key, &body.value).await {
         Ok(()) => {
+            if key == crate::privacy::PRODUCT_ANALYTICS_ENABLED_PREF_KEY {
+                crate::ryu_analytics::set_product_analytics_from_value(&body.value);
+                // The Ryu-owned local-Gateway relay gate is env-backed, so a
+                // preference write needs one best-effort respawn to take effect.
+                // A failed refresh never rolls back the persisted preference.
+                if let Err(error) = state.gateway.refresh().await {
+                    tracing::warn!(error = %error, "gateway: refresh after product-analytics change failed");
+                }
+            }
             if key == crate::exec_approval::EXEC_APPROVAL_MODE_PREF_KEY {
                 crate::exec_approval::apply_from_pref(&body.value);
             }
@@ -5472,6 +5994,12 @@ async fn set_preference(
             }
             if key == crate::entitlement::MANAGED_INFERENCE_ENTITLED_PREF_KEY {
                 crate::entitlement::set_managed_inference_entitled(&body.value);
+            }
+            if key == crate::entitlement::MARKETPLACE_APPS_ENTITLED_PREF_KEY {
+                crate::entitlement::set_marketplace_apps_entitled(&body.value);
+            }
+            if key == crate::entitlement::MARKETPLACE_DIRECT_LICENSED_ITEMS_PREF_KEY {
+                crate::entitlement::set_marketplace_direct_licensed_items(&body.value);
             }
             // Generic per-agent gateway routing: keep the in-process map in sync so
             // the next spawn of any toggled agent injects (or omits) OPENAI_BASE_URL.
@@ -6404,7 +6932,9 @@ async fn all_events_stream(
     ));
 
     #[allow(unused_mut)]
-    let mut streams: Vec<TaggedStream> = vec![
+    let activity = tagged("activity", state.activity.subscribe());
+    let streams: Vec<TaggedStream> = vec![
+        activity,
         notifications,
         tagged("approvals", state.approvals.store.subscribe()),
         downloads,
@@ -7051,18 +7581,31 @@ fn consume_widget_follow_up_ticket(req: &mut ChatStreamRequest) -> Result<(), &'
 )]
 async fn chat_stream(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     // Verified human author (Phase 0), attached by `attach_verified_caller`.
     // `None` in the anonymous single-tenant / loopback flow. Always present as an
     // extension (the middleware inserts it on every protected route), so the
     // direct `Extension` extractor is safe here.
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
-    axum::Extension(user_jwt): axum::Extension<Option<String>>,
+    axum::Extension(VerifiedUserJwt(user_jwt)): axum::Extension<VerifiedUserJwt>,
     Json(mut req): Json<ChatStreamRequest>,
 ) -> axum::response::Response {
     // Stamp the verified author onto this turn unconditionally (None when
     // anonymous). `author_user_id` is `#[serde(skip)]`, so this server-side write
     // is the ONLY source — a client request body can neither set nor spoof it.
     req.author_user_id = caller.as_ref().map(|c| c.user_id.clone());
+    req.client_id = match header_str(&headers, "x-ryu-client-id") {
+        Some(value) => match uuid::Uuid::parse_str(value.trim()) {
+            Ok(id) => Some(id.to_string()),
+            Err(_) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "x-ryu-client-id must be a UUID".to_owned(),
+                )
+            }
+        },
+        None => None,
+    };
     req.user_jwt = user_jwt;
     // Widget follow-ups carry only an opaque ticket on the wire. Validate it
     // here, but defer consumption until the final pre-dispatch point below so
@@ -7488,6 +8031,7 @@ async fn build_hook_context(
     state: &ServerState,
     conversation_id: &str,
     agent_id: Option<&str>,
+    caller_user_id: Option<&str>,
     flags: &std::collections::HashMap<String, bool>,
 ) -> crate::plugin_host::HookContext {
     const MAX_TRANSCRIPT: usize = 20;
@@ -7514,6 +8058,7 @@ async fn build_hook_context(
     crate::plugin_host::HookContext {
         conversation_id: Some(conversation_id.to_string()),
         agent_id: agent_id.map(str::to_string),
+        caller_user_id: caller_user_id.map(str::to_string),
         transcript,
         flags: flags.clone(),
         input: None,
@@ -7586,6 +8131,7 @@ fn build_pre_hook_context(
     crate::plugin_host::HookContext {
         conversation_id: req.conversation_id.clone(),
         agent_id: req.agent_id.clone(),
+        caller_user_id: req.author_user_id.clone(),
         transcript,
         flags: flags.clone(),
         input,
@@ -7678,6 +8224,7 @@ fn spawn_action_hooks(
     hooks: &[crate::plugin_host::HookPlugin],
     conversation_id: &str,
     agent_id: Option<&str>,
+    caller_user_id: Option<&str>,
     flags: &std::collections::HashMap<String, bool>,
     action: crate::plugin_host::HookAction,
     notes: &tokio::sync::mpsc::UnboundedSender<ActionSummaryNote>,
@@ -7688,6 +8235,7 @@ fn spawn_action_hooks(
     let ctx = crate::plugin_host::HookContext {
         conversation_id: Some(conversation_id.to_owned()),
         agent_id: agent_id.map(str::to_owned),
+        caller_user_id: caller_user_id.map(str::to_owned),
         flags: flags.clone(),
         action: Some(action.clone()),
         ..Default::default()
@@ -7890,7 +8438,7 @@ async fn run_chat_with_hooks(
                 .find(|m| m.role == "user")
                 .map(crate::sidecar::adapters::ui_message_text)
                 .unwrap_or_default();
-            crate::sidecar::adapters::persist_handled_turn(
+            let _ = crate::sidecar::adapters::persist_handled_turn(
                 &state.conversations,
                 &conversation_id,
                 &user_text,
@@ -7942,6 +8490,7 @@ async fn run_chat_with_hooks(
                                             &hooks,
                                             &conversation_id,
                                             agent_id.as_deref(),
+                                            current.author_user_id.as_deref(),
                                             &flags,
                                             action,
                                             sender,
@@ -7960,6 +8509,7 @@ async fn run_chat_with_hooks(
                                             &hooks,
                                             &conversation_id,
                                             agent_id.as_deref(),
+                                            current.author_user_id.as_deref(),
                                             &flags,
                                             action,
                                             sender,
@@ -8009,7 +8559,14 @@ async fn run_chat_with_hooks(
             notes_open = false;
 
             // Post-turn hooks: build context from the persisted transcript.
-            let ctx = build_hook_context(&state, &conversation_id, agent_id.as_deref(), &flags).await;
+            let ctx = build_hook_context(
+                &state,
+                &conversation_id,
+                agent_id.as_deref(),
+                current.author_user_id.as_deref(),
+                &flags,
+            )
+            .await;
             let directives = crate::plugin_host::run_hooks(
                 &state,
                 &ctx,
@@ -9340,15 +9897,15 @@ struct CancelRequest {
     conversation_id: String,
 }
 
-/// `POST /api/chat/cancel` — explicitly stop a conversation's in-flight ACP turn.
+/// `POST /api/chat/cancel` — explicitly stop a conversation's in-flight agent turn.
 /// Unlike a mere SSE disconnect (which Core lets finish so the assistant message
-/// persists), this propagates an ACP `session/cancel` to the agent so it actually
-/// stops. `cancelled` is `false` when no live turn was found for the conversation.
+/// persists), this propagates ACP `session/cancel` or A2A `CancelTask` so the agent
+/// actually stops. `cancelled` is `false` when no live turn was found.
 #[utoipa::path(
     post,
     path = "/api/chat/cancel",
     tag = "Chat",
-    summary = "Cancel a conversation's in-flight ACP turn",
+    summary = "Cancel a conversation's in-flight agent turn",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -9363,7 +9920,8 @@ async fn chat_cancel(
     {
         return resp;
     }
-    let cancelled = crate::sidecar::adapters::acp::request_cancel(&body.conversation_id);
+    let cancelled = crate::sidecar::adapters::acp::request_cancel(&body.conversation_id)
+        || crate::a2a::request_cancel(&body.conversation_id);
     Json(serde_json::json!({ "cancelled": cancelled })).into_response()
 }
 
@@ -9437,6 +9995,197 @@ async fn chat_control(
             json_error(StatusCode::BAD_GATEWAY, error)
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatRetryBody {
+    /// The only currently supported automatic retry reason. Keeping the reason
+    /// explicit makes this endpoint auditable and prevents a generic hidden
+    /// "run the last prompt again" action from appearing by accident.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// `POST /api/chat/retry/:conversation_id` — start one bounded retry for a
+/// terminal chat run that the reconnect-retry desktop feature observed during a
+/// connectivity outage.
+///
+/// Core owns the important part of this contract: ACL, permission, terminal-state
+/// validation, and the atomic claim. The desktop only supplies an outage signal;
+/// it cannot force a second turn into a conversation it cannot write.
+#[utoipa::path(
+    post,
+    path = "/api/chat/retry/{conversation_id}",
+    tag = "Chat",
+    summary = "Retry a terminal chat turn after reconnect",
+    params(("conversation_id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 202, description = "Retry accepted", body = serde_json::Value))
+)]
+async fn chat_retry(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Extension(user_jwt): Extension<Option<String>>,
+    Path(conversation_id): Path<String>,
+    Json(body): Json<ChatRetryBody>,
+) -> axum::response::Response {
+    if body.reason.as_deref() != Some("network_reconnect") {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "unsupported chat retry reason".to_owned(),
+        );
+    }
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_RUN,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: agent.run".to_owned(),
+        );
+    }
+    if let Err(resp) = require_resource_write(
+        state.conversations.get_access_meta(&conversation_id).await,
+        caller.as_ref(),
+        "conversation not found",
+    ) {
+        return resp;
+    }
+
+    let summary = match state.conversations.get_run_summary(&conversation_id).await {
+        Ok(Some(summary)) => summary,
+        Ok(None) => {
+            return json_error(StatusCode::NOT_FOUND, "conversation not found".to_owned());
+        }
+        Err(error) => {
+            tracing::warn!(conversation_id, "failed to load retry summary: {error:#}");
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "conversation lookup failed".to_owned(),
+            );
+        }
+    };
+    if !matches!(
+        summary.run_status.as_deref(),
+        Some("failed" | "interrupted")
+    ) {
+        return json_error(
+            StatusCode::CONFLICT,
+            format!(
+                "conversation is not retryable in its current state: {}",
+                summary.run_status.as_deref().unwrap_or("idle")
+            ),
+        );
+    }
+
+    let messages = match state
+        .conversations
+        .get_active_messages(&conversation_id)
+        .await
+    {
+        Ok(messages) => messages,
+        Err(error) => {
+            tracing::warn!(conversation_id, "failed to load retry history: {error:#}");
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "conversation history lookup failed".to_owned(),
+            );
+        }
+    };
+    let Some(last_user) = messages.iter().rev().find(|message| message.role == "user") else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "conversation has no persisted user turn to retry".to_owned(),
+        );
+    };
+    if last_user.content.trim().is_empty() {
+        return json_error(
+            StatusCode::CONFLICT,
+            "conversation's last user turn is empty".to_owned(),
+        );
+    }
+
+    // The conditional update closes the two-window race between the summary read
+    // and starting the background stream. Only one reconnecting desktop can win.
+    match state
+        .conversations
+        .claim_terminal_run_for_retry(&conversation_id)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return json_error(
+                StatusCode::CONFLICT,
+                "conversation was already claimed or is no longer retryable".to_owned(),
+            );
+        }
+        Err(error) => {
+            tracing::warn!(conversation_id, "failed to claim chat retry: {error:#}");
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not claim chat retry".to_owned(),
+            );
+        }
+    }
+
+    let messages = messages
+        .into_iter()
+        .map(|message| {
+            let parts = message
+                .parts
+                .and_then(|value| value.as_array().cloned())
+                .unwrap_or_default();
+            UiMessage {
+                role: message.role,
+                content: UiContent::Text(message.content),
+                parts,
+            }
+        })
+        .collect();
+    let req = ChatStreamRequest {
+        messages,
+        agent_id: summary.agent_id,
+        conversation_id: Some(conversation_id.clone()),
+        cwd: summary.folder_path.clone(),
+        workspace_folders: summary.folder_path.into_iter().collect(),
+        worktree_isolation: summary.worktree_path.is_some(),
+        branch: summary.branch,
+        worktree_path: summary.worktree_path,
+        persist: true,
+        skip_user_append: true,
+        author_user_id: caller.as_ref().map(|value| value.user_id.clone()),
+        user_jwt,
+        ..Default::default()
+    };
+
+    // A reconnecting desktop does not need another SSE response. Drain the
+    // background stream so Core keeps the turn alive and persists its outcome;
+    // any mounted ChatPage can attach through the normal resume endpoint.
+    tokio::spawn(async move {
+        use futures_util::StreamExt;
+
+        let response = run_chat_with_hooks(state, req).await;
+        let mut stream = response.into_body().into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            if chunk.is_err() {
+                break;
+            }
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "ok": true,
+            "conversation_id": conversation_id,
+            "run_status": "running"
+        })),
+    )
+        .into_response()
 }
 
 /// `GET /api/chat/stream/resume/:conversation_id` — reconnect to an in-flight
@@ -9951,8 +10700,10 @@ async fn resolve_channel_agent(
 ///
 /// Channel bots (Telegram, Slack, WhatsApp, Discord) call this endpoint with a
 /// `(conversation_id, agent_id, text)` turn and receive the assembled reply as a
-/// plain JSON `{ "reply": "..." }`. Model calls still flow Core → Gateway so the
-/// governance layer (firewall, DLP, budgets, audit) governs every bot-initiated call.
+/// plain JSON `{ "reply": "...", "assistantMessageId": "..." }`. Model calls
+/// still flow Core → Gateway so the governance layer (firewall, DLP, budgets,
+/// audit) governs every bot-initiated call. The durable assistant id lets a
+/// channel bind a provider reaction to this exact turn after it sends the reply.
 #[utoipa::path(
     post,
     path = "/api/channels/run",
@@ -10015,7 +10766,7 @@ async fn channel_run(
         match state.teams.get(team_id).await {
             Ok(Some(team)) => {
                 run_team_reply_text(
-                    req.conversation_id,
+                    req.conversation_id.clone(),
                     team,
                     req.text,
                     req.author_name,
@@ -10036,7 +10787,7 @@ async fn channel_run(
         }
     } else {
         run_reply_text(
-            req.conversation_id,
+            req.conversation_id.clone(),
             req.agent_id,
             req.text,
             req.author_name,
@@ -10054,8 +10805,10 @@ async fn channel_run(
     };
 
     match result {
-        Ok(reply) => Json(json!({
-            "reply": reply,
+        Ok(result) => Json(json!({
+            "reply": result.reply,
+            "assistantMessageId": result.assistant_message_id,
+            "assistantMessageIds": result.assistant_message_ids,
             "agentId": effective_agent_id,
             "fallbackWarning": fallback_warning,
         }))
@@ -11228,7 +11981,7 @@ async fn list_apps_projection(
                     "mandatory".to_owned(),
                     serde_json::Value::Bool(crate::plugins::builtins::is_mandatory(&m.id)),
                 );
-                // Two-tier registry (#444): Core (first-party, default-on) vs
+                // Two-tier registry (#444): Core (first-party tier) vs
                 // Community (opt-in). Derived from membership, so a plugin cannot
                 // self-assert Core. Lets the desktop render the Core/Community split.
                 obj.insert(
@@ -11722,9 +12475,53 @@ async fn plugin_doctor(
     summary = "List the plugin catalog",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn list_apps_catalog(State(state): State<ServerState>) -> Json<serde_json::Value> {
-    let entries = merged_plugin_catalog_entries(&state).await;
+async fn list_apps_catalog(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> Json<serde_json::Value> {
+    list_apps_catalog_for_surface(&state, surface_from_headers(&headers)).await
+}
+
+/// Build the catalog projection for a caller surface.
+///
+/// Paid Marketplace listings are intentionally absent from the mobile catalog:
+/// this surface has no StoreKit/Play Billing implementation and must not expose
+/// an install or checkout path that could unlock digital value. Existing paid
+/// installs remain available through `GET /api/plugins`, whose surface filter is
+/// separate from this browse-only catalog projection.
+async fn list_apps_catalog_for_surface(
+    state: &ServerState,
+    surface: Option<crate::plugin_manifest::Surface>,
+) -> Json<serde_json::Value> {
+    let entries = filter_mobile_paid_plugin_catalog_entries(
+        merged_plugin_catalog_entries(state).await,
+        surface,
+    );
     Json(json!({ "entries": entries }))
+}
+
+fn is_paid_plugin_catalog_entry(entry: &serde_json::Value) -> bool {
+    let Some(pricing) = entry.get("pricing").filter(|value| value.is_object()) else {
+        return false;
+    };
+    pricing
+        .get("kind")
+        .or_else(|| pricing.get("model"))
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|kind| kind != "free")
+}
+
+fn filter_mobile_paid_plugin_catalog_entries(
+    entries: Vec<serde_json::Value>,
+    surface: Option<crate::plugin_manifest::Surface>,
+) -> Vec<serde_json::Value> {
+    if surface != Some(crate::plugin_manifest::Surface::Mobile) {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|entry| !is_paid_plugin_catalog_entry(entry))
+        .collect()
 }
 
 /// The active Plugin catalog source (Ryu Marketplace by default, or integrations.sh
@@ -11915,7 +12712,7 @@ async fn with_github_token(
 /// browse path.
 /// Catalog entries for every built-in APP — a compiled fixture that claims a UI
 /// DESTINATION ([`manifest_declares_destination`]) — derived from `BUILTIN_MANIFESTS`
-/// once. They re-classify default-off Core apps (Canvas/Whiteboard/Meetings/Clips/…)
+/// once. They re-classify not pre-installed Core apps (Canvas/Whiteboard/Meetings/Clips/…)
 /// that the open git catalog lists as bare plugin cards with empty `kinds`: mapped
 /// through `plugin_manifest_to_entry` they carry the explicit `type:"app"` and the
 /// `runnables` the preview needs, and (placed above the marketplace/git groups) they
@@ -11947,7 +12744,7 @@ async fn merged_plugin_catalog_entries(state: &ServerState) -> Vec<serde_json::V
         manifests.iter().map(plugin_manifest_to_entry).collect()
     };
 
-    // 1a. Keep every compiled built-in discoverable, including default-off
+    // 1a. Keep every compiled built-in discoverable, including not pre-installed
     // plugins that are not present in `app_manifests` until the user enables
     // them. The merge below is first-writer-wins, so active manifests retain
     // their live state while this fills the marketplace browse gap.
@@ -12040,7 +12837,7 @@ async fn merged_plugin_catalog_entries(state: &ServerState) -> Vec<serde_json::V
     // Dedup by id, first-writer-wins: loaded built-ins > compiled built-in apps >
     // GitHub-backed hosted marketplace > legacy central index > legacy registry.
     // The compiled built-in-app
-    // group sits above the remote sources so a default-off Core app is classified
+    // group sits above the remote sources so a not pre-installed Core app is classified
     // from its authoritative fixture (companion `type:"app"`) instead of the open
     // catalog's bare plugin card.
     let merged = merge_plugin_catalog_entries(vec![
@@ -12208,8 +13005,10 @@ fn plugin_entry_matches_query(entry: &serde_json::Value, needle: &str) -> bool {
 )]
 async fn plugin_catalog_browse(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let surface = surface_from_headers(&headers);
     let query = params.get("query").map(String::as_str).unwrap_or("");
     let limit = params
         .get("limit")
@@ -12255,7 +13054,7 @@ async fn plugin_catalog_browse(
                 (
                     StatusCode::OK,
                     Json(json!({
-                        "entries": entries,
+                        "entries": filter_mobile_paid_plugin_catalog_entries(entries, surface),
                         "next_cursor": val.get("next_cursor").cloned().unwrap_or(serde_json::Value::Null),
                         "note": val.get("note").cloned().unwrap_or(serde_json::Value::Null),
                     })),
@@ -12277,7 +13076,10 @@ async fn plugin_catalog_browse(
         return (
             StatusCode::OK,
             Json(json!({
-                "entries": all_plugin_catalog_entries(&state, query, limit).await,
+                "entries": filter_mobile_paid_plugin_catalog_entries(
+                    all_plugin_catalog_entries(&state, query, limit).await,
+                    surface,
+                ),
                 // No cursor: the page is a concatenation of N independently
                 // paginated feeds, and one opaque cursor cannot address a position
                 // in all of them. Each source contributes at most `limit` rows and
@@ -12301,7 +13103,10 @@ async fn plugin_catalog_browse(
             .collect();
         return (
             StatusCode::OK,
-            Json(json!({ "entries": entries, "next_cursor": serde_json::Value::Null })),
+            Json(json!({
+                "entries": filter_mobile_paid_plugin_catalog_entries(entries, surface),
+                "next_cursor": serde_json::Value::Null
+            })),
         );
     }
 
@@ -12329,7 +13134,7 @@ async fn plugin_catalog_browse(
                 (
                     StatusCode::OK,
                     Json(json!({
-                        "entries": entries,
+                    "entries": filter_mobile_paid_plugin_catalog_entries(entries, surface),
                         "next_cursor": val.get("next_cursor").cloned().unwrap_or(serde_json::Value::Null),
                         "note": val.get("note").cloned().unwrap_or(serde_json::Value::Null),
                     })),
@@ -12761,15 +13566,12 @@ fn local_detail_trust_signals(compiled_in: bool) -> (&'static str, &'static str,
 
 /// The version to SHOW for a locally loaded manifest.
 ///
-/// A compiled-in manifest ships INSIDE this binary, so the version the user
+/// A normal compiled-in manifest ships INSIDE this binary, so the version the user
 /// actually has is whatever Core release delivered it — not the `version` the
 /// manifest declares, which is an authoring-time constant no release bump ever
-/// rewrites (`scripts/release/bump-version.sh` covers Cargo.toml / package.json /
-/// tauri.conf.json / Cargo.lock only, and `tools/mirror-satellites.sh` says
-/// outright that `manifest.json` holds the APP version, not the train's). Every
-/// packaged manifest therefore still declares "1.0.0" while Core ships 0.1.x,
-/// which is the phantom v1.0.0 the Store's detail dialog showed for every
-/// built-in app and plugin — a version number that was never released.
+/// rewrites. External-repository apps may opt into their own published train with
+/// the manifest's non-`builtin` `source` hint; their editor version is meaningful
+/// even though Core carries a trusted copy for offline Marketplace discovery.
 ///
 /// A DISK manifest keeps its own version: it was installed from a catalog that
 /// has a real publish train, and overriding it would misreport the installed
@@ -12778,7 +13580,12 @@ fn local_detail_trust_signals(compiled_in: bool) -> (&'static str, &'static str,
 /// on — never the emitted `"source": "built-in"`, which `plugin_manifest_to_entry`
 /// hardcodes for disk manifests too and so cannot tell the two apart.
 fn display_version(m: &crate::plugin_manifest::PluginManifest) -> String {
-    if crate::plugins::builtins::is_compiled_in_manifest(&m.id) {
+    if crate::plugins::builtins::is_compiled_in_manifest(&m.id)
+        && !m
+            .source
+            .as_deref()
+            .is_some_and(|source| !source.trim().is_empty() && source != "builtin")
+    {
         env!("CARGO_PKG_VERSION").to_owned()
     } else {
         m.version.clone()
@@ -13661,9 +14468,16 @@ fn screen_guarded_hostname(host: &str) -> Result<(), String> {
 )]
 async fn install_app_from_url(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<InstallFromUrlRequest>,
 ) -> axum::response::Response {
+    if surface_from_headers(&headers) == Some(crate::plugin_manifest::Surface::Mobile) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "Marketplace installs are not available in Ryu Mobile".to_owned(),
+        );
+    }
     if let Err(response) = enforce_app_lifecycle_permission(
         &state,
         &caller,
@@ -13830,6 +14644,11 @@ async fn install_app_from_url(
     if let Err(e) = manifest.validate_code_sources() {
         return json_error(StatusCode::UNPROCESSABLE_ENTITY, e);
     }
+    // URL installs have no verified package provenance and are always Community
+    // authority: their declarative HTTP may reach only their own ext mount.
+    if let Err(error) = manifest.validate_declarative_http_policy(false) {
+        return json_error(StatusCode::UNPROCESSABLE_ENTITY, error);
+    }
 
     // Validate the app id BEFORE it is ever used as a filesystem path component
     // (see `apps_dir().join(&manifest.id)` below). A crafted id like
@@ -13908,7 +14727,9 @@ async fn install_app_from_url(
 /// Trusted, local path: the bundle is provided directly by the caller (the
 /// desktop over the token'd Core API), so there is no SSRF surface. The manifest
 /// id is still validated before being used as a filesystem path component, and a
-/// duplicate id is rejected (never clobber an installed plugin).
+/// duplicate id is rejected (never clobber an installed plugin). A trusted
+/// standalone host may include `update: true` to replace an existing same-id
+/// carriage while preserving its enabled state and approved grants.
 #[utoipa::path(
     post,
     path = "/api/plugins/install-bundle",
@@ -13922,10 +14743,19 @@ async fn install_app_bundle(
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
+    let bundle_update = body
+        .get("update")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let lifecycle_permission = if bundle_update {
+        crate::identity_verify::permissions::APP_UPDATE
+    } else {
+        crate::identity_verify::permissions::APP_INSTALL
+    };
     if let Err(response) = enforce_app_lifecycle_permission(
         &state,
         &caller,
-        crate::identity_verify::permissions::APP_INSTALL,
+        lifecycle_permission,
     )
     .await
     {
@@ -13940,6 +14770,7 @@ async fn install_app_bundle(
     let mut manifest_value = body.clone();
     if let Some(obj) = manifest_value.as_object_mut() {
         obj.remove("ui_code");
+        obj.remove("update");
     }
 
     let manifest: crate::plugin_manifest::PluginManifest =
@@ -14031,6 +14862,19 @@ async fn install_app_bundle(
 
     let app_name = manifest.name.clone();
     let app_version = manifest.version.clone();
+    if bundle_update {
+        return match update_installed_plugin_bundle(&state, manifest, ui_code).await {
+            Ok(body) => {
+                crate::events::publish_system_notification(
+                    "App updated",
+                    format!("{app_name} {app_version} is updated and ready."),
+                    "success",
+                );
+                Json(body).into_response()
+            }
+            Err((status, msg)) => json_error(status, msg),
+        };
+    }
     match persist_installed_plugin(&state, manifest, ui_code, None).await {
         Ok(body) => {
             crate::events::publish_system_notification(
@@ -14044,10 +14888,21 @@ async fn install_app_bundle(
     }
 }
 
-/// Maximum size of a plugin's bundled sandboxed-UI code (4 MiB). Enforced at both
+/// Maximum size of a plugin's bundled sandboxed-UI code (32 MiB). Enforced at both
 /// the install boundary here and the marketplace integrity gate
 /// (`catalog_source::sources`), so a pathological bundle is refused before storage.
-const MAX_UI_CODE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_UI_CODE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Maximum JSON request body for a local plugin bundle. This is intentionally
+/// larger than [`MAX_UI_CODE_BYTES`] to leave room for the manifest and its
+/// optional inline backend while keeping the limit scoped to the carriage route.
+const MAX_PLUGIN_BUNDLE_BYTES: usize = 40 * 1024 * 1024;
+
+/// Maximum JSON envelope for one app host-bridge call. App-owned files use the
+/// durable `storage:kv` bridge in the current Companion contract, so the wire
+/// envelope includes base64 overhead in addition to the file bytes. Keep this
+/// bounded and scoped to the bridge instead of changing Axum's global default.
+const MAX_PLUGIN_HOST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Maximum size of a plugin's inline node-backend bundle (`backend_code`, 4 MiB).
 /// The backend analogue of [`MAX_UI_CODE_BYTES`]; enforced in the shared install
@@ -14069,6 +14924,11 @@ struct PluginCatalogInstallBody {
     /// stable on its next check.
     #[serde(default)]
     channel: Option<String>,
+    /// Exact historical release tag selected from the Versions tab. This is
+    /// mutually exclusive with `channel` and is resolved only by the trusted
+    /// Marketplace source.
+    #[serde(default)]
+    version: Option<String>,
 }
 
 /// Shared sink that persists a validated plugin manifest (+ optional
@@ -14092,6 +14952,16 @@ async fn persist_installed_plugin(
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     let provenance =
         provenance.map(|p| crate::plugins::lifecycle::capture_provenance(&manifest, &p));
+    if let Some(provenance) = provenance.as_ref() {
+        // Make the digest-bound official provenance visible to the same tier
+        // resolver used by runtime serialization before applying HTTP authority.
+        crate::plugins::builtins::record_verified_official_package(&manifest, provenance);
+    }
+    let allow_core_routes = crate::plugins::builtins::tier_for_manifest(&manifest)
+        == crate::plugin_manifest::PluginTier::Core;
+    if let Err(error) = manifest.validate_declarative_http_policy(allow_core_routes) {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, error));
+    }
     if crate::fleet::is_artifact_blocked(&manifest.id) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -14259,6 +15129,95 @@ async fn persist_installed_plugin(
     Ok(json!({
         "success": true,
         "app": { "id": manifest.id, "name": manifest.name, "version": manifest.version },
+        "has_ui": ui_code.is_some(),
+    }))
+}
+
+/// Replace an installed app with an explicitly supplied local carriage. This is
+/// the update half of the standalone host contract: the local bundle has already
+/// passed the same manifest, code-source, size, and hash validation as install,
+/// so it does not need a Marketplace re-resolve. Existing enabled state, grants,
+/// and provenance remain user state.
+async fn update_installed_plugin_bundle(
+    state: &ServerState,
+    manifest: crate::plugin_manifest::PluginManifest,
+    ui_code: Option<String>,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let id = manifest.id.clone();
+    let old_manifest = state
+        .app_manifests
+        .read()
+        .await
+        .iter()
+        .find(|candidate| candidate.id == id)
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("App '{id}' is not installed"),
+            )
+        })?;
+    let old_record = state
+        .app_store
+        .get_record(&id)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("App '{id}' has no lifecycle record"),
+            )
+        })?;
+
+    write_plugin_manifest_to_disk(&manifest).await?;
+    reload_manifests_inner(state).await;
+
+    let update_result = if old_record.version == manifest.version {
+        state
+            .app_store
+            .set_ui_code(&id, ui_code.as_deref())
+            .await
+            .map(|_| ())
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+    } else {
+        crate::plugins::lifecycle::update_app(&state.app_store, &manifest, ui_code.as_deref(), true)
+            .await
+            .map(|_| ())
+            .map_err(|error| (StatusCode::CONFLICT, error.to_string()))
+    };
+    if let Err(error) = update_result {
+        let _ = write_plugin_manifest_to_disk(&old_manifest).await;
+        reload_manifests_inner(state).await;
+        return Err(error);
+    }
+
+    if old_record.enabled {
+        let _ = deactivate_plugin(state, &old_manifest).await;
+    }
+    let updated = state
+        .app_store
+        .get_record(&id)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("App '{id}' disappeared during standalone update"),
+            )
+        })?;
+    if updated.enabled {
+        let _ = activate_plugin(state, &manifest, &updated).await;
+    }
+    state.mcp.clear_ext_api_routes(&id);
+    state.realtime.broadcast_event(
+        "system:plugins",
+        "plugin.contributions.changed",
+        json!({"type": "contributions_changed"}),
+    );
+
+    Ok(json!({
+        "success": true,
+        "app": updated,
         "has_ui": ui_code.is_some(),
     }))
 }
@@ -14482,6 +15441,12 @@ async fn install_plugin_from_catalog(
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<PluginCatalogInstallBody>,
 ) -> axum::response::Response {
+    if surface_from_headers(&headers) == Some(crate::plugin_manifest::Surface::Mobile) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "Marketplace installs are not available in Ryu Mobile".to_owned(),
+        );
+    }
     if let Err(response) = enforce_app_lifecycle_permission(
         &state,
         &caller,
@@ -14504,6 +15469,29 @@ async fn install_plugin_from_catalog(
         .map(str::trim)
         .filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case(crate::update::STABLE_CHANNEL))
         .map(str::to_ascii_lowercase);
+    let version = body
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        .map(str::to_owned);
+    if version.as_ref().is_some_and(|value| {
+        value.len() > 128
+            || !value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || ".-+vV".contains(character))
+    }) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "`version` must be a semver release tag".to_owned(),
+        );
+    }
+    if channel.is_some() && version.is_some() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "choose either `channel` or an exact `version`, not both".to_owned(),
+        );
+    }
 
     // Forward the caller's bearer to the marketplace install handoff (#491) so a
     // PAID plugin is denied unless the buyer org holds a license. EVERY dependency
@@ -14568,7 +15556,15 @@ async fn install_plugin_from_catalog(
             // Its dependencies resolve on their own default train — see the note on
             // `resolve_plugin_from_catalog`.
             let dep_channel = (next == id).then_some(channel.as_deref()).flatten();
-            match resolve_plugin_from_catalog(&state, &next, buyer_token.clone(), dep_channel).await
+            let dep_version = (next == id).then_some(version.as_deref()).flatten();
+            match resolve_plugin_from_catalog(
+                &state,
+                &next,
+                buyer_token.clone(),
+                dep_channel,
+                dep_version,
+            )
+            .await
             {
                 Ok((m, ui_code, provenance)) => {
                     provenances.insert(next.clone(), provenance);
@@ -14752,7 +15748,7 @@ pub async fn install_default_official_plugins(
         .into_iter()
         .map(|record| record.id)
         .collect();
-    let mut ids: Vec<String> = crate::plugins::builtins::CORE_DEFAULT_ON
+    let mut ids: Vec<String> = crate::plugins::builtins::CORE_PREINSTALLED
         .iter()
         .map(|id| (*id).to_owned())
         .collect();
@@ -14797,6 +15793,7 @@ pub async fn install_default_official_plugins(
             axum::Json(PluginCatalogInstallBody {
                 id: id.clone(),
                 channel: None,
+                version: None,
             }),
         )
         .await;
@@ -14804,10 +15801,10 @@ pub async fn install_default_official_plugins(
             tracing::warn!(plugin = %id, status = %response.status(), "official package materialization deferred");
         }
     }
-    // A default-on package may have been materialized as a dependency of another
+    // A pre-installed package may have been materialized as a dependency of another
     // default package, so derive this from the complete post-pass state rather
     // than only from the top-level catalog requests.
-    for id in crate::plugins::builtins::CORE_DEFAULT_ON {
+    for id in crate::plugins::builtins::CORE_PREINSTALLED {
         if preexisting.contains(*id) {
             continue;
         }
@@ -14876,7 +15873,7 @@ async fn reverify_existing_official_package(state: &ServerState, id: &str) {
         return;
     };
     let Ok((catalog_manifest, _, verified_provenance)) =
-        resolve_plugin_from_catalog(state, id, None, None).await
+        resolve_plugin_from_catalog(state, id, None, None, None).await
     else {
         return;
     };
@@ -14926,10 +15923,11 @@ async fn reverify_existing_official_package(state: &ServerState, id: &str) {
 /// trains, and pulling every dependency onto `nightly` because the target is there
 /// would put a user on prereleases they never chose.
 async fn resolve_plugin_from_catalog(
-    state: &ServerState,
-    id: &str,
-    buyer_token: Option<String>,
-    channel: Option<&str>,
+	state: &ServerState,
+	id: &str,
+	buyer_token: Option<String>,
+	channel: Option<&str>,
+	version: Option<&str>,
 ) -> Result<
     (
         crate::plugin_manifest::PluginManifest,
@@ -14946,7 +15944,7 @@ async fn resolve_plugin_from_catalog(
             crate::downloads::DownloadRole::Plugin,
             id.to_string(),
             async {
-                resolve_plugin_from_catalog_inner(state, id, buyer_token, channel)
+                resolve_plugin_from_catalog_inner(state, id, buyer_token, channel, version)
                     .await
                     .map_err(|(status, message)| {
                         anyhow::Error::new(CatalogResolveFailed { status, message })
@@ -15034,10 +16032,11 @@ impl std::fmt::Display for CatalogResolveFailed {
 impl std::error::Error for CatalogResolveFailed {}
 
 async fn resolve_plugin_from_catalog_inner(
-    state: &ServerState,
-    id: &str,
-    buyer_token: Option<String>,
-    channel: Option<&str>,
+	state: &ServerState,
+	id: &str,
+	buyer_token: Option<String>,
+	channel: Option<&str>,
+	version: Option<&str>,
 ) -> Result<
     (
         crate::plugin_manifest::PluginManifest,
@@ -15084,12 +16083,20 @@ async fn resolve_plugin_from_catalog_inner(
     for source in sources {
         // Fetch detail → verify signature → ui_code integrity gate (all fail-closed
         // inside `install_descriptor`).
-        let descriptor = match crate::catalog_source::with_buyer_token(
-            buyer_token.clone(),
-            source.install_descriptor_at(&state.client, id, channel),
-        )
-        .await
-        {
+        let descriptor_result = if let Some(version) = version {
+            crate::catalog_source::with_buyer_token(
+                buyer_token.clone(),
+                source.install_descriptor_at_version(&state.client, id, version),
+            )
+            .await
+        } else {
+            crate::catalog_source::with_buyer_token(
+                buyer_token.clone(),
+                source.install_descriptor_at(&state.client, id, channel),
+            )
+            .await
+        };
+        let descriptor = match descriptor_result {
             Ok(d) => d,
             Err(e) => {
                 remember((StatusCode::BAD_GATEWAY, e.to_string()));
@@ -15156,6 +16163,13 @@ async fn resolve_plugin_from_catalog_inner(
                 .get("orgVerified")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
+            membership_required: descriptor.source_id
+                == crate::plugins::isolation::OFFICIAL_MARKETPLACE_SOURCE_ID
+                && descriptor
+                    .raw
+                    .get("membershipIncluded")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
             org_verified_tier: descriptor
                 .raw
                 .get("orgVerifiedTier")
@@ -15227,15 +16241,28 @@ async fn plugin_ui_bundle(
     Path(id): Path<String>,
 ) -> axum::response::Response {
     // Enabled-state gate: only an ENABLED plugin's UI is served.
-    let enabled = match state.app_store.get(&id).await {
-        Ok(Some(rec)) => rec.enabled,
-        Ok(None) => false,
+    let record = match state.app_store.get(&id).await {
+        Ok(Some(rec)) => rec,
+        Ok(None) => {
+            return json_error(StatusCode::NOT_FOUND, "plugin not enabled".to_owned());
+        }
         Err(e) => {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
     };
-    if !enabled {
+    if !record.enabled {
         return json_error(StatusCode::NOT_FOUND, "plugin not enabled".to_owned());
+    }
+    if record
+        .provenance
+        .as_ref()
+        .is_some_and(|provenance| provenance.membership_required)
+        && !crate::entitlement::marketplace_app_allowed(&id)
+    {
+        return json_error(
+            StatusCode::PAYMENT_REQUIRED,
+            "an active Ryu Membership or recurring plan is required to run this app".to_owned(),
+        );
     }
     match state.app_store.get_ui_code(&id).await {
         Ok(Some(code)) => Json(json!({ "code": code })).into_response(),
@@ -15422,7 +16449,21 @@ async fn find_manifest(
     id: &str,
 ) -> Option<crate::plugin_manifest::PluginManifest> {
     let manifests = state.app_manifests.read().await;
-    manifests.iter().find(|m| m.id == id).cloned()
+    manifests
+        .iter()
+        .find(|m| m.id == id)
+        .cloned()
+        .or_else(|| {
+            // Opt-in built-in apps are intentionally absent from the runtime
+            // manifest set until installed. They still need to resolve through
+            // the built-in install endpoint. External-repository apps carry their
+            // Companion through the verified package/standalone carriage. Keep
+            // runtime activation unchanged: this is a read-only manifest lookup
+            // for the install/enable handlers.
+            crate::plugin_manifest::PluginManifestLoader::load_builtins()
+                .into_iter()
+                .find(|m| m.id == id)
+        })
 }
 
 /// Load the user's host-access trust policy from preferences.
@@ -15596,6 +16637,16 @@ async fn install_app_handler(
     // The wrapped future is deliberately just the store write: it is small and
     // idempotent, because `register_indeterminate_as` races it against a Cancel
     // watch and a Cancel must not be able to tear a half-written record.
+    let is_compiled_builtin = crate::plugins::builtins::is_compiled_in_manifest(&manifest.id)
+        && crate::plugins::builtins::tier_for_manifest(&manifest)
+            == crate::plugin_manifest::PluginTier::Core;
+    let ui_code = if is_compiled_builtin {
+        crate::plugins::seed::compiled_in_ui_code(&manifest.id).map(str::to_owned)
+    } else {
+        None
+    };
+    let provenance = is_compiled_builtin
+        .then(crate::plugins::isolation::PluginProvenance::builtin);
     let installed = state
         .downloads
         .register_indeterminate_as(
@@ -15603,7 +16654,23 @@ async fn install_app_handler(
             crate::downloads::DownloadKind::Other,
             crate::downloads::DownloadRole::Plugin,
             id.clone(),
-            async { crate::plugins::lifecycle::install_app(&state.app_store, &manifest).await },
+            async {
+                // Built-in opt-in apps are compiled into Core but are deliberately
+                // absent from the runtime manifest set until the user installs
+                // them. Use the shared persisted-package sink here so the manifest
+                // becomes live, the compiled Companion carriage is attached, and
+                // subsequent `/api/plugins` reads and enable calls see the same
+                // state as every catalog/bundle install.
+                persist_installed_plugin(&state, manifest.clone(), ui_code, provenance)
+                    .await
+                    .map_err(|(_, message)| anyhow::anyhow!(message))?;
+                state
+                    .app_store
+                    .get(&id)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("Failed to read installed app: {error}"))?
+                    .ok_or_else(|| anyhow::anyhow!("app '{id}' disappeared after install"))
+            },
         )
         .await;
 
@@ -15688,6 +16755,21 @@ async fn enable_app_handler(
             format!("no manifest found for app '{id}'; ensure the ryu.json is loaded"),
         );
     };
+
+    if let Ok(Some(record)) = state.app_store.get(&id).await {
+        if record
+            .provenance
+            .as_ref()
+            .is_some_and(|provenance| provenance.membership_required)
+            && !crate::entitlement::marketplace_app_allowed(&id)
+        {
+            return json_error(
+                StatusCode::PAYMENT_REQUIRED,
+                "an active Ryu Membership or recurring plan is required to enable this app"
+                    .to_owned(),
+            );
+        }
+    }
 
     let gw_url = gateway_url();
     let gw_token = gateway_token();
@@ -15885,6 +16967,26 @@ async fn activate_plugin(
     manifest: &crate::plugin_manifest::PluginManifest,
     record: &crate::plugins::PluginRecord,
 ) -> (Vec<serde_json::Value>, PolicyApplyOutcome) {
+    if record
+        .provenance
+        .as_ref()
+        .is_some_and(|provenance| provenance.membership_required)
+        && !crate::entitlement::marketplace_app_allowed(&manifest.id)
+    {
+        tracing::info!(
+            plugin = %manifest.id,
+            "activate_plugin: Membership entitlement is not active; app remains inert"
+        );
+        return (
+            vec![json!({
+                "id": manifest.id,
+                "ok": false,
+                "error": "an active Ryu Membership or recurring plan is required to run this app",
+            })],
+            PolicyApplyOutcome::default(),
+        );
+    }
+
     // Build and run the RunnableRegistry to activate the manifest's Runnables.
     // Handlers capture cloned subsystem handles; the registry is built per-call
     // so ServerState stays Clone (no non-Clone field added).
@@ -16477,6 +17579,34 @@ fn collect_plugin_slash_commands(
     out
 }
 
+/// Resolve + validate the server-owned HTTP authority stamped onto declarative
+/// contributions. A manifest id never grants this: only exact compiled bytes or
+/// a digest-bound verified official package can resolve to Core tier.
+fn declarative_http_policy(
+    manifest: &crate::plugin_manifest::PluginManifest,
+) -> Result<&'static str, String> {
+    let core = crate::plugins::builtins::tier_for_manifest(manifest)
+        == crate::plugin_manifest::PluginTier::Core;
+    manifest.validate_declarative_http_policy(core)?;
+    Ok(if core { "core" } else { "owner" })
+}
+
+fn stamp_contribution_authority(
+    manifest: &crate::plugin_manifest::PluginManifest,
+    value: &mut serde_json::Value,
+    http_policy: &str,
+) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("plugin".to_string(), serde_json::json!(manifest.id));
+        // Always overwrite a publisher-supplied lookalike. This field is an
+        // authorization decision made by Core, never manifest data.
+        object.insert(
+            "http_policy".to_string(),
+            serde_json::json!(http_policy),
+        );
+    }
+}
+
 /// Walk the manifests and collect every `store_tabs` entry, tagged with its owning
 /// `plugin` id plus that app's `app_installed` / `app_enabled` bits.
 ///
@@ -16485,17 +17615,16 @@ fn collect_plugin_slash_commands(
 /// Every sibling contribution family is served only for ENABLED plugins, because a
 /// disabled app must not drive the shell. A marketplace tab is the deliberate
 /// exception: it is the surface you *install the app from*. Every built-in feature
-/// app is `plugins::seed::NOT_PRE_INSTALLED` — absent from the store on a fresh
-/// machine, not merely disabled — so an enabled-gated Workflows tab would vanish on
+/// app is absent from the store on a fresh machine, not merely disabled — so an
+/// enabled-gated Workflows tab would vanish on
 /// exactly the profile that has never installed Workflows, taking the workflow
 /// template catalog with it.
 ///
-/// This is safe because the tab is a *declaration*, not an authority: the rows it
-/// lists come from the app's own Core path, which keeps its own app-enabled gate
-/// (`/api/workflows/catalog` is inside `workflow_routes`). The shell learns the
-/// app's state from the two bits stamped here and decides — the desktop Store hides
-/// a tab whose app is not installed and enabled, rather than showing a pill that
-/// only ever opens an enable prompt.
+/// The declaration is executable authority: its source/install HTTP is validated
+/// against the manifest's server-resolved provenance below before the shell can see
+/// it. The shell learns the app's state from the two bits stamped here and decides —
+/// the desktop Store hides a tab whose app is not installed and enabled, rather than
+/// showing a pill that only ever opens an enable prompt.
 ///
 /// The SURFACE filter still applies: a shell the app does not target cannot render
 /// the tab whatever its enabled bit says.
@@ -16513,14 +17642,21 @@ fn collect_plugin_store_tabs(
         let Some(c) = &manifest.contributes else {
             continue;
         };
+        let Ok(http_policy) = declarative_http_policy(manifest) else {
+            tracing::warn!(
+                plugin = %manifest.id,
+                "dropping unsafe declarative Store contributions"
+            );
+            continue;
+        };
         for tab in &c.store_tabs {
             let Ok(mut value) = serde_json::to_value(tab) else {
                 continue;
             };
+            stamp_contribution_authority(manifest, &mut value, http_policy);
             let Some(obj) = value.as_object_mut() else {
                 continue;
             };
-            obj.insert("plugin".to_string(), serde_json::json!(manifest.id));
             obj.insert(
                 "app_installed".to_string(),
                 serde_json::json!(installed_ids.contains(&manifest.id)),
@@ -16684,6 +17820,41 @@ fn collect_plugin_chat_widget_templates(
     out
 }
 
+fn tag_plugin_contribution(
+    mut value: serde_json::Value,
+    plugin_id: &str,
+    approved_grants: &[String],
+) -> serde_json::Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("plugin".to_owned(), serde_json::json!(plugin_id));
+        object.insert(
+            "approved_grants".to_owned(),
+            serde_json::json!(approved_grants),
+        );
+    }
+    value
+}
+
+#[cfg(test)]
+mod contribution_provenance_tests {
+    use super::tag_plugin_contribution;
+
+    #[test]
+    fn client_contributions_carry_stored_grant_provenance() {
+        let tagged = tag_plugin_contribution(
+            serde_json::json!({ "id": "records" }),
+            "com.example.records",
+            &["ui:declarative-http".to_owned()],
+        );
+
+        assert_eq!(tagged["plugin"], "com.example.records");
+        assert_eq!(
+            tagged["approved_grants"],
+            serde_json::json!(["ui:declarative-http"])
+        );
+    }
+}
+
 /// `GET /api/plugins/contributions` — the declarative UI contributions (composer
 /// controls, settings tabs, slash commands) of every **enabled** plugin, each
 /// tagged with its owning `plugin` id. The desktop renders the known widget types
@@ -16727,6 +17898,7 @@ async fn plugin_contributions(
     let mut chat_features = Vec::new();
     let mut settings_tabs = Vec::new();
     let mut message_actions = Vec::new();
+    let mut selection_actions = Vec::new();
     let mut context_menu_items = Vec::new();
     let mut create_actions = Vec::new();
     let mut agent_edit_panels = Vec::new();
@@ -16758,7 +17930,7 @@ async fn plugin_contributions(
     slash_commands.extend(read_user_slash_commands(&state.preferences).await);
     // Marketplace tabs — the ONE family collected outside the enabled filter. See
     // `Contributes::store_tabs`: the Store is where an app gets installed, and every
-    // built-in feature app is `NOT_PRE_INSTALLED`, so an enabled-gated tab would be
+    // built-in feature app is absent until explicit install, so an enabled-gated tab would be
     // absent exactly when the user needs it. The surface filter still applies (a
     // shell that the app does not target cannot render the tab either way), and the
     // catalog DATA behind the tab stays gated by the app's own route gate.
@@ -16798,13 +17970,29 @@ async fn plugin_contributions(
         let Some(c) = &manifest.contributes else {
             continue;
         };
+        let http_policy = match declarative_http_policy(manifest) {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(
+                    plugin = %manifest.id,
+                    %error,
+                    "dropping unsafe declarative contributions"
+                );
+                continue;
+            }
+        };
         // Tag each contribution with its owning plugin id so the desktop knows
         // which `plugin_flags` entry a toggle sets / which plugin a tab belongs to.
+        // The approved grants are carried alongside the server-owned policy so
+        // the client can gate declarative HTTP on stored consent, never the
+        // manifest's claim.
+        let approved_grants = enabled_records
+            .get(&manifest.id)
+            .map(|record| record.approved_grants.as_slice())
+            .unwrap_or_default();
         let tag = |mut v: serde_json::Value| {
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("plugin".to_string(), serde_json::json!(manifest.id));
-            }
-            v
+            stamp_contribution_authority(manifest, &mut v, http_policy);
+            tag_plugin_contribution(v, &manifest.id, approved_grants)
         };
         composer_controls.extend(c.composer_controls.iter().cloned().map(tag));
         // Host-rendered chat feature descriptors. The payload stays opaque so a
@@ -16816,6 +18004,7 @@ async fn plugin_contributions(
         // sibling client-rendered families; the renderer owns the `kind`/`anchor`
         // vocabulary and ignores a member it does not know.
         message_actions.extend(c.message_actions.iter().cloned().map(tag));
+        selection_actions.extend(c.selection_actions.iter().cloned().map(tag));
         context_menu_items.extend(c.context_menu_items.iter().cloned().map(tag));
         // "New X" rows for the shell's create menu. Enabled-gated like the rest of
         // this loop, which is the entire point: the row has to vanish with the app,
@@ -16994,6 +18183,10 @@ async fn plugin_contributions(
                 "plugin_id": manifest.id,
                 "approved_grants": record.approved_grants,
                 "has_ui": has_ui && cfg.ui_entry.is_some(),
+                "membership_required": record
+                    .provenance
+                    .as_ref()
+                    .is_some_and(|provenance| provenance.membership_required),
                 // Provenance, NOT trust tier and NOT privilege: whether this app's
                 // manifest ships compiled into the binary (`BUILTIN_MANIFESTS`). The
                 // host panel uses it for ONE presentational decision — whether the
@@ -17029,6 +18222,7 @@ async fn plugin_contributions(
         "chat_features": chat_features,
         "settings_tabs": settings_tabs,
         "message_actions": message_actions,
+        "selection_actions": selection_actions,
         "context_menu_items": context_menu_items,
         "create_actions": create_actions,
         "agent_edit_panels": agent_edit_panels,
@@ -17671,7 +18865,7 @@ async fn apply_sidecars(
                                 .as_deref()
                                 .map(|m| m.trim_end_matches('/').to_owned())
                                 .unwrap_or_default(),
-                            declared_paths: http.routes.iter().map(|r| r.path.clone()).collect(),
+                            declared_routes: http.routes.clone(),
                             client: state.client.clone(),
                         },
                     );
@@ -18347,9 +19541,9 @@ struct UninstallAppParams {
 ///
 /// # Refusals
 ///
-/// - **Built-in / default-on plugins** → 409 `code: "built_in"`. Their manifest is
+/// - **Built-in / pre-installed plugins** → 409 `code: "built_in"`. Their manifest is
 ///   compiled into the binary and the startup seed would resurrect a removed
-///   default-on record, so they can only be disabled, never uninstalled — matching
+///   pre-installed record, so they can only be disabled, never uninstalled — matching
 ///   how `SystemAppCard` already offers no uninstall.
 /// - **Enabled dependents** → 409 with `dependency_error.dependents`, unless
 ///   `?cascade=true`.
@@ -18522,7 +19716,7 @@ async fn uninstall_app_handler(
             StatusCode::NOT_FOUND,
             format!("app '{id}' is not installed"),
         ),
-        // Built-in / default-on: can only be disabled. 409 with a stable machine
+        // Built-in / pre-installed: can only be disabled. 409 with a stable machine
         // code so the desktop renders a "disable instead" affordance.
         Err(UninstallError::Protected { id }) => (
             StatusCode::CONFLICT,
@@ -18652,6 +19846,13 @@ async fn deactivate_plugin(
     // longer a no-op against the running server. Best-effort + a no-op for every
     // non-MCP-server manifest.
     sync_mcp_entry_for_record(state, manifest, McpEntryMutation::SetEnabled(false)).await;
+    if let Err(error) = crate::sidecar::plugin_credentials::revoke(&manifest.id) {
+        tracing::warn!(
+            plugin_id = %manifest.id,
+            %error,
+            "plugin disable: credential revocation failed"
+        );
+    }
     // Symmetric to enable: deregister the plugin's declared `mcp_servers` from the
     // MCP registry so a disabled/uninstalled plugin's server stops being
     // spawned/listed. A no-op for every manifest with no `mcp_servers`.
@@ -18691,6 +19892,9 @@ struct UpdateAppBody {
     /// update keep following the train the user chose at install.
     #[serde(default)]
     channel: Option<String>,
+    /// Exact historical release tag selected from the Marketplace Versions tab.
+    #[serde(default)]
+    version: Option<String>,
 }
 
 /// `POST /api/apps/:id/update` — update an installed plugin by **re-installing the
@@ -18797,10 +20001,33 @@ async fn update_app_handler(
         .map(str::trim)
         .filter(|c| !c.is_empty())
         .map(str::to_ascii_lowercase);
+    let requested_version = body
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        .map(str::to_owned);
+    if requested_version.as_ref().is_some_and(|value| {
+        value.len() > 128
+            || !value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || ".-+vV".contains(character))
+    }) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "`version` must be a semver release tag".to_owned(),
+        );
+    }
+    if requested_channel.is_some() && requested_version.is_some() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "choose either `channel` or an exact `version`, not both".to_owned(),
+        );
+    }
     let target_channel = requested_channel
         .clone()
         .unwrap_or_else(|| record.channel.clone());
-    let switching_channel = target_channel != record.channel;
+    let switching_channel = requested_version.is_none() && target_channel != record.channel;
 
     // 2. RE-VERIFY: re-resolve the target from the catalog. This runs the ed25519
     //    signature verify + the fail-closed ui_code integrity gate + the paid
@@ -18813,7 +20040,10 @@ async fn update_app_handler(
         &state,
         &id,
         buyer_token.clone(),
-        Some(target_channel.as_str()),
+        requested_version
+            .is_none()
+            .then_some(target_channel.as_str()),
+        requested_version.as_deref(),
     )
     .await
     {
@@ -18826,6 +20056,10 @@ async fn update_app_handler(
             format!("catalog returned manifest `{}` for `{id}`", manifest.id),
         );
     }
+	let channel_to_persist = requested_version
+		.as_ref()
+		.map(|_| crate::update::channel_of(&manifest.version))
+		.or_else(|| switching_channel.then(|| target_channel.clone()));
 
     // 3. Downgrade / no-op gate BEFORE any mutation (one definition: `plan_update`).
     //    An explicit channel switch carries its own authority: every prerelease
@@ -18835,17 +20069,17 @@ async fn update_app_handler(
     match plan_update(
         &record.version,
         &manifest.version,
-        body.force || switching_channel,
+        body.force || switching_channel || requested_version.is_some(),
     ) {
         Ok(UpdatePlan::NoOp) => {
             // The version did not move, but the pin still may have: a switch onto a
             // train that currently sits at the same build is a real change to what
             // the NEXT update follows, so persist it before answering.
             let mut app = record.clone();
-            if switching_channel {
+            if let Some(channel) = channel_to_persist.as_deref() {
                 match state
                     .app_store
-                    .set_channel(&id, Some(target_channel.as_str()))
+                    .set_channel(&id, Some(channel))
                     .await
                 {
                     Ok(Some(updated)) => app = updated,
@@ -18856,7 +20090,7 @@ async fn update_app_handler(
             return Json(json!({
                 "success": true,
                 "app": app,
-                "channel": target_channel,
+                "channel": channel_to_persist.as_deref().unwrap_or(target_channel.as_str()),
                 "installed_dependencies": Vec::<String>::new(),
             }))
             .into_response();
@@ -18892,7 +20126,7 @@ async fn update_app_handler(
     //     still leaves a broken dependent enabled. Refuse by default and name the
     //     blocker; `force=true` is the deliberate override, matching how `disable`
     //     treats its own `blocked_by_dependents` refusal.
-    if !body.force {
+    if !(body.force || requested_version.is_some()) {
         let installed_now: Vec<crate::plugin_manifest::PluginManifest> =
             state.app_manifests.read().await.clone();
         if let Err(dep_err) =
@@ -18928,7 +20162,7 @@ async fn update_app_handler(
         &state.app_store,
         &manifest,
         ui_code.as_deref(),
-        body.force || switching_channel,
+        body.force || switching_channel || requested_version.is_some(),
     )
     .await
     {
@@ -18936,10 +20170,10 @@ async fn update_app_handler(
             // Persist the pin BEFORE reporting success: the record now carries a
             // version off the new train, and leaving the old pin would send the very
             // next update back to the train the user just left.
-            let updated = if switching_channel {
+            let updated = if let Some(channel) = channel_to_persist.as_deref() {
                 match state
                     .app_store
-                    .set_channel(&id, Some(target_channel.as_str()))
+                    .set_channel(&id, Some(channel))
                     .await
                 {
                     Ok(Some(record)) => record,
@@ -19008,7 +20242,7 @@ async fn update_app_handler(
             let mut payload = json!({
                 "success": true,
                 "app": updated,
-                "channel": target_channel,
+                "channel": channel_to_persist.as_deref().unwrap_or(target_channel.as_str()),
                 "installed_dependencies": installed_dependencies,
             });
             if switching_channel {
@@ -19105,7 +20339,7 @@ async fn install_new_dependencies_for_update(
 
         // A dependency resolves on its own default train, never the target's — see
         // the note on `resolve_plugin_from_catalog`.
-        match resolve_plugin_from_catalog(state, &next, buyer_token.clone(), None).await {
+        match resolve_plugin_from_catalog(state, &next, buyer_token.clone(), None, None).await {
             Ok((m, ui_code, provenance)) => {
                 provenances.insert(next.clone(), provenance);
                 if m.id != next {
@@ -20142,6 +21376,820 @@ async fn update_agent(
     }
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct CreateAgentPromptVersionBody {
+    /// Optional editor draft. When omitted, the stored system prompt is used.
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// `GET /api/agents/:id/prompt-versions` — list Prompt Studio snapshots.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/prompt-versions",
+    tag = "Agents",
+    summary = "List an agent's prompt versions",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn list_agent_prompt_versions(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    if let Err(status) = enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+        crate::acl::KIND_AGENT,
+        &id,
+    )
+    .await
+    {
+        return (
+            status,
+            Json(json!({ "error": "insufficient permissions: agent.view" })),
+        )
+            .into_response();
+    }
+    match state.agent_store.list_prompt_versions(&id).await {
+        Ok(versions) => Json(json!({ "versions": versions })).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+/// `POST /api/agents/:id/prompt-versions` — save a Prompt Studio snapshot.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/prompt-versions",
+    tag = "Agents",
+    summary = "Save an agent prompt version",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn create_agent_prompt_version(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+    body: Option<Json<CreateAgentPromptVersionBody>>,
+) -> axum::response::Response {
+    if let Err(status) = enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+        crate::acl::KIND_AGENT,
+        &id,
+    )
+    .await
+    {
+        return (
+            status,
+            Json(json!({ "error": "insufficient permissions: agent.edit" })),
+        )
+            .into_response();
+    }
+    let body = body.map(|Json(value)| value).unwrap_or_default();
+    let label = body
+        .label
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    match state
+        .agent_store
+        .snapshot_prompt(&id, body.prompt.as_deref(), label.as_deref())
+        .await
+    {
+        Ok(Some(version)) => Json(json!({ "version": version })).into_response(),
+        Ok(None) => json_error(StatusCode::NOT_FOUND, "agent not found".to_owned()),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+/// `GET /api/agents/:id/prompt-versions/:version_id` — fetch one snapshot.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/prompt-versions/{version_id}",
+    tag = "Agents",
+    summary = "Get an agent prompt version",
+    params(("id" = String, Path), ("version_id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_agent_prompt_version(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path((id, version_id)): Path<(String, String)>,
+) -> axum::response::Response {
+    if let Err(status) = enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+        crate::acl::KIND_AGENT,
+        &id,
+    )
+    .await
+    {
+        return (
+            status,
+            Json(json!({ "error": "insufficient permissions: agent.view" })),
+        )
+            .into_response();
+    }
+    match state.agent_store.get_prompt_version(&id, &version_id).await {
+        Ok(Some(version)) => Json(json!({
+            "version": {
+                "agent_id": version.agent_id,
+                "created_at": version.created_at,
+                "id": version.id,
+                "label": version.label,
+                "prompt": version.prompt,
+                "source": version.prompt,
+            }
+        }))
+        .into_response(),
+        Ok(None) => json_error(StatusCode::NOT_FOUND, "prompt version not found".to_owned()),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+/// `POST /api/agents/:id/prompt-versions/:version_id/restore` — restore a snapshot.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/prompt-versions/{version_id}/restore",
+    tag = "Agents",
+    summary = "Restore an agent prompt version",
+    params(("id" = String, Path), ("version_id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn restore_agent_prompt_version(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path((id, version_id)): Path<(String, String)>,
+) -> axum::response::Response {
+    if let Err(status) = enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+        crate::acl::KIND_AGENT,
+        &id,
+    )
+    .await
+    {
+        return (
+            status,
+            Json(json!({ "error": "insufficient permissions: agent.edit" })),
+        )
+            .into_response();
+    }
+    match state
+        .agent_store
+        .restore_prompt_version(&id, &version_id)
+        .await
+    {
+        Ok(Some(prompt)) => Json(json!({
+            "success": true,
+            "prompt": prompt,
+            "source": prompt.clone()
+        }))
+        .into_response(),
+        Ok(None) => json_error(StatusCode::NOT_FOUND, "prompt version not found".to_owned()),
+        Err(error) => {
+            let message = error.to_string();
+            let status = if message.contains("locked") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            json_error(status, message)
+        }
+    }
+}
+
+// ── Promptfoo-compatible Prompt Studio suites ──────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct PromptSuiteListQuery {
+    agent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatePromptSuiteBody {
+    agent_id: String,
+    name: String,
+    #[serde(default)]
+    config: serde_json::Value,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdatePromptSuiteBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    config: Option<serde_json::Value>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PromptSuiteVersionBody {
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PromptRunBody {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    request: serde_json::Value,
+    #[serde(default)]
+    result: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptReviewBody {
+    result_key: String,
+    #[serde(default)]
+    pass: Option<bool>,
+    #[serde(default)]
+    score: Option<f32>,
+    #[serde(default)]
+    comment: Option<String>,
+    #[serde(default)]
+    highlighted: bool,
+}
+
+fn prompt_eval_store_or_error(
+) -> Result<&'static crate::prompt_evals::PromptEvalStore, axum::response::Response> {
+    crate::prompt_evals::PromptEvalStore::global().ok_or_else(|| {
+        json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "prompt eval store is not initialized".to_owned(),
+        )
+    })
+}
+
+fn prompt_eval_permission_error(status: StatusCode, permission: &str) -> axum::response::Response {
+    json_error(status, format!("insufficient permissions: {permission}"))
+}
+
+async fn prompt_suite_for_access(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    suite_id: &str,
+    permission: &str,
+) -> Result<
+    (
+        &'static crate::prompt_evals::PromptEvalStore,
+        crate::prompt_evals::PromptSuiteRecord,
+    ),
+    axum::response::Response,
+> {
+    let store = prompt_eval_store_or_error()?;
+    let suite = match store.get_suite(suite_id).await {
+        Ok(Some(suite)) => suite,
+        Ok(None) => {
+            return Err(json_error(
+                StatusCode::NOT_FOUND,
+                "prompt suite not found".to_owned(),
+            ));
+        }
+        Err(error) => {
+            return Err(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            ));
+        }
+    };
+    if let Err(status) = enforce_permission_on(
+        state,
+        caller,
+        permission,
+        crate::acl::KIND_AGENT,
+        &suite.agent_id,
+    )
+    .await
+    {
+        return Err(prompt_eval_permission_error(status, permission));
+    }
+    Ok((store, suite))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/prompt-suites",
+    tag = "Prompt Evals",
+    summary = "List Promptfoo-compatible evaluation suites",
+    params(("agent_id" = String, Query)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn list_prompt_suites(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Query(query): Query<PromptSuiteListQuery>,
+) -> axum::response::Response {
+    if let Err(status) = enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+        crate::acl::KIND_AGENT,
+        &query.agent_id,
+    )
+    .await
+    {
+        return prompt_eval_permission_error(
+            status,
+            crate::identity_verify::permissions::AGENT_VIEW,
+        );
+    }
+    let store = match prompt_eval_store_or_error() {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+    match store.list_suites(&query.agent_id).await {
+        Ok(suites) => Json(json!({ "suites": suites })).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/prompt-suites",
+    tag = "Prompt Evals",
+    summary = "Create a Promptfoo-compatible evaluation suite",
+    request_body = serde_json::Value,
+    responses((status = 201, description = "Created", body = serde_json::Value))
+)]
+async fn create_prompt_suite(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<CreatePromptSuiteBody>,
+) -> axum::response::Response {
+    if let Err(status) = enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+        crate::acl::KIND_AGENT,
+        &body.agent_id,
+    )
+    .await
+    {
+        return prompt_eval_permission_error(
+            status,
+            crate::identity_verify::permissions::AGENT_EDIT,
+        );
+    }
+    match state.agent_store.get(&body.agent_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return json_error(StatusCode::NOT_FOUND, "agent not found".to_owned());
+        }
+        Err(error) => {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    }
+    let store = match prompt_eval_store_or_error() {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+    let suite = match store
+        .create_suite(&body.agent_id, &body.name, &body.config)
+        .await
+    {
+        Ok(suite) => suite,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    let version = match store.snapshot_suite(&suite.id, body.label.as_deref()).await {
+        Ok(version) => version,
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    (
+        StatusCode::CREATED,
+        Json(json!({ "suite": suite, "version": version })),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/prompt-suites/{id}",
+    tag = "Prompt Evals",
+    summary = "Get a Promptfoo-compatible evaluation suite",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_prompt_suite(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_VIEW,
+    )
+    .await
+    {
+        Ok((_store, suite)) => Json(json!({ "suite": suite })).into_response(),
+        Err(response) => response,
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/prompt-suites/{id}",
+    tag = "Prompt Evals",
+    summary = "Update and version a Promptfoo-compatible evaluation suite",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn update_prompt_suite(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdatePromptSuiteBody>,
+) -> axum::response::Response {
+    let (store, suite) = match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let name = body.name.as_deref().unwrap_or(&suite.name);
+    let config = body.config.as_ref().unwrap_or(&suite.config);
+    let updated = match store.update_suite(&id, name, config).await {
+        Ok(Some(suite)) => suite,
+        Ok(None) => return json_error(StatusCode::NOT_FOUND, "prompt suite not found".to_owned()),
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    let version = match store.snapshot_suite(&id, body.label.as_deref()).await {
+        Ok(version) => version,
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    Json(json!({ "suite": updated, "version": version })).into_response()
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/prompt-suites/{id}",
+    tag = "Prompt Evals",
+    summary = "Delete a Promptfoo-compatible evaluation suite",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn delete_prompt_suite(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let (store, _suite) = match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match store.delete_suite(&id).await {
+        Ok(true) => Json(json!({ "success": true })).into_response(),
+        Ok(false) => json_error(StatusCode::NOT_FOUND, "prompt suite not found".to_owned()),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/prompt-suites/{id}/versions",
+    tag = "Prompt Evals",
+    summary = "List evaluation suite versions",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn list_prompt_suite_versions(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let (store, _suite) = match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_VIEW,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match store.list_versions(&id).await {
+        Ok(versions) => Json(json!({ "versions": versions })).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/prompt-suites/{id}/versions",
+    tag = "Prompt Evals",
+    summary = "Snapshot an evaluation suite version",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn create_prompt_suite_version(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+    body: Option<Json<PromptSuiteVersionBody>>,
+) -> axum::response::Response {
+    let (store, _suite) = match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let label = body
+        .map(|Json(value)| value)
+        .unwrap_or_default()
+        .label
+        .and_then(|label| {
+            let trimmed = label.trim().to_owned();
+            (!trimmed.is_empty()).then_some(trimmed)
+        });
+    match store.snapshot_suite(&id, label.as_deref()).await {
+        Ok(Some(version)) => Json(json!({ "version": version })).into_response(),
+        Ok(None) => json_error(StatusCode::NOT_FOUND, "prompt suite not found".to_owned()),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/prompt-suites/{id}/versions/{version_id}",
+    tag = "Prompt Evals",
+    summary = "Get an evaluation suite version",
+    params(("id" = String, Path), ("version_id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_prompt_suite_version(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path((id, version_id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let (store, _suite) = match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_VIEW,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match store.get_version(&id, &version_id).await {
+        Ok(Some(version)) => Json(json!({ "version": version })).into_response(),
+        Ok(None) => json_error(
+            StatusCode::NOT_FOUND,
+            "prompt suite version not found".to_owned(),
+        ),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/prompt-suites/{id}/versions/{version_id}/restore",
+    tag = "Prompt Evals",
+    summary = "Restore an evaluation suite version",
+    params(("id" = String, Path), ("version_id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn restore_prompt_suite_version(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path((id, version_id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let (store, _suite) = match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match store.restore_version(&id, &version_id).await {
+        Ok(Some(suite)) => Json(json!({ "success": true, "suite": suite })).into_response(),
+        Ok(None) => json_error(
+            StatusCode::NOT_FOUND,
+            "prompt suite version not found".to_owned(),
+        ),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/prompt-suites/{id}/runs",
+    tag = "Prompt Evals",
+    summary = "List evaluation runs",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn list_prompt_runs(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let (store, _suite) = match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_VIEW,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match store.list_runs(&id).await {
+        Ok(runs) => Json(json!({ "runs": runs })).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/prompt-suites/{id}/runs",
+    tag = "Prompt Evals",
+    summary = "Save an evaluation run",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 201, description = "Created", body = serde_json::Value))
+)]
+async fn save_prompt_run(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+    Json(body): Json<PromptRunBody>,
+) -> axum::response::Response {
+    let (store, _suite) = match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match store
+        .save_run(&id, &body.name, &body.request, &body.result)
+        .await
+    {
+        Ok(Some(run)) => (StatusCode::CREATED, Json(json!({ "run": run }))).into_response(),
+        Ok(None) => json_error(StatusCode::NOT_FOUND, "prompt suite not found".to_owned()),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/prompt-suites/{id}/runs/{run_id}",
+    tag = "Prompt Evals",
+    summary = "Get an evaluation run",
+    params(("id" = String, Path), ("run_id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_prompt_run(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path((id, run_id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let (store, _suite) = match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_VIEW,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match store.get_run(&id, &run_id).await {
+        Ok(Some(run)) => Json(json!({ "run": run })).into_response(),
+        Ok(None) => json_error(StatusCode::NOT_FOUND, "prompt run not found".to_owned()),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/prompt-suites/{id}/runs/{run_id}/reviews",
+    tag = "Prompt Evals",
+    summary = "List human reviews for an evaluation run",
+    params(("id" = String, Path), ("run_id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn list_prompt_reviews(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path((id, run_id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let (store, _suite) = match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_VIEW,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match store.get_run(&id, &run_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return json_error(StatusCode::NOT_FOUND, "prompt run not found".to_owned()),
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+    match store.list_reviews(&run_id).await {
+        Ok(reviews) => Json(json!({ "reviews": reviews })).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/prompt-suites/{id}/runs/{run_id}/reviews",
+    tag = "Prompt Evals",
+    summary = "Save a human review for an evaluation result",
+    params(("id" = String, Path), ("run_id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn save_prompt_review(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path((id, run_id)): Path<(String, String)>,
+    Json(body): Json<PromptReviewBody>,
+) -> axum::response::Response {
+    let (store, _suite) = match prompt_suite_for_access(
+        &state,
+        &caller,
+        &id,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match store.get_run(&id, &run_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return json_error(StatusCode::NOT_FOUND, "prompt run not found".to_owned()),
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+    if body.result_key.trim().is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "result_key is required".to_owned());
+    }
+    let review = crate::prompt_evals::PromptReview {
+        comment: body.comment,
+        highlighted: body.highlighted,
+        pass: body.pass,
+        result_key: body.result_key,
+        run_id,
+        score: body.score.map(|score| score.clamp(0.0, 1.0)),
+        updated_at: 0,
+    };
+    match store.save_review(&review).await {
+        Ok(review) => Json(json!({ "review": review })).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
 #[utoipa::path(
     delete,
     path = "/api/agents/{id}",
@@ -21066,6 +23114,12 @@ fn binary_installed_on_disk(name: &str) -> bool {
     // Parakeet installs an ONNX model directory (not a binary in ~/.ryu/bin).
     if name == "parakeet" {
         return crate::sidecar::providers::parakeet::model_present();
+    }
+    // Island is a desktop-owned Electron bundle rather than a loose binary in
+    // ~/.ryu/bin. Its install endpoint still participates in the global download
+    // center, so report the bundle's real launch target here.
+    if name == "island" {
+        return crate::sidecar::tools::island::is_installed_on_disk();
     }
     let ext = if cfg!(target_os = "windows") {
         ".exe"
@@ -22006,6 +24060,51 @@ async fn set_conversation_archived_handler(
     }
 }
 
+/// `POST /api/conversations/:id/folder` request body. A null folder detaches
+/// the chat from its project; a string assigns it to that workspace folder.
+#[derive(serde::Deserialize)]
+struct SetConversationFolderBody {
+    folder_path: Option<String>,
+}
+
+/// Change the workspace folder that groups a conversation in desktop clients.
+#[utoipa::path(
+    post,
+    path = "/api/conversations/{id}/folder",
+    tag = "Conversations",
+    summary = "Set or clear a conversation workspace folder",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn set_conversation_folder_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<SetConversationFolderBody>,
+) -> axum::response::Response {
+    if let Err(resp) = require_resource_write(
+        state.conversations.get_access_meta(&id).await,
+        caller.as_ref(),
+        &format!("conversation '{id}' not found"),
+    ) {
+        return resp;
+    }
+    let folder_path = body
+        .folder_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    match state.conversations.set_folder_path(&id, folder_path).await {
+        Ok(true) => Json(json!({ "ok": true, "folder_path": folder_path })).into_response(),
+        Ok(false) => json_error(
+            StatusCode::NOT_FOUND,
+            format!("conversation '{id}' not found"),
+        ),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 /// `POST /api/conversations/:id/title` request body.
 #[derive(serde::Deserialize)]
 struct SetTitleBody {
@@ -22117,6 +24216,98 @@ async fn set_conversation_icon_handler(
 
 /// `POST /api/conversations/:id/visibility` — share a conversation with the
 /// organization or return it to the owner-only private scope.
+async fn get_conversation_access_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let tenancy = match state.conversations.get_access_meta(&id).await {
+        Ok(Some(tenancy)) => tenancy,
+        Ok(None) => {
+            return json_error(
+                StatusCode::NOT_FOUND,
+                format!("conversation '{id}' not found"),
+            );
+        }
+        Err(error) => {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    if let Err(response) = resource_access(
+        Ok(Some(tenancy.clone())),
+        caller.as_ref(),
+        node_org_id().as_deref(),
+        &format!("conversation '{id}' not found"),
+    ) {
+        return response;
+    }
+    let collaborators = match state.conversations.list_collaborators(&id).await {
+        Ok(collaborators) => collaborators,
+        Err(error) => {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    Json(json!({
+        "visibility": tenancy.visibility,
+        "team_id": tenancy.team_id,
+        "owner_user_id": tenancy.owner_user_id,
+        "collaborators": collaborators,
+        "can_manage": conversation_access_manager_authorized(
+            &tenancy,
+            caller.as_ref(),
+            node_org_id().as_deref(),
+        ),
+    }))
+    .into_response()
+}
+
+async fn set_conversation_access_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<SetConversationAccessBody>,
+) -> axum::response::Response {
+    if let Err(response) = require_conversation_access_manager(&state, &id, caller.as_ref()).await {
+        return response;
+    }
+    let (visibility, team_id) =
+        match validate_conversation_visibility(body.visibility.as_deref(), body.team_id.as_deref())
+        {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, message),
+        };
+    match state
+        .conversations
+        .set_access(&id, visibility, team_id, &body.collaborators, true)
+        .await
+    {
+        Ok(true) => Json(json!({
+            "ok": true,
+            "visibility": visibility,
+            "team_id": team_id,
+            "collaborators": body.collaborators,
+            "can_manage": true,
+        }))
+        .into_response(),
+        Ok(false) => json_error(
+            StatusCode::NOT_FOUND,
+            format!("conversation '{id}' not found"),
+        ),
+        Err(error) => {
+            let message = error.to_string();
+            let status = if message.contains("collaborator")
+                || message.contains("visibility")
+                || message.contains("team_id")
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            json_error(status, message)
+        }
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/conversations/{id}/visibility",
@@ -22132,26 +24323,18 @@ async fn set_conversation_visibility_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<SetVisibilityBody>,
 ) -> axum::response::Response {
-    if let Err(resp) = require_resource_write(
-        state.conversations.get_access_meta(&id).await,
-        caller.as_ref(),
-        &format!("conversation '{id}' not found"),
-    ) {
+    if let Err(resp) = require_conversation_access_manager(&state, &id, caller.as_ref()).await {
         return resp;
     }
     let (visibility, team_id) =
-        match validate_visibility(body.visibility.as_deref(), body.team_id.as_deref()) {
+        match validate_conversation_visibility(body.visibility.as_deref(), body.team_id.as_deref())
+        {
             Ok(value) => value,
             Err(message) => return json_error(StatusCode::BAD_REQUEST, message),
         };
     match state
         .conversations
-        .set_visibility(
-            &id,
-            visibility,
-            team_id,
-            visibility_admin_authorized(caller.as_ref()),
-        )
+        .set_visibility(&id, visibility, team_id, true)
         .await
     {
         Ok(true) => Json(json!({
@@ -22201,6 +24384,8 @@ struct GoalRecord {
     #[serde(default)]
     started_at: Option<i64>,
     #[serde(default)]
+    achieved_at: Option<i64>,
+    #[serde(default)]
     last_reason: Option<String>,
     #[serde(default)]
     turns: i64,
@@ -22214,6 +24399,8 @@ struct GoalState {
     last_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     started_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    achieved_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<String>,
     turns: i64,
@@ -22239,17 +24426,30 @@ fn goal_state_from_record(record: Option<GoalRecord>) -> GoalState {
         goal: Some(condition),
         last_reason: record.last_reason,
         started_at: record.started_at,
+        achieved_at: record.achieved_at,
         status: Some(status.to_owned()),
         turns: record.turns.max(0),
     }
 }
 
-async fn read_goal_record(id: &str) -> anyhow::Result<Option<GoalRecord>> {
+fn goal_storage_namespace(
+    caller: Option<&crate::identity_verify::VerifiedCaller>,
+) -> String {
+    crate::plugin_host::storage_namespace_for_tenant(
+        caller.map(|value| value.user_id.as_str()),
+        GOAL_STORAGE_NAMESPACE,
+    )
+}
+
+async fn read_goal_record(
+    id: &str,
+    caller: Option<&crate::identity_verify::VerifiedCaller>,
+) -> anyhow::Result<Option<GoalRecord>> {
     let Some(storage) = crate::plugin_storage::global() else {
         return Err(anyhow::anyhow!("plugin storage is unavailable"));
     };
     let raw = storage
-        .get(GOAL_PLUGIN_ID, GOAL_STORAGE_NAMESPACE, id)
+        .get(GOAL_PLUGIN_ID, &goal_storage_namespace(caller), id)
         .await?;
     let Some(raw) = raw else {
         return Ok(None);
@@ -22257,13 +24457,17 @@ async fn read_goal_record(id: &str) -> anyhow::Result<Option<GoalRecord>> {
     Ok(serde_json::from_str(&raw).ok())
 }
 
-async fn write_goal_record(id: &str, record: &GoalRecord) -> anyhow::Result<()> {
+async fn write_goal_record(
+    id: &str,
+    record: &GoalRecord,
+    caller: Option<&crate::identity_verify::VerifiedCaller>,
+) -> anyhow::Result<()> {
     let Some(storage) = crate::plugin_storage::global() else {
         return Err(anyhow::anyhow!("plugin storage is unavailable"));
     };
     let raw = serde_json::to_string(record)?;
     storage
-        .set(GOAL_PLUGIN_ID, GOAL_STORAGE_NAMESPACE, id, &raw)
+        .set(GOAL_PLUGIN_ID, &goal_storage_namespace(caller), id, &raw)
         .await?;
     Ok(())
 }
@@ -22289,7 +24493,7 @@ async fn get_goal_handler(
     ) {
         return resp;
     }
-    match read_goal_record(&id).await {
+    match read_goal_record(&id, caller.as_ref()).await {
         Ok(record) => Json(goal_state_from_record(record)).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -22343,7 +24547,7 @@ async fn set_goal_handler(
         started_at: Some(started_at),
         ..GoalRecord::default()
     };
-    match write_goal_record(&id, &record).await {
+    match write_goal_record(&id, &record, caller.as_ref()).await {
         Ok(()) => Json(goal_state_from_record(Some(record))).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -22377,7 +24581,7 @@ async fn clear_goal_handler(
         );
     };
     match storage
-        .delete(GOAL_PLUGIN_ID, GOAL_STORAGE_NAMESPACE, &id)
+        .delete(GOAL_PLUGIN_ID, &goal_storage_namespace(caller.as_ref()), &id)
         .await
     {
         Ok(()) => Json(json!({ "success": true })).into_response(),
@@ -22398,7 +24602,7 @@ async fn set_goal_status_handler(
     ) {
         return resp;
     }
-    let record = match read_goal_record(&id).await {
+    let record = match read_goal_record(&id, caller.as_ref()).await {
         Ok(Some(record))
             if record
                 .condition
@@ -22418,7 +24622,7 @@ async fn set_goal_status_handler(
     let mut record = record;
     if record.status.as_deref() != Some("achieved") {
         record.status = Some(status.to_owned());
-        if let Err(e) = write_goal_record(&id, &record).await {
+        if let Err(e) = write_goal_record(&id, &record, caller.as_ref()).await {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
     }
@@ -22486,6 +24690,18 @@ mod goal_contract_tests {
         }));
         assert_eq!(state.status.as_deref(), Some("paused"));
         assert_eq!(state.turns, 7);
+    }
+
+    #[test]
+    fn exposes_achieved_timestamp() {
+        let state = goal_state_from_record(Some(GoalRecord {
+            achieved_at: Some(42),
+            condition: Some("ship it".to_owned()),
+            status: Some("achieved".to_owned()),
+            ..GoalRecord::default()
+        }));
+        assert_eq!(state.status.as_deref(), Some("achieved"));
+        assert_eq!(state.achieved_at, Some(42));
     }
 }
 
@@ -22773,6 +24989,21 @@ pub(crate) async fn call_side_model(
     system: &str,
     user: &str,
 ) -> Result<String, String> {
+    call_side_model_with_provider(state, model, None, effort, system, user).await
+}
+
+/// Same governed side-model call, with an optional explicit provider slot.
+/// Provider selection is carried as the existing Gateway slot header so the
+/// request still passes through the normal router, policy, budget, and audit
+/// path; callers never receive provider credentials.
+pub(crate) async fn call_side_model_with_provider(
+    state: &ServerState,
+    model: &str,
+    provider: Option<&str>,
+    effort: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
     use crate::sidecar::gateway::{gateway_token, gateway_url};
     let base = gateway_url();
     let base = base.trim_end_matches('/');
@@ -22793,6 +25024,9 @@ pub(crate) async fn call_side_model(
         .post(format!("{base}/v1/chat/completions"))
         .timeout(std::time::Duration::from_secs(60))
         .json(&payload);
+    if let Some(provider) = provider.filter(|value| !value.trim().is_empty()) {
+        req = req.header("x-ryu-slot-chat-provider", provider.trim());
+    }
     if let Some(t) = gateway_token() {
         req = req.bearer_auth(t);
     }
@@ -22890,6 +25124,11 @@ struct BtwMessage {
 #[derive(serde::Deserialize)]
 struct BtwBody {
     question: String,
+    /// When supplied by the desktop, use the active main-chat model instead of
+    /// the side-question preference. CLI/mobile may omit this and keep the
+    /// existing `btw-model` resolution.
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default)]
     messages: Option<Vec<BtwMessage>>,
     #[serde(default)]
@@ -22954,20 +25193,35 @@ async fn btw_handler(
         },
     };
 
-    // `btw-model` → the node-wide default selection → the env/registry fallback
-    // `resolve_btw_model` has always applied.
-    let (model, effort) = match crate::agent_selection::resolve_side_model(
-        &state.preferences,
-        BTW_MODEL_PREF,
-        Some(BTW_EFFORT_PREF),
-    )
-    .await
-    {
-        Some(resolved) => (resolved.model, resolved.effort),
-        None => (
-            resolve_btw_model(&state).await,
+    // A desktop selection action carries the active main-chat model explicitly,
+    // so a side chat is a fork of the model/context view rather than silently
+    // switching to a different advisor model. Clients that omit it retain the
+    // original `btw-model` → node default → env/registry fallback.
+    let requested_model = body
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned);
+    let (model, effort) = if let Some(model) = requested_model {
+        (
+            model,
             resolve_side_effort(&state, BTW_EFFORT_PREF, "RYU_BTW_EFFORT").await,
-        ),
+        )
+    } else {
+        match crate::agent_selection::resolve_side_model(
+            &state.preferences,
+            BTW_MODEL_PREF,
+            Some(BTW_EFFORT_PREF),
+        )
+        .await
+        {
+            Some(resolved) => (resolved.model, resolved.effort),
+            None => (
+                resolve_btw_model(&state).await,
+                resolve_side_effort(&state, BTW_EFFORT_PREF, "RYU_BTW_EFFORT").await,
+            ),
+        }
     };
 
     let system = "You are answering a quick SIDE QUESTION about an ongoing conversation. \
@@ -26863,6 +29117,48 @@ fn mcp_batch_refusal(parsed: &serde_json::Value) -> Option<serde_json::Value> {
     })
 }
 
+fn mcp_message_capability(body: &str) -> crate::authorization::Capability {
+    use crate::authorization::Capability;
+    let Ok(message) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Capability::ToolsExec;
+    };
+    let Some(method) = message
+        .as_object()
+        .and_then(|object| object.get("method"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|method| !method.trim().is_empty())
+    else {
+        return Capability::ToolsExec;
+    };
+    match method {
+        "initialize" | "ping" | "notifications/initialized" | "tools/list" => Capability::ToolsRead,
+        "tools/call" => Capability::ToolsExec,
+        method if method.starts_with("resources/") => Capability::FilesRead,
+        method if method.starts_with("prompts/") => Capability::WorkflowsRead,
+        _ => Capability::ToolsExec,
+    }
+}
+
+fn authorize_mcp_message(
+    resolved: &ResolvedAuthorization,
+    body: &str,
+    now: u64,
+) -> crate::authorization::AuthorizationDecision {
+    resolved.context.authorize(
+        &crate::authorization::RoutePolicy::requires([mcp_message_capability(body)]),
+        &resolved.bindings,
+        now,
+    )
+}
+
+fn mcp_message_has_method(parsed: &serde_json::Value) -> bool {
+    parsed
+        .as_object()
+        .and_then(|object| object.get("method"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|method| !method.trim().is_empty())
+}
+
 /// `POST /mcp` — no agent named.
 ///
 /// Registered only so a client configured with the bare base URL gets an
@@ -26872,9 +29168,10 @@ fn mcp_batch_refusal(parsed: &serde_json::Value) -> Option<serde_json::Value> {
 async fn mcp_http_no_agent(
     State(state): State<ServerState>,
     axum::Extension(auth_token): axum::Extension<Option<String>>,
+    axum::Extension(resolved): axum::Extension<ResolvedAuthorization>,
     body: String,
 ) -> axum::response::Response {
-    mcp_http_inner(state, auth_token, String::new(), body).await
+    mcp_http_inner(state, auth_token, resolved, String::new(), body).await
 }
 
 /// `POST /mcp/:agent_id` — MCP over stateless JSON-RPC, scoped to one agent.
@@ -26894,15 +29191,17 @@ async fn mcp_http_no_agent(
 async fn mcp_http(
     State(state): State<ServerState>,
     axum::Extension(auth_token): axum::Extension<Option<String>>,
+    axum::Extension(resolved): axum::Extension<ResolvedAuthorization>,
     Path(agent_id): Path<String>,
     body: String,
 ) -> axum::response::Response {
-    mcp_http_inner(state, auth_token, agent_id, body).await
+    mcp_http_inner(state, auth_token, resolved, agent_id, body).await
 }
 
 async fn mcp_http_inner(
     state: ServerState,
     auth_token: Option<String>,
+    resolved: ResolvedAuthorization,
     agent_id: String,
     body: String,
 ) -> axum::response::Response {
@@ -26937,6 +29236,24 @@ async fn mcp_http_inner(
         return (status, Json(json!({ "ok": false, "error": message }))).into_response();
     }
 
+    if let Some(status) = denial_status(authorize_mcp_message(
+        &resolved,
+        &body,
+        crate::pairing::now_secs(),
+    )) {
+        return (
+            status,
+            Json(json!({
+                "ok": false,
+                "error": format!(
+                    "missing capability: {}",
+                    mcp_message_capability(&body).as_str()
+                ),
+            })),
+        )
+            .into_response();
+    }
+
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
         // JSON-RPC parse error, in the envelope — not an axum 400 body, which a
         // JSON-RPC client cannot read.
@@ -26954,6 +29271,15 @@ async fn mcp_http_inner(
     // revision this server advertises.
     if let Some(refusal) = mcp_batch_refusal(&parsed) {
         return Json(refusal).into_response();
+    }
+
+    if !mcp_message_has_method(&parsed) {
+        return Json(json!({
+            "jsonrpc": "2.0",
+            "id": parsed.get("id").cloned().unwrap_or(serde_json::Value::Null),
+            "error": { "code": -32_600, "message": "invalid JSON-RPC request: method is required" },
+        }))
+        .into_response();
     }
 
     let allowlist = resolved_agent_tool_allowlist(&state, &agent_id).await;
@@ -27729,6 +30055,24 @@ async fn tools_exec(
     State(state): State<ServerState>,
     Json(body): Json<ToolExecBody>,
 ) -> axum::response::Response {
+    if let Some(agent_id) = body.agent_id.as_deref() {
+        if state
+            .agent_store
+            .get(agent_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|record| {
+                record.safety_profile == crate::agents::AgentSafetyProfile::VerifiedPlanOnly
+            })
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "programmatic tool execution is disabled for verified-plan-only agents"})),
+            )
+                .into_response();
+        }
+    }
     let allowlist =
         match crate::tool_exec::resolve_agent_allowlist(&state.agents, body.agent_id.as_deref()) {
             Ok(Some(list)) => Some(list),
@@ -27785,6 +30129,24 @@ async fn tools_exec_resume(
     State(state): State<ServerState>,
     Json(body): Json<ToolExecResumeBody>,
 ) -> axum::response::Response {
+    if let Some(agent_id) = body.agent_id.as_deref() {
+        if state
+            .agent_store
+            .get(agent_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|record| {
+                record.safety_profile == crate::agents::AgentSafetyProfile::VerifiedPlanOnly
+            })
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "programmatic tool execution is disabled for verified-plan-only agents"})),
+            )
+                .into_response();
+        }
+    }
     // Validate the agent (fail-closed) — an unknown agent must not be able to
     // poke someone else's parked execution. The resolved agent id is then
     // ownership-checked against the parked execution inside `resume_parked`
@@ -28288,14 +30650,7 @@ async fn enforce_webhook_secret_access(
     let result = if id == "composio" {
         enforce_permission(state, caller, permission).await
     } else {
-        enforce_permission_on(
-            state,
-            caller,
-            permission,
-            crate::acl::KIND_WORKFLOW,
-            id,
-        )
-        .await
+        enforce_permission_on(state, caller, permission, crate::acl::KIND_WORKFLOW, id).await
     };
     if result.is_err() {
         return Err(json_error(
@@ -28339,9 +30694,9 @@ async fn webhook_secret_set_authorized(
     webhook_secret_set(Path(id), Json(body)).await
 }
 
-/// `POST /api/webhooks/:id/secret` — set a supplied secret or mint a new one.
-/// The new value is returned once so an external provider can be configured;
-/// subsequent list responses expose only `has_secret`.
+/// `POST /api/webhooks/:id/secret` — set or mint a workflow webhook secret.
+/// Composio owns its project-subscription secret, so manual Composio writes are
+/// rejected. Trigger reconciliation stores that provider value automatically.
 #[utoipa::path(
     post,
     path = "/api/webhooks/{id}/secret",
@@ -28353,7 +30708,7 @@ async fn webhook_secret_set_authorized(
         (status = 200, description = "The configured signing secret", body = serde_json::Value),
         (status = 400, description = "Invalid secret"),
         (status = 404, description = "Webhook endpoint not found"),
-        (status = 409, description = "Composio secret is controlled by the environment"),
+        (status = 409, description = "Composio secret is managed by its project subscription"),
         (status = 503, description = "Encrypted secret store unavailable")
     )
 )]
@@ -28361,38 +30716,18 @@ async fn webhook_secret_set(
     Path(id): Path<String>,
     Json(body): Json<WebhookSecretBody>,
 ) -> axum::response::Response {
+    if id == "composio" {
+        return json_error(
+            StatusCode::CONFLICT,
+            "Composio manages the project webhook secret; save a Composio trigger to sync it"
+                .to_owned(),
+        );
+    }
+
     let secret = match normalize_webhook_secret(body.secret) {
         Ok(secret) => secret,
         Err(error) => return json_error(StatusCode::BAD_REQUEST, error),
     };
-
-    if id == "composio" {
-        if crate::composio_triggers::env_webhook_secret().is_some() {
-            return json_error(
-                StatusCode::CONFLICT,
-                "COMPOSIO_WEBHOOK_SECRET is set in the environment; clear it before using the Webhooks app"
-                    .to_owned(),
-            );
-        }
-        let Some(store) = crate::plugin_secrets::global() else {
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "encrypted secret store unavailable".to_owned(),
-            );
-        };
-        if let Err(error) = store
-            .set(
-                crate::composio_triggers::WEBHOOK_SECRET_STORE_OWNER,
-                crate::composio_triggers::WEBHOOK_SECRET_STORE_KEY,
-                &secret,
-            )
-            .await
-        {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
-        }
-        crate::composio_triggers::set_stored_webhook_secret(Some(secret.clone()));
-        return Json(json!({ "secret": secret })).into_response();
-    }
 
     let mut workflow = match crate::workflow::store::load_workflow(&id) {
         Ok(workflow) => workflow,
@@ -28648,9 +30983,38 @@ struct SetVisibilityBody {
     team_id: Option<String>,
 }
 
-fn validate_visibility<'a>(
+#[derive(serde::Deserialize)]
+struct SetConversationAccessBody {
+    #[serde(default)]
+    visibility: Option<String>,
+    #[serde(default)]
+    team_id: Option<String>,
+    #[serde(default)]
+    collaborators: Vec<conversations::ConversationCollaborator>,
+}
+
+fn validate_conversation_visibility<'a>(
     visibility: Option<&'a str>,
     team_id: Option<&'a str>,
+) -> Result<(&'a str, Option<&'a str>), String> {
+    let visibility = visibility.unwrap_or("private");
+    if !matches!(visibility, "private" | "org" | "team") {
+        return Err(format!(
+            "unknown visibility {visibility:?}: expected \"private\", \"org\", or \"team\""
+        ));
+    }
+    if visibility == "team" {
+        let team_id = team_id
+            .filter(|team_id| !team_id.trim().is_empty())
+            .ok_or_else(|| "team visibility requires a non-empty team_id".to_owned())?;
+        return Ok((visibility, Some(team_id)));
+    }
+    Ok((visibility, None))
+}
+
+fn validate_visibility<'a>(
+    visibility: Option<&'a str>,
+    _team_id: Option<&'a str>,
 ) -> Result<(&'a str, Option<&'a str>), String> {
     let visibility = visibility.unwrap_or("private");
     if !matches!(visibility, "private" | "org") {
@@ -28977,6 +31341,192 @@ async fn list_spaces(
         Ok(items) => Json(json!({ "spaces": items })).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SpacePackageImportBody {
+    archive_base64: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+fn space_package_filename(name: &str) -> String {
+    let mut output = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+            output.push(character);
+        } else if !output.ends_with('-') {
+            output.push('-');
+        }
+    }
+    let output = output.trim_matches('-');
+    if output.is_empty() {
+        "space".to_owned()
+    } else {
+        output.to_ascii_lowercase()
+    }
+}
+
+/// POST /api/spaces/import — import a Markdown-only portable Space package.
+#[utoipa::path(
+    post,
+    path = "/api/spaces/import",
+    tag = "Spaces",
+    summary = "Import a portable Markdown Space package",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn import_space_package(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<SpacePackageImportBody>,
+) -> axum::response::Response {
+    use base64::Engine as _;
+
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_WRITE,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: space.write".to_owned(),
+        );
+    }
+    if body.archive_base64.trim().is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "archive_base64 is required".to_owned(),
+        );
+    }
+    if body.archive_base64.len() > space_portable::MAX_SPACE_PACKAGE_BODY_BYTES {
+        return json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Space package exceeds the archive limit".to_owned(),
+        );
+    }
+    let archive = match base64::engine::general_purpose::STANDARD
+        .decode(body.archive_base64.as_bytes())
+    {
+        Ok(bytes) if bytes.len() <= space_portable::MAX_SPACE_PACKAGE_ARCHIVE_BYTES => bytes,
+        Ok(_) => {
+            return json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Space package exceeds the archive limit".to_owned(),
+            );
+        }
+        Err(error) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                format!("archive_base64 is invalid: {error}"),
+            );
+        }
+    };
+    let extracted = match crate::portable_packages::extract_archive(&archive) {
+        Ok(package) => package,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    let parsed = match space_portable::parse_package(&extracted.manifest, &extracted.files) {
+        Ok(package) => package,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    match space_portable::import_package(
+        &state.spaces,
+        &parsed,
+        &spaces::owner_of(&caller_tenancy(&caller)),
+        body.name.as_deref(),
+    )
+    .await
+    {
+        Ok(summary) => Json(json!({ "success": true, "space": summary })).into_response(),
+        Err(error) => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
+    }
+}
+
+/// POST /api/spaces/:id/export — export source Markdown without vector data.
+#[utoipa::path(
+    post,
+    path = "/api/spaces/{id}/export",
+    tag = "Spaces",
+    summary = "Export a Space as a portable Markdown package",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn export_space_package(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    _body: Option<Json<serde_json::Value>>,
+) -> axum::response::Response {
+    use base64::Engine as _;
+
+    if enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_READ,
+        crate::acl::KIND_SPACE,
+        &id,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: space.read".to_owned(),
+        );
+    }
+    if let Err(response) = require_resource_read(
+        spaces::space_access_meta(&state.spaces, &id).await,
+        caller.as_ref(),
+        "space not found",
+    ) {
+        return response;
+    }
+    let filter = caller_doc_filter(&caller);
+    let space = match state
+        .spaces
+        .list_spaces(filter.clone())
+        .await
+        .ok()
+        .and_then(|spaces| spaces.into_iter().find(|space| space.id == id))
+    {
+        Some(space) => space,
+        None => return json_error(StatusCode::NOT_FOUND, "space not found".to_owned()),
+    };
+    let documents = match state
+        .spaces
+        .list_document_contents_for_export(&id, filter)
+        .await
+    {
+        Ok(documents) => documents,
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    let package = match space_portable::export_space(&space, &documents) {
+        Ok(package) => package,
+        Err(error) => return json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
+    };
+    let filename = format!("{}.ryupack", space_package_filename(&space.name));
+    Json(json!({
+        "success": true,
+        "filename": filename,
+        "content_type": "application/zip",
+        "archive_base64": base64::engine::general_purpose::STANDARD.encode(&package.archive),
+        "package": {
+            "kind": "space",
+            "name": space.name,
+            "version": space_portable::SPACE_PACKAGE_VERSION,
+            "files": package.file_paths,
+            "pages": package.page_count,
+            "databases": package.database_count,
+            "rows": package.row_count,
+            "excluded": package.excluded_count,
+            "embeddings": false
+        }
+    }))
+    .into_response()
 }
 
 #[utoipa::path(
@@ -29763,6 +32313,13 @@ async fn search_space(
             "insufficient permissions: space.read".to_owned(),
         );
     }
+    if let Err(response) = require_resource_read(
+        spaces::space_access_meta(&state.spaces, &id).await,
+        caller.as_ref(),
+        "space not found",
+    ) {
+        return response;
+    }
     let limit = body.limit.clamp(1, 50);
     // Lazily start the (off-by-default) reranker server so Spaces RAG can neural-
     // rerank. Fire-and-forget: the current search fails open to the vector order
@@ -30012,6 +32569,37 @@ struct CreateFileBody {
     data_base64: String,
 }
 
+#[derive(serde::Deserialize)]
+struct ReplaceFileBody {
+    /// MIME type of the replacement file. Omitted values retain the stored MIME.
+    #[serde(default)]
+    mime: Option<String>,
+    /// Standard base64-encoded file bytes.
+    data_base64: String,
+}
+
+fn decode_space_file_body(data_base64: &str) -> Result<Vec<u8>, axum::response::Response> {
+    use base64::Engine as _;
+    if uploads::decoded_len_lower_bound(data_base64.len()) > MAX_FILE_BYTES {
+        return Err(json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            uploads::SPACE_FILE_BODY_LIMIT
+                .too_large_message(uploads::Observed::BodyBytes(data_base64.len())),
+        ));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, format!("invalid base64: {e}")))?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            uploads::SPACE_FILE_BODY_LIMIT
+                .too_large_message(uploads::Observed::FileBytes(bytes.len())),
+        ));
+    }
+    Ok(bytes)
+}
+
 /// `POST /api/spaces/:id/files` — store a binary file as a first-class Space
 /// document (`kind = 'file'`). The bytes go to the content-addressed blob store;
 /// the row carries the mime + sha + size. This is the substrate the
@@ -30062,36 +32650,15 @@ async fn create_file(
         .map(str::trim)
         .filter(|m| !m.is_empty())
         .unwrap_or("application/octet-stream");
-    use base64::Engine as _;
     // Refuse from the ENCODED length first, so an oversize upload is rejected without
     // ever allocating the decode buffer it was trying to make us allocate. The LOWER
     // bound is the right one to test: it cannot refuse a file that would have fit (see
     // `decoded_len_lower_bound` — the upper bound rejects a file of exactly the limit),
     // and the exact check below still enforces the boundary.
-    if uploads::decoded_len_lower_bound(body.data_base64.len()) > MAX_FILE_BYTES {
-        return json_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            uploads::SPACE_FILE_BODY_LIMIT
-                .too_large_message(uploads::Observed::BodyBytes(body.data_base64.len())),
-        );
-    }
-    let bytes = match base64::engine::general_purpose::STANDARD.decode(body.data_base64.as_bytes())
-    {
-        Ok(b) => b,
-        Err(e) => {
-            return json_error(StatusCode::BAD_REQUEST, format!("invalid base64: {e}"));
-        }
+    let bytes = match decode_space_file_body(&body.data_base64) {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
-    // The exact check. Reached for a file in the narrow band the wire limit's envelope
-    // slack admits (see `JSON_ENVELOPE_SLACK_BYTES`), which is why this is not dead
-    // code behind the layer — and why a near-miss file gets the precise message.
-    if bytes.len() > MAX_FILE_BYTES {
-        return json_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            uploads::SPACE_FILE_BODY_LIMIT
-                .too_large_message(uploads::Observed::FileBytes(bytes.len())),
-        );
-    }
     // Shared ingest path (see [`crate::space_file_index`]): the bytes are stored AND
     // their text is extracted through the `document.parse` facade, so the document is
     // retrievable by its contents rather than only by its filename. Extraction can
@@ -30121,6 +32688,87 @@ async fn create_file(
                 StatusCode::INTERNAL_SERVER_ERROR
             };
             json_error(status, msg)
+        }
+    }
+}
+
+/// `PUT /api/spaces/:id/documents/:doc_id/blob` — replace the bytes of an
+/// existing file document and re-index the saved revision. The document's real
+/// parent Space and its own ACL are authoritative; the URL Space id is never used
+/// to grant access.
+#[utoipa::path(
+    put,
+    path = "/api/spaces/{id}/documents/{doc_id}/blob",
+    tag = "Spaces",
+    summary = "Replace a file document's bytes",
+    params(("id" = String, Path), ("doc_id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn replace_file_blob(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path((_url_space_id, doc_id)): axum::extract::Path<(String, String)>,
+    Json(body): Json<ReplaceFileBody>,
+) -> axum::response::Response {
+    let Some(owning_space) = document_parent_space(&state, &doc_id).await else {
+        return json_error(StatusCode::NOT_FOUND, "file not found".to_owned());
+    };
+    if enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_WRITE,
+        crate::acl::KIND_SPACE,
+        &owning_space,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: space.write".to_owned(),
+        );
+    }
+    if let Err(response) = require_resource_write(
+        spaces::doc_access_meta(&state.spaces, &doc_id).await,
+        caller.as_ref(),
+        "file not found",
+    ) {
+        return response;
+    }
+    let current = match state.spaces.get_file_meta(&doc_id).await {
+        Ok(Some(meta)) => meta,
+        Ok(None) => return json_error(StatusCode::NOT_FOUND, "file not found".to_owned()),
+        Err(error) => {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    let mime = body
+        .mime
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&current.mime);
+    let bytes = match decode_space_file_body(&body.data_base64) {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    match crate::space_file_index::replace_file_indexed(&state, &doc_id, &bytes, mime).await {
+        Ok(updated) => Json(json!({
+            "id": updated.document_id,
+            "mime": mime,
+            "byte_size": bytes.len(),
+            "index": updated.index.to_json(),
+        }))
+        .into_response(),
+        Err(error) => {
+            let message = error.to_string();
+            let status = if message.contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            json_error(status, message)
         }
     }
 }
@@ -30316,6 +32964,10 @@ async fn get_document(
 struct UpdateDocumentBody {
     title: String,
     source: String,
+    #[serde(default)]
+    expected_revision: Option<i64>,
+    #[serde(default)]
+    operation_id: Option<String>,
 }
 
 /// `PUT /api/spaces/:id/documents/:doc_id` — save edits (re-embeds on save).
@@ -30336,6 +32988,16 @@ async fn update_document(
     axum::extract::Path((_url_space_id, doc_id)): axum::extract::Path<(String, String)>,
     Json(body): Json<UpdateDocumentBody>,
 ) -> axum::response::Response {
+    if body
+        .operation_id
+        .as_deref()
+        .is_some_and(|operation_id| operation_id.is_empty() || operation_id.len() > 128)
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "operation_id must contain between 1 and 128 bytes".to_owned(),
+        );
+    }
     // Resolve the TRUE parent space; the URL id is caller-supplied.
     let Some(owning_space) = document_parent_space(&state, &doc_id).await else {
         return json_error(StatusCode::NOT_FOUND, "document not found".to_owned());
@@ -30366,10 +33028,27 @@ async fn update_document(
     }
     match state
         .spaces
-        .update_document(&doc_id, body.title.trim(), &body.source)
+        .update_document_versioned(
+            &doc_id,
+            body.title.trim(),
+            &body.source,
+            body.expected_revision,
+            body.operation_id.as_deref(),
+            caller.as_ref().map(|value| value.user_id.as_str()),
+        )
         .await
     {
-        Ok(()) => Json(json!({ "success": true })).into_response(),
+        Ok(spaces::DocumentUpdateOutcome::Applied(result)) => {
+            Json(json!({ "success": true, "result": result })).into_response()
+        }
+        Ok(spaces::DocumentUpdateOutcome::Conflict { current_revision }) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "document revision conflict",
+                "current_revision": current_revision,
+            })),
+        )
+            .into_response(),
         Err(e) => {
             let msg = e.to_string();
             let status = if msg.contains("not found") {
@@ -30677,8 +33356,9 @@ struct CreateDocumentVersionBody {
     label: Option<String>,
 }
 
-/// `POST /api/spaces/:id/documents/:doc_id/versions` — snapshot the document's
-/// current content as a new version.
+/// `POST /api/spaces/:id/documents/:doc_id/versions` — checkpoint the document's
+/// current source in the local Git history. An explicit label is retained as a
+/// named checkpoint even when the bytes are unchanged.
 #[utoipa::path(
     post,
     path = "/api/spaces/{id}/documents/{doc_id}/versions",
@@ -30708,7 +33388,11 @@ async fn create_document_version(
         .filter(|s| !s.is_empty());
     match state
         .spaces
-        .snapshot_document(&doc_id, label.as_deref())
+        .snapshot_document_as(
+            &doc_id,
+            label.as_deref(),
+            caller.as_ref().map(|value| value.user_id.as_str()),
+        )
         .await
     {
         Ok(meta) => Json(meta).into_response(),
@@ -30752,7 +33436,15 @@ async fn get_document_version(
     ) {
         return resp;
     }
-    match state.spaces.get_document_version(&version_id).await {
+    let version = match state.spaces.get_document_version(&version_id).await {
+        Ok(Some(version)) => Ok(Some(version)),
+        Ok(None) => state
+            .spaces
+            .get_source_history_version(&doc_id, &version_id)
+            .await,
+        Err(error) => Err(error),
+    };
+    match version {
         // The version is looked up by its own id, so the ACL above (keyed on the
         // PATH doc_id) would be a confused deputy if the two disagreed: a caller
         // could name a document they own plus a version id belonging to someone
@@ -30765,9 +33457,15 @@ async fn get_document_version(
     }
 }
 
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct RestoreDocumentVersionBody {
+    expected_revision: i64,
+    operation_id: String,
+}
+
 /// `POST /api/spaces/:id/documents/:doc_id/versions/:version_id/restore` —
 /// restore a version as the document's current content. The current content is
-/// snapshotted first (as `"Before restore"`) so a restore is itself undoable.
+/// checkpointed first as a named undo point, so a restore is itself undoable.
 #[utoipa::path(
     post,
     path = "/api/spaces/{id}/documents/{doc_id}/versions/{version_id}/restore",
@@ -30778,13 +33476,21 @@ async fn get_document_version(
         ("doc_id" = String, Path),
         ("version_id" = String, Path)
     ),
+    request_body = RestoreDocumentVersionBody,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn restore_document_version(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path((_id, doc_id, version_id)): axum::extract::Path<(String, String, String)>,
+    Json(body): Json<RestoreDocumentVersionBody>,
 ) -> axum::response::Response {
+    if body.operation_id.is_empty() || body.operation_id.len() > 128 {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "operation_id must contain between 1 and 128 bytes".to_owned(),
+        );
+    }
     // Restoring overwrites the document's current content — a write.
     if let Err(resp) = require_resource_write(
         spaces::doc_access_meta(&state.spaces, &doc_id).await,
@@ -30793,27 +33499,37 @@ async fn restore_document_version(
     ) {
         return resp;
     }
-    // Load the target version first — fail fast if it is gone or belongs to
-    // another document.
-    let ver = match state.spaces.get_document_version(&version_id).await {
-        Ok(Some(v)) if v.document_id == doc_id => v,
-        Ok(_) => return json_error(StatusCode::NOT_FOUND, "version not found".to_owned()),
-        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-    // Snapshot the current content so the restore can be undone.
-    if let Err(e) = state
-        .spaces
-        .snapshot_document(&doc_id, Some("Before restore"))
-        .await
-    {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
-    }
     match state
         .spaces
-        .update_document(&doc_id, ver.title.trim(), &ver.source)
+        .restore_document_version_versioned(
+            &doc_id,
+            &version_id,
+            body.expected_revision,
+            &body.operation_id,
+            caller.as_ref().map(|value| value.user_id.as_str()),
+        )
         .await
     {
-        Ok(()) => Json(json!({ "success": true })).into_response(),
+        Ok(spaces::DocumentUpdateOutcome::Applied(result)) => match state.collab.reset(&doc_id) {
+            Ok(epoch) => {
+                state.realtime.publish_document_reset(&doc_id, epoch);
+                Json(json!({
+                    "success": true,
+                    "result": result,
+                    "document_epoch": epoch,
+                }))
+                .into_response()
+            }
+            Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        },
+        Ok(spaces::DocumentUpdateOutcome::Conflict { current_revision }) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "document revision conflict",
+                "current_revision": current_revision,
+            })),
+        )
+            .into_response(),
         Err(e) => {
             let msg = e.to_string();
             let status = if msg.contains("not found") {
@@ -30915,6 +33631,13 @@ async fn get_space_graph(
             StatusCode::FORBIDDEN,
             "insufficient permissions: space.read".to_owned(),
         );
+    }
+    if let Err(response) = require_resource_read(
+        spaces::space_access_meta(&state.spaces, &id).await,
+        caller.as_ref(),
+        "space not found",
+    ) {
+        return response;
     }
     // Per-resource ACL (fine): the graph carries document titles + link topology, so
     // filter nodes/edges to what the caller may read (a member never sees another
@@ -31719,7 +34442,16 @@ async fn composio_actions(
         .get("limit")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(50);
-    match crate::composio_catalog::list_actions(&state.client, toolkit, query, limit).await {
+    let tags: Vec<&str> = params.get("tags").map(String::as_str).into_iter().collect();
+    match crate::composio_catalog::list_actions_with_tags(
+        &state.client,
+        toolkit,
+        query,
+        limit,
+        &tags,
+    )
+    .await
+    {
         Ok(value) => (StatusCode::OK, Json(value)),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
@@ -31870,6 +34602,12 @@ async fn composio_trigger_subscribe(
     } else {
         body.config
     };
+    if let Err(error) = crate::webhook_ingress::reconcile_composio_subscription(store).await {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": error.to_string() })),
+        );
+    }
     match store
         .subscribe(
             &body.agent_id,
@@ -31944,10 +34682,11 @@ async fn composio_trigger_delete(Path(id): Path<String>) -> (StatusCode, Json<se
 ///
 /// This route is **public** (it sits outside `require_auth`) because an external
 /// Composio delivery cannot send Core's bearer token. It is instead authenticated
-/// **fail-closed** with an HMAC-SHA256 signature over the raw body keyed by
-/// `COMPOSIO_WEBHOOK_SECRET` (see [`crate::composio_triggers::verify_webhook_signature`]):
-/// when the secret is unset, or the `webhook-signature` header is absent/invalid,
-/// the request is rejected with 401 and nothing fires.
+/// **fail-closed** with Composio's HMAC-SHA256 signature over
+/// `{webhook-id}.{webhook-timestamp}.{rawBody}` (see
+/// [`crate::composio_triggers::verify_webhook_signature`]). The project secret
+/// is hydrated from the encrypted store, all signed headers are mandatory, and
+/// a stale timestamp or mismatch returns 401 before anything fires.
 #[utoipa::path(
     post,
     path = "/api/composio/webhook",
@@ -31963,39 +34702,27 @@ async fn composio_webhook(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // Replay window (webhook-unify #5): the Composio/Svix HMAC covers the body only,
-    // so a valid delivery is replayable unless we bind it to a timestamp. Require a
-    // present + parseable + in-window timestamp (Svix/Composio always send one); a
-    // stripped or stale timestamp is refused before any work is done.
-    if !webhook_timestamp_present_and_fresh(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "missing or stale webhook timestamp (replay window exceeded)" })),
-        );
-    }
     // Authenticate the raw bytes BEFORE parsing — verify over exactly what was
-    // received, never a re-serialized value. Read the signature from any of the
-    // common header spellings (Composio/Svix vary by version).
-    let signature = ["webhook-signature", "x-composio-signature", "x-signature"]
-        .iter()
-        .find_map(|h| headers.get(*h).and_then(|v| v.to_str().ok()));
-    if !crate::composio_triggers::verify_webhook_signature(&body, signature) {
+    // received, never a re-serialized value. Composio's current signature covers
+    // the id, timestamp, and raw body and enforces the replay window itself.
+    let webhook_id = headers
+        .get("webhook-id")
+        .and_then(|value| value.to_str().ok());
+    let webhook_timestamp = headers
+        .get("webhook-timestamp")
+        .and_then(|value| value.to_str().ok());
+    let signature = headers
+        .get("webhook-signature")
+        .and_then(|value| value.to_str().ok());
+    if !crate::composio_triggers::verify_webhook_signature(
+        &body,
+        webhook_id,
+        webhook_timestamp,
+        signature,
+    ) {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "invalid or missing webhook signature" })),
-        );
-    }
-
-    // Dedup AFTER auth so an unauthenticated caller cannot poison the seen-set
-    // with a forged id and suppress a legitimate delivery. Duplicate ⇒ 200 OK so
-    // the provider stops retrying (the work already happened on first delivery).
-    // Relay parity: matches `ryu_relay.rs`'s `SeenDeliveries` dedup for the
-    // direct-HTTP path (that transport hits the same non-idempotent handler).
-    let delivery_id = webhook_delivery_id(&headers);
-    if !crate::webhook_ingress::first_http_delivery(&delivery_id) {
-        return (
-            StatusCode::OK,
-            Json(json!({ "ok": true, "duplicate": true })),
         );
     }
 
@@ -32015,6 +34742,15 @@ async fn composio_webhook(
             Json(json!({ "error": "composio triggers store unavailable" })),
         );
     };
+    // Reserve only a request that is authenticated, parseable, and dispatchable.
+    // Duplicate retries return success because the first delivery already ran.
+    let delivery_id = webhook_delivery_id(&headers);
+    if !crate::webhook_ingress::first_http_delivery(&delivery_id) {
+        return (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "duplicate": true })),
+        );
+    }
     let fired = store.handle_webhook(&payload).await;
     // Record the delivery for the webhook registry (GET /api/webhooks).
     crate::webhook_ingress::record_delivery(crate::webhook_ingress::WEBHOOK_PATH);
@@ -32047,28 +34783,6 @@ fn webhook_delivery_id(headers: &axum::http::HeaderMap) -> String {
         .find_map(|h| headers.get(*h).and_then(|v| v.to_str().ok()))
         .unwrap_or("")
         .to_owned()
-}
-
-/// Strict freshness for the Composio/Svix receiver: the delivery MUST carry a
-/// present, parseable, in-window timestamp. Composio's HMAC signs the body only, so
-/// an absent-timestamp delivery is otherwise replayable by stripping the header (the
-/// body signature still validates). Svix/Composio always send `webhook-timestamp`, so
-/// this rejects only forged/stripped deliveries — not any legitimate one. Unlike the
-/// generic [`webhook_timestamp_fresh`] this does NOT accept an absent timestamp; the
-/// generic path stays lenient for schemes (e.g. GitHub `x-hub-signature-256`) that
-/// legitimately carry no timestamp header.
-fn webhook_timestamp_present_and_fresh(headers: &axum::http::HeaderMap) -> bool {
-    let ts = ["webhook-timestamp", "x-timestamp", "x-request-timestamp"]
-        .iter()
-        .find_map(|h| headers.get(*h).and_then(|v| v.to_str().ok()));
-    if ts.is_none() {
-        return false;
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    crate::webhook_ingress::timestamp_fresh(ts, now)
 }
 
 /// `POST /api/workflows/:id/webhook`
@@ -32924,9 +35638,9 @@ pub(crate) async fn resolve_guarded_host(
 // (RFC1918) would be reachable. `screen_agent_egress_url` is the shared
 // pre-dispatch screen for that egress path: it accepts http and https (Spider
 // crawls both), reuses the same resolve + is_blocked_ip guard as the first-party
-// path, and is default-on with a host-allowlist escape hatch.
+// path, and is enabled by default with a host-allowlist escape hatch.
 
-/// Env var toggling the agent tool-egress SSRF screen. Default-on: absent or any
+/// Env var toggling the agent tool-egress SSRF screen. Enabled by default: absent or any
 /// non-disable value keeps the screen active. Set to `0`/`false`/`off`/`no`
 /// (case-insensitive) to disable.
 const ENV_AGENT_EGRESS_SSRF_GUARD: &str = "RYU_AGENT_EGRESS_SSRF_GUARD";
@@ -32995,7 +35709,7 @@ pub(crate) fn redact_url_for_display(url: &str) -> String {
     out
 }
 
-/// Pure: is the egress guard enabled for this env value? Default-on — only an
+/// Pure: is the egress guard enabled for this env value? Pre-installed — only an
 /// explicit disable token (`0`/`false`/`off`/`no`, case-insensitive, trimmed)
 /// turns it off. Mirrors [`parse_auto_recall_enabled`] so the behavior is
 /// unit-testable without mutating process env.
@@ -33269,7 +35983,7 @@ const MCP_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60)
 ///    — the single most common remote-MCP development target, and the first thing
 ///    anyone tries. Rejecting it makes the whole feature look broken.
 /// 2. **The screen is [`screen_agent_egress_url`]**, not a bare
-///    `resolve_guarded_host`. That is the same default-on screen the agent
+///    `resolve_guarded_host`. That is the same pre-installed screen the agent
 ///    browsing tools use, so `RYU_AGENT_EGRESS_ALLOW_HOSTS` is the ONE documented
 ///    escape hatch for reaching a loopback or internal MCP endpoint, rather than
 ///    this path inventing a second, undocumented one.
@@ -35261,6 +37975,14 @@ struct InstallSidecarQuery {
     /// no-ops.
     #[serde(default)]
     force: bool,
+    /// Expected release-train version for the desktop-owned Island companion.
+    /// Other sidecars ignore it and use their own pinned/upstream version.
+    version: Option<String>,
+    /// Wait for the Island bundle to finish installing. The normal sidecar
+    /// endpoint remains fire-and-forget; Desktop uses this only for the
+    /// companion path so it can launch a fully materialized bundle later.
+    #[serde(default)]
+    wait: bool,
 }
 
 #[utoipa::path(
@@ -35271,6 +37993,8 @@ struct InstallSidecarQuery {
     params(
         ("name" = String, Path),
         ("force" = Option<bool>, Query, description = "Re-download even when already installed"),
+        ("version" = Option<String>, Query, description = "Expected release-train version for Island"),
+        ("wait" = Option<bool>, Query, description = "Wait for Island extraction to finish"),
     ),
     responses((status = 200, description = "Server-Sent Events stream"))
 )]
@@ -35327,12 +38051,55 @@ async fn install_sidecar(
         }
     }
 
+    // Island is a desktop-owned Electron bundle, not a lifecycle sidecar. Keep
+    // its install/update bytes in the same global DownloadCenter, but allow the
+    // local Desktop bootstrap to await the final extracted bundle before a future
+    // launch toggle uses it.
+    if sidecar_name == "island" && query.wait {
+        let version = query
+            .version
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
+        install_status.set_installing("island").await;
+        match crate::sidecar::tools::island::ensure_installed(&downloads, &version, query.force)
+            .await
+        {
+            Ok(path) => {
+                install_status.set_installed("island", version.clone()).await;
+                return Json(json!({
+                    "success": true,
+                    "forced": query.force,
+                    "version": version,
+                    "path": path,
+                }));
+            }
+            Err(error) => {
+                install_status
+                    .set_failed("island", error.to_string())
+                    .await;
+                return Json(json!({
+                    "success": false,
+                    "forced": query.force,
+                    "error": error.to_string(),
+                }));
+            }
+        }
+    }
+
     // Mark as installing
     install_status.set_installing(&sidecar_name).await;
 
     tokio::spawn(async move {
         let result: anyhow::Result<String> = match sidecar_name.as_str() {
             "llamacpp" => LlamaCppDownloader::new()
+                .ensure_installed(&downloads)
+                .await
+                .map(|_| "installed".to_string()),
+            "shadow" => crate::sidecar::tools::shadow::ShadowDownloader::new()
+                .ensure_installed(&downloads)
+                .await
+                .map(|_| "installed".to_string()),
+            "ghost" => crate::sidecar::tools::ghost::GhostDownloader::new()
                 .ensure_installed(&downloads)
                 .await
                 .map(|_| "installed".to_string()),
@@ -35458,6 +38225,15 @@ async fn install_sidecar(
             // both routes install identically.
             "tailscale" => {
                 crate::sidecar::tailscale::downloader::install_mesh_client(&downloads).await
+            }
+            "island" => {
+                let version = query
+                    .version
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
+                crate::sidecar::tools::island::ensure_installed(&downloads, &version, query.force)
+                    .await
+                    .map(|_| version)
             }
             // Docker Model Runner is adopt-only: there is nothing to download.
             // "Installing" means verifying DMR is enabled + reachable on :12434,
@@ -38326,6 +41102,108 @@ async fn gateway_audit(
     }
 }
 
+#[derive(serde::Deserialize, Debug)]
+struct AuditUsageQueryParams {
+    from: String,
+    until: String,
+    provider: Option<String>,
+    model: Option<String>,
+}
+
+/// Proxy the gateway's canonical 15-minute usage buckets. Core supplies the
+/// gateway admin token server-side, so desktop clients never handle it.
+#[utoipa::path(
+    get,
+    path = "/api/gateway/audit/usage",
+    tag = "Gateway",
+    summary = "Query aggregated gateway usage analytics (proxied)",
+    responses((status = 200, description = "Canonical 15-minute usage rollup", body = serde_json::Value))
+)]
+async fn gateway_audit_usage(
+    State(state): State<ServerState>,
+    axum::extract::Query(params): axum::extract::Query<AuditUsageQueryParams>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
+
+    let base = gateway_url();
+    let base = base.trim_end_matches('/');
+    let mut query_parts = vec![
+        format!("from={}", urlencoding_simple(&params.from)),
+        format!("until={}", urlencoding_simple(&params.until)),
+    ];
+    if let Some(provider) = &params.provider {
+        query_parts.push(format!("provider={}", urlencoding_simple(provider)));
+    }
+    if let Some(model) = &params.model {
+        query_parts.push(format!("model={}", urlencoding_simple(model)));
+    }
+    let url = format!("{base}/v1/audit/usage?{}", query_parts.join("&"));
+    let mut request = state
+        .client
+        .get(&url)
+        .timeout(std::time::Duration::from_millis(3000));
+    if let Some(token) = gateway_admin_key().as_deref() {
+        request = request.bearer_auth(token);
+    }
+
+    match request.send().await {
+        Err(error) => {
+            tracing::warn!(%error, "gateway usage proxy request failed");
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "reachable": false,
+                    "error": "gateway usage unavailable",
+                    "kind": "rollup",
+                    "bucketSeconds": 900,
+                    "events": [],
+                })),
+            )
+        }
+        Ok(response) => {
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let error = response
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap_or_else(|_| json!({}));
+                return (
+                    StatusCode::OK,
+                    Json(json!({
+                        "reachable": false,
+                        "status": status,
+                        "error": error,
+                        "kind": "rollup",
+                        "bucketSeconds": 900,
+                        "events": [],
+                    })),
+                );
+            }
+            let mut body = match response.json::<serde_json::Value>().await {
+                Ok(body) => body,
+                Err(error) => {
+                    tracing::warn!(%error, "gateway usage proxy returned invalid JSON");
+                    return (
+                        StatusCode::OK,
+                        Json(json!({
+                            "reachable": false,
+                            "status": 502,
+                            "error": "gateway usage response invalid",
+                            "kind": "rollup",
+                            "bucketSeconds": 900,
+                            "events": [],
+                        })),
+                    );
+                }
+            };
+            if let serde_json::Value::Object(object) = &mut body {
+                object.insert("reachable".to_owned(), json!(true));
+            }
+            (StatusCode::OK, Json(body))
+        }
+    }
+}
+
 // ── Gateway live-traffic proxy (SSE) ────────────────────────────────────────
 //
 // The gateway exposes `GET /v1/traffic` as an admin-gated Server-Sent Events
@@ -38836,8 +41714,9 @@ struct CreateWorkflowVersionBody {
     label: Option<String>,
 }
 
-/// `POST /workflows/:id/versions` — snapshot the workflow's current definition
-/// as a new version.
+/// `POST /workflows/:id/versions` — checkpoint the workflow's current definition
+/// in the local Git history. An explicit label is retained as a named checkpoint
+/// even when the definition is unchanged.
 #[utoipa::path(
     post,
     path = "/workflows/{id}/versions",
@@ -38900,8 +41779,8 @@ async fn get_workflow_version(
 }
 
 /// `POST /workflows/:id/versions/:version_id/restore` — restore a version as the
-/// workflow's current definition. The current definition is snapshotted first
-/// (as `"Before restore"`) so a restore is itself undoable.
+/// workflow's current definition. The current definition is checkpointed first as
+/// a named undo point so a restore is itself undoable.
 #[utoipa::path(
     post,
     path = "/workflows/{id}/versions/{version_id}/restore",
@@ -41912,7 +44791,7 @@ mod agent_egress_screen_tests {
 
     #[tokio::test]
     async fn metadata_and_private_ip_literals_are_blocked_by_default() {
-        // Default-on (no env mutation): IP-literal hosts are screened directly,
+        // Pre-installed (no env mutation): IP-literal hosts are screened directly,
         // no DNS needed.
         for url in [
             "http://169.254.169.254/",
@@ -42354,8 +45233,7 @@ mod mcp_plugin_governance_tests {
 // non-token request 401s, allowlisted path or not.
 #[cfg(test)]
 mod require_auth_tests {
-    use super::require_auth;
-    use axum::{
+	use axum::{
         body::Body,
         http::{Request, StatusCode},
         middleware,
@@ -42364,16 +45242,18 @@ mod require_auth_tests {
     };
     use tower::ServiceExt;
 
-    /// A stand-in protected router wired exactly like `create_router`'s tail:
-    /// `require_auth` layered over an `Extension<Option<String>>` carrying the
-    /// expected token (the outer layer runs first, inserting the extension before
-    /// `require_auth` reads it).
+    /// A stand-in protected router wired exactly like `create_router`'s tail,
+    /// with the live token source injected into the private middleware helper so
+    /// these tests do not race the process-wide token resolver.
     fn router(expected: Option<&str>) -> Router {
+        let expected = expected.map(str::to_owned);
         Router::new()
             .route("/x", get(|| async { "protected ok" }))
             .route("/api/sandboxes", get(|| async { "sandboxes ok" }))
-            .layer(middleware::from_fn(require_auth))
-            .layer(axum::Extension(expected.map(str::to_owned)))
+            .layer(middleware::from_fn(move |request, next| {
+                let expected = expected.clone();
+                async move { super::require_auth_with_token(request, next, expected).await }
+            }))
     }
 
     async fn get_status(expected: Option<&str>, path: &str, bearer: Option<&str>) -> StatusCode {
@@ -42389,13 +45269,16 @@ mod require_auth_tests {
     }
 
     #[tokio::test]
-    async fn no_configured_token_lets_everything_through() {
-        // Loopback dev: no `RYU_TOKEN` ⇒ the extension flattens to `None` ⇒ every
-        // request passes without a header. This is the local-first default.
-        assert_eq!(get_status(None, "/x", None).await, StatusCode::OK);
+    async fn no_configured_token_fails_closed() {
+        // A protected route must not become owner-authorized when secure token
+        // persistence fails during startup.
+        assert_eq!(
+            get_status(None, "/x", None).await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         assert_eq!(
             get_status(None, "/x", Some("anything")).await,
-            StatusCode::OK
+            StatusCode::SERVICE_UNAVAILABLE
         );
     }
 
@@ -42552,6 +45435,31 @@ mod pure_helper_tests {
         );
         // Absent ⇒ None.
         assert_eq!(surface_from_headers(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn mobile_catalog_filter_hides_paid_listings_but_preserves_free_rows() {
+        use crate::plugin_manifest::Surface;
+
+        let entries = vec![
+            json!({ "id": "free", "pricing": null }),
+            json!({ "id": "free-model", "pricing": { "model": "free" } }),
+            json!({ "id": "paid", "pricing": { "amountMinor": 900, "model": "one_time" } }),
+            json!({ "id": "legacy-paid", "pricing": { "amountMinor": 500 } }),
+        ];
+        let mobile =
+            filter_mobile_paid_plugin_catalog_entries(entries.clone(), Some(Surface::Mobile));
+        assert_eq!(
+            mobile
+                .iter()
+                .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
+                .collect::<Vec<_>>(),
+            vec!["free", "free-model"]
+        );
+        assert_eq!(
+            filter_mobile_paid_plugin_catalog_entries(entries, Some(Surface::Desktop)).len(),
+            4
+        );
     }
 
     // ── append_return_to_query ───────────────────────────────────────────────
@@ -42744,24 +45652,6 @@ mod pure_helper_tests {
         )])));
         // Present + far in the past ⇒ replay, rejected.
         assert!(!webhook_timestamp_fresh(&headers(&[(
-            "webhook-timestamp",
-            &(now_secs() - 10_000).to_string()
-        )])));
-    }
-
-    #[test]
-    fn webhook_present_and_fresh_rejects_a_stripped_timestamp() {
-        // The replay-via-header-strip branch: the strict receiver MUST reject a
-        // delivery that carries no timestamp (Composio's HMAC signs only the body,
-        // so an absent timestamp is otherwise replayable).
-        assert!(!webhook_timestamp_present_and_fresh(&HeaderMap::new()));
-        // A present + current timestamp still passes.
-        assert!(webhook_timestamp_present_and_fresh(&headers(&[(
-            "webhook-timestamp",
-            &now_secs().to_string()
-        )])));
-        // A present but stale timestamp is rejected.
-        assert!(!webhook_timestamp_present_and_fresh(&headers(&[(
             "webhook-timestamp",
             &(now_secs() - 10_000).to_string()
         )])));
@@ -43358,18 +46248,19 @@ mod pure_helper_tests {
     // ── Marketplace tabs (contributes.store_tabs) ────────────────────────────
 
     fn store_tab_manifest(id: &str, tab_id: &str) -> crate::plugin_manifest::PluginManifest {
+        let owner_path = format!("/api/ext/{id}/catalog");
         manifest(json!({
             "id": id, "name": id, "version": "1.0.0", "runnables": [],
             "contributes": { "store_tabs": [
                 { "id": tab_id, "title": "Templates", "group": "catalog",
-                  "spec": { "source": { "http": { "path": "/api/x" } } } }
+                  "spec": { "source": { "http": { "path": owner_path } } } }
             ]}
         }))
     }
 
     /// THE invariant of this family, and the reason it is not enabled-filtered like
-    /// every sibling: every built-in feature app is `NOT_PRE_INSTALLED`, so on a
-    /// fresh profile the Workflows app has no store record at all. If its tab were
+    /// every sibling: every opt-in feature app is absent until explicit install, so on
+    /// a fresh profile the Workflows app has no store record at all. If its tab were
     /// gated on that record, the Store would lose the very tab you install workflow
     /// templates from — on exactly the machine that has never installed one.
     #[test]
@@ -43383,6 +46274,7 @@ mod pure_helper_tests {
             "an absent app still contributes its store tab"
         );
         assert_eq!(out[0]["plugin"], "@ryu/workflows");
+        assert_eq!(out[0]["http_policy"], "owner");
         assert_eq!(out[0]["app_installed"], false);
         assert_eq!(out[0]["app_enabled"], false);
     }
@@ -43443,6 +46335,7 @@ mod pure_helper_tests {
         let out = collect_plugin_store_tabs(&manifests, &none, &none, None);
         assert_eq!(out.len(), 1, "Workflows registers exactly one store tab");
         assert_eq!(out[0]["id"], "workflows");
+        assert_eq!(out[0]["http_policy"], "core");
         assert_eq!(
             out[0]["spec"]["source"]["http"]["path"], "/api/workflows/catalog",
             "the tab must point at the catalog route Core actually serves"
@@ -43451,6 +46344,35 @@ mod pure_helper_tests {
             out[0]["spec"]["install"]["http"]["path"],
             "/api/workflows/catalog/install"
         );
+    }
+
+    #[test]
+    fn community_store_tabs_cannot_escape_their_owner_mount() {
+        let hostile = manifest(json!({
+            "id": "@acme/notes", "name": "Notes", "version": "1.0.0", "runnables": [],
+            "contributes": { "store_tabs": [{
+                "id": "notes", "title": "Notes",
+                "spec": {
+                    "source": { "http": { "path": "/api/preferences" } },
+                    "install": { "http": { "method": "DELETE", "path": "/api/spaces/victim" } }
+                }
+            }]}
+        }));
+        let none = enabled_set(&[]);
+        assert!(collect_plugin_store_tabs(&[hostile], &none, &none, None).is_empty());
+    }
+
+    #[test]
+    fn copied_official_id_does_not_inherit_core_http_authority() {
+        let spoof = manifest(json!({
+            "id": "@ryu/workflows", "name": "Spoof", "version": "99.0.0", "runnables": [],
+            "contributes": { "store_tabs": [{
+                "id": "spoof", "title": "Spoof",
+                "spec": { "source": { "http": { "path": "/api/workflows/catalog" } } }
+            }]}
+        }));
+        let none = enabled_set(&[]);
+        assert!(collect_plugin_store_tabs(&[spoof], &none, &none, None).is_empty());
     }
 
     /// The other half of the same move: "New workflow" was a hardcoded row in the
@@ -43679,17 +46601,52 @@ struct PairStartBody {
     /// Self-declared, display-only label shown to the approver.
     #[serde(default)]
     client_name: Option<String>,
+    #[serde(default)]
+    requested_scopes: Option<crate::authorization::CapabilitySet>,
+    #[serde(default)]
+    requested_constraints: Option<crate::authorization::GrantConstraints>,
+    #[serde(default)]
+    requested_expires_at: Option<u64>,
 }
 
 /// `POST /api/pair/code` — begin pairing. PUBLIC.
-async fn pair_start(Json(body): Json<PairStartBody>) -> Json<serde_json::Value> {
-    let req = crate::pairing::start_request(body.client_name.as_deref().unwrap_or_default());
-    Json(json!({
-        "device_code": req.device_code,
-        "user_code": req.user_code,
-        "interval": crate::pairing::PAIRING_POLL_INTERVAL_SECS,
-        "expires_in": crate::pairing::PAIRING_CODE_TTL_SECS,
-    }))
+async fn pair_start(Json(body): Json<PairStartBody>) -> (StatusCode, Json<serde_json::Value>) {
+    let now = crate::pairing::now_secs();
+    if body
+        .requested_expires_at
+        .is_some_and(|expires_at| expires_at <= now)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "requested_expires_at must be in the future" })),
+        );
+    }
+    let options = crate::pairing::PairingRequestOptions {
+        client_name: body.client_name.unwrap_or_default(),
+        requested_scopes: body
+            .requested_scopes
+            .unwrap_or_else(crate::authorization::CapabilitySet::paired_read_only),
+        requested_constraints: body.requested_constraints.unwrap_or_default(),
+        requested_expires_at: body.requested_expires_at,
+    };
+    let req = match crate::pairing::try_start_request_with_options(options) {
+        Ok(request) => request,
+        Err(crate::pairing::StartRequestError::CapacityExceeded) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "error": "too many pending pairing requests" })),
+            )
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "device_code": req.device_code,
+            "user_code": req.user_code,
+            "interval": crate::pairing::PAIRING_POLL_INTERVAL_SECS,
+            "expires_in": crate::pairing::PAIRING_CODE_TTL_SECS,
+        })),
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -43727,6 +46684,9 @@ async fn pair_requests() -> Json<serde_json::Value> {
                 "user_code": r.user_code,
                 "client_name": r.client_name,
                 "created_at": r.created_at,
+                "requested_scopes": r.requested_scopes.iter().map(|scope| scope.as_str()).collect::<Vec<_>>(),
+                "requested_constraints": r.requested_constraints,
+                "requested_expires_at": r.requested_expires_at,
             })
         })
         .collect();
@@ -43736,14 +46696,32 @@ async fn pair_requests() -> Json<serde_json::Value> {
 #[derive(serde::Deserialize)]
 struct PairDecisionBody {
     user_code: String,
+    #[serde(default)]
+    granted_scopes: Option<crate::authorization::CapabilitySet>,
+    #[serde(default)]
+    expires_at: Option<u64>,
 }
 
 /// `POST /api/pair/approve` — mint a bearer for a pending request. PROTECTED.
 async fn pair_approve(Json(body): Json<PairDecisionBody>) -> (StatusCode, Json<serde_json::Value>) {
-    match crate::pairing::approve(&body.user_code) {
+    match crate::pairing::approve_with_grant(
+        &body.user_code,
+        crate::pairing::PairingApproval {
+            granted_scopes: body.granted_scopes,
+            expires_at: body.expires_at,
+        },
+    ) {
         crate::pairing::DecisionOutcome::Approved => {
             (StatusCode::OK, Json(json!({ "approved": true })))
         }
+        crate::pairing::DecisionOutcome::InvalidGrant => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "approval may only narrow the requested grant" })),
+        ),
+        crate::pairing::DecisionOutcome::PersistenceFailed => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "could not persist paired client" })),
+        ),
         _ => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "no pending pairing request with that code" })),
@@ -43778,6 +46756,10 @@ async fn pair_clients() -> Json<serde_json::Value> {
                 "name": c.name,
                 "created_at": c.created_at,
                 "last_seen": c.last_seen,
+                "granted_scopes": c.effective_scopes().iter().map(|scope| scope.as_str()).collect::<Vec<_>>(),
+                "constraints": c.constraints,
+                "expires_at": c.expires_at,
+                "revoked_at": c.revoked_at,
             })
         })
         .collect();
@@ -43786,50 +46768,37 @@ async fn pair_clients() -> Json<serde_json::Value> {
 
 /// `DELETE /api/pair/clients/:id` — revoke one paired client. PROTECTED.
 async fn pair_revoke(Path(id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
-    if crate::pairing::revoke(&id) {
-        (StatusCode::OK, Json(json!({ "revoked": true })))
-    } else {
-        (
+    match crate::pairing::revoke(&id) {
+        Ok(true) => (StatusCode::OK, Json(json!({ "revoked": true }))),
+        Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "no paired client with that id" })),
-        )
+        ),
+        Err(error) => {
+            tracing::error!(%error, paired_client_id = %id, "pairing: revocation persistence failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(
+                    json!({ "error": "revocation is active locally but could not be persisted; retry" }),
+                ),
+            )
+        }
     }
 }
 
 /// `POST /api/node/token/rotate` — mint a new node auth token. ROOT-ONLY.
 ///
-/// Writes the file only; the running process keeps authenticating the OLD token
-/// until it restarts (see `node_token::rotate`). The response says so explicitly
-/// so the caller can prompt for a restart rather than silently leaving the user
-/// with a token that does not work yet.
-async fn node_token_rotate(
-    Extension(expected): Extension<Option<String>>,
-    headers: axum::http::HeaderMap,
-) -> (StatusCode, Json<serde_json::Value>) {
-    // `require_auth` admits paired client bearers for ordinary protected routes,
-    // but rotating the node root credential must remain a root operation. Keep
-    // loopback/no-token development semantics unchanged; when a root token is
-    // configured, require that exact bearer here as a second, route-specific gate.
-    if let Some(expected) = expected.as_deref() {
-        let provided = headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        if provided.is_none_or(|token| !ct_eq(token, expected)) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "root node token required" })),
-            );
-        }
-    }
+/// The protected route policy is OwnerOnly. `node_token::rotate` persists and
+/// swaps the live verifier before returning, so the old bearer is invalid and the
+/// returned bearer is usable immediately.
+async fn node_token_rotate() -> (StatusCode, Json<serde_json::Value>) {
     match crate::node_token::rotate() {
         Ok(token) => (
             StatusCode::OK,
             Json(json!({
                 "token": token,
-                "restart_required": true,
-                "message": "Restart Ryu Core for the new token to take effect. \
-                            Paired clients are unaffected.",
+                "restart_required": false,
+                "message": "The new owner token is active. Paired clients are unaffected.",
             })),
         ),
         Err(e) => (
@@ -44312,6 +47281,7 @@ mod per_resource_gate_tests {
         NotifyTargetUser {
             user_id: user_id.to_owned(),
             email: email.map(str::to_owned),
+            image: None,
             role: None,
             name: name.map(str::to_owned),
         }
@@ -44349,7 +47319,9 @@ mod per_resource_gate_tests {
             {
                 continue;
             }
-            let args = lines[i + 1..(i + 8).min(lines.len())].join("\n");
+            // Include the call's first line: rustfmt keeps short calls on one
+            // line, while longer calls place their arguments below it.
+            let args = lines[i..(i + 8).min(lines.len())].join("\n");
             let kind_arg = args.lines().find(|a| {
                 a.contains("crate::acl::KIND_") || matches!(a.trim(), "&kind," | "kind,")
             });

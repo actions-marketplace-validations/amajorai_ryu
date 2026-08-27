@@ -1,9 +1,10 @@
 {
   "name": "@ryuhq/protocol",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "exports": {
     "./agent-rules": "./src/agent-rules.ts",
+    "./continuity": "./src/continuity.ts",
     "./deep-link": "./src/deep-link.ts",
     "./hardware": "./src/hardware.ts",
     "./publisher-trust": "./src/publisher-trust.ts",

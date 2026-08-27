@@ -4,6 +4,14 @@ import type { ApiTarget } from "./client.ts";
 export const PULL_REQUESTS_APP_ID = "@ryu/pull-requests";
 export type GitPullRequestLookupState = "all" | "open";
 
+export interface GitHubRepository {
+	defaultBranch: string | null;
+	nameWithOwner: string;
+	url: string;
+}
+
+export type GitHubRepositoryVisibility = "private" | "public";
+
 export interface PullRequestCheck {
 	bucket: string | null;
 	conclusion: string | null;
@@ -62,6 +70,27 @@ const MAX_REPORT_CHARS = 12_000;
 
 function text(value: unknown): string | null {
 	return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+export function normalizeGitHubRepository(
+	value: unknown
+): GitHubRepository | null {
+	if (typeof value !== "object" || value === null) {
+		return null;
+	}
+	const record = value as Record<string, unknown>;
+	const nameWithOwner = text(record.nameWithOwner);
+	const url = text(record.url);
+	if (!(nameWithOwner && url)) {
+		return null;
+	}
+	const defaultBranchRecord = record.defaultBranchRef;
+	const defaultBranch =
+		text(record.defaultBranch) ??
+		(typeof defaultBranchRecord === "object" && defaultBranchRecord !== null
+			? text((defaultBranchRecord as Record<string, unknown>).name)
+			: text(defaultBranchRecord));
+	return { defaultBranch, nameWithOwner, url };
 }
 
 function number(value: unknown): number | null {
@@ -283,4 +312,90 @@ export async function fetchPullRequestForBranch(
 		return null;
 	}
 	return normalizeGitPullRequest((response as { pull?: unknown }).pull);
+}
+
+export async function fetchGitHubRepository(
+	target: ApiTarget,
+	cwd: string,
+	signal?: AbortSignal
+): Promise<GitHubRepository | null> {
+	const params = new URLSearchParams({ cwd });
+	const response = await ownAppRequest(target, PULL_REQUESTS_APP_ID, {
+		path: `/repository?${params.toString()}`,
+		signal,
+	});
+	if (typeof response !== "object" || response === null) {
+		return null;
+	}
+	return normalizeGitHubRepository(
+		(response as { repository?: unknown }).repository
+	);
+}
+
+export async function createGitHubRepository(
+	target: ApiTarget,
+	cwd: string,
+	input: {
+		name: string;
+		visibility: GitHubRepositoryVisibility;
+	},
+	signal?: AbortSignal
+): Promise<GitHubRepository> {
+	const response = await ownAppRequest(target, PULL_REQUESTS_APP_ID, {
+		body: { cwd, name: input.name, visibility: input.visibility },
+		method: "POST",
+		path: "/repository/create",
+		signal,
+	});
+	const repository =
+		typeof response === "object" && response !== null
+			? normalizeGitHubRepository(
+					(response as { repository?: unknown }).repository
+				)
+			: null;
+	if (!repository) {
+		throw new Error("GitHub did not return the created repository");
+	}
+	return repository;
+}
+
+/** Resolve the compare base without requiring the branch picker to be opened. */
+export function selectGitHubCompareBaseBranch(
+	pullRequestBase: string | null | undefined,
+	repositoryDefaultBranch: string | null | undefined,
+	localBranches: readonly string[]
+): string {
+	const configuredBase = [pullRequestBase, repositoryDefaultBranch]
+		.map((value) => value?.trim())
+		.find((value): value is string => Boolean(value));
+	if (configuredBase) {
+		return configuredBase;
+	}
+	if (localBranches.includes("main")) {
+		return "main";
+	}
+	return localBranches.includes("master") ? "master" : "main";
+}
+
+/** Build GitHub's compare view for the current branch against its configured base. */
+export function buildGitHubCompareUrl(
+	repository: Pick<GitHubRepository, "url">,
+	currentBranch: string,
+	baseBranch: string
+): string | null {
+	const branch = currentBranch.trim();
+	const base = baseBranch.trim();
+	if (!(branch && base) || branch === base) {
+		return null;
+	}
+	try {
+		const repositoryUrl = new URL(repository.url);
+		const repositoryPath = repositoryUrl.pathname.replace(/\/+$/, "");
+		if (!repositoryPath || repositoryUrl.protocol !== "https:") {
+			return null;
+		}
+		return `${repositoryUrl.origin}${repositoryPath}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1`;
+	} catch {
+		return null;
+	}
 }

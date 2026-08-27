@@ -25,9 +25,9 @@
 //! destination URL — the same shape as the existing `app:@ryu/quests` deep link the
 //! companion's settings gear already uses.
 //!
-//! `@ryu/quests` is **default-OFF**, so on a fresh install that POST 404s until the
-//! user enables Quests from the Store. [`status`] reports that explicitly rather
-//! than letting the gesture fail silently.
+//! `@ryu/quests` is **not pre-installed**, so on a fresh install that POST 404s
+//! until the user installs and enables Quests from the Store. [`status`] reports
+//! that explicitly rather than letting the gesture fail silently.
 
 pub mod gesture;
 #[cfg(target_os = "macos")]

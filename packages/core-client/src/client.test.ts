@@ -15,6 +15,8 @@ import {
 	SURFACE_HEADER,
 	setBuyerTokenProvider,
 	setSurfaceProvider,
+	setUserJwtProvider,
+	USER_JWT_HEADER,
 } from "./client.ts";
 
 const realFetch = globalThis.fetch;
@@ -23,6 +25,7 @@ afterEach(() => {
 	// Reset module-global providers so tests don't leak into one another.
 	setSurfaceProvider(() => null);
 	setBuyerTokenProvider(() => null);
+	setUserJwtProvider(() => null);
 });
 
 const target = (over?: Partial<ApiTarget>): ApiTarget => ({
@@ -58,6 +61,17 @@ describe("makeHeaders", () => {
 	test("omits the surface header when the provider returns null", () => {
 		setSurfaceProvider(() => null);
 		expect(makeHeaders("t")[SURFACE_HEADER]).toBeUndefined();
+	});
+
+	test("attaches a rotating user JWT separately from the node bearer", () => {
+		let jwt = "alice-jwt";
+		setUserJwtProvider(() => jwt);
+		expect(makeHeaders("node-token")).toMatchObject({
+			Authorization: "Bearer node-token",
+			[USER_JWT_HEADER]: "alice-jwt",
+		});
+		jwt = "rotated-jwt";
+		expect(makeHeaders("node-token")[USER_JWT_HEADER]).toBe("rotated-jwt");
 	});
 });
 

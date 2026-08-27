@@ -238,3 +238,51 @@ test("the shipped shell CSP keeps its narrowing while permitting the bootstraps"
 	// companions did.
 	expect(directives.get("script-src")).toContain("'unsafe-eval'");
 });
+
+test("a sandboxed app can call the grant-gated toast bridge", async ({
+	page,
+}) => {
+	const appHtml = `<!doctype html><html><head></head><body><script>
+    (async function () {
+      var id = await window.ryu.ui.toast.show({
+        title: "Sandbox toast",
+        description: "Rendered by the host Sileo surface",
+        variant: "loading",
+        duration: 60000
+      });
+      window.parent.postMessage({ kind: "toast-shown" }, "*");
+      await window.ryu.ui.toast.update({
+        id: id,
+        title: "Sandbox toast updated",
+        variant: "success"
+      });
+      window.parent.postMessage({ kind: "toast-updated" }, "*");
+    })().catch(function () {
+      window.parent.postMessage({ kind: "toast-failed" }, "*");
+    });
+  </script></body></html>`;
+
+	await page.goto("/companion-host-story.html");
+	await page.waitForSelector("body[data-harness-ready='1']");
+	await page.evaluate((options) => window.__ryuCompanion.mount(options), {
+		appHtml,
+		grants: ["ui:toast"],
+		pluginId: "@ryu/toast-e2e",
+	});
+	await expect
+		.poll(() => page.evaluate(() => window.__ryuCompanion.connected()), {
+			timeout: 15_000,
+		})
+		.toBe(true);
+	await expect
+		.poll(() => page.evaluate(() => window.__ryuCompanion.announced), {
+			timeout: 15_000,
+		})
+		.toContain("toast-updated");
+	await expect(page.getByText("Sandbox toast updated")).toBeVisible();
+	await page.waitForTimeout(1200);
+	await page.screenshot({
+		path: "C:/Users/jiawei/.codex/visualizations/2026/08/22/01a029b3-4e42-76f1-a620-3303d8545b50/plugin-toast-bridge-proof.png",
+		fullPage: true,
+	});
+});

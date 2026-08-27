@@ -70,7 +70,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 20,
 		perSeat: true,
 		defaultOn: true,
-		replacedBy: "300+ models in one chat",
+		replacedBy: "Apps, Bot, and workflows in one subscription",
 	},
 	{
 		id: "claude-pro",
@@ -79,7 +79,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 20,
 		perSeat: true,
 		defaultOn: true,
-		replacedBy: "Bring it, or use pooled credits",
+		replacedBy: "Ask Ryu to run and change the workflow",
 	},
 	{
 		id: "perplexity-pro",
@@ -88,7 +88,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 20,
 		perSeat: true,
 		defaultOn: false,
-		replacedBy: "Web search built into every agent",
+		replacedBy: "Research inside the workflow",
 	},
 	{
 		id: "cursor-pro",
@@ -97,7 +97,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 20,
 		perSeat: true,
 		defaultOn: true,
-		replacedBy: "Claude Code and Codex, hosted",
+		replacedBy: "Coding work you can review",
 	},
 	{
 		id: "copilot-business",
@@ -106,7 +106,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 19,
 		perSeat: true,
 		defaultOn: false,
-		replacedBy: "Agents that run the whole task",
+		replacedBy: "Coding workflows for the team",
 	},
 	{
 		id: "notion-business",
@@ -115,7 +115,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 24,
 		perSeat: true,
 		defaultOn: true,
-		replacedBy: "Spaces: docs your agents can read",
+		replacedBy: "Records your workflows can use",
 	},
 	{
 		id: "granola",
@@ -124,7 +124,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 18,
 		perSeat: true,
 		defaultOn: false,
-		replacedBy: "On-device meeting notes",
+		replacedBy: "Meeting notes your team can review",
 	},
 	{
 		id: "otter-business",
@@ -133,7 +133,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 20,
 		perSeat: true,
 		defaultOn: false,
-		replacedBy: "Local transcription, nothing uploaded",
+		replacedBy: "Meeting notes and follow-up tasks",
 	},
 	{
 		id: "superhuman",
@@ -142,7 +142,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 30,
 		perSeat: true,
 		defaultOn: false,
-		replacedBy: "Agent Inboxes that triage and reply",
+		replacedBy: "Inbox workflows your team can review",
 	},
 	{
 		id: "zapier-pro",
@@ -151,7 +151,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 49,
 		perSeat: false,
 		defaultOn: true,
-		replacedBy: "Workflows and schedules, unmetered",
+		replacedBy: "Workflow apps you can change by asking Ryu",
 	},
 	{
 		id: "make-pro",
@@ -160,7 +160,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 19,
 		perSeat: false,
 		defaultOn: false,
-		replacedBy: "Same graph, running on your node",
+		replacedBy: "Workflow apps on your Ryu node",
 	},
 	{
 		id: "midjourney",
@@ -169,7 +169,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 30,
 		perSeat: true,
 		defaultOn: false,
-		replacedBy: "Image generation on your own GPU",
+		replacedBy: "Creative workflows in the same workspace",
 	},
 	{
 		id: "elevenlabs",
@@ -178,7 +178,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 22,
 		perSeat: false,
 		defaultOn: false,
-		replacedBy: "Local voice and transcription",
+		replacedBy: "Voice and transcription in the workflow",
 	},
 	{
 		id: "agent-host",
@@ -187,7 +187,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 25,
 		perSeat: false,
 		defaultOn: false,
-		replacedBy: "A managed node, included with your plan",
+		replacedBy: "Managed Ryu capacity for apps and workflows",
 	},
 ];
 
@@ -238,7 +238,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 5000,
 		defaultOn: false,
 		hint: "Salary, benefits, payroll, and management overhead",
-		replacedBy: "Agents that research, draft and follow up",
+		replacedBy: "Workflows that research, draft, and follow up",
 	},
 	{
 		id: "hire-support",
@@ -247,7 +247,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 4000,
 		defaultOn: false,
 		hint: "Salary, benefits, payroll, and management overhead",
-		replacedBy: "Agent Inboxes that triage and answer",
+		replacedBy: "Workflows that triage and draft replies",
 	},
 	{
 		id: "hire-analyst",
@@ -256,7 +256,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 5500,
 		defaultOn: false,
 		hint: "Salary, benefits, payroll, and management overhead",
-		replacedBy: "Research runs on a schedule, not a request",
+		replacedBy: "Research workflows that run on schedule",
 	},
 	{
 		id: "hire-ops",
@@ -265,7 +265,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 4500,
 		defaultOn: false,
 		hint: "Salary, benefits, payroll, and management overhead",
-		replacedBy: "Workflows that run the recurring work",
+		replacedBy: "Workflow apps for recurring operations",
 	},
 	{
 		id: "hire-finance",
@@ -274,7 +274,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 3500,
 		defaultOn: false,
 		hint: "Salary, benefits, payroll, and management overhead",
-		replacedBy: "Agents that reconcile, classify, and report",
+		replacedBy: "Workflow apps that reconcile, classify, and report",
 	},
 	{
 		id: "hire-customer-success",
@@ -283,7 +283,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 4500,
 		defaultOn: false,
 		hint: "Salary, benefits, payroll, and management overhead",
-		replacedBy: "Agents that monitor accounts and draft follow-ups",
+		replacedBy: "Workflow apps that monitor accounts and draft follow-ups",
 	},
 	{
 		id: "hire-qa",
@@ -292,7 +292,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 3500,
 		defaultOn: false,
 		hint: "Salary, benefits, payroll, and management overhead",
-		replacedBy: "Checks and repetitive updates that run on schedule",
+		replacedBy: "Workflow apps for checks and repetitive updates",
 	},
 	{
 		id: "ops-hours",
@@ -301,7 +301,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 1600,
 		defaultOn: false,
 		hint: "About 10 hours a week at $40/hour, loaded",
-		replacedBy: "The same work, unattended",
+		replacedBy: "The same work in a workflow",
 	},
 	{
 		id: "support-tickets",
@@ -310,7 +310,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 1000,
 		defaultOn: false,
 		hint: "About 200 tickets a month at $5 each",
-		replacedBy: "First-pass drafts on every ticket",
+		replacedBy: "First-pass drafts for each ticket",
 	},
 	{
 		id: "agency-content",
@@ -319,7 +319,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 3000,
 		defaultOn: false,
 		hint: "A typical small monthly retainer",
-		replacedBy: "Drafts your team edits instead of commissions",
+		replacedBy: "Drafts your team edits in Ryu",
 	},
 	{
 		id: "agency-leadgen",
@@ -328,7 +328,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 2000,
 		defaultOn: false,
 		hint: "A typical small monthly retainer",
-		replacedBy: "Agents that build and enrich the list",
+		replacedBy: "Research and enrichment in a workflow",
 	},
 	{
 		id: "cac-tooling",
@@ -337,7 +337,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 800,
 		defaultOn: false,
 		hint: "Sequencer, dialler and deliverability stack",
-		replacedBy: "Channels and workflows on your own node",
+		replacedBy: "Sales workflows on your Ryu node",
 	},
 	{
 		id: "data-enrichment",
@@ -346,7 +346,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 1200,
 		defaultOn: false,
 		hint: "Apollo, Clay, ZoomInfo and similar",
-		replacedBy: "Web research and enrichment as a tool call",
+		replacedBy: "Web research and enrichment in the workflow",
 	},
 	{
 		id: "own-api-keys",
@@ -358,7 +358,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		// The keyless pass-through story: the models are billed at cost, so this
 		// line is not "cheaper keys" — it is the same spend, minus the accounts,
 		// the cards, the rate limits and the per-vendor minimums.
-		replacedBy: "Same models at cost, without holding a single key",
+		replacedBy: "Managed models and tools in one subscription",
 	},
 ];
 
@@ -601,7 +601,7 @@ export function PricingSavingsCalculator({
 	includedCreditUsd = 50,
 	agentCount = TEAMS_MIN_SEATS,
 	seatCount,
-	planName = "For Teams",
+	planName = "Teams",
 	plansHref = "#plans",
 }: {
 	/** Shared monthly AI-credit pool for the selected contracted agent count. */
@@ -631,9 +631,9 @@ export function PricingSavingsCalculator({
 		TEAMS_MIN_SEATS,
 		Math.floor(seatCount ?? agentCount)
 	);
-	// Per-person software comparisons describe the operator being replaced, not
-	// one subscription per Ryu agent. Hires below are already whole-org costs.
-	const peopleCount = 1;
+	// Per-seat software scales with the selected team size. Hires and contractor
+	// costs below are already whole-organization figures, so they stay flat.
+	const peopleCount = safeAgentCount;
 
 	const toggle = (id: string, next: boolean) => {
 		setSelected((prev) => {
@@ -749,8 +749,8 @@ export function PricingSavingsCalculator({
 			<PageHeader
 				as="h2"
 				className="mb-8 text-center"
-				subtitle="Tick the subscriptions Ryu would replace, then add the work you'd otherwise pay people to do. Vendor prices are public monthly list rates; the rest are yours to edit."
-				title="What is the work worth in hours and dollars?"
+				subtitle="Select the tools you pay for and add the people, hours, or retainers you would otherwise pay for. Edit each number to match your business."
+				title="Compare what you buy today with one Ryu subscription."
 			/>
 
 			<div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_360px]">
@@ -761,10 +761,12 @@ export function PricingSavingsCalculator({
 				<div className="space-y-8">
 					<Card>
 						<CardHeader>
-							<CardTitle className="text-lg">Your current stack</CardTitle>
+							<CardTitle className="text-lg">
+								Software you pay for today
+							</CardTitle>
 							<CardDescription>
-								Per-person tools show one operator; flat-rate tools don&apos;t
-								scale.
+								Per-seat tools multiply by the selected seats; flat-rate tools
+								stay at their listed price.
 							</CardDescription>
 						</CardHeader>
 						<CardContent className="space-y-6">
@@ -797,13 +799,11 @@ export function PricingSavingsCalculator({
 					<Card>
 						<CardHeader>
 							<CardTitle className="text-lg">
-								What would you pay to get this done without us?
+								People and services you would otherwise pay for
 							</CardTitle>
 							<CardDescription>
-								The work, not the software. Anchor on the loaded cost of a hire
-								— salary, benefits, and management — then edit it to your
-								reality. These are your numbers; the defaults are only a
-								starting point.
+								Add a hire, contractor, or overtime cost you would otherwise
+								pay. Edit the number to match your business.
 							</CardDescription>
 						</CardHeader>
 						<CardContent className="space-y-6">
@@ -833,9 +833,9 @@ export function PricingSavingsCalculator({
 				<div className="lg:sticky lg:top-24 lg:self-start">
 					<Card>
 						<CardHeader>
-							<CardTitle className="text-lg">Your savings</CardTitle>
+							<CardTitle className="text-lg">Your estimated cost</CardTitle>
 							<CardDescription>
-								Against Ryu {planName} at{" "}
+								Ryu {planName} at{" "}
 								<span className="font-heading tabular-nums">
 									{usd(ryuMonthlyPrice)}
 								</span>
@@ -846,14 +846,13 @@ export function PricingSavingsCalculator({
 						</CardHeader>
 						<CardContent>
 							<p className="text-muted-foreground text-xs">
-								{planName} starts with five seats. The included AI credits are
-								pooled, so adding people does not multiply provider spend.
+								Your included AI credits are pooled across the organization.
 							</p>
 
 							{hireAnchorMonthly > 0 ? (
 								<div className="mt-4 rounded-xl border border-primary/20 bg-primary/5 p-3 text-xs">
 									<p className="font-medium text-foreground">
-										The salary anchor is yours, not ours.
+										Your current capacity cost
 									</p>
 									<p className="mt-1 text-muted-foreground">
 										At {usd(hireAnchorMonthly)}/mo fully loaded, {planName} is
@@ -867,8 +866,8 @@ export function PricingSavingsCalculator({
 
 							{nothingSelected ? (
 								<p className="mt-6 text-muted-foreground text-sm">
-									Tick what you pay for today — tools, people, or both — to see
-									the difference.
+									Select the tools, people, or contractors you pay for today to
+									compare the total.
 								</p>
 							) : (
 								<>
@@ -882,8 +881,8 @@ export function PricingSavingsCalculator({
 									</div>
 									<p className="mt-1 text-muted-foreground text-sm">
 										{savings > 0
-											? `You'd save ${savingsPct}% by consolidating onto Ryu.`
-											: "Ryu costs more than the tools you picked — pick the ones you actually pay for."}
+											? `On these assumptions, Ryu is ${savingsPct}% lower than the selected costs.`
+											: "On these assumptions, Ryu costs more than the selected costs. Edit the assumptions before you decide."}
 									</p>
 									<ComparisonBars
 										ryuAnnual={ryuAnnual}
@@ -900,12 +899,12 @@ export function PricingSavingsCalculator({
 								Compare plans
 							</Button>
 							<p className="mt-3 text-muted-foreground text-xs">
-								Ryu {planName} also includes a fixed{" "}
+								Your {planName} subscription includes{" "}
 								<span className="font-heading tabular-nums">
 									{usdWithCents(includedCreditUsd)}
 								</span>
-								/mo AI credit pool, so the model bills the tools above charge
-								you for are already in the number.
+								/mo shared AI credit pool. Managed model usage draws from that
+								pool; any top-ups are separate.
 							</p>
 						</CardContent>
 					</Card>

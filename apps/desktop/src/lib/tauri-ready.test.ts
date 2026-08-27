@@ -70,6 +70,14 @@ describe("isTauriReady", () => {
 		globalWithWindow.window!.__TAURI_INTERNALS__ = internals;
 		expect(isTauriReady()).toBe(true);
 	});
+
+	test("rejects a partial bridge that cannot register event callbacks", () => {
+		// biome-ignore lint/style/noNonNullAssertion: installed in beforeEach
+		globalWithWindow.window!.__TAURI_INTERNALS__ = {
+			invoke: async () => null,
+		} as unknown as FakeInternals;
+		expect(isTauriReady()).toBe(false);
+	});
 });
 
 describe("invokeWhenReady", () => {

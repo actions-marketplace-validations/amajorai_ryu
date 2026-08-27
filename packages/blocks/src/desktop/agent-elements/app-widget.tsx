@@ -35,16 +35,23 @@ import {
 	type WidgetGlobalsPatch,
 } from "@ryu/app-host/rpc";
 import {
+	createScopedToastHost,
+	createSileoToastRenderer,
+} from "@ryu/app-host/toast-host";
+import {
 	type WidgetAssetProxy,
 	type WidgetInitialGlobals,
 	widgetBootstrapSrcdoc,
 } from "@ryu/app-host/widget-bootstrap";
 import { useWidgetStateStore } from "@ryu/app-host/widget-state-store";
+import { toast } from "@ryu/ui/components/sileo";
 import { useFriendlyMode } from "@ryu/ui/hooks/use-friendly-mode.ts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useChatDisplayPrefs } from "./chat-display-prefs.tsx";
 import { useWidgetHost } from "./widget-host-context.tsx";
+
+const WIDGET_TOAST_RENDERER = createSileoToastRenderer(toast);
 
 /** A widget CSP (mirrors the blocks `WidgetCsp`); `resource_domains` is ignored
  *  under D3, so only the optional shape matters here. */
@@ -126,6 +133,7 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 	// The template a `requestModal({ template })` asked for, recorded so it is
 	// honored/observable host-side (Ryu maps the modal itself to fullscreen).
 	const modalTemplateRef = useRef<unknown>(null);
+	const grantsKey = (data?.approvedGrants ?? []).join(" ");
 
 	// One nonce per mount, host-generated (never widget/user input).
 	const nonce = useMemo(
@@ -133,8 +141,18 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 			typeof crypto?.randomUUID === "function"
 				? crypto.randomUUID()
 				: `nonce-${Date.now()}-${Math.round(Math.random() * 1e9)}`,
-		[]
+		[grantsKey]
 	);
+	const toastHost = useMemo(
+		() =>
+			createScopedToastHost({
+				renderer: WIDGET_TOAST_RENDERER,
+				sourceId: `widget:${data?.serverId ?? "unavailable"}:${data?.instanceId ?? "unavailable"}:${data?.toolCallId ?? "unavailable"}`,
+			}),
+		[data?.instanceId, data?.serverId, data?.toolCallId]
+	);
+
+	useEffect(() => () => toastHost.dispose(), [toastHost]);
 
 	const [displayMode, setDisplayMode] = useState<
 		"inline" | "fullscreen" | "pip"
@@ -167,7 +185,7 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 		base.add("widget.state");
 		base.add("ui.displayMode");
 		return base;
-	}, [data?.approvedGrants, data?.widgetAccessible]);
+	}, [grantsKey, data?.widgetAccessible]);
 
 	// The globals baked into the srcdoc ONCE (captured on first mount so the srcdoc
 	// stays stable and the iframe never remounts). Subsequent changes go via push.
@@ -276,6 +294,9 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 			return d;
 		};
 		return {
+			uiToastDismiss: (input) => toastHost.dismiss(input),
+			uiToastShow: (input) => toastHost.show(input),
+			uiToastUpdate: (input) => toastHost.update(input),
 			callTool: async (name, args) => {
 				if (!services) {
 					throw new CodedRpcError("server_error", "widget host unavailable");
@@ -379,7 +400,7 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 				return Promise.resolve();
 			},
 		};
-	}, [services, openExternalShell, data, stateStore, pushGlobals]);
+	}, [services, openExternalShell, data, stateStore, pushGlobals, toastHost]);
 
 	// Key the srcdoc on STABLE primitives only (the widget HTML + server), not the
 	// whole `data` object: a streaming update recreates `part.data` (new toolOutput)

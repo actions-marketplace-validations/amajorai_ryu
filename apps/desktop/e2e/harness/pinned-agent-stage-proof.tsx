@@ -86,7 +86,7 @@ function Preview({ count, label }: { count: number; label: string }) {
 			</header>
 			<div className="overflow-hidden rounded-2xl border border-sidebar-border/80 bg-sidebar shadow-[0_12px_36px_-24px_black]">
 				<div className="flex items-center justify-between border-sidebar-border/70 border-b px-4 py-3">
-					<span className="font-semibold text-sm">Bot mode</span>
+					<span className="font-semibold text-sm">Agents view</span>
 					<span className="text-muted-foreground text-xs">
 						Sessions ⇄ Agents
 					</span>
@@ -119,7 +119,7 @@ function Story() {
 				<div className="mx-auto max-w-[1180px]">
 					<header className="mb-8 max-w-2xl">
 						<p className="font-medium text-primary text-xs uppercase tracking-[0.16em]">
-							Ryu Work · Bot mode
+							Ryu Work · Agents view
 						</p>
 						<h1 className="mt-2 font-semibold text-2xl tracking-tight">
 							Pinned agents get the space they deserve

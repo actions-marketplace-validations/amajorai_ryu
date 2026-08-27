@@ -201,7 +201,7 @@ const LOG_PREFIX = "[ryu-plan]";
  * The confirm branch no-ops here: a `--mode json -p` child has no UI, and
  * failing closed would block every tool in every subagent.
  *
- * `ryu-subagent.ts` now ships as a PLUGIN (`plugins-store/pi-subagent`) while this
+ * `ryu-subagent.ts` now ships as a PLUGIN (`plugins-store/plugins/pi-subagent`) while this
  * file stays compiled into Core, so the two halves of the `RYU_PI_SUBAGENT`
  * contract can be enabled independently. That is safe in one direction only, and
  * it is the direction that can happen: with the subagent plugin disabled no child

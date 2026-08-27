@@ -197,6 +197,7 @@ mod tests {
         crate::sidecar::control_plane::NotifyTargetUser {
             user_id: user_id.to_owned(),
             email: None,
+            image: None,
             role: None,
             name: None,
         }

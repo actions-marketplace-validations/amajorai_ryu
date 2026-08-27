@@ -52,7 +52,7 @@ use serde::Serialize;
 /// `1.y` (y ≥ x) kernel unchanged. The `ryu-plugin-ready` handshake carries this
 /// value as `hostApiVersion`; the host accepts a missing value (legacy) this
 /// major and only annotates it (no rejection).
-pub const HOST_API_VERSION: &str = "1.4.0";
+pub const HOST_API_VERSION: &str = "1.8.0";
 
 /// One method in the host↔plugin RPC surface — the row type of the single-sourced
 /// `method → capability → grant` table.
@@ -98,10 +98,74 @@ const fn m(
 /// `METHOD_CAPABILITY` (137 methods) and the Rust bridge's `view.action`
 /// (Rust-only). Serialised to `schemas/host-api.json` for the TS host to consume.
 pub const HOST_API_METHODS: &[HostApiMethod] = &[
+    // Local browser/native host capabilities. These rows are intentionally
+    // grant-free; the host decides whether the concrete surface can provide
+    // them, while the contract still keeps the method vocabulary closed.
+    m("host.capabilities", "host.capabilities", None, false, true),
+    m(
+        "native.haptics",
+        "native.haptics",
+        Some("native:haptics"),
+        false,
+        true,
+    ),
+    m(
+        "native.notifications.create",
+        "native.notifications",
+        Some("native:notifications"),
+        false,
+        true,
+    ),
+    m(
+        "native.liveActivities.update",
+        "native.liveActivities",
+        Some("native:live_activities"),
+        false,
+        true,
+    ),
     m(
         "core.listAgents",
         "core.listAgents",
         Some("core:list_agents"),
+        false,
+        true,
+    ),
+    // Read-only runtime catalog for Companion apps. The projection contains
+    // provider/model/agent metadata plus enabled app and hook declarations;
+    // credentials, hook code, grants, and provider endpoints never cross the
+    // host boundary. It intentionally shares core:list_agents with the older
+    // agent catalog family so existing approval semantics stay simple.
+    m(
+        "catalog.snapshot",
+        "core.listAgents",
+        Some("core:list_agents"),
+        false,
+        true,
+    ),
+    // Server-side model discovery for a selected provider. The request carries
+    // only a provider id; Core resolves any BYOK/subscription credential and
+    // returns ids/labels, never the upstream key or endpoint.
+    m(
+        "catalog.models",
+        "core.listAgents",
+        Some("core:list_agents"),
+        false,
+        true,
+    ),
+    // Cross-chat broadcast for an installed companion. The list is a redacted
+    // projection of the caller's visible conversations; sending reuses the
+    // reviewed `chat.sendFollowUp` grant and the host's authenticated chat path.
+    m(
+        "chat.list",
+        "chat.broadcast",
+        Some("chat.sendFollowUp"),
+        false,
+        true,
+    ),
+    m(
+        "chat.send",
+        "chat.broadcast",
+        Some("chat.sendFollowUp"),
         false,
         true,
     ),
@@ -117,6 +181,20 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         "ui.sendMessage",
         "ui.sendMessage",
         Some("ui:send_message"),
+        false,
+        true,
+    ),
+    // Ephemeral, host-rendered notifications. The wire surface deliberately
+    // carries only bounded strings, a closed variant set, duration and an opaque
+    // caller-local id. It never exposes the renderer library, React nodes,
+    // actions, styles, placement, or a global clear operation. The trusted host
+    // namespaces ids per plugin before it reaches the renderer.
+    m("ui.toast.show", "ui.toast", Some("ui:toast"), false, true),
+    m("ui.toast.update", "ui.toast", Some("ui:toast"), false, true),
+    m(
+        "ui.toast.dismiss",
+        "ui.toast",
+        Some("ui:toast"),
         false,
         true,
     ),
@@ -211,6 +289,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     ),
     m(
         "storage.keys",
+        "storage.kv",
+        Some("storage:kv"),
+        false,
+        true,
+    ),
+    m(
+        "storage.compareAndSet",
         "storage.kv",
         Some("storage:kv"),
         false,
@@ -336,15 +421,15 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
-    // Get-or-create a Space by NAME. Rust-bridge-only (`ts_host: false`): a frame
-    // app is mounted with its `{ spaceId, docId }` context already resolved, so only
-    // a headless caller — a turn hook — has a Space it cannot name by id.
+    // Get-or-create a user-owned Space by NAME. Companion hosts implement this
+    // host-directly with the authenticated Spaces API; headless hooks still use the
+    // Rust bridge path. Keeping one method name lets both surfaces share the contract.
     m(
         "spaces.ensureSpace",
         "spaces.docs",
         Some("spaces:docs"),
         false,
-        false,
+        true,
     ),
     m(
         "spaces.createDoc",
@@ -376,6 +461,16 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     ),
     m(
         "spaces.deleteDoc",
+        "spaces.docs",
+        Some("spaces:docs"),
+        false,
+        true,
+    ),
+    // Direct semantic retrieval through the authenticated Spaces/RAG endpoint. The
+    // companion host owns the token and forwards only the bounded query; Core still
+    // enforces Space visibility and tenancy on the underlying route.
+    m(
+        "spaces.search",
         "spaces.docs",
         Some("spaces:docs"),
         false,
@@ -1081,6 +1176,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         true,
     ),
     m(
+        "notifications.send",
+        "notifications.send",
+        Some("notifications:send-to-user"),
+        false,
+        true,
+    ),
+    m(
         "suggestions.list",
         "approvals.crud",
         Some("approvals:crud"),
@@ -1228,6 +1330,16 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         "reasoning.request",
         "reasoning.check",
         Some("reasoning:check"),
+        false,
+        true,
+    ),
+    // Safe Actions is a Core-owned protected surface. The sandboxed Companion can
+    // supply only a relative sub-path and a closed HTTP verb; the trusted desktop
+    // host fixes the mount at `/api/tools/plans` and keeps the node token.
+    m(
+        "safeActions.request",
+        "safe-actions.manage",
+        Some("safe-actions:manage"),
         false,
         true,
     ),

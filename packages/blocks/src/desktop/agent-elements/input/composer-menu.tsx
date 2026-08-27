@@ -263,7 +263,7 @@ export function ComposerMenu({
 			))}
 			{flat.length === 0 ? (
 				<div className="px-3 py-8 text-center text-muted-foreground text-sm">
-					No matches
+					No results found
 				</div>
 			) : null}
 		</div>

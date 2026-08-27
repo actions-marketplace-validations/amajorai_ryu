@@ -53,6 +53,9 @@ export const VIEW_ACTION_HTTP_METHODS = [
 
 export type ViewActionHttpMethod = (typeof VIEW_ACTION_HTTP_METHODS)[number];
 
+export const VIEW_SOURCE_HTTP_METHODS = ["GET"] as const;
+export type ViewSourceHttpMethod = (typeof VIEW_SOURCE_HTTP_METHODS)[number];
+
 /** A declarative HTTP handler for a {@link ViewAction} — the CRUD tier that makes
  *  actions work with NO per-app sidecar code. The host executes the request through
  *  its own authenticated Core seam (the spec never sees a token); `path` and string
@@ -155,7 +158,7 @@ export interface StatCard {
 export interface ViewSource {
 	http: {
 		/** Defaults to `GET`. */
-		method?: ViewActionHttpMethod;
+		method?: ViewSourceHttpMethod;
 		/** Core-relative path; must satisfy {@link isCoreApiPath}. */
 		path: string;
 	};

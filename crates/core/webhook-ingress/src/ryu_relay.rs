@@ -83,6 +83,10 @@ impl SeenDeliveries {
         Self::default()
     }
 
+    fn contains(&self, id: &str) -> bool {
+        !id.is_empty() && self.set.contains(id)
+    }
+
     /// Record an id. Returns `true` if it was newly inserted (not seen before).
     /// An empty id is always treated as new (no id to dedup on).
     pub fn insert(&mut self, id: &str) -> bool {
@@ -101,6 +105,14 @@ impl SeenDeliveries {
         }
         true
     }
+
+    pub fn remove(&mut self, id: &str) -> bool {
+        if id.is_empty() || !self.set.remove(id) {
+            return false;
+        }
+        self.order.retain(|existing| existing != id);
+        true
+    }
 }
 
 /// The persisted-state file under `~/.ryu` (relay token + node name). `None` when
@@ -113,8 +125,9 @@ fn relay_state_path() -> Option<std::path::PathBuf> {
 /// A parsed SSE frame from the relay subscribe stream (Contract 5).
 #[derive(Debug, Clone, PartialEq)]
 pub enum RelayFrame {
-    /// A **composio** webhook delivery, already parsed + verified server-side
-    /// (trust-relay). Dispatched straight to the composio store, unchanged.
+    /// Legacy parsed Composio frame retained for compatibility with an old
+    /// in-flight relay buffer. New deliveries use `Inbound` so Core verifies the
+    /// project-specific signature over the untouched request.
     Webhook { delivery_id: String, payload: Value },
     /// A **generic** inbound delivery to route by `path` (webhook-unify): the
     /// server forwards the original request path, the pre-extracted signature
@@ -126,6 +139,8 @@ pub enum RelayFrame {
         delivery_id: String,
         path: String,
         signature: Option<String>,
+        webhook_id: Option<String>,
+        webhook_timestamp: Option<String>,
         body: String,
     },
     /// A keep-alive ping — ignored.
@@ -154,6 +169,10 @@ enum WireFrame {
         #[serde(default)]
         signature: Option<String>,
         #[serde(default)]
+        webhook_id: Option<String>,
+        #[serde(default)]
+        webhook_timestamp: Option<String>,
+        #[serde(default)]
         body: String,
     },
     #[serde(rename = "ping")]
@@ -177,11 +196,15 @@ pub fn parse_frame(data: &str) -> Option<RelayFrame> {
             delivery_id,
             path,
             signature,
+            webhook_id,
+            webhook_timestamp,
             body,
         } => RelayFrame::Inbound {
             delivery_id,
             path,
             signature,
+            webhook_id,
+            webhook_timestamp,
             body,
         },
         WireFrame::Ping => RelayFrame::Ping,
@@ -472,7 +495,7 @@ async fn dispatch_frame(data: &str, seen: &mut SeenDeliveries) {
             delivery_id,
             payload,
         }) => {
-            if !seen.insert(&delivery_id) {
+            if seen.contains(&delivery_id) {
                 tracing::debug!("ryu-relay: skipping duplicate delivery {delivery_id}");
                 return;
             }
@@ -482,6 +505,7 @@ async fn dispatch_frame(data: &str, seen: &mut SeenDeliveries) {
             };
             match host.composio_handle_webhook(&payload).await {
                 Some(fired) => {
+                    let _ = seen.insert(&delivery_id);
                     tracing::info!("ryu-relay: dispatched webhook, fired {fired} agent run(s)");
                     // Reflect the relay-delivered firing in the webhook registry.
                     super::record_delivery(super::WEBHOOK_PATH);
@@ -493,23 +517,34 @@ async fn dispatch_frame(data: &str, seen: &mut SeenDeliveries) {
         }
         // The generic path-routed frame (webhook-unify): re-verify + dispatch by
         // path so a per-workflow webhook is reachable over the default relay, not
-        // just composio. Dedup by delivery_id first (the relay is at-least-once and
-        // the handlers have no idempotency — same HIGH concern as the composio arm).
+        // just composio. Check for an authenticated duplicate first, but do not
+        // record a new delivery id until Core accepts the signature. Recording a
+        // forged id here would let an attacker suppress a later legitimate retry.
         Some(RelayFrame::Inbound {
             delivery_id,
             path,
             signature,
+            webhook_id,
+            webhook_timestamp,
             body,
         }) => {
-            if !seen.insert(&delivery_id) {
+            if seen.contains(&delivery_id) {
                 tracing::debug!("ryu-relay: skipping duplicate delivery {delivery_id}");
                 return;
             }
-            // "" for `deliver_inbound`'s inner workflow-webhook dedup: this frame
-            // was already deduped by `delivery_id` above (the `seen.insert` a few
-            // lines up), so a second dedup here would be redundant.
-            let outcome =
-                super::deliver_inbound(&path, body.as_bytes(), signature.as_deref()).await;
+            let outcome = super::deliver_inbound(
+                &path,
+                body.as_bytes(),
+                crate::InboundWebhookHeaders {
+                    signature: signature.as_deref(),
+                    webhook_id: webhook_id.as_deref(),
+                    webhook_timestamp: webhook_timestamp.as_deref(),
+                },
+            )
+            .await;
+            if matches!(&outcome, super::InboundOutcome::Delivered { .. }) {
+                let _ = seen.insert(&delivery_id);
+            }
             match outcome {
                 super::InboundOutcome::Delivered { detail } => {
                     tracing::info!("ryu-relay: delivered inbound to {path}: {detail}");
@@ -542,6 +577,29 @@ mod tests {
                 assert_eq!(payload["trigger_slug"], "SLACK_MESSAGE");
             }
             other => panic!("expected webhook frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_frame_preserves_composio_signed_headers() {
+        let data = r#"{"type":"webhook.inbound","delivery_id":"msg_1","path":"/api/composio/webhook","signature":"v1,signed","webhook_id":"msg_1","webhook_timestamp":"1735689600","body":"{}"}"#;
+        match parse_frame(data) {
+            Some(RelayFrame::Inbound {
+                delivery_id,
+                path,
+                signature,
+                webhook_id,
+                webhook_timestamp,
+                body,
+            }) => {
+                assert_eq!(delivery_id, "msg_1");
+                assert_eq!(path, "/api/composio/webhook");
+                assert_eq!(signature.as_deref(), Some("v1,signed"));
+                assert_eq!(webhook_id.as_deref(), Some("msg_1"));
+                assert_eq!(webhook_timestamp.as_deref(), Some("1735689600"));
+                assert_eq!(body, "{}");
+            }
+            other => panic!("expected inbound frame, got {other:?}"),
         }
     }
 
@@ -588,6 +646,34 @@ mod tests {
         assert!(seen.insert("dlv-1"), "first sight is new");
         assert!(!seen.insert("dlv-1"), "second sight is a duplicate");
         assert!(seen.insert("dlv-2"), "a different id is new");
+    }
+
+    #[test]
+    fn seen_deliveries_can_release_a_failed_attempt() {
+        let mut seen = SeenDeliveries::new();
+        assert!(seen.insert("dlv-retry"));
+        assert!(seen.remove("dlv-retry"));
+        assert!(seen.insert("dlv-retry"), "released delivery can retry");
+    }
+
+    #[tokio::test]
+    async fn rejected_inbound_does_not_poison_delivery_dedup() {
+        let delivery_id = format!("forged-{}", uuid::Uuid::new_v4().simple());
+        let frame = serde_json::json!({
+            "type": "webhook.inbound",
+            "delivery_id": delivery_id,
+            "path": "/api/not-a-webhook",
+            "signature": "forged",
+            "body": "{}"
+        });
+        let mut seen = SeenDeliveries::new();
+
+        dispatch_frame(&frame.to_string(), &mut seen).await;
+
+        assert!(
+            !seen.set.contains(&delivery_id),
+            "an unauthenticated or unhandled frame must not reserve its delivery id"
+        );
     }
 
     #[test]

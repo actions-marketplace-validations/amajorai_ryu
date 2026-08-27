@@ -1,11 +1,12 @@
-//! The git engine: status/branches plus checkout/create-branch,
+//! The git engine: status/branches plus init/checkout/create-branch,
 //! pull/sync, and commit-push, all shelling `git` against a caller-supplied cwd.
 //! This is the "reads/runs what-is, no policy" half of the workspace primitive;
 //! the axum HTTP handlers that call these functions stay in Core (server
 //! wiring), as do the pure-filesystem `/api/workspace/{new-folder,list}`
 //! handlers (they shell no git — node-fs, kernel-owned).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -24,6 +25,16 @@ pub struct GitState {
     pub changed_files_count: usize,
     pub insertions: u32,
     pub deletions: u32,
+}
+
+/// One read-only commit in an explicitly configured memory source repository.
+#[derive(serde::Serialize)]
+pub struct GitMemoryTraceCommit {
+    pub author: String,
+    pub files: Vec<String>,
+    pub hash: String,
+    pub subject: String,
+    pub timestamp: String,
 }
 
 /// Files larger than this are counted as 0 added lines, the same way git treats
@@ -220,11 +231,375 @@ fn git_mutation_failed(operation: &str) -> String {
     format!("git {operation} failed; no command output was returned")
 }
 
+const MAX_FILE_DIFF_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextReplacement {
+    pub after: String,
+    pub before: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReverseEditsConflictReason {
+    ChangedSinceTurn,
+    StagedChanges,
+    UnsupportedFile,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReverseEditsOutcome {
+    Applied {
+        paths: Vec<String>,
+    },
+    Conflict {
+        paths: Vec<String>,
+        reason: ReverseEditsConflictReason,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct GitFileDiff {
+    pub patch: String,
+    pub paths: Vec<String>,
+}
+
+struct RepositoryPaths {
+    cwd: PathBuf,
+    root: PathBuf,
+}
+
+fn repository_paths(cwd: &str) -> Result<RepositoryPaths, String> {
+    let cwd = std::fs::canonicalize(cwd).map_err(|_| "cwd could not be resolved".to_string())?;
+    if !cwd.is_dir() {
+        return Err("cwd is not a directory".to_string());
+    }
+    let root = run_git(cwd.to_string_lossy().as_ref(), &["rev-parse", "--show-toplevel"])
+        .ok_or_else(|| "not a git repository".to_string())?;
+    let root = std::fs::canonicalize(root)
+        .map_err(|_| "repository root could not be resolved".to_string())?;
+    if !cwd.starts_with(&root) {
+        return Err("cwd must stay inside the repository".to_string());
+    }
+    Ok(RepositoryPaths { cwd, root })
+}
+
+fn validate_repository_path(
+    repository: &RepositoryPaths,
+    raw: &str,
+    allow_missing: bool,
+) -> Result<(PathBuf, PathBuf), String> {
+    let raw_path = Path::new(raw);
+    if raw.trim().is_empty()
+        || raw_path
+            .components()
+            .any(|component| component == Component::ParentDir)
+    {
+        return Err("file paths must stay inside the repository".to_string());
+    }
+    let candidate = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        repository.cwd.join(raw_path)
+    };
+    let relative = candidate
+        .strip_prefix(&repository.root)
+        .map_err(|_| "file paths must stay inside the repository".to_string())?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("file paths must name files inside the repository".to_string());
+    }
+
+    let mut current = repository.root.clone();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("symbolic links cannot be reviewed or reversed".to_string())
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && allow_missing => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err("file path does not exist".to_string())
+            }
+            Err(_) => return Err("file path could not be inspected".to_string()),
+        }
+    }
+    if candidate.is_dir() {
+        return Err("only files can be reviewed or reversed".to_string());
+    }
+    Ok((relative.to_path_buf(), candidate))
+}
+
+fn git_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn path_has_staged_changes(root: &Path, relative: &Path) -> Result<bool, String> {
+    let status = Command::new("git")
+        .args(["diff", "--cached", "--quiet", "--"])
+        .arg(relative)
+        .current_dir(root)
+        .no_window()
+        .status()
+        .map_err(|_| "could not inspect staged changes".to_string())?;
+    match status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err("could not inspect staged changes".to_string()),
+    }
+}
+
+static ACTIVE_EDIT_REVERSALS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+struct EditReversalGuard {
+    repository: PathBuf,
+}
+
+impl Drop for EditReversalGuard {
+    fn drop(&mut self) {
+        if let Some(active) = ACTIVE_EDIT_REVERSALS.get() {
+            if let Ok(mut repositories) = active.lock() {
+                repositories.remove(&self.repository);
+            }
+        }
+    }
+}
+
+fn begin_edit_reversal(repository: &Path) -> Result<EditReversalGuard, String> {
+    let active = ACTIVE_EDIT_REVERSALS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut repositories = active
+        .lock()
+        .map_err(|_| "edit reversal lock is unavailable".to_string())?;
+    if !repositories.insert(repository.to_path_buf()) {
+        return Err("another edit reversal is already in progress".to_string());
+    }
+    Ok(EditReversalGuard {
+        repository: repository.to_path_buf(),
+    })
+}
+
+struct PreparedFile {
+    absolute: PathBuf,
+    current: String,
+    next: String,
+    permissions: std::fs::Permissions,
+    relative: PathBuf,
+}
+
+fn changed_since_turn(paths: Vec<String>) -> ReverseEditsOutcome {
+    ReverseEditsOutcome::Conflict {
+        paths,
+        reason: ReverseEditsConflictReason::ChangedSinceTurn,
+    }
+}
+
+pub fn reverse_text_edits(
+    cwd: &str,
+    edits: &[TextReplacement],
+) -> Result<ReverseEditsOutcome, String> {
+    if edits.is_empty() {
+        return Err("at least one text replacement is required".to_string());
+    }
+    let repository = repository_paths(cwd)?;
+    let _guard = begin_edit_reversal(&repository.root)?;
+    let mut file_indexes = HashMap::<PathBuf, usize>::new();
+    let mut files = Vec::<PreparedFile>::new();
+
+    for edit in edits {
+        if edit.after.is_empty() || edit.after == edit.before {
+            return Err("text replacements must contain a non-empty changed value".to_string());
+        }
+        let (relative, absolute) = validate_repository_path(&repository, &edit.path, false)?;
+        if file_indexes.contains_key(&relative) {
+            continue;
+        }
+        if path_has_staged_changes(&repository.root, &relative)? {
+            return Ok(ReverseEditsOutcome::Conflict {
+                paths: vec![git_path(&relative)],
+                reason: ReverseEditsConflictReason::StagedChanges,
+            });
+        }
+        let bytes = std::fs::read(&absolute).map_err(|_| "file could not be read".to_string())?;
+        let Ok(current) = String::from_utf8(bytes) else {
+            return Ok(ReverseEditsOutcome::Conflict {
+                paths: vec![git_path(&relative)],
+                reason: ReverseEditsConflictReason::UnsupportedFile,
+            });
+        };
+        let permissions = std::fs::metadata(&absolute)
+            .map_err(|_| "file metadata could not be read".to_string())?
+            .permissions();
+        let index = files.len();
+        file_indexes.insert(relative.clone(), index);
+        files.push(PreparedFile {
+            absolute,
+            current: current.clone(),
+            next: current,
+            permissions,
+            relative,
+        });
+    }
+
+    for edit in edits.iter().rev() {
+        let (relative, _) = validate_repository_path(&repository, &edit.path, false)?;
+        let Some(index) = file_indexes.get(&relative).copied() else {
+            return Err("validated edit path disappeared".to_string());
+        };
+        let file = &mut files[index];
+        let mut matches = file.next.match_indices(&edit.after);
+        let Some((start, _)) = matches.next() else {
+            return Ok(changed_since_turn(vec![git_path(&relative)]));
+        };
+        if matches.next().is_some() {
+            return Ok(changed_since_turn(vec![git_path(&relative)]));
+        }
+        file.next
+            .replace_range(start..start + edit.after.len(), &edit.before);
+    }
+
+    let mut written = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        if file.current == file.next {
+            continue;
+        }
+        if let Err(error) = std::fs::write(&file.absolute, file.next.as_bytes())
+            .and_then(|()| std::fs::set_permissions(&file.absolute, file.permissions.clone()))
+        {
+            for written_index in written.into_iter().rev() {
+                let previous: &PreparedFile = &files[written_index];
+                let _ = std::fs::write(&previous.absolute, previous.current.as_bytes());
+                let _ = std::fs::set_permissions(&previous.absolute, previous.permissions.clone());
+            }
+            return Err(format!("writing reversed edits failed: {error}"));
+        }
+        written.push(index);
+    }
+
+    Ok(ReverseEditsOutcome::Applied {
+        paths: files.iter().map(|file| git_path(&file.relative)).collect(),
+    })
+}
+
+fn untracked_file_patch(relative: &Path, absolute: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(absolute).map_err(|_| "untracked file could not be read".to_string())?;
+    let path = git_path(relative);
+    if bytes.len() > MAX_FILE_DIFF_BYTES || bytes.contains(&0) {
+        return Ok(format!(
+            "diff --git a/{path} b/{path}\nnew file mode 100644\nBinary files /dev/null and b/{path} differ\n"
+        ));
+    }
+    let content = String::from_utf8(bytes)
+        .map_err(|_| "untracked file is not valid UTF-8".to_string())?;
+    let line_count = content.lines().count();
+    let mut patch = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{line_count} @@\n"
+    );
+    for line in content.lines() {
+        patch.push('+');
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    if !content.is_empty() && !content.ends_with('\n') {
+        patch.push_str("\\ No newline at end of file\n");
+    }
+    Ok(patch)
+}
+
+pub fn query_file_diff(cwd: &str, paths: &[String]) -> Result<GitFileDiff, String> {
+    if paths.is_empty() {
+        return Err("at least one file path is required".to_string());
+    }
+    let repository = repository_paths(cwd)?;
+    let mut seen = HashSet::new();
+    let mut resolved = Vec::new();
+    for raw in paths {
+        let (relative, absolute) = validate_repository_path(&repository, raw, true)?;
+        if seen.insert(relative.clone()) {
+            resolved.push((relative, absolute));
+        }
+    }
+
+    let mut tracked = Vec::new();
+    let mut untracked = Vec::new();
+    for (relative, absolute) in &resolved {
+        let status = Command::new("git")
+            .args(["ls-files", "--error-unmatch", "--"])
+            .arg(relative)
+            .current_dir(&repository.root)
+            .no_window()
+            .status()
+            .map_err(|_| "could not inspect tracked files".to_string())?;
+        if status.success() {
+            tracked.push(relative.clone());
+        } else if absolute.is_file() {
+            untracked.push((relative.clone(), absolute.clone()));
+        } else {
+            return Err(format!("{} does not exist", git_path(relative)));
+        }
+    }
+
+    let mut patch = String::new();
+    if !tracked.is_empty() {
+        let output = Command::new("git")
+            .args(["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--"])
+            .args(&tracked)
+            .current_dir(&repository.root)
+            .no_window()
+            .output()
+            .map_err(|_| "could not read file diff".to_string())?;
+        if !output.status.success() {
+            return Err(command_failure("diff", &output));
+        }
+        patch.push_str(&String::from_utf8_lossy(&output.stdout));
+    }
+    for (relative, absolute) in &untracked {
+        patch.push_str(&untracked_file_patch(relative, absolute)?);
+    }
+    if patch.len() > MAX_FILE_DIFF_BYTES {
+        return Err("file diff exceeds the response limit".to_string());
+    }
+
+    Ok(GitFileDiff {
+        patch,
+        paths: resolved
+            .iter()
+            .map(|(relative, _)| git_path(relative))
+            .collect(),
+    })
+}
+
+fn current_branch(cwd: &str) -> Option<String> {
+    // `rev-parse --abbrev-ref HEAD` returns the literal `HEAD` for a freshly
+    // initialized repository with no commits. The symbolic ref is authoritative
+    // in that state and keeps the Environment row on the branch Git initialized.
+    run_git(cwd, &["symbolic-ref", "--short", "HEAD"])
+        .or_else(|| run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]))
+}
+
+fn command_failure(operation: &str, output: &Output) -> String {
+    let details = String::from_utf8_lossy(&output.stderr)
+        .trim()
+        .chars()
+        .take(400)
+        .collect::<String>();
+    if details.is_empty() {
+        format!("git {operation} failed")
+    } else {
+        format!("git {operation} failed: {details}")
+    }
+}
+
 /// Compute the working-tree state for `cwd` (branch, ahead/behind, dirty, diff
 /// totals). Returns `is_repo:false` when `cwd` is not a git repository.
 pub fn query_git_state(cwd: &str) -> GitState {
     // Confirm this is actually a git repo.
-    let branch = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let branch = current_branch(cwd);
     let is_repo = branch.is_some();
 
     if !is_repo {
@@ -270,6 +645,91 @@ pub fn query_git_state(cwd: &str) -> GitState {
     }
 }
 
+/// Read the bounded Git history for the Markdown memory subtree.
+///
+/// The caller supplies a repository that the user explicitly configured as the
+/// Memory source. Keeping this primitive read-only and path-scoped lets agents
+/// inspect what changed without granting them an arbitrary repository walker.
+pub fn query_memory_trace(
+    cwd: &str,
+    path: &str,
+    limit: usize,
+) -> Result<Vec<GitMemoryTraceCommit>, String> {
+    if !Path::new(cwd).is_dir() {
+        return Err("memory Git source is not a directory".to_string());
+    }
+    if current_branch(cwd).is_none() {
+        return Err("memory Git source is not a repository".to_string());
+    }
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("memory Git trace path is required".to_string());
+    }
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || path.chars().any(|character| character.is_control())
+        || relative
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        || (path != "memory" && !path.starts_with("memory/"))
+    {
+        return Err("memory Git trace path must stay below memory/".to_string());
+    }
+
+    let max_count = limit.clamp(1, 50).to_string();
+    let output = Command::new("git")
+        .args([
+            "log",
+            "--no-renames",
+            &format!("--max-count={max_count}"),
+            "--date=iso-strict",
+            "--format=%H%x1f%an%x1f%aI%x1f%s",
+            "--name-only",
+            "--",
+            path,
+        ])
+        .current_dir(cwd)
+        .no_window()
+        .output()
+        .map_err(|error| format!("could not read memory Git history: {error}"))?;
+    if !output.status.success() {
+        return Err(command_failure("log", &output));
+    }
+
+    let mut commits = Vec::new();
+    let mut current: Option<GitMemoryTraceCommit> = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\u{1f}').collect();
+        if fields.len() == 4 && fields[0].len() >= 7 {
+            if let Some(commit) = current.take() {
+                commits.push(commit);
+            }
+            current = Some(GitMemoryTraceCommit {
+                author: fields[1].to_owned(),
+                files: Vec::new(),
+                hash: fields[0].to_owned(),
+                subject: fields[3].to_owned(),
+                timestamp: fields[2].to_owned(),
+            });
+            continue;
+        }
+        if line.starts_with("memory/") {
+            if let Some(commit) = current.as_mut() {
+                if !commit.files.iter().any(|file| file == line) {
+                    commit.files.push(line.to_owned());
+                }
+            }
+        }
+    }
+    if let Some(commit) = current {
+        commits.push(commit);
+    }
+    Ok(commits)
+}
+
 /// Parse `git rev-list --count --left-right @{u}...HEAD` output: "<behind>\t<ahead>".
 fn parse_ahead_behind(raw: Option<&str>) -> (u32, u32) {
     let Some(s) = raw else {
@@ -289,10 +749,52 @@ pub struct GitBranches {
     pub branches: Vec<String>,
 }
 
+/// Shaped `POST /api/git/init` result: whether Core created the repository and
+/// which branch Git initialized it on.
+#[derive(serde::Serialize)]
+pub struct GitInitOutcome {
+    pub success: bool,
+    pub initialized: bool,
+    pub branch: Option<String>,
+}
+
+/// Initialize a local repository with `main` as its default branch.
+///
+/// This intentionally does not stage files or create a commit. The caller can
+/// review the local Git state first, then use the normal commit flow before
+/// publishing the repository to a provider.
+pub fn initialize_repository(cwd: &str) -> Result<GitInitOutcome, String> {
+    if !std::path::Path::new(cwd).is_dir() {
+        return Err("cwd is not a directory".to_string());
+    }
+    if let Some(branch) = current_branch(cwd) {
+        return Ok(GitInitOutcome {
+            success: true,
+            initialized: false,
+            branch: Some(branch),
+        });
+    }
+
+    let output = git_without_hooks(&["init", "-b", "main"])
+        .current_dir(cwd)
+        .no_window()
+        .output()
+        .map_err(|_| "could not start git init".to_string())?;
+    if !output.status.success() {
+        return Err(command_failure("init", &output));
+    }
+
+    Ok(GitInitOutcome {
+        success: true,
+        initialized: true,
+        branch: current_branch(cwd),
+    })
+}
+
 /// List local branches plus the currently checked-out one for `cwd`. Returns
 /// `is_repo:false` when `cwd` is not a git repository.
 pub fn list_branches(cwd: &str) -> GitBranches {
-    let current = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let current = current_branch(cwd);
     if current.is_none() {
         return GitBranches {
             is_repo: false,
@@ -343,9 +845,9 @@ pub fn checkout_branch(cwd: &str, branch: &str) -> Result<String, String> {
     if !known.branches.iter().any(|b| b == branch) {
         return Err(format!("branch '{branch}' not found"));
     }
+    reject_local_executable_filters(cwd)?;
 
-    let out = Command::new("git")
-        .args(["switch", branch])
+    let out = git_without_hooks(&["switch", branch])
         .current_dir(cwd)
         .no_window()
         .output()
@@ -377,9 +879,9 @@ pub fn create_branch(cwd: &str, branch: &str) -> Result<String, String> {
     {
         return Err(format!("'{branch}' is not a valid branch name"));
     }
+    reject_local_executable_filters(cwd)?;
 
-    let out = Command::new("git")
-        .args(["switch", "-c", name])
+    let out = git_without_hooks(&["switch", "-c", name])
         .current_dir(cwd)
         .no_window()
         .output()
@@ -413,7 +915,7 @@ pub fn run_git_action(
     include_unstaged: bool,
 ) -> Result<CommitPushOutcome, String> {
     // Confirm this is a git repo before touching the working tree.
-    if run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).is_none() {
+    if current_branch(cwd).is_none() {
         return Err("not a git repository".to_string());
     }
     if action != "push" && include_unstaged {
@@ -434,6 +936,7 @@ pub fn run_git_action(
 
     let mut committed = false;
     if action != "push" {
+        let has_head = run_git(cwd, &["rev-parse", "--verify", "HEAD"]).is_some();
         let staged_args = ["diff", "--cached", "--name-only"];
         let has_staged = run_git(cwd, &staged_args)
             .map(|s| s.lines().any(|l| !l.trim().is_empty()))
@@ -448,14 +951,22 @@ pub fn run_git_action(
             }
         }
 
-        let commit = git_without_hooks(&["commit", "--no-verify", "-m", message])
+        let mut commit_args = vec!["commit", "--no-verify", "-m", message];
+        // A newly initialized, empty folder has no staged paths yet, but it
+        // still needs an initial commit before `gh repo create --push` can
+        // publish it. Preserve the normal no-op behavior for an established
+        // repository while allowing the unborn branch to get a real root.
+        if !has_head && !has_staged {
+            commit_args.insert(1, "--allow-empty");
+        }
+        let commit = git_without_hooks(&commit_args)
             .current_dir(cwd)
             .no_window()
             .output()
             .map_err(|_| "could not start git commit".to_string())?;
-        if has_staged && commit.status.success() {
+        if (!has_head || has_staged) && commit.status.success() {
             committed = true;
-        } else if has_staged {
+        } else if has_staged || !has_head {
             return Err(git_mutation_failed("commit"));
         }
     }
@@ -561,7 +1072,7 @@ pub fn run_git_remote_action(cwd: &str, action: &str) -> Result<GitRemoteOutcome
         return Err("invalid git remote action".to_string());
     }
     // Confirm this is a git repo before running a mutating remote command.
-    if run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).is_none() {
+    if current_branch(cwd).is_none() {
         return Err("not a git repository".to_string());
     }
     reject_local_executable_filters(cwd)?;
@@ -743,8 +1254,7 @@ pub fn create_pull_request(
     draft: bool,
     include_unstaged: bool,
 ) -> Result<PullRequestOutcome, String> {
-    let branch = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .ok_or_else(|| "not a git repository".to_string())?;
+    let branch = current_branch(cwd).ok_or_else(|| "not a git repository".to_string())?;
     if branch == "HEAD" {
         return Err("cannot create a pull request from a detached HEAD".to_string());
     }
@@ -916,6 +1426,67 @@ mod tests {
     }
 
     #[test]
+    fn initialize_repository_uses_main_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let first = initialize_repository(path).unwrap();
+        assert!(first.success);
+        assert!(first.initialized);
+        assert_eq!(first.branch.as_deref(), Some("main"));
+        assert_eq!(query_git_state(path).branch.as_deref(), Some("main"));
+
+        let second = initialize_repository(path).unwrap();
+        assert!(second.success);
+        assert!(!second.initialized);
+        assert_eq!(second.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn memory_trace_reads_only_configured_memory_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        initialize_repository(path).unwrap();
+        test_git(dir.path(), &["config", "user.name", "Ryu Test"]);
+        test_git(
+            dir.path(),
+            &["config", "user.email", "ryu-test@example.com"],
+        );
+        std::fs::create_dir_all(dir.path().join("memory/user")).unwrap();
+        std::fs::write(dir.path().join("memory/user/fact.md"), "one\n").unwrap();
+        std::fs::write(dir.path().join("README.md"), "outside\n").unwrap();
+        test_git(dir.path(), &["add", "."]);
+        test_git(dir.path(), &["commit", "-m", "initial memory"]);
+        std::fs::write(dir.path().join("memory/user/fact.md"), "two\n").unwrap();
+        test_git(dir.path(), &["add", "memory/user/fact.md"]);
+        test_git(dir.path(), &["commit", "-m", "revise memory"]);
+
+        let trace = query_memory_trace(path, "memory", 10).unwrap();
+        assert_eq!(trace.len(), 2);
+        assert_eq!(trace[0].subject, "revise memory");
+        assert_eq!(trace[0].files, vec!["memory/user/fact.md"]);
+        assert!(query_memory_trace(path, "README.md", 10).is_err());
+    }
+
+    #[test]
+    fn commit_action_creates_an_initial_commit_for_an_empty_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        initialize_repository(path).unwrap();
+        test_git(dir.path(), &["config", "user.name", "Ryu Test"]);
+        test_git(
+            dir.path(),
+            &["config", "user.email", "ryu-test@example.com"],
+        );
+
+        let outcome = run_git_action(path, "Initial commit", "commit", true).unwrap();
+        assert!(outcome.success);
+        assert!(outcome.committed);
+        assert!(!outcome.pushed);
+        assert!(run_git(path, &["rev-parse", "--verify", "HEAD"]).is_some());
+    }
+
+    #[test]
     fn remote_action_rejects_local_executable_filters() {
         let dir = tempfile::tempdir().unwrap();
         test_git(dir.path(), &["init"]);
@@ -967,10 +1538,8 @@ mod tests {
         assert!(pulled.success);
         assert!(pulled.pulled);
         assert!(!pulled.pushed);
-        assert_eq!(
-            std::fs::read_to_string(local.join("tracked.txt")).unwrap(),
-            "one\ntwo\n"
-        );
+        let pulled_contents = std::fs::read_to_string(local.join("tracked.txt")).unwrap();
+        assert_eq!(pulled_contents.replace("\r\n", "\n"), "one\ntwo\n");
 
         std::fs::write(local.join("local.txt"), "local\n").unwrap();
         test_git(&local, &["add", "local.txt"]);
@@ -990,6 +1559,189 @@ mod tests {
         .trim()
         .to_string();
         assert_eq!(remote_head, local_head);
+    }
+
+    fn initialize_reverse_repo(path: &std::path::Path) {
+        test_git(path, &["init"]);
+        test_git(path, &["config", "user.name", "Ryu Test"]);
+        test_git(path, &["config", "user.email", "ryu-test@example.com"]);
+        std::fs::write(path.join("first.txt"), "alpha\none\nomega\n").unwrap();
+        std::fs::write(path.join("second.txt"), "left\nright\n").unwrap();
+        test_git(path, &["add", "first.txt", "second.txt"]);
+        test_git(path, &["commit", "-m", "initial"]);
+    }
+
+    #[test]
+    fn reverse_text_edits_preserves_unrelated_changes_and_reverses_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        initialize_reverse_repo(dir.path());
+        std::fs::write(dir.path().join("first.txt"), "user note\nalpha\nthree\nomega\n")
+            .unwrap();
+
+        let result = reverse_text_edits(
+            dir.path().to_str().unwrap(),
+            &[
+                TextReplacement {
+                    after: "two".to_string(),
+                    before: "one".to_string(),
+                    path: "first.txt".to_string(),
+                },
+                TextReplacement {
+                    after: "three".to_string(),
+                    before: "two".to_string(),
+                    path: "first.txt".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ReverseEditsOutcome::Applied {
+                paths: vec!["first.txt".to_string()]
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("first.txt")).unwrap(),
+            "user note\nalpha\none\nomega\n"
+        );
+    }
+
+    #[test]
+    fn reverse_text_edits_conflicts_without_writing_any_file() {
+        let dir = tempfile::tempdir().unwrap();
+        initialize_reverse_repo(dir.path());
+        std::fs::write(dir.path().join("first.txt"), "alpha\nchanged later\nomega\n").unwrap();
+        std::fs::write(dir.path().join("second.txt"), "LEFT\nright\n").unwrap();
+
+        let result = reverse_text_edits(
+            dir.path().to_str().unwrap(),
+            &[
+                TextReplacement {
+                    after: "changed by agent".to_string(),
+                    before: "one".to_string(),
+                    path: "first.txt".to_string(),
+                },
+                TextReplacement {
+                    after: "LEFT".to_string(),
+                    before: "left".to_string(),
+                    path: "second.txt".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ReverseEditsOutcome::Conflict {
+                paths: vec!["first.txt".to_string()],
+                reason: ReverseEditsConflictReason::ChangedSinceTurn,
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("second.txt")).unwrap(),
+            "LEFT\nright\n"
+        );
+    }
+
+    #[test]
+    fn reverse_text_edits_rejects_staged_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        initialize_reverse_repo(dir.path());
+        std::fs::write(dir.path().join("first.txt"), "alpha\ntwo\nomega\n").unwrap();
+        test_git(dir.path(), &["add", "first.txt"]);
+
+        let result = reverse_text_edits(
+            dir.path().to_str().unwrap(),
+            &[TextReplacement {
+                after: "two".to_string(),
+                before: "one".to_string(),
+                path: "first.txt".to_string(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ReverseEditsOutcome::Conflict {
+                paths: vec!["first.txt".to_string()],
+                reason: ReverseEditsConflictReason::StagedChanges,
+            }
+        );
+    }
+
+    #[test]
+    fn reverse_text_edits_rejects_ambiguous_binary_and_escaping_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        initialize_reverse_repo(dir.path());
+        std::fs::write(dir.path().join("first.txt"), "two and two\n").unwrap();
+        let ambiguous = reverse_text_edits(
+            dir.path().to_str().unwrap(),
+            &[TextReplacement {
+                after: "two".to_string(),
+                before: "one".to_string(),
+                path: "first.txt".to_string(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            ambiguous,
+            ReverseEditsOutcome::Conflict {
+                paths: vec!["first.txt".to_string()],
+                reason: ReverseEditsConflictReason::ChangedSinceTurn,
+            }
+        );
+
+        std::fs::write(dir.path().join("first.txt"), [0xff, 0x00]).unwrap();
+        let binary = reverse_text_edits(
+            dir.path().to_str().unwrap(),
+            &[TextReplacement {
+                after: "two".to_string(),
+                before: "one".to_string(),
+                path: "first.txt".to_string(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            binary,
+            ReverseEditsOutcome::Conflict {
+                paths: vec!["first.txt".to_string()],
+                reason: ReverseEditsConflictReason::UnsupportedFile,
+            }
+        );
+
+        let escaped = reverse_text_edits(
+            dir.path().to_str().unwrap(),
+            &[TextReplacement {
+                after: "new".to_string(),
+                before: "old".to_string(),
+                path: "../outside.txt".to_string(),
+            }],
+        )
+        .unwrap_err();
+        assert!(escaped.contains("inside the repository"));
+    }
+
+    #[test]
+    fn query_file_diff_is_scoped_and_includes_untracked_text() {
+        let dir = tempfile::tempdir().unwrap();
+        initialize_reverse_repo(dir.path());
+        std::fs::write(dir.path().join("first.txt"), "alpha\nTWO\nomega\n").unwrap();
+        std::fs::write(dir.path().join("untracked.txt"), "new\nlines\n").unwrap();
+        std::fs::write(dir.path().join("second.txt"), "changed but excluded\n").unwrap();
+
+        let diff = query_file_diff(
+            dir.path().to_str().unwrap(),
+            &["first.txt".to_string(), "untracked.txt".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(diff.paths, vec!["first.txt", "untracked.txt"]);
+        assert!(diff.patch.contains("first.txt"));
+        assert!(diff.patch.contains("+TWO"));
+        assert!(diff.patch.contains("new file mode"));
+        assert!(diff.patch.contains("+lines"));
+        assert!(!diff.patch.contains("second.txt"));
     }
 
     fn test_git(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {

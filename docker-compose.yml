@@ -50,6 +50,10 @@ services:
     environment:
       RYU_BIND: "0.0.0.0:7980"
       RYU_DIR: "/data"
+      # Core reads /data/.config/ryu/node-config.json. The example is mounted
+      # for the local stack so this path is exercised end to end; replace the
+      # source with a private copy when customizing local behavior.
+      XDG_CONFIG_HOME: "/data/.config"
       # Use the gateway service instead of spawning a local one.
       RYU_GATEWAY_MANAGED: "0"
       RYU_GATEWAY_URL: "http://gateway:7981"
@@ -57,6 +61,7 @@ services:
       - "7980:7980"
     volumes:
       - ryu-data:/data
+      - ./config/node-config.example.json:/data/.config/ryu/node-config.json:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7980/api/health"]

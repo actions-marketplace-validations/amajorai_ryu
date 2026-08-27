@@ -13,6 +13,8 @@ import { useCallback, useRef, useState } from "react";
 import { chatHeaders, chatStreamUrl } from "@/src/lib/api/chat.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type { ShadowContext } from "@/src/lib/api/shadow.ts";
+import { responseModeForInterface } from "@/src/lib/chat-routing.ts";
+import { readInterfaceLevel } from "@/src/lib/interface-level.ts";
 import {
 	neutralize,
 	stripTemplateTokens,
@@ -176,6 +178,7 @@ export function useAskScreen(target: ApiTarget) {
 					body: JSON.stringify({
 						conversation_id: conversationId,
 						messages: [{ role: "user", content: prompt }],
+						response_mode: responseModeForInterface(readInterfaceLevel()),
 						enable_long_term: false,
 						// Tag this as companion-sourced egress (screen context) so the
 						// Gateway applies unconditional DLP/PII redaction, matching what

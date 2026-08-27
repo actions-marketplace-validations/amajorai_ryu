@@ -23,16 +23,6 @@
 // lookups that can miss. The rule for a reviewer: if a new section needs a Core
 // app to exist, it belongs in that app's manifest, not in `BUILTIN_SECTIONS`.
 //
-// Two entries here — `teams` and `workflows` — are grandfathered exceptions to that
-// rule, and being listed here does NOT mean they always render. Both are compiled-in
-// components (`TeamsSection`/`WorkflowsSection`) whose DATA comes from a Core app
-// (`@ryu/teams`, `@ryu/workflows`), so `AppSidebar`'s `SECTION_PLUGIN_OWNER` hides
-// each one unless its app is installed and enabled — otherwise the sidebar offered a
-// section whose every row hit a route the App gate refuses. Presence in this list is
-// therefore the section's IDENTITY (key, label, glyph, default position), not a
-// promise that it is visible. Do not add a third exception: a genuinely new
-// app-backed section belongs in that app's `sidebar_sections` contribution.
-
 import {
 	Archive01Icon,
 	Chat01Icon,
@@ -49,8 +39,6 @@ import {
 	ServerStack01Icon,
 	Target01Icon,
 	Tv01Icon,
-	UserMultiple02Icon,
-	WorkflowCircle06Icon,
 	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
@@ -113,7 +101,6 @@ export const BUILTIN_SECTIONS = [
 	// and works in, so it belongs beside the other "things I use" sections rather
 	// than trailing the store-adjacent tail at the bottom.
 	{ key: "companions", label: "Apps", icon: Package01Icon },
-	{ key: "teams", label: "Teams", icon: UserMultiple02Icon },
 	{ key: "projects", label: "Projects", icon: FolderOpenIcon },
 	{ key: "pinned", label: "Pinned", icon: PinIcon },
 	{ key: "chats", label: "Chats", icon: Chat01Icon },
@@ -121,7 +108,6 @@ export const BUILTIN_SECTIONS = [
 	{ key: "channels", label: "Channels", icon: Tv01Icon },
 	{ key: "integrations", label: "Integrations", icon: ConnectIcon },
 	{ key: "identities", label: "Identities", icon: FingerPrintIcon },
-	{ key: "workflows", label: "Workflows", icon: WorkflowCircle06Icon },
 	{ key: "skills", label: "Skills", icon: PotionIcon },
 	{ key: "mcp", label: "MCP", icon: ServerStack01Icon },
 	{ key: "tools", label: "Tools", icon: Wrench01Icon },
@@ -146,6 +132,21 @@ export type DynamicSectionKey = `plugin:${string}`;
  *  app-registered dynamic sections from the contributions feed. */
 export type SectionKey = BuiltinSectionKey | DynamicSectionKey;
 
+/** App-owned replacements for the two retired compiled section keys. Kept as a
+ * migration table so every persisted preference follows the section rather than
+ * silently resetting when the app starts contributing it dynamically. */
+export const LEGACY_APP_SECTION_KEYS = {
+	teams: "plugin:@ryu/teams:teams",
+	workflows: "plugin:@ryu/workflows:workflows",
+} as const satisfies Record<string, DynamicSectionKey>;
+
+export function migrateLegacySectionKey(value: string): string {
+	return (
+		LEGACY_APP_SECTION_KEYS[value as keyof typeof LEGACY_APP_SECTION_KEYS] ??
+		value
+	);
+}
+
 /** Default top-level order, derived from {@link BUILTIN_SECTIONS}. */
 export const DEFAULT_SECTION_ORDER: BuiltinSectionKey[] = BUILTIN_SECTIONS.map(
 	(section) => section.key
@@ -160,7 +161,7 @@ export const DEFAULT_SECTION_ORDER: BuiltinSectionKey[] = BUILTIN_SECTIONS.map(
  * the present and silently stop migrating anyone. Never edit an entry — append a
  * new snapshot if the default changes again.
  */
-const LEGACY_DEFAULT_SECTION_ORDERS: BuiltinSectionKey[][] = [
+const LEGACY_DEFAULT_SECTION_ORDERS: string[][] = [
 	// BEFORE `pinned` was promoted above `chats` (no `companions`).
 	[
 		"tabs",
@@ -227,6 +228,27 @@ const LEGACY_DEFAULT_SECTION_ORDERS: BuiltinSectionKey[][] = [
 		"plugins",
 		"companions",
 	],
+	// Last default before Teams and Workflows became app-owned contributions.
+	[
+		"tabs",
+		"agents",
+		"companions",
+		"teams",
+		"projects",
+		"pinned",
+		"chats",
+		"spaces",
+		"channels",
+		"integrations",
+		"identities",
+		"workflows",
+		"skills",
+		"mcp",
+		"tools",
+		"engines",
+		"archived",
+		"plugins",
+	],
 ];
 
 /** Human labels for the built-in sections, shared by the customize dialog. */
@@ -253,6 +275,77 @@ export function isSectionKey(value: string): value is SectionKey {
 	);
 }
 
+export function migrateLegacySectionKeys(values: string[]): string[] {
+	return values.map(migrateLegacySectionKey);
+}
+
+export function migrateLegacySectionRecord<T>(
+	values: Record<string, T>
+): Record<string, T> {
+	const migrated: Record<string, T> = {};
+	for (const [key, value] of Object.entries(values)) {
+		const nextKey = migrateLegacySectionKey(key);
+		// A value already written under the dynamic key is newer than the legacy
+		// alias and wins when both somehow survived a partial migration.
+		if (!(nextKey in migrated) || key === nextKey) {
+			migrated[nextKey] = value;
+		}
+	}
+	return migrated;
+}
+
+interface SectionPreferenceStorage {
+	getItem: (key: string) => string | null;
+	setItem: (key: string, value: string) => void;
+}
+
+/** Rewrite the retired Teams/Workflows keys in every sidebar preference before
+ * AppSidebar reads any of them. Arrays cover order/hidden/collapsed; records cover
+ * page size and sort. Malformed or unavailable storage stays best-effort. */
+export function migrateLegacySectionStorage(
+	storage: SectionPreferenceStorage,
+	keys: { arrays: readonly string[]; records: readonly string[] }
+): void {
+	try {
+		for (const key of keys.arrays) {
+			const raw = storage.getItem(key);
+			if (!raw) {
+				continue;
+			}
+			const parsed: unknown = JSON.parse(raw);
+			if (
+				!(
+					Array.isArray(parsed) &&
+					parsed.every((value) => typeof value === "string")
+				)
+			) {
+				continue;
+			}
+			const migrated = migrateLegacySectionKeys(parsed);
+			if (migrated.some((value, index) => value !== parsed[index])) {
+				storage.setItem(key, JSON.stringify(migrated));
+			}
+		}
+		for (const key of keys.records) {
+			const raw = storage.getItem(key);
+			if (!raw) {
+				continue;
+			}
+			const parsed: unknown = JSON.parse(raw);
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				continue;
+			}
+			const values = parsed as Record<string, unknown>;
+			const migrated = migrateLegacySectionRecord(values);
+			if (Object.keys(migrated).some((value) => !(value in values))) {
+				storage.setItem(key, JSON.stringify(migrated));
+			}
+		}
+	} catch {
+		// localStorage and JSON parsing are best-effort, matching the loaders below.
+	}
+}
+
 /**
  * Reconcile a stored order against the code. The stored order can drift from the
  * build (sections added/removed across versions, apps installed/uninstalled), so:
@@ -264,16 +357,21 @@ export function isSectionKey(value: string): value is SectionKey {
  * part that must never lose a user's saved layout — is testable without a DOM.
  */
 export function reconcileSectionOrder(parsed: string[]): SectionKey[] {
-	const order = [...new Set(parsed.filter(isSectionKey))];
+	const original = [...new Set(parsed)];
 	if (
 		LEGACY_DEFAULT_SECTION_ORDERS.some(
 			(legacy) =>
-				order.length === legacy.length &&
-				order.every((key, index) => key === legacy[index])
+				original.length === legacy.length &&
+				original.every((key, index) => key === legacy[index])
 		)
 	) {
-		return [...DEFAULT_SECTION_ORDER];
+		return migrateLegacySectionKeys(
+			LEGACY_DEFAULT_SECTION_ORDERS.at(-1) ?? DEFAULT_SECTION_ORDER
+		).filter(isSectionKey);
 	}
+	const order = [
+		...new Set(migrateLegacySectionKeys(parsed).filter(isSectionKey)),
+	];
 	const missing = DEFAULT_SECTION_ORDER.filter((k) => !order.includes(k));
 	for (const key of missing) {
 		const defaultIdx = DEFAULT_SECTION_ORDER.indexOf(key);

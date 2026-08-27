@@ -28,11 +28,15 @@ import { getRealtimeJwt } from "./jwt.ts";
 export interface RealtimeRoom {
 	/** Resolved access for this connection, or `null` until the join is acked. */
 	access: "read" | "write" | null;
+	/** Opaque correlation id shared with related HTTP mutations. */
+	clientId: string | null;
 	/** True between socket-open and socket-close. */
 	connected: boolean;
 	/** The live connection once constructed, else `null`. Surfaces that drive
 	 * doc-sync directly (the Yjs provider) read this; most use the helpers below. */
 	connection: RealtimeConnection | null;
+	/** Server-issued id for this concrete room membership. */
+	memberId: string | null;
 	/** Publish this client's awareness/presence payload (the server stamps the
 	 * member id). No-op until the connection is open. */
 	publishPresence: (data: unknown) => void;
@@ -51,7 +55,8 @@ export interface RealtimeRoom {
 export function useRealtimeRoom(
 	roomId: string | null,
 	kind: RealtimeKind,
-	handlers?: RealtimeHandlers
+	handlers?: RealtimeHandlers,
+	clientId?: string
 ): RealtimeRoom {
 	const node = useActiveNode();
 	const { url } = node;
@@ -64,6 +69,8 @@ export function useRealtimeRoom(
 	const [connection, setConnection] = useState<RealtimeConnection | null>(null);
 	const [connected, setConnected] = useState(false);
 	const [access, setAccess] = useState<"read" | "write" | null>(null);
+	const [resolvedClientId, setResolvedClientId] = useState<string | null>(null);
+	const [memberId, setMemberId] = useState<string | null>(null);
 
 	useEffect(() => {
 		if (!roomId) {
@@ -85,6 +92,8 @@ export function useRealtimeRoom(
 			onJoinAck: (ack: JoinAck) => {
 				if (!cancelled) {
 					setAccess(ack.access);
+					setResolvedClientId(ack.clientId);
+					setMemberId(ack.memberId);
 				}
 				handlersRef.current?.onJoinAck?.(ack);
 			},
@@ -95,6 +104,8 @@ export function useRealtimeRoom(
 				handlersRef.current?.onOpen?.();
 			},
 			onPresence: (data) => handlersRef.current?.onPresence?.(data),
+			onResyncRequired: (notice) =>
+				handlersRef.current?.onResyncRequired?.(notice),
 		};
 
 		const open = async () => {
@@ -106,7 +117,7 @@ export function useRealtimeRoom(
 			}
 			const conn = new RealtimeConnection(
 				{ url, token },
-				{ roomId, kind, jwt, handlers: composed }
+				{ roomId, kind, jwt, handlers: composed, clientId }
 			);
 			connectionRef.current = conn;
 			setConnection(conn);
@@ -124,8 +135,10 @@ export function useRealtimeRoom(
 			setConnection(null);
 			setConnected(false);
 			setAccess(null);
+			setResolvedClientId(null);
+			setMemberId(null);
 		};
-	}, [roomId, kind, url, token]);
+	}, [roomId, kind, url, token, clientId]);
 
 	const publishPresence = useCallback((data: unknown) => {
 		connectionRef.current?.publishPresence(data);
@@ -134,5 +147,13 @@ export function useRealtimeRoom(
 		connectionRef.current?.sendDocSync(message);
 	}, []);
 
-	return { access, connected, connection, publishPresence, sendDocSync };
+	return {
+		access,
+		clientId: resolvedClientId,
+		connected,
+		connection,
+		memberId,
+		publishPresence,
+		sendDocSync,
+	};
 }

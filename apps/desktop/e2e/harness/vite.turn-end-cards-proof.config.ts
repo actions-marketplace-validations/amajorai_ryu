@@ -18,8 +18,15 @@ export default defineConfig({
 	clearScreen: false,
 	server: {
 		host: "127.0.0.1",
+		hmr: false,
 		port: 5182,
 		strictPort: true,
+		watch: {
+			// This focused proof runs in a shared checkout where unrelated tasks may
+			// be editing other harness files. Do not reload the page underneath
+			// Playwright while it verifies this immutable fixture.
+			ignored: ["**/*"],
+		},
 	},
 	resolve: {
 		alias: {

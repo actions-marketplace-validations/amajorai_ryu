@@ -11,7 +11,12 @@
 // Placement: this is a Core data-path client (it decides *what runs* - the local
 // capture engine), reached through the same node target as every other module.
 
-import { type ApiTarget, apiUrl, makeHeaders, request } from "./client.ts";
+import {
+	type ApiTarget,
+	apiUrl,
+	authenticatedFetch,
+	request,
+} from "./client.ts";
 
 /** A browser tab tagged onto a clip's diagnostics track (present only when the
  * extension has attached one). */
@@ -285,12 +290,11 @@ export async function fetchClipFrameDataUrl(
 	id: string,
 	atMs: number
 ): Promise<string> {
-	const headers: Record<string, string> = {};
-	const auth = makeHeaders(target.token).Authorization;
-	if (auth) {
-		headers.Authorization = auth;
-	}
-	const resp = await fetch(clipFrameUrl(target, id, atMs), { headers });
+	const resp = await authenticatedFetch(
+		target,
+		`/api/clips/${id}/frame?atMs=${atMs}`,
+		{ headers: { "Content-Type": null } }
+	);
 	if (!resp.ok) {
 		throw new Error(`clip frame failed: ${resp.status}`);
 	}

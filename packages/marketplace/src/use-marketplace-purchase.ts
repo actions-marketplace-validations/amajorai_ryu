@@ -51,7 +51,8 @@ export interface UseMarketplacePurchaseResult {
 }
 
 export function useMarketplacePurchase(): UseMarketplacePurchaseResult {
-	const { useLicenses, startPurchase, openExternal } = useMarketplaceHost();
+	const { guardPurchase, useLicenses, startPurchase, openExternal } =
+		useMarketplaceHost();
 	const { isLicensed, refresh: refreshLicenses } = useLicenses();
 	const [buying, setBuying] = useState<string | null>(null);
 	const [detail, setDetail] = useState<MarketplaceDetailTarget | null>(null);
@@ -60,7 +61,12 @@ export function useMarketplacePurchase(): UseMarketplacePurchaseResult {
 		async (card: { id: string; kind: MarketplaceKind }) => {
 			setBuying(card.id);
 			try {
-				const result = await startPurchase({ kind: card.kind, id: card.id });
+				const result = await (guardPurchase
+					? guardPurchase(() => startPurchase({ kind: card.kind, id: card.id }))
+					: startPurchase({ kind: card.kind, id: card.id }));
+				if (result === null) {
+					return;
+				}
 				const action = purchaseAction(result);
 				if (action.kind === "owned") {
 					sileo.success({ title: "You already own this item." });
@@ -85,7 +91,7 @@ export function useMarketplacePurchase(): UseMarketplacePurchaseResult {
 				setBuying(null);
 			}
 		},
-		[refreshLicenses, startPurchase, openExternal]
+		[guardPurchase, refreshLicenses, startPurchase, openExternal]
 	);
 
 	const openDetail = useCallback(

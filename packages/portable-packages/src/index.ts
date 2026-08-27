@@ -454,9 +454,7 @@ export function redactPackageTree(
 			security: {
 				...tree.manifest.security,
 				containsSecrets: false,
-				privateContent:
-					tree.manifest.security.privateContent &&
-					options.includePrivateContent !== true,
+				privateContent: Object.keys(files).some(isPrivateContentPath),
 				redacted: true,
 			},
 		},
@@ -1465,16 +1463,29 @@ export function validatePackageTree(tree: PackageTree): PackageTree {
 }
 
 export function packageIsPublishable(tree: PackageTree): boolean {
-	return !(hasEncryptedSecrets(tree) || tree.manifest.security.containsSecrets);
+	return !(
+		hasEncryptedSecrets(tree) ||
+		tree.manifest.security.containsSecrets ||
+		tree.manifest.security.privateContent
+	);
 }
 
 export function validatePublishablePackage(tree: PackageTree): void {
 	validatePackageTree(tree);
-	if (!packageIsPublishable(tree)) {
+	if (hasEncryptedSecrets(tree) || tree.manifest.security.containsSecrets) {
 		throw new PackageValidationError([
 			{
 				path: SECRETS_FILE,
 				message: "secret-bearing packages cannot be published to a marketplace",
+			},
+		]);
+	}
+	if (tree.manifest.security.privateContent) {
+		throw new PackageValidationError([
+			{
+				path: "security.privateContent",
+				message:
+					"private-content packages cannot be published to a marketplace",
 			},
 		]);
 	}

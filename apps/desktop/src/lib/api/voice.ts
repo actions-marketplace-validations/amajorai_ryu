@@ -10,7 +10,7 @@
 // voice engine transcribes), reached through the same node target as every other
 // Core client module.
 
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 /** Transcribe a recorded audio blob via Core's whisper proxy. Returns the text. */
 export async function transcribeAudio(
@@ -21,17 +21,9 @@ export async function transcribeAudio(
 	const form = new FormData();
 	form.append("file", audio, filename);
 
-	// Don't use makeHeaders' JSON content-type — FormData sets its own multipart
-	// boundary. Carry only the bearer token when present.
-	const headers: Record<string, string> = {};
-	const auth = makeHeaders(target.token).Authorization;
-	if (auth) {
-		headers.Authorization = auth;
-	}
-
-	const resp = await fetch(apiUrl(target, "/api/voice/transcribe"), {
+	const resp = await authenticatedFetch(target, "/api/voice/transcribe", {
 		method: "POST",
-		headers,
+		headers: { "Content-Type": null },
 		body: form,
 	});
 
@@ -71,9 +63,7 @@ export interface TtsEngine {
 /** List the Audio engines available on this node (nothing hardcoded — Core mirrors
  * the sidecar registry). Always includes the built-in `outetts`. */
 export async function listTtsEngines(target: ApiTarget): Promise<TtsEngine[]> {
-	const resp = await fetch(apiUrl(target, "/api/voice/tts-engines"), {
-		headers: makeHeaders(target.token),
-	});
+	const resp = await authenticatedFetch(target, "/api/voice/tts-engines");
 	if (!resp.ok) {
 		throw new Error(`audio engines failed: ${resp.status}`);
 	}
@@ -97,9 +87,7 @@ export interface TtsModel {
 /** List the curated, installable Audio models (the known-good set Core can install
  * + run), distinct from the raw HF text-to-speech browse in the Models tab. */
 export async function listTtsModels(target: ApiTarget): Promise<TtsModel[]> {
-	const resp = await fetch(apiUrl(target, "/api/voice/tts-models"), {
-		headers: makeHeaders(target.token),
-	});
+	const resp = await authenticatedFetch(target, "/api/voice/tts-models");
 	if (!resp.ok) {
 		throw new Error(`audio models failed: ${resp.status}`);
 	}
@@ -114,11 +102,14 @@ export async function installTtsModel(
 	engine: string,
 	modelName: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, "/api/voice/tts-models/install"), {
-		method: "POST",
-		headers: makeHeaders(target.token),
-		body: JSON.stringify({ engine, model_name: modelName }),
-	});
+	const resp = await authenticatedFetch(
+		target,
+		"/api/voice/tts-models/install",
+		{
+			method: "POST",
+			body: JSON.stringify({ engine, model_name: modelName }),
+		}
+	);
 	if (!resp.ok) {
 		let detail = `install failed: ${resp.status}`;
 		try {
@@ -155,9 +146,8 @@ export async function speakText(
 	text: string,
 	options: SpeakOptions = {}
 ): Promise<Blob> {
-	const resp = await fetch(apiUrl(target, "/api/voice/speak"), {
+	const resp = await authenticatedFetch(target, "/api/voice/speak", {
 		method: "POST",
-		headers: makeHeaders(target.token),
 		body: JSON.stringify({
 			text,
 			engine: options.engine,

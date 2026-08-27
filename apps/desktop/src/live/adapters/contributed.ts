@@ -7,18 +7,18 @@
 // This is how an app exposes a live activity with ZERO sidecar code — the same
 // relationship `DynamicSidebarSection` has to `sidebar_sections`.
 
-import { useQueries } from "@tanstack/react-query";
-import { useEffect, useMemo } from "react";
 import {
-	type LiveActivity,
 	actionForLiveActivity,
+	type LiveActivity,
 	liveActivitiesFromResponse,
 } from "@ryu/app-host/live-activity";
-import { isCoreApiPath } from "@ryu/app-host/views";
+import { contributionSourceRequest } from "@ryu/app-host/views";
+import { useQueries } from "@tanstack/react-query";
+import { useEffect, useMemo } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
+import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
 import type { PluginLiveActivity } from "@/src/lib/api/plugins.ts";
-import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
 import { useLiveActivityStore } from "@/src/store/useLiveActivityStore.ts";
 
 const REFRESH_FLOOR_MS = 1000;
@@ -29,14 +29,12 @@ function mapContribution(
 	payload: unknown,
 	now: number
 ): LiveActivity[] {
-	return liveActivitiesFromResponse(
-		contribution,
-		payload,
-		now
-	).map(({ activity, raw }) => ({
-		...activity,
-		action: actionForLiveActivity(contribution, raw),
-	}));
+	return liveActivitiesFromResponse(contribution, payload, now).map(
+		({ activity, raw }) => ({
+			...activity,
+			action: actionForLiveActivity(contribution, raw),
+		})
+	);
 }
 
 /** Reconcile one contribution's cards into the registry (removes rows that left
@@ -70,34 +68,33 @@ export function useContributedLiveActivities(): void {
 
 	const fetchable = useMemo(
 		() =>
-			live_activities.filter(
-				(a) =>
-					a.spec?.source?.http?.path &&
-					isCoreApiPath(a.spec.source.http.path)
-			),
+			live_activities.flatMap((contribution) => {
+				const source = contribution.spec?.source;
+				const sourceRequest = contributionSourceRequest(contribution, source);
+				return source && sourceRequest
+					? [{ contribution, source, sourceRequest }]
+					: [];
+			}),
 		[live_activities]
 	);
 
 	const queries = useQueries({
-		queries: fetchable.map((contribution) => {
-			const source = contribution.spec?.source;
-			const sourcePath = source?.http.path;
-			const sourceMethod = source?.http.method ?? "GET";
+		queries: fetchable.map(({ contribution, source, sourceRequest }) => {
 			return {
 				queryKey: [
 					"contributed-live-activity-source",
 					target.url,
 					target.token,
-					sourcePath,
-					sourceMethod,
+					sourceRequest.path,
+					sourceRequest.method,
 					contribution.plugin ?? "",
 					contribution.id,
 				],
 				retry: false,
 				queryFn: async () => {
-					const resp = await fetch(apiUrl(target, sourcePath as string), {
-						method: sourceMethod,
-						headers: makeHeaders(target.token),
+					const resp = await fetch(apiUrl(target, sourceRequest.path), {
+						method: sourceRequest.method,
+						headers: await requestHeaders(target),
 					});
 					return resp.ok ? ((await resp.json()) as unknown) : null;
 				},
@@ -112,7 +109,7 @@ export function useContributedLiveActivities(): void {
 	// change (payload fetched/refreshed) — reconciliation is idempotent.
 	useEffect(() => {
 		for (let i = 0; i < fetchable.length; i += 1) {
-			const contribution = fetchable[i];
+			const contribution = fetchable[i]?.contribution;
 			const payload = queries[i]?.data ?? null;
 			if (!contribution) {
 				continue;

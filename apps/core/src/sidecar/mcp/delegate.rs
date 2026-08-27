@@ -51,7 +51,7 @@
 //!
 //! # Bounding fan-out
 //!
-//! Because the tool is default-on and an agent (or a delegated sub-agent) can call
+//! Because the tool is available by default and an agent (or a delegated sub-agent) can call
 //! it repeatedly, a process-global semaphore ([`MAX_CONCURRENT_FANOUTS`]) caps how
 //! many fan-outs run at once across the whole process. Combined with the engine's
 //! per-fan-out concurrency cap this bounds the worst-case number of simultaneous

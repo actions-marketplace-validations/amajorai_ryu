@@ -12,6 +12,7 @@ import {
 	useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import {
 	clearMediaSource,
 	getMediaSourceSnapshot,
@@ -149,6 +150,7 @@ function LiveMediaLightbox({
 }
 
 export function MediaPipDock() {
+	const { canUseNativeShell } = useAppSurface();
 	const source = useMediaSource();
 	const [lightboxOpen, setLightboxOpen] = useState(false);
 	const [pipError, setPipError] = useState<string | null>(null);
@@ -253,14 +255,16 @@ export function MediaPipDock() {
 										: "Following the active tab"}
 							</p>
 						</div>
-						<Button
-							className="h-7 px-2 text-[11px]"
-							data-media-pip-open="true"
-							onClick={openPip}
-							variant="secondary"
-						>
-							Open PiP
-						</Button>
+						{canUseNativeShell ? (
+							<Button
+								className="h-7 px-2 text-[11px]"
+								data-media-pip-open="true"
+								onClick={openPip}
+								variant="secondary"
+							>
+								Open PiP
+							</Button>
+						) : null}
 					</div>
 					{pipError && (
 						<p className="px-3 pb-2 text-[10px] text-destructive">{pipError}</p>

@@ -52,7 +52,8 @@ export function askBtw(
 	conversationId: string,
 	question: string,
 	messages: readonly BtwMessage[] = [],
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	model?: string
 ): Promise<BtwResult> {
 	return request<BtwResult>(target, "/api/btw", {
 		method: "POST",
@@ -60,6 +61,7 @@ export function askBtw(
 			question,
 			conversation_id: conversationId,
 			...(messages.length > 0 ? { messages } : {}),
+			...(model?.trim() ? { model: model.trim() } : {}),
 		},
 		signal,
 	});

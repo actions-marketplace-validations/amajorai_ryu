@@ -13,7 +13,7 @@
 // rather than assuming one layout. Treat the rendering as best-effort until a
 // real video model run confirms the shape.
 
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 /** A single generated clip, ready to drop into a `<video src>` (or `<img>`). */
 export interface GeneratedVideo {
@@ -103,9 +103,8 @@ export async function pollVideoJob(
 	target: ApiTarget,
 	id: string
 ): Promise<VideoJobEnvelope> {
-	const resp = await fetch(apiUrl(target, `/api/video/jobs/${id}`), {
+	const resp = await authenticatedFetch(target, `/api/video/jobs/${id}`, {
 		method: "GET",
-		headers: makeHeaders(target.token),
 	});
 	if (!resp.ok) {
 		throw new Error(`video job poll failed: ${resp.status}`);
@@ -140,9 +139,8 @@ export async function generateVideo(
 		body.model = options.model;
 	}
 
-	const resp = await fetch(apiUrl(target, "/api/video/generate"), {
+	const resp = await authenticatedFetch(target, "/api/video/generate", {
 		method: "POST",
-		headers: makeHeaders(target.token),
 		body: JSON.stringify(body),
 	});
 

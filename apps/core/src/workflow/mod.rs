@@ -947,6 +947,20 @@ pub async fn reconcile_triggers(workflow: &Workflow) {
     let Some(store) = crate::composio_triggers::global() else {
         return;
     };
+    let has_composio = workflow
+        .triggers
+        .iter()
+        .any(|trigger| matches!(trigger, WorkflowTrigger::Composio { .. }));
+    if has_composio {
+        if let Err(error) = crate::webhook_ingress::reconcile_composio_subscription(store).await {
+            tracing::warn!(
+                workflow = %workflow.id,
+                error = %error,
+                "composio project webhook subscription reconcile failed"
+            );
+            return;
+        }
+    }
     // Replace the workflow's existing composio subs with the declared set
     // (simplest convergent strategy: drop all, re-create the current ones).
     if let Err(e) = store.delete_for_workflow(&workflow.id).await {

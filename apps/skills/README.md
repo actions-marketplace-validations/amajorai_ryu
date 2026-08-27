@@ -36,6 +36,7 @@ The `description` is what a loading agent reads to decide whether to open the sk
 - [setup-ryu](setup-ryu/SKILL.md) - set Ryu up end-to-end and point a user's other agents at the node via `apps/mcp`.
 - [ryu-mcp](ryu-mcp/SKILL.md) - drive a Ryu node through the `apps/mcp` MCP server and its tools.
 - [ryu-build-agent](ryu-build-agent/SKILL.md) - create and configure an agent on a node via the `/api/agents` REST surface.
+- [ryu-app-ui](ryu-app-ui/SKILL.md) - build Companion apps with the fixed Ryu App UI v1 primitives and theme contract.
 - [ryu-local-model](ryu-local-model/SKILL.md) - search, download, and serve a local GGUF model via the models and engines REST surface.
 - [ryu-author-skill](ryu-author-skill/SKILL.md) - author a new skill in this same SKILL.md format so the ecosystem is self-extending.
 

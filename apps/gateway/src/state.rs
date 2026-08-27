@@ -31,6 +31,7 @@ use crate::{
     skills::SkillsRegistry,
     tools::ToolSearchClient,
     traffic::TrafficBus,
+    treg::TregClient,
     wasm_policy::WasmPolicyHost,
 };
 
@@ -140,6 +141,7 @@ pub struct AppState {
     pub wallet: Arc<WalletState>,
     pub metrics: Metrics,
     pub composio: Option<ComposioClient>,
+    pub treg: Option<TregClient>,
     /// Unified tool catalog client over Core (#475). `Some` when `providers.core`
     /// is configured (CORE_URL set); `None` ⇒ the tool loop and `/v1/exec/tool`
     /// are inert. Behind the [`tools::CoreCatalog`] trait for the loop.
@@ -316,6 +318,11 @@ impl AppState {
         } else {
             None
         };
+        let treg = if config.treg.enabled {
+            TregClient::from_config(&config.treg, http.clone())
+        } else {
+            None
+        };
 
         // Unified tool catalog client (#475): wired only when Core is configured
         // (CORE_URL → providers.core). Without it the tool loop is inert.
@@ -386,6 +393,7 @@ impl AppState {
             wallet: Arc::new(WalletState::default()),
             metrics,
             composio,
+            treg,
             tools,
             semantic_cache,
             auth: RwLock::new(auth),
@@ -670,6 +678,7 @@ impl AppState {
             wallet: Arc::new(WalletState::default()),
             metrics,
             composio: None,
+            treg: None,
             tools: None,
             semantic_cache,
             auth: RwLock::new(auth),

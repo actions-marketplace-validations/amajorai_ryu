@@ -16,6 +16,10 @@ use std::sync::OnceLock;
 /// Env var naming the active profile. Unset / empty ⇒ `"release"`.
 pub const RYU_PROFILE_ENV: &str = "RYU_PROFILE";
 
+/// Optional explicit port namespace supplied by a standalone app host. The
+/// value is mirrored by Core and Desktop; absent keeps the profile table.
+pub const RYU_PORT_OFFSET_ENV: &str = "RYU_PORT_OFFSET";
+
 /// The canonical release profile — zero offset, no suffix.
 pub const RELEASE_PROFILE: &str = "release";
 
@@ -78,7 +82,11 @@ fn is_release() -> bool {
 /// `unwrap_or(0)` arm is unreachable — `resolve` already rejected any name that
 /// is not in the table.
 pub fn port_offset() -> u16 {
-    offset_of(profile()).unwrap_or(0)
+    std::env::var(RYU_PORT_OFFSET_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|offset| *offset <= 50_000)
+        .unwrap_or_else(|| offset_of(profile()).unwrap_or(0))
 }
 
 /// `base + offset` (saturating). The single offset source, matching Core.

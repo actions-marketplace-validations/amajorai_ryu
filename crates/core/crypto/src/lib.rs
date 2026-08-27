@@ -67,9 +67,25 @@ const KEYRING_SERVICE: &str = "ryu";
 /// a release stack never share the DB-encryption key on one machine.
 const KEYRING_ACCOUNT: &str = "master-key";
 
+/// Compute HMAC-SHA256 over arbitrary bytes and return lowercase hexadecimal.
+/// This is the shared webhook/signature primitive; app satellites must not copy
+/// the block-padding construction into their own request handlers.
+pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+	use hmac::{Hmac, Mac};
+
+	type HmacSha256 = Hmac<sha2::Sha256>;
+	let mut mac = <HmacSha256 as Mac>::new_from_slice(key)
+		.expect("HMAC accepts every key length");
+	mac.update(message);
+	hex::encode(mac.finalize().into_bytes())
+}
+
 /// Env override carrying a base64-encoded 32-byte master key (for
 /// servers/containers/CI, or operator-controlled key injection).
 const ENV_MASTER_KEY: &str = "RYU_MASTER_KEY";
+/// Explicit headless/test switch. The default remains keychain-first; `off`
+/// selects the file fallback without touching the OS credential store.
+const ENV_KEYCHAIN: &str = "RYU_KEYCHAIN";
 
 // ── Kernel seam ──────────────────────────────────────────────────────────────
 
@@ -433,9 +449,20 @@ fn decode_key(encoded: &str) -> Option<[u8; KEY_LEN]> {
     <[u8; KEY_LEN]>::try_from(raw.as_slice()).ok()
 }
 
-fn read_key_file(path: &PathBuf) -> Option<[u8; KEY_LEN]> {
-    let encoded = std::fs::read_to_string(path).ok()?;
-    decode_key(&encoded)
+fn read_key_file(path: &PathBuf) -> Result<Option<[u8; KEY_LEN]>> {
+    let encoded = match std::fs::read_to_string(path) {
+        Ok(encoded) => encoded,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading master key {}", path.display()))
+        }
+    };
+    decode_key(&encoded).map(Some).ok_or_else(|| {
+        anyhow!(
+            "master key {} is corrupt; refusing to replace key material that may protect existing data",
+            path.display()
+        )
+    })
 }
 
 fn write_key_file(path: &PathBuf, key: &[u8; KEY_LEN]) -> Result<()> {
@@ -443,8 +470,24 @@ fn write_key_file(path: &PathBuf, key: &[u8; KEY_LEN]) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating key dir {}", parent.display()))?;
     }
-    std::fs::write(path, b64().encode(key))
-        .with_context(|| format!("writing master key {}", path.display()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("master key path has no parent"))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("creating temporary master key in {}", parent.display()))?;
+    use std::io::Write;
+    temporary
+        .as_file_mut()
+        .write_all(b64().encode(key).as_bytes())
+        .with_context(|| format!("writing temporary master key for {}", path.display()))?;
+    temporary
+        .as_file_mut()
+        .sync_all()
+        .with_context(|| format!("syncing temporary master key for {}", path.display()))?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("atomically replacing master key {}", path.display()))?;
     restrict_permissions(path);
     Ok(())
 }
@@ -475,6 +518,7 @@ fn default_key_paths(host: &dyn CryptoHost) -> KeyPaths {
 enum KeychainState {
     Key([u8; KEY_LEN]),
     Empty,
+    Corrupt,
     Unavailable,
 }
 
@@ -493,6 +537,18 @@ struct OsKeychain {
     account: String,
 }
 
+struct DisabledKeychain;
+
+impl Keychain for DisabledKeychain {
+    fn get(&self) -> KeychainState {
+        KeychainState::Unavailable
+    }
+
+    fn store(&self, _key: &[u8; KEY_LEN]) -> bool {
+        false
+    }
+}
+
 impl Keychain for OsKeychain {
     fn get(&self) -> KeychainState {
         let entry = match keyring::Entry::new(KEYRING_SERVICE, &self.account) {
@@ -505,10 +561,9 @@ impl Keychain for OsKeychain {
         match entry.get_password() {
             Ok(stored) => match decode_key(&stored) {
                 Some(key) => KeychainState::Key(key),
-                // Malformed entry: treat as empty so it gets reseeded.
                 None => {
-                    tracing::warn!("keychain master key malformed; reseeding");
-                    KeychainState::Empty
+                    tracing::error!("keychain master key is malformed; refusing to reseed");
+                    KeychainState::Corrupt
                 }
             },
             Err(keyring::Error::NoEntry) => KeychainState::Empty,
@@ -540,9 +595,15 @@ impl Keychain for OsKeychain {
 /// guarantee) from the file fallback (key next to the data it protects).
 fn load_master_key(host: &dyn CryptoHost) -> Result<([u8; KEY_LEN], MasterKeySource)> {
     let account = format!("{KEYRING_ACCOUNT}{}", host.keyring_account_suffix());
+    let os_keychain = OsKeychain { account };
+    let disabled_keychain = DisabledKeychain;
+    let keychain: &dyn Keychain = match std::env::var(ENV_KEYCHAIN) {
+        Ok(value) if value.trim().eq_ignore_ascii_case("off") => &disabled_keychain,
+        _ => &os_keychain,
+    };
     load_master_key_with(
         std::env::var(ENV_MASTER_KEY).ok(),
-        &OsKeychain { account },
+        keychain,
         &default_key_paths(host),
     )
 }
@@ -559,13 +620,13 @@ fn load_master_key_with(
     if let Some(encoded) = env_value {
         match decode_key(&encoded) {
             Some(key) => return Ok((key, MasterKeySource::Env)),
-            None => tracing::warn!("{ENV_MASTER_KEY} is not a base64 32-byte key; ignoring"),
+            None => return Err(anyhow!("{ENV_MASTER_KEY} is not a base64 32-byte key")),
         }
     }
 
     // A pre-existing memory key is adopted as the master key so prior entries
     // keep decrypting under the unified key.
-    let legacy = read_key_file(&paths.legacy_memory);
+    let legacy = read_key_file(&paths.legacy_memory)?;
 
     // 2. OS keychain (default where reachable).
     match keychain.get() {
@@ -579,11 +640,16 @@ fn load_master_key_with(
             write_key_file(&paths.master, &key)?;
             return Ok((key, MasterKeySource::File));
         }
+        KeychainState::Corrupt => {
+            return Err(anyhow!(
+                "keychain master key is corrupt; refusing to overwrite it"
+            ))
+        }
         KeychainState::Unavailable => {}
     }
 
     // 3. File fallback (headless box with no keychain): current security level.
-    if let Some(key) = read_key_file(&paths.master) {
+    if let Some(key) = read_key_file(&paths.master)? {
         return Ok((key, MasterKeySource::File));
     }
     let key = legacy.unwrap_or_else(generate_key);
@@ -663,11 +729,13 @@ fn copy_master_key_with(from: &dyn Keychain, to: &dyn Keychain) -> KeyCopy {
     let key = match from.get() {
         KeychainState::Key(k) => k,
         KeychainState::Empty => return KeyCopy::SourceMissing,
+        KeychainState::Corrupt => return KeyCopy::Unavailable,
         KeychainState::Unavailable => return KeyCopy::Unavailable,
     };
     match to.get() {
         // Never clobber a key that already seals something.
         KeychainState::Key(_) => return KeyCopy::DestinationOccupied,
+        KeychainState::Corrupt => return KeyCopy::Unavailable,
         KeychainState::Unavailable => return KeyCopy::Unavailable,
         KeychainState::Empty => {}
     }
@@ -680,6 +748,14 @@ fn copy_master_key_with(from: &dyn Keychain, to: &dyn Keychain) -> KeyCopy {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hmac_sha256_hex_matches_rfc4231_case_two() {
+        assert_eq!(
+            super::hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
     use super::*;
 
     fn test_cipher() -> FieldCipher {
@@ -836,6 +912,7 @@ mod tests {
             match self.start {
                 KeychainState::Key(k) => KeychainState::Key(k),
                 KeychainState::Empty => KeychainState::Empty,
+                KeychainState::Corrupt => KeychainState::Corrupt,
                 KeychainState::Unavailable => KeychainState::Unavailable,
             }
         }
@@ -958,6 +1035,40 @@ mod tests {
             load_master_key_with(Some(b64().encode(want)), &kc, &paths_in(dir.path())).unwrap();
         assert_eq!(got, want);
         assert_eq!(source, MasterKeySource::Env);
+    }
+
+    #[test]
+    fn malformed_env_key_fails_instead_of_falling_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let kc = FakeKeychain::new(KeychainState::Key([3u8; KEY_LEN]), true);
+        let error = load_master_key_with(Some("not-a-key".to_owned()), &kc, &paths_in(dir.path()))
+            .expect_err("an explicit malformed key must stop startup");
+        assert!(error.to_string().contains(ENV_MASTER_KEY));
+    }
+
+    #[test]
+    fn corrupt_file_key_is_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        std::fs::write(&paths.master, "truncated").unwrap();
+        let error = load_master_key_with(
+            None,
+            &FakeKeychain::new(KeychainState::Unavailable, false),
+            &paths,
+        )
+        .expect_err("corrupt key material must stop startup");
+        assert!(error.to_string().contains("corrupt"));
+        assert_eq!(std::fs::read_to_string(&paths.master).unwrap(), "truncated");
+    }
+
+    #[test]
+    fn corrupt_keychain_entry_is_never_reseeded() {
+        let dir = tempfile::tempdir().unwrap();
+        let kc = FakeKeychain::new(KeychainState::Corrupt, true);
+        let error = load_master_key_with(None, &kc, &paths_in(dir.path()))
+            .expect_err("corrupt keychain material must stop startup");
+        assert!(error.to_string().contains("corrupt"));
+        assert_eq!(*kc.stored.borrow(), None);
     }
 
     #[test]

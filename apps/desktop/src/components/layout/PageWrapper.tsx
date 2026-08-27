@@ -1,6 +1,7 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils.ts";
+import { isTauriReady } from "@/src/lib/tauri-ready.ts";
 
 interface PageWrapperProps {
 	children: React.ReactNode;
@@ -16,7 +17,7 @@ export function PageWrapper({ children }: PageWrapperProps) {
 	useEffect(() => {
 		// getCurrentWebviewWindow() throws synchronously outside Tauri (browser-mode
 		// dev/QA), which would trip the app-wide crash boundary on every route.
-		if (!("__TAURI_INTERNALS__" in window)) {
+		if (!isTauriReady()) {
 			return;
 		}
 		const win = getCurrentWebviewWindow();

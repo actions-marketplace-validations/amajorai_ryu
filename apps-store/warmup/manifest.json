@@ -1,6 +1,6 @@
 {
-  "tags": ["scheduling","subscriptions","usage","automation"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": ["scheduling", "subscriptions", "usage", "automation"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-warmup",
   "homepage": "https://github.com/amajorai/ryu-warmup",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -40,7 +40,7 @@
       }
     }
   ],
-  "permission_grants": ["warmup:crud"],
+  "permission_grants": ["warmup:crud", "core:list_agents"],
   "permission_levels": [
     {
       "id": "warmup.view",
@@ -63,9 +63,20 @@
   "companion": {
     "label": "Warmup",
     "icon": "sun-03"
-  }
-,
+  },
   "contributes": {
- "chat_widget_templates": [{"id":"warmup.chat","title":"Warmup widget","description":"Warmup chat widget metadata is coming soon; no render tool is available yet.","triggers":["warmup widget"],"examples":["Show me a warmup widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}]
+    "chat_widget_templates": [
+      {
+        "id": "warmup.chat",
+        "title": "Warmup widget",
+        "description": "Warmup chat widget metadata is coming soon; no render tool is available yet.",
+        "triggers": ["warmup widget"],
+        "examples": ["Show me a warmup widget"],
+        "backing": {},
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "coming-soon"
+      }
+    ]
   }
 }

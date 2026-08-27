@@ -27,9 +27,25 @@ export interface ComposioToolkit {
 export interface ComposioAction {
 	description: string | null;
 	displayName: string;
+	inputSchema: ComposioInputSchema;
 	name: string;
 	noAuth: boolean;
+	tags: string[];
 	toolkit: string;
+}
+
+export interface ComposioInputProperty {
+	default?: unknown;
+	description?: string;
+	enum?: unknown[];
+	title?: string;
+	type?: string | string[];
+}
+
+export interface ComposioInputSchema {
+	properties?: Record<string, ComposioInputProperty>;
+	required?: string[];
+	type?: string;
 }
 
 /** A Composio trigger type (an event a toolkit can fire). */
@@ -50,8 +66,10 @@ interface ToolkitWire {
 interface ActionWire {
 	description?: string | null;
 	display_name?: string;
+	input_schema?: ComposioInputSchema;
 	name?: string;
 	no_auth?: boolean;
+	tags?: unknown;
 	toolkit?: string;
 }
 
@@ -93,11 +111,15 @@ export async function fetchComposioToolkits(
 export async function fetchComposioActions(
 	target: ApiTarget,
 	toolkit: string,
-	query = ""
+	query = "",
+	tags: readonly string[] = []
 ): Promise<ComposioAction[]> {
 	const params = new URLSearchParams({ toolkit });
 	if (query) {
 		params.set("q", query);
+	}
+	for (const tag of tags) {
+		params.append("tags", tag);
 	}
 	const json = await request<{ data?: ActionWire[] }>(
 		target,
@@ -109,6 +131,10 @@ export async function fetchComposioActions(
 		description: a.description ?? null,
 		toolkit: a.toolkit ?? toolkit,
 		noAuth: a.no_auth ?? false,
+		tags: Array.isArray(a.tags)
+			? a.tags.filter((tag): tag is string => typeof tag === "string")
+			: [],
+		inputSchema: a.input_schema ?? { type: "object", properties: {} },
 	}));
 }
 

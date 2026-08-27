@@ -1,6 +1,15 @@
 {
-  "tags": ["planning","review","annotation","dependency-graph","approval","code-review","human-in-the-loop","markdown"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": [
+    "planning",
+    "review",
+    "annotation",
+    "dependency-graph",
+    "approval",
+    "code-review",
+    "human-in-the-loop",
+    "markdown"
+  ],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-blueprint",
   "homepage": "https://github.com/amajorai/ryu-blueprint",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -64,16 +73,55 @@
         "mount": "/api/blueprint",
         "public_mount": "/api/blueprint",
         "routes": [
-          { "path": "/plans" },
-          { "path": "/plans/:id" },
-          { "path": "/plans/:id/revisions" },
-          { "path": "/plans/:id/revisions/:rev" },
-          { "path": "/plans/:id/diff" },
-          { "path": "/plans/:id/annotations" },
-          { "path": "/plans/:id/annotations/:annotation_id" },
-          { "path": "/plans/:id/verdict" },
-          { "path": "/plans/:id/steps/:step_id" },
-          { "path": "/plans/:id/feedback" }
+          { "path": "/plans", "method": "GET", "permission": "blueprint.view" },
+          {
+            "path": "/plans",
+            "method": "POST",
+            "permission": "blueprint.review"
+          },
+          {
+            "path": "/plans/:id",
+            "method": "GET",
+            "permission": "blueprint.view"
+          },
+          {
+            "path": "/plans/:id",
+            "method": "DELETE",
+            "permission": "blueprint.review"
+          },
+          {
+            "path": "/plans/:id/revisions",
+            "method": "GET",
+            "permission": "blueprint.view"
+          },
+          {
+            "path": "/plans/:id/revisions/:rev",
+            "method": "GET",
+            "permission": "blueprint.view"
+          },
+          {
+            "path": "/plans/:id/diff",
+            "method": "GET",
+            "permission": "blueprint.view"
+          },
+          {
+            "path": "/plans/:id/annotations",
+            "permission": "blueprint.review"
+          },
+          {
+            "path": "/plans/:id/annotations/:annotation_id",
+            "permission": "blueprint.review"
+          },
+          { "path": "/plans/:id/verdict", "permission": "blueprint.review" },
+          {
+            "path": "/plans/:id/steps/:step_id",
+            "permission": "blueprint.review"
+          },
+          {
+            "path": "/plans/:id/feedback",
+            "method": "GET",
+            "permission": "blueprint.view"
+          }
         ]
       }
     }
@@ -94,7 +142,11 @@
       "grant": "blueprint:review"
     }
   ],
-  "permission_grants": ["blueprint:review", "mcp:blueprint"],
+  "permission_grants": [
+    "blueprint:review",
+    "mcp:blueprint",
+    "ui:declarative-http"
+  ],
   "permission_levels": [
     {
       "id": "blueprint.view",
@@ -113,7 +165,46 @@
     "icon": "structure-check"
   },
   "contributes": {
-  "chat_widget_templates": [{"id":"blueprint.chat","title":"Blueprint widget","description":"Open Blueprint data in a host-rendered chat widget.","triggers":["blueprint widget"],"examples":["Show me a blueprint widget"],"backing":{"view_id":"surface:blueprint"},"display_mode":"inline","safe_action_ids":[],"availability":"available"}],
+    "chat_widget_templates": [
+      {
+        "id": "blueprint.chat",
+        "title": "Blueprint widget",
+        "description": "Open Blueprint data in a host-rendered chat widget.",
+        "triggers": ["blueprint widget"],
+        "examples": ["Show me a blueprint widget"],
+        "backing": { "view_id": "surface:blueprint" },
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "available"
+      }
+    ],
+    "sidebar_sections": [
+      {
+        "id": "plans",
+        "title": "Plans",
+        "icon": "structure-check",
+        "order": 44,
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/blueprint/plans" },
+            "items": "plans",
+            "map": {
+              "id": "id",
+              "title": "title",
+              "subtitle": "status",
+              "accessory": "current_revision",
+              "titleFallback": "Untitled plan"
+            },
+            "refreshMs": 10000
+          },
+          "itemTarget": "/blueprint/{{item.id}}",
+          "emptyState": {
+            "title": "No plans yet",
+            "description": "An agent can publish a plan here for review."
+          }
+        }
+      }
+    ],
     "hook_events": [
       {
         "id": "@ryu/blueprint#plan.published",

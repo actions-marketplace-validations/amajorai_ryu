@@ -1,20 +1,23 @@
 // DesktopStreamPanel — the "Virtual Desktop" workspace panel.
 //
 // Live, INTERACTIVE stream of the active node's virtual desktop. The `@ryu/desktop`
-// sidecar brings up a headless Xvfb + window-manager + VNC desktop on the node, and
-// this panel connects an RFB client (noVNC) to `wss://<node>/api/ext/ws/@ryu/desktop/ws`
-// — Core's generic WebSocket ext-proxy authenticates the node token and bridges to the
-// sidecar's websockify route. Pixels come down the socket, mouse/keyboard go back up:
-// the same desktop Ghost drives, so you watch the agent work and can take over.
+// sidecar brings up headless Linux displays on the node, and this panel connects an
+// RFB client (noVNC) to the authenticated Core WebSocket route for the selected Bot.
+// Pixels come down the socket and mouse/keyboard go back up to the same selected
+// Bot screen. The Virtual Desktop satellite owns those sessions end to end.
 //
-// Works for EVERY node type (managed cloud, self-hosted, local) because the stream
-// rides Core's existing port — no new firewall rule, and no sidecar port is ever
-// exposed. When the app is disabled or the sidecar reports no display, the panel
-// degrades to a clear prompt instead of a dead canvas.
+// Managed cloud nodes allocate one screen per Bot. Self-hosted and local Linux nodes
+// retain the legacy single-screen lane. The stream rides Core's existing port — no
+// new firewall rule, and no sidecar port is ever exposed. When the app is disabled or
+// the sidecar reports no display, the panel degrades to a clear prompt instead of a
+// dead canvas.
+
+/// <reference path="../../novnc.d.ts" />
 
 import RFB from "@novnc/novnc";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { clearMediaSource, publishMediaSource } from "@/src/lib/media-pip.ts";
 import { getRealtimeJwt } from "@/src/lib/realtime/jwt.ts";
@@ -25,9 +28,16 @@ const DESKTOP_PLUGIN_ID = "@ryu/desktop";
 export function desktopWsUrl(
 	url: string,
 	token: string | null,
-	jwt: string | null = null
+	jwt: string | null = null,
+	agentId = "ryu"
 ): string {
-	const wsUrl = new URL("/api/ext/ws/@ryu/desktop/ws", url);
+	const safeAgentId = agentId.trim();
+	const wsUrl = new URL(
+		safeAgentId
+			? `/api/ext/ws/@ryu/desktop/bots/${encodeURIComponent(safeAgentId)}/ws`
+			: "/api/ext/ws/@ryu/desktop/ws",
+		url
+	);
 	wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
 	if (token) {
 		wsUrl.searchParams.set("token", token);
@@ -40,13 +50,28 @@ export function desktopWsUrl(
 
 export function DesktopStreamPanel({ active = true }: { active?: boolean }) {
 	const { apps } = useApps();
+	const { agents } = useAgents();
 	const node = useActiveNode();
 	const canvasRef = useRef<HTMLCanvasElement>(null);
 	const rfbRef = useRef<RFB | null>(null);
 	const [connected, setConnected] = useState(false);
 	const [status, setStatus] = useState<string>("idle");
 	const [error, setError] = useState<string | null>(null);
-	const sourceId = `desktop:${node.url}`;
+	const [selectedAgentId, setSelectedAgentId] = useState("ryu");
+	const selectedAgent = agents.find((agent) => agent.id === selectedAgentId);
+	const sourceId = `desktop:${node.url}:${selectedAgentId}`;
+
+	useEffect(() => {
+		if (agents.length === 0) {
+			return;
+		}
+		setSelectedAgentId((current) => {
+			if (agents.some((agent) => agent.id === current)) {
+				return current;
+			}
+			return agents.find((agent) => agent.id === "ryu")?.id ?? agents[0].id;
+		});
+	}, [agents]);
 
 	const enabled = apps.some((a) => a.id === DESKTOP_PLUGIN_ID && a.enabled);
 
@@ -63,7 +88,7 @@ export function DesktopStreamPanel({ active = true }: { active?: boolean }) {
 			}
 			const rfb = new RFB(
 				canvasRef.current,
-				desktopWsUrl(node.url, node.token ?? null, jwt),
+				desktopWsUrl(node.url, node.token ?? null, jwt, selectedAgentId),
 				{
 					credentials: {},
 				}
@@ -102,7 +127,7 @@ export function DesktopStreamPanel({ active = true }: { active?: boolean }) {
 					: "Couldn't connect to the virtual desktop."
 			);
 		}
-	}, [node.url, node.token, sourceId]);
+	}, [node.token, node.url, selectedAgentId, sourceId]);
 
 	useEffect(() => {
 		if (enabled && active && !connected && !rfbRef.current) {
@@ -115,7 +140,7 @@ export function DesktopStreamPanel({ active = true }: { active?: boolean }) {
 			setConnected(false);
 			setStatus("idle");
 		};
-	}, [active, enabled, node.url, node.token, connect, connected]);
+	}, [active, enabled, node.url, node.token, connect]);
 
 	useEffect(() => {
 		if (!(active && connected)) {
@@ -134,7 +159,7 @@ export function DesktopStreamPanel({ active = true }: { active?: boolean }) {
 					id: sourceId,
 					imageUrl: canvas.toDataURL("image/jpeg", 0.76),
 					kind: "desktop",
-					title: node.name || "Remote desktop",
+					title: `${node.name || "Remote desktop"} · ${selectedAgent?.name ?? selectedAgentId}`,
 				});
 			} catch {
 				// A canvas can be cleared while noVNC is tearing down. The next frame
@@ -144,7 +169,14 @@ export function DesktopStreamPanel({ active = true }: { active?: boolean }) {
 		publishFrame();
 		const timer = window.setInterval(publishFrame, 350);
 		return () => window.clearInterval(timer);
-	}, [active, connected, node.name, sourceId]);
+	}, [
+		active,
+		connected,
+		node.name,
+		selectedAgent?.name,
+		selectedAgentId,
+		sourceId,
+	]);
 
 	useEffect(() => {
 		return () => clearMediaSource(sourceId);
@@ -165,9 +197,29 @@ export function DesktopStreamPanel({ active = true }: { active?: boolean }) {
 	return (
 		<div className="flex h-full flex-col" data-live-media-source="desktop">
 			<div className="flex shrink-0 items-center gap-2 border-border/60 border-b bg-sidebar px-2 py-1.5">
-				<span className="min-w-0 flex-1 truncate text-muted-foreground text-xs">
+				<span className="min-w-0 truncate text-muted-foreground text-xs">
 					{node.name}
 				</span>
+				<label className="sr-only" htmlFor="desktop-agent-session">
+					Bot screen
+				</label>
+				<select
+					aria-label="Bot screen"
+					className="max-w-32 rounded-md border bg-background px-1.5 py-0.5 text-xs"
+					id="desktop-agent-session"
+					onChange={(event) => setSelectedAgentId(event.target.value)}
+					value={selectedAgentId}
+				>
+					{agents.length === 0 ? (
+						<option value="ryu">Ryu</option>
+					) : (
+						agents.map((agent) => (
+							<option key={agent.id} value={agent.id}>
+								{agent.name}
+							</option>
+						))
+					)}
+				</select>
 				<span
 					className={`size-1.5 shrink-0 rounded-full ${
 						connected ? "bg-emerald-500" : "bg-muted-foreground/40"

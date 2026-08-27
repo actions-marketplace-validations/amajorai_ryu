@@ -8,7 +8,7 @@ import "../../src/index.css";
 
 function Story() {
 	const [status, setStatus] = useState<UpdateStepStatus>("available");
-	const [autoUpdate, setAutoUpdate] = useState(true);
+	const [automaticDownload, setAutomaticDownload] = useState(true);
 	const [completed, setCompleted] = useState(false);
 
 	return (
@@ -17,11 +17,12 @@ function Story() {
 			data-testid="onboarding-update-proof"
 		>
 			<UpdateStepView
-				autoUpdate={autoUpdate}
+				automaticDownload={automaticDownload}
 				availableVersion="0.1.16"
 				onContinue={() => setCompleted(true)}
 				onInstall={() => setStatus("checking")}
-				onToggleAutoUpdate={setAutoUpdate}
+				onToggleAutomaticDownload={setAutomaticDownload}
+				prepared={true}
 				status={status}
 			/>
 			<output className="sr-only" data-testid="onboarding-update-state">

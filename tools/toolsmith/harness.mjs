@@ -5,7 +5,7 @@
 // `build_capability_adapter_program` in `crates/core/tool-exec/src/lib.rs`). The
 // body is a FRAGMENT, not a module: no `export`, a top-level `return` is correct.
 // That is exactly why `node --test` cannot simply `import()` one, and why every
-// existing `plugins-store/*/plugin.test.mjs` asserts only on manifest SHAPE and
+// existing `plugins-store/{plugins,lsp,external_plugins}/*/plugin.test.mjs` asserts only on manifest SHAPE and
 // never executes a line of the logic it ships.
 //
 // This module reproduces the splice on the test side so a tool body can actually
@@ -322,7 +322,7 @@ export async function runOnce({ kind, code, testCase, adapterTools }) {
 		];
 	} else if (kind === "turn_hook") {
 		// Core's `plugin_host::build_hook_program` injects `ctx` instead of `input`
-		// and returns a HookDirective. Nine `plugins-store/*/plugin.test.mjs` files
+		// and returns a HookDirective. Nine `plugins-store/{plugins,lsp,external_plugins}/*/plugin.test.mjs` files
 		// hand-roll this splice today, each with its own ad-hoc host stub and no
 		// determinism check; supporting the form here is what lets them converge.
 		bindingNames = ["ctx", "host"];

@@ -122,6 +122,7 @@ fn to_common(platform: &str, c: CommonChannelFileConfig) -> CommonChannelConfig 
         channel_id: c.channel_id,
         group_reply_mode: c.group_reply_mode,
         core_url: c.core_url,
+        reaction_learning: c.reaction_learning,
         access,
         voice_reply: to_voice_reply(c.voice_reply),
         typing_indicator: c.typing_indicator,
@@ -423,6 +424,10 @@ struct StoredBotConfig {
     streaming: bool,
     #[serde(default = "default_true")]
     lifecycle_reactions: bool,
+    /// Optional provider-reaction learning settings. Older control planes omit
+    /// this and keep the bridge disabled via the domain default.
+    #[serde(default)]
+    reaction_learning: ryu_gw_channels::ReactionLearningConfig,
     #[serde(default)]
     voice_reply: VoiceReplyMode,
     /// Send the first Ryu welcome after the channel is ready. Older control
@@ -486,6 +491,7 @@ impl StoredBotConfig {
             rich_text: self.rich_text,
             streaming: self.streaming,
             lifecycle_reactions: self.lifecycle_reactions,
+            reaction_learning: self.reaction_learning.clone(),
             voice_reply: self.voice_reply,
             proactive_opening: self.proactive_opening,
             proactive_target: self.proactive_target.clone(),

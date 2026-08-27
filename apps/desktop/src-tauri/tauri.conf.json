@@ -3,7 +3,7 @@
   "productName": "Ryu (Research Preview)",
   "mainBinaryName": "Ryu",
   "identifier": "ai.amajor.ryu.desktop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -11,7 +11,7 @@
     "beforeBuildCommand": "bun run build:vite"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "title": "Ryu (Research Preview)",
@@ -26,11 +26,11 @@
         "shadow": false,
         "dragDropEnabled": false,
         "zoomHotkeysEnabled": true,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --use-fake-ui-for-media-stream"
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI"
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.userjot.com; script-src-elem 'self' 'unsafe-inline' https://cdn.userjot.com; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:*; font-src 'self' data:; media-src 'self' blob: data: https:; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* http://*:7980 ws://localhost:* ws://127.0.0.1:* wss: https:; frame-src 'self' about: blob: http: https:; object-src 'none'; base-uri 'self'"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; script-src-elem 'self' 'unsafe-inline'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:*; font-src 'self' data:; media-src 'self' blob: data: https:; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* http://*:7980 http://*:8980 http://*:9980 http://*:10980 http://*:11980 ws://*:7980 ws://*:8980 ws://*:9980 ws://*:10980 ws://*:11980 ws://localhost:* ws://127.0.0.1:* wss: https:; frame-src 'self' about: blob: http: https:; object-src 'none'; base-uri 'self'"
     },
     "macOSPrivateApi": true
   },

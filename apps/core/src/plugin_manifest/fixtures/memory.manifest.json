@@ -255,6 +255,20 @@
     }
   ],
   "contributes": {
+    "message_actions": [
+      {
+        "id": "memory.citations",
+        "label": "Memories cited",
+        "icon": "lucide:brain",
+        "target": "assistant",
+        "kind": "button",
+        "capability": "memory.read",
+        "args": {
+          "renderer": "memory-citations"
+        },
+        "order": 20
+      }
+    ],
     "settings_tabs": [
       {
         "id": "memory.settings",

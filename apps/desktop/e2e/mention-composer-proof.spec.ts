@@ -32,6 +32,28 @@ test("renders capability mentions and gates Composio integrations", async ({
 	]) {
 		await expect(connected.getByText(label, { exact: true })).toBeVisible();
 	}
+	const connectedComposer = connected.getByRole("textbox", {
+		name: "Credential available composer",
+	});
+	await connectedComposer.fill("@does-not-exist");
+	await expect(
+		connected.getByText("No results found", { exact: true })
+	).toBeVisible();
+	await page.screenshot({
+		path: "test-results/mention-composer-empty-state-proof.png",
+		fullPage: true,
+	});
+	const composerMention = page
+		.getByTestId("composer-mention-proof")
+		.locator('[data-mention-token="app"]')
+		.first();
+	await expect(composerMention).toHaveText("Browser");
+	await expect(composerMention).toHaveCSS(
+		"background-color",
+		"rgba(0, 0, 0, 0)"
+	);
+	await expect(composerMention.getByLabel("Browser app icon")).toBeVisible();
+	await connectedComposer.fill("@");
 	await connected.getByRole("option", { name: /Design brief/ }).click();
 	await expect(connected.getByTestId("configured-selection")).toHaveText(
 		"@Design brief"
@@ -53,6 +75,75 @@ test("renders capability mentions and gates Composio integrations", async ({
 	await expect(
 		disconnected.getByRole("option", { name: /GitHub/ })
 	).toHaveCount(0);
+
+	const inboxEnabled = page.getByTestId("inbox-enabled-state");
+	const inboxDisabled = page.getByTestId("inbox-disabled-state");
+	await inboxDisabled.getByTestId("human-mention-input").fill("@a");
+	await inboxDisabled.getByTestId("human-mention-input").fill("@");
+	await expect(inboxDisabled.getByText("Users", { exact: true })).toHaveCount(
+		0
+	);
+	await inboxEnabled.getByTestId("human-mention-input").fill("@a");
+	await inboxEnabled.getByTestId("human-mention-input").fill("@");
+	for (const label of ["Agents", "Apps", "Plugins", "Workflows", "Users"]) {
+		await expect(inboxEnabled.getByText(label, { exact: true })).toBeVisible();
+	}
+	for (const label of ["Chats", "Skills", "Teams"]) {
+		await expect(inboxEnabled.getByText(label, { exact: true })).toHaveCount(0);
+	}
+	await inboxEnabled.getByRole("option", { name: "Ada Lovelace" }).click();
+	await expect(inboxEnabled.getByTestId("human-composer-token")).toContainText(
+		"Ada Lovelace"
+	);
+	await expect(
+		inboxEnabled
+			.getByTestId("human-composer-token")
+			.getByLabel("Ada Lovelace avatar")
+	).toBeVisible();
+	const humanToken = inboxEnabled
+		.getByTestId("human-transcript")
+		.locator('[data-mention-kind="user"]');
+	await expect(humanToken).toBeVisible();
+	await expect(
+		inboxEnabled.locator('button[data-mention-kind="user"]')
+	).toHaveCount(0);
+	await expect(humanToken).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+	await inboxEnabled
+		.getByRole("button", { name: "Record notifications.send" })
+		.click();
+	await expect(inboxEnabled.getByTestId("notification-targets")).toHaveText(
+		"user-ada"
+	);
+	await expect(inboxEnabled.getByTestId("routing-callbacks")).toHaveText(
+		"none"
+	);
+
+	const slash = page.getByTestId("slash-command-proof");
+	await expect(slash.getByText("Commands", { exact: true })).toBeVisible();
+	await expect(slash.getByText("Skills", { exact: true })).toBeVisible();
+	await slash.getByRole("option", { name: "/pdf" }).click();
+	await expect(slash.getByTestId("slash-command-value")).toHaveText("/pdf ");
+	await slash.getByTestId("slash-command-input").fill("/deploy");
+	await slash.getByRole("option", { name: "/deploy" }).click();
+	await expect(slash.getByRole("option", { name: "Staging" })).toBeVisible();
+	await slash.getByRole("option", { name: "Staging" }).click();
+	await expect(slash.getByRole("option", { name: "Singapore" })).toBeVisible();
+	await page.screenshot({
+		path: "test-results/slash-command-arguments-menu-proof.png",
+		fullPage: true,
+	});
+	await slash.getByRole("option", { name: "Singapore" }).click();
+	await expect(slash.getByTestId("slash-command-value")).toHaveText(
+		"/deploy staging sg"
+	);
+	await expect(slash.getByTestId("slash-proof-status")).toHaveText("VERIFIED");
+	await expect(slash.getByRole("listbox")).toHaveCount(0);
+	await page.keyboard.press("Escape");
+	await page.screenshot({
+		path: "test-results/slash-command-arguments-proof.png",
+		fullPage: true,
+	});
+
 	const proofLog = page.getByTestId("transcript-proof-log");
 	const clickAndWaitForDestination = async (
 		locator: Locator,
@@ -80,6 +171,9 @@ test("renders capability mentions and gates Composio integrations", async ({
 		);
 		await expect(browserMention).toHaveText("Browser");
 		await expect(browserMention).not.toContainText("@");
+		await expect(
+			browserMention.locator('[data-mention-token="app"]')
+		).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
 		for (const item of [
 			["agent", "claude"],
 			["app", "browser"],
@@ -113,7 +207,7 @@ test("renders capability mentions and gates Composio integrations", async ({
 	);
 
 	await page.screenshot({
-		path: "test-results/mention-composer-proof.png",
+		path: "test-results/mention-command-human-proof.png",
 		fullPage: true,
 	});
 	if (consoleErrors.length > 0) {

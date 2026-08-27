@@ -24,7 +24,13 @@
 // granted asynchronously by the server webhook, so the UI re-fetches licenses on
 // window focus (mirrors useCreditsWallet).
 
+import type { VerificationDetails } from "@ryu/ui/components/verification-popover.tsx";
 import { formatMinorCurrency } from "@ryu/ui/lib/number-format.ts";
+import {
+	type PublisherTrustLevel,
+	type PublisherTrustSource,
+	resolvePublisherTrust,
+} from "@ryuhq/protocol/publisher-trust";
 import { BACKEND_URL, TOKEN_KEY } from "@/lib/auth-client.ts";
 import {
 	type ApiTarget,
@@ -112,12 +118,19 @@ export interface MarketplaceCard {
 	installSource: string | null;
 	kind: MarketplaceKind;
 	latestVersion: string | null;
+	/** Server-derived label: this paid app is included in Membership. */
+	membershipIncluded: boolean;
 	name: string;
+	orgVerified: boolean;
+	orgVerifiedTier: string | null;
 	packageChecksum: string | null;
 	packageKind: string | null;
 	packageSecurity: Record<string, unknown> | null;
 	packageSource: Record<string, unknown> | string | null;
 	pricing: PricingView | null;
+	publisherTrust: PublisherTrustLevel;
+	publisherTrustSource: PublisherTrustSource;
+	publisherVerification: VerificationDetails | null;
 	/** Mean of all published review ratings (0 when there are no reviews). */
 	ratingAverage: number;
 	/** Total count of published reviews. */
@@ -138,6 +151,11 @@ interface MarketplaceCardWire
 	extends Omit<
 		MarketplaceCard,
 		| "verification"
+		| "orgVerified"
+		| "orgVerifiedTier"
+		| "publisherTrust"
+		| "publisherTrustSource"
+		| "publisherVerification"
 		| "artifactKinds"
 		| "packageKind"
 		| "packageSource"
@@ -150,6 +168,7 @@ interface MarketplaceCardWire
 		| "requirements"
 		| "installedVersion"
 		| "latestVersion"
+		| "membershipIncluded"
 		| "updateAvailable"
 		| "updatePreview"
 	> {
@@ -158,10 +177,17 @@ interface MarketplaceCardWire
 	githubSource?: Record<string, unknown> | null;
 	installedVersion?: string | null;
 	latestVersion?: string | null;
+	/** Server-derived Membership inclusion flag, absent on older servers. */
+	membershipIncluded?: boolean | null;
+	orgVerified?: boolean | null;
+	orgVerifiedTier?: string | null;
 	packageChecksum?: string | null;
 	packageKind?: string | null;
 	packageSecurity?: Record<string, unknown> | null;
 	packageSource?: Record<string, unknown> | string | null;
+	publisherTrust?: PublisherTrustLevel | null;
+	publisherTrustSource?: PublisherTrustSource | null;
+	publisherVerification?: VerificationDetails | null;
 	requirements?: Record<string, unknown> | null;
 	scopes?: string[] | null;
 	/** Future Core/server field: presence implies signed (verdict still preferred). */
@@ -206,6 +232,21 @@ function toMarketplaceCard(card: MarketplaceCardWire): MarketplaceCard {
 		artifactKinds: rest.artifactKinds ?? [],
 		iconUrl: rest.iconUrl ?? null,
 		category: rest.category ?? null,
+		orgVerified: Boolean(card.orgVerified),
+		orgVerifiedTier: card.orgVerifiedTier ?? null,
+		publisherTrust:
+			card.publisherTrust ??
+			resolvePublisherTrust({
+				firstParty: card.firstParty,
+				ryuStaffVerified: card.orgVerified,
+			}).level,
+		publisherTrustSource:
+			card.publisherTrustSource ??
+			resolvePublisherTrust({
+				firstParty: card.firstParty,
+				ryuStaffVerified: card.orgVerified,
+			}).source,
+		publisherVerification: card.publisherVerification ?? null,
 		packageKind: rest.packageKind ?? null,
 		packageSource: rest.packageSource ?? null,
 		packageChecksum: rest.packageChecksum ?? null,
@@ -223,6 +264,7 @@ function toMarketplaceCard(card: MarketplaceCardWire): MarketplaceCard {
 		requirements: rest.requirements ?? {},
 		installedVersion: rest.installedVersion ?? null,
 		latestVersion: rest.latestVersion ?? null,
+		membershipIncluded: Boolean(rest.membershipIncluded),
 		updateAvailable: Boolean(rest.updateAvailable),
 		updatePreview: rest.updatePreview ?? null,
 		ratingAverage: rest.ratingAverage ?? 0,
@@ -264,6 +306,84 @@ export function formatPricingLabel(pricing: PricingView): string {
 				? ` · ${pricing.maxUpdates ?? "limited"} updates`
 				: "";
 	return `${formatPrice(pricing.amountMinor, pricing.currency)}${suffix}`;
+}
+
+export interface MarketplaceMembershipUsageResult {
+	created: boolean;
+	ok: boolean;
+	periodId: string;
+}
+
+export interface MarketplaceMembershipRevenueCurrency {
+	currency: string;
+	failedMinor: number;
+	paidMinor: number;
+	pendingMinor: number;
+	usageCount: number;
+}
+
+export interface MarketplaceMembershipPublisherReport {
+	currencies: MarketplaceMembershipRevenueCurrency[];
+	eligibleListingCount: number;
+	organizationId: string;
+}
+
+/** Record one first-use signal for an app included with Membership. */
+export async function recordMarketplaceMembershipUsage(input: {
+	id: string;
+	idempotencyKey: string;
+	kind: MarketplaceKind;
+}): Promise<MarketplaceMembershipUsageResult> {
+	const resp = await fetch(`${BASE}/membership/usage`, {
+		body: JSON.stringify(input),
+		headers: authHeaders(),
+		method: "POST",
+	});
+	if (!resp.ok) {
+		throw await toError(resp);
+	}
+	const json = (await resp.json()) as Partial<MarketplaceMembershipUsageResult>;
+	return {
+		created: Boolean(json.created),
+		ok: Boolean(json.ok),
+		periodId: typeof json.periodId === "string" ? json.periodId : "",
+	};
+}
+
+/** Fetch the active publisher organization's Membership distribution totals. */
+export async function fetchMarketplaceMembershipPublisherReport(): Promise<MarketplaceMembershipPublisherReport> {
+	const resp = await fetch(`${BASE}/membership/publisher-report`, {
+		headers: authHeaders(),
+	});
+	if (!resp.ok) {
+		throw await toError(resp);
+	}
+	const json =
+		(await resp.json()) as Partial<MarketplaceMembershipPublisherReport>;
+	return {
+		currencies: Array.isArray(json.currencies)
+			? json.currencies.map((currency) => ({
+					currency:
+						typeof currency.currency === "string" ? currency.currency : "usd",
+					failedMinor:
+						typeof currency.failedMinor === "number" ? currency.failedMinor : 0,
+					paidMinor:
+						typeof currency.paidMinor === "number" ? currency.paidMinor : 0,
+					pendingMinor:
+						typeof currency.pendingMinor === "number"
+							? currency.pendingMinor
+							: 0,
+					usageCount:
+						typeof currency.usageCount === "number" ? currency.usageCount : 0,
+				}))
+			: [],
+		eligibleListingCount:
+			typeof json.eligibleListingCount === "number"
+				? json.eligibleListingCount
+				: 0,
+		organizationId:
+			typeof json.organizationId === "string" ? json.organizationId : "",
+	};
 }
 
 /** True when the user has a session token; the money layer requires sign-in. */
@@ -648,7 +768,11 @@ export async function fetchInstalledPortablePackages(
 export async function installPortablePackage(
 	target: ApiTarget,
 	input: { kind: string; id: string },
-	options: { installSession?: string; update?: boolean } = {}
+	options: {
+		installSession?: string;
+		update?: boolean;
+		version?: string;
+	} = {}
 ): Promise<PortablePackageState> {
 	const path = options.update
 		? "/api/marketplace/packages/update"
@@ -661,6 +785,7 @@ export async function installPortablePackage(
 			headers: buyerTokenHeader(target),
 			body: {
 				...input,
+				...(options.version ? { version: options.version } : {}),
 				...(options.installSession
 					? { install_session: options.installSession }
 					: {}),
@@ -978,12 +1103,18 @@ export interface MarketplaceDetail {
 	developer: string | null;
 	/** Short one-line pitch under the name (Ryu ext). */
 	examplePrompts: string[];
+	firstParty: boolean;
 	iconUrl: string | null;
 	id: string;
 	kind: MarketplaceKind;
 	name: string;
+	orgVerified: boolean;
+	orgVerifiedTier: string | null;
 	pricing: PricingView | null;
 	privacyPolicyUrl: string | null;
+	publisherTrust: PublisherTrustLevel;
+	publisherTrustSource: PublisherTrustSource;
+	publisherVerification: VerificationDetails | null;
 	ratingAverage: number;
 	ratingCount: number;
 	/** Bundled skills/tools/mcp/agents with their enable state (Ryu ext). */
@@ -1184,7 +1315,23 @@ export async function fetchDetail(
 		id: json.id ?? id,
 		kind: (json.kind as MarketplaceKind) ?? kind,
 		name: json.name ?? "",
+		firstParty: Boolean(json.firstParty),
 		version: json.version ?? "",
+		orgVerified: Boolean(json.orgVerified),
+		orgVerifiedTier: json.orgVerifiedTier ?? null,
+		publisherTrust:
+			json.publisherTrust ??
+			resolvePublisherTrust({
+				firstParty: json.firstParty,
+				ryuStaffVerified: json.orgVerified,
+			}).level,
+		publisherTrustSource:
+			json.publisherTrustSource ??
+			resolvePublisherTrust({
+				firstParty: json.firstParty,
+				ryuStaffVerified: json.orgVerified,
+			}).source,
+		publisherVerification: json.publisherVerification ?? null,
 		pricing: json.pricing ?? null,
 		iconUrl: json.iconUrl ?? null,
 		bannerUrl: json.bannerUrl ?? null,

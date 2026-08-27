@@ -346,28 +346,47 @@ export type WidgetContribution = z.infer<typeof WidgetContributionSchema>;
 
 /** Metadata-only chat affordance. The host owns rendering and dispatch; the
  * manifest carries identifiers and copy only. */
-export const ChatWidgetTemplateSchema = z.object({
-	id: z.string().regex(/^[a-z0-9][a-z0-9._:-]*$/),
-	title: z.string().min(1),
-	description: z.string().optional(),
-	triggers: z.array(z.string()).default([]),
-	examples: z.array(z.string()).default([]),
-	backing: z
-		.object({
-			tool_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/).optional(),
-			view_id: z.string().regex(/^[a-z0-9][a-z0-9._:-]*$/).optional(),
+export const ChatWidgetTemplateSchema = z
+	.object({
+		id: z.string().regex(/^[a-z0-9][a-z0-9._:-]*$/),
+		title: z.string().min(1),
+		description: z.string().optional(),
+		triggers: z.array(z.string()).default([]),
+		examples: z.array(z.string()).default([]),
+		backing: z.object({
+			tool_id: z
+				.string()
+				.regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/)
+				.optional(),
+			view_id: z
+				.string()
+				.regex(/^[a-z0-9][a-z0-9._:-]*$/)
+				.optional(),
 		}),
-	display_mode: z.string().min(1),
-	safe_action_ids: z.array(z.string().regex(/^[a-z0-9][a-z0-9._-]*$/)).default([]),
-	availability: z.string().default("available"),
+		display_mode: z.string().min(1),
+		safe_action_ids: z
+			.array(z.string().regex(/^[a-z0-9][a-z0-9._-]*$/))
+			.default([]),
+		availability: z.string().default("available"),
 	})
 	.superRefine((value, ctx) => {
-		const count = Number(Boolean(value.backing.tool_id)) + Number(Boolean(value.backing.view_id));
+		const count =
+			Number(Boolean(value.backing.tool_id)) +
+			Number(Boolean(value.backing.view_id));
 		if (count !== 1 && value.availability === "available") {
-			ctx.addIssue({ code: "custom", path: ["backing"], message: "available templates need exactly one backing tool_id or view_id" });
+			ctx.addIssue({
+				code: "custom",
+				path: ["backing"],
+				message:
+					"available templates need exactly one backing tool_id or view_id",
+			});
 		}
 		if (count > 1) {
-			ctx.addIssue({ code: "custom", path: ["backing"], message: "backing must declare at most one of tool_id or view_id" });
+			ctx.addIssue({
+				code: "custom",
+				path: ["backing"],
+				message: "backing must declare at most one of tool_id or view_id",
+			});
 		}
 	});
 
@@ -406,10 +425,70 @@ export const ToolAppConfigSchema = z.object({
 
 export type ToolAppConfig = z.infer<typeof ToolAppConfigSchema>;
 
+/** One selectable value for a plugin/app slash-command argument. */
+export const SlashCommandOptionSchema = z
+	.object({
+		description: z.string().optional(),
+		label: z.string().min(1),
+		value: z.string().min(1),
+	})
+	.passthrough();
+
+export type SlashCommandOption = z.infer<typeof SlashCommandOptionSchema>;
+
+/** A registered free-form option shown alongside an argument's choices. */
+export const SlashCommandCustomOptionSchema = z.union([
+	z.literal(true),
+	z
+		.object({
+			description: z.string().optional(),
+			label: z.string().min(1).optional(),
+		})
+		.passthrough(),
+]);
+
+export type SlashCommandCustomOption = z.infer<
+	typeof SlashCommandCustomOptionSchema
+>;
+
+/** One sequential argument in a plugin/app slash command. */
+export const SlashCommandArgumentSchema = z
+	.object({
+		allow_custom: z.boolean().optional(),
+		custom: SlashCommandCustomOptionSchema.optional(),
+		description: z.string().optional(),
+		name: z.string().min(1),
+		options: z.array(SlashCommandOptionSchema).optional(),
+	})
+	.passthrough();
+
+export type SlashCommandArgument = z.infer<typeof SlashCommandArgumentSchema>;
+
+/**
+ * A command registered by a plugin or Ryu App. `args` is the preferred key;
+ * `parameters` is accepted as a readable alias for hand-authored manifests.
+ * Each argument's options are plugin-owned, so the shell never needs a closed
+ * enum for app-specific values.
+ */
+export const SlashCommandContributionSchema = z
+	.object({
+		args: z.array(SlashCommandArgumentSchema).optional(),
+		body: z.string().optional(),
+		command: z.string().min(1),
+		description: z.string().optional(),
+		id: z.string().optional(),
+		parameters: z.array(SlashCommandArgumentSchema).optional(),
+	})
+	.passthrough();
+
+export type SlashCommandContribution = z.infer<
+	typeof SlashCommandContributionSchema
+>;
+
 /**
  * The `contributes` block. Mirrors `Contributes` in
  * `apps/core/src/plugin_manifest/mod.rs`. The declarative UI surfaces
- * (`composer_controls` / `chat_features` / `settings_tabs` / `slash_commands`) are passed verbatim
+ * (`composer_controls` / `chat_features` / `settings_tabs`) are passed verbatim
  * to the desktop renderer, so they are typed loosely here (records).
  */
 export const ContributesSchema = z.object({
@@ -426,7 +505,7 @@ export const ContributesSchema = z.object({
 	 * feature declaration before signing. */
 	chat_features: z.array(z.record(z.string(), z.unknown())).default([]),
 	settings_tabs: z.array(z.record(z.string(), z.unknown())).default([]),
-	slash_commands: z.array(z.record(z.string(), z.unknown())).default([]),
+	slash_commands: z.array(SlashCommandContributionSchema).default([]),
 	/** App widgets (Ryu Apps). Each binds a render tool id to its
 	 *  `ui://widget/<slug>.html` template. Mirrors the Rust-side
 	 *  `Contributes.widgets` field, without which the CLI's zod parse would strip
@@ -496,6 +575,9 @@ export const ContributesSchema = z.object({
 	/** Per-message actions contributed by an enabled plugin. Kept as loose records
 	 *  so renderer-specific `kind`/`args` payloads survive `ryu pack` unchanged. */
 	message_actions: z.array(z.record(z.string(), z.unknown())).default([]),
+	/** Buttons contributed to the floating text-selection toolbar. Kept as loose
+	 *  records so host-owned dispatch args survive `ryu pack` unchanged. */
+	selection_actions: z.array(z.record(z.string(), z.unknown())).default([]),
 });
 
 export type Contributes = z.infer<typeof ContributesSchema>;
@@ -765,6 +847,10 @@ export const PluginManifestSchema = z
 				"version must be a valid semver string (e.g. 1.0.0)"
 			),
 
+		/** Core-owned release maturity metadata. The Rust contract validates the
+		 *  richer shape; the SDK authoring parser must preserve it for pack/publish. */
+		stability: z.unknown().optional(),
+
 		/**
 		 * Lower-case hex `sha256(utf8_bytes(ui_code))` binding the plugin's bundled
 		 * sandboxed-UI code to this manifest. `ryu pack` / `ryu publish` compute it and
@@ -785,8 +871,33 @@ export const PluginManifestSchema = z
 		 */
 		permission_grants: z.array(z.string()).default([]),
 
+		/** Deny-by-default sandbox permissions. Core remains authoritative; this
+		 *  schema mirrors the fields so `ryu pack` cannot strip them. */
+		permissions: z
+			.object({
+				fs: z
+					.object({
+						read: z.array(z.string()).default([]),
+						write: z.array(z.string()).default([]),
+					})
+					.optional(),
+				child_process: z.boolean().optional(),
+				run: z.array(z.string()).default([]),
+				network: z.union([z.boolean(), z.array(z.string())]).optional(),
+				tool: z.array(z.string()).default([]),
+			})
+			.optional(),
+
+		/** Core-owned permission presentation levels. Preserved verbatim here and
+		 *  validated by Core's authoritative manifest contract. */
+		permission_levels: z.unknown().optional(),
+
 		/** Remote or stdio MCP servers registered by this plugin. */
 		mcp_servers: z.record(z.string(), McpServerDeclSchema).optional(),
+
+		/** Core-owned sidecar declarations. Their full process/HTTP schema stays in
+		 *  the Rust contract; this authoring layer must never strip them. */
+		sidecars: z.unknown().optional(),
 
 		/**
 		 * Optional Companion surface (an in-desktop overlay or sidebar panel).
@@ -827,6 +938,10 @@ export const PluginManifestSchema = z
 		 * an unsupported-target plugin stays installable and inspectable.
 		 */
 		targets: z.array(SurfaceSchema).default([]),
+
+		/** Rich per-surface declarations (`support`, UI, contributed commands, …).
+		 *  Core owns and validates the nested vocabulary. */
+		surfaces: z.unknown().optional(),
 
 		/**
 		 * Host version floors — the semver requirement each surface must satisfy for
@@ -954,6 +1069,10 @@ export const PluginManifestSchema = z
 		 */
 		setup: z.union([SetupStepSchema, z.array(SetupStepSchema)]).optional(),
 	})
+	// Core's Rust-derived schema is the full wire authority. Keep this deliberately
+	// forward-compatible so a newly-added Core field survives SDK pack/publish even
+	// before the simpler authoring schema grows first-class validation for it.
+	.passthrough()
 	.superRefine((manifest, context) => {
 		const hasOAuthServer = Object.values(manifest.mcp_servers ?? {}).some(
 			(server) => server.auth?.type === "oauth"

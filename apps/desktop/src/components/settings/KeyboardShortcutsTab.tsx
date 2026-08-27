@@ -32,6 +32,7 @@ import { Input } from "@ryu/ui/components/input";
 import { Kbd } from "@ryu/ui/components/kbd";
 import { toast } from "@ryu/ui/components/sileo";
 import { useCallback, useEffect, useState } from "react";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
@@ -267,6 +268,7 @@ function GlobalRow({
 }
 
 export function KeyboardShortcutsTab() {
+	const { canUseNativeShell } = useAppSurface();
 	const {
 		registry,
 		bindings,
@@ -495,7 +497,7 @@ export function KeyboardShortcutsTab() {
 						</SettingsSection>
 					))}
 
-					{showGlobalDictation || showGlobalAgentAsk ? (
+					{canUseNativeShell && (showGlobalDictation || showGlobalAgentAsk) ? (
 						<SettingsSection
 							caption="System-wide shortcuts work anywhere on your desktop and are managed by the island companion."
 							title="Global"
@@ -636,7 +638,9 @@ export function KeyboardShortcutsTab() {
 
 					{/* The one "shortcut" that is not an accelerator: a bare-modifier double
 			    tap, owned by the native layer rather than the hotkey registry. */}
-					{showQuickCapture ? <QuickCaptureSettings /> : null}
+					{canUseNativeShell && showQuickCapture ? (
+						<QuickCaptureSettings />
+					) : null}
 
 					{query.length > 0 && !hasMatches ? (
 						<p className="px-3 text-muted-foreground text-sm">

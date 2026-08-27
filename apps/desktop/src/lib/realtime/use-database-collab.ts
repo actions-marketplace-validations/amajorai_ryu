@@ -37,6 +37,8 @@ export interface DatabaseSnapshot {
 export interface UseDatabaseCollabOptions {
 	/** Produce the seed for a first-into-an-empty-room client (the loaded JSON). */
 	getSeed: () => DatabaseDoc;
+	/** Refetch the authoritative JSON after a server-side version restore. */
+	onReset?: () => void;
 	/** Adopt a snapshot into render state (fires on first sync and every change). */
 	onSnapshot: (snapshot: DatabaseSnapshot) => void;
 	/** Gate: don't connect until the page has loaded its initial JSON (we need it
@@ -114,6 +116,8 @@ export function useDatabaseCollab(
 	getSeedRef.current = options.getSeed;
 	const onSnapshotRef = useRef(options.onSnapshot);
 	onSnapshotRef.current = options.onSnapshot;
+	const onResetRef = useRef(options.onReset);
+	onResetRef.current = options.onReset;
 
 	useEffect(() => {
 		if (!ready) {
@@ -137,6 +141,13 @@ export function useDatabaseCollab(
 				target: { url, token },
 				jwt,
 				handlers: {
+					onReset: () => {
+						if (!cancelled) {
+							collaborativeRef.current = false;
+							setCollaborative(false);
+							onResetRef.current?.();
+						}
+					},
 					onJoinAck: (ack) => {
 						maySeed = ack.maySeed;
 						if (!cancelled) {

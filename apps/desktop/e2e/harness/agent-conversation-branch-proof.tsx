@@ -177,7 +177,7 @@ function Story() {
 							data-testid="agent-sidebar-proof"
 						>
 							<header className="border-border/70 border-b px-5 py-4">
-								<p className="font-semibold text-sm">Bot mode</p>
+								<p className="font-semibold text-sm">Agents view</p>
 								<p className="mt-1 text-muted-foreground text-xs">
 									Sessions ⇄ Agents · branch tree
 								</p>

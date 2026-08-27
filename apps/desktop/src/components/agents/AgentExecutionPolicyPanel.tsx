@@ -23,6 +23,7 @@ const LIFECYCLE_LABELS: Record<AgentLifecycleStatus, string> = {
 const SAFETY_LABELS: Record<AgentSafetyProfile, string> = {
 	read_only: "Read-only",
 	approval_required: "Approval required",
+	verified_plan_only: "Verified plans only",
 	autonomous: "Autonomous",
 };
 
@@ -55,7 +56,9 @@ export function AgentExecutionPolicyPanel({
 					? "Read-only allows retrieval and previews only. Core blocks state changes even when a tool is not marked risky."
 					: safetyProfile === "approval_required"
 						? "Risky and unknown-effect tools enter the existing approval queue before they run."
-						: null;
+						: safetyProfile === "verified_plan_only"
+							? "Only deterministic plans verified and certified by Core may run tools. Direct tool calls are blocked."
+							: null;
 
 	return (
 		<SettingsSection

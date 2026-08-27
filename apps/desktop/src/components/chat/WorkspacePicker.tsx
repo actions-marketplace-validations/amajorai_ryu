@@ -66,6 +66,7 @@ import {
 	WORKSPACE_MENU_CONTENT,
 	WORKSPACE_SELECT_TRIGGER,
 } from "@/components/agent-elements/input/composer-select.ts";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import {
 	invalidateGitStatus,
 	useGitStatus,
@@ -129,7 +130,7 @@ export function DiffStat({ stat }: { stat: LineStat }) {
 		return null;
 	}
 	return (
-		<span className="flex shrink-0 items-center gap-1 font-heading font-medium text-[11px] tabular-nums">
+		<span className="flex shrink-0 items-center gap-1 font-medium font-mono text-[11px] tabular-nums">
 			{stat.insertions > 0 && (
 				<span className="text-emerald-600 dark:text-emerald-400/90">
 					+{formatCount(stat.insertions)}
@@ -169,6 +170,7 @@ export function WorkspacePicker({
 	stacked = false,
 	worktreeModeOverride,
 }: WorkspacePickerProps) {
+	const { canUseNativeShell } = useAppSurface();
 	const storeFolder = useWorkspaceStore((s) => s.folder);
 	const folder = folderOverride === undefined ? storeFolder : folderOverride;
 	const projectNames = useWorkspaceStore((s) => s.projectNames);
@@ -510,7 +512,7 @@ export function WorkspacePicker({
 							{runModeBody}
 						</PickerRow>
 					)}
-					{folder && projectEnvironments.length > 0 && (
+					{canUseNativeShell && folder && projectEnvironments.length > 0 && (
 						<PickerRow
 							fullWidth
 							icon={ComputerTerminal01Icon}
@@ -600,7 +602,7 @@ export function WorkspacePicker({
 						{runModeBody}
 					</PickerRow>
 				)}
-				{folder && projectEnvironments.length > 0 && (
+				{canUseNativeShell && folder && projectEnvironments.length > 0 && (
 					<PickerRow
 						icon={ComputerTerminal01Icon}
 						id="environment"
@@ -628,26 +630,28 @@ export function WorkspacePicker({
 						{branchBody}
 					</PickerRow>
 				)}
-				{activeEnvironment?.actions.map((action) => (
-					<Button
-						className={WORKSPACE_SELECT_TRIGGER}
-						disabled={runningActionId !== null}
-						key={action.id}
-						loading={runningActionId === action.id}
-						onClick={() => {
-							runEnvironmentAction(activeEnvironment, action.id).catch(
-								() => undefined
-							);
-						}}
-						size="sm"
-						title={`Run ${action.name} in ${worktreeStatus.path ? "the worktree" : "the project"}`}
-						type="button"
-						variant="ghost"
-					>
-						<HugeiconsIcon className="size-3.5" icon={PlayIcon} />
-						<ButtonLabel className="max-w-28">{action.name}</ButtonLabel>
-					</Button>
-				))}
+				{canUseNativeShell
+					? activeEnvironment?.actions.map((action) => (
+							<Button
+								className={WORKSPACE_SELECT_TRIGGER}
+								disabled={runningActionId !== null}
+								key={action.id}
+								loading={runningActionId === action.id}
+								onClick={() => {
+									runEnvironmentAction(activeEnvironment, action.id).catch(
+										() => undefined
+									);
+								}}
+								size="sm"
+								title={`Run ${action.name} in ${worktreeStatus.path ? "the worktree" : "the project"}`}
+								type="button"
+								variant="ghost"
+							>
+								<HugeiconsIcon className="size-3.5" icon={PlayIcon} />
+								<ButtonLabel className="max-w-28">{action.name}</ButtonLabel>
+							</Button>
+						))
+					: null}
 			</div>
 			<CreateFolderDialog
 				onOpenChange={setCreateFolderOpen}

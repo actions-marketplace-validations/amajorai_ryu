@@ -578,8 +578,9 @@ export async function removeSkillPack(
 // The catalog installs read-only skills from skills.sh; these endpoints let a
 // user create and edit their own SKILL.md in the Plate editor with server-backed,
 // undoable version history (the same `VersionHistory` UI pages/workflows use).
-// Skills live in `~/.claude/skills/<id>/SKILL.md`; versions live in Core's own
-// `~/.ryu/skill-versions/` (see `apps/core/src/skills/store.rs`).
+// Skills live in `~/.claude/skills/<id>/SKILL.md`; source versions are Git
+// checkpoints in Core's managed `~/.ryu/source-history/` repository, with the
+// old JSON directory retained as a read-only migration fallback.
 
 /** A skill's editable form fields plus its raw SKILL.md source. */
 export interface SkillSource {

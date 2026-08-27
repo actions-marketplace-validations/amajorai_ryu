@@ -1,0 +1,392 @@
+/*
+ * Ryu App UI v1.
+ *
+ * This is the shared visual contract for sandboxed Companion apps. Apps may
+ * choose their domain layout, but their shell, controls, list rows, forms,
+ * empty states, focus treatment, density, and semantic colors come from this
+ * file and the primitives that consume it.
+ *
+ * Keep this stylesheet deliberately small. The point is a dependable visual
+ * grammar, not another app-specific component framework.
+ */
+
+@import "@ryu/ui/companion-theme.css";
+
+:root {
+	--ryu-app-gutter: 1rem;
+	--ryu-app-toolbar-height: 3rem;
+	--ryu-app-control-height: 2.25rem;
+	--ryu-app-list-row-height: 3rem;
+	--ryu-app-radius: var(--radius);
+	--ryu-app-panel: var(--card);
+	--ryu-app-panel-muted: var(--muted);
+	--ryu-app-row-hover: color-mix(in oklch, var(--muted), transparent 28%);
+	--ryu-app-row-selected: color-mix(in oklch, var(--primary), transparent 88%);
+}
+
+html,
+body,
+#ryu-plugin-root,
+#root {
+	height: 100%;
+	min-height: 100%;
+	margin: 0;
+}
+
+body {
+	font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	font-size: 14px;
+	line-height: 1.45;
+	color: var(--foreground);
+	background: var(--background);
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell) {
+	display: flex;
+	flex-direction: column;
+	width: 100%;
+	min-width: 0;
+	height: 100%;
+	min-height: 100%;
+	font-family: inherit;
+	font-size: inherit;
+	-webkit-font-smoothing: antialiased;
+	font-synthesis: none;
+	line-height: inherit;
+	color: var(--foreground);
+	background: var(--background);
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell) *,
+:where([data-ryu-app-ui="v1"], .ryu-app-shell) *::before,
+:where([data-ryu-app-ui="v1"], .ryu-app-shell) *::after {
+	box-sizing: border-box;
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell) :where(h1, h2, h3, h4, p) {
+	margin: 0;
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell)
+	:where(button, input, select, textarea) {
+	font: inherit;
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell)
+	:where(
+		button:not([data-slot]),
+		input:not([data-slot]),
+		select:not([data-slot]),
+		textarea:not([data-slot])
+	) {
+	color: var(--foreground);
+	background: var(--background);
+	border: 1px solid var(--border);
+	border-radius: var(--ryu-app-radius);
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell)
+	:where(
+		input:not([data-slot]),
+		select:not([data-slot]),
+		textarea:not([data-slot])
+	) {
+	min-height: var(--ryu-app-control-height);
+	padding: 0.5rem 0.75rem;
+	outline: none;
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell)
+	:where(textarea:not([data-slot])) {
+	min-height: 5rem;
+	resize: vertical;
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell) :where(button:not([data-slot])) {
+	min-height: var(--ryu-app-control-height);
+	padding: 0.45rem 0.8rem;
+	cursor: pointer;
+	transition:
+		background-color 120ms ease,
+		border-color 120ms ease,
+		color 120ms ease,
+		transform 120ms ease;
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell)
+	:where(button:not([data-slot]):hover:not(:disabled)) {
+	background: var(--muted);
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell)
+	:where(button:not([data-slot]):active:not(:disabled)) {
+	transform: translateY(1px);
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell)
+	:where(
+		button:not([data-slot]):disabled,
+		input:not([data-slot]):disabled,
+		select:not([data-slot]):disabled,
+		textarea:not([data-slot]):disabled
+	) {
+	cursor: not-allowed;
+	opacity: 0.55;
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell)
+	:where(
+		button,
+		a,
+		input,
+		select,
+		textarea,
+		summary,
+		[tabindex]
+	):focus-visible {
+	outline: 2px solid color-mix(in oklch, var(--ring) 75%, transparent);
+	outline-offset: 2px;
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell) a {
+	color: var(--primary);
+	text-underline-offset: 0.2em;
+}
+
+.ryu-app-toolbar {
+	display: flex;
+	gap: 0.75rem;
+	align-items: center;
+	justify-content: space-between;
+	min-width: 0;
+	min-height: var(--ryu-app-toolbar-height);
+	padding: 0.5rem var(--ryu-app-gutter);
+	background: var(--background);
+	border-bottom: 1px solid var(--border);
+}
+
+.ryu-app-toolbar__title {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	font-size: 0.9375rem;
+	font-weight: 600;
+	line-height: 1.25;
+	white-space: nowrap;
+}
+
+.ryu-app-toolbar__actions,
+.ryu-app-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	align-items: center;
+	justify-content: flex-end;
+}
+
+.ryu-app-main {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	gap: 1rem;
+	min-width: 0;
+	min-height: 0;
+	padding: var(--ryu-app-gutter);
+	overflow: auto;
+}
+
+.ryu-app-section {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+	min-width: 0;
+}
+
+.ryu-app-section__heading {
+	font-size: 0.8125rem;
+	font-weight: 600;
+	color: var(--muted-foreground);
+}
+
+.ryu-app-list {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	min-width: 0;
+	min-height: 0;
+	overflow: auto;
+}
+
+.ryu-app-list__section {
+	display: flex;
+	flex-direction: column;
+	border-bottom: 1px solid var(--border);
+}
+
+.ryu-app-list__section:last-child {
+	border-bottom: 0;
+}
+
+.ryu-app-list__section-title {
+	padding: 0.75rem var(--ryu-app-gutter) 0.4rem;
+	font-size: 0.6875rem;
+	font-weight: 600;
+	color: var(--muted-foreground);
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+}
+
+.ryu-app-list__item {
+	display: flex;
+	gap: 0.75rem;
+	align-items: center;
+	width: 100%;
+	min-height: var(--ryu-app-list-row-height);
+	padding: 0.6rem var(--ryu-app-gutter);
+	color: var(--foreground);
+	text-align: start;
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+}
+
+.ryu-app-list__item:hover:not(:disabled),
+.ryu-app-list__item[data-selected="true"] {
+	background: var(--ryu-app-row-hover);
+}
+
+.ryu-app-list__item[data-selected="true"] {
+	background: var(--ryu-app-row-selected);
+	box-shadow: inset 2px 0 0 var(--primary);
+}
+
+.ryu-app-list__item-icon {
+	display: grid;
+	flex: 0 0 auto;
+	place-items: center;
+	width: 1.75rem;
+	height: 1.75rem;
+	color: var(--muted-foreground);
+	background: var(--muted);
+	border-radius: calc(var(--ryu-app-radius) - 2px);
+}
+
+.ryu-app-list__item-content {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	gap: 0.15rem;
+	min-width: 0;
+}
+
+.ryu-app-list__item-title {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	font-size: 0.875rem;
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.ryu-app-list__item-subtitle {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	font-size: 0.75rem;
+	line-height: 1.35;
+	color: var(--muted-foreground);
+	white-space: nowrap;
+}
+
+.ryu-app-list__item-accessories {
+	display: flex;
+	flex: 0 0 auto;
+	gap: 0.5rem;
+	align-items: center;
+	color: var(--muted-foreground);
+}
+
+.ryu-app-empty {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	gap: 0.5rem;
+	align-items: center;
+	justify-content: center;
+	min-width: 0;
+	min-height: 12rem;
+	padding: 2rem;
+	text-align: center;
+}
+
+.ryu-app-empty__title {
+	font-size: 0.9375rem;
+	font-weight: 600;
+}
+
+.ryu-app-empty__description,
+.ryu-app-field__description {
+	max-width: 52ch;
+	font-size: 0.8125rem;
+	line-height: 1.5;
+	color: var(--muted-foreground);
+}
+
+.ryu-app-empty__actions {
+	margin-top: 0.5rem;
+}
+
+.ryu-app-detail {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	gap: 1rem;
+	min-width: 0;
+	min-height: 0;
+	padding: var(--ryu-app-gutter);
+	overflow: auto;
+	background: var(--ryu-app-panel);
+	border-left: 1px solid var(--border);
+}
+
+.ryu-app-form {
+	display: flex;
+	flex-direction: column;
+	gap: 1rem;
+	min-width: 0;
+}
+
+.ryu-app-field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.4rem;
+	min-width: 0;
+}
+
+.ryu-app-field__label {
+	font-size: 0.8125rem;
+	font-weight: 500;
+}
+
+.ryu-app-field__description {
+	font-size: 0.75rem;
+}
+
+[data-ryu-app-ui="v1"][data-ryu-surface="canvas"] {
+	overflow: hidden;
+}
+
+[data-ryu-app-ui="v1"][data-ryu-surface="canvas"]
+	:where(
+		button:not([data-slot]),
+		input:not([data-slot]),
+		select:not([data-slot]),
+		textarea:not([data-slot])
+	) {
+	border-radius: var(--ryu-app-radius);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:where([data-ryu-app-ui="v1"], .ryu-app-shell)
+		:where(button:not([data-slot])) {
+		transition: none;
+	}
+}

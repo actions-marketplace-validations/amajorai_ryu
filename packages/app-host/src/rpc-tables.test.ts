@@ -18,6 +18,13 @@ import {
 	STREAMING_METHODS,
 } from "./rpc.ts";
 
+test("registers targeted Inbox notifications as a separate capability", () => {
+	expect(METHOD_CAPABILITY["notifications.send"]).toBe("notifications.send");
+	expect(GRANT_CAPABILITY["notifications:send-to-user"]).toBe(
+		"notifications.send"
+	);
+});
+
 // ── Frozen fixtures: the hand-written tables exactly as they were before the
 //    single-source refactor (git HEAD~ of rpc.ts). Do NOT regenerate these from
 //    the JSON — their whole job is to be an INDEPENDENT copy. ──────────────────
@@ -29,9 +36,16 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"native.liveActivities.update": "native.liveActivities",
 	"app.request": "app.http",
 	"core.listAgents": "core.listAgents",
+	"catalog.snapshot": "core.listAgents",
+	"catalog.models": "core.listAgents",
+	"chat.list": "chat.broadcast",
+	"chat.send": "chat.broadcast",
 	"ui.registerRoute": "ui.render",
 	"tool.call": "tool.call",
 	"ui.sendMessage": "ui.sendMessage",
+	"ui.toast.show": "ui.toast",
+	"ui.toast.update": "ui.toast",
+	"ui.toast.dismiss": "ui.toast",
 	"widget.setState": "widget.state",
 	"widget.getGlobals": "widget.state",
 	"ui.requestDisplayMode": "ui.displayMode",
@@ -49,6 +63,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"storage.set": "storage.kv",
 	"storage.delete": "storage.kv",
 	"storage.keys": "storage.kv",
+	"storage.compareAndSet": "storage.kv",
 	// Added deliberately with the sealing primitive: all three share ONE
 	// capability so a grant covers seal+open+status as a unit — an app that can
 	// seal must be able to open, or it writes data it can never read back.
@@ -57,11 +72,13 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"crypto.status": "crypto.seal",
 	"agent.run.stream": "agent.run",
 	"agent.cancel": "agent.run",
+	"spaces.ensureSpace": "spaces.docs",
 	"spaces.createDoc": "spaces.docs",
 	"spaces.getDoc": "spaces.docs",
 	"spaces.updateDoc": "spaces.docs",
 	"spaces.listDocs": "spaces.docs",
 	"spaces.deleteDoc": "spaces.docs",
+	"spaces.search": "spaces.docs",
 	"media.image": "media.generate",
 	"media.video": "media.generate",
 	"media.tts": "media.generate",
@@ -164,6 +181,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"notifications.list": "approvals.crud",
 	"notifications.markRead": "approvals.crud",
 	"notifications.ack": "approvals.crud",
+	"notifications.send": "notifications.send",
 	"suggestions.list": "approvals.crud",
 	"suggestions.feedback": "approvals.crud",
 	"suggestions.openInChat": "approvals.crud",
@@ -187,6 +205,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	// `reasoning.request` fronts the whole `/api/reasoning` public mount, and the
 	// companion has no navigation verb to add — it never opens a shell tab.
 	"reasoning.request": "reasoning.check",
+	"safeActions.request": "safe-actions.manage",
 	// Deep Read, same one-forwarder shape: `rlm.request` fronts the whole `/api/rlm`
 	// public mount and the companion has no navigation verb.
 	"rlm.request": "rlm.query",
@@ -236,9 +255,11 @@ const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
 	"native:live_activities": "native.liveActivities",
 	"app:http": "app.http",
 	"core:list_agents": "core.listAgents",
+	"chat.sendFollowUp": "chat.broadcast",
 	"ui:render": "ui.render",
 	"tool:call": "tool.call",
 	"ui:send_message": "ui.sendMessage",
+	"ui:toast": "ui.toast",
 	"hook:side-model": "model.complete",
 	"hook:run-agent": "agent.run",
 	"storage:kv": "storage.kv",
@@ -263,9 +284,11 @@ const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
 	"warmup:crud": "warmup.crud",
 	"learning:crud": "learning.crud",
 	"approvals:crud": "approvals.crud",
+	"notifications:send-to-user": "notifications.send",
 	"meetings:crud": "meetings.crud",
 	"social:crud": "social.crud",
 	"reasoning:check": "reasoning.check",
+	"safe-actions:manage": "safe-actions.manage",
 	"rlm:query": "rlm.query",
 	"tuition:crud": "tuition.crud",
 	"news:crud": "news.crud",

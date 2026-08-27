@@ -399,10 +399,10 @@ export function PrivacySettings() {
 								on by default so we can fix what breaks and improve the app.
 								They never include your prompts, conversations, files, or any
 								agent content, and they use a random install ID that is not
-								linked to your account. Your local data plane (Core and the
-								Gateway) sends nothing off your device unless you turn on
-								diagnostics export below. You can change any of these any time.
-								See{" "}
+								linked to your account. Product analytics is separate from your
+								local Core/Gateway traces and diagnostics: those stay on your
+								device unless you turn on export to a destination you choose.
+								You can change any of these any time. See{" "}
 								<button
 									className="text-primary underline underline-offset-2"
 									onClick={openDocs}
@@ -427,7 +427,7 @@ export function PrivacySettings() {
 	const sharingPage = (
 		<>
 			<SettingsSection
-				caption="On by default. Anonymous, content-free usage events (which screens you open, whether onboarding finished, install success) help us improve Ryu. Never includes prompts, conversations, files, or any agent content; identified only by a random install ID, not your account."
+				caption="On by default. Ryu's anonymous, content-free usage events (which screens you open, whether onboarding finished, install success) help us improve Ryu. Managed nodes also send a small content-free heartbeat while this is on. Never includes prompts, conversations, files, or any agent content; identified only by a random install ID, not your account."
 				title="Product analytics"
 			>
 				<SettingsGroup>
@@ -490,7 +490,7 @@ export function PrivacySettings() {
 	const diagnosticsPage = (
 		<>
 			<SettingsSection
-				caption="Off by default. When on, Core and the Gateway export their local run-trace and audit records (already content-free: hashed args, redacted keys) to an OpenTelemetry (OTLP) endpoint you choose. With no endpoint set, nothing is exported even when this is on. Point it at Axiom, Grafana, a self-hosted Collector, or anything OTLP-native."
+				caption="Off by default. When on, Core and the Gateway export their local run-trace and audit records (already content-free: hashed args, redacted keys) to the customer-owned OpenTelemetry (OTLP) endpoint you choose. With no endpoint set, nothing is exported even when this is on. Point it at your Axiom, Grafana, self-hosted Collector, or anything OTLP-native."
 				title="Diagnostics export"
 			>
 				<SettingsGroup>
@@ -617,9 +617,10 @@ export function PrivacySettings() {
 			<SettingsSection title="Learn more">
 				<SettingsCard>
 					<p className="text-muted-foreground text-xs leading-relaxed">
-						Ryu is local-first and encrypted by default. The data plane (your
-						prompts and agent content) never leaves your device except for the
-						model call itself. For the full policy, see{" "}
+						Ryu is local-first and encrypted by default. Your prompts and agent
+						content never leave your device except for the model call itself;
+						content-free analytics and diagnostics are separate controls. For
+						the full policy, see{" "}
 						<button
 							className="text-primary underline underline-offset-2"
 							onClick={openDocs}

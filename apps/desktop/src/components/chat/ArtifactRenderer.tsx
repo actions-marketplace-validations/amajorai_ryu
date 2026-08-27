@@ -49,60 +49,14 @@ import {
 import { cn } from "@ryu/ui/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState } from "react";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
+import { artifactSrcDoc } from "@/src/lib/artifact-srcdoc.ts";
 import {
 	type Artifact,
 	type ArtifactAction,
 	type ArtifactKind,
 	parseTabularContent,
 } from "@/src/lib/artifacts.ts";
-
-// One CSP for every sandboxed artifact document. `unsafe-eval` mirrors the plugin
-// host (some HTML artifacts self-compile); `connect-src 'none'` still forbids any
-// network so nothing can be fetched to eval or beaconed out.
-const ARTIFACT_CSP =
-	"default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'";
-const CSP_META = `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_CSP}">`;
-
-const HEAD_OPEN_RE = /<head[^>]*>/i;
-const HTML_OPEN_RE = /<html[^>]*>/i;
-
-const BASE_STYLE =
-	":root{color-scheme:light dark}html,body{margin:0}body{padding:12px;box-sizing:border-box;font:14px/1.5 system-ui,-apple-system,sans-serif;background:Canvas;color:CanvasText}img,svg{max-width:100%;height:auto}svg{display:block;margin:0 auto}";
-
-/** Wrap a body fragment (SVG source, mermaid SVG) in a minimal, CSP-locked doc. */
-function wrapFragment(body: string): string {
-	return `<!doctype html><html><head><meta charset="utf-8">${CSP_META}<style>${BASE_STYLE}</style></head><body>${body}</body></html>`;
-}
-
-/** Inject the CSP meta as the first thing in <head> of a full HTML document. */
-function injectCsp(html: string): string {
-	const headMatch = HEAD_OPEN_RE.exec(html);
-	if (headMatch) {
-		const at = headMatch.index + headMatch[0].length;
-		return html.slice(0, at) + CSP_META + html.slice(at);
-	}
-	const htmlMatch = HTML_OPEN_RE.exec(html);
-	if (htmlMatch) {
-		const at = htmlMatch.index + htmlMatch[0].length;
-		return `${html.slice(0, at)}<head>${CSP_META}</head>${html.slice(at)}`;
-	}
-	return wrapFragment(html);
-}
-
-const FULL_DOC_RE = /<html[\s>]|<!doctype html/i;
-
-/** The synchronous srcdoc for HTML/SVG artifacts (mermaid is compiled async). */
-function syncDocFor(kind: ArtifactKind, content: string): string | null {
-	if (kind === "html") {
-		return FULL_DOC_RE.test(content)
-			? injectCsp(content)
-			: wrapFragment(content);
-	}
-	if (kind === "svg") {
-		return wrapFragment(content);
-	}
-	return null;
-}
 
 const MERMAID_ID_UNSAFE_RE = /[^a-zA-Z0-9_-]/g;
 
@@ -256,7 +210,7 @@ function MermaidBody({ artifact }: { artifact: Artifact }) {
 		compileMermaid(artifact.id, artifact.content)
 			.then((svg) => {
 				if (!cancelled) {
-					setMermaidDoc(wrapFragment(svg));
+					setMermaidDoc(artifactSrcDoc("svg", svg));
 				}
 			})
 			.catch((err: unknown) => {
@@ -291,7 +245,7 @@ function MermaidBody({ artifact }: { artifact: Artifact }) {
  */
 export function ArtifactContentView({ artifact }: { artifact: Artifact }) {
 	const syncDoc = useMemo(
-		() => syncDocFor(artifact.kind, artifact.content),
+		() => artifactSrcDoc(artifact.kind, artifact.content),
 		[artifact.kind, artifact.content]
 	);
 
@@ -360,6 +314,7 @@ export function ArtifactHeader({
 	onOpenInEditor?: (filePath: string) => void;
 	onAction?: (action: ArtifactAction) => void;
 }) {
+	const { canUseNativeShell } = useAppSurface();
 	const host = useArtifactHost();
 	const submit =
 		onAction ??
@@ -370,9 +325,8 @@ export function ArtifactHeader({
 			submit(action);
 		}
 	});
-	const openInEditor =
-		onOpenInEditor ??
-		(artifact.kind === "file" && artifact.filePath
+	const defaultOpenInEditor =
+		artifact.kind === "file" && artifact.filePath
 			? (path: string) => {
 					Promise.resolve(
 						invoke("open_in_editor", { editor: "vscode", path })
@@ -380,7 +334,10 @@ export function ArtifactHeader({
 						/* the artifact stays viewable; nothing else to do */
 					});
 				}
-			: undefined);
+			: undefined;
+	const openInEditor = canUseNativeShell
+		? (onOpenInEditor ?? defaultOpenInEditor)
+		: undefined;
 
 	return (
 		<div

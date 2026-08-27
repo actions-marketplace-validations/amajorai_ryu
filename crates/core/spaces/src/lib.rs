@@ -10,16 +10,16 @@
 //! ## GraphRAG retrieval mode (spec unit U046)
 //!
 //! A Space can carry a `retrieval_mode` of `"vector"` (default) or `"graph"`.
-//! When set to `"graph"`, ingestion additionally extracts entities and relations
-//! from each chunk and stores them in `graph_nodes` / `graph_edges` tables.
+//! When set to `"graph"`, ingestion additionally extracts normalized terms and
+//! directed within-chunk co-occurrence pairs into `graph_nodes` / `graph_edges`.
 //! `SpaceStore::search` then branches on the mode: vector mode runs the existing
 //! KNN query; graph mode runs entity-matching + BFS traversal and returns the
 //! grounded chunks reachable from the query's entities.
 //!
-//! The extraction strategy and model id are registry-configurable via
-//! `RYU_GRAPH_EXTRACTION_MODEL` / `registry.json` `graph_extraction_model`. The
-//! built-in local extractor is deterministic and offline (co-occurrence of
-//! normalized noun-like tokens within a chunk).
+//! `RYU_GRAPH_EXTRACTION_MODEL` / `registry.json` `graph_extraction_model` select
+//! the implementation. `local-cooccurrence` is the only shipped value and is
+//! deterministic/offline; unsupported ids fail store creation instead of being
+//! accepted while the local algorithm runs silently.
 //!
 //! ## Migration
 //!
@@ -39,11 +39,17 @@
 //! `bundled-sqlcipher` later turns it into real at-rest encryption with no code
 //! change. We also restrict the db file permissions on Unix. See `apply_encryption`.
 
+mod history;
+
+#[cfg(test)]
+mod version_history_tests;
+
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use rusqlite::{named_params, params, Connection, OptionalExtension};
@@ -58,6 +64,12 @@ use tokio::sync::Mutex;
 // single swap changes the model everywhere.
 use ryu_kernel_contracts::ResourceKey;
 use ryu_rag::{Embedder, Reranker};
+use ryu_workspace::source_history::{SourceHistory, SourceHistoryVersion};
+
+use history::{
+    decode_snapshot, encode_snapshot, plan_automatic_retention, RetentionCandidate,
+    SnapshotPayload, AUTO_BUCKET_MS, MAX_HISTORY_BYTES_PER_SPACE, SNAPSHOT_CODEC,
+};
 
 /// Default embedding dimensionality for the in-memory/test store when the caller
 /// does not resolve a model registry. Production stores are opened through the
@@ -67,13 +79,128 @@ use ryu_rag::{Embedder, Reranker};
 /// interacts with the Core registry value.
 pub const DEFAULT_EMBED_DIMS: usize = 768;
 
-/// Default graph-extraction model id (the offline local co-occurrence extractor)
-/// used by the in-memory/test store. Production stores receive the registry value
-/// through the Core-side shim.
+static SOURCE_HISTORY_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Publish Core's managed source-history root. The extracted Spaces crate keeps
+/// this host path as an explicit seam, just like the embedder and blob root.
+pub fn set_source_history_root(root: PathBuf) {
+    let _ = SOURCE_HISTORY_ROOT.set(root);
+}
+
+fn source_history() -> SourceHistory {
+    let root = SOURCE_HISTORY_ROOT
+        .get()
+        .cloned()
+        .or_else(|| std::env::var_os("RYU_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| std::env::temp_dir().join("ryu-spaces"));
+    SourceHistory::new(root)
+}
+
+fn source_history_path(doc_id: &str, kind: &str, space_id: &str) -> String {
+    let extension = if kind == "page" { "md" } else { "json" };
+    format!("spaces/{space_id}/documents/{doc_id}.{extension}")
+}
+
+async fn checkpoint_source_history(
+    relative_path: String,
+    content: String,
+    label: Option<String>,
+) -> Result<SourceHistoryVersion> {
+    let history = source_history();
+    tokio::task::spawn_blocking(move || {
+        history.checkpoint(&relative_path, &content, label.as_deref())
+    })
+    .await
+    .context("source history checkpoint task panicked")
+    .and_then(|result| result.context("checkpointing source history"))
+}
+
+/// Record history after a committed Space mutation without changing the
+/// mutation's response semantics. SQLite is the source-of-truth transaction;
+/// Git is a durable audit projection that can be repaired after a transient
+/// disk or process failure.
+async fn checkpoint_source_history_best_effort(
+    relative_path: String,
+    content: String,
+    label: Option<String>,
+) {
+    if let Err(error) = checkpoint_source_history(relative_path.clone(), content, label).await {
+        tracing::warn!(
+            path = %relative_path,
+            error = %error,
+            "Space source-history checkpoint was not recorded"
+        );
+    }
+}
+
+async fn list_source_history(
+    relative_path: String,
+    limit: Option<usize>,
+) -> Result<Vec<SourceHistoryVersion>> {
+    let history = source_history();
+    tokio::task::spawn_blocking(move || history.list(&relative_path, limit))
+        .await
+        .context("source history list task panicked")?
+        .context("listing source history")
+}
+
+async fn read_source_history(relative_path: String, version_id: String) -> Result<Option<String>> {
+    let history = source_history();
+    tokio::task::spawn_blocking(move || history.read(&relative_path, &version_id))
+        .await
+        .context("source history read task panicked")?
+        .context("reading source history")
+}
+
+fn is_git_version_id(version_id: &str) -> bool {
+    (7..=64).contains(&version_id.len())
+        && version_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+}
+
+/// Supported graph-extraction implementation id. The in-memory/test store selects
+/// it directly; production stores receive the configured id through Core and reject
+/// any other value before opening the database.
 pub const DEFAULT_GRAPH_EXTRACTION_MODEL: &str = "local-cooccurrence";
 
 const RETRIEVAL_REBUILD_BATCH_SIZE: usize = 32;
 const MAX_RETRIEVAL_MODE_TERMINAL_STATUSES: usize = 16;
+/// Bound graph construction to at most 64 unique terms per chunk/query. Since the
+/// local extractor writes directed pairs, this caps one chunk at 4,032 edges.
+const MAX_EXTRACTED_GRAPH_TERMS: usize = 64;
+const MAX_GRAPH_TERM_BYTES: usize = 128;
+const MAX_GRAPH_CHUNKS_PER_DOCUMENT: usize = 256;
+const MAX_GRAPH_ROWS_PER_SPACE: usize = 2_000_000;
+const MAX_DOCUMENT_TITLE_BYTES: usize = 512;
+const MAX_DOCUMENT_MIME_BYTES: usize = 255;
+
+/// A validated graph-extraction implementation.
+///
+/// Keeping this as an enum prevents a configured-but-unsupported id from entering
+/// the store and being reported as active while [`extract_entities`] still runs the
+/// local algorithm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphExtractionModel {
+    LocalCooccurrence,
+}
+
+impl GraphExtractionModel {
+    fn parse(configured: &str) -> Result<Self> {
+        match configured.trim() {
+            DEFAULT_GRAPH_EXTRACTION_MODEL => Ok(Self::LocalCooccurrence),
+            _ => anyhow::bail!(
+                "unsupported graph extraction model '{configured}'; only '{DEFAULT_GRAPH_EXTRACTION_MODEL}' is available"
+            ),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalCooccurrence => DEFAULT_GRAPH_EXTRACTION_MODEL,
+        }
+    }
+}
 
 /// Owner attribution for a Spaces/documents row — the extracted, apps/core-free
 /// twin of Core's `conversations::Tenancy`. It is a plain data record (NOT a
@@ -218,6 +345,9 @@ const CHUNK_CHAR_SIZE: usize = 1_000;
 /// edges), `graph_search_reaches_a_two_hop_chunk_through_a_truncated_frontier` (a
 /// truncated search still returns the grounded chunk), and the lossiness test above.
 const MAX_FRONTIER_ENTITIES: usize = 512;
+/// Link expansion shares the reranker candidate budget with vector/term hits.
+const MAX_LINK_EXPANDED_DOCUMENTS: usize = 16;
+const MAX_LINK_EXPANDED_CHUNKS: usize = 32;
 
 /// **The graph seed floor.** A query entity present in more than this fraction of a
 /// Space's chunks does not discriminate between them, so it is not allowed to seed
@@ -313,7 +443,8 @@ const DOC_TENANCY_VISIBLE_PREDICATE: &str = "(
         OR (:uid IS NOT NULL AND d.owner_user_id = :uid)
         OR (:uid IS NOT NULL AND :org IS NOT NULL AND d.org_id = :org
             AND (d.visibility = 'org'
-                 OR (d.visibility = 'team' AND :team IS NOT NULL AND d.team_id = :team)))
+                 OR (d.visibility = 'team' AND d.team_id IN
+                     (SELECT value FROM json_each(:teams)))))
         OR EXISTS (
             SELECT 1 FROM spaces inherited_space
             WHERE inherited_space.id = d.space_id
@@ -323,8 +454,8 @@ const DOC_TENANCY_VISIBLE_PREDICATE: &str = "(
                       AND inherited_space.org_id = :org
                       AND (inherited_space.visibility = 'org'
                            OR (inherited_space.visibility = 'team'
-                               AND :team IS NOT NULL
-                               AND inherited_space.team_id = :team)))
+                               AND inherited_space.team_id IN
+                                   (SELECT value FROM json_each(:teams)))))
               )
         )
      )";
@@ -339,13 +470,14 @@ const SPACE_TENANCY_VISIBLE_PREDICATE: &str = "(
         OR (:uid IS NOT NULL AND s.owner_user_id = :uid)
         OR (:uid IS NOT NULL AND :org IS NOT NULL AND s.org_id = :org
             AND (s.visibility = 'org'
-                 OR (s.visibility = 'team' AND :team IS NOT NULL AND s.team_id = :team)))
+                 OR (s.visibility = 'team' AND s.team_id IN
+                     (SELECT value FROM json_each(:teams)))))
      )";
 
 /// The caller context a tenancy-filtered Spaces query is evaluated against. Cheap
-/// `Copy`; construct via [`DocFilter::unrestricted`] (in-process, full-trust) or
+/// to clone; construct via [`DocFilter::unrestricted`] (in-process, full-trust) or
 /// [`DocFilter::for_caller`] (an HTTP request narrowed to this node's org).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct DocFilter<'a> {
     /// Whether THIS node is bound to an org. Unbound → no filtering at all.
     node_bound: bool,
@@ -353,10 +485,9 @@ pub struct DocFilter<'a> {
     owner_user_id: Option<&'a str>,
     /// The caller's org (already narrowed to this node's org by identity verify).
     org_id: Option<&'a str>,
-    /// One team membership used by the SQL list/search gate. By-id access still
-    /// checks the full verified team set; callers with multiple teams should use
-    /// the first matching team for the list path and can open other rows by id.
-    team_id: Option<&'a str>,
+    /// All verified team memberships, encoded once for SQLite's `json_each`.
+    /// Owning this value avoids order-dependent authorization for multi-team users.
+    team_ids_json: String,
 }
 
 impl<'a> DocFilter<'a> {
@@ -367,7 +498,7 @@ impl<'a> DocFilter<'a> {
             node_bound: false,
             owner_user_id: None,
             org_id: None,
-            team_id: None,
+            team_ids_json: "[]".to_owned(),
         }
     }
 
@@ -379,7 +510,7 @@ impl<'a> DocFilter<'a> {
         org_id: Option<&'a str>,
         node_bound: bool,
     ) -> Self {
-        Self::for_caller_with_team(owner_user_id, org_id, None, node_bound)
+        Self::for_caller_with_teams(owner_user_id, org_id, &[], node_bound)
     }
 
     /// Build a caller filter with a team-scoped visibility context.
@@ -389,11 +520,23 @@ impl<'a> DocFilter<'a> {
         team_id: Option<&'a str>,
         node_bound: bool,
     ) -> Self {
+        let team_ids: Vec<&str> = team_id.into_iter().collect();
+        Self::for_caller_with_teams(owner_user_id, org_id, &team_ids, node_bound)
+    }
+
+    /// Build a caller filter from the caller's complete verified team set.
+    pub fn for_caller_with_teams(
+        owner_user_id: Option<&'a str>,
+        org_id: Option<&'a str>,
+        team_ids: &[&str],
+        node_bound: bool,
+    ) -> Self {
         Self {
             node_bound,
             owner_user_id,
             org_id,
-            team_id,
+            team_ids_json: serde_json::to_string(team_ids)
+                .expect("serializing verified team ids cannot fail"),
         }
     }
 
@@ -415,6 +558,20 @@ impl<'a> DocFilter<'a> {
 /// `conversations::upsert_conversation_row`. The caller has already inserted the
 /// document's non-tenancy columns in the same statement; this fn owns only the
 /// full row insert so the tenancy clause lives in exactly one place.
+fn validate_document_metadata(title: &str, mime: Option<&str>) -> Result<()> {
+    anyhow::ensure!(
+        title.len() <= MAX_DOCUMENT_TITLE_BYTES,
+        "document title exceeds the {MAX_DOCUMENT_TITLE_BYTES}-byte limit"
+    );
+    if let Some(mime) = mime {
+        anyhow::ensure!(
+            mime.len() <= MAX_DOCUMENT_MIME_BYTES,
+            "document MIME type exceeds the {MAX_DOCUMENT_MIME_BYTES}-byte limit"
+        );
+    }
+    Ok(())
+}
+
 fn upsert_document_row(
     conn: &Connection,
     document_id: &str,
@@ -429,6 +586,7 @@ fn upsert_document_row(
     byte_size: Option<i64>,
     tenancy: &DocOwner,
 ) -> Result<()> {
+    validate_document_metadata(title, mime)?;
     let (owner_user_id, org_id) = tenancy.parts();
     conn.execute(
         "INSERT INTO documents
@@ -645,6 +803,17 @@ impl std::fmt::Display for RetrievalModeRebuildConflict {
 
 impl std::error::Error for RetrievalModeRebuildConflict {}
 
+#[derive(Debug)]
+struct RetrievalModeCancelled;
+
+impl std::fmt::Display for RetrievalModeCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("retrieval-mode rebuild cancelled")
+    }
+}
+
+impl std::error::Error for RetrievalModeCancelled {}
+
 /// Observable state for a retrieval-mode rebuild.
 ///
 /// `state = "cancelled"` means the transaction was rolled back. The progress
@@ -757,6 +926,9 @@ pub struct DocumentContent {
     pub created_at: i64,
     /// Unix milliseconds.
     pub updated_at: i64,
+    /// Monotonic content revision used by conditional saves and restores.
+    #[serde(default)]
+    pub revision: i64,
     pub chunk_count: i64,
     /// `"page"` (markdown) or `"database"` (data-grid JSON in `source`).
     pub kind: String,
@@ -765,6 +937,29 @@ pub struct DocumentContent {
     /// Optional Notion-style glyph (`GlyphValue` JSON). Null = kind default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<serde_json::Value>,
+}
+
+/// Stable-id snapshot used by Core's opt-in cross-device mirror. Binary files
+/// are intentionally excluded because their blob bytes need a separate transfer
+/// protocol; pages, databases, whiteboards, and app-owned JSON are supported.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentSyncRecord {
+    pub document: DocumentContent,
+    pub owner_user_id: Option<String>,
+}
+
+/// Space metadata carried alongside every synced document so a receiving node
+/// can recreate the collection before replaying its pages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpaceSyncRecord {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub retrieval_mode: String,
+    pub visibility: String,
+    pub team_id: Option<String>,
 }
 
 /// One app-owned document as returned to a full-page Companion app (grant
@@ -816,6 +1011,44 @@ pub struct FileMeta {
     pub created_at: i64,
 }
 
+/// One editable page or database produced by a Space import.
+///
+/// Imports can fan out, most notably a ZIP containing several files or a workbook
+/// containing several sheets. Keeping the result kind and title beside the id lets
+/// clients open every result without guessing from the requested destination.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpaceImportResultDocument {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+}
+
+/// Durable progress and provenance for one file or connected-app import.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpaceImportRecord {
+    pub id: String,
+    pub space_id: String,
+    /// `file` or `composio`.
+    pub source_type: String,
+    /// Filename for file imports, toolkit display name for connected apps.
+    pub source_name: String,
+    /// Lowercase extension for files, toolkit slug for connected apps.
+    pub source_format: String,
+    /// Requested destination while queued, then the actual result kind
+    /// (`page`, `database`, or `mixed`) when complete.
+    pub destination_kind: String,
+    /// `pending`, `running`, `completed`, or `failed`.
+    pub status: String,
+    pub result_documents: Vec<SpaceImportResultDocument>,
+    pub item_count: i64,
+    pub byte_size: i64,
+    /// A failure reason or a non-fatal completion note.
+    pub message: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub completed_at: Option<i64>,
+}
+
 /// Metadata for one saved version of a document (no `source`, so version lists
 /// stay light). The full snapshot is fetched per-version via `get_document_version`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -829,6 +1062,17 @@ pub struct DocumentVersionMeta {
     pub kind: String,
     /// Unix milliseconds.
     pub created_at: i64,
+    /// Last edit captured by an automatic group. Equals `created_at` for pins.
+    pub updated_at: i64,
+    /// `automatic`, `baseline`, `named`, `manual`, or `restore_guard`.
+    pub capture_type: String,
+    /// `exact`, `ten_minute`, `hour`, `day`, or `week`.
+    pub granularity: String,
+    /// Document revision represented by this checkpoint.
+    pub revision: i64,
+    /// Verified editor id when Core had one at the write boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
 }
 
 /// A full saved version of a document, including the captured `source`.
@@ -842,6 +1086,46 @@ pub struct DocumentVersion {
     pub kind: String,
     /// Unix milliseconds.
     pub created_at: i64,
+    pub updated_at: i64,
+    pub capture_type: String,
+    pub granularity: String,
+    pub revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentUpdateResult {
+    pub revision: i64,
+    pub updated_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    pub duplicate: bool,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DocumentUpdateOutcome {
+    Applied(DocumentUpdateResult),
+    Conflict { current_revision: i64 },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DocumentHistoryAction {
+    Automatic,
+    RestoreGuard,
+}
+
+struct DocumentHistoryHead {
+    chunk_count: i64,
+    kind: String,
+    mode: String,
+    revision: i64,
+    source: String,
+    space_id: String,
+    title: String,
+    updated_by: Option<String>,
 }
 
 /// An inter-document link (wiki `[[Title]]` or mention `[[@Title]]`). Used for the
@@ -966,29 +1250,36 @@ pub struct ChunkMatch {
 
 /// Extract entities from a text chunk using deterministic co-occurrence.
 ///
-/// Strategy: every normalized alphanumeric token of length ≥ 3 that starts with
+/// Strategy: every normalized alphanumeric token of at least three characters that starts with
 /// an uppercase letter (or, for the purposes of this local extractor, any token
 /// that the heuristic selects as "noun-like") is treated as an entity. The
 /// normalization step lowercases and trims so that "Alice" and "alice" map to the
 /// same node key, guaranteeing bridge-entity consistency across chunks.
 ///
-/// This is intentionally simple so the spike works offline with no model. A
-/// production deployment can swap in an LLM-based extractor by setting
-/// `RYU_GRAPH_EXTRACTION_MODEL` to a non-local id and wiring a remote call here.
+/// This is intentionally simple and offline. Graph fan-out is quadratic in the
+/// number of unique terms, so extraction stops at [`MAX_EXTRACTED_GRAPH_TERMS`].
+/// Unsupported configured extractor ids are rejected during store construction.
 fn extract_entities(text: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut entities = Vec::new();
     for token in text.split(|c: char| !c.is_alphanumeric()) {
-        if token.len() < 3 {
+        if token.len() > MAX_GRAPH_TERM_BYTES {
+            continue;
+        }
+        let character_count = token.chars().count();
+        if character_count < 3 {
             continue;
         }
         // Heuristic: starts with an uppercase letter OR is longer than 4 chars
         // (catches common nouns that might bridge chunks).
         let first_upper = token.chars().next().is_some_and(|c| c.is_uppercase());
-        if first_upper || token.len() > 4 {
+        if first_upper || character_count > 4 {
             let normalized = token.to_lowercase();
             if seen.insert(normalized.clone()) {
                 entities.push(normalized);
+                if entities.len() >= MAX_EXTRACTED_GRAPH_TERMS {
+                    break;
+                }
             }
         }
     }
@@ -1015,16 +1306,28 @@ fn seed_entities_above_floor(
     conn: &Connection,
     space_id: &str,
     entities: Vec<String>,
+    filter: &DocFilter<'_>,
 ) -> Result<Vec<String>> {
     // One entity: there is no rarer alternative to prefer, so the floor could only
     // turn a working query into an empty one. Skips two queries on the common path.
     if entities.len() < 2 {
         return Ok(entities);
     }
+    let total_sql = format!(
+        "SELECT COUNT(*) FROM chunks c
+         JOIN documents d ON d.id = c.document_id
+         WHERE c.space_id = :space_id AND {DOC_TENANCY_VISIBLE_PREDICATE}"
+    );
     let total_chunks: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM chunks WHERE space_id = ?1",
-            params![space_id],
+            &total_sql,
+            named_params! {
+                ":space_id": space_id,
+                ":bound": filter.bound_flag(),
+                ":uid": filter.owner_user_id,
+                ":org": filter.org_id,
+                ":teams": filter.team_ids_json.as_str(),
+            },
             |row| row.get(0),
         )
         .context("counting space chunks for the graph seed floor")?;
@@ -1033,16 +1336,30 @@ fn seed_entities_above_floor(
     }
     let cutoff = total_chunks as f64 * SEED_MAX_CHUNK_FRACTION;
 
+    let frequency_sql = format!(
+        "SELECT COUNT(DISTINCT n.chunk_id) FROM graph_nodes n
+         JOIN chunks c ON c.id = n.chunk_id
+         JOIN documents d ON d.id = c.document_id
+         WHERE n.space_id = :space_id AND n.entity = :entity
+           AND {DOC_TENANCY_VISIBLE_PREDICATE}"
+    );
     let mut stmt = conn
-        .prepare(
-            "SELECT COUNT(DISTINCT chunk_id) FROM graph_nodes
-             WHERE space_id = ?1 AND entity = ?2",
-        )
+        .prepare(&frequency_sql)
         .context("preparing seed-entity document frequency query")?;
     let mut kept = Vec::with_capacity(entities.len());
     for entity in &entities {
         let df: i64 = stmt
-            .query_row(params![space_id, entity], |row| row.get(0))
+            .query_row(
+                named_params! {
+                    ":space_id": space_id,
+                    ":entity": entity,
+                    ":bound": filter.bound_flag(),
+                    ":uid": filter.owner_user_id,
+                    ":org": filter.org_id,
+                    ":teams": filter.team_ids_json.as_str(),
+                },
+                |row| row.get(0),
+            )
             .context("reading seed-entity document frequency")?;
         if df > 0 && (df as f64) <= cutoff {
             kept.push(entity.clone());
@@ -1274,9 +1591,9 @@ pub struct SpaceStore {
     /// Current width of the `chunk_vectors` vec0 table. Equals the active
     /// embedder's dims; updated when a model change recreates the table.
     vec_dims: Arc<AtomicUsize>,
-    /// Graph extraction model id (from registry; informational — the local
-    /// extractor always runs offline; a remote id here is a future hook).
-    graph_extraction_model: String,
+    /// Validated graph extractor. Unsupported configured ids fail store creation,
+    /// so this value always names the algorithm that writes and queries graph rows.
+    graph_extraction_model: GraphExtractionModel,
     /// Neural reranker for Spaces RAG (the bge cross-encoder served by the
     /// lazily-started `llamacpp-rerank` server). `search` over-fetches candidates
     /// and re-scores them with this before truncating to the requested limit;
@@ -1307,6 +1624,7 @@ struct RetrievalModeInner {
     terminal_job_ids: VecDeque<String>,
     cancel: Option<Arc<AtomicBool>>,
     finalizing: bool,
+    direct_active: bool,
 }
 
 impl Default for RetrievalModeInner {
@@ -1316,6 +1634,21 @@ impl Default for RetrievalModeInner {
             terminal_job_ids: VecDeque::new(),
             cancel: None,
             finalizing: false,
+            direct_active: false,
+        }
+    }
+}
+
+/// Releases the direct/background retrieval-mode arbitration flag even if the
+/// awaiting caller is cancelled or the blocking task panics.
+struct DirectRetrievalModeGuard {
+    state: Arc<StdMutex<RetrievalModeInner>>,
+}
+
+impl Drop for DirectRetrievalModeGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.direct_active = false;
         }
     }
 }
@@ -1396,6 +1729,7 @@ impl SpaceStore {
         blob_root: PathBuf,
         backfill_owner: Option<(String, String)>,
     ) -> Result<Self> {
+        let graph_extraction_model = GraphExtractionModel::parse(&graph_extraction_model)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating db dir {}", parent.display()))?;
@@ -1437,7 +1771,7 @@ impl SpaceStore {
             conn: Arc::new(Mutex::new(conn)),
             embedder: Arc::new(Mutex::new(Embedder::Local { dims })),
             vec_dims: Arc::new(AtomicUsize::new(dims)),
-            graph_extraction_model: DEFAULT_GRAPH_EXTRACTION_MODEL.to_owned(),
+            graph_extraction_model: GraphExtractionModel::LocalCooccurrence,
             // Test helper: the local (server-backed, fail-open) reranker needs no
             // registry — mirrors `Embedder::Local` above.
             reranker: Reranker::Local,
@@ -1499,6 +1833,8 @@ impl SpaceStore {
              );
              CREATE INDEX IF NOT EXISTS idx_graph_nodes_space_entity
                  ON graph_nodes(space_id, entity);
+             CREATE INDEX IF NOT EXISTS idx_graph_nodes_space_entity_chunk
+                 ON graph_nodes(space_id, entity, chunk_id);
              CREATE INDEX IF NOT EXISTS idx_graph_nodes_chunk
                  ON graph_nodes(chunk_id);
              CREATE TABLE IF NOT EXISTS graph_edges (
@@ -1510,8 +1846,28 @@ impl SpaceStore {
              );
              CREATE INDEX IF NOT EXISTS idx_graph_edges_space_src
                  ON graph_edges(space_id, src_entity);
+             CREATE INDEX IF NOT EXISTS idx_graph_edges_space_src_dst
+                 ON graph_edges(space_id, src_entity, dst_entity);
              CREATE INDEX IF NOT EXISTS idx_graph_edges_space_dst
-                 ON graph_edges(space_id, dst_entity);",
+                 ON graph_edges(space_id, dst_entity);
+             CREATE TABLE IF NOT EXISTS space_imports (
+                 id                   TEXT PRIMARY KEY,
+                 space_id             TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+                 source_type          TEXT NOT NULL,
+                 source_name          TEXT NOT NULL,
+                 source_format        TEXT NOT NULL,
+                 destination_kind     TEXT NOT NULL,
+                 status               TEXT NOT NULL,
+                 result_documents     TEXT NOT NULL DEFAULT '[]',
+                 item_count           INTEGER NOT NULL DEFAULT 0,
+                 byte_size            INTEGER NOT NULL DEFAULT 0,
+                 message              TEXT,
+                 created_at           INTEGER NOT NULL,
+                 updated_at           INTEGER NOT NULL,
+                 completed_at         INTEGER
+             );
+             CREATE INDEX IF NOT EXISTS idx_space_imports_space_created
+                 ON space_imports(space_id, created_at DESC);",
         )
         .context("initializing spaces schema")?;
 
@@ -1600,12 +1956,9 @@ impl SpaceStore {
         )
         .context("initializing document_links schema")?;
 
-        // Page version history (Notion/Prompt-Studio-style snapshots). Each row is
-        // an immutable full copy of a document's `title` + `source` at snapshot
-        // time. Versions are created manually ("Save version") or captured
-        // automatically just before a restore so a restore is itself undoable.
-        // Rows are FK-less plain-text ids (like `document_links`); `delete_document`
-        // removes them explicitly. Oldest rows past a per-document cap are pruned.
+        // Page history keeps metadata in the legacy-compatible version ledger and
+        // stores new snapshot bodies once in a compressed, content-addressed blob.
+        // Existing inline `source` rows are backfilled below without changing ids.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS document_versions (
                  id          TEXT PRIMARY KEY,
@@ -1621,6 +1974,86 @@ impl SpaceStore {
                  ON document_versions(document_id, created_at DESC);",
         )
         .context("initializing document_versions schema")?;
+
+        let existing_version_columns: std::collections::HashSet<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(document_versions)")?;
+            let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            names.filter_map(|r| r.ok()).collect()
+        };
+        for (col, ddl) in [
+            ("blob_hash", "ALTER TABLE document_versions ADD COLUMN blob_hash TEXT"),
+            ("capture_type", "ALTER TABLE document_versions ADD COLUMN capture_type TEXT NOT NULL DEFAULT 'manual'"),
+            ("granularity", "ALTER TABLE document_versions ADD COLUMN granularity TEXT NOT NULL DEFAULT 'exact'"),
+            ("revision", "ALTER TABLE document_versions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0"),
+            ("updated_at", "ALTER TABLE document_versions ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0"),
+            ("created_by", "ALTER TABLE document_versions ADD COLUMN created_by TEXT"),
+            ("group_key", "ALTER TABLE document_versions ADD COLUMN group_key TEXT"),
+            ("pinned", "ALTER TABLE document_versions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 1"),
+        ] {
+            if !existing_version_columns.contains(col) {
+                conn.execute_batch(ddl)
+                    .with_context(|| format!("adding column {col} to document_versions"))?;
+            }
+        }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS document_version_blobs (
+                 hash TEXT PRIMARY KEY, codec TEXT NOT NULL, payload BLOB NOT NULL,
+                 raw_bytes INTEGER NOT NULL, stored_bytes INTEGER NOT NULL,
+                 created_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS document_version_operations (
+                 document_id TEXT NOT NULL, operation_id TEXT NOT NULL,
+                 revision INTEGER NOT NULL, version_id TEXT, changed INTEGER NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 PRIMARY KEY (document_id, operation_id)
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_document_versions_group
+                 ON document_versions(document_id, group_key)
+                 WHERE group_key IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS idx_document_version_operations_age
+                 ON document_version_operations(document_id, created_at DESC);",
+        )
+        .context("initializing document history v2 schema")?;
+
+        // Existing manual versions are pins. Backfill their inline sources into
+        // the blob table so every read and restore uses one codec from now on.
+        let legacy_versions: Vec<(String, String, String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, source, kind FROM document_versions
+                 WHERE blob_hash IS NULL",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.filter_map(std::result::Result::ok).collect()
+        };
+        for (id, title, source, kind) in legacy_versions {
+            let encoded = encode_snapshot(&SnapshotPayload {
+                kind,
+                source,
+                title,
+            })?;
+            conn.execute(
+                "INSERT OR IGNORE INTO document_version_blobs
+                     (hash, codec, payload, raw_bytes, stored_bytes, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    encoded.hash,
+                    SNAPSHOT_CODEC,
+                    encoded.payload,
+                    encoded.raw_bytes,
+                    encoded.stored_bytes,
+                    now_millis()
+                ],
+            )?;
+            conn.execute(
+                "UPDATE document_versions
+                 SET blob_hash = ?1,
+                     updated_at = CASE WHEN updated_at = 0 THEN created_at ELSE updated_at END
+                 WHERE id = ?2",
+                params![encoded.hash, id],
+            )?;
+        }
 
         // Multi-user tenancy (collaboration epic, Phase 0): the verified human
         // owner of the document, the org it belongs to, its sharing visibility,
@@ -1644,6 +2077,14 @@ impl SpaceStore {
                 "ALTER TABLE documents ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
             ),
             ("team_id", "ALTER TABLE documents ADD COLUMN team_id TEXT"),
+            (
+                "revision",
+                "ALTER TABLE documents ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "updated_by",
+                "ALTER TABLE documents ADD COLUMN updated_by TEXT",
+            ),
         ] {
             if !existing_doc_columns.contains(col) {
                 conn.execute_batch(ddl)
@@ -1857,6 +2298,66 @@ impl SpaceStore {
         Ok(id)
     }
 
+    /// Recreate or refresh a mirrored Space with its stable id. Metadata is
+    /// last-writer-wins by `updated_at`; tenancy stays first-writer-wins.
+    pub async fn apply_synced_space(
+        &self,
+        record: &SpaceSyncRecord,
+        tenancy: &DocOwner,
+    ) -> Result<bool> {
+        let mode = RetrievalMode::from_str(&record.retrieval_mode);
+        let visibility = match record.visibility.as_str() {
+            "org" => "org",
+            "team" => "team",
+            _ => "private",
+        };
+        let team_id = if visibility == "team" {
+            record.team_id.as_deref()
+        } else {
+            None
+        };
+        let conn = self.conn.lock().await;
+        let existing: Option<i64> = conn
+            .query_row(
+                "SELECT updated_at FROM spaces WHERE id = ?1",
+                params![record.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some_and(|updated_at| updated_at >= record.updated_at) {
+            return Ok(false);
+        }
+        upsert_space_row_with_visibility(
+            &conn,
+            &record.id,
+            &record.name,
+            record.description.as_deref(),
+            record.created_at,
+            mode.as_str(),
+            0,
+            tenancy,
+            visibility,
+            team_id,
+        )?;
+        conn.execute(
+            "UPDATE spaces
+             SET name = ?1, description = ?2, created_at = ?3, updated_at = ?4,
+                 retrieval_mode = ?5, visibility = ?6, team_id = ?7
+             WHERE id = ?8",
+            params![
+                record.name,
+                record.description,
+                record.created_at,
+                record.updated_at,
+                mode.as_str(),
+                visibility,
+                team_id,
+                record.id,
+            ],
+        )?;
+        Ok(true)
+    }
+
     /// List the Spaces the caller may READ, most-recently-updated first, with
     /// document counts. The `filter` is the SQL twin of `resource_access`
     /// ([`SPACE_TENANCY_VISIBLE_PREDICATE`]); pass [`DocFilter::unrestricted`] for
@@ -1866,7 +2367,8 @@ impl SpaceStore {
         let sql = format!(
             "SELECT s.id, s.name, s.description, s.created_at, s.updated_at,
                     (SELECT COUNT(*) FROM documents d
-                        WHERE d.space_id = s.id AND d.parent_id IS NULL),
+                        WHERE d.space_id = s.id AND d.parent_id IS NULL
+                          AND {DOC_TENANCY_VISIBLE_PREDICATE}),
                     s.retrieval_mode, s.system, s.icon, s.visibility, s.team_id
              FROM spaces s
              WHERE {SPACE_TENANCY_VISIBLE_PREDICATE}
@@ -1878,7 +2380,7 @@ impl SpaceStore {
                 ":bound": filter.bound_flag(),
                 ":uid": filter.owner_user_id,
                 ":org": filter.org_id,
-                ":team": filter.team_id,
+                ":teams": filter.team_ids_json.as_str(),
             },
             |row| {
                 let mode_str: String = row.get(6)?;
@@ -1931,7 +2433,7 @@ impl SpaceStore {
                 ":bound": filter.bound_flag(),
                 ":uid": filter.owner_user_id,
                 ":org": filter.org_id,
-                ":team": filter.team_id,
+                ":teams": filter.team_ids_json.as_str(),
             },
             |row| {
                 let icon_raw: Option<String> = row.get(10)?;
@@ -1950,6 +2452,92 @@ impl SpaceStore {
                 })
             },
         )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// List full source documents for a portable Space export.
+    ///
+    /// Binary files are intentionally excluded: their blobs are node-local and
+    /// are not part of the Markdown/OKF interchange contract. Unlike
+    /// list_documents, this includes database row pages so an export can
+    /// preserve the row-to-page relationship.
+    pub async fn list_document_contents_for_export(
+        &self,
+        space_id: &str,
+        filter: DocFilter<'_>,
+    ) -> Result<Vec<DocumentContent>> {
+        let conn = self.conn.lock().await;
+        let sql = format!(
+            "SELECT d.id, d.space_id, d.title, d.source, d.created_at, d.updated_at,
+                    (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id),
+                    d.kind, d.parent_id, d.icon, d.revision
+             FROM documents d
+             WHERE d.space_id = :space_id AND d.kind != 'file'
+               AND {DOC_TENANCY_VISIBLE_PREDICATE}
+             ORDER BY d.parent_id IS NOT NULL, d.created_at ASC, d.id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            named_params! {
+                ":space_id": space_id,
+                ":bound": filter.bound_flag(),
+                ":uid": filter.owner_user_id,
+                ":org": filter.org_id,
+                ":teams": filter.team_ids_json.as_str(),
+            },
+            |row| {
+                let icon_raw: Option<String> = row.get(9)?;
+                Ok(DocumentContent {
+                    id: row.get(0)?,
+                    space_id: row.get(1)?,
+                    title: row.get(2)?,
+                    source: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    revision: row.get(10)?,
+                    chunk_count: row.get(6)?,
+                    kind: row.get(7)?,
+                    parent_id: row.get(8)?,
+                    icon: icon_raw.and_then(|value| serde_json::from_str(&value).ok()),
+                })
+            },
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("listing Space source documents for export")
+    }
+
+    /// List every non-binary document for cross-device sync, including child pages.
+    pub async fn list_documents_for_sync(&self) -> Result<Vec<DocumentSyncRecord>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT d.id, d.space_id, d.title, d.source, d.created_at, d.updated_at,
+                    (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id),
+                    d.kind, d.parent_id, d.icon, d.revision, d.owner_user_id
+             FROM documents d WHERE d.kind != 'file' ORDER BY d.created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let icon_raw: Option<String> = row.get(9)?;
+            Ok(DocumentSyncRecord {
+                document: DocumentContent {
+                    id: row.get(0)?,
+                    space_id: row.get(1)?,
+                    title: row.get(2)?,
+                    source: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    revision: row.get(10)?,
+                    chunk_count: row.get(6)?,
+                    kind: row.get(7)?,
+                    parent_id: row.get(8)?,
+                    icon: icon_raw.and_then(|value| serde_json::from_str(&value).ok()),
+                },
+                owner_user_id: row.get(11)?,
+            })
+        })?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -1983,7 +2571,7 @@ impl SpaceStore {
         let mut seen = std::collections::HashSet::new();
         for term in terms {
             let term_matches = self
-                .search_documents_lexical_term(&term, limit, filter)
+                .search_documents_lexical_term(&term, limit, filter.clone())
                 .await?;
             for hit in term_matches {
                 if seen.insert(hit.document_id.clone()) {
@@ -2060,7 +2648,7 @@ impl SpaceStore {
                 ":bound": filter.bound_flag(),
                 ":uid": filter.owner_user_id,
                 ":org": filter.org_id,
-                ":team": filter.team_id,
+                ":teams": filter.team_ids_json.as_str(),
                 ":pattern": pattern,
                 ":term": term,
                 ":limit": limit as i64,
@@ -2128,7 +2716,27 @@ impl SpaceStore {
         content: &str,
         tenancy: &DocOwner,
     ) -> Result<String> {
+        validate_document_metadata(title, None)?;
         let chunks = chunk_text(content);
+        let mode = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT retrieval_mode FROM spaces WHERE id = ?1",
+                params![space_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("querying space retrieval_mode before ingest")?
+            .map(|value| RetrievalMode::from_str(&value))
+        }
+        .ok_or_else(|| anyhow::anyhow!("space '{space_id}' not found"))?;
+        if mode == RetrievalMode::Graph {
+            anyhow::ensure!(
+                chunks.len() <= MAX_GRAPH_CHUNKS_PER_DOCUMENT,
+                "document has {} chunks; graph mode supports at most {MAX_GRAPH_CHUNKS_PER_DOCUMENT} chunks per document",
+                chunks.len()
+            );
+        }
         // Embed outside the lock — the embedder may do network I/O.
         let emb = self.embedder_snapshot().await;
         let model_id = emb.model_id().to_string();
@@ -2144,12 +2752,14 @@ impl SpaceStore {
         // and the guard is taken as an *owned* one. Acquiring the lock HERE rather
         // than inside the closure keeps the wait asynchronous: callers queue on the
         // tokio mutex instead of occupying a blocking-pool thread while they wait.
-        let space_id = space_id.to_owned();
+        let history_space_id = space_id.to_owned();
+        let space_id = history_space_id.clone();
         let title = title.to_owned();
-        let content = content.to_owned();
+        let history_content = content.to_owned();
+        let content = history_content.clone();
         let tenancy = tenancy.clone();
         let guard = self.conn.clone().lock_owned().await;
-        tokio::task::spawn_blocking(move || {
+        let created_id = tokio::task::spawn_blocking(move || {
             Self::ingest_document_blocking(
                 guard,
                 &document_id,
@@ -2164,7 +2774,14 @@ impl SpaceStore {
             )
         })
         .await
-        .context("document ingest task panicked")?
+        .context("document ingest task panicked")??;
+        checkpoint_source_history_best_effort(
+            source_history_path(&created_id, "page", &history_space_id),
+            history_content,
+            Some("Document created".to_owned()),
+        )
+        .await;
+        Ok(created_id)
     }
 
     /// The blocking body of [`SpaceStore::ingest_document`]. Split out only so the
@@ -2271,6 +2888,142 @@ impl SpaceStore {
     /// Create an empty database (data-grid) document in a Space. Same lifecycle as
     /// a page — the editor fills its grid JSON in via `update_document`, which
     /// chunks + embeds the flattened cell text so the database stays searchable.
+    /// Import a source document without embedding it.
+    ///
+    /// Portable packages use this path so a package never has to ship
+    /// provider-specific vectors. A later save or the manual embedding re-index
+    /// path turns the source into searchable chunks on the target node.
+    pub async fn import_document(
+        &self,
+        space_id: &str,
+        title: &str,
+        source: &str,
+        kind: &str,
+        parent_id: Option<&str>,
+        tenancy: &DocOwner,
+    ) -> Result<String> {
+        anyhow::ensure!(
+            matches!(kind, "page" | "database"),
+            "portable documents support page and database kinds only"
+        );
+        validate_document_metadata(title, None)?;
+        let document_id = uuid::Uuid::new_v4().to_string();
+        let now = now_millis();
+        let conn = self.conn.lock().await;
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM spaces WHERE id = ?1",
+                params![space_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("verifying space exists")?;
+        if exists.is_none() {
+            anyhow::bail!("space '{space_id}' not found");
+        }
+        upsert_document_row(
+            &conn,
+            &document_id,
+            space_id,
+            title,
+            now,
+            source,
+            kind,
+            parent_id,
+            None,
+            None,
+            None,
+            tenancy,
+        )?;
+        conn.execute(
+            "UPDATE spaces SET updated_at = ?1 WHERE id = ?2",
+            params![now, space_id],
+        )
+        .context("bumping space updated_at")?;
+        reresolve_pending_links(&conn, space_id, &document_id, title)?;
+        store_doc_links(&conn, space_id, &document_id, source, now)?;
+        let history_path = source_history_path(&document_id, kind, space_id);
+        let history_source = source.to_owned();
+        drop(conn);
+        checkpoint_source_history_best_effort(
+            history_path,
+            history_source,
+            Some("Document imported".to_owned()),
+        )
+        .await;
+        Ok(document_id)
+    }
+
+    /// Replace the source of a document that has not been embedded yet.
+    ///
+    /// This is the second half of a portable database import: the database row
+    /// pages need their new local ids before the database source can point at
+    /// them. It refuses to overwrite an indexed document so it cannot silently
+    /// discard searchable content.
+    pub async fn replace_document_source_without_embedding(
+        &self,
+        doc_id: &str,
+        title: &str,
+        source: &str,
+    ) -> Result<bool> {
+        validate_document_metadata(title, None)?;
+        let now = now_millis();
+        let conn = self.conn.lock().await;
+        let chunk_count: Option<i64> = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE document_id = ?1",
+                params![doc_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("checking unindexed document")?;
+        let Some(chunk_count) = chunk_count else {
+            return Ok(false);
+        };
+        anyhow::ensure!(
+            chunk_count == 0,
+            "document {doc_id} is already indexed and cannot be replaced without embedding"
+        );
+        let Some((space_id, kind)) = conn
+            .query_row(
+                "SELECT space_id, kind FROM documents WHERE id = ?1",
+                params![doc_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .context("reading unindexed document space")?
+        else {
+            return Ok(false);
+        };
+        let updated = conn
+            .execute(
+                "UPDATE documents
+                 SET title = ?1, source = ?2, updated_at = ?3, revision = revision + 1
+                 WHERE id = ?4",
+                params![title, source, now, doc_id],
+            )
+            .context("replacing unindexed document source")?;
+        if updated == 0 {
+            return Ok(false);
+        }
+        conn.execute(
+            "UPDATE spaces SET updated_at = ?1 WHERE id = ?2",
+            params![now, space_id],
+        )
+        .context("bumping Space updated_at")?;
+        store_doc_links(&conn, &space_id, doc_id, source, now)?;
+        let history_path = source_history_path(doc_id, &kind, &space_id);
+        let history_source = source.to_owned();
+        drop(conn);
+        checkpoint_source_history_best_effort(
+            history_path,
+            history_source,
+            Some("Document imported".to_owned()),
+        )
+        .await;
+        Ok(true)
+    }
+
     pub async fn create_database(
         &self,
         space_id: &str,
@@ -2322,10 +3075,8 @@ impl SpaceStore {
         tenancy: &DocOwner,
     ) -> Result<String> {
         let kind = Self::app_kind(plugin_id);
-        // App-owned docs are created by the plugin bridge / migrations — no HTTP
-        // caller — so they attribute to the local owner on a bound node (else they
-        // would be stranded and vanish from `list_documents`). The Core-side shim
-        // resolves that owner (`spaces::background_owner`) and injects it here.
+        // The Core-side bridge injects the verified HTTP caller's owner when one is
+        // present, or the local background owner for hook and migration writers.
         self.create_document_of_kind(space_id, title, &kind, None, tenancy)
             .await
     }
@@ -2449,7 +3200,7 @@ impl SpaceStore {
                 ":bound": filter.bound_flag(),
                 ":uid": filter.owner_user_id,
                 ":org": filter.org_id,
-                ":team": filter.team_id,
+                ":teams": filter.team_ids_json.as_str(),
             },
             |row| {
                 Ok(AppSpaceUsage {
@@ -2488,7 +3239,7 @@ impl SpaceStore {
                     ":bound": filter.bound_flag(),
                     ":uid": filter.owner_user_id,
                     ":org": filter.org_id,
-                    ":team": filter.team_id,
+                    ":teams": filter.team_ids_json.as_str(),
                 },
                 |row| row.get::<_, String>(0),
             )?;
@@ -2549,6 +3300,14 @@ impl SpaceStore {
         .context("bumping space updated_at")?;
         // A new page may satisfy pending `[[Title]]` links from other documents.
         reresolve_pending_links(&conn, space_id, &document_id, title)?;
+        let history_path = source_history_path(&document_id, kind, space_id);
+        drop(conn);
+        checkpoint_source_history_best_effort(
+            history_path,
+            String::new(),
+            Some("Document created".to_owned()),
+        )
+        .await;
         Ok(document_id)
     }
 
@@ -2688,11 +3447,9 @@ impl SpaceStore {
     /// [`build_graph_for_chunks`], and it joins its three siblings on
     /// [`tokio::task::spawn_blocking`] for the same reason. "It is only one chunk" is
     /// true but is not a bound: the descriptor is never split by [`chunk_text`], and
-    /// `title` is caller-supplied with no length cap at any HTTP or MCP entry point,
-    /// so its entity count — and therefore the `n·(n−1)` edge fan-out — is bounded by
-    /// nothing this crate controls. That hazard already existed on the rebuild path
-    /// (which scans this same row); what changes here is only that the *cheap* path
-    /// no longer differs from it.
+    /// `title` is caller-supplied, so this method validates title and MIME byte caps
+    /// before writing the blob or embedding the descriptor. The extractor also caps
+    /// term bytes/count, bounding the descriptor's graph fan-out.
     pub async fn create_file(
         &self,
         space_id: &str,
@@ -2701,6 +3458,7 @@ impl SpaceStore {
         mime: &str,
         tenancy: &DocOwner,
     ) -> Result<String> {
+        validate_document_metadata(title, Some(mime))?;
         // Persist the bytes first (content-addressed, deduped). Done outside the
         // db lock — filesystem I/O should not hold the sqlite mutex.
         let sha = write_blob(&self.blob_root, bytes)?;
@@ -2743,6 +3501,194 @@ impl SpaceStore {
         })
         .await
         .context("file insert task panicked")?
+    }
+
+    /// Put source bytes in the content-addressed blob store for a conversion job.
+    ///
+    /// No document row is created. The caller schedules this synchronous disk write
+    /// on a blocking thread, then passes the returned address to Core's
+    /// `document.parse` facade. Content addressing makes retries idempotent and lets
+    /// parser sidecars read the same allowlisted blob path as ordinary Space files.
+    pub fn stage_import_blob(&self, bytes: &[u8]) -> Result<String> {
+        write_blob(&self.blob_root, bytes)
+    }
+
+    /// Create the durable history row before an import worker is spawned.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_import_record(
+        &self,
+        space_id: &str,
+        source_type: &str,
+        source_name: &str,
+        source_format: &str,
+        destination_kind: &str,
+        byte_size: i64,
+    ) -> Result<SpaceImportRecord> {
+        let id = format!("import_{}", uuid::Uuid::new_v4().simple());
+        let now = now_millis();
+        let conn = self.conn.lock().await;
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM spaces WHERE id = ?1)",
+            params![space_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            anyhow::bail!("space '{space_id}' not found");
+        }
+        conn.execute(
+            "INSERT INTO space_imports
+                (id, space_id, source_type, source_name, source_format,
+                 destination_kind, status, result_documents, item_count,
+                 byte_size, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', '[]', 0, ?7, ?8, ?8)",
+            params![
+                id,
+                space_id,
+                source_type,
+                source_name,
+                source_format,
+                destination_kind,
+                byte_size,
+                now,
+            ],
+        )
+        .context("creating space import record")?;
+        Ok(SpaceImportRecord {
+            id,
+            space_id: space_id.to_owned(),
+            source_type: source_type.to_owned(),
+            source_name: source_name.to_owned(),
+            source_format: source_format.to_owned(),
+            destination_kind: destination_kind.to_owned(),
+            status: "pending".to_owned(),
+            result_documents: Vec::new(),
+            item_count: 0,
+            byte_size,
+            message: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        })
+    }
+
+    /// Mark a queued import as owned by a live worker.
+    pub async fn start_import(&self, import_id: &str) -> Result<()> {
+        let now = now_millis();
+        let conn = self.conn.lock().await;
+        let claimed = conn
+            .execute(
+                "UPDATE space_imports SET status = 'running', updated_at = ?1
+             WHERE id = ?2 AND status = 'pending'",
+                params![now, import_id],
+            )
+            .context("starting space import")?;
+        if claimed != 1 {
+            anyhow::bail!("import '{import_id}' is not pending");
+        }
+        Ok(())
+    }
+
+    /// Finish an import and atomically publish all result documents to history.
+    pub async fn complete_import(
+        &self,
+        import_id: &str,
+        destination_kind: &str,
+        documents: &[SpaceImportResultDocument],
+        item_count: i64,
+        message: Option<&str>,
+    ) -> Result<()> {
+        let now = now_millis();
+        let encoded = serde_json::to_string(documents).context("encoding import results")?;
+        let conn = self.conn.lock().await;
+        let completed = conn
+            .execute(
+                "UPDATE space_imports
+             SET status = 'completed', destination_kind = ?1,
+                 result_documents = ?2, item_count = ?3, message = ?4,
+                 updated_at = ?5, completed_at = ?5
+             WHERE id = ?6 AND status = 'running'",
+                params![
+                    destination_kind,
+                    encoded,
+                    item_count.max(0),
+                    message,
+                    now,
+                    import_id,
+                ],
+            )
+            .context("completing space import")?;
+        if completed != 1 {
+            anyhow::bail!("import '{import_id}' is not running");
+        }
+        Ok(())
+    }
+
+    /// Record a terminal import failure without erasing its provenance.
+    pub async fn fail_import(&self, import_id: &str, message: &str) -> Result<()> {
+        let now = now_millis();
+        let conn = self.conn.lock().await;
+        let failed = conn
+            .execute(
+                "UPDATE space_imports
+             SET status = 'failed', message = ?1, updated_at = ?2, completed_at = ?2
+             WHERE id = ?3 AND status IN ('pending', 'running')",
+                params![message, now, import_id],
+            )
+            .context("failing space import")?;
+        if failed != 1 {
+            anyhow::bail!("import '{import_id}' is not pending or running");
+        }
+        Ok(())
+    }
+
+    /// List a Space's newest imports. Authorization is enforced against the parent
+    /// Space by the HTTP layer, so the store only applies the parent id and a cap.
+    pub async fn list_imports(
+        &self,
+        space_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SpaceImportRecord>> {
+        let conn = self.conn.lock().await;
+        let now = now_millis();
+        conn.execute(
+            "UPDATE space_imports
+             SET status = 'failed', message = 'Core restarted before this import finished',
+                 updated_at = ?1, completed_at = ?1
+             WHERE space_id = ?2 AND status IN ('pending', 'running') AND updated_at < ?3",
+            params![now, space_id, now - 10 * 60 * 1000],
+        )
+        .context("expiring abandoned space imports")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, space_id, source_type, source_name, source_format,
+                    destination_kind, status, result_documents, item_count,
+                    byte_size, message, created_at, updated_at, completed_at
+             FROM space_imports
+             WHERE space_id = ?1
+             ORDER BY created_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![space_id, limit.clamp(1, 200) as i64], |row| {
+            let encoded: String = row.get(7)?;
+            let result_documents = serde_json::from_str(&encoded).unwrap_or_default();
+            Ok(SpaceImportRecord {
+                id: row.get(0)?,
+                space_id: row.get(1)?,
+                source_type: row.get(2)?,
+                source_name: row.get(3)?,
+                source_format: row.get(4)?,
+                destination_kind: row.get(5)?,
+                status: row.get(6)?,
+                result_documents,
+                item_count: row.get(8)?,
+                byte_size: row.get(9)?,
+                message: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+                completed_at: row.get(13)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("listing space imports")
     }
 
     /// The blocking body of [`SpaceStore::create_file`]. Split out only so the
@@ -2816,6 +3762,133 @@ impl SpaceStore {
         .context("bumping space updated_at")?;
         tx.commit().context("committing file insert")?;
         Ok(document_id.to_owned())
+    }
+
+    /// Replace a file document's bytes and reset its searchable content to the new
+    /// `{title}\n{mime}` descriptor in one transaction.
+    ///
+    /// The content-addressed blob is written before the database lock is taken. The
+    /// row pointer, MIME, byte size, descriptor and chunk/vector/graph rows then move
+    /// together, so an editor save can never expose new bytes with text extracted
+    /// from the previous revision. Core may replace the descriptor chunks again after
+    /// its document parser finishes.
+    pub async fn replace_file_blob(
+        &self,
+        doc_id: &str,
+        bytes: &[u8],
+        mime: &str,
+    ) -> Result<FileMeta> {
+        let sha = write_blob(&self.blob_root, bytes)?;
+        let byte_size = bytes.len() as i64;
+
+        // Resolve the title before embedding, then verify the same row again inside
+        // the write transaction. A concurrent delete/update therefore fails cleanly
+        // instead of creating a detached chunk set.
+        let current = self
+            .get_file_meta(doc_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("file document '{doc_id}' not found"))?;
+        let descriptor = format!("{}\n{mime}", current.title);
+        let emb = self.embedder_snapshot().await;
+        let model_id = emb.model_id().to_string();
+        let dims = emb.dims();
+        let vector = emb.embed(&descriptor).await?;
+
+        let doc_id = doc_id.to_owned();
+        let mime = mime.to_owned();
+        let title = current.title;
+        let now = now_millis();
+        let mut guard = self.conn.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            let conn = &mut *guard;
+            let tx = conn
+                .transaction()
+                .context("starting file blob replacement")?;
+            let row: Option<(String, String, String, i64, String)> = tx
+                .query_row(
+                    "SELECT d.space_id, d.kind, s.retrieval_mode, d.created_at, d.title
+                     FROM documents d JOIN spaces s ON s.id = d.space_id
+                     WHERE d.id = ?1",
+                    params![doc_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .context("resolving file for blob replacement")?;
+            let (space_id, kind, mode_str, created_at, current_title) =
+                row.ok_or_else(|| anyhow::anyhow!("document '{doc_id}' not found"))?;
+            if kind != "file" {
+                anyhow::bail!("document '{doc_id}' is kind '{kind}', not 'file'");
+            }
+            if current_title != title {
+                anyhow::bail!(
+                    "file document '{doc_id}' changed while its replacement was prepared"
+                );
+            }
+
+            tx.execute(
+                "DELETE FROM chunk_vectors WHERE rowid IN
+                     (SELECT rowid FROM chunks WHERE document_id = ?1)",
+                params![doc_id],
+            )
+            .context("deleting old file chunk vectors")?;
+            tx.execute(
+                "DELETE FROM graph_nodes WHERE chunk_id IN
+                     (SELECT id FROM chunks WHERE document_id = ?1)",
+                params![doc_id],
+            )?;
+            tx.execute(
+                "DELETE FROM graph_edges WHERE chunk_id IN
+                     (SELECT id FROM chunks WHERE document_id = ?1)",
+                params![doc_id],
+            )?;
+            tx.execute("DELETE FROM chunks WHERE document_id = ?1", params![doc_id])
+                .context("deleting old file chunks")?;
+
+            tx.execute(
+                "UPDATE documents
+                 SET mime = ?1, blob_sha256 = ?2, byte_size = ?3,
+                     source = ?4, updated_at = ?5
+                 WHERE id = ?6",
+                params![mime, sha, byte_size, descriptor, now, doc_id],
+            )
+            .context("updating file blob pointer")?;
+            insert_chunks(
+                &tx,
+                &doc_id,
+                &space_id,
+                &[(descriptor, vector)],
+                now,
+                &model_id,
+                dims,
+                RetrievalMode::from_str(&mode_str),
+            )?;
+            tx.execute(
+                "UPDATE spaces SET updated_at = ?1 WHERE id = ?2",
+                params![now, space_id],
+            )
+            .context("bumping space updated_at")?;
+            tx.commit().context("committing file blob replacement")?;
+
+            Ok(FileMeta {
+                id: doc_id,
+                space_id,
+                title,
+                mime,
+                sha256: sha,
+                byte_size,
+                created_at,
+            })
+        })
+        .await
+        .context("file blob replacement task panicked")?
     }
 
     /// Replace a **file** document's chunk set from extracted text, leaving every
@@ -3147,7 +4220,7 @@ impl SpaceStore {
             .query_row(
                 "SELECT d.id, d.space_id, d.title, d.source, d.created_at, d.updated_at,
                         (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id),
-                        d.kind, d.parent_id, d.icon
+                        d.kind, d.parent_id, d.icon, d.revision
                  FROM documents d WHERE d.id = ?1",
                 params![doc_id],
                 |row| {
@@ -3159,6 +4232,7 @@ impl SpaceStore {
                         source: row.get(3)?,
                         created_at: row.get(4)?,
                         updated_at: row.get(5)?,
+                        revision: row.get(10)?,
                         chunk_count: row.get(6)?,
                         kind: row.get(7)?,
                         parent_id: row.get(8)?,
@@ -3264,9 +4338,7 @@ impl SpaceStore {
                 .optional()
                 .context("reading current space visibility")?;
             if matches!(current.as_deref(), Some("org" | "team")) && !admin_authorized {
-                anyhow::bail!(
-                    "only organization admins can make shared spaces private"
-                );
+                anyhow::bail!("only organization admins can make shared spaces private");
             }
         }
         let updated = conn
@@ -3343,6 +4415,26 @@ impl SpaceStore {
         space_id: &str,
         mode: RetrievalMode,
     ) -> Result<Option<RetrievalModeChange>> {
+        // Direct and background changes share one arbitration domain. Without this
+        // flag a staged Graph rebuild could overwrite a later direct Vector change
+        // during finalization.
+        let _direct_guard = {
+            let mut state = self
+                .retrieval_mode
+                .lock()
+                .expect("retrieval-mode state mutex poisoned");
+            let background_active = state
+                .statuses
+                .values()
+                .any(|status| matches!(status.state.as_str(), "running" | "cancelling"));
+            if state.direct_active || background_active {
+                return Err(RetrievalModeRebuildConflict.into());
+            }
+            state.direct_active = true;
+            DirectRetrievalModeGuard {
+                state: self.retrieval_mode.clone(),
+            }
+        };
         // `spawn_blocking` demands `'static`, so the borrowed id is cloned and the
         // guard is taken as an *owned* one. Acquiring the lock here rather than
         // inside the closure keeps the wait itself asynchronous: callers queue on
@@ -3401,10 +4493,19 @@ impl SpaceStore {
             )? as usize;
             (previous, total)
         };
-        progress(0, 0, 0, total_chunks);
+        progress(
+            0,
+            0,
+            0,
+            if mode == RetrievalMode::Graph {
+                total_chunks
+            } else {
+                0
+            },
+        );
         if mode == RetrievalMode::Vector {
             if !prepare_finalization() {
-                anyhow::bail!("retrieval-mode rebuild cancelled");
+                return Err(RetrievalModeCancelled.into());
             }
             let mut conn = store.conn.blocking_lock();
             return Self::set_retrieval_mode_blocking_with_control(
@@ -3477,6 +4578,10 @@ impl SpaceStore {
             processed += rows.len();
             nodes += batch_nodes;
             edges += batch_edges;
+            anyhow::ensure!(
+                nodes.saturating_add(edges) <= MAX_GRAPH_ROWS_PER_SPACE,
+                "graph row budget exceeded; a Space supports at most {MAX_GRAPH_ROWS_PER_SPACE} term and co-occurrence rows"
+            );
             last_rowid = rows
                 .last()
                 .map(|(rowid, _, _)| *rowid)
@@ -3486,12 +4591,14 @@ impl SpaceStore {
         if should_cancel() {
             let conn = store.conn.blocking_lock();
             cleanup_retrieval_staging(&conn)?;
-            anyhow::bail!("retrieval-mode rebuild cancelled");
+            return Err(RetrievalModeCancelled.into());
         }
 
         let fingerprint = format!("{:x}", fingerprint.finalize());
         if !prepare_finalization() {
-            anyhow::bail!("retrieval-mode rebuild cancelled");
+            let conn = store.conn.blocking_lock();
+            cleanup_retrieval_staging(&conn)?;
+            return Err(RetrievalModeCancelled.into());
         }
         let mut conn = store.conn.blocking_lock();
         let result = finalize_chunked_retrieval_mode(
@@ -3546,6 +4653,9 @@ impl SpaceStore {
                 .retrieval_mode
                 .lock()
                 .expect("retrieval-mode state mutex poisoned");
+            if state.direct_active {
+                return Err(RetrievalModeRebuildConflict.into());
+            }
             if let Some(current) = state
                 .statuses
                 .values()
@@ -3616,7 +4726,7 @@ impl SpaceStore {
                 .context("retrieval-mode rebuild task panicked")?
             }
             .await;
-            store.finish_retrieval_mode_job(&job_id, cancel.load(Ordering::SeqCst), result);
+            store.finish_retrieval_mode_job(&job_id, result);
         });
         Ok(Some(job))
     }
@@ -3651,7 +4761,13 @@ impl SpaceStore {
         let Some(status) = state.statuses.get_mut(job_id) else {
             return false;
         };
-        if status.space_id != space_id || status.job_id != job_id || status.state != "running" {
+        if status.space_id != space_id || status.job_id != job_id {
+            return false;
+        }
+        if status.state == "cancelling" {
+            return true;
+        }
+        if status.state != "running" {
             return false;
         }
         status.state = "cancelling".to_owned();
@@ -3704,12 +4820,7 @@ impl SpaceStore {
         }
     }
 
-    fn finish_retrieval_mode_job(
-        &self,
-        job_id: &str,
-        cancel_requested: bool,
-        result: Result<Option<RetrievalModeChange>>,
-    ) {
+    fn finish_retrieval_mode_job(&self, job_id: &str, result: Result<Option<RetrievalModeChange>>) {
         let mut state = self
             .retrieval_mode
             .lock()
@@ -3731,7 +4842,7 @@ impl SpaceStore {
                 status.state = "failed".to_owned();
                 status.error = Some("space not found".to_owned());
             }
-            Err(_error) if cancel_requested => {
+            Err(error) if error.downcast_ref::<RetrievalModeCancelled>().is_some() => {
                 status.state = "cancelled".to_owned();
             }
             Err(error) => {
@@ -3775,7 +4886,7 @@ impl SpaceStore {
         let previous = RetrievalMode::from_str(&previous);
 
         if should_cancel() {
-            anyhow::bail!("retrieval-mode rebuild cancelled")
+            return Err(RetrievalModeCancelled.into());
         }
 
         tx.execute(
@@ -3834,7 +4945,7 @@ impl SpaceStore {
         }
 
         if should_cancel() {
-            anyhow::bail!("retrieval-mode rebuild cancelled")
+            return Err(RetrievalModeCancelled.into());
         }
 
         tx.commit().context("committing retrieval-mode change")?;
@@ -3890,10 +5001,221 @@ impl SpaceStore {
         Ok(true)
     }
 
+    /// Apply a stable-id document snapshot from the opt-in cross-device mirror.
+    /// The timestamp comparison and replacement happen in one transaction, so a
+    /// local edit that lands while embedding is in flight cannot be overwritten by
+    /// an older remote snapshot.
+    pub async fn apply_synced_document(
+        &self,
+        record: &DocumentSyncRecord,
+        tenancy: &DocOwner,
+    ) -> Result<bool> {
+        let document = &record.document;
+        if document.kind == "file" {
+            anyhow::bail!("binary file documents require the blob transfer protocol")
+        }
+        let chunk_source = match document.kind.as_str() {
+            "database" => flatten_database_source(&document.source),
+            "whiteboard" => flatten_whiteboard_source(&document.source),
+            kind if kind.starts_with("app:") => flatten_app_source(&document.source),
+            _ => document.source.clone(),
+        };
+        let chunks = chunk_text(&chunk_source);
+        let emb = self.embedder_snapshot().await;
+        let model_id = emb.model_id().to_string();
+        let dims = emb.dims();
+        let mut embedded: Vec<(String, Vec<f32>)> = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            embedded.push((chunk.clone(), emb.embed(chunk).await?));
+        }
+
+        let record = record.clone();
+        let tenancy = tenancy.clone();
+        let icon = record
+            .document
+            .icon
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let guard = self.conn.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            Self::apply_synced_document_blocking(
+                guard,
+                &record,
+                &tenancy,
+                icon.as_deref(),
+                &model_id,
+                dims,
+                &embedded,
+            )
+        })
+        .await
+        .context("synced document apply task panicked")?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_synced_document_blocking(
+        mut guard: tokio::sync::OwnedMutexGuard<Connection>,
+        record: &DocumentSyncRecord,
+        tenancy: &DocOwner,
+        icon: Option<&str>,
+        model_id: &str,
+        dims: usize,
+        embedded: &[(String, Vec<f32>)],
+    ) -> Result<bool> {
+        let document = &record.document;
+        let conn = &mut *guard;
+        let tx = conn
+            .transaction()
+            .context("starting synced document transaction")?;
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT updated_at FROM documents WHERE id = ?1",
+                params![document.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some_and(|updated_at| updated_at >= document.updated_at) {
+            return Ok(false);
+        }
+
+        upsert_document_row(
+            &tx,
+            &document.id,
+            &document.space_id,
+            &document.title,
+            document.created_at,
+            &document.source,
+            &document.kind,
+            document.parent_id.as_deref(),
+            None,
+            None,
+            None,
+            tenancy,
+        )?;
+        let mode_str: String = tx.query_row(
+            "SELECT retrieval_mode FROM spaces WHERE id = ?1",
+            params![document.space_id],
+            |row| row.get(0),
+        )?;
+        let mode = RetrievalMode::from_str(&mode_str);
+
+        tx.execute(
+            "DELETE FROM chunk_vectors WHERE rowid IN
+                 (SELECT rowid FROM chunks WHERE document_id = ?1)",
+            params![document.id],
+        )?;
+        tx.execute(
+            "DELETE FROM graph_nodes WHERE chunk_id IN
+                 (SELECT id FROM chunks WHERE document_id = ?1)",
+            params![document.id],
+        )?;
+        tx.execute(
+            "DELETE FROM graph_edges WHERE chunk_id IN
+                 (SELECT id FROM chunks WHERE document_id = ?1)",
+            params![document.id],
+        )?;
+        tx.execute(
+            "DELETE FROM chunks WHERE document_id = ?1",
+            params![document.id],
+        )?;
+        insert_chunks(
+            &tx,
+            &document.id,
+            &document.space_id,
+            embedded,
+            document.updated_at,
+            model_id,
+            dims,
+            mode,
+        )?;
+        tx.execute(
+            "UPDATE documents
+             SET space_id = ?1, title = ?2, source = ?3, created_at = ?4,
+                 updated_at = ?5, kind = ?6, parent_id = ?7, icon = ?8
+             WHERE id = ?9",
+            params![
+                document.space_id,
+                document.title,
+                document.source,
+                document.created_at,
+                document.updated_at,
+                document.kind,
+                document.parent_id,
+                icon,
+                document.id,
+            ],
+        )?;
+        tx.execute(
+            "UPDATE spaces SET updated_at = MAX(updated_at, ?1) WHERE id = ?2",
+            params![document.updated_at, document.space_id],
+        )?;
+        store_doc_links(
+            &tx,
+            &document.space_id,
+            &document.id,
+            &document.source,
+            document.updated_at,
+        )?;
+        tx.execute(
+            "UPDATE document_links SET dst_doc_id = NULL
+             WHERE dst_doc_id = ?1 AND dst_title != ?2 COLLATE NOCASE",
+            params![document.id, document.title],
+        )?;
+        reresolve_pending_links(&tx, &document.space_id, &document.id, &document.title)?;
+        tx.commit().context("committing synced document")?;
+        Ok(true)
+    }
+
     /// Save an edited page: replace the document's chunks + vectors (+ graph) from
     /// the new markdown `source`, re-embedding with the current model. This is the
     /// embed-on-save path; the desktop debounces calls to it.
     pub async fn update_document(&self, doc_id: &str, title: &str, source: &str) -> Result<()> {
+        match self
+            .update_document_versioned(doc_id, title, source, None, None, None)
+            .await?
+        {
+            DocumentUpdateOutcome::Applied(_) => Ok(()),
+            DocumentUpdateOutcome::Conflict { current_revision } => Err(anyhow::anyhow!(
+                "document revision conflict at {current_revision}"
+            )),
+        }
+    }
+
+    /// Revision-aware, retry-safe document update. A missing expected revision is
+    /// the compatibility path for older clients; new clients should always send it.
+    pub async fn update_document_versioned(
+        &self,
+        doc_id: &str,
+        title: &str,
+        source: &str,
+        expected_revision: Option<i64>,
+        operation_id: Option<&str>,
+        created_by: Option<&str>,
+    ) -> Result<DocumentUpdateOutcome> {
+        self.update_document_with_history(
+            doc_id,
+            title,
+            source,
+            expected_revision,
+            operation_id,
+            created_by,
+            DocumentHistoryAction::Automatic,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_document_with_history(
+        &self,
+        doc_id: &str,
+        title: &str,
+        source: &str,
+        expected_revision: Option<i64>,
+        operation_id: Option<&str>,
+        created_by: Option<&str>,
+        history_action: DocumentHistoryAction,
+    ) -> Result<DocumentUpdateOutcome> {
         // A database document stores grid JSON in `source`; embed a flattened
         // text rendering of it (column labels + cell values) so it stays
         // searchable like a page. The stored `source` remains the raw JSON.
@@ -3936,14 +5258,46 @@ impl SpaceStore {
         let doc_id = doc_id.to_owned();
         let title = title.to_owned();
         let source = source.to_owned();
+        let history_source = source.clone();
+        let blocking_doc_id = doc_id.clone();
+        let operation_id = operation_id.map(str::to_owned);
+        let created_by = created_by.map(str::to_owned);
         let guard = self.conn.clone().lock_owned().await;
-        tokio::task::spawn_blocking(move || {
+        let outcome = tokio::task::spawn_blocking(move || {
             Self::update_document_blocking(
-                guard, &doc_id, &title, &source, now, &model_id, dims, &embedded,
+                guard,
+                &blocking_doc_id,
+                &title,
+                &source,
+                now,
+                &model_id,
+                dims,
+                &embedded,
+                expected_revision,
+                operation_id.as_deref(),
+                created_by.as_deref(),
+                history_action,
             )
         })
         .await
-        .context("document update task panicked")?
+        .context("document update task panicked")??;
+        if let DocumentUpdateOutcome::Applied(result) = &outcome {
+            if result.changed && matches!(history_action, DocumentHistoryAction::Automatic) {
+                if let Some(document) = self.get_document(&doc_id).await? {
+                    let label = match history_action {
+                        DocumentHistoryAction::Automatic => "Document saved",
+                        DocumentHistoryAction::RestoreGuard => "Document restored",
+                    };
+                    checkpoint_source_history_best_effort(
+                        source_history_path(&document.id, &document.kind, &document.space_id),
+                        history_source,
+                        Some(label.to_owned()),
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(outcome)
     }
 
     /// The blocking body of [`SpaceStore::update_document`]. Split out only so the
@@ -3960,23 +5314,97 @@ impl SpaceStore {
         model_id: &str,
         dims: usize,
         embedded: &[(String, Vec<f32>)],
-    ) -> Result<()> {
+        expected_revision: Option<i64>,
+        operation_id: Option<&str>,
+        created_by: Option<&str>,
+        history_action: DocumentHistoryAction,
+    ) -> Result<DocumentUpdateOutcome> {
         let conn = &mut *guard;
         let tx = conn.transaction().context("starting update transaction")?;
 
-        // Resolve the document's space + retrieval mode (and prove it exists).
-        let row: Option<(String, String)> = tx
+        if let Some(operation_id) = operation_id {
+            let receipt: Option<(i64, Option<String>, bool)> = tx
+                .query_row(
+                    "SELECT revision, version_id, changed
+                     FROM document_version_operations
+                     WHERE document_id = ?1 AND operation_id = ?2",
+                    params![doc_id, operation_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+                )
+                .optional()
+                .context("reading document write receipt")?;
+            if let Some((revision, version_id, changed)) = receipt {
+                let updated_at = tx.query_row(
+                    "SELECT updated_at FROM documents WHERE id = ?1",
+                    params![doc_id],
+                    |row| row.get(0),
+                )?;
+                return Ok(DocumentUpdateOutcome::Applied(DocumentUpdateResult {
+                    revision,
+                    updated_at,
+                    version_id,
+                    duplicate: true,
+                    changed,
+                }));
+            }
+        }
+
+        // Resolve the current state inside the same transaction that will replace
+        // it. The revision check happens here, after embeddings were prepared.
+        let row: Option<DocumentHistoryHead> = tx
             .query_row(
-                "SELECT d.space_id, s.retrieval_mode
+                "SELECT d.space_id, s.retrieval_mode, d.title, d.source, d.kind,
+                        d.revision, d.updated_by,
+                        (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id)
                  FROM documents d JOIN spaces s ON s.id = d.space_id
                  WHERE d.id = ?1",
                 params![doc_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| {
+                    Ok(DocumentHistoryHead {
+                        chunk_count: row.get(7)?,
+                        space_id: row.get(0)?,
+                        mode: row.get(1)?,
+                        title: row.get(2)?,
+                        source: row.get(3)?,
+                        kind: row.get(4)?,
+                        revision: row.get(5)?,
+                        updated_by: row.get(6)?,
+                    })
+                },
             )
             .optional()
             .context("resolving document space")?;
-        let (space_id, mode_str) =
-            row.ok_or_else(|| anyhow::anyhow!("document '{doc_id}' not found"))?;
+        let DocumentHistoryHead {
+            chunk_count,
+            kind,
+            mode: mode_str,
+            revision: current_revision,
+            source: old_source,
+            space_id,
+            title: old_title,
+            updated_by: old_updated_by,
+        } = row.ok_or_else(|| anyhow::anyhow!("document '{doc_id}' not found"))?;
+        if expected_revision.is_some_and(|expected| expected != current_revision) {
+            return Ok(DocumentUpdateOutcome::Conflict { current_revision });
+        }
+        if old_title == title && old_source == source && chunk_count > 0 {
+            if let Some(operation_id) = operation_id {
+                tx.execute(
+                    "INSERT INTO document_version_operations
+                         (document_id, operation_id, revision, version_id, changed, created_at)
+                     VALUES (?1, ?2, ?3, NULL, 0, ?4)",
+                    params![doc_id, operation_id, current_revision, now],
+                )?;
+            }
+            tx.commit().context("committing no-op document update")?;
+            return Ok(DocumentUpdateOutcome::Applied(DocumentUpdateResult {
+                revision: current_revision,
+                updated_at: now,
+                version_id: None,
+                duplicate: false,
+                changed: false,
+            }));
+        }
         let mode = RetrievalMode::from_str(&mode_str);
 
         // Drop the document's old chunks, vectors, and graph rows.
@@ -4001,9 +5429,13 @@ impl SpaceStore {
 
         insert_chunks(&tx, doc_id, &space_id, embedded, now, model_id, dims, mode)?;
 
+        let new_revision = current_revision.saturating_add(1);
         tx.execute(
-            "UPDATE documents SET title = ?1, source = ?2, updated_at = ?3 WHERE id = ?4",
-            params![title, source, now, doc_id],
+            "UPDATE documents
+             SET title = ?1, source = ?2, updated_at = ?3, revision = ?4,
+                 updated_by = COALESCE(?5, updated_by)
+             WHERE id = ?6",
+            params![title, source, now, new_revision, created_by, doc_id],
         )
         .context("updating document")?;
         tx.execute(
@@ -4024,116 +5456,670 @@ impl SpaceStore {
         .context("unresolving stale inbound links on rename")?;
         reresolve_pending_links(&tx, &space_id, doc_id, title)?;
 
+        let version_id = match history_action {
+            DocumentHistoryAction::Automatic => Self::capture_automatic_version(
+                &tx,
+                doc_id,
+                &space_id,
+                &old_title,
+                &old_source,
+                &kind,
+                current_revision,
+                old_updated_by.as_deref(),
+                title,
+                source,
+                new_revision,
+                created_by,
+                now,
+            )?,
+            DocumentHistoryAction::RestoreGuard => Some(Self::insert_history_version(
+                &tx,
+                doc_id,
+                &space_id,
+                &SnapshotPayload {
+                    kind: kind.clone(),
+                    source: old_source.clone(),
+                    title: old_title.clone(),
+                },
+                Some("Before restore"),
+                "restore_guard",
+                "exact",
+                current_revision,
+                old_updated_by.as_deref(),
+                None,
+                true,
+                now,
+            )?),
+        };
+        Self::prune_document_history(&tx, doc_id, &space_id, now)?;
+        if let Some(operation_id) = operation_id {
+            tx.execute(
+                "INSERT INTO document_version_operations
+                     (document_id, operation_id, revision, version_id, changed, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+                params![doc_id, operation_id, new_revision, version_id, now],
+            )
+            .context("recording document write receipt")?;
+            Self::prune_document_operation_receipts(&tx, doc_id, now)?;
+        }
+
         tx.commit().context("committing update transaction")?;
+        Ok(DocumentUpdateOutcome::Applied(DocumentUpdateResult {
+            revision: new_revision,
+            updated_at: now,
+            version_id,
+            duplicate: false,
+            changed: true,
+        }))
+    }
+
+    fn insert_history_blob(
+        tx: &rusqlite::Transaction<'_>,
+        snapshot: &SnapshotPayload,
+        now: i64,
+    ) -> Result<String> {
+        let encoded = encode_snapshot(snapshot)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO document_version_blobs
+                 (hash, codec, payload, raw_bytes, stored_bytes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                encoded.hash,
+                SNAPSHOT_CODEC,
+                encoded.payload,
+                encoded.raw_bytes,
+                encoded.stored_bytes,
+                now
+            ],
+        )
+        .context("storing document history blob")?;
+        Ok(encoded.hash)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_history_version(
+        tx: &rusqlite::Transaction<'_>,
+        document_id: &str,
+        space_id: &str,
+        snapshot: &SnapshotPayload,
+        label: Option<&str>,
+        capture_type: &str,
+        granularity: &str,
+        revision: i64,
+        created_by: Option<&str>,
+        group_key: Option<&str>,
+        pinned: bool,
+        now: i64,
+    ) -> Result<String> {
+        let version_id = format!("dv_{}", uuid::Uuid::new_v4());
+        let blob_hash = Self::insert_history_blob(tx, snapshot, now)?;
+        tx.execute(
+            "INSERT INTO document_versions
+                 (id, document_id, space_id, title, source, label, kind, created_at,
+                  blob_hash, capture_type, granularity, revision, updated_at,
+                  created_by, group_key, pinned)
+             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                     ?7, ?12, ?13, ?14)",
+            params![
+                version_id,
+                document_id,
+                space_id,
+                snapshot.title,
+                label,
+                snapshot.kind,
+                now,
+                blob_hash,
+                capture_type,
+                granularity,
+                revision,
+                created_by,
+                group_key,
+                i64::from(pinned)
+            ],
+        )
+        .context("inserting document history version")?;
+        Ok(version_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn capture_automatic_version(
+        tx: &rusqlite::Transaction<'_>,
+        document_id: &str,
+        space_id: &str,
+        old_title: &str,
+        old_source: &str,
+        kind: &str,
+        old_revision: i64,
+        old_updated_by: Option<&str>,
+        new_title: &str,
+        new_source: &str,
+        new_revision: i64,
+        created_by: Option<&str>,
+        now: i64,
+    ) -> Result<Option<String>> {
+        let has_baseline: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM document_versions
+                 WHERE document_id = ?1 AND capture_type = 'baseline'
+             )",
+            params![document_id],
+            |row| row.get(0),
+        )?;
+        if !has_baseline {
+            Self::insert_history_version(
+                tx,
+                document_id,
+                space_id,
+                &SnapshotPayload {
+                    kind: kind.to_owned(),
+                    source: old_source.to_owned(),
+                    title: old_title.to_owned(),
+                },
+                None,
+                "baseline",
+                "exact",
+                old_revision,
+                old_updated_by,
+                None,
+                true,
+                now,
+            )?;
+        }
+
+        let group_key = format!("auto:{}", now.div_euclid(AUTO_BUCKET_MS));
+        let snapshot = SnapshotPayload {
+            kind: kind.to_owned(),
+            source: new_source.to_owned(),
+            title: new_title.to_owned(),
+        };
+        let blob_hash = Self::insert_history_blob(tx, &snapshot, now)?;
+        let existing_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM document_versions
+                 WHERE document_id = ?1 AND group_key = ?2",
+                params![document_id, group_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(version_id) = existing_id {
+            tx.execute(
+                "UPDATE document_versions
+                 SET title = ?1, blob_hash = ?2, revision = ?3, updated_at = ?4,
+                     created_by = ?5, granularity = 'ten_minute'
+                 WHERE id = ?6",
+                params![
+                    new_title,
+                    blob_hash,
+                    new_revision,
+                    now,
+                    created_by,
+                    version_id
+                ],
+            )?;
+            Ok(Some(version_id))
+        } else {
+            Self::insert_history_version(
+                tx,
+                document_id,
+                space_id,
+                &snapshot,
+                None,
+                "automatic",
+                "ten_minute",
+                new_revision,
+                created_by,
+                Some(&group_key),
+                false,
+                now,
+            )
+            .map(Some)
+        }
+    }
+
+    fn prune_document_history(
+        tx: &rusqlite::Transaction<'_>,
+        document_id: &str,
+        space_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        let candidates: Vec<RetentionCandidate> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, updated_at FROM document_versions
+                 WHERE document_id = ?1 AND capture_type = 'automatic' AND pinned = 0
+                 ORDER BY updated_at DESC, id DESC",
+            )?;
+            let rows = stmt.query_map(params![document_id], |row| {
+                Ok(RetentionCandidate {
+                    id: row.get(0)?,
+                    updated_at: row.get(1)?,
+                })
+            })?;
+            rows.filter_map(std::result::Result::ok).collect()
+        };
+        let plan = plan_automatic_retention(now, &candidates);
+        for (id, granularity) in plan.granularity_updates {
+            tx.execute(
+                "UPDATE document_versions SET granularity = ?1 WHERE id = ?2",
+                params![granularity, id],
+            )?;
+        }
+        for id in plan.delete_ids {
+            tx.execute("DELETE FROM document_versions WHERE id = ?1", params![id])?;
+        }
+
+        loop {
+            let bytes: i64 = tx.query_row(
+                "SELECT COALESCE(SUM(b.stored_bytes), 0)
+                 FROM document_version_blobs b
+                 WHERE EXISTS (
+                     SELECT 1 FROM document_versions v
+                     WHERE v.space_id = ?1 AND v.blob_hash = b.hash
+                 )",
+                params![space_id],
+                |row| row.get(0),
+            )?;
+            if bytes <= MAX_HISTORY_BYTES_PER_SPACE {
+                break;
+            }
+            let oldest_automatic: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM document_versions
+                     WHERE space_id = ?1 AND capture_type = 'automatic' AND pinned = 0
+                     ORDER BY updated_at ASC, id ASC LIMIT 1",
+                    params![space_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(id) = oldest_automatic else {
+                break;
+            };
+            tx.execute("DELETE FROM document_versions WHERE id = ?1", params![id])?;
+            Self::delete_orphaned_history_blobs(tx)?;
+        }
+        Self::delete_orphaned_history_blobs(tx)
+    }
+
+    fn delete_orphaned_history_blobs(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+        tx.execute(
+            "DELETE FROM document_version_blobs
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM document_versions v WHERE v.blob_hash = hash
+             )",
+            [],
+        )
+        .context("collecting unreferenced document history blobs")?;
         Ok(())
     }
 
-    /// Maximum retained versions per document. Oldest beyond this are pruned on
-    /// each new snapshot so history stays bounded (mirrors Prompt Studio's cap).
-    const MAX_DOC_VERSIONS: usize = 50;
+    fn prune_document_operation_receipts(
+        tx: &rusqlite::Transaction<'_>,
+        document_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        const RECEIPT_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+        const MAX_RECEIPTS_PER_DOCUMENT: i64 = 1_000;
+        tx.execute(
+            "DELETE FROM document_version_operations
+             WHERE document_id = ?1 AND created_at < ?2",
+            params![document_id, now.saturating_sub(RECEIPT_RETENTION_MS)],
+        )?;
+        tx.execute(
+            "DELETE FROM document_version_operations
+             WHERE document_id = ?1 AND operation_id NOT IN (
+                 SELECT operation_id FROM document_version_operations
+                 WHERE document_id = ?1
+                 ORDER BY created_at DESC, operation_id DESC LIMIT ?2
+             )",
+            params![document_id, MAX_RECEIPTS_PER_DOCUMENT],
+        )?;
+        Ok(())
+    }
 
-    /// Capture the document's current `title`/`source`/`kind` as an immutable
-    /// version row and return its metadata. Prunes the oldest rows past
-    /// [`Self::MAX_DOC_VERSIONS`]. Errors if the document does not exist.
+    /// Capture the current state as a pinned manual or named version.
     pub async fn snapshot_document(
         &self,
         doc_id: &str,
         label: Option<&str>,
     ) -> Result<DocumentVersionMeta> {
-        let now = now_millis();
-        let version_id = format!("dv_{}", uuid::Uuid::new_v4());
-        let conn = self.conn.lock().await;
+        self.snapshot_document_as(doc_id, label, None).await
+    }
 
-        let (space_id, title, source, kind): (String, String, String, String) = conn
-            .query_row(
-                "SELECT space_id, title, source, kind FROM documents WHERE id = ?1",
+    pub async fn snapshot_document_as(
+        &self,
+        doc_id: &str,
+        label: Option<&str>,
+        created_by: Option<&str>,
+    ) -> Result<DocumentVersionMeta> {
+        let (space_id, title, source, kind, revision): (String, String, String, String, i64) = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT space_id, title, source, kind, revision
+                 FROM documents WHERE id = ?1",
                 params![doc_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()
             .context("reading document for snapshot")?
-            .ok_or_else(|| anyhow::anyhow!("document '{doc_id}' not found"))?;
-
-        conn.execute(
-            "INSERT INTO document_versions
-                 (id, document_id, space_id, title, source, label, kind, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![version_id, doc_id, space_id, title, source, label, kind, now],
+            .ok_or_else(|| anyhow::anyhow!("document '{doc_id}' not found"))?
+        };
+        let version = checkpoint_source_history(
+            source_history_path(doc_id, &kind, &space_id),
+            source,
+            label.map(str::to_owned),
         )
-        .context("inserting document version")?;
-
-        // Prune oldest rows beyond the cap for this document.
-        conn.execute(
-            "DELETE FROM document_versions
-             WHERE document_id = ?1 AND id NOT IN (
-                 SELECT id FROM document_versions
-                 WHERE document_id = ?1
-                 ORDER BY created_at DESC, id DESC
-                 LIMIT ?2
-             )",
-            params![doc_id, Self::MAX_DOC_VERSIONS as i64],
-        )
-        .context("pruning old document versions")?;
+        .await?;
 
         Ok(DocumentVersionMeta {
-            id: version_id,
+            id: version.id,
             document_id: doc_id.to_string(),
             title,
-            label: label.map(str::to_string),
+            label: version.label,
             kind,
-            created_at: now,
+            created_at: version.created_at,
+            updated_at: version.created_at,
+            capture_type: "manual".to_owned(),
+            granularity: "exact".to_owned(),
+            revision,
+            created_by: created_by.map(str::to_owned),
         })
     }
 
     /// List a document's saved versions, newest first (metadata only).
     pub async fn list_document_versions(&self, doc_id: &str) -> Result<Vec<DocumentVersionMeta>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, document_id, title, label, kind, created_at
-                 FROM document_versions
-                 WHERE document_id = ?1
-                 ORDER BY created_at DESC, id DESC",
+        let current: Option<(String, String, String, i64)> = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT space_id, title, kind, revision FROM documents WHERE id = ?1",
+                params![doc_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
-            .context("preparing version list")?;
-        let rows = stmt
-            .query_map(params![doc_id], |row| {
-                Ok(DocumentVersionMeta {
-                    id: row.get(0)?,
-                    document_id: row.get(1)?,
-                    title: row.get(2)?,
-                    label: row.get(3)?,
-                    kind: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
+            .optional()
+            .context("reading document for version list")?
+        };
+        let Some((space_id, current_title, kind, revision)) = current else {
+            return Ok(Vec::new());
+        };
+        let path = source_history_path(doc_id, &kind, &space_id);
+        let mut versions = list_source_history(path.clone(), None)
+            .await?
+            .into_iter()
+            .map(|version| DocumentVersionMeta {
+                id: version.id,
+                document_id: doc_id.to_owned(),
+                title: current_title.clone(),
+                label: version.label,
+                kind: kind.clone(),
+                created_at: version.created_at,
+                updated_at: version.created_at,
+                capture_type: "git".to_owned(),
+                granularity: "exact".to_owned(),
+                revision,
+                created_by: None,
             })
-            .context("querying document versions")?;
-        Ok(rows.filter_map(std::result::Result::ok).collect())
+            .collect::<Vec<_>>();
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, document_id, title, label, kind, created_at,
+                    updated_at, capture_type, granularity, revision, created_by
+             FROM document_versions
+             WHERE document_id = ?1
+             ORDER BY updated_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![doc_id], |row| {
+            Ok(DocumentVersionMeta {
+                id: row.get(0)?,
+                document_id: row.get(1)?,
+                title: row.get(2)?,
+                label: row.get(3)?,
+                kind: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+                capture_type: row.get(7)?,
+                granularity: row.get(8)?,
+                revision: row.get(9)?,
+                created_by: row.get(10)?,
+            })
+        })?;
+        let legacy = rows.filter_map(std::result::Result::ok).collect::<Vec<_>>();
+        if versions.is_empty() {
+            // Pre-Git documents keep their complete legacy history as a
+            // compatibility fallback.
+            versions.extend(legacy);
+        } else {
+            // Once a document has Git checkpoints, SQLite snapshots remain the
+            // multiplayer/conflict primitive but are not duplicated in the
+            // user-facing history list.
+            let _ = legacy;
+        }
+        versions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        Ok(versions)
     }
 
     /// Fetch one saved version in full (including its captured `source`).
     pub async fn get_document_version(&self, version_id: &str) -> Result<Option<DocumentVersion>> {
         let conn = self.conn.lock().await;
-        let ver = conn
+        let row = conn
             .query_row(
-                "SELECT id, document_id, title, source, label, kind, created_at
+                "SELECT id, document_id, title, source, label, kind, created_at,
+                        updated_at, capture_type, granularity, revision, created_by,
+                        blob_hash
                  FROM document_versions WHERE id = ?1",
                 params![version_id],
                 |row| {
-                    Ok(DocumentVersion {
-                        id: row.get(0)?,
-                        document_id: row.get(1)?,
-                        title: row.get(2)?,
-                        source: row.get(3)?,
-                        label: row.get(4)?,
-                        kind: row.get(5)?,
-                        created_at: row.get(6)?,
-                    })
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, Option<String>>(11)?,
+                        row.get::<_, Option<String>>(12)?,
+                    ))
                 },
             )
             .optional()
             .context("reading document version")?;
-        Ok(ver)
+        let Some((
+            id,
+            document_id,
+            title,
+            legacy_source,
+            label,
+            kind,
+            created_at,
+            updated_at,
+            capture_type,
+            granularity,
+            revision,
+            created_by,
+            blob_hash,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let source = if let Some(blob_hash) = blob_hash {
+            let (codec, payload): (String, Vec<u8>) = conn
+                .query_row(
+                    "SELECT codec, payload FROM document_version_blobs WHERE hash = ?1",
+                    params![blob_hash],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .context("reading document history blob")?;
+            decode_snapshot(&codec, &payload)?.source
+        } else {
+            legacy_source
+        };
+        Ok(Some(DocumentVersion {
+            id,
+            document_id,
+            title,
+            source,
+            label,
+            kind,
+            created_at,
+            updated_at,
+            capture_type,
+            granularity,
+            revision,
+            created_by,
+        }))
+    }
+
+    /// Fetch a Git-backed source checkpoint for a known document. The document id
+    /// is part of the path because a Git commit hash alone does not identify which
+    /// source file the caller intends to read.
+    pub async fn get_source_history_version(
+        &self,
+        doc_id: &str,
+        version_id: &str,
+    ) -> Result<Option<DocumentVersion>> {
+        if !is_git_version_id(version_id) {
+            return Ok(None);
+        }
+        let current: Option<(String, String, String, String, i64)> = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT id, space_id, title, kind, revision
+                 FROM documents WHERE id = ?1",
+                params![doc_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("reading document for Git history")?
+        };
+        let Some((document_id, space_id, title, kind, revision)) = current else {
+            return Ok(None);
+        };
+        let path = source_history_path(doc_id, &kind, &space_id);
+        let Some(source) = read_source_history(path.clone(), version_id.to_owned()).await? else {
+            return Ok(None);
+        };
+        let metadata = list_source_history(path, Some(1000))
+            .await?
+            .into_iter()
+            .find(|version| version.id == version_id);
+        let Some(metadata) = metadata else {
+            return Ok(None);
+        };
+        Ok(Some(DocumentVersion {
+            id: version_id.to_owned(),
+            document_id,
+            title,
+            source,
+            label: metadata.label,
+            kind,
+            created_at: metadata.created_at,
+            updated_at: metadata.created_at,
+            capture_type: "git".to_owned(),
+            granularity: "exact".to_owned(),
+            revision,
+            created_by: None,
+        }))
+    }
+
+    /// Restore a saved version as a new document head. The existing SQLite update
+    /// remains the concurrency/receipt boundary; Git checkpoints before and after
+    /// the update make the source restore visible in the user-facing history.
+    pub async fn restore_document_version_versioned(
+        &self,
+        doc_id: &str,
+        version_id: &str,
+        expected_revision: i64,
+        operation_id: &str,
+        created_by: Option<&str>,
+    ) -> Result<DocumentUpdateOutcome> {
+        let version = match self.get_document_version(version_id).await? {
+            Some(version) if version.document_id == doc_id => version,
+            _ => self
+                .get_source_history_version(doc_id, version_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("version not found"))?,
+        };
+        let (space_id, kind) = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT space_id, kind FROM documents WHERE id = ?1",
+                params![doc_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .context("reading document for Git restore")?
+            .ok_or_else(|| anyhow::anyhow!("document '{doc_id}' not found"))?
+        };
+        let duplicate = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM document_version_operations
+                     WHERE document_id = ?1 AND operation_id = ?2
+                 )",
+                params![doc_id, operation_id],
+                |row| row.get::<_, bool>(0),
+            )?
+        };
+        if duplicate {
+            return self
+                .update_document_with_history(
+                    doc_id,
+                    version.title.trim(),
+                    &version.source,
+                    Some(expected_revision),
+                    Some(operation_id),
+                    created_by,
+                    DocumentHistoryAction::RestoreGuard,
+                )
+                .await;
+        }
+        if let Some(current) = self.get_document(doc_id).await? {
+            checkpoint_source_history(
+                source_history_path(doc_id, &kind, &space_id),
+                current.source,
+                Some("Before restore".to_owned()),
+            )
+            .await?;
+        }
+        let outcome = self
+            .update_document_with_history(
+                doc_id,
+                version.title.trim(),
+                &version.source,
+                Some(expected_revision),
+                Some(operation_id),
+                created_by,
+                DocumentHistoryAction::RestoreGuard,
+            )
+            .await?;
+        if let DocumentUpdateOutcome::Applied(_) = &outcome {
+            checkpoint_source_history_best_effort(
+                source_history_path(doc_id, &kind, &space_id),
+                version.source.clone(),
+                Some("Restore document version".to_owned()),
+            )
+            .await;
+        }
+        Ok(outcome)
     }
 
     /// Delete a document and all its chunks/vectors/graph rows. If the document
@@ -4193,7 +6179,13 @@ impl SpaceStore {
                 params![id],
             )
             .context("deleting document versions")?;
+            tx.execute(
+                "DELETE FROM document_version_operations WHERE document_id = ?1",
+                params![id],
+            )
+            .context("deleting document write receipts")?;
         }
+        Self::delete_orphaned_history_blobs(&tx)?;
 
         tx.commit().context("committing delete transaction")?;
         Ok(removed > 0)
@@ -4239,12 +6231,19 @@ impl SpaceStore {
         // re-score. Capped so we never balloon the KNN/graph query.
         const RERANK_FANOUT: usize = 4;
         const RERANK_MAX_CANDIDATES: usize = 50;
-        let candidate_limit = limit
+        let requested_limit = limit.min(RERANK_MAX_CANDIDATES);
+        let candidate_limit = requested_limit
             .saturating_mul(RERANK_FANOUT)
-            .clamp(limit, RERANK_MAX_CANDIDATES);
+            .clamp(requested_limit, RERANK_MAX_CANDIDATES);
         let mut candidates = match mode {
-            RetrievalMode::Vector => self.vector_search(space_id, query, candidate_limit).await?,
-            RetrievalMode::Graph => self.graph_search(space_id, query, candidate_limit).await?,
+            RetrievalMode::Vector => {
+                self.vector_search(space_id, query, candidate_limit, &filter)
+                    .await?
+            }
+            RetrievalMode::Graph => {
+                self.graph_search(space_id, query, candidate_limit, &filter)
+                    .await?
+            }
         };
 
         // Wiki GraphRAG: expand seed hits along resolved `[[page]]` links so the
@@ -4261,15 +6260,27 @@ impl SpaceStore {
                 }
             }
             match self
-                .expand_by_links(space_id, &seed_doc_ids, LINK_HOPS, LINK_PER_DOC_CHUNKS)
+                .expand_by_links(
+                    space_id,
+                    &seed_doc_ids,
+                    LINK_HOPS,
+                    LINK_PER_DOC_CHUNKS,
+                    MAX_LINK_EXPANDED_DOCUMENTS,
+                    MAX_LINK_EXPANDED_CHUNKS
+                        .min(RERANK_MAX_CANDIDATES.saturating_sub(candidates.len())),
+                    &filter,
+                )
                 .await
             {
                 Ok(extra) => {
-                    let existing: std::collections::HashSet<String> =
+                    let mut existing: std::collections::HashSet<String> =
                         candidates.iter().map(|c| c.chunk_id.clone()).collect();
                     for c in extra {
-                        if !existing.contains(&c.chunk_id) {
+                        if existing.insert(c.chunk_id.clone()) {
                             candidates.push(c);
+                            if candidates.len() >= RERANK_MAX_CANDIDATES {
+                                break;
+                            }
                         }
                     }
                 }
@@ -4277,46 +6288,7 @@ impl SpaceStore {
             }
         }
 
-        // Per-resource tenancy: drop any candidate whose document the caller may not
-        // READ. On an unbound node (`filter` unrestricted → `bound = 0`) this loads
-        // every doc id and retains everything, so the path is byte-identical.
-        if !candidates.is_empty() {
-            let visible = self.visible_document_ids(space_id, filter).await?;
-            candidates.retain(|c| visible.contains(&c.document_id));
-        }
-
         Ok(self.apply_reranking(query, candidates, limit).await)
-    }
-
-    /// The ids of every document in `space_id` the caller may READ, using
-    /// [`DOC_TENANCY_VISIBLE_PREDICATE`]. Backs the search post-filter so RAG never
-    /// returns a chunk from a document the caller cannot open.
-    async fn visible_document_ids(
-        &self,
-        space_id: &str,
-        filter: DocFilter<'_>,
-    ) -> Result<std::collections::HashSet<String>> {
-        let conn = self.conn.lock().await;
-        let sql = format!(
-            "SELECT d.id FROM documents d
-             WHERE d.space_id = :space_id AND {DOC_TENANCY_VISIBLE_PREDICATE}"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            named_params! {
-                ":space_id": space_id,
-                ":bound": filter.bound_flag(),
-                ":uid": filter.owner_user_id,
-                ":org": filter.org_id,
-                ":team": filter.team_id,
-            },
-            |row| row.get::<_, String>(0),
-        )?;
-        let mut out = std::collections::HashSet::new();
-        for row in rows {
-            out.insert(row?);
-        }
-        Ok(out)
     }
 
     /// Re-score retrieval `candidates` with the neural reranker and truncate to
@@ -4380,6 +6352,7 @@ impl SpaceStore {
         space_id: &str,
         query: &str,
         limit: usize,
+        filter: &DocFilter<'_>,
     ) -> Result<Vec<ChunkMatch>> {
         let emb = self.embedder_snapshot().await;
         // A caller can temporarily install a new embedder before its reindex has
@@ -4397,19 +6370,39 @@ impl SpaceStore {
         // different embedding model lives in an incomparable space, so matching it
         // would yield meaningless distances. Stale chunks are excluded until a
         // re-index re-embeds them (see `reindex_all`).
-        let mut stmt = conn.prepare(
+        let visible_predicate = DOC_TENANCY_VISIBLE_PREDICATE.replace("d.", "visible_document.");
+        let sql = format!(
             "SELECT c.id, c.document_id, c.content, v.distance
              FROM chunk_vectors v
              JOIN chunks c ON c.rowid = v.rowid
-             WHERE v.embedding MATCH ?1
-               AND k = ?2
-               AND c.space_id = ?3
-               AND c.embed_model = ?4
-               AND c.embed_dims = ?5
-             ORDER BY v.distance",
-        )?;
+             WHERE v.embedding MATCH :embedding
+               AND k = :limit
+               AND v.rowid IN (
+                   SELECT visible_chunk.rowid
+                   FROM chunks visible_chunk
+                   JOIN documents visible_document
+                     ON visible_document.id = visible_chunk.document_id
+                   WHERE visible_chunk.space_id = :space_id
+                     AND {visible_predicate}
+               )
+               AND c.space_id = :space_id
+               AND c.embed_model = :model_id
+               AND c.embed_dims = :dims
+             ORDER BY v.distance"
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(
-            params![bytes, limit as i64, space_id, model_id, emb.dims() as i64],
+            named_params! {
+                ":embedding": bytes,
+                ":limit": limit as i64,
+                ":space_id": space_id,
+                ":model_id": model_id,
+                ":dims": emb.dims() as i64,
+                ":bound": filter.bound_flag(),
+                ":uid": filter.owner_user_id,
+                ":org": filter.org_id,
+                ":teams": filter.team_ids_json.as_str(),
+            },
             |row| {
                 Ok(ChunkMatch {
                     chunk_id: row.get(0)?,
@@ -4503,6 +6496,7 @@ impl SpaceStore {
         space_id: &str,
         query: &str,
         limit: usize,
+        filter: &DocFilter<'_>,
     ) -> Result<Vec<ChunkMatch>> {
         let query_entities = extract_entities(query);
         if query_entities.is_empty() || limit == 0 {
@@ -4510,22 +6504,30 @@ impl SpaceStore {
         }
 
         let conn = self.conn.lock().await;
-        let query_entities = seed_entities_above_floor(&conn, space_id, query_entities)?;
+        let query_entities = seed_entities_above_floor(&conn, space_id, query_entities, filter)?;
 
         // Prepared once for the whole traversal. These used to be re-prepared per
         // entity per hop, i.e. `2 × Σ frontier` SQL parses for one search.
-        let mut chunk_stmt = conn.prepare(
+        let chunk_sql = format!(
             "SELECT DISTINCT n.chunk_id
              FROM graph_nodes n
-             WHERE n.space_id = ?1 AND n.entity = ?2
-             ORDER BY n.chunk_id",
-        )?;
-        let mut edge_stmt = conn.prepare(
+             JOIN chunks c ON c.id = n.chunk_id
+             JOIN documents d ON d.id = c.document_id
+             WHERE n.space_id = :space_id AND n.entity = :entity
+               AND {DOC_TENANCY_VISIBLE_PREDICATE}
+             ORDER BY n.chunk_id LIMIT :limit"
+        );
+        let edge_sql = format!(
             "SELECT DISTINCT e.dst_entity
              FROM graph_edges e
-             WHERE e.space_id = ?1 AND e.src_entity = ?2
-             ORDER BY e.dst_entity",
-        )?;
+             JOIN chunks c ON c.id = e.chunk_id
+             JOIN documents d ON d.id = c.document_id
+             WHERE e.space_id = :space_id AND e.src_entity = :entity
+               AND {DOC_TENANCY_VISIBLE_PREDICATE}
+             ORDER BY e.dst_entity LIMIT :limit"
+        );
+        let mut chunk_stmt = conn.prepare(&chunk_sql)?;
+        let mut edge_stmt = conn.prepare(&edge_sql)?;
 
         // Seed: find chunks that directly contain a query entity.
         let mut visited_chunks = LinkedHashSet::<String>::new();
@@ -4539,16 +6541,28 @@ impl SpaceStore {
             }
         }
 
-        let max_hops = 3usize;
-        'hops: for _ in 0..max_hops {
+        // Processing the seed frontier is distance zero. Include one iteration for
+        // each of the three edge traversals promised by the public contract.
+        let max_edge_hops = 3usize;
+        'hops: for _ in 0..=max_edge_hops {
             if frontier.is_empty() || visited_chunks.len() >= limit {
                 break;
             }
             let mut next_frontier: Vec<String> = Vec::new();
             // For each frontier entity, collect the chunks it appears in.
             for entity in &frontier {
-                let chunk_rows = chunk_stmt
-                    .query_map(params![space_id, entity], |row| row.get::<_, String>(0))?;
+                let chunk_rows = chunk_stmt.query_map(
+                    named_params! {
+                        ":space_id": space_id,
+                        ":entity": entity,
+                        ":limit": limit as i64,
+                        ":bound": filter.bound_flag(),
+                        ":uid": filter.owner_user_id,
+                        ":org": filter.org_id,
+                        ":teams": filter.team_ids_json.as_str(),
+                    },
+                    |row| row.get::<_, String>(0),
+                )?;
                 for row in chunk_rows {
                     visited_chunks.insert(row?);
                     // Stop the moment the caller's budget is met: any further
@@ -4562,8 +6576,18 @@ impl SpaceStore {
                 if next_frontier.len() >= MAX_FRONTIER_ENTITIES {
                     continue;
                 }
-                let edge_rows = edge_stmt
-                    .query_map(params![space_id, entity], |row| row.get::<_, String>(0))?;
+                let edge_rows = edge_stmt.query_map(
+                    named_params! {
+                        ":space_id": space_id,
+                        ":entity": entity,
+                        ":limit": MAX_FRONTIER_ENTITIES as i64,
+                        ":bound": filter.bound_flag(),
+                        ":uid": filter.owner_user_id,
+                        ":org": filter.org_id,
+                        ":teams": filter.team_ids_json.as_str(),
+                    },
+                    |row| row.get::<_, String>(0),
+                )?;
                 for row in edge_rows {
                     let neighbour = row?;
                     if expanded.insert(neighbour.clone()) {
@@ -4705,7 +6729,7 @@ impl SpaceStore {
                 ":bound": filter.bound_flag(),
                 ":uid": filter.owner_user_id,
                 ":org": filter.org_id,
-                ":team": filter.team_id,
+                ":teams": filter.team_ids_json.as_str(),
             },
             |row| {
                 Ok((
@@ -4751,31 +6775,45 @@ impl SpaceStore {
         // resolved dst the caller cannot read is dropped so it never surfaces even
         // as a node.
         let mut seen_pending: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut link_stmt = conn.prepare(
-            "SELECT space_id, src_doc_id, dst_doc_id, dst_title, link_kind
-             FROM document_links WHERE (?1 IS NULL OR space_id = ?1)",
+        let src_visible = DOC_TENANCY_VISIBLE_PREDICATE.replace("d.", "src.");
+        let dst_visible = DOC_TENANCY_VISIBLE_PREDICATE.replace("d.", "dst.");
+        let link_sql = format!(
+            "SELECT l.space_id, l.src_doc_id, l.dst_doc_id, l.dst_title, l.link_kind
+             FROM document_links l
+             JOIN documents src ON src.id = l.src_doc_id
+             WHERE (:space IS NULL OR l.space_id = :space)
+               AND {src_visible}
+               AND (
+                   l.dst_doc_id IS NULL
+                   OR EXISTS (
+                       SELECT 1 FROM documents dst
+                       WHERE dst.id = l.dst_doc_id AND {dst_visible}
+                   )
+               )"
+        );
+        let mut link_stmt = conn.prepare(&link_sql)?;
+        let link_rows = link_stmt.query_map(
+            named_params! {
+                ":space": space_filter,
+                ":bound": filter.bound_flag(),
+                ":uid": filter.owner_user_id,
+                ":org": filter.org_id,
+                ":teams": filter.team_ids_json.as_str(),
+            },
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
         )?;
-        let link_rows = link_stmt.query_map(params![space_filter], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })?;
         for row in link_rows {
             let (space_id, src, dst_doc_id, dst_title, kind) = row?;
-            if !visible.contains(&src) {
-                continue;
-            }
             let dst = match dst_doc_id {
-                Some(id) => {
-                    if !visible.contains(&id) {
-                        continue;
-                    }
-                    id
-                }
+                Some(id) => id,
                 None => {
                     let pending_id = pending_node_id(&space_id, &dst_title);
                     if seen_pending.insert(pending_id.clone()) {
@@ -4817,8 +6855,11 @@ impl SpaceStore {
         seed_doc_ids: &[String],
         hops: usize,
         per_doc_cap: usize,
+        document_cap: usize,
+        total_chunk_cap: usize,
+        filter: &DocFilter<'_>,
     ) -> Result<Vec<ChunkMatch>> {
-        if seed_doc_ids.is_empty() {
+        if seed_doc_ids.is_empty() || document_cap == 0 || total_chunk_cap == 0 {
             return Ok(Vec::new());
         }
         let conn = self.conn.lock().await;
@@ -4826,21 +6867,44 @@ impl SpaceStore {
         let mut frontier: Vec<String> = seed_doc_ids.to_vec();
         let mut reached: Vec<String> = Vec::new();
         for _ in 0..hops {
-            if frontier.is_empty() {
+            if frontier.is_empty() || reached.len() >= document_cap {
                 break;
             }
             let mut next = Vec::new();
             for doc in &frontier {
-                let mut stmt = conn.prepare(
-                    "SELECT DISTINCT dst_doc_id FROM document_links
-                     WHERE space_id = ?1 AND src_doc_id = ?2 AND dst_doc_id IS NOT NULL",
+                let remaining = document_cap.saturating_sub(reached.len());
+                if remaining == 0 {
+                    break;
+                }
+                let sql = format!(
+                    "SELECT DISTINCT l.dst_doc_id FROM document_links l
+                     JOIN documents d ON d.id = l.dst_doc_id
+                     WHERE l.space_id = :space_id AND l.src_doc_id = :src_doc_id
+                       AND l.dst_doc_id IS NOT NULL
+                       AND {DOC_TENANCY_VISIBLE_PREDICATE}
+                     ORDER BY l.dst_doc_id LIMIT :limit"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    named_params! {
+                        ":space_id": space_id,
+                        ":src_doc_id": doc,
+                        ":limit": remaining as i64,
+                        ":bound": filter.bound_flag(),
+                        ":uid": filter.owner_user_id,
+                        ":org": filter.org_id,
+                        ":teams": filter.team_ids_json.as_str(),
+                    },
+                    |row| row.get::<_, String>(0),
                 )?;
-                let rows = stmt.query_map(params![space_id, doc], |row| row.get::<_, String>(0))?;
                 for row in rows {
                     let d = row?;
                     if visited.insert(d.clone()) {
                         next.push(d.clone());
                         reached.push(d);
+                        if reached.len() >= document_cap {
+                            break;
+                        }
                     }
                 }
             }
@@ -4849,11 +6913,15 @@ impl SpaceStore {
 
         let mut out = Vec::new();
         for doc in &reached {
+            let remaining = total_chunk_cap.saturating_sub(out.len());
+            if remaining == 0 {
+                break;
+            }
             let mut stmt = conn.prepare(
                 "SELECT id, document_id, content FROM chunks
                  WHERE document_id = ?1 ORDER BY ordinal LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![doc, per_doc_cap as i64], |row| {
+            let rows = stmt.query_map(params![doc, per_doc_cap.min(remaining) as i64], |row| {
                 Ok(ChunkMatch {
                     chunk_id: row.get(0)?,
                     document_id: row.get(1)?,
@@ -5008,6 +7076,28 @@ impl SpaceStore {
         self.run_reindex(embedder).await.map(|_| ())
     }
 
+    async fn index_unindexed_documents(&self) -> Result<()> {
+        let documents: Vec<(String, String, String)> = {
+            let conn = self.conn.lock().await;
+            let mut stmt = conn.prepare(
+                "SELECT d.id, d.title, d.source
+                 FROM documents d
+                 WHERE d.kind IN ('page', 'database')
+                   AND d.source != ''
+                   AND NOT EXISTS (
+                       SELECT 1 FROM chunks c WHERE c.document_id = d.id
+                   )
+                 ORDER BY d.created_at ASC, d.id ASC",
+            )?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, title, source) in documents {
+            self.update_document(&id, &title, &source).await?;
+        }
+        Ok(())
+    }
+
     async fn run_reindex(&self, embedder: Embedder) -> Result<bool> {
         let target_model = embedder.model_id().to_string();
         let target_dims = embedder.dims();
@@ -5034,6 +7124,7 @@ impl SpaceStore {
     }
 
     async fn reindex_inner(&self, embedder: &Embedder) -> Result<bool> {
+        self.index_unindexed_documents().await?;
         let model_id = embedder.model_id().to_string();
         let dims = embedder.dims();
         let old_dims = self.vec_dims.load(Ordering::SeqCst);
@@ -5411,7 +7502,27 @@ fn chunk_text(content: &str) -> Vec<String> {
     let mut current = String::new();
     for paragraph in trimmed.split("\n\n") {
         for word in paragraph.split_whitespace() {
-            if current.chars().count() + word.chars().count() + 1 > CHUNK_CHAR_SIZE
+            let word_characters = word.chars().count();
+            if word_characters > CHUNK_CHAR_SIZE {
+                if !current.is_empty() {
+                    chunks.push(std::mem::take(&mut current));
+                }
+                let mut piece = String::new();
+                let mut piece_characters = 0usize;
+                for character in word.chars() {
+                    piece.push(character);
+                    piece_characters += 1;
+                    if piece_characters == CHUNK_CHAR_SIZE {
+                        chunks.push(std::mem::take(&mut piece));
+                        piece_characters = 0;
+                    }
+                }
+                if !piece.is_empty() {
+                    current = piece;
+                }
+                continue;
+            }
+            if current.chars().count() + word_characters + 1 > CHUNK_CHAR_SIZE
                 && !current.is_empty()
             {
                 chunks.push(std::mem::take(&mut current));
@@ -5445,6 +7556,30 @@ fn insert_chunks(
     dims: usize,
     mode: RetrievalMode,
 ) -> Result<()> {
+    if mode == RetrievalMode::Graph {
+        anyhow::ensure!(
+            embedded.len() <= MAX_GRAPH_CHUNKS_PER_DOCUMENT,
+            "document has {} chunks; graph mode supports at most {MAX_GRAPH_CHUNKS_PER_DOCUMENT} chunks per document",
+            embedded.len()
+        );
+        let new_rows = embedded.iter().try_fold(0usize, |total, (content, _)| {
+            let terms = extract_entities(content).len();
+            total
+                .checked_add(terms.saturating_mul(terms))
+                .context("graph row estimate overflow")
+        })?;
+        let existing_rows: i64 = tx.query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM graph_nodes WHERE space_id = ?1) +
+               (SELECT COUNT(*) FROM graph_edges WHERE space_id = ?1)",
+            params![space_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            (existing_rows as usize).saturating_add(new_rows) <= MAX_GRAPH_ROWS_PER_SPACE,
+            "graph row budget exceeded; a Space supports at most {MAX_GRAPH_ROWS_PER_SPACE} term and co-occurrence rows"
+        );
+    }
     let mut chunk_ids: Vec<String> = Vec::with_capacity(embedded.len());
     for (ordinal, (content, embedding)) in embedded.iter().enumerate() {
         let chunk_id = uuid::Uuid::new_v4().to_string();
@@ -5725,15 +7860,11 @@ type GraphCounts = (usize, usize);
 /// Take the 23 % as history explaining why the current shape was chosen, not as a
 /// number to re-verify.
 ///
-/// That byte-identical output is exactly why this was the optimisation taken and an
-/// entity cap was not. A cap would be far faster — it attacks the `entities²` term
-/// rather than the constant — but it changes **which chunks a graph query can
-/// reach**, and that is a retrieval-quality decision, not a performance one.
-///
-/// **If you ever add a cap, say so out loud**: the multi-hop retrieval test
-/// (`graphrag_multi_hop_finds_connected_chunk_that_vector_misses`) and
-/// `graph_edge_count_matches_the_quadratic_fan_out` both pin today's contents, and
-/// a silent cap would change which chunks a graph query can reach.
+/// Extraction deliberately caps a chunk at [`MAX_EXTRACTED_GRAPH_TERMS`]. That is a
+/// retrieval-quality trade: source-order terms beyond the cap cannot become graph
+/// bridges, but one adversarial title or chunk also cannot create unbounded
+/// quadratic rows. The multi-hop and fan-out tests pin both the retained behavior
+/// and the exact `n·(n−1)` shape inside the cap.
 ///
 /// Note on `INSERT OR IGNORE`: `graph_nodes`/`graph_edges` have no UNIQUE
 /// constraint beyond their `id` primary key, and [`graph_row_id`] cannot collide
@@ -5819,7 +7950,7 @@ fn build_graph_for_tables(
     let mut edges = 0usize;
     for (chunk_id, content) in chunks {
         if should_cancel() {
-            anyhow::bail!("retrieval-mode rebuild cancelled");
+            return Err(RetrievalModeCancelled.into());
         }
         let entities = extract_entities(content);
         for entity in &entities {
@@ -5839,6 +7970,10 @@ fn build_graph_for_tables(
                 ])?;
             }
         }
+        anyhow::ensure!(
+            nodes.saturating_add(edges) <= MAX_GRAPH_ROWS_PER_SPACE,
+            "graph row budget exceeded; a Space supports at most {MAX_GRAPH_ROWS_PER_SPACE} term and co-occurrence rows"
+        );
     }
     Ok((nodes, edges))
 }
@@ -5872,7 +8007,7 @@ fn finalize_chunked_retrieval_mode(
     drop(rows);
     drop(stmt);
     if should_cancel() {
-        anyhow::bail!("retrieval-mode rebuild cancelled");
+        return Err(RetrievalModeCancelled.into());
     }
     if actual_chunks != total_chunks
         || processed != total_chunks
@@ -5881,21 +8016,31 @@ fn finalize_chunked_retrieval_mode(
         anyhow::bail!("chunks changed during retrieval-mode rebuild");
     }
     if should_cancel() {
-        anyhow::bail!("retrieval-mode rebuild cancelled");
+        return Err(RetrievalModeCancelled.into());
     }
-    tx.execute(
-        "UPDATE spaces SET retrieval_mode = ?1, updated_at = ?2 WHERE id = ?3",
-        params![RetrievalMode::Graph.as_str(), now_millis(), space_id],
+    let updated = tx.execute(
+        "UPDATE spaces SET retrieval_mode = ?1, updated_at = ?2
+         WHERE id = ?3 AND retrieval_mode = ?4",
+        params![
+            RetrievalMode::Graph.as_str(),
+            now_millis(),
+            space_id,
+            previous.as_str()
+        ],
     )?;
+    anyhow::ensure!(
+        updated == 1,
+        "space was deleted or its retrieval mode changed during rebuild"
+    );
     if should_cancel() {
-        anyhow::bail!("retrieval-mode rebuild cancelled");
+        return Err(RetrievalModeCancelled.into());
     }
     tx.execute(
         "DELETE FROM graph_edges WHERE space_id = ?1",
         params![space_id],
     )?;
     if should_cancel() {
-        anyhow::bail!("retrieval-mode rebuild cancelled");
+        return Err(RetrievalModeCancelled.into());
     }
     tx.execute(
         "DELETE FROM graph_nodes WHERE space_id = ?1",
@@ -5918,7 +8063,7 @@ fn finalize_chunked_retrieval_mode(
         should_cancel,
     )?;
     if should_cancel() {
-        anyhow::bail!("retrieval-mode rebuild cancelled");
+        return Err(RetrievalModeCancelled.into());
     }
     tx.commit()?;
     Ok(Some(RetrievalModeChange {
@@ -5940,39 +8085,16 @@ fn copy_staged_graph_table(
     space_id: &str,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<()> {
+    if should_cancel() {
+        return Err(RetrievalModeCancelled.into());
+    }
     let sql = format!(
         "INSERT INTO {destination_table} SELECT {columns}
-         FROM {source_table} WHERE space_id = ?1 AND rowid > ?2
-         ORDER BY rowid LIMIT ?3"
+         FROM {source_table} WHERE space_id = ?1"
     );
-    let mut last_rowid = 0i64;
-    loop {
-        if should_cancel() {
-            anyhow::bail!("retrieval-mode rebuild cancelled");
-        }
-        let copied = tx.execute(
-            &sql,
-            params![space_id, last_rowid, RETRIEVAL_REBUILD_BATCH_SIZE as i64],
-        )?;
-        if copied == 0 {
-            break;
-        }
-        last_rowid = tx
-            .query_row(
-                &format!(
-                    "SELECT MAX(rowid) FROM (
-                   SELECT rowid FROM {source_table}
-                   WHERE space_id = ?1 AND rowid > ?2
-                   ORDER BY rowid LIMIT ?3
-                 )"
-                ),
-                params![space_id, last_rowid, RETRIEVAL_REBUILD_BATCH_SIZE as i64],
-                |row| row.get::<_, Option<i64>>(0),
-            )?
-            .context("finding the staged graph copy keyset boundary")?;
-        if should_cancel() {
-            anyhow::bail!("retrieval-mode rebuild cancelled");
-        }
+    tx.execute(&sql, params![space_id])?;
+    if should_cancel() {
+        return Err(RetrievalModeCancelled.into());
     }
     Ok(())
 }
@@ -6013,7 +8135,7 @@ fn build_graph_for_chunks_with_control(
     let mut edges = 0usize;
     for (chunk_index, (chunk_id, chunk_content)) in chunks.iter().enumerate() {
         if should_cancel() {
-            anyhow::bail!("retrieval-mode rebuild cancelled")
+            return Err(RetrievalModeCancelled.into());
         }
         let entities = extract_entities(chunk_content);
         for entity in &entities {
@@ -6039,9 +8161,13 @@ fn build_graph_for_chunks_with_control(
                     .context("inserting graph edge")?;
             }
         }
+        anyhow::ensure!(
+            nodes.saturating_add(edges) <= MAX_GRAPH_ROWS_PER_SPACE,
+            "graph row budget exceeded; a Space supports at most {MAX_GRAPH_ROWS_PER_SPACE} term and co-occurrence rows"
+        );
         progress(chunk_index + 1, nodes, edges);
         if should_cancel() {
-            anyhow::bail!("retrieval-mode rebuild cancelled")
+            return Err(RetrievalModeCancelled.into());
         }
     }
     Ok((nodes, edges))
@@ -6067,6 +8193,41 @@ mod tests {
             user_id: Some(uid.to_owned()),
             org_id: Some("org1".to_owned()),
         }
+    }
+
+    #[tokio::test]
+    async fn import_history_persists_lifecycle_and_results() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space_id = store
+            .create_space("Imports", None, &owned("alice"))
+            .await
+            .unwrap();
+        let import = store
+            .create_import_record(&space_id, "file", "people.csv", "csv", "database", 128)
+            .await
+            .unwrap();
+        store.start_import(&import.id).await.unwrap();
+        assert!(store.start_import(&import.id).await.is_err());
+        let result = SpaceImportResultDocument {
+            id: "doc_1".to_owned(),
+            kind: "database".to_owned(),
+            title: "People".to_owned(),
+        };
+        store
+            .complete_import(&import.id, "database", &[result.clone()], 3, None)
+            .await
+            .unwrap();
+        assert!(store
+            .complete_import(&import.id, "database", &[result.clone()], 3, None)
+            .await
+            .is_err());
+        assert!(store.fail_import(&import.id, "late failure").await.is_err());
+
+        let history = store.list_imports(&space_id, 10).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, "completed");
+        assert_eq!(history[0].item_count, 3);
+        assert_eq!(history[0].result_documents, vec![result]);
     }
 
     /// **ResourceKey regression (task C2, deliverable #1): behavior-preserving.**
@@ -6299,6 +8460,124 @@ mod tests {
             right_team.iter().map(|d| &d.id).collect::<Vec<_>>(),
             vec![&doc]
         );
+
+        let both_orders = [vec!["team-2", "team-1"], vec!["team-1", "team-2"]];
+        for teams in both_orders {
+            let visible = store
+                .list_documents(
+                    &space,
+                    DocFilter::for_caller_with_teams(Some("bob"), Some("org1"), &teams, true),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                visible
+                    .iter()
+                    .map(|document| &document.id)
+                    .collect::<Vec<_>>(),
+                vec![&doc],
+                "all verified teams must be honored regardless of JWT ordering"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_search_cannot_bridge_from_a_private_term_to_a_shared_document() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space_with_mode("Private graph", None, RetrievalMode::Graph, &owned("alice"))
+            .await
+            .unwrap();
+        let private_document = store
+            .ingest_document(&space, "Private", "Secret Acme", &owned("alice"))
+            .await
+            .unwrap();
+        let shared_document = store
+            .ingest_document(&space, "Shared", "Acme public", &owned("alice"))
+            .await
+            .unwrap();
+        store
+            .set_document_access(&shared_document, "org", None)
+            .await
+            .unwrap();
+
+        let bob_filter = DocFilter::for_caller(Some("bob"), Some("org1"), true);
+        let hits = store
+            .search_ext(&space, "Secret", 10, Some(false), bob_filter)
+            .await
+            .unwrap();
+        assert!(
+            hits.is_empty(),
+            "a private term must not seed visible graph work"
+        );
+
+        let alice_hits = store
+            .search_ext(
+                &space,
+                "Secret",
+                10,
+                Some(false),
+                DocFilter::for_caller(Some("alice"), Some("org1"), true),
+            )
+            .await
+            .unwrap();
+        assert!(alice_hits
+            .iter()
+            .any(|match_| match_.document_id == private_document));
+        assert!(alice_hits
+            .iter()
+            .any(|match_| match_.document_id == shared_document));
+    }
+
+    #[tokio::test]
+    async fn vector_search_filters_before_the_candidate_limit() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Private vectors", None, &owned("alice"))
+            .await
+            .unwrap();
+        for index in 0..5 {
+            store
+                .ingest_document(
+                    &space,
+                    &format!("Private {index}"),
+                    "Exact private needle",
+                    &owned("alice"),
+                )
+                .await
+                .unwrap();
+        }
+        let visible_document = store
+            .ingest_document(
+                &space,
+                "Shared",
+                "A public note with different wording",
+                &owned("alice"),
+            )
+            .await
+            .unwrap();
+        store
+            .set_document_access(&visible_document, "org", None)
+            .await
+            .unwrap();
+
+        let hits = store
+            .search_ext(
+                &space,
+                "Exact private needle",
+                1,
+                Some(false),
+                DocFilter::for_caller(Some("bob"), Some("org1"), true),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|match_| &match_.document_id)
+                .collect::<Vec<_>>(),
+            vec![&visible_document],
+            "private nearest neighbours must not consume the visible candidate budget"
+        );
     }
 
     /// list_spaces filters by owner too, but system spaces (`system = 1`) stay
@@ -6312,6 +8591,14 @@ mod tests {
             .unwrap();
         let _bob_space = store
             .create_space("Bob", None, &owned("bob"))
+            .await
+            .unwrap();
+        let bob_owned_space = store
+            .create_space("Bob's private space", None, &owned("bob"))
+            .await
+            .unwrap();
+        store
+            .create_page(&bob_owned_space, "Alice's hidden document", &owned("alice"))
             .await
             .unwrap();
         let sys = store.ensure_system_space("Artifacts", None).await.unwrap();
@@ -6328,6 +8615,14 @@ mod tests {
         assert!(
             ids.contains(&sys.as_str()),
             "system space stays shared to every member"
+        );
+        let bob_private = bob_view
+            .iter()
+            .find(|space| space.id == bob_owned_space)
+            .expect("Bob's private space is visible to Bob");
+        assert_eq!(
+            bob_private.document_count, 0,
+            "a Space summary must count only documents visible to the caller"
         );
     }
 
@@ -6741,6 +9036,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacing_a_file_blob_updates_bytes_and_resets_stale_extracted_chunks() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Files", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        let doc = store
+            .create_file(
+                &space,
+                "budget.xlsx",
+                b"first revision",
+                "application/octet-stream",
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        store
+            .replace_file_chunks(&doc, "stale extracted worksheet prose")
+            .await
+            .unwrap();
+
+        let replacement = b"second revision";
+        let meta = store
+            .replace_file_blob(
+                &doc,
+                replacement,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            .await
+            .unwrap();
+        assert_eq!(meta.byte_size, replacement.len() as i64);
+        assert_eq!(
+            meta.mime,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        let (mime, bytes) = store.read_file_blob(&doc).await.unwrap().unwrap();
+        assert_eq!(mime, meta.mime);
+        assert_eq!(bytes, replacement);
+
+        let document = store.get_document(&doc).await.unwrap().unwrap();
+        assert_eq!(document.source, format!("budget.xlsx\n{}", meta.mime));
+        assert_eq!(
+            document.chunk_count, 1,
+            "saving new bytes must discard chunks extracted from the old revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_a_blob_refuses_non_file_documents() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Pages", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        let page = store
+            .create_page(&space, "Notes", &DocOwner::unattributed())
+            .await
+            .unwrap();
+        let error = store
+            .replace_file_blob(&page, b"nope", "application/octet-stream")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("file document"));
+    }
+
+    #[tokio::test]
     async fn page_create_edit_search_delete() {
         let store = SpaceStore::open_in_memory().unwrap();
         let space = store
@@ -7016,13 +9377,24 @@ mod tests {
 
         // Seeded at A, expansion reaches B's chunks.
         let reached = store
-            .expand_by_links(&space, &[a.clone()], 2, 3)
+            .expand_by_links(
+                &space,
+                &[a.clone()],
+                2,
+                3,
+                16,
+                32,
+                &DocFilter::unrestricted(),
+            )
             .await
             .unwrap();
         assert!(reached.iter().any(|c| c.document_id == b));
 
         // A document with no outgoing links reaches nothing.
-        let none = store.expand_by_links(&space, &[b], 2, 3).await.unwrap();
+        let none = store
+            .expand_by_links(&space, &[b], 2, 3, 16, 32, &DocFilter::unrestricted())
+            .await
+            .unwrap();
         assert!(none.is_empty());
     }
 
@@ -7668,7 +10040,7 @@ mod tests {
         // bytes are not extracted here. That is `document.parse`'s job, and its
         // output reaches a Space through `ingest_document`.)
         let hits = store
-            .graph_search(&graph_space, "revenue", 5)
+            .graph_search(&graph_space, "revenue", 5, &DocFilter::unrestricted())
             .await
             .unwrap();
         assert!(
@@ -7733,7 +10105,7 @@ mod tests {
         // `platform` sorts first in the query, and appears in 12/13 chunks; the floor
         // is what stops it seeding while `kryptonite` (1/13) can.
         let hits = store
-            .graph_search(&space, "platform kryptonite", 3)
+            .graph_search(&space, "platform kryptonite", 3, &DocFilter::unrestricted())
             .await
             .unwrap();
         assert!(
@@ -7749,7 +10121,7 @@ mod tests {
         // Escape hatch: a query whose every entity floods the Space seeds exactly as
         // it did before the floor existed, rather than returning nothing.
         let all_common = store
-            .graph_search(&space, "platform ledger", 3)
+            .graph_search(&space, "platform ledger", 3, &DocFilter::unrestricted())
             .await
             .unwrap();
         assert_eq!(
@@ -8175,6 +10547,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retrieval_job_terminal_state_uses_the_worker_outcome_not_the_cancel_flag() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Jobs", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+
+        for (job_id, error, expected_state) in [
+            ("failed-job", anyhow::anyhow!("disk full"), "failed"),
+            (
+                "cancelled-job",
+                anyhow::Error::new(RetrievalModeCancelled),
+                "cancelled",
+            ),
+        ] {
+            {
+                let mut state = store.retrieval_mode.lock().unwrap();
+                state.statuses.insert(
+                    job_id.to_owned(),
+                    RetrievalModeJobStatus {
+                        job_id: job_id.to_owned(),
+                        space_id: space.clone(),
+                        requested_mode: RetrievalMode::Graph,
+                        previous_mode: Some(RetrievalMode::Vector),
+                        state: "cancelling".to_owned(),
+                        total_chunks: 1,
+                        processed_chunks: 0,
+                        graph_nodes: 0,
+                        graph_edges: 0,
+                        change: None,
+                        error: None,
+                    },
+                );
+                state.cancel = Some(Arc::new(AtomicBool::new(true)));
+            }
+
+            assert!(store.cancel_retrieval_mode_rebuild(&space, job_id));
+            assert!(store.cancel_retrieval_mode_rebuild(&space, job_id));
+            store.finish_retrieval_mode_job(job_id, Err(error));
+            let status = store.retrieval_mode_status(&space, job_id).unwrap();
+            assert_eq!(status.state, expected_state);
+            if expected_state == "failed" {
+                assert_eq!(status.error.as_deref(), Some("disk full"));
+            } else {
+                assert!(status.error.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn vector_rebuild_progress_never_reports_unscanned_chunks() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Vector progress", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        store
+            .ingest_document(
+                &space,
+                "Document",
+                "A chunk that vector mode does not scan",
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        let totals = Arc::new(StdMutex::new(Vec::new()));
+        let worker_totals = totals.clone();
+        let worker_store = store.clone();
+        let worker_space = space.clone();
+        tokio::task::spawn_blocking(move || {
+            SpaceStore::set_retrieval_mode_chunked_with_control(
+                &worker_store,
+                &worker_space,
+                RetrievalMode::Vector,
+                &|| false,
+                &|| true,
+                &mut |_processed, _nodes, _edges, total| {
+                    worker_totals.lock().unwrap().push(total);
+                },
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!totals.lock().unwrap().is_empty());
+        assert!(totals.lock().unwrap().iter().all(|total| *total == 0));
+    }
+
+    #[tokio::test]
     async fn missing_space_is_not_confused_with_an_active_rebuild() {
         let store = SpaceStore::open_in_memory().unwrap();
         let missing = "missing-space";
@@ -8429,6 +10890,51 @@ mod tests {
         assert_eq!(store.graph_extraction_model_id(), "local-cooccurrence");
     }
 
+    #[test]
+    fn graph_extraction_model_accepts_only_the_shipped_implementation() {
+        assert_eq!(
+            GraphExtractionModel::parse("  local-cooccurrence  ").unwrap(),
+            GraphExtractionModel::LocalCooccurrence
+        );
+        for unsupported in [
+            "",
+            "   ",
+            "Local-Cooccurrence",
+            "acme/extract",
+            "https://example.test",
+        ] {
+            assert!(GraphExtractionModel::parse(unsupported).is_err());
+        }
+    }
+
+    #[test]
+    fn open_at_rejects_an_unsupported_graph_extractor_before_creating_the_database() {
+        let root = std::env::temp_dir().join(format!(
+            "ryu-spaces-unsupported-extractor-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = root.join("spaces.db");
+        let result = SpaceStore::open_at(
+            database.clone(),
+            Embedder::Local {
+                dims: DEFAULT_EMBED_DIMS,
+            },
+            DEFAULT_EMBED_DIMS,
+            "acme/entity-extractor".to_owned(),
+            Reranker::Local,
+            root.join("blobs"),
+            None,
+        );
+        let error = result.err().expect("unsupported extractor must fail");
+        assert!(error
+            .to_string()
+            .contains("unsupported graph extraction model"));
+        assert!(
+            !database.exists(),
+            "validation must precede filesystem mutation"
+        );
+    }
+
     // ── Entity extraction unit tests ───────────────────────────────────────────
 
     #[test]
@@ -8445,6 +10951,105 @@ mod tests {
         let b = extract_entities("Acme is based in Paris.");
         assert!(a.contains(&"acme".to_owned()));
         assert!(b.contains(&"acme".to_owned()));
+    }
+
+    #[test]
+    fn extract_entities_uses_character_lengths_and_caps_quadratic_fanout() {
+        assert!(extract_entities("Ab 東京").is_empty());
+        assert!(extract_entities("東京大学校").contains(&"東京大学校".to_owned()));
+
+        let text = (0..(MAX_EXTRACTED_GRAPH_TERMS + 20))
+            .map(|index| format!("Entity{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let entities = extract_entities(&text);
+        assert_eq!(entities.len(), MAX_EXTRACTED_GRAPH_TERMS);
+        assert_eq!(entities.first().map(String::as_str), Some("entity0"));
+        assert_eq!(
+            entities.last().map(String::as_str),
+            Some("entity63"),
+            "the cap must preserve deterministic source order"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_and_background_mode_changes_share_one_arbitration_domain() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Arbitrated", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        {
+            let mut state = store.retrieval_mode.lock().unwrap();
+            state.statuses.insert(
+                "background".to_owned(),
+                RetrievalModeJobStatus {
+                    job_id: "background".to_owned(),
+                    space_id: space.clone(),
+                    requested_mode: RetrievalMode::Graph,
+                    previous_mode: Some(RetrievalMode::Vector),
+                    state: "running".to_owned(),
+                    total_chunks: 0,
+                    processed_chunks: 0,
+                    graph_nodes: 0,
+                    graph_edges: 0,
+                    change: None,
+                    error: None,
+                },
+            );
+        }
+        assert!(store
+            .set_retrieval_mode(&space, RetrievalMode::Vector)
+            .await
+            .is_err());
+
+        {
+            let mut state = store.retrieval_mode.lock().unwrap();
+            state.statuses.clear();
+            state.direct_active = true;
+        }
+        assert!(store
+            .start_retrieval_mode_rebuild(&space, RetrievalMode::Graph)
+            .await
+            .is_err());
+        store.retrieval_mode.lock().unwrap().direct_active = false;
+    }
+
+    #[tokio::test]
+    async fn finalization_fails_if_an_empty_space_was_deleted_after_snapshot() -> Result<()> {
+        let store = SpaceStore::open_in_memory()?;
+        let space = store
+            .create_space("Deleted", None, &DocOwner::unattributed())
+            .await?;
+        let mut conn = store.conn.lock().await;
+        conn.execute_batch(
+            "CREATE TEMP TABLE retrieval_rebuild_nodes (
+               id TEXT PRIMARY KEY, space_id TEXT NOT NULL, entity TEXT NOT NULL, chunk_id TEXT NOT NULL
+             );
+             CREATE TEMP TABLE retrieval_rebuild_edges (
+               id TEXT PRIMARY KEY, space_id TEXT NOT NULL, src_entity TEXT NOT NULL,
+               dst_entity TEXT NOT NULL, chunk_id TEXT NOT NULL
+             );",
+        )?;
+        conn.execute("DELETE FROM spaces WHERE id = ?1", params![&space])?;
+        let empty_fingerprint = format!("{:x}", Sha256::new().finalize());
+        let result = finalize_chunked_retrieval_mode(
+            &mut conn,
+            &space,
+            RetrievalMode::Vector,
+            0,
+            0,
+            0,
+            0,
+            &empty_fingerprint,
+            &|| false,
+        );
+        assert!(
+            result.is_err(),
+            "a deleted Space must never report completion"
+        );
+        cleanup_retrieval_staging(&conn)?;
+        Ok(())
     }
 
     #[test]
@@ -8496,12 +11101,10 @@ mod tests {
     /// `n·(n−1)` directed edges, exactly.**
     ///
     /// The cost documented on [`build_graph_for_chunks`] is `O(chunks × entities²)`,
-    /// and the fix taken for it (hoisting the two INSERTs onto prepared statements)
-    /// was chosen *because* it preserves this identity byte for byte. A cap on
-    /// entities per chunk, a narrower `extract_entities`, or emitting one direction
-    /// instead of two would each be a legitimate optimisation — and each would break
-    /// this assertion, which is the point: they change which chunks a graph query
-    /// can reach, so they must be argued for, not slipped in.
+    /// and the prepared statements preserve this identity for the bounded term set.
+    /// [`extract_entities`] deliberately caps `n`; within that cap, changing the
+    /// extractor or emitting one direction instead of two still changes which chunks
+    /// a graph query can reach and must update this assertion explicitly.
     ///
     /// **Both properties of [`graph_row_id`] at once: strictly ascending (the
     /// performance property) and all-distinct (the correctness property).**
@@ -8640,7 +11243,10 @@ mod tests {
 
         // Bounded: never more than asked for, even though the traversal could reach
         // every chunk in the Space.
-        let first = store.graph_search(&space, "logistics", 5).await.unwrap();
+        let first = store
+            .graph_search(&space, "logistics", 5, &DocFilter::unrestricted())
+            .await
+            .unwrap();
         assert!(
             first.len() <= 5,
             "graph_search returned {} chunks for limit=5",
@@ -8653,7 +11259,10 @@ mod tests {
 
         // Deterministic: identical query ⇒ identical chunks in identical order.
         for _ in 0..3 {
-            let again = store.graph_search(&space, "logistics", 5).await.unwrap();
+            let again = store
+                .graph_search(&space, "logistics", 5, &DocFilter::unrestricted())
+                .await
+                .unwrap();
             assert_eq!(
                 again.iter().map(|c| &c.chunk_id).collect::<Vec<_>>(),
                 first.iter().map(|c| &c.chunk_id).collect::<Vec<_>>(),
@@ -8664,7 +11273,7 @@ mod tests {
         // A limit larger than the Space cannot invent chunks, and the public
         // `search` entry point honours the limit through reranking too.
         let wide = store
-            .graph_search(&space, "logistics", 10_000)
+            .graph_search(&space, "logistics", 10_000, &DocFilter::unrestricted())
             .await
             .unwrap();
         assert!(wide.len() <= total_chunks);
@@ -8691,10 +11300,66 @@ mod tests {
             .await
             .unwrap();
         assert!(store
-            .graph_search(&space, "Alice", 0)
+            .graph_search(&space, "Alice", 0, &DocFilter::unrestricted())
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn public_search_caps_oversized_limits_without_panicking() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        for mode in [RetrievalMode::Vector, RetrievalMode::Graph] {
+            let space = store
+                .create_space_with_mode(mode.as_str(), None, mode, &DocOwner::unattributed())
+                .await
+                .unwrap();
+            store
+                .ingest_document(
+                    &space,
+                    "Doc",
+                    "Alice works at Acme in Paris.",
+                    &DocOwner::unattributed(),
+                )
+                .await
+                .unwrap();
+            let hits = store.search(&space, "Alice", usize::MAX).await.unwrap();
+            assert!(hits.len() <= 50);
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_search_reaches_a_chunk_three_edges_from_the_query_seed() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space_with_mode(
+                "Three hops",
+                None,
+                RetrievalMode::Graph,
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        for (title, content) in [
+            ("Seed", "Alpha Bridgeone"),
+            ("Hop one", "Bridgeone Bridgetwo"),
+            ("Hop two", "Bridgetwo Bridgethree"),
+            ("Answer", "Bridgethree Finalanswer"),
+        ] {
+            store
+                .ingest_document(&space, title, content, &DocOwner::unattributed())
+                .await
+                .unwrap();
+        }
+
+        let hits = store
+            .graph_search(&space, "Alpha", 20, &DocFilter::unrestricted())
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.content.contains("Finalanswer")),
+            "the documented three-edge traversal must load the distance-three chunk"
+        );
     }
 
     /// **Exercises [`MAX_FRONTIER_ENTITIES`].** A bound whose truncation branch no
@@ -8766,7 +11431,7 @@ mod tests {
         // A limit far above the Space's size means the traversal never short-circuits
         // on `limit`, so the cap is the only thing bounding hop 2.
         let wide = store
-            .graph_search(&space, "hubentity", 10_000)
+            .graph_search(&space, "hubentity", 10_000, &DocFilter::unrestricted())
             .await
             .unwrap();
         assert!(
@@ -8777,7 +11442,7 @@ mod tests {
         assert!(!wide.is_empty(), "the hub entity must hit its own chunks");
         for _ in 0..3 {
             let again = store
-                .graph_search(&space, "hubentity", 10_000)
+                .graph_search(&space, "hubentity", 10_000, &DocFilter::unrestricted())
                 .await
                 .unwrap();
             assert_eq!(
@@ -8892,7 +11557,7 @@ mod tests {
     async fn graph_search_reaches_a_two_hop_chunk_through_a_truncated_frontier() {
         let (store, space, answer) = hub_fixture("sat", "aaabridge").await;
         let hits = store
-            .graph_search(&space, "hubentity", 10_000)
+            .graph_search(&space, "hubentity", 10_000, &DocFilter::unrestricted())
             .await
             .unwrap();
         assert!(
@@ -8934,7 +11599,7 @@ mod tests {
         // the answer chunk in one hop. So the fixture is connected, and the miss
         // below is the cap's doing.
         let direct = store
-            .graph_search(&space, "zzzbridge", 10_000)
+            .graph_search(&space, "zzzbridge", 10_000, &DocFilter::unrestricted())
             .await
             .unwrap();
         assert!(
@@ -8943,7 +11608,7 @@ mod tests {
         );
 
         let hits = store
-            .graph_search(&space, "hubentity", 10_000)
+            .graph_search(&space, "hubentity", 10_000, &DocFilter::unrestricted())
             .await
             .unwrap();
         assert!(
@@ -9022,7 +11687,11 @@ mod tests {
         // quadratic graph build over the whole document, so it was moved off the
         // worker in the same change and is measured in the same window.
         let before_update = ticks.load(std::sync::atomic::Ordering::Relaxed);
-        store.update_document(&doc, "Dense", &corpus).await.unwrap();
+        let updated_corpus = format!("{corpus}\nAdditional updated evidence.");
+        store
+            .update_document(&doc, "Dense", &updated_corpus)
+            .await
+            .unwrap();
         let during_update = ticks.load(std::sync::atomic::Ordering::Relaxed) - before_update;
 
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -9081,7 +11750,9 @@ mod tests {
     #[ignore = "measurement harness: ~35 s, run manually (see doc comment)"]
     async fn measure_graph_rebuild_cost() {
         let dir = std::env::temp_dir().join(format!("ryu-spaces-measure-{}", uuid::Uuid::new_v4()));
-        for target in [96usize, 383, 1530] {
+        // Stay within the public graph quotas; the quota rejection itself is
+        // covered by fast deterministic tests rather than this timing harness.
+        for target in [96usize, 383] {
             let corpus = prose_corpus(target);
             let chunks = chunk_text(&corpus);
             let per: Vec<usize> = chunks.iter().map(|c| extract_entities(c).len()).collect();
@@ -9178,8 +11849,9 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("ryu-spaces-stall-{}", uuid::Uuid::new_v4()));
         // Sizes chosen to bracket "a file someone drags into a chat": a note, a
-        // README, a spec, a long report.
-        for target in [8usize, 32, 100, 400] {
+        // README, a spec, a long report. The largest case stays below the
+        // 256-chunk Graph document limit.
+        for target in [8usize, 32, 100, 240] {
             let corpus = prose_corpus(target);
             let case = dir.join(target.to_string());
             let store = SpaceStore::open_at(
@@ -9251,8 +11923,8 @@ mod tests {
                 std::time::Duration::from_micros(worst_us.load(Ordering::Relaxed)),
                 samples,
             );
-            // Per-case cleanup, not just at the end: the 400-chunk graph is ~1.3M
-            // edge rows across two indexes — several hundred MB on disk — and
+            // Per-case cleanup, not just at the end: the largest graph is hundreds
+            // of thousands of edge rows across two indexes, and
             // keeping every case alive would make the harness's peak footprint the
             // sum rather than the max.
             drop(store);

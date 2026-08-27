@@ -474,6 +474,21 @@ pub fn get(kind: &str, id: &str) -> Result<Option<InstalledPackage>> {
     Ok(Some(read_state(&destination)?))
 }
 
+/// Read the validated package manifest from an installed package.
+pub fn manifest(kind: &str, id: &str) -> Result<Option<PortablePackageManifest>> {
+    validate_kind(kind)?;
+    let destination = package_dir(kind, id);
+    if !destination.exists() {
+        return Ok(None);
+    }
+    let data = std::fs::read(destination.join(PACKAGE_MANIFEST_FILE))
+        .context("installed package manifest is missing")?;
+    let value = serde_json::from_slice::<Value>(&data)
+        .context("installed package manifest is not valid JSON")?;
+    let (manifest, _) = validate_manifest(value)?;
+    Ok(Some(manifest))
+}
+
 /// Read the validated package tree that was materialised by [`install`]. The
 /// package state file is deliberately excluded; callers receive only the
 /// signed artifact tree that host subsystems are allowed to activate.

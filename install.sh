@@ -7,7 +7,9 @@
 # ~/.ryu/bin. Starting Core is part of the install so the same entry point also
 # kicks off the bundled models, engines, skills, and built-in defaults. Core owns
 # those defaults; this script is the cross-surface bootstrap that starts them.
-# Island and Ghost are intentionally NOT part of the default closure yet.
+# Shadow and Ghost are preinstalled and started by Core. Island is preinstalled
+# and kept up to date through the global download center, but remains stopped
+# until the companion feature is enabled in a later release.
 #
 # Environment overrides:
 #   RYU_INSTALL_DIR   install location            (default: $HOME/.ryu/bin)
@@ -221,9 +223,10 @@ if [ "$START_CORE" = "1" ]; then
 
   info "Core is provisioning bundled models, engines, skills, and defaults"
   emit "defaults" "bundled-defaults" "started" 80
-  info "Island and Ghost installs are disabled for this release"
-  emit "defaults" "island" "skipped" 85
-  emit "defaults" "ghost" "skipped" 85
+  info "Core is preinstalling Shadow, Ghost, and Island (Island stays stopped)"
+  emit "defaults" "shadow" "started" 85
+  emit "defaults" "ghost" "started" 90
+  emit "defaults" "island" "started" 95
 fi
 
 emit "bootstrap" "ryu" "complete" 100

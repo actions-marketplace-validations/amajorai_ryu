@@ -43,7 +43,7 @@ export default defineConfig({
 	},
 	server: {
 		host: "127.0.0.1",
-		port: 5177,
+		port: Number(process.env.RYU_E2E_PORT ?? "5177"),
 		strictPort: true,
 	},
 	build: {
@@ -53,6 +53,19 @@ export default defineConfig({
 		rollupOptions: {
 			input: {
 				index: path.resolve(harnessDir, "index.html"),
+				tauriUpdatePredownloadProof: path.resolve(
+					harnessDir,
+					"tauri-update-predownload-proof.html"
+				),
+				shareConversation: path.resolve(
+					harnessDir,
+					"share-conversation-story.html"
+				),
+				a2aSettingsProof: path.resolve(harnessDir, "a2a-settings-proof.html"),
+				graphragSpacesLive: path.resolve(
+					harnessDir,
+					"graphrag-spaces-live.html"
+				),
 				interfaceLevelStory: path.resolve(
 					harnessDir,
 					"interface-level-story.html"
@@ -82,6 +95,10 @@ export default defineConfig({
 					harnessDir,
 					"agent-conversation-branch-proof.html"
 				),
+				sidebarTodoProgressProof: path.resolve(
+					harnessDir,
+					"sidebar-todo-progress-proof.html"
+				),
 				pinnedAgentStageProof: path.resolve(
 					harnessDir,
 					"pinned-agent-stage-proof.html"
@@ -104,6 +121,10 @@ export default defineConfig({
 					"pinned-summary-scroll-proof.html"
 				),
 				storeChromeStory: path.resolve(harnessDir, "store-chrome-story.html"),
+				marketplaceStabilityVersionHistory: path.resolve(
+					harnessDir,
+					"marketplace-stability-version-history-proof.html"
+				),
 				pinnedBackgroundProcesses: path.resolve(
 					harnessDir,
 					"pinned-background-processes-story.html"
@@ -114,6 +135,10 @@ export default defineConfig({
 				),
 				newTabMenuProof: path.resolve(harnessDir, "new-tab-menu-proof.html"),
 				chatRecovery: path.resolve(harnessDir, "chat-recovery-story.html"),
+				reconnectRetryProof: path.resolve(
+					harnessDir,
+					"reconnect-retry-proof.html"
+				),
 				onboardingAgents: path.resolve(
 					harnessDir,
 					"onboarding-agents-story.html"
@@ -134,6 +159,10 @@ export default defineConfig({
 					harnessDir,
 					"channel-agent-lifecycle-proof.html"
 				),
+				learningFeedbackProof: path.resolve(
+					harnessDir,
+					"learning-feedback-proof.html"
+				),
 				managedChannelProvisioningProof: path.resolve(
 					harnessDir,
 					"managed-channel-provisioning-proof.html"
@@ -153,6 +182,10 @@ export default defineConfig({
 					"private-team-visibility-story.html"
 				),
 				scrollFade: path.resolve(harnessDir, "scroll-fade-story.html"),
+				horizontalWheelScrollProof: path.resolve(
+					harnessDir,
+					"horizontal-wheel-scroll-proof.html"
+				),
 				keyboardShortcutsSearchProof: path.resolve(
 					harnessDir,
 					"keyboard-shortcuts-search-proof.html"
@@ -203,11 +236,21 @@ export default defineConfig({
 					harnessDir,
 					"button-label-overflow-proof.html"
 				),
+				emptyStateFolderPicker: path.resolve(
+					harnessDir,
+					"empty-state-folder-picker-proof.html"
+				),
 				creditUsageCharts: path.resolve(
 					harnessDir,
 					"credit-usage-charts-proof.html"
 				),
+				creditSidebarWarning: path.resolve(
+					harnessDir,
+					"credit-sidebar-warning-proof.html"
+				),
 				chatVoiceUiProof: path.resolve(harnessDir, "chat-voice-ui-proof.html"),
+				replyMessageProof: path.resolve(harnessDir, "reply-message-proof.html"),
+				replyThreadProof: path.resolve(harnessDir, "reply-thread-proof.html"),
 				chatPreviewRail: path.resolve(
 					harnessDir,
 					"chat-preview-rail-story.html"
@@ -221,6 +264,18 @@ export default defineConfig({
 					harnessDir,
 					"chat-typing-indicator-proof.html"
 				),
+				botChatSectionsProof: path.resolve(
+					harnessDir,
+					"bot-chat-sections-proof.html"
+				),
+				botProductShellProof: path.resolve(
+					harnessDir,
+					"bot-product-shell-proof.html"
+				),
+				osDesktopSurfaceProof: path.resolve(
+					harnessDir,
+					"os-desktop-surface-proof.html"
+				),
 				chatUnreadMessagesProof: path.resolve(
 					harnessDir,
 					"chat-unread-messages-proof.html"
@@ -228,6 +283,10 @@ export default defineConfig({
 				workspaceSessionProof: path.resolve(
 					harnessDir,
 					"workspace-session-proof.html"
+				),
+				subagentsWorkspaceProof: path.resolve(
+					harnessDir,
+					"subagents-workspace-proof.html"
 				),
 				notificationLayoutProof: path.resolve(
 					harnessDir,
@@ -262,6 +321,22 @@ export default defineConfig({
 				morphiconsAdoptionProof: path.resolve(
 					harnessDir,
 					"morphicons-adoption-proof.html"
+				),
+				versionHistoryStory: path.resolve(
+					harnessDir,
+					"version-history-story.html"
+				),
+				gitEnvironmentProof: path.resolve(
+					harnessDir,
+					"git-environment-proof.html"
+				),
+				gatewayGovernanceProof: path.resolve(
+					harnessDir,
+					"gateway-governance-proof.html"
+				),
+				skillRelationsStory: path.resolve(
+					harnessDir,
+					"skill-relations-story.html"
 				),
 			},
 		},

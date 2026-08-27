@@ -57,7 +57,7 @@
 //! BOOT, before anything spawns. A live mask would leave every sidecar, MCP child
 //! and scheduler loop that already started still burning CPU — which is exactly
 //! the cost the user is trying to measure away. So the resolution below runs in
-//! `main.rs` right after the preferences store opens and BEFORE the default-on
+//! `main.rs` right after the preferences store opens and BEFORE the pre-installed
 //! seed, the MCP registry, the sidecar `start_all`, and the scheduler spawn.
 
 use std::path::PathBuf;

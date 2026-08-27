@@ -627,7 +627,9 @@ pub fn stage_target(
     );
     let exploration = count_signal_hits(
         &text,
-        &["read", "search", "grep", "find", "list", "inspect", "explore"],
+        &[
+            "read", "search", "grep", "find", "list", "inspect", "explore",
+        ],
     );
     let production = count_signal_hits(
         &text,
@@ -644,8 +646,8 @@ pub fn stage_target(
         ],
     );
 
-    let signed_score = errors.saturating_mul(3) as i32 + exploration as i32
-        - production.saturating_mul(2) as i32;
+    let signed_score =
+        errors.saturating_mul(3) as i32 + exploration as i32 - production.saturating_mul(2) as i32;
     if signed_score == 0 {
         return default_target;
     }
@@ -1298,10 +1300,7 @@ mod tests {
         );
 
         let ambiguous = json!([{"role": "user", "content": "hello"}]);
-        assert_eq!(
-            stage_target(&ambiguous, 3, 0.5, true),
-            StageTarget::Capable
-        );
+        assert_eq!(stage_target(&ambiguous, 3, 0.5, true), StageTarget::Capable);
         assert_eq!(
             stage_target(&ambiguous, 3, 0.5, false),
             StageTarget::Efficient

@@ -18,6 +18,7 @@ import type {
 	HookEventContribution,
 	PluginManifest,
 	RunnableMeta,
+	SlashCommandContribution,
 	Surface,
 	TurnHookContribution,
 } from "../manifest.ts";
@@ -144,8 +145,8 @@ export interface DefinePluginOptions {
 	requires?: DefineAppRequires;
 	/** Declarative settings tabs (model pickers, fields), passed verbatim. */
 	settingsTabs?: Record<string, unknown>[];
-	/** Declarative slash commands, passed verbatim. */
-	slashCommands?: Record<string, unknown>[];
+	/** Declarative slash commands, including sequential argument choices. */
+	slashCommands?: SlashCommandContribution[];
 	/**
 	 * Host surfaces this plugin runs on. **Omitted/empty = every surface** (the
 	 * backward-compatible default); it never means "hidden".
@@ -190,6 +191,7 @@ export function definePlugin(options: DefinePluginOptions): PluginManifest {
 		pi_extensions: [],
 		output_styles: [],
 		message_actions: [],
+		selection_actions: [],
 	};
 	// Ship each inline tool as a `kind:"tool"` runnable (Core's `inline_deno`
 	// backend). Shipping tools requires the `tool:execute` grant; add it once.

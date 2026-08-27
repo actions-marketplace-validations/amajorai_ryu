@@ -2518,18 +2518,23 @@ fn ryu_marketplace_base() -> String {
 /// still the signed marketplace handoff, so the caller can verify the manifest
 /// before asking for the entitlement-gated archive.
 pub async fn fetch_ryu_package_detail(
-    client: &reqwest::Client,
-    kind: &str,
-    id: &str,
-    update: bool,
+	client: &reqwest::Client,
+	kind: &str,
+	id: &str,
+	update: bool,
+	version: Option<&str>,
 ) -> Result<Value> {
-    let url = format!(
-        "{}/api/marketplace/catalog/detail?kind={}&id={}{}",
-        ryu_marketplace_base(),
-        urlencoding::encode(kind),
-        urlencoding::encode(id.trim()),
-        if update { "&operation=update" } else { "" },
-    );
+	let version_param = version
+		.map(|value| format!("&version={}", urlencoding::encode(value)))
+		.unwrap_or_default();
+	let url = format!(
+		"{}/api/marketplace/catalog/detail?kind={}&id={}{}{}",
+		ryu_marketplace_base(),
+		urlencoding::encode(kind),
+		urlencoding::encode(id.trim()),
+		if update { "&operation=update" } else { "" },
+		version_param,
+	);
     let mut request = client.get(&url);
     if let Some(token) = marketplace_buyer_token() {
         request = request.bearer_auth(token);
@@ -2759,6 +2764,11 @@ struct MarketplaceCard {
     /// server at purchase/install, never by this field.
     #[serde(default)]
     pricing: Option<Value>,
+    /// True only when the hosted server says this paid app is included in the
+    /// recurring Marketplace Membership. Display only; install entitlement is
+    /// still decided by the control plane detail handoff.
+    #[serde(default, rename = "membershipIncluded")]
+    membership_included: bool,
     /// True when the hosted server vouches for the item as first-party. Used to
     /// order the unified view (first-party above third-party) rather than to grant
     /// any trust — trust comes from the signed manifest.
@@ -2798,6 +2808,11 @@ struct MarketplaceCard {
     publisher_trust: Option<String>,
     #[serde(default, rename = "publisherTrustSource")]
     publisher_trust_source: Option<String>,
+    /// Public evidence behind the publisher mark (`verifiedSince` plus method
+    /// ids/labels), kept opaque here so Core can forward newer methods without
+    /// needing to know the presentation vocabulary.
+    #[serde(default, rename = "publisherVerification")]
+    publisher_verification: Option<Value>,
     /// The plugin's declared dependency closure + host surfaces, when the
     /// marketplace server exposes them on the card. Raw JSON, and `Option` so an
     /// older server that omits the columns still parses (the fields survive inside
@@ -3114,6 +3129,53 @@ impl RyuMarketplaceSource {
             .map_err(|e| anyhow::anyhow!("parsing Ryu Marketplace detail {url}: {e}"))
     }
 
+    /// Fetch one exact historical version. The control plane validates the
+    /// immutable release and returns an error when it cannot serve that tag;
+    /// this method never retries without the requested version.
+    async fn fetch_detail_on_version(
+        &self,
+        client: &reqwest::Client,
+        id: &str,
+        version: &str,
+    ) -> Result<Value> {
+        let version = version.trim();
+        if version.is_empty() {
+            bail!("historical Marketplace version must not be empty");
+        }
+        let url = format!(
+            "{}/api/marketplace/catalog/detail?kind={}&id={}&version={}",
+            self.resolve_base(),
+            self.kind.as_str(),
+            urlencode_path(id.trim()),
+            urlencode_component(version),
+        );
+        let mut req = client.get(&url);
+        if let Some(token) = marketplace_buyer_token() {
+            req = req.bearer_auth(token);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("fetching Ryu Marketplace detail {url}: {e}"))?;
+        if resp.status() == reqwest::StatusCode::PAYMENT_REQUIRED {
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            let reason = body
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("this package requires an active marketplace entitlement");
+            bail!("cannot install `{id}`: {reason}");
+        }
+        if !resp.status().is_success() {
+            bail!(
+                "Ryu Marketplace item `{id}` has no published `{version}` build ({} from {url})",
+                resp.status()
+            );
+        }
+        resp.json()
+            .await
+            .map_err(|e| anyhow::anyhow!("parsing Ryu Marketplace detail {url}: {e}"))
+    }
+
     /// The release channels this listing publishes, each with the version that
     /// channel currently resolves to — read from the control plane, the same shape
     /// [`crate::catalog_source::github_listing_channels`] returns for a
@@ -3375,6 +3437,10 @@ impl RyuMarketplaceSource {
                     if let Some(pricing) = card.pricing.clone().filter(|v| !v.is_null()) {
                         obj.insert("pricing".to_owned(), pricing);
                     }
+                    obj.insert(
+                        "membership_included".to_owned(),
+                        serde_json::json!(card.membership_included),
+                    );
                     if card.first_party {
                         obj.insert("first_party".to_owned(), serde_json::json!(true));
                     }
@@ -3399,6 +3465,13 @@ impl RyuMarketplaceSource {
                             "publisher_trust_source".to_owned(),
                             serde_json::json!(source),
                         );
+                    }
+                    if let Some(verification) = card
+                        .publisher_verification
+                        .clone()
+                        .filter(|value| !value.is_null())
+                    {
+                        obj.insert("publisher_verification".to_owned(), verification);
                     }
                     if let Some(org_verified) = card.org_verified {
                         obj.insert("org_verified".to_owned(), serde_json::json!(org_verified));
@@ -3702,6 +3775,27 @@ impl RyuMarketplaceSource {
         channel: Option<&str>,
     ) -> Result<InstallDescriptor> {
         let detail = self.fetch_detail_on_channel(client, id, channel).await?;
+        self.install_descriptor_from_detail(client, id, detail).await
+    }
+
+    /// Resolve one exact historical release selected from the Versions tab.
+    /// Unlike a channel, this never asks the source for its current build.
+    pub async fn install_descriptor_on_version(
+        &self,
+        client: &reqwest::Client,
+        id: &str,
+        version: &str,
+    ) -> Result<InstallDescriptor> {
+        let detail = self.fetch_detail_on_version(client, id, version).await?;
+        self.install_descriptor_from_detail(client, id, detail).await
+    }
+
+    async fn install_descriptor_from_detail(
+        &self,
+        client: &reqwest::Client,
+        id: &str,
+        detail: Value,
+    ) -> Result<InstallDescriptor> {
         // Verify-on-install (#468): reject a tampered manifest before mapping it
         // onto an install descriptor. `signed` is true only when a signature was
         // present AND verified valid.
@@ -3760,8 +3854,8 @@ impl RyuMarketplaceSource {
 
 /// Maximum size of a plugin's bundled sandboxed-UI code, enforced fail-closed at
 /// the integrity gate (mirrors the Core install cap so a pathological bundle is
-/// refused before it is ever stored). 4 MiB.
-const MAX_UI_CODE_BYTES: usize = 4 * 1024 * 1024;
+/// refused before it is ever stored). 32 MiB.
+const MAX_UI_CODE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Lower-case hex `sha256(utf8_bytes(s))`. The SDK (`ryu pack`) hashes the exact
 /// same UTF-8 bytes with the same lower-case-hex encoding, so JS and Rust agree
@@ -4991,6 +5085,28 @@ impl Source {
         }
     }
 
+    /// Resolve one exact historical version. Only the trusted Ryu Marketplace
+    /// source owns this selector; every other source refuses instead of
+    /// interpreting the version as a generic URL or silently serving current.
+    pub async fn install_descriptor_at_version(
+        &self,
+        client: &reqwest::Client,
+        id: &str,
+        version: &str,
+    ) -> Result<InstallDescriptor> {
+        match self {
+            Source::RyuMarketplace(source) => {
+                source
+                    .install_descriptor_on_version(client, id, version)
+                    .await
+            }
+            other => bail!(
+                "source `{}` does not publish exact historical versions for `{id}`",
+                other.id()
+            ),
+        }
+    }
+
     /// Source-aware MCP install (#464). An MCP install is not a file download; it
     /// resolves a validated launch command (stdio) or remote URL and writes a
     /// `~/.ryu/mcp.json` entry the [`crate::sidecar::mcp::McpRegistry`] then
@@ -5867,7 +5983,8 @@ mod tests {
         // matching desktop tab reads (models/skills/servers/items).
         const BODY: &str = r#"{ "kind": "skill", "items": [
             { "id": "owner/foo", "name": "Foo Skill", "description": "does foo",
-              "author": "Acme", "version": "1.0.0", "installSource": "owner/foo" }
+              "author": "Acme", "version": "1.0.0", "installSource": "owner/foo",
+              "membershipIncluded": true }
         ] }"#;
         let env: MarketplaceListEnvelope = serde_json::from_str(BODY).expect("parse catalog body");
         assert_eq!(env.items.len(), 1);
@@ -5886,6 +6003,9 @@ mod tests {
             assert_eq!(arr.len(), 1, "kind {kind} → key `{key}`");
             assert_eq!(arr[0]["id"], "owner/foo");
             assert_eq!(arr[0]["name"], "Foo Skill");
+            if kind == CatalogKind::Plugin {
+                assert_eq!(arr[0]["membership_included"], true);
+            }
             // No `note` on the success path.
             assert!(value.get("note").is_none());
         }
@@ -5901,7 +6021,10 @@ mod tests {
         const BODY: &str = r#"{ "kind": "plugin", "items": [
             { "id": "acme/verified", "name": "Verified", "orgVerified": true,
               "orgVerifiedTier": "partner", "publisherTrust": "blue",
-              "publisherTrustSource": "stripe_connect" },
+              "publisherTrustSource": "stripe_connect",
+              "publisherVerification": { "verifiedSince": "2026-08-23T00:00:00.000Z",
+                "methods": [{ "kind": "email", "label": "Verified email" },
+                             { "kind": "domain", "label": "Verified domain" }] } },
             { "id": "acme/unverified", "name": "Unverified", "orgVerified": false,
               "publisherTrust": "dotted", "publisherTrustSource": "none" },
             { "id": "acme/silent", "name": "Silent" },
@@ -5918,6 +6041,14 @@ mod tests {
         assert_eq!(cards[0]["org_verified_tier"], "partner");
         assert_eq!(cards[0]["publisher_trust"], "blue");
         assert_eq!(cards[0]["publisher_trust_source"], "stripe_connect");
+        assert_eq!(
+            cards[0]["publisher_verification"]["verifiedSince"],
+            "2026-08-23T00:00:00.000Z"
+        );
+        assert_eq!(
+            cards[0]["publisher_verification"]["methods"][1]["label"],
+            "Verified domain"
+        );
         // The camelCase spellings must NOT leak onto the snake_case card.
         assert!(cards[0].get("orgVerified").is_none());
         assert!(cards[0].get("orgVerifiedTier").is_none());

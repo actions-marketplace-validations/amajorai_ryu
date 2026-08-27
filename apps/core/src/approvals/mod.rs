@@ -828,7 +828,7 @@ impl ApprovalEngine {
                 // Re-dispatch through the NO-GATE entry so the approved call runs
                 // exactly once and does not re-raise an approval (infinite loop).
                 let result = registry
-                    .call_tool_with_identity_no_gate(
+                    .call_tool_with_identity_after_approval(
                         agent_id.as_deref(),
                         tool_id,
                         arguments.clone(),

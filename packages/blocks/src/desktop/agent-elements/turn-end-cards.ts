@@ -12,10 +12,23 @@ export interface EditedFile {
 	path: string;
 }
 
+export interface ReversibleTextEdit {
+	after: string;
+	before: string;
+	kind: "replace";
+	path: string;
+}
+
+export interface FileEditUndoPlan {
+	edits: ReversibleTextEdit[];
+	kind: "text-replacements";
+}
+
 export interface FileEditsTurnEndCard {
 	files: EditedFile[];
 	id: string;
 	kind: "file-edits";
+	undoPlan?: FileEditUndoPlan;
 }
 
 export interface JsonRenderTurnEndCard {
@@ -362,6 +375,131 @@ export function deriveEditedFiles(parts: unknown[]): EditedFile[] {
 	return [...files.values()];
 }
 
+function reversibleTextEdit({
+	after,
+	before,
+	path,
+}: {
+	after: unknown;
+	before: unknown;
+	path: string | undefined;
+}): ReversibleTextEdit | undefined {
+	if (
+		!path ||
+		typeof before !== "string" ||
+		typeof after !== "string" ||
+		after.length === 0 ||
+		after === before
+	) {
+		return undefined;
+	}
+	return { after, before, kind: "replace", path };
+}
+
+function explicitOutputEdit(
+	input: RecordValue,
+	output: RecordValue
+): ReversibleTextEdit | undefined {
+	return reversibleTextEdit({
+		after: output.content,
+		before: output.old_content,
+		path: firstString(output, input),
+	});
+}
+
+function singleInputEdit(
+	tool: string,
+	input: RecordValue,
+	output: RecordValue
+): ReversibleTextEdit | undefined {
+	if (input.replace_all === true) {
+		return undefined;
+	}
+	if (
+		tool === "str_replace_editor" &&
+		typeof input.command === "string" &&
+		input.command !== "str_replace"
+	) {
+		return undefined;
+	}
+	return reversibleTextEdit({
+		after: input.new_string ?? input.new_str,
+		before: input.old_string ?? input.old_str,
+		path: firstString(input, output),
+	});
+}
+
+function multiInputEdits(
+	input: RecordValue,
+	output: RecordValue
+): ReversibleTextEdit[] | undefined {
+	if (!Array.isArray(input.edits) || input.edits.length === 0) {
+		return undefined;
+	}
+	const edits: ReversibleTextEdit[] = [];
+	for (const rawEdit of input.edits) {
+		if (!isRecord(rawEdit) || rawEdit.replace_all === true) {
+			return undefined;
+		}
+		const edit = reversibleTextEdit({
+			after: rawEdit.new_string ?? rawEdit.new_str,
+			before: rawEdit.old_string ?? rawEdit.old_str,
+			path: firstString(rawEdit, input, output),
+		});
+		if (!edit) {
+			return undefined;
+		}
+		edits.push(edit);
+	}
+	return edits;
+}
+
+/** Build an exact text-replacement reversal only when the whole turn is safe. */
+export function deriveUndoPlan(parts: unknown[]): FileEditUndoPlan | undefined {
+	const normalizedParts = normalizeAssistantToolParts(parts ?? []);
+	const edits: ReversibleTextEdit[] = [];
+	let foundWrite = false;
+	for (const part of normalizedParts) {
+		const tool = partToolName(part);
+		if (
+			!WRITE_TOOLS.has(tool) ||
+			isFailedPart(part) ||
+			isIncompletePart(part)
+		) {
+			continue;
+		}
+		foundWrite = true;
+		const input = partInput(part);
+		const output = partOutput(part);
+		const outputEdit = explicitOutputEdit(input, output);
+		if (outputEdit) {
+			edits.push(outputEdit);
+			continue;
+		}
+		if (tool === "MultiEdit") {
+			const multiEdits = multiInputEdits(input, output);
+			if (!multiEdits) {
+				return undefined;
+			}
+			edits.push(...multiEdits);
+			continue;
+		}
+		if (tool === "Edit" || tool === "str_replace_editor") {
+			const edit = singleInputEdit(tool, input, output);
+			if (!edit) {
+				return undefined;
+			}
+			edits.push(edit);
+			continue;
+		}
+		return undefined;
+	}
+	if (!foundWrite || edits.length === 0) {
+		return undefined;
+	}
+	return { edits, kind: "text-replacements" };
+}
+
 function isUiRenderPart(part: unknown): boolean {
 	const value = recordOf(part);
 	return (
@@ -452,10 +590,12 @@ export function deriveTurnEndCards(
 	const cards: TurnEndCard[] = [];
 	const files = deriveEditedFiles(normalizedParts);
 	if (files.length > 0) {
+		const undoPlan = deriveUndoPlan(normalizedParts);
 		cards.push({
 			files,
 			id: `${sourceId}-edited-files`,
 			kind: "file-edits",
+			...(undoPlan ? { undoPlan } : {}),
 		});
 	}
 

@@ -16,10 +16,14 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { formatMinorCurrency } from "@ryu/ui/lib/number-format.ts";
 import { useCallback } from "react";
 import { sileo } from "sileo";
 import VerifiedBadge from "./catalog/chrome/verified-badge.tsx";
-import { useMarketplaceHost } from "./host.tsx";
+import {
+	type MarketplaceMembershipState,
+	useMarketplaceHost,
+} from "./host.tsx";
 import { SellerReportsPanel } from "./seller-reports.tsx";
 import { NoOrgState, SignedOutState } from "./states.tsx";
 import type { SellerOnboardingStatus } from "./types.ts";
@@ -30,6 +34,20 @@ const SELLER_STATUS_LABEL: Record<SellerOnboardingStatus, string> = {
 	active: "Active",
 	restricted: "Restricted",
 };
+
+function useMissingMembershipReport(): MarketplaceMembershipState {
+	return {
+		authed: false,
+		error: null,
+		loading: false,
+		refresh: async () => {
+			// no-op when the host does not supply Membership reporting
+		},
+		report: null,
+	};
+}
+
+const MISSING_MEMBERSHIP_REPORT_HOOK = useMissingMembershipReport;
 
 /** CTA label for the seller payout button based on onboarding state. */
 export function payoutButtonLabel(
@@ -46,10 +64,16 @@ export function payoutButtonLabel(
 }
 
 export function SellTab() {
-	const { openExternal, openOrganization, openSignIn, useSellerStatus } =
-		useMarketplaceHost();
+	const {
+		openExternal,
+		openOrganization,
+		openSignIn,
+		useMembershipReport,
+		useSellerStatus,
+	} = useMarketplaceHost();
 	const { status, loading, error, authed, onboard, onboarding, refresh } =
 		useSellerStatus();
+	const membership = (useMembershipReport ?? MISSING_MEMBERSHIP_REPORT_HOOK)();
 
 	const handleOnboard = useCallback(async () => {
 		try {
@@ -102,6 +126,7 @@ export function SellTab() {
 	const payoutsEnabled = status?.payoutsEnabled ?? false;
 	const stripeIdentityStatus = status?.stripeIdentityStatus ?? "none";
 	const stripeUnavailable = error && error.kind === "stripe";
+	const membershipTotals = membership.report?.currencies[0] ?? null;
 
 	return (
 		<div className="mx-auto max-w-2xl px-6 py-8">
@@ -180,6 +205,71 @@ export function SellTab() {
 					</div>
 				)}
 			</div>
+
+			{useMembershipReport && membership.authed ? (
+				<div className="mt-5 rounded-lg border border-primary/20 bg-primary/5 p-5">
+					<div className="flex items-start justify-between gap-3">
+						<div>
+							<p className="font-medium text-sm">Marketplace Membership</p>
+							<p className="mt-1 text-muted-foreground text-sm">
+								Opt paid apps in to show “Included with Membership”. Ryu
+								allocates 70% of Membership revenue to opted-in publishers using
+								weighted app usage.
+							</p>
+						</div>
+						<Badge variant="outline">Recurring plans only</Badge>
+					</div>
+					<p className="mt-3 text-muted-foreground text-xs">
+						One-time buyer licenses remain separate. A publisher payout requires
+						a completed Stripe Connect setup.
+					</p>
+					{membership.loading && !membership.report ? (
+						<div className="mt-4 flex items-center gap-2 text-muted-foreground text-sm">
+							<Spinner className="size-4" />
+							Loading Membership totals…
+						</div>
+					) : membership.error ? (
+						<p className="mt-4 text-destructive text-xs">
+							{membership.error.message}
+						</p>
+					) : membership.report ? (
+						<div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+							<div>
+								<p className="font-semibold text-base">
+									{membership.report.eligibleListingCount}
+								</p>
+								<p className="text-muted-foreground text-xs">
+									Eligible paid apps
+								</p>
+							</div>
+							<div>
+								<p className="font-semibold text-base">
+									{formatMinorCurrency(
+										membershipTotals?.pendingMinor ?? 0,
+										membershipTotals?.currency ?? "usd"
+									)}
+								</p>
+								<p className="text-muted-foreground text-xs">Pending</p>
+							</div>
+							<div>
+								<p className="font-semibold text-base">
+									{formatMinorCurrency(
+										membershipTotals?.paidMinor ?? 0,
+										membershipTotals?.currency ?? "usd"
+									)}
+								</p>
+								<p className="text-muted-foreground text-xs">Paid out</p>
+							</div>
+							<div>
+								<p className="font-semibold text-base">
+									{membershipTotals?.usageCount ?? 0}
+								</p>
+								<p className="text-muted-foreground text-xs">Usage signals</p>
+							</div>
+						</div>
+					) : null}
+				</div>
+			) : null}
 
 			<SellerReportsPanel />
 		</div>

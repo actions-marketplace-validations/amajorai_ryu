@@ -29,6 +29,7 @@ export const PLANS_INCLUDING_BASE_NODE: readonly PlanId[] = [
 	"pro",
 	"max",
 	"teams",
+	"business",
 ];
 
 /**
@@ -60,6 +61,7 @@ export const BASE_NODE_TYPE_BY_PLAN: Readonly<Record<string, string>> = {
 	pro: "cx23",
 	max: "cx33",
 	teams: "cx23",
+	business: "cpx32",
 };
 
 /**
@@ -74,6 +76,7 @@ export const BASE_NODE_TYPE_BY_PLAN_IN_SINGAPORE: Readonly<
 	pro: "cpx22",
 	max: "ccx13",
 	teams: "cpx22",
+	business: "cpx32",
 };
 
 /**

@@ -97,12 +97,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /usr/local/bin/ryu-core /usr/local/bin/ryu-core
 COPY --from=builder /usr/local/bin/ryu-gateway /usr/local/bin/ryu-gateway
+COPY config/node-config.example.json /usr/share/ryu/node-config.example.json
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Core persists everything (models, state, keys) under RYU_DIR; point it at a
 # mountable volume so a redeploy does not re-download the local model stack.
 ENV RYU_DIR=/data
+# Keep the structured node config on the same persistent volume as Core state.
+ENV XDG_CONFIG_HOME=/data/.config
 # Default listen port. Render/Railway/DigitalOcean/Fly inject their own $PORT;
 # the entrypoint maps it onto RYU_BIND. Gateway stays on loopback (Core-managed).
 ENV PORT=7980

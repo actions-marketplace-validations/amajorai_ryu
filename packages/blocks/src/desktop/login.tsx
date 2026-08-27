@@ -17,6 +17,14 @@
 import { CheckmarkCircle02Icon, Copy01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@ryu/ui/components/dialog";
 import { Logo as GhostOrb } from "@ryu/ui/components/logo";
 import { PageHeader } from "@ryu/ui/components/page-header";
 import { toast } from "@ryu/ui/components/sileo";
@@ -24,6 +32,11 @@ import { Spinner } from "@ryu/ui/components/spinner";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import { cn } from "@ryu/ui/lib/utils";
 import { useState } from "react";
+
+export type LocalCoreSetupState =
+	| { phase: "downloading" }
+	| { fileName: string; phase: "waiting" }
+	| { message: string; phase: "error" };
 
 export interface LoginViewProps {
 	/** True once Ryu Core is reachable; gates the Get Started button. */
@@ -36,26 +49,130 @@ export interface LoginViewProps {
 	guestLoading?: boolean;
 	/** Whether the verification URI is known (shows the "Open" button). */
 	hasVerificationUri?: boolean;
-	/** Keeps the local Core download copy honest on phones and tablets. */
-	isMobileBrowser?: boolean;
+	/** Browser-only Core setup shown after the local runtime probe misses. */
+	localCoreSetup?: LocalCoreSetupState | null;
 	onCancel?: () => void;
 	/** Browser-only guest session action; omitted from native desktop login. */
 	onContinueAsGuest?: () => void | Promise<void>;
-	/** Browser-only link to the standalone, headless Core binary download. */
-	onDownloadCore?: () => void | Promise<void>;
+	/** Re-run the browser download when it was blocked or dismissed. */
+	onDownloadCoreAgain?: () => void | Promise<void>;
+	/** Open the full download page when automatic resolution fails. */
+	onOpenCoreDownloads?: () => void | Promise<void>;
 	onOpenVerification?: () => void;
 	/** Retry startup after it failed; renders a "Try again" button in that state. */
 	onRetry?: () => void;
 	onSignIn?: () => void;
+	/** Finish the pending guest session against Ryu Cloud instead. */
+	onUseCloud?: () => void | Promise<void>;
 	/** True while silently polling for approval (adds a waiting hint; the manual
 	 *  "Open" button stays reachable throughout). */
 	polling?: boolean;
-	/** Show the computer-only Core download option. */
-	showLocalCoreDownload?: boolean;
 	/** The user code to enter on the verification page. */
 	userCode?: string | null;
 	/** When set, the device-auth flow is in progress (shows the code panel). */
 	waiting?: boolean;
+}
+
+function SetupStatus({
+	children,
+	complete = false,
+	muted = false,
+}: {
+	children: React.ReactNode;
+	complete?: boolean;
+	muted?: boolean;
+}) {
+	return (
+		<div
+			className={cn(
+				"flex items-center gap-3 rounded-xl border border-border/50 bg-muted/30 px-3 py-2.5",
+				muted && "text-muted-foreground"
+			)}
+		>
+			{complete ? (
+				<HugeiconsIcon
+					className="size-4 shrink-0 text-emerald-500"
+					icon={CheckmarkCircle02Icon}
+				/>
+			) : (
+				<Spinner className="size-4 shrink-0" />
+			)}
+			<span>{children}</span>
+		</div>
+	);
+}
+
+function LocalCoreSetupDialog({
+	state,
+	onDownloadCoreAgain,
+	onOpenCoreDownloads,
+	onUseCloud,
+}: {
+	state: LocalCoreSetupState | null;
+	onDownloadCoreAgain?: () => void | Promise<void>;
+	onOpenCoreDownloads?: () => void | Promise<void>;
+	onUseCloud?: () => void | Promise<void>;
+}) {
+	return (
+		<Dialog open={state !== null}>
+			<DialogContent showCloseButton={false}>
+				{state ? (
+					<>
+						<DialogHeader>
+							<DialogTitle>
+								{state.phase === "downloading"
+									? "Downloading Ryu Core"
+									: state.phase === "waiting"
+										? "Set up Ryu Core"
+										: "Core download needs a hand"}
+							</DialogTitle>
+							<DialogDescription>
+								{state.phase === "downloading"
+									? "Ryu is getting the right Core build for this computer."
+									: state.phase === "waiting"
+										? "Open the download to start Core, then leave this window open. Ryu connects as soon as Core is ready."
+										: state.message}
+							</DialogDescription>
+						</DialogHeader>
+
+						<div className="space-y-2">
+							{state.phase === "downloading" ? (
+								<SetupStatus>Downloading Ryu Core…</SetupStatus>
+							) : null}
+							{state.phase === "waiting" ? (
+								<>
+									<SetupStatus complete>
+										Download started: {state.fileName}
+									</SetupStatus>
+									<SetupStatus muted>Waiting for Ryu Core…</SetupStatus>
+								</>
+							) : null}
+						</div>
+
+						<DialogFooter className="sm:justify-between">
+							<Button onClick={onUseCloud} type="button" variant="ghost">
+								Use Ryu Cloud instead
+							</Button>
+							{state.phase === "waiting" ? (
+								<Button
+									onClick={onDownloadCoreAgain}
+									type="button"
+									variant="outline"
+								>
+									Download again
+								</Button>
+							) : null}
+							{state.phase === "error" ? (
+								<Button onClick={onOpenCoreDownloads} type="button">
+									Open Core downloads
+								</Button>
+							) : null}
+						</DialogFooter>
+					</>
+				) : null}
+			</DialogContent>
+		</Dialog>
+	);
 }
 
 /** The device code, click-to-copy. The code is deliberately not selectable text:
@@ -143,9 +260,10 @@ export function LoginView({
 	onRetry,
 	onContinueAsGuest,
 	guestLoading = false,
-	onDownloadCore,
-	showLocalCoreDownload = false,
-	isMobileBrowser = false,
+	localCoreSetup = null,
+	onDownloadCoreAgain,
+	onOpenCoreDownloads,
+	onUseCloud,
 }: LoginViewProps) {
 	return (
 		// The empty area around the centered column is the start page's window
@@ -155,6 +273,12 @@ export function LoginView({
 			className="flex h-full w-full flex-col items-center justify-center gap-8 p-8"
 			data-tauri-drag-region="true"
 		>
+			<LocalCoreSetupDialog
+				onDownloadCoreAgain={onDownloadCoreAgain}
+				onOpenCoreDownloads={onOpenCoreDownloads}
+				onUseCloud={onUseCloud}
+				state={localCoreSetup}
+			/>
 			<StaggerReveal>
 				<div className="shrink-0">
 					<GhostOrb size="50px" variant="outline" />
@@ -246,27 +370,6 @@ export function LoginView({
 										"Try Ryu without an account"
 									)}
 								</Button>
-							) : null}
-							{showLocalCoreDownload && onDownloadCore ? (
-								<div className="flex w-full flex-col gap-2 pt-2">
-									<Button
-										className="w-full"
-										onClick={onDownloadCore}
-										size="sm"
-										variant="ghost"
-									>
-										Download Ryu Core for this computer
-									</Button>
-									<p className="text-center text-muted-foreground text-xs">
-										A standalone local runtime — no desktop app required.
-									</p>
-								</div>
-							) : null}
-							{isMobileBrowser ? (
-								<p className="text-center text-muted-foreground text-xs">
-									Local Core downloads are for computers. You can use Ryu in
-									this browser instead.
-								</p>
 							) : null}
 							{/* Browser-extension CTA intentionally stays dormant until the
 							    public extension release. At that point, use the browser family

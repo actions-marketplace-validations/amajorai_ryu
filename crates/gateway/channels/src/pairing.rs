@@ -36,6 +36,8 @@ use tracing::{info, warn};
 /// message again to get a fresh code — a code left lying around in a chat log
 /// should not be approvable a month later.
 pub const CODE_TTL: Duration = Duration::from_secs(60 * 60 * 24);
+const REPLY_LINK_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 90);
+const MAX_REPLY_LINKS: usize = 4096;
 
 /// Characters a pairing code is drawn from. Digits `0`/`1` and letters `O`/`I`
 /// are omitted so a code read aloud or off a phone screen is unambiguous.
@@ -114,6 +116,12 @@ pub enum PairState {
     Blocked,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ReplyLink {
+    core_message_ids: Vec<String>,
+    updated_at: u64,
+}
+
 /// The on-disk shape. A map of `"<platform>:<sender_id>"` → state, plus a version
 /// tag so a future format change can migrate rather than silently mis-parse.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -122,6 +130,8 @@ struct PairingFile {
     version: u32,
     #[serde(default)]
     entries: HashMap<String, PairState>,
+    #[serde(default)]
+    reply_links: HashMap<String, ReplyLink>,
 }
 
 /// Pairing state for every channel on this node, backed by a JSON file.
@@ -193,6 +203,68 @@ impl PairingStore {
         if let Err(err) = tokio::fs::write(path, bytes).await {
             warn!(path = %path.display(), %err, "failed to persist channel pairing store");
         }
+    }
+
+    /// Persist provider-message → Core-message links next to pairing state so a
+    /// delayed reaction still targets the exact assistant row after restart.
+    /// The table is TTL-pruned and hard-bounded on every write.
+    pub async fn bind_reply_messages(
+        &self,
+        platform: &str,
+        conversation_id: &str,
+        provider_message_ids: &[String],
+        core_message_ids: &[String],
+    ) {
+        let now = unix_now();
+        let cutoff = now.saturating_sub(REPLY_LINK_TTL.as_secs());
+        {
+            let mut file = self.inner.write().await;
+            file.reply_links.retain(|_, link| link.updated_at >= cutoff);
+            for provider_message_id in provider_message_ids {
+                if provider_message_id.trim().is_empty() {
+                    continue;
+                }
+                file.reply_links.insert(
+                    reply_link_key(platform, conversation_id, provider_message_id),
+                    ReplyLink {
+                        core_message_ids: core_message_ids.to_vec(),
+                        updated_at: now,
+                    },
+                );
+            }
+            while file.reply_links.len() > MAX_REPLY_LINKS {
+                let Some(oldest) = file
+                    .reply_links
+                    .iter()
+                    .min_by_key(|(_, link)| link.updated_at)
+                    .map(|(key, _)| key.clone())
+                else {
+                    break;
+                };
+                file.reply_links.remove(&oldest);
+            }
+        }
+        self.persist().await;
+    }
+
+    pub async fn reply_message(
+        &self,
+        platform: &str,
+        conversation_id: &str,
+        provider_message_id: &str,
+    ) -> Option<Vec<String>> {
+        let cutoff = unix_now().saturating_sub(REPLY_LINK_TTL.as_secs());
+        self.inner
+            .read()
+            .await
+            .reply_links
+            .get(&reply_link_key(
+                platform,
+                conversation_id,
+                provider_message_id,
+            ))
+            .filter(|link| link.updated_at >= cutoff)
+            .map(|link| link.core_message_ids.clone())
     }
 
     /// Look up one sender's state.
@@ -402,6 +474,10 @@ fn entry_key(platform: &str, sender_id: &str) -> String {
     format!("{platform}:{sender_id}")
 }
 
+fn reply_link_key(platform: &str, conversation_id: &str, provider_message_id: &str) -> String {
+    format!("{platform}\0{conversation_id}\0{provider_message_id}")
+}
+
 /// Seconds since the Unix epoch, saturating to 0 if the clock is before it.
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -479,6 +555,51 @@ mod tests {
             policy.decide_dm(&store, "telegram", "u1").await,
             Decision::Allow
         );
+    }
+
+    #[tokio::test]
+    async fn exact_reply_links_survive_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "ryu-channel-reply-links-{}-{}.json",
+            std::process::id(),
+            unix_now()
+        ));
+        let store = PairingStore::load(&path).await;
+        store
+            .bind_reply_messages(
+                "telegram",
+                "channel:bot:chat",
+                &["provider-42".to_owned()],
+                &["assistant-98".to_owned(), "assistant-99".to_owned()],
+            )
+            .await;
+        drop(store);
+
+        let restored = PairingStore::load(&path).await;
+        assert_eq!(
+            restored
+                .reply_message("telegram", "channel:bot:chat", "provider-42")
+                .await,
+            Some(vec!["assistant-98".to_owned(), "assistant-99".to_owned()])
+        );
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn reply_links_stay_within_the_hard_limit() {
+        let store = PairingStore::ephemeral();
+        for index in 0..=MAX_REPLY_LINKS {
+            store
+                .bind_reply_messages(
+                    "telegram",
+                    "channel:bot:chat",
+                    &[format!("provider-{index}")],
+                    &[format!("assistant-{index}")],
+                )
+                .await;
+        }
+
+        assert_eq!(store.inner.read().await.reply_links.len(), MAX_REPLY_LINKS);
     }
 
     #[tokio::test]

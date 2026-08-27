@@ -1,8 +1,8 @@
 //! RTK per-agent auto-wrap (Phase 2 of the `rtk` plugin).
 //!
 //! Phase 1 exposes RTK as an explicit `rtk.run` tool — now a fully declarative
-//! `command`-backend plugin (`plugins-store/rtk`, mirrored as the built-in
-//! manifest `plugins-store/rtk/manifest.json`, which Core includes directly); its native provider
+//! `command`-backend plugin (`plugins-store/plugins/rtk`, mirrored as the built-in
+//! manifest `plugins-store/plugins/rtk/manifest.json`, which Core includes directly); its native provider
 //! (`sidecar/mcp/rtk.rs`) was deleted. Phase 2, below, is NOT a tool and cannot be
 //! declarative, so it stays as Rust — including [`rtk_bin_path`]/[`is_available`],
 //! relocated here from the deleted provider (Phase 2 is their only consumer).

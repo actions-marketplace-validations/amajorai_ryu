@@ -7,8 +7,8 @@
 // OpenAI-style `choices[].delta.content` fallback; structural parts yield nothing.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { installFetch } from "./test-fetch.ts";
 import { AgentsAPI } from "./agents.ts";
+import { installFetch } from "./test-fetch.ts";
 import type { RyuClientOptions } from "./types.ts";
 
 const realFetch = globalThis.fetch;
@@ -19,16 +19,15 @@ afterEach(() => {
 const OPTIONS: RyuClientOptions = { baseUrl: "http://localhost:7980" };
 
 function jsonOnce(body: unknown): void {
-	installFetch((() =>
-		Promise.resolve(
-			new Response(JSON.stringify(body), { status: 200 })
-		)));
+	installFetch(() =>
+		Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))
+	);
 }
 
 /** A streaming Response whose body enqueues each string as its own chunk. */
 function streamOnce(chunks: string[], init?: ResponseInit): void {
 	const encoder = new TextEncoder();
-	installFetch((() =>
+	installFetch(() =>
 		Promise.resolve(
 			new Response(
 				new ReadableStream<Uint8Array>({
@@ -41,7 +40,8 @@ function streamOnce(chunks: string[], init?: ResponseInit): void {
 				}),
 				init
 			)
-		)));
+		)
+	);
 }
 
 describe("AgentsAPI.list mapper", () => {
@@ -107,6 +107,43 @@ async function collectStream(api: AgentsAPI) {
 	}
 	return chunks;
 }
+
+describe("AgentsAPI.stream request options", () => {
+	test("sends the developer response mode when requested", async () => {
+		let capturedBody: string | undefined;
+		installFetch((_input, init) => {
+			capturedBody = String(init?.body ?? "");
+			return Promise.resolve(new Response("data: [DONE]\n"));
+		});
+
+		await new AgentsAPI(OPTIONS)
+			.stream("ryu", [{ role: "user", content: "Build a plugin" }], {
+				responseMode: "developer",
+			})
+			.next();
+
+		expect(JSON.parse(capturedBody ?? "{}")).toMatchObject({
+			agent_id: "ryu",
+			response_mode: "developer",
+		});
+	});
+
+	test("omits response mode when no option is supplied", async () => {
+		let capturedBody: string | undefined;
+		installFetch((_input, init) => {
+			capturedBody = String(init?.body ?? "");
+			return Promise.resolve(new Response("data: [DONE]\n"));
+		});
+
+		await new AgentsAPI(OPTIONS)
+			.stream("ryu", [{ role: "user", content: "Build a plugin" }])
+			.next();
+
+		expect(JSON.parse(capturedBody ?? "{}")).not.toHaveProperty(
+			"response_mode"
+		);
+	});
+});
 
 describe("AgentsAPI.stream frame parsing", () => {
 	test("surfaces text-delta parts and terminates on [DONE]", async () => {

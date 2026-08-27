@@ -69,7 +69,10 @@ use crate::{
     audit::AuditRecord,
     budget::{BudgetChargeKind, BudgetDecision, CreditReservation},
     cache::Cache,
-    config::{AlertTier, ApiKeyConfig, BudgetAction, FirewallPolicy, Modality, ProviderId},
+    config::{
+        AlertTier, ApiKeyConfig, ApiKeyOperation, BudgetAction, FirewallPolicy, Modality,
+        ProviderId,
+    },
     error::GatewayError,
     evaluators::{Evaluator, EvaluatorImpl, EvaluatorRegistry, EvaluatorTarget},
     firewall::{inspector::InspectorClient, FirewallScanner},
@@ -607,6 +610,11 @@ pub async fn authenticate(
             // default bind is 0.0.0.0). Keep first-match semantics — only the
             // per-byte signal is removed.
             if ct_eq(key, cfg_key.key.as_str()) {
+                if !cfg_key.allows_operation(ApiKeyOperation::Inference) {
+                    return StaticOutcome::Reject(GatewayError::Unauthorized(
+                        "API key is not authorized for inference relay".to_owned(),
+                    ));
+                }
                 // The budget identity must not be spoofable. Only honor the
                 // client-supplied x-ryu-user-id / x-ryu-agent-id headers when this
                 // key is an explicitly trusted forwarder (e.g. Ryu Core relaying a
@@ -1776,6 +1784,30 @@ fn inline_outcome_rank(o: InlineOutcome) -> u8 {
     }
 }
 
+/// Whether this error says the provider itself is unhealthy. Rate limits and
+/// payment-required responses belong to capacity/account state, so fallbacks may
+/// run but the circuit must stay ready for a later request after recovery.
+fn penalizes_provider_circuit(error: &GatewayError) -> bool {
+    !matches!(
+        error,
+        GatewayError::ProviderRateLimited { .. } | GatewayError::ProviderPaymentRequired { .. }
+    )
+}
+
+/// Keep an actionable payment-required failure if later fallbacks also fail.
+/// A generic outage may explain the last attempt, but it must not erase the
+/// account recovery the caller can actually perform.
+fn remember_preferred_provider_error(slot: &mut Option<GatewayError>, error: GatewayError) {
+    let existing_is_payment = matches!(
+        slot.as_ref(),
+        Some(GatewayError::ProviderPaymentRequired { .. })
+    );
+    let current_is_payment = matches!(&error, GatewayError::ProviderPaymentRequired { .. });
+    if current_is_payment || !existing_is_payment {
+        *slot = Some(error);
+    }
+}
+
 // ─── Non-streaming pipeline ───────────────────────────────────────────────────
 
 pub async fn run(
@@ -1990,9 +2022,10 @@ pub async fn run(
                 provider = provider_kind.as_str(),
                 "circuit open, skipping provider"
             );
-            last_err = Some(GatewayError::CircuitOpen(
-                provider_kind.as_str().to_string(),
-            ));
+            remember_preferred_provider_error(
+                &mut last_err,
+                GatewayError::CircuitOpen(provider_kind.as_str().to_string()),
+            );
             if Some(provider_kind) == primary_provider.as_ref() {
                 primary_skipped = true;
             }
@@ -2254,6 +2287,7 @@ pub async fn run(
                 // or configured model-price fallback as the wallet debit.
                 let budget_cost_micro_usd = charged_budget_cost_micro_usd(
                     &state,
+                    Some(provider.name()),
                     reported_cost,
                     input_tokens,
                     output_tokens,
@@ -2304,6 +2338,16 @@ pub async fn run(
                     input_tokens,
                     output_tokens,
                     latency_ms,
+                );
+                crate::ryu_analytics::emit_model_call(
+                    "chat",
+                    provider.name(),
+                    &decision.model,
+                    input_tokens,
+                    output_tokens,
+                    latency_ms,
+                    "ok",
+                    None,
                 );
 
                 info!(
@@ -2411,13 +2455,11 @@ pub async fn run(
                 });
             }
             Err(e) => {
-                // A pure upstream rate-limit (429, after in-provider account
-                // rotation exhausted all keys) means "busy, try the next tier",
-                // not "broken" — demote down the cost-tier chain WITHOUT tripping
-                // the circuit breaker. All other errors penalize the provider.
-                if matches!(e, GatewayError::ProviderRateLimited { .. }) {
+                // Capacity (429) and account payment (402) are retry/fallback
+                // signals, not provider outages. Neither may poison health state.
+                if !penalizes_provider_circuit(&e) {
                     state.metrics.inc_provider_error(provider.name());
-                    warn!(provider = %provider.name(), error = %e, "provider rate limited, demoting to next tier");
+                    warn!(provider = %provider.name(), error = %e, "provider unavailable for this account, demoting to next tier");
                 } else {
                     state.circuit_breaker.record_failure(provider.name());
                     state.metrics.inc_provider_error(provider.name());
@@ -2426,7 +2468,7 @@ pub async fn run(
                 if Some(provider_kind) == primary_provider.as_ref() {
                     primary_skipped = true;
                 }
-                last_err = Some(e);
+                remember_preferred_provider_error(&mut last_err, e);
             }
         }
     }
@@ -2453,6 +2495,28 @@ pub async fn run(
         },
     );
     audit_failure(&state, &ctx, &decision.model, &err, start);
+    let error_code = match &err {
+        GatewayError::AllProvidersUnavailable(_) => "all_providers_unavailable",
+        GatewayError::ProviderRateLimited { .. } => "provider_rate_limited",
+        GatewayError::ProviderPaymentRequired { .. } => "provider_payment_required",
+        GatewayError::RateLimited => "rate_limit_exceeded",
+        GatewayError::InsufficientCredits => "insufficient_credits",
+        GatewayError::BudgetExceeded(_) => "budget_exceeded",
+        GatewayError::FirewallBlocked(_, _) | GatewayError::PolicyViolation(_) => {
+            "policy_violation"
+        }
+        _ => "gateway_error",
+    };
+    crate::ryu_analytics::emit_model_call(
+        "chat",
+        "unknown",
+        &decision.model,
+        0,
+        0,
+        start.elapsed().as_millis() as u64,
+        "error",
+        Some(error_code),
+    );
     Err(err)
 }
 
@@ -2707,9 +2771,10 @@ pub async fn run_stream(
 
     for provider_kind in &fallback_chain {
         if state.circuit_breaker.is_open(provider_kind.as_str()) {
-            last_err = Some(GatewayError::CircuitOpen(
-                provider_kind.as_str().to_string(),
-            ));
+            remember_preferred_provider_error(
+                &mut last_err,
+                GatewayError::CircuitOpen(provider_kind.as_str().to_string()),
+            );
             if Some(provider_kind) == primary_provider_stream.as_ref() {
                 primary_skipped_stream = true;
             }
@@ -2878,14 +2943,14 @@ pub async fn run_stream(
                 });
             }
             Err(e) => {
-                // See the non-stream arm: a 429 demotes tiers without a circuit
-                // penalty; other errors trip the breaker as before.
-                if matches!(e, GatewayError::ProviderRateLimited { .. }) {
+                // See the non-stream arm: 429 capacity and 402 payment conditions
+                // demote tiers without a circuit penalty.
+                if !penalizes_provider_circuit(&e) {
                     state.metrics.inc_provider_error(provider.name());
                     warn!(
                         provider = %provider.name(),
                         error = %e,
-                        "stream provider rate limited, demoting to next tier"
+                        "stream provider unavailable for this account, demoting to next tier"
                     );
                 } else {
                     state.circuit_breaker.record_failure(provider.name());
@@ -2899,7 +2964,7 @@ pub async fn run_stream(
                 if Some(provider_kind) == primary_provider_stream.as_ref() {
                     primary_skipped_stream = true;
                 }
-                last_err = Some(e);
+                remember_preferred_provider_error(&mut last_err, e);
             }
         }
     }
@@ -3069,9 +3134,10 @@ pub async fn run_multimodal(
 
     for provider_kind in &fallback_chain {
         if state.circuit_breaker.is_open(provider_kind.as_str()) {
-            last_err = Some(GatewayError::CircuitOpen(
-                provider_kind.as_str().to_string(),
-            ));
+            remember_preferred_provider_error(
+                &mut last_err,
+                GatewayError::CircuitOpen(provider_kind.as_str().to_string()),
+            );
             if Some(provider_kind) == primary_provider_mm.as_ref() {
                 primary_skipped_mm = true;
             }
@@ -3135,7 +3201,10 @@ pub async fn run_multimodal(
                         &state,
                         &ctx,
                         BudgetChargeKind::Media,
-                        state.config.credits.debit_amount(media_cost_micro_usd),
+                        state
+                            .config
+                            .credits
+                            .debit_amount_for_provider(Some(provider.name()), media_cost_micro_usd),
                     );
                 }
 
@@ -3179,6 +3248,16 @@ pub async fn run_multimodal(
                     0,
                     0,
                     latency_ms,
+                );
+                crate::ryu_analytics::emit_model_call(
+                    modality.as_str(),
+                    provider.name(),
+                    &decision.model,
+                    0,
+                    0,
+                    latency_ms,
+                    "ok",
+                    None,
                 );
 
                 info!(
@@ -3299,7 +3378,7 @@ pub async fn run_multimodal(
                 if Some(provider_kind) == primary_provider_mm.as_ref() {
                     primary_skipped_mm = true;
                 }
-                last_err = Some(e);
+                remember_preferred_provider_error(&mut last_err, e);
             }
         }
     }
@@ -3441,6 +3520,7 @@ pub async fn run_embedding(
                     .and_then(cost_usd_to_micro);
                 let budget_cost_micro_usd = charged_budget_cost_micro_usd(
                     &state,
+                    Some(provider.name()),
                     response["usage"]["cost"].as_f64(),
                     input_tokens,
                     output_tokens,
@@ -3549,7 +3629,7 @@ pub async fn run_embedding(
                 });
             }
             Err(error) => {
-                if !matches!(error, GatewayError::ProviderRateLimited { .. }) {
+                if penalizes_provider_circuit(&error) {
                     state.circuit_breaker.record_failure(provider.name());
                 }
                 state.metrics.inc_provider_error(provider.name());
@@ -3760,7 +3840,10 @@ pub async fn submit_video_job(
                 job_agent_id.as_deref(),
                 job_session_id.as_deref(),
                 BudgetChargeKind::Media,
-                state.config.credits.debit_amount(cost),
+                state
+                    .config
+                    .credits
+                    .debit_amount_for_provider(Some(provider.name()), cost),
             );
             // Outside the `cost > 0` guard — see the sync media path above. A
             // fallback priced at zero is precisely the case that must not be silent.
@@ -3898,7 +3981,10 @@ pub async fn poll_video_job(
                 job.agent_id.as_deref(),
                 job.session_id.as_deref(),
                 BudgetChargeKind::Media,
-                state.config.credits.debit_amount(cost),
+                state
+                    .config
+                    .credits
+                    .debit_amount_for_provider(Some(provider.name()), cost),
             );
             // Outside the `cost > 0` guard — see the sync media path above.
             if estimated {
@@ -4775,18 +4861,16 @@ fn response_cost_micro_usd(
 /// useful on self-hosted nodes where the markup is zero and no wallet is active.
 fn charged_budget_cost_micro_usd(
     state: &AppState,
+    provider: Option<&str>,
     reported_cost_usd: Option<f64>,
     input_tokens: u64,
     output_tokens: u64,
     model: &str,
 ) -> u64 {
-    state.config.credits.debit_amount(response_cost_micro_usd(
-        state,
-        reported_cost_usd,
-        input_tokens,
-        output_tokens,
-        model,
-    ))
+    state.config.credits.debit_amount_for_provider(
+        provider,
+        response_cost_micro_usd(state, reported_cost_usd, input_tokens, output_tokens, model),
+    )
 }
 
 /// Add one successful charged model call to the local user/agent/session
@@ -5065,7 +5149,7 @@ async fn debit_wallet_for_request(
     if !credits.is_active() {
         return;
     }
-    let amount = credits.debit_amount(cost_micro_usd);
+    let amount = credits.debit_amount_for_provider(attribution.provider.as_deref(), cost_micro_usd);
     if amount == 0 {
         return;
     }
@@ -5220,15 +5304,70 @@ pub(crate) fn spawn_tool_call_debit_for_ids(
     managed_inference: bool,
     billable_tool_calls: u64,
 ) {
+    spawn_external_tool_debit_for_ids(
+        state,
+        user_id,
+        agent_id,
+        session_id,
+        org_id,
+        request_id,
+        managed_inference,
+        "composio",
+        None,
+        None,
+        None,
+        false,
+        None,
+        billable_tool_calls,
+    );
+}
+
+/// Best-effort provider-neutral external-tool charge entry point. A provider may
+/// report its raw transaction cost (Treg), while Composio keeps the existing
+/// configured per-call fallback when no raw amount is available.
+pub(crate) fn spawn_external_tool_debit_for_ids(
+    state: &Arc<AppState>,
+    user_id: Option<&str>,
+    agent_id: Option<&str>,
+    session_id: Option<&str>,
+    org_id: Option<&str>,
+    request_id: &str,
+    managed_inference: bool,
+    provider: &str,
+    tool_id: Option<&str>,
+    raw_cost_micro_usd: Option<u64>,
+    transaction_id: Option<&str>,
+    estimated: bool,
+    task_label: Option<&str>,
+    billable_tool_calls: u64,
+) {
     if billable_tool_calls == 0 {
         return;
     }
+    let provider = provider.trim();
+    let reason: &'static str = match provider {
+        "composio" => "composio",
+        "treg" => "treg",
+        _ => {
+            warn!(
+                provider,
+                "credits: ignoring unsupported external tool provider"
+            );
+            return;
+        }
+    };
     let credits = &state.config.credits;
-    let raw_cost = credits.tool_call_cost_micro_usd(billable_tool_calls);
+    let raw_cost = raw_cost_micro_usd.unwrap_or_else(|| {
+        if provider == "composio" {
+            credits.tool_call_cost_micro_usd(billable_tool_calls)
+        } else {
+            0
+        }
+    });
     if raw_cost == 0 {
         return;
     }
-    let charged_cost = credits.debit_amount(raw_cost);
+    let charged_cost = credits.debit_amount_for_provider(Some(provider), raw_cost);
     record_charged_budget_for_ids(
         state,
         user_id,
@@ -5244,13 +5383,24 @@ pub(crate) fn spawn_tool_call_debit_for_ids(
     if !credits.is_active() {
         return;
     }
-    let ref_id = format!("{request_id}:composio");
+    let ref_id = transaction_id
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("{provider}:{value}"))
+        .unwrap_or_else(|| format!("{request_id}:{provider}"));
     let fail_closed_sticky = credits.fail_closed && managed_inference;
+    let default_label = format!(
+        "{billable_tool_calls} {provider} tool {}",
+        if billable_tool_calls == 1 {
+            "call"
+        } else {
+            "calls"
+        }
+    );
     tokio::spawn(debit_wallet_for_request(
         Arc::clone(state),
         org_id.to_string(),
         ref_id,
-        "composio",
+        reason,
         raw_cost,
         fail_closed_sticky,
         None,
@@ -5266,9 +5416,16 @@ pub(crate) fn spawn_tool_call_debit_for_ids(
         // the row a customer is most likely to query, and until now it was the
         // one with the least to say for itself.
         DebitAttribution {
-            provider: Some("composio".to_string()),
+            provider: Some(provider.to_string()),
+            model: tool_id
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned),
             user_id: user_id.map(str::to_owned),
-            task_label: Some(format!("{billable_tool_calls} tool calls")),
+            task_label: task_label
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+                .or(Some(default_label)),
+            estimated: Some(estimated),
             ..Default::default()
         },
     ));
@@ -5626,6 +5783,7 @@ fn attach_stream_observer(
                     let provider_cost_micro_usd = reported_cost.and_then(cost_usd_to_micro);
                     let budget_cost_micro_usd = charged_budget_cost_micro_usd(
                         &s.state,
+                        Some(s.provider_name.as_str()),
                         reported_cost,
                         input_tokens,
                         output_tokens,
@@ -5686,6 +5844,16 @@ fn attach_stream_observer(
                         input_tokens,
                         output_tokens,
                         latency_ms,
+                    );
+                    crate::ryu_analytics::emit_model_call(
+                        "chat",
+                        &s.provider_name,
+                        &s.model,
+                        input_tokens,
+                        output_tokens,
+                        latency_ms,
+                        "ok",
+                        None,
                     );
 
                     // Credit-wallet debit hook (#486), streaming path. We are
@@ -8867,6 +9035,8 @@ mod fallback_tests {
         Ok,
         /// Return a 429 → `ProviderError::RateLimited` (capacity signal, demote).
         RateLimited,
+        /// Return a 402 account/payment condition (demote without provider fault).
+        PaymentRequired,
         /// Return a generic provider failure (fault, trip circuit + fail over).
         Fail,
     }
@@ -8921,6 +9091,10 @@ mod fallback_tests {
                         retry_after: Some(30),
                         reset_at: None,
                     }),
+                    Mode::PaymentRequired => Err(ProviderError::PaymentRequired {
+                        provider: id.to_string(),
+                        message: "no credits".to_owned(),
+                    }),
                     Mode::Fail => Err(ProviderError::Provider(format!("{id} boom"))),
                 }
             })
@@ -8956,6 +9130,10 @@ mod fallback_tests {
                         provider: id.to_string(),
                         retry_after: None,
                         reset_at: None,
+                    }),
+                    Mode::PaymentRequired => Err(ProviderError::PaymentRequired {
+                        provider: id.to_string(),
+                        message: "no credits".to_owned(),
                     }),
                     Mode::Fail => Err(ProviderError::Provider(format!("{id} stream boom"))),
                 }
@@ -9353,6 +9531,47 @@ mod fallback_tests {
         assert!(
             !state.circuit_breaker.is_open("primary"),
             "a rate-limit is a capacity signal and must not trip the circuit"
+        );
+    }
+
+    #[tokio::test]
+    async fn payment_required_primary_demotes_without_tripping_circuit() {
+        let mut state = chain_state(1);
+        let (primary, primary_calls) = StubProvider::new("primary", Mode::PaymentRequired);
+        let (secondary, secondary_calls) = StubProvider::new("secondary", Mode::Ok);
+        state.providers.register(primary as Arc<dyn Provider>);
+        state.providers.register(secondary as Arc<dyn Provider>);
+        let state = Arc::new(state);
+
+        let out = run(Arc::clone(&state), plain_ctx(), ping_body())
+            .await
+            .expect("secondary must serve after the selected account returns 402");
+
+        assert_eq!(out.provider_used, "secondary");
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !state.circuit_breaker.is_open("primary"),
+            "a payment condition belongs to the account, not provider health"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_chain_preserves_the_payment_required_reason() {
+        let mut state = chain_state(1);
+        let (primary, _) = StubProvider::new("primary", Mode::PaymentRequired);
+        let (secondary, _) = StubProvider::new("secondary", Mode::Fail);
+        state.providers.register(primary as Arc<dyn Provider>);
+        state.providers.register(secondary as Arc<dyn Provider>);
+        let state = Arc::new(state);
+
+        let err = match run(Arc::clone(&state), plain_ctx(), ping_body()).await {
+            Err(error) => error,
+            Ok(_) => panic!("an exhausted fallback chain must fail"),
+        };
+        assert!(
+            matches!(err, GatewayError::ProviderPaymentRequired { .. }),
+            "the actionable 402 must survive a later generic fallback error: {err:?}"
         );
     }
 

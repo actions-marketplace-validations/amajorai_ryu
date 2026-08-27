@@ -1,8 +1,8 @@
 // Unit tests for `resolveRlmPath` — the desktop half of the `rlm.request` security
 // boundary. The frame contributes a sub-path and nothing else; this is what decides
-// whether that sub-path is a sub-path, and it is duplicated from
-// `@ryu/app-host/rpc`'s `asRlmRequestArg` on purpose, because either layer alone
-// would be the only thing between a sandboxed frame and the node's credentials.
+// whether that sub-path is a sub-path. The desktop host and `@ryu/app-host/rpc`
+// deliberately keep independent checks, because either layer alone would be the
+// only thing between a sandboxed frame and the node's credentials.
 
 import { describe, expect, it } from "bun:test";
 import { resolveRlmPath } from "./rlm.ts";

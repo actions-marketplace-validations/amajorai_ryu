@@ -22,6 +22,9 @@ import { describe, expect, mock, test } from "bun:test";
 mock.module("@ryu/blocks/desktop/agent-elements/text-shimmer", () => ({
 	TextShimmer: () => null,
 }));
+mock.module("@/components/agent-elements/message-list.tsx", () => ({
+	MessageList: () => null,
+}));
 
 const { extractSources } = await import(
 	"@/src/components/panels/CoworkContextPanel.tsx"

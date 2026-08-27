@@ -6,6 +6,11 @@ import {
 	type ArtifactHostValue,
 } from "@ryu/blocks/desktop/agent-elements/artifact-host-context.tsx";
 import { ChatDisplayPrefsProvider } from "@ryu/blocks/desktop/agent-elements/chat-display-prefs";
+import type {
+	FileEditsTurnEndCard,
+	FileEditUndoPlan,
+} from "@ryu/blocks/desktop/agent-elements/turn-end-cards.ts";
+import { TurnEndCards } from "@ryu/blocks/desktop/agent-elements/turn-end-cards.tsx";
 import type { UIMessage } from "ai";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -196,6 +201,23 @@ const messages: UIMessage[] = [
 	} as unknown as UIMessage,
 ];
 
+const singleFileCard: FileEditsTurnEndCard = {
+	files: [{ deletions: 0, insertions: 1, path: ".env" }],
+	id: "single-file",
+	kind: "file-edits",
+	undoPlan: {
+		edits: [
+			{
+				after: "TOKEN=new",
+				before: "TOKEN=old",
+				kind: "replace",
+				path: ".env",
+			},
+		],
+		kind: "text-replacements",
+	},
+};
+
 function Story() {
 	const [action, setAction] = useState("No card action yet");
 	const artifactHostValue: ArtifactHostValue = {
@@ -204,6 +226,9 @@ function Story() {
 		openInPanel: (_payload, id) => setAction(`Opened artifact ${id} in panel`),
 		openInTab: (_payload, id) => setAction(`Opened artifact ${id} in tab`),
 		submitFollowUp: (text) => setAction(`Follow-up: ${text}`),
+	};
+	const handleUndo = async (plan: FileEditUndoPlan) => {
+		setAction(`Undid ${plan.edits.map((edit) => edit.path).join(", ")}`);
 	};
 
 	return (
@@ -234,17 +259,31 @@ function Story() {
 			<main className="mx-auto h-[calc(100vh-108px)] max-w-4xl px-4 py-4 sm:px-6">
 				<ChatDisplayPrefsProvider value={{ hideToolDetail: true }}>
 					<ArtifactHostContext.Provider value={artifactHostValue}>
-						<AgentChat
-							conversationKey="turn-end-cards-proof"
-							currentUser={{ id: "proof-user", name: "You" }}
-							initialScrollBehavior="bottom"
-							messages={messages}
-							onAgentUiSubmit={() => setAction("JSON UI submitted")}
-							onOpenFile={(path) => setAction(`Opened ${path}`)}
-							onSend={() => undefined}
-							onStop={() => undefined}
-							status="ready"
-						/>
+						<div className="space-y-4">
+							<AgentChat
+								conversationKey="turn-end-cards-proof"
+								currentUser={{ id: "proof-user", name: "You" }}
+								initialScrollBehavior="bottom"
+								messages={messages}
+								onAgentUiSubmit={() => setAction("JSON UI submitted")}
+								onOpenFile={(path) => setAction(`Opened ${path}`)}
+								onReviewFileEdits={(paths) =>
+									setAction(`Reviewing ${paths.join(", ")}`)
+								}
+								onSend={() => undefined}
+								onStop={() => undefined}
+								onUndoFileEdits={handleUndo}
+								status="ready"
+							/>
+							<section aria-label="Undo proof">
+								<TurnEndCards
+									cards={[singleFileCard]}
+									onOpenFile={(path) => setAction(`Opened ${path}`)}
+									onReviewFileEdits={() => setAction("Reviewing Last turn")}
+									onUndoFileEdits={handleUndo}
+								/>
+							</section>
+						</div>
 					</ArtifactHostContext.Provider>
 				</ChatDisplayPrefsProvider>
 			</main>

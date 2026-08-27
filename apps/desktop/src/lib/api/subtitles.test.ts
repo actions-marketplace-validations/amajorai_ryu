@@ -8,10 +8,10 @@
 // it WITH the node bearer attached. So a hole here is not a bug in Subtitles — it is
 // every API on the node.
 //
-// The encoded-traversal cases are not hypothetical: the identical check in
-// `social.ts` shipped as a literal-`..` blocklist and let `/%2e%2e/settings` through
-// as `/api/settings`, because `fetch` reads the URL parser's output rather than the
-// string. This file exists so that lesson cannot be lost a second time by a copy.
+// The encoded-traversal cases are not hypothetical: the old Outpost check shipped
+// as a literal-`..` blocklist and let `/%2e%2e/settings` through as `/api/settings`,
+// because `fetch` reads the URL parser's output rather than the string. The shared
+// host resolver and its cross-mount corpus now keep that lesson canonical.
 
 import { describe, expect, it } from "bun:test";
 

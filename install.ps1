@@ -5,8 +5,9 @@
 # Installs and starts the headless stack — ryu-core, ryu-gateway, ryu-cli — in
 # %USERPROFILE%\.ryu\bin. Starting Core is part of the install so the same entry
 # point also kicks off the bundled models, engines, skills, and built-in defaults.
-# Core owns those defaults. Island and Ghost are intentionally NOT part of the
-# default closure yet.
+# Core owns those defaults. Shadow and Ghost are preinstalled and started by Core.
+# Island is preinstalled and kept up to date through the global download center,
+# but remains stopped until the companion feature is enabled in a later release.
 #
 # Environment overrides:
 #   $env:RYU_INSTALL_DIR    install location   (default: $HOME\.ryu\bin)
@@ -169,9 +170,10 @@ if ($startCore -eq '1') {
 
   Write-Host '  Core is provisioning bundled models, engines, skills, and defaults'
   Emit-Progress 'defaults' 'bundled-defaults' 'started' 80
-  Write-Host '  Island and Ghost installs are disabled for this release'
-  Emit-Progress 'defaults' 'island' 'skipped' 85
-  Emit-Progress 'defaults' 'ghost' 'skipped' 85
+  Write-Host '  Core is preinstalling Shadow, Ghost, and Island (Island stays stopped)'
+  Emit-Progress 'defaults' 'shadow' 'started' 85
+  Emit-Progress 'defaults' 'ghost' 'started' 90
+  Emit-Progress 'defaults' 'island' 'started' 95
 }
 
 Emit-Progress 'bootstrap' 'ryu' 'complete' 100

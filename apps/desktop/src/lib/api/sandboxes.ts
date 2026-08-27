@@ -93,9 +93,9 @@ export async function fetchNodeSandboxes(
 	return Array.isArray(raw.sandboxes) ? raw.sandboxes.map(normalizeRun) : [];
 }
 
-// ── Persistent sandbox lifecycle (Daytona-only) ───────────────────────────────
+// ── Persistent sandbox lifecycle (Box or Daytona) ─────────────────────────────
 //
-// A persistent sandbox is a long-lived Daytona workspace: create once, run many
+// A persistent sandbox is a long-lived Box or Daytona workspace: create once, run many
 // execs against it, destroy explicitly. It is metered per-second by Core's
 // heartbeat (registered on create, deregistered on destroy) and budget-killed if
 // it runs over cap. These three write ops are RYU_TOKEN-only on Core, which the
@@ -105,8 +105,10 @@ export async function fetchNodeSandboxes(
 export interface CreatedSandbox {
 	/** Stable run id — pass this to {@link execSandbox} / {@link destroySandbox}. */
 	runId: string;
-	/** The real Daytona workspace id backing the run. */
+	/** The real provider workspace id backing the run. */
 	workspaceId: string;
+	/** The remote backend that owns the workspace. */
+	backend: string;
 }
 
 /** The result of one `execSandbox` command (normalized to camelCase). */
@@ -118,6 +120,7 @@ export interface SandboxExecResult {
 }
 
 interface RawCreatedSandbox {
+	backend?: string;
 	run_id?: string;
 	workspace_id?: string;
 }
@@ -132,7 +135,7 @@ interface RawSandboxExecResult {
  * Create a persistent sandbox on a node (`POST /api/sandboxes`).
  *
  * `budgetMicroUsd` caps the run's spend in micro-USD; omit it to use the node's
- * default run budget. The node provisions with its configured Daytona spec, so
+ * default run budget. The node provisions with its configured Box or Daytona spec, so
  * no spec is sent from the desktop v1 surface. Throws on any non-2xx.
  */
 export async function createSandbox(
@@ -148,6 +151,7 @@ export async function createSandbox(
 		body,
 	});
 	return {
+		backend: raw.backend ?? "unknown",
 		runId: raw.run_id ?? "",
 		workspaceId: raw.workspace_id ?? "",
 	};

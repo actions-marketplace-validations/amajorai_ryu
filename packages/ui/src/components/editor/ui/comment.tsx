@@ -43,7 +43,7 @@ import {
 	type TCommentText,
 	type Value,
 } from "platejs";
-import type { CreatePlateEditorOptions } from "platejs/react";
+import type { CreatePlateEditorOptions, PlateEditor } from "platejs/react";
 import {
 	Plate,
 	useEditorPlugin,
@@ -71,6 +71,14 @@ export interface TComment {
 	id: string;
 	isEdited: boolean;
 	userId: string;
+}
+
+function saveDiscussions(
+	editor: PlateEditor,
+	discussions: TDiscussion[]
+): void {
+	editor.setOption(discussionPlugin, "discussions", discussions);
+	editor.getOption(discussionPlugin, "onDiscussionsChange")?.(discussions);
 }
 
 export function Comment(props: {
@@ -107,14 +115,14 @@ export function Comment(props: {
 				}
 				return discussion;
 			});
-		editor.setOption(discussionPlugin, "discussions", updatedDiscussions);
+		saveDiscussions(editor, updatedDiscussions);
 	};
 
 	const removeDiscussion = async (id: string) => {
 		const updatedDiscussions = editor
 			.getOption(discussionPlugin, "discussions")
 			.filter((discussion) => discussion.id !== id);
-		editor.setOption(discussionPlugin, "discussions", updatedDiscussions);
+		saveDiscussions(editor, updatedDiscussions);
 	};
 
 	const updateComment = async (input: {
@@ -142,7 +150,7 @@ export function Comment(props: {
 				}
 				return discussion;
 			});
-		editor.setOption(discussionPlugin, "discussions", updatedDiscussions);
+		saveDiscussions(editor, updatedDiscussions);
 	};
 
 	const { tf } = useEditorPlugin(CommentPlugin);
@@ -274,9 +282,9 @@ export function Comment(props: {
 							<div className="ml-auto flex shrink-0 gap-1">
 								<Button
 									className="size-[28px]"
-						onClick={(e: MouseEvent<HTMLButtonElement>) => {
-							 e.stopPropagation();
-							onCancel();
+									onClick={(e: MouseEvent<HTMLButtonElement>) => {
+										e.stopPropagation();
+										onCancel();
 									}}
 									size="icon"
 									variant="ghost"
@@ -287,9 +295,9 @@ export function Comment(props: {
 								</Button>
 
 								<Button
-						onClick={(e: MouseEvent<HTMLButtonElement>) => {
-							e.stopPropagation();
-							onSave();
+									onClick={(e: MouseEvent<HTMLButtonElement>) => {
+										e.stopPropagation();
+										onSave();
 									}}
 									size="icon"
 									variant="ghost"
@@ -358,7 +366,7 @@ function CommentMoreDropdown(props: {
 			});
 
 		// Save back to session storage
-		editor.setOption(discussionPlugin, "discussions", updatedDiscussions);
+		saveDiscussions(editor, updatedDiscussions);
 		onRemoveComment?.();
 	}, [comment.discussionId, comment.id, editor, onRemoveComment]);
 
@@ -495,10 +503,7 @@ export function CommentCreateForm({
 					userId: editor.getOption(discussionPlugin, "currentUserId"),
 				};
 
-				editor.setOption(discussionPlugin, "discussions", [
-					...discussions,
-					newDiscussion,
-				]);
+				saveDiscussions(editor, [...discussions, newDiscussion]);
 				return;
 			}
 
@@ -523,7 +528,7 @@ export function CommentCreateForm({
 				.filter((d) => d.id !== discussionId)
 				.concat(updatedDiscussion);
 
-			editor.setOption(discussionPlugin, "discussions", updatedDiscussions);
+			saveDiscussions(editor, updatedDiscussions);
 
 			return;
 		}
@@ -560,10 +565,7 @@ export function CommentCreateForm({
 			userId: editor.getOption(discussionPlugin, "currentUserId"),
 		};
 
-		editor.setOption(discussionPlugin, "discussions", [
-			...discussions,
-			newDiscussion,
-		]);
+		saveDiscussions(editor, [...discussions, newDiscussion]);
 
 		const id = newDiscussion.id;
 

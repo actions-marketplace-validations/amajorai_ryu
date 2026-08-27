@@ -19,8 +19,8 @@ A tool body in Ryu is a **fragment**, not a module: Core splices it into an asyn
 IIFE with a fixed set of bindings and the body `return`s its result
 (`build_inline_tool_program` / `build_capability_adapter_program` in
 `crates/core/tool-exec/src/lib.rs`). Because it is not a module, `node --test`
-cannot import it — so the 34 co-located `plugins-store/*/plugin.test.mjs` files
-mostly assert on manifest *shape*, and the nine that do execute a hook each
+cannot import it — so the co-located `plugins-store/{plugins,lsp,external_plugins}/*/plugin.test.mjs` files
+mostly assert on manifest *shape*, and the 26 that execute a hook currently
 hand-roll their own `new AsyncFunction("ctx", "host", code)` with ad-hoc stubs.
 
 Nothing checked that a tool body was replayable, and nothing ran any of it in CI.
@@ -37,7 +37,7 @@ toolsmith is the shared piece: one splice, one stub protocol, one gate.
 
 `scaffold` emits `inline_tool` and `adapter` packages. `turn_hook` is supported by
 the harness (set `"kind": "turn_hook"` in `cases.json`) but has no scaffold
-template yet: it exists so the nine `plugins-store/*/plugin.test.mjs` files that
+template yet: it exists so the 26 `plugins-store/{plugins,lsp,external_plugins}/*/plugin.test.mjs` files that
 hand-roll their own `new AsyncFunction("ctx", "host", code)` splice can converge
 onto one implementation.
 
@@ -165,7 +165,7 @@ that the manifest points at the file the cases test — and that it has not been
 
 | Situation | Home |
 | --- | --- |
-| Built at dev time, shipped with Ryu | `plugins-store/<name>/` (add the `include_str!` registration row) |
+| Built at dev time, shipped with Ryu | `plugins-store/{plugins,lsp,external_plugins}/<name>/` (add the `include_str!` registration row) |
 | Made by an agent at runtime, on a user's machine | `~/.ryu/plugins/<id>/` — `hydrate_manifest_code_files` reads `code_file` off disk for any manifest with a `code_base`, so this works today with no Core change |
 | Needs a process: a Python lib, a binary, a long-lived server | Not a plugin tool. `apps-store/<app>/sidecar/` with an `http.public_mount`, per AGENTS.md |
 
@@ -175,7 +175,7 @@ that the manifest points at the file the cases test — and that it has not been
 | --- | --- |
 | `tools/toolsmith/*.mjs` | the harness, the scan, the manifest checks, the CLI |
 | `tools/toolsmith/*.test.mjs` | one test file per module, beside the module |
-| `plugins-store/toolsmith-example/` | the worked example — a real verified tool, in its own plugin folder like every other package, so `bun run test:plugins` picks it up with no special-casing. Deliberately in Core's `UNREGISTERED_BY_DESIGN` list: registering a demo would put it in every user's catalog. |
+| `plugins-store/plugins/toolsmith-example/` | the worked example — a real verified tool, in its own plugin folder like every other package, so `bun run test:plugins` picks it up with no special-casing. Deliberately in Core's `UNREGISTERED_BY_DESIGN` list: registering a demo would put it in every user's catalog. |
 
 Both suites run in CI (`.github/workflows/ci.yml`, the `js` job):
 
@@ -201,7 +201,7 @@ is the contributor-facing one and may name internals the docs page must not.
   that for packages that opt in.
 
   If you tighten that guard to cover `runnables[].config.code`, note that
-  `plugins-store/toolsmith-example` will trip it — **not a regression**. Its inline
+  `plugins-store/plugins/toolsmith-example` will trip it — **not a regression**. Its inline
   `code` is machine-sealed from `tools/text_chunk.js` by `sync`, and the drift check
   proves the two agree on every run. It is exempt by construction until `ToolConfig`
   gains a `code_file` field, at which point the example converts and the exemption

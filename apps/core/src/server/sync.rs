@@ -101,6 +101,25 @@ pub struct SyncMessage {
     pub created_at: i64,
 }
 
+/// Stable-id LWW snapshot for a Spaces document. The Space metadata rides with
+/// every document so a receiving node can recreate the collection first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentSyncPayload {
+    pub document_id: String,
+    pub title: String,
+    pub source: String,
+    pub kind: String,
+    pub parent_id: Option<String>,
+    pub icon: Option<serde_json::Value>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub revision: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
+    pub space: ryu_spaces::SpaceSyncRecord,
+}
+
 /// HTTP client that pushes and pulls conversation payloads.
 #[derive(Clone)]
 pub struct SyncClient {
@@ -162,6 +181,62 @@ impl SyncClient {
             return Err(SyncError::ServerError(status, body));
         }
         Ok(())
+    }
+
+    /// Push one non-binary Spaces document snapshot to the user's cloud mirror.
+    pub async fn push_document(&self, payload: &DocumentSyncPayload) -> Result<(), SyncError> {
+        let url = format!("{}/api/documents-sync/push", self.server_url);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(payload)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SyncError::ServerError(status, body));
+        }
+        Ok(())
+    }
+
+    /// Pull document snapshots changed since `since_ms` and apply each row
+    /// independently so one malformed or inaccessible document cannot abort the
+    /// rest of the batch.
+    pub async fn pull_documents_since(
+        &self,
+        store: &super::spaces::SpaceStore,
+        since_ms: i64,
+        tenancy: Tenancy,
+    ) -> Result<usize, SyncError> {
+        let url = format!(
+            "{}/api/documents-sync/pull?since={}",
+            self.server_url, since_ms
+        );
+        let resp = self.http.get(&url).bearer_auth(&self.token).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SyncError::ServerError(status, body));
+        }
+        #[derive(Deserialize)]
+        struct PullResponse {
+            documents: Vec<DocumentSyncPayload>,
+        }
+        let data: PullResponse = resp.json().await?;
+        let mut applied = 0;
+        for payload in data.documents {
+            match apply_document_sync_payload(store, &payload, tenancy.clone()).await {
+                Ok(true) => applied += 1,
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    "cloud sync: applying pulled document {} failed: {error:#}",
+                    payload.document_id
+                ),
+            }
+        }
+        Ok(applied)
     }
 
     /// Pull all conversations updated at or after `since_ms` and apply them
@@ -348,6 +423,7 @@ async fn sync_enabled(preferences: &super::preferences::PreferencesStore) -> boo
 /// a flaky network or a signed-out user never panics or stalls Core.
 pub fn spawn_sync_loop(
     conversations: ConversationStore,
+    spaces: super::spaces::SpaceStore,
     preferences: super::preferences::PreferencesStore,
 ) {
     tokio::spawn(async move {
@@ -356,6 +432,7 @@ pub fn spawn_sync_loop(
         // advanced to "now" after each success. Kept in memory only: no new
         // persistence path, so a restart simply does one extra full pull.
         let mut pull_since_ms: i64 = 0;
+        let mut document_pull_since_ms: i64 = 0;
         // Throttle the "no token" warning so a signed-out user with sync on does
         // not spam the log every tick.
         let mut warned_unauthenticated = false;
@@ -387,8 +464,31 @@ pub fn spawn_sync_loop(
                 }
             };
 
-            // Push every local conversation (best-effort, per-conversation).
-            match conversations.list_conversations().await {
+            let Some(replay_ctx) = resolve_replay_context() else {
+                tracing::debug!(
+                    "cloud sync: skipping this tick on an org-bound node — no signed-in \
+                     account to authorise attribution (fail closed); complete device login"
+                );
+                continue;
+            };
+
+            // Push only conversations visible to the active account on a bound node.
+            // An unfiltered export here would leak another member's private chat into
+            // the signed-in user's cloud mirror.
+            let local_conversations = match &replay_ctx {
+                Tenancy::Unattributed => conversations.list_conversations().await,
+                Tenancy::Owned { user_id, org_id } => {
+                    conversations
+                        .list_conversations_visible(Some(user_id), org_id.as_deref(), true)
+                        .await
+                }
+                Tenancy::SharedOrg { org_id } => {
+                    conversations
+                        .list_conversations_visible(None, Some(org_id), true)
+                        .await
+                }
+            };
+            match local_conversations {
                 Ok(summaries) => {
                     for summary in &summaries {
                         if let Err(e) = client.push(&conversations, &summary.id).await {
@@ -410,20 +510,44 @@ pub fn spawn_sync_loop(
             // advanced cursor. The watermark is captured BEFORE streaming, so a
             // delta that lands mid-session (updated_at ≥ now_ms) is re-delivered
             // by the next snapshot — apply is idempotent, so nothing is lost.
-            // RECEIVE half. Replay is a CREATION path (a payload for a conversation
-            // this device has never seen mints the row). Resolve the attribution
-            // context for this node: unbound → `Unattributed` (byte-identical); bound
-            // + signed-in → the node's org, with each row owned by its OWN payload
-            // author; bound + no account → skip (fail closed). This closes the old
-            // hard-skip that starved bound nodes of the receive half. The PUSH half
-            // above is unaffected either way.
-            let Some(replay_ctx) = resolve_replay_context() else {
-                tracing::debug!(
-                    "cloud sync: skipping replay on an org-bound node — no signed-in \
-                     account to authorise attribution (fail closed); complete device login"
-                );
-                continue;
-            };
+            match build_document_sync_payloads(&spaces).await {
+                Ok(payloads) => {
+                    for payload in payloads {
+                        let visible_to_account = match &replay_ctx {
+                            Tenancy::Unattributed => true,
+                            Tenancy::Owned { user_id, .. } => {
+                                payload.owner_user_id.as_deref() == Some(user_id.as_str())
+                            }
+                            Tenancy::SharedOrg { .. } => true,
+                        };
+                        if visible_to_account {
+                            if let Err(error) = client.push_document(&payload).await {
+                                tracing::warn!(
+                                    "cloud sync: push of document {} failed: {error}",
+                                    payload.document_id
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("cloud sync: listing local documents failed: {error:#}")
+                }
+            }
+
+            let document_now_ms = chrono::Utc::now().timestamp_millis();
+            match client
+                .pull_documents_since(&spaces, document_pull_since_ms, replay_ctx.clone())
+                .await
+            {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!("cloud sync: pulled {count} document(s)");
+                    }
+                    document_pull_since_ms = document_now_ms;
+                }
+                Err(error) => tracing::warn!("cloud sync: document pull failed: {error}"),
+            }
             let now_ms = chrono::Utc::now().timestamp_millis();
             match tokio::time::timeout(
                 SYNC_INTERVAL,
@@ -464,6 +588,108 @@ pub fn spawn_sync_loop(
 }
 
 // ── Pure helpers (no HTTP — tested independently) ────────────────────────────
+
+/// Serialize every non-system, non-binary Spaces document with its stable Space
+/// metadata. The server mirror remains a transport; local Spaces is authoritative.
+pub async fn build_document_sync_payloads(
+    store: &super::spaces::SpaceStore,
+) -> Result<Vec<DocumentSyncPayload>> {
+    use std::collections::HashMap;
+
+    let spaces = store
+        .list_spaces(super::spaces::DocFilter::unrestricted())
+        .await?;
+    let spaces_by_id: HashMap<String, ryu_spaces::SpaceSyncRecord> = spaces
+        .into_iter()
+        .filter(|space| !space.system)
+        .map(|space| {
+            let id = space.id.clone();
+            (
+                id,
+                ryu_spaces::SpaceSyncRecord {
+                    id: space.id,
+                    name: space.name,
+                    description: space.description,
+                    created_at: space.created_at,
+                    updated_at: space.updated_at,
+                    retrieval_mode: space.retrieval_mode.as_str().to_owned(),
+                    visibility: space.visibility,
+                    team_id: space.team_id,
+                },
+            )
+        })
+        .collect();
+    let documents = store.list_documents_for_sync().await?;
+    Ok(documents
+        .into_iter()
+        .filter_map(|record| {
+            let space = spaces_by_id.get(&record.document.space_id)?.clone();
+            Some(DocumentSyncPayload {
+                document_id: record.document.id,
+                title: record.document.title,
+                source: record.document.source,
+                kind: record.document.kind,
+                parent_id: record.document.parent_id,
+                icon: record.document.icon,
+                created_at: record.document.created_at,
+                updated_at: record.document.updated_at,
+                revision: record.document.revision,
+                owner_user_id: record.owner_user_id,
+                space,
+            })
+        })
+        .collect())
+}
+
+/// Apply one document snapshot after deriving its owner from the payload author
+/// and the receiving node's org context, matching conversation replay semantics.
+pub async fn apply_document_sync_payload(
+    store: &super::spaces::SpaceStore,
+    payload: &DocumentSyncPayload,
+    context: Tenancy,
+) -> Result<bool> {
+    if payload.document_id.is_empty()
+        || payload.document_id.len() > 200
+        || payload.space.id.is_empty()
+        || payload.space.id.len() > 200
+        || payload.title.len() > 1000
+        || payload.source.len() > 5_000_000
+        || payload.kind == "file"
+        || payload.updated_at < 0
+        || payload.created_at < 0
+    {
+        anyhow::bail!("invalid document sync payload")
+    }
+    let tenancy = match &context {
+        Tenancy::Unattributed => Tenancy::Unattributed,
+        Tenancy::Owned { org_id, .. } => {
+            Tenancy::owned_by(payload.owner_user_id.as_deref(), org_id.as_deref())
+        }
+        Tenancy::SharedOrg { org_id } => Tenancy::shared_with_org(org_id),
+    };
+    if tenancy == Tenancy::Unattributed && node_bound() {
+        anyhow::bail!("refusing author-less document replay on an org-bound node (fail closed)")
+    }
+    let owner = super::spaces::owner_of(&tenancy);
+    store.apply_synced_space(&payload.space, &owner).await?;
+    let record = ryu_spaces::DocumentSyncRecord {
+        document: ryu_spaces::DocumentContent {
+            id: payload.document_id.clone(),
+            space_id: payload.space.id.clone(),
+            title: payload.title.clone(),
+            source: payload.source.clone(),
+            created_at: payload.created_at,
+            updated_at: payload.updated_at,
+            revision: payload.revision,
+            chunk_count: 0,
+            kind: payload.kind.clone(),
+            parent_id: payload.parent_id.clone(),
+            icon: payload.icon.clone(),
+        },
+        owner_user_id: payload.owner_user_id.clone(),
+    };
+    store.apply_synced_document(&record, &owner).await
+}
 
 /// Serialize a conversation from `store` into a [`SyncPayload`].
 ///
@@ -623,10 +849,12 @@ pub async fn apply_sync_payload_at(
     // Ensure the conversation row exists (creates it with initial metadata if
     // this is the first time we see this conversation on this device).
     store
-        .ensure_conversation(
+        .ensure_sync_conversation(
             &payload.conversation_id,
             payload.agent_id.as_deref(),
             payload.title.as_deref(),
+            payload.created_at,
+            payload.updated_at,
             tenancy.clone(),
         )
         .await?;
@@ -645,25 +873,19 @@ pub async fn apply_sync_payload_at(
         )
         .await?;
 
-    // Union-merge messages: fetch existing ids, then insert only new ones.
-    let existing = store.get_messages(&payload.conversation_id).await?;
-    let existing_ids: std::collections::HashSet<&str> =
-        existing.iter().map(|m| m.id.as_str()).collect();
-
+    // Union-merge messages. The store's insert is idempotent and deliberately
+    // metadata-neutral; metadata was resolved by LWW above.
     for msg in &payload.messages {
-        if !existing_ids.contains(msg.id.as_str()) {
-            store
-                .append_message_with_id(
-                    &payload.conversation_id,
-                    &msg.id,
-                    &msg.role,
-                    &msg.content,
-                    payload.agent_id.as_deref(),
-                    msg.created_at,
-                    tenancy.clone(),
-                )
-                .await?;
-        }
+        store
+            .append_sync_message_with_id(
+                &payload.conversation_id,
+                &msg.id,
+                &msg.role,
+                &msg.content,
+                payload.agent_id.as_deref(),
+                msg.created_at,
+            )
+            .await?;
     }
 
     Ok(())
@@ -673,6 +895,59 @@ pub async fn apply_sync_payload_at(
 mod tests {
     use super::*;
     use crate::server::conversations::ConversationStore;
+
+    #[tokio::test]
+    async fn document_round_trip_preserves_stable_ids_and_rejects_stale_replay() {
+        let source = super::super::spaces::SpaceStore::open_in_memory().unwrap();
+        let target = super::super::spaces::SpaceStore::open_in_memory().unwrap();
+        let owner = super::super::spaces::DocOwner::unattributed();
+        let space_id = source
+            .create_space("Research", Some("Shared notes"), &owner)
+            .await
+            .unwrap();
+        let document_id = source.create_page(&space_id, "Plan", &owner).await.unwrap();
+        source
+            .update_document(&document_id, "Plan", "# First draft")
+            .await
+            .unwrap();
+
+        let payload = build_document_sync_payloads(&source)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|payload| payload.document_id == document_id)
+            .expect("document payload");
+        assert!(
+            apply_document_sync_payload(&target, &payload, Tenancy::Unattributed)
+                .await
+                .unwrap()
+        );
+        let restored = target
+            .get_document(&document_id)
+            .await
+            .unwrap()
+            .expect("restored document");
+        assert_eq!(restored.space_id, space_id);
+        assert_eq!(restored.title, "Plan");
+        assert_eq!(restored.source, "# First draft");
+
+        let mut stale = payload.clone();
+        stale.updated_at = payload.updated_at.saturating_sub(1);
+        stale.title = "Stale".to_owned();
+        stale.source = "old".to_owned();
+        assert!(
+            !apply_document_sync_payload(&target, &stale, Tenancy::Unattributed)
+                .await
+                .unwrap()
+        );
+        let unchanged = target
+            .get_document(&document_id)
+            .await
+            .unwrap()
+            .expect("unchanged document");
+        assert_eq!(unchanged.title, "Plan");
+        assert_eq!(unchanged.source, "# First draft");
+    }
 
     /// Proves "two DBs, one synced conversation" (AC2):
     /// - store_a gets messages appended,

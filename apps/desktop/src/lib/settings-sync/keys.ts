@@ -290,6 +290,11 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 		group: "chat",
 	},
 	{
+		key: "ryu:composer-send-shortcut",
+		label: "Send shortcut",
+		group: "chat",
+	},
+	{
 		key: "ryu_queue_drain_mode",
 		label: "How queued messages send (Auto / Claude Code)",
 		group: "chat",

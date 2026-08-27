@@ -153,9 +153,10 @@ curl -fsSL https://raw.githubusercontent.com/amajorai/ryu/main/install.sh | sh
 irm https://raw.githubusercontent.com/amajorai/ryu/main/install.ps1 | iex
 ```
 
-The installer waits for Core to become healthy, then the bundled models, engines, and
-skills continue downloading in the background. Island and Ghost are intentionally not
-installed by default yet. Attach with the CLI:
+The installer waits for Core to become healthy, then the bundled models, engines, skills,
+Shadow, Ghost, and Island continue installing in the background. Island is kept stopped
+and hidden until the companion feature is enabled; Shadow and Ghost start with Core.
+Attach with the CLI:
 
 ```bash
 ryu-cli      # attaches to the Core started by the installer — no API key

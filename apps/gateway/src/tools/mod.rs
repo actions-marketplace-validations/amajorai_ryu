@@ -757,7 +757,10 @@ mod tests {
             .iter()
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
-        assert!(names.contains(&model_tool("exa.search").as_str()), "{names:?}");
+        assert!(
+            names.contains(&model_tool("exa.search").as_str()),
+            "{names:?}"
+        );
         assert!(
             !names.contains(&"skills.merge-conflicts"),
             "a skill must never be offered as a callable function: {names:?}"
@@ -891,7 +894,11 @@ mod tests {
         // Round 3: model returns final text.
         let provider = ScriptedProvider::new(vec![
             tool_call("c1", TOOL_SEARCH_NAME, r#"{"query":"web search"}"#),
-            tool_call("c2", model_tool("exa.search").as_str(), r#"{"query":"rust"}"#),
+            tool_call(
+                "c2",
+                model_tool("exa.search").as_str(),
+                r#"{"query":"rust"}"#,
+            ),
             final_text("done"),
         ]);
         let ctx = ToolLoopContext {
@@ -1064,7 +1071,11 @@ mod tests {
         };
         let provider = ScriptedProvider::new(vec![
             tool_call("c1", TOOL_SEARCH_NAME, r#"{"query":"web search"}"#),
-            tool_call("c2", model_tool("exa.search").as_str(), r#"{"query":"rust"}"#),
+            tool_call(
+                "c2",
+                model_tool("exa.search").as_str(),
+                r#"{"query":"rust"}"#,
+            ),
             final_text("done"),
         ]);
         let ctx = ToolLoopContext {

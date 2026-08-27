@@ -4,7 +4,7 @@
 // attachments, page/editor media, and `ui.uploadFile` all share this path so
 // bytes land as first-class Space file documents (not `~/.ryu/media/`).
 
-import { type ApiTarget, apiUrl, identityHeaders } from "./client.ts";
+import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 /** A stored upload. `url` is relative (`/api/uploads/<id>`); callers prepend the
  *  node base when rendering. */
@@ -54,14 +54,10 @@ export async function uploadUserFile(
 		opts?.fileName ??
 		(file instanceof File && file.name ? file.name : "upload");
 	const headers: Record<string, string> = {
-		...identityHeaders(),
 		"x-filename": fileName,
 		"content-type": file.type || "application/octet-stream",
 	};
-	if (target.token) {
-		headers.authorization = `Bearer ${target.token}`;
-	}
-	const res = await fetch(apiUrl(target, "/api/uploads"), {
+	const res = await authenticatedFetch(target, "/api/uploads", {
 		method: "POST",
 		headers,
 		body: file,

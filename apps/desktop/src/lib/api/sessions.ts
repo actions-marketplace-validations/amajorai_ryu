@@ -6,7 +6,7 @@
 // conversation and how they ended); creation/status mutation is driven by Core
 // itself during a run, not by the user.
 
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 export type SessionStatus = "idle" | "running" | "completed" | "failed";
 
@@ -48,9 +48,9 @@ export async function listSessionsForConversation(
 	target: ApiTarget,
 	conversationId: string
 ): Promise<Session[]> {
-	const resp = await fetch(
-		apiUrl(target, `/api/conversations/${conversationId}/sessions`),
-		{ headers: makeHeaders(target.token) }
+	const resp = await authenticatedFetch(
+		target,
+		`/api/conversations/${conversationId}/sessions`
 	);
 	if (!resp.ok) {
 		throw new Error(`Failed to load sessions: ${resp.status}`);

@@ -39,6 +39,11 @@ use std::path::PathBuf;
 /// Env var naming the active profile. Unset / empty / `release` ⇒ release.
 pub const RYU_PROFILE_ENV: &str = "RYU_PROFILE";
 
+/// Optional explicit port namespace supplied by a standalone app build. Core,
+/// Gateway, and Desktop all read the same value so the host can isolate one app
+/// without inventing a new profile row for every app id.
+pub const RYU_PORT_OFFSET_ENV: &str = "RYU_PORT_OFFSET";
+
 /// Port offset for the `dev` profile. Must equal Core's
 /// `profile::DEV_PORT_OFFSET`.
 pub const DEV_PORT_OFFSET: u16 = 1000;
@@ -161,7 +166,13 @@ pub fn is_dev() -> bool {
 /// *different, running* stack instead. Failing to connect beats connecting to
 /// the wrong stack.
 pub fn port(base: u16) -> u16 {
-    base.saturating_add(offset_of(&name()).unwrap_or(0))
+    base.saturating_add(
+        std::env::var(RYU_PORT_OFFSET_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<u16>().ok())
+            .filter(|offset| *offset <= 50_000)
+            .unwrap_or_else(|| offset_of(&name()).unwrap_or(0)),
+    )
 }
 
 /// The Core HTTP port for this profile: 7980 release, 8980 dev.
@@ -213,6 +224,12 @@ pub fn suffix() -> String {
 
 /// The Ryu data/home dir for this profile: `~/.ryu` release, `~/.ryu-dev` dev.
 pub fn ryu_home_dir() -> PathBuf {
+    if let Ok(value) = std::env::var("RYU_DIR") {
+        let path = PathBuf::from(value);
+        if !path.as_os_str().is_empty() {
+            return path;
+        }
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(format!(".ryu{}", suffix()))

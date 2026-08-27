@@ -447,7 +447,7 @@ export function StatCard({
 					</span>
 				) : null}
 			</div>
-			<span className="font-heading font-semibold text-2xl text-foreground tabular-nums">
+			<span className="font-mono font-semibold text-2xl text-foreground tabular-nums">
 				{value}
 			</span>
 			{sub ? (

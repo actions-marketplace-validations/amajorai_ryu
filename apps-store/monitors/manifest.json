@@ -1,6 +1,6 @@
 {
-  "tags": ["monitoring","alerts","uptime","scraping"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": ["monitoring", "alerts", "uptime", "scraping"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-monitors",
   "homepage": "https://github.com/amajorai/ryu-monitors",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -55,14 +55,29 @@
         "mount": "/api/monitors",
         "public_mount": "/api/monitors",
         "routes": [
-          { "path": "/alerts/stream" },
-          { "path": "/alerts" },
-          { "path": "/alerts/:id/ack" },
-          { "path": "/" },
-          { "path": "/:id" },
-          { "path": "/:id/run" },
-          { "path": "/:id/snapshots" },
-          { "path": "/:id/alerts" }
+          { "path": "/alerts/stream", "permission": "monitors.view" },
+          { "path": "/alerts", "permission": "monitors.view" },
+          { "path": "/alerts/:id/ack", "permission": "monitors.edit" },
+          { "path": "/", "method": "GET", "permission": "monitors.view" },
+          { "path": "/", "method": "POST", "permission": "monitors.edit" },
+          { "path": "/:id", "method": "GET", "permission": "monitors.view" },
+          { "path": "/:id", "method": "PUT", "permission": "monitors.edit" },
+          { "path": "/:id", "method": "DELETE", "permission": "monitors.edit" },
+          {
+            "path": "/:id/run",
+            "method": "POST",
+            "permission": "monitors.edit"
+          },
+          {
+            "path": "/:id/snapshots",
+            "method": "GET",
+            "permission": "monitors.view"
+          },
+          {
+            "path": "/:id/alerts",
+            "method": "GET",
+            "permission": "monitors.view"
+          }
         ]
       },
       "host_api": {
@@ -70,7 +85,7 @@
       }
     }
   ],
-  "permission_grants": ["monitors:crud", "tools.invoke"],
+  "permission_grants": ["monitors:crud", "tools.invoke", "ui:declarative-http"],
   "permission_levels": [
     {
       "id": "monitors.view",
@@ -89,7 +104,45 @@
     "icon": "radar-01"
   },
   "contributes": {
-  "chat_widget_templates": [{"id":"monitors.chat","title":"Monitors widget","description":"Open Monitors data in a host-rendered chat widget.","triggers":["monitors widget"],"examples":["Show me a monitors widget"],"backing":{"view_id":"surface:monitors"},"display_mode":"inline","safe_action_ids":[],"availability":"available"}],
+    "chat_widget_templates": [
+      {
+        "id": "monitors.chat",
+        "title": "Monitors widget",
+        "description": "Open Monitors data in a host-rendered chat widget.",
+        "triggers": ["monitors widget"],
+        "examples": ["Show me a monitors widget"],
+        "backing": { "view_id": "surface:monitors" },
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "available"
+      }
+    ],
+    "sidebar_sections": [
+      {
+        "id": "monitors",
+        "title": "Monitors",
+        "icon": "radar-01",
+        "order": 46,
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/monitors" },
+            "items": "monitors",
+            "map": {
+              "id": "id",
+              "title": "name",
+              "subtitle": "url",
+              "accessory": "last_status"
+            },
+            "refreshMs": 15000
+          },
+          "itemTarget": "/monitors/{{item.id}}",
+          "emptyState": {
+            "title": "No monitors yet",
+            "description": "Create a monitor in the companion to start watching a site."
+          }
+        }
+      }
+    ],
     "data_categories": [
       {
         "id": "monitors",

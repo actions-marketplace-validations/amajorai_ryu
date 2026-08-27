@@ -1695,8 +1695,9 @@ export default function AgentEditPage({
 						isNew || !canUse("prompt-studio") ? null : (
 							<PromptStudio
 								agentId={agentId ?? null}
+								engine={chatModel}
 								locked={isLocked}
-								model={chatModel}
+								model={agentModel}
 								onChange={setSystemPrompt}
 								target={target}
 								value={systemPrompt}

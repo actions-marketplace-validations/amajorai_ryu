@@ -843,14 +843,46 @@ export async function fetchGatewayAudit(
 // plus promptfoo-style per-case assertions (deterministic + llm_judge),
 // run-level system prompts, {{var}} substitution, and multi-model compare.
 
+/** Promptfoo-compatible per-assertion controls. */
+export interface AssertionOptions {
+	config?: Record<string, unknown>;
+	metric?: string;
+	provider?: string;
+	rubric_prompt?: string;
+	threshold?: number;
+	transform?: string;
+	weight?: number;
+}
+
 /** One assertion to evaluate against a case's response (internally tagged on kind). */
 export type Assertion =
-	| { kind: "contains"; value: string }
-	| { kind: "not_contains"; value: string }
-	| { kind: "equals"; value: string }
-	| { kind: "regex"; value: string }
-	| { kind: "json_valid" }
-	| { kind: "llm_judge"; rubric: string };
+	| { kind: "contains"; options?: AssertionOptions; value: string }
+	| { kind: "not_contains"; options?: AssertionOptions; value: string }
+	| { kind: "equals"; options?: AssertionOptions; value: string }
+	| { kind: "regex"; options?: AssertionOptions; value: string }
+	| { kind: "icontains"; options?: AssertionOptions; value: string }
+	| { kind: "starts_with"; options?: AssertionOptions; value: string }
+	| { kind: "contains_any"; options?: AssertionOptions; value: string }
+	| { kind: "contains_all"; options?: AssertionOptions; value: string }
+	| { kind: "icontains_any"; options?: AssertionOptions; value: string }
+	| { kind: "icontains_all"; options?: AssertionOptions; value: string }
+	| { kind: "contains_json"; options?: AssertionOptions; value: string }
+	| { kind: "is_html"; options?: AssertionOptions }
+	| { kind: "is_xml"; options?: AssertionOptions }
+	| { kind: "is_sql"; options?: AssertionOptions }
+	| { kind: "is_refusal"; options?: AssertionOptions }
+	| { kind: "moderation"; options?: AssertionOptions; value: string }
+	| { kind: "javascript"; options?: AssertionOptions; value: string }
+	| { kind: "python"; options?: AssertionOptions; value: string }
+	| { kind: "ruby"; options?: AssertionOptions; value: string }
+	| { kind: "webhook"; options?: AssertionOptions; value: string }
+	| { kind: "is_json"; options?: AssertionOptions }
+	| { kind: "json_valid"; options?: AssertionOptions }
+	| { kind: "llm_judge"; options?: AssertionOptions; rubric: string }
+	| { kind: "llm_rubric"; options?: AssertionOptions; rubric: string }
+	| { kind: "factuality"; options?: AssertionOptions; rubric: string }
+	| { kind: "context_faithfulness"; options?: AssertionOptions; rubric: string }
+	| { kind: "answer_relevance"; options?: AssertionOptions; rubric: string };
 
 /** Result of evaluating one assertion against a response. */
 export interface AssertionResult {
@@ -868,20 +900,34 @@ export interface AssertionResult {
 export interface EvalDatasetCase {
 	/** Assertions to evaluate against this case's response. */
 	assertions?: Assertion[];
+	/** Shared Gateway evaluator ids applied to this case. */
+	evaluators?: string[];
 	/**
 	 * Optional expected substring. When present the gateway applies a
 	 * case-insensitive contains check and adds a substring_match score.
 	 * When absent the scorer is omitted — no penalty for a missing expected.
 	 */
 	expected?: string | null;
-	/** The prompt to replay through the gateway pipeline. May contain {{vars}}. */
+	/** Optional ordered chat turns; when present the gateway replays these. */
+	messages?: EvalMessage[];
+	/** The single-turn prompt fallback. May contain {{vars}}. */
 	prompt: string;
+	/** Promptfoo-style threshold for the mean assertion score (0..1). */
+	threshold?: number;
 	/** Per-case {{var}} substitutions (prompt, system prompt, assertions). */
-	vars?: Record<string, string>;
+	vars?: Record<string, unknown>;
+}
+
+/** One ordered chat turn in a Promptfoo-compatible case. */
+export interface EvalMessage {
+	content: string;
+	role: "assistant" | "system" | "user";
 }
 
 /** Per-case scores returned by the gateway eval runner. */
 export interface EvalCaseScore {
+	/** Mean assertion score in [0,1], before the case threshold is applied. */
+	assertion_score: number;
 	/** NEW: per-assertion results (always present; [] when no assertions). */
 	assertions: AssertionResult[];
 	/** NEW: true iff every assertion passed (vacuously true for []). */
@@ -940,6 +986,8 @@ export interface RunEvalsRequest {
 	 * 3-case dataset so the panel works on first run without any configuration.
 	 */
 	dataset?: EvalDatasetCase[];
+	/** Registry evaluator ids applied to every case. */
+	evaluators?: string[];
 	/**
 	 * Optional judge model override; a single fixed judge across all models.
 	 * When unset, the server defaults to the first model in `models`.
@@ -955,6 +1003,8 @@ export interface RunEvalsRequest {
 	 * and the response gains a per-model `models` breakdown.
 	 */
 	models?: string[];
+	/** Run-level multi-turn prompt variant; rendered before each test case. */
+	system_messages?: EvalMessage[];
 	/**
 	 * Run-level system prompt; the server prepends it as a system message per
 	 * case and substitutes any {{vars}} using that case's `vars`.

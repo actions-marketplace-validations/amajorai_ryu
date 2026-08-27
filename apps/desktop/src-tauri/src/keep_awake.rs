@@ -11,6 +11,8 @@ use tauri::State;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::{Child, Command, Stdio};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::time::Duration;
 
 #[derive(Default)]
 pub struct KeepAwakeState {
@@ -22,6 +24,16 @@ struct KeepAwakeInner {
     enabled: bool,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     child: Option<Child>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for KeepAwakeInner {
+    fn drop(&mut self) {
+        // `std::process::Child` does not terminate on drop. Without explicit
+        // cleanup, quitting Ryu leaves caffeinate/systemd-inhibit alive and the
+        // machine can remain awake indefinitely.
+        let _ = stop_child(self);
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -115,11 +127,14 @@ pub fn set_keep_awake(
     #[cfg(target_os = "macos")]
     {
         if enabled && !inner.enabled {
-            let child = Command::new("/usr/bin/caffeinate")
+            let mut command = Command::new("/usr/bin/caffeinate");
+            command
                 .arg("-i")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::null());
+            configure_process_group(&mut command);
+            let child = command
                 .spawn()
                 .map_err(|error| format!("could not start caffeinate: {error}"))?;
             inner.child = Some(child);
@@ -132,7 +147,8 @@ pub fn set_keep_awake(
     #[cfg(target_os = "linux")]
     {
         if enabled && !inner.enabled {
-            let child = match Command::new("systemd-inhibit")
+            let mut command = Command::new("systemd-inhibit");
+            command
                 .args([
                     "--what=idle:sleep",
                     "--who=Ryu",
@@ -144,9 +160,9 @@ pub fn set_keep_awake(
                 ])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
+                .stderr(Stdio::null());
+            configure_process_group(&mut command);
+            let child = match command.spawn() {
                 Ok(child) => child,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     inner.enabled = false;
@@ -185,15 +201,68 @@ pub fn set_keep_awake(
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn stop_child(inner: &mut KeepAwakeInner) -> Result<(), String> {
     if let Some(mut child) = inner.child.take() {
-        if let Err(error) = child.kill() {
-            if !matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
-            ) {
-                return Err(format!("could not stop sleep inhibition: {error}"));
+        let raw_pid = child.id() as i32;
+        if raw_pid > 0 {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+
+            // The inhibitor and any helper command it spawned share a dedicated
+            // process group. Signal the group, not only its leader.
+            let group = Pid::from_raw(-raw_pid);
+            let _ = kill(group, Signal::SIGTERM);
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while std::time::Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                    Err(error) => {
+                        return Err(format!("could not inspect sleep inhibition: {error}"));
+                    }
+                }
             }
+            // TERM gives the helper a clean exit; KILL is a final group sweep for
+            // a wedged child or a command left behind by systemd-inhibit.
+            let _ = kill(group, Signal::SIGKILL);
         }
         let _ = child.wait();
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn configure_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn dropping_keep_awake_state_terminates_the_inhibitor_group() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 & wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_process_group(&mut command);
+        let child = command.spawn().expect("spawn inhibitor stand-in");
+        let process_group = child.id() as i32;
+        let inner = KeepAwakeInner {
+            enabled: true,
+            child: Some(child),
+        };
+
+        drop(inner);
+
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+        assert!(
+            kill(Pid::from_raw(-process_group), None).is_err(),
+            "the inhibitor process group survived state drop"
+        );
+    }
 }

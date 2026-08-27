@@ -1,18 +1,66 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 const STORY_URL = "/credit-usage-charts-proof.html";
+const PROOF_PATH =
+	"D:\\Code\\ryu\\apps\\desktop\\test-results\\gateway-usage-analytics-proof.png";
 
-test("shows credit spend charts alongside the transactions list", async ({
+interface RuntimeIssues {
+	consoleErrors: string[];
+	pageErrors: string[];
+	requestFailures: string[];
+}
+
+function observeRuntimeIssues(page: Page): RuntimeIssues {
+	const issues: RuntimeIssues = {
+		consoleErrors: [],
+		pageErrors: [],
+		requestFailures: [],
+	};
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			issues.consoleErrors.push(message.text());
+		}
+	});
+	page.on("pageerror", (error) => {
+		issues.pageErrors.push(error.message);
+	});
+	page.on("requestfailed", (request) => {
+		const failure = request.failure();
+		issues.requestFailures.push(
+			`${request.method()} ${request.url()}: ${failure?.errorText ?? "unknown error"}`
+		);
+	});
+	return issues;
+}
+
+async function openProof(page: Page): Promise<RuntimeIssues> {
+	const issues = observeRuntimeIssues(page);
+	await page.goto(STORY_URL);
+	await expect(page.getByTestId("usage-analytics-dashboard")).toBeVisible();
+	return issues;
+}
+
+function expectCleanRuntime(issues: RuntimeIssues): void {
+	expect(issues.consoleErrors, "console.error output").toEqual([]);
+	expect(issues.pageErrors, "uncaught page errors").toEqual([]);
+	expect(issues.requestFailures, "failed browser requests").toEqual([]);
+}
+
+test("shows canonical gateway rollup totals beside the credit ledger", async ({
 	page,
 }) => {
-	await page.goto(STORY_URL);
+	const issues = await openProof(page);
 
 	await expect(page.getByTestId("credit-usage-view")).toBeVisible();
-	await expect(page.getByTestId("usage-analytics-dashboard")).toBeVisible();
-	await expect(page.getByTestId("usage-kpi-active-nodes")).toContainText("3");
 	await expect(
 		page.getByRole("heading", { name: "Credit usage analytics" })
 	).toBeVisible();
+	await expect(page.getByTestId("usage-kpi-requests")).toContainText("6");
+	await expect(page.getByTestId("usage-kpi-errors")).toContainText("3");
+	await expect(page.getByTestId("usage-kpi-avg-latency")).toContainText(
+		"375 ms"
+	);
+	await expect(page.getByTestId("usage-kpi-active-nodes")).toContainText("1");
 
 	for (const kind of [
 		"trend",
@@ -23,8 +71,9 @@ test("shows credit spend charts alongside the transactions list", async ({
 		"provider-ranking",
 		"heatmap",
 	]) {
-		const chart = page.getByTestId(`usage-analytics-chart-${kind}`);
-		await expect(chart).toBeVisible();
+		await expect(
+			page.getByTestId(`usage-analytics-chart-${kind}`)
+		).toBeVisible();
 	}
 
 	for (const kind of ["reason", "model", "provider"]) {
@@ -36,13 +85,11 @@ test("shows credit spend charts alongside the transactions list", async ({
 
 	await expect(page.getByText("Summarize release notes")).toBeVisible();
 	await expect(page.getByText("Top-up")).toBeVisible();
-	await expect(page.getByTestId("proof-status")).toContainText(
-		"provider/model filters"
-	);
+	expectCleanRuntime(issues);
 });
 
 test("keeps credit receipts out of spend breakdowns", async ({ page }) => {
-	await page.goto(STORY_URL);
+	const issues = await openProof(page);
 
 	await expect(page.getByTestId("usage-chart-reason")).not.toContainText(
 		"Top-up"
@@ -50,20 +97,24 @@ test("keeps credit receipts out of spend breakdowns", async ({ page }) => {
 	await expect(
 		page.getByTestId("usage-chart-reason").getByText("Model usage")
 	).toBeVisible();
+	expectCleanRuntime(issues);
 });
 
-test("supports scope, provider, model, date range, and granularity controls", async ({
+test("keeps totals stable across controls, empties, and recovery", async ({
 	page,
 }) => {
-	await page.goto(STORY_URL);
+	const issues = await openProof(page);
+	const requests = page.getByTestId("usage-kpi-requests");
+	const errors = page.getByTestId("usage-kpi-errors");
+	const averageLatency = page.getByTestId("usage-kpi-avg-latency");
 
 	await page.getByRole("button", { name: "This node", exact: true }).click();
 	await expect(
 		page.getByText("Only usage routed through the selected node.")
 	).toBeVisible();
-	const sourceChart = page.getByTestId("usage-analytics-chart-source");
-	await expect(sourceChart.getByText("Local", { exact: true })).toBeVisible();
-	await expect(sourceChart.getByText("BYOK", { exact: true })).toBeVisible();
+	await expect(requests).toContainText("6");
+	await expect(errors).toContainText("3");
+	await expect(averageLatency).toContainText("375 ms");
 
 	await page.getByRole("button", { name: "15 min", exact: true }).click();
 	await expect(
@@ -71,17 +122,38 @@ test("supports scope, provider, model, date range, and granularity controls", as
 			"Requests, tokens, errors, and billed spend at 15 min resolution."
 		)
 	).toBeVisible();
+	await expect(requests).toContainText("6");
+	await expect(errors).toContainText("3");
+	await expect(averageLatency).toContainText("375 ms");
 
 	await page.getByRole("combobox", { name: "Filter by provider" }).click();
 	await page.getByRole("option", { name: "openai", exact: true }).click();
-	await expect(page.getByTestId("usage-kpi-requests")).toContainText("3");
+	await expect(requests).toContainText("6");
 
 	await page.getByRole("combobox", { name: "Filter by model" }).click();
 	await page.getByRole("option", { name: "gpt-4.1-mini", exact: true }).click();
-	await expect(page.getByTestId("usage-kpi-requests")).toContainText("3");
+	await expect(requests).toContainText("6");
+	await expect(errors).toContainText("3");
+	await expect(averageLatency).toContainText("375 ms");
 
-	await page.getByRole("button", { name: "Choose usage date range" }).click();
-	await expect(
-		page.getByRole("button", { name: "30 days", exact: true })
-	).toBeVisible();
+	await page.getByRole("combobox", { name: "Filter by model" }).click();
+	await page
+		.getByRole("option", { name: "claude-sonnet-4", exact: true })
+		.click();
+	await expect(requests).toContainText("0");
+	await expect(errors).toContainText("0");
+	await expect(averageLatency).toContainText("—");
+	await expect(page.getByText("No activity in this range.")).toBeVisible();
+
+	await page.getByRole("combobox", { name: "Filter by model" }).click();
+	await page.getByRole("option", { name: "All models", exact: true }).click();
+	await expect(requests).toContainText("6");
+	await expect(errors).toContainText("3");
+	await expect(averageLatency).toContainText("375 ms");
+	await expect(page.getByText("No activity in this range.")).toHaveCount(0);
+	await expect(page.getByTestId("proof-status")).toContainText(
+		"provider/model filters"
+	);
+	expectCleanRuntime(issues);
+	await page.screenshot({ fullPage: true, path: PROOF_PATH });
 });

@@ -21,10 +21,128 @@ import {
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
-import { useMemo } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { FRONTEND_URL } from "@/lib/auth-client.ts";
+import { openExternal } from "@/lib/tauri-bridge.ts";
+import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { PluginHostPanel } from "@/src/contributions/host/PluginHostPanel.tsx";
+import { useMyLicenses } from "@/src/hooks/useMyLicenses.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
+import { toTarget } from "@/src/lib/api/client.ts";
+import { recordMarketplaceMembershipUsage } from "@/src/lib/api/marketplace.ts";
+import type { PluginCompanion } from "@/src/lib/api/plugins.ts";
+import {
+	setMarketplaceAppsEntitled,
+	setMarketplaceDirectLicensedItems,
+} from "@/src/lib/api/preferences.ts";
+import { useNodeStore } from "@/src/store/useNodeStore.ts";
+
+function MembershipRequired({
+	children,
+	companion,
+}: {
+	children: ReactNode;
+	companion: PluginCompanion | undefined;
+}) {
+	const { ready, requestUpgrade, verdict } = useEntitlementContext();
+	const { isLicensed, licenses, loading } = useMyLicenses();
+	const directLicense = companion
+		? isLicensed("app", companion.pluginId)
+		: false;
+	const required = Boolean(companion?.membershipRequired);
+	const hasAccess =
+		!required || directLicense || Boolean(verdict?.marketplaceApps);
+	const usageKey = useRef<string | null>(null);
+	const [directLicenseSyncReady, setDirectLicenseSyncReady] = useState(
+		!required
+	);
+
+	useEffect(() => {
+		if (!required || loading) {
+			return;
+		}
+		const target = toTarget(useNodeStore.getState().getActiveNode());
+		Promise.all([
+			setMarketplaceAppsEntitled(target, Boolean(verdict?.marketplaceApps)),
+			setMarketplaceDirectLicensedItems(
+				target,
+				licenses
+					.filter(
+						(license) =>
+							license.status === "active" && license.itemKind === "app"
+					)
+					.map((license) => license.itemId)
+			),
+		]).finally(() => setDirectLicenseSyncReady(true));
+	}, [licenses, loading, required, verdict?.marketplaceApps]);
+
+	useEffect(() => {
+		if (
+			!required ||
+			directLicense ||
+			!verdict?.marketplaceApps ||
+			!companion?.pluginId ||
+			usageKey.current
+		) {
+			return;
+		}
+		const idempotencyKey =
+			typeof crypto?.randomUUID === "function"
+				? crypto.randomUUID()
+				: `membership-${companion.pluginId}-${Date.now()}`;
+		usageKey.current = idempotencyKey;
+		recordMarketplaceMembershipUsage({
+			id: companion.pluginId,
+			idempotencyKey,
+			kind: "app",
+		}).catch(() => {
+			usageKey.current = null;
+		});
+	}, [companion?.pluginId, directLicense, required, verdict?.marketplaceApps]);
+
+	if (!required || hasAccess) {
+		return <>{children}</>;
+	}
+
+	if (!ready || loading || !directLicenseSyncReady) {
+		return (
+			<div className="flex h-full items-center justify-center p-6 text-muted-foreground text-sm">
+				Checking Marketplace access...
+			</div>
+		);
+	}
+
+	return (
+		<div className="flex h-full items-center justify-center p-6">
+			<Empty>
+				<EmptyHeader>
+					<EmptyMedia variant="icon">
+						<HugeiconsIcon icon={Package01Icon} />
+					</EmptyMedia>
+					<EmptyTitle>Upgrade to use</EmptyTitle>
+					<EmptyDescription>
+						This paid Marketplace app is included with an active Ryu Membership
+						or recurring plan. Your direct app license still works without
+						Membership.
+					</EmptyDescription>
+				</EmptyHeader>
+				<EmptyContent>
+					<Button
+						onClick={() => {
+							openExternal(
+								`${FRONTEND_URL.replace(/\/$/, "")}/pricing#marketplace-membership`
+							).catch(() => requestUpgrade());
+						}}
+						size="sm"
+					>
+						View Membership plans
+					</Button>
+				</EmptyContent>
+			</Empty>
+		</div>
+	);
+}
 
 /**
  * The shared "this app isn't here" state for every route that resolves to a companion.
@@ -33,7 +151,7 @@ import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
  * id that the feed no longer reports (a disabled plugin), and the short-path alias
  * route in `contributions/builtins.ts`, which resolves a path like `/inbox` against the
  * feed and finds no owner. That second path used to render `null` — a truly blank tab —
- * which is worse than it sounds: most apps ship default-OFF, so on a fresh install the
+ * which is worse than it sounds: most apps are install-on-demand, so on a fresh install the
  * palette's "Inbox" row, an OS notification click, the Timeline hotkey and the tray's
  * "Open Timeline" all landed on blank with nothing to explain it or act on.
  *
@@ -88,17 +206,16 @@ export default function PluginCompanionPage({
 	// biome-ignore lint/correctness/useExhaustiveDependencies: contextKey is the content hash of mountContext.
 	const stableContext = useMemo(() => mountContext, [contextKey]);
 
-	// The single decision gate for running third-party code: no bundle → the benign
-	// summary below; never a fetch, never code.
-	if (companion?.hasUi) {
-		return (
-			<PluginHostPanel companion={companion} mountContext={stableContext} />
-		);
-	}
-
 	if (!companion) {
 		return <CompanionUnavailable />;
 	}
+
+	// The single decision gate for running third-party code: no bundle → the benign
+	// summary below; never a fetch, never code. Membership is checked around both
+	// paths so an opted-in paid app cannot keep running after a recurring plan ends.
+	const content = companion.hasUi ? (
+		<PluginHostPanel companion={companion} mountContext={stableContext} />
+	) : null;
 
 	// `app__<runnable id>` — strip the `app__` prefix for a cleaner owning-plugin
 	// hint without hardcoding any specific plugin.
@@ -106,7 +223,7 @@ export default function PluginCompanionPage({
 		? companion.id.slice("app__".length)
 		: companion.id;
 
-	return (
+	const summary = (
 		<div className="scroll-fade flex h-full flex-col overflow-y-auto p-6">
 			<div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
 				<div className="flex items-center gap-3">
@@ -140,5 +257,11 @@ export default function PluginCompanionPage({
 				</div>
 			</div>
 		</div>
+	);
+
+	return (
+		<MembershipRequired companion={companion}>
+			{content ?? summary}
+		</MembershipRequired>
 	);
 }

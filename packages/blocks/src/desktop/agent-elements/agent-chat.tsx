@@ -36,17 +36,21 @@ export function AgentChat({
 	onAgentUiSubmit,
 	onEditMessage,
 	onRegenerateMessage,
+	onRetryError,
 	onRetryGeneration,
-	onFeedback,
-	feedback,
 	messageActions,
 	messageActionStates,
 	onContributedMessageAction,
+	selectionActions,
+	onContributedSelectionAction,
 	onSelectVersion,
 	versions,
 	onSpeak,
 	onQuote,
+	onReply,
 	onOpenFile,
+	onReviewFileEdits,
+	onUndoFileEdits,
 	onOpenLink,
 	onOpenMention,
 	mentionItems,
@@ -66,6 +70,7 @@ export function AgentChat({
 	density,
 	composerDisabled,
 	composerFooter,
+	infoBar,
 	onComposerMenuSelect,
 	onComposerResize,
 	currentUser,
@@ -90,6 +95,10 @@ export function AgentChat({
 	style,
 	contextSize,
 	conversationKey,
+	goalCompletion,
+	statsPluginEnabled,
+	statsUsage,
+	statsModelName,
 	onOpenContext,
 	draftControls,
 }: AgentChatProps) {
@@ -279,6 +288,7 @@ export function AgentChat({
 			contextMeterOnOpen={onOpenContext}
 			disabled={composerDisabled}
 			draftControls={resolvedDraftControls}
+			infoBar={infoBar}
 			isDragOver={attachments?.isDragOver}
 			onAttach={attachments?.onAttach}
 			onChange={handleDraftChange}
@@ -378,7 +388,7 @@ export function AgentChat({
 				conversationKey={conversationKey}
 				currentUser={currentUser}
 				enableImagePreview={enableImagePreview}
-				feedback={feedback}
+				goalCompletion={goalCompletion}
 				hasOlderMessages={hasOlderMessages}
 				// Declared and destructured since the prop was introduced, but never
 				// actually handed to the transcript — so a surface that set it got
@@ -394,21 +404,29 @@ export function AgentChat({
 				onAgentUiSubmit={onAgentUiSubmit}
 				onBranch={onBranch}
 				onContributedMessageAction={onContributedMessageAction}
+				onContributedSelectionAction={onContributedSelectionAction}
 				onEditMessage={onEditMessage}
-				onFeedback={onFeedback}
 				onLoadOlderMessages={onLoadOlderMessages}
 				onOpenFile={onOpenFile}
 				onOpenLink={onOpenLink}
 				onOpenMention={onOpenMention}
 				onQuote={onQuote}
 				onRegenerateMessage={onRegenerateMessage}
+				onReply={onReply}
+				onRetryError={onRetryError}
 				onRetryGeneration={onRetryGeneration}
+				onReviewFileEdits={onReviewFileEdits}
 				onSelectVersion={onSelectVersion}
 				onSpeak={onSpeak}
+				onUndoFileEdits={onUndoFileEdits}
 				onWorkflowResume={onWorkflowResume}
 				previewResolvers={previewResolvers}
+				selectionActions={selectionActions}
 				showCopyToolbar={showCopyToolbar}
 				slots={slots}
+				statsModelName={statsModelName}
+				statsPluginEnabled={statsPluginEnabled}
+				statsUsage={statsUsage}
 				status={status}
 				suppressQuestionTool={Boolean(visiblePendingQuestion)}
 				toolRenderers={toolRenderers}

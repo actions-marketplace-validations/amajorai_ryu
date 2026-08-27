@@ -21,6 +21,7 @@
 
 import {
 	ArrowDown01Icon,
+	ArrowLeft01Icon,
 	BrowserIcon,
 	CheckmarkCircle02Icon,
 	ComputerTerminal01Icon,
@@ -44,6 +45,12 @@ import {
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { TextShimmer } from "@ryu/blocks/desktop/agent-elements/text-shimmer";
+import {
+	formatToolDuration,
+	readToolTiming,
+	type ToolTimingSource,
+	useToolElapsed,
+} from "@ryu/blocks/desktop/agent-elements/tools/tool-timing.tsx";
 import { extractCitations } from "@ryu/blocks/desktop/agent-elements/utils/citations.ts";
 import { formatCount } from "@ryu/ui/lib/number-format";
 import { cn } from "@ryu/ui/lib/utils";
@@ -57,12 +64,10 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { MessageList } from "@/components/agent-elements/message-list.tsx";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { DiffReviewPane } from "@/src/components/chat/DiffReviewPane.tsx";
-import {
-	SubagentAvatar,
-	subagentName,
-} from "@/src/components/panels/subagent-identity.tsx";
+import { SubagentAvatar } from "@/src/components/panels/subagent-identity.tsx";
 import {
 	BouncyAccordion,
 	type BouncyAccordionItem,
@@ -84,6 +89,7 @@ import {
 } from "@/src/lib/mission-control/turn-groups.ts";
 import type { PlanArtifact } from "@/src/lib/plan-artifacts.ts";
 import { compactAge } from "@/src/lib/time.ts";
+import { deriveTodoProgress } from "@/src/lib/todo-progress.ts";
 
 // ── Message-stream shapes (loose, mirroring the AI SDK parts we read) ──────────
 
@@ -162,35 +168,11 @@ export interface CoworkContextPanelProps {
 
 // ── Derivations from the message stream ────────────────────────────────────────
 
-const PLAN_PART_TYPE = "tool-TodoWrite";
-
 function isToolPart(part: StreamPart): boolean {
 	return (
 		part.type === "dynamic-tool" ||
 		(typeof part.type === "string" && part.type.startsWith("tool-"))
 	);
-}
-
-/** The most recent plan snapshot (Core re-sends the full list each update). */
-function extractLatestTodos(messages: StreamMessage[]): CoworkPlanTodo[] {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const parts = messages[i]?.parts;
-		if (!parts) {
-			continue;
-		}
-		for (let j = parts.length - 1; j >= 0; j--) {
-			const part = parts[j];
-			if (part.type !== PLAN_PART_TYPE) {
-				continue;
-			}
-			const input = part.input as { todos?: CoworkPlanTodo[] } | undefined;
-			const todos = input?.todos;
-			if (Array.isArray(todos) && todos.length > 0) {
-				return todos;
-			}
-		}
-	}
-	return [];
 }
 
 /** One thing a source was actually used ON — a file, a link, a command. */
@@ -524,6 +506,8 @@ export function extractSources(messages: StreamMessage[]): DerivedSource[] {
 const SUBAGENT_PART_TYPES = new Set(["tool-Task", "tool-Agent"]);
 const TOOL_PREFIX_RE = /^tool-/;
 const WHITESPACE_RE = /\s+/g;
+const TASK_TITLE_MAX_CHARS = 60;
+const SENTENCE_END_RE = /[.!?](?:\s|$)/;
 
 export interface SubagentSummary {
 	/**
@@ -551,8 +535,6 @@ export interface SubagentSummary {
 	 * already titled "Subagents" printed "Atlas Agent" and said nothing.
 	 */
 	label: string;
-	/** A stable, friendly English name derived from `id`, e.g. "Atlas". */
-	name: string;
 	status: "running" | "done";
 	/**
 	 * How many tool steps of the subagent's own we could reconstruct. ZERO is the
@@ -564,8 +546,52 @@ export interface SubagentSummary {
 	steps: number;
 	/** The one-line task description, if any. */
 	subtitle: string;
+	/** The Core-stamped start/completion time for this Task tool call. */
+	timing: ToolTimingSource | null;
+	/** Human-facing task name, derived from the spawn's description or prompt. */
+	title: string;
 	/** A reconstructed read-only transcript for the right panel's MessageList. */
 	transcript: UIMessage[];
+}
+
+/**
+ * Name a subagent after the work it owns. Task-capable agents already author a
+ * short `description`; older or foreign ACP producers may omit it, so the first
+ * sentence of the prompt is the deterministic fallback. An opaque call id must
+ * never leak into the label and we never invent a persona name.
+ */
+export function subagentTaskTitle({
+	description,
+	prompt,
+}: {
+	description?: unknown;
+	prompt?: unknown;
+}): string {
+	const described = nonEmptyString(description)?.trim();
+	const prompted = nonEmptyString(prompt)?.trim();
+	const source = described || prompted;
+	if (!source) {
+		return "Subagent task";
+	}
+	const firstLine = source
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.find(Boolean);
+	if (!firstLine) {
+		return "Subagent task";
+	}
+	const flattened = firstLine.replace(WHITESPACE_RE, " ");
+	const sentenceEnd = flattened.search(SENTENCE_END_RE);
+	const specific = (
+		sentenceEnd === -1 ? flattened : flattened.slice(0, sentenceEnd + 1)
+	).replace(/[.!?]+$/, "");
+	const characters = [...specific];
+	return characters.length <= TASK_TITLE_MAX_CHARS
+		? specific
+		: `${characters
+				.slice(0, TASK_TITLE_MAX_CHARS - 1)
+				.join("")
+				.trimEnd()}…`;
 }
 
 /** Best-effort text extraction from a tool part's loose input/output shapes. */
@@ -728,15 +754,21 @@ function toSubagentSummary(
 	grouped: SubagentParts
 ): SubagentSummary {
 	const id = task.toolCallId as string;
-	const input = task.input as
-		| { description?: string; prompt?: string; subagent_type?: string }
-		| undefined;
-	const subtitle = input?.description || "";
+	const input =
+		typeof task.input === "object" && task.input !== null
+			? (task.input as Record<string, unknown>)
+			: undefined;
+	const subtitle = nonEmptyString(input?.description)?.trim() ?? "";
+	const taskPrompt = nonEmptyString(input?.prompt)?.trim() ?? "";
 	const status: SubagentSummary["status"] =
 		task.state === "output-available" || task.state === "output-error"
 			? "done"
 			: "running";
-	const prompt = input?.prompt || subtitle || "Subagent task";
+	const title = subagentTaskTitle({
+		description: subtitle,
+		prompt: taskPrompt,
+	});
+	const prompt = taskPrompt || subtitle || "Subagent task";
 	const nested = (grouped.nested.get(id) ?? []).map(stripParentPrefix);
 	const activity = status === "running" ? latestActivity(nested) : "";
 	const outputText = grouped.output.get(id) || partText(task.output);
@@ -757,13 +789,14 @@ function toSubagentSummary(
 	return {
 		changes: nestedChanges(nested),
 		id,
-		name: subagentName(id),
-		label: input?.subagent_type || "",
+		label: nonEmptyString(input?.subagent_type)?.trim() ?? "",
 		subtitle,
 		status,
 		errored: task.state === "output-error",
 		activity,
 		steps: nested.length,
+		timing: readToolTiming(task),
+		title,
 		transcript,
 	};
 }
@@ -823,7 +856,7 @@ function SubagentsList({
 							<SubagentAvatar className="size-5 shrink-0" seed={sub.id} />
 							<span className="flex min-w-0 flex-1 flex-col">
 								<span className="flex min-w-0 items-center gap-1.5">
-									<span className="truncate text-foreground">{sub.name}</span>
+									<span className="truncate text-foreground">{sub.title}</span>
 									{/* Only a REAL `subagent_type` earns a chip. An untyped spawn
 									    leaves `label` empty rather than printing "Agent" under a
 									    section already titled "Subagents". */}
@@ -896,7 +929,7 @@ export function SubagentActivityChips({
 		<div className="scrollbar-none flex min-w-0 items-center gap-1.5 overflow-x-auto px-4 py-2">
 			{subagents.map((subagent) => (
 				<button
-					aria-label={`Open ${subagent.name}'s subagent thread`}
+					aria-label={`Open ${subagent.title} subagent task`}
 					className="group flex shrink-0 items-center gap-1.5 rounded-full border border-border/60 bg-transparent px-2.5 py-1 text-muted-foreground text-xs transition-colors hover:border-border hover:bg-muted/50 hover:text-foreground"
 					key={subagent.id}
 					onClick={() => onOpen?.(subagent)}
@@ -906,7 +939,7 @@ export function SubagentActivityChips({
 						className="size-4 opacity-75 transition-opacity group-hover:opacity-100"
 						seed={subagent.id}
 					/>
-					<span>{subagent.name}</span>
+					<span>{subagent.title}</span>
 					{subagent.status === "running" && (
 						<span
 							aria-hidden
@@ -1369,14 +1402,172 @@ function WorkspaceListHeading({
 	);
 }
 
+const COLLAPSED_ACTIVE_SUBAGENTS = 4;
+
+function SubagentGroupHeading({
+	count,
+	title,
+}: {
+	count: number;
+	title: string;
+}) {
+	return (
+		<h2 className="px-1 text-muted-foreground text-xs">
+			{title} <span aria-hidden>·</span> {count}
+		</h2>
+	);
+}
+
+function completedAge(completedAt: number | undefined): string {
+	if (completedAt === undefined) {
+		return "";
+	}
+	const age = compactAge(completedAt);
+	return age === "now" ? age : `${age} ago`;
+}
+
+function SubagentRosterRow({
+	onOpen,
+	subagent,
+}: {
+	onOpen: (subagent: SubagentSummary) => void;
+	subagent: SubagentSummary;
+}) {
+	const running = subagent.status === "running";
+	const elapsed = useToolElapsed(running, subagent.timing?.startedAt);
+	const time = running
+		? elapsed === null
+			? ""
+			: formatToolDuration(elapsed)
+		: completedAge(subagent.timing?.completedAt);
+	const state = running ? "Working" : subagent.errored ? "Failed" : "";
+
+	return (
+		<li>
+			<button
+				aria-label={`Open ${subagent.title}`}
+				className="flex min-h-14 w-full min-w-0 items-start gap-3 rounded-lg px-1 py-2 text-left transition-[background-color,transform] duration-150 hover:bg-muted/50 active:scale-[0.99] motion-reduce:transition-none"
+				onClick={() => onOpen(subagent)}
+				type="button"
+			>
+				<SubagentAvatar
+					animate={false}
+					className="mt-0.5 size-5"
+					seed={subagent.id}
+				/>
+				<span className="flex min-w-0 flex-1 flex-col gap-0.5">
+					<span className="truncate font-medium text-foreground text-sm">
+						{subagent.title}
+					</span>
+					{state && (
+						<span className="truncate text-muted-foreground text-xs">
+							{state}
+						</span>
+					)}
+				</span>
+				{time && (
+					<span className="shrink-0 pt-0.5 text-muted-foreground/70 text-xs tabular-nums">
+						{time}
+					</span>
+				)}
+			</button>
+		</li>
+	);
+}
+
+function SubagentTranscript({
+	onBack,
+	subagent,
+}: {
+	onBack: () => void;
+	subagent: SubagentSummary;
+}) {
+	const running = subagent.status === "running";
+	const messages = useMemo(() => {
+		const last = subagent.transcript.at(-1) as
+			| { parts?: unknown[] }
+			| undefined;
+		return (last?.parts?.length ?? 0) === 0
+			? subagent.transcript.slice(0, -1)
+			: subagent.transcript;
+	}, [subagent]);
+	const empty = messages.length < subagent.transcript.length;
+
+	return (
+		<div className="flex h-full flex-col" data-testid="subagent-detail">
+			<div className="flex h-12 shrink-0 items-center gap-2 border-border/60 border-b px-3">
+				<button
+					aria-label="Back to subagents"
+					className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground transition-[background-color,color,transform] duration-150 hover:bg-muted hover:text-foreground active:scale-95 motion-reduce:transition-none"
+					onClick={onBack}
+					type="button"
+				>
+					<HugeiconsIcon className="size-4" icon={ArrowLeft01Icon} />
+				</button>
+				<SubagentAvatar animate={false} className="size-5" seed={subagent.id} />
+				<h2 className="min-w-0 flex-1 truncate font-medium text-foreground text-sm">
+					{subagent.title}
+				</h2>
+			</div>
+			<div className="min-h-0 flex-1 overflow-hidden">
+				<MessageList
+					initialScrollBehavior="top"
+					messages={messages}
+					status={running ? "streaming" : "ready"}
+				/>
+			</div>
+			{empty && (
+				<div className="shrink-0 border-border/60 border-t px-3 py-2 text-muted-foreground text-xs">
+					{running
+						? "No steps reported yet. The answer appears here when the task finishes."
+						: subagent.errored
+							? "This task ended in an error with no output to show."
+							: "This task finished without returning any output."}
+				</div>
+			)}
+		</div>
+	);
+}
+
 /** Complete Codex-style run roster shown in a dedicated workspace tab. */
 export function SubagentsWorkspacePanel({
 	messages,
-	onOpenSubagent,
-}: Pick<CoworkContextPanelProps, "messages" | "onOpenSubagent">) {
+	onClearRequestedSubagent,
+	requestedSubagent,
+}: Pick<CoworkContextPanelProps, "messages"> & {
+	onClearRequestedSubagent?: () => void;
+	requestedSubagent?: { id: string; nonce: number } | null;
+}) {
 	const subagents = useMemo(() => extractSubagents(messages), [messages]);
+	const [selectedId, setSelectedId] = useState<string | null>(
+		requestedSubagent?.id ?? null
+	);
+	const [showAllActive, setShowAllActive] = useState(false);
+
+	useEffect(() => {
+		setSelectedId(requestedSubagent?.id ?? null);
+	}, [requestedSubagent]);
+
+	const selected = selectedId
+		? subagents.find((subagent) => subagent.id === selectedId)
+		: undefined;
+	if (selected) {
+		return (
+			<SubagentTranscript
+				onBack={() => {
+					setSelectedId(null);
+					onClearRequestedSubagent?.();
+				}}
+				subagent={selected}
+			/>
+		);
+	}
 	const active = subagents.filter((subagent) => subagent.status === "running");
 	const done = subagents.filter((subagent) => subagent.status === "done");
+	const shownActive = showAllActive
+		? active
+		: active.slice(0, COLLAPSED_ACTIVE_SUBAGENTS);
+	const hiddenActive = active.length - shownActive.length;
 
 	if (subagents.length === 0) {
 		return (
@@ -1387,26 +1578,48 @@ export function SubagentsWorkspacePanel({
 	}
 
 	return (
-		<div className="h-full overflow-y-auto px-4 py-5">
-			<div className="flex flex-col gap-7">
+		<div
+			className="h-full overflow-y-auto px-4 py-5"
+			data-testid="subagents-roster"
+		>
+			<div className="flex flex-col gap-6">
 				{active.length > 0 && (
 					<section className="flex flex-col gap-2">
-						<WorkspaceListHeading
-							count={active.length}
-							icon={Robot01Icon}
-							title="Active"
-						/>
-						<SubagentsList onOpen={onOpenSubagent} subagents={active} />
+						<SubagentGroupHeading count={active.length} title="Active" />
+						<ul className="flex flex-col gap-0.5">
+							{shownActive.map((subagent) => (
+								<SubagentRosterRow
+									key={subagent.id}
+									onOpen={(next) => setSelectedId(next.id)}
+									subagent={subagent}
+								/>
+							))}
+							{hiddenActive > 0 && (
+								<li>
+									<button
+										className="ml-8 rounded-md px-1 py-1.5 text-muted-foreground text-xs transition-colors hover:text-foreground"
+										onClick={() => setShowAllActive(true)}
+										type="button"
+									>
+										Show {hiddenActive} more
+									</button>
+								</li>
+							)}
+						</ul>
 					</section>
 				)}
 				{done.length > 0 && (
 					<section className="flex flex-col gap-2">
-						<WorkspaceListHeading
-							count={done.length}
-							icon={CheckmarkCircle02Icon}
-							title="Done"
-						/>
-						<SubagentsList onOpen={onOpenSubagent} subagents={done} />
+						<SubagentGroupHeading count={done.length} title="Done" />
+						<ul className="flex flex-col gap-0.5">
+							{done.map((subagent) => (
+								<SubagentRosterRow
+									key={subagent.id}
+									onOpen={(next) => setSelectedId(next.id)}
+									subagent={subagent}
+								/>
+							))}
+						</ul>
 					</section>
 				)}
 			</div>
@@ -1528,7 +1741,15 @@ export function CoworkContextPanel({
 	maxItemsPerSection,
 	variant = "cards",
 }: CoworkContextPanelProps) {
-	const todos = useMemo(() => extractLatestTodos(messages), [messages]);
+	const todos = useMemo(() => {
+		const snapshot = deriveTodoProgress(messages);
+		return (
+			snapshot?.items.map(({ label, status }) => ({
+				content: label,
+				status,
+			})) ?? []
+		);
+	}, [messages]);
 	const sources = useMemo(() => extractSources(messages), [messages]);
 	const subagents = useMemo(() => extractSubagents(messages), [messages]);
 	const artifacts = useMemo(() => extractArtifacts(messages), [messages]);

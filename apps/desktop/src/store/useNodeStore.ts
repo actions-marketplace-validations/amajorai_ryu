@@ -131,6 +131,8 @@ interface NodeState {
 	removeNode: (name: string) => Promise<void>;
 	setAutoSelect: (enabled: boolean) => void;
 	setDefault: (name: string) => Promise<void>;
+	/** Adopt a local node token returned by a native standalone bootstrap. */
+	setLocalNodeToken: (token: string) => void;
 	setTabOverride: (tabId: string, name: string) => void;
 	/**
 	 * Cloud instances tied to the active workspace that the user can reach but has
@@ -223,6 +225,16 @@ function decorateLocal(local: Node[], cloud: Node[]): Node[] {
 			serverId: match.serverId ?? null,
 		};
 	});
+}
+
+/** Merge discovered managed nodes into the display set without persisting them. */
+function mergeNodes(local: Node[], cloud: Node[]): Node[] {
+	const decorated = decorateLocal(local, cloud);
+	const localUrls = new Set(local.map((node) => normalizeUrl(node.url)));
+	return [
+		...decorated,
+		...cloud.filter((node) => !localUrls.has(normalizeUrl(node.url))),
+	];
 }
 
 /**
@@ -490,6 +502,18 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 		}
 	},
 
+	setLocalNodeToken: (token) => {
+		set((state) => {
+			const localNodes = state.localNodes.map((node) =>
+				isLocalNode(node) ? { ...node, token } : node
+			);
+			return {
+				localNodes,
+				nodes: mergeNodes(localNodes, state.cloudNodes),
+			};
+		});
+	},
+
 	probeAutoSelect: async () => {
 		if (!get().autoSelect) {
 			return;
@@ -542,7 +566,7 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 		set((s) => ({
 			localNodes: data.nodes,
 			defaultNode: data.default,
-			nodes: decorateLocal(data.nodes, s.cloudNodes),
+			nodes: mergeNodes(data.nodes, s.cloudNodes),
 			suggestedCloudNodes: computeSuggestions(
 				data.nodes,
 				s.cloudNodes,
@@ -578,7 +602,7 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 			cloudNodes: cloud,
 			// Added cloud nodes decorate as "Cloud"; the rest surface as suggestions
 			// (tied to the active workspace, deduped against added + dismissed URLs).
-			nodes: decorateLocal(s.localNodes, cloud),
+			nodes: mergeNodes(s.localNodes, cloud),
 			suggestedCloudNodes: computeSuggestions(
 				s.localNodes,
 				cloud,
@@ -616,7 +640,7 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 					? { ...n, token: freshByName.get(n.name) ?? null }
 					: n
 			);
-			return { cloudNodes: cloud, nodes: decorateLocal(s.localNodes, cloud) };
+			return { cloudNodes: cloud, nodes: mergeNodes(s.localNodes, cloud) };
 		});
 	},
 

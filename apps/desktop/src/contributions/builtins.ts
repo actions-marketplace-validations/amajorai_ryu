@@ -25,7 +25,7 @@
 //     component is a shell page (no companion bundle), but the feature is the app's,
 //     so the app decides both the path AND whether the route exists at all. It used
 //     to be a frozen `exact("/home", …)` here: the sidebar button was already
-//     app-registered and correctly hid itself when the (default-OFF) app was
+//     app-registered and correctly hid itself when the (not pre-installed) app was
 //     disabled, while the route stayed live — the exact disagreement
 //     `companion-alias.ts` exists to prevent. See `app-shell-routes.ts`.
 //   - The scaffold "extras" the old `TabContent` never handled (`/graph`,
@@ -81,6 +81,7 @@ import SpaceAppDocPage from "@/src/pages/SpaceAppDocPage.tsx";
 import SpaceDatabaseEditorPage from "@/src/pages/SpaceDatabaseEditorPage.tsx";
 import SpaceDatabaseRowPage from "@/src/pages/SpaceDatabaseRowPage.tsx";
 import SpaceDocEditorPage from "@/src/pages/SpaceDocEditorPage.tsx";
+import SpaceFileViewerPage from "@/src/pages/SpaceFileViewerPage.tsx";
 import SpacesPage from "@/src/pages/SpacesPage.tsx";
 import StorePage from "@/src/pages/StorePage.tsx";
 import WorkflowsPage from "@/src/pages/WorkflowsPage.tsx";
@@ -98,6 +99,8 @@ const CHANNEL_DETAIL = /^\/channels\/[^/]+$/;
 const IDENTITY_PROFILE = /^\/identities\/profile\/[^/]+$/;
 // A Notion-style markdown page inside a Space: /spaces/:spaceId/doc/:docId
 const SPACE_DOC = /^\/spaces\/[^/]+\/doc\/[^/]+$/;
+// A stored binary file in its native viewer/editor: /spaces/:spaceId/file/:docId
+const SPACE_FILE = /^\/spaces\/[^/]+\/file\/[^/]+$/;
 // A single database row's detail: /spaces/:spaceId/db/:databaseId/row/:rowId
 const SPACE_DB_ROW = /^\/spaces\/[^/]+\/db\/[^/]+\/row\/[^/]+$/;
 // A Space's data-grid database: /spaces/:spaceId/db/:databaseId
@@ -121,6 +124,14 @@ const CHAT_MERGED_AGENT = /^\/chat\/agent\/([^/]+)$/;
 // segment ([^/]+, not .+) so it does NOT swallow the two-segment builder path
 // `/workflows/build/:id`.
 const WORKFLOW_DETAIL = /^\/workflows\/[^/]+$/;
+// App-owned record details opened from contributed sidebar sections. The list
+// lives in the host sidebar; the companion receives the selected id as mount
+// context so its content surface never needs to rebuild that picker.
+const BLUEPRINT_DETAIL = /^\/blueprint\/[^/]+$/;
+const MAIL_DETAIL = /^\/mail\/[^/]+$/;
+const MONITOR_DETAIL = /^\/monitors\/[^/]+$/;
+const REASONING_DETAIL = /^\/reasoning\/[^/]+$/;
+const RLM_DETAIL = /^\/rlm\/[^/]+$/;
 // /workflows/build/:id — the NL workflow builder for an existing workflow (the
 // `/workflows/build` new-draft entry is an exact route). The builder is shell-
 // only (see WorkflowsPage): host.runAgent's PermissionPreset never exposes the
@@ -178,7 +189,7 @@ function CompanionAliasRoute({
 	const companionId = useCompanionAlias(alias);
 	if (!companionId) {
 		// NOT `null`. A blank tab is the one outcome worse than a hardcoded route:
-		// most apps ship default-OFF, so on a fresh install the palette's "Inbox"
+		// most apps ship not pre-installed, so on a fresh install the palette's "Inbox"
 		// row, an OS notification click, the Timeline hotkey and the tray's
 		// "Open Timeline" all reach this branch, and blank gives the user nothing to
 		// read and nothing to do. Shares one definition with the by-id mount below so
@@ -264,6 +275,8 @@ export function seedBuiltinRoutes(): void {
 				initialImages: tab.initialImages as AttachedImage[] | undefined,
 				initialProject: tab.initialProject,
 				initialPrompt: tab.initialPrompt,
+				initialQuote: tab.initialQuote,
+				initialModel: tab.initialModel,
 				initialProactiveOpening: tab.initialProactiveOpening,
 				initialSubmit: tab.initialSubmit,
 				tabConversationId: tab.conversationId,
@@ -295,6 +308,9 @@ export function seedBuiltinRoutes(): void {
 	);
 	exact("/store/integrations", () =>
 		createElement(StorePage, { initialSection: "integrations" })
+	);
+	exact("/store/connections", () =>
+		createElement(StorePage, { initialSection: "connections" })
 	);
 	exact("/library", () => createElement(LibraryPage));
 	// Channels/Identities: bare routes open the Library collection tab; manage
@@ -459,6 +475,14 @@ export function seedBuiltinRoutes(): void {
 			spaceId: segments[2],
 		});
 	});
+	// /spaces/:spaceId/file/:docId
+	pattern(SPACE_FILE, (tab) => {
+		const segments = tab.path.split("/");
+		return createElement(SpaceFileViewerPage, {
+			documentId: segments[4],
+			spaceId: segments[2],
+		});
+	});
 	// /spaces/:spaceId/db/:databaseId/row/:rowId
 	pattern(SPACE_DB_ROW, (tab) => {
 		const segments = tab.path.split("/");
@@ -540,6 +564,31 @@ export function seedBuiltinRoutes(): void {
 			workflowId === "new" ? undefined : { workflowId }
 		);
 	});
+	pattern(BLUEPRINT_DETAIL, (tab) =>
+		companionAlias(topLevelAlias(tab.path), {
+			planId: tab.path.split("/")[2],
+		})
+	);
+	pattern(MAIL_DETAIL, (tab) =>
+		companionAlias(topLevelAlias(tab.path), {
+			inboxId: tab.path.split("/")[2],
+		})
+	);
+	pattern(MONITOR_DETAIL, (tab) =>
+		companionAlias(topLevelAlias(tab.path), {
+			monitorId: tab.path.split("/")[2],
+		})
+	);
+	pattern(REASONING_DETAIL, (tab) =>
+		companionAlias(topLevelAlias(tab.path), {
+			policyId: tab.path.split("/")[2],
+		})
+	);
+	pattern(RLM_DETAIL, (tab) =>
+		companionAlias(topLevelAlias(tab.path), {
+			contextId: tab.path.split("/")[2],
+		})
+	);
 	// /timeline/:ts — "open captured moment": mount the app that answers to `/timeline`
 	// with the target timestamp (Unix µs) baked into the frame as
 	// `window.ryu.context.focusTs`, so it scrubs straight to that moment (the desktop

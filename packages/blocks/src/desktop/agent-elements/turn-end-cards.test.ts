@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	deriveEditedFiles,
 	deriveTurnEndCards,
+	deriveUndoPlan,
 	hasTurnEndCards,
 	isTurnEndJsonRenderPart,
 } from "./turn-end-cards.ts";
@@ -51,6 +52,107 @@ describe("turn-end card contract", () => {
 			{ deletions: 0, insertions: 2, path: "src/b.ts" },
 			{ deletions: 0, insertions: 2, path: "src/c.ts" },
 		]);
+	});
+
+	it("derives an exact reversible plan for supported text edits", () => {
+		expect(
+			deriveUndoPlan([
+				{
+					input: {
+						file_path: "src/a.ts",
+						new_string: "const value = 2;",
+						old_string: "const value = 1;",
+					},
+					type: "tool-Edit",
+				},
+			])
+		).toEqual({
+			edits: [
+				{
+					after: "const value = 2;",
+					before: "const value = 1;",
+					kind: "replace",
+					path: "src/a.ts",
+				},
+			],
+			kind: "text-replacements",
+		});
+	});
+
+	it("keeps MultiEdit operation order and accepts explicit ACP before content", () => {
+		expect(
+			deriveUndoPlan([
+				{
+					input: {
+						edits: [
+							{ new_string: "two", old_string: "one" },
+							{ new_string: "three", old_string: "two" },
+						],
+						file_path: "src/multi.ts",
+					},
+					type: "tool-MultiEdit",
+				},
+				{
+					input: { file_path: "src/acp.ts" },
+					output: {
+						content: "after",
+						old_content: "before",
+						path: "src/acp.ts",
+					},
+					type: "tool-Write",
+				},
+			])?.edits
+		).toEqual([
+			{
+				after: "two",
+				before: "one",
+				kind: "replace",
+				path: "src/multi.ts",
+			},
+			{
+				after: "three",
+				before: "two",
+				kind: "replace",
+				path: "src/multi.ts",
+			},
+			{
+				after: "after",
+				before: "before",
+				kind: "replace",
+				path: "src/acp.ts",
+			},
+		]);
+	});
+
+	it("keeps Review but refuses partial or ambiguous Undo plans", () => {
+		const unsupported = [
+			{
+				input: { content: "new file", file_path: "src/new.ts" },
+				type: "tool-Write",
+			},
+		];
+		expect(deriveUndoPlan(unsupported)).toBeUndefined();
+		expect(deriveTurnEndCards(unsupported, "unsupported")).toEqual([
+			{
+				files: [{ deletions: 0, insertions: 1, path: "src/new.ts" }],
+				id: "unsupported-edited-files",
+				kind: "file-edits",
+			},
+		]);
+
+		expect(
+			deriveUndoPlan([
+				{
+					input: {
+						file_path: "src/a.ts",
+						new_string: "new",
+						old_string: "old",
+						replace_all: true,
+					},
+					type: "tool-Edit",
+				},
+			])
+		).toBeUndefined();
 	});
 
 	it("does not summarize failed writes", () => {
@@ -159,6 +261,17 @@ describe("turn-end card contract", () => {
 				files: [{ deletions: 1, insertions: 1, path: "docs/release.md" }],
 				id: "assistant-1-edited-files",
 				kind: "file-edits",
+				undoPlan: {
+					edits: [
+						{
+							after: "ready",
+							before: "draft",
+							kind: "replace",
+							path: "docs/release.md",
+						},
+					],
+					kind: "text-replacements",
+				},
 			},
 			{
 				id: "assistant-1-json-2",

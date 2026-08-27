@@ -1,6 +1,6 @@
 {
-  "tags": ["email","inbox","communication","agents"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": ["email", "inbox", "communication", "agents"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-mail",
   "homepage": "https://github.com/amajorai/ryu-mail",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -49,6 +49,7 @@
         "command_env": "RYU_MAIL_BIN",
         "port_env": "RYU_MAIL_PORT"
       },
+      "host_api": { "grants": ["mail:crud"] },
       "port": 7996,
       "health_path": "/api/mail/status",
       "http": {
@@ -56,20 +57,55 @@
         "public_mount": "/api/mail",
         "max_body_bytes": 27262976,
         "routes": [
-          { "path": "/status" },
-          { "path": "/inboxes" },
-          { "path": "/inboxes/:id" },
-          { "path": "/inboxes/:id/rotate-secret" },
-          { "path": "/inboxes/:id/messages" },
-          { "path": "/inboxes/:id/send" },
-          { "path": "/messages/:id" },
-          { "path": "/attachments/:id" },
+          { "path": "/status", "permission": "mail.read" },
+          { "path": "/inboxes", "method": "GET", "permission": "mail.read" },
+          { "path": "/inboxes", "method": "POST", "permission": "mail.manage" },
+          {
+            "path": "/inboxes/:id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id",
+            "method": "PATCH",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id",
+            "method": "DELETE",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/rotate-secret",
+            "method": "POST",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/messages",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/send",
+            "method": "POST",
+            "permission": "mail.send"
+          },
+          {
+            "path": "/messages/:id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/attachments/:id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
           { "path": "/inbound/:id", "auth": "public" }
         ]
       }
     }
   ],
-  "permission_grants": ["mail:crud"],
+  "permission_grants": ["mail:crud", "ui:toast"],
   "permission_levels": [
     {
       "id": "mail.read",
@@ -94,7 +130,45 @@
     "icon": "mail-01"
   },
   "contributes": {
-  "chat_widget_templates": [{"id":"mail.chat","title":"Mail widget","description":"Mail chat widget metadata is coming soon; no render tool is available yet.","triggers":["mail widget"],"examples":["Show me a mail widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}],
+    "chat_widget_templates": [
+      {
+        "id": "mail.chat",
+        "title": "Mail widget",
+        "description": "Mail chat widget metadata is coming soon; no render tool is available yet.",
+        "triggers": ["mail widget"],
+        "examples": ["Show me a mail widget"],
+        "backing": {},
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "coming-soon"
+      }
+    ],
+    "sidebar_sections": [
+      {
+        "id": "inboxes",
+        "title": "Inboxes",
+        "icon": "mail-01",
+        "order": 52,
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/mail/inboxes" },
+            "items": "inboxes",
+            "map": {
+              "id": "id",
+              "title": "name",
+              "titleFallback": "Unnamed inbox",
+              "subtitle": "address"
+            },
+            "refreshMs": 15000
+          },
+          "itemTarget": "/mail/{{item.id}}",
+          "emptyState": {
+            "title": "No inboxes yet",
+            "description": "Create an inbox in Agent Inboxes to receive mail."
+          }
+        }
+      }
+    ],
     "hook_events": [
       {
         "id": "@ryu/mail#message.received",

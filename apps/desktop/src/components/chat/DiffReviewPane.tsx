@@ -123,7 +123,7 @@ function FileSummaryRow({
 				<TooltipContent>{file.path}</TooltipContent>
 			</Tooltip>
 			{(file.additions > 0 || file.deletions > 0) && (
-				<span className="ml-auto flex shrink-0 items-center gap-1.5 font-heading text-muted-foreground tabular-nums">
+				<span className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-muted-foreground tabular-nums">
 					{file.additions > 0 && (
 						<span className="flex items-center gap-0.5 text-success dark:text-success">
 							<HugeiconsIcon
@@ -339,7 +339,7 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 						{formatCount(diff.files.length) ?? "—"} file
 						{diff.files.length === 1 ? "" : "s"} changed
 					</span>
-					<span className="ml-auto flex items-center gap-2 font-heading text-muted-foreground text-xs tabular-nums">
+					<span className="ml-auto flex items-center gap-2 font-mono text-muted-foreground text-xs tabular-nums">
 						{totalAdditions > 0 && (
 							<span className="text-success dark:text-success">
 								+{formatCount(totalAdditions)}
@@ -391,7 +391,7 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 									{selectedFile?.path ?? "Changes"}
 								</span>
 								{selectedFile && (
-									<span className="flex shrink-0 gap-1.5 font-heading tabular-nums">
+									<span className="flex shrink-0 gap-1.5 font-mono tabular-nums">
 										<span className="text-success">
 											+{formatCount(selectedFile.additions)}
 										</span>

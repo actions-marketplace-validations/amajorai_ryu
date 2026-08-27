@@ -36,6 +36,34 @@
       "tsHost": true
     },
     {
+      "capability": "core.listAgents",
+      "grant": "core:list_agents",
+      "method": "catalog.snapshot",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "core.listAgents",
+      "grant": "core:list_agents",
+      "method": "catalog.models",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "chat.broadcast",
+      "grant": "chat.sendFollowUp",
+      "method": "chat.list",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "chat.broadcast",
+      "grant": "chat.sendFollowUp",
+      "method": "chat.send",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "ui.render",
       "grant": "ui:render",
       "method": "ui.registerRoute",
@@ -53,6 +81,27 @@
       "capability": "ui.sendMessage",
       "grant": "ui:send_message",
       "method": "ui.sendMessage",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "ui.toast",
+      "grant": "ui:toast",
+      "method": "ui.toast.show",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "ui.toast",
+      "grant": "ui:toast",
+      "method": "ui.toast.update",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "ui.toast",
+      "grant": "ui:toast",
+      "method": "ui.toast.dismiss",
       "streaming": false,
       "tsHost": true
     },
@@ -225,6 +274,13 @@
       "tsHost": true
     },
     {
+      "capability": "storage.kv",
+      "grant": "storage:kv",
+      "method": "storage.compareAndSet",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "crypto.seal",
       "grant": "crypto:seal",
       "method": "crypto.seal",
@@ -306,7 +362,7 @@
       "grant": "spaces:docs",
       "method": "spaces.ensureSpace",
       "streaming": false,
-      "tsHost": false
+      "tsHost": true
     },
     {
       "capability": "spaces.docs",
@@ -340,6 +396,13 @@
       "capability": "spaces.docs",
       "grant": "spaces:docs",
       "method": "spaces.deleteDoc",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "spaces.docs",
+      "grant": "spaces:docs",
+      "method": "spaces.search",
       "streaming": false,
       "tsHost": true
     },
@@ -1058,6 +1121,13 @@
       "tsHost": true
     },
     {
+      "capability": "notifications.send",
+      "grant": "notifications:send-to-user",
+      "method": "notifications.send",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "approvals.crud",
       "grant": "approvals:crud",
       "method": "suggestions.list",
@@ -1180,6 +1250,13 @@
       "capability": "reasoning.check",
       "grant": "reasoning:check",
       "method": "reasoning.request",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "safe-actions.manage",
+      "grant": "safe-actions:manage",
+      "method": "safeActions.request",
       "streaming": false,
       "tsHost": true
     },
@@ -1317,5 +1394,5 @@
       "tsHost": false
     }
   ],
-  "version": "1.6.0"
+  "version": "1.8.0"
 }

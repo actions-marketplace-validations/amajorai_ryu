@@ -15,7 +15,20 @@ import {
 	IconSparkles,
 	IconUsers,
 } from "@tabler/icons-react";
-import type { MentionGroup, MentionItem, MentionSources } from "./types.ts";
+import type {
+	MentionGroup,
+	MentionItem,
+	MentionKind,
+	MentionSources,
+} from "./types.ts";
+
+export const CHAT_MENTION_KINDS = [
+	"agent",
+	"app",
+	"plugin",
+	"workflow",
+	"user",
+] as const;
 
 const PATH_SEPARATOR = /[\\/]/;
 /** The in-progress "@word" fragment at the cursor (after start or whitespace). */
@@ -131,8 +144,10 @@ export function resolveFirstNamedMentionId(
  */
 export function buildMentionGroups(
 	sources: MentionSources,
-	query: string
+	query: string,
+	allowedKinds?: readonly MentionKind[]
 ): MentionGroup[] {
+	const allowed = new Set(allowedKinds);
 	const q = query.trim().toLowerCase();
 	const matches = (...fields: string[]) =>
 		q === "" || fields.some((f) => f.toLowerCase().includes(q));
@@ -143,7 +158,7 @@ export function buildMentionGroups(
 		label: string,
 		items: MentionItem[]
 	) => {
-		if (items.length > 0) {
+		if (items.length > 0 && (!allowedKinds || allowed.has(kind))) {
 			groups.push({ kind, label, items });
 		}
 	};
@@ -325,8 +340,29 @@ export function buildMentionGroups(
 				icon: IconFolder,
 			}))
 	);
+	add(
+		"user",
+		"Users",
+		(sources.users ?? [])
+			.filter((user) => matches(user.name, user.id, user.description ?? ""))
+			.map((user) => ({
+				description: user.description,
+				id: user.id,
+				kind: "user",
+				label: user.name,
+				visualIcon: user.visualIcon,
+			}))
+	);
 
-	return groups;
+	if (!allowedKinds) {
+		return groups;
+	}
+	const order = new Map(allowedKinds.map((kind, index) => [kind, index]));
+	return groups.sort(
+		(left, right) =>
+			(order.get(left.kind) ?? Number.MAX_SAFE_INTEGER) -
+			(order.get(right.kind) ?? Number.MAX_SAFE_INTEGER)
+	);
 }
 
 /** Flatten grouped candidates into a single ordered list for keyboard nav. */

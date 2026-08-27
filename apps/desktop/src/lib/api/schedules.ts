@@ -12,7 +12,7 @@
 // throws a generic status-only error and discards that body, so we read the
 // JSON here to surface the exact Core validation message in the UI.
 
-import { type ApiTarget, apiUrl, makeHeaders, request } from "./client.ts";
+import { type ApiTarget, authenticatedFetch, request } from "./client.ts";
 
 /** How a job is scheduled: a cron expression or a fixed interval. */
 export type Schedule =
@@ -267,9 +267,8 @@ export async function createJob(
 	target: ApiTarget,
 	input: JobInput
 ): Promise<ScheduledJob> {
-	const resp = await fetch(apiUrl(target, "/heartbeat/jobs"), {
+	const resp = await authenticatedFetch(target, "/heartbeat/jobs", {
 		method: "POST",
-		headers: makeHeaders(target.token),
 		body: JSON.stringify({
 			name: input.name,
 			schedule: toScheduleBody(input.schedule),

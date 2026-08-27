@@ -242,7 +242,7 @@ export function defineTool<
  * The plugin must declare the `tool:execute` grant (see `definePlugin`).
  */
 export function inlineToolRunnable(
-	tool: ToolRunnable,
+	tool: Pick<ToolRunnable, "code" | "id" | "name" | "schema">,
 	options?: { description?: string }
 ): RunnableMeta {
 	return {

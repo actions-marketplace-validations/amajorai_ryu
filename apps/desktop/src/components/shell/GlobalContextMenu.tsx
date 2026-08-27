@@ -43,6 +43,7 @@ import {
 } from "@/src/lib/console-buffer.ts";
 import { getCrashRoute } from "@/src/lib/crash-context.ts";
 import { toggleFullscreen, useFullscreen } from "@/src/lib/fullscreen.ts";
+import { isTauriReady } from "@/src/lib/tauri-ready.ts";
 import { STORAGE_KEYS } from "@/src/lib/themes/presets.ts";
 import { openFeedbackWidget } from "@/src/lib/userjot.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
@@ -81,7 +82,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 async function toggleDevtools(): Promise<void> {
-	if (!("__TAURI_INTERNALS__" in window)) {
+	if (!isTauriReady()) {
 		toast.info("DevTools are only available in the desktop app.");
 		return;
 	}

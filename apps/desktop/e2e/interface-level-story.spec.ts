@@ -15,6 +15,24 @@ import { expect, type Page, test } from "@playwright/test";
 test.describe.configure({ timeout: 90_000 });
 
 const STORY_URL = "/interface-level-story.html";
+const browserErrors = new WeakMap<Page, string[]>();
+
+test.beforeEach(({ page }) => {
+	const errors: string[] = [];
+	browserErrors.set(page, errors);
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(`console: ${message.text()}`);
+		}
+	});
+	page.on("pageerror", (error) => {
+		errors.push(`pageerror: ${error.message}`);
+	});
+});
+
+test.afterEach(({ page }) => {
+	expect(browserErrors.get(page)).toEqual([]);
+});
 
 async function openModePicker(page: Page) {
 	await page.goto(STORY_URL);
@@ -37,6 +55,7 @@ test("the control is a binary switch and starts in Ryu Work", async ({
 	await expect(firstMenuItem.locator("svg")).toHaveCount(0);
 	await expect(page.getByRole("slider")).toHaveCount(0);
 	await expect(toggle).toHaveAttribute("aria-checked", "false");
+	await expect(page.getByTestId("ryu:response-mode")).toHaveText("everyday");
 	await expect(
 		page.getByText("Ryu Work", { exact: true }).first()
 	).toBeVisible();
@@ -51,11 +70,17 @@ test("clicking the switch moves between Ryu Work and Code", async ({
 	await toggle.click();
 	await expect(toggle).toHaveAttribute("aria-checked", "true");
 	await expect(page.getByTestId("ryu:interface-level")).toHaveText("expert");
+	await expect(page.getByTestId("ryu:response-mode")).toHaveText("developer");
 	await expect(toggle).toBeVisible();
+	await page.screenshot({
+		fullPage: true,
+		path: "/tmp/ryu-response-mode-proof.png",
+	});
 
 	await toggle.click();
 	await expect(toggle).toHaveAttribute("aria-checked", "false");
 	await expect(page.getByTestId("ryu:interface-level")).toHaveText("simple");
+	await expect(page.getByTestId("ryu:response-mode")).toHaveText("everyday");
 });
 
 test("the inline switch is keyboard-operable without closing the account menu", async ({

@@ -12,8 +12,6 @@ import { useDownloadsStore } from "@/src/store/useDownloadsStore.ts";
 import { useInstallStore } from "@/src/store/useInstallStore.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
-const RECONNECT_DELAY_MS = 2000;
-
 export function useDownloadsStream(): void {
 	// The global overlay tracks the active (default) node; switching the default
 	// node re-runs this effect via the url/token deps below.
@@ -26,8 +24,6 @@ export function useDownloadsStream(): void {
 	const reset = useDownloadsStore((s) => s.reset);
 
 	useEffect(() => {
-		let cancelled = false;
-		let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 		const controller = new AbortController();
 		const target = { url, token: token ?? null };
 
@@ -38,41 +34,23 @@ export function useDownloadsStream(): void {
 		// forever on a node where nothing is happening.
 		useInstallStore.getState().reset();
 
-		const run = async () => {
-			while (!cancelled) {
-				try {
-					await streamDownloads(
-						target,
-						(event) => {
-							if (event.type === "snapshot") {
-								applySnapshot(event.tasks);
-							} else if (event.type === "update") {
-								applyUpdate(event.task);
-							} else if (event.type === "removed") {
-								removeTask(event.id);
-							}
-						},
-						controller.signal
-					);
-				} catch {
-					// Aborted (node switch/unmount) or transient — fall through to retry.
+		// The shared event multiplexer owns reconnect/backoff for this channel.
+		streamDownloads(
+			target,
+			(event) => {
+				if (event.type === "snapshot") {
+					applySnapshot(event.tasks);
+				} else if (event.type === "update") {
+					applyUpdate(event.task);
+				} else if (event.type === "removed") {
+					removeTask(event.id);
 				}
-				if (cancelled) {
-					break;
-				}
-				await new Promise<void>((resolve) => {
-					reconnectTimer = setTimeout(resolve, RECONNECT_DELAY_MS);
-				});
-			}
-		};
-		run();
+			},
+			controller.signal
+		).catch(() => undefined);
 
 		return () => {
-			cancelled = true;
 			controller.abort();
-			if (reconnectTimer) {
-				clearTimeout(reconnectTimer);
-			}
 		};
 	}, [url, token, applySnapshot, applyUpdate, removeTask, reset]);
 }

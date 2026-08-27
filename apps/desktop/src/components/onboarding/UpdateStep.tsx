@@ -8,16 +8,27 @@ import { Switch } from "@ryu/ui/components/switch";
 import { cn } from "@ryu/ui/lib/utils";
 import { useCallback, useEffect, useState } from "react";
 import { sileo } from "sileo";
-import { installUpdate } from "@/src/components/updater/AutoUpdater.tsx";
+import {
+	installUpdate,
+	prepareUpdate,
+} from "@/src/components/updater/AutoUpdater.tsx";
+import {
+	APP_UPDATE_DOWNLOAD_ARIA_LABEL,
+	APP_UPDATE_DOWNLOAD_DESCRIPTION,
+	APP_UPDATE_DOWNLOAD_TITLE,
+	APP_UPDATE_INSTALL_ACTION,
+} from "@/src/components/updater/app-update-policy.ts";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	checkForUpdate,
-	getAutoUpdateEnabled,
-	setAutoUpdateEnabled,
 	type UpdateCheck,
 	updateCheckFailed,
 } from "@/src/lib/api/update.ts";
+import {
+	getAutomaticAppUpdateDownload,
+	setAutomaticAppUpdateDownload,
+} from "@/src/lib/app-update-preparation.ts";
 import { verdictAppliesToApp } from "@/src/lib/app-version.ts";
 import { isLocalNode, type Node } from "@/src/store/useNodeStore.ts";
 
@@ -28,7 +39,7 @@ export type UpdateStepStatus =
 	| "up-to-date";
 
 export interface UpdateStepViewProps {
-	autoUpdate: boolean;
+	automaticDownload: boolean;
 	availableVersion?: string | null;
 	checking?: boolean;
 	downloading?: boolean;
@@ -36,7 +47,8 @@ export interface UpdateStepViewProps {
 	onCheck?: () => void;
 	onContinue: () => void;
 	onInstall?: () => void;
-	onToggleAutoUpdate?: (enabled: boolean) => void;
+	onToggleAutomaticDownload?: (enabled: boolean) => void;
+	prepared?: boolean;
 	status: UpdateStepStatus;
 }
 
@@ -78,7 +90,7 @@ function statusCopy(
  * become a gate for choosing local, cloud, or an existing node.
  */
 export function UpdateStepView({
-	autoUpdate,
+	automaticDownload,
 	availableVersion,
 	checking = false,
 	downloading = false,
@@ -86,7 +98,8 @@ export function UpdateStepView({
 	onCheck,
 	onContinue,
 	onInstall,
-	onToggleAutoUpdate,
+	onToggleAutomaticDownload,
+	prepared = false,
 	status,
 }: UpdateStepViewProps) {
 	const copy = statusCopy(status, availableVersion, errorMessage);
@@ -141,15 +154,15 @@ export function UpdateStepView({
 
 					<div className="flex items-center justify-between gap-4 rounded-xl bg-muted/50 px-4 py-3">
 						<div className="min-w-0">
-							<p className="font-medium text-sm">Automatic updates</p>
+							<p className="font-medium text-sm">{APP_UPDATE_DOWNLOAD_TITLE}</p>
 							<p className="text-muted-foreground text-xs">
-								Check for updates when you launch Ryu
+								{APP_UPDATE_DOWNLOAD_DESCRIPTION}
 							</p>
 						</div>
 						<Switch
-							aria-label="Check for updates automatically"
-							checked={autoUpdate}
-							onCheckedChange={onToggleAutoUpdate}
+							aria-label={APP_UPDATE_DOWNLOAD_ARIA_LABEL}
+							checked={automaticDownload}
+							onCheckedChange={onToggleAutomaticDownload}
 						/>
 					</div>
 
@@ -160,7 +173,11 @@ export function UpdateStepView({
 								onClick={onInstall}
 								variant="default"
 							>
-								{downloading ? "Downloading…" : "Update now"}
+								{downloading
+									? "Preparing…"
+									: prepared
+										? APP_UPDATE_INSTALL_ACTION
+										: "Download and install"}
 							</Button>
 						) : null}
 						{isError && onCheck ? (
@@ -188,51 +205,65 @@ interface UpdateStepProps {
 /** Desktop-only container for the first-run update check. */
 export function UpdateStep({ onContinue }: UpdateStepProps) {
 	const getNode = useActiveNodeGetter();
-	const [autoUpdate, setAutoUpdate] = useState(true);
+	const [automaticDownload, setAutomaticDownload] = useState(true);
 	const [checking, setChecking] = useState(true);
 	const [downloading, setDownloading] = useState(false);
+	const [prepared, setPrepared] = useState(false);
 	const [errorMessage, setErrorMessage] = useState<string | null>(null);
 	const [status, setStatus] = useState<UpdateStepStatus>("checking");
 	const [available, setAvailable] = useState<UpdateCheck | null>(null);
 	const [node, setNode] = useState<Node | null>(null);
 
-	const check = useCallback(async () => {
-		setChecking(true);
-		setStatus("checking");
-		setErrorMessage(null);
-		setAvailable(null);
+	const check = useCallback(
+		async (downloadAutomatically: boolean) => {
+			setChecking(true);
+			setStatus("checking");
+			setErrorMessage(null);
+			setAvailable(null);
+			setPrepared(false);
 
-		const activeNode = getNode();
-		setNode(activeNode);
-		const verdict = await checkForUpdate(toTarget(activeNode), {
-			clamp: isLocalNode(activeNode),
-		});
-		if (updateCheckFailed(verdict)) {
-			setStatus("error");
-			setErrorMessage(verdict.error ?? "Check your connection and try again.");
-			return;
-		}
+			const activeNode = getNode();
+			setNode(activeNode);
+			const verdict = await checkForUpdate(toTarget(activeNode), {
+				clamp: isLocalNode(activeNode),
+			});
+			if (updateCheckFailed(verdict)) {
+				setStatus("error");
+				setErrorMessage(
+					verdict.error ?? "Check your connection and try again."
+				);
+				return;
+			}
 
-		const appliesToApp = await verdictAppliesToApp(verdict);
-		if (verdict.update_available && appliesToApp) {
-			setAvailable(verdict);
-			setStatus("available");
-		} else {
-			setStatus("up-to-date");
-		}
-	}, [getNode]);
+			const appliesToApp = await verdictAppliesToApp(verdict);
+			if (verdict.update_available && appliesToApp) {
+				setAvailable(verdict);
+				setStatus("available");
+				if (downloadAutomatically) {
+					setDownloading(true);
+					try {
+						const ready = await prepareUpdate(verdict, { node: activeNode });
+						setPrepared(ready !== null);
+					} finally {
+						setDownloading(false);
+					}
+				}
+			} else {
+				setStatus("up-to-date");
+			}
+		},
+		[getNode]
+	);
 
 	useEffect(() => {
 		let active = true;
-		const nodeForPreference = getNode();
-		getAutoUpdateEnabled(toTarget(nodeForPreference))
-			.then((enabled) => {
+		getAutomaticAppUpdateDownload()
+			.then(async (enabled) => {
 				if (active) {
-					setAutoUpdate(enabled);
+					setAutomaticDownload(enabled);
 				}
+				await check(enabled);
 			})
-			.catch(() => undefined);
-		check()
 			.catch((error: unknown) => {
 				if (!active) {
 					return;
@@ -252,10 +283,10 @@ export function UpdateStep({ onContinue }: UpdateStepProps) {
 		return () => {
 			active = false;
 		};
-	}, [check, getNode]);
+	}, [check]);
 
 	const handleCheck = useCallback(() => {
-		check()
+		check(automaticDownload)
 			.catch((error: unknown) => {
 				setStatus("error");
 				setErrorMessage(
@@ -265,29 +296,39 @@ export function UpdateStep({ onContinue }: UpdateStepProps) {
 				);
 			})
 			.finally(() => setChecking(false));
-	}, [check]);
+	}, [automaticDownload, check]);
 
 	const handleToggle = useCallback(
 		(next: boolean) => {
-			const previous = autoUpdate;
-			setAutoUpdate(next);
-			setAutoUpdateEnabled(toTarget(getNode()), next)
-				.then((saved) => {
+			const previous = automaticDownload;
+			setAutomaticDownload(next);
+			setAutomaticAppUpdateDownload(next)
+				.then(async (saved) => {
 					if (!saved) {
-						setAutoUpdate(previous);
+						setAutomaticDownload(previous);
 						sileo.error({
-							title: "Could not save the auto-update setting",
+							title: "Could not save the automatic-download setting",
 						});
+						return;
+					}
+					if (next && available && node) {
+						setDownloading(true);
+						try {
+							const ready = await prepareUpdate(available, { node });
+							setPrepared(ready !== null);
+						} finally {
+							setDownloading(false);
+						}
 					}
 				})
 				.catch(() => {
-					setAutoUpdate(previous);
+					setAutomaticDownload(previous);
 					sileo.error({
-						title: "Could not save the auto-update setting",
+						title: "Could not save the automatic-download setting",
 					});
 				});
 		},
-		[autoUpdate, getNode]
+		[automaticDownload, available, node]
 	);
 
 	const handleInstall = useCallback(() => {
@@ -302,7 +343,7 @@ export function UpdateStep({ onContinue }: UpdateStepProps) {
 
 	return (
 		<UpdateStepView
-			autoUpdate={autoUpdate}
+			automaticDownload={automaticDownload}
 			availableVersion={available?.latest}
 			checking={checking}
 			downloading={downloading}
@@ -310,7 +351,8 @@ export function UpdateStep({ onContinue }: UpdateStepProps) {
 			onCheck={handleCheck}
 			onContinue={onContinue}
 			onInstall={handleInstall}
-			onToggleAutoUpdate={handleToggle}
+			onToggleAutomaticDownload={handleToggle}
+			prepared={prepared}
 			status={status}
 		/>
 	);

@@ -1314,7 +1314,7 @@ return { length: text.length };
     }
 
     /// The full gate, through the REAL deny-all sandbox, on the real worked
-    /// example `plugins-store/toolsmith-example` ships. Proves the runtime gate
+    /// example `plugins-store/plugins/toolsmith-example` ships. Proves the runtime gate
     /// and the dev-time harness certify the same body — the whole point of
     /// keeping the two in lockstep.
     #[test]
@@ -1327,6 +1327,7 @@ return { length: text.length };
             .join("..")
             .join("..")
             .join("plugins-store")
+            .join("plugins")
             .join("toolsmith-example");
         let dir = tmp_dir();
         std::fs::create_dir_all(dir.join("tools")).unwrap();

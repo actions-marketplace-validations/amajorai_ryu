@@ -22,6 +22,7 @@
 //     containing `</script>` cannot break out of the tag. This is defense in
 //     depth, NOT the load-bearing boundary (the null-origin sandbox is).
 
+import { HORIZONTAL_WHEEL_SCROLL_SCRIPT } from "./horizontal-wheel-scroll-script.ts";
 import { handshakeAnnounceScript } from "./rpc.ts";
 
 /** Build a third-party plugin's sandboxed document.
@@ -111,6 +112,8 @@ export function thirdPartyPluginSrcdoc(
     var pending = {};
     var errEl = document.getElementById("ryu-plugin-error");
 
+${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
+
     function fail(text) {
       if (errEl) {
         errEl.textContent = String(text);
@@ -160,7 +163,9 @@ export function thirdPartyPluginSrcdoc(
       // Reject on ANY error (string legacy OR structured { code, message }).
       if (msg.error) {
         var em = typeof msg.error === "string" ? msg.error : (msg.error.message || "error");
-        p.reject(new Error(em));
+        var error = new Error(em);
+        if (typeof msg.error === "object" && msg.error.code) error.code = msg.error.code;
+        p.reject(error);
       } else {
         p.resolve(msg.result);
       }
@@ -187,8 +192,27 @@ export function thirdPartyPluginSrcdoc(
               update: function (a) { return call("native.liveActivities.update", [a || {}]); }
             }
           },
+          ui: {
+            toast: {
+              show: function (a) { return call("ui.toast.show", [a || {}]); },
+              update: function (a) { return call("ui.toast.update", [a || {}]); },
+              dismiss: function (a) { return call("ui.toast.dismiss", [a || {}]); }
+            }
+          },
           // Projected {id,name}[] — the host never returns a secret (invariant #5).
           listAgents: function () { return call("core.listAgents", []); },
+          // Secret-free provider/model/agent/app/hook metadata for shared Ryu pickers.
+          catalog: {
+            snapshot: function () { return call("catalog.snapshot", []); },
+            models: function (a) { return call("catalog.models", [a || {}]); }
+          },
+          // Cross-chat broadcast (needs grant chat.sendFollowUp). The host returns
+          // only redacted summaries and accepts one explicitly targeted message;
+          // it never exposes a node token or transcript to the frame.
+          chat: {
+            list: function () { return call("chat.list", []); },
+            send: function (a) { return call("chat.send", [a || {}]); }
+          },
           // App host-bridge capabilities. Each is an RPC over the gated port; the host
           // grant-gates it against the plugin's Gateway-approved grants and forwards to
           // the Core bridge (POST /api/plugins/:id/host). This is the NATIVE full-page
@@ -219,7 +243,8 @@ export function thirdPartyPluginSrcdoc(
             get: function (args) { return call("storage.get", [args || {}]); },
             set: function (args) { return call("storage.set", [args || {}]); },
             delete: function (args) { return call("storage.delete", [args || {}]); },
-            keys: function (args) { return call("storage.keys", [args || {}]); }
+            keys: function (args) { return call("storage.keys", [args || {}]); },
+            compareAndSet: function (args) { return call("storage.compareAndSet", [args || {}]); }
           },
           // Seal/open under this app's own key (needs crypto:seal). The key is
           // derived by Core per app and never enters the frame, so sealing is a
@@ -232,6 +257,8 @@ export function thirdPartyPluginSrcdoc(
           // Spaces documents (needs spaces:docs) — the app owns docs of kind
           // app:<pluginId>; persisted, search-embedded, backlinked, Space-routed.
           spaces: {
+            ensureSpace: function (args) { return call("spaces.ensureSpace", [args || {}]); },
+            search: function (args) { return call("spaces.search", [args || {}]); },
             createDoc: function (args) { return call("spaces.createDoc", [args || {}]); },
             getDoc: function (args) { return call("spaces.getDoc", [args || {}]); },
             updateDoc: function (args) { return call("spaces.updateDoc", [args || {}]); },
@@ -275,6 +302,17 @@ export function thirdPartyPluginSrcdoc(
           }
         },
         listAgents: function () { return call("core.listAgents", []); },
+        // Secret-free provider/model/agent/app/hook metadata for shared Ryu pickers.
+        catalog: {
+          snapshot: function () { return call("catalog.snapshot", []); },
+          models: function (a) { return call("catalog.models", [a || {}]); }
+        },
+        // Cross-chat broadcast (needs grant chat.sendFollowUp). The host returns
+        // only redacted summaries and accepts one explicitly targeted message.
+        chat: {
+          list: function () { return call("chat.list", []); },
+          send: function (a) { return call("chat.send", [a || {}]); }
+        },
         model: {
           complete: function (args) { return call("model.complete", [args || {}]); }
         },
@@ -296,7 +334,8 @@ export function thirdPartyPluginSrcdoc(
           get: function (args) { return call("storage.get", [args || {}]); },
           set: function (args) { return call("storage.set", [args || {}]); },
           delete: function (args) { return call("storage.delete", [args || {}]); },
-          keys: function (args) { return call("storage.keys", [args || {}]); }
+          keys: function (args) { return call("storage.keys", [args || {}]); },
+          compareAndSet: function (args) { return call("storage.compareAndSet", [args || {}]); }
         },
         // Seal/open under this app's own key (needs crypto:seal). The key is
         // derived by Core per app and never enters the frame, so sealing is a
@@ -309,6 +348,8 @@ export function thirdPartyPluginSrcdoc(
         // Spaces documents (needs grant spaces:docs). The app owns docs of kind
         // app:<pluginId>; source is a string (JSON.stringify your scene).
         spaces: {
+          ensureSpace: function (args) { return call("spaces.ensureSpace", [args || {}]); },
+          search: function (args) { return call("spaces.search", [args || {}]); },
           createDoc: function (args) { return call("spaces.createDoc", [args || {}]); },
           getDoc: function (args) { return call("spaces.getDoc", [args || {}]); },
           updateDoc: function (args) { return call("spaces.updateDoc", [args || {}]); },
@@ -429,7 +470,7 @@ export function thirdPartyPluginSrcdoc(
         // Generic application-room realtime (grant app:realtime). The trusted
         // host owns the node target/token and returns only opaque connection
         // metadata; this namespace never receives a URL or credential.
-        tokenTable: {
+        realtime: {
           connect: function (a, opts) {
             a = a || {}; opts = opts || {};
             return call("realtime.connect", [{ room_id: a.roomId }]).then(function (info) {
@@ -440,6 +481,8 @@ export function thirdPartyPluginSrcdoc(
                   opts.onEvent({ name: push.name, data: push.data });
                 } else if (push && push.type === "presence" && typeof opts.onPresence === "function") {
                   opts.onPresence({ data: push.data });
+                } else if (push && push.type === "resync_required" && typeof opts.onResyncRequired === "function") {
+                  opts.onResyncRequired({ dropped: push.dropped, reason: push.reason });
                 } else if (push && push.type === "close" && typeof opts.onClose === "function") {
                   opts.onClose({ code: push.code, reason: push.reason });
                 }
@@ -472,7 +515,14 @@ export function thirdPartyPluginSrcdoc(
         // Host-vetted browser navigation. ui.openExternal accepts only http(s)
         // and is a local host capability, so the sandbox never opens URLs itself.
         ui: {
-          openExternal: function (a) { return call("ui.openExternal", [a || {}]); }
+          openExternal: function (a) { return call("ui.openExternal", [a || {}]); },
+          // Stable ephemeral notification contract (grant ui:toast). The host owns
+          // namespacing/rate limits/rendering; the frame only receives an opaque id.
+          toast: {
+            show: function (a) { return call("ui.toast.show", [a || {}]); },
+            update: function (a) { return call("ui.toast.update", [a || {}]); },
+            dismiss: function (a) { return call("ui.toast.dismiss", [a || {}]); }
+          }
         },
         // Outpost (needs grant social:crud). ONE generic forwarder plus two navigation
         // verbs — see the sibling bridge below for why the app's 33 sidecar routes do
@@ -498,6 +548,9 @@ export function thirdPartyPluginSrcdoc(
         // in only one is a verb whose availability depends on how the app was built.
         reasoning: {
           request: function (a) { return call("reasoning.request", [a || {}]); }
+        },
+        safeActions: {
+          request: function (a) { return call("safeActions.request", [a || {}]); }
         },
         // Deep Read (needs grant rlm:query). Same ONE-forwarder shape as reasoning
         // directly above, and kept in step with the sibling bridge below by hand.
@@ -580,6 +633,9 @@ export function thirdPartyPluginSrcdoc(
         // Mount context: { spaceId, docId } when opened as a Space document, else null.
         context: MOUNT_CONTEXT
       };
+	  // Compatibility for the original first adopter. New apps use the generic
+	  // namespace; both names reference the same credential-free bridge object.
+	  ryu.tokenTable = ryu.realtime;
       try {
         window.ryu = ryu;
         // window.openai alias for OpenAI-Apps-SDK compatibility (parity with the
@@ -840,7 +896,9 @@ function htmlCompanionHeadFragment(
       delete pending[msg.id];
       if (msg.error) {
         var em = typeof msg.error === "string" ? msg.error : (msg.error.message || "error");
-        p.reject(new Error(em));
+        var error = new Error(em);
+        if (typeof msg.error === "object" && msg.error.code) error.code = msg.error.code;
+        p.reject(error);
       } else {
         p.resolve(msg.result);
       }
@@ -851,6 +909,17 @@ function htmlCompanionHeadFragment(
     // surface to the Path A installWindowRyu().
     var ryu = {
       listAgents: function () { return call("core.listAgents", []); },
+      // Secret-free provider/model/agent/app/hook metadata for shared Ryu pickers.
+      catalog: {
+        snapshot: function () { return call("catalog.snapshot", []); },
+        models: function (a) { return call("catalog.models", [a || {}]); }
+      },
+      // Cross-chat broadcast (needs grant chat.sendFollowUp). The host returns
+      // only redacted summaries and accepts one explicitly targeted message.
+      chat: {
+        list: function () { return call("chat.list", []); },
+        send: function (a) { return call("chat.send", [a || {}]); }
+      },
       model: { complete: function (a) { return call("model.complete", [a || {}]); } },
       agent: {
         run: function (a) { return call("agent.run", [a || {}]); },
@@ -868,7 +937,8 @@ function htmlCompanionHeadFragment(
         get: function (a) { return call("storage.get", [a || {}]); },
         set: function (a) { return call("storage.set", [a || {}]); },
         delete: function (a) { return call("storage.delete", [a || {}]); },
-        keys: function (a) { return call("storage.keys", [a || {}]); }
+        keys: function (a) { return call("storage.keys", [a || {}]); },
+        compareAndSet: function (a) { return call("storage.compareAndSet", [a || {}]); }
       },
       // Seal/open under this app's own key (needs crypto:seal). The key is
       // derived by Core per app and never enters the frame, so sealing is a
@@ -879,6 +949,8 @@ function htmlCompanionHeadFragment(
         status: function () { return call("crypto.status", []); }
       },
       spaces: {
+        ensureSpace: function (a) { return call("spaces.ensureSpace", [a || {}]); },
+        search: function (a) { return call("spaces.search", [a || {}]); },
         createDoc: function (a) { return call("spaces.createDoc", [a || {}]); },
         getDoc: function (a) { return call("spaces.getDoc", [a || {}]); },
         updateDoc: function (a) { return call("spaces.updateDoc", [a || {}]); },
@@ -1106,7 +1178,7 @@ function htmlCompanionHeadFragment(
       },
       // Generic application-room realtime (grant app:realtime). Kept in sync
       // with the Path A bridge; credentials remain in the trusted host.
-      tokenTable: {
+      realtime: {
         connect: function (a, opts) {
           a = a || {}; opts = opts || {};
           return call("realtime.connect", [{ room_id: a.roomId }]).then(function (info) {
@@ -1117,6 +1189,8 @@ function htmlCompanionHeadFragment(
                 opts.onEvent({ name: push.name, data: push.data });
               } else if (push && push.type === "presence" && typeof opts.onPresence === "function") {
                 opts.onPresence({ data: push.data });
+              } else if (push && push.type === "resync_required" && typeof opts.onResyncRequired === "function") {
+                opts.onResyncRequired({ dropped: push.dropped, reason: push.reason });
               } else if (push && push.type === "close" && typeof opts.onClose === "function") {
                 opts.onClose({ code: push.code, reason: push.reason });
               }
@@ -1148,7 +1222,12 @@ function htmlCompanionHeadFragment(
       },
       // Host-vetted browser navigation. Kept in step with the Path A bridge.
       ui: {
-        openExternal: function (a) { return call("ui.openExternal", [a || {}]); }
+        openExternal: function (a) { return call("ui.openExternal", [a || {}]); },
+        toast: {
+          show: function (a) { return call("ui.toast.show", [a || {}]); },
+          update: function (a) { return call("ui.toast.update", [a || {}]); },
+          dismiss: function (a) { return call("ui.toast.dismiss", [a || {}]); }
+        }
       },
       // Outpost (needs grant social:crud). The @ryu/social companion renders the
       // compose, calendar, queue and inbox surface. ONE generic request forwarder
@@ -1186,6 +1265,9 @@ function htmlCompanionHeadFragment(
       // building the URL. No navigation verb: the companion never opens a shell tab.
       reasoning: {
         request: function (a) { return call("reasoning.request", [a || {}]); }
+      },
+      safeActions: {
+        request: function (a) { return call("safeActions.request", [a || {}]); }
       },
       // Deep Read (needs grant rlm:query). The same ONE-forwarder shape as reasoning
       // directly above: the frame supplies { method, path, body } and the host
@@ -1298,6 +1380,7 @@ function htmlCompanionHeadFragment(
       },
       context: MOUNT_CONTEXT
     };
+	ryu.tokenTable = ryu.realtime;
     try {
       window.ryu = ryu;
       if (!window.openai) window.openai = ryu;
@@ -1312,6 +1395,8 @@ function htmlCompanionHeadFragment(
       if (ev.source !== window.parent || !msg || msg.kind !== "ryu-plugin-theme" || msg.nonce !== NONCE) return;
       applyThemeTokens(msg.tokens);
     });
+
+${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
 
     // Accept the port ONLY from the host message carrying our nonce, once.
     window.addEventListener("message", function (ev) {
@@ -1486,12 +1571,9 @@ export function htmlCompanionSrcdoc(
 	// inlined <style> sits relative to it.
 	const themeStyle = buildThemeTokenStyle(themeTokens);
 	const head = themeStyle ? `${fragment}\n${themeStyle}` : fragment;
-	// Inject the CSP + bridge as the FIRST children of <head> so both precede the
-	// app's own deferred module scripts. If the app HTML somehow lacks a <head>
-	// (never true for a singlefile build), prepend the fragment as a last resort.
-	const headOpen = /<head[^>]*>/i;
-	if (headOpen.test(appHtml)) {
-		return appHtml.replace(headOpen, (match) => `${match}\n${head}`);
-	}
-	return `${head}\n${appHtml}`;
+	// A trusted prefix is stronger than searching for the app's <head>: malformed
+	// or hostile HTML may contain an executable token before that tag. Starting the
+	// parser with the CSP and bridge guarantees both exist before ANY app token.
+	const withoutDoctype = appHtml.replace(/^\s*<!doctype[^>]*>/i, "");
+	return `<!doctype html><meta charset="utf-8">${head}\n${withoutDoctype}`;
 }

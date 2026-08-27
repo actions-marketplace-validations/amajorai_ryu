@@ -23,6 +23,8 @@
 // has to make a human copy three fields into three boxes. `buildRyuDeepLink`
 // emits its `url` verbatim so the string stays readable —
 // `ryu://nodes/connect?url=https://node.example.com&name=prod`.
+
+import { normalizeRnpNodeUrl } from "./continuity.ts";
 //
 // For models/skills, `<source>` names the catalog (huggingface, skills.sh, …) and
 // everything after it is the verbatim catalog id (joined by "/", so a Hugging Face
@@ -55,6 +57,12 @@ export type DeepLinkIntent =
 	| { kind: "skill"; source: string; id: string; node: string | null }
 	| { kind: "app"; id: string; node: string | null }
 	| { kind: "node"; name: string; url: string; token: string | null }
+	| {
+			kind: "handoff";
+			version: 0;
+			conversationId: string;
+			sourceNodeUrl: string;
+	  }
 	| { kind: "page"; page: string }
 	| {
 			kind: "chat";
@@ -74,6 +82,12 @@ export type DeepLinkBuildInput =
 	| { kind: "skill"; source: string; id: string; node?: string | null }
 	| { kind: "app"; id: string; node?: string | null }
 	| { kind: "node"; name: string; url: string; token?: string | null }
+	| {
+			kind: "handoff";
+			version: 0;
+			conversationId: string;
+			sourceNodeUrl: string;
+	  }
 	| { kind: "page"; page: string }
 	| {
 			kind: "chat";
@@ -166,6 +180,21 @@ function parseQuery(query: string): Map<string, string> {
 		}
 	}
 	return out;
+}
+
+function hasExactQueryKeys(
+	query: string,
+	expected: readonly string[]
+): boolean {
+	const keys = query
+		.split("&")
+		.filter(Boolean)
+		.map((pair) => decodeQueryValue(pair.split("=", 1)[0] ?? ""));
+	return (
+		keys.length === expected.length &&
+		new Set(keys).size === keys.length &&
+		expected.every((key) => keys.includes(key))
+	);
 }
 
 /** `ryu://nodes/connect?url=…` — the payload lives in the query string. */
@@ -274,6 +303,16 @@ export function parseRyuDeepLink(raw: string): DeepLinkIntent | null {
 		return parseNode(params);
 	}
 	const pathSegments = pathStr.split("/").filter(Boolean).map(decodeSafe);
+	if (category === "handoff") {
+		if (!hasExactQueryKeys(query, ["source", "v"])) {
+			return null;
+		}
+		const conversationId = pathSegments.length === 1 ? pathSegments[0] : null;
+		const sourceNodeUrl = normalizeRnpNodeUrl(params.get("source") ?? "");
+		return conversationId && sourceNodeUrl && params.get("v") === "0"
+			? { kind: "handoff", version: 0, conversationId, sourceNodeUrl }
+			: null;
+	}
 	if (category === "open") {
 		const page = pathSegments[0]?.toLowerCase();
 		return page ? { kind: "page", page } : null;
@@ -303,6 +342,13 @@ function encodeQueryValue(value: string): string {
 
 /** Build a `ryu://` deep link from an intent (used to render "Open in Ryu"). */
 export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
+	if (intent.kind === "handoff") {
+		const sourceNodeUrl = normalizeRnpNodeUrl(intent.sourceNodeUrl);
+		if (!sourceNodeUrl) {
+			throw new Error("A handoff link requires a safe HTTP source node URL.");
+		}
+		return `ryu://handoff/${encodeURIComponent(intent.conversationId)}?source=${encodeQueryValue(sourceNodeUrl)}&v=0`;
+	}
 	if (intent.kind === "node") {
 		// The node link doubles as the CONNECTION STRING a user copies, pastes into
 		// another surface's "Add node" field, or reads off a QR — so the base URL is

@@ -2,6 +2,54 @@
   "version": "1",
   "entries": [
     {
+      "id": "@ryu/backstage",
+      "name": "Backstage",
+      "version": "1.5.3",
+      "description": "A local-first YouTube thumbnail studio that keeps its editor while using Ryu for governed model and image generation.",
+      "source": "builtin",
+      "kinds": [
+        "companion"
+      ],
+      "permission_grants": [
+        "storage:kv",
+        "media:generate",
+        "hook:side-model",
+        "hook:run-agent"
+      ],
+      "built_in": true,
+      "tags": [
+        "youtube",
+        "thumbnails",
+        "creative",
+        "design",
+        "images",
+        "editor"
+      ],
+      "type": "app",
+      "icon": "ai-image",
+      "icon_dither": {
+        "from": 225,
+        "to": "transparent",
+        "direction": "down"
+      },
+      "tagline": "Make thumbnails with your own creative workspace and Ryu AI",
+      "category": "Creative",
+      "repository": "https://github.com/amajorai/backstage",
+      "homepage": "https://github.com/amajorai/backstage",
+      "keywords": [
+        "youtube",
+        "thumbnails",
+        "creative",
+        "design",
+        "images",
+        "editor"
+      ],
+      "privacy_policy_url": "https://ryuhq.com/privacy",
+      "terms_of_service_url": "https://ryuhq.com/terms",
+      "developer": "A Major",
+      "stability": "experimental"
+    },
+    {
       "id": "@ryu/ghost",
       "name": "Ghost",
       "version": "0.1.14",
@@ -27,8 +75,8 @@
       },
       "tagline": "Let agents see and drive your desktop",
       "category": "Automation",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/ghost",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/ghost",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/ghost",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/ghost",
       "keywords": [
         "automation",
         "desktop"
@@ -80,8 +128,8 @@
       },
       "tagline": "Recall what you have seen and done",
       "category": "Knowledge & Memory",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/shadow",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/shadow",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/shadow",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/shadow",
       "keywords": [
         "capture",
         "memory"
@@ -116,8 +164,8 @@
       },
       "tagline": "Crawl and extract web pages for agents",
       "category": "Search",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/spider",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/spider",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/spider",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/spider",
       "keywords": [
         "web",
         "scraping"
@@ -175,8 +223,8 @@
       },
       "tagline": "Neural web search for agents",
       "category": "Search",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/exa",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/exa",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/exa",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/exa",
       "keywords": [
         "search",
         "web"
@@ -225,8 +273,8 @@
       "icon_padding": "md",
       "tagline": "Agent-tuned web search and extraction",
       "category": "Search",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/tavily",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/tavily",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/tavily",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/tavily",
       "keywords": [
         "search",
         "web",
@@ -284,8 +332,8 @@
       "icon_padding": "md",
       "tagline": "Search an index nobody else syndicates",
       "category": "Search",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/brave",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/brave",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/brave",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/brave",
       "keywords": [
         "search",
         "web"
@@ -330,8 +378,8 @@
       },
       "tagline": "Compress noisy context down to a fraction of its tokens",
       "category": "Developer Tools",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/headroom",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/headroom",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/headroom",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/headroom",
       "keywords": [
         "context",
         "compression"
@@ -371,8 +419,8 @@
       "icon_padding": "md",
       "tagline": "Search and scrape the web for agents",
       "category": "Search",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/firecrawl",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/firecrawl",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/firecrawl",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/firecrawl",
       "keywords": [
         "search",
         "web",
@@ -442,8 +490,8 @@
       },
       "tagline": "Google's real results, as JSON, in a second",
       "category": "Search",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/serper",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/serper",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/serper",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/serper",
       "keywords": [
         "search",
         "web",
@@ -503,8 +551,8 @@
       },
       "tagline": "Recall and record in an existing Mem0 project inside Ryu",
       "category": "Knowledge & Memory",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/mem0",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/mem0",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/mem0",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/mem0",
       "keywords": [
         "memory",
         "recall",
@@ -558,8 +606,8 @@
       "icon_padding": "md",
       "tagline": "Hosted site crawling, no local binary",
       "category": "Search",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/spidercloud",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/spidercloud",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/spidercloud",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/spidercloud",
       "keywords": [
         "web",
         "crawl",
@@ -585,7 +633,7 @@
       "id": "@ryu/scrapling",
       "name": "Scrapling",
       "version": "0.1.14",
-      "description": "Adaptive web-page extraction via the Scrapling MCP server (https://scrapling.readthedocs.io), a BYO local install. Provides the swappable `web.extract` layer as a THIRD provider alongside the local `spider` CLI and the hosted BYOK services, so selecting it re-points the stable `web.extract` tool at a fetcher that impersonates a real browser TLS fingerprint. No API key. Requires `pip install \"scrapling[ai]\"` and the `scrapling` binary on PATH; until then the MCP server does not start and the layer falls back to whichever other provider you select. Deliberately provides NO `web.crawl`: neither the MCP server nor the CLI follows links — only Scrapling's Python `Spider` class crawls, and it is not reachable over MCP.",
+      "description": "Adaptive web-page extraction via the Scrapling MCP server (https://scrapling.readthedocs.io), a BYO local install. Provides the swappable `web.extract` layer as a THIRD provider alongside the local `spider` CLI and the hosted BYOK services, so selecting it re-points the stable `web.extract` tool at a fetcher that impersonates a real browser TLS fingerprint. No API key. Requires `pip install \"scrapling[ai]\"` and the `scrapling` binary on PATH; selecting Scrapling before that makes `web.extract` unavailable until you install it or select a working provider. Deliberately provides NO `web.crawl`: neither the MCP server nor the CLI follows links — only Scrapling's Python `Spider` class crawls, and it is not reachable over MCP.",
       "source": "builtin",
       "kinds": [
         "tool"
@@ -610,8 +658,8 @@
       "icon_padding": "md",
       "tagline": "Anti-bot page extraction, no API key",
       "category": "Search",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/scrapling",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/scrapling",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/scrapling",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/scrapling",
       "keywords": [
         "web",
         "scraping",
@@ -663,8 +711,8 @@
       },
       "tagline": "A standing synthesis of the user, not a list of facts",
       "category": "Knowledge & Memory",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/honcho",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/honcho",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/honcho",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/honcho",
       "keywords": [
         "memory",
         "context",
@@ -719,8 +767,8 @@
       },
       "tagline": "Swap computer control onto a Bytebot desktop",
       "category": "Automation",
-      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/bytebot",
-      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/bytebot",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/bytebot",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/bytebot",
       "keywords": [
         "automation",
         "desktop",

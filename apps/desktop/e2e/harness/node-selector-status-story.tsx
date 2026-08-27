@@ -44,6 +44,7 @@ window.fetch = async (input) => {
 			sidecars: [
 				{ name: "core", running: true },
 				{ name: "gateway", running: true },
+				{ name: "shadow", running: true },
 			],
 		});
 	}

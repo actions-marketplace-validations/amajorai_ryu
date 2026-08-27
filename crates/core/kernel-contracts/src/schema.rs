@@ -144,6 +144,12 @@ pub struct ToolConfig {
     /// verbatim forwarding). Must be a JSON object when present.
     #[serde(default)]
     pub body_defaults: Option<serde_json::Value>,
+    /// `http`: optional query-parameter name that Core fills from the verified
+    /// calling agent. The value is never model-controlled and is appended before
+    /// model arguments are lowered. This is the generic per-agent routing seam for
+    /// sidecars that keep isolated lanes without teaching Core any app identity.
+    #[serde(default)]
+    pub caller_agent_query: Option<String>,
     /// `command`: the LOGICAL allowlist key of the local binary to exec (e.g.
     /// `"exa"`). Resolved to an absolute path against Core's command allowlist at
     /// dispatch — NEVER a filesystem path from the manifest. Required for the
@@ -274,7 +280,7 @@ impl ArgSpec {
 pub const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 
 /// How a [`ToolBackend::Command`] shapes its child's stdout into the tool result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum CommandOutput {
     /// Return the raw stdout as a (bounded) string. The default.
     #[default]
@@ -285,7 +291,7 @@ pub enum CommandOutput {
 
 /// The resolved, dispatch-ready backend of a [`ToolConfig`]. Produced by
 /// [`ToolConfig::resolve_backend`]; the dispatcher (`sidecar/mcp`) matches on it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ToolBackend {
     /// Re-expose an existing registry tool named `target` (the legacy alias).
     Alias { target: String },
@@ -315,6 +321,8 @@ pub enum ToolBackend {
         /// win). `Value::Null` = no defaulting. Resolved to a body-shaping default in
         /// `run_http_tool`; never model-visible.
         body_defaults: serde_json::Value,
+        /// Query parameter populated from the server-derived calling agent.
+        caller_agent_query: Option<String>,
     },
     /// Exec an allowlisted local CLI. `bin` is an allowlist KEY (never a path —
     /// `resolve_backend` structurally rejects path-shaped values); the KEY→abs-path
@@ -351,7 +359,7 @@ pub enum ToolBackend {
 /// [`clamp_and_default_args`] so the argv a command sees is always within the
 /// bounds the schema advertises — even for a caller that hand-rolls raw JSON and
 /// skips the MCP schema's own `minimum`/`maximum` validation.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct ArgBounds {
     /// Value substituted when the arg is absent/null (the JSON-schema `default`).
     pub default: Option<serde_json::Value>,
@@ -557,6 +565,23 @@ impl ToolConfig {
                         )
                     }
                 };
+                let caller_agent_query = match self.caller_agent_query.as_deref() {
+                    None => None,
+                    Some(raw) => {
+                        let name = raw.trim();
+                        if name.is_empty()
+                            || !name.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+                            })
+                        {
+                            return Err(
+                                "tool backend 'http': 'caller_agent_query' must be an ASCII query-parameter name"
+                                    .to_owned(),
+                            );
+                        }
+                        Some(name.to_owned())
+                    }
+                };
                 Ok(ToolBackend::Http {
                     url: url.to_owned(),
                     method,
@@ -565,6 +590,7 @@ impl ToolConfig {
                     fail_open: self.fail_open.unwrap_or(false),
                     unwrap_body: self.unwrap_body.unwrap_or(false),
                     body_defaults,
+                    caller_agent_query,
                 })
             }
             "command" => {
@@ -1158,6 +1184,13 @@ pub struct RouteSpec {
     /// `*rest` (matches the remainder), mirroring axum/matchit patterns so a
     /// sidecar's REST routes (`/inboxes/:id`) can be declared faithfully.
     pub path: String,
+
+    /// Optional HTTP method selector for this path (canonical uppercase such as
+    /// `GET` or `POST`). Absent preserves the legacy behavior and matches every
+    /// method. Declare one row per method when reads and writes share a path but
+    /// require different permission levels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
 
     /// Auth posture for this route. Defaults to [`RouteAuth::Protected`] (secure by
     /// default): the request must carry the node bearer exactly as any other
@@ -2160,8 +2193,41 @@ mod tests {
                 fail_open: false,
                 unwrap_body: false,
                 body_defaults: serde_json::Value::Null,
+                caller_agent_query: None,
             }
         );
+    }
+
+    #[test]
+    fn http_backend_validates_and_carries_the_server_owned_agent_query() {
+        let configured: ToolConfig = serde_json::from_value(json!({
+            "slug": "browser.tabs",
+            "backend": "http",
+            "url": "core:/api/ext/com.ryu.browser/tabs",
+            "caller_agent_query": "agent_id",
+        }))
+        .unwrap();
+        match configured.resolve_backend().unwrap() {
+            ToolBackend::Http {
+                caller_agent_query,
+                ..
+            } => assert_eq!(caller_agent_query.as_deref(), Some("agent_id")),
+            other => panic!("expected Http backend, got {other:?}"),
+        }
+
+        for invalid in ["", "agent id", "agent/id", "agent?id", "é"] {
+            let configured: ToolConfig = serde_json::from_value(json!({
+                "slug": "browser.tabs",
+                "backend": "http",
+                "url": "core:/api/ext/com.ryu.browser/tabs",
+                "caller_agent_query": invalid,
+            }))
+            .unwrap();
+            assert!(
+                configured.resolve_backend().is_err(),
+                "invalid query name {invalid:?} must fail"
+            );
+        }
     }
 
     #[test]

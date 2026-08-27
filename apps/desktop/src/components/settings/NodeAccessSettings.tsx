@@ -1,4 +1,5 @@
 import { Button } from "@ryu/ui/components/button";
+import { Checkbox } from "@ryu/ui/components/checkbox";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import { toast } from "@ryu/ui/components/sileo";
@@ -6,6 +7,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { type ApiTarget, request } from "@/src/lib/api/client.ts";
+import { isTauriReady } from "@/src/lib/tauri-ready.ts";
+import {
+	canRevokePairedClient,
+	describePairingConstraints,
+	formatPairingTimestamp,
+	getPairedClientStatus,
+	narrowPairingScopes,
+	type PairedClient,
+	type PairingConstraints,
+} from "./NodeAccessSettings.model.ts";
 
 /**
  * Who is allowed to talk to this node.
@@ -25,14 +36,40 @@ type TokenSource = "env" | "file" | "none";
 interface PairingRequest {
 	client_name: string;
 	created_at: number;
+	requested_constraints?: PairingConstraints;
+	requested_expires_at?: number | null;
+	requested_scopes?: string[];
 	user_code: string;
 }
 
-interface PairedClient {
-	created_at: number;
-	id: string;
-	last_seen: number;
-	name: string;
+function ScopeList({
+	emptyLabel,
+	label,
+	scopes,
+}: {
+	emptyLabel: string;
+	label: string;
+	scopes?: string[];
+}) {
+	return (
+		<div className="mt-2">
+			<p className="text-muted-foreground text-xs">{label}</p>
+			{scopes && scopes.length > 0 ? (
+				<ul aria-label={label} className="mt-1 flex flex-wrap gap-1">
+					{scopes.map((scope) => (
+						<li
+							className="rounded border bg-muted px-1.5 py-0.5 font-mono text-[11px]"
+							key={scope}
+						>
+							{scope}
+						</li>
+					))}
+				</ul>
+			) : (
+				<p className="mt-1 text-muted-foreground text-xs">{emptyLabel}</p>
+			)}
+		</div>
+	);
 }
 
 /** Poll interval for pending requests, in ms. Short: a human is waiting. */
@@ -48,7 +85,7 @@ const PENDING_POLL_MS = 3000;
  * pairs and gets approved instead.
  */
 function isTauri(): boolean {
-	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+	return isTauriReady();
 }
 
 export function NodeAccessSettings() {
@@ -59,6 +96,9 @@ export function NodeAccessSettings() {
 	const [revealed, setRevealed] = useState(false);
 	const [pending, setPending] = useState<PairingRequest[]>([]);
 	const [clients, setClients] = useState<PairedClient[]>([]);
+	const [selectedScopes, setSelectedScopes] = useState<
+		Record<string, string[]>
+	>({});
 	const [busy, setBusy] = useState(false);
 	const [pairingCode, setPairingCode] = useState<string | null>(null);
 	const inBrowser = !isTauri();
@@ -83,7 +123,23 @@ export function NodeAccessSettings() {
 				request<{ requests: PairingRequest[] }>(target, "/api/pair/requests"),
 				request<{ clients: PairedClient[] }>(target, "/api/pair/clients"),
 			]);
-			setPending(requests.requests ?? []);
+			const nextRequests = requests.requests ?? [];
+			setPending(nextRequests);
+			setSelectedScopes((current) => {
+				const next: Record<string, string[]> = {};
+				for (const pairingRequest of nextRequests) {
+					if (!pairingRequest.requested_scopes) {
+						continue;
+					}
+					const previous = current[pairingRequest.user_code];
+					next[pairingRequest.user_code] = previous
+						? previous.filter((scope) =>
+								pairingRequest.requested_scopes?.includes(scope)
+							)
+						: [...pairingRequest.requested_scopes];
+				}
+				return next;
+			});
 			setClients(paired.clients ?? []);
 		} catch {
 			// Core down, or this node does not speak pairing yet. Leave the lists
@@ -103,11 +159,23 @@ export function NodeAccessSettings() {
 	}, [loadPending]);
 
 	const decide = async (userCode: string, approve: boolean) => {
+		const requestToDecide = pending.find(
+			(requestItem) => requestItem.user_code === userCode
+		);
 		setBusy(true);
 		try {
+			const grantedScopes = requestToDecide?.requested_scopes
+				? (selectedScopes[userCode] ?? requestToDecide.requested_scopes)
+				: undefined;
 			await request(target, `/api/pair/${approve ? "approve" : "deny"}`, {
 				method: "POST",
-				body: { user_code: userCode },
+				body:
+					approve && grantedScopes
+						? {
+								granted_scopes: grantedScopes,
+								user_code: userCode,
+							}
+						: { user_code: userCode },
 			});
 			toast.success(approve ? "Device approved" : "Device denied", {
 				id: `pair-${userCode}`,
@@ -144,17 +212,15 @@ export function NodeAccessSettings() {
 	const rotate = async () => {
 		setBusy(true);
 		try {
-			const result = await request<{ message: string }>(
-				target,
-				"/api/node/token/rotate",
-				{ method: "POST" }
-			);
-			// Deliberately surfaced as a warning, not a success: the new token is on
-			// disk but the RUNNING Core still authenticates the old one, so the user
-			// has to restart before anything changes.
-			toast.warning("New token written — restart required", {
+			const result = await request<{
+				message: string;
+				restart_required: boolean;
+			}>(target, "/api/node/token/rotate", { method: "POST" });
+			toast.success("Owner token rotated", {
 				id: "rotate-node-token",
-				description: result.message,
+				description: result.restart_required
+					? `${result.message} Restart Core to finish.`
+					: result.message,
 			});
 			await loadToken();
 		} catch (error) {
@@ -219,7 +285,11 @@ export function NodeAccessSettings() {
 				</div>
 
 				{pairingCode ? (
-					<div className="rounded-md border px-4 py-6 text-center">
+					<div
+						aria-live="polite"
+						className="rounded-md border px-4 py-6 text-center"
+						role="status"
+					>
 						<p className="font-mono text-2xl tracking-widest">{pairingCode}</p>
 						<p className="mt-2 text-muted-foreground text-xs">
 							Waiting for approval in the desktop app&hellip;
@@ -265,9 +335,83 @@ export function NodeAccessSettings() {
 									<p className="font-mono text-muted-foreground text-xs tracking-widest">
 										{req.user_code}
 									</p>
+									{req.requested_scopes && req.requested_scopes.length > 0 ? (
+										<fieldset className="mt-2">
+											<legend className="text-muted-foreground text-xs">
+												Grant access
+											</legend>
+											<p className="text-[11px] text-muted-foreground">
+												Clear anything this device should not use.
+											</p>
+											<div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+												{req.requested_scopes.map((scope, scopeIndex) => {
+													const checkboxId = `pair-${req.user_code}-scope-${scopeIndex}`;
+													const selected =
+														selectedScopes[req.user_code] ??
+														req.requested_scopes ??
+														[];
+													return (
+														<label
+															className="flex cursor-pointer items-center gap-1.5 font-mono text-[11px]"
+															htmlFor={checkboxId}
+															key={scope}
+														>
+															<Checkbox
+																checked={selected.includes(scope)}
+																disabled={busy}
+																id={checkboxId}
+																onCheckedChange={(checked) =>
+																	setSelectedScopes((current) => {
+																		const currentSelection =
+																			current[req.user_code] ??
+																			req.requested_scopes ??
+																			[];
+																		return {
+																			...current,
+																			[req.user_code]: narrowPairingScopes({
+																				checked: checked === true,
+																				requested: req.requested_scopes ?? [],
+																				scope,
+																				selected: currentSelection,
+																			}),
+																		};
+																	})
+																}
+															/>
+															{scope}
+														</label>
+													);
+												})}
+											</div>
+										</fieldset>
+									) : (
+										<ScopeList
+											emptyLabel={
+												req.requested_scopes
+													? "No capabilities requested"
+													: "Default read-only access"
+											}
+											label="Requested access"
+											scopes={req.requested_scopes}
+										/>
+									)}
+									<p className="mt-2 text-muted-foreground text-xs">
+										Binding:{" "}
+										{describePairingConstraints(req.requested_constraints).join(
+											", "
+										)}
+									</p>
+									{req.requested_expires_at == null ? null : (
+										<p className="text-muted-foreground text-xs">
+											Expires{" "}
+											{formatPairingTimestamp(req.requested_expires_at) ??
+												"at an invalid time"}
+										</p>
+									)}
 								</div>
 								<div className="flex shrink-0 gap-2">
 									<Button
+										aria-label={`Deny ${req.client_name}`}
 										disabled={busy}
 										onClick={() => void decide(req.user_code, false)}
 										size="sm"
@@ -276,6 +420,7 @@ export function NodeAccessSettings() {
 										Deny
 									</Button>
 									<Button
+										aria-label={`Approve ${req.client_name} with requested access`}
 										disabled={busy}
 										onClick={() => void decide(req.user_code, true)}
 										size="sm"
@@ -305,18 +450,52 @@ export function NodeAccessSettings() {
 					<ul className="flex flex-col gap-2">
 						{clients.map((client) => (
 							<li
-								className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+								className="flex items-start justify-between gap-3 rounded-md border px-3 py-3"
 								key={client.id}
 							>
-								<p className="truncate text-sm">{client.name}</p>
-								<Button
-									disabled={busy}
-									onClick={() => void revoke(client)}
-									size="sm"
-									variant="ghost"
-								>
-									Revoke
-								</Button>
+								<div className="min-w-0">
+									<div className="flex flex-wrap items-center gap-2">
+										<p className="truncate font-medium text-sm">
+											{client.name}
+										</p>
+										<span className="rounded-full border px-2 py-0.5 text-xs">
+											{getPairedClientStatus(client)}
+										</span>
+									</div>
+									<ScopeList
+										emptyLabel={
+											client.granted_scopes === undefined &&
+											(client.schema_version ?? 0) < 2
+												? "Legacy read-only access"
+												: "No capabilities granted"
+										}
+										label="Granted access"
+										scopes={client.granted_scopes}
+									/>
+									<p className="mt-2 text-muted-foreground text-xs">
+										Binding:{" "}
+										{describePairingConstraints(client.constraints).join(", ")}
+									</p>
+									<p className="text-muted-foreground text-xs">
+										{client.expires_at == null
+											? "Does not expire"
+											: `Expires ${formatPairingTimestamp(client.expires_at) ?? "at an invalid time"}`}
+										{client.revoked_at == null
+											? ""
+											: ` · Revoked ${formatPairingTimestamp(client.revoked_at) ?? "at an invalid time"}`}
+									</p>
+								</div>
+								{canRevokePairedClient(client) ? (
+									<Button
+										aria-label={`Revoke ${client.name}`}
+										disabled={busy}
+										onClick={() => void revoke(client)}
+										size="sm"
+										variant="ghost"
+									>
+										Revoke
+									</Button>
+								) : null}
 							</li>
 						))}
 					</ul>
@@ -378,7 +557,7 @@ export function NodeAccessSettings() {
 								Rotate token
 							</Button>
 							<span className="text-muted-foreground text-xs">
-								Requires restarting Ryu. Paired devices keep working.
+								Takes effect immediately. Paired devices keep working.
 							</span>
 						</div>
 					)}

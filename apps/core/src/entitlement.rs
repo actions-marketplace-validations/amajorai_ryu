@@ -25,7 +25,9 @@
 //! handshake supplies; it enforces no billing policy of its own and classifies
 //! nothing. It is Core orchestration config, not a Gateway policy decision.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{OnceLock, RwLock};
 
 /// Preferences key the desktop writes on every entitlement verdict change; Core
 /// loads it on startup and on change. Absent ⇒ the default-ON behaviour holds.
@@ -34,12 +36,19 @@ pub const ENTITLEMENT_ACTIVE_PREF_KEY: &str = "entitlement-active";
 /// Core-owned profile bootstrap. Unlike the autonomy flag, this defaults OFF:
 /// a free or headless node must never start a paid-only profile job.
 pub const MANAGED_INFERENCE_ENTITLED_PREF_KEY: &str = "managed-inference-entitled";
+/// Desktop-pushed snapshot of the recurring Marketplace capability.
+pub const MARKETPLACE_APPS_ENTITLED_PREF_KEY: &str = "marketplace-apps-entitled";
+/// Desktop-pushed active direct Marketplace app licenses, used so a direct
+/// license can bypass the Membership-only runtime gate for that app.
+pub const MARKETPLACE_DIRECT_LICENSED_ITEMS_PREF_KEY: &str = "marketplace-direct-licensed-items";
 
 /// In-process flag, populated from preferences. Defaults to `true` (active): a
 /// node with no signal must run automations normally (headless / OSS Core / a
 /// desktop still within its trial or subscribed).
 static ACTIVE: AtomicBool = AtomicBool::new(true);
 static MANAGED_INFERENCE_ENTITLED: AtomicBool = AtomicBool::new(false);
+static MARKETPLACE_APPS_ENTITLED: AtomicBool = AtomicBool::new(false);
+static MARKETPLACE_DIRECT_LICENSED_ITEMS: OnceLock<RwLock<BTreeSet<String>>> = OnceLock::new();
 
 /// Set the in-process flag from a preferences value. Accepts the common truthy
 /// string forms the desktop may persist (`"true"`, `"1"`, `"on"`, `"yes"`);
@@ -71,6 +80,44 @@ pub fn managed_inference_entitled() -> bool {
     MANAGED_INFERENCE_ENTITLED.load(Ordering::Relaxed)
 }
 
+pub fn set_marketplace_apps_entitled(value: &str) {
+    let on = matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "on" | "yes"
+    );
+    MARKETPLACE_APPS_ENTITLED.store(on, Ordering::Relaxed);
+}
+
+pub fn marketplace_apps_entitled() -> bool {
+    MARKETPLACE_APPS_ENTITLED.load(Ordering::Relaxed)
+}
+
+pub fn set_marketplace_direct_licensed_items(value: &str) {
+    let parsed = serde_json::from_str::<Vec<String>>(value).unwrap_or_default();
+    let values = parsed
+        .into_iter()
+        .map(|item| item.trim().to_owned())
+        .filter(|item| !item.is_empty())
+        .collect::<BTreeSet<_>>();
+    if let Ok(mut current) = MARKETPLACE_DIRECT_LICENSED_ITEMS
+        .get_or_init(|| RwLock::new(BTreeSet::new()))
+        .write()
+    {
+        *current = values;
+    }
+}
+
+pub fn marketplace_app_allowed(plugin_id: &str) -> bool {
+    if marketplace_apps_entitled() {
+        return true;
+    }
+    MARKETPLACE_DIRECT_LICENSED_ITEMS
+        .get_or_init(|| RwLock::new(BTreeSet::new()))
+        .read()
+        .map(|items| items.contains(plugin_id))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +139,17 @@ mod tests {
         assert!(!is_active());
         // Restore the default-ON state so other tests are unaffected.
         set_active("true");
+    }
+
+    #[test]
+    fn marketplace_app_access_allows_subscription_or_exact_direct_license() {
+        set_marketplace_apps_entitled("false");
+        set_marketplace_direct_licensed_items(r#"["com.example.direct"]"#);
+        assert!(marketplace_app_allowed("com.example.direct"));
+        assert!(!marketplace_app_allowed("com.example.other"));
+        set_marketplace_apps_entitled("true");
+        assert!(marketplace_app_allowed("com.example.other"));
+        set_marketplace_apps_entitled("false");
+        set_marketplace_direct_licensed_items("[]");
     }
 }

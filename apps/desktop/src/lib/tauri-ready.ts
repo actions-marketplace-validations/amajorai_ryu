@@ -74,12 +74,20 @@ export class TauriUnavailableError extends Error {
  *  free, so it is safe to re-check on every call — that is what lets a LATE
  *  bridge still work after the gate has already returned a negative verdict. */
 export function isTauriReady(): boolean {
+	if (typeof window === "undefined") {
+		return false;
+	}
+	const internals = (
+		window as Window & {
+			__TAURI_INTERNALS__?: {
+				invoke?: unknown;
+				transformCallback?: unknown;
+			};
+		}
+	).__TAURI_INTERNALS__;
 	return (
-		typeof window !== "undefined" &&
-		Boolean(
-			(window as Window & { __TAURI_INTERNALS__?: unknown })
-				.__TAURI_INTERNALS__
-		)
+		typeof internals?.invoke === "function" &&
+		typeof internals.transformCallback === "function"
 	);
 }
 

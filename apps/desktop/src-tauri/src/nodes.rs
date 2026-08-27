@@ -21,6 +21,12 @@ pub struct NodeStatus {
     pub latency_ms: Option<u64>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct LocalNodeToken {
+    pub source: String,
+    pub token: Option<String>,
+}
+
 /// A reachable Core found by the LAN sweep ([`discover_lan_nodes`]).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DiscoveredNode {
@@ -177,12 +183,8 @@ fn save(config: &NodesConfig) -> anyhow::Result<()> {
 }
 
 #[tauri::command]
-pub fn list_nodes() -> serde_json::Value {
-    let config = load();
-    serde_json::json!({
-        "default": config.default,
-        "nodes": config.nodes,
-    })
+pub fn list_nodes() -> NodesConfig {
+    load()
 }
 
 /// The local Core's auth token, for the settings UI (show / copy / share with a
@@ -193,19 +195,29 @@ pub fn list_nodes() -> serde_json::Value {
 /// effect, and the UI says so), `"file"` when Core minted it, or `"none"` when
 /// there is no token yet.
 #[tauri::command]
-pub fn local_node_token() -> serde_json::Value {
+pub fn local_node_token() -> LocalNodeToken {
     // An operator-provisioned RYU_TOKEN wins in Core's own resolution order, so
     // the UI must report the same precedence or it would offer to rotate a file
     // that is being ignored.
     if let Ok(env_token) = std::env::var("RYU_TOKEN") {
         let trimmed = env_token.trim();
         if !trimmed.is_empty() {
-            return serde_json::json!({ "token": trimmed, "source": "env" });
+            return LocalNodeToken {
+                source: "env".to_owned(),
+                token: Some(trimmed.to_owned()),
+            };
         }
     }
-    match read_local_node_token() {
-        Some(token) => serde_json::json!({ "token": token, "source": "file" }),
-        None => serde_json::json!({ "token": null, "source": "none" }),
+    let token = read_local_node_token();
+    match token {
+        Some(token) => LocalNodeToken {
+            source: "file".to_owned(),
+            token: Some(token),
+        },
+        None => LocalNodeToken {
+            source: "none".to_owned(),
+            token: None,
+        },
     }
 }
 

@@ -103,13 +103,13 @@ type SettingsSection =
  * meetings,learning}`) that declares a `companion`, so it was already being
  * listed by the data-driven sidebar-section index — the hardcoded row was a second, dumber
  * copy that rendered whether or not the app was installed (all six are
- * default-OFF) and pointed at a shell alias route rather than the seam route the
+ * not pre-installed) and pointed at a shell alias route rather than the seam route the
  * companion mints. Same reasoning, and the same fix, as the sidebar's
  * `CHROME_ORDER`: the App declares itself; the shell does not enumerate Apps.
  *
  * Inbox and Memory were the last two survivors of that rule, and both were live
  * dead ends: `@ryu/approvals` and `@ryu/memory` are BOTH absent from Core's
- * `CORE_DEFAULT_ON`, so on a fresh install "Inbox" opened a tab reading "App not
+ * `CORE_PREINSTALLED`, so on a fresh install "Inbox" opened a tab reading "App not
  * enabled" and "Memory" opened a Memory Library whose `/api/memory` reads 503
  * behind the same app gate. Neither needs a row here: an enabled approvals app is
  * listed by the data-driven sidebar-section index, and an enabled memory app contributes a
@@ -213,7 +213,7 @@ export function CommandPalette() {
 	// Tray quick actions (Rust emits these from src-tauri/src/tray.rs).
 	//
 	// `/timeline` is an app-owned path resolved through the companion-alias
-	// catch-all, and the owning app is default-OFF — so the tray item is gated on
+	// catch-all, and the owning app is not pre-installed — so the tray item is gated on
 	// the same live feed the route mounts from, and does nothing when no enabled
 	// app claims it rather than opening an "App not enabled" tab. Same AFFORDANCE
 	// rule the `nav.timeline` hotkey in `Layout.tsx` already follows.
@@ -734,7 +734,8 @@ export function CommandPalette() {
 			id: "nav-channels",
 			group: "Navigation",
 			title: "Channels",
-				value: "navigate channels telegram slack whatsapp personal business cloud api discord bots",
+			value:
+				"navigate channels telegram slack whatsapp personal business cloud api discord bots",
 			icon: Tv01Icon,
 			resultType: "channels",
 			onSelect: () => handleNavigate("/library/channel", "Channels"),
@@ -832,7 +833,7 @@ export function CommandPalette() {
 				title: "Settings",
 				value: "settings open",
 				icon: Settings01Icon,
-				shortcut: `${modKey},`,
+				shortcut: `${modKey}.`,
 				onSelect: () => handleOpenSettings("appearance"),
 			},
 			{

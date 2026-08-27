@@ -22,7 +22,6 @@ import {
 	GridIcon,
 	InboxIcon,
 	LibraryIcon,
-	LinkSquare02Icon,
 	Message01Icon,
 	PackageIcon,
 	PencilEdit01Icon,
@@ -34,7 +33,6 @@ import {
 	RowDeleteIcon,
 	ServerStack01Icon,
 	Settings01Icon,
-	SidebarLeftIcon,
 	SidebarRightIcon,
 	SidebarTopIcon,
 	Tag01Icon,
@@ -85,7 +83,10 @@ import {
 	type WheelEvent,
 } from "react";
 import { openTabWindow } from "@/lib/tauri-bridge.ts";
-import { TabBarAppearanceMenuItems } from "@/src/components/layout/appearance-context-menu.tsx";
+import {
+	TabBarAppearanceMenuItems,
+	TabLayoutMenuItems,
+} from "@/src/components/layout/appearance-context-menu.tsx";
 import { MorphingTabSurface } from "@/src/components/layout/MorphingTabSurface.tsx";
 import { TabDropdown } from "@/src/components/layout/tab-dropdown.tsx";
 import { TabSearchDialog } from "@/src/components/layout/tab-search-dialog.tsx";
@@ -123,8 +124,10 @@ import { useTabSearchButton } from "@/src/hooks/useTabSearchButton.ts";
 import { setTabSizing, useTabSizing } from "@/src/hooks/useTabSizing.ts";
 import { setTitlebarHidden } from "@/src/lib/decorumTitlebar.ts";
 import { toggleFullscreen, useFullscreen } from "@/src/lib/fullscreen.ts";
+import { conversationEntityKey } from "@/src/lib/window-routing.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import { useSidePanelRouteStore } from "@/src/store/useSidePanelRouteStore.ts";
+import { OpenInNewWindowContextMenuItem } from "./OpenInNewWindowMenuItem.tsx";
 import { OverflowTooltip } from "./overflow-tooltip.tsx";
 import { SeasonalParticles } from "./SeasonalEffects.tsx";
 import { SplitPresetMenuItems } from "./SplitPresetMenu.tsx";
@@ -132,10 +135,6 @@ import { TabEntityMenuSection } from "./tab-entity-menu.tsx";
 import { TabRenameInput, useTabRename } from "./tab-rename.tsx";
 import { useTabDnd, useTabDragProps } from "./tabDnd.tsx";
 import { pathScrollsUnderTitlebar } from "./titlebarScroll.ts";
-
-// Sidebar toggle moved to the window's fixed top-left (see Layout), so its
-// icons are no longer imported here.
-const isMac = navigator.userAgent.includes("Mac");
 
 // Radio value used for the "follow the default node" choice in the per-tab node
 // picker, distinct from any real node name.
@@ -716,24 +715,26 @@ function bulkCloseItems(tab: Tab, tabs: Tab[], closeTab: (id: string) => void) {
 	);
 }
 
-// Move a tab into its own OS window (browser-style "Move tab to new window").
-// The conversation lives server-side, so the spawned window re-fetches it by id;
-// we carry the tab's node binding so a remote-targeted chat keeps its node. Move
-// semantics (close the source) match Chrome — a mid-stream reply not yet
-// persisted is the one thing lost, so the menu item is omitted while streaming is
-// not something we can detect here; the trade-off is documented in CLAUDE notes.
-async function moveTabToNewWindow(tab: Tab, closeTab: (id: string) => void) {
+// Open a tab in its own OS window. The conversation lives server-side, so the
+// spawned window re-fetches it by id; we carry the tab's node binding so a
+// remote-targeted chat keeps its node. This is intentionally a non-destructive
+// copy: a native window can be constructed before its renderer is ready, so a
+// true move must wait for a destination-ready handshake (the future drag-out
+// path) before closing the source tab.
+async function openTabInNewWindow(tab: Tab) {
 	const overrideName = useNodeStore.getState().tabOverrides[tab.id];
 	try {
 		await openTabWindow({
+			entityKey: tab.conversationId
+				? conversationEntityKey(tab.conversationId)
+				: undefined,
 			path: tab.path,
 			conversationId: tab.conversationId,
 			node: overrideName,
 			title: tab.title,
 		});
-		closeTab(tab.id);
 	} catch {
-		// Window creation failed — leave the tab in place rather than losing it.
+		// Window creation failed — the source tab remains the owner.
 	}
 }
 
@@ -742,6 +743,7 @@ function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 	const { activateTab, closeTab, togglePin, openTab, tabs, unloadTab } =
 		useTabsContext();
 	const [floatingTabs] = useFloatingTabs();
+	const tabLayout = useTabLayout();
 	const { isDragging, showBefore, showAfter, dragHandlers } = useTabDragProps(
 		tab.id
 	);
@@ -822,15 +824,25 @@ function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 				    showing a chat/space/agent, so the verbs for it belong here too. */}
 				<TabEntityMenuSection tab={tab} />
 				<ContextMenuSeparator />
-				<ContextMenuItem onClick={() => openTab(tab.path, { forceNew: true })}>
+				<ContextMenuItem
+					onClick={() =>
+						openTab(tab.path, {
+							conversationId: tab.conversationId,
+							forceNew: true,
+							icon: tab.icon,
+							title: tab.title,
+						})
+					}
+				>
 					<HugeiconsIcon className="size-4" icon={Copy01Icon} />
 					Duplicate tab
 				</ContextMenuItem>
-				<ContextMenuItem onClick={() => moveTabToNewWindow(tab, closeTab)}>
-					<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
-					Open in new window
-				</ContextMenuItem>
+				<OpenInNewWindowContextMenuItem
+					iconClassName="size-4"
+					onClick={() => openTabInNewWindow(tab)}
+				/>
 				<OpenInSidePanelItem tab={tab} />
+				<TabLayoutMenuItems onChange={setTabLayout} value={tabLayout} />
 				<ContextMenuSeparator />
 				<NodeSubmenu tabId={tab.id} />
 				<ContextMenuSeparator />
@@ -1053,14 +1065,23 @@ function RegularTab({
 				    there now rather than being a hardcoded chat-only row here. */}
 				<TabEntityMenuSection tab={tab} />
 				<ContextMenuSeparator />
-				<ContextMenuItem onClick={() => openTab(tab.path, { forceNew: true })}>
+				<ContextMenuItem
+					onClick={() =>
+						openTab(tab.path, {
+							conversationId: tab.conversationId,
+							forceNew: true,
+							icon: tab.icon,
+							title: tab.title,
+						})
+					}
+				>
 					<HugeiconsIcon className="size-4" icon={Copy01Icon} />
 					Duplicate tab
 				</ContextMenuItem>
-				<ContextMenuItem onClick={() => moveTabToNewWindow(tab, closeTab)}>
-					<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
-					Open in new window
-				</ContextMenuItem>
+				<OpenInNewWindowContextMenuItem
+					iconClassName="size-4"
+					onClick={() => openTabInNewWindow(tab)}
+				/>
 				<OpenInSidePanelItem tab={tab} />
 				<ContextMenuItem disabled={!hasClosedTabs} onClick={restoreTab}>
 					<HugeiconsIcon className="size-4" icon={ArrowTurnBackwardIcon} />
@@ -1073,19 +1094,7 @@ function RegularTab({
 					</>
 				)}
 				<ContextMenuSeparator />
-				<ContextMenuItem
-					onClick={() =>
-						setTabLayout(tabLayout === "vertical" ? "horizontal" : "vertical")
-					}
-				>
-					<HugeiconsIcon
-						className="size-4"
-						icon={tabLayout === "vertical" ? SidebarTopIcon : SidebarLeftIcon}
-					/>
-					{tabLayout === "vertical"
-						? "Use horizontal tabs"
-						: "Use vertical tabs"}
-				</ContextMenuItem>
+				<TabLayoutMenuItems onChange={setTabLayout} value={tabLayout} />
 				<ContextMenuItem onClick={() => closeTab(tab.id)}>
 					<HugeiconsIcon className="size-4" icon={Cancel01Icon} />
 					Close tab
@@ -1383,7 +1392,15 @@ function buildSegments(
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
-export function TitleBar() {
+interface TitleBarProps {
+	navClusterReserve: string;
+	pageActionsMargin: string;
+}
+
+export function TitleBar({
+	navClusterReserve,
+	pageActionsMargin,
+}: TitleBarProps) {
 	const { open } = useSidebar();
 	const activeSeason = useActiveSeason();
 	// At phone widths the sidebar is never docked, so the strip always has to
@@ -1391,12 +1408,6 @@ export function TitleBar() {
 	// buttons it keeps there, not the full desktop four-button + traffic-light
 	// reservation.
 	const isMobile = useIsMobile();
-	let navClusterReserve = "w-40";
-	if (isMobile) {
-		navClusterReserve = "w-[4.5rem]";
-	} else if (isMac) {
-		navClusterReserve = "w-48";
-	}
 	const { actions } = useTitleBarContext();
 	const {
 		activateTab,
@@ -1414,8 +1425,9 @@ export function TitleBar() {
 		unsplit,
 	} = useTabsContext();
 	const scrollRef = useRef<HTMLDivElement>(null);
-	// In vertical-tabs mode the open tabs live in the sidebar, so the horizontal
-	// strip is hidden and a drag-region spacer takes its place.
+	// Only the compact horizontal mode owns a title-bar tab strip. Vertical tabs
+	// move the list into the sidebar; scroll and canvas modes own the live center
+	// surface and leave a drag-region spacer here.
 	const tabLayout = useTabLayout();
 	const tabSizing = useTabSizing();
 	const [tabDropdownEnabled, setTabDropdownEnabled] = useTabDropdown();
@@ -1749,38 +1761,9 @@ export function TitleBar() {
 						/>
 					)}
 
-					{/* Tab strip — scrollable, fills remaining space. Hidden in
-					    vertical-tabs mode, where the sidebar's Tabs section owns it. */}
-					{tabLayout === "vertical" ? (
-						<ContextMenu onOpenChange={onTitleBarMenuOpenChange}>
-							<ContextMenuTrigger
-								className="min-w-0 flex-1"
-								data-tauri-drag-region
-							>
-								<div className="min-w-0 flex-1" data-tauri-drag-region />
-							</ContextMenuTrigger>
-							<ContextMenuContent>
-								<ContextMenuCheckboxItem
-									checked={autoHideTitleBar}
-									onCheckedChange={setAutoHideTitleBar}
-								>
-									<HugeiconsIcon className="size-4" icon={SidebarTopIcon} />
-									Auto-hide title bar
-								</ContextMenuCheckboxItem>
-								<ContextMenuItem onClick={handleToggleFullscreen}>
-									<HugeiconsIcon
-										className="size-4"
-										icon={isFullscreen ? ArrowShrink02Icon : FullScreenIcon}
-									/>
-									{isFullscreen ? "Exit full screen" : "Enter full screen"}
-								</ContextMenuItem>
-								<ContextMenuItem onClick={() => setTabLayout("horizontal")}>
-									<HugeiconsIcon className="size-4" icon={SidebarLeftIcon} />
-									Use horizontal tabs
-								</ContextMenuItem>
-							</ContextMenuContent>
-						</ContextMenu>
-					) : (
+					{/* Tab strip — scrollable, fills remaining space. Hidden whenever a
+					    different tab view owns the tabs. */}
+					{tabLayout === "horizontal" ? (
 						<ContextMenu onOpenChange={onTitleBarMenuOpenChange}>
 							<div className="flex min-w-0 flex-1 items-center">
 								{tabDropdownEnabled ? (
@@ -2003,12 +1986,7 @@ export function TitleBar() {
 										? "Use fixed-width tabs"
 										: "Fit tabs to width"}
 								</ContextMenuItem>
-								{/* The strip only renders in horizontal mode, so this always
-							    switches to vertical. */}
-								<ContextMenuItem onClick={() => setTabLayout("vertical")}>
-									<HugeiconsIcon className="size-4" icon={SidebarLeftIcon} />
-									Use vertical tabs
-								</ContextMenuItem>
+								<TabLayoutMenuItems onChange={setTabLayout} value={tabLayout} />
 								<TabBarAppearanceMenuItems
 									floatingTabs={floatingTabs}
 									setFloatingTabs={setFloatingTabs}
@@ -2077,6 +2055,32 @@ export function TitleBar() {
 								</ContextMenuItem>
 							</ContextMenuContent>
 						</ContextMenu>
+					) : (
+						<ContextMenu onOpenChange={onTitleBarMenuOpenChange}>
+							<ContextMenuTrigger
+								className="min-w-0 flex-1"
+								data-tauri-drag-region
+							>
+								<div className="min-w-0 flex-1" data-tauri-drag-region />
+							</ContextMenuTrigger>
+							<ContextMenuContent>
+								<ContextMenuCheckboxItem
+									checked={autoHideTitleBar}
+									onCheckedChange={setAutoHideTitleBar}
+								>
+									<HugeiconsIcon className="size-4" icon={SidebarTopIcon} />
+									Auto-hide title bar
+								</ContextMenuCheckboxItem>
+								<ContextMenuItem onClick={handleToggleFullscreen}>
+									<HugeiconsIcon
+										className="size-4"
+										icon={isFullscreen ? ArrowShrink02Icon : FullScreenIcon}
+									/>
+									{isFullscreen ? "Exit full screen" : "Enter full screen"}
+								</ContextMenuItem>
+								<TabLayoutMenuItems onChange={setTabLayout} value={tabLayout} />
+							</ContextMenuContent>
+						</ContextMenu>
 					)}
 
 					{/* Spacer so actions hug the right edge */}
@@ -2099,7 +2103,7 @@ export function TitleBar() {
 								// A phone width is always the browser build — no caption
 								// buttons to clear, and 12rem of dead margin would push the
 								// actions off screen.
-								isMac || isMobile ? "mr-2" : "mr-48"
+								pageActionsMargin
 							)}
 							data-tauri-drag-region={false}
 						>

@@ -2544,13 +2544,17 @@ mod tests {
         assert_eq!(store.profiles().await.unwrap().len(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn hash_rejects_symlink_traversal() {
         let dir = tempdir().unwrap();
         let target = dir.path().join("target.txt");
         fs::write(&target, "secret").unwrap();
         let link = dir.path().join("link.txt");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
         assert!(hash_path(&link).is_err());
     }
 

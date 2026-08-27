@@ -161,17 +161,35 @@ pub async fn list_actions(
     query: &str,
     limit: usize,
 ) -> Result<Value> {
+    list_actions_with_tags(client, toolkit, query, limit, &[]).await
+}
+
+fn action_query_parameters<'a>(
+    toolkit: &'a str,
+    query: &'a str,
+    limit: &'a str,
+    tags: &'a [&'a str],
+) -> Vec<(&'static str, &'a str)> {
+    let mut parameters = vec![
+        (TOOLKIT_FILTER_PARAM, toolkit),
+        ("search", query),
+        ("limit", limit),
+    ];
+    parameters.extend(tags.iter().map(|tag| ("tags", *tag)));
+    parameters
+}
+
+/// List actions while requiring every provider-owned behavior tag in `tags`.
+pub async fn list_actions_with_tags(
+    client: &Client,
+    toolkit: &str,
+    query: &str,
+    limit: usize,
+    tags: &[&str],
+) -> Result<Value> {
     let limit_s = limit.to_string();
-    let raw = get_json(
-        client,
-        "/tools",
-        &[
-            (TOOLKIT_FILTER_PARAM, toolkit),
-            ("search", query),
-            ("limit", &limit_s),
-        ],
-    )
-    .await?;
+    let parameters = action_query_parameters(toolkit, query, &limit_s, tags);
+    let raw = get_json(client, "/tools", &parameters).await?;
     let data: Vec<Value> = items_of(&raw)
         .iter()
         .map(|a| {
@@ -182,6 +200,12 @@ pub async fn list_actions(
                 "toolkit": str_field(a, &["toolkit_slug", "toolkit", "app_name"])
                     .unwrap_or_else(|| toolkit.to_string()),
                 "no_auth": a.get("no_auth").and_then(Value::as_bool).unwrap_or(false),
+                "tags": a.get("tags").cloned().unwrap_or_else(|| json!([])),
+                "input_schema": a.get("input_parameters")
+                    .or_else(|| a.get("input_schema"))
+                    .or_else(|| a.get("parameters"))
+                    .cloned()
+                    .unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
             })
         })
         .filter(|a| !a["name"].as_str().unwrap_or("").is_empty())
@@ -241,6 +265,20 @@ mod tests {
             Some(v) => std::env::set_var("COMPOSIO_BASE_URL", v),
             None => std::env::remove_var("COMPOSIO_BASE_URL"),
         }
+    }
+
+    #[test]
+    fn action_query_repeats_provider_owned_tag_filters() {
+        assert_eq!(
+            action_query_parameters("gmail", "list", "50", &["readOnlyHint", "important"]),
+            vec![
+                (TOOLKIT_FILTER_PARAM, "gmail"),
+                ("search", "list"),
+                ("limit", "50"),
+                ("tags", "readOnlyHint"),
+                ("tags", "important"),
+            ]
+        );
     }
 
     #[test]

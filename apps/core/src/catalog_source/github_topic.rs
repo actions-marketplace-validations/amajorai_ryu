@@ -421,6 +421,8 @@ pub(crate) struct RepoManifestDisplay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    stability: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     tagline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     category: Option<String>,
@@ -521,6 +523,11 @@ impl RepoManifestDisplay {
                 .get("version")
                 .and_then(Value::as_str)
                 .and_then(scrub_version),
+            stability: obj
+                .get("stability")
+                .and_then(Value::as_str)
+                .and_then(|value| scrub_text(value, MAX_NAME_CHARS))
+                .map(|value| value.to_ascii_lowercase()),
             tagline: manifest_text(obj, "shortDescription", &["tagline"], MAX_TAGLINE_CHARS),
             category: manifest_text(obj, "category", &["category"], MAX_CATEGORY_CHARS),
             // Both spellings, because a manifest is authored in camelCase
@@ -2211,6 +2218,7 @@ pub(crate) fn manifest_display_fields(manifest: &Value) -> serde_json::Map<Strin
         };
     insert_string(&mut out, "description", &display.description);
     insert_string(&mut out, "version", &display.version);
+    insert_string(&mut out, "stability", &display.stability);
     insert_string(&mut out, "tagline", &display.tagline);
     insert_string(&mut out, "category", &display.category);
     insert_string(&mut out, "icon", &display.icon);
@@ -3064,6 +3072,7 @@ mod tests {
             "id": "com.acme.thing",
             "name": "Thing",
             "version": "1.2.3",
+            "stability": "Beta",
             "description": "a thing",
             "category": "Productivity",
             "ui_code": "<script>alert(1)</script>",
@@ -3075,6 +3084,7 @@ mod tests {
         });
         let lifted = manifest_display_fields(&manifest);
         assert_eq!(lifted["version"], "1.2.3");
+        assert_eq!(lifted["stability"], "beta");
         assert_eq!(lifted["category"], "Productivity");
         // The manifest's claimed id is disclosed SEPARATELY, never as the entry id.
         assert_eq!(lifted["manifestId"], "com.acme.thing");

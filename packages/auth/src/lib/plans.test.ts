@@ -20,9 +20,11 @@ import {
 	KERNEL_QUOTAS,
 	MAIL_LIFECYCLE,
 	managedInferenceAvailable,
+	monthlyPriceMicroUsdForSeats,
 	PLANS,
 	type PlanLimitField,
 	type PolarBinding,
+	planByProductId,
 	planLimit,
 	planVersionFor,
 	QUOTAS,
@@ -120,6 +122,46 @@ describe("emailQuotaForPlan (Agent Inboxes)", () => {
 });
 
 describe("resolveEntitlement — subscriptions", () => {
+	it("gives recurring plans Marketplace app access but not the desktop license", () => {
+		expect(PLANS["marketplace-membership"].marketplaceApps).toBe(true);
+		expect(PLANS.pro.marketplaceApps).toBe(true);
+		expect(PLANS.max.marketplaceApps).toBe(true);
+		expect(PLANS.teams.marketplaceApps).toBe(true);
+		expect(PLANS["desktop-license"].marketplaceApps).toBe(false);
+	});
+
+	it("resolves the Marketplace-only plan without unrelated paid capabilities", () => {
+		const binding = requireBinding(
+			PLANS["marketplace-membership"].bindings.monthly,
+			"marketplace-membership.monthly"
+		);
+		const entitlement = resolveEntitlement(
+			{
+				productId: resolveProductId(binding, defaultsOnly),
+				seats: 3,
+				status: "active",
+			},
+			null,
+			defaultsOnly
+		);
+		expect(entitlement.plan).toBe("marketplace-membership");
+		expect(entitlement.marketplaceApps).toBe(true);
+		expect(entitlement.desktopAccess).toBe(false);
+		expect(entitlement.managedInference).toBe(false);
+		expect(entitlement.monthlyCreditPoolMicroUsd).toBe(0);
+		expect(entitlement.seats).toBe(3);
+	});
+
+	it("does not grant Marketplace apps from a desktop license", () => {
+		const entitlement = resolveEntitlement(
+			null,
+			{ active: true },
+			defaultsOnly
+		);
+		expect(entitlement.plan).toBe("desktop-license");
+		expect(entitlement.marketplaceApps).toBe(false);
+	});
+
 	it("returns the un-entitled baseline for no inputs", () => {
 		const e = resolveEntitlement(null, null, defaultsOnly);
 		expect(e.plan).toBeNull();
@@ -184,10 +226,41 @@ describe("resolveEntitlement — subscriptions", () => {
 });
 
 describe("plan audience — personal versus organization ownership", () => {
-	it("keeps Pro and Max personal while Teams owns the shared boundary", () => {
+	it("keeps Pro and Max personal while Teams and Business own the shared boundary", () => {
 		expect(PLANS.pro.audience).toBe("individual");
 		expect(PLANS.max.audience).toBe("individual");
 		expect(PLANS.teams.audience).toBe("organization");
+		expect(PLANS.business.audience).toBe("organization");
+		expect(PLANS.business.seatModel).toEqual({
+			kind: "per_seat",
+			minSeats: 5,
+		});
+		expect(PLANS.business.monthlyCreditPoolMicroUsd).toBe(usdToMicro(100));
+	});
+
+	it("resolves Business products and its graduated monthly quote", () => {
+		const binding = requireBinding(
+			PLANS.business.bindings.monthly,
+			"business.monthly"
+		);
+		const productId = resolveProductId(binding, defaultsOnly);
+		expect(planByProductId(defaultsOnly).get(productId)?.plan.id).toBe(
+			"business"
+		);
+		expect(
+			monthlyPriceMicroUsdForSeats({
+				plan: PLANS.business,
+				seats: 5,
+				version: planVersionFor("business"),
+			})
+		).toBe(usdToMicro(300));
+		expect(
+			monthlyPriceMicroUsdForSeats({
+				plan: PLANS.business,
+				seats: 6,
+				version: planVersionFor("business"),
+			})
+		).toBe(usdToMicro(350));
 	});
 });
 
@@ -361,6 +434,7 @@ describe("decideDesktopAccess (trial + paywall gate)", () => {
 	const sub: Entitlement = {
 		plan: "pro",
 		desktopAccess: true,
+		marketplaceApps: true,
 		managedInference: true,
 		monthlyCreditPoolMicroUsd: usdToMicro(10),
 		seats: 1,
@@ -368,6 +442,7 @@ describe("decideDesktopAccess (trial + paywall gate)", () => {
 	const licenseEnt: Entitlement = {
 		plan: "desktop-license",
 		desktopAccess: true,
+		marketplaceApps: false,
 		managedInference: false,
 		monthlyCreditPoolMicroUsd: 0,
 		seats: 1,
@@ -375,6 +450,7 @@ describe("decideDesktopAccess (trial + paywall gate)", () => {
 	const noneEnt: Entitlement = {
 		plan: null,
 		desktopAccess: false,
+		marketplaceApps: false,
 		managedInference: false,
 		monthlyCreditPoolMicroUsd: 0,
 		seats: 0,
@@ -444,6 +520,7 @@ describe("decideDesktopAccess (trial + paywall gate)", () => {
 	it("rides the offline grace window on a failed live check with fresh cache", () => {
 		const cached: CachedEntitlement = {
 			cachedAtMs: NOW - 3 * DAY,
+			marketplaceApps: true,
 			proUnlocked: true,
 			managedInference: true,
 			plan: "pro",
@@ -464,6 +541,7 @@ describe("decideDesktopAccess (trial + paywall gate)", () => {
 	it("locks once the offline grace window has lapsed", () => {
 		const cached: CachedEntitlement = {
 			cachedAtMs: NOW - 10 * DAY, // older than the 7-day grace
+			marketplaceApps: true,
 			proUnlocked: true,
 			managedInference: true,
 			plan: "pro",
@@ -479,6 +557,7 @@ describe("decideDesktopAccess (trial + paywall gate)", () => {
 	it("does not grant offline grace from a non-Pro cache", () => {
 		const cached: CachedEntitlement = {
 			cachedAtMs: NOW - 1 * DAY,
+			marketplaceApps: false,
 			proUnlocked: false,
 			managedInference: false,
 			plan: null,
@@ -499,6 +578,7 @@ describe("decideDesktopAccess — betaFree break-glass flag (off by default)", (
 	const noneEnt: Entitlement = {
 		plan: null,
 		desktopAccess: false,
+		marketplaceApps: false,
 		managedInference: false,
 		monthlyCreditPoolMicroUsd: 0,
 		seats: 0,
@@ -506,6 +586,7 @@ describe("decideDesktopAccess — betaFree break-glass flag (off by default)", (
 	const sub: Entitlement = {
 		plan: "pro",
 		desktopAccess: true,
+		marketplaceApps: true,
 		managedInference: true,
 		monthlyCreditPoolMicroUsd: usdToMicro(10),
 		seats: 1,
@@ -771,6 +852,7 @@ describe("Lifetime (desktop-license) bands into the pro capability tier", () => 
 		const licenseEnt: Entitlement = {
 			plan: "desktop-license",
 			desktopAccess: true,
+			marketplaceApps: false,
 			managedInference: false,
 			monthlyCreditPoolMicroUsd: 0,
 			seats: 1,
@@ -792,6 +874,7 @@ describe("managedInferenceAvailable — balance gate, not a pure tier gate", () 
 	const license: Entitlement = {
 		plan: "desktop-license",
 		desktopAccess: true,
+		marketplaceApps: false,
 		managedInference: false,
 		monthlyCreditPoolMicroUsd: 0,
 		seats: 1,
@@ -799,6 +882,7 @@ describe("managedInferenceAvailable — balance gate, not a pure tier gate", () 
 	const proSub: Entitlement = {
 		plan: "pro",
 		desktopAccess: true,
+		marketplaceApps: true,
 		managedInference: true,
 		monthlyCreditPoolMicroUsd: usdToMicro(19.5),
 		seats: 1,
@@ -806,6 +890,7 @@ describe("managedInferenceAvailable — balance gate, not a pure tier gate", () 
 	const none: Entitlement = {
 		plan: null,
 		desktopAccess: false,
+		marketplaceApps: false,
 		managedInference: false,
 		monthlyCreditPoolMicroUsd: 0,
 		seats: 0,

@@ -1,4 +1,5 @@
 import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
+import { safeValidateUIMessages, type UIMessage } from "ai";
 import {
 	createContext,
 	type ReactNode,
@@ -11,6 +12,11 @@ import {
 import { useMessagingRows } from "@/src/hooks/useAgentRowStyle.ts";
 import { useSidebarChatPreview } from "@/src/hooks/useSidebarChatPreview.ts";
 import {
+	type AuthenticatedFetchOptions,
+	authenticatedFetch,
+} from "@/src/lib/api/client.ts";
+import {
+	setConversationFolder as setConversationFolderApi,
 	setConversationIcon,
 	setConversationTitle,
 	setConversationVisibility as setConversationVisibilityApi,
@@ -62,7 +68,7 @@ interface ChatHistoryContextValue {
 	/** Branch (fork) a conversation into a new one, copying history up to (and
 	 * including) `messageId`. Returns the new conversation's id, or null on
 	 * failure. The new conversation is added to the local list optimistically. */
-	forkConversation: (id: string, messageId: string) => Promise<string | null>;
+	forkConversation: (id: string, messageId?: string) => Promise<string | null>;
 	getConversation: (id: string) => Conversation | undefined;
 	listConversations: () => Conversation[];
 	/** Fetch a conversation's full message history from Core. Returns `[]` for a
@@ -87,6 +93,7 @@ interface ChatHistoryContextValue {
 	 * user turn above it so a subsequent stream appends a fresh assistant version.
 	 * Returns true on success. */
 	regenerateMessage: (id: string, messageId: string) => Promise<boolean>;
+	removeConversationFromProject: (id: string) => Promise<boolean>;
 	/** Rename a conversation: updates the local title immediately (optimistic) and
 	 * writes through to Core so the new title is server-backed and shared. */
 	renameConversation: (id: string, title: string) => void;
@@ -193,33 +200,60 @@ interface CoreConversationPage {
 
 const CHAT_HISTORY_PAGE_SIZE = 40;
 
-function mapCoreMessages(messages: CoreMessage[] | undefined): Message[] {
-	return (messages ?? []).map((m) => ({
-		id: m.id,
-		role: m.role === "assistant" ? "assistant" : "user",
-		content: m.content,
-		originServer:
-			typeof m.origin_server === "string" ? m.origin_server : undefined,
-		source: m.source ?? undefined,
-		// Carry through the structured parts when Core has them, so the
-		// chat page can rehydrate tool rows + cowork context instead of
-		// only flat text (see ChatPage's hydration).
-		parts: Array.isArray(m.parts) && m.parts.length > 0 ? m.parts : undefined,
-		interrupted: m.interrupted === true,
-		siblingIndex: m.sibling_index,
-		siblingCount: m.sibling_count,
-		siblingIds: m.sibling_ids,
-		parentMessageId: m.parent_message_id,
-		timestamp: m.created_at,
-		widgetInstanceId:
-			typeof m.widget_instance_id === "string"
-				? m.widget_instance_id
-				: undefined,
-	}));
+async function validatedMessageParts(
+	message: CoreMessage
+): Promise<UIMessage["parts"] | undefined> {
+	if (!(Array.isArray(message.parts) && message.parts.length > 0)) {
+		return undefined;
+	}
+	const result = await safeValidateUIMessages({
+		messages: [
+			{
+				id: message.id,
+				parts: message.parts,
+				role: message.role === "assistant" ? "assistant" : "user",
+			},
+		],
+	});
+	return result.success ? result.data[0]?.parts : undefined;
 }
 
-function authHeaders(token: string | null): Record<string, string> {
-	return token ? { Authorization: `Bearer ${token}` } : {};
+async function mapCoreMessages(
+	messages: CoreMessage[] | undefined
+): Promise<Message[]> {
+	return await Promise.all(
+		(messages ?? []).map(async (m) => ({
+			id: m.id,
+			role: m.role === "assistant" ? "assistant" : "user",
+			content: m.content,
+			originServer:
+				typeof m.origin_server === "string" ? m.origin_server : undefined,
+			source: m.source ?? undefined,
+			// Carry through the structured parts when Core has them, so the
+			// chat page can rehydrate tool rows + cowork context instead of
+			// only flat text (see ChatPage's hydration).
+			parts: await validatedMessageParts(m),
+			interrupted: m.interrupted === true,
+			siblingIndex: m.sibling_index,
+			siblingCount: m.sibling_count,
+			siblingIds: m.sibling_ids,
+			parentMessageId: m.parent_message_id,
+			timestamp: m.created_at,
+			widgetInstanceId:
+				typeof m.widget_instance_id === "string"
+					? m.widget_instance_id
+					: undefined,
+		}))
+	);
+}
+
+function coreFetch(
+	url: string,
+	token: string | null | undefined,
+	path: string,
+	options?: AuthenticatedFetchOptions
+): Promise<Response> {
+	return authenticatedFetch({ url, token: token ?? null }, path, options);
 }
 
 /** The title a conversation carries until it has been named — the only string
@@ -298,7 +332,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 		const { url, token } = activeNode;
 		const query = wantPreview ? "?preview=1" : "";
 		setConversationsLoading(true);
-		fetch(`${url}/api/conversations${query}`, { headers: authHeaders(token) })
+		coreFetch(url, token, `/api/conversations${query}`)
 			.then((res) =>
 				res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))
 			)
@@ -386,6 +420,24 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 		[]
 	);
 
+	const removeConversationFromProject = useCallback(
+		async (id: string): Promise<boolean> => {
+			const { url, token } = activeNode;
+			const success = await setConversationFolderApi({ url, token }, id, null);
+			if (success) {
+				setConversations((prev) =>
+					prev.map((conversation) =>
+						conversation.id === id
+							? { ...conversation, folderPath: undefined }
+							: conversation
+					)
+				);
+			}
+			return success;
+		},
+		[activeNode]
+	);
+
 	// Default chat naming, independent of any plugin: the moment the user sends,
 	// the thread is called what they asked. Core derives the identical title when
 	// it persists the turn, so this only removes the round trip — nothing here is
@@ -415,9 +467,8 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 		(id: string) => {
 			setConversations((prev) => prev.filter((c) => c.id !== id));
 			const { url, token } = activeNode;
-			fetch(`${url}/api/conversations/${encodeURIComponent(id)}`, {
+			coreFetch(url, token, `/api/conversations/${encodeURIComponent(id)}`, {
 				method: "DELETE",
-				headers: authHeaders(token),
 			}).catch(() => {
 				// Best-effort: the row is already gone from the UI.
 			});
@@ -491,11 +542,10 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 		async (id: string): Promise<LoadMessagesResult> => {
 			const { url, token } = activeNode;
 			try {
-				const res = await fetch(
-					`${url}/api/conversations/${encodeURIComponent(id)}`,
-					{
-						headers: authHeaders(token),
-					}
+				const res = await coreFetch(
+					url,
+					token,
+					`/api/conversations/${encodeURIComponent(id)}`
 				);
 				// 404 is an ANSWER, not a failure: the node is up and says this
 				// conversation is gone (deleted, or never persisted). That is the
@@ -510,7 +560,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 				const data: { messages?: CoreMessage[] } = await res.json();
 				return {
 					status: "ok",
-					messages: mapCoreMessages(data.messages),
+					messages: await mapCoreMessages(data.messages),
 				};
 			} catch {
 				return { status: "error", messages: [] };
@@ -529,11 +579,10 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 				query.set("before", before);
 			}
 			try {
-				const res = await fetch(
-					`${url}/api/conversations/${encodeURIComponent(id)}?${query.toString()}`,
-					{
-						headers: authHeaders(token),
-					}
+				const res = await coreFetch(
+					url,
+					token,
+					`/api/conversations/${encodeURIComponent(id)}?${query.toString()}`
 				);
 				if (res.status === 404) {
 					return {
@@ -548,7 +597,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 				const data: CoreConversationPage = await res.json();
 				return {
 					hasOlderMessages: data.has_older_messages === true,
-					messages: mapCoreMessages(data.messages),
+					messages: await mapCoreMessages(data.messages),
 					olderMessagesCursor:
 						typeof data.older_messages_cursor === "string"
 							? data.older_messages_cursor
@@ -571,18 +620,16 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 	);
 
 	const forkConversation = useCallback(
-		async (id: string, messageId: string): Promise<string | null> => {
+		async (id: string, messageId?: string): Promise<string | null> => {
 			const { url, token } = activeNode;
 			try {
-				const res = await fetch(
-					`${url}/api/conversations/${encodeURIComponent(id)}/fork`,
+				const res = await coreFetch(
+					url,
+					token,
+					`/api/conversations/${encodeURIComponent(id)}/fork`,
 					{
 						method: "POST",
-						headers: {
-							"Content-Type": "application/json",
-							...authHeaders(token),
-						},
-						body: JSON.stringify({ message_id: messageId }),
+						body: JSON.stringify(messageId ? { message_id: messageId } : {}),
 					}
 				);
 				if (!res.ok) {
@@ -613,16 +660,11 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 		): Promise<string | null> => {
 			const { url, token } = activeNode;
 			try {
-				const res = await fetch(
-					`${url}/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/edit`,
-					{
-						method: "POST",
-						headers: {
-							"Content-Type": "application/json",
-							...authHeaders(token),
-						},
-						body: JSON.stringify({ content }),
-					}
+				const res = await coreFetch(
+					url,
+					token,
+					`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/edit`,
+					{ method: "POST", body: JSON.stringify({ content }) }
 				);
 				if (!res.ok) {
 					return null;
@@ -640,12 +682,11 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 		async (id: string, messageId: string): Promise<boolean> => {
 			const { url, token } = activeNode;
 			try {
-				const res = await fetch(
-					`${url}/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/regenerate`,
-					{
-						method: "POST",
-						headers: authHeaders(token),
-					}
+				const res = await coreFetch(
+					url,
+					token,
+					`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/regenerate`,
+					{ method: "POST" }
 				);
 				return res.ok;
 			} catch {
@@ -659,12 +700,11 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 		async (id: string, versionId: string): Promise<boolean> => {
 			const { url, token } = activeNode;
 			try {
-				const res = await fetch(
-					`${url}/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(versionId)}/select`,
-					{
-						method: "POST",
-						headers: authHeaders(token),
-					}
+				const res = await coreFetch(
+					url,
+					token,
+					`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(versionId)}/select`,
+					{ method: "POST" }
 				);
 				return res.ok;
 			} catch {
@@ -684,6 +724,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			deleteConversation,
 			renameConversation,
 			setConversationFolder,
+			removeConversationFromProject,
 			setConversationGlyph,
 			setConversationVisibility,
 			setActiveConversationId,
@@ -707,6 +748,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			deleteConversation,
 			renameConversation,
 			setConversationFolder,
+			removeConversationFromProject,
 			setConversationGlyph,
 			setConversationVisibility,
 			listConversations,

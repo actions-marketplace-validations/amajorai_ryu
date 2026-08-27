@@ -20,7 +20,9 @@
 
 import {
 	ArrowUpRight01Icon,
+	CloudUploadIcon,
 	ComputerTerminal01Icon,
+	GitBranchIcon,
 	SentIcon,
 	Share08Icon,
 	StopIcon,
@@ -30,6 +32,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
+import { IconBrandGithub } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import type { AttachedImage } from "@/components/agent-elements/input-bar.tsx";
@@ -42,6 +45,7 @@ import { WorktreeHandoffControl } from "@/src/components/chat/WorktreeHandoffCon
 import type { CoworkContextPanelProps } from "@/src/components/panels/CoworkContextPanel.tsx";
 import { CoworkContextPanel } from "@/src/components/panels/CoworkContextPanel.tsx";
 import {
+	CreateGitHubRepositoryDialog,
 	GitActionDialog,
 	type GitProgressPhase,
 	GitProgressStatus,
@@ -60,6 +64,7 @@ import {
 	useGitStatus,
 	useWorktreeStatus,
 } from "@/src/hooks/useGitStatus.ts";
+import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import {
 	type BackgroundProcess,
 	listBackgroundProcesses,
@@ -74,17 +79,24 @@ import {
 	fetchGitBranches,
 	type GitCommitAction,
 	type GitStatus,
+	initializeGit,
 	isPullRequestBranch,
 	pullGit,
 	syncGit,
 } from "@/src/lib/api/git.ts";
 import {
+	buildGitHubCompareUrl,
 	buildPullRequestCheckReport,
 	buildPullRequestMergeConflictReport,
+	createGitHubRepository,
+	fetchGitHubRepository,
+	type GitHubRepository,
+	type GitHubRepositoryVisibility,
 	type GitPullRequest,
 	gitPullRequestStatus,
 	normalizeGitPullRequest,
 	pullRequestHasMergeConflicts,
+	selectGitHubCompareBaseBranch,
 } from "@/src/lib/api/pull-requests.ts";
 import { textToDataUrl } from "@/src/lib/composer/attachments.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
@@ -126,6 +138,21 @@ type GitOperationState =
 	| { label: string; status: "done"; url?: string }
 	| { status: "error"; message: string };
 
+function defaultRepositoryName(folder: string | null): string {
+	return folder?.split(/[\\/]/).filter(Boolean).at(-1) ?? "";
+}
+
+function repositoryUrlFromName(repository: string | null): string | null {
+	const normalized = repository?.trim();
+	if (!normalized) {
+		return null;
+	}
+	if (/^https:\/\//i.test(normalized)) {
+		return normalized;
+	}
+	return `https://github.com/${normalized.replace(/^\/+/, "")}`;
+}
+
 function formatBackgroundElapsed(elapsedMs: number): string {
 	const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
 	if (seconds < 60) {
@@ -133,6 +160,50 @@ function formatBackgroundElapsed(elapsedMs: number): string {
 	}
 	const minutes = Math.floor(seconds / 60);
 	return `${minutes}m${seconds % 60}s`;
+}
+
+/** The provider-facing compare action shown only when the current branch can be compared. */
+export function CompareBranchLink({ href }: { href: string }) {
+	return (
+		<a
+			aria-label="Compare branch"
+			className="flex w-full items-center gap-2 rounded-md border border-border/70 px-2 py-1.5 font-medium text-muted-foreground text-xs transition hover:bg-muted/60 hover:text-foreground"
+			data-testid="compare-branch-link"
+			href={href}
+			rel="noopener noreferrer"
+			target="_blank"
+		>
+			<IconBrandGithub aria-hidden className="size-3.5 shrink-0" />
+			<span className="min-w-0 flex-1 truncate">Compare branch</span>
+			<HugeiconsIcon
+				aria-hidden
+				className="size-3.5 shrink-0"
+				icon={ArrowUpRight01Icon}
+			/>
+		</a>
+	);
+}
+
+/** Ryu Work's only Git affordance for a folder that is not a repository yet. */
+export function CreateLocalGitButton({
+	busy,
+	onClick,
+}: {
+	busy: boolean;
+	onClick: () => void;
+}) {
+	return (
+		<button
+			aria-label="Create local Git"
+			className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border/70 px-2 py-1.5 font-medium text-muted-foreground text-xs transition hover:bg-muted/60 hover:text-foreground disabled:cursor-wait disabled:opacity-50"
+			disabled={busy}
+			onClick={onClick}
+			type="button"
+		>
+			<HugeiconsIcon aria-hidden className="size-3.5" icon={GitBranchIcon} />
+			Create local Git
+		</button>
+	);
 }
 
 function BackgroundProcessRow({
@@ -192,13 +263,19 @@ function EnvironmentDescription({
 	remote,
 	commit,
 	existingPullRequest,
+	compareUrl,
+	githubRepository,
+	githubRepositoryLoading,
 	githubAppEnabled,
+	gitSetup,
 	hasWork,
 	chatRunning,
 	onHandOffToWorktree,
 	onInterruptChat,
 	onOpenCommit,
+	onOpenCreateRepository,
 	onOpenPullRequest,
+	onInitializeGit,
 	onPull,
 	onSync,
 	onFixCi,
@@ -207,6 +284,8 @@ function EnvironmentDescription({
 	onWorktreeModeChange,
 	pullRequest,
 	pullRequestLoading,
+	repositoryOperation,
+	simpleMode,
 	canCreatePullRequest,
 	worktreeActive,
 	worktreeBranch,
@@ -218,16 +297,22 @@ function EnvironmentDescription({
 	commit: GitOperationState;
 	conversationId?: string | null;
 	existingPullRequest: GitPullRequest | null;
+	compareUrl: string | null;
 	folder: string | null;
 	git: GitStatus | null;
+	githubRepository: GitHubRepository | null;
+	githubRepositoryLoading: boolean;
 	githubAppEnabled: boolean;
+	gitSetup: GitOperationState;
 	hasWork: boolean;
 	onFixCi?: () => void;
 	onFixMergeConflicts?: () => void;
 	onHandOffToWorktree: (branchName: string) => void;
 	onInterruptChat?: () => void;
 	onOpenCommit: () => void;
+	onOpenCreateRepository: () => void;
 	onOpenPullRequest: () => void;
+	onInitializeGit: () => void;
 	onPull: () => void;
 	onSync: () => void;
 	onStop: () => void;
@@ -235,6 +320,8 @@ function EnvironmentDescription({
 	pullRequest: GitOperationState;
 	pullRequestLoading: boolean;
 	remote: GitOperationState;
+	repositoryOperation: GitOperationState;
+	simpleMode: boolean;
 	showLineStats: boolean;
 	target: ApiTarget;
 	worktreeActive: boolean;
@@ -247,13 +334,17 @@ function EnvironmentDescription({
 	const changedFiles = git?.changed_files_count ?? 0;
 	const clean = changedFiles === 0 && insertions === 0 && deletions === 0;
 	const progress =
-		remote.status === "loading"
-			? remote.phase
-			: commit.status === "loading"
-				? commit.phase
-				: pullRequest.status === "loading"
-					? pullRequest.phase
-					: undefined;
+		gitSetup.status === "loading"
+			? gitSetup.phase
+			: repositoryOperation.status === "loading"
+				? repositoryOperation.phase
+				: remote.status === "loading"
+					? remote.phase
+					: commit.status === "loading"
+						? commit.phase
+						: pullRequest.status === "loading"
+							? pullRequest.phase
+							: undefined;
 
 	// No folder: the branch and run-mode rows and every git affordance render
 	// nothing, so the row shows just the read-only folder state and says why it is bare.
@@ -305,9 +396,23 @@ function EnvironmentDescription({
 				/>
 			)}
 
-			{!git && (
-				<p className="text-muted-foreground text-xs">Not a git repository.</p>
-			)}
+			{!git &&
+				(simpleMode ? (
+					<>
+						<p className="text-muted-foreground text-xs">
+							This folder is not a Git repository yet.
+						</p>
+						{gitSetup.status === "loading" ? (
+							<GitProgressStatus onStop={onStop} phase={gitSetup.phase} />
+						) : (
+							<CreateLocalGitButton busy={false} onClick={onInitializeGit} />
+						)}
+					</>
+				) : (
+					<p className="text-muted-foreground text-xs">
+						This folder is not a Git repository.
+					</p>
+				))}
 			{/* Summary headers stay quiet: the line stats live in the body so the
 			    header is only the section name, while the useful numbers remain
 			    available when Environment is expanded. */}
@@ -378,6 +483,27 @@ function EnvironmentDescription({
 				))}
 
 			{githubAppEnabled &&
+				git &&
+				!githubRepositoryLoading &&
+				!githubRepository &&
+				!existingPullRequest?.repository && (
+					<button
+						className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border/70 px-2 py-1.5 font-medium text-muted-foreground text-xs transition hover:bg-muted/60 hover:text-foreground disabled:cursor-wait disabled:opacity-50"
+						disabled={repositoryOperation.status === "loading"}
+						onClick={onOpenCreateRepository}
+						type="button"
+					>
+						<HugeiconsIcon
+							aria-hidden
+							className="size-3.5"
+							icon={CloudUploadIcon}
+						/>
+						Create GitHub repository
+					</button>
+				)}
+			{git && compareUrl && <CompareBranchLink href={compareUrl} />}
+
+			{githubAppEnabled &&
 				!existingPullRequest &&
 				pullRequestLoading &&
 				pullRequest.status !== "loading" && (
@@ -433,6 +559,39 @@ function EnvironmentDescription({
 					{pullRequest.message}
 				</p>
 			)}
+			{gitSetup.status === "done" && (
+				<p className="flex items-center gap-1 text-emerald-600 text-xs dark:text-emerald-400">
+					<HugeiconsIcon aria-hidden className="size-3.5" icon={Tick02Icon} />
+					{gitSetup.label}
+				</p>
+			)}
+			{gitSetup.status === "error" && (
+				<p className="break-words text-destructive text-xs">
+					{gitSetup.message}
+				</p>
+			)}
+			{repositoryOperation.status === "done" && (
+				<p className="flex items-center gap-1 text-emerald-600 text-xs dark:text-emerald-400">
+					<HugeiconsIcon aria-hidden className="size-3.5" icon={Tick02Icon} />
+					{repositoryOperation.url ? (
+						<a
+							className="truncate underline underline-offset-2"
+							href={repositoryOperation.url}
+							rel="noopener noreferrer"
+							target="_blank"
+						>
+							{repositoryOperation.label}
+						</a>
+					) : (
+						repositoryOperation.label
+					)}
+				</p>
+			)}
+			{repositoryOperation.status === "error" && (
+				<p className="break-words text-destructive text-xs">
+					{repositoryOperation.message}
+				</p>
+			)}
 		</div>
 	);
 }
@@ -451,16 +610,23 @@ export function PinnedSummaryPanel({
 	showLineStats = true,
 	worktreeModeOverride,
 }: PinnedSummaryPanelProps) {
+	const interfaceLevel = useInterfaceLevel();
+	const simpleMode = interfaceLevel === "simple";
 	const worktreeBranch = useWorkspaceStore((state) => state.worktreeBranch);
 	const setWorktreeBranch = useWorkspaceStore(
 		(state) => state.setWorktreeBranch
 	);
 	const setWorktreeMode = useWorkspaceStore((state) => state.setWorktreeMode);
 	const [commit, setCommit] = useState<GitOperationState>({ status: "idle" });
+	const [gitSetup, setGitSetup] = useState<GitOperationState>({
+		status: "idle",
+	});
 	const [pullRequest, setPullRequest] = useState<GitOperationState>({
 		status: "idle",
 	});
 	const [remote, setRemote] = useState<GitOperationState>({ status: "idle" });
+	const [repositoryOperation, setRepositoryOperation] =
+		useState<GitOperationState>({ status: "idle" });
 	const [commitDialogOpen, setCommitDialogOpen] = useState(false);
 	const [commitMessage, setCommitMessage] = useState("");
 	const [includeUnstaged, setIncludeUnstaged] = useState(true);
@@ -469,6 +635,10 @@ export function PinnedSummaryPanel({
 	const [pullRequestDescription, setPullRequestDescription] = useState("");
 	const [pullRequestIncludeUnstaged, setPullRequestIncludeUnstaged] =
 		useState(true);
+	const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
+	const [repositoryName, setRepositoryName] = useState("");
+	const [repositoryVisibility, setRepositoryVisibility] =
+		useState<GitHubRepositoryVisibility>("private");
 	const [branches, setBranches] = useState<string[]>([]);
 	const [branchesLoading, setBranchesLoading] = useState(false);
 	const [branchError, setBranchError] = useState<string | null>(null);
@@ -554,6 +724,20 @@ export function PinnedSummaryPanel({
 	const worktreeStatus = useWorktreeStatus(target, conversationId);
 	const git = gitStatus.is_repo ? gitStatus : null;
 	const branch = git?.branch ?? "Repository";
+	const githubRepositoryQuery = useQuery({
+		enabled: pullRequestsEnabled && Boolean(folder && git),
+		queryFn: ({ signal }) =>
+			folder
+				? fetchGitHubRepository(targetRef.current, folder, signal).catch(
+						() => null
+					)
+				: Promise.resolve(null),
+		queryKey: ["github-repository", target.url, folder],
+		refetchOnMount: "always",
+		refetchOnWindowFocus: true,
+		staleTime: 0,
+	});
+	const githubRepository = githubRepositoryQuery.data ?? null;
 	const { data: queriedPullRequest, isLoading: pullRequestLoading } =
 		useGitPullRequest(
 			target,
@@ -572,11 +756,21 @@ export function PinnedSummaryPanel({
 		isPullRequestBranch(branch) &&
 		(!existingPullRequest ||
 			["closed", "merged"].includes(gitPullRequestStatus(existingPullRequest)));
-	const baseBranch = branches.includes("main")
-		? "main"
-		: branches.includes("master")
-			? "master"
-			: "main";
+	const baseBranch = selectGitHubCompareBaseBranch(null, null, branches);
+	const compareBaseBranch = selectGitHubCompareBaseBranch(
+		existingPullRequest?.baseRefName,
+		githubRepository?.defaultBranch,
+		branches
+	);
+	const compareRepository = githubRepository
+		? githubRepository
+		: existingPullRequest?.repository
+			? { url: repositoryUrlFromName(existingPullRequest.repository) ?? "" }
+			: null;
+	const compareUrl =
+		git && compareRepository
+			? buildGitHubCompareUrl(compareRepository, branch, compareBaseBranch)
+			: null;
 
 	// An agent run mutates the tree, so re-read the moment it goes idle instead
 	// of waiting out the poll interval.
@@ -592,6 +786,12 @@ export function PinnedSummaryPanel({
 			invalidateGitStatus(folder);
 		}
 	}, [chatStatus, folder]);
+	useEffect(() => {
+		setGitSetup({ status: "idle" });
+		setRepositoryOperation({ status: "idle" });
+		setRepositoryDialogOpen(false);
+		setRepositoryName("");
+	}, [folder, target.url]);
 
 	const loadBranches = async () => {
 		if (!folder) {
@@ -623,9 +823,135 @@ export function PinnedSummaryPanel({
 		void loadBranches();
 	};
 
+	const openCreateRepositoryDialog = () => {
+		setRepositoryName((current) => current || defaultRepositoryName(folder));
+		setRepositoryOperation({ status: "idle" });
+		setRepositoryDialogOpen(true);
+	};
+
+	const handleInitializeGit = async () => {
+		if (!folder || gitSetup.status === "loading") {
+			return;
+		}
+		const controller = new AbortController();
+		activeGitOperationRef.current = controller;
+		setGitSetup({ status: "loading", phase: "initializing" });
+		try {
+			const result = await initializeGit(
+				targetRef.current,
+				folder,
+				controller.signal
+			);
+			if (controller.signal.aborted) {
+				return;
+			}
+			if (!result.success) {
+				setGitSetup({
+					status: "error",
+					message: result.error ?? "Could not create local Git.",
+				});
+				return;
+			}
+			setGitSetup({
+				status: "done",
+				label: result.initialized ? "Local Git ready" : "Local Git is ready",
+			});
+			invalidateGitStatus(folder);
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return;
+			}
+			setGitSetup({
+				status: "error",
+				message:
+					error instanceof Error
+						? error.message
+						: "Could not create local Git.",
+			});
+		} finally {
+			if (activeGitOperationRef.current === controller) {
+				activeGitOperationRef.current = null;
+			}
+		}
+	};
+
+	const handleCreateRepository = async (
+		visibility: GitHubRepositoryVisibility
+	) => {
+		const name = repositoryName.trim();
+		if (
+			!(folder && pullRequestsEnabled && name) ||
+			repositoryOperation.status === "loading"
+		) {
+			return;
+		}
+		const controller = new AbortController();
+		activeGitOperationRef.current = controller;
+		setRepositoryOperation({ status: "loading", phase: "committing" });
+		try {
+			const committed = await commitPush(
+				targetRef.current,
+				folder,
+				"Initial commit",
+				controller.signal,
+				"commit",
+				true
+			);
+			if (controller.signal.aborted) {
+				return;
+			}
+			if (!committed.success) {
+				setRepositoryOperation({
+					status: "error",
+					message: committed.error ?? "Could not create the initial commit.",
+				});
+				return;
+			}
+			setRepositoryOperation({
+				status: "loading",
+				phase: "creating-repository",
+			});
+			const repository = await createGitHubRepository(
+				targetRef.current,
+				folder,
+				{ name, visibility },
+				controller.signal
+			);
+			if (controller.signal.aborted) {
+				return;
+			}
+			setRepositoryOperation({
+				status: "done",
+				label: `Published ${repository.nameWithOwner}`,
+				url: repository.url,
+			});
+			setRepositoryDialogOpen(false);
+			setRepositoryName("");
+			invalidateGitStatus(folder);
+			void githubRepositoryQuery.refetch();
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return;
+			}
+			setRepositoryOperation({
+				status: "error",
+				message:
+					error instanceof Error
+						? error.message
+						: "Could not create the GitHub repository.",
+			});
+		} finally {
+			if (activeGitOperationRef.current === controller) {
+				activeGitOperationRef.current = null;
+			}
+		}
+	};
+
 	const handleRemoteGit = async (action: "pull" | "sync") => {
 		if (
 			!folder ||
+			gitSetup.status === "loading" ||
+			repositoryOperation.status === "loading" ||
 			commit.status === "loading" ||
 			pullRequest.status === "loading" ||
 			remote.status === "loading"
@@ -710,16 +1036,21 @@ export function PinnedSummaryPanel({
 	const stopGitOperation = () => {
 		activeGitOperationRef.current?.abort();
 		activeGitOperationRef.current = null;
+		setGitSetup({ status: "idle" });
 		setCommit({ status: "idle" });
 		setPullRequest({ status: "idle" });
 		setRemote({ status: "idle" });
+		setRepositoryOperation({ status: "idle" });
 		setCommitDialogOpen(false);
 		setPullRequestDialogOpen(false);
+		setRepositoryDialogOpen(false);
 	};
 
 	const handleCommitPush = async (action: GitCommitAction) => {
 		if (
 			!folder ||
+			gitSetup.status === "loading" ||
+			repositoryOperation.status === "loading" ||
 			commit.status === "loading" ||
 			pullRequest.status === "loading" ||
 			remote.status === "loading"
@@ -822,6 +1153,8 @@ export function PinnedSummaryPanel({
 	const handlePullRequest = async (action: PullRequestAction) => {
 		if (
 			!(folder && canCreatePullRequest) ||
+			gitSetup.status === "loading" ||
+			repositoryOperation.status === "loading" ||
 			commit.status === "loading" ||
 			pullRequest.status === "loading" ||
 			remote.status === "loading"
@@ -991,19 +1324,29 @@ export function PinnedSummaryPanel({
 				canCreatePullRequest={canCreatePullRequest}
 				chatRunning={chatRunning}
 				commit={commit}
+				compareUrl={compareUrl}
 				conversationId={conversationId}
 				existingPullRequest={existingPullRequest}
 				folder={folder}
 				git={git}
 				githubAppEnabled={pullRequestsEnabled}
+				githubRepository={githubRepository}
+				githubRepositoryLoading={
+					githubRepositoryQuery.isLoading || githubRepositoryQuery.isFetching
+				}
+				gitSetup={gitSetup}
 				hasWork={hasWork}
 				onFixCi={onAttachTextFile ? handleFixCi : undefined}
 				onFixMergeConflicts={
 					onAttachTextFile ? handleFixMergeConflicts : undefined
 				}
 				onHandOffToWorktree={handleHandOffToWorktree}
+				onInitializeGit={() => {
+					void handleInitializeGit();
+				}}
 				onInterruptChat={onInterruptChat}
 				onOpenCommit={openCommitDialog}
+				onOpenCreateRepository={openCreateRepositoryDialog}
 				onOpenPullRequest={openPullRequestDialog}
 				onPull={() => {
 					void handleRemoteGit("pull");
@@ -1016,7 +1359,9 @@ export function PinnedSummaryPanel({
 				pullRequest={pullRequest}
 				pullRequestLoading={pullRequestLoading}
 				remote={remote}
+				repositoryOperation={repositoryOperation}
 				showLineStats={showLineStats}
+				simpleMode={simpleMode}
 				target={target}
 				worktreeActive={worktreeStatus.active}
 				worktreeBranch={worktreeBranch}
@@ -1087,6 +1432,27 @@ export function PinnedSummaryPanel({
 					pullRequest.status === "loading" ? pullRequest.phase : undefined
 				}
 				title={pullRequestTitle}
+			/>
+			<CreateGitHubRepositoryDialog
+				error={
+					repositoryOperation.status === "error"
+						? repositoryOperation.message
+						: null
+				}
+				name={repositoryName}
+				onNameChange={setRepositoryName}
+				onOpenChange={setRepositoryDialogOpen}
+				onSubmit={(visibility) => {
+					void handleCreateRepository(visibility);
+				}}
+				onVisibilityChange={setRepositoryVisibility}
+				open={repositoryDialogOpen}
+				progress={
+					repositoryOperation.status === "loading"
+						? repositoryOperation.phase
+						: undefined
+				}
+				visibility={repositoryVisibility}
 			/>
 		</div>
 	);

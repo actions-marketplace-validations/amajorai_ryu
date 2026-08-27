@@ -18,6 +18,19 @@ export function writeProjectFile(path: string, content: string): Promise<void> {
 	return invokeWhenReady<void>("write_project_file", { path, content });
 }
 
+/** Write one Markdown file below a selected project folder. */
+export function writeProjectMarkdown(
+	root: string,
+	relativePath: string,
+	content: string
+): Promise<void> {
+	return invokeWhenReady<void>("write_project_markdown", {
+		content,
+		relativePath,
+		root,
+	});
+}
+
 /** List markdown files (recursive, bounded) under a workspace folder. */
 export function listProjectMarkdown(folder: string): Promise<string[]> {
 	return invokeWhenReady<string[]>("list_project_markdown", { folder });

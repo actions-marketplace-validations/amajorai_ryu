@@ -32,6 +32,7 @@ import type { Scorecard } from "../scorecard.ts";
 import { runScorecard } from "../scorecard.ts";
 import type {
 	CatalogEntry,
+	CatalogVersion,
 	PluginCatalogDetail,
 	VersionSnapshot,
 } from "../types.ts";
@@ -68,6 +69,7 @@ export function ListingDetailTabs({
 	onTabChange,
 	kind = "plugin",
 	fetchVersionDetail,
+	installVersion,
 }: {
 	/** Optional configured-agent review. Omitted on read-only hosts. */
 	agentScan?: () => Promise<CatalogScanResult>;
@@ -119,6 +121,9 @@ export function ListingDetailTabs({
 	 *  hosts with no such endpoint (the web catalog), which hides the affordance
 	 *  rather than showing one that cannot resolve. */
 	fetchVersionDetail?: (tag: string) => Promise<VersionSnapshot | null>;
+	/** Exact-version install/update action. Omitted on read-only or browse-only
+	 *  surfaces. */
+	installVersion?: (version: CatalogVersion) => Promise<void>;
 }) {
 	const [uncontrolledTab, setUncontrolledTab] = useState<DetailTabId>(
 		overview ? "overview" : "readme"
@@ -228,6 +233,7 @@ export function ListingDetailTabs({
 				<TabsContent className="pt-2" value="versions">
 					<VersionsPanel
 						fetchVersionDetail={fetchVersionDetail}
+						installVersion={installVersion}
 						versions={versions}
 					/>
 				</TabsContent>

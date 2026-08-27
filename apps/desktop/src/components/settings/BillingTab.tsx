@@ -26,6 +26,7 @@ import { useCallback, useEffect, useState } from "react";
 import { sileo } from "sileo";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { OrgBillingContext } from "@/src/components/billing/OrgBillingContext.tsx";
+import { useStepUp } from "@/src/components/StepUpDialog.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { useOrgBillingStatus } from "@/src/hooks/useOrgBillingStatus.ts";
@@ -390,6 +391,7 @@ function SpendControlsSection() {
 	const [saving, setSaving] = useState(false);
 	const [loadingSettings, setLoadingSettings] = useState(false);
 	const [portalPending, setPortalPending] = useState(false);
+	const stepUp = useStepUp();
 
 	const [budgetText, setBudgetText] = useState("0");
 
@@ -503,13 +505,18 @@ function SpendControlsSection() {
 			}
 			setSaving(true);
 			try {
-				const result = await putAutoTopup({
-					enabled: nextEnabled,
-					amountCents,
-					thresholdCents,
-					monthlyCapCents,
-					cooldownSec: settings?.cooldownSec,
-				});
+				const result = await stepUp.guard("billing", () =>
+					putAutoTopup({
+						enabled: nextEnabled,
+						amountCents,
+						thresholdCents,
+						monthlyCapCents,
+						cooldownSec: settings?.cooldownSec,
+					})
+				);
+				if (result === null) {
+					return false;
+				}
 				if (result) {
 					setSettings(result);
 					setEnabled(result.enabled);
@@ -524,7 +531,7 @@ function SpendControlsSection() {
 				setSaving(false);
 			}
 		},
-		[topupText, thresholdText, capText, settings]
+		[topupText, thresholdText, capText, settings, stepUp]
 	);
 
 	const handleToggle = useCallback(
@@ -553,14 +560,20 @@ function SpendControlsSection() {
 	const handleManagePayment = useCallback(async () => {
 		setPortalPending(true);
 		try {
-			const { url } = await settingsApi.billing.getPortalUrl();
+			const portal = await stepUp.guard("billing", () =>
+				settingsApi.billing.getPortalUrl()
+			);
+			if (portal === null) {
+				return;
+			}
+			const { url } = portal;
 			await openExternal(url);
 		} catch {
 			toast.error("Couldn't open the billing portal. Please try again.");
 		} finally {
 			setPortalPending(false);
 		}
-	}, []);
+	}, [stepUp]);
 
 	const saveBudget = useCallback(async () => {
 		const micro = Math.max(0, dollarTextToMicro(budgetText));
@@ -624,7 +637,7 @@ function SpendControlsSection() {
 								Your org's spendable credit.
 							</p>
 						</div>
-						<span className="font-heading font-medium text-sm tabular-nums">
+						<span className="font-medium font-mono text-sm tabular-nums">
 							{balanceLabel}
 						</span>
 					</div>
@@ -756,6 +769,7 @@ function SpendControlsSection() {
 					</div>
 				</SettingsCard>
 			</SettingsSection>
+			{stepUp.dialog}
 		</>
 	);
 }
@@ -773,6 +787,7 @@ export function BillingTab() {
 	const { plan: organizationPlan } = useOrgBillingStatus();
 
 	const activeOrgId = useActiveOrgId();
+	const stepUp = useStepUp();
 
 	const [pendingAction, setPendingAction] = useState<
 		"manage" | "lifetime" | null
@@ -792,7 +807,13 @@ export function BillingTab() {
 	const handleManageSubscription = async () => {
 		setPendingAction("manage");
 		try {
-			const { url } = await settingsApi.billing.getPortalUrl();
+			const portal = await stepUp.guard("billing", () =>
+				settingsApi.billing.getPortalUrl()
+			);
+			if (portal === null) {
+				return;
+			}
+			const { url } = portal;
 			await openExternal(url);
 		} catch {
 			sileo.error({
@@ -806,7 +827,13 @@ export function BillingTab() {
 	const handleLifetimeCheckout = async () => {
 		setPendingAction("lifetime");
 		try {
-			const { url } = await settingsApi.billing.createLifetimeCheckout();
+			const checkout = await stepUp.guard("billing", () =>
+				settingsApi.billing.createLifetimeCheckout()
+			);
+			if (checkout === null) {
+				return;
+			}
+			const { url } = checkout;
 			await openExternal(url);
 		} catch {
 			sileo.error({ title: "Failed to open checkout. Please try again." });
@@ -945,7 +972,7 @@ export function BillingTab() {
 						{invoicesData.invoices.map((invoice) => (
 							<SettingsItem
 								actions={
-									<span className="font-heading font-medium text-sm tabular-nums">
+									<span className="font-medium font-mono text-sm tabular-nums">
 										{formatMinorCurrency(invoice.amount, invoice.currency)}
 									</span>
 								}
@@ -965,6 +992,7 @@ export function BillingTab() {
 					<p className="px-3 text-muted-foreground text-sm">No invoices yet.</p>
 				)}
 			</SettingsSection>
+			{stepUp.dialog}
 		</div>
 	);
 }

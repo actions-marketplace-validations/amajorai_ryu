@@ -110,6 +110,75 @@ impl PluginStorage {
         Ok(())
     }
 
+    /// Atomically replace a value only when it still equals `expected`.
+    /// `None` means the key must be absent; a `None` replacement deletes it.
+    /// The connection mutex is held across the read and write so concurrent
+    /// plugin-host calls cannot lose a read-modify-write update.
+    pub async fn compare_and_set(
+        &self,
+        plugin_id: &str,
+        namespace: &str,
+        key: &str,
+        expected: Option<&str>,
+        value: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let current = conn
+            .query_row(
+                "SELECT value FROM plugin_kv WHERE plugin_id = ?1 AND namespace = ?2 AND key = ?3",
+                params![plugin_id, namespace, key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("reading plugin_kv for compare_and_set")?;
+        if current.as_deref() != expected {
+            return Ok(false);
+        }
+        match value {
+            Some(value) => {
+                conn.execute(
+                    "INSERT INTO plugin_kv (plugin_id, namespace, key, value, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(plugin_id, namespace, key)
+                     DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    params![plugin_id, namespace, key, value, now_millis()],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "DELETE FROM plugin_kv WHERE plugin_id = ?1 AND namespace = ?2 AND key = ?3",
+                    params![plugin_id, namespace, key],
+                )?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Move legacy unscoped namespaces into one authenticated user's tenant.
+    /// Rows already carrying a tenant prefix win on a rerun, so a failed schema
+    /// version write cannot duplicate or overwrite newer state.
+    pub async fn migrate_legacy_namespaces(&self, tenant: &str) -> Result<usize> {
+        let tenant = tenant.trim();
+        if tenant.is_empty() {
+            return Ok(0);
+        }
+        let prefix = format!("tenant:{tenant}:");
+        let conn = self.conn.lock().await;
+        let transaction = conn.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO plugin_kv (plugin_id, namespace, key, value, updated_at)
+             SELECT plugin_id, ?1 || namespace, key, value, updated_at
+             FROM plugin_kv WHERE namespace NOT LIKE 'tenant:%'",
+            params![prefix],
+        )?;
+        let removed = transaction.execute(
+            "DELETE FROM plugin_kv WHERE namespace NOT LIKE 'tenant:%'",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(removed)
+    }
+
     /// Delete a value (no-op if absent).
     pub async fn delete(&self, plugin_id: &str, namespace: &str, key: &str) -> Result<()> {
         let conn = self.conn.lock().await;
@@ -214,6 +283,48 @@ mod tests {
         assert_eq!(s.get("p", "ns", "k").await.unwrap().as_deref(), Some("v2"));
         s.delete("p", "ns", "k").await.unwrap();
         assert_eq!(s.get("p", "ns", "k").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn compare_and_set_is_atomic_and_checks_absence() {
+        let s = PluginStorage::in_memory().unwrap();
+        assert!(s
+            .compare_and_set("p", "ns", "k", None, Some("v1"))
+            .await
+            .unwrap());
+        assert!(!s
+            .compare_and_set("p", "ns", "k", None, Some("v2"))
+            .await
+            .unwrap());
+        assert!(s
+            .compare_and_set("p", "ns", "k", Some("v1"), Some("v2"))
+            .await
+            .unwrap());
+        assert!(s
+            .compare_and_set("p", "ns", "k", Some("v2"), None)
+            .await
+            .unwrap());
+        assert_eq!(s.get("p", "ns", "k").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn migrates_legacy_namespaces_once_into_a_tenant() {
+        let s = PluginStorage::in_memory().unwrap();
+        s.set("p", "default", "k", "legacy").await.unwrap();
+        s.set("p", "tenant:other:default", "k", "other")
+            .await
+            .unwrap();
+
+        assert_eq!(s.migrate_legacy_namespaces("user-1").await.unwrap(), 1);
+        assert_eq!(s.get("p", "default", "k").await.unwrap(), None);
+        assert_eq!(
+            s.get("p", "tenant:user-1:default", "k")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("legacy")
+        );
+        assert_eq!(s.migrate_legacy_namespaces("user-1").await.unwrap(), 0);
     }
 
     #[tokio::test]

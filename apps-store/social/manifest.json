@@ -1,6 +1,6 @@
 {
-  "tags": ["social","scheduling","publishing","calendar","inbox"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": ["social", "scheduling", "publishing", "calendar", "inbox"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-social",
   "homepage": "https://github.com/amajorai/ryu-social",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -49,23 +49,101 @@
         "command_env": "RYU_SOCIAL_BIN",
         "port_env": "RYU_SOCIAL_PORT"
       },
+      "host_api": {
+        "grants": ["tools.invoke"]
+      },
       "port": 8005,
       "health_path": "/health",
       "http": {
         "mount": "/api/social",
         "public_mount": "/api/social",
         "routes": [
-          { "path": "/workspaces", "permission": "social.view" },
-          { "path": "/workspaces/:id", "permission": "social.view" },
-          { "path": "/accounts", "permission": "social.view" },
-          { "path": "/accounts/:id", "permission": "social.view" },
+          {
+            "path": "/workspaces",
+            "method": "GET",
+            "permission": "social.view"
+          },
+          {
+            "path": "/workspaces",
+            "method": "POST",
+            "permission": "social.publish"
+          },
+          {
+            "path": "/workspaces/:id",
+            "method": "GET",
+            "permission": "social.view"
+          },
+          {
+            "path": "/workspaces/:id",
+            "method": "PATCH",
+            "permission": "social.publish"
+          },
+          {
+            "path": "/workspaces/:id",
+            "method": "DELETE",
+            "permission": "social.publish"
+          },
+          { "path": "/accounts", "method": "GET", "permission": "social.view" },
+          {
+            "path": "/accounts",
+            "method": "POST",
+            "permission": "social.publish"
+          },
+          {
+            "path": "/accounts/:id",
+            "method": "GET",
+            "permission": "social.view"
+          },
+          {
+            "path": "/accounts/:id",
+            "method": "DELETE",
+            "permission": "social.publish"
+          },
           { "path": "/accounts/:id/connect", "permission": "social.publish" },
           { "path": "/accounts/:id/capabilities", "permission": "social.view" },
-          { "path": "/drafts", "permission": "social.view" },
-          { "path": "/drafts/:id", "permission": "social.view" },
-          { "path": "/posts", "permission": "social.view" },
+          { "path": "/drafts", "method": "GET", "permission": "social.view" },
+          {
+            "path": "/drafts",
+            "method": "POST",
+            "permission": "social.publish"
+          },
+          {
+            "path": "/drafts/:id",
+            "method": "GET",
+            "permission": "social.view"
+          },
+          {
+            "path": "/drafts/:id",
+            "method": "PATCH",
+            "permission": "social.publish"
+          },
+          {
+            "path": "/drafts/:id",
+            "method": "DELETE",
+            "permission": "social.publish"
+          },
+          { "path": "/posts", "method": "GET", "permission": "social.view" },
+          {
+            "path": "/posts",
+            "method": "POST",
+            "permission": "social.publish"
+          },
           { "path": "/posts/validate", "permission": "social.publish" },
-          { "path": "/posts/:id", "permission": "social.view" },
+          {
+            "path": "/posts/:id",
+            "method": "GET",
+            "permission": "social.view"
+          },
+          {
+            "path": "/posts/:id",
+            "method": "PATCH",
+            "permission": "social.publish"
+          },
+          {
+            "path": "/posts/:id",
+            "method": "DELETE",
+            "permission": "social.publish"
+          },
           { "path": "/posts/:id/schedule", "permission": "social.publish" },
           { "path": "/posts/:id/cancel", "permission": "social.publish" },
           { "path": "/posts/:id/publish-now", "permission": "social.publish" },
@@ -75,24 +153,72 @@
           { "path": "/best-times", "permission": "social.view" },
           { "path": "/history", "permission": "social.view" },
           { "path": "/history/:id", "permission": "social.view" },
-          { "path": "/history/:id/refresh-engagement", "permission": "social.publish" },
+          {
+            "path": "/history/:id/refresh-engagement",
+            "permission": "social.publish"
+          },
           { "path": "/inbox", "permission": "social.view" },
           { "path": "/inbox/refresh", "permission": "social.view" },
           { "path": "/inbox/:id/reply", "permission": "social.publish" },
           { "path": "/inbox/:id/read", "permission": "social.view" },
-          { "path": "/templates", "permission": "social.view" },
-          { "path": "/templates/:id", "permission": "social.view" },
+          {
+            "path": "/templates",
+            "method": "GET",
+            "permission": "social.view"
+          },
+          {
+            "path": "/templates",
+            "method": "POST",
+            "permission": "social.publish"
+          },
+          {
+            "path": "/templates/:id",
+            "method": "GET",
+            "permission": "social.view"
+          },
+          {
+            "path": "/templates/:id",
+            "method": "PATCH",
+            "permission": "social.publish"
+          },
+          {
+            "path": "/templates/:id",
+            "method": "DELETE",
+            "permission": "social.publish"
+          },
           { "path": "/templates/:id/use", "permission": "social.publish" },
-          { "path": "/media", "permission": "social.view" },
-          { "path": "/media/:id", "permission": "social.view" },
-          { "path": "/activity", "permission": "social.view" },
-          { "path": "/settings", "permission": "social.publish" },
+          { "path": "/media", "method": "GET", "permission": "social.view" },
+          {
+            "path": "/media",
+            "method": "POST",
+            "permission": "social.publish"
+          },
+          {
+            "path": "/media/:id",
+            "method": "DELETE",
+            "permission": "social.publish"
+          },
+          { "path": "/activity", "method": "GET", "permission": "social.view" },
+          { "path": "/settings", "method": "GET", "permission": "social.view" },
+          {
+            "path": "/settings",
+            "method": "PATCH",
+            "permission": "social.publish"
+          },
           { "path": "/platforms", "permission": "social.view" }
         ]
       }
     }
   ],
-  "permission_grants": ["social:crud", "hook:side-model", "shell:integrate"],
+  "permission_grants": [
+    "social:crud",
+    "tools.invoke",
+    "hook:side-model",
+    "shell:integrate",
+    "core:list_agents",
+    "ui:toast",
+    "ui:declarative-http"
+  ],
   "permission_levels": [
     {
       "id": "social.view",
@@ -111,7 +237,19 @@
     "icon": "share-08"
   },
   "contributes": {
-  "chat_widget_templates": [{"id":"social.chat","title":"Outpost widget","description":"Open Outpost data in a host-rendered chat widget.","triggers":["outpost widget"],"examples":["Show me a outpost widget"],"backing":{"view_id":"surface:social"},"display_mode":"inline","safe_action_ids":[],"availability":"available"}],
+    "chat_widget_templates": [
+      {
+        "id": "social.chat",
+        "title": "Outpost widget",
+        "description": "Open Outpost data in a host-rendered chat widget.",
+        "triggers": ["outpost widget"],
+        "examples": ["Show me a outpost widget"],
+        "backing": { "view_id": "surface:social" },
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "available"
+      }
+    ],
     "data_categories": [
       {
         "id": "social",
@@ -244,6 +382,72 @@
             "description": "Try a different search, or write one in Outpost's Library."
           }
         }
+      }
+    ],
+    "sidebar_buttons": [
+      {
+        "id": "social-overview",
+        "title": "Overview",
+        "icon": "dashboard-square-02",
+        "target": "/plugin/app__social-companion",
+        "context": { "section": "overview" },
+        "order": 60
+      },
+      {
+        "id": "social-inbox",
+        "title": "Inbox",
+        "icon": "inbox",
+        "target": "/plugin/app__social-companion",
+        "context": { "section": "inbox" },
+        "order": 61
+      },
+      {
+        "id": "social-compose",
+        "title": "Compose",
+        "icon": "edit-02",
+        "target": "/plugin/app__social-companion",
+        "context": { "section": "compose" },
+        "order": 62
+      },
+      {
+        "id": "social-queue",
+        "title": "Queue",
+        "icon": "calendar-03",
+        "target": "/plugin/app__social-companion",
+        "context": { "section": "queue" },
+        "order": 63
+      },
+      {
+        "id": "social-library",
+        "title": "Library",
+        "icon": "book-02",
+        "target": "/plugin/app__social-companion",
+        "context": { "section": "library" },
+        "order": 64
+      },
+      {
+        "id": "social-calendar",
+        "title": "Calendar",
+        "icon": "calendar-01",
+        "target": "/plugin/app__social-companion",
+        "context": { "section": "calendar" },
+        "order": 65
+      },
+      {
+        "id": "social-activity",
+        "title": "Activity",
+        "icon": "chart-line-data-01",
+        "target": "/plugin/app__social-companion",
+        "context": { "section": "activity" },
+        "order": 66
+      },
+      {
+        "id": "social-settings",
+        "title": "Settings",
+        "icon": "settings-01",
+        "target": "/plugin/app__social-companion",
+        "context": { "section": "settings" },
+        "order": 67
       }
     ],
     "sidebar_sections": [

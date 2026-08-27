@@ -1182,7 +1182,7 @@ function PoolGrantBadge({
 				render={
 					<span
 						aria-label={`${label}: ${amount} of granted credit left`}
-						className="flex shrink-0 items-center gap-1 font-heading text-[10px] text-muted-foreground/70 tabular-nums"
+						className="flex shrink-0 items-center gap-1 font-mono text-[10px] text-muted-foreground/70 tabular-nums"
 					/>
 				}
 			>

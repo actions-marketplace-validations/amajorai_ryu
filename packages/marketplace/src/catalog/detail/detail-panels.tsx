@@ -17,15 +17,28 @@ import {
 	Tag01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "@ryu/ui/components/alert-dialog.tsx";
 import { Badge } from "@ryu/ui/components/badge.tsx";
+import { Button } from "@ryu/ui/components/button.tsx";
 import { formatCount as formatSharedCount } from "@ryu/ui/lib/number-format.ts";
 import type { ComponentType } from "react";
 import { useState } from "react";
 import { grantDescription, grantLabel } from "../grant-labels.ts";
 import { safeHttpUrl } from "../safe-url.ts";
+import { versionStabilityLabel } from "../stability.ts";
 import { surfaceLabel } from "../surface-labels.ts";
 import type {
 	CatalogEntry,
+	CatalogVersion,
 	PluginCatalogDetail,
 	VersionSnapshot,
 } from "../types.ts";
@@ -266,6 +279,11 @@ function VersionSnapshotRow({
 	const { snapshot } = state;
 	const facts = [
 		snapshot.description ? `“${snapshot.description}”` : null,
+		`Stability: ${versionStabilityLabel(
+			snapshot.stability,
+			snapshot.stabilityKnown === true,
+			false
+		)}`,
 		snapshot.license ? `Licence: ${snapshot.license}` : null,
 		snapshot.engines?.ryu ? `Requires Ryu ${snapshot.engines.ryu}` : null,
 		snapshot.readme
@@ -292,15 +310,103 @@ function VersionSnapshotRow({
 	);
 }
 
+function HistoricalVersionInstallAction({
+	isCurrent,
+	onInstall,
+	version,
+}: {
+	isCurrent: boolean;
+	onInstall: (version: CatalogVersion) => Promise<void>;
+	version: CatalogVersion;
+}) {
+	const [confirmOpen, setConfirmOpen] = useState(false);
+	const [state, setState] = useState<
+		"idle" | "installing" | "installed" | "error"
+	>("idle");
+	const [error, setError] = useState<string | null>(null);
+	const older = !isCurrent;
+
+	const install = async () => {
+		setConfirmOpen(false);
+		setState("installing");
+		setError(null);
+		try {
+			await onInstall(version);
+			setState("installed");
+		} catch (cause) {
+			setState("error");
+			setError(cause instanceof Error ? cause.message : "Install failed");
+		}
+	};
+
+	if (state === "installed") {
+		return (
+			<span className="text-success text-xs" role="status">
+				Installed {version.version}
+			</span>
+		);
+	}
+
+	const button = (
+		<Button
+			aria-label={`Install ${version.version}`}
+			loading={state === "installing"}
+			onClick={() => {
+				if (older) {
+					setConfirmOpen(true);
+					return;
+				}
+				install().catch(() => undefined);
+			}}
+			size="sm"
+			variant="ghost"
+		>
+			<HugeiconsIcon className="size-3.5" icon={Download01Icon} />
+			Install this version
+		</Button>
+	);
+
+	return (
+		<div className="flex flex-col items-end gap-1">
+			{button}
+			{error ? (
+				<p className="max-w-56 text-right text-destructive text-xs">{error}</p>
+			) : null}
+			<AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
+				<AlertDialogContent>
+					<AlertDialogHeader>
+						<AlertDialogTitle>Install {version.version}?</AlertDialogTitle>
+						<AlertDialogDescription>
+							This is an older Marketplace release. Ryu will verify and install
+							this exact version; it will not silently substitute the latest
+							build.
+						</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel>Cancel</AlertDialogCancel>
+						<AlertDialogAction onClick={() => install().catch(() => undefined)}>
+							Install version
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+		</div>
+	);
+}
+
 export function VersionsPanel({
 	versions,
 	fetchVersionDetail,
+	installVersion,
 }: {
 	versions: NonNullable<PluginCatalogDetail["versions"]>;
 	/** Host-supplied reader for one version's snapshot. Injected because this
 	 *  package is host-agnostic — the desktop talks to Core, the web host has no
 	 *  such endpoint and simply omits it, which hides the affordance entirely. */
 	fetchVersionDetail?: (tag: string) => Promise<VersionSnapshot | null>;
+	/** Exact-version install/update action. Omitted for read-only or browse-only
+	 *  surfaces. */
+	installVersion?: (version: CatalogVersion) => Promise<void>;
 }) {
 	return (
 		<ul className="flex flex-col gap-1.5">
@@ -318,9 +424,15 @@ export function VersionsPanel({
 									Current
 								</Badge>
 							) : null}
-							{version.prerelease ? (
+							{version.prerelease ||
+							version.stability ||
+							version.stabilityKnown !== undefined ? (
 								<Badge className="text-xs" variant="outline">
-									Pre-release
+									{versionStabilityLabel(
+										version.stability,
+										version.stabilityKnown === true,
+										version.prerelease === true
+									)}
 								</Badge>
 							) : null}
 							{version.tagOnly ? (
@@ -336,6 +448,15 @@ export function VersionsPanel({
 								{published ? <span>{published}</span> : null}
 							</span>
 						</div>
+						{installVersion &&
+						!version.tagOnly &&
+						version.installable !== false ? (
+							<HistoricalVersionInstallAction
+								isCurrent={index === 0}
+								onInstall={installVersion}
+								version={version}
+							/>
+						) : null}
 						{version.notes ? (
 							<p className="mt-1 whitespace-pre-wrap text-muted-foreground text-xs leading-relaxed">
 								{version.notes}

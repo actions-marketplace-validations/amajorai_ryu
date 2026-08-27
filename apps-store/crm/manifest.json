@@ -1,6 +1,6 @@
 {
-  "tags": ["crm","contacts","pipeline","deals","sales"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": ["crm", "contacts", "pipeline", "deals", "sales"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-crm",
   "homepage": "https://github.com/amajorai/ryu-crm",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -51,7 +51,10 @@
               "type": "string",
               "description": "Optional object slug to scope the search to, e.g. `company`, `person`, `deal`. Omit to search everything."
             },
-            "limit": { "type": "integer", "description": "Max hits. Defaults to the node's page size; clamped to its ceiling." }
+            "limit": {
+              "type": "integer",
+              "description": "Max hits. Defaults to the node's page size; clamped to its ceiling."
+            }
           }
         }
       }
@@ -73,10 +76,22 @@
           "type": "object",
           "required": ["object", "value"],
           "properties": {
-            "object": { "type": "string", "description": "Object slug, e.g. `company`, `person`, `deal`." },
-            "field": { "type": "string", "description": "Field slug to match on, e.g. `email` or `domain`. Omit to match the object's title field." },
-            "value": { "type": "string", "description": "The exact value to match." },
-            "limit": { "type": "integer", "description": "Max records to return." }
+            "object": {
+              "type": "string",
+              "description": "Object slug, e.g. `company`, `person`, `deal`."
+            },
+            "field": {
+              "type": "string",
+              "description": "Field slug to match on, e.g. `email` or `domain`. Omit to match the object's title field."
+            },
+            "value": {
+              "type": "string",
+              "description": "The exact value to match."
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Max records to return."
+            }
           }
         }
       }
@@ -98,7 +113,10 @@
           "type": "object",
           "required": ["record_id"],
           "properties": {
-            "record_id": { "type": "string", "description": "The record's id, as returned by search or find." }
+            "record_id": {
+              "type": "string",
+              "description": "The record's id, as returned by search or find."
+            }
           }
         }
       }
@@ -120,7 +138,10 @@
           "type": "object",
           "required": ["object", "values"],
           "properties": {
-            "object": { "type": "string", "description": "Object slug, e.g. `company`, `person`, `deal`." },
+            "object": {
+              "type": "string",
+              "description": "Object slug, e.g. `company`, `person`, `deal`."
+            },
             "values": {
               "type": "object",
               "description": "Field values keyed by field slug. Currency fields are integer cents. Dates and datetimes are RFC-3339 strings. A select or status field takes one of its declared option values.",
@@ -147,7 +168,10 @@
           "type": "object",
           "required": ["record_id", "values"],
           "properties": {
-            "record_id": { "type": "string", "description": "The record to update." },
+            "record_id": {
+              "type": "string",
+              "description": "The record to update."
+            },
             "values": {
               "type": "object",
               "description": "Field values keyed by field slug. Only the fields present are touched.",
@@ -174,16 +198,31 @@
           "type": "object",
           "required": ["record_id", "kind", "title"],
           "properties": {
-            "record_id": { "type": "string", "description": "The record this happened against." },
+            "record_id": {
+              "type": "string",
+              "description": "The record this happened against."
+            },
             "kind": {
               "type": "string",
               "enum": ["note", "call", "meeting"],
               "description": "What kind of entry this is. `field_change` and `stage_change` are written by the store itself and cannot be logged here."
             },
-            "title": { "type": "string", "description": "One-line summary shown in the timeline." },
-            "body": { "type": "string", "description": "Optional longer detail." },
-            "assignee": { "type": "string", "description": "Optional person this is attributed to." },
-            "due_at": { "type": "string", "description": "Ignored for notes/calls/meetings; use crm.create_task instead." }
+            "title": {
+              "type": "string",
+              "description": "One-line summary shown in the timeline."
+            },
+            "body": {
+              "type": "string",
+              "description": "Optional longer detail."
+            },
+            "assignee": {
+              "type": "string",
+              "description": "Optional person this is attributed to."
+            },
+            "due_at": {
+              "type": "string",
+              "description": "Ignored for notes/calls/meetings; use crm.create_task instead."
+            }
           }
         }
       }
@@ -206,10 +245,16 @@
           "required": ["title"],
           "properties": {
             "title": { "type": "string", "description": "What needs doing." },
-            "record_id": { "type": "string", "description": "Optional record to hang the task off. Omit for a standalone to-do." },
+            "record_id": {
+              "type": "string",
+              "description": "Optional record to hang the task off. Omit for a standalone to-do."
+            },
             "body": { "type": "string", "description": "Optional detail." },
             "assignee": { "type": "string", "description": "Who owns it." },
-            "due_at": { "type": "string", "description": "RFC-3339 timestamp. Required if you want the task to raise `task.due` when it comes due." }
+            "due_at": {
+              "type": "string",
+              "description": "RFC-3339 timestamp. Required if you want the task to raise `task.due` when it comes due."
+            }
           }
         }
       }
@@ -230,10 +275,22 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "object_id": { "type": "string", "description": "Object slug or id. Defaults to `deal`." },
-            "field_id": { "type": "string", "description": "The status field to group by. Defaults to the object's own status field." },
-            "value_field_id": { "type": "string", "description": "The currency/number field to sum per stage. Defaults to the object's amount field." },
-            "include_closed": { "type": "boolean", "description": "Include stages marked as closed/won/lost. Defaults to false, i.e. open pipeline only." }
+            "object_id": {
+              "type": "string",
+              "description": "Object slug or id. Defaults to `deal`."
+            },
+            "field_id": {
+              "type": "string",
+              "description": "The status field to group by. Defaults to the object's own status field."
+            },
+            "value_field_id": {
+              "type": "string",
+              "description": "The currency/number field to sum per stage. Defaults to the object's amount field."
+            },
+            "include_closed": {
+              "type": "boolean",
+              "description": "Include stages marked as closed/won/lost. Defaults to false, i.e. open pipeline only."
+            }
           }
         }
       }
@@ -259,13 +316,40 @@
           { "path": "/objects", "permission": "crm.view" },
           { "path": "/objects/:object", "permission": "crm.view" },
           { "path": "/objects/:object/fields", "permission": "crm.view" },
-          { "path": "/objects/:object/fields/reorder", "permission": "crm.admin" },
+          {
+            "path": "/objects/:object/fields/reorder",
+            "permission": "crm.admin"
+          },
           { "path": "/fields/:field_id", "permission": "crm.admin" },
-          { "path": "/objects/:object/records", "permission": "crm.edit" },
-          { "path": "/objects/:object/records/query", "permission": "crm.view" },
-          { "path": "/objects/:object/records/validate", "permission": "crm.edit" },
+          {
+            "path": "/objects/:object/records",
+            "method": "GET",
+            "permission": "crm.view"
+          },
+          {
+            "path": "/objects/:object/records",
+            "method": "POST",
+            "permission": "crm.edit"
+          },
+          {
+            "path": "/objects/:object/records/query",
+            "permission": "crm.view"
+          },
+          {
+            "path": "/objects/:object/records/validate",
+            "permission": "crm.edit"
+          },
           { "path": "/objects/:object/duplicates", "permission": "crm.view" },
-          { "path": "/records/:record_id", "permission": "crm.edit" },
+          {
+            "path": "/records/:record_id",
+            "method": "GET",
+            "permission": "crm.view"
+          },
+          {
+            "path": "/records/:record_id",
+            "method": "PATCH",
+            "permission": "crm.edit"
+          },
           { "path": "/records/:record_id/restore", "permission": "crm.edit" },
           { "path": "/records/:record_id/links", "permission": "crm.edit" },
           { "path": "/records/:record_id/unlink", "permission": "crm.edit" },
@@ -281,12 +365,21 @@
           { "path": "/lists/:list_id/fields", "permission": "crm.edit" },
           { "path": "/lists/:list_id/entries", "permission": "crm.edit" },
           { "path": "/lists/:list_id/entries/query", "permission": "crm.view" },
-          { "path": "/lists/:list_id/entries/reorder", "permission": "crm.edit" },
+          {
+            "path": "/lists/:list_id/entries/reorder",
+            "permission": "crm.edit"
+          },
           { "path": "/list-entries/:entry_id", "permission": "crm.edit" },
-          { "path": "/records/:record_id/activities", "permission": "crm.edit" },
+          {
+            "path": "/records/:record_id/activities",
+            "permission": "crm.edit"
+          },
           { "path": "/activities", "permission": "crm.edit" },
           { "path": "/activities/:activity_id", "permission": "crm.edit" },
-          { "path": "/activities/:activity_id/complete", "permission": "crm.edit" },
+          {
+            "path": "/activities/:activity_id/complete",
+            "permission": "crm.edit"
+          },
           { "path": "/tasks", "permission": "crm.edit" },
           { "path": "/imports", "permission": "crm.admin" },
           { "path": "/imports/:import_id", "permission": "crm.admin" },
@@ -311,7 +404,11 @@
       }
     }
   ],
-  "permission_grants": ["crm:crud", "tool:http-egress:127.0.0.1"],
+  "permission_grants": [
+    "crm:crud",
+    "tool:http-egress:127.0.0.1",
+    "ui:declarative-http"
+  ],
   "permission_levels": [
     {
       "id": "crm.view",
@@ -332,7 +429,19 @@
     }
   ],
   "contributes": {
-  "chat_widget_templates": [{"id":"crm.chat","title":"Harbor widget","description":"Harbor chat widget metadata is coming soon; no render tool is available yet.","triggers":["harbor widget"],"examples":["Show me a harbor widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}],
+    "chat_widget_templates": [
+      {
+        "id": "crm.chat",
+        "title": "Harbor widget",
+        "description": "Harbor chat widget metadata is coming soon; no render tool is available yet.",
+        "triggers": ["harbor widget"],
+        "examples": ["Show me a harbor widget"],
+        "backing": {},
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "coming-soon"
+      }
+    ],
     "dock_panels": [
       {
         "id": "crm",

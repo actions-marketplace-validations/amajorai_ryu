@@ -155,6 +155,11 @@ import {
 } from "@/src/lib/api/sandboxes.ts";
 import type { SystemInfo } from "@/src/lib/api/system.ts";
 import { listTtsEngines, type TtsEngine } from "@/src/lib/api/voice.ts";
+import {
+	connectionDisplayName,
+	connectionSurfaceMeta,
+} from "@/src/lib/connection-surface.ts";
+import { creditBalanceStatus } from "@/src/lib/credit-warning.ts";
 import { collapsesNodeSections } from "@/src/lib/interface-level.ts";
 import {
 	type CatalogItem,
@@ -3005,11 +3010,6 @@ function relativeAge(lastSeen: number): string {
 	return `${Math.floor(secs / 60)}m ago`;
 }
 
-/** Best display label for a connected client: name → email → device → anon. */
-function clientDisplayName(c: ConnectedClient): string {
-	return c.userName ?? c.userId ?? c.clientLabel ?? "Anonymous";
-}
-
 /**
  * "Connected" section in the node dropdown: the clients currently talking to
  * THIS node (desktop / CLI / mobile / extension), newest activity first. This is
@@ -3034,7 +3034,8 @@ function ConnectedSection({
 				Connected · {clients.length}
 			</p>
 			{clients.map((c) => {
-				const device = c.clientLabel ?? c.surface;
+				const surface = connectionSurfaceMeta(c.surface);
+				const displayName = connectionDisplayName(c);
 				return (
 					<div
 						className="flex items-center gap-2 px-2 py-1 text-xs"
@@ -3044,20 +3045,23 @@ function ConnectedSection({
 							aria-hidden
 							className="size-1.5 shrink-0 rounded-full bg-success"
 						/>
+						<HugeiconsIcon
+							aria-hidden
+							className="size-3.5 shrink-0 text-muted-foreground"
+							icon={surface.icon}
+						/>
 						<AutoScrollText
 							className="flex-1 text-muted-foreground"
-							title={`${clientDisplayName(c)}${c.clientId === selfClientId ? " (you)" : ""}`}
+							title={`${displayName}${c.clientId === selfClientId ? " (you)" : ""}`}
 						>
-							{clientDisplayName(c)}
+							{displayName}
 							{c.clientId === selfClientId && (
 								<span className="text-muted-foreground/50"> (you)</span>
 							)}
 						</AutoScrollText>
-						{device && (
-							<span className="shrink-0 text-[10px] text-muted-foreground/60">
-								{device}
-							</span>
-						)}
+						<span className="shrink-0 text-[10px] text-muted-foreground/60">
+							{surface.label}
+						</span>
 						<span className="shrink-0 text-[10px] text-muted-foreground/50 tabular-nums">
 							{relativeAge(c.lastSeen)}
 						</span>
@@ -3076,49 +3080,122 @@ function ConnectedSection({
  * when the user is signed out / has no managed wallet, so a local-only install
  * shows no wallet row.
  */
-function ManagedNodeWallet() {
-	const openSettings = useSettingsDialog((s) => s.openSettings);
-	const { organization } = useOrgBillingStatus();
-	const { authed, wallet, entitlement, walletEmpty, loading } =
-		useCreditsWallet();
+function formatCreditResetDate(
+	value: string | null | undefined
+): string | null {
+	if (!value) {
+		return null;
+	}
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) {
+		return null;
+	}
+	return new Intl.DateTimeFormat(undefined, {
+		day: "numeric",
+		hour: "numeric",
+		minute: "2-digit",
+		month: "short",
+	}).format(date);
+}
 
-	// Only meaningful for a signed-in user whose plan includes managed inference.
-	if (!(authed && entitlement?.managedInference)) {
+function ManagedNodeWallet({ node }: { node: Node | undefined }) {
+	const openSettings = useSettingsDialog((s) => s.openSettings);
+	const { activeOrgId, billing, organization } = useOrgBillingStatus();
+	const { authed, wallet, entitlement, loading } = useCreditsWallet();
+
+	// The warning belongs to the node the user is actually using. A different
+	// configured cloud node must not make a local sidebar look billable.
+	if (
+		!(node?.managed && authed && entitlement?.managedInference) ||
+		(node?.orgId && activeOrgId && node.orgId !== activeOrgId)
+	) {
 		return null;
 	}
 
 	const currency = wallet?.currency ?? "usd";
 	const balanceLabel =
 		wallet && !loading ? formatMicroUsd(wallet.balanceMicroUsd, currency) : "—";
+	const status =
+		wallet && !loading
+			? creditBalanceStatus({
+					balanceMicroUsd: wallet.balanceMicroUsd,
+					monthlyCreditPoolMicroUsd: entitlement.monthlyCreditPoolMicroUsd,
+				})
+			: null;
+	const warning = status?.kind === "low" || status?.kind === "empty";
+	const resetDate = formatCreditResetDate(
+		billing?.subscription?.currentPeriodEnd
+	);
+	const organizationLabel = organization?.name ?? "Organization wallet";
+	const warningLabel =
+		status?.kind === "empty"
+			? "Credits empty"
+			: status?.kind === "low"
+				? `${status.remainingPercent}% credits remaining`
+				: "Cloud credits";
+	const openCredits = () => openSettings("credits");
 
 	return (
-		<button
+		<div
 			className={cn(
-				"mt-1 flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-xs",
-				walletEmpty
-					? "bg-warning/10 text-warning hover:bg-warning/15 dark:text-warning"
-					: "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+				"mt-1 rounded-xl text-xs",
+				warning
+					? "border border-warning/30 bg-warning/10 text-warning dark:text-warning"
+					: "text-muted-foreground"
 			)}
-			onClick={() => openSettings("credits")}
-			type="button"
+			data-credit-state={status?.kind ?? "loading"}
+			data-testid="managed-node-wallet"
 		>
-			<HugeiconsIcon
-				className="shrink-0"
-				icon={walletEmpty ? Alert02Icon : DollarCircleIcon}
-				size={13}
-			/>
-			<span className="flex min-w-0 flex-1 flex-col">
-				<span className="truncate">
-					{walletEmpty ? "Credits empty — top up" : "Cloud credits"}
+			<button
+				className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-accent/50 hover:text-foreground"
+				onClick={openCredits}
+				type="button"
+			>
+				<HugeiconsIcon
+					className="shrink-0"
+					icon={warning ? Alert02Icon : DollarCircleIcon}
+					size={13}
+				/>
+				<span className="flex min-w-0 flex-1 flex-col">
+					<span className="truncate">{warningLabel}</span>
+					<span className="truncate text-[10px] text-muted-foreground/70">
+						{organizationLabel}
+					</span>
 				</span>
-				<span className="truncate text-[10px] text-muted-foreground/70">
-					{organization?.name ?? "Organization wallet"}
+				<span className="shrink-0 font-heading font-medium tabular-nums">
+					{balanceLabel}
 				</span>
-			</span>
-			<span className="shrink-0 font-heading font-medium tabular-nums">
-				{balanceLabel}
-			</span>
-		</button>
+			</button>
+			{warning && status ? (
+				<div className="space-y-2 px-2 pb-2">
+					<div
+						aria-label="Credits remaining"
+						aria-valuemax={100}
+						aria-valuemin={0}
+						aria-valuenow={status.remainingPercent}
+						className="h-1.5 overflow-hidden rounded-full bg-warning/20"
+						role="progressbar"
+					>
+						<div
+							className="h-full rounded-full bg-warning transition-[width]"
+							style={{ width: `${status.remainingPercent}%` }}
+						/>
+					</div>
+					<div className="flex items-center justify-between gap-2 text-[10px]">
+						<span className="truncate text-muted-foreground/80">
+							{resetDate ? `Resets ${resetDate}` : "Shared organization wallet"}
+						</span>
+						<button
+							className="shrink-0 rounded-md bg-background/70 px-2 py-1 font-medium text-foreground hover:bg-background"
+							onClick={openCredits}
+							type="button"
+						>
+							Add credits
+						</button>
+					</div>
+				</div>
+			) : null}
+		</div>
 	);
 }
 
@@ -3426,9 +3503,8 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 						/>
 					))}
 				</div>
-				{/* Org-wallet nudge for managed (Ryu Cloud) inference, shown only when a
-				    managed node is configured so a local-only install never sees it. */}
-				{nodes.some((n) => n.managed) && <ManagedNodeWallet />}
+				{/* The wallet belongs to the active managed node's organization. */}
+				{activeNode?.managed && <ManagedNodeWallet node={activeNode} />}
 				{/* Auto-detected cloud instances tied to this workspace, not yet added. */}
 				<CloudSuggestions />
 				{/* Prefer whichever node is actually reachable (opt-in, OFF by default). */}
@@ -3596,11 +3672,10 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 							<span className="flex-1">Hardware</span>
 						</DropdownMenuItem>
 					)}
-					{/* Org-wallet nudge for managed (Ryu Cloud) inference, shown only when
-					    a managed node is configured. */}
-					{nodes.some((n) => n.managed) && (
+					{/* The wallet belongs to the active managed node's organization. */}
+					{activeNode?.managed && (
 						<div className="px-1 pt-0.5 pb-1">
-							<ManagedNodeWallet />
+							<ManagedNodeWallet node={activeNode} />
 						</div>
 					)}
 					{/* Auto-detected cloud instances tied to this workspace, not yet added. */}
@@ -3637,10 +3712,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 							updateAvailable={appUpdateAvailable}
 							version={appVersion}
 						/>
-						{/* # 0.1.0: Shadow disabled for the alpha — uncomment when re-enabling
-						    Shadow. The sidecar and its status plumbing (useSystemStatus's
-						    `shadowReachable`) stay wired, so restoring the row is the only edit
-						    needed; nothing below it depends on the row existing.
+						{/* Shadow is preinstalled and managed by Core's normal sidecar lifecycle. */}
 						<ServiceRow
 							label="Shadow"
 							onChanged={refresh}
@@ -3648,7 +3720,6 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 							sidecarKey="shadow"
 							target={target}
 						/>
-						*/}
 						{/* # 0.1.0: Island disabled — uncomment when re-enabling Island
 						    Island is a device-local Electron companion (loopback :7989), not
 						    a Core sidecar — Core can't start/stop it, so the row is

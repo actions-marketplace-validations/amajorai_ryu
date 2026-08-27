@@ -175,6 +175,12 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub composio: ComposioConfig,
 
+    /// Treg tool-router credentials. The token is runtime-only: fleet values
+    /// arrive from the sealed provider vault and must never be written to
+    /// `gateway.toml` or returned by `/v1/config`.
+    #[serde(default)]
+    pub treg: TregConfig,
+
     #[serde(default)]
     pub semantic_cache: SemanticCacheConfig,
 
@@ -461,6 +467,26 @@ impl Default for StageBackendsConfig {
     }
 }
 
+/// Provider-level billing mode for managed provider costs.
+///
+/// `inherit_global` preserves the existing `[credits].markup_bps` behavior.
+/// `pass_through` charges the raw provider cost with no platform markup. This
+/// controls wallet pricing only; it does not change credential ownership or
+/// subscription-preserving egress.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderBillingMode {
+    #[default]
+    InheritGlobal,
+    PassThrough,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProviderBillingPolicy {
+    #[serde(default)]
+    pub mode: ProviderBillingMode,
+}
+
 /// Platform-credits wallet debit hook (marketplace monetization #486, spec §4).
 ///
 /// When enabled, after each metered model call the gateway debits the request's
@@ -489,6 +515,12 @@ pub struct CreditsConfig {
     /// (pass-through at cost).
     #[serde(default)]
     pub markup_bps: u64,
+    /// Provider-level billing modes. This is an operational billing policy, not
+    /// the routing `provider_tiers` map and not subscription credential
+    /// passthrough. Unknown ids are harmless and allow a provider adapter to be
+    /// enabled before its first request reaches this gateway.
+    #[serde(default)]
+    pub provider_billing: HashMap<ProviderId, ProviderBillingPolicy>,
     /// Per-tool-call cost in micro-USD for billable (Composio) tool executions.
     ///
     /// AT COST, and that is the whole pricing position: Composio charges per
@@ -785,6 +817,7 @@ impl Default for CreditsConfig {
             base_url: default_control_plane_url(),
             internal_secret: None,
             markup_bps: 0,
+            provider_billing: HashMap::new(),
             cost_per_tool_call_micro_usd: default_cost_per_tool_call_micro_usd(),
             cost_per_gpu_second_micro_usd: default_cost_per_gpu_second_micro_usd(),
             cost_per_image_micro_usd: default_cost_per_image_micro_usd(),
@@ -818,6 +851,18 @@ impl Default for CreditsConfig {
 }
 
 impl CreditsConfig {
+    /// Whether this gateway provider is configured as raw-cost pass-through.
+    /// Provider ids are operational strings, so matching is trimmed and
+    /// case-insensitive while preserving the configured spelling on the wire.
+    pub fn is_pass_through_provider(&self, provider: &str) -> bool {
+        let provider = provider.trim();
+        !provider.is_empty()
+            && self.provider_billing.iter().any(|(configured, policy)| {
+                configured.as_str().eq_ignore_ascii_case(provider)
+                    && policy.mode == ProviderBillingMode::PassThrough
+            })
+    }
+
     /// The amount to debit (micro-USD) for a call costing `cost_micro_usd`, after
     /// applying the platform markup. Round-half-up; saturating to avoid overflow.
     /// With `markup_bps == 0` this is the identity (pass-through at cost).
@@ -827,6 +872,18 @@ impl CreditsConfig {
             .saturating_mul(BPS_DENOM.saturating_add(self.markup_bps))
             .saturating_add(BPS_DENOM / 2)
             / BPS_DENOM
+    }
+
+    /// The charged amount for a raw provider cost, using the provider-level
+    /// pass-through policy when one is configured and the global markup for all
+    /// other providers. `None` keeps the legacy global-markup behavior for
+    /// unattributed charges.
+    pub fn debit_amount_for_provider(&self, provider: Option<&str>, cost_micro_usd: u64) -> u64 {
+        if provider.is_some_and(|name| self.is_pass_through_provider(name)) {
+            cost_micro_usd
+        } else {
+            self.debit_amount(cost_micro_usd)
+        }
     }
 
     /// The inverse of [`Self::debit_amount`]: the raw provider cost whose debit
@@ -848,6 +905,20 @@ impl CreditsConfig {
             return debit_micro_usd;
         }
         debit_micro_usd.saturating_mul(BPS_DENOM) / scale
+    }
+
+    /// Inverse of [`Self::debit_amount_for_provider`], used when a charged
+    /// wallet headroom must be converted into a raw-cost or token ceiling.
+    pub fn undo_debit_amount_for_provider(
+        &self,
+        provider: Option<&str>,
+        debit_micro_usd: u64,
+    ) -> u64 {
+        if provider.is_some_and(|name| self.is_pass_through_provider(name)) {
+            debit_micro_usd
+        } else {
+            self.undo_debit_amount(debit_micro_usd)
+        }
     }
 
     /// The raw (pre-markup) cost in micro-USD for `n` billable tool calls. Pass
@@ -3055,6 +3126,15 @@ fn env_keys(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn first_non_empty_env(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    })
+}
+
 fn non_empty_provider_key<'a>(
     keys: &'a HashMap<String, String>,
     provider: &str,
@@ -3157,6 +3237,60 @@ pub struct ApiKeyConfig {
     /// identity headers to evade its quota.
     #[serde(default)]
     pub trusted_forwarder: bool,
+}
+
+/// Static `api_keys` are data-plane relay credentials. Administrative
+/// authority is represented only by `AuthConfig::master_key`, never by a relay
+/// token or by `trusted_forwarder`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKeyPurpose {
+    InferenceRelay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKeyOperation {
+    Inference,
+}
+
+impl ApiKeyConfig {
+    pub const fn purpose(&self) -> ApiKeyPurpose {
+        ApiKeyPurpose::InferenceRelay
+    }
+
+    pub const fn allows_operation(&self, operation: ApiKeyOperation) -> bool {
+        matches!(
+            (self.purpose(), operation),
+            (ApiKeyPurpose::InferenceRelay, ApiKeyOperation::Inference)
+        )
+    }
+}
+
+#[cfg(test)]
+mod api_key_purpose_tests {
+    use super::{ApiKeyConfig, ApiKeyOperation, ApiKeyPurpose};
+
+    fn relay_key() -> ApiKeyConfig {
+        ApiKeyConfig {
+            key: "sk-relay".to_owned(),
+            name: "relay".to_owned(),
+            org_id: None,
+            team_id: None,
+            channel_id: None,
+            project_id: None,
+            requests_per_minute: None,
+            tokens_per_minute: None,
+            token_budget_total: None,
+            downgrade_to: None,
+            trusted_forwarder: false,
+        }
+    }
+
+    #[test]
+    fn static_keys_are_inference_relays_not_admin_keys() {
+        let key = relay_key();
+        assert_eq!(key.purpose(), ApiKeyPurpose::InferenceRelay);
+        assert!(key.allows_operation(ApiKeyOperation::Inference));
+    }
 }
 
 /// Widget (Ryu Apps) governance config (§4.3). Governs the interactive widget
@@ -3475,6 +3609,12 @@ impl GatewayConfig {
             applied.push("composio".to_string());
         }
 
+        if let Some(key) = non_empty_provider_key(keys, "treg") {
+            self.treg.token = Some(key.to_owned());
+            self.treg.enabled = true;
+            applied.push("treg".to_string());
+        }
+
         if let Some(key) = non_empty_provider_key(keys, "modal") {
             let base_url = self
                 .providers
@@ -3547,6 +3687,8 @@ impl GatewayConfig {
         }
         self.composio.api_key = None;
         self.composio.enabled = false;
+        self.treg.token = None;
+        self.treg.enabled = false;
         let applied = self.apply_provider_vault_keys(keys);
 
         if non_empty_provider_key(keys, "openai").is_none() {
@@ -3916,6 +4058,17 @@ impl GatewayConfig {
         }
         if let Ok(entity_id) = std::env::var("COMPOSIO_ENTITY_ID") {
             config.composio.entity_id = entity_id;
+        }
+
+        // Treg. A local standalone gateway may use an operator-provided token;
+        // required fleet mode replaces this runtime value from the provider vault
+        // after load, so a stale env token cannot survive a successful vault read.
+        if let Some(token) = first_non_empty_env(&["RYU_TREG_TOKEN", "TREG_TOKEN"]) {
+            config.treg.token = Some(token);
+            config.treg.enabled = true;
+        }
+        if let Some(base_url) = first_non_empty_env(&["RYU_TREG_URL", "TREG_URL"]) {
+            config.treg.base_url = base_url;
         }
 
         // OpenRouter
@@ -4441,6 +4594,21 @@ impl GatewayConfig {
                 config.credits.markup_bps = bps;
             }
         }
+        if let Ok(raw) = std::env::var("GATEWAY_CREDITS_PASS_THROUGH_PROVIDERS") {
+            config.credits.provider_billing = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|provider| !provider.is_empty())
+                .map(|provider| {
+                    (
+                        ProviderId::from(provider),
+                        ProviderBillingPolicy {
+                            mode: ProviderBillingMode::PassThrough,
+                        },
+                    )
+                })
+                .collect();
+        }
         if let Ok(raw) = std::env::var("GATEWAY_CREDITS_COST_PER_TOOL_CALL_MICRO_USD") {
             if let Ok(cost) = raw.trim().parse::<u64>() {
                 config.credits.cost_per_tool_call_micro_usd = cost;
@@ -4680,6 +4848,12 @@ pub struct CommonChannelFileConfig {
     /// `team_id` is set, and for the voice/command round trips.
     #[serde(default = "default_core_url")]
     pub core_url: String,
+    /// Optional reaction-to-Learning bridge. Disabled by default; when enabled,
+    /// `positive_emoji` / `negative_emoji` choose the provider reactions that
+    /// become thumbs-up/down labels. The exact reaction is still bound to a
+    /// confirmed bot reply before Core receives it.
+    #[serde(default)]
+    pub reaction_learning: ryu_gw_channels::ReactionLearningConfig,
 
     // ── Access ──────────────────────────────────────────────────────────────
     //
@@ -4769,6 +4943,7 @@ impl Default for CommonChannelFileConfig {
             channel_id: None,
             group_reply_mode: GroupReplyMode::default(),
             core_url: default_core_url(),
+            reaction_learning: ryu_gw_channels::ReactionLearningConfig::default(),
             dm_policy: None,
             group_policy: None,
             dm_allowlist: Vec::new(),
@@ -5057,6 +5232,7 @@ fn common_channel_from_env(
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(base.core_url),
+        reaction_learning: base.reaction_learning,
         dm_policy: dm_policy_from_env(platform).or(base.dm_policy),
         group_policy: group_policy_from_env(platform).or(base.group_policy),
         dm_allowlist: channel_env_list(platform, "DM_ALLOWLIST").unwrap_or(base.dm_allowlist),
@@ -5272,6 +5448,44 @@ impl Default for ComposioConfig {
             max_rounds: default_composio_max_rounds(),
             entity_id: default_composio_entity_id(),
         }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct TregConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_treg_base_url")]
+    pub base_url: String,
+    /// Runtime-only secret, supplied by the environment or provider vault.
+    #[serde(skip)]
+    pub token: Option<String>,
+}
+
+fn default_treg_base_url() -> String {
+    "https://treg.to".to_owned()
+}
+
+impl Default for TregConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: default_treg_base_url(),
+            token: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for TregConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TregConfig")
+            .field("enabled", &self.enabled)
+            .field("base_url", &self.base_url)
+            .field(
+                "token",
+                &self.token.as_ref().map(|_| "<set>").unwrap_or("<unset>"),
+            )
+            .finish()
     }
 }
 
@@ -5502,6 +5716,7 @@ impl Default for GatewayConfig {
             audit: AuditConfig::default(),
             evals: EvalsConfig::default(),
             composio: ComposioConfig::default(),
+            treg: TregConfig::default(),
             semantic_cache: SemanticCacheConfig::default(),
             budgets: BudgetConfig::default(),
             channels: ChannelsConfig::default(),
@@ -5653,24 +5868,45 @@ mod computer_use_config_tests {
 mod local_embed_endpoint_tests {
     use super::{local_embed_base_url, DEFAULT_EMBED_PORT};
 
-    struct EnvVar(&'static str, Option<std::ffi::OsString>);
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvVar {
+        name: &'static str,
+        prior: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
     impl EnvVar {
         fn set(name: &'static str, value: &str) -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let prior = std::env::var_os(name);
             std::env::set_var(name, value);
-            Self(name, prior)
+            Self {
+                name,
+                prior,
+                _lock: lock,
+            }
         }
         fn cleared(name: &'static str) -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let prior = std::env::var_os(name);
             std::env::remove_var(name);
-            Self(name, prior)
+            Self {
+                name,
+                prior,
+                _lock: lock,
+            }
         }
     }
     impl Drop for EnvVar {
         fn drop(&mut self) {
-            match self.1.take() {
-                Some(prior) => std::env::set_var(self.0, prior),
-                None => std::env::remove_var(self.0),
+            match self.prior.take() {
+                Some(prior) => std::env::set_var(self.name, prior),
+                None => std::env::remove_var(self.name),
             }
         }
     }
@@ -5990,7 +6226,10 @@ mod capacity_config_tests {
 
 #[cfg(test)]
 mod credits_config_tests {
-    use super::{CreditsConfig, GpuKind, Modality, OsKind, WalletEmptyAction};
+    use super::{
+        CreditsConfig, GpuKind, Modality, OsKind, ProviderBillingPolicy, ProviderId,
+        WalletEmptyAction,
+    };
 
     #[test]
     fn debit_amount_passthrough_at_zero_bps() {
@@ -6120,6 +6359,65 @@ enabled = true
         assert_eq!(
             partial.credits.min_reserve_micro_usd,
             CreditsConfig::default().min_reserve_micro_usd
+        );
+    }
+
+    #[test]
+    fn provider_billing_policy_round_trips_from_gateway_config() {
+        let config: crate::GatewayConfig = toml::from_str(
+            r#"
+[credits]
+[credits.provider_billing.whatsapp]
+mode = "pass_through"
+
+[credits.provider_billing.openrouter]
+mode = "pass_through"
+"#,
+        )
+        .expect("provider pass-through config parses");
+
+        let encoded = serde_json::to_value(config.credits).expect("credits serialize");
+        assert_eq!(
+            encoded["provider_billing"]["whatsapp"]["mode"],
+            "pass_through"
+        );
+        assert_eq!(
+            encoded["provider_billing"]["openrouter"]["mode"],
+            "pass_through"
+        );
+    }
+
+    #[test]
+    fn provider_pass_through_bypasses_global_markup_only_for_that_provider() {
+        let config = CreditsConfig {
+            markup_bps: 2000,
+            provider_billing: [(
+                ProviderId::from("WhatsApp"),
+                ProviderBillingPolicy {
+                    mode: super::ProviderBillingMode::PassThrough,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.debit_amount_for_provider(Some("whatsapp"), 1000),
+            1000
+        );
+        assert_eq!(
+            config.debit_amount_for_provider(Some("openrouter"), 1000),
+            1200
+        );
+        assert_eq!(config.debit_amount_for_provider(None, 1000), 1200);
+        assert_eq!(
+            config.undo_debit_amount_for_provider(Some("WHATSAPP"), 1000),
+            1000
+        );
+        assert_eq!(
+            config.undo_debit_amount_for_provider(Some("openrouter"), 1200),
+            1000
         );
     }
 
@@ -6726,6 +7024,67 @@ mod pure_helper_tests {
             assert_eq!(parse_bool_env(f), Some(false), "{f}");
         }
         assert_eq!(parse_bool_env("maybe"), None);
+    }
+}
+
+#[cfg(test)]
+mod reaction_learning_config_tests {
+    use super::{CommonChannelFileConfig, TelegramChannelConfig, TelegramChannelOptionsFileConfig};
+
+    #[test]
+    fn telegram_channel_toml_round_trip_preserves_reaction_learning() {
+        let mut common = CommonChannelFileConfig::default();
+        common.reaction_learning.enabled = true;
+        common.reaction_learning.positive_emojis = vec!["👍".to_owned(), "❤️".to_owned()];
+        common.reaction_learning.negative_emojis = vec!["👎".to_owned(), "💀".to_owned()];
+        common.reaction_learning.allow_group = true;
+
+        let authored = TelegramChannelConfig {
+            token: "[REDACTED_SECRET]".to_owned(),
+            common,
+            options: TelegramChannelOptionsFileConfig::default(),
+        };
+        let text = toml::to_string(&authored).expect("reaction config should serialize");
+        let parsed: TelegramChannelConfig =
+            toml::from_str(&text).expect("reaction config should parse after serialization");
+
+        assert!(parsed.common.reaction_learning.enabled);
+        assert_eq!(
+            parsed.common.reaction_learning.positive_emojis,
+            vec!["👍", "❤️"]
+        );
+        assert_eq!(
+            parsed.common.reaction_learning.negative_emojis,
+            vec!["👎", "💀"]
+        );
+        assert!(parsed.common.reaction_learning.allow_group);
+    }
+
+    #[test]
+    fn telegram_channel_toml_accepts_issue_style_reaction_keys() {
+        let parsed: TelegramChannelConfig = toml::from_str(
+            r#"
+token = "[REDACTED_SECRET]"
+
+[reaction_learning]
+enabled = true
+positive_emoji = ["👍", "🎉"]
+negative_emoji = ["👎", "😴"]
+allow_group = false
+"#,
+        )
+        .expect("issue-style reaction settings should parse");
+
+        assert!(parsed.common.reaction_learning.enabled);
+        assert_eq!(
+            parsed.common.reaction_learning.positive_emojis,
+            vec!["👍", "🎉"]
+        );
+        assert_eq!(
+            parsed.common.reaction_learning.negative_emojis,
+            vec!["👎", "😴"]
+        );
+        assert!(!parsed.common.reaction_learning.allow_group);
     }
 }
 

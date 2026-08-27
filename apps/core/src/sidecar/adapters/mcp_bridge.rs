@@ -430,7 +430,17 @@ impl RyuMcpHandler {
     /// emits — Composio is searchable-not-listed — so the filter result is
     /// unchanged.
     async fn build_tool_list(&self) -> Vec<Tool> {
-        let registry_tools = self.mcp.tools_for_agent(self.allowlist.as_deref()).await;
+        let verified_plan_only = self.verified_plan_only().await;
+        let registry_tools = if verified_plan_only {
+            self.mcp
+                .list_all_tools()
+                .await
+                .into_iter()
+                .filter(|tool| tool.server == "plans")
+                .collect()
+        } else {
+            self.mcp.tools_for_agent(self.allowlist.as_deref()).await
+        };
         let registry_tools =
             crate::sidecar::mcp::filter_capability_tools(registry_tools, self.caps);
         let mut tools: Vec<Tool> = registry_tools
@@ -454,13 +464,14 @@ impl RyuMcpHandler {
             .collect();
 
         // Per-agent Composio actions (offered + callable via the merged allowlist).
-        for slug in &self.composio_actions {
-            tools.push(tool_from_def(&composio_def(slug)));
-        }
+        if !verified_plan_only {
+            for slug in &self.composio_actions {
+                tools.push(tool_from_def(&composio_def(slug)));
+            }
 
         // Always-on discovery meta-tools.
-        tools.push(tool_from_def(&tool_search_def()));
-        tools.push(tool_from_def(&describe_tool_def()));
+            tools.push(tool_from_def(&tool_search_def()));
+            tools.push(tool_from_def(&describe_tool_def()));
 
         // Programmatic tool calling — only when a JS backend is built + runnable.
         //
@@ -471,13 +482,29 @@ impl RyuMcpHandler {
         // has Deno is not touched, and a failed install just leaves code mode
         // off — the state it was already in — so `is_available()` below stays
         // the single gate either way.
-        crate::sidecar::deno_runtime::ensure_deno_in_background();
-        if tool_exec::is_available() {
-            tools.push(tool_from_def(&tool_exec::schema::execute_tool_def()));
-            tools.push(tool_from_def(&tool_exec::schema::resume_tool_def()));
+            crate::sidecar::deno_runtime::ensure_deno_in_background();
+            if tool_exec::is_available() {
+                tools.push(tool_from_def(&tool_exec::schema::execute_tool_def()));
+                tools.push(tool_from_def(&tool_exec::schema::resume_tool_def()));
+            }
         }
 
         tools
+    }
+
+    async fn verified_plan_only(&self) -> bool {
+        match self.mcp.agent_store.as_ref() {
+            Some(store) => store
+                .get(&self.agent_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|record| {
+                    record.safety_profile
+                        == crate::agents::AgentSafetyProfile::VerifiedPlanOnly
+                }),
+            None => false,
+        }
     }
 
     /// The bound agent's per-agent **skill** allowlist (`AgentRecord.skills`).
@@ -577,6 +604,14 @@ impl RyuMcpHandler {
         // Retained for the widget-emit path (the `_` arm moves `args` into
         // `call_tool_with_identity`).
         let tool_input = args.clone();
+
+        if self.verified_plan_only().await && !tool_id.starts_with("plans.") {
+            return Err(McpError::new(
+                rmcp::model::ErrorCode::INVALID_REQUEST,
+                "verified agent direct tool call denied; submit a typed plan with plans.submit",
+                None,
+            ));
+        }
 
         // Capability gate (defense in depth): these tools are filtered out of the
         // advertised set for an agent that lacks the capability, but a model can

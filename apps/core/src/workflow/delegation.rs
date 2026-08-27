@@ -266,10 +266,18 @@ pub struct DelegationLifecycleTransition {
     pub agent_id: String,
     pub active_count: usize,
     pub transition_id: u64,
+    #[serde(default)]
+    pub run_active_count: usize,
 }
 
 static NEXT_LIFECYCLE_TRANSITION_ID: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_DELEGATES: AtomicU64 = AtomicU64::new(0);
+
+fn active_by_run() -> &'static std::sync::Mutex<std::collections::HashMap<String, usize>> {
+    static COUNTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
+        std::sync::OnceLock::new();
+    COUNTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
 
 fn lifecycle_dispatch_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -280,12 +288,18 @@ fn next_lifecycle_transition_id() -> u64 {
     NEXT_LIFECYCLE_TRANSITION_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-fn emit_lifecycle_transition(run_id: &str, agent_id: &str, active_count: usize) {
+fn emit_lifecycle_transition(
+    run_id: &str,
+    agent_id: &str,
+    active_count: usize,
+    run_active_count: usize,
+) {
     let transition = DelegationLifecycleTransition {
         run_id: run_id.to_owned(),
         agent_id: agent_id.to_owned(),
         active_count,
         transition_id: next_lifecycle_transition_id(),
+        run_active_count,
     };
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
@@ -315,7 +329,15 @@ struct DelegationLifecycleLease {
 impl DelegationLifecycleLease {
     fn admit(run_id: &str, agent_id: &str) -> Self {
         let active_count = ACTIVE_DELEGATES.fetch_add(1, Ordering::AcqRel) + 1;
-        emit_lifecycle_transition(run_id, agent_id, active_count as usize);
+        let run_active_count = active_by_run()
+            .lock()
+            .map(|mut counts| {
+                let count = counts.entry(run_id.to_owned()).or_default();
+                *count += 1;
+                *count
+            })
+            .unwrap_or(1);
+        emit_lifecycle_transition(run_id, agent_id, active_count as usize, run_active_count);
         Self {
             run_id: run_id.to_owned(),
             agent_id: agent_id.to_owned(),
@@ -333,10 +355,23 @@ impl DelegationLifecycleLease {
                 count.checked_sub(1)
             })
             .unwrap_or(0);
+        let run_active_count = active_by_run()
+            .lock()
+            .map(|mut counts| {
+                let count = counts.entry(self.run_id.clone()).or_default();
+                *count = count.saturating_sub(1);
+                let remaining = *count;
+                if remaining == 0 {
+                    counts.remove(&self.run_id);
+                }
+                remaining
+            })
+            .unwrap_or(0);
         emit_lifecycle_transition(
             &self.run_id,
             &self.agent_id,
             previous.saturating_sub(1) as usize,
+            run_active_count,
         );
     }
 }
@@ -777,6 +812,7 @@ fn should_use_registered_agent(
 ) -> bool {
     matches!(execution_policy, DelegationExecutionPolicy::Normal)
         && spec.inline.is_none()
+        && spec.preset.allows_mutation()
         && spec.agent_id.as_deref().is_some_and(|id| !id.is_empty())
 }
 
@@ -785,12 +821,10 @@ async fn call_sub_agent(
     max_tokens: u32,
     execution_policy: DelegationExecutionPolicy,
 ) -> Result<SubAgentCall, SubAgentError> {
-    // A configured delegate agent + an available runner: invoke the real agent
-    // through the chat path so its own engine binding, gateway routing, tools, and
-    // system prompt govern the sub-task. The per-delegate `max_tokens` cap and the
-    // synthetic preset system message do NOT apply on this path — the chosen
-    // agent's own config takes over (the `run_one` wall-time timeout still bounds
-    // it). The `None` path below keeps both.
+    // Only an explicitly mutation-capable delegate may enter a registered agent's
+    // full tool loop. Research/read/summarise presets use the clean completion path
+    // below, so their read-only promise cannot be bypassed by naming a powerful
+    // registered agent.
     //
     // An **inline** ephemeral definition always takes the clean-context Gateway
     // path below, regardless of any `agent_id` also present. This keeps precedence
@@ -1014,7 +1048,7 @@ mod tests {
             &spec,
             DelegationExecutionPolicy::ReadOnly
         ));
-        assert!(should_use_registered_agent(
+        assert!(!should_use_registered_agent(
             &spec,
             DelegationExecutionPolicy::Normal
         ));
@@ -1060,6 +1094,7 @@ mod tests {
             agent_id: "agent-a".into(),
             active_count: 0,
             transition_id: second,
+            run_active_count: 0,
         };
         let value = serde_json::to_value(transition).expect("transition serialises");
         assert_eq!(
@@ -1069,9 +1104,35 @@ mod tests {
                 "agent_id": "agent-a",
                 "active_count": 0,
                 "transition_id": second,
+                "run_active_count": 0,
             })
         );
-        assert_eq!(value.as_object().expect("object").len(), 4);
+        assert_eq!(value.as_object().expect("object").len(), 5);
+    }
+
+    #[test]
+    fn read_only_presets_never_enter_a_registered_agent_tool_loop() {
+        let mut spec = DelegateSpec {
+            id: "review".into(),
+            task: "inspect".into(),
+            agent_id: Some("configured-agent".into()),
+            preset: PermissionPreset::CodeRead,
+            inline: None,
+        };
+        assert!(!should_use_registered_agent(
+            &spec,
+            DelegationExecutionPolicy::Normal
+        ));
+        spec.preset = PermissionPreset::Summarise;
+        assert!(!should_use_registered_agent(
+            &spec,
+            DelegationExecutionPolicy::Normal
+        ));
+        spec.preset = PermissionPreset::CodeWrite;
+        assert!(should_use_registered_agent(
+            &spec,
+            DelegationExecutionPolicy::Normal
+        ));
     }
 
     #[test]

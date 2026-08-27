@@ -37,6 +37,11 @@ import {
 	removeAwarenessStates,
 } from "y-protocols/awareness";
 import { applyUpdate, Doc, encodeStateAsUpdate, encodeStateVector } from "yjs";
+import {
+	clearYjsSnapshot,
+	loadYjsSnapshot,
+	storeYjsSnapshot,
+} from "./yjs-persistence.ts";
 
 /**
  * Connection state of a provider, for surfaces that must not claim to be live
@@ -62,6 +67,8 @@ export interface RyuYjsProviderHandlers {
 	/** The resolved access for this connection (`read` => the server drops this
 	 * member's mutations; surfaces so a caller can render a read-only UI). */
 	onJoinAck?: (ack: JoinAck) => void;
+	/** The server restored the document and fenced the previous CRDT epoch. */
+	onReset?: (epoch: number) => void;
 	/** Connection state changes (see {@link RyuYjsStatus}). */
 	onStatusChange?: (status: RyuYjsStatus) => void;
 	onSyncChange?: (isSynced: boolean) => void;
@@ -95,6 +102,10 @@ export class RyuYjsProvider implements UnifiedProvider {
 	isSynced = false;
 
 	private connection: RealtimeConnection | null = null;
+	private discarded = false;
+	private opening = false;
+	private hydrated = false;
+	private persistTimer: ReturnType<typeof setTimeout> | null = null;
 	/** Pending reconnect timer, if a retry is scheduled. */
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	/** Consecutive failed opens, for the backoff curve. Reset on a clean open. */
@@ -104,6 +115,7 @@ export class RyuYjsProvider implements UnifiedProvider {
 	private status: RyuYjsStatus = "connecting";
 	private readonly options: RyuYjsProviderOptions;
 	private readonly onDocUpdate: (update: Uint8Array, origin: unknown) => void;
+	private readonly onPersistUpdate: () => void;
 	private readonly onAwarenessUpdate: (
 		changes: { added: number[]; removed: number[]; updated: number[] },
 		origin: unknown
@@ -127,6 +139,15 @@ export class RyuYjsProvider implements UnifiedProvider {
 			}
 			this.send({ tag: DOC_SYNC_UPDATE, payload: update });
 		};
+		this.onPersistUpdate = () => {
+			if (this.persistTimer !== null) {
+				clearTimeout(this.persistTimer);
+			}
+			this.persistTimer = setTimeout(() => {
+				this.persistTimer = null;
+				void this.persistSnapshot();
+			}, 250);
+		};
 
 		// Local awareness changes -> broadcast. Skip awareness we applied from the
 		// network (origin === this) to avoid an echo loop.
@@ -147,15 +168,41 @@ export class RyuYjsProvider implements UnifiedProvider {
 				payload: encodeAwarenessUpdate(this.awareness, changed),
 			});
 		};
+		this.document.on("update", this.onPersistUpdate);
 	}
 
 	/** Open the realtime connection (document room) and start syncing. Idempotent. */
 	connect(): void {
 		this.closedByCaller = false;
-		if (this.connection) {
+		if (this.connection || this.opening) {
 			return;
 		}
+		this.opening = true;
 		this.setStatus(this.reconnectAttempt === 0 ? "connecting" : "reconnecting");
+		void this.hydrateThenOpen();
+	}
+
+	private async hydrateThenOpen(): Promise<void> {
+		try {
+			if (!this.hydrated) {
+				const stored = await loadYjsSnapshot(this.options.roomId);
+				if (stored && stored.length > 0) {
+					applyUpdate(this.document, stored, this);
+				}
+				this.hydrated = true;
+			}
+		} catch (error) {
+			this.options.handlers?.onError?.(
+				error instanceof Error
+					? error
+					: new Error("Yjs snapshot hydration failed")
+			);
+		} finally {
+			this.opening = false;
+		}
+		if (this.closedByCaller || this.connection) {
+			return;
+		}
 		const connection = new RealtimeConnection(this.options.target, {
 			roomId: this.options.roomId,
 			kind: "document",
@@ -167,6 +214,19 @@ export class RyuYjsProvider implements UnifiedProvider {
 					this.options.handlers?.onError?.(new Error("realtime ws error")),
 				onJoinAck: (ack) => this.options.handlers?.onJoinAck?.(ack),
 				onDocSync: (message) => this.handleDocSync(message),
+				onDocumentReset: (epoch) => {
+					this.closedByCaller = true;
+					this.discarded = true;
+					void clearYjsSnapshot(this.options.roomId);
+					this.connection?.close();
+					this.options.handlers?.onReset?.(epoch);
+				},
+				onResyncRequired: () => {
+					this.send({
+						tag: DOC_SYNC_STEP1,
+						payload: encodeStateVector(this.document),
+					});
+				},
 			},
 		});
 		this.connection = connection;
@@ -201,7 +261,15 @@ export class RyuYjsProvider implements UnifiedProvider {
 
 	/** Tear down everything (called on editor unmount). */
 	destroy(): void {
+		if (this.persistTimer !== null) {
+			clearTimeout(this.persistTimer);
+			this.persistTimer = null;
+		}
+		if (!this.discarded) {
+			void this.persistSnapshot();
+		}
 		this.disconnect();
+		this.document.off("update", this.onPersistUpdate);
 		this.awareness.destroy();
 		// Only destroy a Doc we created; a caller-supplied doc is theirs to manage.
 		if (!this.options.doc) {
@@ -350,5 +418,23 @@ export class RyuYjsProvider implements UnifiedProvider {
 
 	private send(message: DocSyncMessage): void {
 		this.connection?.sendDocSync(message);
+	}
+
+	private async persistSnapshot(): Promise<void> {
+		if (this.discarded) {
+			return;
+		}
+		try {
+			await storeYjsSnapshot(
+				this.options.roomId,
+				encodeStateAsUpdate(this.document)
+			);
+		} catch (error) {
+			this.options.handlers?.onError?.(
+				error instanceof Error
+					? error
+					: new Error("Yjs snapshot persistence failed")
+			);
+		}
 	}
 }

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8">
+		<meta content="width=device-width, initial-scale=1" name="viewport">
+		<title>Share conversation story</title>
+		<script>
+			localStorage.setItem("ryu_session_token", "story-session");
+			localStorage.setItem("ryu_active_user_id", "user-owner");
+			localStorage.setItem("ryu_accounts", JSON.stringify([{
+				userId: "user-owner",
+				email: "jiawei@example.com",
+				name: "Jia Wei Ng",
+				image: null,
+				token: "story-session"
+			}]));
+		</script>
+	</head>
+	<body>
+		<div id="root"></div>
+		<script src="./share-conversation-story.tsx" type="module"></script>
+	</body>
+</html>

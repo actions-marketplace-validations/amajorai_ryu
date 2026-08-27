@@ -142,7 +142,7 @@ describe("routingViewIncludesSmartRouting", () => {
 describe("DEFAULT_SMART_ROUTING", () => {
 	test("carries every field RoutingView serves, so a form bound to it round-trips", () => {
 		// `RoutingView.smart_routing` (apps/gateway/src/api/config.rs) is a plain
-		// struct with nine `#[serde(default)]` fields, all always emitted. A default
+		// struct whose `#[serde(default)]` fields are all always emitted. A default
 		// object missing any of them is a consumer-visible hole: spread it into a
 		// PUT and the absent fields deserialize back to the Rust defaults, silently
 		// resetting an operator's `strategy`/`similarity_threshold`.
@@ -152,8 +152,21 @@ describe("DEFAULT_SMART_ROUTING", () => {
 			"default_model",
 			"embedding_model",
 			"enabled",
+			"escalation_confirmations",
+			"escalation_judge_model",
+			"escalation_message_chars",
+			"escalation_recent_message_window",
+			"escalation_strong_model",
+			"escalation_weak_model",
+			"random_seed",
+			"router_type",
 			"rules",
 			"similarity_threshold",
+			"stage_capable_model",
+			"stage_confidence_threshold",
+			"stage_efficient_model",
+			"stage_picker",
+			"stage_recent_message_window",
 			"strategy",
 			"timeout_ms",
 		]);

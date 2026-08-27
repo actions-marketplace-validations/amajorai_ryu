@@ -342,6 +342,9 @@ pub fn create_channel_body(
         }
     }
     body["proactiveOpening"] = json!(intent.proactive_opening);
+    if let Some(reaction_learning) = &intent.reaction_learning {
+        body["reactionLearning"] = reaction_learning.clone();
+    }
     body
 }
 
@@ -377,6 +380,9 @@ pub struct ChannelIntent {
     /// serves only enabled configs and "create a bot for me" plainly asks for a
     /// running bot.
     pub enabled: bool,
+    /// Provider-emoji to Learning feedback mapping, carried until the delayed
+    /// control-plane write completes.
+    pub reaction_learning: Option<Value>,
 }
 
 impl Default for ChannelIntent {
@@ -392,6 +398,7 @@ impl Default for ChannelIntent {
             proactive_opening: false,
             proactive_target: None,
             enabled: true,
+            reaction_learning: None,
         }
     }
 }
@@ -1118,6 +1125,12 @@ mod tests {
             proactive_opening: true,
             proactive_target: Some("123456".into()),
             enabled: false,
+            reaction_learning: Some(json!({
+                "enabled": true,
+                "positiveEmoji": ["👍", "❤️"],
+                "negativeEmoji": ["👎", "💀"],
+                "allowGroup": true,
+            })),
         };
         let body = create_channel_body("Support bot", "123:ABC", "claim", NONCE, &intent);
         assert_eq!(body["teamId"], "team-7");
@@ -1126,6 +1139,8 @@ mod tests {
         assert_eq!(body["groupReplyMode"], "mentions");
         assert_eq!(body["proactiveOpening"], true);
         assert_eq!(body["proactiveTarget"], "123456");
+        assert_eq!(body["reactionLearning"]["positiveEmoji"][0], "👍");
+        assert_eq!(body["reactionLearning"]["allowGroup"], true);
         // The user's own switch, not a forced `true`: the control plane reads
         // `body.enabled === true`, so this field must always be present.
         assert_eq!(body["enabled"], false);

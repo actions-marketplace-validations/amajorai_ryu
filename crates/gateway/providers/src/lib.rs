@@ -184,6 +184,12 @@ pub(crate) async fn check_stream_status(
         return Ok(resp);
     }
     let body = resp.text().await.unwrap_or_default();
+    if status == reqwest::StatusCode::PAYMENT_REQUIRED {
+        return Err(ProviderError::PaymentRequired {
+            provider: provider.to_owned(),
+            message: provider_error_message(&body),
+        });
+    }
     Err(ProviderError::Provider(format!(
         "{provider} stream error {status}: {body}"
     )))
@@ -234,9 +240,33 @@ pub(crate) async fn check_response_status(
         .unwrap_or("unknown error")
         .to_string();
     tracing::warn!(provider, status = %status, error = %msg, "provider returned error");
+    if status == reqwest::StatusCode::PAYMENT_REQUIRED {
+        return Err(ProviderError::PaymentRequired {
+            provider: provider.to_owned(),
+            message: msg,
+        });
+    }
     Err(ProviderError::Provider(format!(
         "{provider} error {status}: {msg}"
     )))
+}
+
+/// Pull a provider's human message from an error body without losing a plain
+/// text response. Streaming status checks have not parsed JSON yet, unlike the
+/// completed-response path above.
+fn provider_error_message(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|json| json["error"]["message"].as_str().map(str::to_owned))
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or_else(|| {
+            let trimmed = body.trim();
+            if trimmed.is_empty() {
+                "payment or provider credits required".to_owned()
+            } else {
+                trimmed.to_owned()
+            }
+        })
 }
 
 /// Check a completed **audio** response and normalize it to the JSON audio
@@ -1037,6 +1067,46 @@ mod status_check_tests {
         let msg = err.to_string();
         assert!(msg.contains("503"), "got: {msg}");
         assert!(msg.contains("upstream down"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn payment_required_is_typed_and_keeps_the_provider_message() {
+        let server = MockServer::always(MockResponse::json(
+            402,
+            r#"{"error":{"message":"no credits"}}"#,
+        ))
+        .await;
+        let resp = fetch(&server).await;
+        let err = check_response_status(resp, "openrouter", None)
+            .await
+            .unwrap_err();
+        match err {
+            ProviderError::PaymentRequired { provider, message } => {
+                assert_eq!(provider, "openrouter");
+                assert_eq!(message, "no credits");
+            }
+            other => panic!("expected PaymentRequired, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_payment_required_is_typed_and_keeps_the_response_body() {
+        let server = MockServer::always(MockResponse::json(
+            402,
+            r#"{"error":{"message":"insufficient credits"}}"#,
+        ))
+        .await;
+        let resp = fetch(&server).await;
+        let err = check_stream_status(resp, "openrouter", None)
+            .await
+            .unwrap_err();
+        match err {
+            ProviderError::PaymentRequired { provider, message } => {
+                assert_eq!(provider, "openrouter");
+                assert!(message.contains("insufficient credits"));
+            }
+            other => panic!("expected PaymentRequired, got {other:?}"),
+        }
     }
 }
 

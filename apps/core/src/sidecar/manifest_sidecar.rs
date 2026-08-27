@@ -145,7 +145,7 @@ fn resolve_node_runtime(explicit: Option<&str>) -> anyhow::Result<String> {
 /// Not yet true of [`resolve_node_runtime`] above, which returns the bare `"bun"` /
 /// `"node"` string it later spawns (`spawn_clean`) — a latent break for a host whose
 /// only `bun` is an npm `bun.cmd`. Left alone deliberately: it is a separate,
-/// default-off code path (the experimental node extension host) and needs its own
+/// not pre-installed code path (the experimental node extension host) and needs its own
 /// test, not a drive-by.
 pub(crate) fn which_on_path(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -719,7 +719,7 @@ pub struct McpRegistration {
 /// own mount; pairing sidecar A's mount with sidecar B's routes yields sub-paths that
 /// fail the intersection and are dropped — safe, but it would report the drop against
 /// the wrong manifest block and leave the app author hunting a route that was never
-/// the problem. So `mount`/`declared_paths` are read for the spec this sidecar owns.
+/// the problem. So `mount`/`declared_routes` are read for the spec this sidecar owns.
 ///
 /// Per-sidecar arming is why [`sidecar_key`](Self::sidecar_key), not `plugin_id`, is
 /// the registry key and the re-wake latch — see
@@ -742,7 +742,7 @@ pub struct OpenApiImport {
     /// is byte-identical to the one the manager, the proxy and the idle reaper use.
     pub sidecar_key: String,
     /// The live manifest store (`ServerState::app_manifests`), read at IMPORT time to
-    /// resolve `upstream_mount` + `declared_paths` for this sidecar.
+    /// resolve `upstream_mount` + `declared_routes` for this sidecar.
     ///
     /// A live read rather than the arm-time snapshot below because an in-place app
     /// update rewrites the manifest **without** re-running `apply_sidecars`: it calls
@@ -761,11 +761,11 @@ pub struct OpenApiImport {
     /// proxy normalises it. Stripped from every spec path, because the ext-proxy
     /// re-adds it. Used only when the live lookup above is unavailable.
     pub upstream_mount: String,
-    /// Arm-time snapshot of this sidecar's declared `http.routes[].path` patterns. The
-    /// proxy 404s anything outside them, so an operation that matches none is
-    /// unreachable and must not become a tool. Used only when the live lookup is
-    /// unavailable.
-    pub declared_paths: Vec<String>,
+    /// Arm-time snapshot of this sidecar's declared HTTP routes. The proxy 404s
+    /// anything outside them (including a method that has no declaration), so an
+    /// operation that matches none is unreachable and must not become a tool. Used
+    /// only when the live lookup is unavailable.
+    pub declared_routes: Vec<crate::plugin_manifest::schema::RouteSpec>,
     /// Shared client for the one-shot spec fetch. Reused rather than built per call so
     /// the hook does not stand up a fresh connection pool on every sidecar.
     pub client: reqwest::Client,
@@ -785,8 +785,13 @@ impl OpenApiImport {
     /// (`trim_end_matches('/')`). If the two normalisations disagreed, the prefix
     /// stripped at lowering would stop matching the one the proxy re-adds, and the
     /// mismatch would appear only *after* an update — the same window this fixes.
-    async fn lowering_inputs(&self) -> (String, Vec<String>) {
-        let fallback = || (self.upstream_mount.clone(), self.declared_paths.clone());
+    async fn lowering_inputs(
+        &self,
+    ) -> (
+        String,
+        Vec<crate::plugin_manifest::schema::RouteSpec>,
+    ) {
+        let fallback = || (self.upstream_mount.clone(), self.declared_routes.clone());
         let Some(store) = self.manifests.as_ref() else {
             return fallback();
         };
@@ -802,7 +807,7 @@ impl OpenApiImport {
                         .as_deref()
                         .map(|m| m.trim_end_matches('/').to_owned())
                         .unwrap_or_default(),
-                    http.routes.iter().map(|r| r.path.clone()).collect(),
+                    http.routes.clone(),
                 )
             });
         drop(guard);
@@ -916,9 +921,11 @@ impl ManifestSidecar {
         let Some(spec) = self.spec.provides_provider.as_ref() else {
             return;
         };
-        if !self.provider_registered.swap(false, Ordering::SeqCst) {
-            return;
-        }
+        // A crash/reconcile race can lose the in-memory latch while the owned
+        // models.json row still exists. Always attempt the ownership-checked
+        // removal; `deregister_sidecar_provider` is a no-op for absent or
+        // foreign rows, so this remains safe for sidecars that never registered.
+        self.provider_registered.swap(false, Ordering::SeqCst);
         match crate::pi_config::deregister_sidecar_provider(&self.plugin_id, &spec.id) {
             Ok(true) => tracing::info!(
                 plugin = %self.plugin_id,
@@ -1002,14 +1009,9 @@ fn inject_ext_env(env: &mut BTreeMap<String, String>, plugin_id: &str, token: &s
 /// (`apps/shadow/src/server.rs`: everything except `/health` requires it). The
 /// value is the SAME read-or-create token `ShadowProcess::start` injects into
 /// Shadow itself ([`crate::sidecar::tools::shadow::ensure_api_token`] /
-/// `api_token`), so spawn and clients always agree. An operator-exported
-/// `SHADOW_API_TOKEN` is inherited by the child anyway (these spawn paths layer
-/// over Core's env) and `api_token()` prefers it too, so explicit wins.
-///
-/// Only called on the INHERIT-env spawn paths (Binary/Local/Python). The node
-/// extension host spawns with a minimal clean env precisely so third-party JS
-/// cannot read Core's secrets — the Shadow token (full screen history) must not
-/// ride into that lane.
+/// `api_token`), so spawn and clients always agree. The token is injected
+/// deliberately for sidecars that need direct Shadow access; it is never
+/// obtained through ambient environment inheritance.
 fn inject_shadow_env(env: &mut BTreeMap<String, String>) {
     if env.contains_key("SHADOW_API_TOKEN") {
         return;
@@ -1723,8 +1725,8 @@ fn openapi_doc_urls(base: &str, mount: &str) -> Vec<String> {
 /// # Why the HEALTHY edge and not plugin-enable
 ///
 /// This is the decisive constraint, not a preference. [`crate::plugins::seed`]'s
-/// `seed_default_on` runs from `main.rs` *before* `ServerState` exists and writes
-/// `store.insert` / `set_enabled` directly — so for every default-on built-in (which
+/// `seed_preinstalled` runs from `main.rs` *before* `ServerState` exists and writes
+/// `store.insert` / `set_enabled` directly — so for every pre-installed built-in (which
 /// is every app that matters here) `activate_plugin` NEVER runs. An enable-time hook
 /// would therefore give the highest-value apps zero derived tools permanently, and
 /// would do it silently: nothing errors, the tools simply are not there.
@@ -1876,7 +1878,7 @@ async fn import_openapi(
     // re-lowering after an in-place update intersects the new spec against the new
     // manifest, not the one this hook was armed with. Resolved before the fetch so the
     // read guard is long gone by the time anything blocks on the network.
-    let (upstream_mount, declared_paths) = spec.lowering_inputs().await;
+    let (upstream_mount, declared_routes) = spec.lowering_inputs().await;
 
     // Try the candidates in order, keeping the FIRST 2xx. A 4xx moves on to the next
     // candidate; a 5xx/408/429 and any transport failure abort immediately and are
@@ -2004,7 +2006,7 @@ async fn import_openapi(
     };
 
     let (routes, dropped_undeclared) =
-        crate::ext_api::lower(&spec.plugin_id, &api, &upstream_mount, &declared_paths);
+        crate::ext_api::lower(&spec.plugin_id, &api, &upstream_mount, &declared_routes);
     // The two drop counters are reported SEPARATELY on purpose. `api.dropped` is the
     // importer's cap truncation ("your spec is bigger than we will expose"); the other
     // is a manifest-declaration gap ("the proxy would 404 this path"). Different
@@ -2078,8 +2080,10 @@ pub(crate) async fn remove_local_sidecar_binaries(
     }
 }
 
-/// Spawn a program (absolute path) with owned args + env layered on the inherited
-/// environment, storing the child in `handle`.
+/// Spawn a manifest-owned process with a minimal allowlisted environment plus
+/// its explicit manifest/Core contract. Native sidecars are powerful host
+/// processes, but they must never receive Core's owner token or master/provider
+/// secrets merely through ambient environment inheritance.
 async fn spawn(
     handle: &ProcessHandle,
     program: &str,
@@ -2087,7 +2091,7 @@ async fn spawn(
     env: &BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
     let env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    handle.start_path_with_env(program, args, &env).await
+    handle.start_path_with_clean_env(program, args, &env).await
 }
 
 /// Spawn a program with a MINIMAL env — the child does NOT inherit Core's
@@ -2586,7 +2590,7 @@ mod tests {
         assert!(!sc.is_required());
         assert!(!sc.is_running());
         assert_eq!(sc.pid(), None);
-        assert_eq!(sc.port(), Some(9099));
+        assert_eq!(sc.port(), Some(crate::profile::port(9099)));
     }
 
     #[test]
@@ -2662,7 +2666,10 @@ mod tests {
         let downloads = crate::downloads::DownloadCenter::with_default_client();
         let sc = ManifestSidecar::new("com.acme.voice".to_owned(), spec, downloads);
         assert_eq!(sc.name(), "com.acme.voice/tts");
-        assert_eq!(sc.health_url(), "http://127.0.0.1:8085/health");
+        assert_eq!(
+            sc.health_url(),
+            format!("http://127.0.0.1:{}/health", crate::profile::port(8085))
+        );
     }
 
     /// **Defect 3.** `lazy: true` + `provides_provider` is an unsatisfiable pair, so
@@ -3550,7 +3557,7 @@ mod tests {
             sidecar_key: namespaced_name(plugin_id, sidecar),
             manifests: None,
             upstream_mount: "/api".to_owned(),
-            declared_paths: Vec::new(),
+            declared_routes: Vec::new(),
             client: reqwest::Client::new(),
         }
     }
@@ -4005,13 +4012,9 @@ mod tests {
             manifests: Some(Arc::clone(&store)),
             ..probe_import_named(&registry, "@ryu/updated", "worker")
         };
-        assert_eq!(
-            live.lowering_inputs().await,
-            ("/api/new".to_owned(), vec!["/added".to_owned()]),
-            "the live manifest wins over the arm-time snapshot — and the mount is \
-             normalised the same way the arming site normalises it (no trailing slash), \
-             or the prefix stripped at lowering stops matching the one the proxy re-adds"
-        );
+        let (mount, routes) = live.lowering_inputs().await;
+        assert_eq!(mount, "/api/new");
+        assert_eq!(routes.iter().map(|route| route.path.as_str()).collect::<Vec<_>>(), ["/added"]);
 
         // A sidecar the live manifest does not describe (renamed, or the app was
         // uninstalled mid-fetch) falls back rather than lowering against nothing.

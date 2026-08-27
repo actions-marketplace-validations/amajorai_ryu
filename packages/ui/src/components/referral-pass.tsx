@@ -82,7 +82,7 @@ function ReferralStat({ label, value }: { label: string; value: string }) {
 	return (
 		<div className="flex min-w-0 flex-col">
 			<span
-				className="truncate font-heading font-medium tabular-nums leading-none"
+				className="truncate font-medium font-mono tabular-nums leading-none"
 				style={{ fontSize: `${REFERRAL_STAT_VALUE_PX}px` }}
 			>
 				{value}

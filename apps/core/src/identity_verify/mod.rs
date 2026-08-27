@@ -203,7 +203,7 @@ impl Access {
     }
 }
 
-/// The tenancy quartet of a shareable resource (conversation or document), loaded
+/// The tenancy metadata of a shareable resource (conversation or document), loaded
 /// from its row and fed verbatim into [`can_access`]. The fields mirror the
 /// additive Phase 0 tenancy columns. EXISTING/legacy single-tenant rows carry
 /// `owner_user_id = None` AND `org_id = None` (with `visibility = "private"`),
@@ -215,6 +215,13 @@ pub struct ResourceTenancy {
     pub org_id: Option<String>,
     pub visibility: String,
     pub team_id: Option<String>,
+    pub collaborators: Vec<ResourceCollaborator>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceCollaborator {
+    pub user_id: String,
+    pub access: Access,
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -637,13 +644,14 @@ pub fn to_caller_for_org(claims: &VerifiedClaims, node_org_id: Option<&str>) -> 
 ///
 /// Rules:
 ///   - The resource owner always gets `Write`.
+///   - A same-org direct collaborator gets the stored `Read` or `Write` grant.
 ///   - `visibility == "org"`: a member of the SAME org gets `Write` (`Read` for
 ///     a `Viewer`); anyone else gets `None`.
 ///   - `visibility == "team"`: the caller must have a verified membership in
 ///     `team_id`, and that team must be narrowed to the node's org. The team's
 ///     embedded role determines whether the grant is read-only or writable.
-///   - `visibility == "private"`: only the owner (handled above) — everyone else
-///     gets `None`.
+///   - `visibility == "private"`: the owner and direct collaborators handled above;
+///     everyone else gets `None`.
 ///   - Any unknown visibility string → `None`.
 pub fn can_access(
     caller: &VerifiedCaller,
@@ -651,10 +659,21 @@ pub fn can_access(
     org_id: Option<&str>,
     visibility: &str,
     team_id: Option<&str>,
+    collaborators: &[ResourceCollaborator],
 ) -> Access {
     if let Some(owner) = owner_user_id {
         if owner == caller.user_id {
             return Access::Write;
+        }
+    }
+
+    let same_scope = org_id.is_none() || caller.org_id.as_deref() == org_id;
+    if same_scope {
+        if let Some(collaborator) = collaborators
+            .iter()
+            .find(|collaborator| collaborator.user_id == caller.user_id)
+        {
+            return collaborator.access;
         }
     }
 
@@ -762,7 +781,7 @@ mod tests {
     fn owner_always_writes() {
         let c = caller("u1", None, OrgRole::Viewer);
         assert_eq!(
-            can_access(&c, Some("u1"), Some("o1"), "private", None),
+            can_access(&c, Some("u1"), Some("o1"), "private", None, &[]),
             Access::Write
         );
     }
@@ -779,7 +798,40 @@ mod tests {
     fn private_denies_non_owner() {
         let c = caller("u2", Some("o1"), OrgRole::Owner);
         assert_eq!(
-            can_access(&c, Some("u1"), Some("o1"), "private", None),
+            can_access(&c, Some("u1"), Some("o1"), "private", None, &[]),
+            Access::None
+        );
+    }
+
+    #[test]
+    fn direct_collaborators_get_their_role_only_inside_the_resource_org() {
+        let viewer = caller("u2", Some("o1"), OrgRole::Viewer);
+        let collaborators = vec![ResourceCollaborator {
+            user_id: "u2".to_owned(),
+            access: Access::Read,
+        }];
+        assert_eq!(
+            can_access(
+                &viewer,
+                Some("u1"),
+                Some("o1"),
+                "private",
+                None,
+                &collaborators,
+            ),
+            Access::Read
+        );
+
+        let outsider = caller("u2", Some("o2"), OrgRole::Owner);
+        assert_eq!(
+            can_access(
+                &outsider,
+                Some("u1"),
+                Some("o1"),
+                "private",
+                None,
+                &collaborators,
+            ),
             Access::None
         );
     }
@@ -788,12 +840,12 @@ mod tests {
     fn org_member_writes_viewer_reads() {
         let member = caller("u2", Some("o1"), OrgRole::Member);
         assert_eq!(
-            can_access(&member, Some("u1"), Some("o1"), "org", None),
+            can_access(&member, Some("u1"), Some("o1"), "org", None, &[]),
             Access::Write
         );
         let viewer = caller("u3", Some("o1"), OrgRole::Viewer);
         assert_eq!(
-            can_access(&viewer, Some("u1"), Some("o1"), "org", None),
+            can_access(&viewer, Some("u1"), Some("o1"), "org", None, &[]),
             Access::Read
         );
     }
@@ -808,11 +860,11 @@ mod tests {
             role: "member".to_owned(),
         });
         assert_eq!(
-            can_access(&member, Some("u1"), Some("o1"), "team", Some("t1")),
+            can_access(&member, Some("u1"), Some("o1"), "team", Some("t1"), &[]),
             Access::Write
         );
         assert_eq!(
-            can_access(&member, Some("u1"), Some("o1"), "team", Some("t2")),
+            can_access(&member, Some("u1"), Some("o1"), "team", Some("t2"), &[]),
             Access::None
         );
 
@@ -823,7 +875,7 @@ mod tests {
             role: "viewer".to_owned(),
         });
         assert_eq!(
-            can_access(&viewer, Some("u1"), Some("o1"), "team", Some("t1")),
+            can_access(&viewer, Some("u1"), Some("o1"), "team", Some("t1"), &[]),
             Access::Read
         );
     }
@@ -833,13 +885,13 @@ mod tests {
         // A non-member has org_id = None, so the same-org check cannot match.
         let outsider = caller("u4", None, OrgRole::Viewer);
         assert_eq!(
-            can_access(&outsider, Some("u1"), Some("o1"), "org", None),
+            can_access(&outsider, Some("u1"), Some("o1"), "org", None, &[]),
             Access::None
         );
         // Different org also denied.
         let other = caller("u5", Some("o2"), OrgRole::Owner);
         assert_eq!(
-            can_access(&other, Some("u1"), Some("o1"), "org", None),
+            can_access(&other, Some("u1"), Some("o1"), "org", None, &[]),
             Access::None
         );
     }
@@ -848,7 +900,7 @@ mod tests {
     fn unknown_visibility_denied() {
         let c = caller("u2", Some("o1"), OrgRole::Owner);
         assert_eq!(
-            can_access(&c, Some("u1"), Some("o1"), "weird", None),
+            can_access(&c, Some("u1"), Some("o1"), "weird", None, &[]),
             Access::None
         );
     }

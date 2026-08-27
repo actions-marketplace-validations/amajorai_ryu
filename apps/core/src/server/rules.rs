@@ -220,6 +220,9 @@ fn walk_rule_dir(
         return;
     }
     let canonical_dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if !canonical_dir.starts_with(project_root) {
+        return;
+    }
     if !visited_dirs.insert(canonical_dir) {
         return;
     }
@@ -263,11 +266,16 @@ fn add_rule(path: &Path, root: &Path, state: &mut DiscoveryState) {
     if !state.seen_paths.insert(PathBuf::from(&relative)) {
         return;
     }
-    let canonical_file = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if !state.seen_files.insert(canonical_file) {
+    let Ok(canonical_file) = fs::canonicalize(path) else {
+        return;
+    };
+    if !canonical_file.starts_with(root) {
         return;
     }
-    let Ok(bytes) = fs::read(path) else { return };
+    if !state.seen_files.insert(canonical_file.clone()) {
+        return;
+    }
+    let Ok(bytes) = fs::read(&canonical_file) else { return };
     if bytes.is_empty() || bytes.len() > MAX_TOTAL_BYTES.saturating_sub(state.bytes) {
         return;
     }
@@ -498,7 +506,10 @@ fn provider_string(provider: &RuleProvider) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_dir as symlink;
 
     #[test]
     fn discovers_provider_layouts_and_frontmatter() {
@@ -546,6 +557,7 @@ mod tests {
         assert_eq!(nested.globs, vec!["nested/**"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn claude_symlink_cycle_is_safe_and_cursor_symlink_is_ignored() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -572,5 +584,39 @@ mod tests {
             .rules
             .iter()
             .any(|rule| rule.provider == RuleProvider::Cursor));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_rules_follow_only_symlinks_that_stay_inside_the_project() {
+        let root = tempfile::tempdir().expect("project tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        fs::create_dir_all(root.path().join(".claude/rules")).unwrap();
+        fs::create_dir_all(root.path().join("shared")).unwrap();
+        fs::write(root.path().join("shared/inside.md"), "inside rule").unwrap();
+        fs::write(outside.path().join("secret.md"), "outside secret").unwrap();
+        fs::create_dir_all(outside.path().join("rules")).unwrap();
+        fs::write(outside.path().join("rules/leak.md"), "outside directory").unwrap();
+
+        symlink(
+            root.path().join("shared/inside.md"),
+            root.path().join(".claude/rules/inside.md"),
+        )
+        .unwrap();
+        symlink(
+            outside.path().join("secret.md"),
+            root.path().join(".claude/rules/external.md"),
+        )
+        .unwrap();
+        symlink(
+            outside.path().join("rules"),
+            root.path().join(".claude/rules/external-dir"),
+        )
+        .unwrap();
+
+        let response = discover_rules(root.path());
+        assert_eq!(response.rules.len(), 1);
+        assert_eq!(response.rules[0].path, ".claude/rules/inside.md");
+        assert_eq!(response.rules[0].content, "inside rule");
     }
 }

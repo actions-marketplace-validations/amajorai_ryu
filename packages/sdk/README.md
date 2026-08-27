@@ -20,7 +20,7 @@ bun test
 
 ## What it provides
 
-- **Runnable factories:** `agent`, `workflow`, `tool`, `skill` (and `AgentBuilder` / `WorkflowBuilder` / `ToolBuilder` / `SkillBuilder` / `PluginBuilder`) for the one Runnable contract (input to run to output).
+- **Runnable factories:** `agent`, `workflow`, `tool`, `skill` (and `AgentBuilder` / `WorkflowBuilder` / `ToolBuilder` / `SkillBuilder` / `PluginBuilder`) for the one Runnable contract (input to run to output). `defineApp` can attach a `ToolRunnable` so a widget's behavior ships as a grant-gated Core `inline_deno` tool.
 - **Manifest model:** `PluginManifest` types + `PluginManifestSchema` / `validateManifestStrict` / `validatePluginId` (also exported from `@ryuhq/sdk/manifest`).
 - **Gateway-mandatory model client:** chat types and a client where every model call routes through the Ryu Gateway (also from `@ryuhq/sdk/model`).
 - **MCP server/client:** author (`McpServer`) and consume (`listTools` / `callTool`) MCP tool surfaces, via `@ryuhq/sdk/mcp`, `@ryuhq/sdk/mcp/server`, or `@ryuhq/sdk/mcp/client`.

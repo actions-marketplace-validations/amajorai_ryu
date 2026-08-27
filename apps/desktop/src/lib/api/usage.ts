@@ -54,6 +54,8 @@ export type UsageValueKind = "percent" | "dollars" | "count";
 
 /** One figure on a {@link UsageMeter} row. */
 export interface UsageValue {
+	/** Billing currency when the provider reports one; absent for unitless values. */
+	currency?: string | null;
 	kind: UsageValueKind;
 	number: number;
 	/** Unit noun for the label ("credits", "available", "cap"), when it adds anything. */
@@ -97,6 +99,7 @@ interface WireWindow {
 }
 
 interface WireValue {
+	currency?: string | null;
 	kind: UsageValueKind;
 	number: number;
 	unit?: string | null;
@@ -140,6 +143,7 @@ function toSnapshot(wire: WireSnapshot): UsageSnapshot {
 			values: m.values.map((v) => ({
 				number: v.number,
 				kind: v.kind,
+				currency: v.currency ?? null,
 				unit: v.unit ?? null,
 			})),
 			expiresAt: m.expires_at ?? [],

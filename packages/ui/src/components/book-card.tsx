@@ -4,11 +4,10 @@
 // a visible fore-edge of pages — vendored from smoothui's `Book`
 // (https://smoothui.dev/docs/components/book) and re-expressed in our tokens.
 //
-// Kept purely presentational on purpose: the Library's Spaces shelf needs the
-// whole book to open a tab AND a nested favorite control, which is the same
-// `role="button"` + stop-propagated child pattern `LibraryCard` uses. Baking that
-// in here would fix one consumer's interaction model into a shape component, so
-// the surface owns it and this file only draws.
+// Kept purely presentational on purpose: a Library collection shelf owns each
+// item's opening and any nested controls. Baking one consumer's interaction
+// model into this shape component would make the presentation less reusable, so
+// the surface owns behavior and this file only draws.
 //
 // Two things about the geometry are load-bearing:
 //  - `width` is a real px number, not a percentage. The fore-edge is positioned

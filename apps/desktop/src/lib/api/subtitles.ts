@@ -12,13 +12,17 @@
 // `subtitles.request` bridge verb, so a per-endpoint client here would be ten
 // functions with no callers.
 //
-// What this file owns instead is the SECURITY BOUNDARY between a frame-chosen
-// sub-path and a URL — deliberately a second copy of the check in
-// `@ryu/app-host/rpc`'s `asSubtitlesRequestArg`, because either layer alone is one
-// refactor away from being the only thing standing between a frame and the node's
-// whole API.
+// This file owns the fixed mount + method policy and the download route's text
+// response. The shared desktop-host containment check lives in `app-request.ts`;
+// the independent sandbox-side check remains in `@ryu/app-host/rpc`.
 
-import { type ApiTarget, apiUrl, request, requestHeaders } from "./client.ts";
+import {
+	type AppRequestMethod,
+	requestValidatedMountedApp,
+	resolveMountedAppPath,
+	validateMountedAppRequest,
+} from "./app-request.ts";
+import { type ApiTarget, apiUrl, requestHeaders } from "./client.ts";
 
 /** The mount Core serves the `ryu-subtitles` sidecar on. A CONSTANT, never a
  *  parameter: the whole point of the validation below is that the frame contributes
@@ -27,7 +31,12 @@ const SUBTITLES_MOUNT = "/api/subtitles";
 
 /** Methods the forwarder will issue. A closed set, mirroring `SUBTITLES_METHODS` in
  *  `@ryu/app-host/rpc` — the sidecar's router serves no others. */
-const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
+const ALLOWED_METHODS: ReadonlySet<AppRequestMethod> = new Set([
+	"GET",
+	"POST",
+	"PUT",
+	"DELETE",
+]);
 
 /** A base that exists only to give `new URL()` something to resolve against. Never
  *  reaches a socket: only `pathname`/`search` are read back off the result, and the
@@ -71,27 +80,7 @@ export interface SubtitlesRequestInput {
  * requested.
  */
 export function resolveSubtitlesPath(path: unknown): null | string {
-	if (typeof path !== "string" || !path.startsWith("/")) {
-		return null;
-	}
-	if (path.startsWith("//") || path.includes("\\")) {
-		return null;
-	}
-	let url: URL;
-	try {
-		url = new URL(`${SUBTITLES_MOUNT}${path}`, PARSE_BASE);
-	} catch {
-		return null;
-	}
-	// A resolved path that left the mount — by any encoding — is not ours. The
-	// `/`-suffixed test is what stops `/api/subtitlessomething` passing as a prefix.
-	if (
-		url.pathname !== SUBTITLES_MOUNT &&
-		!url.pathname.startsWith(`${SUBTITLES_MOUNT}/`)
-	) {
-		return null;
-	}
-	return `${url.pathname}${url.search}`;
+	return resolveMountedAppPath(SUBTITLES_MOUNT, path);
 }
 
 /** Whether a resolved path is the download route, whose response is a subtitle FILE
@@ -118,21 +107,17 @@ export async function subtitlesRequest(
 	target: ApiTarget,
 	input: SubtitlesRequestInput
 ): Promise<unknown> {
-	const path = resolveSubtitlesPath(input.path);
-	if (!path) {
-		throw new Error(
-			`Refusing to forward "${String(input.path)}" — a Subtitles request path must be a sub-path of ${SUBTITLES_MOUNT} beginning with "/" and containing no ".." segment.`
-		);
-	}
-	const method = input.method ?? "GET";
-	if (!ALLOWED_METHODS.has(method)) {
-		throw new Error(
-			`Refusing to forward a Subtitles request with method "${method}".`
-		);
-	}
+	const validated = validateMountedAppRequest(input, {
+		allowedMethods: ALLOWED_METHODS,
+		invalidMethodMessage: (method) =>
+			`Refusing to forward a Subtitles request with method "${method}".`,
+		invalidPathMessage: (path) =>
+			`Refusing to forward "${String(path)}" — a Subtitles request path must be a sub-path of ${SUBTITLES_MOUNT} beginning with "/" and containing no ".." segment.`,
+		mount: SUBTITLES_MOUNT,
+	});
 
-	if (method === "GET" && isDownloadPath(path)) {
-		const response = await fetch(apiUrl(target, path), {
+	if (validated.method === "GET" && isDownloadPath(validated.path)) {
+		const response = await fetch(apiUrl(target, validated.path), {
 			headers: await requestHeaders(target),
 			method: "GET",
 		});
@@ -145,8 +130,5 @@ export async function subtitlesRequest(
 		return text;
 	}
 
-	return await request<unknown>(target, path, {
-		body: input.body,
-		method,
-	});
+	return await requestValidatedMountedApp(target, validated);
 }

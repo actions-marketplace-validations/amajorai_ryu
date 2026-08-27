@@ -15,7 +15,8 @@
 
 import { defineConfig, devices } from "@playwright/test";
 
-const HARNESS_URL = "http://localhost:5177/";
+const HARNESS_PORT = Number(process.env.RYU_E2E_PORT ?? "5177");
+const HARNESS_URL = `http://localhost:${HARNESS_PORT}/`;
 
 export default defineConfig({
 	testDir: "./e2e",
@@ -44,7 +45,8 @@ export default defineConfig({
 		},
 	],
 	webServer: {
-		command: "bunx vite --config e2e/harness/vite.harness.config.ts",
+		command:
+			"node node_modules/vite/bin/vite.js --config e2e/harness/vite.harness.config.ts",
 		url: HARNESS_URL,
 		reuseExistingServer: !process.env.CI,
 		timeout: 120_000,

@@ -1,27 +1,39 @@
 "use client";
 
-import { SPRING_MORPH } from "@ryu/ui/lib/ease.ts";
-import { motion, useAnimationControls, useReducedMotion } from "motion/react";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
-
-const REDUCED_TRANSITION = { duration: 0.15, ease: "easeOut" } as const;
-const MENU_RADIUS = 24;
-const CONTENT_FADE = 0.14;
-const OPEN_CONTENT_DELAY = 0.06;
+import {
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+} from "react";
 
 type PopupRenderProps = React.ComponentPropsWithRef<"div">;
+
+type DropdownSide =
+	| "bottom"
+	| "inline-end"
+	| "inline-start"
+	| "left"
+	| "right"
+	| "top";
+type DropdownAlign = "center" | "end" | "start";
+
 interface PopupState {
+	align: DropdownAlign;
 	open: boolean;
+	side: DropdownSide;
 }
 
-interface MorphGeometry {
-	scaleX: number;
-	scaleY: number;
-	triggerRadius: number;
-	x: number;
-	y: number;
-}
+export type DropdownOrigin =
+	| "bottom-center"
+	| "bottom-left"
+	| "bottom-right"
+	| "top-center"
+	| "top-left"
+	| "top-right";
 
 interface VerticalScrollEdges {
 	bottom: boolean;
@@ -38,50 +50,34 @@ function assignRef<T>(ref: React.Ref<T> | undefined, value: T | null) {
 	}
 }
 
-function clampScale(value: number) {
-	return Math.max(0.01, Math.min(value, 4));
+export function dropdownOriginFor(
+	side: DropdownSide,
+	align: DropdownAlign
+): DropdownOrigin {
+	const verticalOrigin =
+		side === "top" || (side !== "bottom" && align === "end") ? "bottom" : "top";
+	const horizontalOrigin =
+		side === "left" || side === "inline-start"
+			? "right"
+			: side === "right" || side === "inline-end"
+				? "left"
+				: align === "end"
+					? "right"
+					: align === "center"
+						? "center"
+						: "left";
+
+	return `${verticalOrigin}-${horizontalOrigin}` as DropdownOrigin;
 }
 
-function triggerElementFor(
-	popup: HTMLDivElement,
-	labelledBy: string | undefined
-): HTMLElement | null {
-	if (!labelledBy) {
-		return null;
+export function dropdownMotionClassNames(
+	open: boolean,
+	openReady: boolean
+): string {
+	if (!open) {
+		return "t-dropdown is-closing";
 	}
-	return popup.ownerDocument.getElementById(labelledBy.split(/\s+/u)[0] ?? "");
-}
-
-function triggerRadius(trigger: HTMLElement, height: number) {
-	const radius = Number.parseFloat(
-		trigger.ownerDocument.defaultView?.getComputedStyle(trigger)
-			.borderTopLeftRadius ?? ""
-	);
-	return Number.isFinite(radius) ? radius : height / 2;
-}
-
-function measureMorphGeometry(
-	popup: HTMLDivElement,
-	labelledBy: string | undefined
-): MorphGeometry | null {
-	const trigger = triggerElementFor(popup, labelledBy);
-	if (!trigger) {
-		return null;
-	}
-
-	const popupRect = popup.getBoundingClientRect();
-	const triggerRect = trigger.getBoundingClientRect();
-	if (popupRect.width <= 0 || popupRect.height <= 0) {
-		return null;
-	}
-
-	return {
-		scaleX: clampScale(triggerRect.width / popupRect.width),
-		scaleY: clampScale(triggerRect.height / popupRect.height),
-		triggerRadius: triggerRadius(trigger, triggerRect.height),
-		x: triggerRect.left - popupRect.left,
-		y: triggerRect.top - popupRect.top,
-	};
+	return cn("t-dropdown", openReady && "is-open");
 }
 
 function scrollFadeStyle(
@@ -171,123 +167,65 @@ function useVerticalScrollEdges(
 	return edges;
 }
 
+function useDropdownOpenReady(open: boolean): boolean {
+	const [openReady, setOpenReady] = useState(false);
+
+	useEffect(() => {
+		if (!open) {
+			setOpenReady(false);
+			return;
+		}
+
+		setOpenReady(false);
+		const frame = requestAnimationFrame(() => setOpenReady(true));
+		return () => cancelAnimationFrame(frame);
+	}, [open]);
+
+	return openReady;
+}
+
 /**
- * Replaces Base UI's popup render element with one animated glass surface.
- * The popup remains Base UI's focusable element; Motion only owns the visual
- * transform, which lets Base UI wait for the same Web Animations API lifecycle
- * before unmounting the menu on close.
+ * Applies the shared Transitions.dev scale/fade surface to Base UI's popup.
+ * Base UI keeps the popup mounted while the ending transition is active, so
+ * the `.is-closing` state can finish before focus and the portal are released.
  */
-export function renderMorphingDropdownPopup(
+export function renderDropdownPopup(
 	props: PopupRenderProps,
 	state: PopupState
 ): React.ReactElement {
-	return <MorphingDropdownPopup {...props} popupState={state} />;
+	return <AnimatedDropdownPopup {...props} popupState={state} />;
 }
 
-function MorphingDropdownPopup({
+function AnimatedDropdownPopup({
 	popupState: state,
 	...props
 }: PopupRenderProps & { popupState: PopupState }): React.ReactElement {
 	const {
 		children,
+		className,
 		ref: forwardedRef,
 		style: forwardedStyle,
 		...elementProps
 	} = props;
 	const popupRef = useRef<HTMLDivElement>(null);
-	const controls = useAnimationControls();
-	const prefersReducedMotion = useReducedMotion();
-	const geometryRef = useRef<MorphGeometry | null>(null);
-	const [ready, setReady] = useState(false);
+	const forwardedRefRef = useRef(forwardedRef);
+	const openReady = useDropdownOpenReady(state.open);
 	const scrollEdges = useVerticalScrollEdges(popupRef, state.open);
-	const labelledBy =
-		typeof props["aria-labelledby"] === "string"
-			? props["aria-labelledby"]
-			: undefined;
-	const transition = prefersReducedMotion ? REDUCED_TRANSITION : SPRING_MORPH;
-	const motionElementProps = elementProps as React.ComponentProps<
-		typeof motion.div
-	>;
-
-	const setPopupRef = useCallback(
-		(element: HTMLDivElement | null) => {
-			popupRef.current = element;
-			assignRef(forwardedRef, element);
-		},
-		[forwardedRef]
-	);
 
 	useLayoutEffect(() => {
-		const popup = popupRef.current;
-		controls.stop();
+		forwardedRefRef.current = forwardedRef;
+	}, [forwardedRef]);
 
-		if (!(state.open && popup)) {
-			const geometry = geometryRef.current;
-			if (geometry) {
-				void controls.start(
-					{
-						x: geometry.x,
-						y: geometry.y,
-						scaleX: geometry.scaleX,
-						scaleY: geometry.scaleY,
-						borderRadius: geometry.triggerRadius,
-					},
-					transition
-				);
-			}
-			return () => controls.stop();
-		}
-
-		setReady(false);
-		controls.set({
-			x: 0,
-			y: 0,
-			scaleX: 1,
-			scaleY: 1,
-			borderRadius: MENU_RADIUS,
-		});
-
-		let frame = 0;
-		const open = () => {
-			const nextGeometry = measureMorphGeometry(popup, labelledBy);
-			if (!nextGeometry) {
-				setReady(true);
-				return;
-			}
-
-			geometryRef.current = nextGeometry;
-			controls.stop();
-			controls.set({
-				x: nextGeometry.x,
-				y: nextGeometry.y,
-				scaleX: nextGeometry.scaleX,
-				scaleY: nextGeometry.scaleY,
-				borderRadius: nextGeometry.triggerRadius,
-			});
-			setReady(true);
-			void controls.start(
-				{
-					x: 0,
-					y: 0,
-					scaleX: 1,
-					scaleY: 1,
-					borderRadius: MENU_RADIUS,
-				},
-				transition
-			);
-		};
-
-		frame = requestAnimationFrame(open);
-		return () => {
-			cancelAnimationFrame(frame);
-			controls.stop();
-		};
-	}, [controls, labelledBy, state.open, transition]);
+	const setPopupRef = useCallback((element: HTMLDivElement | null) => {
+		popupRef.current = element;
+		assignRef(forwardedRefRef.current, element);
+	}, []);
 
 	return (
-		<motion.div
-			{...motionElementProps}
-			animate={controls}
+		<div
+			{...elementProps}
+			className={cn(className, dropdownMotionClassNames(state.open, openReady))}
+			data-origin={dropdownOriginFor(state.side, state.align)}
 			data-scroll-edges={
 				scrollEdges.top && scrollEdges.bottom
 					? "both"
@@ -301,21 +239,9 @@ function MorphingDropdownPopup({
 			style={{
 				...forwardedStyle,
 				...scrollFadeStyle(scrollEdges),
-				transformOrigin: "top left",
-				visibility: ready ? "visible" : "hidden",
 			}}
 		>
-			<motion.div
-				animate={{ opacity: state.open ? 1 : 0 }}
-				initial={{ opacity: 0 }}
-				style={{ pointerEvents: state.open ? "auto" : "none" }}
-				transition={{
-					delay: state.open ? OPEN_CONTENT_DELAY : 0,
-					duration: CONTENT_FADE,
-				}}
-			>
-				{children}
-			</motion.div>
-		</motion.div>
+			{children}
+		</div>
 	);
 }

@@ -25,6 +25,28 @@ use crate::identity_verify::VerifiedCaller;
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
 
+/// Project the node-scoped notification roster into the compact shape the chat
+/// composer needs. The user id is the only durable identity; the other fields
+/// are display data and may be absent on partially mirrored accounts.
+fn mention_targets_payload(
+    users: Vec<crate::sidecar::control_plane::NotifyTargetUser>,
+) -> serde_json::Value {
+    json!({
+        "users": users
+            .into_iter()
+            .map(|user| {
+                json!({
+                    "email": user.email,
+                    "image": user.image,
+                    "name": user.name.unwrap_or_else(|| user.user_id.clone()),
+                    "role": user.role,
+                    "userId": user.user_id,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// Query for `GET /api/notifications` and the SSE stream.
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -112,6 +134,42 @@ pub async fn list_notifications(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// `GET /api/notifications/mention-targets` — the human rows the active Inbox
+/// app may expose in the chat `@` picker. Core resolves the organization/team
+/// scope from the node's gateway credential; the verified caller requirement
+/// prevents an anonymous node-token holder from enumerating that roster.
+#[utoipa::path(
+    get,
+    path = "/api/notifications/mention-targets",
+    tag = "Notifications",
+    summary = "list scoped human mention targets.",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn mention_targets(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<VerifiedCaller>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(caller) = caller else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "verified caller required" })),
+        );
+    };
+    if caller.org_id.is_none() || crate::sidecar::control_plane::registered_org().is_none() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "organization roster unavailable" })),
+        );
+    }
+    match crate::sidecar::control_plane::resolve_notify_targets(&state.client, None).await {
+        Ok(users) => (StatusCode::OK, Json(mention_targets_payload(users))),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "organization roster unavailable" })),
         ),
     }
 }
@@ -594,5 +652,29 @@ mod tests {
         assert_eq!(10_000i64.clamp(1, MAX_LIMIT), MAX_LIMIT);
         assert_eq!((-5i64).clamp(1, MAX_LIMIT), 1);
         assert_eq!(DEFAULT_LIMIT.clamp(1, MAX_LIMIT), DEFAULT_LIMIT);
+    }
+
+    #[test]
+    fn mention_targets_payload_preserves_member_avatar_data() {
+        let payload =
+            mention_targets_payload(vec![crate::sidecar::control_plane::NotifyTargetUser {
+                email: Some("ada@example.test".to_owned()),
+                image: Some("https://cdn.example.test/ada.webp".to_owned()),
+                name: Some("Ada Lovelace".to_owned()),
+                role: Some("member".to_owned()),
+                user_id: "user-ada".to_owned(),
+            }]);
+        assert_eq!(
+            payload,
+            json!({
+                "users": [{
+                    "email": "ada@example.test",
+                    "image": "https://cdn.example.test/ada.webp",
+                    "name": "Ada Lovelace",
+                    "role": "member",
+                    "userId": "user-ada",
+                }]
+            })
+        );
     }
 }

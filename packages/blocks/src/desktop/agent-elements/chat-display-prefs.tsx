@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useContext, useMemo } from "react";
+import type { ComposerSendShortcut } from "./composer-send-shortcut.ts";
 
 /**
  * Global display preferences for the chat message list. Consumed by tool
@@ -15,6 +16,10 @@ export interface ChatDisplayPrefs {
 	 * Default: true.
 	 */
 	animationsEnabled: boolean;
+	/**
+	 * Which Enter-key combo sends the current composer draft. Default: "enter".
+	 */
+	composerSendShortcut: ComposerSendShortcut;
 	/**
 	 * How much room the transcript gives each turn.
 	 * - "comfortable" (default): the full desktop chat — centred 720px column,
@@ -142,6 +147,7 @@ export interface ChatDisplayPrefs {
 const DEFAULT_PREFS: ChatDisplayPrefs = {
 	markdownComposer: false,
 	animationsEnabled: true,
+	composerSendShortcut: "enter",
 	density: "comfortable",
 	groupToolUses: true,
 	expandFileEdits: false,
@@ -158,7 +164,7 @@ const DEFAULT_PREFS: ChatDisplayPrefs = {
 	streamAnimation: true,
 	// Must equal APPEARANCE_DEFAULTS.inferenceStats in
 	// apps/desktop/src/lib/appearance-settings.ts.
-	inferenceStats: false,
+	inferenceStats: true,
 };
 
 const ChatDisplayPrefsContext = createContext<ChatDisplayPrefs>(DEFAULT_PREFS);

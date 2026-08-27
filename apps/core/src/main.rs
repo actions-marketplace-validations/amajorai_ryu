@@ -1,6 +1,7 @@
 mod acl;
 mod acp_runtime;
 mod activity;
+mod a2a;
 mod agent_control;
 mod agent_execution;
 mod agent_routing;
@@ -8,6 +9,7 @@ mod agent_selection;
 mod agents;
 mod approvals;
 mod auth;
+mod authorization;
 mod background_processes;
 mod capabilities;
 mod catalog;
@@ -25,6 +27,7 @@ pub(crate) use ryu_composio::catalog as composio_catalog;
 pub(crate) use ryu_composio::connect as composio_connect;
 pub(crate) use ryu_composio::triggers as composio_triggers;
 mod connections;
+mod config_file;
 mod crash;
 mod crypto_host;
 mod dashboards_client;
@@ -44,6 +47,7 @@ mod exec_approval;
 mod ext_api;
 mod fal_auth;
 mod fleet;
+mod governance;
 mod hardware;
 mod healing_client;
 mod hf_auth;
@@ -105,6 +109,7 @@ mod finetune_client;
 mod openrouter_auth;
 mod pairing;
 mod paths;
+mod payment;
 mod pi_config;
 mod plugin_host;
 mod plugin_manifest;
@@ -113,6 +118,7 @@ mod plugin_storage;
 mod plugins;
 mod policy_alerts;
 mod portable_packages;
+mod prompt_evals;
 mod predict;
 mod predict_host;
 mod privacy;
@@ -126,6 +132,8 @@ mod replicate_auth;
 mod routing_policy;
 mod rtk_config;
 mod runnable;
+mod ryu_analytics;
+mod safe_actions;
 mod ryu_platform;
 /// The OS-style "boot with the extension layer off" switch (apps, plugins,
 /// skills, user MCP servers, the scheduler). Resolved once, below, BEFORE
@@ -278,6 +286,22 @@ async fn main() {
     // sidecar SPAWN ports are threaded through `profile::port` in `sidecar/**`.
     crate::profile::apply_env_defaults();
 
+    // Load non-secret node defaults from the structured config before any
+    // component resolves its own environment fallback. Explicit environment
+    // values remain higher precedence, so deployments can override a local file
+    // and rollback is simply removing the file.
+    if let Err(error) = crate::config_file::load() {
+        boot_fail!("failed to load structured node config: {error:#}");
+    }
+
+    // Prompt Studio suites/runs/reviews are Core-owned durable resources. Install
+    // the store after profile defaults so the database follows the active node
+    // data directory, before any HTTP router can serve the prompt-eval surface.
+    let prompt_eval_store = crate::prompt_evals::PromptEvalStore::open()
+        .expect("open prompt eval store");
+    crate::prompt_evals::PromptEvalStore::install_global(prompt_eval_store)
+        .expect("install prompt eval store");
+
     // PATH enrichment: add the user's own bin directories that a GUI launcher
     // does not pass down. Must run before ANY CLI probe or spawn, so agent
     // detection and agent execution resolve names against the same PATH — see
@@ -406,7 +430,10 @@ async fn main() {
     // local sinks (stdout `fmt` + the `server/trace.rs` SQLite store) are untouched.
     // The provider is held for the process lifetime (leaked) so batched spans flush.
     let otel = match crate::server::preferences::PreferencesStore::open_default() {
-        Ok(prefs) => crate::telemetry::build_otlp_layer(&prefs).await,
+        Ok(prefs) => {
+            crate::ryu_analytics::seed_product_analytics(&prefs).await;
+            crate::telemetry::build_otlp_layer(&prefs).await
+        }
         Err(e) => {
             // No subscriber yet — eprintln so the failure is visible without spans.
             eprintln!("telemetry: could not open preferences store; OTLP export off: {e}");
@@ -538,6 +565,29 @@ async fn main() {
     let download_center = crate::downloads::DownloadCenter::with_default_client();
     download_center.load().await;
 
+    // Island is a desktop-owned companion, not a Core sidecar: Core never starts
+    // it and it stays out of the node selector while the feature is disabled. Its
+    // bundle is still preinstalled here so the future launch toggle is a product
+    // switch, not a reinstall. Using the same DownloadCenter also makes the
+    // disabled companion's initial download and later refresh visible in Desktop's
+    // global Downloads surface.
+    #[cfg(not(debug_assertions))]
+    {
+        let island_downloads = download_center.clone();
+        tokio::spawn(async move {
+            let version = env!("CARGO_PKG_VERSION");
+            if let Err(error) = crate::sidecar::tools::island::ensure_installed(
+                &island_downloads,
+                version,
+                false,
+            )
+            .await
+            {
+                tracing::warn!(error = %error, "Island preinstall/update failed");
+            }
+        });
+    }
+
     // Define all available sidecars
     let all_sidecars: Vec<Arc<dyn sidecar::Sidecar>> = vec![
         // Providers
@@ -622,15 +672,12 @@ async fn main() {
     let startup_order = vec![
         // Tools first
         "llmfit".into(),
-        // ── shadow + ghost autostart: DISABLED for v1 ───────────────────────
-        // Deferred out of the first release to shrink the shippable surface.
-        // Both are still registered in `all_sidecars` above and stay seeded via
-        // CORE_DEFAULT_ON, so their tools remain available on-demand (Core spawns
-        // them lazily when a ghost/shadow MCP tool is first invoked). Removing
-        // them here only stops the *boot-time* auto-start + binary download.
-        // TO RE-ENABLE: uncomment the two lines below.
-        // "shadow".into(),
-        // "ghost".into(),
+        // Release Core treats Shadow and Ghost as first-party preinstalled tools.
+        // Their managers download through the global DownloadCenter on a fresh
+        // node and start normally here; debug Core leaves eligibility to the
+        // local turbo/dev processes.
+        "shadow".into(),
+        "ghost".into(),
         // Then providers
         "llamacpp".into(),
         // Embeddings server auto-starts so RAG has real embeddings on launch.
@@ -779,7 +826,7 @@ async fn main() {
     // Full-text (FTS5) message index backing the FTS session-search recall layer.
     // Opened best-effort (fail-open, same as the semantic index): if the FTS table
     // can't be created, conversations still work — the FTS recall source just
-    // returns no index. Population is lazy-on-search and default-OFF, so wiring the
+    // returns no index. Population is lazy-on-search and disabled by default, so wiring the
     // index here materializes nothing until a user opts into FTS recall.
     let conversations = match search_host::open_default_message_fts() {
         Ok(index) => conversations.with_message_fts_index(index),
@@ -824,8 +871,8 @@ async fn main() {
     // Uploads seeds are not: those two back **kernel** surfaces that run whatever
     // the user has installed (agent file output; the ungated `/api/uploads`
     // mount). Clips/Canvas/Whiteboard back three OPT-IN APPS — `@ryu/clips`,
-    // `@ryu/canvas`, `@ryu/whiteboard`, none of them default-on, all three in
-    // `plugins::seed::NOT_PRE_INSTALLED` — so seeding their Spaces created three
+    // `@ryu/canvas`, `@ryu/whiteboard`, none of them pre-installed — so seeding their
+    // Spaces created three
     // undeletable, permanently empty Spaces on machines whose owner had never
     // installed the apps and could not delete them (`ensure_system_space` marks
     // them system ⇒ undeletable). It also survived a full node reset, because the
@@ -892,7 +939,7 @@ async fn main() {
     // ── Safe Mode (see `crate::safe_mode`) ────────────────────────────────────
     //
     // Resolved HERE and nowhere else. Everything the flag suppresses — the
-    // default-on plugin seed, the MCP registry, the sidecar `start_all`, the
+    // pre-installed plugin seed, the MCP registry, the sidecar `start_all`, the
     // scheduler tick loop — is constructed further down this function, so this
     // read has to land ahead of all of them. Consulting the flag at request time
     // instead would mean boot already paid every cost the user is trying to
@@ -1049,7 +1096,7 @@ async fn main() {
     }
     // Node entitlement gate (#496): seed the in-process flag so the scheduler
     // pauses autonomous automation when the desktop's trial has hard-expired
-    // with no subscription/license. Absent ⇒ default-ON (headless / OSS Core /
+    // with no subscription/license. Absent ⇒ enabled by default (headless / OSS Core /
     // still-entitled desktop run automations normally).
     if let Ok(Some(v)) = preferences
         .get(entitlement::ENTITLEMENT_ACTIVE_PREF_KEY)
@@ -1062,6 +1109,18 @@ async fn main() {
         .await
     {
         entitlement::set_managed_inference_entitled(&v);
+    }
+    if let Ok(Some(v)) = preferences
+        .get(entitlement::MARKETPLACE_APPS_ENTITLED_PREF_KEY)
+        .await
+    {
+        entitlement::set_marketplace_apps_entitled(&v);
+    }
+    if let Ok(Some(v)) = preferences
+        .get(entitlement::MARKETPLACE_DIRECT_LICENSED_ITEMS_PREF_KEY)
+        .await
+    {
+        entitlement::set_marketplace_direct_licensed_items(&v);
     }
     // Same for the Artificial Analysis API key, which enriches the model catalog
     // with independent benchmark stats (intelligence/speed/price).
@@ -1102,7 +1161,7 @@ async fn main() {
         exec_approval::seed_from_pref(&value);
     }
     // Untrusted-content wrapping toggle: external/tool RESULTS re-entering the
-    // model are boundary-wrapped + chat-template-token-stripped. Default-ON (safe:
+    // model are boundary-wrapped + chat-template-token-stripped. Pre-installed (safe:
     // only untrusted tool output, never user text); seed only to honour an
     // explicit opt-OUT persisted by the desktop.
     if let Ok(Some(value)) = preferences
@@ -1136,7 +1195,7 @@ async fn main() {
     // (they used to share one preference, so declining credential routing also
     // silently stripped every Ryu tool). Seeded the same way, but note the
     // asymmetry: this map holds only opt-OUTs — an absent preference is the
-    // default-ON case and needs no seeding at all, which is exactly what a missing
+    // enabled-by-default case and needs no seeding at all, which is exactly what a missing
     // key here leaves behind. See `agent_routing`'s module docs.
     if let Ok(Some(value)) = preferences
         .get(agent_routing::AGENT_TOOL_BRIDGE_PREF_KEY)
@@ -1335,23 +1394,23 @@ async fn main() {
         crate::predict::set_enabled(rec.enabled);
     }
     // Seed system-wide dictation from the Dictation plugin's persisted enabled
-    // state. Default-on (see CORE_DEFAULT_ON): Island hosts the OS surface and
+    // state. Pre-installed (see CORE_PREINSTALLED): Island hosts the OS surface and
     // reads the synced `dictation` preference `enabled` field for live shortcut
     // rebinding when the plugin flips.
     if let Ok(Some(rec)) = app_store.get(crate::dictation::DICTATION_PLUGIN_ID).await {
         crate::dictation::set_enabled(rec.enabled);
     }
-    // Default-on plugin seeding (#444) — the ONE definition lives in
-    // `plugins::seed`. It seeds every `CORE_DEFAULT_ON` plugin INSTALLED +
+    // Pre-installed plugin seeding (#444) — the ONE definition lives in
+    // `plugins::seed`. It seeds every `CORE_PREINSTALLED` plugin INSTALLED +
     // ENABLED on a fresh install (the three companions with their grants +
     // prebuilt `ui_code` bundle, everything else with empty grants), in
     // DEPENDENCY ORDER, and refuses to enable a plugin whose `requires` cannot be
-    // satisfied from the default-on set.
+    // satisfied from the pre-installed set.
     //
     // It writes the store directly rather than calling `lifecycle::enable_app`
     // because the Gateway is not spawned until further below and `enable_app`
     // fails closed on an unreachable Gateway — routing the seed through it would
-    // disable every default-on plugin on every fresh install. The dependency
+    // disable every pre-installed plugin on every fresh install. The dependency
     // GRAPH is still honoured (see the module docs); only the Gateway grant call
     // is bypassed, for a fixed first-party grant set.
     //
@@ -1364,16 +1423,23 @@ async fn main() {
     // persist state the user never asked for. Both are one-time and gated on
     // record presence / schema version, so the next normal boot performs them.
     if crate::safe_mode::is_active() {
-        tracing::info!("safe mode: skipping default-on plugin seed and one-time migrations");
+        tracing::info!("safe mode: skipping pre-installed plugin seed and one-time migrations");
     } else {
         let manifests = app_manifests.read().await.clone();
+        // Open plugin-owned KV before the seed migrations: v6 moves legacy
+        // unscoped rows through this process-global handle. Safe mode leaves the
+        // store unopened, preserving its non-destructive boot contract.
+        match crate::plugin_storage::open_default() {
+            Ok(store) => crate::plugin_storage::set_global(store),
+            Err(e) => tracing::warn!("plugin storage unavailable: {e:#}"),
+        }
         // Repair ALREADY-INSTALLED stores before seeding fresh defaults. The
         // migration must see the user's legacy disabled record first; seeding it
-        // before migration would recreate a default-on row and erase that choice.
+        // before migration would recreate a pre-installed row and erase that choice.
         crate::plugins::seed::run_one_time_migrations(&app_store, &manifests).await;
-        crate::plugins::seed::seed_default_on(&app_store, &manifests).await;
+        crate::plugins::seed::seed_preinstalled(&app_store, &manifests).await;
     }
-    // Re-read dictation after default-on seed: a fresh install may have just
+    // Re-read dictation after pre-installed seed: a fresh install may have just
     // created the enabled record, and the pre-seed AtomicBool read above would
     // have missed it.
     if let Ok(Some(rec)) = app_store.get(crate::dictation::DICTATION_PLUGIN_ID).await {
@@ -1406,6 +1472,16 @@ async fn main() {
     // per-run diff captured during a workflow agent turn is visible to chat too).
     let worktree_diffs: crate::server::WorktreeDiffStore =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
+    // Core is the sole authority for verified tool plans. The companion app only
+    // reads and mutates this protected API; certificates and execution grants are
+    // never issued by app code.
+    let safe_actions_store = match crate::safe_actions::SafeActionsStore::open_default() {
+        Ok(store) => store,
+        Err(error) => boot_fail!("failed to open Safe Actions store: {error:#}"),
+    };
+    let safe_actions = crate::safe_actions::SafeActionsService::new(safe_actions_store);
+    crate::safe_actions::install_global(safe_actions.clone());
 
     // Wire self-build context into the MCP registry (U57). The registry holds
     // Arc references to the manifest store and app store so scaffold_runnable /
@@ -1612,14 +1688,6 @@ async fn main() {
     // Publish the MCP registry globally so the workflow `Tool` node can invoke
     // tools (the executor is a free function with no ServerState handle).
     crate::sidecar::mcp::set_global_registry(Arc::clone(&mcp_registry));
-    // Plugin-owned KV storage (the plugin turn-hook runtime's `storage:kv`
-    // capability). Published as a process-global so the sandbox bridge reaches it
-    // without threading through ServerState. Best-effort: a plugin's `host.storage`
-    // call surfaces a clean error if the store could not open.
-    match crate::plugin_storage::open_default() {
-        Ok(store) => crate::plugin_storage::set_global(store),
-        Err(e) => tracing::warn!("plugin storage unavailable: {e:#}"),
-    }
     // Per-plugin BYOK secrets (the `env:` secret-header fallback + the `secret`
     // settings field). Published as a process-global for the same reason as the KV
     // store above: `tool_exec::resolve_secret_token` is a free fn with no
@@ -1695,13 +1763,18 @@ async fn main() {
         ),
     );
 
-    // Clone the conversation + preferences stores (both cheap Arc-backed handles)
-    // for the opt-in cross-device sync loop before they move into ServerState.
+    // Clone the local stores for the opt-in cross-device sync loop before they
+    // move into ServerState.
     let sync_conversations = conversations.clone();
+    let sync_spaces = spaces.clone();
     let sync_preferences = preferences.clone();
     // Clone the preferences handle for the opt-in anonymous community-savings
     // beacon (OFF by default) before `preferences` moves into ServerState below.
     let stats_preferences = preferences.clone();
+    // Clone the preferences handle for the managed Ryu analytics heartbeat. It
+    // starts after durable-token adoption below so the relay sees the live node
+    // credential rather than a consumed bootstrap key.
+    let ryu_analytics_preferences = preferences.clone();
     // Clone the preferences handle for the local-model auto-unload reactor (restarts
     // the resident engine when the idle timeout changes) before `preferences` moves
     // into ServerState below.
@@ -1709,7 +1782,7 @@ async fn main() {
 
     // NOTE: chat auto-rename is NOT wired here. Core titles a conversation from
     // its first user message when it persists the turn, and the LLM rename on top
-    // of that belongs to the `@ryu/chat-title` turn-hook plugin (default-on),
+    // of that belongs to the `@ryu/chat-title` turn-hook plugin (pre-installed),
     // which owns the cadence, the toggle and the model. The background titler that
     // used to run from this file could only reach an active *local* engine, so it
     // no-opped on cloud-only nodes and left every chat on its placeholder.
@@ -1776,6 +1849,7 @@ async fn main() {
         auth: Arc::clone(&auth_state),
         agents: Arc::clone(&agent_registry),
         agent_store,
+        safe_actions,
         teams,
         conversations,
         memory,
@@ -1851,7 +1925,7 @@ async fn main() {
     // Ordinary first-party plugins are official marketplace packages, not
     // compiled runtime entries. Install the default package set through the
     // same verified catalog path as the Store, then reload the runtime list
-    // before activation and default-on seeding.
+    // before activation and pre-installed seeding.
     if !crate::safe_mode::is_active() {
         const DEFAULT_MARKETPLACE_STARTUP_WAIT: std::time::Duration =
             std::time::Duration::from_secs(15);
@@ -1861,7 +1935,7 @@ async fn main() {
                 crate::server::install_default_official_plugins(&materialization_state).await;
             let runtime = crate::plugin_manifest::PluginManifestLoader::load_runtime();
             *materialization_state.app_manifests.write().await = runtime.clone();
-            crate::plugins::seed::seed_default_on_with_materialized(
+            crate::plugins::seed::seed_preinstalled_with_materialized(
                 &materialization_state.app_store,
                 &runtime,
                 &newly_materialized,
@@ -2018,7 +2092,7 @@ async fn main() {
     }
 
     // (The `ryu-mail` sidecar is spawned by the generic plugin-sidecar loader when
-    // the default-on `@ryu/mail` app is reconciled — no bespoke startup here.)
+    // the `@ryu/mail` app is reconciled — no bespoke startup here.)
 
     // Webhook ingress seam (#479, P6a): build the configured ingress backend
     // (default RyuRelay; pref `webhook.ingress.backend`; env override
@@ -2076,7 +2150,7 @@ async fn main() {
     // tick until the user opts in (env `RYU_SYNC_ENABLED` or the
     // `cloud-sync-enabled` pref). OFF by default per the local-first rule, so
     // this never alters default behaviour or blocks startup.
-    server::sync::spawn_sync_loop(sync_conversations, sync_preferences);
+    server::sync::spawn_sync_loop(sync_conversations, sync_spaces, sync_preferences);
 
     // Start the opt-in anonymous community-savings beacon. A no-op every tick
     // until the user opts in (`community-stats-enabled` pref or
@@ -2094,6 +2168,12 @@ async fn main() {
     // (no file) is untouched and exchanges its bootstrap normally.
     sidecar::control_plane::load_persisted_durable_token();
 
+    // Managed Core analytics is a typed, content-free relay separate from the
+    // customer's consented OTLP diagnostics stream. The producer no-ops on
+    // unmanaged/local nodes and re-reads the product-analytics preference every
+    // tick, so an opt-out stops future egress without a restart.
+    ryu_analytics::spawn(ryu_analytics_preferences);
+
     // Enrolled nodes pull signed fleet desired state over an outbound-only
     // long poll. Unenrolled/local-only nodes sleep without touching the network.
     fleet::spawn_reconciler(server_state.clone());
@@ -2105,12 +2185,24 @@ async fn main() {
     // Core from coming up — chat still works with the local registry.
     {
         let cp_client = reqwest::Client::new();
+        let governance_state = server_state.clone();
         tokio::spawn(async move {
             match sidecar::control_plane::resolve_scope(&cp_client).await {
                 Ok(None) => tracing::info!(
                     "control-plane: no gateway key (RYU_GATEWAY_KEY) set; using local MCP registry only"
                 ),
                 Ok(Some(scope)) => {
+                    if let Err(error) = scope
+                        .apply_governance(
+                            &governance_state.preferences,
+                            &governance_state.app_store,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "control-plane: managed governance apply failed ({error}); keeping last known good policy"
+                        );
+                    }
                     let mcp = scope.allowed_slugs("mcp");
                     let composio = scope.allowed_slugs("composio");
                     tracing::info!(
@@ -2128,11 +2220,11 @@ async fn main() {
         });
     }
 
-    // Managed-node registration (A4 / #501): on a node flagged
-    // `RYU_MANAGED_NODE`, bind this node to its org via the gateway key so usage
-    // attributes to the right wallet (the credits debit resolves the same org).
-    // Best-effort: a non-managed install or a missing key is a no-op, and a
-    // resolve failure logs a warning but never blocks Core from coming up.
+    // Organization registration (A4 / #501): managed cloud nodes use their
+    // provisioned gateway key; enrolled self-hosted nodes use the persisted
+    // node-control credential without requiring `RYU_MANAGED_NODE`. Both bind
+    // usage to the credential's organization. A local unbound install remains a
+    // no-op, and resolve failures never block Core from coming up.
     //
     // F7 (bounded retry): on a fresh managed node the FIRST `/gateway/resolve`
     // ALSO performs the single-use bootstrap→durable exchange, and Core is
@@ -2147,12 +2239,22 @@ async fn main() {
     // `Ok(None)` on the first attempt and never loop.
     {
         let cp_client = reqwest::Client::new();
+        let gateway_ref = Arc::clone(&gateway);
         tokio::spawn(async move {
             const MAX_ATTEMPTS: u32 = 6;
             let mut attempt: u32 = 0;
             loop {
                 attempt += 1;
                 match sidecar::control_plane::register_managed_node(&cp_client).await {
+                    Ok(None)
+                        if fleet::enrollment_recovery_pending() && attempt < MAX_ATTEMPTS =>
+                    {
+                        let backoff = std::time::Duration::from_secs(2u64.pow(attempt.min(5)));
+                        tracing::info!(
+                            "control-plane: waiting for saved organization enrollment recovery; retrying registration in {backoff:?}"
+                        );
+                        tokio::time::sleep(backoff).await;
+                    }
                     Ok(None) => break,
                     Ok(Some(org)) => {
                         tracing::info!(
@@ -2160,6 +2262,13 @@ async fn main() {
                             org = %org.name,
                             "control-plane: managed node registered; usage attributes to this org"
                         );
+                        // The bootstrap→durable exchange updates Core's process
+                        // environment after the local Gateway may already have
+                        // started. Respawn once so its typed Ryu relay uses the
+                        // durable node key rather than the consumed bootstrap.
+                        if let Err(error) = gateway_ref.refresh().await {
+                            tracing::warn!(error = %error, "gateway: refresh after managed-node registration failed");
+                        }
                         break;
                     }
                     Err(e) if attempt < MAX_ATTEMPTS => {

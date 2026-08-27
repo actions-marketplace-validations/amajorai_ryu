@@ -5,10 +5,12 @@ import {
 	CHANNEL_TYPES,
 	type ChannelType,
 	DEFAULT_GROUP_REPLY_MODE,
+	defaultReactionLearningSettings,
 	GROUP_REPLY_LABELS,
 	GROUP_REPLY_MODES,
 	type GroupReplyMode,
 	REQUIRED_SECRETS,
+	type ReactionLearningSettings,
 	SECRET_LABELS,
 } from "@ryu/blocks/desktop/channels";
 import { Alert, AlertDescription } from "@ryu/ui/components/alert";
@@ -55,6 +57,7 @@ interface FormState {
 	name: string;
 	proactiveOpening: boolean;
 	proactiveTarget: string;
+	reactionLearning: ReactionLearningSettings;
 	secrets: Record<string, string>;
 	systemPrompt: string;
 }
@@ -87,6 +90,7 @@ function emptyForm(): FormState {
 		groupReplyMode: DEFAULT_GROUP_REPLY_MODE,
 		proactiveOpening: false,
 		proactiveTarget: "",
+		reactionLearning: defaultReactionLearningSettings(),
 		enabled: false,
 		secrets: {},
 	};
@@ -129,6 +133,7 @@ export function AddChannelDialog({
 		model: string | null;
 		proactiveOpening: boolean;
 		proactiveTarget: string | null;
+		reactionLearning: ReactionLearningSettings;
 		systemPrompt: string | null;
 		enabled: boolean;
 	}) => Promise<boolean>;
@@ -220,6 +225,7 @@ export function AddChannelDialog({
 					model: form.model.trim() || null,
 					proactiveOpening: form.proactiveOpening,
 					proactiveTarget: form.proactiveTarget.trim() || null,
+					reactionLearning: form.reactionLearning,
 					systemPrompt: form.systemPrompt.trim() || null,
 					enabled: form.enabled,
 				});
@@ -252,6 +258,7 @@ export function AddChannelDialog({
 			model: form.model.trim() || null,
 			proactive_opening: form.proactiveOpening,
 			proactive_target: form.proactiveTarget.trim() || null,
+			reaction_learning: form.reactionLearning,
 			system_prompt: form.systemPrompt.trim() || null,
 			team_id: teamId,
 		};
@@ -262,6 +269,7 @@ export function AddChannelDialog({
 		form.model,
 		form.proactiveOpening,
 		form.proactiveTarget,
+		form.reactionLearning,
 		form.systemPrompt,
 	]);
 
@@ -538,6 +546,99 @@ export function AddChannelDialog({
 								))}
 							</NativeSelect>
 						</div>
+
+						{form.channelType === "telegram" ? (
+							<div className="space-y-3 rounded-lg border bg-card p-4">
+								<div className="flex items-center justify-between gap-4">
+									<div>
+										<p className="font-medium text-sm">Reaction learning</p>
+										<p className="text-muted-foreground text-xs">
+											Use reactions on this bot's replies as Good response / Bad
+											response feedback. Off by default.
+										</p>
+									</div>
+									<Switch
+										aria-label="Enable reaction learning"
+										checked={form.reactionLearning.enabled}
+										onCheckedChange={(v) =>
+											setForm((f) => ({
+												...f,
+												reactionLearning: { ...f.reactionLearning, enabled: v },
+											}))
+										}
+									/>
+								</div>
+								<div className="space-y-1.5">
+									<Label htmlFor="channel-add-positive-emojis">
+										Good response emojis
+									</Label>
+									<Input
+										disabled={!form.reactionLearning.enabled}
+										id="channel-add-positive-emojis"
+										onChange={(e) =>
+											setForm((f) => ({
+												...f,
+												reactionLearning: {
+													...f.reactionLearning,
+													positiveEmoji: e.target.value
+														.split(",")
+														.map((value) => value.trim())
+														.filter(Boolean),
+												},
+											}))
+										}
+										placeholder="👍, ❤️, 🎉"
+										value={form.reactionLearning.positiveEmoji.join(", ")}
+									/>
+								</div>
+								<div className="space-y-1.5">
+									<Label htmlFor="channel-add-negative-emojis">
+										Bad response emojis
+									</Label>
+									<Input
+										disabled={!form.reactionLearning.enabled}
+										id="channel-add-negative-emojis"
+										onChange={(e) =>
+											setForm((f) => ({
+												...f,
+												reactionLearning: {
+													...f.reactionLearning,
+													negativeEmoji: e.target.value
+														.split(",")
+														.map((value) => value.trim())
+														.filter(Boolean),
+												},
+											}))
+										}
+										placeholder="👎, 💀, 😴"
+										value={form.reactionLearning.negativeEmoji.join(", ")}
+									/>
+								</div>
+								<div className="flex items-center justify-between gap-4">
+									<div>
+										<p className="text-sm">Allow group reactions</p>
+										<p className="text-muted-foreground text-xs">
+											Off by default because group feedback can represent more
+											than one person.
+										</p>
+									</div>
+									<Switch
+										aria-label="Allow group reaction learning"
+										checked={form.reactionLearning.allowGroup}
+										disabled={!form.reactionLearning.enabled}
+										onCheckedChange={(v) =>
+											setForm((f) => ({
+												...f,
+												reactionLearning: {
+													...f.reactionLearning,
+													allowGroup: v,
+												},
+											}))
+										}
+									/>
+								</div>
+							</div>
+						) : null}
 
 						<div className="space-y-3 rounded-lg border bg-card p-4">
 							<div className="flex items-center justify-between gap-4">

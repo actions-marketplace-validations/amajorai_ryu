@@ -39,6 +39,8 @@
 export type SettingsDialogId = "app" | "gateway";
 
 export interface SettingsEntry {
+	/** Hidden outside the native desktop shell. */
+	desktopOnly?: boolean;
 	/** Which dialog renders it — decides where a result click navigates. */
 	dialog: SettingsDialogId;
 	/** The `SettingsSection` header above the row. Empty for ungrouped rows. */
@@ -152,6 +154,10 @@ export const SETTINGS_SECTION_LABELS: Record<string, string> = {
 	integrations: "Integrations",
 	network: "Network",
 	connections: "Connected accounts",
+	hooks: "Hooks",
+	git: "Git",
+	worktrees: "Worktrees",
+	environments: "Environments",
 	"email-alerts": "Email & alerts",
 	privacy: "Privacy",
 	storage: "Storage",
@@ -218,8 +224,8 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		dialog: "app",
 		section: "general",
 		group: "Tabs",
-		label: "Vertical tabs",
-		keywords: "side tab bar orientation",
+		label: "Tab layout",
+		keywords: "horizontal vertical side tab bar scroll canvas orientation",
 	},
 	{
 		id: "general.tabs.floating-tabs",
@@ -276,6 +282,15 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		keywords: "claude codex acp history import",
 	},
 	{
+		id: "general.chats.send-shortcut",
+		desktopOnly: true,
+		dialog: "app",
+		section: "general",
+		group: "Chats",
+		label: "Send shortcut",
+		keywords: "send enter return shift command ctrl newline prompt composer",
+	},
+	{
 		id: "general.chats.queued-messages-send",
 		dialog: "app",
 		section: "general",
@@ -297,6 +312,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		group: "Terminal",
 		label: "Default shell",
 		keywords: "terminal zsh bash fish powershell cmd os system",
+		desktopOnly: true,
 	},
 	{
 		id: "general.files.default-file-opener",
@@ -305,6 +321,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		group: "Files",
 		label: "Default file opener",
 		keywords: "open file folder editor finder explorer files vscode cursor zed",
+		desktopOnly: true,
 	},
 	{
 		id: "general.system.start-ryu-on-startup",
@@ -313,6 +330,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		group: "System",
 		label: "Start Ryu on startup",
 		keywords: "autostart login item boot launch",
+		desktopOnly: true,
 	},
 	{
 		id: "general.system.start-hidden",
@@ -321,6 +339,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		group: "System",
 		label: "Start hidden",
 		keywords: "minimized background tray",
+		desktopOnly: true,
 	},
 	{
 		id: "general.system.close-to-tray",
@@ -329,6 +348,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		group: "System",
 		label: "Stay in tray on close",
 		keywords: "close window quit background keep running menu bar",
+		desktopOnly: true,
 	},
 	{
 		id: "general.system.hide-tray-icon",
@@ -337,6 +357,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		group: "System",
 		label: "Hide tray icon",
 		keywords: "menu bar menubar status item",
+		desktopOnly: true,
 	},
 	{
 		id: "general.setup.onboarding",
@@ -935,6 +956,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		group: "Global",
 		label: "Global Shortcuts",
 		keywords: "system wide os accelerator island push to talk",
+		desktopOnly: true,
 	},
 
 	// --- Updates (this desktop client) ---
@@ -943,8 +965,10 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		dialog: "app",
 		section: "updates",
 		group: "",
-		label: "Automatic updates",
-		keywords: "auto update install version upgrade",
+		label: "Download updates automatically",
+		keywords:
+			"auto update version upgrade background download ready install restart",
+		desktopOnly: true,
 	},
 	{
 		id: "updates.check-for-updates",
@@ -953,6 +977,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		group: "",
 		label: "Check for updates",
 		keywords: "version new release upgrade",
+		desktopOnly: true,
 	},
 	{
 		id: "updates.extend-updates",
@@ -961,6 +986,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		group: "",
 		label: "Extend updates",
 		keywords: "updates window licence license renew",
+		desktopOnly: true,
 	},
 
 	// --- Voice ---
@@ -1120,8 +1146,8 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		dialog: "gateway",
 		section: "connections",
 		group: "Cross-device sync",
-		label: "Sync my conversations across devices",
-		keywords: "sync chats cloud devices",
+		label: "Sync my chats and Spaces across devices",
+		keywords: "sync chats spaces pages documents cloud devices",
 	},
 	{
 		id: "gw.privacy.product-analytics.share-anonymous-usage-analytics",
@@ -1226,6 +1252,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		section: "storage",
 		group: "Backup & restore",
 		label: "Export backup",
+		desktopOnly: true,
 	},
 	{
 		id: "gw.storage.backup-restore.restore-backup",
@@ -1233,6 +1260,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		section: "storage",
 		group: "Backup & restore",
 		label: "Restore backup",
+		desktopOnly: true,
 	},
 	{
 		id: "gw.encryption.encryption-key.keychain-entry",
@@ -1284,6 +1312,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		section: "danger",
 		group: "Deep clean",
 		label: "Run deep clean",
+		desktopOnly: true,
 	},
 	{
 		id: "gw.integrations.artificial-analysis.live-data",
@@ -1377,6 +1406,38 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		group: "ACP agent runtime",
 		label: "Keep this computer awake while agents run",
 		keywords: "acp sleep power caffeinate systemd inhibit battery",
+	},
+	{
+		id: "gw.hooks.lifecycle",
+		dialog: "gateway",
+		section: "hooks",
+		group: "Hooks",
+		label: "Lifecycle hooks",
+		keywords: "trust review plugin config automation enable disable",
+	},
+	{
+		id: "gw.git.defaults",
+		dialog: "gateway",
+		section: "git",
+		group: "Git",
+		label: "Git defaults",
+		keywords: "branch prefix merge squash force push draft pull request",
+	},
+	{
+		id: "gw.worktrees.defaults",
+		dialog: "gateway",
+		section: "worktrees",
+		group: "Worktrees",
+		label: "Worktree defaults",
+		keywords: "root fetch upstream cleanup retention auto delete",
+	},
+	{
+		id: "gw.environments.projects",
+		dialog: "gateway",
+		section: "environments",
+		group: "Environments",
+		label: "Project environments",
+		keywords: "setup cleanup variables actions worktree",
 	},
 	// Group-level entries for the bespoke panes (see COVERAGE above).
 	{
@@ -1572,6 +1633,15 @@ export function searchSettings(query: string, limit = 40): SettingsEntry[] {
 			: b.score - a.score
 	);
 	return hits.slice(0, limit).map((h) => h.entry);
+}
+
+export function visibleSettingsEntries(
+	entries: readonly SettingsEntry[],
+	isDesktop: boolean
+): SettingsEntry[] {
+	return isDesktop
+		? [...entries]
+		: entries.filter((entry) => !entry.desktopOnly);
 }
 
 /** The section label a result should print as its "where it lives" line. */

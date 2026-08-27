@@ -6,7 +6,6 @@ import {
 	TEAMS_NODE_TIERS,
 } from "./base-node.ts";
 import {
-	CURRENT_PLAN_VERSION,
 	currentPlanVersionFor,
 	DEPOSIT_FEE_BPS,
 	DEPOSIT_FEE_BPS_BY_PLAN,
@@ -14,6 +13,7 @@ import {
 	depositFee,
 	INCLUDED_CREDIT_FRACTION_MAX,
 	monthlyCreditPoolMicroUsdForSeats,
+	monthlyPriceMicroUsdForSeats,
 	PLAN_IDS,
 	PLAN_VERSIONS,
 	PLANS,
@@ -107,6 +107,7 @@ describe("regional included node profiles", () => {
 		expect(baseNodeTypeForPlanAtLocation("pro", "sin")).toBe("cpx22");
 		expect(baseNodeTypeForPlanAtLocation("max", "sin")).toBe("ccx13");
 		expect(baseNodeTypeForPlanAtLocation("teams", "sin", 20)).toBe("cpx22");
+		expect(baseNodeTypeForPlanAtLocation("business", "sin", 20)).toBe("cpx32");
 	});
 });
 
@@ -142,12 +143,18 @@ function nodeUsdPerMonth(id: PlanId, seats: number): number {
  */
 function periodMarginUsd(id: PlanId, yearly: boolean, seats: number): number {
 	const plan = PLANS[id];
+	const billedSeats = plan.seatModel.kind === "per_seat" ? seats : 1;
+	const currentVersion = planVersionFor(id, currentPlanVersionFor(id));
 	const monthsBilled = yearly ? YEARLY_MONTHS_BILLED : 1;
 	const monthsServed = yearly ? YEARLY_MONTHS_SERVED : 1;
-
-	const billedSeats = plan.seatModel.kind === "per_seat" ? seats : 1;
-	const revenue = usd(plan.monthlyPriceMicroUsd) * monthsBilled * billedSeats;
-	const currentVersion = planVersionFor(id, currentPlanVersionFor(id));
+	const revenue =
+		usd(
+			monthlyPriceMicroUsdForSeats({
+				plan,
+				seats: billedSeats,
+				version: currentVersion,
+			})
+		) * monthsBilled;
 	const credits =
 		usd(
 			monthlyCreditPoolMicroUsdForSeats({
@@ -194,6 +201,15 @@ describe("plan margin (worst case: the whole pool is spent)", () => {
 			it(`teams ${term} is profitable at the ${tier.minSeats}-seat band (${tier.count}x ${tier.type})`, () => {
 				const margin = periodMarginUsd("teams", yearly, tier.minSeats);
 				expect(margin).toBeGreaterThan(0);
+			});
+		}
+	}
+
+	for (const seats of [5, 6, 10, 25, 50]) {
+		for (const yearly of [false, true]) {
+			const term = yearly ? "yearly" : "monthly";
+			it(`business ${term} is profitable at ${seats} seats`, () => {
+				expect(periodMarginUsd("business", yearly, seats)).toBeGreaterThan(0);
 			});
 		}
 	}
@@ -373,6 +389,10 @@ describe("the ladder is coherent", () => {
 		expect(PLANS.teams.seatModel).toEqual({ kind: "per_seat", minSeats: 5 });
 		expect(PLANS.teams.creditPoolModel).toBe("per_bundle");
 		expect(PLANS.teams.creditPoolBundleSize).toBe(5);
+		expect(PLANS["marketplace-membership"].seatModel).toEqual({
+			kind: "per_seat",
+			minSeats: 1,
+		});
 		expect(PLANS.pro.seatModel.kind).toBe("single");
 		expect(PLANS.max.seatModel.kind).toBe("single");
 	});
@@ -405,7 +425,14 @@ function versionMarginUsd(
 	const monthsServed = yearly ? YEARLY_MONTHS_SERVED : 1;
 
 	const billedSeats = PLANS[id].seatModel.kind === "per_seat" ? seats : 1;
-	const revenue = usd(row.monthlyPriceMicroUsd) * monthsBilled * billedSeats;
+	const revenue =
+		usd(
+			monthlyPriceMicroUsdForSeats({
+				plan: PLANS[id],
+				seats: billedSeats,
+				version: row,
+			})
+		) * monthsBilled;
 	const credits =
 		usd(
 			monthlyCreditPoolMicroUsdForSeats({
@@ -496,9 +523,8 @@ describe("grandfathering", () => {
 
 	it("the current version exists for every plan", () => {
 		for (const id of PLAN_IDS) {
-			expect(planVersionFor(id, CURRENT_PLAN_VERSION).version).toBe(
-				CURRENT_PLAN_VERSION
-			);
+			const currentVersion = currentPlanVersionFor(id);
+			expect(planVersionFor(id, currentVersion).version).toBe(currentVersion);
 		}
 	});
 
@@ -507,7 +533,7 @@ describe("grandfathering", () => {
 		// If they drift, one of them is lying to somebody: the page renders the
 		// catalog and the wallet is granted from the version.
 		for (const id of PLAN_IDS) {
-			const row = planVersionFor(id, CURRENT_PLAN_VERSION);
+			const row = planVersionFor(id, currentPlanVersionFor(id));
 			expect(PLANS[id].monthlyPriceMicroUsd).toBe(row.monthlyPriceMicroUsd);
 			expect(PLANS[id].monthlyCreditPoolMicroUsd).toBe(
 				row.monthlyCreditPoolMicroUsd

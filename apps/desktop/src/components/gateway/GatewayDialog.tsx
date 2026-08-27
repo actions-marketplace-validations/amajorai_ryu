@@ -5,6 +5,7 @@ import {
 	ArrowDown01Icon,
 	ArrowUp01Icon,
 	BubbleChatIcon,
+	CodeCircleIcon,
 	CpuIcon,
 	Delete01Icon,
 	Dollar01Icon,
@@ -108,12 +109,16 @@ import {
 	microUsdToBudgetInput,
 } from "@/src/components/gateway/budget-copy.ts";
 import { ComputerUseSettings } from "@/src/components/gateway/ComputerUseSettings.tsx";
+import { EnvironmentsSection } from "@/src/components/gateway/EnvironmentsSection.tsx";
 import { FallbackRulesSection } from "@/src/components/gateway/FallbackRulesSection.tsx";
 import { GatewayPostureCard } from "@/src/components/gateway/GatewayPostureCard.tsx";
+import { GitSettingsSection } from "@/src/components/gateway/GitSettingsSection.tsx";
+import { HooksSection } from "@/src/components/gateway/HooksSection.tsx";
 import { McpSection } from "@/src/components/gateway/McpSection.tsx";
 import { ProviderControlCenter } from "@/src/components/gateway/ProviderControlCenter.tsx";
 import { UsageCostSection } from "@/src/components/gateway/UsageCostSection.tsx";
 import { WorkspaceSection } from "@/src/components/gateway/WorkspaceSection.tsx";
+import { WorktreesSection } from "@/src/components/gateway/WorktreesSection.tsx";
 import ResizableSettingsLayout from "@/src/components/ResizableSettingsLayout.tsx";
 import { ConnectionsTab } from "@/src/components/settings/ConnectionsTab.tsx";
 import { DangerZoneSettings } from "@/src/components/settings/DangerZoneSettings.tsx";
@@ -6441,7 +6446,7 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 }
 
 /**
- * The 21 built-in gateway sections.
+ * The built-in gateway sections.
  *
  * `value` is a deep-link key (`openGateway("keys")`, `?section=privacy`, the
  * command palette) — **never rename one**. `label` and `hint` are free to change
@@ -6540,6 +6545,14 @@ const GATEWAY_SECTIONS: {
 			"acp agents idle timeout garbage collection memory oom concurrency parallel keep awake sleep power",
 	},
 	{
+		value: "hooks",
+		label: "Hooks",
+		hint: "Review and control lifecycle automation from config and plugins.",
+		icon: CodeCircleIcon,
+		keywords:
+			"hooks lifecycle trust plugin config automation review enable disable",
+	},
+	{
 		value: "routing",
 		label: "Model routing",
 		hint: "Rules that send a request to a different model than the one asked for.",
@@ -6604,6 +6617,28 @@ const GATEWAY_SECTIONS: {
 		hint: "The Model Context Protocol servers this node runs, and the tools they expose.",
 		icon: Plug01Icon,
 		keywords: "mcp model context protocol server tools claude cursor stdio",
+	},
+	{
+		value: "git",
+		label: "Git",
+		hint: "Choose defaults for branches, commits, pushes, and pull requests.",
+		icon: GitBranchIcon,
+		keywords:
+			"git branch prefix merge squash force push draft review commit pull request",
+	},
+	{
+		value: "worktrees",
+		label: "Worktrees",
+		hint: "Choose where managed worktrees live and when old ones are removed.",
+		icon: GitBranchIcon,
+		keywords: "worktree root fetch upstream auto delete cleanup retention",
+	},
+	{
+		value: "environments",
+		label: "Environments",
+		hint: "Set up project environments for worktrees and agent actions.",
+		icon: Package01Icon,
+		keywords: "environment setup cleanup variables actions project worktree",
 	},
 	{
 		value: "import",
@@ -6838,7 +6873,7 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 	},
 	{
 		title: "Limits & safety",
-		items: ["budgets", "guardrails", "runtime"],
+		items: ["budgets", "guardrails", "runtime", "hooks"],
 	},
 	{
 		title: "Connect",
@@ -6846,7 +6881,7 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 	},
 	{
 		title: "Developer",
-		items: ["mcp"],
+		items: ["git", "worktrees", "environments", "mcp"],
 	},
 	{
 		title: "Transfer",
@@ -6893,11 +6928,15 @@ const SECTION_TINTS: Partial<Record<GatewaySection, SettingsTint>> = {
 	budgets: "green",
 	guardrails: "red",
 	runtime: "purple",
+	hooks: "red",
 	network: "blue",
 	integrations: "indigo",
 	connections: "teal",
 	api: "blue",
 	mcp: "teal",
+	git: "blue",
+	worktrees: "indigo",
+	environments: "gray",
 	import: "blue",
 	export: "indigo",
 	"email-alerts": "orange",
@@ -7241,6 +7280,16 @@ export function GatewayDialog({
 						<AcpRuntimeSection canConfigure={canConfigure} target={target} />
 					</>
 				) : null}
+				{section === "hooks" ? (
+					<HooksSection canConfigure={canConfigure} target={target} />
+				) : null}
+				{section === "git" ? (
+					<GitSettingsSection canConfigure={canConfigure} target={target} />
+				) : null}
+				{section === "worktrees" ? (
+					<WorktreesSection canConfigure={canConfigure} target={target} />
+				) : null}
+				{section === "environments" ? <EnvironmentsSection /> : null}
 				{section === "budgets" ? (
 					<>
 						{canConfigure ? null : <PolicyReadOnlyBanner />}
