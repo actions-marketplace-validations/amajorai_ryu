@@ -30,14 +30,15 @@ const EXIT_USAGE = 2;
  *  they set. A table keeps the parse loop flat: each new value-flag is one entry
  *  here instead of two more branches in an ever-growing else-if chain. */
 const VALUE_FLAGS = {
+	"--agent": "agent",
 	"--kind": "kind",
 	"--node": "node",
 	"--template": "template",
-} as const satisfies Record<string, "kind" | "node" | "template">;
+} as const satisfies Record<string, "agent" | "kind" | "node" | "template">;
 
 /** Parse `process.argv.slice(2)` into a command, its positional args, and flags.
- *  Flags may appear anywhere; the value flags in {@link VALUE_FLAGS} (`--node`,
- *  `--kind`, `--template`) each consume the following token, or take it inline
+ *  Flags may appear anywhere; the value flags in {@link VALUE_FLAGS} (`--agent`,
+ *  `--node`, `--kind`, `--template`) each consume the following token, or take it inline
  *  after an `=`. The first non-flag token is the command; the rest are its
  *  positional args. Unknown `--flags` are ignored so they never masquerade as
  *  positional args. A value flag given with no value stays null — its owner then
@@ -45,6 +46,7 @@ const VALUE_FLAGS = {
  *  never silently pick up the NEXT token as its value. */
 export function parseArgs(argv: string[]): ParsedArgs {
 	const flags: GlobalFlags = {
+		agent: null,
 		json: false,
 		kind: null,
 		node: null,

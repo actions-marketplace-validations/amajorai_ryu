@@ -25,7 +25,7 @@ test.describe.configure({ timeout: 90_000 });
 const STORY_URL = "/chat-grouping-story.html";
 
 /** The fixture's own message count; see `buildHistory` in the story. */
-const HISTORY_MESSAGE_COUNT = "7";
+const HISTORY_MESSAGE_COUNT = "9";
 
 /** Sub-pixel rounding between independently-laid-out rows. */
 const EDGE_SLACK_PX = 1;
@@ -167,4 +167,35 @@ test("rows inside a run sit tighter than unrelated turns", async ({ page }) => {
 			expect(gap.marginTop).toBeLessThan(other.marginTop);
 		}
 	}
+});
+
+test("assistant replies use the same top, middle, and bottom grouping radii", async ({
+	page,
+}) => {
+	await openStory(page);
+
+	const assistantBubbles = page.locator(
+		'[data-assistant-group-position] [data-slot="bubble-content"]'
+	);
+	await expect(assistantBubbles).toHaveCount(4, { timeout: 30_000 });
+
+	const radii = await assistantBubbles.evaluateAll((nodes) =>
+		nodes.map((node) => ({
+			classes: node.className,
+			position: node
+				.closest("[data-assistant-group-position]")
+				?.getAttribute("data-assistant-group-position"),
+		}))
+	);
+
+	const firstRun = radii.slice(0, 3);
+	expect(firstRun.map((entry) => entry.position)).toEqual([
+		"first",
+		"middle",
+		"last",
+	]);
+	expect(firstRun[0]?.classes).toContain("rounded-bl-md");
+	expect(firstRun[1]?.classes).toContain("rounded-l-md");
+	expect(firstRun[2]?.classes).toContain("rounded-tl-md");
+	expect(radii[3]?.position).toBe("single");
 });

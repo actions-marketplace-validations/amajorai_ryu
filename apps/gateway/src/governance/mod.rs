@@ -628,6 +628,7 @@ fn protected_owner_id_list() -> &'static Vec<String> {
             "social",
             "crm",
             "workflows",
+            "safe-actions",
         ]
         .into_iter()
         .flat_map(|name| [format!("@ryu/{name}"), format!("com.ryu.{name}")])
@@ -929,6 +930,27 @@ mod tests {
 
         let impostor = validate_grants_for(Some("com.evil.monitors"), &scopes(&["monitors:crud"]));
         assert_eq!(impostor.denied, vec!["monitors:crud".to_string()]);
+    }
+
+    #[test]
+    fn safe_actions_namespace_rejects_owner_squat() {
+        for id in ["@ryu/safe-actions", "com.ryu.safe-actions"] {
+            let owned = validate_grants_for(Some(id), &scopes(&["safe-actions:manage"]));
+            assert!(owned.all_approved(), "{id} denied: {:?}", owned.denied);
+        }
+
+        for id in [
+            "com.evil.safe-actions",
+            "@evil/safe-actions",
+            "safe-actions",
+        ] {
+            let impostor = validate_grants_for(Some(id), &scopes(&["safe-actions:manage"]));
+            assert_eq!(
+                impostor.denied,
+                vec!["safe-actions:manage".to_string()],
+                "{id} must not squat on Safe Actions' namespace"
+            );
+        }
     }
 
     #[test]

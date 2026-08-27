@@ -28,7 +28,10 @@ import { ImageLightbox } from "./image-lightbox.tsx";
 import { FileAttachment } from "./input/file-attachment.tsx";
 import type { LinkPreviewResolvers } from "./link-preview.tsx";
 import { Markdown } from "./markdown.tsx";
-import { MessageActionSurface } from "./message-action-surface.tsx";
+import {
+	type MessageGroupPosition,
+	messageBubbleRadius,
+} from "./message-bubble.ts";
 import {
 	messageSelectableProps,
 	QuoteBlock,
@@ -44,11 +47,9 @@ import { getWidgetMessageAttribution } from "./types.ts";
 
 export interface UserMessageProps {
 	/**
-	 * Hover actions (copy / edit / branch) for this turn, rendered directly under
-	 * the bubble INSIDE its column so they start on the bubble's own left edge.
-	 * Rendered as a sibling of the whole message they could only ever align to the
-	 * transcript column's edge, which is metres away from a short right-aligned
-	 * bubble. The surface owns the buttons; this component owns where they sit.
+	 * Hover actions (copy / edit / branch) for this turn. The message row places
+	 * them beside the bubble: on the outside edge for the local user and the
+	 * opposite edge for a remote sender.
 	 */
 	actions?: ReactNode;
 	className?: string;
@@ -82,7 +83,7 @@ export interface UserMessageProps {
 	 * Defaults to `"single"`, which is the ungrouped behaviour every other
 	 * surface (island, storyboard, subagent panel) gets for free.
 	 */
-	groupPosition?: "first" | "last" | "middle" | "single";
+	groupPosition?: MessageGroupPosition;
 	mentionItems?: MentionItem[];
 	message: UIMessage;
 	/** Runtime state keyed for the message-action renderers. */
@@ -359,14 +360,11 @@ export const UserMessage = memo(function UserMessage({
 	enableImagePreview = true,
 	editing = false,
 	groupPosition = "single",
-	messageActionState,
-	messageActions,
 	onEditSubmit,
 	onEditCancel,
 	onOpenFile,
 	onOpenLink,
 	onOpenMention,
-	onContributedMessageAction,
 	mentionItems,
 	previewResolvers,
 }: UserMessageProps) {
@@ -434,16 +432,6 @@ export const UserMessage = memo(function UserMessage({
 			</Tooltip>
 		</TooltipProvider>
 	) : null;
-
-	const MessageActionsNode = (
-		<MessageActionSurface
-			actions={messageActions}
-			align={isOwnMessage ? "end" : "start"}
-			messageId={message.id}
-			onAction={onContributedMessageAction}
-			state={messageActionState}
-		/>
-	);
 
 	const MessageBubble = (
 		<>
@@ -522,7 +510,13 @@ export const UserMessage = memo(function UserMessage({
 					variant="default"
 				>
 					<BubbleContent
-						className="rounded-2xl px-3.5 py-1.5 text-sm leading-5 transition-colors"
+						className={cn(
+							messageBubbleRadius(
+								isOwnMessage ? "end" : "start",
+								groupPosition
+							),
+							"px-3.5 py-1.5 text-sm leading-5 transition-colors"
+						)}
 						data-testid="user-message-bubble"
 					>
 						{quote && <QuoteBlock text={quote} />}
@@ -547,12 +541,6 @@ export const UserMessage = memo(function UserMessage({
 							</CollapsibleText>
 						)}
 					</BubbleContent>
-					{/* Inside `Bubble`, which is the `relative` box the absolutely
-					    positioned chip row anchors to. Hung off the bubble's OUTER
-					    edge (start for a remote sender, end for one's own) so it
-					    overlaps the bubble corner the way every messaging client
-					    places it. */}
-					{MessageActionsNode}
 				</Bubble>
 			)}
 		</>
@@ -647,10 +635,9 @@ export const UserMessage = memo(function UserMessage({
 			</MessageHeader>
 		) : null;
 
-	// One shrink-to-fit column holding the body and its actions. The width cap
-	// lives here rather than on the bubble so the toolbar inherits the bubble's
-	// edges instead of the transcript's — `w-fit` is what keeps it shrink-to-fit
-	// now that its parent is a flex COLUMN (`MessageContent`) rather than a row.
+	// One shrink-to-fit column holding the body. The width cap stays here rather
+	// than on the bubble so the action row can sit beside a short bubble without
+	// changing the bubble's own edge.
 	const BubbleColumn = (
 		<div
 			className={cn(
@@ -663,16 +650,17 @@ export const UserMessage = memo(function UserMessage({
 			)}
 		>
 			{BodyNode}
-			{actions ? (
-				// Taken out of flow (with a spacer keeping its 28px) so a SHORT message
-				// cannot make the toolbar the widest row in the column: that would move
-				// the column's left edge off the bubble again.
-				<div className="relative h-7 w-full">
-					<div className="absolute inset-y-0 left-0 flex items-center">
-						{actions}
-					</div>
-				</div>
-			) : null}
+		</div>
+	);
+	const MessageRow = (
+		<div
+			className={cn(
+				"flex w-fit max-w-full items-center gap-2",
+				isOwnMessage ? "flex-row-reverse" : "flex-row"
+			)}
+		>
+			{BubbleColumn}
+			{actions ? <div className="shrink-0">{actions}</div> : null}
 		</div>
 	);
 
@@ -697,7 +685,7 @@ export const UserMessage = memo(function UserMessage({
 				className={cn("gap-1", isOwnMessage ? "items-end" : "items-start")}
 			>
 				{HeaderNode}
-				{BubbleColumn}
+				{MessageRow}
 			</MessageContent>
 		</Message>
 	);

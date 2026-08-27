@@ -59,9 +59,8 @@ import { beginInstall, endInstall } from "@/src/store/useInstallStore.ts";
 import { useDebouncedValue } from "./use-debounced-value.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
-/** Read the control-plane session bearer (for paid-plugin entitlement checks).
- *  Absent for anonymous/free installs, which is fine — the server only needs it
- *  for a paid item's license lookup. */
+/** Read the control-plane session bearer for optional Marketplace account-aware
+ *  operations. Installs remain available without a plan or item license. */
 function readBuyerToken(): string | null {
 	try {
 		return localStorage.getItem(TOKEN_KEY);
@@ -658,8 +657,8 @@ export function useAppsCatalog(
 
 	// Switching trains is an UPDATE of something already installed, which is why it
 	// goes through the update endpoint rather than install: Core re-resolves the
-	// listing on the requested channel, re-runs the signature + bundle-integrity +
-	// entitlement gates, moves the install to that train's current build and
+	// listing on the requested channel, re-runs the signature + bundle-integrity
+	// checks, moves the install to that train's current build and
 	// persists the new pin. It can move the version BACKWARDS — every prerelease
 	// sorts below its stable release — and Core allows that for an explicit switch
 	// without a `force`, because the request itself is the authority.

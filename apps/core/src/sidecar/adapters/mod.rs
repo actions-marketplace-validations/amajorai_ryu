@@ -661,9 +661,10 @@ pub struct ChatStreamRequest {
     /// default (no hook acts on a flag it cannot see).
     #[serde(default)]
     pub plugin_flags: std::collections::HashMap<String, bool>,
-    /// Output style to apply to THIS turn — tier 1 of the three-tier resolution in
-    /// `docs/output-styles.md` §5 (per-turn → per-conversation → node default), set
-    /// by the composer's style picker.
+    /// Output style to apply to THIS turn — the explicit one-turn override for the
+    /// agent's persisted personality profile. The normal desktop agent editor saves
+    /// the profile on the agent; this field remains available to API callers that
+    /// need a deliberate, ephemeral override.
     ///
     /// Per-turn rather than per-session is the whole point of the picker: upstream
     /// Claude Code reads the style once at session start and needs `/clear` to change
@@ -3113,36 +3114,34 @@ async fn user_personalization_block(
 // ── Output styles (docs/output-styles.md §5) ──────────────────────────────────
 //
 // A style changes HOW the agent answers by editing the system prompt for the turn.
-// Selection is resolved here, at turn assembly, which is what makes the composer
-// picker live (design §7.1); injection happens at the two seams the skills block
-// already uses, one per plane.
+// Agent profile assignment is resolved here, at turn assembly, so changing an
+// agent's profile takes effect on its next turn; injection happens at the two seams
+// the skills block already uses, one per plane.
 
 /// The style in force for this turn, resolved against `registry`.
 ///
-/// The tiers, most specific first, exactly as design §5 lists them: per-turn
-/// ([`ChatStreamRequest::output_style`]) → per-conversation → node default. A plugin
-/// style with `force-for-plugin: true` beats all three while its plugin is enabled.
+/// The tiers, most specific first, are the caller's one-turn override followed by
+/// the selected agent's persisted personality profile. A plugin style with
+/// `force-for-plugin: true` beats both while its plugin is enabled.
 ///
-/// Takes the registry and the node default as **arguments** rather than reading the
-/// process globals itself so the ladder is unit-testable against a locally built
-/// registry; [`output_style_for_turn`] is the thin wrapper that supplies the globals.
+/// Takes the registry and both selection ids as **arguments** rather than reading
+/// process globals itself so the agent-profile precedence is unit-testable against a
+/// locally built registry; [`output_style_for_turn`] is the thin wrapper that supplies
+/// the global registry.
 ///
 /// A tier that names an id which no longer resolves (style deleted, plugin disabled,
-/// stale picker state) **falls through to the next tier** instead of resolving to "no
-/// style". The tiers are a specificity ladder, not a chain of overrides that can be
-/// set to "off": there is no way to express "explicitly no style" in tier 1 or 2 — the
-/// picker clears its selection instead of sending one — so a dangling id carries no
-/// intent to suppress the tier below it.
+/// stale client state) **falls through to the next tier** instead of failing the
+/// turn. A missing agent id is the explicit "agent's own voice" state; a missing
+/// one-turn id can still fall through to the agent's profile.
 fn resolve_output_style(
     registry: &ryu_output_styles::OutputStyleRegistry,
     per_turn: Option<&str>,
-    per_conversation: Option<&str>,
-    node_default: Option<&str>,
+    per_agent: Option<&str>,
 ) -> Option<ryu_output_styles::OutputStyleRecord> {
     if let Some(forced) = registry.forced_style() {
         return Some(forced);
     }
-    [per_turn, per_conversation, node_default]
+    [per_turn, per_agent]
         .into_iter()
         .flatten()
         .map(str::trim)
@@ -3156,21 +3155,16 @@ fn resolve_output_style(
         })
 }
 
-/// [`resolve_output_style`] against the process-global registry and the persisted
-/// node default. `None` before Core has mounted the registry (a headless/embedded
-/// caller that never built the router), which keeps the feature inert rather than
-/// panicking on a handle that was never published.
+/// [`resolve_output_style`] against the process-global registry. `None` before Core
+/// has mounted the registry (a headless/embedded caller that never built the router),
+/// which keeps the feature inert rather than panicking on a handle that was never
+/// published.
 fn output_style_for_turn(
     per_turn: Option<&str>,
-    per_conversation: Option<&str>,
+    per_agent: Option<&str>,
 ) -> Option<ryu_output_styles::OutputStyleRecord> {
     let registry = ryu_output_styles::global_registry()?;
-    resolve_output_style(
-        registry,
-        per_turn,
-        per_conversation,
-        ryu_output_styles::load_selection().as_deref(),
-    )
+    resolve_output_style(registry, per_turn, per_agent)
 }
 
 /// The system-prompt prefix a resolved style contributes to this turn, or `None`
@@ -4554,7 +4548,7 @@ async fn run_text_turn_in_with_metadata(
         // Never styled: docs/output-styles.md §5 scopes output styles to the main
         // conversation, because a delegate's reply is structured text the PARENT
         // parses back and a style would reshape it. `route_chat_stream` enforces that
-        // from `background` (which is what actually suppresses the node-default tier);
+        // from `background` (which is what actually suppresses all profile injection);
         // spelling it out here too keeps the intent visible at the construction site.
         output_style: None,
         // Programmatic turn, no verified human author to attribute.
@@ -6318,19 +6312,17 @@ pub async fn route_chat_stream(
     // reply is structured text the parent parses back, and reshaping it would corrupt
     // that. `background` is the existing discriminant for exactly this class
     // (sub-agent fan-out, worker, scheduled run), and skipping here rather than at the
-    // construction sites is what also keeps the node-DEFAULT tier off those turns —
-    // a `None` per-turn field would still fall through to it.
+    // construction sites keeps profile injection off those turns.
     let resolved_style = if req.background {
         None
     } else {
         output_style_for_turn(
             req.output_style.as_deref(),
-            // Tier 2 (the per-conversation sticky selection) has no server-side store
-            // yet — nothing persists a style id on the conversation row. Until it does,
-            // the composer re-sends its sticky choice as tier 1 on every turn, which is
-            // behaviourally identical for a single client; this argument is the seam the
-            // store lands on.
-            None,
+            // The selected agent owns its profile. A missing profile is an explicit
+            // "agent's own voice" state; there is no node-wide fallback here.
+            persona
+                .as_ref()
+                .and_then(|value| value.output_style_id.as_deref()),
         )
     };
     let style_prefix = match resolved_style {
@@ -11772,6 +11764,36 @@ mod tests {
         "---\nname: Plain text\nkeep-coding-instructions: false\n---\n\nNo markdown, prose only.";
 
     #[test]
+    fn agent_personality_profile_resolves_after_a_one_turn_override() {
+        let registry = ryu_output_styles::OutputStyleRegistry::empty();
+        registry
+            .register_plugin_style("eli5".to_owned(), KEEP_STYLE)
+            .expect("agent profile style registers");
+        registry
+            .register_plugin_style("plain-text".to_owned(), REPLACE_STYLE)
+            .expect("one-turn style registers");
+
+        let persisted = resolve_output_style(&registry, None, Some("eli5"))
+            .expect("the agent profile should resolve");
+        assert_eq!(persisted.id, "eli5");
+
+        let override_style = resolve_output_style(&registry, Some("plain-text"), Some("eli5"))
+            .expect("the explicit turn override should resolve");
+        assert_eq!(override_style.id, "plain-text");
+    }
+
+    #[test]
+    fn missing_agent_personality_profile_does_not_fall_back_to_a_node_style() {
+        let registry = ryu_output_styles::OutputStyleRegistry::empty();
+        registry
+            .register_plugin_style("eli5".to_owned(), KEEP_STYLE)
+            .expect("style registers");
+
+        assert!(resolve_output_style(&registry, None, None).is_none());
+        assert!(resolve_output_style(&registry, None, Some("missing")).is_none());
+    }
+
+    #[test]
     fn keep_coding_instructions_appends_the_style_after_base_instructions() {
         let prefix = output_style_prefix(&test_style(KEEP_STYLE), Some("You review Rust code."))
             .expect("a style with a body injects something");
@@ -11816,8 +11838,8 @@ mod tests {
 
     #[test]
     fn no_output_style_leaves_the_acp_preamble_byte_identical() {
-        // The inert case, which is the shipped default (§8: the node default is "no
-        // style"). Both arms of the ACP seam must produce exactly today's prompt.
+        // The inert case, which is the shipped default (§8: an agent has no profile).
+        // Both arms of the ACP seam must produce exactly today's prompt.
         let long_term_system =
             merge_system_prompt(Some("Remembered: the user likes tea.".to_owned()), None);
         let with_skills =
@@ -11946,12 +11968,12 @@ mod tests {
         assert_eq!(multimodal[1]["content"], parts, "the parts array survives");
     }
 
-    // ── Selection ladder (§5) ──────────────────────────────────────────────────
+    // ── Agent profile selection (§5) ───────────────────────────────────────────
     //
     // Built against a local registry rather than the process-global handle, which is
     // a `OnceLock` a test cannot re-set (and would leak into every other test in the
     // binary). `register_plugin_style` takes whole-file markdown, so these also pin
-    // that the tiers compare ids, not names.
+    // that the profile selection compares ids, not names.
 
     fn styles_registry(entries: &[(&str, &str)]) -> ryu_output_styles::OutputStyleRegistry {
         let registry = ryu_output_styles::OutputStyleRegistry::empty();
@@ -11964,43 +11986,31 @@ mod tests {
     }
 
     #[test]
-    fn the_most_specific_selection_tier_wins() {
+    fn the_most_specific_profile_selection_wins() {
         let registry = styles_registry(&[
             ("turn", "---\nname: Turn\n---\nbody"),
-            ("conversation", "---\nname: Conversation\n---\nbody"),
-            ("node", "---\nname: Node\n---\nbody"),
+            ("agent", "---\nname: Agent\n---\nbody"),
         ]);
-        let pick = |t, c, n| resolve_output_style(&registry, t, c, n).map(|r| r.id);
-        assert_eq!(
-            pick(Some("turn"), Some("conversation"), Some("node")).as_deref(),
-            Some("turn")
-        );
-        assert_eq!(
-            pick(None, Some("conversation"), Some("node")).as_deref(),
-            Some("conversation")
-        );
-        assert_eq!(pick(None, None, Some("node")).as_deref(), Some("node"));
-        assert_eq!(pick(None, None, None), None);
-        // Blank is not a selection — an empty string reaching the tier from a client
-        // body or a half-written selection file must not shadow the tier below it.
-        assert_eq!(
-            pick(Some("  "), None, Some("node")).as_deref(),
-            Some("node")
-        );
+        let pick = |t, a| resolve_output_style(&registry, t, a).map(|r| r.id);
+        assert_eq!(pick(Some("turn"), Some("agent")).as_deref(), Some("turn"));
+        assert_eq!(pick(None, Some("agent")).as_deref(), Some("agent"));
+        assert_eq!(pick(None, None), None);
+        // Blank is not a selection — an empty string reaching the tier from a
+        // client body must not shadow the persisted agent profile.
+        assert_eq!(pick(Some("  "), Some("agent")).as_deref(), Some("agent"));
     }
 
     #[test]
     fn a_selected_style_that_no_longer_exists_falls_through() {
-        // Deleted style / disabled plugin / stale picker state. There is no way to
-        // say "explicitly no style" in a tier, so a dangling id carries no intent to
-        // suppress the tier below it.
-        let registry = styles_registry(&[("node", "---\nname: Node\n---\nbody")]);
+        // Deleted style / disabled plugin / stale profile state. A dangling id
+        // carries no intent to suppress the agent's own voice.
+        let registry = styles_registry(&[("agent", "---\nname: Agent\n---\nbody")]);
         assert_eq!(
-            resolve_output_style(&registry, Some("deleted"), None, Some("node")).map(|r| r.id),
-            Some("node".to_owned())
+            resolve_output_style(&registry, Some("deleted"), Some("agent")).map(|r| r.id),
+            Some("agent".to_owned())
         );
         assert_eq!(
-            resolve_output_style(&registry, Some("deleted"), None, None).map(|r| r.id),
+            resolve_output_style(&registry, Some("deleted"), None).map(|r| r.id),
             None
         );
     }
@@ -12015,9 +12025,9 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            resolve_output_style(&registry, Some("turn"), Some("turn"), Some("turn")).map(|r| r.id),
+            resolve_output_style(&registry, Some("turn"), Some("turn")).map(|r| r.id),
             Some("forced".to_owned()),
-            "force-for-plugin overrides all three tiers while its plugin is enabled"
+            "force-for-plugin overrides the turn and agent profile while its plugin is enabled"
         );
     }
 

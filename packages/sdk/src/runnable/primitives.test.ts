@@ -158,6 +158,35 @@ describe("createPrimitives — transport routing mirrors rpc.ts", () => {
 		expect(ragCall.body).toMatchObject({ op: "retrieve" });
 	});
 
+	it("storage primitives use the grant-gated app-owned KV bridge", async () => {
+		const { transport, calls } = recordingTransport();
+		const p = createPrimitives(transport);
+		await p.storage.get({ namespace: "tickets", key: "t-1" });
+		await p.storage.set({ namespace: "tickets", key: "t-1", value: "open" });
+		await p.storage.delete({ namespace: "tickets", key: "t-1" });
+		await p.storage.keys({ namespace: "tickets" });
+		await p.storage.compareAndSet({
+			namespace: "tickets",
+			key: "t-1",
+			expected: null,
+			value: "open",
+		});
+
+		expect(calls.map((c) => c.target)).toEqual([
+			"storage.get",
+			"storage.set",
+			"storage.delete",
+			"storage.keys",
+			"storage.compareAndSet",
+		]);
+		expect(calls.every((c) => c.op === "bridge")).toBe(true);
+		expect(calls[1]?.body).toEqual({
+			namespace: "tickets",
+			key: "t-1",
+			value: "open",
+		});
+	});
+
 	it("every declared primitive has a binding entry (no silent drift)", () => {
 		const expected = [
 			"engines.complete",
@@ -174,6 +203,11 @@ describe("createPrimitives — transport routing mirrors rpc.ts", () => {
 			"realtime.subscribe",
 			"durable.checkpoint",
 			"durable.resume",
+			"storage.get",
+			"storage.set",
+			"storage.delete",
+			"storage.keys",
+			"storage.compareAndSet",
 		];
 		for (const key of expected) {
 			expect(PRIMITIVE_BINDINGS[key]).toBeDefined();

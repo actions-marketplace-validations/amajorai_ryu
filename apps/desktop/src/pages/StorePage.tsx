@@ -108,6 +108,8 @@ export default function StorePage({
 	initialSection = "home",
 	initialQuery,
 	initialInstalledOnly = false,
+	initialMarketplaceQuery,
+	initialMarketplaceItem,
 }: {
 	initialSection?: string;
 	/** Open with the "Installed only" switch already on. Set by the legacy
@@ -117,6 +119,10 @@ export default function StorePage({
 	/** Seed the active section's search (deep-links carry it, e.g. the
 	 *  integrations.sh → MCP-catalog hand-off pre-filters by server name). */
 	initialQuery?: string;
+	/** One-shot query carried from the global command palette's Marketplace result. */
+	initialMarketplaceQuery?: string;
+	/** One-shot Marketplace listing to open after the Browse tab mounts. */
+	initialMarketplaceItem?: { id: string; kind: string };
 }) {
 	const { openTab } = useTabsContext();
 	// App-registered sections. These arrive asynchronously (Core's contributions
@@ -194,7 +200,7 @@ export default function StorePage({
 	// section's initial search; cleared whenever a section is picked manually.
 	const [sectionInitialQuery, setSectionInitialQuery] = useState<
 		string | undefined
-	>(initialQuery);
+	>(initialQuery ?? initialMarketplaceQuery);
 
 	// …and when a HOME shelf card opens a realm, the clicked item's id rides along
 	// instead, so the section opens with that item's preview rather than with its
@@ -203,7 +209,10 @@ export default function StorePage({
 	// query, and collapsing them would make one of the two lie.
 	const [sectionInitialSelectedId, setSectionInitialSelectedId] = useState<
 		string | undefined
-	>(undefined);
+	>(initialMarketplaceItem?.id);
+	const [marketplaceItem, setMarketplaceItem] = useState(
+		initialMarketplaceItem
+	);
 
 	// The active section publishes its filter panel here; the chrome's toolbar row
 	// renders it as a popover button beside the search.
@@ -224,6 +233,7 @@ export default function StorePage({
 	) => {
 		setSectionInitialQuery(query.trim() || undefined);
 		setSectionInitialSelectedId(itemId || undefined);
+		setMarketplaceItem(undefined);
 		setSearchQuery("");
 		setSection(realm);
 	};
@@ -231,6 +241,7 @@ export default function StorePage({
 	const openConnections = () => {
 		setSectionInitialQuery(undefined);
 		setSectionInitialSelectedId(undefined);
+		setMarketplaceItem(undefined);
 		setSearchQuery("");
 		setSection("connections");
 	};
@@ -259,6 +270,7 @@ export default function StorePage({
 				// A manual tab pick must drop a stale preselect too, or the section
 				// re-opens the last Home card's preview when the user comes back to it.
 				setSectionInitialSelectedId(undefined);
+				setMarketplaceItem(undefined);
 				setSearchQuery("");
 				setPendingSection(null);
 				setSection(resolved);
@@ -399,6 +411,7 @@ export default function StorePage({
 							) : (
 								<StoreContent
 									contributedTab={activeContributedTab}
+									initialMarketplaceItem={marketplaceItem}
 									initialQuery={sectionInitialQuery}
 									initialSelectedId={sectionInitialSelectedId}
 									onBrowseHome={() => setSection("home")}
@@ -428,6 +441,7 @@ function StoreContent({
 	section,
 	initialQuery,
 	initialSelectedId,
+	initialMarketplaceItem,
 	onOpenRealm,
 	onOpenConnections,
 	onOpenInstallChat,
@@ -443,6 +457,8 @@ function StoreContent({
 	 *  to the six sections that own a per-item preview; Integrations, Engines,
 	 *  Account and app-registered tabs have no such concept. */
 	initialSelectedId?: string;
+	/** One-shot Marketplace result forwarded to the cross-kind paid Browse view. */
+	initialMarketplaceItem?: { id: string; kind: string };
 	onOpenRealm: (
 		realm: StoreSearchRealm,
 		query: string,
@@ -536,7 +552,12 @@ function StoreContent({
 		return <MarketplacesCatalogSection />;
 	}
 	if (section === "browse") {
-		return <MarketplaceBrowseSection />;
+		return (
+			<MarketplaceBrowseSection
+				initialItem={initialMarketplaceItem}
+				initialQuery={initialQuery}
+			/>
+		);
 	}
 	if (section === "connections") {
 		return <ConnectionsTab />;

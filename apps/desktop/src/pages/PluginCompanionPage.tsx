@@ -21,128 +21,10 @@ import {
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { FRONTEND_URL } from "@/lib/auth-client.ts";
-import { openExternal } from "@/lib/tauri-bridge.ts";
-import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
+import { useMemo } from "react";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { PluginHostPanel } from "@/src/contributions/host/PluginHostPanel.tsx";
-import { useMyLicenses } from "@/src/hooks/useMyLicenses.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
-import { toTarget } from "@/src/lib/api/client.ts";
-import { recordMarketplaceMembershipUsage } from "@/src/lib/api/marketplace.ts";
-import type { PluginCompanion } from "@/src/lib/api/plugins.ts";
-import {
-	setMarketplaceAppsEntitled,
-	setMarketplaceDirectLicensedItems,
-} from "@/src/lib/api/preferences.ts";
-import { useNodeStore } from "@/src/store/useNodeStore.ts";
-
-function MembershipRequired({
-	children,
-	companion,
-}: {
-	children: ReactNode;
-	companion: PluginCompanion | undefined;
-}) {
-	const { ready, requestUpgrade, verdict } = useEntitlementContext();
-	const { isLicensed, licenses, loading } = useMyLicenses();
-	const directLicense = companion
-		? isLicensed("app", companion.pluginId)
-		: false;
-	const required = Boolean(companion?.membershipRequired);
-	const hasAccess =
-		!required || directLicense || Boolean(verdict?.marketplaceApps);
-	const usageKey = useRef<string | null>(null);
-	const [directLicenseSyncReady, setDirectLicenseSyncReady] = useState(
-		!required
-	);
-
-	useEffect(() => {
-		if (!required || loading) {
-			return;
-		}
-		const target = toTarget(useNodeStore.getState().getActiveNode());
-		Promise.all([
-			setMarketplaceAppsEntitled(target, Boolean(verdict?.marketplaceApps)),
-			setMarketplaceDirectLicensedItems(
-				target,
-				licenses
-					.filter(
-						(license) =>
-							license.status === "active" && license.itemKind === "app"
-					)
-					.map((license) => license.itemId)
-			),
-		]).finally(() => setDirectLicenseSyncReady(true));
-	}, [licenses, loading, required, verdict?.marketplaceApps]);
-
-	useEffect(() => {
-		if (
-			!required ||
-			directLicense ||
-			!verdict?.marketplaceApps ||
-			!companion?.pluginId ||
-			usageKey.current
-		) {
-			return;
-		}
-		const idempotencyKey =
-			typeof crypto?.randomUUID === "function"
-				? crypto.randomUUID()
-				: `membership-${companion.pluginId}-${Date.now()}`;
-		usageKey.current = idempotencyKey;
-		recordMarketplaceMembershipUsage({
-			id: companion.pluginId,
-			idempotencyKey,
-			kind: "app",
-		}).catch(() => {
-			usageKey.current = null;
-		});
-	}, [companion?.pluginId, directLicense, required, verdict?.marketplaceApps]);
-
-	if (!required || hasAccess) {
-		return <>{children}</>;
-	}
-
-	if (!ready || loading || !directLicenseSyncReady) {
-		return (
-			<div className="flex h-full items-center justify-center p-6 text-muted-foreground text-sm">
-				Checking Marketplace access...
-			</div>
-		);
-	}
-
-	return (
-		<div className="flex h-full items-center justify-center p-6">
-			<Empty>
-				<EmptyHeader>
-					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={Package01Icon} />
-					</EmptyMedia>
-					<EmptyTitle>Upgrade to use</EmptyTitle>
-					<EmptyDescription>
-						This paid Marketplace app is included with an active Ryu Membership
-						or recurring plan. Your direct app license still works without
-						Membership.
-					</EmptyDescription>
-				</EmptyHeader>
-				<EmptyContent>
-					<Button
-						onClick={() => {
-							openExternal(
-								`${FRONTEND_URL.replace(/\/$/, "")}/pricing#marketplace-membership`
-							).catch(() => requestUpgrade());
-						}}
-						size="sm"
-					>
-						View Membership plans
-					</Button>
-				</EmptyContent>
-			</Empty>
-		</div>
-	);
-}
 
 /**
  * The shared "this app isn't here" state for every route that resolves to a companion.
@@ -211,8 +93,8 @@ export default function PluginCompanionPage({
 	}
 
 	// The single decision gate for running third-party code: no bundle → the benign
-	// summary below; never a fetch, never code. Membership is checked around both
-	// paths so an opted-in paid app cannot keep running after a recurring plan ends.
+	// summary below; never a fetch, never code. App access is not a billing decision;
+	// the host still enforces the enabled state and the Gateway-approved grants.
 	const content = companion.hasUi ? (
 		<PluginHostPanel companion={companion} mountContext={stableContext} />
 	) : null;
@@ -259,9 +141,5 @@ export default function PluginCompanionPage({
 		</div>
 	);
 
-	return (
-		<MembershipRequired companion={companion}>
-			{content ?? summary}
-		</MembershipRequired>
-	);
+	return content ?? summary;
 }

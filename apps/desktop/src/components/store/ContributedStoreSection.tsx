@@ -204,6 +204,7 @@ function DetailPanel({
 		);
 	}
 	const installSpec = tab.spec?.install;
+	const installable = installSpec != null;
 	const sourceHref = safeHttpUrl(item.sourceUrl);
 	return (
 		<ListingDetailShell
@@ -273,9 +274,10 @@ function DetailPanel({
 			}
 			hero={
 				<ListingHero
-					badges={[item.badge ?? null, installed ? "Added" : null].filter(
-						(b): b is string => Boolean(b)
-					)}
+					badges={[
+						item.badge ?? null,
+						installable && installed ? "Added" : null,
+					].filter((b): b is string => Boolean(b))}
 					icon={<TabIcon className="size-8" icon={item.icon ?? tab.icon} />}
 					name={item.title}
 					tagline={item.description}
@@ -285,7 +287,14 @@ function DetailPanel({
 				<ListingStatStrip
 					items={[
 						{ label: "Catalog", value: tab.title },
-						{ label: "Status", value: installed ? "Added" : "Not added" },
+						{
+							label: "Status",
+							value: installable
+								? installed
+									? "Added"
+									: "Not added"
+								: "Available",
+						},
 						{ label: "Tags", value: `${item.tags.length}` },
 					]}
 				/>

@@ -623,7 +623,7 @@ export function SettingsDialog({
 								</SidebarGroup>
 								<SidebarGroup className="py-1">
 									<SidebarGroupLabel>
-										{simpleInterface ? "Computer" : "Node"}
+										{simpleInterface ? "Device" : "Node"}
 									</SidebarGroupLabel>
 									<SidebarMenu>
 										<SidebarMenuItem>
@@ -635,7 +635,7 @@ export function SettingsDialog({
 												/>
 												<span className="truncate">
 													{simpleInterface
-														? "Computer settings"
+														? "Device settings"
 														: "Gateway settings"}
 												</span>
 											</SidebarMenuButton>

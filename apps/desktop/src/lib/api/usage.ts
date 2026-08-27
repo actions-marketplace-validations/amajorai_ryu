@@ -5,8 +5,9 @@
 // that CLI's own local credential and calls the vendor's usage endpoint,
 // returning its rolling rate-limit windows plus the non-percent figures — credit
 // balances, Codex's banked rate-limit resets and their per-credit expiry dates —
-// à la CodexBar / openusage. Core owns all the provider logic + the
-// never-refresh token safety; this is a thin typed reader.
+// à la CodexBar / openusage. Core also exposes the same normalized contract for
+// each saved Ryu provider account without switching the active account. Core owns
+// all provider logic + the never-refresh token safety; this is a thin typed reader.
 //
 // The endpoint always returns 200: refusals carry `available: false` + a
 // `reason` rather than an error, so callers never branch on HTTP status — they
@@ -216,6 +217,23 @@ export async function fetchAgentUsage(
 	const wire = await request<WireSnapshot>(
 		target,
 		`/api/agents/${encodeURIComponent(agentId)}/usage`
+	);
+	return toSnapshot(wire);
+}
+
+/**
+ * Fetch the live subscription meters for one saved Ryu provider account. The
+ * account credential stays in Core's sealed vault; only normalized usage data
+ * crosses this boundary.
+ */
+export async function fetchProviderAccountUsage(
+	target: ApiTarget,
+	providerId: string,
+	accountId: string
+): Promise<UsageSnapshot> {
+	const wire = await request<WireSnapshot>(
+		target,
+		`/api/pi-config/providers/${encodeURIComponent(providerId)}/accounts/${encodeURIComponent(accountId)}/usage`
 	);
 	return toSnapshot(wire);
 }

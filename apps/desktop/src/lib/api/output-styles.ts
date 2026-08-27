@@ -1,10 +1,10 @@
 // apps/desktop/src/lib/api/output-styles.ts
 //
 // Typed client for Core's output-styles API (`/api/output-styles/*`, served by the
-// `ryu-output-styles` crate). An output style changes *how* an agent answers — role,
-// tone, default response shape — by editing the system prompt for the turn; it never
-// changes what the agent knows, which tools it has, or which model runs. The full
-// contract is `docs/output-styles.md`.
+// `ryu-output-styles` crate). An output style is a reusable personality profile that
+// changes *how* an agent answers — role, tone, default response shape — by editing
+// the system prompt for the turn; it never changes what the agent knows, which tools
+// it has, or which model runs. The full contract is `docs/output-styles.md`.
 //
 // Field names are snake_case to match Core's serde shapes exactly, as in the sibling
 // clients (meetings, skills). Two naming traps worth knowing before reading below:
@@ -35,7 +35,7 @@ export type OutputStyleSource =
 
 /** One row of `GET /api/output-styles` — enough to render a picker row or a store card. */
 export interface OutputStyleSummary {
-	/** Whether this is the style currently in force (selection OR a plugin's force). */
+	/** Legacy node-level selection metadata (or a plugin force), not agent assignment. */
 	active: boolean;
 	description: string | null;
 	/** False when saving an edit would fork this style into the user root. */
@@ -50,9 +50,8 @@ export interface OutputStyleSummary {
 	source: OutputStyleSource;
 }
 
-/** `GET /api/output-styles`. `selected` is the id in force (a forced plugin style
- *  beats the node default, so it is NOT simply the stored selection); `forced` names
- *  the plugin-forced style when there is one, else null. */
+/** `GET /api/output-styles`. `selected`/`forced` are legacy node-level metadata kept
+ * for older clients; agent assignment is read from the agent's persona record. */
 export interface OutputStyleList {
 	forced: string | null;
 	selected: string | null;
@@ -210,14 +209,12 @@ export async function deleteOutputStyle(
 }
 
 /**
- * `POST /api/output-styles/select` — set the node-default style, or clear it back to
- * "no style" with `null`.
+ * `POST /api/output-styles/select` — set the legacy node-default style, or clear it
+ * back to "no style" with `null`. New callers should assign a profile through the
+ * agent API.
  *
- * This is the whole of adopting a style: a style is a prompt preset, so the selection
- * file the injection seams read IS the installed state. There is no parallel store of
- * "installed" styles to keep in sync. Core rejects an unknown id with a 404 rather
- * than persisting it — a silently-stored dangling id would leave every later turn
- * unstyled while the picker showed a selection.
+ * This helper remains for older clients while the node selection file is migrated.
+ * Core rejects an unknown id with a 404 rather than persisting it.
  */
 export async function selectOutputStyle(
 	target: ApiTarget,

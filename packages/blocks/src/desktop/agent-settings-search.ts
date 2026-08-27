@@ -83,6 +83,13 @@ export const AGENT_SETTINGS_ENTRIES: AgentSettingsEntry[] = [
 		keywords: "voice style formal friendly concise personality",
 	},
 	{
+		id: "agent.personality-profile",
+		label: "Personality profile",
+		group: "Personality & tone",
+		tab: "behavior",
+		keywords: "output style preset plugin reusable voice profile",
+	},
+	{
 		id: "agent.custom-tone",
 		label: "Custom tone",
 		group: "Personality & tone",
@@ -235,7 +242,8 @@ export const AGENT_SETTINGS_ENTRIES: AgentSettingsEntry[] = [
 		label: "Advanced",
 		group: "",
 		tab: "advanced",
-		keywords: "slots speech to text tts image model gateway policy extra models",
+		keywords:
+			"slots speech to text tts image model gateway policy extra models",
 	},
 	{
 		id: "agent.byoa",

@@ -69,7 +69,7 @@ export interface SellerReportsState {
 	}) => Promise<void>;
 }
 
-/** Publisher-facing Membership revenue totals, grouped by payout currency. */
+/** Publisher-facing A Major Pass revenue totals, grouped by payout currency. */
 export interface MarketplaceMembershipRevenueBucket {
 	currency: string;
 	failedMinor: number;
@@ -169,7 +169,7 @@ export interface MarketplaceHost {
 	}) => Promise<PurchaseResult>;
 	/** The surface's owned-licenses hook (called at component top level). */
 	useLicenses: () => LicensesState;
-	/** Optional publisher Membership revenue report. */
+	/** Optional publisher A Major Pass revenue report. */
 	useMembershipReport?: () => MarketplaceMembershipState;
 	/** Optional seller-reports inbox for org admins. */
 	useSellerReports?: () => SellerReportsState;

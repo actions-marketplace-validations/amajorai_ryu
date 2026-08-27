@@ -5,11 +5,19 @@
 //     lists directories on the ACTIVE node's filesystem, which may be remote).
 //   - `POST /api/workspace/new-folder` `{ name }` (the composer's "Start from
 //     scratch" flow — Core creates ~/Documents/Ryu/<name> and returns its path).
+//   - `POST /api/workspace/clone` `{ url, name? }` (clone a GitHub repository
+//     onto the ACTIVE node and return its new project path).
 
 import { type ApiTarget, authenticatedFetch, readJsonBody } from "./client.ts";
 
 export interface CreateFolderResult {
 	error?: string;
+	path?: string;
+}
+
+export interface CloneFolderResult {
+	error?: string;
+	name?: string;
 	path?: string;
 }
 
@@ -34,6 +42,19 @@ export interface DirectoryListing {
 	label?: string;
 	parent: string | null;
 	path: string;
+}
+
+const GITHUB_CLONE_SOURCE =
+	/^(?:https:\/\/(?:www\.)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com(?::22)?\/)[A-Za-z0-9_.-]+\/([A-Za-z0-9_.-]+)\/?$/i;
+
+/** Return the default folder name for a supported GitHub clone URL. */
+export function githubRepositoryName(source: string): string | null {
+	const match = source.trim().match(GITHUB_CLONE_SOURCE);
+	if (!match?.[1]) {
+		return null;
+	}
+	const name = match[1].replace(/\.git$/i, "");
+	return name && name !== "." && name !== ".." ? name : null;
 }
 
 /**
@@ -82,5 +103,35 @@ export async function createProjectFolder(
 		return { path: data?.path };
 	} catch (e) {
 		return { error: e instanceof Error ? e.message : "create failed" };
+	}
+}
+
+/** Clone a GitHub repository onto the active node and return its project path. */
+export async function cloneProjectFolder(
+	target: ApiTarget,
+	url: string,
+	name?: string
+): Promise<CloneFolderResult> {
+	try {
+		const trimmedName = name?.trim();
+		const resp = await authenticatedFetch(target, "/api/workspace/clone", {
+			method: "POST",
+			body: JSON.stringify({
+				url,
+				...(trimmedName ? { name: trimmedName } : {}),
+			}),
+		});
+		const { data, error } = await readJsonBody<CloneFolderResult>(
+			resp,
+			"clone"
+		);
+		if (error) {
+			return { error };
+		}
+		return { name: data?.name, path: data?.path };
+	} catch (error) {
+		return {
+			error: error instanceof Error ? error.message : "clone failed",
+		};
 	}
 }

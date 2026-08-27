@@ -33,7 +33,7 @@ impl SetupStatus {
 /// each of them startable.
 ///
 /// This list is load-bearing, not bookkeeping. `SidecarManager::start_sidecar`
-/// refuses anything absent from the installed set, and none of these three is in
+/// refuses anything absent from the installed set, and three of these four are not in
 /// `startup_order`, so a name missing here can only ever fail its lazy start with
 /// `"'<name>' is not installed"` at `debug!` level — a feature that is silently and
 /// permanently dead on every node. `llamacpp-rerank` was exactly that: neural
@@ -54,6 +54,8 @@ const LLAMACPP_DERIVED_SIDECARS: &[&str] = &[
     // `"'…' is not installed"` and the guardrail dies silently (both consumers fail
     // open). The const is the only spelling any of the three sites now uses.
     crate::sidecar::providers::llamacpp::classify::CLASSIFY_SIDECAR_NAME,
+    // Speech Processing — lazily started by the dictation cleanup route.
+    crate::sidecar::providers::llamacpp::speech::SPEECH_PROCESSING_SIDECAR_NAME,
 ];
 
 /// First-party desktop tools that are part of the default local closure. They
@@ -114,6 +116,10 @@ pub struct LocalStackStatus {
     /// "running". Deliberately NOT part of [`LocalStackStatus::is_ready`]: a
     /// classifier download failure must never gate chat.
     pub classifier_gguf_installed: bool,
+    /// True if the S1-mini Q4_K_M Speech Processing GGUF is present. It is
+    /// downloaded here by default and served by the lazy `llamacpp-speech`
+    /// sidecar; a failure is non-fatal and dictation falls back to raw ASR text.
+    pub speech_processing_gguf_installed: bool,
     /// True if the whisper.cpp voice (STT) engine + its default GGML model are
     /// present. Voice is an opt-in sidecar (not in `startup_order`), so this
     /// reflects "downloaded and ready to start", not "running".
@@ -193,7 +199,7 @@ impl SetupManager {
     /// version after it succeeds. The
     /// [`LLAMACPP_DERIVED_SIDECARS`] share the `llama-server` binary with `llamacpp`,
     /// so their presence is derived from `llamacpp` (mirroring
-    /// [`Self::install_local_stack`]) — two of the three are not in `names` at all
+    /// [`Self::install_local_stack`]) — three of the four are not in `names` at all
     /// (never in `startup_order`, so they must not auto-start), so without the
     /// derivation a Core restart would leave their lazy starts permanently
     /// "not installed".
@@ -477,7 +483,7 @@ impl SetupManager {
     ///
     /// Both steps read their URLs and checksums from [`ModelRegistry::from_env`] so
     /// the bundled model is swappable without recompiling —
-    /// `RYU_LOCAL_{CHAT,EMBED,RERANKER,CLASSIFIER}_MODEL_{ID,URL,SHA256}`, env-only.
+    /// `RYU_LOCAL_{CHAT,EMBED,RERANKER,CLASSIFIER,SPEECH}_MODEL_{ID,URL,SHA256}`, env-only.
     ///
     /// `from_env` is the right constructor here precisely *because* those triples
     /// have no `registry.json` key: this function is the moment that writes
@@ -520,7 +526,7 @@ impl SetupManager {
             }
         };
 
-        // ── Steps 2–8 register together ───────────────────────────────────────
+        // ── Steps 2–9 register together ───────────────────────────────────────
         //
         // Everything below depends only on step 1 (the llama.cpp binary, for the
         // GGUF steps) and on nothing else here, so the steps are *registered*
@@ -545,7 +551,7 @@ impl SetupManager {
             let gguf_installed = if llamacpp_installed {
                 let model_id = registry.local_chat_model.id.clone();
                 match downloads
-                    .download_blocking(crate::model_catalog::gguf_download_spec(
+                    .resume_and_download_blocking(crate::model_catalog::gguf_download_spec(
                         &registry.local_chat_model.id,
                         &registry.local_chat_model.weight_url,
                         &registry.local_chat_model.sha256,
@@ -820,6 +826,64 @@ impl SetupManager {
             (classifier_gguf_installed, warnings)
         };
 
+        let speech_processing_step = async {
+            let mut warnings = Vec::<String>::new();
+            // Step 3.7 — S1-mini Speech Processing GGUF.
+            //
+            // S1-mini is the post-ASR cleanup stage, not a second chat model. It
+            // is downloaded alongside the other default local weights, while
+            // its dedicated llama.cpp server remains lazy so a user who turns
+            // cleanup off does not pay its resident memory cost.
+            let speech_processing_gguf_installed = if llamacpp_installed {
+                let id = registry.local_speech_model.id.clone();
+                match downloads
+                    .resume_and_download_blocking(crate::model_catalog::gguf_download_spec(
+                        &registry.local_speech_model.id,
+                        &registry.local_speech_model.weight_url,
+                        &registry.local_speech_model.sha256,
+                        &format!("{id} (Speech Processing model)"),
+                        crate::downloads::DownloadRole::SpeechModel,
+                    ))
+                    .await
+                {
+                    Ok(path) => {
+                        self.mark_installed(&format!("gguf:{id}")).await;
+                        if let Err(e) = crate::model_catalog::record_default_download(
+                            &id,
+                            &registry.local_speech_model.weight_url,
+                            None,
+                            None,
+                        ) {
+                            tracing::warn!(
+                                "recording Speech Processing model provenance failed: {e:#}"
+                            );
+                        }
+                        tracing::info!(
+                            "onboarding: Speech Processing GGUF {} installed at {}",
+                            id,
+                            path.display()
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        let msg = format!(
+                            "Speech Processing GGUF {id} download failed (dictation will use raw ASR text): {e:#}"
+                        );
+                        tracing::warn!("{msg}");
+                        warnings.push(msg);
+                        false
+                    }
+                }
+            } else {
+                warnings.push(
+                    "Speech Processing GGUF download skipped because llama.cpp binary was not installed"
+                        .to_owned(),
+                );
+                false
+            };
+            (speech_processing_gguf_installed, warnings)
+        };
+
         let whisper_step = async {
             let mut warnings = Vec::<String>::new();
             // Step 4 — whisper.cpp voice (STT) engine + default GGML model.
@@ -1075,6 +1139,7 @@ impl SetupManager {
             (embed_gguf_installed, w_embed),
             (reranker_gguf_installed, w_rerank),
             (classifier_gguf_installed, w_classify),
+            (speech_processing_gguf_installed, w_speech_processing),
             (whisper_installed, w_whisper),
             (parakeet_installed, w_parakeet),
             (vad_installed, w_vad),
@@ -1086,6 +1151,7 @@ impl SetupManager {
             embed_step,
             reranker_step,
             classifier_step,
+            speech_processing_step,
             whisper_step,
             parakeet_step,
             vad_step,
@@ -1096,7 +1162,15 @@ impl SetupManager {
         // Merged in step order, so the warning list a user reads stays stable even
         // though the steps themselves no longer finish in that order.
         for w in [
-            w_chat, w_embed, w_rerank, w_classify, w_whisper, w_parakeet, w_vad, w_outetts,
+            w_chat,
+            w_embed,
+            w_rerank,
+            w_classify,
+            w_speech_processing,
+            w_whisper,
+            w_parakeet,
+            w_vad,
+            w_outetts,
             w_kokoro, w_sdcpp,
         ] {
             warnings.extend(w);
@@ -1108,6 +1182,7 @@ impl SetupManager {
             embed_gguf_installed,
             reranker_gguf_installed,
             classifier_gguf_installed,
+            speech_processing_gguf_installed,
             whisper_installed,
             parakeet_installed,
             vad_installed,
@@ -1147,6 +1222,7 @@ mod onboarding_tests {
             embed_gguf_installed: false,
             reranker_gguf_installed: false,
             classifier_gguf_installed: false,
+            speech_processing_gguf_installed: false,
             whisper_installed: false,
             parakeet_installed: false,
             vad_installed: false,
@@ -1183,6 +1259,7 @@ mod onboarding_tests {
         let extras = LocalStackStatus {
             whisper_installed: true,
             parakeet_installed: true,
+            speech_processing_gguf_installed: true,
             vad_installed: true,
             outetts_installed: true,
             kokoro_installed: true,
@@ -1241,6 +1318,9 @@ mod onboarding_tests {
             "rerank shares the llama-server binary and has no other install step"
         );
         assert!(LLAMACPP_DERIVED_SIDECARS.contains(&"llamacpp-embed"));
+        assert!(LLAMACPP_DERIVED_SIDECARS.contains(
+            &crate::sidecar::providers::llamacpp::speech::SPEECH_PROCESSING_SIDECAR_NAME
+        ));
         // Asserted against the SIDECAR'S OWN CONST, and additionally against what
         // `Sidecar::name()` returns. A literal here would pass while the list and the
         // sidecar disagreed, which is precisely the `"not installed"` dead-lazy-start

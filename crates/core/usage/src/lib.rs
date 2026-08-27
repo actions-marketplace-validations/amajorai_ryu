@@ -447,6 +447,33 @@ pub async fn fetch_ryu_provider_usage(provider_id: &str) -> UsageSnapshot {
     }
 }
 
+/// Fetch usage for one credential from Ryu's sealed provider-account vault.
+///
+/// This is the account-aware counterpart to [`fetch_ryu_provider_usage`]. The
+/// caller owns the vault lookup and passes one decrypted credential for the
+/// duration of this request; this crate still returns only normalized usage and
+/// never logs or serializes the credential. `None` produces the same structured
+/// `not_logged_in` result as the active-account reader.
+pub async fn fetch_ryu_provider_usage_for_credential(
+    provider_id: &str,
+    credential: Option<serde_json::Value>,
+) -> UsageSnapshot {
+    let Some(engine) = engine_for_agent(provider_id) else {
+        return UsageSnapshot::unavailable(provider_id, "", UsageUnavailable::Unsupported);
+    };
+    match engine {
+        Engine::Claude => claude::fetch_ryu_with_credential(provider_id, credential).await,
+        Engine::Codex => codex::fetch_ryu_with_credential(provider_id, credential).await,
+        Engine::Copilot => copilot::fetch_ryu_with_credential(provider_id, credential).await,
+        // Ryu's provider catalog currently exposes account-backed logins for
+        // Claude, Codex, and Copilot only. Keep future engines conservative
+        // until their credential shapes have an account-aware reader too.
+        Engine::Grok | Engine::Glm => {
+            UsageSnapshot::unavailable(provider_id, "", UsageUnavailable::Unsupported)
+        }
+    }
+}
+
 /// Shared HTTP client for the vendor usage calls. Short timeout — this backs a
 /// polled widget, never a hot path.
 fn http_client() -> reqwest::Client {

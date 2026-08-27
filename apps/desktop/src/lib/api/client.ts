@@ -77,10 +77,10 @@ export type AuthenticatedFetchOptions = Omit<RequestInit, "headers"> & {
 
 /**
  * The dedicated header carrying the user's CONTROL-PLANE (Better-Auth) session
- * bearer to Core on a marketplace install, so a PAID item's entitlement check
- * (#491) can resolve the buyer org + license. Kept distinct from `Authorization`
+ * bearer to Core on a Marketplace install for optional account-aware operations.
+ * Kept distinct from `Authorization`
  * (which holds the Core node token, a machine secret the control plane does not
- * recognize as a user). Core forwards this to the marketplace install handoff.
+ * recognize as a user). Core forwards this to the Marketplace install handoff when present.
  */
 export const BUYER_TOKEN_HEADER = "X-Ryu-Buyer-Token";
 
@@ -128,7 +128,7 @@ export function buyerTokenHeader(
 			return { [BUYER_TOKEN_HEADER]: token };
 		}
 	} catch {
-		// No storage — install proceeds anonymously (free items only).
+		// No storage — install proceeds anonymously.
 	}
 	return {};
 }

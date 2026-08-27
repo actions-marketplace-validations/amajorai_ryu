@@ -89,6 +89,13 @@ pub struct CatalogEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<Surface>,
 
+    /// Support levels for each surfaced host, plus the shared-shell inheritance
+    /// note used by Marketplace detail and native catalog clients. This is a
+    /// display projection only; the signed manifest remains authoritative for
+    /// lifecycle filtering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surface_support: Vec<serde_json::Value>,
+
     /// The host version floors this plugin declares, mirrored from the manifest's
     /// `engines`. Absent = no floors.
     ///

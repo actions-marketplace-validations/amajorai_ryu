@@ -101,6 +101,32 @@ test("renders GitHub presentation metadata and screenshots", async ({
 	});
 });
 
+test("renders the support, extension, and implementation split", async ({
+	page,
+}, testInfo) => {
+	await page.setViewportSize(WIDE);
+	await expect(page.getByText("Support & extensions")).toBeVisible();
+	await expect(page.getByTestId("surface-support")).toContainText("Desktop");
+	await expect(page.getByTestId("surface-support")).toContainText("Mobile");
+	await expect(page.getByTestId("surface-support")).toContainText(
+		"Uses the shared Desktop shell"
+	);
+	await expect(page.getByTestId("surface-extensions")).toContainText(
+		"Browser control"
+	);
+	await expect(page.getByTestId("surface-implementation")).toContainText(
+		"Core runtime"
+	);
+	await expect(page.getByTestId("surface-implementation")).toContainText(
+		"Package sidecar"
+	);
+	await page.getByTestId("surface-support").scrollIntoViewIfNeeded();
+	await page.screenshot({
+		fullPage: true,
+		path: "/Users/jiawei/Documents/Code/ryu/apps/desktop/artifacts/marketplace-support-extension-proof.png",
+	});
+});
+
 test("stat strip scrolls inside its own band", async ({ page }) => {
 	await page.setViewportSize(NARROW);
 	// The strip is the only `overflow-x-auto` band directly under the action bar.

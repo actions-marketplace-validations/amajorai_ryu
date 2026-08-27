@@ -711,6 +711,10 @@ struct MarketplacePlugin {
     /// install-closure resolver.
     #[serde(default)]
     requires: Option<serde_json::Value>,
+    /// Optional per-surface support map from a custom marketplace entry. Kept
+    /// raw here; `manifest_surface` produces the bounded display projection.
+    #[serde(default)]
+    surfaces: Option<serde_json::Value>,
     #[serde(default)]
     targets: Vec<String>,
 }
@@ -749,6 +753,7 @@ struct MarketplaceItemMeta {
     layers: Vec<serde_json::Value>,
     requires: Option<serde_json::Value>,
     targets: Vec<String>,
+    surface_support: Vec<serde_json::Value>,
 }
 
 impl MarketplacePlugin {
@@ -784,6 +789,12 @@ impl MarketplacePlugin {
             layers: scrub_marketplace_layers(&self.layers),
             requires: self.requires.clone(),
             targets: self.targets.clone(),
+            surface_support: super::manifest_surface::project_surface_support(
+                &serde_json::json!({
+                    "surfaces": self.surfaces.clone(),
+                    "targets": self.targets.clone(),
+                }),
+            ),
         }
     }
 }
@@ -1038,6 +1049,12 @@ impl MarketplaceSource {
                     if !item.meta.targets.is_empty() {
                         obj.insert("targets".to_owned(), serde_json::json!(item.meta.targets));
                     }
+                    if !item.meta.surface_support.is_empty() {
+                        obj.insert(
+                            "surface_support".to_owned(),
+                            serde_json::json!(item.meta.surface_support),
+                        );
+                    }
                     // Snake_case presentation keys for the browse card + hero.
                     if let Some(icon) = &item.meta.icon_url {
                         obj.insert("icon_url".to_owned(), serde_json::json!(icon));
@@ -1247,6 +1264,12 @@ impl CatalogSource for MarketplaceSource {
         }
         if !meta.targets.is_empty() {
             detail.insert("targets".to_owned(), serde_json::json!(meta.targets));
+        }
+        if !meta.surface_support.is_empty() {
+            detail.insert(
+                "surfaceSupport".to_owned(),
+                serde_json::json!(meta.surface_support),
+            );
         }
         if !meta.example_prompts.is_empty() {
             detail.insert(
@@ -2422,12 +2445,12 @@ pub const RYU_MARKETPLACE_API_ENV: &str = "RYU_MARKETPLACE_API_URL";
 const RYU_MARKETPLACE_DEFAULT_BASE: &str = "https://api.ryuhq.com";
 
 /// Env var carrying a control-plane bearer (Better Auth / OAuth session token)
-/// to forward on the marketplace install handoff so a PAID item's entitlement
-/// check (#491) can resolve the buyer org + its license. This is the
+/// to forward on the marketplace install handoff for optional account-aware
+/// Marketplace operations. This is the
 /// *fallback*/headless path; the live desktop install threads the caller's
 /// bearer per-request via [`with_buyer_token`] (env vars are fixed at spawn and
-/// cannot carry a live, expiring session token). Unset ⇒ anonymous install
-/// (fine for free items; a paid item is denied 402). Nothing hardcoded.
+/// cannot carry a live, expiring session token). Unset ⇒ anonymous install.
+/// Nothing hardcoded.
 const RYU_MARKETPLACE_TOKEN_ENV: &str = "RYU_MARKETPLACE_TOKEN";
 
 /// Header carrying a short-lived control-plane install session redeemed from a
@@ -2516,7 +2539,7 @@ fn ryu_marketplace_base() -> String {
 /// package kinds intentionally do not expand `CatalogKind`: they are a package
 /// transport, not one of Core's legacy catalog adapters. The returned detail is
 /// still the signed marketplace handoff, so the caller can verify the manifest
-/// before asking for the entitlement-gated archive.
+/// before asking for the archive.
 pub async fn fetch_ryu_package_detail(
 	client: &reqwest::Client,
 	kind: &str,
@@ -2546,14 +2569,6 @@ pub async fn fetch_ryu_package_detail(
         .send()
         .await
         .map_err(|error| anyhow::anyhow!("fetching Ryu package detail {url}: {error}"))?;
-    if response.status() == reqwest::StatusCode::PAYMENT_REQUIRED {
-        let body = response.json::<Value>().await.unwrap_or(Value::Null);
-        let reason = body
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("this package requires an active marketplace entitlement");
-        bail!("cannot install `{kind}/{id}`: {reason}");
-    }
     if !response.status().is_success() {
         bail!(
             "Ryu package detail returned {} for `{kind}/{id}`",
@@ -2608,9 +2623,6 @@ pub async fn fetch_ryu_package_archive(
         .send()
         .await
         .map_err(|error| anyhow::anyhow!("downloading Ryu package archive {url}: {error}"))?;
-    if response.status() == reqwest::StatusCode::PAYMENT_REQUIRED {
-        bail!("marketplace entitlement is required to download this package");
-    }
     if !response.status().is_success() {
         bail!("Ryu package archive returned {}", response.status());
     }
@@ -2624,7 +2636,7 @@ pub async fn fetch_ryu_package_archive(
 /// Verify the signed portable-package manifest using the existing Gateway
 /// signing path. Unlike legacy seed listings, a new GitHub package must carry a
 /// signature: otherwise the release digest could be valid while the listing
-/// identity and entitlement metadata were replaced at the control plane.
+/// identity and publisher metadata were replaced at the control plane.
 pub async fn verify_ryu_package_signature(
     client: &reqwest::Client,
     id: &str,
@@ -2702,7 +2714,7 @@ pub async fn verify_ryu_package_signature(
 /// disk when the server is unavailable, with a staleness note; a first-ever
 /// offline search returns an empty, labelled per-kind envelope. `detail` /
 /// `install_descriptor` return a clear error, because stale detail must not
-/// bypass signature or entitlement checks. Never panics.
+/// bypass signature, integrity, or node-policy checks. Never panics.
 #[derive(Clone)]
 pub struct RyuMarketplaceSource {
     pub id: String,
@@ -2760,13 +2772,13 @@ struct MarketplaceCard {
     /// so a paid listing still reads as paid once it is folded into the unified
     /// first-party view alongside the free git catalog; without it the merged list
     /// showed every paid item as if it were free, and the price only reappeared
-    /// after the user reached checkout. Display only: entitlement is decided by the
-    /// server at purchase/install, never by this field.
+    /// after the user reached checkout. Display only: pricing is not an install
+    /// decision, and the signed handoff remains available before checkout.
     #[serde(default)]
     pricing: Option<Value>,
     /// True only when the hosted server says this paid app is included in the
-    /// recurring Marketplace Membership. Display only; install entitlement is
-    /// still decided by the control plane detail handoff.
+    /// recurring A Major Pass publisher pool. Display only; it does not
+    /// control install or runtime access.
     #[serde(default, rename = "membershipIncluded")]
     membership_included: bool,
     /// True when the hosted server vouches for the item as first-party. Used to
@@ -2822,6 +2834,10 @@ struct MarketplaceCard {
     requires: Option<Value>,
     #[serde(default)]
     targets: Option<Value>,
+    /// Per-surface support levels from the hosted catalog. Optional for older
+    /// marketplace servers; local manifest detail remains the fallback.
+    #[serde(default, rename = "surfaceSupport")]
+    surface_support: Option<Value>,
     /// GitHub-backed package identity and public download metadata. The
     /// installation URL is a relative Ryu route; Core never receives a GitHub
     /// token or a raw release URL from this card.
@@ -3052,14 +3068,12 @@ impl RyuMarketplaceSource {
 
     /// Fetch one item's detail (manifest + descriptor) for this source's kind.
     ///
-    /// `catalog/detail` is the install handoff AND the install-time entitlement
-    /// seam (#491): for a PAID item the control plane returns `402 Payment
-    /// Required` unless the caller's org holds an active license. So when a buyer
-    /// bearer is present — the per-request token threaded from the install
-    /// handler's `Authorization` header via [`with_buyer_token`], else the
-    /// `RYU_MARKETPLACE_TOKEN` headless fallback — it is forwarded so a licensed
-    /// org's install succeeds. A 402 is surfaced as a clear "requires purchase"
-    /// error (never a generic not-found), carrying the server's actionable reason.
+    /// `catalog/detail` is the signed install handoff. When a buyer bearer is
+    /// present — the per-request token threaded from the install handler's
+    /// `Authorization` header via [`with_buyer_token`], else the
+    /// `RYU_MARKETPLACE_TOKEN` headless fallback — it is forwarded for optional
+    /// account-aware Marketplace behavior. Any upstream 402 is reported as an
+    /// upstream service response, not treated as the local access policy.
     async fn fetch_detail(&self, client: &reqwest::Client, id: &str) -> Result<Value> {
         self.fetch_detail_on_channel(client, id, None).await
     }
@@ -3097,17 +3111,6 @@ impl RyuMarketplaceSource {
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("fetching Ryu Marketplace detail {url}: {e}"))?;
-        // 402 Payment Required: a paid item the buyer org is not licensed for.
-        // Surface the server's actionable purchase reason verbatim.
-        if resp.status() == reqwest::StatusCode::PAYMENT_REQUIRED {
-            let body: Value = resp.json().await.unwrap_or(Value::Null);
-            let reason = body
-                .get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or("this is a paid item; purchase a license before installing")
-                .to_string();
-            bail!("cannot install `{id}`: {reason}");
-        }
         if !resp.status().is_success() {
             // A channelled request that 404s means that TRAIN has no build — a
             // materially different fact from "no such item", and the one the user
@@ -3157,14 +3160,6 @@ impl RyuMarketplaceSource {
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("fetching Ryu Marketplace detail {url}: {e}"))?;
-        if resp.status() == reqwest::StatusCode::PAYMENT_REQUIRED {
-            let body: Value = resp.json().await.unwrap_or(Value::Null);
-            let reason = body
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("this package requires an active marketplace entitlement");
-            bail!("cannot install `{id}`: {reason}");
-        }
         if !resp.status().is_success() {
             bail!(
                 "Ryu Marketplace item `{id}` has no published `{version}` build ({} from {url})",
@@ -3418,6 +3413,13 @@ impl RyuMarketplaceSource {
                         .filter(|a| !a.is_empty())
                     {
                         obj.insert("targets".to_owned(), serde_json::json!(targets));
+                    }
+                    if let Some(surface_support) = card
+                        .surface_support
+                        .clone()
+                        .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
+                    {
+                        obj.insert("surface_support".to_owned(), surface_support);
                     }
                     // Icon glyph + dither background + app-ness — see `MarketplaceCard`.
                     if let Some(icon) = &card.icon {
@@ -3766,8 +3768,8 @@ impl RyuMarketplaceSource {
     ///
     /// The channel changes only WHICH published version is resolved; every trust
     /// gate below is unchanged and runs identically on a prerelease. A nightly is
-    /// signature-verified, ui_code-hash-gated and entitlement-checked exactly like
-    /// a stable build — the channel is a selection, never a relaxation.
+    /// signature-verified and ui_code-hash-checked exactly like a stable build —
+    /// the channel is a selection, never a relaxation.
     pub async fn install_descriptor_on_channel(
         &self,
         client: &reqwest::Client,
@@ -3828,10 +3830,9 @@ impl RyuMarketplaceSource {
             return Ok(descriptor);
         }
 
-        // PAID-ARTIFACT CARRIAGE (Phase 4A): the generalized sibling of the plugin
-        // path for a PAID `ryu_bundle` NON-plugin item (today: a skill). Its
-        // artifact is served — ONLY past the control-plane's 402 entitlement gate —
-        // as a base64 bundle whose integrity anchor is the signed
+        // ARTIFACT CARRIAGE: the generalized sibling of the plugin path for a
+        // `ryu_bundle` NON-plugin item (today: a skill). Its artifact is served as
+        // a base64 bundle whose integrity anchor is the signed
         // `manifest.artifact_sha256`. When a validated bundle is present, carry it
         // in `raw` and skip the public-source descriptor entirely (a bundle-served
         // skill deliberately advertises NO public `install_source`, closing the
@@ -3959,7 +3960,7 @@ fn gate_plugin_backend_code(id: &str, manifest: &mut Value, signed: bool) {
     }
 }
 
-/// Largest base64 `artifact` string carried on a paid-bundle install. The blob is
+/// Largest base64 `artifact` string carried on a bundled install. The blob is
 /// a base64 `.tar.gz`; base64 is ~4/3 the raw size, so this bounds a ~4 MiB
 /// archive the same way the plugin `uiCode` cap bounds its module. Refused
 /// fail-closed before decode/install so a pathological blob never lands on disk.
@@ -3975,12 +3976,11 @@ fn compute_artifact_sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// The fail-closed carriage ladder for a PAID `ryu_bundle` NON-plugin artifact
-/// (Phase 4A) — the generalized sibling of [`gate_plugin_ui_code`]. The artifact
-/// rides OUTSIDE the signed manifest (the server's top-level base64 `artifact`
-/// blob, served ONLY past the 402 entitlement gate); its integrity anchor is the
-/// SIGNED `manifest.artifact_sha256`. The trust ladder is identical to the plugin
-/// path (carry code ONLY off a valid signature attesting the hash):
+/// The fail-closed carriage ladder for a `ryu_bundle` NON-plugin artifact — the
+/// generalized sibling of [`gate_plugin_ui_code`]. The artifact rides OUTSIDE the
+/// signed manifest (the server's top-level base64 `artifact` blob); its integrity
+/// anchor is the SIGNED `manifest.artifact_sha256`. The trust ladder is identical
+/// to the plugin path (carry code ONLY off a valid signature attesting the hash):
 /// - unsigned                                          -> `Ok(None)` (never carry
 ///   bytes off an unattested hash; a matching hash would be self-attestation).
 /// - signed, no `artifact_sha256` declared             -> `Ok(None)` (no bundle: a
@@ -4013,7 +4013,7 @@ fn gate_artifact(id: &str, detail: &Value, signed: bool) -> Result<Option<String
         return Ok(None);
     }
     let Some(declared) = declared else {
-        // Signed manifest declaring no artifact hash: not a paid-bundle item.
+        // Signed manifest declaring no artifact hash: not a bundled-artifact item.
         return Ok(None);
     };
     // A declared hash means a bundle existed at signing time. Missing now = the
@@ -4021,7 +4021,7 @@ fn gate_artifact(id: &str, detail: &Value, signed: bool) -> Result<Option<String
     let Some(artifact_b64) = artifact_b64 else {
         bail!(
             "item `{id}` manifest declares artifact_sha256 but no artifact was served; \
-             refusing install (paid bundle stripped after signing)"
+             refusing install (bundle stripped after signing)"
         );
     };
     if artifact_b64.len() > MAX_ARTIFACT_B64_BYTES {
@@ -5204,9 +5204,9 @@ impl Source {
             // descriptor's `install_source` feeds Unit #462's from-source fetcher.
             Source::RyuMarketplace(s) if s.kind == CatalogKind::Skill => {
                 let descriptor = s.install_descriptor(client, id).await?;
-                // PAID-ARTIFACT CARRIAGE (Phase 4A): a paid `ryu_bundle` skill's
-                // `install_descriptor` carries the entitlement-gated, integrity-
-                // verified bundle bytes (base64 `.tar.gz`) instead of a public
+                // ARTIFACT CARRIAGE: a `ryu_bundle` skill's `install_descriptor`
+                // carries the integrity-verified bundle bytes (base64 `.tar.gz`)
+                // instead of a public
                 // source. Install from those bytes — never a public git repo.
                 if let Some(b64) = descriptor
                     .raw
@@ -6411,15 +6411,15 @@ mod tests {
         assert!(obj.contains_key("backend_sha256"));
     }
 
-    // ── PAID-ARTIFACT CARRIAGE (Phase 4A): entitlement-gated bundle integrity ──
+    // ── ARTIFACT CARRIAGE: signed bundle integrity ───────────────────────────
     //
-    // The generalized sibling of the plugin gate for a paid `ryu_bundle` skill.
+    // The generalized sibling of the plugin gate for a `ryu_bundle` skill.
     // The hash contract IS the interop spec (there is no separate publisher tool
     // in this phase): `manifest.artifact_sha256` is the lower-case hex sha256 over
     // the DECODED `.tar.gz` bytes, and the served `artifact` is those bytes
     // base64-encoded. These tests lock that contract and the fail-closed ladder.
 
-    /// Build a server-shaped `catalog/detail` for a paid bundle: the declared hash
+    /// Build a server-shaped `catalog/detail` for a bundle: the declared hash
     /// inside the signed `manifest`, the bundle as the unsigned top-level base64
     /// `artifact`.
     fn artifact_detail(

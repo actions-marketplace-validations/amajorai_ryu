@@ -112,7 +112,7 @@ export function CreateMenu() {
 		},
 		{
 			id: "team",
-			label: "New team",
+			label: "New group",
 			onSelect: () => setTeamOpen(true),
 		},
 		// No "New workflow" / "Build with AI" here any more. Both were hardcoded

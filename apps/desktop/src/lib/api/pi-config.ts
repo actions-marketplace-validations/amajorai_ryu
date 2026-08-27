@@ -98,6 +98,8 @@ export interface PiAccount {
 	accountId: string;
 	/** Whether this is the account Pi will use this turn. */
 	active: boolean;
+	/** Whether this is the account installed in the shared Gateway. */
+	gatewayActive?: boolean;
 	/** "api_key" | "oauth" | "opaque". */
 	kind: string;
 	/** Display name (email, provider label, or "Account N"). */
@@ -106,18 +108,37 @@ export interface PiAccount {
 	updatedAt: number;
 }
 
-/** Switch the active account for a provider. Returns the refreshed catalog. */
+export type ProviderAccountTarget = "gateway" | "self";
+
+/** Map a Pi provider id to the local Gateway provider-key slot, when supported. */
+export function gatewayProviderSlug(
+	providerId: string
+): "anthropic" | "gemini" | "openai" | "openrouter" | null {
+	switch (providerId) {
+		case "anthropic":
+		case "openai":
+		case "openrouter":
+			return providerId;
+		case "google":
+			return "gemini";
+		default:
+			return null;
+	}
+}
+
+/** Switch a provider account for yourself or install it in the Gateway. */
 export async function switchProviderAccount(
 	target: ApiTarget,
 	providerId: string,
-	accountId: string
+	accountId: string,
+	accountTarget: ProviderAccountTarget = "self"
 ): Promise<PiCatalog> {
 	return await request<PiCatalog>(
 		target,
 		`/api/pi-config/providers/${encodeURIComponent(providerId)}/accounts/switch`,
 		{
 			method: "POST",
-			body: { accountId },
+			body: { accountId, target: accountTarget },
 		}
 	);
 }

@@ -121,6 +121,7 @@ const LOCAL_ENGINES: ReadonlySet<string> = new Set([
 	"omlx",
 	"docker-model-runner",
 	"apfel",
+	"mesh-llm",
 ]);
 
 /** Registry ids Core routes through a dedicated, format-specific mechanism. */
@@ -208,7 +209,7 @@ export type EgressMechanism =
 	| "openai-base-url"
 	/** An OpenAI-compat registry agent: Core forwards via the gateway always. */
 	| "gateway-forward"
-	/** A local inference engine — nothing leaves this computer. */
+	/** A local inference engine — nothing leaves this device. */
 	| "local-engine"
 	/** Core has no hook into this agent's protocol (`gateway_bypass`). */
 	| "unroutable"
@@ -653,7 +654,7 @@ function classifyEgressLayer(
 			credentialNote: null,
 			takesEffect: null,
 			detail:
-				"Runs a model on this computer. Nothing is sent to a provider, so there is no egress to govern.",
+				"Runs a model on this device. Nothing is sent to a provider, so there is no egress to govern.",
 		};
 	}
 
@@ -813,7 +814,7 @@ export function describeEgressBadge(
 	}
 	if (row.mechanism === "local-engine") {
 		return {
-			label: "On this computer",
+			label: "On this device",
 			variant: "secondary",
 			pendingStart: false,
 		};

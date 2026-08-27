@@ -149,6 +149,7 @@ export interface AgentTemplate {
 		title?: string;
 		description: string | null;
 		system_prompt: string | null;
+		persona?: AgentPersona | null;
 		tools: string[];
 		required_plugins?: string[];
 		engine: string | null;
@@ -218,6 +219,9 @@ export interface AgentPersona {
 	icon?: string | null;
 	/** Optional hex tint for {@link icon}. Null = theme `currentColor`. */
 	icon_color?: string | null;
+	/** Installed output-style profile assigned to this agent. Null/absent means
+	 * the agent uses its own instructions and tone. */
+	output_style_id?: string | null;
 	/** Tone string: "neutral" | "professional" | "friendly" | "pirate" | any custom string. Null = default. */
 	tone: string | null;
 }
@@ -685,9 +689,8 @@ export async function installPublishedAgent(
 	}>(target, "/api/agents/published/install", {
 		method: "POST",
 		body: { id, idempotency_key: idempotencyKey },
-		// A published agent may be PAID. Core forwards this control-plane bearer to
-		// the marketplace install handoff so the entitlement check can resolve the
-		// buyer org; without it a bought listing is denied as if unowned.
+		// A published agent may be PAID. Forward the control-plane bearer for
+		// optional account-aware Marketplace operations; it is not required to install.
 		headers: buyerTokenHeader(target),
 	});
 	const wire = json.requires ?? {};
@@ -1069,6 +1072,8 @@ export interface AgentAccount {
 	accountId: string;
 	/** Whether this is the account the agent uses. */
 	active: boolean;
+	/** Whether this is the account installed in the shared Gateway. */
+	gatewayActive?: boolean;
 	/** "api_key" | "oauth" | "opaque". */
 	kind: string;
 	/** Display name (email, provider label, or "Signed-in account"). */

@@ -478,6 +478,11 @@ pub(crate) struct RepoManifestDisplay {
     external: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     layers: Vec<Value>,
+    /// Bounded support rows from the manifest's `surfaces` map. Stored in the
+    /// discovery cache so the community card can explain support before detail
+    /// enrichment runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    surface_support: Vec<Value>,
     /// Does the manifest claim a UI DESTINATION — a companion runnable, a dock
     /// panel, or a top-level sidebar-button target? The same three keys Core's own
     /// `manifest_declares_destination` reads, so one rule decides app-vs-plugin for
@@ -601,6 +606,9 @@ impl RepoManifestDisplay {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             layers: scrub_layers(obj.get("provides")),
+            surface_support: (obj.contains_key("surfaces") || obj.contains_key("targets"))
+                .then(|| super::manifest_surface::project_surface_support(manifest))
+                .unwrap_or_default(),
             has_destination: manifest_claims_destination(obj),
         };
         (out != Self::default()).then_some(out)
@@ -656,6 +664,8 @@ pub(crate) struct GithubMarketplaceEntry {
     icon_background: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     banner: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    surface_support: Vec<Value>,
     /// True when the entry ships a Companion UI surface — classified as an "app".
     #[serde(default)]
     has_companion: bool,
@@ -748,6 +758,7 @@ impl GithubMarketplaceEntry {
                 .and_then(|v| v.as_str())
                 .and_then(scrub_css_color),
             banner: obj.get("banner").and_then(scrub_banner),
+            surface_support: super::manifest_surface::project_surface_support(plugin),
             has_companion: obj
                 .get("hasCompanion")
                 .and_then(|v| v.as_bool())
@@ -805,6 +816,7 @@ impl GithubMarketplaceEntry {
             icon_dither: None,
             icon_background: None,
             banner: None,
+            surface_support: Vec::new(),
             has_companion: kind == "app",
             source_repo: Some(repo_url),
             homepage: text("homepage", MAX_URL_CHARS).and_then(|value| sanitize_url(&value)),
@@ -2052,6 +2064,7 @@ pub(crate) fn marketplace_entry_to_item(
         "icon_dither": entry.icon_dither.clone(),
         "icon_background": entry.icon_background.clone(),
         "banner": entry.banner.clone(),
+        "surface_support": entry.surface_support.clone(),
         "tags": entry.tags.clone(),
         "category": entry.category.clone().unwrap_or_else(|| "Community".to_string()),
         "tagline": entry.tagline.clone().or_else(|| entry.description.clone()),
@@ -2151,6 +2164,9 @@ pub(crate) fn record_to_item(record: &GithubTopicRecord) -> Value {
             .unwrap_or_default(),
         "external": manifest.map(|m| m.external).unwrap_or(false),
         "layers": manifest.map(|m| m.layers.clone()).unwrap_or_default(),
+        "surface_support": manifest
+            .map(|m| m.surface_support.clone())
+            .unwrap_or_default(),
         "tags": tags,
         "keywords": manifest.map(|m| m.keywords.clone()).unwrap_or_default(),
         "author": manifest.and_then(|m| m.author.clone()),
@@ -2280,6 +2296,12 @@ pub(crate) fn manifest_display_fields(manifest: &Value) -> serde_json::Map<Strin
     }
     if !display.layers.is_empty() {
         out.insert("layers".to_owned(), Value::Array(display.layers.clone()));
+    }
+    if !display.surface_support.is_empty() {
+        out.insert(
+            "surfaceSupport".to_owned(),
+            Value::Array(display.surface_support.clone()),
+        );
     }
     for key in ["requires", "targets"] {
         if let Some(v) = obj.get(key).filter(|v| !v.is_null()) {

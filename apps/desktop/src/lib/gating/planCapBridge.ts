@@ -21,7 +21,6 @@ import {
 	type PlanId,
 	type PlanLimitField,
 	planLimit,
-	quotaOwner,
 } from "@ryu/auth/lib/plans";
 import { hasBillingAuth } from "@/src/lib/api/billing.ts";
 
@@ -44,18 +43,12 @@ export function effectivePlan(
 }
 
 interface PlanCapState {
-	/**
-	 * Ids of the apps currently installed AND enabled on the active node, or
-	 * `undefined` until the React layer first syncs them → treat as unknown.
-	 */
-	enabledApps: ReadonlySet<string> | undefined;
 	/** `undefined` until the React layer first syncs → treat as unknown. */
 	plan: PlanId | null | undefined;
 	requestUpgrade: (() => void) | null;
 }
 
 const state: PlanCapState = {
-	enabledApps: undefined,
 	plan: undefined,
 	requestUpgrade: null,
 };
@@ -63,36 +56,15 @@ const state: PlanCapState = {
 /**
  * Keep the non-React singleton in sync with the resolved entitlement.
  *
- * `enabledApps` is what makes an app-declared quota disappear with its app; it
- * is optional so a caller that only knows the plan (the tests, and any future
- * sync point without an app list) still leaves every app-owned key uncapped
- * rather than guessing.
+ * App/plugin surfaces are not represented by this bridge. Only the remaining
+ * desktop/Core resource quotas reach this plan-based helper.
  */
 export function syncPlanCapState(
 	plan: PlanId | null,
-	requestUpgrade: () => void,
-	enabledApps?: ReadonlySet<string>
+	requestUpgrade: () => void
 ): void {
 	state.plan = plan;
 	state.requestUpgrade = requestUpgrade;
-	state.enabledApps = enabledApps;
-}
-
-/**
- * Whether `field`'s quota binds on this node at all.
- *
- * A KERNEL-owned key always binds — it gates the shell or a Core subsystem, so
- * there is nothing to uninstall. An APP-owned key binds only while its owning app
- * is installed and enabled: a node that never installed Monitors must not be
- * told it has run out of monitors. Before the app list has synced we do not know,
- * and unknown means uncapped, matching the plan's own fail-open above.
- */
-function quotaApplies(field: PlanLimitField): boolean {
-	const owner = quotaOwner(field);
-	if (owner === null) {
-		return true;
-	}
-	return state.enabledApps?.has(owner) ?? false;
 }
 
 /**
@@ -106,9 +78,6 @@ export function resolveCapLimit(field: PlanLimitField): number {
 		return Number.POSITIVE_INFINITY;
 	}
 	if (state.plan === undefined) {
-		return Number.POSITIVE_INFINITY;
-	}
-	if (!quotaApplies(field)) {
 		return Number.POSITIVE_INFINITY;
 	}
 	return planLimit(state.plan, field);

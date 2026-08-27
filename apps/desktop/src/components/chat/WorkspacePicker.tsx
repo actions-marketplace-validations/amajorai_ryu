@@ -90,7 +90,11 @@ import type {
 } from "@/src/store/useWorkspaceStore.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 import { NodeFolderBrowser } from "./NodeFolderBrowser.tsx";
-import { CreateFolderDialog, ProjectPickerContent } from "./ProjectPicker.tsx";
+import {
+	CloneFolderDialog,
+	CreateFolderDialog,
+	ProjectPickerContent,
+} from "./ProjectPicker.tsx";
 
 interface WorkspacePickerProps {
 	conversationId?: string | null;
@@ -208,6 +212,7 @@ export function WorkspacePicker({
 	const [createFolderOpen, setCreateFolderOpen] = useState(false);
 	const [createBranchOpen, setCreateBranchOpen] = useState(false);
 	const [browseOpen, setBrowseOpen] = useState(false);
+	const [cloneFolderOpen, setCloneFolderOpen] = useState(false);
 
 	const handleSelectBrowsed = useCallback(
 		(selected: string) => {
@@ -371,6 +376,10 @@ export function WorkspacePicker({
 			onBrowse={() => {
 				closeMenus();
 				setBrowseOpen(true);
+			}}
+			onClone={() => {
+				closeMenus();
+				setCloneFolderOpen(true);
 			}}
 			onClose={closeMenus}
 			onStartFromScratch={() => {
@@ -547,6 +556,10 @@ export function WorkspacePicker({
 					onOpenChange={setCreateFolderOpen}
 					open={createFolderOpen}
 				/>
+				<CloneFolderDialog
+					onOpenChange={setCloneFolderOpen}
+					open={cloneFolderOpen}
+				/>
 				<NodeFolderBrowser
 					onOpenChange={setBrowseOpen}
 					onSelect={handleSelectBrowsed}
@@ -656,6 +669,10 @@ export function WorkspacePicker({
 			<CreateFolderDialog
 				onOpenChange={setCreateFolderOpen}
 				open={createFolderOpen}
+			/>
+			<CloneFolderDialog
+				onOpenChange={setCloneFolderOpen}
+				open={cloneFolderOpen}
 			/>
 			<NodeFolderBrowser
 				onOpenChange={setBrowseOpen}

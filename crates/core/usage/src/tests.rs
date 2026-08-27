@@ -122,6 +122,15 @@ async fn unsupported_agent_yields_hide_snapshot() {
     assert_eq!(snap.engine, "");
 }
 
+#[tokio::test]
+async fn account_usage_without_a_credential_is_structured_not_logged_in() {
+    let snap = fetch_ryu_provider_usage_for_credential("claude-pro-max", None).await;
+    assert!(!snap.available);
+    assert_eq!(snap.agent_id, "claude-pro-max");
+    assert_eq!(snap.engine, "claude");
+    assert!(matches!(snap.reason, Some(UsageUnavailable::NotLoggedIn)));
+}
+
 #[test]
 fn jwt_exp_reads_claim_without_verification() {
     use base64::Engine as _;

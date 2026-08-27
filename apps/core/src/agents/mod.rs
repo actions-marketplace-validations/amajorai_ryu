@@ -276,6 +276,12 @@ pub struct ExpressiveSpec {
 /// and never interprets the fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PersonaSlot {
+    /// Output-style profile assigned to this agent. The id resolves through the
+    /// enabled output-style registry, while the profile body remains owned by
+    /// the plugin or user style store. `None` means this agent uses its own
+    /// instructions and tone without a profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_style_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -846,6 +852,58 @@ impl AgentStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Move the retired node-wide output-style selection onto every existing
+    /// agent that has not chosen a profile yet.
+    ///
+    /// The old selector applied to every agent, so copying it to all existing
+    /// records preserves the user's behavior while making the ownership explicit.
+    /// The caller clears the legacy selection file after this succeeds; this method
+    /// is therefore intentionally idempotent and never overwrites a profile an
+    /// agent already owns (including an explicit JSON `null`).
+    pub async fn migrate_legacy_output_style(&self, style_id: &str) -> Result<usize> {
+        let style_id = style_id.trim();
+        if style_id.is_empty() {
+            return Ok(0);
+        }
+
+        let conn = self.conn.lock().await;
+        let records = {
+            let mut stmt = conn.prepare("SELECT id, persona FROM agents")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
+            let records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            records
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut migrated = 0;
+
+        for (id, raw_persona) in records {
+            let mut persona = match raw_persona {
+                None => serde_json::Map::new(),
+                Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                    Ok(serde_json::Value::Object(object)) => object,
+                    Ok(_) | Err(_) => continue,
+                },
+            };
+            if persona.contains_key("output_style_id") {
+                continue;
+            }
+            persona.insert(
+                "output_style_id".to_owned(),
+                serde_json::Value::String(style_id.to_owned()),
+            );
+            let serialized = serde_json::to_string(&serde_json::Value::Object(persona))?;
+            conn.execute(
+                "UPDATE agents SET persona = ?1, updated_at = ?2 WHERE id = ?3",
+                params![serialized, now, id],
+            )?;
+            migrated += 1;
+        }
+
+        Ok(migrated)
     }
 
     fn migrate(conn: &Connection) -> Result<()> {
@@ -2805,6 +2863,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_output_style_migrates_to_each_agent_without_overwriting_profiles() {
+        let store = store();
+        let existing = store
+            .create(CreateAgent {
+                name: "Existing profile".into(),
+                persona: Some(PersonaSlot {
+                    output_style_id: Some("plain-text".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let unconfigured = store
+            .create(CreateAgent {
+                name: "Legacy profile".into(),
+                persona: Some(PersonaSlot {
+                    tone: Some("friendly".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let migrated = store.migrate_legacy_output_style("eli5").await.unwrap();
+        assert!(migrated >= 1);
+
+        let existing_persona = store
+            .get(&existing.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .persona
+            .unwrap();
+        assert_eq!(
+            existing_persona.output_style_id.as_deref(),
+            Some("plain-text")
+        );
+
+        let migrated_persona = store
+            .get(&unconfigured.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .persona
+            .unwrap();
+        assert_eq!(migrated_persona.output_style_id.as_deref(), Some("eli5"));
+        assert_eq!(migrated_persona.tone.as_deref(), Some("friendly"));
+
+        assert_eq!(store.migrate_legacy_output_style("eli5").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn prompt_versions_snapshot_diff_and_restore_roundtrip() {
         let store = store();
         let created = store
@@ -2975,6 +3087,7 @@ mod tests {
         };
         let persona = PersonaSlot {
             display_name: Some("Aria".into()),
+            output_style_id: Some("eli5".into()),
             tone: Some("friendly".into()),
             ..Default::default()
         };

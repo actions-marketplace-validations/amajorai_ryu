@@ -35,6 +35,10 @@ export default defineConfig({
 		"process.env": {},
 	},
 	root: harnessDir,
+	// Reuse the desktop's bundled logos and other offline assets so visual proof
+	// pages exercise the same product marks as the real webview instead of showing
+	// broken-image placeholders from the harness root.
+	publicDir: path.resolve(desktopRoot, "public"),
 	clearScreen: false,
 	resolve: {
 		alias: {
@@ -76,6 +80,7 @@ export default defineConfig({
 					"electron-auto-update-proof.html"
 				),
 				actionSummary: path.resolve(harnessDir, "action-summary-proof.html"),
+				connectionHub: path.resolve(harnessDir, "connection-hub-proof.html"),
 				agentApproval: path.resolve(harnessDir, "agent-approval-story.html"),
 				composerInteraction: path.resolve(
 					harnessDir,
@@ -254,6 +259,10 @@ export default defineConfig({
 				chatPreviewRail: path.resolve(
 					harnessDir,
 					"chat-preview-rail-story.html"
+				),
+				chatComposerTransition: path.resolve(
+					harnessDir,
+					"chat-composer-transition-proof.html"
 				),
 				appearanceContextMenuProof: path.resolve(
 					harnessDir,

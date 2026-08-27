@@ -351,7 +351,14 @@ export function seedBuiltinRoutes(): void {
 	);
 	exact("/review", () => createElement(ReviewPage));
 	// Marketplace folded into the store: the legacy route opens the store.
-	exact("/marketplace", () => createElement(StorePage));
+	exact("/marketplace", (tab) =>
+		createElement(StorePage, {
+			initialMarketplaceItem: tab.initialStoreItem,
+			initialMarketplaceQuery: tab.initialStoreQuery,
+			initialSection:
+				tab.initialStoreItem || tab.initialStoreQuery ? "browse" : undefined,
+		})
+	);
 	// The NL workflow builder (fresh draft). The visual canvas is the
 	// @ryu/workflows companion (see the /workflows/:id pattern route below); the
 	// builder is architecturally shell-only, so it keeps its own shell page.

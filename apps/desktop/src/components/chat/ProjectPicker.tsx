@@ -6,6 +6,7 @@ import {
 	Folder03Icon,
 	FolderAddIcon,
 	Search01Icon,
+	SourceCodeIcon,
 	Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -28,7 +29,7 @@ import {
 } from "@ryu/ui/components/dropdown-menu";
 import { Input } from "@ryu/ui/components/input";
 import { cn } from "@ryu/ui/lib/utils";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
 	COMPOSER_SELECT_ITEM,
 	WORKSPACE_MENU_CONTENT,
@@ -36,7 +37,11 @@ import {
 } from "@/components/agent-elements/input/composer-select.ts";
 import { ProjectGlyph } from "@/src/components/layout/ProjectIconDialog.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
-import { createProjectFolder } from "@/src/lib/api/workspace.ts";
+import {
+	cloneProjectFolder,
+	createProjectFolder,
+	githubRepositoryName,
+} from "@/src/lib/api/workspace.ts";
 import { sameFolder } from "@/src/lib/folder-path.ts";
 import {
 	findWorkspaceProject,
@@ -58,6 +63,7 @@ export function ProjectPicker({
 	// the menu closing on select (a dialog nested in the menu would unmount with it).
 	const [createOpen, setCreateOpen] = useState(false);
 	const [browseOpen, setBrowseOpen] = useState(false);
+	const [cloneOpen, setCloneOpen] = useState(false);
 
 	const handleSelectBrowsed = useCallback(
 		(selected: string) => {
@@ -114,6 +120,10 @@ export function ProjectPicker({
 							setMenuOpen(false);
 							setBrowseOpen(true);
 						}}
+						onClone={() => {
+							setMenuOpen(false);
+							setCloneOpen(true);
+						}}
 						onClose={() => setMenuOpen(false)}
 						onFolderSelected={onFolderSelected}
 						onStartFromScratch={() => {
@@ -133,6 +143,11 @@ export function ProjectPicker({
 				onSelect={handleSelectBrowsed}
 				open={browseOpen}
 			/>
+			<CloneFolderDialog
+				onFolderSelected={onFolderSelected}
+				onOpenChange={setCloneOpen}
+				open={cloneOpen}
+			/>
 		</>
 	);
 }
@@ -144,6 +159,7 @@ export function ProjectPickerContent({
 	onClose,
 	onStartFromScratch,
 	onBrowse,
+	onClone,
 	onFolderSelected,
 }: {
 	onClose: () => void;
@@ -157,6 +173,8 @@ export function ProjectPickerContent({
 	 *  the desktop host and not a remote node. Omit to hide the "New project"
 	 *  submenu. */
 	onBrowse?: () => void;
+	/** Opens the GitHub clone dialog owned by the persistent parent. */
+	onClone?: () => void;
 }) {
 	const {
 		folder,
@@ -174,6 +192,11 @@ export function ProjectPickerContent({
 		onClose();
 		onBrowse?.();
 	}, [onBrowse, onClose]);
+
+	const handleClone = useCallback(() => {
+		onClose();
+		onClone?.();
+	}, [onClose, onClone]);
 
 	const handleSelectRecent = useCallback(
 		async (path: string) => {
@@ -322,7 +345,7 @@ export function ProjectPickerContent({
 
 			{/* Project creation stays flat: both actions are reachable in one click from
 			    this menu, with no flyout nested inside the project picker. */}
-			{(onBrowse || onStartFromScratch) && (
+			{(onBrowse || onClone || onStartFromScratch) && (
 				<>
 					{onBrowse && (
 						<DropdownMenuItem onClick={handleBrowse}>
@@ -331,6 +354,15 @@ export function ProjectPickerContent({
 								icon={FolderAddIcon}
 							/>
 							New project
+						</DropdownMenuItem>
+					)}
+					{onClone && (
+						<DropdownMenuItem onClick={handleClone}>
+							<HugeiconsIcon
+								className="size-4 shrink-0 text-foreground/40"
+								icon={SourceCodeIcon}
+							/>
+							Clone from GitHub
 						</DropdownMenuItem>
 					)}
 					{onStartFromScratch && (
@@ -458,6 +490,165 @@ export function CreateFolderDialog({
 						type="button"
 					>
 						Create project
+					</Button>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+/** Dialog to clone a GitHub repository onto the active node, then open the
+ * resulting checkout as the active project. The active node owns both the
+ * destination filesystem and the SSH configuration used by a Git clone. */
+export function CloneFolderDialog({
+	activate = true,
+	onFolderSelected,
+	onOpenChange,
+	open: dialogOpen,
+}: {
+	activate?: boolean;
+	onFolderSelected?: (folder: string) => void;
+	onOpenChange: (open: boolean) => void;
+	open: boolean;
+}) {
+	const { setFolder } = useWorkspaceStore();
+	const activeNode = useActiveNode();
+	const [url, setUrl] = useState("");
+	const [name, setName] = useState("");
+	const [nameTouched, setNameTouched] = useState(false);
+	const [cloning, setCloning] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+
+	useEffect(() => {
+		if (dialogOpen) {
+			setUrl("");
+			setName("");
+			setNameTouched(false);
+			setError(null);
+		}
+	}, [dialogOpen]);
+
+	const handleClone = useCallback(async () => {
+		const trimmedUrl = url.trim();
+		if (!trimmedUrl || cloning) {
+			return;
+		}
+		setCloning(true);
+		setError(null);
+		const result = await cloneProjectFolder(
+			{ url: activeNode.url, token: activeNode.token ?? null },
+			trimmedUrl,
+			name
+		);
+		if (!result.path) {
+			setCloning(false);
+			setError(result.error ?? "Could not clone the repository");
+			return;
+		}
+		try {
+			if (activate) {
+				await setFolder(result.path);
+			}
+			onFolderSelected?.(result.path);
+			setUrl("");
+			setName("");
+			setNameTouched(false);
+			onOpenChange(false);
+		} catch {
+			setError("Cloned the repository, but could not open it");
+		} finally {
+			setCloning(false);
+		}
+	}, [
+		activeNode.token,
+		activeNode.url,
+		activate,
+		cloning,
+		name,
+		onFolderSelected,
+		onOpenChange,
+		setFolder,
+		url,
+	]);
+
+	const locationLabel =
+		activeNode.name === "local"
+			? "this device"
+			: `the "${activeNode.name}" node`;
+
+	return (
+		<Dialog onOpenChange={onOpenChange} open={dialogOpen}>
+			<DialogContent className="sm:max-w-md">
+				<DialogHeader>
+					<DialogTitle>Clone from GitHub</DialogTitle>
+					<DialogDescription>
+						Clone onto {locationLabel}. SSH clones use the keys configured on
+						that node.
+					</DialogDescription>
+				</DialogHeader>
+				<div className="space-y-3">
+					<div className="space-y-1.5">
+						<label className="font-medium text-sm" htmlFor="github-clone-url">
+							GitHub repository URL
+						</label>
+						<Input
+							aria-label="GitHub repository URL"
+							autoCapitalize="off"
+							autoCorrect="off"
+							className="font-mono text-xs"
+							disabled={cloning}
+							id="github-clone-url"
+							onChange={(event) => {
+								const value = event.target.value;
+								setUrl(value);
+								if (!nameTouched) {
+									setName(githubRepositoryName(value) ?? "");
+								}
+								setError(null);
+							}}
+							placeholder="https://github.com/owner/repo.git"
+							spellCheck={false}
+							value={url}
+						/>
+						<p className="text-[11px] text-muted-foreground">
+							HTTPS uses Git's configured credentials. For private repositories,
+							you can use git@github.com:owner/repo.git.
+						</p>
+					</div>
+					<div className="space-y-1.5">
+						<label className="font-medium text-sm" htmlFor="github-clone-name">
+							Folder name
+						</label>
+						<Input
+							aria-label="Folder name"
+							disabled={cloning}
+							id="github-clone-name"
+							onChange={(event) => {
+								setNameTouched(true);
+								setName(event.target.value);
+								setError(null);
+							}}
+							placeholder="repo"
+							value={name}
+						/>
+					</div>
+					{error && (
+						<p className="text-destructive text-xs" role="alert">
+							{error}
+						</p>
+					)}
+				</div>
+				<DialogFooter>
+					<DialogClose render={<Button disabled={cloning} variant="ghost" />}>
+						Cancel
+					</DialogClose>
+					<Button
+						disabled={!url.trim()}
+						loading={cloning}
+						onClick={handleClone}
+						type="button"
+					>
+						Clone repository
 					</Button>
 				</DialogFooter>
 			</DialogContent>

@@ -30,17 +30,9 @@ Needs Core on `:7980` (`bun run dev:core`); Shadow on `:3030` is optional (conte
 - Morphing overlay with idle / context / suggestion / expanded states
 - Local-model proactive suggestions driven by Shadow context loops
 - Mini chat onto Core
-- Quick-action dock: separate round islands (the same circle form as the logo) that split out below the text pill for voice mode, image attach, and the command palette, each its own glass shape
+- Expanded chat stays a single quiet card with a small header; attachments remain in the composer's `+` menu, while voice and the command palette keep their global shortcuts
 - Command bar: the global hotkey expands the island into a command palette / mini-chat (the former standalone `apps/command` was merged in)
 - Per-capability consent gate (chat / contextRead / proactive) enforced in the main process; no telemetry
-
-## Credits
-
-The quick-action dock and the multi-action island form factor take inspiration
-from [clui-cc](https://github.com/lcoutodemos/clui-cc) by lcoutodemos — a
-floating Electron overlay for Claude Code with a stacked circle-button launcher,
-voice input, and file attachments. Ryu Island keeps its own minimal design; the
-useful idea of packing each action into its own little island is theirs.
 
 ## License
 

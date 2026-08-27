@@ -1198,11 +1198,17 @@ mod asset_proxy_tests {
             "172.16.0.1",
             "0.0.0.0",
         ] {
-            assert!(ryu_egress::is_blocked_ip(value.parse().expect("valid IP")), "{value}");
+            assert!(
+                ryu_egress::is_blocked_ip(value.parse().expect("valid IP")),
+                "{value}"
+            );
         }
         // IPv6 loopback + ULA + link-local + IPv4-mapped private.
         for value in ["::1", "fc00::1", "fe80::1", "::ffff:10.0.0.1"] {
-            assert!(ryu_egress::is_blocked_ip(value.parse().expect("valid IP")), "{value}");
+            assert!(
+                ryu_egress::is_blocked_ip(value.parse().expect("valid IP")),
+                "{value}"
+            );
         }
         // Internal names.
         for value in ["localhost", "db.internal", "printer.local"] {
@@ -1210,7 +1216,9 @@ mod asset_proxy_tests {
         }
         // A real public host is NOT blocked.
         assert!(!ryu_egress::is_blocked_hostname("cdn.example.com"));
-        assert!(!ryu_egress::is_blocked_ip("8.8.8.8".parse().expect("valid IP")));
+        assert!(!ryu_egress::is_blocked_ip(
+            "8.8.8.8".parse().expect("valid IP")
+        ));
     }
 
     #[test]

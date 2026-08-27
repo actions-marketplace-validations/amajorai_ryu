@@ -25,7 +25,7 @@ export function SafetyPostureStep({
 					</div>
 					<PageHeader
 						stagger={false}
-						subtitle="Choose how much autonomy your agents should have. You can change this later in Computer settings."
+						subtitle="Choose how much autonomy your agents should have. You can change this later in Device settings."
 						title="Set your safety posture"
 					/>
 				</StaggerReveal>

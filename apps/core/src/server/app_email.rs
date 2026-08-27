@@ -200,6 +200,9 @@ mod tests {
     fn threading_headers_share_the_message_body_limit() {
         let mut input = body();
         input.references = Some("x".repeat(super::MAX_BODY_BYTES));
-        assert_eq!(validate_send_body(&input).unwrap_err(), "message body is too large");
+        assert_eq!(
+            validate_send_body(&input).unwrap_err(),
+            "message body is too large"
+        );
     }
 }

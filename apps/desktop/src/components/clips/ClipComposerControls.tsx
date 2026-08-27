@@ -11,12 +11,10 @@
 import { cn } from "@ryu/ui/lib/utils";
 import { useCallback, useMemo } from "react";
 import type { ComposerSendFile } from "@/src/components/assistant/useComposerSlot.tsx";
-import { ProLockedBadge } from "@/src/components/billing/ProLockedBadge.tsx";
 import { AttachRecentActivityControl } from "@/src/components/clips/AttachRecentActivityControl.tsx";
 import { AttachVideoControl } from "@/src/components/clips/AttachVideoControl.tsx";
 import { ClipsList } from "@/src/components/clips/ClipsList.tsx";
 import { RecordingControls } from "@/src/components/clips/RecordingControls.tsx";
-import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
@@ -96,7 +94,6 @@ export function ClipComposerControls({
 	className,
 	onAttach,
 }: ClipComposerControlsProps) {
-	const { canUse } = useEntitlementContext();
 	const { apps } = useApps();
 	const node = useNodeStore((s) => s.getActiveNode());
 	const target = useMemo(() => toTarget(node), [node]);
@@ -153,23 +150,12 @@ export function ClipComposerControls({
 		[attachContext, target]
 	);
 
-	// Clips is an APP: only surface its composer controls (record/attach + the Pro
-	// badge) when `@ryu/clips` is installed AND enabled, so an install-on-demand Clips
-	// leaves the composer clean — the app owns its own presence in the shell rather
-	// than the composer hardcoding it. Hidden while the app list is still loading.
+	// Clips is an APP: only surface its composer controls when `@ryu/clips` is
+	// installed AND enabled, so an install-on-demand Clips leaves the composer clean
+	// — the app owns its own presence in the shell rather than the composer
+	// hardcoding it. Hidden while the app list is still loading.
 	if (!apps.some((a) => a.id === CLIPS_PLUGIN_ID && a.enabled)) {
 		return null;
-	}
-
-	// Band-2 gate (free-tier plan): Ryu Clips (agent video recording/ingest) is a
-	// Pro feature. Show a locked upsell badge in place of the controls rather than
-	// hiding the affordance.
-	if (!canUse("clips")) {
-		return (
-			<div className={cn("flex items-center gap-1", className)}>
-				<ProLockedBadge feature="Clips" />
-			</div>
-		);
 	}
 
 	return (

@@ -1386,7 +1386,7 @@ export default function OnboardingPage() {
 		const role = selectedOrg?.role?.toLowerCase();
 		const ownerOrAdmin = role === "owner" || role === "admin";
 		// A paid owner/admin can build a useful first draft even before connecting
-		// a source: the agent can use imported sessions and the agent team itself.
+		// a source: the agent can use imported sessions and the agent group itself.
 		// Connected source ids are still passed when available, and Core performs
 		// the authoritative paid-plan/role/consent check before materialising.
 		return entitlementStateRef.current.paid && ownerOrAdmin;

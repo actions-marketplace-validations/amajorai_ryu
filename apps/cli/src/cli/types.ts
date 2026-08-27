@@ -7,6 +7,10 @@
 // instead of writing to the real stdout), and the `CoreApi` seam (so tests mock
 // the HTTP layer without a running node). Handlers return a process EXIT CODE.
 
+import type {
+	ActionCallInput,
+	ActionCallResult,
+} from "@ryuhq/core-client/actions";
 import type { ApiTarget, RequestOptions } from "@ryuhq/core-client/client";
 import type {
 	AppInfo,
@@ -30,18 +34,20 @@ export interface CliIO {
 
 /** Global flags recognized before/around any subcommand. */
 export interface GlobalFlags {
+	/** `--agent <id>` — calling agent for a governed Action invocation. */
+	agent: string | null;
 	/** `--cascade` — opt into disabling/uninstalling the dependent chain too. */
 	cascade: boolean;
 	/** `--dry-run` — preview a mutating command without applying changes. */
 	dryRun: boolean;
 	/** `--fix` — apply the safe fixes owned by the command, when supported. */
 	fix: boolean;
-	/** `--include-secrets` — include an encrypted local secret envelope. */
-	includeSecrets: boolean;
 	/** `--force` — override a refused update (downgrade). */
 	force: boolean;
 	/** `-h`/`--help`. */
 	help: boolean;
+	/** `--include-secrets` — include an encrypted local secret envelope. */
+	includeSecrets: boolean;
 	/** `--json` — machine-readable output for agents/CI instead of a human table. */
 	json: boolean;
 	/** `--kind app|plugin|all` — narrow `list`/`catalog` to one classification.
@@ -76,6 +82,12 @@ export interface CoreApi {
 		path: string,
 		options?: RequestOptions
 	) => Promise<unknown>;
+	/** Call one canonical Action through Core's existing approval/tool plane. */
+	callAction?: (
+		t: ApiTarget,
+		actionId: string,
+		input: ActionCallInput
+	) => Promise<ActionCallResult>;
 	disableApp: (
 		t: ApiTarget,
 		id: string,

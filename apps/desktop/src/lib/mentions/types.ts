@@ -71,7 +71,7 @@ export interface MentionSources {
 	/** Connected integrations, such as active Composio toolkits. */
 	integrations: { id: string; name: string; description?: string }[];
 	mcp: { id: string; name: string }[];
-	/** Output styles available to the composer on the active node. */
+	/** Personality profiles available to assign from the Agents page. */
 	outputStyles: MentionSourceItem[];
 	/** Documents listed inside Spaces, including pages, databases, and boards. */
 	pages: MentionSourceItem[];

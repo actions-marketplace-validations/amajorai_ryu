@@ -320,6 +320,20 @@ export type CoreTranscribeResult =
 	| { available: true; text: string }
 	| { available: false; reason: string };
 
+/** Request for Core's node-local Speech Processing cleanup stage. */
+export interface CoreSpeechProcessingRequest {
+	context?: "general" | "email";
+	engine: string;
+	structure?: "prose" | "lists";
+	styling?: "casual" | "semi-casual" | "semi-formal" | "formal";
+	text: string;
+}
+
+/** Result of Speech Processing. Empty text is valid for filler-only input. */
+export type CoreSpeechProcessingResult =
+	| { available: true; text: string }
+	| { available: false; reason: string };
+
 /** Request for `POST /api/voice/speak` (text-to-speech), built in the main process. */
 export interface CoreSpeakRequest {
 	/** TTS engine id; omit (or `"outetts"`) for the built-in default. */

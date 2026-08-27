@@ -23,6 +23,8 @@ import type {
 	CoreConversationSummary,
 	CoreSpeakRequest,
 	CoreSpeakResult,
+	CoreSpeechProcessingRequest,
+	CoreSpeechProcessingResult,
 	CoreStreamEndEvent,
 	CoreStreamPartEvent,
 	CoreToolCallRequest,
@@ -42,6 +44,8 @@ const PROBE_TIMEOUT_MS = 5000;
 const COMPLETION_TIMEOUT_MS = 60_000;
 /** Timeout for a transcription round-trip (local STT can be slow on first run). */
 const TRANSCRIBE_TIMEOUT_MS = 120_000;
+/** Timeout for the first Speech Processing call while llama.cpp warms. */
+const SPEECH_PROCESSING_TIMEOUT_MS = 120_000;
 
 /** Sinks the IPC layer wires to `webContents.send`. */
 export interface StreamSink {
@@ -369,6 +373,41 @@ export async function transcribe(
 		);
 		if (!resp.ok) {
 			return { available: false, reason: `core responded ${resp.status}` };
+		}
+		const data = (await resp.json()) as { text?: string };
+		return { available: true, text: data.text ?? "" };
+	} catch (error) {
+		return { available: false, reason: reasonFromError(error) };
+	}
+}
+
+/**
+ * Clean one raw transcript via Core's Speech Processing layer. The Island main
+ * process calls this only when Dictation cleanup is enabled; the renderer never
+ * talks to Core directly. Never rejects to the caller.
+ */
+export async function processSpeechText(
+	req: CoreSpeechProcessingRequest
+): Promise<CoreSpeechProcessingResult> {
+	const { coreBaseUrl } = loadConfig();
+	try {
+		const resp = await fetchWithTimeout(
+			`${coreBaseUrl}/api/voice/speech-processing`,
+			{
+				method: "POST",
+				headers: coreHeaders({ "Content-Type": "application/json" }),
+				body: JSON.stringify(req),
+			},
+			SPEECH_PROCESSING_TIMEOUT_MS
+		);
+		if (!resp.ok) {
+			const data = (await resp.json().catch(() => ({}))) as {
+				error?: string;
+			};
+			return {
+				available: false,
+				reason: data.error ?? `core responded ${resp.status}`,
+			};
 		}
 		const data = (await resp.json()) as { text?: string };
 		return { available: true, text: data.text ?? "" };

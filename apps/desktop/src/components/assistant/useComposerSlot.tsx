@@ -86,10 +86,10 @@ export interface ComposerSlot {
 		onPaste: (e: React.ClipboardEvent) => void;
 		onRemoveImage: (id: string) => void;
 	};
-	/** Stable `InputBar` slot for `AgentChat`'s `slots.InputBar`. */
-	inputBar: (props: InputBarProps) => ReactNode;
 	/** Directory rows shared by the `+` menu and inline mention tokens. */
 	composerMenuGroups: ComposerMenuGroup[];
+	/** Stable `InputBar` slot for `AgentChat`'s `slots.InputBar`. */
+	inputBar: (props: InputBarProps) => ReactNode;
 	mentionItems: MentionItem[];
 	onComposerMenuSelect: (item: ComposerMenuItem) => void;
 	/**
@@ -102,8 +102,8 @@ export interface ComposerSlot {
 	 * The composed Agent · Model · Thinking sections — the SAME ones inside the
 	 * composer's settings menu.
 	 *
-	 * This is the FULL list, including the contributed pickers (output style, an
-	 * app's own `select`). It is what the composer's keyboard shortcuts act on, and
+	 * This is the FULL list, including contributed app pickers. It is what the
+	 * composer's keyboard shortcuts act on, and
 	 * what any surface rendering these as rows must use. A surface building its own
 	 * settings TRIGGER wants {@link triggerSections} instead.
 	 */
@@ -152,8 +152,6 @@ export interface ComposerRuntime {
 }
 
 export interface ComposerSlotOptions {
-	/** Browser model-selection namespace for this shared composer surface. */
-	surface?: BrowserSurface;
 	/** Single-row compact layout (used once the thread has history). */
 	compact?: boolean;
 	/**
@@ -172,6 +170,12 @@ export interface ComposerSlotOptions {
 	/** Whether this surface currently has an agent turn in flight. */
 	isWorking?: boolean;
 	/**
+	 * Use the floating assistant's quiet composer: one compact row, no visible
+	 * agent/model summary, and no secondary generation/voice-mode buttons. The
+	 * full settings menu remains available from the floating header.
+	 */
+	minimal?: boolean;
+	/**
 	 * Offer "Create new agent" in the agent picker. The surface routes it (a tab, a
 	 * dialog), so it's a callback rather than a slot-owned navigation.
 	 */
@@ -185,15 +189,17 @@ export interface ComposerSlotOptions {
 	 * the draft text is owned by the InputBar, so the host receives only the prompt.
 	 */
 	onGenerateImage?: (prompt: string) => void | Promise<void>;
-	/** Handle a team pick. Omit to hide the picker's Teams section entirely. */
+	/** Handle a group pick. Omit to hide the picker's Groups section entirely. */
 	onSelectTeam?: (teamId: string) => void;
 	/** Composer placeholder override (builders use "Describe what to build…"). */
 	placeholder?: string;
+	/** Browser model-selection namespace for this shared composer surface. */
+	surface?: BrowserSurface;
 	/** Node target for voice STT + realtime voice mode. */
 	target: ApiTarget;
 	/** The picked team, when the surface can target one instead of an agent. */
 	teamId?: string | null;
-	/** Live teams for the picker's Teams section. */
+	/** Live groups for the picker's Groups section. */
 	teams?: Team[];
 }
 
@@ -212,6 +218,7 @@ export function useComposerSlot(
 		target,
 		compact = false,
 		compactTrigger = false,
+		minimal = false,
 		surface = "ask-ryu",
 		placeholder,
 		conversationId,
@@ -308,7 +315,7 @@ export function useComposerSlot(
 			const selectedTeam = teams?.find(
 				(candidate) => candidate.id === nextTeamId
 			);
-			announceComposerSelection("Agent", selectedTeam?.name ?? "Team");
+			announceComposerSelection("Agent", selectedTeam?.name ?? "Group");
 		},
 		[announceComposerSelection, onSelectTeam, teams]
 	);
@@ -338,10 +345,10 @@ export function useComposerSlot(
 		onModelChange: handleModelChange,
 		modelSection: acp.modelSection,
 		extraSections: acp.extraSections,
-			compact,
-			compactTrigger,
+		compact,
+		compactTrigger,
 		surface,
-		});
+	});
 	const composerDirectory = useMemo(
 		() => createComposerDirectory(sections),
 		[sections]
@@ -463,6 +470,7 @@ export function useComposerSlot(
 		compact: boolean;
 		ghost?: GhostControls;
 		left: ReactNode;
+		minimal: boolean;
 		onGenerateImage?: (prompt: string) => void | Promise<void>;
 		onStartVoiceMode: () => void;
 		infoBar: InputBarInfoBar | undefined;
@@ -477,6 +485,7 @@ export function useComposerSlot(
 		// thing the chat page does when a rule reroutes a turn.
 		infoBar,
 		left: leftActions,
+		minimal,
 		onGenerateImage,
 		onStartVoiceMode: voiceMode.start,
 		placeholder,
@@ -489,6 +498,7 @@ export function useComposerSlot(
 		ghost,
 		infoBar,
 		left: leftActions,
+		minimal,
 		onGenerateImage,
 		onStartVoiceMode: voiceMode.start,
 		placeholder,
@@ -504,11 +514,11 @@ export function useComposerSlot(
 				return (
 					<InputBar
 						{...props}
-						compact={live.compact}
+						compact={live.minimal || live.compact}
 						ghostControls={live.ghost}
 						infoBar={live.infoBar}
-						leftActions={live.left}
-						onGenerateImage={live.onGenerateImage}
+						leftActions={live.minimal ? null : live.left}
+						onGenerateImage={live.minimal ? undefined : live.onGenerateImage}
 						onTextareaKeyDown={(event) => {
 							if (
 								handleComposerSettingsShortcut(
@@ -522,9 +532,11 @@ export function useComposerSlot(
 							props.onTextareaKeyDown?.(event);
 						}}
 						placeholder={live.placeholder ?? props.placeholder}
-						rightActions={live.right}
+						rightActions={live.minimal ? null : live.right}
 						voice={{ transcribe }}
-						voiceMode={{ onStart: live.onStartVoiceMode }}
+						voiceMode={
+							live.minimal ? undefined : { onStart: live.onStartVoiceMode }
+						}
 					/>
 				);
 			},
@@ -543,7 +555,7 @@ export function useComposerSlot(
 			images,
 			onAttach,
 			onPaste,
-			 onRemoveImage,
+			onRemoveImage,
 		},
 		composerMenuGroups: composerDirectory.groups,
 		inputBar,

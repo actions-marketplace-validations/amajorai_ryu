@@ -18,8 +18,10 @@ import {
 	FieldSeparator,
 } from "@ryu/ui/components/field";
 import { Input } from "@ryu/ui/components/input";
+import { Label } from "@ryu/ui/components/label";
 import PageHeader from "@ryu/ui/components/page-header";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
+import { Switch } from "@ryu/ui/components/switch";
 import { Fingerprint } from "lucide-react";
 import type { ReactNode, SVGProps } from "react";
 import { useEffect, useState } from "react";
@@ -59,6 +61,7 @@ export type SignInLastUsedMethod =
 export interface SignInValues {
 	email: string;
 	password: string;
+	rememberDevice: boolean;
 }
 
 export interface SignInFormProps {
@@ -77,7 +80,7 @@ export interface SignInFormProps {
 	/** Continue-with-Google handler. */
 	onGoogle?: () => void | Promise<void>;
 	/** Sign in with the device's passkey or security key. */
-	onPasskey?: () => void | Promise<void>;
+	onPasskey?: (rememberDevice: boolean) => void | Promise<void>;
 	/** Continue-with-enterprise-SSO handler. Receives the email field value. */
 	onSSO?: (email: string) => void | Promise<void>;
 	/** Called with the entered credentials when the form is submitted. */
@@ -132,6 +135,7 @@ export default function SignInForm({
 	const [email, setEmail] = useState("");
 	const [password, setPassword] = useState("");
 	const [showPassword, setShowPassword] = useState(false);
+	const [rememberDevice, setRememberDevice] = useState(false);
 	// A field that has been edited since its error arrived is back in its
 	// default state — the error described the *previous* value, and leaving it
 	// lit while the user retypes reads as "still wrong". Reset on each new
@@ -173,7 +177,7 @@ export default function SignInForm({
 					onSubmit={(e) => {
 						e.preventDefault();
 						e.stopPropagation();
-						onSubmit({ email, password });
+						onSubmit({ email, password, rememberDevice });
 					}}
 				>
 					<FieldGroup>
@@ -261,6 +265,20 @@ export default function SignInForm({
 
 					{captcha}
 
+					{useMagicLink ? null : (
+						<div className="mb-6 flex items-center gap-2">
+							<Switch
+								checked={rememberDevice}
+								disabled={submitting}
+								id="remember-device"
+								onCheckedChange={setRememberDevice}
+							/>
+							<Label className="text-sm" htmlFor="remember-device">
+								Remember this device for 30 days
+							</Label>
+						</div>
+					)}
+
 					<div className="relative">
 						<Button
 							className="w-full"
@@ -317,9 +335,17 @@ export default function SignInForm({
 						) : null}
 					</div>
 
-					<Accordion defaultValue={[]}>
-						<AccordionItem value="more-options">
-							<AccordionTrigger>More options</AccordionTrigger>
+					<Accordion
+						className="overflow-visible rounded-none border-0 bg-transparent shadow-none"
+						defaultValue={[]}
+					>
+						<AccordionItem
+							className="border-0 bg-transparent data-open:bg-transparent"
+							value="more-options"
+						>
+							<AccordionTrigger className="border-0 bg-transparent shadow-none hover:bg-transparent hover:shadow-none">
+								More options
+							</AccordionTrigger>
 							<AccordionContent>
 								<div className="flex flex-col gap-4">
 									{onPasskey ? (
@@ -327,7 +353,7 @@ export default function SignInForm({
 											<Button
 												className="w-full gap-3"
 												disabled={submitting}
-												onClick={onPasskey}
+												onClick={() => onPasskey(rememberDevice)}
 												size="lg"
 												variant="secondary"
 											>
@@ -368,21 +394,6 @@ export default function SignInForm({
 									>
 										{useMagicLink ? "Use password instead" : "Send me a link"}
 									</Button>
-
-									{!useMagicLink && showForgotPassword ? (
-										<>
-											<FieldSeparator className="*:data-[slot=field-separator-content]:bg-background">
-												Or
-											</FieldSeparator>
-											<Button
-												className="mx-auto text-muted-foreground"
-												onClick={onForgotPassword}
-												variant="ghost"
-											>
-												Forgot your password?
-											</Button>
-										</>
-									) : null}
 								</div>
 							</AccordionContent>
 						</AccordionItem>
@@ -395,6 +406,21 @@ export default function SignInForm({
 					>
 						Don&apos;t have an account? Create one
 					</Button>
+
+					{!useMagicLink && showForgotPassword ? (
+						<>
+							<FieldSeparator className="*:data-[slot=field-separator-content]:bg-background">
+								Or
+							</FieldSeparator>
+							<Button
+								className="mx-auto text-muted-foreground"
+								onClick={onForgotPassword}
+								variant="ghost"
+							>
+								Forgot your password?
+							</Button>
+						</>
+					) : null}
 				</div>
 
 				<div className="text-center text-muted-foreground text-sm">

@@ -53,6 +53,14 @@ interface SurfaceEntryWire {
 	ui?: unknown;
 }
 
+/** Safe catalog projection of one manifest surface. `inheritedFrom` is the
+ * shared-shell relationship for Web, Mobile, and the Browser extension. */
+export interface SurfaceSupportSummary {
+	inheritedFrom?: string | null;
+	support?: string | null;
+	surface: string;
+}
+
 interface AppManifestWire {
 	// System app fields injected by list_apps for Ghost/Shadow
 	built_in: boolean;
@@ -73,6 +81,8 @@ interface AppManifestWire {
 	requires?: RequiresWire | null;
 	runnables: RunnableEntryWire[];
 	sidecar_name: string | null;
+	/** Display-only support levels projected from the manifest. */
+	surface_support?: SurfaceSupportSummary[];
 	/** Per-surface support + UI + contributed commands. Absent = legacy `targets`
 	 *  semantics; the `cli` entry's `commands` feed the TUI dispatcher. */
 	surfaces?: Record<string, SurfaceEntryWire> | null;
@@ -160,6 +170,8 @@ export interface AppInfo {
 	requires: AppRequires | null;
 	runnables: RunnableEntry[];
 	sidecarName: string | null;
+	/** Per-surface support levels from Core's catalog projection. */
+	surfaceSupport: SurfaceSupportSummary[];
 	/** Host surfaces this plugin runs on. **Empty = every surface**, never "none". */
 	targets: Surface[];
 	version: string;
@@ -386,6 +398,7 @@ function toAppInfo(w: AppManifestWire): AppInfo {
 		// Absent/empty targets = every surface. Never invent a default surface here:
 		// treating "" as "none" would hide every plugin that predates the field.
 		targets: w.targets ?? [],
+		surfaceSupport: w.surface_support ?? [],
 		version: w.version,
 		windowsFirst: w.windows_first ?? false,
 	};
@@ -734,6 +747,10 @@ export interface CatalogEntry {
 	description: string;
 	id: string;
 	kinds: string[];
+	/** Non-executable capability layers this listing extends. */
+	layers?: { capability: string; title?: string | null }[];
+	/** Server-derived A Major Pass inclusion marker for catalog presentation. */
+	membership_included?: boolean;
 	name: string;
 	permission_grants: string[];
 	/** Commerce metadata for hosted Marketplace listings; absent/null means free. */
@@ -744,6 +761,8 @@ export interface CatalogEntry {
 		model?: string;
 	} | null;
 	source: string;
+	/** Per-surface support levels and shared-shell inheritance. */
+	surface_support?: SurfaceSupportSummary[];
 	tags: string[];
 	version: string;
 }
@@ -772,6 +791,25 @@ export async function installAppFromUrl(
 	});
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, "/api/plugins/install");
+		throw Object.assign(new Error(err.message), err);
+	}
+}
+
+/** `POST /api/plugins/catalog/install { id }` — install a plugin from Core's
+ * active catalog source. The endpoint applies the signed-package and node ACL
+ * checks; catalog pricing is not part of the request's access decision. */
+export async function installPluginFromCatalog(
+	target: ApiTarget,
+	id: string
+): Promise<void> {
+	const path = "/api/plugins/catalog/install";
+	const resp = await fetch(apiUrl(target, path), {
+		method: "POST",
+		headers: makeHeaders(target.token),
+		body: JSON.stringify({ id }),
+	});
+	if (!resp.ok) {
+		const err = await parseLifecycleError(resp, path);
 		throw Object.assign(new Error(err.message), err);
 	}
 }

@@ -141,7 +141,6 @@ import {
 } from "@/src/components/panels/WorkspacePanels.tsx";
 import { VoiceModeOverlay } from "@/src/components/voice/VoiceModeOverlay.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
-import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useSystemStatusContext } from "@/src/contexts/SystemStatusContext.tsx";
 import {
@@ -656,12 +655,6 @@ function CouncilInputBar({
 	const isActiveTab = useIsActiveTab();
 	const composerShortcuts = useComposerShortcutBindings();
 	const showTechnicalPermissionDetails = useInterfaceLevel() !== "simple";
-	// Band-2 gate (free-tier plan): council (multi-agent) chat is a Pro feature.
-	// A team @mention is the entry into council, so gate the two paths that set a
-	// team target — the mention-menu pick and the send-time team resolution — and
-	// open the upgrade paywall on a blocked attempt (a Pro badge does not fit in a
-	// mention dropdown). Never silently downgrade a team send to single-agent.
-	const { canUse, requestUpgrade } = useEntitlementContext();
 	const [mentionQuery, setMentionQuery] = useState<string | null>(null);
 	const [dismissedSlashValue, setDismissedSlashValue] = useState<string | null>(
 		null
@@ -745,7 +738,7 @@ function CouncilInputBar({
 													: item.kind === "page"
 														? "Page"
 														: item.kind === "output-style"
-															? "Style"
+															? "Profile"
 															: undefined,
 								icon:
 									item.visualIcon ??
@@ -842,17 +835,6 @@ function CouncilInputBar({
 			if (botProduct) {
 				return;
 			}
-			// Picking a team or a workflow enters council (multi-agent). Block it
-			// behind the Pro gate before inserting the mention or setting the
-			// target. Never silently downgrade a council send to single-agent.
-			if (
-				(item.kind === "team" || item.kind === "workflow") &&
-				!canUse("council")
-			) {
-				setMentionQuery(null);
-				requestUpgrade();
-				return;
-			}
 			onChange?.(applyMention(value ?? "", item));
 			if (item.kind === "chat") {
 				referencedChatIdsRef.current.add(item.id);
@@ -887,9 +869,7 @@ function CouncilInputBar({
 			onTargetAgentChange,
 			onTeamChange,
 			onWorkflowChange,
-			canUse,
 			botProduct,
-			requestUpgrade,
 		]
 	);
 	const handleDirectorySelect = useCallback(
@@ -901,13 +881,6 @@ function CouncilInputBar({
 				.flatMap((group) => group.items)
 				.find((candidate) => `${candidate.kind}:${candidate.id}` === item.id);
 			if (!mention) {
-				return;
-			}
-			if (
-				(mention.kind === "team" || mention.kind === "workflow") &&
-				!canUse("council")
-			) {
-				requestUpgrade();
 				return;
 			}
 			if (mention.kind === "workflow") {
@@ -927,8 +900,6 @@ function CouncilInputBar({
 		[
 			directoryMentionGroups,
 			botProduct,
-			canUse,
-			requestUpgrade,
 			onWorkflowChange,
 			onTeamChange,
 			onTargetAgentChange,
@@ -951,16 +922,6 @@ function CouncilInputBar({
 			// agent mention.
 			const workflowId = resolveFirstWorkflowMention(msg.content, allWorkflows);
 			const teamId = resolveFirstTeamMention(msg.content, allTeams);
-			const blockedCouncil = (workflowId || teamId) && !canUse("council");
-			// A council mention dispatches a multi-agent turn. Gate it behind Pro;
-			// block the whole send (rather than silently sending single-agent) so
-			// the user understands why nothing happened, then upsell.
-			if (blockedCouncil) {
-				setMentionQuery(null);
-				setDismissedSlashValue(value ?? "");
-				requestUpgrade();
-				return;
-			}
 			if (workflowId) {
 				onWorkflowChange(workflowId);
 				onTeamChange(null);
@@ -1004,9 +965,7 @@ function CouncilInputBar({
 			onTeamChange,
 			onWorkflowChange,
 			onReferencedChats,
-			canUse,
 			botProduct,
-			requestUpgrade,
 		]
 	);
 
@@ -1266,9 +1225,9 @@ export default function ChatPage({
 	// where depending on `agentId` is what reverted the user's own pick.
 	const agentIdRef = useRef(agentId);
 	agentIdRef.current = agentId;
-	// Persistent team selection from the composer target picker. When set, every
-	// turn fans out to the team's members (Core's `team_id` takes precedence over
-	// `agent_id`). Session-only — distinct from the transient `@team` mention ref.
+	// Persistent group selection from the composer target picker. When set, every
+	// turn fans out to the group's members (Core's `team_id` takes precedence over
+	// `agent_id`). Session-only — distinct from the transient `@group` mention ref.
 	const [teamId, setTeamId] = useState<string | null>(null);
 	const [agentTools, setAgentTools] = useState<string[]>([]);
 
@@ -1368,13 +1327,13 @@ export default function ChatPage({
 	// each send and consumed by the transport body closure below.
 	const targetAgentIdRef = useRef<string | null>(null);
 
-	// team_id for @team mentions — when set, Core fans the message out to the
-	// team's members per its coordination strategy (takes precedence over
+	// team_id for @group mentions — when set, Core fans the message out to the
+	// group's members per its coordination strategy (takes precedence over
 	// agent_id/target_agent_id). Reset after each send.
 	const teamIdRef = useRef<string | null>(null);
 
-	// Mirror of the persistent team selection for the send-time body closure
-	// (assigned every render, like selectedModelRef). The transient `@team`
+	// Mirror of the persistent group selection for the send-time body closure
+	// (assigned every render, like selectedModelRef). The transient `@group`
 	// mention in teamIdRef wins for one send, then falls back to this.
 	const composerTeamIdRef = useRef<string | null>(null);
 	composerTeamIdRef.current = teamId;
@@ -1419,7 +1378,7 @@ export default function ChatPage({
 	const { data: composioToolkits = [] } = useComposioToolkits(
 		composioConfigured && composioConnections.length > 0
 	);
-	// Load teams so @team mentions resolve in the composer autocomplete.
+	// Load groups so @group mentions resolve in the composer autocomplete.
 	const { teams } = useTeams();
 	// Load workflows so @workflow mentions resolve in the composer autocomplete.
 	// Only chat-triggerable ones (a root Input node, per Core) surface in the
@@ -2002,7 +1961,7 @@ export default function ChatPage({
 
 	// #415: Load the conversation's participants so assistant messages can still be
 	// labelled per-agent. (The in-composer "add agent" control was removed in favour
-	// of agent teams, but legacy multi-agent conversations keep their attribution.)
+	// of agent groups, but legacy multi-agent conversations keep their attribution.)
 	useEffect(() => {
 		if (!convId) {
 			setParticipants([]);
@@ -2853,7 +2812,7 @@ export default function ChatPage({
 					openTab("/apps", { title: item.label });
 					break;
 				case "output-style":
-					openTab("/settings", { title: item.label });
+					openTab("/library/agent", { title: item.label });
 					break;
 				case "team":
 					openTab("/library/team", { title: item.label });
@@ -6043,7 +6002,7 @@ export default function ChatPage({
 		hydratedTargetConvRef.current = convId;
 		// An existing thread is agent-pinned (conversations carry an agentId, never
 		// a team) — drop any persistent team pick so the composer target matches
-		// the thread instead of silently fanning out to a team.
+		// the thread instead of silently fanning out to a group.
 		setTeamId(null);
 		if (pinnedAgentId !== agentIdRef.current) {
 			setAgentId(pinnedAgentId);

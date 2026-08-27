@@ -3,7 +3,8 @@
 // The presentational shell for one swappable "layer" of a node in the node
 // selector dropdown: services (Core / Gateway / Shadow / Island), the resident
 // Chat, the run-alongside engines (Audio / image / embeddings), the
-// Audio and Voice Recognition engines, and the sandbox backend.
+// Audio, Voice Recognition, and Speech Processing engines, plus the sandbox
+// backend.
 //
 // Every layer renders as the same submenu so the dropdown reads as one system:
 //
@@ -33,7 +34,8 @@
 //                     sidecar toggle (see ENGINE_GROUPS in NodeSelector)
 //   - run-alongside → header + actions (start/stop) + uninstall; these engines
 //                     are NOT mutually exclusive, so they get no swap list
-//   - Audio/Voice Recognition → header + installed (swap) + available (install)
+//   - Audio/Voice Recognition/Speech Processing → header + installed (swap) +
+//     available (install)
 //   - sandbox       → header + installed (swap); backends are node capabilities,
 //                     not installables
 //

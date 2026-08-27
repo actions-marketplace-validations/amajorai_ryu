@@ -43,6 +43,7 @@ interface AgentRecordWire {
 	locked?: boolean;
 	model?: string | null;
 	name: string;
+	persona?: Agent["persona"];
 	system_prompt?: string | null;
 	title?: string | null;
 	tools?: string[];
@@ -81,6 +82,7 @@ function toAgent(a: AgentRecordWire): Agent {
 		engine: a.engine ?? null,
 		model: a.model ?? null,
 		title: a.title ?? "",
+		persona: a.persona ?? null,
 		tools: a.tools ?? [],
 		builtIn: a.built_in ?? false,
 		createdAt: a.created_at ?? null,

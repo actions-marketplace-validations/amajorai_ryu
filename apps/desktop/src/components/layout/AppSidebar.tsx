@@ -150,6 +150,7 @@ import { ImportSetupDialog } from "@/src/components/chat/ImportSetupDialog.tsx";
 import { ImportThreadsDialog } from "@/src/components/chat/ImportThreadsDialog.tsx";
 import { NodeFolderBrowser } from "@/src/components/chat/NodeFolderBrowser.tsx";
 import {
+	CloneFolderDialog,
 	CreateFolderDialog,
 	ProjectPickerContent,
 } from "@/src/components/chat/ProjectPicker.tsx";
@@ -7655,11 +7656,13 @@ function ProjectsSection({
 
 	// The `+` opens the SAME dropdown as the composer's folder picker — recent
 	// folders, "Open existing folder" (the node-aware NodeFolderBrowser), and
-	// "Start from scratch" — by reusing ProjectPickerContent. The create/browse
-	// dialogs live OUTSIDE the menu so they survive it closing on select.
+	// "Clone from GitHub", and "Start from scratch" — by reusing
+	// ProjectPickerContent. The create/browse/clone dialogs live OUTSIDE the menu
+	// so they survive it closing on select.
 	const [menuOpen, setMenuOpen] = useState(false);
 	const [createOpen, setCreateOpen] = useState(false);
 	const [browseOpen, setBrowseOpen] = useState(false);
+	const [cloneOpen, setCloneOpen] = useState(false);
 	const handleSelectBrowsed = (selected: string) => {
 		// no-op on failure: never drop the folder here (removal is explicit only).
 		setFolder(selected).catch(() => {
@@ -7721,6 +7724,10 @@ function ProjectsSection({
 									onBrowse={() => {
 										setMenuOpen(false);
 										setBrowseOpen(true);
+									}}
+									onClone={() => {
+										setMenuOpen(false);
+										setCloneOpen(true);
 									}}
 									onClose={() => setMenuOpen(false)}
 									onStartFromScratch={() => {
@@ -7802,6 +7809,7 @@ function ProjectsSection({
 				)}
 			</SidebarSection>
 			<CreateFolderDialog onOpenChange={setCreateOpen} open={createOpen} />
+			<CloneFolderDialog onOpenChange={setCloneOpen} open={cloneOpen} />
 			<NodeFolderBrowser
 				onOpenChange={setBrowseOpen}
 				onSelect={handleSelectBrowsed}

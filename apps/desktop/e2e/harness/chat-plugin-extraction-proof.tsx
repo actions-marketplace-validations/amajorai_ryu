@@ -52,7 +52,7 @@ const REACTION_ACTION: ContributedMessageAction = {
 	label: "Add reaction",
 	order: 100,
 	plugin: "@ryu/reactions",
-	target: "user",
+	target: "any",
 };
 
 const MAIN_CHAT_MESSAGES = [

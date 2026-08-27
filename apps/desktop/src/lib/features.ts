@@ -84,7 +84,7 @@ export const TOGGLEABLE_FEATURES: FeatureDef[] = [
 	},
 	{
 		key: "teams",
-		name: "Agent Teams",
+		name: "Agent Groups",
 		description:
 			"Group several agents so they answer together, debate, or route to the best one.",
 	},

@@ -38,6 +38,30 @@ const MAX_NAME: usize = 200;
 /// Cap on the length of any projected list.
 const MAX_ITEMS: usize = 200;
 
+/// The browser-hosted, mobile, and extension clients reuse the desktop shell's
+/// contribution contract. This is a host relationship, not a claim that the
+/// package contains desktop code, so it belongs in the catalog projection rather
+/// than in a plugin's executable manifest fields.
+const WRAPPED_SURFACES: [(&str, &str); 3] = [
+    ("extension", "desktop"),
+    ("mobile", "desktop"),
+    ("web", "desktop"),
+];
+
+/// The known surface order used when a legacy manifest omits both `surfaces` and
+/// `targets`. Core treats that omission as "all surfaces"; spelling it out in a
+/// detail payload makes the old default visible without changing its semantics.
+const KNOWN_SURFACES: [&str; 8] = [
+    "gateway",
+    "core",
+    "desktop",
+    "island",
+    "mobile",
+    "extension",
+    "web",
+    "cli",
+];
+
 /// Trim, cap, and drop-if-empty a string field.
 fn text(value: Option<&Value>, max: usize) -> Option<String> {
     let raw = value?.as_str()?.trim();
@@ -72,6 +96,365 @@ fn string_list(value: Option<&Value>) -> Vec<Value> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Return the wrapper parent for a supported surface, when the parent is also
+/// supported by the same listing. A package can still explicitly target Mobile
+/// or Web without Desktop, so the parent is only shown when the listing has a
+/// real Desktop row to inherit from.
+fn wrapped_parent(surface: &str, supported: &std::collections::BTreeSet<String>) -> Option<Value> {
+    WRAPPED_SURFACES
+        .iter()
+        .find(|(child, parent)| *child == surface && supported.contains(*parent))
+        .map(|(_, parent)| Value::String((*parent).to_owned()))
+}
+
+/// Project the manifest's support map into a renderer-safe list. The list keeps
+/// the support level instead of flattening it to a platform badge, and records
+/// the shared-shell relationship for the browser extension, mobile, and hosted
+/// web clients.
+pub(crate) fn project_surface_support(manifest: &Value) -> Vec<Value> {
+    let Some(obj) = manifest.as_object() else {
+        return Vec::new();
+    };
+
+    let mut declared: Vec<(String, String)> = Vec::new();
+    if let Some(map) = obj.get("surfaces").and_then(Value::as_object) {
+        for (surface, entry) in map.iter().take(MAX_ITEMS) {
+            let support = text(entry.get("support"), MAX_NAME);
+            if let Some(support) = support {
+                if support.eq_ignore_ascii_case("none") {
+                    continue;
+                }
+                declared.push((surface.clone(), support));
+            }
+        }
+    } else if let Some(targets) = obj.get("targets").and_then(Value::as_array) {
+        if targets.is_empty() {
+            declared.extend(
+                KNOWN_SURFACES
+                    .iter()
+                    .map(|surface| ((*surface).to_owned(), "legacy".to_owned())),
+            );
+        } else {
+            for target in targets.iter().take(MAX_ITEMS) {
+                if let Some(surface) = text(Some(target), MAX_NAME) {
+                    declared.push((surface, "supported".to_owned()));
+                }
+            }
+        }
+    } else {
+        // `surfaces` absent and `targets` absent/empty is the legacy all-surfaces
+        // default. Do not make that compatibility rule disappear from the detail
+        // view merely because the old manifest did not have a support block.
+        declared.extend(
+            KNOWN_SURFACES
+                .iter()
+                .map(|surface| ((*surface).to_owned(), "legacy".to_owned())),
+        );
+    }
+
+    let supported = declared
+        .iter()
+        .map(|(surface, _)| surface.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    declared
+        .into_iter()
+        .map(|(surface, support)| {
+            let mut item = serde_json::Map::new();
+            item.insert("surface".to_owned(), Value::String(surface.clone()));
+            item.insert("support".to_owned(), Value::String(support));
+            if let Some(parent) = wrapped_parent(&surface, &supported) {
+                item.insert("inheritedFrom".to_owned(), parent);
+            }
+            Value::Object(item)
+        })
+        .collect()
+}
+
+/// Insert one feature into a grouped extension summary, preserving declaration
+/// order and bounding every untrusted string before it reaches a catalog client.
+fn add_grouped_feature(
+    groups: &mut Vec<(String, String, Vec<String>)>,
+    target: &str,
+    label: &str,
+    feature: Option<String>,
+) {
+    let Some(feature) = feature.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let Some((_, _, features)) = groups.iter_mut().find(|(id, _, _)| id == target) else {
+        groups.push((target.to_owned(), label.to_owned(), vec![feature]));
+        return;
+    };
+    if !features.contains(&feature) && features.len() < MAX_ITEMS {
+        features.push(feature);
+    }
+}
+
+fn capability_extension_target(capability: &str) -> (&'static str, &'static str) {
+    if capability.starts_with("browser.") {
+        ("browser", "Browser")
+    } else if capability.starts_with("computer.") || capability.starts_with("desktop.") {
+        ("computer", "Computer")
+    } else if capability.starts_with("web.") {
+        ("web", "Web")
+    } else if capability.starts_with("document.") {
+        ("documents", "Document pipeline")
+    } else {
+        ("core", "Core capability")
+    }
+}
+
+/// Project what the package extends. Capabilities come from the manifest's
+/// existing `provides` contract; host-rendered contributions are grouped as the
+/// shared Ryu shell. Nothing here grants access or changes dispatch — it is a
+/// safe catalog explanation of declarations Core already enforces elsewhere.
+fn project_extensions(manifest: &Value) -> Vec<Value> {
+    let Some(obj) = manifest.as_object() else {
+        return Vec::new();
+    };
+    let mut groups: Vec<(String, String, Vec<String>)> = Vec::new();
+
+    if let Some(provides) = obj.get("provides").and_then(Value::as_array) {
+        for entry in provides.iter().take(MAX_ITEMS) {
+            let Some(capability) = text(entry.get("capability"), MAX_NAME) else {
+                continue;
+            };
+            let (target, label) = capability_extension_target(&capability);
+            let feature = text(entry.get("title"), MAX_TEXT)
+                .map(|title| format!("{title} ({capability})"))
+                .or(Some(capability));
+            add_grouped_feature(&mut groups, target, label, feature);
+        }
+    }
+
+    // Inline tools, agents, workflows, skills, and policies extend Core's
+    // registries even when they do not publish a swappable capability through
+    // `provides`. Keep that fact visible instead of making the Extensions section
+    // look empty for the most common plugin shape.
+    if let Some(runnables) = obj.get("runnables").and_then(Value::as_array) {
+        for runnable in runnables.iter().take(MAX_ITEMS) {
+            let Some(kind) = text(runnable.get("kind"), MAX_NAME) else {
+                continue;
+            };
+            if !kind.eq_ignore_ascii_case("companion") {
+                add_grouped_feature(
+                    &mut groups,
+                    "core",
+                    "Core runtime",
+                    Some(format!("{kind} runnable")),
+                );
+            }
+        }
+    }
+    if obj
+        .get("mcp_servers")
+        .and_then(Value::as_object)
+        .is_some_and(|servers| !servers.is_empty())
+    {
+        add_grouped_feature(
+            &mut groups,
+            "core",
+            "Core runtime",
+            Some("MCP servers".to_owned()),
+        );
+    }
+
+    const SHELL_CONTRIBUTIONS: [(&str, &str); 14] = [
+        ("views", "host-rendered views"),
+        ("dock_panels", "dock panels"),
+        ("sidebar_sections", "sidebar sections"),
+        ("sidebar_buttons", "sidebar buttons"),
+        ("sidebar_modes", "sidebar modes"),
+        ("settings_tabs", "settings tabs"),
+        ("composer_controls", "composer controls"),
+        ("widgets", "inline widgets"),
+        ("chat_widget_templates", "chat widget prompts"),
+        ("live_activities", "live activities"),
+        ("message_actions", "message actions"),
+        ("selection_actions", "selection actions"),
+        ("context_menu_items", "context-menu actions"),
+        ("themes", "themes"),
+    ];
+    if let Some(contributes) = obj.get("contributes").and_then(Value::as_object) {
+        for (key, label) in SHELL_CONTRIBUTIONS {
+            if contributes
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+            {
+                add_grouped_feature(
+                    &mut groups,
+                    "ryu-shell",
+                    "Shared Ryu shell",
+                    Some(label.to_owned()),
+                );
+            }
+        }
+
+        const CORE_CONTRIBUTIONS: [(&str, &str); 3] = [
+            ("turn_hooks", "turn hooks"),
+            ("hook_events", "app events"),
+            ("tool_filters", "tool filters"),
+        ];
+        for (key, label) in CORE_CONTRIBUTIONS {
+            if contributes
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+            {
+                add_grouped_feature(
+                    &mut groups,
+                    "core",
+                    "Core runtime",
+                    Some(label.to_owned()),
+                );
+            }
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(target, label, features)| {
+            serde_json::json!({
+                "target": target,
+                "label": label,
+                "features": features,
+            })
+        })
+        .collect()
+}
+
+/// Project the implementation boundaries visible from a manifest. This is an
+/// ownership explanation, not a source-file inventory: Core hosts the runtime
+/// contract, the shared shell renders declared UI slots, and the package owns
+/// any managed process it ships.
+fn project_implementation(manifest: &Value) -> Vec<Value> {
+    let Some(obj) = manifest.as_object() else {
+        return Vec::new();
+    };
+    let mut groups: Vec<(String, String, Vec<String>)> = Vec::new();
+
+    if let Some(runnables) = obj.get("runnables").and_then(Value::as_array) {
+        for runnable in runnables.iter().take(MAX_ITEMS) {
+            let Some(kind) = text(runnable.get("kind"), MAX_NAME) else {
+                continue;
+            };
+            if kind.eq_ignore_ascii_case("companion") {
+                add_grouped_feature(
+                    &mut groups,
+                    "shared-shell",
+                    "Shared Ryu shell",
+                    Some("companion UI".to_owned()),
+                );
+            } else {
+                add_grouped_feature(
+                    &mut groups,
+                    "core",
+                    "Core runtime",
+                    Some(format!("{kind} runnable")),
+                );
+            }
+        }
+    }
+
+    if let Some(contributes) = obj.get("contributes").and_then(Value::as_object) {
+        for key in ["turn_hooks", "hook_events", "tool_filters"] {
+            if contributes
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+            {
+                add_grouped_feature(
+                    &mut groups,
+                    "core",
+                    "Core runtime",
+                    Some(match key {
+                        "turn_hooks" => "turn hooks",
+                        "hook_events" => "app events",
+                        _ => "tool filters",
+                    }
+                    .to_owned()),
+                );
+            }
+        }
+    }
+
+    if obj
+        .get("mcp_servers")
+        .and_then(Value::as_object)
+        .is_some_and(|servers| !servers.is_empty())
+    {
+        add_grouped_feature(
+            &mut groups,
+            "core",
+            "Core runtime",
+            Some("MCP registration".to_owned()),
+        );
+    }
+    if obj
+        .get("provides")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| !entries.is_empty())
+    {
+        add_grouped_feature(
+            &mut groups,
+            "core",
+            "Core runtime",
+            Some("capability broker".to_owned()),
+        );
+    }
+
+    if let Some(contributes) = obj.get("contributes").and_then(Value::as_object) {
+        for (key, label) in [
+            ("views", "host-rendered views"),
+            ("dock_panels", "dock panels"),
+            ("sidebar_sections", "sidebar sections"),
+            ("sidebar_buttons", "sidebar buttons"),
+            ("settings_tabs", "settings tabs"),
+            ("composer_controls", "composer controls"),
+            ("widgets", "inline widgets"),
+            ("themes", "themes"),
+        ] {
+            if contributes
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+            {
+                add_grouped_feature(
+                    &mut groups,
+                    "shared-shell",
+                    "Shared Ryu shell",
+                    Some(label.to_owned()),
+                );
+            }
+        }
+    }
+
+    if let Some(sidecars) = obj.get("sidecars").and_then(Value::as_array) {
+        for sidecar in sidecars.iter().take(MAX_ITEMS) {
+            let name = text(sidecar.get("name"), MAX_NAME);
+            add_grouped_feature(
+                &mut groups,
+                "sidecar",
+                "Package sidecar",
+                name.map(|value| format!("{value} process")),
+            );
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(layer, label, features)| {
+            serde_json::json!({
+                "layer": layer,
+                "label": label,
+                "features": features,
+            })
+        })
+        .collect()
 }
 
 /// Project one `runnables[]` entry. `config` is deliberately NOT copied: it is the
@@ -416,6 +799,23 @@ pub(crate) fn project_manifest(manifest: &Value) -> Map<String, Value> {
         }),
     );
 
+    // These three summaries answer different questions and deliberately stay
+    // separate: support is where a listing appears, extensions are what it adds
+    // to an existing host capability, and implementation is the ownership seam
+    // that carries the work.
+    out.insert(
+        "surfaceSupport".to_owned(),
+        Value::Array(project_surface_support(manifest)),
+    );
+    out.insert(
+        "extensions".to_owned(),
+        Value::Array(project_extensions(manifest)),
+    );
+    out.insert(
+        "implementation".to_owned(),
+        Value::Array(project_implementation(manifest)),
+    );
+
     // ── Governance keys (only when declared) ──────────────────────────────────
     let grants = string_list(obj.get("permission_grants"));
     if !grants.is_empty() {
@@ -625,6 +1025,67 @@ mod tests {
             !names.contains(&"island"),
             "an unsupported surface is not a platform"
         );
+    }
+
+    #[test]
+    fn surface_support_keeps_levels_and_marks_shared_shell_wrappers() {
+        let projected = project_manifest(&serde_json::json!({
+            "surfaces": {
+                "desktop": { "support": "full" },
+                "mobile": { "support": "limited" },
+                "web": { "support": "full" },
+                "extension": { "support": "none" }
+            }
+        }));
+        assert_eq!(
+            projected["surfaceSupport"],
+            serde_json::json!([
+                { "surface": "desktop", "support": "full" },
+                { "surface": "mobile", "support": "limited", "inheritedFrom": "desktop" },
+                { "surface": "web", "support": "full", "inheritedFrom": "desktop" }
+            ])
+        );
+    }
+
+    #[test]
+    fn extension_and_implementation_projection_separates_browser_shell_and_core() {
+        let projected = project_manifest(&serde_json::json!({
+            "runnables": [
+                { "id": "browser-tool", "name": "Browser", "kind": "tool" },
+                { "id": "browser-panel", "name": "Browser", "kind": "companion" }
+            ],
+            "provides": [
+                { "capability": "browser.control", "version": "1.0.0", "title": "Browser" }
+            ],
+            "contributes": {
+                "dock_panels": [{ "id": "browser" }],
+                "turn_hooks": [{ "event": "context" }]
+            },
+            "sidecars": [{ "name": "browser" }]
+        }));
+        assert_eq!(
+            projected["extensions"][0],
+            serde_json::json!({
+                "target": "browser",
+                "label": "Browser",
+                "features": ["Browser (browser.control)"]
+            })
+        );
+        let extension_targets: Vec<&str> = projected["extensions"]
+            .as_array()
+            .expect("extensions")
+            .iter()
+            .filter_map(|entry| entry["target"].as_str())
+            .collect();
+        assert!(extension_targets.contains(&"ryu-shell"));
+        assert!(extension_targets.contains(&"core"));
+        let layers: Vec<&str> = projected["implementation"]
+            .as_array()
+            .expect("implementation")
+            .iter()
+            .filter_map(|entry| entry["layer"].as_str())
+            .collect();
+        assert_eq!(layers, vec!["core", "shared-shell", "sidecar"]);
     }
 
     #[test]

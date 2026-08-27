@@ -624,7 +624,7 @@ function ImportSetup({
 const PROFILE_LINES = [
 	"Reviewing your connected sources",
 	"Looking for patterns in what you do",
-	"Learning how your agent team fits together",
+	"Learning how your agent group fits together",
 	"Drafting useful memories",
 	"Checking recommendations before sharing them",
 ];

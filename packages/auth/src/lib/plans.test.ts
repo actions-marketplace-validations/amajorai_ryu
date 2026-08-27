@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import {
-	APP_QUOTAS,
 	type CachedEntitlement,
 	capabilityTier,
 	channelUserLimitForEntitlement,
@@ -122,15 +121,20 @@ describe("emailQuotaForPlan (Agent Inboxes)", () => {
 });
 
 describe("resolveEntitlement — subscriptions", () => {
-	it("gives recurring plans Marketplace app access but not the desktop license", () => {
+	it("marks recurring plans for Marketplace publisher-pool funding", () => {
 		expect(PLANS["marketplace-membership"].marketplaceApps).toBe(true);
+		expect(PLANS["marketplace-membership"].name).toBe("A Major Pass");
+		expect(PLANS["marketplace-membership"].monthlyPriceMicroUsd).toBe(
+			usdToMicro(20)
+		);
+		expect(currentPlanVersionFor("marketplace-membership")).toBe(6);
 		expect(PLANS.pro.marketplaceApps).toBe(true);
 		expect(PLANS.max.marketplaceApps).toBe(true);
 		expect(PLANS.teams.marketplaceApps).toBe(true);
 		expect(PLANS["desktop-license"].marketplaceApps).toBe(false);
 	});
 
-	it("resolves the Marketplace-only plan without unrelated paid capabilities", () => {
+	it("resolves the legacy A Major Pass publisher-pool plan without unrelated paid capabilities", () => {
 		const binding = requireBinding(
 			PLANS["marketplace-membership"].bindings.monthly,
 			"marketplace-membership.monthly"
@@ -152,7 +156,7 @@ describe("resolveEntitlement — subscriptions", () => {
 		expect(entitlement.seats).toBe(3);
 	});
 
-	it("does not grant Marketplace apps from a desktop license", () => {
+	it("does not mark a desktop license for the Marketplace publisher pool", () => {
 		const entitlement = resolveEntitlement(
 			null,
 			{ active: true },
@@ -645,25 +649,25 @@ describe("decideDesktopAccess — betaFree break-glass flag (off by default)", (
 
 describe("CAPABILITY_TIERS — Band-2 pro capabilities (2026-07-11)", () => {
 	it("maps the new local power features to the pro band", () => {
-		for (const cap of [
-			"fine-tuning",
-			"evals",
-			"graphrag",
-			"companion-overlay",
-			"clips",
-		] as const) {
+		for (const cap of ["evals", "graphrag", "companion-overlay"] as const) {
 			expect(capabilityTier(cap)).toBe("pro");
 		}
 	});
 
 	it("keeps the existing pro capabilities in the pro band", () => {
-		for (const cap of [
-			"council",
-			"prompt-studio",
-			"local-background-runs",
-			"gateway-governance-ui",
-		] as const) {
+		for (const cap of ["prompt-studio", "gateway-governance-ui"] as const) {
 			expect(capabilityTier(cap)).toBe("pro");
+		}
+	});
+
+	it("does not plan-gate Marketplace app and plugin surfaces", () => {
+		for (const capability of [
+			"council",
+			"local-background-runs",
+			"fine-tuning",
+			"clips",
+		] as const) {
+			expect(GATED_CAPABILITIES).not.toContain(capability);
 		}
 	});
 
@@ -681,13 +685,7 @@ describe("CAPABILITY_TIERS — Band-2 pro capabilities (2026-07-11)", () => {
 	});
 
 	it("lists every new capability in GATED_CAPABILITIES", () => {
-		for (const cap of [
-			"fine-tuning",
-			"evals",
-			"graphrag",
-			"companion-overlay",
-			"clips",
-		] as const) {
+		for (const cap of ["evals", "graphrag", "companion-overlay"] as const) {
 			expect(GATED_CAPABILITIES).toContain(cap);
 		}
 	});
@@ -697,16 +695,9 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 	it("returns the free baseline for a null plan", () => {
 		expect(planLimit(null, "maxOpenTabs")).toBe(3);
 		expect(planLimit(null, "maxAgents")).toBe(3);
-		expect(planLimit(null, "maxWorkflows")).toBe(3);
 		expect(planLimit(null, "maxSpaces")).toBe(1);
-		expect(planLimit(null, "maxMonitors")).toBe(3);
-		expect(planLimit(null, "maxMcpServers")).toBe(3);
-		expect(planLimit(null, "maxPlugins")).toBe(5);
-		expect(planLimit(null, "maxSkills")).toBe(5);
-		expect(planLimit(null, "maxSchedules")).toBe(1);
 		expect(planLimit(null, "maxConcurrentRuns")).toBe(1);
 		expect(planLimit(null, "maxEvalRunsMonthly")).toBe(10);
-		expect(planLimit(null, "meetingRetentionDays")).toBe(14);
 		expect(planLimit(null, "spaceStorageLimitGb")).toBe(1);
 		expect(planLimit(null, "maxRemoteNodes")).toBe(1);
 	});
@@ -722,7 +713,6 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 	it("gives paid rows unbounded symbolic caps", () => {
 		for (const plan of ["desktop-license", "pro", "max", "teams"] as const) {
 			expect(planLimit(plan, "maxAgents")).toBe(Number.POSITIVE_INFINITY);
-			expect(planLimit(plan, "maxWorkflows")).toBe(Number.POSITIVE_INFINITY);
 			expect(planLimit(plan, "maxOpenTabs")).toBe(Number.POSITIVE_INFINITY);
 			expect(planLimit(plan, "maxRemoteNodes")).toBe(Number.POSITIVE_INFINITY);
 		}
@@ -755,16 +745,9 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 			maxAgents: [3, INF, INF, INF, INF],
 			maxConcurrentRuns: [1, 3, 3, 3, 8],
 			maxEvalRunsMonthly: [10, INF, INF, INF, INF],
-			maxMcpServers: [3, INF, INF, INF, INF],
-			maxMonitors: [3, INF, INF, INF, INF],
 			maxOpenTabs: [3, INF, INF, INF, INF],
-			maxPlugins: [5, INF, INF, INF, INF],
 			maxRemoteNodes: [1, INF, INF, INF, INF],
-			maxSchedules: [1, INF, INF, INF, INF],
-			maxSkills: [5, INF, INF, INF, INF],
 			maxSpaces: [1, INF, INF, INF, INF],
-			maxWorkflows: [3, INF, INF, INF, INF],
-			meetingRetentionDays: [14, INF, INF, INF, INF],
 			spaceStorageLimitGb: [1, 20, 20, 50, 50],
 		};
 		// Every declared key is in the matrix, and vice versa: a new quota that
@@ -782,36 +765,34 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 	});
 });
 
-describe("quota ownership — kernel-compiled vs app-declared", () => {
+describe("quota ownership — Core-owned limits", () => {
 	it("leaves shell and Core-subsystem quotas unowned", () => {
-		// These have no package home under `apps-store/`, so there is no app whose
-		// absence could lift them; `maxSpaces` also matches Core's own taxonomy,
-		// where `spaces` is a KERNEL data category an app may not claim.
 		for (const field of [
 			"maxOpenTabs",
 			"maxRemoteNodes",
-			"maxPlugins",
 			"maxSpaces",
 			"maxAgents",
-			"maxSkills",
-			"maxSchedules",
-			"maxMcpServers",
 			"maxConcurrentRuns",
 			"maxEvalRunsMonthly",
 			"spaceStorageLimitGb",
-			// Workflows too: `@ryu/workflows` gates only the CRUD routes, while
-			// Core's executor keeps running workflows off the scheduler with the
-			// app disabled, so this quota must not disappear with it.
-			"maxWorkflows",
 		] as const) {
 			expect(quotaOwner(field)).toBeNull();
 			expect(KERNEL_QUOTAS).toHaveProperty(field);
 		}
 	});
 
-	it("attributes each app-owned quota to the app that declares it", () => {
-		expect(quotaOwner("maxMonitors")).toBe("@ryu/monitors");
-		expect(quotaOwner("meetingRetentionDays")).toBe("@ryu/meetings");
+	it("does not expose Marketplace app/plugin quota keys", () => {
+		for (const field of [
+			"maxMcpServers",
+			"maxMonitors",
+			"maxPlugins",
+			"maxSchedules",
+			"maxSkills",
+			"maxWorkflows",
+			"meetingRetentionDays",
+		] as const) {
+			expect(QUOTAS).not.toHaveProperty(field);
+		}
 	});
 
 	it("carries a label and a unit on every key, so surfaces need no table", () => {
@@ -819,20 +800,13 @@ describe("quota ownership — kernel-compiled vs app-declared", () => {
 			expect(spec.label.trim().length).toBeGreaterThan(0);
 			expect(["count", "days", "gigabytes"]).toContain(spec.unit);
 		}
-		// The unit is what distinguishes a count from a retention window — the
-		// declaration that lets a manifest-declared key render without a lookup.
-		expect(QUOTAS.meetingRetentionDays.unit).toBe("days");
 		expect(QUOTAS.spaceStorageLimitGb.unit).toBe("gigabytes");
-		expect(QUOTAS.maxMonitors.unit).toBe("count");
 	});
 
-	it("keeps the two registries disjoint (one owner per key)", () => {
-		for (const field of Object.keys(APP_QUOTAS)) {
-			expect(KERNEL_QUOTAS).not.toHaveProperty(field);
+	it("keeps every remaining quota Core-owned", () => {
+		for (const field of Object.keys(QUOTAS) as PlanLimitField[]) {
+			expect(quotaOwner(field)).toBeNull();
 		}
-		expect(Object.keys(QUOTAS)).toHaveLength(
-			Object.keys(KERNEL_QUOTAS).length + Object.keys(APP_QUOTAS).length
-		);
 	});
 });
 

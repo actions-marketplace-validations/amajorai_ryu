@@ -86,7 +86,7 @@ const MANY: StoreSectionTab[] = [
 		count: 3,
 		group: "manage",
 		icon: SECTION_ICONS.teams,
-		label: "Teams",
+		label: "Groups",
 		value: "teams",
 	},
 	{
@@ -214,7 +214,7 @@ const ICON_PROOF = [
 		name: "WorkflowCircle06Icon",
 	},
 	{ icon: Chat01Icon, label: "Chats", name: "Chat01Icon" },
-	{ icon: SECTION_ICONS.teams, label: "Teams", name: "UserMultiple02Icon" },
+	{ icon: SECTION_ICONS.teams, label: "Groups", name: "UserMultiple02Icon" },
 	{ icon: SECTION_ICONS.channels, label: "Channels", name: "Tv01Icon" },
 	{
 		icon: SECTION_ICONS.identities,
@@ -378,7 +378,7 @@ function Story() {
 						data-icon-name="Cursor02Icon"
 					>
 						<HugeiconsIcon className="size-4 shrink-0" icon={Cursor02Icon} />
-						<span>Computer use</span>
+						<span>Device use</span>
 					</div>
 					<div
 						className="flex items-center gap-2 rounded-lg border border-border/70 bg-background px-3 py-2 text-sm"
@@ -388,7 +388,7 @@ function Story() {
 							className="size-4 shrink-0"
 							icon={CursorMagicSelection04Icon}
 						/>
-						<span>Computer control</span>
+						<span>Device control</span>
 					</div>
 				</div>
 			</section>

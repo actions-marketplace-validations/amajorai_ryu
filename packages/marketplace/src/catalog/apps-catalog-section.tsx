@@ -40,6 +40,7 @@ import {
 import { Icon } from "@ryu/ui/components/icon.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
 import { Label } from "@ryu/ui/components/label.tsx";
+import { MarketplaceAccessBadge } from "@ryu/ui/components/marketplace-access-badge.tsx";
 import {
 	Popover,
 	PopoverContent,
@@ -107,6 +108,7 @@ import {
 } from "./detail/listing-detail-shell.tsx";
 import { ListingDetailTabs } from "./detail/listing-detail-tabs.tsx";
 import { ScorecardBadge } from "./detail/scorecard-panel.tsx";
+import { SupportExtensionPanel } from "./detail/support-extension-panel.tsx";
 import { grantDescription, grantLabel } from "./grant-labels.ts";
 import {
 	type CatalogHost,
@@ -395,11 +397,6 @@ export default function AppsCatalogSection({
 	variant?: AppsCatalogVariant;
 } = {}) {
 	const host = useCatalogHost();
-	// One resolver for the whole section, threaded down to the cards + detail
-	// header. Called here rather than per card because a host implementation reads
-	// live node state to answer it — per card that would be one fetch per row.
-	// The host is a stable per-surface value, so this branch never flips between
-	// renders on a given surface (rules of hooks).
 	const usePluginSettingsOpener =
 		host.usePluginSettingsOpener ?? useNoSettingsOpener;
 	const settingsOpener = usePluginSettingsOpener();
@@ -1456,7 +1453,6 @@ function CommunityShelf({
 			// A community listing has no marketplace document — the namespace
 			// key is the whole reason it can be liked at all. See the model.
 			likeNamespace={it.entry.id}
-			membershipIncluded={false}
 			name={it.entry.name}
 			onClick={() => onSelect(it.entry.id)}
 			// The check rides on the COMMUNITY shelf too, and that is exactly
@@ -2397,6 +2393,8 @@ function AppDetailPanel({
 				</ListingSection>
 			) : null}
 
+			<SupportExtensionPanel detail={detail} entry={entry} />
+
 			{isIntegrationDescriptor ? (
 				<DescriptorDetail
 					detail={detail}
@@ -3079,13 +3077,19 @@ function AppHero({
 				// `tone="hero"` because every foreground in this band is fixed white over
 				// an author-supplied wash under a black scrim — the card's themed
 				// blue-on-tint chip would be unreadable here.
-				<VerifiedBadge
-					orgVerified={orgVerified}
-					publisherTrust={publisherTrust}
-					tier={orgVerifiedTier}
-					tone="hero"
-					verificationDetails={publisherVerification}
-				/>
+				<>
+					<VerifiedBadge
+						orgVerified={orgVerified}
+						publisherTrust={publisherTrust}
+						tier={orgVerifiedTier}
+						tone="hero"
+						verificationDetails={publisherVerification}
+					/>
+					<MarketplaceAccessBadge
+						className="text-white hover:text-white/75"
+						membershipIncluded={Boolean(entry.membership_included)}
+					/>
+				</>
 			}
 			statusIcons={statusIcons}
 			tagline={tagline}

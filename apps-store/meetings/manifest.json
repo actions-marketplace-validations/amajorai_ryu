@@ -167,13 +167,6 @@
         "detail": "Every meeting record and its transcript will be permanently deleted."
       }
     ],
-    "quotas": [
-      {
-        "id": "meetingRetentionDays",
-        "label": "Meeting-note retention",
-        "unit": "days"
-      }
-    ],
     "hook_events": [
       {
         "id": "@ryu/meetings#meeting.started",

@@ -167,7 +167,7 @@ function Story() {
 				<div className="flex flex-col gap-0.5">
 					{[
 						{ icon: TextFontIcon, label: "Appearance", tint: "purple" },
-						{ icon: ComputerIcon, label: "This computer", tint: "gray" },
+						{ icon: ComputerIcon, label: "This device", tint: "gray" },
 						{
 							icon: SparklesIcon,
 							label: "Default agent & model",

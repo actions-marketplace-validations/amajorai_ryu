@@ -639,7 +639,7 @@ export function PrivacySettings() {
 		<SettingsSubpages
 			backLabel="Privacy"
 			intro={disclosureIntro}
-			label="What leaves this computer"
+			label="What leaves this device"
 			outro={learnMore}
 			pages={[
 				{

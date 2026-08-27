@@ -109,6 +109,10 @@ export interface Tab {
 	initialPrompt?: string;
 	/** One-shot quote to carry into a newly opened focused reply thread. */
 	initialQuote?: string;
+	/** One-shot Marketplace listing to select after the Store shell mounts. */
+	initialStoreItem?: { id: string; kind: string };
+	/** One-shot Store search seed for a Marketplace result opened from Cmd+K. */
+	initialStoreQuery?: string;
 	/** When true, the seeded `initialPrompt` (and any `initialImages`) is SENT
 	    automatically once the chat is ready, rather than only pre-filling the
 	    composer. Set ONLY for user-initiated sends (the launchpad composer) — the
@@ -323,6 +327,8 @@ interface TabsContextValue {
 			initialAgent?: string;
 			initialGhost?: boolean;
 			initialProject?: string;
+			initialStoreQuery?: string;
+			initialStoreItem?: { id: string; kind: string };
 			mountContext?: Record<string, unknown> | null;
 			worktreeMode?: boolean;
 			/** Entity glyph to show in the tab strip (mirrors the sidebar). */
@@ -1281,6 +1287,8 @@ export function TabsProvider({
 				initialAgent?: string;
 				initialGhost?: boolean;
 				initialProject?: string;
+				initialStoreQuery?: string;
+				initialStoreItem?: { id: string; kind: string };
 				mountContext?: Record<string, unknown> | null;
 				worktreeMode?: boolean;
 				icon?: GlyphValue;
@@ -1342,7 +1350,9 @@ export function TabsProvider({
 						existing.path !== base ||
 						existing.title !== shell.title ||
 						existing.icon !== undefined ||
-						opts?.mountContext !== undefined
+						opts?.mountContext !== undefined ||
+						opts?.initialStoreQuery !== undefined ||
+						opts?.initialStoreItem !== undefined
 					) {
 						const reused: Tab = {
 							...existing,
@@ -1352,8 +1362,17 @@ export function TabsProvider({
 							...(opts?.mountContext === undefined
 								? {}
 								: { mountContext: opts.mountContext }),
+							...(opts?.initialStoreQuery === undefined
+								? {}
+								: { initialStoreQuery: opts.initialStoreQuery }),
+							...(opts?.initialStoreItem === undefined
+								? {}
+								: { initialStoreItem: opts.initialStoreItem }),
 							navToken:
-								existing.path === base && opts?.mountContext === undefined
+								existing.path === base &&
+								opts?.mountContext === undefined &&
+								opts?.initialStoreQuery === undefined &&
+								opts?.initialStoreItem === undefined
 									? existing.navToken
 									: (existing.navToken ?? 0) + 1,
 						};
@@ -1454,6 +1473,8 @@ export function TabsProvider({
 					initialAgent: opts?.initialAgent,
 					initialGhost: opts?.initialGhost,
 					initialProject: opts?.initialProject,
+					initialStoreQuery: opts?.initialStoreQuery,
+					initialStoreItem: opts?.initialStoreItem,
 					mountContext: opts?.mountContext,
 					worktreeMode: opts?.worktreeMode,
 					workspaceSession: undefined,
@@ -1498,6 +1519,8 @@ export function TabsProvider({
 				initialAgent: opts?.initialAgent,
 				initialGhost: opts?.initialGhost,
 				initialProject: opts?.initialProject,
+				initialStoreQuery: opts?.initialStoreQuery,
+				initialStoreItem: opts?.initialStoreItem,
 				mountContext: opts?.mountContext,
 				worktreeMode: opts?.worktreeMode,
 			};

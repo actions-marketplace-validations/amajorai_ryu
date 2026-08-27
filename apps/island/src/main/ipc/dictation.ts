@@ -11,6 +11,7 @@
 import { type BrowserWindow, ipcMain } from "electron";
 import { DICTATION_PREF_KEY } from "../../shared/dictation.ts";
 import { type DictationSubmitResult, IPC } from "../../shared/ipc.ts";
+import { SPEECH_PROCESSING_PREF_KEY } from "../../shared/speech-processing.ts";
 import { runDictation } from "../services/dictation.ts";
 import {
 	getPreferenceRaw,
@@ -34,8 +35,11 @@ export function registerDictationIpc(
 			audio: ArrayBuffer,
 			task: "transcribe" | "ask" = "transcribe"
 		): Promise<DictationSubmitResult> => {
-			const rawPrefs = await getPreferenceRaw(DICTATION_PREF_KEY);
-			return runDictation(audio, rawPrefs, task);
+			const [rawPrefs, rawSpeechProcessing] = await Promise.all([
+				getPreferenceRaw(DICTATION_PREF_KEY),
+				getPreferenceRaw(SPEECH_PROCESSING_PREF_KEY),
+			]);
+			return runDictation(audio, rawPrefs, rawSpeechProcessing, task);
 		}
 	);
 

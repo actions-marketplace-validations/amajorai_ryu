@@ -29,8 +29,11 @@ import {
 	type PiCatalog,
 	type PiConfig,
 	type PiConfigInput,
+	type ProviderAccountTarget,
 	type ProviderConfigInput,
+	removeProviderAccount,
 	setModelEnabled,
+	switchProviderAccount,
 	updatePiConfig,
 } from "@/src/lib/api/pi-config.ts";
 import { useActiveNode } from "./useActiveNode.ts";
@@ -52,6 +55,14 @@ export interface UseLlmProvidersResult {
 	reload: () => void;
 	/** Remove a stored credential / custom provider. */
 	remove: (id: string) => Promise<PiCatalog>;
+	/** Remove one saved account without removing the provider. */
+	removeAccount: (provider: string, accountId: string) => Promise<PiCatalog>;
+	/** Switch one saved provider account for yourself or the Gateway. */
+	switchAccount: (
+		provider: string,
+		accountId: string,
+		target?: ProviderAccountTarget
+	) => Promise<PiCatalog>;
 	/** Enable/disable a single model within a provider. */
 	toggleModelEnabled: (
 		provider: string,
@@ -135,6 +146,28 @@ export function useLlmProviders(): UseLlmProvidersResult {
 		(id: string) => removeMutation.mutateAsync(id),
 		[removeMutation]
 	);
+	const switchAccount = useCallback(
+		(
+			provider: string,
+			accountId: string,
+			accountTarget: ProviderAccountTarget = "self"
+		) =>
+			switchProviderAccount(target, provider, accountId, accountTarget).then(
+				(catalog) => {
+					queryClient.setQueryData(["pi-config-catalog", node.url], catalog);
+					return catalog;
+				}
+			),
+		[target, queryClient, node.url]
+	);
+	const removeAccount = useCallback(
+		(provider: string, accountId: string) =>
+			removeProviderAccount(target, provider, accountId).then((catalog) => {
+				queryClient.setQueryData(["pi-config-catalog", node.url], catalog);
+				return catalog;
+			}),
+		[target, queryClient, node.url]
+	);
 	// Discovery is not a cache mutation — it's a live lookup the caller awaits.
 	const discover = useCallback(
 		(input: DiscoverModelsInput) => discoverModels(target, input),
@@ -167,6 +200,8 @@ export function useLlmProviders(): UseLlmProvidersResult {
 		check,
 		configure,
 		remove,
+		switchAccount,
+		removeAccount,
 		discover,
 		toggleModelEnabled,
 		reload: invalidate,

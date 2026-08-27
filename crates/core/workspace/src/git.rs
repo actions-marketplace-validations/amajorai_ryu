@@ -1061,6 +1061,99 @@ fn run_remote_git_command(cwd: &str, args: &[&str]) -> Result<Output, String> {
     }
 }
 
+/// Clone one repository into a new directory without exposing an incomplete
+/// checkout as a project. The caller validates the source URL and destination
+/// boundary; this function owns the bounded, non-interactive Git invocation.
+///
+/// The temporary directory is created by this process and renamed into place
+/// only after `git clone` succeeds. A failed clone therefore cannot leave a
+/// half-populated project folder that the desktop might register on its next
+/// refresh.
+pub fn clone_repository(url: &str, destination: &Path) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("clone URL is required".to_string());
+    }
+    if !destination.is_absolute() {
+        return Err("clone destination must be an absolute path".to_string());
+    }
+    match std::fs::symlink_metadata(destination) {
+        Ok(_) => return Err("clone destination already exists".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("clone destination could not be inspected".to_string()),
+    }
+
+    let parent = destination
+        .parent()
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| "clone destination parent is not a directory".to_string())?;
+    let parent_string = parent.to_string_lossy().into_owned();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let mut temporary_name = None;
+    for attempt in 0..8 {
+        let candidate = format!(".ryu-clone-{}-{nonce}-{attempt}", std::process::id());
+        match std::fs::create_dir(parent.join(&candidate)) {
+            Ok(()) => {
+                temporary_name = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err("could not create a temporary clone directory".to_string()),
+        }
+    }
+    let temporary_name = temporary_name
+        .ok_or_else(|| "could not reserve a temporary clone directory".to_string())?;
+    let temporary_path = parent.join(&temporary_name);
+    let cleanup = || {
+        if std::fs::symlink_metadata(&temporary_path)
+            .map(|metadata| metadata.file_type().is_dir())
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_dir_all(&temporary_path);
+        }
+    };
+
+    let output = match run_remote_git_command(
+        &parent_string,
+        &[
+            "clone",
+            "--depth",
+            "1",
+            "--no-recurse-submodules",
+            "--",
+            url,
+            &temporary_name,
+        ],
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            cleanup();
+            return Err(format!("git clone {error}"));
+        }
+    };
+    if !output.status.success() {
+        let error = remote_git_failed("clone", &output);
+        cleanup();
+        return Err(error);
+    }
+    if !temporary_path.is_dir() {
+        cleanup();
+        return Err("git clone completed without creating a repository".to_string());
+    }
+    if std::fs::symlink_metadata(destination).is_ok() {
+        cleanup();
+        return Err("clone destination appeared while cloning".to_string());
+    }
+    if let Err(error) = std::fs::rename(&temporary_path, destination) {
+        cleanup();
+        return Err(format!("could not finalize cloned repository: {error}"));
+    }
+    Ok(())
+}
+
 /// Pull the current branch from its upstream, or pull and then push for sync.
 ///
 /// Pull is deliberately fast-forward-only: the Environment summary must not
@@ -1802,5 +1895,65 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(counted, 3);
+    }
+
+    #[test]
+    fn clone_repository_finalizes_only_a_successful_checkout() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("README.md"), "hello\n").unwrap();
+        test_git(source.path(), &["init", "-b", "main"]);
+        test_git(source.path(), &["add", "README.md"]);
+        test_git(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Ryu Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+
+        let destination_parent = tempfile::tempdir().unwrap();
+        let destination = destination_parent.path().join("project");
+        clone_repository(source.path().to_str().unwrap(), &destination).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(destination.join("README.md")).unwrap(),
+            "hello\n"
+        );
+        assert!(destination.join(".git").is_dir());
+        let temporary_leftovers = std::fs::read_dir(destination_parent.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(".ryu-clone-"));
+        assert!(!temporary_leftovers);
+    }
+
+    #[test]
+    fn clone_repository_does_not_overwrite_an_existing_destination() {
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("project");
+        std::fs::create_dir(&destination).unwrap();
+
+        let error = clone_repository("git@github.com:owner/repo.git", &destination).unwrap_err();
+        assert_eq!(error, "clone destination already exists");
+    }
+
+    #[test]
+    fn clone_repository_cleans_up_after_git_failure() {
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("project");
+        let missing_source = parent.path().join("missing-source");
+
+        assert!(clone_repository(missing_source.to_str().unwrap(), &destination).is_err());
+        assert!(!destination.exists());
+        let temporary_leftovers = std::fs::read_dir(parent.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(".ryu-clone-"));
+        assert!(!temporary_leftovers);
     }
 }

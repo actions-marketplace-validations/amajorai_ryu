@@ -33,6 +33,7 @@ test("every layer renders as a submenu trigger", async ({ page }) => {
 		"Island",
 		"Chat",
 		"Voice Recognition",
+		"Speech Processing",
 		"Audio",
 	]) {
 		await expect(
@@ -88,6 +89,18 @@ test("the nested voice picker is reachable three levels deep", async ({
 	await voiceTrigger.click();
 	await expect(page.getByRole("menuitem", { name: /af_heart/ })).toBeVisible();
 	await expect(page.getByRole("menuitem", { name: /am_puck/ })).toBeVisible();
+});
+
+test("Speech Processing exposes the S1-mini model and its style control", async ({
+	page,
+}) => {
+	await openMenu(page);
+	await page.getByRole("menuitem", { name: /Speech Processing/ }).click();
+	await expect(
+		page.getByRole("menuitem", { name: /S1-mini by Superwhisper/ })
+	).toBeVisible();
+	await page.getByRole("menuitem", { name: /^Style semi-formal/ }).click();
+	await expect(page.getByRole("menuitem", { name: /^formal/ })).toBeVisible();
 });
 
 test("a header-only layer still renders its status", async ({ page }) => {

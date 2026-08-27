@@ -903,6 +903,7 @@ function installedAppAsEntry(app: AppInfo): CatalogEntry {
 		id: app.id,
 		kinds: [...new Set(app.runnables.map((r) => r.kind))],
 		name: app.name,
+		surface_support: app.surfaceSupport,
 		// The one exception to "synthesise nothing": the installed record IS the
 		// authority on what this app requires, and the catalog detail is not — Core's
 		// catalog source only emits `requires` when it has it, which is why

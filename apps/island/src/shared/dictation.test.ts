@@ -123,11 +123,18 @@ describe("parseDictationPrefs", () => {
 		expect(prefs.shortcut).toBe(DEFAULT_DICTATION_SHORTCUT);
 		expect(prefs.ask).toEqual(DEFAULT_DICTATION_ASK);
 		expect(prefs.postProcess).toEqual({
-			enabled: false,
+			enabled: true,
 			prompt: DEFAULT_DICTATION_POSTPROCESS_PROMPT,
 			selection: EMPTY_AGENT_SELECTION,
 		});
 		expect(prefs.ask.prompt).toBe(DEFAULT_DICTATION_ASK_PROMPT);
 		expect(prefs.ask.shortcut).toBe(DEFAULT_DICTATION_ASK_SHORTCUT);
+	});
+
+	it("preserves an explicit Speech Processing opt-out", () => {
+		const prefs = parseDictationPrefs(
+			JSON.stringify({ postProcess: { enabled: false } })
+		);
+		expect(prefs.postProcess.enabled).toBe(false);
 	});
 });

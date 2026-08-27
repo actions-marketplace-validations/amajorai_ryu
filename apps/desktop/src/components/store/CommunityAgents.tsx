@@ -71,49 +71,43 @@ function priceLabel(card: MarketplaceCard): string {
 function CommunityAgentAction({
 	busy,
 	card,
-	licensed,
 	onBuy,
 	onInstall,
 }: {
 	busy: boolean;
 	card: MarketplaceCard;
-	/** True when the active org already owns this paid listing. */
-	licensed: boolean;
 	onBuy: () => void;
 	onInstall: () => void;
 }) {
-	// A paid listing has to be bought before Core will hand over the definition
-	// (the install forwards the buyer bearer and the server checks the license),
-	// so offering Install first would be an error the user cannot act on.
-	if (card.pricing && !licensed) {
-		return (
+	return (
+		<div className="flex items-center gap-1">
+			{card.pricing ? (
+				<Button
+					disabled={busy}
+					onClick={(event) => {
+						event.stopPropagation();
+						onBuy();
+					}}
+					size="sm"
+					variant="ghost"
+				>
+					<HugeiconsIcon className="size-4" icon={ShoppingCart01Icon} />
+					<span className="font-mono tabular-nums">{priceLabel(card)}</span>
+				</Button>
+			) : null}
 			<Button
-				disabled={busy}
+				loading={busy}
 				onClick={(event) => {
 					event.stopPropagation();
-					onBuy();
+					onInstall();
 				}}
 				size="sm"
 				variant="ghost"
 			>
-				<HugeiconsIcon className="size-4" icon={ShoppingCart01Icon} />
-				<span className="font-mono tabular-nums">{priceLabel(card)}</span>
+				{!busy && <HugeiconsIcon className="size-4" icon={Download01Icon} />}
+				Add
 			</Button>
-		);
-	}
-	return (
-		<Button
-			loading={busy}
-			onClick={(event) => {
-				event.stopPropagation();
-				onInstall();
-			}}
-			size="sm"
-			variant="ghost"
-		>
-			{!busy && <HugeiconsIcon className="size-4" icon={Download01Icon} />}
-			Add
-		</Button>
+		</div>
 	);
 }
 
@@ -122,7 +116,6 @@ export interface CommunityAgentsShelfProps {
 	/** Listing id whose install/purchase is in flight, or null. */
 	busyId: string | null;
 	error: string | null;
-	isLicensed: (id: string) => boolean;
 	loading: boolean;
 	onBuy: (card: MarketplaceCard) => void;
 	onInstall: (card: MarketplaceCard) => void;
@@ -139,7 +132,6 @@ export function CommunityAgentsShelf({
 	agents,
 	busyId,
 	error,
-	isLicensed,
 	loading,
 	onBuy,
 	onInstall,
@@ -169,22 +161,14 @@ export function CommunityAgentsShelf({
 							<CommunityAgentAction
 								busy={busyId === card.id}
 								card={card}
-								licensed={isLicensed(card.id)}
 								onBuy={() => onBuy(card)}
 								onInstall={() => onInstall(card)}
 							/>
 						}
-						// A paid listing nobody has bought yet has no Add verb at all
-						// (Core withholds the definition until the licence exists), so it
-						// gets no menu rather than one offering an install that 402s.
-						contextMenu={
-							card.pricing && !isLicensed(card.id)
-								? undefined
-								: storeItemContextMenu({
-										installed: false,
-										onInstall: () => onInstall(card),
-									})
-						}
+						contextMenu={storeItemContextMenu({
+							installed: false,
+							onInstall: () => onInstall(card),
+						})}
 						employeeId={card.id}
 						footer={
 							<Badge className="font-normal" variant="outline">
@@ -225,7 +209,6 @@ function RequiresRow({ label, values }: { label: string; values: string[] }) {
 export interface CommunityAgentDetailProps {
 	busy: boolean;
 	card: MarketplaceCard;
-	isLicensed: (id: string) => boolean;
 	onBuy: () => void;
 	onInstall: () => void;
 	/** How many publisher Space bindings were dropped on that install. */
@@ -238,7 +221,6 @@ export interface CommunityAgentDetailProps {
 export function CommunityAgentDetail({
 	busy,
 	card,
-	isLicensed,
 	onBuy,
 	onInstall,
 	requires,
@@ -261,7 +243,6 @@ export function CommunityAgentDetail({
 				<CommunityAgentAction
 					busy={busy}
 					card={card}
-					licensed={isLicensed(card.id)}
 					onBuy={onBuy}
 					onInstall={onInstall}
 				/>

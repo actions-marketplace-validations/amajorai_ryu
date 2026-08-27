@@ -24,14 +24,11 @@ import { useVoiceModeShortcuts } from "../hooks/use-voice-mode-shortcuts.ts";
 import { useWindowDrag } from "../hooks/use-window-drag.ts";
 import type { IslandState } from "../store/island-state.ts";
 import { useIslandState } from "../store/island-state.ts";
-import { type IslandAction, IslandActionDock } from "./IslandActionDock.tsx";
 import { IslandContent } from "./IslandContent.tsx";
-import { AttachIcon, CommandIcon, MicIcon, VoiceModeIcon } from "./icons.tsx";
 import {
 	ACTION_CIRCLE,
 	ACTION_PILL_HEIGHT,
 	ACTION_PILL_WIDTH,
-	actionDockWidth,
 	CONTENT_SPRING,
 	DETAIL_SIZES,
 	EXPANDED_COMPACT_MAX_H,
@@ -291,8 +288,6 @@ function IslandShell() {
 	const state = useIslandState((store) => store.state);
 	const setState = useIslandState((store) => store.setState);
 	const openPanel = useIslandState((store) => store.openPanel);
-	const openVoice = useIslandState((store) => store.openVoice);
-	const expandedView = useIslandState((store) => store.expandedView);
 	const expandedTall = useIslandState((store) => store.expandedTall);
 	const composerHeight = useIslandState((store) => store.composerHeight);
 	const toggleCollapse = useIslandState((store) => store.toggleCollapse);
@@ -341,11 +336,7 @@ function IslandShell() {
 	// Push-to-talk voice capture (global shortcut → waveform → transcript → chat).
 	// `toggle` also drives the mic action island (a tap triggers voice mode, the
 	// same as the shortcut); the recording state's waveform is the active indicator.
-	const {
-		levels: voiceLevels,
-		error: voiceError,
-		toggle: voiceToggle,
-	} = useVoiceInput();
+	const { levels: voiceLevels, error: voiceError } = useVoiceInput();
 	// System-wide dictation on its own global shortcut: captures audio and types
 	// the transcript straight into the focused native app (no chat, no focus steal).
 	useDictation();
@@ -359,16 +350,10 @@ function IslandShell() {
 		agentId: agentId.length > 0 ? agentId : undefined,
 	});
 	useVoiceModeShortcuts(voiceMode.active, sections, composerShortcuts);
-	const handleVoiceMode = (): void => {
-		voiceMode.start();
-		openVoice();
-	};
 	const handleVoiceClose = (): void => {
 		voiceMode.stop();
 		setState("collapsed");
 	};
-	const openCommand = useIslandState((store) => store.openCommand);
-	const attachAndOpen = useIslandState((store) => store.attachAndOpen);
 
 	// Context-driven label swap: while the pill is split out (idle), promote to
 	// `context` when a live active app is available, and fall back when it goes
@@ -387,10 +372,10 @@ function IslandShell() {
 	const isExpanded = state === "expanded";
 	const isCollapsed = state === "collapsed";
 	const isTextPill = state === "idle" || state === "context";
-	// The logo circle leads every state — including the expanded chat panel, where
-	// it stays docked to the panel's left as the Ryu island (and the tap-to-collapse
-	// target). The detail island is present whenever we are not collapsed.
-	const showCircle = true;
+	// The logo circle leads the compact states. Once the chat is expanded it gives
+	// the panel its own quiet header and close control, so a second circle beside
+	// the card is unnecessary visual chrome.
+	const showCircle = !isExpanded;
 	// The expanded surface is a short composer bar until there is chat history, then
 	// it grows to the full panel height. The compact bar's height tracks the
 	// composer (so it stays tight on one row and grows as the draft wraps), clamped.
@@ -429,49 +414,10 @@ function IslandShell() {
 	// panel on-screen (anchored to the resting island, flipped upward at the
 	// bottom edge and clamped at the sides), then restores the resting position on
 	// collapse — the translucent window keeps its fixed size and only moves.
-	// Quick-action islands shown beside the input in text mode (the expanded chat
-	// composer only — not the command palette, which is itself a text input): mic
-	// drives voice mode (same toggle as the hotkey), attach stages images on the
-	// composer to send as multimodal file-parts (the same Core path the desktop
-	// uses), and command opens the palette.
-	const handleAttach = (): void => {
-		window.island.system
-			.attachFiles()
-			.then((files) => {
-				if (files.length > 0) {
-					attachAndOpen(files);
-				}
-			})
-			.catch(() => undefined);
-	};
-	const actions: IslandAction[] = [
-		{
-			key: "voice",
-			label: "Voice input",
-			icon: <MicIcon />,
-			onClick: voiceToggle,
-		},
-		{
-			key: "voice-mode",
-			label: "Voice mode",
-			icon: <VoiceModeIcon />,
-			onClick: handleVoiceMode,
-		},
-		{
-			key: "attach",
-			label: "Attach files",
-			icon: <AttachIcon />,
-			onClick: handleAttach,
-		},
-		{
-			key: "command",
-			label: "Command palette",
-			icon: <CommandIcon />,
-			onClick: openCommand,
-		},
-	];
-	const dockVisible = isExpanded && expandedView === "panel";
-	const dockWidth = dockVisible ? actionDockWidth(actions.length) : 0;
+	// The expanded chat is one quiet card. Attachments still live behind the
+	// composer's + button, while voice and the command palette keep their global
+	// shortcuts; separate action islands are reserved for compact suggestions.
+	const dockWidth = 0;
 
 	const { width: footprintWidth, height: footprintHeight } = islandFootprint(
 		showCircle,
@@ -625,16 +571,6 @@ function IslandShell() {
 							</motion.div>
 						) : null}
 					</AnimatePresence>
-
-					{/* Quick-action islands: a stacked avatar-group of round islands
-					    (mic / attach / command) that split out to the RIGHT of the input
-					    in text mode (the expanded composer). Bottom-aligned so they sit
-					    beside the input row; absent in every other state. */}
-					{dockVisible ? (
-						<div className="self-end">
-							<IslandActionDock actions={actions} />
-						</div>
-					) : null}
 				</div>
 
 				{/* Action mini-islands split out below the chip (renders only in the

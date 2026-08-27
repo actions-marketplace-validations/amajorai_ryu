@@ -90,11 +90,7 @@ pub(crate) async fn host_tool_usage_record(
     }
 
     if let Err((status, message)) = authenticate_sidecar(&state, &headers).await {
-        return (
-            status,
-            Json(json!({ "error": message })),
-        )
-            .into_response();
+        return (status, Json(json!({ "error": message }))).into_response();
     }
 
     let Some(org) = crate::sidecar::control_plane::registered_org() else {
@@ -117,10 +113,11 @@ pub(crate) async fn host_tool_usage_record(
         task_label: body.task_label,
     };
 
-    match crate::sidecar::gateway::record_external_tool_charge(&state.client, &org.id, charge)
-        .await
+    match crate::sidecar::gateway::record_external_tool_charge(&state.client, &org.id, charge).await
     {
-        Ok(_) => Json(json!({ "accepted": true, "billed": true, "org_id": org.id })).into_response(),
+        Ok(_) => {
+            Json(json!({ "accepted": true, "billed": true, "org_id": org.id })).into_response()
+        }
         Err(error) => (
             axum::http::StatusCode::BAD_GATEWAY,
             Json(json!({ "error": format!("gateway tool charge failed: {error}") })),

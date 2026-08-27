@@ -643,7 +643,7 @@ describe("describeEgressBadge will not call a saved value in force", () => {
 			)
 		).toBe("Pointed at gateway");
 		expect(settled(classify({ id: "agt_local", engine: "mlx" }))).toBe(
-			"On this computer"
+			"On this device"
 		);
 		expect(settled(classify({ id: "acp:gemini", engine: "acp:gemini" }))).toBe(
 			"Can't be routed"

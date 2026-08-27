@@ -97,10 +97,10 @@ describe("mention resource bridges", () => {
 		} satisfies OutputStyleSummary;
 		expect(buildOutputStyleMentionSources([style])).toEqual([
 			{
-				description: "Short and direct · Active",
+				description: "Short and direct",
 				id: "plain",
 				name: "Plain text",
-				target: { path: "/settings" },
+				target: { path: "/library/agent" },
 			},
 		]);
 	});

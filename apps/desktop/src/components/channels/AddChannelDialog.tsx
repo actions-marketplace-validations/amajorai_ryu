@@ -484,7 +484,7 @@ export function AddChannelDialog({
 									</optgroup>
 								) : null}
 								{teams.length > 0 ? (
-									<optgroup label="Teams">
+									<optgroup label="Groups">
 										{teams.map((t) => (
 											<NativeSelectOption
 												key={t.id}
@@ -497,7 +497,7 @@ export function AddChannelDialog({
 								) : null}
 							</NativeSelect>
 							<p className="text-muted-foreground text-xs">
-								Pick a single agent, or a team — the team's lead agent
+								Pick a single agent, or a group — the group's lead agent
 								orchestrates and calls the other members to answer.
 							</p>
 						</div>

@@ -675,7 +675,7 @@ function MentionComposerProof() {
 		"Plugins",
 		"Skills",
 		"Space pages",
-		"Output styles",
+		"Personality profiles",
 	].every((group) => configuredLabels.includes(group));
 	const integrationHidden = !unconfiguredLabels.includes("Integrations");
 

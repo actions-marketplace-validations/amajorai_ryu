@@ -175,6 +175,28 @@ const NOOP_UNLISTEN: UnlistenFn = () => {
 };
 
 /**
+ * React effect cleanup is fire-and-forget at every call site in the desktop.
+ * Tauri's event unlisten function is async and reaches into a separate event
+ * plugin bridge before it invokes native cleanup. That bridge can disappear
+ * during a webview teardown, so let cleanup fail closed instead of turning a
+ * stale listener into an unhandled rejection.
+ */
+function safeUnlisten(unlisten: UnlistenFn): UnlistenFn {
+	let called = false;
+	return () => {
+		if (called) {
+			return;
+		}
+		called = true;
+		try {
+			void Promise.resolve(unlisten()).catch(() => undefined);
+		} catch {
+			// The bridge may disappear between effect cleanup and this call.
+		}
+	};
+}
+
+/**
  * `listen`, but a subscription attempted before the bridge exists waits for it
  * rather than rejecting — and, outside Tauri, resolves to a no-op unlisten so the
  * caller's `.then((fn) => unlisteners.push(fn))` stays honest instead of becoming
@@ -188,7 +210,7 @@ export async function listenWhenReady<T>(
 	handler: EventCallback<T>
 ): Promise<UnlistenFn> {
 	try {
-		return await tauriListen<T>(event, handler);
+		return safeUnlisten(await tauriListen<T>(event, handler));
 	} catch (error) {
 		if (!isBridgeMissingFailure(error)) {
 			throw error;
@@ -196,7 +218,7 @@ export async function listenWhenReady<T>(
 		if (!(await whenTauriReady())) {
 			return NOOP_UNLISTEN;
 		}
-		return await tauriListen<T>(event, handler);
+		return safeUnlisten(await tauriListen<T>(event, handler));
 	}
 }
 

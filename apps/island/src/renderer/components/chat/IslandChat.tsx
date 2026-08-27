@@ -14,19 +14,19 @@ import {
 	InputBar,
 	type InputBarProps,
 } from "@ryu/blocks/desktop/agent-elements/input-bar";
-import type { KeyboardEvent, ReactNode } from "react";
+import type { KeyboardEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIslandComposerContext } from "../../context/island-composer-context.tsx";
 import { useComposerShortcutBindings } from "../../hooks/use-composer-shortcut-bindings.ts";
 import { IslandWidgetHost } from "../../host/IslandWidgetHost.tsx";
 import { useIslandState } from "../../store/island-state.ts";
+import { CommandIcon } from "../icons.tsx";
 import { useIslandChat } from "./use-island-chat.ts";
 
 type Reachability = "checking" | "offline" | "online";
 
 export function IslandChat() {
 	const {
-		leftActions,
 		composerMenuGroups,
 		mentionItems,
 		onComposerMenuSelect,
@@ -36,15 +36,9 @@ export function IslandChat() {
 		applyStreamedAcpMode,
 	} = useIslandComposerContext();
 	const composerShortcuts = useComposerShortcutBindings();
-	// Session-scoped double-check toggle. Read via a getter so useIslandChat's
-	// `send` callback never closes over a stale value.
-	const [doubleCheck, setDoubleCheck] = useState(false);
-	const doubleCheckRef = useRef(doubleCheck);
-	doubleCheckRef.current = doubleCheck;
 	const { messages, status, error, notes, send, stop, clearNotes } =
 		useIslandChat({
 			getAcpPayload,
-			getDoubleCheck: () => doubleCheckRef.current,
 			// Agent-driven session-control write-backs go straight back into the
 			// composer's ACP state, so the next turn sends what the agent asked for.
 			onAcpConfig: applyStreamedAcpConfig,
@@ -52,8 +46,10 @@ export function IslandChat() {
 		});
 	const chatPrefill = useIslandState((store) => store.chatPrefill);
 	const clearChatPrefill = useIslandState((store) => store.clearChatPrefill);
+	const openCommand = useIslandState((store) => store.openCommand);
 	const setExpandedTall = useIslandState((store) => store.setExpandedTall);
 	const setComposerHeight = useIslandState((store) => store.setComposerHeight);
+	const toggleCollapse = useIslandState((store) => store.toggleCollapse);
 	const pendingAttachments = useIslandState(
 		(store) => store.pendingAttachments
 	);
@@ -81,26 +77,6 @@ export function IslandChat() {
 
 	const offline = reachability === "offline";
 
-	// Action pills (double-check, and future plugin composer actions) live in their
-	// own strip BELOW the composer, not crammed at its left edge — so they stay
-	// visible and tappable. The composer's left edge keeps only the agent/model
-	// picker (`leftActions`).
-	const belowInputActions = (
-		<button
-			aria-pressed={doubleCheck}
-			className={`shrink-0 rounded-full border px-2.5 py-1 font-medium text-[11px] transition-colors ${
-				doubleCheck
-					? "border-indigo-400/40 bg-indigo-500/20 text-indigo-200"
-					: "border-white/10 text-neutral-400 hover:bg-white/10 hover:text-neutral-200"
-			}`}
-			onClick={() => setDoubleCheck((prev) => !prev)}
-			title="Have Ryu review each answer before replying"
-			type="button"
-		>
-			Double-check
-		</button>
-	);
-
 	const onComposerKeyDown = useCallback(
 		(event: KeyboardEvent<HTMLTextAreaElement>): boolean =>
 			handleComposerSettingsShortcut(event, sections, composerShortcuts),
@@ -123,11 +99,10 @@ export function IslandChat() {
 		[clearAttachments, send]
 	);
 	const inputBarPropsRef = useRef<{
-		leftActions: ReactNode;
 		onAttach: () => void;
 		onComposerKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean;
-	}>({ leftActions, onAttach, onComposerKeyDown });
-	inputBarPropsRef.current = { leftActions, onAttach, onComposerKeyDown };
+	}>({ onAttach, onComposerKeyDown });
+	inputBarPropsRef.current = { onAttach, onComposerKeyDown };
 	const islandInputBar = useMemo(
 		() =>
 			function IslandInputBar(props: InputBarProps) {
@@ -136,7 +111,7 @@ export function IslandChat() {
 					<InputBar
 						{...props}
 						compact
-						leftActions={live.leftActions}
+						leftActions={null}
 						onAttach={live.onAttach}
 						onTextareaKeyDown={(event) => {
 							if (
@@ -166,6 +141,31 @@ export function IslandChat() {
 
 	return (
 		<div className="flex h-full w-full flex-col gap-2">
+			<header className="relative z-20 flex shrink-0 items-center justify-between px-1 pt-1">
+				<span className="font-medium text-neutral-100 text-sm">New chat</span>
+				<div className="flex items-center gap-0.5">
+					<button
+						aria-label="Open command palette"
+						className="flex size-7 items-center justify-center rounded-full text-neutral-400 transition-colors hover:bg-white/10 hover:text-neutral-100"
+						onClick={openCommand}
+						title="Open command palette"
+						type="button"
+					>
+						<CommandIcon size={15} />
+					</button>
+					<button
+						aria-label="Minimize Ryu"
+						className="flex size-7 items-center justify-center rounded-full text-neutral-400 transition-colors hover:bg-white/10 hover:text-neutral-100"
+						onClick={toggleCollapse}
+						title="Minimize"
+						type="button"
+					>
+						<span aria-hidden="true" className="text-lg leading-none">
+							−
+						</span>
+					</button>
+				</div>
+			</header>
 			{notes.length > 0 ? (
 				<div className="relative z-20 shrink-0 rounded-lg border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5">
 					<div className="flex items-start justify-between gap-2">
@@ -229,7 +229,6 @@ export function IslandChat() {
 								onRemoveImage: removeAttachment,
 							}}
 							composerDisabled={offline}
-							composerFooter={belowInputActions}
 							composerMenuGroups={composerMenuGroups}
 							density="compact"
 							error={error ? new Error(error) : undefined}

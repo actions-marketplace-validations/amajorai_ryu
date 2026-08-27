@@ -24,7 +24,11 @@ import {
 	reverseGitEdits,
 	syncGit,
 } from "./git.ts";
-import { createProjectFolder } from "./workspace.ts";
+import {
+	cloneProjectFolder,
+	createProjectFolder,
+	githubRepositoryName,
+} from "./workspace.ts";
 
 const TARGET = { url: "http://127.0.0.1:7980", token: "node-token" };
 
@@ -259,6 +263,52 @@ describe("git client request headers", () => {
 			})
 		);
 		await createProjectFolder(TARGET, "x");
+		expect(headerEntries(captured.init, "content-type")).toEqual([
+			"application/json",
+		]);
+	});
+
+	it("derives a folder name from HTTPS and SSH GitHub URLs", () => {
+		expect(githubRepositoryName("https://github.com/owner/project.git")).toBe(
+			"project"
+		);
+		expect(githubRepositoryName("git@github.com:owner/project.git")).toBe(
+			"project"
+		);
+		expect(githubRepositoryName("ssh://git@github.com/owner/project")).toBe(
+			"project"
+		);
+		expect(githubRepositoryName("https://gitlab.com/owner/project")).toBeNull();
+	});
+
+	it("clones a project through the active node and preserves the response path", async () => {
+		const captured = stubFetch(
+			new Response(
+				JSON.stringify({
+					name: "project",
+					path: "/home/me/Documents/Ryu/project",
+				}),
+				{
+					headers: { "content-type": "application/json" },
+					status: 200,
+				}
+			)
+		);
+		const result = await cloneProjectFolder(
+			TARGET,
+			"git@github.com:owner/project.git",
+			"project"
+		);
+
+		expect(captured.url).toBe("http://127.0.0.1:7980/api/workspace/clone");
+		expect(JSON.parse(String(captured.init?.body))).toEqual({
+			name: "project",
+			url: "git@github.com:owner/project.git",
+		});
+		expect(result).toEqual({
+			name: "project",
+			path: "/home/me/Documents/Ryu/project",
+		});
 		expect(headerEntries(captured.init, "content-type")).toEqual([
 			"application/json",
 		]);

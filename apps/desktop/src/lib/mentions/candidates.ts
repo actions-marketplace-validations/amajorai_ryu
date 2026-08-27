@@ -172,7 +172,7 @@ export function buildMentionGroups(
 	);
 	add(
 		"team",
-		"Teams",
+		"Groups",
 		sources.teams
 			.filter((t) => matches(t.name))
 			.map((t) => ({ kind: "team", id: t.id, label: t.name, icon: IconUsers }))
@@ -313,7 +313,7 @@ export function buildMentionGroups(
 	);
 	add(
 		"output-style",
-		"Output styles",
+		"Personality profiles",
 		(sources.outputStyles ?? [])
 			.filter((style) => matches(style.name, style.id, style.description ?? ""))
 			.map((style) => ({

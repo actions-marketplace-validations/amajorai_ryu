@@ -312,7 +312,7 @@ export function NodeAccessSettings() {
 				<div>
 					<h3 className="font-medium text-sm">Devices waiting to connect</h3>
 					<p className="text-muted-foreground text-xs">
-						A phone, browser, or another computer asking to use this node. Check
+						A phone, browser, or another device asking to use this node. Check
 						the code matches what that device is showing before you approve.
 					</p>
 				</div>
@@ -506,7 +506,7 @@ export function NodeAccessSettings() {
 				<div>
 					<h3 className="font-medium text-sm">This node's access token</h3>
 					<p className="text-muted-foreground text-xs">
-						Apps on this computer pick this up automatically. You only need to
+						Apps on this device pick this up automatically. You only need to
 						copy it by hand for something that cannot ask to be approved, like a
 						headless server you reach over SSH.
 					</p>

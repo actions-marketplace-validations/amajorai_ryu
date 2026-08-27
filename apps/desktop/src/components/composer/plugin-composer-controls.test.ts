@@ -239,7 +239,7 @@ describe("select values", () => {
 });
 
 // The composer trigger summarises the sections it opens, but NOT the contributed
-// ones — an app's mode picker and the output style stay in the popover instead of
+// ones — an app's mode picker stays in the popover instead of
 // spending a permanent segment on a bar that is already narrow at compact density.
 // The section key is the whole discriminator, so it is asserted from both ends:
 // the builder and the predicate must agree, or the filter silently stops matching
@@ -262,13 +262,7 @@ describe("contributed settings-menu section keys", () => {
 		// These are the sections that legitimately earn a trigger segment; if the
 		// predicate ever matched one, the trigger would lose the agent/model/approval
 		// summary it exists for.
-		for (const key of [
-			"agent",
-			"model",
-			"approval",
-			"thinking",
-			"output-style",
-		]) {
+		for (const key of ["agent", "model", "approval", "thinking"]) {
 			expect(isComposerPluginSectionKey(key)).toBe(false);
 		}
 	});

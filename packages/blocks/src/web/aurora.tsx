@@ -174,7 +174,7 @@ function normalizeColorStops(stops: AuroraColorStopInput[]): AuroraColorStop[] {
 
 	return normalized
 		.slice(0, MAX_COLOR_STOPS)
-		.toSorted((a, b) => a.position - b.position);
+		.sort((a, b) => a.position - b.position);
 }
 
 function packColorStops(stops: AuroraColorStop[]) {
@@ -256,6 +256,7 @@ export default function Aurora({
 		// does not upload it. `delete` rather than assigning `undefined` — the
 		// attribute map's values are `Partial<Attribute>`, not optional.
 		if (geometry.attributes.uv) {
+			// biome-ignore lint/performance/noDelete: OGL must not upload the unused attribute.
 			delete geometry.attributes.uv;
 		}
 

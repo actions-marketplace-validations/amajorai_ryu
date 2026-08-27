@@ -58,9 +58,9 @@ fn json_rejection_response(rejection: &JsonRejection) -> Response {
 // The git engine (everything that shells `git`) lives in the `ryu-workspace`
 // crate; these handlers are the thin axum surface over it.
 use ryu_workspace::git::{
-    checkout_branch, create_branch, create_pull_request, initialize_repository, list_branches,
-    query_file_diff, query_git_state, reverse_text_edits, run_git_action, run_git_remote_action,
-    ReverseEditsOutcome, TextReplacement,
+    checkout_branch, clone_repository, create_branch, create_pull_request,
+    initialize_repository, list_branches, query_file_diff, query_git_state, reverse_text_edits,
+    run_git_action, run_git_remote_action, ReverseEditsOutcome, TextReplacement,
 };
 
 const MAX_FILE_REVIEW_PATHS: usize = 64;
@@ -1061,6 +1061,221 @@ pub struct NewFolderBody {
     name: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloneFolderBody {
+    /// GitHub HTTPS or SSH clone URL.
+    url: String,
+    /// Optional destination folder name. Defaults to the repository name.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum GithubCloneTransport {
+    Https,
+    Ssh,
+}
+
+fn github_repository_name_from_path(path: &str) -> Result<String, String> {
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() != 2 {
+        return Err("GitHub URL must include exactly owner/repository".to_string());
+    }
+    for segment in &segments {
+        if segment == &"."
+            || segment == &".."
+            || segment
+                .chars()
+                .any(|character| !(character.is_ascii_alphanumeric() || ".-_".contains(character)))
+        {
+            return Err("GitHub URL contains an invalid repository path".to_string());
+        }
+    }
+    let repository = segments[1].strip_suffix(".git").unwrap_or(segments[1]);
+    if repository.is_empty() {
+        return Err("GitHub URL must include a repository name".to_string());
+    }
+    Ok(repository.to_string())
+}
+
+/// Accept the two GitHub clone forms the picker documents: HTTPS and SSH.
+/// Rejecting other hosts keeps this endpoint from becoming a generic outbound
+/// Git transport, while the separate SSH form still lets a remote node use its
+/// configured `~/.ssh` keys for private repositories.
+fn parse_github_clone_url(raw: &str) -> Result<(String, GithubCloneTransport), String> {
+    let source = raw.trim();
+    if source.is_empty() {
+        return Err("A GitHub repository URL is required".to_string());
+    }
+    if source.len() > 2048 || source.chars().any(char::is_control) {
+        return Err("That GitHub URL is not valid".to_string());
+    }
+
+    if let Some(path) = source.strip_prefix("git@github.com:") {
+        return github_repository_name_from_path(path)
+            .map(|name| (name, GithubCloneTransport::Ssh));
+    }
+
+    let parsed = url::Url::parse(source).map_err(|_| {
+        "Use a GitHub HTTPS URL or an SSH URL such as git@github.com:owner/repo.git".to_string()
+    })?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "GitHub URL has no host".to_string())?;
+    let transport = match parsed.scheme() {
+        "https"
+            if host.eq_ignore_ascii_case("github.com")
+                || host.eq_ignore_ascii_case("www.github.com") =>
+        {
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                return Err("GitHub HTTPS URLs cannot contain credentials".to_string());
+            }
+            if parsed.port().is_some_and(|port| port != 443) {
+                return Err("GitHub HTTPS URLs must use port 443".to_string());
+            }
+            GithubCloneTransport::Https
+        }
+        "ssh" if host.eq_ignore_ascii_case("github.com") => {
+            if parsed.username() != "git"
+                || parsed.password().is_some()
+                || parsed.port().is_some_and(|port| port != 22)
+            {
+                return Err("GitHub SSH URLs must use the git user and port 22".to_string());
+            }
+            GithubCloneTransport::Ssh
+        }
+        _ => {
+            return Err("Only GitHub HTTPS and SSH clone URLs are supported".to_string());
+        }
+    };
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("GitHub clone URLs cannot contain a query or fragment".to_string());
+    }
+    let path = parsed
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>().join("/"))
+        .unwrap_or_default();
+    github_repository_name_from_path(&path).map(|name| (name, transport))
+}
+
+fn clone_error(status: StatusCode, error: impl Into<String>) -> axum::response::Response {
+    (
+        status,
+        Json(json!({ "success": false, "error": error.into() })),
+    )
+        .into_response()
+}
+
+/// `POST /api/workspace/clone` `{ url, name? }`
+///
+/// Clone a GitHub repository into `~/Documents/Ryu/<name>` on the node serving
+/// this request. SSH URLs run on that node, so its existing SSH config and keys
+/// are used; no private key crosses the desktop boundary. The destination is
+/// registered by the desktop only after this operation returns successfully.
+#[utoipa::path(
+    post,
+    path = "/api/workspace/clone",
+    tag = "Git",
+    summary = "Clone a GitHub repository into a project folder",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn clone_project_folder(
+    JsonBody(body): JsonBody<CloneFolderBody>,
+) -> axum::response::Response {
+    let url = body.url.trim().to_string();
+    let (repository_name, transport) = match parse_github_clone_url(&url) {
+        Ok(parsed) => parsed,
+        Err(error) => return clone_error(StatusCode::BAD_REQUEST, error),
+    };
+    let name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&repository_name)
+        .to_string();
+    if let Err(error) = validate_folder_name(&name) {
+        return clone_error(StatusCode::BAD_REQUEST, error);
+    }
+
+    let port = match transport {
+        GithubCloneTransport::Https => 443,
+        GithubCloneTransport::Ssh => 22,
+    };
+    if let Err(error) = crate::server::resolve_guarded_host("github.com", port).await {
+        return clone_error(StatusCode::BAD_GATEWAY, error);
+    }
+
+    let Some(docs) = dirs::document_dir() else {
+        return clone_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not resolve the Documents directory",
+        );
+    };
+    let projects_root = docs.join("Ryu");
+    if let Err(error) = std::fs::create_dir_all(&projects_root) {
+        return clone_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to create the project folder: {error}"),
+        );
+    }
+    let root_string = projects_root.to_string_lossy().into_owned();
+    let projects_root = match canonical_remote_workspace(&root_string) {
+        Ok(root) => root,
+        Err(error) => return clone_error(StatusCode::FORBIDDEN, error),
+    };
+    let destination = projects_root.join(&name);
+    if std::fs::symlink_metadata(&destination).is_ok() {
+        return clone_error(
+            StatusCode::CONFLICT,
+            format!("A project folder named \"{name}\" already exists"),
+        );
+    }
+
+    let clone_destination = destination.clone();
+    let result =
+        tokio::task::spawn_blocking(move || clone_repository(&url, &clone_destination)).await;
+    match result {
+        Ok(Ok(())) => Json(json!({
+            "success": true,
+            "name": name,
+            "path": destination.to_string_lossy(),
+        }))
+        .into_response(),
+        Ok(Err(error)) => clone_error(StatusCode::CONFLICT, error),
+        Err(error) => {
+            tracing::error!("clone_project_folder: join error: {error}");
+            clone_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+pub(crate) async fn clone_project_folder_authorized(
+    State(state): State<crate::server::ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    JsonBody(body): JsonBody<CloneFolderBody>,
+) -> axum::response::Response {
+    if crate::server::enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return clone_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: agent.edit",
+        );
+    }
+    clone_project_folder(JsonBody(body)).await
+}
+
 /// `POST /api/workspace/new-folder` `{ name }`
 ///
 /// Create a fresh, empty project folder under `~/Documents/Ryu/<name>` and return
@@ -1309,6 +1524,27 @@ mod tests {
         assert!(validate_folder_name("a\\b").is_err());
         assert!(validate_folder_name("foo..bar").is_err());
         assert!(validate_folder_name("bad\nname").is_err());
+    }
+
+    #[test]
+    fn github_clone_url_accepts_https_and_ssh() {
+        let (https_name, _) =
+            parse_github_clone_url("https://github.com/amajorai/ryu.git").unwrap();
+        assert_eq!(https_name, "ryu");
+
+        let (scp_name, _) = parse_github_clone_url("git@github.com:amajorai/ryu.git").unwrap();
+        assert_eq!(scp_name, "ryu");
+
+        let (ssh_name, _) = parse_github_clone_url("ssh://git@github.com/amajorai/ryu").unwrap();
+        assert_eq!(ssh_name, "ryu");
+    }
+
+    #[test]
+    fn github_clone_url_rejects_other_hosts_and_extra_paths() {
+        assert!(parse_github_clone_url("https://gitlab.com/org/repo").is_err());
+        assert!(parse_github_clone_url("https://github.com/org/repo/tree/main").is_err());
+        assert!(parse_github_clone_url("https://token@github.com/org/repo").is_err());
+        assert!(parse_github_clone_url("ssh://root@github.com/org/repo").is_err());
     }
 
     async fn body_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
@@ -1600,7 +1836,10 @@ mod tests {
         };
         let (status, json) = body_json(git_reverse_edits(JsonBody(reverse)).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(json["error"].as_str().unwrap().contains("between 1 and 256"));
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("between 1 and 256"));
     }
 
     #[tokio::test]

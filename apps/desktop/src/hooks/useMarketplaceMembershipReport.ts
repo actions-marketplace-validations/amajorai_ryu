@@ -1,4 +1,4 @@
-// Publisher-facing Marketplace Membership revenue totals.
+// Publisher-facing A Major Pass revenue totals.
 
 import type { MarketplaceMembershipState } from "@ryu/marketplace/host";
 import { useCallback, useEffect, useState } from "react";
@@ -13,7 +13,7 @@ function toHostError(error: unknown): MarketplaceMembershipState["error"] {
 	const typed = error as MarketplaceError;
 	return {
 		kind: typed?.kind ?? "unknown",
-		message: typed?.message ?? "Could not load Marketplace Membership revenue.",
+		message: typed?.message ?? "Could not load A Major Pass revenue.",
 	};
 }
 

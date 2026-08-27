@@ -135,15 +135,19 @@ fn token_from_hosts_yml(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Read the managed Pi OAuth entry for Ryu's Copilot subscription provider.
-fn token_from_ryu_json(root: &serde_json::Value) -> Option<String> {
-    let entry = root.get("github-copilot")?;
+/// Read a managed Pi OAuth entry for Ryu's Copilot subscription provider.
+fn token_from_ryu_entry(entry: &serde_json::Value) -> Option<String> {
     ["access", "accessToken", "oauth_token"]
         .iter()
         .find_map(|key| entry.get(*key).and_then(serde_json::Value::as_str))
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .map(str::to_string)
+}
+
+/// Read the managed Pi auth file's Copilot entry.
+fn token_from_ryu_json(root: &serde_json::Value) -> Option<String> {
+    token_from_ryu_entry(root.get("github-copilot")?)
 }
 
 fn load_ryu_token() -> Option<String> {
@@ -193,6 +197,16 @@ pub(super) async fn fetch_ryu(agent_id: &str) -> UsageSnapshot {
             return UsageSnapshot::unavailable(agent_id, "copilot", UsageUnavailable::NotLoggedIn)
         }
         Err(_) => return UsageSnapshot::unavailable(agent_id, "copilot", UsageUnavailable::Error),
+    };
+    fetch_with_token(agent_id, token).await
+}
+
+pub(super) async fn fetch_ryu_with_credential(
+    agent_id: &str,
+    credential: Option<serde_json::Value>,
+) -> UsageSnapshot {
+    let Some(token) = credential.as_ref().and_then(token_from_ryu_entry) else {
+        return UsageSnapshot::unavailable(agent_id, "copilot", UsageUnavailable::NotLoggedIn);
     };
     fetch_with_token(agent_id, token).await
 }

@@ -46,7 +46,7 @@ export interface ChatStreamOptions {
 	/** Per-turn plugin toggles forwarded as `plugin_flags`; Core's turn-hooks read
 	 * them (e.g. `{ "io.ryu.double-check": true }` to arm the review hook). */
 	pluginFlags?: Record<string, boolean>;
-	/** Route the turn to a team instead of a single agent (/team <id>). */
+	/** Route the turn to a group instead of a single agent (/group <id>). */
 	teamId?: string;
 }
 

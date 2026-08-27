@@ -25,7 +25,7 @@ export interface UseTeamsResult {
 	update: (id: string, input: UpdateTeamInput) => Promise<Team>;
 }
 
-/// Loads agent teams from the active Core node and exposes CRUD + member
+/// Loads agent groups from the active Core node and exposes CRUD + member
 /// management that keep the in-memory list in sync after each mutation, so the
 /// sidebar (and the chat @mention list) reflect edits immediately.
 export function useTeams(): UseTeamsResult {

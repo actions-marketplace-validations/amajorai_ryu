@@ -179,7 +179,7 @@ pub const DEFAULT_LOCAL_EMBED_MODEL_ID: &str = "nomic-embed-text-v1.5.Q4_K_M";
 /// download with `checksum mismatch: expected … got …` and the model is
 /// permanently unobtainable — the retry path re-fetches the same new bytes and
 /// fails again. That is not hypothetical: it is exactly what happened to
-/// [`DEFAULT_LOCAL_CHAT_MODEL_URL`] (Gemma), and it is the reason all four of
+/// [`DEFAULT_LOCAL_CHAT_MODEL_URL`] (Gemma), and it is the reason all five of
 /// these now carry a 40-hex commit sha instead.
 ///
 /// `/resolve/<commit-sha>/` is a permalink on the HF CDN, so URL and checksum move
@@ -253,6 +253,24 @@ pub const DEFAULT_LOCAL_CLASSIFIER_MODEL_URL: &str =
 /// (empty string skips verification).
 pub const DEFAULT_LOCAL_CLASSIFIER_MODEL_SHA256: &str =
     "3626e245220ca4a1c5911eb4010b3ecb7bdbf5bc53c79403c21355354d1e2dc6";
+
+/// Default local Speech Processing model id (storage key + filename stem in
+/// `~/.ryu/models/`). S1-mini by Superwhisper is a 0.6B Q4_K_M text normalizer
+/// for raw speech-recognition transcripts. It is not a chat model: the
+/// dedicated `llamacpp-speech` sidecar serves it only for post-ASR cleanup.
+pub const DEFAULT_LOCAL_SPEECH_MODEL_ID: &str = "s1-mini-q4_k_m";
+
+/// Default local Speech Processing model weight URL. Override with
+/// `RYU_LOCAL_SPEECH_MODEL_URL`. The revision is pinned so the checksum remains
+/// valid if the upstream repository changes its default branch.
+pub const DEFAULT_LOCAL_SPEECH_MODEL_URL: &str =
+    "https://huggingface.co/superwhisper/s1-mini-GGUF/resolve/ee2c0f56e56345f475749a44ff2893e21c3cb292/s1-mini-q4_k_m.gguf";
+
+/// SHA-256 of S1-mini Q4_K_M (484,219,808 bytes), from the Hugging Face LFS oid.
+/// Override with `RYU_LOCAL_SPEECH_MODEL_SHA256`; an empty value disables
+/// verification, like the other local model overrides.
+pub const DEFAULT_LOCAL_SPEECH_MODEL_SHA256: &str =
+    "3b41ebe2502cbd03e811d5d16b022f5ab551eda58d62597d152f89535003c634";
 /// Last-resort fallback: default chat provider base URL.
 pub const DEFAULT_LLM_BASE_URL: &str = "https://api.openai.com";
 /// Last-resort fallback: default chat model id.
@@ -661,9 +679,18 @@ pub struct ProviderRegistry {
     /// needs the three consumers unified onto one process-lifetime resolution first
     /// (a `OnceLock`, or a value threaded from boot) — not three `load()` calls.
     ///
-    /// This field was the first to be resolved that way. The other three local-model
+    /// This field was the first to be resolved that way. The other four local-model
     /// triples have since joined it on the same argument; see [`LocalModelEntry`].
     pub local_classifier_model: LocalModelEntry,
+    /// Local Speech Processing model: the S1-mini GGUF served by the dedicated
+    /// `llamacpp-speech` instance for post-ASR cleanup. It is separate from the
+    /// Voice Recognition engine: Whisper/Parakeet produce raw text, while this
+    /// model formats that text before dictation inserts it.
+    ///
+    /// Env-only so onboarding, the sidecar, and the model catalog all resolve
+    /// one process-lifetime artifact consistently. Use
+    /// `RYU_LOCAL_SPEECH_MODEL_{ID,URL,SHA256}` to provide a compatible model.
+    pub local_speech_model: LocalModelEntry,
     /// Default RAG strategy for Spaces that have no per-Space `retrieval_mode`
     /// set. One of `"vector"` or `"graph"`. Defaults to `"vector"`.
     /// File-backed (`rag_strategy`) and live — `server::create_space` uses [`load`].
@@ -758,7 +785,7 @@ impl ProviderRegistry {
             .unwrap_or(DEFAULT_EMBED_DIMS);
         let embed_base_url =
             env_or_file_or_literal("RYU_EMBED_BASE_URL", None, DEFAULT_EMBED_BASE_URL);
-        // Local GGUF triples (embed / rerank / chat / classify): env → literal, no
+        // Local GGUF triples (embed / rerank / chat / classify / speech): env → literal, no
         // file layer. One consumer downloads the weight, another serves it much
         // later — see [`LocalModelEntry`].
         let embed_model_id = env_or_file_or_literal(
@@ -810,6 +837,19 @@ impl ProviderRegistry {
         let classifier_model_sha256 = std::env::var("RYU_LOCAL_CLASSIFIER_MODEL_SHA256")
             .ok()
             .unwrap_or_else(|| DEFAULT_LOCAL_CLASSIFIER_MODEL_SHA256.to_owned());
+        let speech_model_id = env_or_file_or_literal(
+            "RYU_LOCAL_SPEECH_MODEL_ID",
+            None,
+            DEFAULT_LOCAL_SPEECH_MODEL_ID,
+        );
+        let speech_model_url = env_or_file_or_literal(
+            "RYU_LOCAL_SPEECH_MODEL_URL",
+            None,
+            DEFAULT_LOCAL_SPEECH_MODEL_URL,
+        );
+        let speech_model_sha256 = std::env::var("RYU_LOCAL_SPEECH_MODEL_SHA256")
+            .ok()
+            .unwrap_or_else(|| DEFAULT_LOCAL_SPEECH_MODEL_SHA256.to_owned());
         let rag_strategy =
             env_or_file_or_literal("RYU_RAG_STRATEGY", file.rag_strategy, DEFAULT_RAG_STRATEGY);
         let graph_extraction_model = env_or_file_or_literal(
@@ -861,6 +901,11 @@ impl ProviderRegistry {
                 id: classifier_model_id,
                 weight_url: classifier_model_url,
                 sha256: classifier_model_sha256,
+            },
+            local_speech_model: LocalModelEntry {
+                id: speech_model_id,
+                weight_url: speech_model_url,
+                sha256: speech_model_sha256,
             },
             rag_strategy,
             graph_extraction_model,
@@ -957,10 +1002,10 @@ impl ProviderRegistry {
     ///
     /// The remaining production callers are `search_host::CoreSearchEmbedder`,
     /// `model_catalog_host::default_model_repos`, `sidecar::gateway::classify_model_id`,
-    /// `sidecar::providers::llamacpp` (`mod`/`process`/`embed`/`rerank`/`classify`),
+    /// `sidecar::providers::llamacpp` (`mod`/`process`/`embed`/`rerank`/`classify`/`speech`),
     /// `sidecar::onboarding::install_local_stack`, and `server::get_active_model`.
     /// Every one of them reads **only** fields that have no `registry.json` key at
-    /// all — the `embed_*` trio and the four local-GGUF triples — so for them
+    /// all — the `embed_*` trio and the five local-GGUF triples — so for them
     /// `from_env()` and [`load`](Self::load) return identical values and the choice
     /// of constructor is not observable. That is the invariant, and
     /// `from_env_and_load_agree_on_every_field_a_from_env_consumer_reads` enforces
@@ -1039,6 +1084,11 @@ impl Default for ProviderRegistry {
                 id: DEFAULT_LOCAL_CLASSIFIER_MODEL_ID.to_owned(),
                 weight_url: DEFAULT_LOCAL_CLASSIFIER_MODEL_URL.to_owned(),
                 sha256: DEFAULT_LOCAL_CLASSIFIER_MODEL_SHA256.to_owned(),
+            },
+            local_speech_model: LocalModelEntry {
+                id: DEFAULT_LOCAL_SPEECH_MODEL_ID.to_owned(),
+                weight_url: DEFAULT_LOCAL_SPEECH_MODEL_URL.to_owned(),
+                sha256: DEFAULT_LOCAL_SPEECH_MODEL_SHA256.to_owned(),
             },
             rag_strategy: DEFAULT_RAG_STRATEGY.to_owned(),
             graph_extraction_model: DEFAULT_GRAPH_EXTRACTION_MODEL.to_owned(),
@@ -1212,6 +1262,9 @@ const REGISTRY_ENV: &[&str] = &[
     "RYU_LOCAL_CLASSIFIER_MODEL_ID",
     "RYU_LOCAL_CLASSIFIER_MODEL_URL",
     "RYU_LOCAL_CLASSIFIER_MODEL_SHA256",
+    "RYU_LOCAL_SPEECH_MODEL_ID",
+    "RYU_LOCAL_SPEECH_MODEL_URL",
+    "RYU_LOCAL_SPEECH_MODEL_SHA256",
     "RYU_DEFAULT_AGENT",
     // Listed so the `resolve_rag_strategy` precedence tests below are hermetic:
     // this knob now has a production consumer (`server::create_space`), so a
@@ -1240,7 +1293,7 @@ mod tests {
     ///
     /// It is not hypothetical — this test exists because the default chat model
     /// (Gemma) sat broken in exactly this state: pinned `9378bc47…`, upstream
-    /// serving `740185b2…`. The four consts are checked together because the bug
+    /// serving `740185b2…`. The five consts are checked together because the bug
     /// is a property of the URL SHAPE, not of any one model.
     ///
     /// If this fails on a URL you just edited: keep `/resolve/<40-hex-commit>/`
@@ -1268,6 +1321,11 @@ mod tests {
                 "chat",
                 DEFAULT_LOCAL_CHAT_MODEL_URL,
                 DEFAULT_LOCAL_CHAT_MODEL_SHA256,
+            ),
+            (
+                "speech",
+                DEFAULT_LOCAL_SPEECH_MODEL_URL,
+                DEFAULT_LOCAL_SPEECH_MODEL_SHA256,
             ),
         ] {
             let Some((_, tail)) = url.split_once("/resolve/") else {
@@ -1302,6 +1360,9 @@ mod tests {
             .weight_url
             .contains("nomic-embed-text"));
         assert!(!reg.local_embed_model.sha256.is_empty());
+        assert_eq!(reg.local_speech_model.id, DEFAULT_LOCAL_SPEECH_MODEL_ID);
+        assert!(reg.local_speech_model.weight_url.contains("s1-mini-GGUF"));
+        assert!(!reg.local_speech_model.sha256.is_empty());
         assert_eq!(reg.reranker.id, "BAAI/bge-reranker");
         assert_eq!(reg.default_llm_base_url, DEFAULT_LLM_BASE_URL);
         assert_eq!(reg.default_llm_model, DEFAULT_LLM_MODEL);
@@ -1338,6 +1399,15 @@ mod tests {
             DEFAULT_LOCAL_CHAT_MODEL_URL
         );
         assert_eq!(reg.local_chat_model.sha256, DEFAULT_LOCAL_CHAT_MODEL_SHA256);
+        assert_eq!(reg.local_speech_model.id, DEFAULT_LOCAL_SPEECH_MODEL_ID);
+        assert_eq!(
+            reg.local_speech_model.weight_url,
+            DEFAULT_LOCAL_SPEECH_MODEL_URL
+        );
+        assert_eq!(
+            reg.local_speech_model.sha256,
+            DEFAULT_LOCAL_SPEECH_MODEL_SHA256
+        );
     }
 
     #[test]
@@ -1351,6 +1421,7 @@ mod tests {
         std::env::set_var("RYU_LOCAL_CHAT_MODEL_ID", "my-custom-model");
         std::env::set_var("RYU_LOCAL_CHAT_MODEL_URL", "https://example.com/model.gguf");
         std::env::set_var("RYU_LOCAL_CHAT_MODEL_SHA256", "abc123");
+        std::env::set_var("RYU_LOCAL_SPEECH_MODEL_ID", "my-speech-model");
         let reg = ProviderRegistry::from_env();
         assert_eq!(reg.embedder.id, "custom/embed-model");
         assert_eq!(reg.embedder.dims, 512);
@@ -1361,6 +1432,7 @@ mod tests {
             "https://example.com/model.gguf"
         );
         assert_eq!(reg.local_chat_model.sha256, "abc123");
+        assert_eq!(reg.local_speech_model.id, "my-speech-model");
     }
 
     /// The classify tier's model must resolve to the pinned 270M GGUF out of the
@@ -1768,7 +1840,7 @@ mod tests {
         assert_eq!(reg.embed_base_url, "http://127.0.0.1:9991");
     }
 
-    /// All four local-GGUF triples are **env-only**. `local_chat_model` is the one
+    /// All five local-GGUF triples are **env-only**. `local_chat_model` is the one
     /// that most needs pinning: its key was the last half-live field in the schema —
     /// honoured by `pi_config` (`load()`) and ignored by the onboarding downloader,
     /// `llamacpp::{mod,process}`, `model_catalog_host` and `get_active_model`
@@ -1787,6 +1859,7 @@ mod tests {
               "local_chat_model_id":"file-chat","local_chat_model_url":"https://example.com/chat.gguf","local_chat_model_sha256":"deadbeef",
               "local_embed_model_id":"file-embed","local_embed_model_url":"https://example.com/embed.gguf","local_embed_model_sha256":"deadbeef",
               "local_reranker_model_id":"file-rerank","local_reranker_model_url":"https://example.com/rerank.gguf","local_reranker_model_sha256":"deadbeef",
+              "local_speech_model_id":"file-speech","local_speech_model_url":"https://example.com/speech.gguf","local_speech_model_sha256":"deadbeef",
               "rag_strategy":"graph"
             }"#,
         )
@@ -1806,6 +1879,7 @@ mod tests {
         assert_eq!(reg.local_chat_model.sha256, DEFAULT_LOCAL_CHAT_MODEL_SHA256);
         assert_eq!(reg.local_embed_model.id, DEFAULT_LOCAL_EMBED_MODEL_ID);
         assert_eq!(reg.local_reranker_model.id, DEFAULT_LOCAL_RERANKER_MODEL_ID);
+        assert_eq!(reg.local_speech_model.id, DEFAULT_LOCAL_SPEECH_MODEL_ID);
 
         // The env half still works.
         std::env::set_var("RYU_LOCAL_CHAT_MODEL_ID", "env-chat");
@@ -2046,11 +2120,11 @@ mod tests {
     /// The invariant: `from_env()` and `load()` must return the same value for every
     /// field any `from_env()` consumer reads. Those consumers are
     /// `search_host::CoreSearchEmbedder` (embed trio),
-    /// `model_catalog_host::default_model_repos` (chat + embed GGUFs),
+    /// `model_catalog_host::default_model_repos` (chat + embed + Speech Processing GGUFs),
     /// `sidecar::gateway::classify_model_id` and `llamacpp::classify` (classifier
     /// GGUF), `llamacpp::{mod,process}` and `server::get_active_model` (chat GGUF),
     /// `llamacpp::embed` (embed GGUF), `llamacpp::rerank` (rerank GGUF), and
-    /// `sidecar::onboarding::install_local_stack` (all four GGUFs). Verified by
+    /// `sidecar::onboarding::install_local_stack` (all five GGUFs). Verified by
     /// reading each call site, not assumed.
     ///
     /// Holding the invariant is what makes the choice of constructor unobservable at
@@ -2078,6 +2152,7 @@ mod tests {
               "local_embed_model_id":"file-embed","local_embed_model_url":"https://example.com/embed.gguf","local_embed_model_sha256":"bb",
               "local_reranker_model_id":"file-rerank","local_reranker_model_url":"https://example.com/rerank.gguf","local_reranker_model_sha256":"cc",
               "local_classifier_model_id":"file-classify","local_classifier_model_url":"https://example.com/classify.gguf","local_classifier_model_sha256":"dd",
+              "local_speech_model_id":"file-speech","local_speech_model_url":"https://example.com/speech.gguf","local_speech_model_sha256":"ee",
               "rag_strategy":"graph"
             }"#,
         )
@@ -2127,6 +2202,11 @@ mod tests {
             loaded.local_classifier_model, env_only.local_classifier_model,
             "local_classifier_model must have no file key: a mid-session desync \
              fails the firewall inspector and the routing classifier OPEN"
+        );
+        assert_eq!(
+            loaded.local_speech_model, env_only.local_speech_model,
+            "local_speech_model must have no file key: onboarding and the lazy \
+             Speech Processing sidecar must resolve the same model"
         );
     }
 

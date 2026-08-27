@@ -200,6 +200,24 @@ pub const CRM_PLUGIN_ID: &str = "@ryu/crm";
 /// app owns a process and is not part of the fresh-install preinstalled set.
 pub const EXPENSES_PLUGIN_ID: &str = "@ryu/expenses";
 
+/// Outreach is the small-batch campaign layer between Harbor CRM and Agent
+/// Inboxes. It is Core-tier because its compiled companion uses the reviewed
+/// model, storage, Mail, catalog, shell-theme, and toast host primitives; it
+/// remains opt-in so no outbound surface appears on a fresh node.
+pub const OUTREACH_PLUGIN_ID: &str = "@ryu/outreach";
+
+/// Projects is the local work-management layer between a customer record and
+/// an automation run. It is a Core-tier, opt-in Companion over shared storage.
+pub const PROJECTS_PLUGIN_ID: &str = "@ryu/projects";
+
+/// Invoices is a local accounts-receivable register. It tracks status and due
+/// dates but deliberately does not replace payment processing or accounting.
+pub const INVOICES_PLUGIN_ID: &str = "@ryu/invoices";
+
+/// People is a private local team directory for roles, onboarding, and leave
+/// status. Payroll and HRIS integrations remain outside the app.
+pub const PEOPLE_PLUGIN_ID: &str = "@ryu/people";
+
 /// Backstage is an external-repository Companion app. Its editor remains owned by
 /// `amajorai/backstage`; Ryu owns the generic host lifecycle, storage, and AI
 /// bridges. Its UI carriage is supplied by the external Marketplace/standalone
@@ -531,12 +549,13 @@ pub const TIMELINE_PLUGIN_ID: &str = "@ryu/timeline";
 /// `/skills/new` + `/skills/:id/edit` routes resolve on every fresh install.
 pub const SKILL_EDITOR_PLUGIN_ID: &str = "@ryu/skill-editor";
 
-/// The built-in **output styles** (`docs/output-styles.md`): six prose files a user
-/// picks between in the composer to change how the agent talks.
+/// The built-in **personality profiles** (`docs/output-styles.md`): eleven prose files
+/// an agent can assign to change how it talks.
 ///
 /// Carries no runnable, sidecar, hook or grant — `contributes.output_styles` is inert
 /// text Core parses and appends to the system prompt, and `contributes.store_tabs`
-/// points the Store at Core's own `/api/output-styles`. It is a plugin rather than a
+/// points the Store at Core's own `/api/output-styles`. The Store catalog is
+/// browse-only because assignment belongs to an agent. It is a plugin rather than a
 /// hardcoded table for the reason `Contributes::themes` gives: a contribution inherits
 /// install/enable, versioning, signing, the Store detail page and reviews for free, and
 /// it is what lets a third party ship a style at all. Pre-installed — see the entry in
@@ -889,6 +908,10 @@ pub const CORE_PLUGINS: &[&str] = &[
     // Expenses — same opt-in sidecar posture as Harbor, but with a companion bundle
     // carried by the explicit install path and an MCP server for the ledger agent.
     EXPENSES_PLUGIN_ID,
+    OUTREACH_PLUGIN_ID,
+    PROJECTS_PLUGIN_ID,
+    INVOICES_PLUGIN_ID,
+    PEOPLE_PLUGIN_ID,
     // Backstage — an external-repository Companion whose editor is carried by its
     // Marketplace/standalone package and whose provider calls use generic Ryu
     // model/media/storage bridges. Opt-in; it is not opened on a fresh node.
@@ -965,18 +988,18 @@ pub const CORE_PLUGINS: &[&str] = &[
     // hides its New/Edit affordances unless an enabled app answers the editor path, so
     // authoring is opt-in from the Store rather than a dead button. No `requires` edge.
     SKILL_EDITOR_PLUGIN_ID,
-    // The six built-in output styles (`docs/output-styles.md`). Core-tier AND
+    // The eleven built-in personality profiles (`docs/output-styles.md`). Core-tier AND
     // pre-installed, which for this one is a *reachability* decision rather than a
     // product-taste one: `contributes.output_styles` is served enabled-filtered, so a
-    // disabled record means the composer's style picker offers nothing but "None" and
-    // the Store tab is hidden (the desktop renders a contributed tab only when its app
-    // is installed AND enabled). Not pre-installed would have shipped a feature with no
-    // discovery path to turn itself on.
+    // disabled record means the agent editor offers no reusable profiles and the Store
+    // tab is hidden (the desktop renders a contributed tab only when its app is installed
+    // AND enabled). Not pre-installed would have shipped a feature with no discovery path
+    // to turn itself on.
     //
     // Affordable because the plugin is inert: no runnables, no sidecar, no hooks, no
-    // grants — six prose files nothing evaluates. Enabling it changes what is
-    // *listable*, never what runs, because the node default is "no style" (§8) and no
-    // built-in sets `force-for-plugin`. This is the same argument `exa` makes one
+    // grants — eleven prose files nothing evaluates. Enabling it changes what is
+    // *listable*, never what runs, because agents default to their own voice (§8) and
+    // no built-in sets `force-for-plugin`. This is the same argument `exa` makes one
     // block down (seed a provider so the capability is non-empty), minus the caveat
     // that sank `@ryu/browser` — there is no binary to fail to spawn.
     OUTPUT_STYLES_PLUGIN_ID,
@@ -1410,13 +1433,13 @@ pub const CORE_PREINSTALLED: &[&str] = &[
     // surface the user cannot reach is not a setting; it contributes no runnables,
     // gates no route, and spawns no process, so enabling it costs nothing.
     LAYERS_PLUGIN_ID,
-    // The six built-in output styles. Same shape as `layers` directly above — a
-    // picker whose options the user cannot reach is not a picker — and the same
+    // The eleven built-in personality profiles. Same shape as `layers` directly above —
+    // a catalog whose options the user cannot reach is not a catalog — and the same
     // zero cost: no runnables, no route gate, no process. `contributes.output_styles`
     // and the Store tab are both served enabled-filtered, so this line is what makes
     // the feature visible at all. Enabling it changes nothing about what RUNS: the
-    // node default is "no style", so every turn's prompt stays byte-identical until a
-    // user picks one (asserted by `no_output_style_leaves_the_acp_preamble_byte_identical`).
+    // every agent defaults to its own voice, so every turn's prompt stays byte-identical
+    // until an agent is assigned one (asserted by `no_output_style_leaves_the_acp_preamble_byte_identical`).
     //
     // CONSEQUENCE, deliberate: pre-installed ⇒ `is_uninstall_protected`, so the built-in
     // styles can be DISABLED but not uninstalled. Correct here — they are the picker's
@@ -1771,11 +1794,11 @@ mod tests {
     /// The built-in output styles must be reachable on a fresh install.
     ///
     /// This guards a gap that is invisible at the type level and silent at runtime:
-    /// both surfaces that expose a style — `contributes.output_styles` on
+    /// both surfaces that expose a profile — `contributes.output_styles` on
     /// `GET /api/plugins/contributions`, and the Store tab (which the desktop renders
     /// only when its app is installed AND enabled) — are served **enabled-filtered**.
     /// Drop this id from `CORE_PREINSTALLED` and nothing fails to compile and no test
-    /// about styles breaks; the composer's picker just quietly offers "None" forever,
+    /// about profiles breaks; the agent editor would quietly offer no reusable profile,
     /// with no discovery path anywhere in the product to turn it back on.
     #[test]
     fn output_styles_ship_reachable_on_a_fresh_install() {
@@ -1786,7 +1809,7 @@ mod tests {
         assert!(
             CORE_PREINSTALLED.contains(&OUTPUT_STYLES_PLUGIN_ID),
             "output-styles must be pre-installed or its contributions are filtered out of \
-             the composer picker and the Store tab, with no way for a user to reach it"
+             the agent editor and the Store tab, with no way for a user to reach them"
         );
     }
 

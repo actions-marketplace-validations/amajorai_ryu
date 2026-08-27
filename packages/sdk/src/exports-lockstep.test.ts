@@ -57,6 +57,7 @@ describe("package exports ↔ tsup entries lockstep", () => {
 		// Each of these is referenced by real consumers (fumadocs cookbooks,
 		// examples/, the desktop host, create-ryu-app) and must never 404.
 		const documented = [
+			"action",
 			"manifest",
 			"agent",
 			"model",

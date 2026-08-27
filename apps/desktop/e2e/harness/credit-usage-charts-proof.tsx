@@ -12,6 +12,9 @@ import {
 } from "@ryu/blocks/desktop/usage-analytics.ts";
 import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { SubscriptionUsageDashboard } from "../../src/components/usage/SubscriptionUsageDashboard.tsx";
+import type { SubscriptionUsageAccount } from "../../src/hooks/useSubscriptionUsage.ts";
+import type { UsageSnapshot } from "../../src/lib/api/usage.ts";
 import "../../src/index.css";
 
 const summary: UsageSummaryData = {
@@ -128,6 +131,156 @@ const analyticsEvents: UsageEvent[] = [
 const providerOptions = ["openai", "anthropic"];
 const modelOptions = ["gpt-4.1-mini", "claude-sonnet-4"];
 
+function snapshot(
+	overrides: Partial<UsageSnapshot> & Pick<UsageSnapshot, "agentId" | "engine">
+): UsageSnapshot {
+	return {
+		agentId: overrides.agentId,
+		available: true,
+		engine: overrides.engine,
+		extraUsageUsd: null,
+		meters: [],
+		plan: null,
+		reason: null,
+		retryAfterSeconds: null,
+		windows: [],
+		...overrides,
+	};
+}
+
+const subscriptionAccounts: SubscriptionUsageAccount[] = [
+	{
+		accountId: "claude-work",
+		accountLabel: "Work account",
+		active: true,
+		category: "Claude",
+		gatewayActive: false,
+		kind: "oauth",
+		loading: false,
+		providerId: "claude-pro-max",
+		providerLabel: "Claude (Pro/Max · login)",
+		snapshot: snapshot({
+			extraUsageUsd: 2.5,
+			plan: "Max 20x",
+			agentId: "claude-pro-max",
+			engine: "claude",
+			windows: [
+				{
+					label: "Session",
+					model: null,
+					resetsAt: "2026-09-01T18:00:00Z",
+					usedPercent: 28,
+					windowSeconds: 18_000,
+				},
+				{
+					label: "Weekly",
+					model: null,
+					resetsAt: "2026-09-05T00:00:00Z",
+					usedPercent: 62,
+					windowSeconds: 604_800,
+				},
+			],
+		}),
+		error: null,
+	},
+	{
+		accountId: "claude-personal",
+		accountLabel: "Personal account",
+		active: false,
+		category: "Claude",
+		gatewayActive: false,
+		kind: "oauth",
+		loading: false,
+		providerId: "claude-pro-max",
+		providerLabel: "Claude (Pro/Max · login)",
+		snapshot: snapshot({
+			plan: "Max 20x",
+			agentId: "claude-pro-max",
+			engine: "claude",
+			windows: [
+				{
+					label: "Session",
+					model: null,
+					resetsAt: "2026-09-01T12:00:00Z",
+					usedPercent: 84,
+					windowSeconds: 18_000,
+				},
+				{
+					label: "Weekly",
+					model: null,
+					resetsAt: "2026-09-05T00:00:00Z",
+					usedPercent: 74,
+					windowSeconds: 604_800,
+				},
+			],
+		}),
+		error: null,
+	},
+	{
+		accountId: "chatgpt-team",
+		accountLabel: "Team account",
+		active: false,
+		category: "ChatGPT",
+		gatewayActive: true,
+		kind: "oauth",
+		loading: false,
+		providerId: "openai-codex",
+		providerLabel: "ChatGPT (Plus/Pro · login)",
+		snapshot: snapshot({
+			plan: "Pro 5x",
+			agentId: "openai-codex",
+			engine: "codex",
+			meters: [
+				{
+					expiresAt: ["2026-09-02T00:00:00Z"],
+					label: "Rate limit resets",
+					resetsAt: "2026-09-02T00:00:00Z",
+					values: [
+						{ kind: "count", number: 3, unit: "available" },
+						{ kind: "count", number: 10, unit: "cap" },
+					],
+				},
+			],
+			windows: [
+				{
+					label: "Session",
+					model: null,
+					resetsAt: "2026-09-01T16:00:00Z",
+					usedPercent: 41,
+					windowSeconds: 18_000,
+				},
+				{
+					label: "Weekly",
+					model: null,
+					resetsAt: "2026-09-05T00:00:00Z",
+					usedPercent: 73,
+					windowSeconds: 604_800,
+				},
+			],
+		}),
+		error: null,
+	},
+	{
+		accountId: "copilot-old",
+		accountLabel: "Legacy account",
+		active: false,
+		category: "GitHub Copilot",
+		gatewayActive: false,
+		kind: "oauth",
+		loading: false,
+		providerId: "github-copilot",
+		providerLabel: "GitHub Copilot (login)",
+		snapshot: snapshot({
+			agentId: "github-copilot",
+			available: false,
+			engine: "copilot",
+			plan: "Pro",
+			reason: "token_expired",
+		}),
+		error: null,
+	},
+];
+
 const proofRange: UsageDateRange = {
 	from: new Date("2026-08-01T00:00:00.000Z"),
 	to: new Date("2026-08-18T00:00:00.000Z"),
@@ -186,13 +339,19 @@ function CreditUsageChartsProof() {
 						Ryu desktop verification artifact
 					</p>
 					<h1 className="font-semibold text-3xl tracking-tight">
-						Usage analytics
+						Usage & subscription analytics
 					</h1>
 					<p className="text-muted-foreground">
-						Explore requests, tokens, latency, errors, providers, models, and
-						non-credit traffic alongside the credit ledger.
+						Explore connected subscription accounts alongside requests, tokens,
+						latency, errors, providers, models, and the credit ledger.
 					</p>
 				</header>
+
+				<SubscriptionUsageDashboard
+					accounts={subscriptionAccounts}
+					catalogLoading={false}
+					onRefresh={() => undefined}
+				/>
 
 				<UsageView
 					analyticsDashboard={{

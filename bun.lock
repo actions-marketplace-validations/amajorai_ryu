@@ -28,7 +28,7 @@
     },
     "apps/cli": {
       "name": "cli",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "bin": {
         "ryu": "./src/index.tsx",
         "ryu-cli": "./src/index.tsx",
@@ -62,11 +62,11 @@
     },
     "apps/core": {
       "name": "core",
-      "version": "0.2.1",
+      "version": "0.2.2",
     },
     "apps/desktop": {
       "name": "desktop",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "dependencies": {
         "@ai-sdk/react": "catalog:",
         "@base-ui/react": "^1.3.0",
@@ -167,11 +167,11 @@
     },
     "apps/gateway": {
       "name": "gateway",
-      "version": "0.2.1",
+      "version": "0.2.2",
     },
     "apps/island": {
       "name": "island",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "dependencies": {
         "@ai-sdk/react": "catalog:",
         "@fontsource-variable/inter": "^5.2.8",
@@ -208,7 +208,7 @@
     },
     "apps/mcp": {
       "name": "mcp",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "bin": {
         "ryu-mcp": "./src/index.ts",
       },
@@ -232,7 +232,7 @@
     },
     "crates/sdk/napi": {
       "name": "@ryuhq/sdk-native",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "devDependencies": {
         "@napi-rs/cli": "^2.18.4",
       },
@@ -340,7 +340,7 @@
     },
     "packages/client": {
       "name": "@ryuhq/client",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "devDependencies": {
         "tsup": "^8.5.0",
         "typescript": "^5",
@@ -367,11 +367,11 @@
     },
     "packages/config": {
       "name": "@ryu/config",
-      "version": "0.2.1",
+      "version": "0.2.2",
     },
     "packages/core-client": {
       "name": "@ryuhq/core-client",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "dependencies": {
         "@ryuhq/protocol": "workspace:*",
       },
@@ -382,7 +382,7 @@
     },
     "packages/create-ryu-app": {
       "name": "create-ryu-app",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "bin": {
         "create-ryu-app": "./dist/index.js",
       },
@@ -412,7 +412,7 @@
     },
     "packages/github-action": {
       "name": "@ryuhq/github-action",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "dependencies": {
         "@actions/core": "^1.11.1",
       },
@@ -461,7 +461,7 @@
     },
     "packages/portable-packages": {
       "name": "@ryu/portable-packages",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "dependencies": {
         "fflate": "^0.8.3",
       },
@@ -473,7 +473,7 @@
     },
     "packages/protocol": {
       "name": "@ryuhq/protocol",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "devDependencies": {
         "@ryu/config": "workspace:*",
         "@types/bun": "catalog:",
@@ -482,7 +482,7 @@
     },
     "packages/sdk": {
       "name": "@ryuhq/sdk",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "bin": {
         "ryu": "./dist/cli.js",
       },

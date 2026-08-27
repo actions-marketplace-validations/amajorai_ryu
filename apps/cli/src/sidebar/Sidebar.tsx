@@ -199,7 +199,7 @@ function SectionList({ data }: { data: SidebarData }) {
 			createPath: "/agents",
 			items: data.agents,
 		},
-		{ key: "teams", title: "Teams", createPath: "/teams", items: data.teams },
+		{ key: "teams", title: "Groups", createPath: "/teams", items: data.teams },
 		{
 			key: "spaces",
 			title: "Spaces",

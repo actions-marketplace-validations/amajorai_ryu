@@ -48,6 +48,7 @@ import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
 import { useSkillPacks } from "@/src/hooks/useSkillPacks.ts";
 import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
+import { fetchEntitlementSnapshot } from "@/src/lib/api/billing.ts";
 import { runCatalogScan } from "@/src/lib/api/catalog-scan.ts";
 import type { DownloadKind } from "@/src/lib/api/downloads.ts";
 import { estimateLlmfit, listInstalledModels } from "@/src/lib/api/models.ts";
@@ -148,6 +149,18 @@ function useDesktopHostVersions(): Partial<Record<Surface, string>> {
 	return useMemo(() => (version ? { desktop: version } : {}), [version]);
 }
 
+/** Resolve the Marketplace plan marker for the shared catalog's ticket badge.
+ * This is presentation-only; lifecycle actions never read this result. */
+function useMarketplaceAccess(): boolean {
+	const query = useQuery({
+		queryKey: ["billing", "marketplace-access"],
+		queryFn: async () =>
+			Boolean((await fetchEntitlementSnapshot())?.entitlement?.marketplaceApps),
+		staleTime: 60_000,
+	});
+	return query.data ?? false;
+}
+
 /** Mount once above every store surface that renders the shared catalog sections. */
 export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 	const activeNode = useCatalogNode();
@@ -206,6 +219,7 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			runCatalogScan: (input) =>
 				runCatalogScan({ url: activeNode.url, token: activeNode.token }, input),
 			useAppsCatalog,
+			useMarketplaceAccess,
 			useSkillsCatalog,
 			useModelCatalog,
 			useSkillPacks,

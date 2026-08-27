@@ -1052,8 +1052,8 @@ pub fn plan_update(
 /// This is the STORE half of an update; it performs no signature / `ui_code`
 /// verification of its own. That verification lives in the catalog resolve path
 /// the server handler drives (`resolve_plugin_from_catalog` → `install_descriptor`,
-/// the SAME ed25519 signature + `ui_code_sha256` integrity gate + paid-entitlement
-/// gate that `install` runs). Callers MUST pass only a `(manifest, ui_code)` pair
+/// the SAME ed25519 signature + `ui_code_sha256` integrity checks that `install`
+/// runs). Callers MUST pass only a `(manifest, ui_code)` pair
 /// that path returned — never an unverified or merely-loaded manifest — so an
 /// update can never swap in unverified code the way the old `set_version`-only
 /// path could.

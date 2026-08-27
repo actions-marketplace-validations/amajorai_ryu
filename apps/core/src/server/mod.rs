@@ -1429,7 +1429,7 @@ fn portable_package_version(
 ///
 /// This endpoint deliberately does not consult the control plane. Once an
 /// archive has been installed, its local bytes and lifecycle state remain
-/// usable even if the buyer's paid entitlement later expires.
+/// usable regardless of its listed price or optional commerce state.
 async fn marketplace_packages_installed() -> axum::response::Response {
     match crate::portable_packages::list() {
         Ok(packages) => Json(json!({ "packages": packages })).into_response(),
@@ -1555,8 +1555,8 @@ async fn install_portable_marketplace_package(
 }
 
 /// `POST /api/marketplace/packages/install { kind, id }` — download and install
-/// an entitlement-gated GitHub Release package. The lifecycle gate runs before
-/// any control-plane request or filesystem work.
+/// a signed GitHub Release package. The lifecycle ACL runs before any
+/// control-plane request or filesystem work; listed price does not gate access.
 async fn marketplace_package_install(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
@@ -1598,9 +1598,9 @@ async fn marketplace_package_install(
     .await
 }
 
-/// `POST /api/marketplace/packages/update { kind, id }` — entitlement is
-/// checked by the detail/download proxy before the old local package is
-/// replaced. A failed download or digest check leaves the old version intact.
+/// `POST /api/marketplace/packages/update { kind, id }` — the signed detail and
+/// download handoff is checked before the old local package is replaced. A failed
+/// download or digest check leaves the old version intact.
 async fn marketplace_package_update(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
@@ -3437,7 +3437,7 @@ pub fn create_router(
         // blocks (catalog + CRUD/versions) live in the one fn. ──
         .merge(skills_routes(&state))
         // ── Output styles (`/api/output-styles/*`) — the style registry + authoring
-        // + node-default selection. UNGATED on purpose (see `output_styles_routes`):
+        // + legacy node-default selection. UNGATED on purpose (see `output_styles_routes`):
         // a style is a Core axis like the selected model, and three of its four
         // sources are not plugins at all. ──
         .merge(output_styles_routes())
@@ -3530,7 +3530,7 @@ pub fn create_router(
             get(app_lifecycle_capabilities),
         )
         // GitHub-backed portable packages. The control plane resolves the
-        // signed descriptor and entitlement-gated proxy URL; Core verifies the
+        // signed descriptor and Marketplace proxy URL; Core verifies the
         // archive and owns the on-node package lifecycle. These routes cover
         // package kinds that are newer than the legacy CatalogKind adapters.
         .route(
@@ -3688,6 +3688,10 @@ pub fn create_router(
             get(pi_provider_accounts),
         )
         .route(
+            "/api/pi-config/providers/:id/accounts/:account_id/usage",
+            get(usage_api::provider_account_usage),
+        )
+        .route(
             "/api/pi-config/providers/:id/accounts/switch",
             post(pi_provider_account_switch),
         )
@@ -3723,6 +3727,10 @@ pub fn create_router(
         )
         .route("/api/mcp/tools", get(list_mcp_tools))
         .route("/api/mcp/tools/call", post(call_mcp_tool))
+        // Canonical Actions are an action-shaped projection of the same
+        // approval-aware tool dispatcher. The wildcard accepts a namespaced
+        // `<plugin-id>/<action-id>` while a plain action id remains ergonomic.
+        .route("/api/actions/*action_id", post(call_action))
         // Command-approval scan for callers Core cannot gate at the ACP
         // `request_permission` seam — today the flagship Pi agent's built-in
         // `bash`, via `assets/pi-extensions/ryu-plan.ts`. A thin proxy to
@@ -4220,6 +4228,10 @@ pub fn create_router(
         .route(
             "/api/workspace/new-folder",
             post(git::create_project_folder),
+        )
+        .route(
+            "/api/workspace/clone",
+            post(git::clone_project_folder_authorized),
         )
         .route("/api/workspace/list", get(git::list_directory))
         // ── Worktree diff (read-only, Unit U011) ────────────────────────────
@@ -4787,8 +4799,8 @@ fn skills_routes(state: &ServerState) -> Router<ServerState> {
 /// `OnceLock` makes the loser's `set` a harmless no-op (both then read the winner's
 /// `Arc`, which is the same disk scan).
 ///
-/// [`ryu_output_styles::set_data_dir`] is called here rather than in main.rs for the
-/// same reason `ryu_skills::set_data_dir` is called before `SkillRegistry::load`: the
+/// [`ryu_output_styles::set_data_dir`] is also called here as a fallback for embedded
+/// callers; normal startup publishes it before plugin activation. The legacy
 /// selection file and the profile-aware user styles root must resolve against the
 /// real (possibly relocated) data folder, not the crate's `$RYU_DIR`/`~/.ryu`
 /// fallback. Both are `OnceLock`s, so the ordering only has to hold on the first
@@ -4812,8 +4824,8 @@ fn output_style_registry() -> &'static ryu_output_styles::OutputStyleRegistry {
 /// model or the default agent — not an app feature. Three of its four sources
 /// (user, project, managed; design §3) have nothing to do with any plugin, and the
 /// authoring surface writes the user root. Gating this on `@ryu/output-styles` would
-/// mean disabling the plugin that ships the six built-in styles also took away the
-/// styles the user wrote themselves, plus the picker that selects them.
+/// mean disabling the plugin that ships the ten built-in profiles also took away the
+/// styles the user wrote themselves, plus the profile selector that assigns them.
 ///
 /// This is *not* the [`collect_plugin_store_tabs`] carve-out ("the declaration is
 /// ungated, the data behind it keeps its own gate") — there is no gate to keep. The
@@ -5320,6 +5332,17 @@ fn voice_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
         // STT — proxies audio to whisper.cpp.
         .route("/api/voice/transcribe", post(voice::transcribe))
+        // Speech Processing — optional post-ASR cleanup, served by the dedicated
+        // lazy S1-mini llama.cpp sidecar.
+        .route(
+            "/api/voice/speech-processing-engines",
+            get(voice::speech_processing_engines),
+        )
+        .route(
+            "/api/voice/speech-processing-model/install",
+            post(voice::speech_processing_model_install),
+        )
+        .route("/api/voice/speech-processing", post(voice::speech_processing))
         // TTS — OuteTTS (built-in) or `?engine=` via the universal Ryu TTS sidecar.
         .route("/api/voice/speak", post(voice::speak))
         .route("/api/voice/tts-engines", get(voice::tts_engines))
@@ -5994,12 +6017,6 @@ async fn set_preference(
             }
             if key == crate::entitlement::MANAGED_INFERENCE_ENTITLED_PREF_KEY {
                 crate::entitlement::set_managed_inference_entitled(&body.value);
-            }
-            if key == crate::entitlement::MARKETPLACE_APPS_ENTITLED_PREF_KEY {
-                crate::entitlement::set_marketplace_apps_entitled(&body.value);
-            }
-            if key == crate::entitlement::MARKETPLACE_DIRECT_LICENSED_ITEMS_PREF_KEY {
-                crate::entitlement::set_marketplace_direct_licensed_items(&body.value);
             }
             // Generic per-agent gateway routing: keep the in-process map in sync so
             // the next spawn of any toggled agent injects (or omits) OPENAI_BASE_URL.
@@ -8853,6 +8870,23 @@ async fn acp_logout(
     }
 }
 
+/// Where a provider account should become active. `self` keeps the account in
+/// the current Ryu/Pi session; `gateway` installs an API-key account in the
+/// shared Gateway and therefore requires `gateway.configure` on org-bound nodes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum AccountActionTarget {
+    #[serde(rename = "self")]
+    SelfTarget,
+    Gateway,
+}
+
+impl Default for AccountActionTarget {
+    fn default() -> Self {
+        Self::SelfTarget
+    }
+}
+
 /// Body for the provider/agent account switch + remove routes.
 #[derive(serde::Deserialize)]
 struct AccountAction {
@@ -8863,6 +8897,9 @@ struct AccountAction {
     /// accounts, which live in a provider scope).
     #[serde(default)]
     provider: Option<String>,
+    /// `self` (default) or `gateway` for a provider account switch.
+    #[serde(default)]
+    target: AccountActionTarget,
 }
 
 /// `GET /api/pi-config/providers/:id/accounts` — the accounts a provider holds
@@ -8882,20 +8919,117 @@ async fn pi_provider_accounts(Path(provider_id): Path<String>) -> Json<serde_jso
 }
 
 /// `POST /api/pi-config/providers/:id/accounts/switch` — make another stored
-/// account the active one for a provider, materializing it into Pi's files.
+/// account active for the current Ryu session, or install an API-key account in
+/// the shared Gateway when `target` is `gateway`.
 #[utoipa::path(
     post,
     path = "/api/pi-config/providers/{id}/accounts/switch",
     tag = "Agents",
     summary = "Switch a Pi provider's active account",
+    description = "Switches the account for the current Ryu session by default. Set target to gateway to install a gateway-compatible BYOK account in the shared Gateway; that target requires the gateway.configure permission.",
     params(("id" = String, Path, description = "Provider id")),
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn pi_provider_account_switch(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(provider_id): Path<String>,
     Json(body): Json<AccountAction>,
 ) -> axum::response::Response {
+    if matches!(body.target, AccountActionTarget::Gateway) {
+        if enforce_permission(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::GATEWAY_CONFIGURE,
+        )
+        .await
+        .is_err()
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "switched": false,
+                    "error": "insufficient permissions: gateway.configure",
+                })),
+            )
+                .into_response();
+        }
+        let Some(gateway_provider) = crate::pi_config::gateway_provider_slug(&provider_id) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "switched": false,
+                    "error": "this provider account cannot be installed in the Gateway",
+                })),
+            )
+                .into_response();
+        };
+        let api_key = match crate::pi_config::provider_account_api_key(
+            &provider_id,
+            &body.account_id,
+        ) {
+            Ok(key) => key,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "switched": false,
+                        "error": error.to_string(),
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        let (status, Json(result)) = gateway_set_provider(
+            State(state.clone()),
+            Extension(caller.clone()),
+            Json(SetProviderBody {
+                provider: gateway_provider.to_owned(),
+                api_key: Some(api_key),
+            }),
+        )
+        .await;
+        if !status.is_success() || result.get("success") != Some(&serde_json::Value::Bool(true)) {
+            return (status, Json(result)).into_response();
+        }
+        return match crate::pi_config::set_provider_gateway_active(&provider_id, &body.account_id) {
+            Ok(true) => Json(crate::pi_config::catalog()).into_response(),
+            Ok(false) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "switched": false,
+                    "error": "the Gateway account marker could not be updated",
+                })),
+            )
+                .into_response(),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "switched": false,
+                    "error": error.to_string(),
+                })),
+            )
+                .into_response(),
+        };
+    }
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_RUN,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "switched": false,
+                "error": "insufficient permissions: agent.run",
+            })),
+        )
+            .into_response();
+    }
     match crate::pi_config::switch_provider_account(&provider_id, &body.account_id) {
         Ok(catalog) => Json(catalog).into_response(),
         Err(e) => (
@@ -12475,53 +12609,9 @@ async fn plugin_doctor(
     summary = "List the plugin catalog",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn list_apps_catalog(
-    State(state): State<ServerState>,
-    headers: axum::http::HeaderMap,
-) -> Json<serde_json::Value> {
-    list_apps_catalog_for_surface(&state, surface_from_headers(&headers)).await
-}
-
-/// Build the catalog projection for a caller surface.
-///
-/// Paid Marketplace listings are intentionally absent from the mobile catalog:
-/// this surface has no StoreKit/Play Billing implementation and must not expose
-/// an install or checkout path that could unlock digital value. Existing paid
-/// installs remain available through `GET /api/plugins`, whose surface filter is
-/// separate from this browse-only catalog projection.
-async fn list_apps_catalog_for_surface(
-    state: &ServerState,
-    surface: Option<crate::plugin_manifest::Surface>,
-) -> Json<serde_json::Value> {
-    let entries = filter_mobile_paid_plugin_catalog_entries(
-        merged_plugin_catalog_entries(state).await,
-        surface,
-    );
+async fn list_apps_catalog(State(state): State<ServerState>) -> Json<serde_json::Value> {
+    let entries = merged_plugin_catalog_entries(&state).await;
     Json(json!({ "entries": entries }))
-}
-
-fn is_paid_plugin_catalog_entry(entry: &serde_json::Value) -> bool {
-    let Some(pricing) = entry.get("pricing").filter(|value| value.is_object()) else {
-        return false;
-    };
-    pricing
-        .get("kind")
-        .or_else(|| pricing.get("model"))
-        .and_then(serde_json::Value::as_str)
-        .is_none_or(|kind| kind != "free")
-}
-
-fn filter_mobile_paid_plugin_catalog_entries(
-    entries: Vec<serde_json::Value>,
-    surface: Option<crate::plugin_manifest::Surface>,
-) -> Vec<serde_json::Value> {
-    if surface != Some(crate::plugin_manifest::Surface::Mobile) {
-        return entries;
-    }
-    entries
-        .into_iter()
-        .filter(|entry| !is_paid_plugin_catalog_entry(entry))
-        .collect()
 }
 
 /// The active Plugin catalog source (Ryu Marketplace by default, or integrations.sh
@@ -12552,7 +12642,7 @@ async fn community_plugin_source(state: &ServerState) -> Option<crate::catalog_s
 
 /// The plugin catalog source ids that render as ONE "Ryu Marketplace" view.
 ///
-/// `ryu-marketplace` is the GitHub-backed hosted bridge (commerce, entitlements,
+/// `ryu-marketplace` is the GitHub-backed hosted bridge (commerce metadata,
 /// signatures, and buyer downloads); `ryu-catalog` is the read-only compatibility
 /// reader for the pre-bridge central marketplace.json index. They are two BACKENDS
 /// of a single product surface, and splitting them across two picker rows made the
@@ -13005,10 +13095,8 @@ fn plugin_entry_matches_query(entry: &serde_json::Value, needle: &str) -> bool {
 )]
 async fn plugin_catalog_browse(
     State(state): State<ServerState>,
-    headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let surface = surface_from_headers(&headers);
     let query = params.get("query").map(String::as_str).unwrap_or("");
     let limit = params
         .get("limit")
@@ -13054,7 +13142,7 @@ async fn plugin_catalog_browse(
                 (
                     StatusCode::OK,
                     Json(json!({
-                        "entries": filter_mobile_paid_plugin_catalog_entries(entries, surface),
+                        "entries": entries,
                         "next_cursor": val.get("next_cursor").cloned().unwrap_or(serde_json::Value::Null),
                         "note": val.get("note").cloned().unwrap_or(serde_json::Value::Null),
                     })),
@@ -13076,10 +13164,7 @@ async fn plugin_catalog_browse(
         return (
             StatusCode::OK,
             Json(json!({
-                "entries": filter_mobile_paid_plugin_catalog_entries(
-                    all_plugin_catalog_entries(&state, query, limit).await,
-                    surface,
-                ),
+                "entries": all_plugin_catalog_entries(&state, query, limit).await,
                 // No cursor: the page is a concatenation of N independently
                 // paginated feeds, and one opaque cursor cannot address a position
                 // in all of them. Each source contributes at most `limit` rows and
@@ -13104,7 +13189,7 @@ async fn plugin_catalog_browse(
         return (
             StatusCode::OK,
             Json(json!({
-                "entries": filter_mobile_paid_plugin_catalog_entries(entries, surface),
+                "entries": entries,
                 "next_cursor": serde_json::Value::Null
             })),
         );
@@ -13134,7 +13219,7 @@ async fn plugin_catalog_browse(
                 (
                     StatusCode::OK,
                     Json(json!({
-                    "entries": filter_mobile_paid_plugin_catalog_entries(entries, surface),
+                    "entries": entries,
                         "next_cursor": val.get("next_cursor").cloned().unwrap_or(serde_json::Value::Null),
                         "note": val.get("note").cloned().unwrap_or(serde_json::Value::Null),
                     })),
@@ -13368,7 +13453,7 @@ async fn plugin_catalog_detail(
         } else if is_merged_plugin_view(&source_id) {
             let mut list = Vec::new();
             // Hosted bridge first: it is authoritative for GitHub-backed listings,
-            // offers, entitlements, and signed downloads. The legacy index follows
+            // offers, publisher metadata, and signed downloads. The legacy index follows
             // only as a read-only compatibility source.
             for id in PLUGIN_MERGED_SOURCE_IDS {
                 if let Some(source) = plugin_source_by_id(&state, id).await {
@@ -14029,6 +14114,17 @@ fn merge_plugin_contract_fields(
             obj.insert("surfaces".to_owned(), json!(listed));
         }
     }
+    // Keep the richer support level on the CARD as well as on detail. The card
+    // itself stays visually quiet, but a native/read-only host may need to explain
+    // support without making a second detail request. This comes from the same
+    // allowlisted projection used by local and community detail payloads, so the
+    // three surfaces cannot grow different interpretations of `surfaces`.
+    if let Ok(manifest) = serde_json::to_value(m) {
+        let support = crate::catalog_source::manifest_surface::project_surface_support(&manifest);
+        if !support.is_empty() {
+            obj.insert("surface_support".to_owned(), json!(support));
+        }
+    }
     // capabilities: declared, else derived from permission_grants.
     obj.insert("capabilities".to_owned(), json!(m.resolved_capabilities()));
     // runnables: bundled runnables as {id, kind, name}. `enabled` is intentionally
@@ -14468,16 +14564,9 @@ fn screen_guarded_hostname(host: &str) -> Result<(), String> {
 )]
 async fn install_app_from_url(
     State(state): State<ServerState>,
-    headers: axum::http::HeaderMap,
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<InstallFromUrlRequest>,
 ) -> axum::response::Response {
-    if surface_from_headers(&headers) == Some(crate::plugin_manifest::Surface::Mobile) {
-        return json_error(
-            StatusCode::FORBIDDEN,
-            "Marketplace installs are not available in Ryu Mobile".to_owned(),
-        );
-    }
     if let Err(response) = enforce_app_lifecycle_permission(
         &state,
         &caller,
@@ -15426,7 +15515,8 @@ async fn write_plugin_manifest_to_disk(
 /// resolve errors and nothing is installed). Only the VALIDATED manifest + ui_code
 /// reach here (in `descriptor.raw`), so this handler just persists them through
 /// the SAME sink `install-bundle` uses. An unsigned item resolves with `ui_code`
-/// null (a benign summary). The buyer bearer is forwarded for paid plugins (#491).
+/// null (a benign summary). The buyer bearer is forwarded when present for
+/// optional Marketplace account-aware operations.
 #[utoipa::path(
     post,
     path = "/api/plugins/catalog/install",
@@ -15441,12 +15531,6 @@ async fn install_plugin_from_catalog(
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<PluginCatalogInstallBody>,
 ) -> axum::response::Response {
-    if surface_from_headers(&headers) == Some(crate::plugin_manifest::Surface::Mobile) {
-        return json_error(
-            StatusCode::FORBIDDEN,
-            "Marketplace installs are not available in Ryu Mobile".to_owned(),
-        );
-    }
     if let Err(response) = enforce_app_lifecycle_permission(
         &state,
         &caller,
@@ -15493,12 +15577,11 @@ async fn install_plugin_from_catalog(
         );
     }
 
-    // Forward the caller's bearer to the marketplace install handoff (#491) so a
-    // PAID plugin is denied unless the buyer org holds a license. EVERY dependency
-    // resolved below goes through the SAME `install_descriptor` seam with the SAME
-    // bearer, so a dependency clears the identical signature + ui_code-integrity +
-    // paid-entitlement gates as the plugin the user actually clicked. A dependency
-    // is never a back door around the gate the target gets.
+    // Forward the caller's bearer to the Marketplace install handoff for optional
+    // account-aware commerce. EVERY dependency resolved below goes through the
+    // SAME `install_descriptor` seam with the SAME bearer, so a dependency clears
+    // the identical signature + ui_code-integrity checks as the plugin the user
+    // actually clicked. Pricing is not an access gate for the target or its deps.
     let buyer_token = buyer_bearer_from_headers(&headers);
 
     // The installed set: both the dependency graph's "already satisfied" side and
@@ -16163,13 +16246,6 @@ async fn resolve_plugin_from_catalog_inner(
                 .get("orgVerified")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
-            membership_required: descriptor.source_id
-                == crate::plugins::isolation::OFFICIAL_MARKETPLACE_SOURCE_ID
-                && descriptor
-                    .raw
-                    .get("membershipIncluded")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
             org_verified_tier: descriptor
                 .raw
                 .get("orgVerifiedTier")
@@ -16252,17 +16328,6 @@ async fn plugin_ui_bundle(
     };
     if !record.enabled {
         return json_error(StatusCode::NOT_FOUND, "plugin not enabled".to_owned());
-    }
-    if record
-        .provenance
-        .as_ref()
-        .is_some_and(|provenance| provenance.membership_required)
-        && !crate::entitlement::marketplace_app_allowed(&id)
-    {
-        return json_error(
-            StatusCode::PAYMENT_REQUIRED,
-            "an active Ryu Membership or recurring plan is required to run this app".to_owned(),
-        );
     }
     match state.app_store.get_ui_code(&id).await {
         Ok(Some(code)) => Json(json!({ "code": code })).into_response(),
@@ -16756,21 +16821,6 @@ async fn enable_app_handler(
         );
     };
 
-    if let Ok(Some(record)) = state.app_store.get(&id).await {
-        if record
-            .provenance
-            .as_ref()
-            .is_some_and(|provenance| provenance.membership_required)
-            && !crate::entitlement::marketplace_app_allowed(&id)
-        {
-            return json_error(
-                StatusCode::PAYMENT_REQUIRED,
-                "an active Ryu Membership or recurring plan is required to enable this app"
-                    .to_owned(),
-            );
-        }
-    }
-
     let gw_url = gateway_url();
     let gw_token = gateway_token();
 
@@ -16967,26 +17017,6 @@ async fn activate_plugin(
     manifest: &crate::plugin_manifest::PluginManifest,
     record: &crate::plugins::PluginRecord,
 ) -> (Vec<serde_json::Value>, PolicyApplyOutcome) {
-    if record
-        .provenance
-        .as_ref()
-        .is_some_and(|provenance| provenance.membership_required)
-        && !crate::entitlement::marketplace_app_allowed(&manifest.id)
-    {
-        tracing::info!(
-            plugin = %manifest.id,
-            "activate_plugin: Membership entitlement is not active; app remains inert"
-        );
-        return (
-            vec![json!({
-                "id": manifest.id,
-                "ok": false,
-                "error": "an active Ryu Membership or recurring plan is required to run this app",
-            })],
-            PolicyApplyOutcome::default(),
-        );
-    }
-
     // Build and run the RunnableRegistry to activate the manifest's Runnables.
     // Handlers capture cloned subsystem handles; the registry is built per-call
     // so ServerState stays Clone (no non-Clone field added).
@@ -17752,7 +17782,7 @@ fn collect_plugin_settings_tabs(
 /// `parse_output_style_md` rather than mirrored manifest keys because design §4
 /// makes the frontmatter the single source of truth for it — an unparseable
 /// contribution is skipped here exactly as it is skipped at registration, so this
-/// list never advertises a style the picker cannot select.
+/// list never advertises a style the profile selector cannot assign.
 fn collect_plugin_output_styles(
     manifests: &[crate::plugin_manifest::PluginManifest],
     enabled_ids: &std::collections::HashSet<String>,
@@ -18183,10 +18213,6 @@ async fn plugin_contributions(
                 "plugin_id": manifest.id,
                 "approved_grants": record.approved_grants,
                 "has_ui": has_ui && cfg.ui_entry.is_some(),
-                "membership_required": record
-                    .provenance
-                    .as_ref()
-                    .is_some_and(|provenance| provenance.membership_required),
                 // Provenance, NOT trust tier and NOT privilege: whether this app's
                 // manifest ships compiled into the binary (`BUILTIN_MANIFESTS`). The
                 // host panel uses it for ONE presentational decision — whether the
@@ -19904,8 +19930,8 @@ struct UpdateAppBody {
 ///
 /// The old handler bumped the store version off `find_manifest` (the in-memory,
 /// already-loaded manifest) and called `set_version` — it never re-fetched the
-/// target version, never re-ran the ed25519 signature verify, never re-checked the
-/// `ui_code_sha256` integrity gate, and never re-checked paid entitlement. An update
+/// target version, never re-ran the ed25519 signature verify, and never re-checked the
+/// `ui_code_sha256` integrity gate. An update
 /// could therefore swap in UNVERIFIED code. This handler treats an update as a
 /// re-install of the new version:
 ///
@@ -19913,9 +19939,8 @@ struct UpdateAppBody {
 /// 2. **Re-verify by re-resolving** the target from the catalog via
 ///    [`resolve_plugin_from_catalog`] — the SAME path `install` uses, which runs
 ///    `verify_manifest_signature` (ed25519) + the fail-closed `ui_code_sha256` gate
-///    (inside `install_descriptor`) + forwards the buyer bearer for the paid
-///    entitlement check. A tampered bundle, a bad signature, an unentitled paid
-///    plugin, or an unreachable verify gateway all fail HERE — before any mutation,
+///    (inside `install_descriptor`). A tampered bundle, a bad signature, or an
+///    unreachable verify gateway all fail HERE — before any mutation,
 ///    so the OLD version stays fully intact.
 /// 3. **Downgrade / no-op gate** ([`plan_update`]) before any mutation.
 /// 4. **Resolve + install any NEW dependencies** the new version declares, reusing
@@ -20030,8 +20055,9 @@ async fn update_app_handler(
     let switching_channel = requested_version.is_none() && target_channel != record.channel;
 
     // 2. RE-VERIFY: re-resolve the target from the catalog. This runs the ed25519
-    //    signature verify + the fail-closed ui_code integrity gate + the paid
-    //    entitlement check (buyer bearer forwarded), all inside `install_descriptor`.
+    //    signature verify + the fail-closed ui_code integrity gate + optional
+    //    account-aware Marketplace behavior (buyer bearer forwarded), all inside
+    //    `install_descriptor`.
     //    Nothing is mutated yet — a verify failure leaves the OLD version intact.
     //    Resolution is channel-scoped: a train with no build errors out here (the
     //    resolve reports which channel was asked for) rather than falling back.
@@ -22592,6 +22618,9 @@ async fn migrate_to_ryu(
         if source.model.is_some() {
             c.push("model");
         }
+        if source.persona.is_some() {
+            c.push("persona");
+        }
         c
     };
 
@@ -22609,6 +22638,7 @@ async fn migrate_to_ryu(
                 tools: Some(source.tools.clone()),
                 model: source.model.clone(),
                 engine: Some("acp:pi".to_owned()),
+                persona: source.persona.clone(),
                 ..Default::default()
             };
             match state.agent_store.update(RYU_AGENT_ID, patch).await {
@@ -22640,6 +22670,7 @@ async fn migrate_to_ryu(
                 tools: source.tools.clone(),
                 model: source.model.clone(),
                 engine: Some("acp:pi".to_owned()),
+                persona: source.persona.clone(),
                 ..Default::default()
             };
             match state
@@ -22956,8 +22987,8 @@ async fn published_agent_install(
 
     // A completed install is authoritative even when the publisher has since
     // mutated the listing. Only a server-verified caller may take this fast
-    // path; anonymous/local requests must reach the catalog so its entitlement
-    // check still runs before an empty-scope mapping can be replayed.
+    // path; anonymous/local requests must reach the catalog so its signed
+    // descriptor and source checks still run before an empty-scope mapping can be replayed.
     if caller.is_some() {
         match state
             .agent_store
@@ -22986,8 +23017,8 @@ async fn published_agent_install(
         }
     }
 
-    // Forward the caller's bearer to the marketplace install handoff (#491) so a
-    // PAID listing is denied unless the buyer org holds a license.
+    // Forward the caller's bearer to the Marketplace install handoff for optional
+    // account-aware commerce. A listing price or license does not gate install.
     let buyer_token = buyer_bearer_from_headers(&headers);
 
     let Some(source) = active_published_agent_source(&state).await else {
@@ -23135,6 +23166,9 @@ fn binary_installed_on_disk(name: &str) -> bool {
     // is the one `start()` will actually act on.
     if name == "tailscale" {
         return crate::sidecar::tailscale::resolve_mesh_pair().is_ok();
+    }
+    if name == "mesh-llm" {
+        return crate::sidecar::providers::mesh_llm::installer::binary_is_available();
     }
     // llama.cpp (and every tier that shares its binary) installs into a
     // per-variant directory rather than loose in `~/.ryu/bin`, because the CPU,
@@ -28821,6 +28855,18 @@ struct CallToolBody {
     budget_already_metered: bool,
 }
 
+#[derive(serde::Deserialize)]
+struct CallActionBody {
+    #[serde(default)]
+    arguments: serde_json::Value,
+    /// The calling agent is required so Core can apply its exact allowlist and
+    /// approval posture; the node bearer alone authenticates only the machine.
+    agent_id: Option<String>,
+    /// Optional Composio entity/audit selector. This is never an auth principal.
+    #[serde(default)]
+    user_id: Option<String>,
+}
+
 fn is_billable_composio_tool(tool_id: &str) -> bool {
     tool_id.starts_with("composio.") || tool_id.starts_with("composio__")
 }
@@ -28932,6 +28978,47 @@ async fn call_mcp_tool(
         )
             .into_response(),
     }
+}
+
+/// `POST /api/actions/{action_id}` — invoke one SDK Action by its semantic id.
+/// Resolution is action-marker-only, then the request re-enters
+/// `call_mcp_tool`, so schema/backend/allowlist/identity/approval/audit behavior
+/// cannot drift between the HTTP Action and MCP projections.
+#[utoipa::path(
+    post,
+    path = "/api/actions/{action_id}",
+    tag = "Actions",
+    summary = "Call a canonical Action",
+    params(("action_id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn call_action(
+    State(state): State<ServerState>,
+    Path(action_id): Path<String>,
+    Json(body): Json<CallActionBody>,
+) -> axum::response::Response {
+    let Some(tool_id) = state.mcp.resolve_action_tool_id(&action_id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": format!("unknown action '{action_id}'") })),
+        )
+            .into_response();
+    };
+    call_mcp_tool(
+        State(state),
+        Json(CallToolBody {
+            tool: tool_id,
+            arguments: body.arguments,
+            agent_id: body.agent_id,
+            user_id: body.user_id,
+            host_conversation_id: None,
+            // The public Action route must never accept the Gateway's internal
+            // charge-bypass marker.
+            budget_already_metered: false,
+        }),
+    )
+    .await
 }
 
 // ── The network MCP surface (`POST /mcp/:agent_id`) ──────────────────────────
@@ -35039,13 +35126,12 @@ struct ModelInstallBody {
     format: Option<String>,
 }
 
-/// Header carrying the buyer's CONTROL-PLANE session bearer for a marketplace
+/// Header carrying the buyer's CONTROL-PLANE session bearer for a Marketplace
 /// install (#491). Distinct from `Authorization` on purpose: `Authorization`
 /// holds the Core **node** token (a machine secret the control plane does not
 /// recognize as a user), so the desktop sends its signed-in Better-Auth session
-/// token here instead, and Core forwards it to the install handoff. The control
-/// plane resolves the buyer org + license from it. Absent ⇒ anonymous install
-/// (free items only).
+/// token here instead, and Core forwards it to the install handoff for optional
+/// account-aware commerce. Absent ⇒ anonymous install.
 const BUYER_TOKEN_HEADER: &str = "x-ryu-buyer-token";
 
 /// Extract the caller's marketplace buyer bearer to forward to the install
@@ -35053,7 +35139,7 @@ const BUYER_TOKEN_HEADER: &str = "x-ryu-buyer-token";
 /// control-plane session token); when absent, falls back to the
 /// `Authorization: Bearer …` value so a direct/headless caller hitting Core with
 /// a real user token still works. Returns the trimmed token, or `None` for an
-/// anonymous (free-item) install.
+/// anonymous install.
 fn buyer_bearer_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
     let from_dedicated = headers
         .get(BUYER_TOKEN_HEADER)
@@ -38212,6 +38298,21 @@ async fn install_sidecar(
                 )
                 .await
                 .map(|_| "installed".to_string()),
+            // Mesh LLM is adopt-or-start: Ryu keeps its config and model cache
+            // outside the node data directory, and only records the executable's
+            // presence after the operator installs it or Homebrew succeeds.
+            "mesh-llm" => downloads
+                .register_indeterminate(
+                    "engine:mesh-llm".to_string(),
+                    crate::downloads::DownloadKind::Engine,
+                    "Mesh LLM".to_string(),
+                    async {
+                        crate::sidecar::providers::mesh_llm::installer::ensure_installed()
+                            .await
+                            .map(|_| "adopted".to_string())
+                    },
+                )
+                .await,
             // The mesh client (#478). Two legs by asset reality, not by taste — see
             // `sidecar/tailscale/downloader.rs`: a pinned upstream `.tgz` through the
             // download center where one exists, and Homebrew on macOS, where
@@ -45438,27 +45539,19 @@ mod pure_helper_tests {
     }
 
     #[test]
-    fn mobile_catalog_filter_hides_paid_listings_but_preserves_free_rows() {
-        use crate::plugin_manifest::Surface;
-
+    fn marketplace_catalog_keeps_paid_listings_visible_on_every_surface() {
         let entries = vec![
             json!({ "id": "free", "pricing": null }),
             json!({ "id": "free-model", "pricing": { "model": "free" } }),
             json!({ "id": "paid", "pricing": { "amountMinor": 900, "model": "one_time" } }),
             json!({ "id": "legacy-paid", "pricing": { "amountMinor": 500 } }),
         ];
-        let mobile =
-            filter_mobile_paid_plugin_catalog_entries(entries.clone(), Some(Surface::Mobile));
         assert_eq!(
-            mobile
+            entries
                 .iter()
                 .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
                 .collect::<Vec<_>>(),
-            vec!["free", "free-model"]
-        );
-        assert_eq!(
-            filter_mobile_paid_plugin_catalog_entries(entries, Some(Surface::Desktop)).len(),
-            4
+            vec!["free", "free-model", "paid", "legacy-paid"]
         );
     }
 

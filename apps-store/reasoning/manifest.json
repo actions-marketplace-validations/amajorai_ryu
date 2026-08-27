@@ -285,13 +285,6 @@
         "detail": "Every reasoning policy on this node will be deleted, along with its rules and saved test cases. Checks will stop until a policy is created again."
       }
     ],
-    "quotas": [
-      {
-        "id": "maxReasoningPolicies",
-        "label": "Reasoning policies",
-        "unit": "count"
-      }
-    ],
     "views": [
       {
         "id": "surface:reasoning",

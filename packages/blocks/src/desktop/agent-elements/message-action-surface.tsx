@@ -1,6 +1,6 @@
 import { isMessageReactionAction } from "./message-action-types.ts";
 import { isServerAssignedMessageId } from "./message-reaction-id.ts";
-import { MessageReactions } from "./message-reactions.tsx";
+import { MessageReactionButton } from "./message-reactions.tsx";
 import type {
 	ContributedMessageAction,
 	MessageActionContext,
@@ -14,6 +14,7 @@ export {
 } from "./message-action-types.ts";
 
 export interface MessageActionSurfaceProps {
+	/** Kept for compatibility with the original bubble-mounted renderer. */
 	actions?: readonly ContributedMessageAction[];
 	align?: "start" | "end";
 	messageId: string;
@@ -29,11 +30,10 @@ export interface MessageActionSurfaceProps {
  *
  * Blocks owns the safe native renderer, while the enabled plugin owns the
  * declaration that opts a surface into it. No contribution means no reaction
- * row, and no callback means no dead controls for read-only surfaces.
+ * icon, and no callback means no dead controls for read-only surfaces.
  */
 export function MessageActionSurface({
 	actions,
-	align = "end",
 	messageId,
 	onAction,
 	state,
@@ -44,8 +44,7 @@ export function MessageActionSurface({
 	}
 
 	return (
-		<MessageReactions
-			align={align}
+		<MessageReactionButton
 			buckets={state?.reactionBuckets ?? []}
 			canReact={isServerAssignedMessageId(messageId)}
 			onToggle={(emoji) =>

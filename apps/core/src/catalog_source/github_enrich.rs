@@ -260,6 +260,11 @@ pub async fn version_detail(owner: &str, repo: &str, tag: &str) -> Option<serde_
             out.insert(key.to_string(), v.clone());
         }
     }
+    if let Some(surface_support) = super::manifest_surface::project_manifest(&manifest)
+        .get("surfaceSupport")
+    {
+        out.insert("surfaceSupport".to_owned(), surface_support.clone());
+    }
     out.insert(
         "stability".into(),
         stability.map_or(Value::Null, Value::String),

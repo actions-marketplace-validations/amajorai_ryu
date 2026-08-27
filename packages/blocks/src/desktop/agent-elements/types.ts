@@ -205,8 +205,8 @@ export interface ChatSlots {
 	}>;
 	UserMessage: React.ComponentType<{
 		/** Hover actions for the turn (copy / edit / branch). A replacement
-		 *  UserMessage must render this inside the bubble's own column, otherwise
-		 *  the surface silently loses its toolbar. */
+		 *  UserMessage must render this beside its bubble row, otherwise the surface
+		 *  silently loses its toolbar. */
 		actions?: React.ReactNode;
 		message: UIMessage;
 		className?: string;

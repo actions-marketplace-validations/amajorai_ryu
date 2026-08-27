@@ -206,6 +206,23 @@ describe("AppsCatalogSection — list states", () => {
 		expect(html).toContain("Add");
 	});
 
+	test("a paid listing keeps its price disclosure and Add action", () => {
+		const html = render(
+			makeAppsState({
+				items: [
+					makeItem({
+						entry: makeEntry({
+							pricing: { amountMinor: 900, currency: "usd", kind: "one_time" },
+						}),
+					}),
+				],
+			})
+		);
+		expect(html).toContain("9.00");
+		expect(html).toContain("Add");
+		expect(html).not.toContain("Upgrade to use");
+	});
+
 	test("read-only host (install:null) shows Details, not Add, on cards", () => {
 		const html = render(makeAppsState({ items: [makeItem()] }), {
 			install: null,

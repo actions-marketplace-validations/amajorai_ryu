@@ -24,7 +24,6 @@ const companion = (
 	hasUi: true,
 	id,
 	label,
-	membershipRequired: false,
 	name,
 	pluginId,
 });

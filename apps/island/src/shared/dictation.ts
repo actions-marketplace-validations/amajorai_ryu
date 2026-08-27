@@ -7,10 +7,10 @@
 // SuperWhisper style). Agent-ask is a second mode on this same surface: speak a
 // question, run an agent, paste the finished answer.
 //
-// postProcess and ask both use the standard AgentSelection (same picker as other
-// apps/plugins): pick an agent OR a model. Cross-app reach (Spaces, MCP tools from
-// other apps) lives on the *chosen agent*'s allowlists — Dictation settings expose
-// those inline when an agent is selected.
+// postProcess keeps the standard AgentSelection as an explicit compatibility
+// override. When it is empty, cleanup uses the node's Speech Processing layer.
+// Cross-app reach (Spaces, MCP tools from other apps) still lives on a chosen
+// custom agent's allowlists — Dictation settings expose those inline.
 
 import {
 	type AgentSelection,
@@ -55,10 +55,10 @@ export type DictationTask = "transcribe" | "ask";
 export type DictationInsertMode = "type" | "paste";
 
 /**
- * Optional LLM cleanup of the raw transcript before it is inserted. `selection`
- * is the standard agent/model picker value (empty = fast local default model).
- * Fails open — if the model is unavailable or returns empty, the raw transcript
- * is inserted unchanged.
+ * Optional cleanup of the raw transcript before it is inserted. An empty
+ * `selection` uses the node's Speech Processing layer (S1-mini by Superwhisper);
+ * a non-empty selection preserves the older custom agent/model override. Fails
+ * open when a cleanup engine is unavailable, so raw ASR text is still inserted.
  */
 export interface DictationPostProcess {
 	enabled: boolean;
@@ -113,7 +113,7 @@ export interface DictationPrefs {
 	shortcut: string;
 }
 
-/** Default cleanup prompt: tidy dictation without changing meaning. */
+/** Default prompt for the legacy custom cleanup agent/model override. */
 export const DEFAULT_DICTATION_POSTPROCESS_PROMPT =
 	"You clean up dictated speech into polished written text. Fix grammar, punctuation, and capitalization, and remove filler words (um, uh, like, you know) and false starts. Preserve the original meaning and wording as much as possible. Output ONLY the cleaned text, with no preamble, quotes, or commentary.";
 
@@ -136,7 +136,7 @@ export const DEFAULT_DICTATION_ASK: DictationAskPrefs = {
 	shortcut: DEFAULT_DICTATION_ASK_SHORTCUT,
 };
 
-/** Default dictation settings: enabled, hold-to-talk, parakeet, type-insertion. */
+/** Default dictation settings: enabled, hold-to-talk, parakeet, S1-mini cleanup. */
 export const DEFAULT_DICTATION_PREFS: DictationPrefs = {
 	ask: DEFAULT_DICTATION_ASK,
 	autoSend: false,
@@ -146,7 +146,7 @@ export const DEFAULT_DICTATION_PREFS: DictationPrefs = {
 	mode: "push-to-talk",
 	pasteKeys: "",
 	postProcess: {
-		enabled: false,
+		enabled: true,
 		prompt: DEFAULT_DICTATION_POSTPROCESS_PROMPT,
 		selection: EMPTY_AGENT_SELECTION,
 	},
@@ -185,7 +185,7 @@ function parsePostProcess(value: unknown): DictationPostProcess {
 			? raw.prompt
 			: DEFAULT_DICTATION_POSTPROCESS_PROMPT;
 	return {
-		enabled: raw.enabled === true,
+		enabled: value == null ? true : raw.enabled === true,
 		prompt,
 		selection: parseAgentSelectionWithLegacyAgent(raw.selection, raw.agent),
 	};

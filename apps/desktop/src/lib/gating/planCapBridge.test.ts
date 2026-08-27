@@ -27,7 +27,6 @@
 // asserted before any `syncPlanCapState`.
 
 import { beforeEach, describe, expect, mock, test } from "bun:test";
-import { QUOTAS } from "@ryu/auth/lib/plans";
 
 let billingAuthOn = false;
 
@@ -110,59 +109,6 @@ describe("resolveCapLimit — after sync", () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
-// App-declared quotas. `maxMonitors` is declared by `@ryu/monitors`, so it is a
-// limit only on a node that actually has Monitors — the same "the row appears
-// and disappears with the app" rule the Danger Zone categories follow. Kernel
-// keys (`maxAgents`) have no app to uninstall and must be unaffected by all of
-// this, which is what makes these two assertions a pair.
-// ---------------------------------------------------------------------------
-describe("resolveCapLimit — app-declared quotas follow their app", () => {
-	test("an app-owned key is uncapped when its app is not enabled", () => {
-		syncPlanCapState(null, () => undefined, new Set(["@ryu/mail"]));
-		billingAuthOn = true;
-		expect(resolveCapLimit("maxMonitors")).toBe(Number.POSITIVE_INFINITY);
-		// The kernel key alongside it still binds.
-		expect(resolveCapLimit("maxAgents")).toBe(3);
-	});
-
-	test("an app-owned key binds once its app is enabled", () => {
-		syncPlanCapState(null, () => undefined, new Set(["@ryu/monitors"]));
-		billingAuthOn = true;
-		// FREE_TIER_LIMITS.maxMonitors === 3.
-		expect(resolveCapLimit("maxMonitors")).toBe(3);
-	});
-
-	test("a retention window is a quota like any other (days, not a count)", () => {
-		syncPlanCapState(null, () => undefined, new Set(["@ryu/meetings"]));
-		billingAuthOn = true;
-		expect(resolveCapLimit("meetingRetentionDays")).toBe(14);
-		expect(QUOTAS.meetingRetentionDays.unit).toBe("days");
-	});
-
-	test("an unsynced app list leaves app-owned keys uncapped (fail open)", () => {
-		// No app list passed at all — the plan is known but installs are not, and
-		// guessing "not installed" would cap a user who does have the app.
-		syncPlanCapState(null, () => undefined);
-		billingAuthOn = true;
-		expect(resolveCapLimit("maxMonitors")).toBe(Number.POSITIVE_INFINITY);
-	});
-
-	test("enforcePlanCap never throws for an app that is not enabled", () => {
-		let upgrades = 0;
-		syncPlanCapState(
-			null,
-			() => {
-				upgrades += 1;
-			},
-			new Set<string>()
-		);
-		billingAuthOn = true;
-		expect(() => enforcePlanCap("maxMonitors", 10_000)).not.toThrow();
-		expect(upgrades).toBe(0);
-	});
-});
-
 describe("enforcePlanCap", () => {
 	test("under the cap is a silent no-op (no throw, no upgrade prompt)", () => {
 		let upgrades = 0;
@@ -209,11 +155,11 @@ describe("enforcePlanCap", () => {
 
 describe("PlanCapError", () => {
 	test("carries field + limit and a descriptive message", () => {
-		const err = new PlanCapError("maxWorkflows", 3);
+		const err = new PlanCapError("maxAgents", 3);
 		expect(err.name).toBe("PlanCapError");
-		expect(err.field).toBe("maxWorkflows");
+		expect(err.field).toBe("maxAgents");
 		expect(err.limit).toBe(3);
-		expect(err.message).toContain("maxWorkflows");
+		expect(err.message).toContain("maxAgents");
 		expect(err.message).toContain("3");
 		expect(err).toBeInstanceOf(Error);
 	});

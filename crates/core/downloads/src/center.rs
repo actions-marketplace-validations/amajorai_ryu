@@ -435,6 +435,25 @@ impl DownloadCenter {
         }
     }
 
+    /// Start or explicitly resume a download and await its terminal state.
+    ///
+    /// This is the install-path variant of [`Self::download_blocking`]. A task
+    /// restored from `downloads.json` is intentionally parked after a Core
+    /// restart; an explicit Install action must wake that parked task instead
+    /// of deduplicating onto a receiver that can never complete.
+    pub async fn resume_and_download_blocking(&self, spec: DownloadSpec) -> Result<PathBuf> {
+        let (id, mut done_rx) = self.spawn(spec, false).await;
+        self.resume(&id).await;
+        loop {
+            if let Some(result) = done_rx.borrow_and_update().clone() {
+                return result.map_err(|e| anyhow::anyhow!(e));
+            }
+            if done_rx.changed().await.is_err() {
+                anyhow::bail!("download driver dropped before completing");
+            }
+        }
+    }
+
     pub async fn pause(&self, id: &str) -> bool {
         self.signal(id, Control::Pause).await
     }

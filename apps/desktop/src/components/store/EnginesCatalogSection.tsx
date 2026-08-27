@@ -561,7 +561,7 @@ const ACCELERATION_ENGINE = "llamacpp";
  *
  * Written for someone who does not know what CUDA, Metal or Vulkan are: the
  * first line states what is happening right now in plain words, "Automatic" is
- * the default and is marked recommended, and the builds this computer cannot
+ * the default and is marked recommended, and the builds this device cannot
  * run are visibly disabled with the reason next to them rather than hidden
  * (hiding them makes the list look arbitrary; showing why is what teaches).
  */
@@ -584,7 +584,7 @@ function EngineAccelerationSection() {
 		acceleration;
 	const hardware = hasGpu
 		? `Graphics card detected${gpuName ? `: ${gpuName}` : ""}${vram ? ` (${vram})` : ""}.`
-		: "No usable graphics card detected on this computer.";
+		: "No usable graphics card detected on this device.";
 
 	return (
 		<ListingSection title="Speed">
@@ -592,7 +592,7 @@ function EngineAccelerationSection() {
 				{hardware} Right now this engine runs on{" "}
 				<span className="text-foreground">{resolvedLabel}</span>. Leave this on
 				Automatic unless something is going wrong — Ryu picks the fastest option
-				your computer can actually run.
+				your device can actually run.
 			</p>
 			<RadioGroup
 				aria-label="How llama.cpp runs"

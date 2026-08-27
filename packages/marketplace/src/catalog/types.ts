@@ -57,6 +57,34 @@ export type Surface =
 	| "cli"
 	| "unknown";
 
+/** One safe catalog row for a listing's per-surface support declaration.
+ *
+ * `support` stays a string so a newer Core can add a level without breaking an
+ * older catalog client. `inheritedFrom` describes the host-shell relationship,
+ * not package code inheritance: Web, Mobile, and the Browser extension reuse the
+ * shared Desktop shell contract. */
+export interface CatalogSurfaceSupport {
+	inheritedFrom?: string | null;
+	support?: string | null;
+	surface: string;
+}
+
+/** A display-only summary of an existing host capability or shell slot this
+ * listing extends. The signed manifest's `provides`/`contributes` declarations
+ * remain the authority; this shape contains no executable binding. */
+export interface CatalogExtensionSummary {
+	features: string[];
+	label: string;
+	target: string;
+}
+
+/** A display-only ownership boundary for the listing's implementation. */
+export interface CatalogImplementationSummary {
+	features: string[];
+	label: string;
+	layer: string;
+}
+
 // ── Host version floors (`engines`) ──────────────────────────────────────────
 
 /** The `engines` block: a semver requirement per host surface. Mirrors Core's
@@ -437,6 +465,7 @@ export interface VersionSnapshot {
 	stability?: string | null;
 	/** False when the ref could not be read as a manifest-backed snapshot. */
 	stabilityKnown?: boolean;
+	surfaceSupport?: CatalogSurfaceSupport[] | null;
 	surfaces?: string[] | null;
 	targets?: string[] | null;
 	/** The version the manifest declared at that tag. */
@@ -640,7 +669,7 @@ export interface CatalogEntry {
 	 *  carries this key is asserting something Core never agreed to. Only trust it
 	 *  on a built-in (`source: "built-in"`) entry. */
 	mandatory?: boolean;
-	/** Server-derived label for an eligible paid app in recurring Membership. */
+	/** Server-derived A Major Pass inclusion marker for catalog presentation. */
 	membership_included?: boolean;
 	name: string;
 	/** The PUBLISHING ORGANIZATION's identity has been verified by Ryu — the
@@ -698,7 +727,7 @@ export interface CatalogEntry {
 	 *  Absent/null = free. Present on cards in the unified first-party view, where
 	 *  free (git catalog) and paid (hosted) listings sit side by side — without it a
 	 *  paid item would be indistinguishable from a free one until checkout. Display
-	 *  only: entitlement is decided server-side at purchase/install. */
+	 *  only: price is commerce metadata and is not an install/runtime decision. */
 	pricing?: {
 		amountMinor?: number;
 		currency?: string;
@@ -762,6 +791,8 @@ export interface CatalogEntry {
 	stability?: string | null;
 	/** Upstream popularity signal (GitHub stars) for ranking unmoderated listings. */
 	stars?: number | null;
+	/** Per-surface support levels on the browse card. */
+	surface_support?: CatalogSurfaceSupport[];
 	surfaces?: string[];
 	tagline?: string | null;
 	tags: string[];
@@ -843,11 +874,16 @@ export interface PluginCatalogDetail {
 	 *  the health scan's "reads cleanly" check — surfaced, never swallowed. */
 	enrichmentError?: string | null;
 	examplePrompts?: string[];
+	/** Existing host capabilities and shell slots this listing extends. */
+	extensions?: CatalogExtensionSummary[];
 	external?: boolean;
 	feeds?: string[] | null;
 	forks?: number | null;
 	iconBackground?: string | null;
 	iconUrl?: string | null;
+	/** Where the feature is implemented: Core runtime, shared shell, or package
+	 *  process. Display-only; it is not an execution route. */
+	implementation?: CatalogImplementationSummary[];
 	/** False when the upstream issue tracker is turned off. */
 	issuesEnabled?: boolean;
 	keywords?: string[];
@@ -859,7 +895,7 @@ export interface PluginCatalogDetail {
 	manifestId?: string | null;
 	/** Where the manifest was read from (a raw repository URL). */
 	manifestUrl?: string | null;
-	/** True when this paid app is included with an active Membership plan. */
+	/** Server-derived A Major Pass inclusion marker for catalog presentation. */
 	membershipIncluded?: boolean;
 	/** Count of open issues upstream. */
 	openIssues?: number | null;
@@ -911,6 +947,7 @@ export interface PluginCatalogDetail {
 	 *  Ryu may name a surface this build has never heard of, and the catalog must
 	 *  carry it through rather than drop it. Use {@link Surface} when you need the
 	 *  known set (e.g. to exhaustively label them). */
+	surfaceSupport?: CatalogSurfaceSupport[];
 	surfaces?: string[];
 	tagline?: string | null;
 	tags?: string[];

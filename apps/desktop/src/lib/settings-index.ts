@@ -153,7 +153,7 @@ export const SETTINGS_SECTION_LABELS: Record<string, string> = {
 	routing: "Model routing",
 	integrations: "Integrations",
 	network: "Network",
-	connections: "Connected accounts",
+	connections: "Connections",
 	hooks: "Hooks",
 	git: "Git",
 	worktrees: "Worktrees",
@@ -1404,7 +1404,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		dialog: "gateway",
 		section: "runtime",
 		group: "ACP agent runtime",
-		label: "Keep this computer awake while agents run",
+		label: "Keep this device awake while agents run",
 		keywords: "acp sleep power caffeinate systemd inhibit battery",
 	},
 	{
@@ -1483,10 +1483,10 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 	{
 		id: "gw.access.devices",
 		dialog: "gateway",
-		section: "access",
+		section: "connections",
 		group: "",
-		label: "Devices & access",
-		keywords: "pair pairing approve device token revoke",
+		label: "Connections",
+		keywords: "pair pairing approve device token revoke remote nodes ssh hosts",
 	},
 	{
 		id: "gw.permissions.overwrites",

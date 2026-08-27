@@ -1,6 +1,6 @@
 {
-  "tags": ["dictation","voice","transcription","speech"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": ["dictation", "voice", "transcription", "speech"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-dictation",
   "homepage": "https://github.com/amajorai/ryu-dictation",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -10,9 +10,9 @@
   "version": "0.1.14",
   "stability": "experimental",
   "category": "Media & Voice",
-  "description": "System-wide dictation and agent-ask via the Island companion: speak anywhere to type a transcript, or ask an agent and paste the answer into the focused app.",
+  "description": "System-wide dictation and agent-ask via the Island companion: speak anywhere to type a raw or locally cleaned transcript, or ask an agent and paste the answer into the focused app.",
   "tagline": "Speak anywhere, type anywhere",
-  "keywords": ["dictation", "voice", "transcription", "speech"],
+  "keywords": ["dictation", "voice", "transcription", "speech", "cleanup"],
   "icon": "voice",
   "iconDither": { "from": 6, "to": "transparent", "direction": "down" },
   "surfaces": {
@@ -37,13 +37,25 @@
         "policy_type": "dictation",
         "definition": {
           "surface": "island",
-          "note": "On/off switch for system-wide dictation + agent-ask hosted by the Island companion. Enabling this plugin is the single switch — there is no separate settings master toggle. Island registers the global shortcuts and drives capture → Core STT → optional agent → ghost insert. Core-local — no gateway restart."
+          "note": "On/off switch for system-wide dictation + agent-ask hosted by the Island companion. Enabling this plugin is the single switch — there is no separate settings master toggle. Island registers the global shortcuts and drives capture → Core Voice Recognition → optional Speech Processing → optional agent → ghost insert. Core-local — no gateway restart."
         }
       }
     }
   ],
   "contributes": {
-  "chat_widget_templates": [{"id":"dictation.chat","title":"Dictation widget","description":"Dictation chat widget metadata is coming soon; no render tool is available yet.","triggers":["dictation widget"],"examples":["Show me a dictation widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}],
+    "chat_widget_templates": [
+      {
+        "id": "dictation.chat",
+        "title": "Dictation widget",
+        "description": "Dictation chat widget metadata is coming soon; no render tool is available yet.",
+        "triggers": ["dictation widget"],
+        "examples": ["Show me a dictation widget"],
+        "backing": {},
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "coming-soon"
+      }
+    ],
     "settings_tabs": [
       {
         "id": "dictation.settings",

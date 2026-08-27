@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 
 const STORY_URL = "/node-lifecycle-capability-proof.html";
 
-test("renders the node scope, ACL decisions, and entitlement matrix", async ({
+test("renders the node scope, ACL decisions, and access-first matrix", async ({
 	page,
 }) => {
 	await page.goto(STORY_URL);
@@ -39,20 +39,17 @@ test("renders the node scope, ACL decisions, and entitlement matrix", async ({
 	);
 
 	for (const id of [
-		"member-denied",
-		"individual-deny",
-		"expired-update",
-		"expired-download",
-	]) {
-		await expect(page.getByTestId(`result-${id}`)).toHaveText("denied");
-	}
-	for (const id of [
 		"team-grant",
 		"admin-team-node",
-		"expired-disable",
-		"expired-uninstall",
+		"paid-update",
+		"paid-download",
+		"paid-disable",
+		"paid-uninstall",
 	]) {
 		await expect(page.getByTestId(`result-${id}`)).toHaveText("allowed");
+	}
+	for (const id of ["member-denied", "individual-deny"]) {
+		await expect(page.getByTestId(`result-${id}`)).toHaveText("denied");
 	}
 
 	await expect(page.getByTestId("captured-logs")).toContainText('"status":403');

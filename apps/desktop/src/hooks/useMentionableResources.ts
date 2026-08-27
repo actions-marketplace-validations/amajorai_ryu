@@ -23,7 +23,7 @@ export interface MentionableResources {
  *
  * Sidebar-section queries intentionally come from `useSidebarSectionSources`, so
  * Chat, Sidebar, and Library share the same React Query cache and response mapper.
- * Space documents and output styles use the same active-node cache boundary as their
+ * Space documents and personality profiles use the same active-node cache boundary as their
  * existing surfaces; a missing/old endpoint simply contributes no candidates.
  */
 export function useMentionableResources(

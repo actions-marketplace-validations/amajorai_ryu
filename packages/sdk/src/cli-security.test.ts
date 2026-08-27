@@ -63,6 +63,7 @@ describe.skipIf(process.platform === "win32")(
 						"output-styles/gen-z.md",
 						"output-styles/learning.md",
 						"output-styles/no-ai-slop.md",
+						"output-styles/no-hype.md",
 						"output-styles/plain-technical.md",
 						"output-styles/plain-text.md",
 						"output-styles/proactive.md",

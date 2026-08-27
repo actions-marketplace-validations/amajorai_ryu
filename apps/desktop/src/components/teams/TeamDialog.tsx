@@ -46,9 +46,9 @@ export interface TeamAgentOption {
 }
 
 /**
- * Create-or-edit dialog for an agent team. Owns the team's name, description,
+ * Create-or-edit dialog for an agent group. Owns the group's name, description,
  * coordination strategy, members, and (for debate/router) the lead agent.
- * Members are added and removed inline here; dragging an agent onto a team in
+ * Members are added and removed inline here; dragging an agent onto a group in
  * the sidebar is a shortcut for the same thing, not the only path.
  */
 export function TeamDialog({
@@ -126,7 +126,7 @@ export function TeamDialog({
 			});
 			onClose();
 		} catch (err) {
-			setError(err instanceof Error ? err.message : "Failed to save team");
+			setError(err instanceof Error ? err.message : "Failed to save group");
 		} finally {
 			setBusy(false);
 		}
@@ -144,10 +144,10 @@ export function TeamDialog({
 			<DialogContent>
 				<form onSubmit={handleSubmit}>
 					<DialogHeader>
-						<DialogTitle>{isEdit ? "Edit team" : "New team"}</DialogTitle>
+						<DialogTitle>{isEdit ? "Edit group" : "New group"}</DialogTitle>
 						<DialogDescription>
-							A team is a group of agents you can call together with{" "}
-							<code>@team</code> in chat.
+							A group is a set of agents you can call together with{" "}
+							<code>@group-name</code> in chat.
 						</DialogDescription>
 					</DialogHeader>
 					<div className="flex flex-col gap-4 py-4">
@@ -165,7 +165,7 @@ export function TeamDialog({
 							<Input
 								id="team-description"
 								onChange={(e) => setDescription(e.target.value)}
-								placeholder="What is this team for?"
+								placeholder="What is this group for?"
 								value={description}
 							/>
 						</div>

@@ -66,6 +66,13 @@ import { jwt } from "better-auth/plugins/jwt";
 import { POLAR_PRODUCTS } from "./lib/constants.ts";
 import { resolveRyuCorsOrigins } from "./lib/cors-origins.ts";
 import {
+	assertPendingEmailMatches,
+	assertPendingPasskeyMatches,
+	loginAssuranceAfterFactor,
+	loginAssuranceAfterPassword,
+	loginAssuranceCleanupPlugin,
+} from "./lib/login-assurance.ts";
+import {
 	businessEmailDecision,
 	businessEmailDomainDecision,
 	businessEmailMessage,
@@ -1343,8 +1350,15 @@ export const auth = betterAuth({
 					});
 				}
 			}
+			await assertPendingEmailMatches(ctx);
 		}),
 		after: createAuthMiddleware(async (ctx) => {
+			const loginAssuranceResponse = await loginAssuranceAfterPassword(ctx);
+			if (loginAssuranceResponse) {
+				return loginAssuranceResponse;
+			}
+			await loginAssuranceAfterFactor(ctx);
+
 			if (ctx.path === "/change-password") {
 				const session = ctx.context.session;
 				if (session?.user) {
@@ -1679,6 +1693,9 @@ export const auth = betterAuth({
 		passkey({
 			...PASSKEY_WEBAUTHN_OPTIONS,
 			rpName: "Ryu",
+			authentication: {
+				afterVerification: ({ ctx }) => assertPendingPasskeyMatches(ctx),
+			},
 		}),
 		twoFactor({
 			issuer: "Ryu",
@@ -2323,6 +2340,7 @@ export const auth = betterAuth({
 				}
 			},
 		}),
+		loginAssuranceCleanupPlugin(),
 		// LAST on purpose. Before-hooks run in `[config.hooks.before, ...plugins]`
 		// order, so this has to sit after `bearer` — which rewrites an
 		// `Authorization` header into the session cookie — or the gate resolves no

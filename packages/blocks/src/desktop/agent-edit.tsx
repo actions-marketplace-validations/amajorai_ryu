@@ -1729,6 +1729,8 @@ export interface AgentSettingsFormProps {
 	onNameChange?: (v: string) => void;
 	onOpenPromptStudio?: () => void;
 	onPersonaDisplayNameChange?: (v: string) => void;
+	/** Select the reusable personality profile assigned to this agent. */
+	onPersonalityProfileChange?: (v: string) => void;
 	onRemoveRule?: (index: number) => void;
 	onRuleChange?: (index: number, value: string) => void;
 	onSave?: () => void;
@@ -1749,6 +1751,10 @@ export interface AgentSettingsFormProps {
 
 	// Persona
 	personaDisplayName: string;
+	/** Current personality profile id, or the caller's sentinel for the agent's own voice. */
+	personalityProfile?: string;
+	/** Available plugin/user personality profiles, including the agent's own voice option. */
+	personalityProfiles?: SlotOption[];
 	/** Injected: RyuPiConfig for the `ryu` agent. */
 	piConfig?: ReactNode;
 
@@ -2098,6 +2104,9 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		onAddMoreAgentProviders,
 		personaDisplayName,
 		onPersonaDisplayNameChange,
+		personalityProfile = "",
+		personalityProfiles = [],
+		onPersonalityProfileChange,
 		tone,
 		toneOptions,
 		onToneChange,
@@ -3004,6 +3013,36 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 
 			<SettingsSection title="Personality & tone">
 				<SettingsGroup>
+					{personalityProfiles.length > 1 ? (
+						<SettingsItem
+							actions={
+								<Select
+									disabled={isLocked}
+									items={personalityProfiles.map((profile) => ({
+										label: profile.label,
+										value: profile.id,
+									}))}
+									onValueChange={(v) => onPersonalityProfileChange?.(v ?? "")}
+									value={personalityProfile}
+								>
+									<SelectTrigger
+										className="h-8 w-56 flex-shrink-0 text-sm"
+										id="agent-personality-profile"
+									>
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										{personalityProfiles.map((profile) => (
+											<SelectItem key={profile.id} value={profile.id}>
+												{profile.label}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							}
+							title="Personality profile"
+						/>
+					) : null}
 					<SettingsItem
 						actions={
 							<Input

@@ -23,7 +23,7 @@ export async function loadBrowserCoreDownload(): Promise<BrowserCoreDownload> {
 		await detectDownloadArchAsync()
 	);
 	if (!found) {
-		throw new Error("Ryu Core is not available for this computer yet.");
+		throw new Error("Ryu Core is not available for this device yet.");
 	}
 	return {
 		assetUrl: found.asset.browser_download_url,

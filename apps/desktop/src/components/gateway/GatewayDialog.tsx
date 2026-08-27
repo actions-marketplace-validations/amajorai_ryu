@@ -130,7 +130,6 @@ import {
 	ManagedInferenceSettings,
 	NetworkSettings,
 } from "@/src/components/settings/NetworkSettings.tsx";
-import { NodeAccessSettings } from "@/src/components/settings/NodeAccessSettings.tsx";
 import { NodePermissionsSettings } from "@/src/components/settings/NodePermissionsSettings.tsx";
 import { NodeRoutingSettings } from "@/src/components/settings/NodeRoutingSettings.tsx";
 import { PrivacySettings } from "@/src/components/settings/PrivacySettings.tsx";
@@ -6499,16 +6498,16 @@ const GATEWAY_SECTIONS: {
 	},
 	{
 		value: "access",
-		label: "Devices & access",
-		hint: "Approve devices that ask to connect, and manage this node's access token.",
+		label: "Connections",
+		hint: "Legacy route for the unified Connections hub.",
 		icon: Key01Icon,
 		keywords:
 			"pair pairing device token access approve revoke browser remote security auth",
 	},
 	{
 		value: "computer",
-		label: "Computer settings",
-		hint: "Choose how Ghost may use this computer, including locked-session access.",
+		label: "Device settings",
+		hint: "Choose how Ghost may use this device, including locked-session access.",
 		icon: LaptopIcon,
 		keywords:
 			"computer computers ghost computer use locked lock background accessibility screen recording",
@@ -6577,10 +6576,10 @@ const GATEWAY_SECTIONS: {
 	// Moved from the App Settings dialog (node-level Core infra, not apps).
 	{
 		value: "connections",
-		label: "Connected accounts",
-		hint: "The accounts already linked, and what each one can reach.",
+		label: "Connections",
+		hint: "Control this device, connect other nodes, and manage SSH hosts.",
 		icon: Share08Icon,
-		keywords: "connections accounts linked identities",
+		keywords: "connections accounts linked identities devices nodes ssh remote",
 	},
 	{
 		value: "email-alerts",
@@ -6665,14 +6664,14 @@ const GATEWAY_SECTIONS: {
 	{
 		value: "privacy",
 		label: "Privacy",
-		hint: "What leaves this computer, and what stays on it.",
+		hint: "What leaves this device, and what stays on it.",
 		icon: SquareLock01Icon,
 		keywords: "privacy telemetry analytics learning data",
 	},
 	{
 		value: "storage",
 		label: "Storage",
-		hint: "Where files, models, and databases are kept on this computer.",
+		hint: "Where files, models, and databases are kept on this device.",
 		icon: Key01Icon,
 		// "parsing"/"parser"/"pdf" search here on purpose. There is no Document
 		// parsing section any more — the parser is bound from the node dropdown's
@@ -6684,7 +6683,7 @@ const GATEWAY_SECTIONS: {
 	{
 		value: "encryption",
 		label: "Encryption",
-		hint: "How this computer holds its key, and what is encrypted at rest.",
+		hint: "How this device holds its key, and what is encrypted at rest.",
 		icon: SquareLock01Icon,
 		keywords:
 			"encryption encrypted at rest master key keychain custody sealed plaintext coverage",
@@ -6891,13 +6890,12 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 	// Node-level Core-infra tabs moved out of the App Settings dialog (not apps —
 	// apps register their own tabs dynamically under the Apps/Plugins headers).
 	{
-		title: "This computer",
+		title: "This device",
 		// A section listed in GATEWAY_SECTIONS but missing from a group here renders
 		// NOWHERE, with no type error and no warning, so the two lists move together.
 		items: [
 			"computer",
 			"privacy",
-			"access",
 			"storage",
 			"encryption",
 			"updates",
@@ -7084,7 +7082,7 @@ export function GatewayDialog({
 			}),
 		});
 		const nodeIdx = GATEWAY_NAV_GROUPS.findIndex(
-			(g) => g.title === "This computer"
+			(g) => g.title === "This device"
 		);
 		const before = GATEWAY_NAV_GROUPS.slice(0, nodeIdx).map(toGroup);
 		const nodeAndAfter = GATEWAY_NAV_GROUPS.slice(nodeIdx).map(toGroup);
@@ -7183,6 +7181,7 @@ export function GatewayDialog({
 				    component is reused verbatim; only its host dialog moved. */}
 				{section === "providers" ? (
 					<ProviderControlCenter
+						canSetGatewayAccount={canConfigure}
 						credentials={
 							<>
 								{managed ? <ManagedKeysBanner /> : null}
@@ -7218,6 +7217,7 @@ export function GatewayDialog({
 							</>
 						}
 						integrations={<IntegrationsTab />}
+						managed={managed}
 						routing={
 							<>
 								{canConfigure ? null : <PolicyReadOnlyBanner />}
@@ -7380,7 +7380,7 @@ export function GatewayDialog({
 						target={target}
 					/>
 				) : null}
-				{section === "access" ? <NodeAccessSettings /> : null}
+				{section === "access" ? <ConnectionsTab /> : null}
 				{section === "permissions" ? <NodePermissionsSettings /> : null}
 				{/* Also carries the node's upload ceiling, which used to be the one
 				    thing the retired "Document parsing" section owned alone. The parser

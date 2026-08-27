@@ -80,14 +80,14 @@ pub struct SeedSpec {
 /// pre-installed set: the explicit install path derives opt-in companion bundles from
 /// this same table. Adding a 16th companion to a second list is what caused the
 /// original carriage bug; there is no second list.
-fn seed_overrides() -> [SeedSpec; 31] {
+fn seed_overrides() -> [SeedSpec; 35] {
 	use crate::plugin_manifest::{
 		ACTIVITY_UI_HTML, APPROVALS_UI_HTML, BLUEPRINT_UI_HTML, CALENDAR_UI_HTML,
 		CHAT_BROADCAST_UI_HTML, CANVAS_PLUGIN_ID,
         CANVAS_UI_HTML, FINETUNE_PLUGIN_ID, FINETUNE_UI_HTML, HELP_CENTER_UI_HTML,
         SITES_UI_HTML,
         LEARNING_UI_HTML, MAIL_UI_HTML,
-        EXPENSES_UI_HTML, MEETINGS_UI_HTML, MONITORS_UI_HTML, NEWS_UI_HTML, PULL_REQUESTS_UI_HTML, QUESTS_UI_HTML,
+        EXPENSES_UI_HTML, INVOICES_UI_HTML, MEETINGS_UI_HTML, MONITORS_UI_HTML, NEWS_UI_HTML, OUTREACH_UI_HTML, PEOPLE_UI_HTML, PROJECTS_UI_HTML, PULL_REQUESTS_UI_HTML, QUESTS_UI_HTML,
         REASONING_PLUGIN_ID, REASONING_UI_HTML, RLM_UI_HTML, SKILL_EDITOR_UI_HTML, SOCIAL_UI_HTML,
         SLIDES_PLUGIN_ID, SLIDES_UI_HTML, SUBTITLES_UI_HTML, TIMELINE_UI_HTML, TUITION_UI_HTML, WARMUP_UI_HTML, WEBHOOKS_UI_HTML,
         WHITEBOARD_PLUGIN_ID, WHITEBOARD_UI_HTML, WORKFLOWS_UI_HTML,
@@ -464,6 +464,37 @@ fn seed_overrides() -> [SeedSpec; 31] {
             // generic own-app HTTP bridge; Core does not carry expense routes.
             grants: &["app:http", "mcp:expenses"],
             ui_code: Some(EXPENSES_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::OUTREACH_PLUGIN_ID,
+            // Outreach is a pure Companion composition layer. It uses the host's
+            // durable app storage, shared model lane, existing Mail transport,
+            // secret-free runtime catalog, live theme, and toast primitives — no
+            // second CRM, SMTP service, scheduler, or provider client.
+            grants: &[
+                "storage:kv",
+                "hook:side-model",
+                "mail:crud",
+                "core:list_agents",
+                "shell:integrate",
+                "ui:toast",
+            ],
+            ui_code: Some(OUTREACH_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::PROJECTS_PLUGIN_ID,
+            grants: &["storage:kv", "shell:integrate", "ui:toast"],
+            ui_code: Some(PROJECTS_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::INVOICES_PLUGIN_ID,
+            grants: &["storage:kv", "shell:integrate", "ui:toast"],
+            ui_code: Some(INVOICES_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::PEOPLE_PLUGIN_ID,
+            grants: &["storage:kv", "shell:integrate", "ui:toast"],
+            ui_code: Some(PEOPLE_UI_HTML),
         },
         SeedSpec {
             id: REASONING_PLUGIN_ID,

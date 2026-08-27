@@ -141,8 +141,8 @@ const noop = () => {
  * it here in the same commit.
  * -------------------------------------------------------------------------- */
 export const PRO_MONTHLY_USD = 39;
-/** The recurring-only catalog access plan. */
-export const MARKETPLACE_MEMBERSHIP_MONTHLY_USD = 9.99;
+/** The recurring A Major Pass price per user. */
+export const MARKETPLACE_PASS_MONTHLY_USD = 20;
 /**
  * Max is the original hidden individual plan price. The public business shelf
  * uses the separate Teams automation offer below.
@@ -587,8 +587,8 @@ export function HostedAgentEffortSlider({
 }
 
 /**
- * Which public shelf is rendered. Individual includes Marketplace Membership,
- * Pro, and Max; the business shelf owns Teams and Enterprise.
+ * Which public shelf is rendered. Individual includes A Major Pass, Pro, and
+ * Max; the business shelf owns Teams, Business, and Enterprise.
  */
 export type PricingAudience = "business" | "individual";
 
@@ -902,7 +902,7 @@ interface SeatPlanCardProps extends PlanCardProps {
 	seats?: number;
 }
 
-interface MarketplaceMembershipPlanCardProps extends PlanCardProps {
+interface MarketplacePassPlanCardProps extends PlanCardProps {
 	onUsersChange?: (users: number) => void;
 	users?: number;
 }
@@ -1014,28 +1014,28 @@ export function LifetimePlanCard({
 	);
 }
 
-/** Marketplace-only recurring access: paid app catalog, no hosted compute. */
-export function MarketplaceMembershipPlanCard({
+/** A Major Pass: recurring access to supported paid Marketplace apps. */
+export function MarketplacePassPlanCard({
 	loadingPlan = null,
 	onCheckout = noop,
 	onUsersChange = noop,
 	currentPlan = null,
 	users = 1,
-}: MarketplaceMembershipPlanCardProps) {
+}: MarketplacePassPlanCardProps) {
 	const isCurrent = currentPlan === "marketplace-membership";
 	const selectedUsers = Number.isInteger(users) && users >= 1 ? users : 1;
-	const monthlyTotal = selectedUsers * MARKETPLACE_MEMBERSHIP_MONTHLY_USD;
+	const monthlyTotal = selectedUsers * MARKETPLACE_PASS_MONTHLY_USD;
 	return (
 		<Card className="relative flex h-full flex-col border border-primary/30">
 			<CardHeader>
 				<CardTitle className="flex items-center gap-2 text-xl">
-					Marketplace Membership
+					A Major Pass
 					<span className="rounded-full bg-primary/10 px-2 py-0.5 font-medium text-primary text-xs">
 						App access
 					</span>
 				</CardTitle>
 				<CardDescription>
-					A simple subscription for the paid apps you want to try.
+					One pass for all supported paid Marketplace apps and publishers.
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
@@ -1046,20 +1046,20 @@ export function MarketplaceMembershipPlanCard({
 						</span>
 						<span className="text-muted-foreground">/month</span>
 						<p className="mt-1 text-muted-foreground text-xs">
-							${MARKETPLACE_MEMBERSHIP_MONTHLY_USD.toFixed(2)}/user/month
+							${MARKETPLACE_PASS_MONTHLY_USD.toFixed(2)}/user/month
 						</p>
 					</div>
 					<div className="grid gap-1">
 						<label
 							className="font-medium text-muted-foreground text-xs"
-							htmlFor="marketplace-membership-users"
+							htmlFor="marketplace-pass-users"
 						>
 							Users
 						</label>
 						<Input
-							aria-describedby="marketplace-membership-users-help"
+							aria-describedby="marketplace-pass-users-help"
 							className="w-24 text-right tabular-nums"
-							id="marketplace-membership-users"
+							id="marketplace-pass-users"
 							inputMode="numeric"
 							min={1}
 							onChange={(event) => {
@@ -1074,7 +1074,7 @@ export function MarketplaceMembershipPlanCard({
 						/>
 						<span
 							className="text-muted-foreground text-xs"
-							id="marketplace-membership-users-help"
+							id="marketplace-pass-users-help"
 						>
 							1 user minimum
 						</span>
@@ -1083,7 +1083,7 @@ export function MarketplaceMembershipPlanCard({
 				<ul className="space-y-3">
 					<li className="flex items-center">
 						<Download className="mr-2 size-4" />
-						<span>Use publisher-opted-in paid Marketplace apps</span>
+						<span>Access all supported paid Marketplace apps</span>
 					</li>
 					<li className="flex items-center">
 						<Users className="mr-2 size-4" />
@@ -1094,7 +1094,7 @@ export function MarketplaceMembershipPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Star className="mr-2 size-4" />
-						<span>See exactly what is included before you install</span>
+						<span>See the ticket marker before you install</span>
 					</li>
 					<li className="flex items-center">
 						<Calendar className="mr-2 size-4" />
@@ -1110,7 +1110,7 @@ export function MarketplaceMembershipPlanCard({
 				<PlanCta
 					isCurrent={isCurrent}
 					isLoading={loadingPlan === "marketplace-membership-monthly"}
-					label="Get Membership"
+					label="Get A Major Pass"
 					onClick={() => onCheckout("marketplace-membership-monthly")}
 				/>
 			</CardFooter>

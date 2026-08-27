@@ -47,7 +47,7 @@ describe("grantLabel — known grants", () => {
 		expect(grantLabel("net")).toBe("Access the internet");
 		expect(grantLabel("net.fetch")).toBe("Access the internet");
 		expect(grantLabel("clipboard")).toBe("Use the clipboard");
-		expect(grantLabel("shell")).toBe("Run commands on your computer");
+		expect(grantLabel("shell")).toBe("Run commands on your device");
 	});
 });
 

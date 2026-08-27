@@ -34,7 +34,7 @@
         "id": "reactions.picker",
         "label": "Add reaction",
         "icon": "smile",
-        "target": "user",
+        "target": "any",
         "kind": "menu",
         "capability": "reactions.toggle",
         "args": {

@@ -86,6 +86,8 @@ export interface HomeCard {
 	id: string;
 	/** Already on this node — the row shows an "Added" pill instead of a button. */
 	installed: boolean;
+	/** The listing is covered by the A Major Pass eligibility pool. */
+	membershipIncluded?: boolean;
 	/** Weight format, models only: their add endpoint needs it to pick a file. */
 	modelFormat: ModelFormat | null;
 	name: string;
@@ -409,6 +411,7 @@ export function useStoreHome(): UseStoreHomeResult {
 			iconUrl: e.icon_url ?? null,
 			dither: e.icon_dither ?? null,
 			installed: installedIds.has(e.id),
+			membershipIncluded: Boolean(e.membership_included),
 			builtIn: e.source === "built-in",
 			modelFormat: null,
 		});

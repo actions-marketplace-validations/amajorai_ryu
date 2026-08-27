@@ -45,7 +45,7 @@ use serde::Serialize;
 use device::{estimate_fit, human_bytes, DeviceInfo};
 use ryu_model_format::ModelFormat;
 
-/// The bundled default chat/embed/reranker model repos, as `(id, weight_url)`.
+/// The bundled default chat/embed/Speech Processing model repos, as `(id, weight_url)`.
 /// Used only to derive a Hugging Face repo fallback for origin-less pre-existing
 /// installs, so they resolve to a real repo card instead of a bare `local:` one.
 pub type DefaultModelRepos = Vec<(String, String)>;

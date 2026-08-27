@@ -11,9 +11,9 @@
 //
 // Failure posture: a signed-out or offline caller still sees whatever reviews
 // loaded, and the write form explains why it is unavailable rather than vanishing.
-// A paid item rejects non-purchasers server-side (403 + `requiresPurchase`), which
-// surfaces here as the message the server sent — the client never pre-judges
-// entitlement, since only the control plane knows the license state.
+// A paid item may reject non-purchasers server-side (403 + `requiresPurchase`)
+// for review eligibility only. That response is not an install/runtime gate; it
+// surfaces here as the message the server sent, and the client never pre-judges it.
 
 import {
 	Alert02Icon,

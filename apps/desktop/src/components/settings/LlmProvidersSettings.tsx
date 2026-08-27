@@ -40,6 +40,10 @@ import { Switch } from "@ryu/ui/components/switch";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { sileo } from "sileo";
 import { modelMenuItem } from "@/components/agent-elements/input/model-router.ts";
+import {
+	ProviderAccountSection,
+	type ProviderAccountTarget,
+} from "@/components/agent-elements/input/provider-account-section.tsx";
 import { useProviderCommandNavigation } from "@/components/agent-elements/input/provider-command-dialog.tsx";
 import { OrgBillingContext } from "@/src/components/billing/OrgBillingContext.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
@@ -51,6 +55,7 @@ import type {
 	PiConfig,
 	PiProvider,
 } from "@/src/lib/api/pi-config.ts";
+import { gatewayProviderSlug } from "@/src/lib/api/pi-config.ts";
 import { svglForProvider } from "@/src/lib/provider-brand.tsx";
 import { AgentModelsSettings } from "./AgentModelsSettings.tsx";
 import { CapabilityProvidersSettings } from "./CapabilityProvidersSettings.tsx";
@@ -178,6 +183,8 @@ function ProviderBrandMark({
 
 interface ProviderCardProps {
 	activeConfig: PiConfig | null;
+	/** Whether this caller may set a BYOK account for the Gateway. */
+	canSetGatewayAccount?: boolean;
 	/** Live connectivity probe (latency + model count). */
 	check: ReturnType<typeof useLlmProviders>["check"];
 	discover: ReturnType<typeof useLlmProviders>["discover"];
@@ -195,6 +202,14 @@ interface ProviderCardProps {
 	/** Refresh the catalog so `configured` (login state) flips after a login. */
 	onReload: () => void;
 	onRemove: (id: string) => Promise<void>;
+	/** Remove one saved account without removing the provider. */
+	onRemoveAccount: (provider: string, accountId: string) => Promise<void>;
+	/** Switch one saved account for yourself or the shared Gateway. */
+	onSwitchAccount: (
+		provider: string,
+		accountId: string,
+		target: ProviderAccountTarget
+	) => Promise<void>;
 	/** Enable/disable a single model within this provider. */
 	onToggleModel: (
 		provider: string,
@@ -253,12 +268,15 @@ function ProviderCard(props: ProviderCardProps) {
 
 function ProviderCardContent({
 	activeConfig,
+	canSetGatewayAccount = true,
 	check,
 	discover,
 	onActivate,
 	onConfigure,
 	onReload,
 	onRemove,
+	onRemoveAccount,
+	onSwitchAccount,
 	onToggleModel,
 	provider,
 	thinkingLevels,
@@ -319,6 +337,38 @@ function ProviderCardContent({
 		null
 	);
 	const [togglingModel, setTogglingModel] = useState<string | null>(null);
+
+	const handleSwitchAccount = async (
+		accountId: string,
+		target: ProviderAccountTarget
+	) => {
+		try {
+			await onSwitchAccount(provider.id, accountId, target);
+			sileo.success({
+				title:
+					target === "gateway"
+						? `${provider.label} account is active for Gateway`
+						: `${provider.label} account switched for you`,
+			});
+		} catch (error) {
+			sileo.error({
+				title: "Could not switch account",
+				description: errMessage(error, "Core rejected the request."),
+			});
+		}
+	};
+
+	const handleRemoveAccount = async (accountId: string) => {
+		try {
+			await onRemoveAccount(provider.id, accountId);
+			sileo.success({ title: `${provider.label} account removed` });
+		} catch (error) {
+			sileo.error({
+				title: "Could not remove account",
+				description: errMessage(error, "Core rejected the request."),
+			});
+		}
+	};
 
 	// Keep the card's routing mirror honest when the catalog refreshes.
 	useEffect(() => {
@@ -626,6 +676,19 @@ function ProviderCardContent({
 						</div>
 					) : null}
 
+					<ProviderAccountSection
+						accounts={provider.accounts ?? []}
+						canSetGateway={canSetGatewayAccount}
+						gatewaySupported={
+							provider.authKind === "api-key" &&
+							gatewayProviderSlug(provider.id) !== null
+						}
+						onRemove={handleRemoveAccount}
+						onSwitch={(account, target) =>
+							handleSwitchAccount(account.accountId, target)
+						}
+					/>
+
 					{needsKey ? (
 						<div className="flex flex-col gap-1.5">
 							<Label htmlFor={`key-${provider.id}`}>API key</Label>
@@ -900,7 +963,11 @@ function CustomProviderForm({ apiTypes, onCreate }: CustomProviderFormProps) {
 	);
 }
 
-export function LlmProvidersSettings() {
+export function LlmProvidersSettings({
+	canSetGatewayAccount = true,
+}: {
+	canSetGatewayAccount?: boolean;
+} = {}) {
 	const {
 		catalog,
 		config,
@@ -912,6 +979,8 @@ export function LlmProvidersSettings() {
 		remove,
 		discover,
 		toggleModelEnabled,
+		switchAccount,
+		removeAccount,
 		reload,
 	} = useLlmProviders();
 
@@ -996,6 +1065,7 @@ export function LlmProvidersSettings() {
 					{ordered.map((provider) => (
 						<ProviderCard
 							activeConfig={config}
+							canSetGatewayAccount={canSetGatewayAccount}
 							check={check}
 							discover={discover}
 							key={provider.id}
@@ -1003,6 +1073,12 @@ export function LlmProvidersSettings() {
 							onConfigure={handleConfigure}
 							onReload={reload}
 							onRemove={handleRemove}
+							onRemoveAccount={async (providerId, accountId) => {
+								await removeAccount(providerId, accountId);
+							}}
+							onSwitchAccount={async (providerId, accountId, target) => {
+								await switchAccount(providerId, accountId, target);
+							}}
 							onToggleModel={handleToggleModel}
 							provider={provider}
 							thinkingLevels={cat.thinkingLevels}

@@ -91,9 +91,9 @@ function ProofArtifact() {
 							<div className="text-[#c4b5fd] text-xs tracking-[1.4px]">
 								RYU · LIVE REACT PROOF
 							</div>
-							<h1 className="mt-2 font-semibold text-3xl">Computer settings</h1>
+							<h1 className="mt-2 font-semibold text-3xl">Device settings</h1>
 							<p className="mt-2 max-w-2xl text-[#a1a1aa] text-base leading-6">
-								Gateway-owned permissions for Ghost on the selected computer.
+								Gateway-owned permissions for Ghost on the selected device.
 							</p>
 						</div>
 						<div className="rounded-full border border-[#245c3e] bg-[#123022] px-3 py-2 font-semibold text-[#86efac] text-[11px] tracking-wide">
@@ -106,7 +106,7 @@ function ProofArtifact() {
 							<div className="mb-5 flex items-center justify-between border-[#27272a] border-b pb-4">
 								<div>
 									<div className="text-[#a1a1aa] text-[11px] uppercase tracking-wide">
-										Selected computer
+										Selected device
 									</div>
 									<div className="mt-1 font-medium text-lg">My MacBook</div>
 								</div>
@@ -121,9 +121,9 @@ function ProofArtifact() {
 							<div className="text-[#a1a1aa] text-[11px] tracking-wide">
 								GATEWAY EVENT LOG
 							</div>
-							<h2 className="mt-2 font-medium text-xl">Computer policy</h2>
+							<h2 className="mt-2 font-medium text-xl">Device policy</h2>
 							<div className="mt-4 rounded-xl border border-[#3f3f46] bg-[#18181b] p-3 font-mono text-[#d4d4d8] text-xs leading-6">
-								<div>scope: selected computer</div>
+								<div>scope: selected device</div>
 								<div>section: [computer_use]</div>
 								<div>default: locked_use = false</div>
 							</div>

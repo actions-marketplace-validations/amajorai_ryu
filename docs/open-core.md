@@ -4,6 +4,13 @@ Ryu follows an open-core model (the Vercel / Supabase shape): the orchestration 
 infrastructure is open-sourced and self-hostable so contributors and enterprise operators can
 audit, extend, and deploy it themselves; the UX and identity layer is closed.
 
+The supported OSS deployment unit is the **Self-hosted Ryu Node**: Ryu Core +
+Ryu Gateway, used through the CLI, SDK, or another compatible client. It does
+not require a Ryu-operated account or control-plane backend. A **Private/Full
+Ryu Deployment** is a separate customer-operated offering that adds the
+proprietary identity, organization, billing, entitlement, and Marketplace plane
+around one or more self-hosted nodes.
+
 ## Tier mapping
 
 Every unit in the monorepo carries its own `LICENSE` file and maps to one of these tiers.
@@ -65,13 +72,26 @@ The plugin/extension runtime is implemented in unit U054 (issue #168,
 
 ## Self-hosting
 
-To self-host the OSS tier:
+### Self-hosted Ryu Node
+
+To self-host the OSS node:
 
 1. Build `apps/core` - `cargo build --release` in `apps/core/`
 2. Build `apps/gateway` - `cargo build --release` in `apps/gateway/`
-3. Point any OpenAI-compatible client at the gateway's `/v1/chat/completions` endpoint.
+3. Configure a local model or your own provider keys.
+4. Point the CLI, SDK, or any OpenAI-compatible client at the node.
 
-No `apps/desktop`, `apps/web`, or `apps/server` code is required for a self-hosted deployment.
+The node owns its runtime state, model/provider configuration, policies, audit,
+and local storage. No `apps/server`, Ryu account, Ryu billing account, or Ryu
+Marketplace service is required.
+
+### Private/Full Ryu Deployment
+
+A full customer-operated product deployment adds the proprietary control plane
+(`apps/server` and its supporting Web/API surfaces) for account sessions,
+organizations, entitlements, billing, Marketplace commerce, and managed-node
+operations. That deployment is customer-operated under the applicable
+commercial terms; it is not part of the public OSS self-hosting unit.
 
 ## License placement
 

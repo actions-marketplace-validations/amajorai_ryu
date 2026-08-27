@@ -58,6 +58,7 @@ const baseApp: AppInfo = {
 	runnables: [],
 	sidecarName: null,
 	targets: [],
+	surfaceSupport: [],
 	version: "1.0.0",
 	windowsFirst: false,
 };

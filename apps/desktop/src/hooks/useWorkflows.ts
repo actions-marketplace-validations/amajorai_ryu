@@ -10,8 +10,6 @@ import {
 	type WorkflowRun,
 } from "@/src/lib/api/workflows.ts";
 import { useCoreRefresh } from "@/src/lib/core-refresh.ts";
-import { PlanCapError } from "@/src/lib/gating/planCapBridge.ts";
-import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
 /** Fires whenever a workflow is created, saved, or deleted, so every
@@ -41,8 +39,6 @@ export function useWorkflows(): UseWorkflowsResult {
 	const activeNode = useActiveNode();
 	const url = activeNode.url;
 	const token = activeNode.token ?? null;
-
-	const { guard, limitFor } = useEntityCap();
 
 	const [workflows, setWorkflows] = useState<Workflow[]>([]);
 	const [loading, setLoading] = useState(true);
@@ -80,19 +76,6 @@ export function useWorkflows(): UseWorkflowsResult {
 
 	const create = useCallback(
 		async (definition: unknown) => {
-			// `create` is an UPSERT (it also persists edits to an existing workflow),
-			// so only the genuinely-new case counts against the cap — saving an
-			// existing workflow while at the limit must still work. A new workflow
-			// carries an empty/absent id or one not yet in the list. Off the managed
-			// path this is a no-op (self-host uncapped).
-			const defId = (definition as { id?: unknown })?.id;
-			const isNew =
-				typeof defId !== "string" ||
-				defId === "" ||
-				!workflows.some((w) => w.id === defId);
-			if (isNew && !guard("maxWorkflows", workflows.length)) {
-				throw new PlanCapError("maxWorkflows", limitFor("maxWorkflows"));
-			}
 			const workflow = await apiCreateWorkflow({ url, token }, definition);
 			setWorkflows((prev) => {
 				const next = prev.filter((w) => w.id !== workflow.id);
@@ -101,7 +84,7 @@ export function useWorkflows(): UseWorkflowsResult {
 			notifyWorkflowsChanged();
 			return workflow;
 		},
-		[url, token, guard, limitFor, workflows]
+		[url, token]
 	);
 
 	const remove = useCallback(

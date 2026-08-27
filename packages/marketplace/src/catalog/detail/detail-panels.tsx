@@ -286,6 +286,11 @@ function VersionSnapshotRow({
 		)}`,
 		snapshot.license ? `Licence: ${snapshot.license}` : null,
 		snapshot.engines?.ryu ? `Requires Ryu ${snapshot.engines.ryu}` : null,
+		snapshot.surfaceSupport?.length
+			? `Support: ${snapshot.surfaceSupport
+					.map((surface) => surfaceLabel(surface.surface))
+					.join(", ")}`
+			: null,
 		snapshot.readme
 			? `README: ${Math.round(snapshot.readme.length / 100) / 10}k chars`
 			: "No README at this tag",

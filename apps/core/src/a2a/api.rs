@@ -15,7 +15,7 @@ use ryu_a2a::{
     PublishedAgentUpsert, PushConfigInput, StoreError, TaskCreate, TaskDirection, TaskState,
     discover_agent_card, outbound_task_record_id,
     protocol::{
-        AgentCapabilities, AgentCard, AgentInterface, Artifact, AuthenticationInfo,
+        AgentCapabilities, AgentCard, AgentInterface, AgentSkill, Artifact, AuthenticationInfo,
         CancelTaskRequest, DeleteTaskPushNotificationConfigRequest, GetExtendedAgentCardRequest,
         GetTaskPushNotificationConfigRequest, GetTaskRequest, HttpAuthSecurityScheme, JsonRpcError,
         JsonRpcId, JsonRpcRequest, JsonRpcResponse, ListTaskPushNotificationConfigsRequest,
@@ -261,6 +261,29 @@ async fn build_agent_card(extended: bool) -> Result<AgentCard, ApiError> {
         .iter()
         .flat_map(|agent| agent.skills.clone())
         .collect::<Vec<_>>();
+    // SDK Actions are published as A2A skills for discovery. A2A still hands
+    // natural-language work to the published agent; it does not become a second
+    // direct Action executor. The descriptor source is the same activated
+    // manifest/tool registry used by `/api/actions/*` and MCP discovery.
+    if let Some(state) = crate::learning::global_state() {
+        skills.extend(
+            state
+                .mcp
+                .action_descriptors()
+                .await
+                .into_iter()
+                .map(|action| AgentSkill {
+                    id: format!("{}/{}", action.plugin_id, action.action_id),
+                    name: action.name,
+                    description: action.description,
+                    tags: vec!["ryu".to_owned(), "action".to_owned(), action.effect.to_owned()],
+                    examples: None,
+                    input_modes: Some(vec!["application/json".to_owned()]),
+                    output_modes: Some(vec!["application/json".to_owned()]),
+                    security_requirements: None,
+                }),
+        );
+    }
     skills.sort_by(|left, right| left.id.cmp(&right.id));
     skills.dedup_by(|left, right| left.id == right.id);
     let base_url = config

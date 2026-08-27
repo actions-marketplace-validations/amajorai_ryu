@@ -15,6 +15,41 @@
     }
   ],
   "paths": {
+    "/api/actions/{action_id}": {
+      "post": {
+        "tags": ["Actions"],
+        "summary": "Call a canonical Action",
+        "operationId": "call_action",
+        "parameters": [
+          {
+            "name": "action_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/activity": {
       "get": {
         "tags": ["Activity"],
@@ -6536,8 +6571,8 @@
     "/api/output-styles/select": {
       "post": {
         "tags": ["Output styles"],
-        "summary": "Select the node-default output style",
-        "description": "This is the store tab's install action, and it is deliberately the whole of it: a\nstyle is a prompt preset, so adopting one is a write to the one selection file the\ninjection seams read. No parallel store of \"installed\" styles, and no second source\nof truth about which style is in force \u2014 exactly the shape the Meetings\nnote-templates tab uses.",
+        "summary": "Select the legacy node-default output style",
+        "description": "This is the store tab's install action, and it is deliberately the whole of it: a\nstyle is a prompt preset. This endpoint remains for older clients and upgrade\ntooling; normal turns now resolve the profile stored on the selected agent.",
         "operationId": "select_style",
         "requestBody": {
           "content": {
@@ -6927,6 +6962,7 @@
       "post": {
         "tags": ["Agents"],
         "summary": "Switch a Pi provider's active account",
+        "description": "Switches the account for the current Ryu session by default. Set target to gateway to install a gateway-compatible BYOK account in the shared Gateway; that target requires the gateway.configure permission.",
         "operationId": "pi_provider_account_switch",
         "parameters": [
           {
@@ -6947,6 +6983,44 @@
           },
           "required": true
         },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pi-config/providers/{id}/accounts/{account_id}/usage": {
+      "get": {
+        "tags": ["Agents"],
+        "summary": "Per-account subscription usage",
+        "description": "Reads one saved subscription credential inside Core's sealed vault and returns normalized provider usage meters without exposing the credential.",
+        "operationId": "provider_account_usage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Ryu provider id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Saved account id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK",
@@ -7647,7 +7721,7 @@
       "post": {
         "tags": ["Plugins"],
         "summary": "Update a plugin",
-        "description": "# Security (the gap this closes)\n\nThe old handler bumped the store version off `find_manifest` (the in-memory,\nalready-loaded manifest) and called `set_version` \u2014 it never re-fetched the\ntarget version, never re-ran the ed25519 signature verify, never re-checked the\n`ui_code_sha256` integrity gate, and never re-checked paid entitlement. An update\ncould therefore swap in UNVERIFIED code. This handler treats an update as a\nre-install of the new version:\n\n1. **Installed?** else 404.\n2. **Re-verify by re-resolving** the target from the catalog via\n   [`resolve_plugin_from_catalog`] \u2014 the SAME path `install` uses, which runs\n   `verify_manifest_signature` (ed25519) + the fail-closed `ui_code_sha256` gate\n   (inside `install_descriptor`) + forwards the buyer bearer for the paid\n   entitlement check. A tampered bundle, a bad signature, an unentitled paid\n   plugin, or an unreachable verify gateway all fail HERE \u2014 before any mutation,\n   so the OLD version stays fully intact.\n3. **Downgrade / no-op gate** ([`plan_update`]) before any mutation.\n4. **Resolve + install any NEW dependencies** the new version declares, reusing\n   the exact closure machinery `install_plugin_from_catalog` uses (rollback on\n   partial failure), so an update that adds a dependency never leaves the plugin\n   un-enableable.\n5. **Persist**: write the new manifest to disk, then `set_version` + `set_ui_code`\n   in the store ([`update_app`]). The store transition preserves the `enabled`\n   bit + grants, so a disabled app stays disabled. A store failure restores the\n   previous on-disk manifest, keeping the target transition all-or-nothing.\n\nBehaviour change (intended): a plugin with no resolvable catalog entry (e.g. one\nside-loaded via `install-bundle` with no marketplace listing) can no longer be\nupdated through this endpoint \u2014 the catalog re-pull is the trust boundary and is\nmandatory.\n\n# Release channels\n\nThe re-resolve in step 2 runs on the record's PINNED channel, so an install that\nfollowed `beta` keeps getting betas instead of being pulled back to stable the\nfirst time it checks for an update.\n\nA body `channel` switches trains. That is deliberately a different operation\nfrom an update, because semver ranks every prerelease BELOW its stable release\n(`1.2.0-beta.1 < 1.2.0`): moving a stable install onto `beta` is a downgrade by\nprecedence and step 3 would refuse it. An explicit switch therefore carries its\nown authority \u2014 it does not need `force`, the request already said what to do \u2014\nand the response reports `channel_switch` plus the version delta so the client\ncan show that the new train is behind the old one. The pin is persisted whether\nor not the version actually moved, so a switch onto a train that happens to be\nat the same version still changes what the NEXT update follows.",
+        "description": "# Security (the gap this closes)\n\nThe old handler bumped the store version off `find_manifest` (the in-memory,\nalready-loaded manifest) and called `set_version` \u2014 it never re-fetched the\ntarget version, never re-ran the ed25519 signature verify, and never re-checked the\n`ui_code_sha256` integrity gate. An update\ncould therefore swap in UNVERIFIED code. This handler treats an update as a\nre-install of the new version:\n\n1. **Installed?** else 404.\n2. **Re-verify by re-resolving** the target from the catalog via\n   [`resolve_plugin_from_catalog`] \u2014 the SAME path `install` uses, which runs\n   `verify_manifest_signature` (ed25519) + the fail-closed `ui_code_sha256` gate\n   (inside `install_descriptor`). A tampered bundle, a bad signature, or an\n   unreachable verify gateway all fail HERE \u2014 before any mutation,\n   so the OLD version stays fully intact.\n3. **Downgrade / no-op gate** ([`plan_update`]) before any mutation.\n4. **Resolve + install any NEW dependencies** the new version declares, reusing\n   the exact closure machinery `install_plugin_from_catalog` uses (rollback on\n   partial failure), so an update that adds a dependency never leaves the plugin\n   un-enableable.\n5. **Persist**: write the new manifest to disk, then `set_version` + `set_ui_code`\n   in the store ([`update_app`]). The store transition preserves the `enabled`\n   bit + grants, so a disabled app stays disabled. A store failure restores the\n   previous on-disk manifest, keeping the target transition all-or-nothing.\n\nBehaviour change (intended): a plugin with no resolvable catalog entry (e.g. one\nside-loaded via `install-bundle` with no marketplace listing) can no longer be\nupdated through this endpoint \u2014 the catalog re-pull is the trust boundary and is\nmandatory.\n\n# Release channels\n\nThe re-resolve in step 2 runs on the record's PINNED channel, so an install that\nfollowed `beta` keeps getting betas instead of being pulled back to stable the\nfirst time it checks for an update.\n\nA body `channel` switches trains. That is deliberately a different operation\nfrom an update, because semver ranks every prerelease BELOW its stable release\n(`1.2.0-beta.1 < 1.2.0`): moving a stable install onto `beta` is a downgrade by\nprecedence and step 3 would refuse it. An explicit switch therefore carries its\nown authority \u2014 it does not need `force`, the request already said what to do \u2014\nand the response reports `channel_switch` plus the version delta so the client\ncan show that the new train is behind the old one. The pin is persisted whether\nor not the version actually moved, so a switch onto a train that happens to be\nat the same version still changes what the NEXT update follows.",
         "operationId": "update_app_handler",
         "parameters": [
           {
@@ -11196,6 +11270,73 @@
         }
       }
     },
+    "/api/voice/speech-processing": {
+      "post": {
+        "tags": ["Voice"],
+        "summary": "clean a speech transcript",
+        "operationId": "speech_processing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/voice/speech-processing-engines": {
+      "get": {
+        "tags": ["Voice"],
+        "summary": "list Speech Processing engines",
+        "operationId": "speech_processing_engines",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/voice/speech-processing-model/install": {
+      "post": {
+        "tags": ["Voice"],
+        "summary": "install the Speech Processing model",
+        "operationId": "speech_processing_model_install",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/voice/transcribe": {
       "post": {
         "tags": ["Voice"],
@@ -11638,6 +11779,32 @@
           },
           "404": {
             "description": "No webhook trigger on this workflow"
+          }
+        }
+      }
+    },
+    "/api/workspace/clone": {
+      "post": {
+        "tags": ["Git"],
+        "summary": "Clone a GitHub repository into a project folder",
+        "description": "Clone a GitHub repository into `~/Documents/Ryu/<name>` on the node serving\nthis request. SSH URLs run on that node, so its existing SSH config and keys\nare used; no private key crosses the desktop boundary. The destination is\nregistered by the desktop only after this operation returns successfully.",
+        "operationId": "clone_project_folder",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
           }
         }
       }
@@ -12384,7 +12551,7 @@
       "post": {
         "tags": ["Plugins"],
         "summary": "(Deprecated alias) Update a plugin",
-        "description": "Deprecated alias for `/api/plugins/{id}/update`. Prefer `/api/plugins` routes.\n\n# Security (the gap this closes)\n\nThe old handler bumped the store version off `find_manifest` (the in-memory,\nalready-loaded manifest) and called `set_version` \u2014 it never re-fetched the\ntarget version, never re-ran the ed25519 signature verify, never re-checked the\n`ui_code_sha256` integrity gate, and never re-checked paid entitlement. An update\ncould therefore swap in UNVERIFIED code. This handler treats an update as a\nre-install of the new version:\n\n1. **Installed?** else 404.\n2. **Re-verify by re-resolving** the target from the catalog via\n   [`resolve_plugin_from_catalog`] \u2014 the SAME path `install` uses, which runs\n   `verify_manifest_signature` (ed25519) + the fail-closed `ui_code_sha256` gate\n   (inside `install_descriptor`) + forwards the buyer bearer for the paid\n   entitlement check. A tampered bundle, a bad signature, an unentitled paid\n   plugin, or an unreachable verify gateway all fail HERE \u2014 before any mutation,\n   so the OLD version stays fully intact.\n3. **Downgrade / no-op gate** ([`plan_update`]) before any mutation.\n4. **Resolve + install any NEW dependencies** the new version declares, reusing\n   the exact closure machinery `install_plugin_from_catalog` uses (rollback on\n   partial failure), so an update that adds a dependency never leaves the plugin\n   un-enableable.\n5. **Persist**: write the new manifest to disk, then `set_version` + `set_ui_code`\n   in the store ([`update_app`]). The store transition preserves the `enabled`\n   bit + grants, so a disabled app stays disabled. A store failure restores the\n   previous on-disk manifest, keeping the target transition all-or-nothing.\n\nBehaviour change (intended): a plugin with no resolvable catalog entry (e.g. one\nside-loaded via `install-bundle` with no marketplace listing) can no longer be\nupdated through this endpoint \u2014 the catalog re-pull is the trust boundary and is\nmandatory.\n\n# Release channels\n\nThe re-resolve in step 2 runs on the record's PINNED channel, so an install that\nfollowed `beta` keeps getting betas instead of being pulled back to stable the\nfirst time it checks for an update.\n\nA body `channel` switches trains. That is deliberately a different operation\nfrom an update, because semver ranks every prerelease BELOW its stable release\n(`1.2.0-beta.1 < 1.2.0`): moving a stable install onto `beta` is a downgrade by\nprecedence and step 3 would refuse it. An explicit switch therefore carries its\nown authority \u2014 it does not need `force`, the request already said what to do \u2014\nand the response reports `channel_switch` plus the version delta so the client\ncan show that the new train is behind the old one. The pin is persisted whether\nor not the version actually moved, so a switch onto a train that happens to be\nat the same version still changes what the NEXT update follows.",
+        "description": "Deprecated alias for `/api/plugins/{id}/update`. Prefer `/api/plugins` routes.\n\n# Security (the gap this closes)\n\nThe old handler bumped the store version off `find_manifest` (the in-memory,\nalready-loaded manifest) and called `set_version` \u2014 it never re-fetched the\ntarget version, never re-ran the ed25519 signature verify, and never re-checked the\n`ui_code_sha256` integrity gate. An update\ncould therefore swap in UNVERIFIED code. This handler treats an update as a\nre-install of the new version:\n\n1. **Installed?** else 404.\n2. **Re-verify by re-resolving** the target from the catalog via\n   [`resolve_plugin_from_catalog`] \u2014 the SAME path `install` uses, which runs\n   `verify_manifest_signature` (ed25519) + the fail-closed `ui_code_sha256` gate\n   (inside `install_descriptor`). A tampered bundle, a bad signature, or an\n   unreachable verify gateway all fail HERE \u2014 before any mutation,\n   so the OLD version stays fully intact.\n3. **Downgrade / no-op gate** ([`plan_update`]) before any mutation.\n4. **Resolve + install any NEW dependencies** the new version declares, reusing\n   the exact closure machinery `install_plugin_from_catalog` uses (rollback on\n   partial failure), so an update that adds a dependency never leaves the plugin\n   un-enableable.\n5. **Persist**: write the new manifest to disk, then `set_version` + `set_ui_code`\n   in the store ([`update_app`]). The store transition preserves the `enabled`\n   bit + grants, so a disabled app stays disabled. A store failure restores the\n   previous on-disk manifest, keeping the target transition all-or-nothing.\n\nBehaviour change (intended): a plugin with no resolvable catalog entry (e.g. one\nside-loaded via `install-bundle` with no marketplace listing) can no longer be\nupdated through this endpoint \u2014 the catalog re-pull is the trust boundary and is\nmandatory.\n\n# Release channels\n\nThe re-resolve in step 2 runs on the record's PINNED channel, so an install that\nfollowed `beta` keeps getting betas instead of being pulled back to stable the\nfirst time it checks for an update.\n\nA body `channel` switches trains. That is deliberately a different operation\nfrom an update, because semver ranks every prerelease BELOW its stable release\n(`1.2.0-beta.1 < 1.2.0`): moving a stable install onto `beta` is a downgrade by\nprecedence and step 3 would refuse it. An explicit switch therefore carries its\nown authority \u2014 it does not need `force`, the request already said what to do \u2014\nand the response reports `channel_switch` plus the version delta so the client\ncan show that the new train is behind the old one. The pin is persisted whether\nor not the version actually moved, so a switch onto a train that happens to be\nat the same version still changes what the NEXT update follows.",
         "operationId": "update_app_handler_apps_alias",
         "parameters": [
           {
@@ -12921,6 +13088,10 @@
     {
       "name": "MCP",
       "description": "MCP servers, tools, catalog, sandbox."
+    },
+    {
+      "name": "Actions",
+      "description": "Canonical governed Action calls."
     },
     {
       "name": "Tools",

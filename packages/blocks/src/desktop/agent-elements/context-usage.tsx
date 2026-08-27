@@ -165,7 +165,7 @@ export const CATEGORY_META: Record<
 	output_style: {
 		color: "oklch(0.64 0.21 1)",
 		order: 2,
-		hint: "The output style's formatting instructions.",
+		hint: "The assigned personality profile's formatting instructions.",
 	},
 	tools: {
 		color: "oklch(0.78 0.16 76)",

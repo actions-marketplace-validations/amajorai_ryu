@@ -180,7 +180,7 @@ export function DesktopThemeSubmenu() {
 
 const PLAN_LABELS: Record<string, string> = {
 	"desktop-license": "Ryu Desktop",
-	"marketplace-membership": "Marketplace Membership",
+	"marketplace-membership": "A Major Pass",
 	pro: "Ryu Pro",
 	max: "Ryu Max",
 	teams: "Ryu Teams",

@@ -11,10 +11,23 @@ const BROWSE_KINDS: MarketplaceKind[] = MARKETPLACE_BROWSE_KINDS.map(
  * realm tab; this page is the one cross-kind view of paid Marketplace listings. */
 export default function MarketplaceBrowseSection({
 	onlyKind,
+	initialQuery,
+	initialItem,
 }: {
+	initialItem?: { id: string; kind: string };
+	initialQuery?: string;
 	onlyKind?: MarketplaceKind;
 }) {
-	const kinds = onlyKind ? [onlyKind] : BROWSE_KINDS;
+	const selectedKind = BROWSE_KINDS.includes(
+		initialItem?.kind as MarketplaceKind
+	)
+		? (initialItem?.kind as MarketplaceKind)
+		: undefined;
+	const kinds = onlyKind
+		? [onlyKind]
+		: selectedKind
+			? [selectedKind]
+			: BROWSE_KINDS;
 	return (
 		<div className="scroll-fade h-full overflow-auto">
 			<div className="mx-auto w-full max-w-4xl px-4 pt-2 pb-8">
@@ -24,7 +37,14 @@ export default function MarketplaceBrowseSection({
 					</StoreShelfHeading>
 				)}
 				{kinds.map((kind) => (
-					<MarketplaceStrip key={kind} kind={kind} />
+					<MarketplaceStrip
+						initialQuery={initialQuery}
+						initialSelectedId={
+							kind === selectedKind ? initialItem?.id : undefined
+						}
+						key={kind}
+						kind={kind}
+					/>
 				))}
 			</div>
 		</div>

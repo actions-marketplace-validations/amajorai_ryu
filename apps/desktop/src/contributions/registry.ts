@@ -38,6 +38,10 @@ export interface RouteTab {
 	initialPrompt?: string;
 	/** One-shot quote carried into a newly opened focused reply thread. */
 	initialQuote?: string;
+	/** One-shot Marketplace listing to select after the Store shell mounts. */
+	initialStoreItem?: { id: string; kind: string };
+	/** One-shot Store search seed for a Marketplace result opened from Cmd+K. */
+	initialStoreQuery?: string;
 	/** When true, the seeded prompt/images are sent automatically once chat is
 	 *  ready (the `/chat` built-in forwards it to `ChatPage`). */
 	initialSubmit?: boolean;

@@ -227,7 +227,7 @@ export function PreferencesStep({
 												onCheckedChange={handleLaunchAtLogin}
 											/>
 										}
-										description="Start Ryu automatically when you sign in to your computer, so your agents and background work are ready without opening it yourself."
+										description="Start Ryu automatically when you sign in to your device, so your agents and background work are ready without opening it yourself."
 										title="Start Ryu on startup"
 									/>
 									<SettingsItem

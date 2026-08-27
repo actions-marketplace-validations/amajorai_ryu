@@ -22,7 +22,10 @@ import type {
 	CardDither,
 	CardThemePreview,
 	CatalogBanner,
+	CatalogExtensionSummary,
+	CatalogImplementationSummary,
 	CatalogLayer,
+	CatalogSurfaceSupport,
 } from "@ryu/marketplace/catalog/types";
 import {
 	type ApiTarget,
@@ -118,6 +121,8 @@ interface AppManifestWire {
 	 *  a write — so without this the card would show "enabled" beside a panel that
 	 *  is gone. Absent on a node predating Safe Mode. */
 	suppressed_by_safe_mode?: boolean;
+	/** Display-only per-surface support levels from Core. */
+	surface_support?: CatalogSurfaceSupport[];
 	/** Short one-line pitch shown under the name. */
 	tagline?: string | null;
 	/** Host surfaces the plugin runs on. Absent/empty = EVERY surface. */
@@ -254,6 +259,8 @@ export interface AppInfo extends AppPresentation {
 	 *  claim the app is running — that mismatch (enabled switch, missing panel) is
 	 *  the confusing state Safe Mode has to explain, not create. */
 	suppressedBySafeMode: boolean;
+	/** Per-surface support levels from Core's catalog projection. */
+	surfaceSupport: CatalogSurfaceSupport[];
 	/** Host surfaces this plugin runs on. **Empty = every surface**, never "none". */
 	targets: Surface[];
 	version: string;
@@ -527,6 +534,7 @@ function toAppInfo(w: AppManifestWire): AppInfo {
 		})),
 		sidecarName: w.sidecar_name ?? null,
 		stability: w.stability ?? null,
+		surfaceSupport: w.surface_support ?? [],
 		suppressedBySafeMode: w.suppressed_by_safe_mode ?? false,
 		tagline: w.tagline ?? null,
 		layers: w.layers ?? [],
@@ -870,13 +878,13 @@ export interface PluginTheme {
  *
  *  So this is what a surface uses to answer "which plugin shipped this style" and to
  *  explain a style it cannot offer (a `force_for_plugin` row is pinned while its
- *  plugin is enabled). The picker's actual data source is `GET /api/output-styles`,
+ *  plugin is enabled). The profile selector's data source is `GET /api/output-styles`,
  *  which merges these with the user's, the project's and managed styles. */
 export interface PluginOutputStyle {
 	/** Frontmatter `description`; `null` when the style file omits it. */
 	description: string | null;
-	/** Frontmatter `force-for-plugin` — this style overrides all three selection
-	 *  tiers while its plugin is enabled (design §5). */
+	/** Frontmatter `force-for-plugin` — this style overrides per-turn and per-agent
+	 *  selection while its plugin is enabled (design §5). */
 	force_for_plugin: boolean;
 	id: string;
 	/** Frontmatter `keep-coding-instructions` — whether the body is appended after the
@@ -1162,8 +1170,6 @@ export interface PluginCompanion {
 	icon?: string;
 	id: string;
 	label: string;
-	/** Whether the official Marketplace listing requires active Membership access. */
-	membershipRequired: boolean;
 	name: string;
 	/** The owning plugin's manifest id (the PluginStore key). The UI bundle is
 	 *  keyed by this, NOT by the companion id (`app__<runnable id>`). */
@@ -1182,7 +1188,6 @@ interface PluginCompanionWire {
 	icon?: string;
 	id: string;
 	label: string;
-	membership_required?: boolean;
 	name: string;
 	plugin_id?: string;
 	shortcut?: string;
@@ -1198,7 +1203,6 @@ function toPluginCompanion(w: PluginCompanionWire): PluginCompanion {
 		pluginId: w.plugin_id ?? "",
 		approvedGrants: w.approved_grants ?? [],
 		hasUi: w.has_ui ?? false,
-		membershipRequired: w.membership_required ?? false,
 		csp: w.csp
 			? {
 					connectDomains: w.csp.connect_domains ?? [],
@@ -1886,6 +1890,8 @@ export interface CatalogEntry {
 	layers?: CatalogLayer[];
 	/** SPDX licence id, when the source reports one. */
 	license?: string | null;
+	/** Server-derived A Major Pass inclusion marker for catalog presentation. */
+	membership_included?: boolean;
 	name: string;
 	/** Who listed this and how vetted it is. `"community"` = discovered
 	 *  automatically from a public GitHub topic and NOT reviewed by Ryu; absent
@@ -1901,7 +1907,7 @@ export interface CatalogEntry {
 	/** Commerce disclosure for a PAID listing; absent/null = free. Present on cards
 	 *  in the unified first-party view, where free (git catalog) and paid (hosted)
 	 *  listings sit in one list — without it a paid item is indistinguishable from a
-	 *  free one until checkout. Display only; entitlement is decided server-side. */
+	 *  free one until checkout. Display only; it does not gate the install handoff. */
 	pricing?: {
 		amountMinor?: number;
 		currency?: string;
@@ -1933,6 +1939,8 @@ export interface CatalogEntry {
 	source: string;
 	/** Upstream popularity signal (GitHub stars) for unmoderated listings. */
 	stars?: number | null;
+	/** Per-surface support levels, preserved for shared Marketplace detail. */
+	surface_support?: CatalogSurfaceSupport[];
 	/** Short one-line pitch shown under the name. */
 	tagline?: string | null;
 	tags: string[];
@@ -2132,11 +2140,13 @@ export interface PluginCatalogDetail {
 	domain?: string | null;
 	downloads?: number | null;
 	examplePrompts?: string[];
+	extensions?: CatalogExtensionSummary[];
 	external?: boolean;
 	feeds?: string[];
 	iconBackground?: string | null;
 	iconUrl?: string | null;
 	id: string;
+	implementation?: CatalogImplementationSummary[];
 	integration_kind?: string | null;
 	keywords?: string[];
 	kind?: string | null;
@@ -2148,6 +2158,7 @@ export interface PluginCatalogDetail {
 	screenshots?: string[];
 	source?: string;
 	sourceUrl?: string | null;
+	surfaceSupport?: CatalogSurfaceSupport[];
 	tagline?: string | null;
 	tags?: string[];
 	termsOfServiceUrl?: string | null;
@@ -2270,8 +2281,8 @@ export async function installAppFromUrl(
  * existing `GET /api/plugins/:id/ui-bundle` + `PluginHostPanel` path renders it.
  *
  * `buyerToken` (the control-plane session bearer) is forwarded as
- * `x-ryu-buyer-token` so a PAID plugin's entitlement check can resolve the buyer
- * org + its license; omit it for free plugins (anonymous install is fine).
+ * `x-ryu-buyer-token` for optional account-aware Marketplace operations; it is
+ * not required for a paid or free plugin install.
  */
 export async function installPluginFromCatalog(
 	target: ApiTarget,

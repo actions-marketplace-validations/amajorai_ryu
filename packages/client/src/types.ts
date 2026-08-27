@@ -45,12 +45,21 @@ export interface Agent {
 	locked: boolean;
 	model: string | null;
 	name: string;
+	/** Persona identity and the reusable personality profile assigned to this agent. */
+	persona: AgentPersona | null;
 	systemPrompt: string | null;
 	/** Optional role/title badge shown beside the agent name. */
 	title: string;
 	tools: string[];
 	updatedAt: string | null;
 	version: string;
+}
+
+/** Agent presentation and optional output-style personality profile. */
+export interface AgentPersona {
+	display_name: string | null;
+	output_style_id?: string | null;
+	tone: string | null;
 }
 
 /** A chat message sent to or received from an agent. */

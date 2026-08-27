@@ -1,4 +1,9 @@
 import { useChat } from "@ai-sdk/react";
+import {
+	RyuAssistantRecentChats,
+	RyuAssistantWidgetFrame,
+	RyuAssistantWidgetHeader,
+} from "@ryu/assistant-widget/surface";
 import { Button } from "@ryu/ui/components/button";
 import {
 	DropdownMenu,
@@ -15,6 +20,7 @@ import {
 	MoreHorizontal,
 	PanelRight,
 	Plus,
+	Settings2,
 	X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -23,6 +29,7 @@ import {
 	EmptyStateHeader,
 	type EmptyStateLogo,
 } from "@/components/agent-elements/empty-state-header.tsx";
+import { ComposerSettingsMenu } from "@/components/agent-elements/input/composer-settings-menu.tsx";
 import {
 	type ActivePermission,
 	PermissionPrompt,
@@ -51,6 +58,7 @@ import { generateImage } from "@/src/lib/api/images.ts";
 import { getDesktopTtsPrefs } from "@/src/lib/api/preferences.ts";
 import { speakText } from "@/src/lib/api/voice.ts";
 import { getRealtimeJwt } from "@/src/lib/realtime/jwt.ts";
+import { compactAge } from "@/src/lib/time.ts";
 import {
 	type AssistantBuilderSession,
 	type PageContextItem,
@@ -372,6 +380,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	const { openTab, tabs, activeTabId } = useTabsContext();
 	const {
 		createConversation,
+		listConversations,
 		seedTitleFromFirstMessage,
 		setActiveConversationId,
 		loadMessages,
@@ -426,6 +435,26 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	}, [storeConvId]);
 
 	const activeConvId = builder ? builder.conversationId : convId;
+	const conversations = useMemo(() => listConversations(), [listConversations]);
+	const floatingRecentChats = useMemo(
+		() =>
+			conversations
+				.filter((conversation) => !conversation.archived)
+				.slice(0, 4)
+				.map((conversation) => ({
+					id: conversation.id,
+					meta: compactAge(conversation.updatedAt),
+					title: conversation.title || "Untitled chat",
+				})),
+		[conversations]
+	);
+	const activeConversation = conversations.find(
+		(conversation) => conversation.id === activeConvId
+	);
+	const floatingTitle =
+		activeConversation?.title && activeConversation.title !== "Untitled"
+			? activeConversation.title
+			: "New chat";
 	const convIdRef = useRef(convId);
 	convIdRef.current = convId;
 
@@ -624,9 +653,11 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	const genericComposer = useComposerSlot(genericRuntime, {
 		target: chatTarget,
 		surface: "ask-ryu",
+		compact: bare && !isBuilder,
 		compactTrigger: true,
 		conversationId: convId,
 		isWorking: status === "streaming" || status === "submitted",
+		minimal: bare && !isBuilder,
 		// Image-gen only on the chat composer — the builder pane describes what to
 		// build, where a free-form "generate image" prompt has no place.
 		onGenerateImage: handleGenerateImage,
@@ -903,6 +934,15 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 		close();
 	}, [convId, openTab, setConversationId, close]);
 
+	const handleSelectRecentConversation = useCallback(
+		(id: string) => {
+			setActiveConversationId(id);
+			openTab("/chat", { conversationId: id });
+			close();
+		},
+		[close, openTab, setActiveConversationId]
+	);
+
 	// Docked shell chrome tracks the app sidebar variant (must run before any
 	// early return — bare/closed paths still need a stable hook order). The rail
 	// also starts below the frosted titlebar when it's shown; auto-hide frees the
@@ -944,20 +984,39 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 		/>
 	);
 
-	const body = (
+	const headerActions = (
 		<>
-			<header
-				className={cn("flex shrink-0 items-center gap-1.5 px-3 py-2", divider)}
-				data-tauri-drag-region={false}
-			>
-				{/* Floating mode is deliberately minimal — no titled header bar, just the
-				    conversation + composer as islands. Drop the title so only the
-				    top-right controls float; the docked sidebar keeps a plain "Chat"
-				    label across every page (builder mode included). */}
-				{bare ? null : (
-					<span className="truncate font-medium text-sm">Chat</span>
-				)}
-				<div className="flex-1" />
+			{bare && !isBuilder ? (
+				<ComposerSettingsMenu
+					align="end"
+					renderBody={(menuClose) => activeComposer.renderBody(menuClose)}
+					sections={activeComposer.triggerSections}
+					side="bottom"
+					trigger={
+						<Button
+							aria-label="Assistant settings"
+							className="size-7"
+							size="icon"
+							title="Assistant settings"
+							variant="ghost"
+						>
+							<Settings2 className="size-3.5" />
+						</Button>
+					}
+				/>
+			) : null}
+			{bare ? (
+				<Button
+					aria-label="Open assistant in full screen"
+					className="size-7"
+					onClick={handleOpenFullScreen}
+					size="icon"
+					title="Open in full screen"
+					variant="ghost"
+				>
+					<Maximize2 className="size-3.5" />
+				</Button>
+			) : (
 				<Button
 					aria-label={isSidebar ? "Float panel" : "Dock to sidebar"}
 					className="size-7"
@@ -968,53 +1027,51 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 				>
 					<PanelRight className="size-4" />
 				</Button>
-				{/* The 3-dots menu (full-screen hand-off / new chat) only applies to the
-				    generic assistant; builder threads are page-bound + ephemeral. */}
-				{isBuilder ? null : (
-					<DropdownMenu>
-						<DropdownMenuTrigger
-							render={
-								<Button
-									aria-label="Assistant options"
-									className="size-7"
-									size="icon"
-									variant="ghost"
-								/>
-							}
-						>
-							<MoreHorizontal className="size-4" />
-						</DropdownMenuTrigger>
-						<DropdownMenuContent
-							align="end"
-							className="min-w-48"
-							sideOffset={4}
-						>
-							<DropdownMenuItem onClick={handleOpenFullScreen}>
-								<Maximize2 className="size-4" />
-								Open in full screen
-							</DropdownMenuItem>
-							<DropdownMenuItem onClick={() => newConversation()}>
-								<MessageSquarePlus className="size-4" />
-								New chat
-							</DropdownMenuItem>
-							<DropdownMenuSeparator />
-							<DropdownMenuItem onClick={() => close()}>
-								<X className="size-4" />
-								Close
-							</DropdownMenuItem>
-						</DropdownMenuContent>
-					</DropdownMenu>
-				)}
-				<Button
-					aria-label="Close assistant"
-					className="size-7"
-					onClick={() => close()}
-					size="icon"
-					variant="ghost"
-				>
-					<X className="size-4" />
-				</Button>
-			</header>
+			)}
+			{bare || isBuilder ? null : (
+				<DropdownMenu>
+					<DropdownMenuTrigger
+						render={
+							<Button
+								aria-label="Assistant options"
+								className="size-7"
+								size="icon"
+								variant="ghost"
+							/>
+						}
+					>
+						<MoreHorizontal className="size-4" />
+					</DropdownMenuTrigger>
+					<DropdownMenuContent align="end" className="min-w-48" sideOffset={4}>
+						<DropdownMenuItem onClick={handleOpenFullScreen}>
+							<Maximize2 className="size-4" />
+							Open in full screen
+						</DropdownMenuItem>
+						<DropdownMenuItem onClick={() => newConversation()}>
+							<MessageSquarePlus className="size-4" />
+							New chat
+						</DropdownMenuItem>
+						<DropdownMenuSeparator />
+						<DropdownMenuItem onClick={() => close()}>
+							<X className="size-4" />
+							Close
+						</DropdownMenuItem>
+					</DropdownMenuContent>
+				</DropdownMenu>
+			)}
+		</>
+	);
+
+	const body = (
+		<>
+			<RyuAssistantWidgetHeader
+				actions={headerActions}
+				closeTitle={bare ? "Close assistant" : undefined}
+				divider={Boolean(divider)}
+				onClose={close}
+				testId={bare ? "floating-assistant-header" : undefined}
+				title={bare ? floatingTitle : "Chat"}
+			/>
 
 			{/* Page-context chips belong to the generic assistant only — a builder is
 			    scoped to the record it edits, not the page it happens to sit over.
@@ -1034,7 +1091,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 			{/* Ryu Clips: record screen+audio or attach an existing recording, folding
 			    its agent-context summary + key frames into the next turn. Generic chat
 			    only (a builder is scoped to the record it edits). */}
-			{isBuilder ? null : (
+			{isBuilder || bare ? null : (
 				<ClipComposerControls
 					className={cn("shrink-0 px-3 py-1.5", divider)}
 					onAttach={attachClip}
@@ -1046,8 +1103,16 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 					attachments={activeComposer.attachments}
 					composerMenuGroups={activeComposer.composerMenuGroups}
 					composerPrompt={permissionComposerPrompt}
-					emptyStateHeader={emptyHeader}
-					emptyStatePosition="center"
+					emptyStateFooter={
+						bare && !isBuilder ? (
+							<RyuAssistantRecentChats
+								items={floatingRecentChats}
+								onSelect={handleSelectRecentConversation}
+							/>
+						) : undefined
+					}
+					emptyStateHeader={bare ? undefined : emptyHeader}
+					emptyStatePosition={bare ? "default" : "center"}
 					error={error ?? undefined}
 					key={`${activeNode.url}-${activeConvId}`}
 					mentionItems={activeComposer.mentionItems}
@@ -1071,7 +1136,14 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	// Embedded in the morph launcher: fill its morphing frame, no shell of our own
 	// (the launcher supplies the glass floating frame + spring animation).
 	if (bare) {
-		return <div className={cn(ASSISTANT_SURFACE_CONTENT)}>{body}</div>;
+		return (
+			<RyuAssistantWidgetFrame
+				className={cn(ASSISTANT_SURFACE_CONTENT)}
+				placement="floating"
+			>
+				{body}
+			</RyuAssistantWidgetFrame>
+		);
 	}
 
 	// Docked sidebar: mirrors the left rail + workspace right dock. Floating
@@ -1082,8 +1154,8 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	// the page it sits beside, so the panel spans the viewport instead — Layout
 	// drops its width reservation at the same breakpoint.
 	return (
-		<aside
-			aria-label={builder ? "Ryu builder" : "Ask Ryu assistant"}
+		<RyuAssistantWidgetFrame
+			ariaLabel={builder ? "Ryu builder" : "Ask Ryu assistant"}
 			className={cn(
 				"fixed z-[55] flex flex-col overflow-hidden bg-sidebar text-sidebar-foreground md:left-auto md:w-[380px]",
 				titleBarClearsContent
@@ -1094,8 +1166,9 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 						? cn("inset-y-0 right-2 bottom-2 left-2", sidebarFloatingChrome)
 						: "inset-y-0 right-0 left-0 md:left-auto"
 			)}
+			placement="docked"
 		>
 			{body}
-		</aside>
+		</RyuAssistantWidgetFrame>
 	);
 }

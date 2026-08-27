@@ -2530,7 +2530,95 @@ pub fn provider_account_scope(provider_id: &str) -> Option<String> {
         Some(meta) if !meta.auth_key.is_empty() => meta.auth_key.to_owned(),
         _ => provider_id.to_owned(),
     };
-    Some(accounts::provider_scope(&key))
+	Some(accounts::provider_scope(&key))
+}
+
+/// Map a Pi provider id to the local Gateway provider-key slot, when the
+/// Gateway supports installing that account. Subscription OAuth and custom
+/// providers intentionally return `None`: their credentials must not be copied
+/// into the shared Gateway config through this BYOK path.
+pub fn gateway_provider_slug(provider_id: &str) -> Option<&'static str> {
+	match provider_id.trim() {
+		"anthropic" => Some("anthropic"),
+		"google" => Some("gemini"),
+		"openai" => Some("openai"),
+		"openrouter" => Some("openrouter"),
+		_ => None,
+	}
+}
+
+/// Read one saved API-key account for the Gateway handoff without exposing the
+/// credential through an HTTP response. OAuth and opaque accounts are rejected:
+/// the shared Gateway only accepts its own provider-key vault, while subscription
+/// credentials stay with the caller's local passthrough.
+pub fn provider_account_api_key(provider_id: &str, account_id: &str) -> Result<String> {
+	let scope = provider_account_scope(provider_id)
+		.ok_or_else(|| anyhow::anyhow!("provider '{provider_id}' has no Gateway key slot"))?;
+	let vault = accounts::global()
+		.ok_or_else(|| anyhow::anyhow!("the pi-accounts vault is not initialized"))?;
+	let info = vault
+		.list(&scope)?
+		.into_iter()
+		.find(|account| account.account_id == account_id)
+		.ok_or_else(|| anyhow::anyhow!("no account with id '{account_id}' for provider '{provider_id}'"))?;
+	if info.kind != accounts::KIND_API_KEY {
+		anyhow::bail!(
+			"account '{}' is not an API-key account and cannot be installed in the Gateway",
+			info.label
+		);
+	}
+	let credential = vault
+		.credential(&scope, account_id)?
+		.ok_or_else(|| anyhow::anyhow!("account '{}' has no readable credential", info.label))?;
+	let key = credential
+		.as_str()
+		.or_else(|| credential.get("key").and_then(Value::as_str))
+		.map(str::trim)
+		.filter(|key| !key.is_empty())
+		.ok_or_else(|| anyhow::anyhow!("account '{}' has no API key", info.label))?;
+	Ok(key.to_owned())
+}
+
+/// Read one saved subscription credential for the account-aware usage reader.
+///
+/// The credential stays inside Core: this helper is only called by the usage
+/// route, which passes it directly to `ryu-usage` and returns normalized meters.
+/// API-key and opaque accounts are rejected here so the usage endpoint cannot be
+/// repurposed as a generic secret reader.
+pub fn subscription_account_credential(
+	provider_id: &str,
+	account_id: &str,
+) -> Result<Option<Value>> {
+	let meta = provider_meta(provider_id)
+		.ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
+	if meta.auth_kind != "subscription" || meta.auth_key.is_empty() {
+		anyhow::bail!("provider '{provider_id}' is not a subscription provider");
+	}
+	let scope = accounts::provider_scope(meta.auth_key);
+	let vault = accounts::global()
+		.ok_or_else(|| anyhow::anyhow!("the pi-accounts vault is not initialized"))?;
+	let info = vault
+		.list(&scope)?
+		.into_iter()
+		.find(|account| account.account_id == account_id)
+		.ok_or_else(|| {
+			anyhow::anyhow!(
+				"no account with id '{account_id}' for provider '{provider_id}'"
+			)
+		})?;
+	if info.kind != accounts::KIND_OAUTH {
+		return Ok(None);
+	}
+	vault.credential(&scope, account_id)
+}
+
+/// Mark one saved account as the selected Gateway account after the Gateway has
+/// accepted its key. This marker is independent from `active`, which is the
+/// account selected for the current Ryu session.
+pub fn set_provider_gateway_active(provider_id: &str, account_id: &str) -> Result<bool> {
+	let scope = provider_account_scope(provider_id)
+		.ok_or_else(|| anyhow::anyhow!("provider '{provider_id}' has no Gateway account scope"))?;
+	with_account_vault(|vault| vault.set_gateway_active(&scope, account_id))
 }
 
 /// The accounts a provider holds, labels only. `[]` when it holds none.
@@ -5236,6 +5324,17 @@ mod tests {
             })
             .is_err());
             assert!(remove_provider(GATEWAY_PROVIDER_ID).is_err());
+        });
+    }
+
+    #[test]
+    fn subscription_account_credential_rejects_non_subscription_providers() {
+        with_temp_dir(|| {
+            let error = subscription_account_credential("openai", "acct-1")
+                .expect_err("API-key providers must not enter the usage reader");
+            assert!(error
+                .to_string()
+                .contains("is not a subscription provider"));
         });
     }
 

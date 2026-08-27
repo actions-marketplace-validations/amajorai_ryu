@@ -2,7 +2,7 @@ import { expect, type Page, test } from "@playwright/test";
 
 const STORY_URL = "/credit-usage-charts-proof.html";
 const PROOF_PATH =
-	"D:\\Code\\ryu\\apps\\desktop\\test-results\\gateway-usage-analytics-proof.png";
+	"/Users/jiawei/Documents/Code/ryu/apps/desktop/artifacts/usage-subscription-dashboard-proof.png";
 
 interface RuntimeIssues {
 	consoleErrors: string[];
@@ -52,6 +52,19 @@ test("shows canonical gateway rollup totals beside the credit ledger", async ({
 	const issues = await openProof(page);
 
 	await expect(page.getByTestId("credit-usage-view")).toBeVisible();
+	await expect(page.getByTestId("subscription-usage-dashboard")).toBeVisible();
+	await expect(page.getByText("Work account")).toBeVisible();
+	await expect(page.getByText("Personal account")).toBeVisible();
+	await expect(page.getByText("Team account")).toBeVisible();
+	await expect(
+		page.getByText("Reconnect this subscription to refresh its access token.")
+	).toBeVisible();
+	await expect(page.getByTestId("subscription-usage-cost-note")).toContainText(
+		"not an invoice"
+	);
+	await expect(
+		page.getByRole("progressbar", { name: "Session: 72% left" })
+	).toBeVisible();
 	await expect(
 		page.getByRole("heading", { name: "Credit usage analytics" })
 	).toBeVisible();

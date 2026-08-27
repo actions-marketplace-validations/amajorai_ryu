@@ -17,4 +17,14 @@ test("secondary sign-in methods live under More options", () => {
 
 	expect(html).toContain("More options");
 	expect(html).toContain('data-slot="accordion"');
+	const rememberIndex = html.indexOf("Remember this device for 30 days");
+	expect(rememberIndex).toBeLessThan(html.indexOf(">Sign in<"));
+	expect(html).toContain("flex items-center gap-2");
+	expect(html).toContain("mb-6 flex items-center gap-2");
+	expect(html).toContain(
+		"overflow-visible rounded-none border-0 bg-transparent shadow-none"
+	);
+	expect(html).toContain(
+		"border-0 bg-transparent shadow-none hover:bg-transparent hover:shadow-none"
+	);
 });

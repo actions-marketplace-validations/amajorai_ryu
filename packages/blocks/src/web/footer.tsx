@@ -26,13 +26,12 @@ export default function Footer({
 				<div className="mb-12 grid grid-cols-1 gap-12 md:grid-cols-2">
 					<div className="space-y-4">
 						<h3 className="font-medium text-2xl">
-							The foundation for AI agents
+							AI deployment for small teams
 						</h3>
 						<p className="max-w-md text-muted-foreground">
-							An open, composable platform for agent orchestration and
-							multiplayer AI. Build plugins that extend capabilities and apps
-							that use pre-built primitives. Ryu provides the infrastructure
-							layer around agents.
+							Ryu helps pre-seed to seed startups with fewer than 10 employees
+							run autonomous AI safely in the cloud. We deploy it, keep it
+							running, and connect the tools your team already uses.
 						</p>
 						<BackedBy className="pt-2" />
 					</div>

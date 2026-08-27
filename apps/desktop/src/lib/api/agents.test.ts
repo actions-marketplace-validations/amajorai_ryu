@@ -26,6 +26,25 @@ describe("agent setup model slot wire format", () => {
 		});
 	});
 
+	test("sends a personality profile inside the agent persona slot", () => {
+		const input: AgentInput = {
+			description: null,
+			engine: "acp:pi",
+			name: "ELI5 helper",
+			persona: {
+				display_name: "Aria",
+				output_style_id: "eli5",
+				tone: null,
+			},
+			systemPrompt: "Explain things clearly.",
+			tools: ["*"],
+		};
+
+		expect(toAgentBody(input).persona).toMatchObject({
+			output_style_id: "eli5",
+		});
+	});
+
 	test("keeps the runtime engine separate from the chat provider slot", async () => {
 		const originalFetch = globalThis.fetch;
 		globalThis.fetch = (async () =>
@@ -38,6 +57,11 @@ describe("agent setup model slot wire format", () => {
 					engine: "acp:pi",
 					id: "researcher",
 					name: "Researcher",
+					persona: {
+						display_name: null,
+						output_style_id: "eli5",
+						tone: null,
+					},
 				},
 			})) as unknown as typeof globalThis.fetch;
 		try {
@@ -50,6 +74,7 @@ describe("agent setup model slot wire format", () => {
 				engine: "openrouter",
 				modelId: "openai/gpt-5-mini",
 			});
+			expect(agent.persona?.output_style_id).toBe("eli5");
 		} finally {
 			globalThis.fetch = originalFetch;
 		}

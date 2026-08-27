@@ -20,7 +20,7 @@
 // attributes and geometry, not about nesting.
 //
 // The fixture, in order:
-//   • a run of THREE consecutive user messages, then one assistant reply;
+//   • a run of THREE consecutive user messages, then THREE assistant replies;
 //   • a lone user message with a reply (a run of one);
 //   • a pair of user messages split by a DAY boundary, which must break the run
 //     even though no assistant spoke between them.
@@ -106,15 +106,21 @@ function buildHistory(): UIMessage[] {
 			"Can you read `scheduler.rs` and tell me what retries look like?",
 			stampFor(0, 2)
 		),
+		assistant("t-assistant-0", "Retries are capped at three.", stampFor(0, 3)),
 		assistant(
-			"t-assistant-0",
-			`Retries are capped at three.\n\n${"The relevant loop backs off exponentially and gives up on the fourth attempt. ".repeat(4)}`,
+			"t-assistant-1",
+			"The relevant loop backs off exponentially.",
+			stampFor(0, 3)
+		),
+		assistant(
+			"t-assistant-2",
+			"It gives up on the fourth attempt.",
 			stampFor(0, 3)
 		),
 		// A single question with a reply: the ungrouped shape.
 		user("t-user-3", "And the queue depth?", stampFor(0, 4)),
 		assistant(
-			"t-assistant-1",
+			"t-assistant-3",
 			`Unbounded today.\n\n${"Nothing sheds load, so a slow consumer grows the queue until memory runs out. ".repeat(4)}`,
 			stampFor(0, 5)
 		),

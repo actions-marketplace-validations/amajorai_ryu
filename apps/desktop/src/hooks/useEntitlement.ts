@@ -52,7 +52,6 @@ import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	setEntitlementActive,
 	setManagedInferenceEntitled,
-	setMarketplaceAppsEntitled,
 } from "@/src/lib/api/preferences.ts";
 import { publishFeatureFlags } from "@/src/lib/feature-flags.ts";
 import { setUpdatesWindow } from "@/src/lib/updates-window.ts";
@@ -251,7 +250,6 @@ export function useEntitlement(): UseEntitlement {
 			const target = toTarget(useNodeStore.getState().getActiveNode());
 			await setEntitlementActive(target, next.reason !== "locked");
 			await setManagedInferenceEntitled(target, Boolean(next.managedInference));
-			await setMarketplaceAppsEntitled(target, Boolean(next.marketplaceApps));
 		} catch {
 			// Non-fatal: Core sync is best-effort; the paywall UI already gated the
 			// shell, and Core re-reads the flag on its next startup regardless.

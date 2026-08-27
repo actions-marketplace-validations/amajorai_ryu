@@ -1025,9 +1025,10 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // its `node` server is never spawned unless a developer installs it. The
     // canonical copy under `plugins-store/` and this fixture are byte-identical.
     include_str!("../../../../plugins-store/plugins/sample-widget/manifest.json"),
-    // The six built-in output styles (ELI5, I have ADHD, Explanatory, Learning,
-    // Proactive, Plain text). Zero runnables and zero `permission_grants`: a style
-    // body is inert prose appended to (or replacing) the agent's base instructions
+    // The eleven built-in personality profiles (ELI5, I have ADHD, Explanatory, Learning,
+    // Proactive, Plain text, Plain Technical, No AI slop, No Hype, Bro, Gen Z). Zero runnables
+    // and zero `permission_grants`: a profile body is inert prose appended to (or
+    // replacing) the agent's base instructions
     // for a turn, so nothing evaluates it — the same argument `ThemeContribution`
     // makes for themes, and the reason a style is a plugin CONTRIBUTION rather than
     // its own `CatalogKind` (it inherits install/enable, versioning, signing, the
@@ -1038,9 +1039,9 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `builtin_code::BUILTIN_OUTPUT_STYLES` — a built-in ships only this manifest,
     // so an un-embedded style file would resolve to nothing.
     //
-    // Pre-installed but INERT: the node default is "no style" and none of the six
-    // sets `force-for-plugin`, so registering it changes no prompt until a user
-    // picks one in the composer or the Store's Output Styles tab.
+    // Pre-installed but INERT: agents default to their own voice and none of the eleven
+    // sets `force-for-plugin`, so registering it changes no prompt until a user assigns
+    // one in the agent editor or browses the Store's Personality Profiles tab.
     include_str!("../../../../plugins-store/plugins/output-styles/manifest.json"),
     include_str!("../../../../plugins-store/plugins/firecrawl/manifest.json"),
     include_str!("../../../../plugins-store/plugins/mem0/manifest.json"),
@@ -1210,6 +1211,10 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // other way — the sidecar publishes a ranked snapshot the `pre_user_turn` hook
     // reads.
     include_str!("../../../../apps-store/news/manifest.json"),
+    include_str!("../../../../apps-store/outreach/manifest.json"),
+    include_str!("../../../../apps-store/projects/manifest.json"),
+    include_str!("../../../../apps-store/invoices/manifest.json"),
+    include_str!("../../../../apps-store/people/manifest.json"),
     // Subtitles — pick a video on this machine, transcribe it, translate the
     // transcript, and write a timed `.srt`/`.vtt` beside the file. Same zero-coupling
     // posture as Outpost: the whole pipeline (container demux, the 16 kHz downmix,
@@ -1315,6 +1320,10 @@ const CORE_RUNTIME_BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../apps-store/monitors/manifest.json"),
     include_str!("../../../../apps-store/mpp/manifest.json"),
     include_str!("../../../../apps-store/news/manifest.json"),
+    include_str!("../../../../apps-store/outreach/manifest.json"),
+    include_str!("../../../../apps-store/projects/manifest.json"),
+    include_str!("../../../../apps-store/invoices/manifest.json"),
+    include_str!("../../../../apps-store/people/manifest.json"),
     include_str!("../../../../apps-store/predict/manifest.json"),
     include_str!("../../../../apps-store/pull-requests/manifest.json"),
     include_str!("../../../../apps-store/quests/manifest.json"),
@@ -1457,6 +1466,25 @@ pub const EXPENSES_UI_HTML: &str = include_str!("fixtures/expenses.ui.html");
 /// The Wire app's prebuilt, self-contained UI bundle. Same carriage as
 /// [`TUITION_UI_HTML`]; refresh with `scripts/sync-app-fixtures.sh news`.
 pub const NEWS_UI_HTML: &str = include_str!("fixtures/news.ui.html");
+
+/// The Outreach app's prebuilt, self-contained UI bundle (a
+/// `vite-plugin-singlefile` build of `apps-store/outreach/ui`, all JS/CSS inlined).
+/// It is attached on explicit install through the same compiled-in companion table
+/// as the other opt-in apps. Refresh with
+/// `scripts/sync-app-fixtures.sh outreach`.
+pub const OUTREACH_UI_HTML: &str = include_str!("fixtures/outreach.ui.html");
+
+/// The Projects app's prebuilt, self-contained UI bundle. Refresh with
+/// `scripts/sync-app-fixtures.sh projects`.
+pub const PROJECTS_UI_HTML: &str = include_str!("fixtures/projects.ui.html");
+
+/// The Invoices app's prebuilt, self-contained UI bundle. Refresh with
+/// `scripts/sync-app-fixtures.sh invoices`.
+pub const INVOICES_UI_HTML: &str = include_str!("fixtures/invoices.ui.html");
+
+/// The People app's prebuilt, self-contained UI bundle. Refresh with
+/// `scripts/sync-app-fixtures.sh people`.
+pub const PEOPLE_UI_HTML: &str = include_str!("fixtures/people.ui.html");
 
 /// The Blueprint app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `apps-store/blueprint/ui`, all JS/CSS inlined —
@@ -2377,8 +2405,8 @@ impl PluginManifestLoader {
             // path allowlist and the size cap, but NOT the id alphabet or id
             // uniqueness. A duplicate id is the one that has to be caught at load —
             // two rows sharing one id collapse to a single entry in the merged
-            // registry, so a persisted selection silently resolves to whichever
-            // happened to load last. Runs AFTER hydration on purpose: by now every
+            // registry, so an agent's persisted profile reference silently resolves
+            // to whichever happened to load last. Runs AFTER hydration on purpose: by now every
             // row is in the `source`-only wire form the check's second arm accepts.
             contributes
                 .validate_output_styles()
@@ -3615,56 +3643,6 @@ mod tests {
         let declared = &manifest.contributes.unwrap().data_categories;
         assert_eq!(declared.len(), 1);
         assert_eq!(declared[0].confirm_word(), "Watches");
-    }
-
-    // ── app-declared tier quotas (`contributes.quotas`) ──────────────────────
-
-    /// Plan tier limits used to be a closed key set hand-written into the billing
-    /// catalog (`packages/auth/src/lib/plans.ts`), so shipping an app with a quota
-    /// meant editing core auth code. The key now travels with the app that owns it,
-    /// exactly like [`Contributes::data_categories`]: the manifest declares that the
-    /// key exists and what its number MEANS (a count vs a retention window), while
-    /// the per-tier numbers stay in the catalog — an app that could write its own
-    /// tier row would simply grant itself unlimited everything.
-    ///
-    /// This asserts the raw JSON rather than a parsed field because the typed
-    /// `Contributes::quotas` half lives in `ryu-kernel-contracts`, which this unit
-    /// does not own; until it lands the loader drops the key (no
-    /// `deny_unknown_fields` anywhere in that file). The guard is here anyway
-    /// because the declaration is deletable today and nothing else would notice:
-    /// `@ryu/monitors` losing its row silently un-caps monitors on every free node.
-    #[test]
-    fn packaged_apps_declare_the_tier_quotas_they_own() {
-        for (raw, id, unit) in [
-            (
-                include_str!("../../../../apps-store/monitors/manifest.json"),
-                "maxMonitors",
-                "count",
-            ),
-            (
-                include_str!("../../../../apps-store/meetings/manifest.json"),
-                "meetingRetentionDays",
-                "days",
-            ),
-        ] {
-            let json: serde_json::Value =
-                serde_json::from_str(raw).expect("packaged manifest must be valid JSON");
-            let declared = json["contributes"]["quotas"]
-                .as_array()
-                .and_then(|quotas| quotas.iter().find(|q| q["id"] == id))
-                .unwrap_or_else(|| {
-                    panic!("'{id}' is no longer declared by its owning app — the tier limit is orphaned")
-                });
-            // The id is the wire key the client gates on (`guard("maxMonitors", n)`),
-            // so it is spelled identically to the catalog's `PlanLimitField`.
-            assert_eq!(declared["unit"], unit, "{id} declares the wrong unit");
-            assert!(
-                declared["label"]
-                    .as_str()
-                    .is_some_and(|l| !l.trim().is_empty()),
-                "{id} needs a label — it is what the upgrade prompt says"
-            );
-        }
     }
 
     // ── app id validation (path-traversal hardening) ─────────────────────────

@@ -158,6 +158,20 @@ describe("listenWhenReady", () => {
 		expect(typeof unlisten).toBe("function");
 		expect(calls).toEqual(["plugin:event|listen"]);
 	});
+
+	test("swallows stale event-plugin teardown failures", async () => {
+		const { internals } = makeInternals(() => Promise.resolve(7));
+		// biome-ignore lint/style/noNonNullAssertion: installed in beforeEach
+		globalWithWindow.window!.__TAURI_INTERNALS__ = internals;
+
+		const unlisten = await listenWhenReady(
+			"core-install-progress",
+			() => undefined
+		);
+		// The event plugin can disappear first while the core bridge still exists.
+		expect(() => unlisten()).not.toThrow();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	});
 });
 
 describe("withTauri", () => {

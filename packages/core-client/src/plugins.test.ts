@@ -16,6 +16,7 @@ import {
 	disableApp,
 	enableApp,
 	installApp,
+	installPluginFromCatalog,
 	isSafeCommandPath,
 	uninstallApp,
 	updateApp,
@@ -101,4 +102,25 @@ test("lifecycle routes encode a scoped plugin id exactly once", async () => {
 	for (const url of urls) {
 		expect(url).not.toContain("%2540ryu%252Fmail");
 	}
+});
+
+test("catalog install forwards the plugin id without a purchase gate", async () => {
+	let request: { body: string; url: string } | null = null;
+	globalThis.fetch = Object.assign(
+		(input: RequestInfo | URL, init?: RequestInit) => {
+			request = { body: String(init?.body), url: String(input) };
+			return Promise.resolve(Response.json({ success: true }));
+		},
+		{ preconnect: realFetch.preconnect }
+	);
+
+	await installPluginFromCatalog(
+		{ token: "node-token", url: "http://127.0.0.1:7980" },
+		"@ryu/paid-plugin"
+	);
+
+	expect(request).toEqual({
+		body: JSON.stringify({ id: "@ryu/paid-plugin" }),
+		url: "http://127.0.0.1:7980/api/plugins/catalog/install",
+	});
 });

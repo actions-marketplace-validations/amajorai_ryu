@@ -152,13 +152,6 @@
         "detail": "Every website monitor will be deleted and its scheduled checks will stop."
       }
     ],
-    "quotas": [
-      {
-        "id": "maxMonitors",
-        "label": "Website monitors",
-        "unit": "count"
-      }
-    ],
     "hook_events": [
       {
         "id": "@ryu/monitors#alert.raised",

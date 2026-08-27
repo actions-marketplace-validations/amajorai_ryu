@@ -358,14 +358,14 @@ fn local_ipv4() -> Option<String> {
     Some(addr.ip().to_string())
 }
 
-/// Return this computer's primary outbound LAN IPv4 as a dotted-quad string
+/// Return this device's primary outbound LAN IPv4 as a dotted-quad string
 /// (e.g. "192.168.1.50"). Used to prefill the "Connect a phone" QR with an
 /// address other devices on the same Wi-Fi can actually reach, instead of a
 /// localhost address a phone can't. Errors when no route can be resolved
 /// (offline / no Wi-Fi); the caller falls back to a manually typed address.
 #[tauri::command]
 pub fn get_lan_ip() -> Result<String, String> {
-    local_ipv4().ok_or_else(|| "could not determine this computer's Wi-Fi address".to_string())
+    local_ipv4().ok_or_else(|| "could not determine this device's Wi-Fi address".to_string())
 }
 
 /// Probe a single `host:port` for a live Core `/api/health` endpoint.

@@ -624,6 +624,11 @@ pub(crate) const BUILTIN_OUTPUT_STYLES: &[(&str, &str, &str)] = &[
     ),
     (
         "@ryu/output-styles",
+        "output-styles/no-hype.md",
+        include_str!("../../../../plugins-store/plugins/output-styles/output-styles/no-hype.md"),
+    ),
+    (
+        "@ryu/output-styles",
         "output-styles/plain-text.md",
         include_str!("../../../../plugins-store/plugins/output-styles/output-styles/plain-text.md"),
     ),

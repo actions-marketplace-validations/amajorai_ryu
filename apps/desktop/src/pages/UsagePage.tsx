@@ -13,6 +13,9 @@ import type {
 } from "@ryu/blocks/desktop/usage-analytics.ts";
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { OrgBillingContext } from "@/src/components/billing/OrgBillingContext.tsx";
+import { SubscriptionUsageDashboard } from "@/src/components/usage/SubscriptionUsageDashboard.tsx";
+import { useLlmProviders } from "@/src/hooks/useLlmProviders.ts";
+import { useSubscriptionUsage } from "@/src/hooks/useSubscriptionUsage.ts";
 import { useUsageStatement } from "@/src/hooks/useUsageStatement.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
@@ -51,6 +54,13 @@ export default function UsageTab() {
 		loadMore,
 		refresh,
 	} = useUsageStatement();
+	const {
+		catalog: providerCatalog,
+		error: providerCatalogError,
+		loading: providerCatalogLoading,
+		reload: reloadProviderCatalog,
+	} = useLlmProviders();
+	const subscriptionUsage = useSubscriptionUsage(providerCatalog);
 	const activeOrgId = useActiveOrgId();
 	const getActiveNode = useNodeStore((state) => state.getActiveNode);
 	const defaultNode = useNodeStore((state) => state.defaultNode);
@@ -157,6 +167,8 @@ export default function UsageTab() {
 
 	const refreshAll = () => {
 		refresh();
+		reloadProviderCatalog();
+		subscriptionUsage.refresh();
 		setAnalyticsRefreshNonce((nonce) => nonce + 1);
 	};
 
@@ -185,6 +197,13 @@ export default function UsageTab() {
 	return (
 		<div className="space-y-4">
 			<OrgBillingContext description="Credits stay scoped to the organization; usage analytics also include BYOK, self-hosted, and local traffic." />
+			<SubscriptionUsageDashboard
+				accounts={subscriptionUsage.accounts}
+				catalogError={providerCatalogError}
+				catalogLoading={providerCatalogLoading}
+				onRefresh={refreshAll}
+				refreshing={subscriptionUsage.refreshing}
+			/>
 			<UsageView
 				analyticsDashboard={{
 					analytics,

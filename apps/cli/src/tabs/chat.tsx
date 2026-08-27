@@ -11,7 +11,7 @@
 //   - /check            arm per-turn double-check via plugin_flags; Core reviews
 //                       and emits the critique as a plugin note (overlay)
 //   - /model <id>       ACP model override (acp_model); /model clears
-//   - /team <id>        route to a team (team_id, wins over agent); /team clears
+//   - /group <id>       route to a group (team_id, wins over agent); /group clears
 //   - /sessions         run-history overlay for the conversation
 //   - /new (Ctrl+L)     start a fresh chat (new conversation_id)
 //
@@ -126,7 +126,7 @@ export function ChatTab({ active }: TabProps) {
 		const pluginFlags = doubleCheckOn
 			? { "io.ryu.double-check": true }
 			: undefined;
-		// Team routing wins over a single agent (parity with apps/cli).
+		// Group routing wins over a single agent (parity with apps/cli).
 		if (selectedTeam) {
 			return {
 				conversationId,
@@ -317,12 +317,12 @@ export function ChatTab({ active }: TabProps) {
 		(arg: string) => {
 			if (arg.length === 0 || arg === "clear") {
 				setSelectedTeam(null);
-				notify("Team routing cleared", "info");
+				notify("Group routing cleared", "info");
 				return;
 			}
 			setSelectedTeam(arg);
 			setSelectedAgent(null);
-			notify(`Team: ${arg}`, "info");
+			notify(`Group: ${arg}`, "info");
 		},
 		[notify]
 	);
@@ -378,6 +378,7 @@ export function ChatTab({ active }: TabProps) {
 						"info"
 					);
 					break;
+				case "group":
 				case "team":
 					runTeam(arg);
 					break;
@@ -535,7 +536,7 @@ export function ChatTab({ active }: TabProps) {
 					cursorColor={theme.colors.primary}
 					focused={composerFocused}
 					onChange={setComposer}
-					placeholder="Message, or /btw /goal /proof /check /model /team /sessions /new (Ctrl+A agent, Ctrl+L new)"
+					placeholder="Message, or /btw /goal /proof /check /model /group /sessions /new (Ctrl+A agent, Ctrl+L new)"
 					placeholderColor={theme.colors.mutedForeground}
 					textColor={theme.colors.foreground}
 					value={composer}
@@ -558,7 +559,7 @@ function Transcript({
 		return (
 			<box flexGrow={1} paddingLeft={1} paddingTop={1}>
 				<text fg={theme.colors.mutedForeground}>
-					Ask anything. Slash commands - /btw /goal /proof /check /model /team
+					Ask anything. Slash commands - /btw /goal /proof /check /model /group
 					/sessions /new.
 				</text>
 			</box>

@@ -19,6 +19,11 @@ test("keeps canonical command specs and autocomplete on one source", () => {
 	);
 	expect(resolveCommand("/double-check")?.name).toBe("check");
 	expect(resolveCommand("newchat")?.name).toBe("new");
+	expect(resolveCommand("/team")?.name).toBe("group");
+	expect(dispatchCommand("/group research")).toMatchObject({
+		canonicalName: "group",
+		action: { action: "set-team", team: "research" },
+	});
 	expect(resolveCommand("/ACP")?.mode).toBe("overlay");
 });
 

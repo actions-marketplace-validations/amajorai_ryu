@@ -12,12 +12,16 @@ import { LlmProvidersSettings } from "@/src/components/settings/LlmProvidersSett
  * navigation so every provider surface opens from the same command dialog.
  */
 export function ProviderControlCenter({
+	canSetGatewayAccount = true,
 	credentials,
 	integrations,
+	managed = false,
 	routing,
 }: {
+	canSetGatewayAccount?: boolean;
 	credentials: ReactNode;
 	integrations: ReactNode;
+	managed?: boolean;
 	routing: ReactNode;
 }) {
 	return (
@@ -26,7 +30,9 @@ export function ProviderControlCenter({
 				<>
 					<CommandGroup heading="Chat providers and models">
 						<div className="p-2">
-							<LlmProvidersSettings />
+							<LlmProvidersSettings
+								canSetGatewayAccount={canSetGatewayAccount && !managed}
+							/>
 						</div>
 					</CommandGroup>
 					<CommandSeparator />

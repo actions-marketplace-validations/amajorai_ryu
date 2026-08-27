@@ -47,6 +47,7 @@ const sampleApp: AppInfo = {
 	runnables: [],
 	sidecarName: null,
 	targets: [],
+	surfaceSupport: [],
 	version: "1.0.0",
 	windowsFirst: false,
 };
@@ -353,6 +354,58 @@ test("add without an id is a usage error (exit 2, stderr)", async () => {
 	const code = await runCli(["add"], { io: cap.io, api: stubApi() });
 	expect(code).toBe(2);
 	expect(cap.err()).toContain("Usage");
+});
+
+test("action calls one known operation through Core with an explicit agent", async () => {
+	const cap = makeIo();
+	let capturedPath = "";
+	let capturedMethod = "";
+	let capturedBody: unknown;
+	const code = await runCli(
+		[
+			"action",
+			"app.support/save",
+			'{"customer":"acme"}',
+			"--agent",
+			"support-agent",
+			"--json",
+		],
+		{
+			io: cap.io,
+			api: stubApi({
+				call: (_target, path, options) => {
+					capturedPath = path;
+					capturedMethod = options?.method ?? "";
+					capturedBody = options?.body;
+					return Promise.resolve({
+						ok: true,
+						output: { ticketId: "t-1" },
+					});
+				},
+			}),
+		}
+	);
+	expect(code).toBe(0);
+	expect(capturedPath).toBe("/api/actions/app.support%2Fsave");
+	expect(capturedMethod).toBe("POST");
+	expect(capturedBody).toEqual({
+		agent_id: "support-agent",
+		arguments: { customer: "acme" },
+	});
+	expect(JSON.parse(cap.out())).toMatchObject({
+		ok: true,
+		output: { ticketId: "t-1" },
+	});
+});
+
+test("action without an agent is a usage error", async () => {
+	const cap = makeIo();
+	const code = await runCli(["action", "app.support/save", "{}"], {
+		io: cap.io,
+		api: stubApi(),
+	});
+	expect(code).toBe(2);
+	expect(cap.err()).toContain("--agent");
 });
 
 // ── catalog / search ──────────────────────────────────────────────────────────

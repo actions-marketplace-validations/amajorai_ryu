@@ -1,13 +1,13 @@
 /* @jsxImportSource @opentui/react */
 // Chat surface - the reference home surface (path /chat), restructured toward the
-// desktop AgentChat layout: an empty-state header with an agent/team mode picker,
+// desktop AgentChat layout: an empty-state header with an agent/group mode picker,
 // a scrolling message list, a WorkspaceBar (project + model) above the composer,
 // and the composer/InputBar itself. It conforms to the SurfaceProps contract
 // (see src/workspace/router.ts) and is the default tab the shell boots on.
 //
 // Migrated from the legacy src/tabs/chat.tsx: same SSE streaming via
 // src/core/chatStream.ts, agent picker (Ctrl+A), and slash commands
-// (/btw /goal /proof /check /model /team /sessions /queue /theme /help /new
+// (/btw /goal /proof /check /model /group /sessions /queue /theme /help /new
 // /newchat). /goal, /proof
 // and /check are Core server-side plugin turn-hooks: /goal and /proof pass through
 // as normal messages, /check arms the double-check hook via plugin_flags and its
@@ -556,12 +556,12 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 		(arg: string) => {
 			if (arg.length === 0 || arg === "clear") {
 				setSelectedTeam(null);
-				notify("Team routing cleared", "info");
+				notify("Group routing cleared", "info");
 				return;
 			}
 			setSelectedTeam(arg);
 			setSelectedAgent(null);
-			notify(`Team: ${arg}`, "info");
+			notify(`Group: ${arg}`, "info");
 		},
 		[notify]
 	);
@@ -1461,7 +1461,7 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 }
 
 // Empty-state header shown before the first turn: the desktop AgentChat greeting
-// with the current agent/team mode. Once messages exist it yields to the list.
+// with the current agent/group mode. Once messages exist it yields to the list.
 function EmptyStateHeader({
 	agent,
 	team,
@@ -1472,7 +1472,7 @@ function EmptyStateHeader({
 	const theme = useTheme();
 	let mode = "Ask anything";
 	if (team) {
-		mode = `Team: ${team}`;
+		mode = `Group: ${team}`;
 	} else if (agent) {
 		mode = `Agent: ${agent}`;
 	}
@@ -1483,7 +1483,7 @@ function EmptyStateHeader({
 			</text>
 			<text fg={theme.colors.mutedForeground}>
 				Ctrl+A pick agent · Ctrl+Q queue · slash commands /help /queue /theme
-				/btw /goal /proof /check /model /team /sessions /fork /new
+				/btw /goal /proof /check /model /group /sessions /fork /new
 			</text>
 		</box>
 	);
@@ -1537,8 +1537,8 @@ function Transcript({
 
 // WorkspaceBar - the desktop project-folder + model row that sits above the
 // composer. The TUI has no folder picker yet, so it surfaces the routing target
-// (agent/team) and the model selection as read-only chips (set via /model,
-// /team, Ctrl+A) so the composer always shows what a turn will run against.
+// (agent/group) and the model selection as read-only chips (set via /model,
+// /group, Ctrl+A) so the composer always shows what a turn will run against.
 function WorkspaceBar({
 	agent,
 	team,

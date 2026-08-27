@@ -312,7 +312,9 @@ fn clean_line(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_suggestions, prompt_suggestions_plugin_enabled, PROMPT_SUGGESTIONS_PLUGIN_ID};
+    use super::{
+        parse_suggestions, prompt_suggestions_plugin_enabled, PROMPT_SUGGESTIONS_PLUGIN_ID,
+    };
     use crate::plugins::PluginStore;
 
     #[tokio::test]

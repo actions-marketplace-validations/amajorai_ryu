@@ -1,7 +1,7 @@
 // Standalone browser story for the REAL `NodeLayerMenu` — the submenu shell every
 // layer of the node selector renders through (services, Chat, the
 // run-alongside engines, Audio + its nested voice picker, Voice Recognition,
-// sandbox backend).
+// Speech Processing, and sandbox backend).
 //
 // The component is purely prop-driven (it owns layout + pending state and nothing
 // else), so the whole matrix is reachable without Core, Tauri, or seed data. This
@@ -19,7 +19,7 @@ import {
 	DropdownMenuContent,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import {
 	type LayerOption,
 	NodeLayerMenu,
@@ -74,6 +74,13 @@ const VOICES: LayerOption[] = [
 	{ name: "am_puck", label: "am_puck", select: noop },
 ];
 
+const SPEECH_PROCESSING_STYLES: LayerOption[] = [
+	{ name: "casual", label: "casual", select: noop },
+	{ name: "semi-casual", label: "semi-casual", select: noop },
+	{ name: "semi-formal", label: "semi-formal", active: true, select: noop },
+	{ name: "formal", label: "formal", select: noop },
+];
+
 function Story() {
 	return (
 		<div style={{ padding: 40 }}>
@@ -126,6 +133,29 @@ function Story() {
 						running={true}
 						selectionMode="toggle"
 					/>
+					{/* Post-ASR cleanup is its own model layer, independent of the
+					    Voice Recognition engine that produced the raw transcript. */}
+					<NodeLayerMenu
+						caption="Optional cleanup · 484 MB · local"
+						currentLabel="S1-mini by Superwhisper"
+						installed={[
+							{
+								name: "s1-mini",
+								label: "S1-mini by Superwhisper",
+								active: true,
+								detail: "s1-mini-q4_k_m",
+								select: noop,
+							},
+						]}
+						label="Speech Processing"
+						running={true}
+					>
+						<NodeLayerMenu
+							currentLabel="semi-formal"
+							installed={SPEECH_PROCESSING_STYLES}
+							label="Style"
+						/>
+					</NodeLayerMenu>
 					{/* Nested second dimension: a Voice picker inside the Audio layer. */}
 					<NodeLayerMenu
 						caption="Speaks as af_heart"
@@ -156,5 +186,8 @@ function Story() {
 
 const root = document.getElementById("root");
 if (root) {
-	createRoot(root).render(<Story />);
+	const storyWindow = window as Window & { __ryuNodeLayerStoryRoot?: Root };
+	const appRoot = storyWindow.__ryuNodeLayerStoryRoot ?? createRoot(root);
+	storyWindow.__ryuNodeLayerStoryRoot = appRoot;
+	appRoot.render(<Story />);
 }

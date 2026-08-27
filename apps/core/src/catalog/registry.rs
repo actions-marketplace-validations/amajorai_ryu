@@ -377,6 +377,17 @@ pub fn static_registry() -> Vec<CatalogEntry> {
             deprecated: false,
             recommended: false,
         },
+        CatalogEntry {
+            name: "mesh-llm",
+            display_name: "Mesh LLM",
+            description: "Distributed OpenAI-compatible local inference · adopts the Mesh LLM runtime · models and mesh membership stay in Mesh LLM's config",
+            category: SidecarCategory::Provider,
+            source: SidecarSource::Github {
+                repo: "Mesh-LLM/mesh-llm",
+            },
+            deprecated: false,
+            recommended: false,
+        },
         // NOTE: the local embeddings server (`llamacpp-embed`) is intentionally
         // NOT a catalog/Store entry — it is backing infrastructure, not a
         // user-pickable engine. It auto-starts (startup_order) and serves the
@@ -517,7 +528,7 @@ mod tests {
         let r = static_registry();
         // 20 base entries + 4 sandbox backends (wasmtime, docker, microsandbox,
         // opensandbox). The nano/pico/nemo/iron-claw + temporal + qmd rows were
-        // dropped and unsloth/docker-model-runner/apfel added since the old count
+        // dropped and unsloth/docker-model-runner/apfel/mesh-llm added since the old count
         // of 30; `spider` then left the managed-sidecar catalog when it became a
         // BYO declarative `command` plugin, taking the base count 21 → 20 (its
         // sibling assertions in `registry_recommended_entries` and the tool count
@@ -611,8 +622,9 @@ mod tests {
         // when it became a BYO declarative command plugin.)
         assert_eq!(tools.len(), 5);
         // llamacpp, ollama, vllm, sglang, mlx, mlx-vlm, omlx (Apple Silicon only),
-        // docker-model-runner (adopt-only), apfel (Apple FM, Apple Silicon macOS 26+).
-        assert_eq!(providers.len(), 9);
+        // docker-model-runner (adopt-only), apfel (Apple FM, Apple Silicon macOS 26+),
+        // mesh-llm (adopt-or-start, OpenAI-compatible distributed runtime).
+        assert_eq!(providers.len(), 10);
         // whisper.cpp + OuteTTS + Ryu TTS multi-engine sidecar (parakeet is a
         // model, not a Store engine entry).
         assert_eq!(voice.len(), 3);

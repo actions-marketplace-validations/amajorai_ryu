@@ -882,7 +882,7 @@ export function GeneralTab() {
 								onCheckedChange={handleLaunchAtLogin}
 							/>
 						}
-						description="Start Ryu automatically when you sign in to your computer, so your agents and background work are ready without opening it yourself. Works on macOS, Windows, and Linux."
+						description="Start Ryu automatically when you sign in to your device, so your agents and background work are ready without opening it yourself. Works on macOS, Windows, and Linux."
 						title="Start Ryu on startup"
 					/>
 					<SettingsItem

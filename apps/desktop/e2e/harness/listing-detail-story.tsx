@@ -24,6 +24,11 @@ import {
 	ListingSection,
 	ListingStatStrip,
 } from "@ryu/marketplace/catalog/detail/listing-detail-shell";
+import { SupportExtensionPanel } from "@ryu/marketplace/catalog/detail/support-extension-panel";
+import type {
+	CatalogEntry,
+	PluginCatalogDetail,
+} from "@ryu/marketplace/catalog/types";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { StatusBadge } from "@ryu/ui/components/status-badge";
@@ -36,7 +41,7 @@ import "../../src/index.css";
  *  is the thing under test, so it is spelled out here rather than trusted. */
 const DIALOG_CLASS =
 	"mx-auto max-h-[88vh] w-[min(80rem,94vw)] overflow-y-auto overflow-x-hidden rounded-xl border bg-background shadow-lg";
-const LISTING_SCREENSHOT = "http://localhost:5177/mouse-navigation-proof.png";
+const LISTING_SCREENSHOT = "http://127.0.0.1:5198/assets/images/ui-system.png";
 
 /** A deliberately LONG value set. A layout that only survives short strings is
  *  what produced the early-wrapping preview in the first place. */
@@ -50,6 +55,67 @@ const INFO_ROWS = [
 	{ label: "Privacy Policy", value: "https://example.com/privacy" },
 	{ label: "Terms of Service", value: "https://example.com/terms" },
 ];
+
+const SUPPORT_ENTRY: CatalogEntry = {
+	description: "A browser session and shared shell companion.",
+	id: "@ryu/browser",
+	kinds: ["tool"],
+	name: "Browser",
+	surface_support: [
+		{ surface: "desktop", support: "full" },
+		{ inheritedFrom: "desktop", surface: "mobile", support: "limited" },
+		{ inheritedFrom: "desktop", surface: "web", support: "full" },
+		{
+			inheritedFrom: "desktop",
+			surface: "extension",
+			support: "limited",
+		},
+	],
+	tags: ["browser", "shell"],
+	version: "1.0.0",
+};
+
+const SUPPORT_DETAIL: PluginCatalogDetail = {
+	apiSurface: {
+		provides: [{ capability: "browser.control" }],
+		runnables: [
+			{ id: "browser-tool", kind: "tool", name: "Browser tools" },
+			{ id: "browser-companion", kind: "companion", name: "Browser panel" },
+		],
+		sidecars: [{ name: "browser", routes: [] }],
+		triggers: { turnHooks: [] },
+	},
+	extensions: [
+		{
+			features: ["Browser control (browser.control)"],
+			label: "Browser",
+			target: "browser",
+		},
+		{
+			features: ["dock panels"],
+			label: "Shared Ryu shell",
+			target: "ryu-shell",
+		},
+	],
+	implementation: [
+		{
+			features: ["tool runnable", "capability broker"],
+			label: "Core runtime",
+			layer: "core",
+		},
+		{
+			features: ["companion UI", "dock panels"],
+			label: "Shared Ryu shell",
+			layer: "shared-shell",
+		},
+		{
+			features: ["browser process"],
+			label: "Package sidecar",
+			layer: "sidecar",
+		},
+	],
+	surfaceSupport: SUPPORT_ENTRY.surface_support,
+};
 
 function Story() {
 	return (
@@ -203,6 +269,10 @@ function Story() {
 							))}
 						</ul>
 					</ListingSection>
+					<SupportExtensionPanel
+						detail={SUPPORT_DETAIL}
+						entry={SUPPORT_ENTRY}
+					/>
 				</ListingDetailShell>
 			</div>
 		</div>

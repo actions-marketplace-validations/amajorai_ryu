@@ -5,15 +5,18 @@
 // Owned by the `dictation` apps-store app; Island is the OS surface. Stages:
 //   1. transcribe  — Core `/api/voice/transcribe` with the configured engine.
 //   2. task branch:
-//        - transcribe → optional LLM cleanup (postProcess selection), then insert
+//        - transcribe → optional Speech Processing cleanup (S1-mini by default), then insert
 //        - ask        → run agent/model from ask.selection, insert the answer
 //   3. insert       — type (ghost `ghost_type`) or paste (clipboard + paste chord).
 //
-// Selection resolve: non-empty agent_id → runAgentText (agent tools/Spaces apply);
-// otherwise → completions with optional model id (fast local default when blank).
+// Cleanup resolve: non-empty postProcess selection keeps the legacy custom
+// agent/model path; otherwise the node's Speech Processing engine is used.
 
 import { clipboard } from "electron";
-import type { AgentSelection } from "../../shared/agent-selection.ts";
+import {
+	type AgentSelection,
+	isAgentSelectionEmpty,
+} from "../../shared/agent-selection.ts";
 import { DEFAULT_AGENT_ID } from "../../shared/agents.ts";
 import {
 	type DictationPrefs,
@@ -24,7 +27,14 @@ import type {
 	CoreChatMessage,
 	DictationSubmitResult,
 } from "../../shared/ipc.ts";
-import { callTool, completions, runAgentText, transcribe } from "./core.ts";
+import { parseSpeechProcessingPrefs } from "../../shared/speech-processing.ts";
+import {
+	callTool,
+	completions,
+	processSpeechText,
+	runAgentText,
+	transcribe,
+} from "./core.ts";
 
 /**
  * Delay before restoring the pre-paste clipboard. The paste chord is dispatched
@@ -81,18 +91,33 @@ async function runSelection(
  */
 async function postProcess(
 	text: string,
-	prefs: DictationPrefs
+	prefs: DictationPrefs,
+	rawSpeechProcessing: string | null
 ): Promise<string> {
 	if (!prefs.postProcess.enabled) {
 		return text;
 	}
-	// Empty selection = fast local default model (omit model id).
-	const cleaned = await runSelection(
-		prefs.postProcess.selection,
-		prefs.postProcess.prompt,
-		text
-	);
-	return cleaned ?? text;
+	// A non-empty selection is an explicit legacy/custom override. The normal
+	// path stays on the node's first-class Speech Processing layer.
+	if (!isAgentSelectionEmpty(prefs.postProcess.selection)) {
+		const cleaned = await runSelection(
+			prefs.postProcess.selection,
+			prefs.postProcess.prompt,
+			text
+		);
+		return cleaned ?? text;
+	}
+	const speechProcessing = parseSpeechProcessingPrefs(rawSpeechProcessing);
+	const cleaned = await processSpeechText({
+		context: speechProcessing.context,
+		engine: speechProcessing.engine,
+		structure: speechProcessing.structure,
+		styling: speechProcessing.styling,
+		text,
+	});
+	// S1-mini may intentionally return an empty string for filler-only input;
+	// preserve that valid result so nothing noisy is inserted.
+	return cleaned.available ? cleaned.text : text;
 }
 
 /**
@@ -144,6 +169,7 @@ async function insertText(text: string, prefs: DictationPrefs): Promise<void> {
 export async function runDictation(
 	audio: ArrayBuffer,
 	rawPrefs: string | null,
+	rawSpeechProcessing: string | null,
 	task: DictationTask = "transcribe"
 ): Promise<DictationSubmitResult> {
 	const prefs = parseDictationPrefs(rawPrefs);
@@ -170,7 +196,7 @@ export async function runDictation(
 		}
 		finalText = answer;
 	} else {
-		finalText = (await postProcess(raw, prefs)).trim();
+		finalText = (await postProcess(raw, prefs, rawSpeechProcessing)).trim();
 		if (finalText.length === 0) {
 			return { ok: false, reason: "empty" };
 		}

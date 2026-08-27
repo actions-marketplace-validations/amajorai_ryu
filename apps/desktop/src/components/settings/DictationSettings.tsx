@@ -22,11 +22,16 @@ import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
 	DEFAULT_DICTATION_ASK,
 	DEFAULT_DICTATION_PREFS,
+	DEFAULT_SPEECH_PROCESSING_PREFS,
 	type DictationInsertMode,
 	type DictationMode,
 	type DictationPrefs,
 	getDictationPrefs,
+	getSpeechProcessingPrefs,
+	SPEECH_PROCESSING_ENGINES,
+	type SpeechProcessingPrefs,
 	setDictationPrefs,
+	setSpeechProcessingPrefs,
 	VOICE_ENGINES,
 	type VoiceEngine,
 } from "@/src/lib/api/preferences.ts";
@@ -63,12 +68,19 @@ function activeTarget(): ApiTarget {
 
 export function DictationSettings() {
 	const [prefs, setPrefs] = useState<DictationPrefs>(DEFAULT_DICTATION_PREFS);
+	const [speechPrefs, setSpeechPrefs] = useState<SpeechProcessingPrefs>(
+		DEFAULT_SPEECH_PROCESSING_PREFS
+	);
 
 	useEffect(() => {
 		let cancelled = false;
-		getDictationPrefs(activeTarget()).then((value) => {
+		Promise.all([
+			getDictationPrefs(activeTarget()),
+			getSpeechProcessingPrefs(activeTarget()),
+		]).then(([dictation, speechProcessing]) => {
 			if (!cancelled) {
-				setPrefs(value);
+				setPrefs(dictation);
+				setSpeechPrefs(speechProcessing);
 			}
 		});
 		return () => {
@@ -82,11 +94,24 @@ export function DictationSettings() {
 		void setDictationPrefs(activeTarget(), withEnabled).catch(() => undefined);
 	}, []);
 
+	const writeSpeechPrefs = useCallback((next: SpeechProcessingPrefs) => {
+		setSpeechPrefs(next);
+		void setSpeechProcessingPrefs(activeTarget(), next).catch(() => undefined);
+	}, []);
+
 	const sttEngineOptions = useMemo(
 		() =>
 			VOICE_ENGINES.map((e) => ({
 				value: e.engine,
 				label: e.label,
+			})),
+		[]
+	);
+	const speechEngineOptions = useMemo(
+		() =>
+			SPEECH_PROCESSING_ENGINES.map((entry) => ({
+				value: entry.engine,
+				label: entry.label,
 			})),
 		[]
 	);
@@ -276,7 +301,7 @@ export function DictationSettings() {
 					<SettingsItem
 						actions={
 							<Switch
-								aria-label="Clean up dictation with a model"
+								aria-label="Clean up dictation with Speech Processing"
 								checked={prefs.postProcess.enabled}
 								onCheckedChange={(v) =>
 									writePrefs({
@@ -289,30 +314,64 @@ export function DictationSettings() {
 								}
 							/>
 						}
-						description="Run the raw transcript through a model to fix grammar/punctuation and drop filler words before it lands. Falls back to the raw text if the model is unavailable."
-						title="Clean up with a model"
+						description="Run the selected Speech Processing engine after Voice Recognition. Defaults to S1-mini by Superwhisper; turn this off to insert the raw transcript."
+						title="Clean up with Speech Processing"
 					/>
 					{prefs.postProcess.enabled ? (
-						<SettingsItem
-							description="Pick an agent (uses its tools/Spaces) or a model for one-shot cleanup. Empty = fast local default."
-							title="Cleanup agent or model"
-						>
-							<AgentSelectionField
-								ariaLabel="Dictation cleanup agent or model"
-								onChange={(selection) =>
-									writePrefs({
-										...prefs,
-										postProcess: {
-											...prefs.postProcess,
-											selection,
-										},
-									})
+						<>
+							<SettingsItem
+								actions={
+									<Select
+										items={speechEngineOptions}
+										onValueChange={(value) => {
+											if (value === "s1-mini") {
+												writeSpeechPrefs({
+													...speechPrefs,
+													engine: value,
+												} satisfies SpeechProcessingPrefs);
+											}
+										}}
+										value={speechPrefs.engine}
+									>
+										<SelectTrigger
+											aria-label="Speech Processing engine"
+											className="h-8 w-56 text-sm"
+										>
+											<SelectValue />
+										</SelectTrigger>
+										<SelectContent>
+											{speechEngineOptions.map((option) => (
+												<SelectItem key={option.value} value={option.value}>
+													{option.label}
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
 								}
-								placeholder="Default local model"
-								target={activeTarget()}
-								value={prefs.postProcess.selection}
+								description="The node-local cleanup model. Style, structure, and context are configured from the Speech Processing layer in the node menu."
+								title="Cleanup engine"
 							/>
-						</SettingsItem>
+							<SettingsItem
+								description="Leave empty to use the selected Speech Processing engine. Pick an agent or model only for an explicit custom cleanup override."
+								title="Custom cleanup override"
+							>
+								<AgentSelectionField
+									ariaLabel="Dictation cleanup agent or model"
+									onChange={(selection) =>
+										writePrefs({
+											...prefs,
+											postProcess: {
+												...prefs.postProcess,
+												selection,
+											},
+										})
+									}
+									placeholder="Use Speech Processing engine"
+									target={activeTarget()}
+									value={prefs.postProcess.selection}
+								/>
+							</SettingsItem>
+						</>
 					) : null}
 				</SettingsGroup>
 				{/* Outside the group on purpose: a prompt is a tall text block, so it
@@ -321,8 +380,8 @@ export function DictationSettings() {
 				{prefs.postProcess.enabled ? (
 					<SettingsItem
 						bare
-						description="Instructions for the cleanup model. It sees this plus your raw transcript."
-						title="Cleanup prompt"
+						description="Used only when a custom cleanup agent/model is selected. S1-mini uses its required local control prompt."
+						title="Custom cleanup prompt"
 					>
 						<Textarea
 							aria-label="Dictation cleanup prompt"

@@ -26,7 +26,7 @@ export function TrainingDataNotice() {
 					<p className="text-muted-foreground text-xs leading-relaxed">
 						Ryu never uses your chats, files, or activity to train Ryu models.
 						Core and Gateway are open source, so you can inspect and verify that
-						promise. You choose where work runs: on this computer, your
+						promise. You choose where work runs: on this device, your
 						self-hosted node, or a managed Ryu node. A model provider, app, or
 						plugin you deliberately connect may process content to complete the
 						task you ask for; its own terms and privacy policy apply.

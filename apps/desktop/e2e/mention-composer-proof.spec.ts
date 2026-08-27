@@ -28,7 +28,7 @@ test("renders capability mentions and gates Composio integrations", async ({
 		"Plugins",
 		"Skills",
 		"Space pages",
-		"Output styles",
+		"Personality profiles",
 	]) {
 		await expect(connected.getByText(label, { exact: true })).toBeVisible();
 	}
@@ -88,7 +88,7 @@ test("renders capability mentions and gates Composio integrations", async ({
 	for (const label of ["Agents", "Apps", "Plugins", "Workflows", "Users"]) {
 		await expect(inboxEnabled.getByText(label, { exact: true })).toBeVisible();
 	}
-	for (const label of ["Chats", "Skills", "Teams"]) {
+	for (const label of ["Chats", "Skills", "Groups"]) {
 		await expect(inboxEnabled.getByText(label, { exact: true })).toHaveCount(0);
 	}
 	await inboxEnabled.getByRole("option", { name: "Ada Lovelace" }).click();

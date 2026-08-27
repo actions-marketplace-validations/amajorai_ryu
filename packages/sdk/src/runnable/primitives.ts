@@ -326,6 +326,31 @@ export const PRIMITIVE_BINDINGS: Record<string, PrimitiveBinding> = {
 		method: "background.stop",
 		grant: "background:control",
 	},
+	"storage.get": {
+		transport: "bridge",
+		method: "storage.get",
+		grant: "storage:kv",
+	},
+	"storage.set": {
+		transport: "bridge",
+		method: "storage.set",
+		grant: "storage:kv",
+	},
+	"storage.delete": {
+		transport: "bridge",
+		method: "storage.delete",
+		grant: "storage:kv",
+	},
+	"storage.keys": {
+		transport: "bridge",
+		method: "storage.keys",
+		grant: "storage:kv",
+	},
+	"storage.compareAndSet": {
+		transport: "bridge",
+		method: "storage.compareAndSet",
+		grant: "storage:kv",
+	},
 	// Host-direct media data-path (the host holds the node token; returns data: URLs).
 	"image.generate": {
 		transport: "direct",
@@ -509,6 +534,25 @@ export interface BackgroundClient {
 	}>;
 }
 
+/** Durable app-owned key/value state (`storage:kv` via the host bridge). */
+export interface StorageClient {
+	/** Atomically replace a value when it still equals `expected`. */
+	compareAndSet(input: {
+		expected: string | null;
+		key: string;
+		namespace?: string;
+		value: string | null;
+	}): Promise<boolean>;
+	/** Delete one value. */
+	delete(input: { key: string; namespace?: string }): Promise<void>;
+	/** Read one value; missing keys return `null`. */
+	get(input: { key: string; namespace?: string }): Promise<string | null>;
+	/** List keys in an app-owned namespace. */
+	keys(input?: { namespace?: string }): Promise<string[]>;
+	/** Write one string value. JSON can be encoded by the app when needed. */
+	set(input: { key: string; namespace?: string; value: string }): Promise<void>;
+}
+
 /** TTS primitive — speech synthesis (`crates/ryu-tts`). */
 export interface TtsClient {
 	/**
@@ -561,6 +605,7 @@ export interface RyuPrimitives {
 	memory: MemoryClient;
 	rag: RagClient;
 	realtime: RealtimeClient;
+	storage: StorageClient;
 	stt: SttClient;
 	tts: TtsClient;
 }
@@ -598,6 +643,20 @@ export function createPrimitives(transport: PrimitiveTransport): RyuPrimitives {
 					requested: boolean;
 					process_id: string;
 				}>,
+		},
+		storage: {
+			get: (input) =>
+				transport.bridge("storage.get", input) as Promise<string | null>,
+			set: (input) =>
+				transport.bridge("storage.set", input).then(() => undefined),
+			delete: (input) =>
+				transport.bridge("storage.delete", input).then(() => undefined),
+			keys: (input) =>
+				transport
+					.bridge("storage.keys", input ?? {})
+					.then((value) => (Array.isArray(value) ? (value as string[]) : [])),
+			compareAndSet: (input) =>
+				transport.bridge("storage.compareAndSet", input) as Promise<boolean>,
 		},
 		rag: {
 			retrieve: (input) =>

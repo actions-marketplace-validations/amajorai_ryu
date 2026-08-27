@@ -186,6 +186,16 @@ export function useNoSettingsOpener(): PluginSettingsOpener {
 	return NO_SETTINGS_OPENER;
 }
 
+/** Stable fallback for hosts that do not have an account session to resolve the
+ * A Major Pass presentation marker. This value is informational only: it never
+ * controls catalog visibility or any lifecycle action. */
+const NO_MARKETPLACE_ACCESS = () => false;
+
+/** Hook-shaped fallback so catalog sections make one presentation lookup. */
+export function useNoMarketplaceAccess(): boolean {
+	return NO_MARKETPLACE_ACCESS();
+}
+
 /** Props for the host-provided Markdown renderer. The two surfaces render skill
  *  READMEs / bundled files through their own Markdown component (desktop:
  *  Streamdown; web: react-markdown), so the shared sections never pick one. */
@@ -309,6 +319,10 @@ export interface CatalogHost {
 	 *  never as the raw level: a detail panel must not learn the ladder, or every
 	 *  new level becomes an edit in twenty components. */
 	useInterfaceLevel?: () => CatalogInterfaceLevel;
+	/** Whether the current account has a recurring plan that contributes to the
+	 * Marketplace publisher pool. This only drives the optional ticket explanation;
+	 * it is not an install, update, enable, or runtime gate. */
+	useMarketplaceAccess?: () => boolean;
 	/** The surface's Models catalog hook (called at component top level). */
 	useModelCatalog: (initialQuery: string) => ModelCatalogState;
 	/** A persisted boolean toggle synced across consumers (e.g. "Show tags"). */

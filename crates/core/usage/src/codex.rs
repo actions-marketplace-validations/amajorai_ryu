@@ -134,10 +134,9 @@ fn load_auth() -> Option<AuthFile> {
     None
 }
 
-/// Read the managed Pi OAuth entry for Ryu's ChatGPT subscription provider and
-/// adapt it to the Codex CLI auth shape consumed by this reader.
-fn auth_from_ryu_json(root: &serde_json::Value) -> Option<AuthFile> {
-    let entry = root.get("openai-codex")?;
+/// Adapt one managed Pi OAuth entry to the Codex CLI auth shape consumed by this
+/// reader.
+fn auth_from_ryu_entry(entry: &serde_json::Value) -> Option<AuthFile> {
     let access_token = entry
         .get("access")
         .and_then(serde_json::Value::as_str)
@@ -163,6 +162,12 @@ fn auth_from_ryu_json(root: &serde_json::Value) -> Option<AuthFile> {
     })
 }
 
+/// Read the managed Pi OAuth entry for Ryu's ChatGPT subscription provider and
+/// adapt it to the Codex CLI auth shape consumed by this reader.
+fn auth_from_ryu_json(root: &serde_json::Value) -> Option<AuthFile> {
+    auth_from_ryu_entry(root.get("openai-codex")?)
+}
+
 fn load_ryu_auth() -> Option<AuthFile> {
     let path = super::host()?.ryu_pi_auth_path()?;
     let text = read_file(&path)?;
@@ -176,6 +181,13 @@ pub(super) async fn fetch(agent_id: &str) -> UsageSnapshot {
 
 pub(super) async fn fetch_ryu(agent_id: &str) -> UsageSnapshot {
     fetch_from_auth(agent_id, load_ryu_auth()).await
+}
+
+pub(super) async fn fetch_ryu_with_credential(
+    agent_id: &str,
+    credential: Option<serde_json::Value>,
+) -> UsageSnapshot {
+    fetch_from_auth(agent_id, credential.as_ref().and_then(auth_from_ryu_entry)).await
 }
 
 async fn fetch_from_auth(agent_id: &str, auth: Option<AuthFile>) -> UsageSnapshot {

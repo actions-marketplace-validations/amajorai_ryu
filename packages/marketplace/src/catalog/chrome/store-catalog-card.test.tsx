@@ -140,4 +140,21 @@ describe("StoreCatalogCard", () => {
 		expect(html).toContain("External");
 		expect(html).toContain("Browser toolkit");
 	});
+
+	test("shows the A Major Pass ticket only for eligible listings", () => {
+		const eligible = render(
+			<StoreCatalogCard
+				membershipIncluded
+				name="Harbor"
+				onClick={() => undefined}
+			/>
+		);
+		const excluded = render(
+			<StoreCatalogCard name="Harbor" onClick={() => undefined} />
+		);
+
+		expect(eligible).toContain('data-slot="marketplace-access-trigger"');
+		expect(eligible).toContain("Get this with A Major Pass");
+		expect(excluded).not.toContain('data-slot="marketplace-access-trigger"');
+	});
 });

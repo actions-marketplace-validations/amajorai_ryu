@@ -37,5 +37,6 @@ export function toCardData(
 		priceLabel,
 		owned,
 		buying,
+		membershipIncluded: card.membershipIncluded,
 	};
 }

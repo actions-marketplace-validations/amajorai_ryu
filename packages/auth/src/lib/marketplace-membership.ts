@@ -1,6 +1,6 @@
 import { PLANS, type PlanId } from "./plans.ts";
 
-/** The offer shapes that can contribute a Marketplace Membership price tier. */
+/** The offer shapes that can contribute an A Major Pass price tier. */
 export type MarketplaceMembershipPricingModel =
 	| "bounded_updates"
 	| "one_time"
@@ -46,7 +46,7 @@ export const MARKETPLACE_PRICE_TIERS: readonly MarketplacePriceTier[] = [
 	{ maxAnnualizedUsd: null, multiplier: 100 },
 ];
 
-/** True only for a plan that carries the recurring Marketplace entitlement. */
+/** True only for a recurring plan that can fund the Marketplace publisher pool. */
 export function isRecurringMarketplacePlan(
 	plan: PlanId | null | undefined
 ): boolean {

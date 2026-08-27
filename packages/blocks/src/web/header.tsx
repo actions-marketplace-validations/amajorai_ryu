@@ -5,6 +5,9 @@ import { buttonVariants } from "@ryu/ui/components/button";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
+	DropdownMenuGroup,
+	DropdownMenuItem,
+	DropdownMenuLabel,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu.tsx";
 import { Logo } from "@ryu/ui/components/logo";
@@ -17,7 +20,7 @@ import {
 	MotionNavigationMenuTrigger,
 } from "@ryu/ui/components/motion-navigation-menu";
 import { cn } from "@ryu/ui/lib/utils";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Menu } from "lucide-react";
 // import { Link2 } from "lucide-react";
 import type { Route } from "next";
 import Link from "next/link";
@@ -159,6 +162,123 @@ function ProductsMenu({ pathname }: { pathname: string }) {
 	);
 }
 
+function isHeaderLinkActive(pathname: string, link: HeaderLink) {
+	return (
+		!link.external &&
+		(pathname === link.to || pathname.startsWith(`${link.to}/`))
+	);
+}
+
+function HeaderLinkList({
+	links,
+	pathname,
+	portal = false,
+}: {
+	links: readonly HeaderLink[];
+	pathname: string;
+	portal?: boolean;
+}) {
+	return (
+		<>
+			{links.map((link) => {
+				const active = isHeaderLinkActive(pathname, link);
+				const className = portal
+					? cn(
+							"relative inline-flex h-12 shrink-0 items-center rounded-none px-3 font-medium text-sm transition-colors after:pointer-events-none after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:rounded-full",
+							active
+								? "text-foreground after:bg-foreground"
+								: "text-muted-foreground hover:text-foreground"
+						)
+					: cn(
+							buttonVariants({ size: "sm", variant: "ghost" }),
+							"text-muted-foreground hover:bg-muted hover:text-foreground",
+							active && "bg-muted text-foreground"
+						);
+				if (link.external) {
+					return (
+						<a
+							className={className}
+							href={link.to}
+							key={link.to}
+							rel="noopener noreferrer"
+							target="_blank"
+						>
+							{link.label}
+						</a>
+					);
+				}
+				return (
+					<Link
+						aria-current={active ? "page" : undefined}
+						className={className}
+						href={link.to as Route}
+						key={link.to}
+					>
+						{link.label}
+					</Link>
+				);
+			})}
+		</>
+	);
+}
+
+function PortalMobileNavigation({
+	links,
+	pathname,
+}: {
+	links: readonly HeaderLink[];
+	pathname: string;
+}) {
+	if (links.length === 0) {
+		return null;
+	}
+
+	return (
+		<DropdownMenu>
+			<DropdownMenuTrigger
+				aria-label="Open workspace navigation"
+				className={cn(
+					buttonVariants({ size: "icon-sm", variant: "ghost" }),
+					"md:hidden"
+				)}
+			>
+				<Menu aria-hidden="true" />
+			</DropdownMenuTrigger>
+			<DropdownMenuContent
+				align="end"
+				className="min-w-52 p-1"
+				withBackdrop={false}
+			>
+				<DropdownMenuGroup>
+					<DropdownMenuLabel>Workspace</DropdownMenuLabel>
+					{links.map((link) => {
+						const active = isHeaderLinkActive(pathname, link);
+						return (
+							<DropdownMenuItem
+								className={cn(active && "bg-foreground/10")}
+								key={link.to}
+								render={
+									link.external ? (
+										<a
+											href={link.to}
+											rel="noopener noreferrer"
+											target="_blank"
+										/>
+									) : (
+										<Link href={link.to as Route} />
+									)
+								}
+							>
+								{link.label}
+							</DropdownMenuItem>
+						);
+					})}
+				</DropdownMenuGroup>
+			</DropdownMenuContent>
+		</DropdownMenu>
+	);
+}
+
 export default function Header({
 	className,
 	userMenu,
@@ -167,15 +287,16 @@ export default function Header({
 	showCatalogMenus = true,
 	homeHref = "/",
 	signedIn = false,
+	variant = "marketing",
 }: {
 	className?: string;
 	signedIn?: boolean;
+	variant?: "marketing" | "portal";
 	userMenu?: ReactNode;
 	/**
-	 * Vercel-style breadcrumb slot rendered immediately after the logo/badge,
-	 * separated by a muted "/". Portal surfaces pass the org switcher here so it
-	 * reads as `logo / [org ▾]`. Presentational only — the block owns the
-	 * separator, the caller owns the control.
+	 * Workspace context rendered immediately after the logo/badge. Portal surfaces
+	 * pass the organization switcher here so the current workspace stays visible
+	 * while people move between the primary routes.
 	 */
 	orgSlot?: ReactNode;
 	/** Nav links to render. Defaults to the marketing links. */
@@ -190,6 +311,60 @@ export default function Header({
 	homeHref?: string;
 }) {
 	const pathname = usePathname();
+
+	if (variant === "portal") {
+		return (
+			<div className={cn("relative", className)}>
+				<div className="border-border/70 border-b bg-background/85 backdrop-blur-xl">
+					<div className="mx-auto w-full max-w-7xl">
+						<div className="flex min-h-14 items-center gap-3 px-4 sm:gap-4 sm:px-6">
+							<Link
+								className="group flex shrink-0 items-center gap-2"
+								href={homeHref as Route}
+							>
+								<Logo
+									className="text-foreground"
+									size="26px"
+									variant="outline-static"
+								/>
+								<span className="font-heading font-medium text-base tracking-tight">
+									ryu
+								</span>
+								<Badge
+									className="hidden rounded-full text-[10px] sm:inline-flex"
+									variant="secondary"
+								>
+									Preview
+								</Badge>
+							</Link>
+							{orgSlot ? (
+								<div className="min-w-0 border-border/70 border-l pl-3 sm:pl-4">
+									{orgSlot}
+								</div>
+							) : null}
+
+							<div className="ml-auto flex items-center gap-1.5">
+								<div className="flex items-center gap-1.5">{userMenu}</div>
+							</div>
+						</div>
+						{links.length > 0 ? (
+							<div className="flex min-h-12 items-center px-4 sm:px-6">
+								<nav
+									aria-label="Workspace navigation"
+									className="hidden items-center gap-0.5 md:flex"
+								>
+									<HeaderLinkList links={links} pathname={pathname} portal />
+								</nav>
+								<div className="ml-auto md:hidden">
+									<PortalMobileNavigation links={links} pathname={pathname} />
+								</div>
+							</div>
+						) : null}
+					</div>
+				</div>
+			</div>
+		);
+	}
 
 	return (
 		<div className={`relative ${className ?? ""}`}>
@@ -375,24 +550,7 @@ export default function Header({
 						</MotionNavigationMenu>
 					)}
 
-					{links.map(({ to, label, external }) => {
-						const isActive = !external && pathname.startsWith(to);
-						return (
-							<a
-								className={cn(
-									buttonVariants({ variant: "ghost" }),
-									"hover:bg-muted hover:text-foreground",
-									isActive && "bg-muted"
-								)}
-								href={to}
-								key={to}
-								rel={external ? "noopener noreferrer" : undefined}
-								target={external ? "_blank" : "_self"}
-							>
-								{label}
-							</a>
-						);
-					})}
+					<HeaderLinkList links={links} pathname={pathname} />
 				</nav>
 
 				<div className="hidden flex-1 items-center justify-end md:flex">

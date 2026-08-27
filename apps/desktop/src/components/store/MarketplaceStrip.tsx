@@ -13,16 +13,43 @@ import { Store01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { MarketplaceItemCard } from "@ryu/blocks/desktop/marketplace";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { useEffect, useRef } from "react";
 import MarketplaceDetailDialog from "@/src/components/marketplace/MarketplaceDetailDialog.tsx";
 import { useMarketplacePurchase } from "@/src/components/marketplace/useMarketplacePurchase.ts";
 import { useMarketplaceCatalog } from "@/src/hooks/useMarketplaceCatalog.ts";
 import type { MarketplaceKind } from "@/src/lib/api/marketplace.ts";
 import { toCardData } from "@/src/lib/api/marketplace-view.ts";
 
-export default function MarketplaceStrip({ kind }: { kind: MarketplaceKind }) {
-	const { items, loading, error } = useMarketplaceCatalog(kind);
+export default function MarketplaceStrip({
+	initialQuery,
+	initialSelectedId,
+	kind,
+}: {
+	initialQuery?: string;
+	initialSelectedId?: string;
+	kind: MarketplaceKind;
+}) {
+	const { items, loading, error } = useMarketplaceCatalog(kind, initialQuery);
 	const { buying, buy, isLicensed, detail, openDetail, closeDetail } =
 		useMarketplacePurchase();
+	const openedSelection = useRef<string | null>(null);
+
+	useEffect(() => {
+		if (!initialSelectedId || openedSelection.current === initialSelectedId) {
+			return;
+		}
+		const card = items.find((item) => item.id === initialSelectedId);
+		if (!card) {
+			return;
+		}
+		openedSelection.current = initialSelectedId;
+		openDetail({
+			id: card.id,
+			kind: card.kind,
+			name: card.name,
+			iconUrl: card.iconUrl ?? null,
+		});
+	}, [initialSelectedId, items, openDetail]);
 
 	// The money layer being unavailable (signed out, no org, Stripe off, network)
 	// must never disturb the free Core section above — just render nothing.

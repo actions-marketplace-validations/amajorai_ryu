@@ -1,11 +1,10 @@
 //! Core's privileged consumer for GitHub-backed `.ryupack` releases.
 //!
-//! The control plane owns discovery, signatures, Stripe entitlements, and the
+//! The control plane owns discovery, signatures, optional commerce, and the
 //! short-lived GitHub App proxy. Core owns the last trust boundary: it fetches
-//! the entitlement-gated archive, verifies both digests, validates every ZIP
-//! entry, and only then materialises a package on the node. Installed bytes are
-//! intentionally independent from entitlement state; expiry blocks a new
-//! download/update, while local enable/disable/uninstall continues to work.
+//! the signed archive, verifies both digests, validates every ZIP entry, and only
+//! then materialises a package on the node. Pricing never gates package bytes or
+//! lifecycle; local enable/disable/uninstall continues to work.
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Write};

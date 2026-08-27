@@ -52,6 +52,113 @@ export async function transcribeAudio(
 	return (body.text ?? "").trim();
 }
 
+/** S1-mini styling controls exposed by the Speech Processing layer. */
+export type SpeechProcessingStyling =
+	| "casual"
+	| "semi-casual"
+	| "semi-formal"
+	| "formal";
+
+/** One node-local engine that can clean a raw Voice Recognition transcript. */
+export interface SpeechProcessingEngine {
+	description: string;
+	display_name: string;
+	id: string;
+	installed: boolean;
+	languages: string[];
+	loaded: boolean;
+	model: string;
+	sidecar: string;
+	size_mb: number;
+}
+
+/** S1-mini request controls. The defaults are applied by Core when omitted. */
+export interface SpeechProcessingOptions {
+	context?: "general" | "email";
+	engine?: string;
+	structure?: "prose" | "lists";
+	styling?: SpeechProcessingStyling;
+}
+
+/** List the node's Speech Processing engines and their install/load state. */
+export async function listSpeechProcessingEngines(
+	target: ApiTarget
+): Promise<SpeechProcessingEngine[]> {
+	const resp = await fetch(
+		apiUrl(target, "/api/voice/speech-processing-engines"),
+		{
+			headers: makeHeaders(target.token),
+		}
+	);
+	if (!resp.ok) {
+		throw new Error(`Speech Processing engines failed: ${resp.status}`);
+	}
+	const body = (await resp.json()) as {
+		data?: SpeechProcessingEngine[];
+	};
+	return body.data ?? [];
+}
+
+/** Install the curated default Speech Processing model through Core. */
+export async function installSpeechProcessingModel(
+	target: ApiTarget,
+	engine = "s1-mini"
+): Promise<void> {
+	const resp = await fetch(
+		apiUrl(target, "/api/voice/speech-processing-model/install"),
+		{
+			method: "POST",
+			headers: makeHeaders(target.token),
+			body: JSON.stringify({ engine }),
+		}
+	);
+	if (!resp.ok) {
+		let detail = `Speech Processing install failed: ${resp.status}`;
+		try {
+			const body = (await resp.json()) as { error?: string };
+			if (body.error) {
+				detail = body.error;
+			}
+		} catch {
+			// Keep the status-based message for a non-JSON error body.
+		}
+		throw new Error(detail);
+	}
+}
+
+/** Clean one raw Voice Recognition transcript with the selected local engine. */
+export async function processSpeechText(
+	target: ApiTarget,
+	text: string,
+	options: SpeechProcessingOptions = {}
+): Promise<string> {
+	const resp = await fetch(apiUrl(target, "/api/voice/speech-processing"), {
+		method: "POST",
+		headers: makeHeaders(target.token),
+		body: JSON.stringify({
+			text,
+			engine: options.engine,
+			styling: options.styling,
+			structure: options.structure,
+			context: options.context,
+		}),
+	});
+	if (!resp.ok) {
+		let detail = `Speech Processing failed: ${resp.status}`;
+		try {
+			const body = (await resp.json()) as { error?: string };
+			if (body.error) {
+				detail = body.error;
+			}
+		} catch {
+			// Keep the status-based message for a non-JSON error body.
+		}
+		throw new Error(detail);
+	}
+	const body = (await resp.json()) as { text?: string };
+	return (body.text ?? "").trim();
+}
+
 /** One selectable text-to-speech engine, as Core's `/api/voice/tts-engines`
  * returns it (built-in OuteTTS + whatever the Ryu TTS sidecar registry serves). */
 export interface TtsEngine {

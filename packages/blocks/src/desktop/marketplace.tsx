@@ -37,6 +37,7 @@ import {
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
 import { Input } from "@ryu/ui/components/input";
+import { MarketplaceAccessBadge } from "@ryu/ui/components/marketplace-access-badge";
 import { Spinner } from "@ryu/ui/components/spinner";
 import {
 	APP_ICON_TILE_CARD,
@@ -71,7 +72,8 @@ export type MarketplaceVerification =
 
 /** Presentational card shape. Mirrors the app's `MarketplaceCard` but pre-resolves
  *  the price string so this layer carries no money-formatting logic. `priceLabel`
- *  is null for free items (which render with no price/buy affordance). */
+ *  is null for free items. A price is commerce metadata, not a runtime access
+ *  decision; every catalog item keeps the same add/open affordance. */
 export interface MarketplaceCardData {
 	author: string | null;
 	/** True while a checkout for this card is in flight. */
@@ -83,6 +85,8 @@ export interface MarketplaceCardData {
 	iconUrl?: string | null;
 	id: string;
 	kind: MarketplaceItemKind;
+	/** The listing is covered by the A Major Pass eligibility pool. */
+	membershipIncluded?: boolean;
 	name: string;
 	/** Whether the active org already owns this paid item. */
 	owned: boolean;
@@ -259,6 +263,9 @@ export function MarketplaceItemCard({
 						</Badge>
 					) : null}
 					<TrustBadge status={card.verification} />
+					<MarketplaceAccessBadge
+						membershipIncluded={card.membershipIncluded}
+					/>
 				</div>
 			</div>
 
@@ -366,9 +373,7 @@ export function MarketplaceBrowseView({
 				</EmptyHeader>
 				<EmptyContent>
 					<Button
-						onClick={() =>
-								query.trim() ? onQueryChange("") : onRefresh()
-						}
+						onClick={() => (query.trim() ? onQueryChange("") : onRefresh())}
 						size="sm"
 						variant="ghost"
 					>

@@ -9,7 +9,7 @@ const LOOPBACK_HOST =
 const URL_PORT = /:(\d+)(?:\/|$)/;
 const DEFAULT_CORE_PORT = "7980";
 
-/** Swap a loopback host for this computer's Wi-Fi address, keeping the port. */
+/** Swap a loopback host for this device's Wi-Fi address, keeping the port. */
 function withDetectedHost(nodeUrl: string, wifiAddress: string): string {
 	const port = nodeUrl.match(URL_PORT)?.[1] ?? DEFAULT_CORE_PORT;
 	return `http://${wifiAddress}:${port}`;
@@ -22,7 +22,7 @@ function ConnectDeviceQR() {
 
 	// Re-seed the editable address when the active node changes, and — because a
 	// phone can't reach a localhost address — try to auto-fill the address other
-	// devices on the same Wi-Fi use to reach this computer.
+	// devices on the same Wi-Fi use to reach this device.
 	useEffect(() => {
 		setHost(node.url);
 		if (!LOOPBACK_HOST.test(node.url)) {
@@ -65,10 +65,10 @@ function ConnectDeviceQR() {
 					className="text-[11px] text-muted-foreground"
 					htmlFor="connect-device-address"
 				>
-					Address other devices use to reach this computer
+					Address other devices use to reach this device
 				</label>
 				<input
-					aria-label="Address other devices use to reach this computer"
+					aria-label="Address other devices use to reach this device"
 					className="w-full rounded-md border px-2 py-1 text-sm"
 					id="connect-device-address"
 					onChange={(e) => setHost(e.target.value)}
@@ -78,7 +78,7 @@ function ConnectDeviceQR() {
 			</div>
 			{isLoopback && (
 				<p className="text-[11px] text-warning">
-					This address only works on this computer. Enter the address other
+					This address only works on this device. Enter the address other
 					devices on the same Wi-Fi use to reach it, for example
 					http://192.168.1.50:7980.
 				</p>

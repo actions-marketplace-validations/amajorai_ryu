@@ -3,7 +3,7 @@
 //! These let a builder meta-agent (the left pane of the desktop agent-edit page)
 //! mutate a persisted [`AgentRecord`] by tool call — rename it, edit its
 //! instructions, add/remove tools, skills, Composio actions, identities, and set
-//! its persona. They are exposed through the MCP registry using the same
+//! its persona and personality profile. They are exposed through the MCP registry using the same
 //! in-process built-in pattern as [`crate::runnable::self_build`].
 //!
 //! # Core-vs-Gateway placement
@@ -127,10 +127,11 @@ fn configure_agent_schema() -> Value {
             "engine": { "type": "string", "description": "Engine/runtime id, e.g. 'acp:pi', 'acp:claude', or a local engine id." },
             "persona": {
                 "type": "object",
-                "description": "Persona: how the agent presents itself.",
+                "description": "Persona and personality profile: how the agent presents and speaks.",
                 "properties": {
                     "display_name": { "type": "string", "description": "Name the agent uses when introducing itself." },
-                    "tone": { "type": "string", "description": "Tone, e.g. 'professional', 'friendly', or a custom phrase." }
+                    "tone": { "type": "string", "description": "Tone, e.g. 'professional', 'friendly', or a custom phrase." },
+                    "output_style_id": { "type": "string", "description": "Installed personality profile id, such as 'eli5'. Omit or set null for the agent's own voice." }
                 }
             },
             "inference": { "type": "object", "description": "Advanced sampling defaults (temperature, top_p, …)." },
@@ -152,7 +153,16 @@ fn create_agent_schema() -> Value {
             "system_prompt": { "type": "string", "description": "The agent's instructions." },
             "engine": { "type": "string", "description": "Engine/runtime id, e.g. 'acp:pi'." },
             "tools": { "type": "array", "items": { "type": "string" }, "description": "Initial tool allowlist." },
-            "skills": { "type": "array", "items": { "type": "string" }, "description": "Initial skill allowlist." }
+            "skills": { "type": "array", "items": { "type": "string" }, "description": "Initial skill allowlist." },
+            "persona": {
+                "type": "object",
+                "description": "Initial persona and optional personality profile.",
+                "properties": {
+                    "display_name": { "type": "string" },
+                    "tone": { "type": "string" },
+                    "output_style_id": { "type": "string" }
+                }
+            }
         },
         "required": ["name"]
     })
@@ -316,14 +326,23 @@ async fn configure_agent(args: Value, store: AgentStore) -> Result<Value> {
         patch.engine = Some(v.to_owned());
     }
     if let Some(persona) = args.get("persona").filter(|p| p.is_object()) {
-        patch.persona = Some(PersonaSlot {
-            display_name: persona["display_name"].as_str().map(str::to_owned),
-            tone: persona["tone"].as_str().map(str::to_owned),
-            // Avatar glyph fields (avatar_url / emoji / icon / dicebear / expressive / dither)
-            // are edited through the desktop GlyphPicker, not the builder tools —
-            // leave them unset here so a builder patch doesn't wipe a custom glyph.
-            ..Default::default()
-        });
+        // Persona is a whole stored slot. Start from the existing value so a
+        // builder request that changes only tone/profile cannot erase an avatar
+        // chosen in the desktop GlyphPicker. Fields omitted from the request stay
+        // unchanged; an explicit JSON null clears one field.
+        let mut next = record.persona.unwrap_or_default();
+        if persona.get("display_name").is_some() {
+            next.display_name = persona["display_name"].as_str().map(str::to_owned);
+        }
+        if persona.get("tone").is_some() {
+            next.tone = persona["tone"].as_str().map(str::to_owned);
+        }
+        if persona.get("output_style_id").is_some() {
+            next.output_style_id = persona["output_style_id"].as_str().map(str::to_owned);
+        }
+        // Avatar glyph fields (avatar_url / emoji / icon / dicebear / expressive / dither)
+        // are not exposed by this builder schema and therefore remain untouched.
+        patch.persona = Some(next);
     }
     if let Some(inference) = args.get("inference").filter(|i| i.is_object()) {
         patch.inference = serde_json::from_value(inference.clone()).ok();
@@ -355,6 +374,10 @@ async fn create_agent(args: Value, store: AgentStore) -> Result<Value> {
         engine: args["engine"].as_str().map(str::to_owned),
         tools: str_array(&args, "tools"),
         skills: str_array(&args, "skills"),
+        persona: args
+            .get("persona")
+            .filter(|value| value.is_object())
+            .and_then(|value| serde_json::from_value(value.clone()).ok()),
         ..Default::default()
     };
     let created = store.create(input).await?;
@@ -652,6 +675,39 @@ mod tests {
         assert_eq!(updated.name, "Research helper");
         assert_eq!(updated.system_prompt.as_deref(), Some("Be concise."));
         assert_eq!(updated.tools, vec!["a".to_owned(), "b".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn configure_agent_sets_profile_without_erasing_avatar() {
+        let store = store();
+        let created = store
+            .create(CreateAgent {
+                name: "Profiled".to_owned(),
+                persona: Some(PersonaSlot {
+                    icon: Some("lucide:sparkles".to_owned()),
+                    tone: Some("friendly".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        configure_agent(
+            json!({
+                "agent_id": created.id,
+                "persona": { "output_style_id": "eli5" }
+            }),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+
+        let updated = store.get(&created.id).await.unwrap().unwrap();
+        let persona = updated.persona.expect("persona remains present");
+        assert_eq!(persona.output_style_id.as_deref(), Some("eli5"));
+        assert_eq!(persona.icon.as_deref(), Some("lucide:sparkles"));
+        assert_eq!(persona.tone.as_deref(), Some("friendly"));
     }
 
     #[tokio::test]

@@ -82,6 +82,8 @@ export interface Agent {
 	 * means "use the default", which is **on** (delegation is default-available).
 	 */
 	orchestrator: boolean | null;
+	/** Persona identity and the reusable personality profile assigned to this agent. */
+	persona: AgentPersona | null;
 	/** Skill id allowlist. Empty = all enabled skills; non-empty = only these. */
 	skills: string[];
 	systemPrompt: string | null;
@@ -98,6 +100,7 @@ export interface AgentTemplate {
 	agent_config: {
 		description: string | null;
 		system_prompt: string | null;
+		persona?: AgentPersona | null;
 		tools: string[];
 		engine: string | null;
 		model: string | null;
@@ -111,6 +114,8 @@ export interface AgentTemplate {
 export interface AgentPersona {
 	/** Display name the agent uses when introducing itself (optional). */
 	display_name: string | null;
+	/** Installed output-style profile id; null/absent means the agent's own voice. */
+	output_style_id?: string | null;
 	/** Tone string: "neutral" | "professional" | "friendly" | "pirate" | any custom string. Null = default. */
 	tone: string | null;
 }
@@ -187,6 +192,7 @@ interface AgentRecordWire {
 	model?: string | null;
 	name: string;
 	orchestrator?: boolean | null;
+	persona?: AgentPersona | null;
 	skills?: string[];
 	system_prompt?: string | null;
 	title?: string | null;
@@ -240,6 +246,7 @@ function toAgent(a: AgentRecordWire): Agent {
 		// creation off). Preserve it rather than collapsing to a boolean here.
 		orchestrator: a.orchestrator ?? null,
 		canCreateAgents: a.can_create_agents ?? null,
+		persona: a.persona ?? null,
 	};
 }
 

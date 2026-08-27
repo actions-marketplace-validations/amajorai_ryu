@@ -1,4 +1,4 @@
-//! HTTP API for output styles — list, read, author, and select.
+//! HTTP API for output styles — list, read, and author (plus a legacy selector).
 //!
 //! **Routing shape (why this differs from `ryu_skills::api`).** The skills router
 //! registers *absolute* paths (`/api/skills/...`) because Core owns some leaves under
@@ -99,10 +99,9 @@ struct OutputStylesApiDoc;
 
 /// The id currently in force, and whether a plugin is what forces it.
 ///
-/// One helper because "which style is active" must have exactly one answer across the
-/// list rows, the picker, and the injection seams: a forced plugin style beats the
-/// node default (design §5), and anything that re-derives that ordering separately is
-/// a second source of truth waiting to disagree.
+/// One helper for older clients that still display node-level metadata. A forced
+/// plugin style beats the legacy node selection; normal agent turns resolve their
+/// profile from the agent record in Core.
 fn effective_selection() -> (Option<String>, Option<String>) {
     let forced = registry().forced_style().map(|r| r.id);
     let active = forced.clone().or_else(crate::load_selection);
@@ -291,18 +290,16 @@ pub struct SelectStyleBody {
     pub style_id: Option<String>,
 }
 
-/// `POST /api/output-styles/select { style_id }` — set the node-default style.
+/// `POST /api/output-styles/select { style_id }` — set the legacy node-default style.
 ///
 /// This is the store tab's install action, and it is deliberately the whole of it: a
-/// style is a prompt preset, so adopting one is a write to the one selection file the
-/// injection seams read. No parallel store of "installed" styles, and no second source
-/// of truth about which style is in force — exactly the shape the Meetings
-/// note-templates tab uses.
+/// style is a prompt preset. This endpoint remains for older clients and upgrade
+/// tooling; normal turns now resolve the profile stored on the selected agent.
 #[utoipa::path(
     post,
     path = "/api/output-styles/select",
     tag = "Output styles",
-    summary = "Select the node-default output style",
+    summary = "Select the legacy node-default output style",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]

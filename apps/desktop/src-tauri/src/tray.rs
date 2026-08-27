@@ -4,6 +4,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, Runtime,
 };
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_store::StoreExt;
 
 /// Stable id so the tray handle can be looked up again after creation to toggle
@@ -25,6 +26,10 @@ const CLOSE_TO_TRAY_KEY: &str = "close-to-tray";
 /// let this one through. Without it, "stay in tray" would swallow the tray's own
 /// Quit and the app could only be killed from Activity Monitor.
 static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Prevent repeated native close events from opening multiple confirmation
+/// dialogs while the first active-run check is still in flight.
+static CLOSE_CONFIRMING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Mark a real quit as in progress (tray Quit, app-menu Quit, `quit_app`).
 pub(crate) fn begin_quit() {
@@ -68,6 +73,113 @@ fn control_client() -> Option<reqwest::Client> {
         .timeout(std::time::Duration::from_secs(CONTROL_TIMEOUT_SECS))
         .build()
         .ok()
+}
+
+/// Read one local Core JSON endpoint for the quit guard. The desktop owns the
+/// local node token on disk, so the check can use the same protected API that
+/// the renderer uses without passing a secret through the UI.
+async fn local_core_json(client: &reqwest::Client, path: &str) -> Option<serde_json::Value> {
+    let base = crate::profile::core_base_url();
+    let mut request = client.get(format!("{}{}", base.trim_end_matches('/'), path));
+    if let Some(token) = crate::nodes::local_node_token().token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json().await.ok()
+}
+
+fn running_conversation_count(value: &serde_json::Value) -> u64 {
+    value
+        .get("runs")
+        .and_then(serde_json::Value::as_array)
+        .map(|runs| {
+            runs.iter()
+                .filter(|run| run.get("run_status").and_then(serde_json::Value::as_str) == Some("running"))
+                .count() as u64
+        })
+        .unwrap_or(0)
+}
+
+fn running_workflow_count(value: &serde_json::Value) -> u64 {
+    value
+        .get("running")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+}
+
+/// Count local work that an actual quit would interrupt. A missing endpoint is
+/// treated as zero: Core may be offline, and there is nothing for this desktop
+/// process to stop in that case.
+pub(crate) async fn active_local_run_count() -> u64 {
+    let Some(client) = control_client() else {
+        return 0;
+    };
+    let (conversations, workflows) = tokio::join!(
+        local_core_json(&client, "/api/runs"),
+        local_core_json(&client, "/workflows/runs/live")
+    );
+    conversations
+        .as_ref()
+        .map(running_conversation_count)
+        .unwrap_or(0)
+        + workflows
+            .as_ref()
+            .map(running_workflow_count)
+            .unwrap_or(0)
+}
+
+fn complete_quit<R: Runtime>(app: tauri::AppHandle<R>) {
+    begin_quit();
+    crate::stop_managed_core(&app);
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = island_control("quit").await;
+        handle.exit(0);
+    });
+}
+
+/// Check local work before a real application quit. Closing to the tray does
+/// not call this path because it deliberately keeps Core alive.
+pub(crate) fn request_quit<R: Runtime>(app: &tauri::AppHandle<R>) {
+    if is_quitting()
+        || CLOSE_CONFIRMING.swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let active = active_local_run_count().await;
+        let finish_handle = handle.clone();
+        let finish = move |confirmed: bool| {
+            CLOSE_CONFIRMING.store(false, std::sync::atomic::Ordering::SeqCst);
+            if confirmed {
+                tracing::info!(active_runs = active, "user confirmed Ryu quit");
+                complete_quit(finish_handle);
+            }
+        };
+        if active == 0 {
+            finish(true);
+            return;
+        }
+
+        tracing::info!(active_runs = active, "delaying Ryu quit for active local runs");
+        let task_word = if active == 1 { "task is" } else { "tasks are" };
+        handle
+            .dialog()
+            .message(format!(
+                "{active} local {task_word} still running. Quitting Ryu will stop them. Keep the app open until they finish, or quit anyway."
+            ))
+            .title("Quit Ryu?")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Quit anyway".to_owned(),
+                "Keep working".to_owned(),
+            ))
+            .show(finish);
+    });
 }
 
 /// Bring the main window forward (creating focus) before running a webview action.
@@ -263,19 +375,7 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
             // Stop the companion island too, then exit — the unified tray owns both
             // lifecycles, and the island has no other quit affordance.
             "quit" => {
-                // Flag the quit BEFORE it starts: with close-to-tray on, the window's
-                // CloseRequested handler would otherwise cancel the very shutdown this
-                // item exists to perform.
-                begin_quit();
-                // Stop the backend explicitly. With close-to-tray on, the window is
-                // never destroyed, so `WindowEvent::Destroyed` — the arm that used to
-                // own this — does not fire on the way out.
-                crate::stop_managed_core(app);
-                let handle = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = island_control("quit").await;
-                    handle.exit(0);
-                });
+                request_quit(app);
             }
             _ => {}
         })
@@ -340,4 +440,35 @@ pub fn set_close_to_tray(app: tauri::AppHandle, enabled: bool) -> Result<(), Str
     store.set(CLOSE_TO_TRAY_KEY, serde_json::json!(enabled));
     store.save().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{running_conversation_count, running_workflow_count};
+
+    #[test]
+    fn quit_guard_counts_only_active_conversations() {
+        let payload = serde_json::json!({
+            "runs": [
+                { "run_status": "running" },
+                { "run_status": "completed" },
+                { "run_status": "awaiting_input" },
+                { "run_status": null }
+            ]
+        });
+
+        assert_eq!(running_conversation_count(&payload), 1);
+    }
+
+    #[test]
+    fn quit_guard_reads_workflow_running_count() {
+        assert_eq!(
+            running_workflow_count(&serde_json::json!({
+                "running": 3,
+                "awaiting_input": 2
+            })),
+            3
+        );
+        assert_eq!(running_workflow_count(&serde_json::json!({})), 0);
+    }
 }

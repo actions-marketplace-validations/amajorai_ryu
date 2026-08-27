@@ -30,6 +30,7 @@ import {
 	ServerStack01Icon,
 	Settings01Icon,
 	Share08Icon,
+	SparklesIcon,
 	ViewIcon,
 	ViewOffSlashIcon,
 	VolumeHighIcon,
@@ -131,14 +132,21 @@ import {
 	stopSidecar,
 } from "@/src/lib/api/plugins.ts";
 import {
+	DEFAULT_SPEECH_PROCESSING_PREFS,
 	DEFAULT_VOICE_PREFS,
 	DESKTOP_TTS_ENGINE_KEY,
 	DESKTOP_TTS_VOICE_KEY,
 	getDesktopTtsPrefs,
 	getPreference,
+	getSpeechProcessingPrefs,
 	getVoiceInputPrefs,
+	SPEECH_PROCESSING_ENGINES,
+	type SpeechProcessingContext,
+	type SpeechProcessingStructure,
+	type SpeechProcessingStyling,
 	setDesktopTtsPref,
 	setPreference,
+	setSpeechProcessingPrefs,
 	setVoiceInputPrefs,
 	subscribeDesktopTtsPrefs,
 	VOICE_ENGINES,
@@ -154,7 +162,13 @@ import {
 	type SandboxSpec,
 } from "@/src/lib/api/sandboxes.ts";
 import type { SystemInfo } from "@/src/lib/api/system.ts";
-import { listTtsEngines, type TtsEngine } from "@/src/lib/api/voice.ts";
+import {
+	installSpeechProcessingModel,
+	listSpeechProcessingEngines,
+	listTtsEngines,
+	type SpeechProcessingEngine as SpeechProcessingEngineInfo,
+	type TtsEngine,
+} from "@/src/lib/api/voice.ts";
 import {
 	connectionDisplayName,
 	connectionSurfaceMeta,
@@ -1991,21 +2005,39 @@ function VoiceAndSandboxSection({
 	);
 
 	// The catalog + live sidecar sample, shared with the Engines section above (same
-	// query key ⇒ one poll). Both voice layers are backed by catalog sidecars —
-	// `ryutts` for the extra Audio voices, `whispercpp`/`parakeet` for transcription —
-	// so install/uninstall here goes through the same generic endpoints.
+	// query key ⇒ one poll). Audio, Voice Recognition, and Speech Processing each
+	// have their own layer: ASR produces text, Speech Processing optionally cleans
+	// it, and Audio speaks it back.
 	const { catalog, details, refresh: refreshEngines } = useNodeEngines(target);
 
 	const query = useQuery({
 		queryKey: ["node-voice-sandbox", target.url],
 		queryFn: async () => {
-			const [ttsEngines, sttPrefs, sandboxBackends] = await Promise.all([
+			const [
+				ttsEngines,
+				sttPrefs,
+				speechProcessingEngines,
+				speechProcessingPrefs,
+				sandboxBackends,
+			] = await Promise.all([
 				listTtsEngines(target).catch(() => [] as TtsEngine[]),
 				getVoiceInputPrefs(target).catch(() => DEFAULT_VOICE_PREFS),
+				listSpeechProcessingEngines(target).catch(
+					() => [] as SpeechProcessingEngineInfo[]
+				),
+				getSpeechProcessingPrefs(target).catch(
+					() => DEFAULT_SPEECH_PROCESSING_PREFS
+				),
 				// Absent on an older Core → no sandbox layer rather than a fake one.
 				fetchSandboxBackends(target).catch(() => null),
 			]);
-			return { ttsEngines, sttPrefs, sandboxBackends };
+			return {
+				ttsEngines,
+				sttPrefs,
+				speechProcessingEngines,
+				speechProcessingPrefs,
+				sandboxBackends,
+			};
 		},
 		enabled,
 		refetchInterval: 15_000,
@@ -2018,6 +2050,9 @@ function VoiceAndSandboxSection({
 
 	const ttsEngines = query.data?.ttsEngines ?? [];
 	const sttPrefs = query.data?.sttPrefs ?? DEFAULT_VOICE_PREFS;
+	const speechProcessingEngines = query.data?.speechProcessingEngines ?? [];
+	const speechProcessingPrefs =
+		query.data?.speechProcessingPrefs ?? DEFAULT_SPEECH_PROCESSING_PREFS;
 	const sandboxBackends = query.data?.sandboxBackends ?? null;
 
 	/** Start/stop/install one voice sidecar by catalog name, then reconcile. */
@@ -2137,6 +2172,89 @@ function VoiceAndSandboxSection({
 		? catalogItem(selectedSttSidecar)?.installState === "installed"
 		: true;
 
+	// ---- Speech Processing --------------------------------------------------
+	// S1-mini is a separate, lazy local model. Voice Recognition creates the raw
+	// transcript; this layer only formats it when Dictation cleanup is enabled.
+	const selectedSpeech =
+		speechProcessingEngines.find(
+			(engine) => engine.id === speechProcessingPrefs.engine
+		) ??
+		speechProcessingEngines[0] ??
+		null;
+	const selectedSpeechMeta =
+		SPEECH_PROCESSING_ENGINES.find(
+			(engine) => engine.engine === speechProcessingPrefs.engine
+		) ?? SPEECH_PROCESSING_ENGINES[0];
+	const speechInstalled = selectedSpeech?.installed ?? false;
+	const speechRunning = selectedSpeech?.loaded ?? false;
+
+	const updateSpeechProcessing = async (
+		patch: Partial<typeof speechProcessingPrefs>
+	) => {
+		try {
+			await setSpeechProcessingPrefs(target, {
+				...speechProcessingPrefs,
+				...patch,
+			});
+		} catch (e) {
+			sileo.error({
+				title:
+					e instanceof Error ? e.message : "Couldn't update Speech Processing",
+			});
+		}
+		await refresh();
+	};
+
+	const pickSpeechProcessing = async (
+		entry: (typeof SPEECH_PROCESSING_ENGINES)[number]
+	) => {
+		await updateSpeechProcessing({ engine: entry.engine });
+	};
+
+	const installSpeechProcessing = async () => {
+		try {
+			await installSpeechProcessingModel(target, speechProcessingPrefs.engine);
+			sileo.success({ title: `Installing ${selectedSpeechMeta.label}` });
+		} catch (e) {
+			sileo.error({
+				title:
+					e instanceof Error
+						? e.message
+						: `Couldn't install ${selectedSpeechMeta.label}`,
+			});
+		}
+		await refresh();
+	};
+
+	const speechInstallAction: LayerAction | null = speechInstalled
+		? null
+		: {
+				id: "install-speech-processing",
+				label: `Install ${selectedSpeechMeta.label}`,
+				busyLabel: "Installing…",
+				icon: Download04Icon,
+				run: installSpeechProcessing,
+			};
+	const speechActions: LayerAction[] = speechInstallAction
+		? [speechInstallAction]
+		: [
+				startStopAction(speechRunning ? true : null, (next) =>
+					toggleSidecar(
+						selectedSpeechMeta.sidecar,
+						selectedSpeechMeta.label,
+						next
+					)
+				),
+			];
+	const speechStyles: SpeechProcessingStyling[] = [
+		"casual",
+		"semi-casual",
+		"semi-formal",
+		"formal",
+	];
+	const speechStructures: SpeechProcessingStructure[] = ["prose", "lists"];
+	const speechContexts: SpeechProcessingContext[] = ["general", "email"];
+
 	// ---- Sandbox backend ----------------------------------------------------
 	const activeBackend =
 		sandboxBackends?.available.find((b) => b.name === sandboxBackends.active) ??
@@ -2205,6 +2323,89 @@ function VoiceAndSandboxSection({
 							)}
 							label="Voice"
 						/>
+					)}
+				</NodeLayerMenu>
+			)}
+			{speechProcessingEngines.length > 0 && (
+				<NodeLayerMenu
+					actions={speechActions}
+					available={
+						speechInstalled
+							? []
+							: SPEECH_PROCESSING_ENGINES.map(
+									(entry): LayerOption => ({
+										name: entry.engine,
+										label: entry.label,
+										detail: `${entry.model} · 484 MB`,
+										select: installSpeechProcessing,
+									})
+								)
+					}
+					caption={
+						speechInstalled
+							? "Optional cleanup after Voice Recognition · off in Dictation settings"
+							: "S1-mini model is not installed on this node"
+					}
+					currentLabel={
+						selectedSpeech?.display_name ?? selectedSpeechMeta.label
+					}
+					icon={SparklesIcon}
+					installed={
+						speechInstalled
+							? SPEECH_PROCESSING_ENGINES.map(
+									(entry): LayerOption => ({
+										name: entry.engine,
+										label: entry.label,
+										active: entry.engine === speechProcessingPrefs.engine,
+										detail: selectedSpeech?.model ?? entry.model,
+										select: () => pickSpeechProcessing(entry),
+									})
+								)
+							: []
+					}
+					label="Speech Processing"
+					running={speechRunning ? true : null}
+					trailing={speechInstalled ? "ready" : "install"}
+				>
+					{speechInstalled && (
+						<>
+							<NodeLayerMenu
+								currentLabel={speechProcessingPrefs.styling}
+								installed={speechStyles.map(
+									(value): LayerOption => ({
+										name: value,
+										label: value,
+										active: value === speechProcessingPrefs.styling,
+										select: () => updateSpeechProcessing({ styling: value }),
+									})
+								)}
+								label="Style"
+							/>
+							<NodeLayerMenu
+								currentLabel={speechProcessingPrefs.structure}
+								installed={speechStructures.map(
+									(value): LayerOption => ({
+										name: value,
+										label: value,
+										active: value === speechProcessingPrefs.structure,
+										select: () => updateSpeechProcessing({ structure: value }),
+									})
+								)}
+								label="Structure"
+							/>
+							<NodeLayerMenu
+								currentLabel={speechProcessingPrefs.context}
+								installed={speechContexts.map(
+									(value): LayerOption => ({
+										name: value,
+										label: value,
+										active: value === speechProcessingPrefs.context,
+										select: () => updateSpeechProcessing({ context: value }),
+									})
+								)}
+								label="Context"
+							/>
+						</>
 					)}
 				</NodeLayerMenu>
 			)}
@@ -2312,7 +2513,7 @@ const CAPABILITY_LAYERS: Array<{
 	},
 	{
 		capability: "computer.control",
-		fallbackLabel: "Computer",
+		fallbackLabel: "Device",
 		icon: CursorMagicSelection04Icon,
 	},
 	{ capability: "memory", fallbackLabel: "Memory", icon: BrainIcon },
@@ -2400,7 +2601,7 @@ function orderCapabilityLayers(
 }
 
 /**
- * `This computer` / `Remote desktop` — which machine a provider acts on.
+ * `This device` / `Remote desktop` — which machine a provider acts on.
  *
  * Returned only when the capability's providers actually DISAGREE. Labelling
  * every row when they all drive the same machine is noise that trains the user to
@@ -2418,9 +2619,7 @@ function providerTargetLabel(
 	if (distinct.size < 2) {
 		return null;
 	}
-	return provider.target === "local-machine"
-		? "this computer"
-		: "remote desktop";
+	return provider.target === "local-machine" ? "this device" : "remote desktop";
 }
 
 /**
@@ -2449,7 +2648,7 @@ function providerDetail(
 	if (provider.isDefault) {
 		parts.unshift("default");
 	}
-	// Leads the detail line: which computer this types on outranks how many verbs
+	// Leads the detail line: which device this types on outranks how many verbs
 	// it exposes when the two candidates are not the same machine.
 	const where = providerTargetLabel(provider, siblings);
 	if (where) {
@@ -3488,7 +3687,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 		return (
 			<div className="space-y-0.5">
 				<p className="mb-1 px-2 font-medium text-[10px] text-muted-foreground/60 uppercase tracking-wider">
-					{simpleInterface ? "Computers" : "Nodes"}
+					{simpleInterface ? "Devices" : "Nodes"}
 				</p>
 				<div className="space-y-0.5">
 					{nodes.map((node) => (
@@ -3515,7 +3714,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 					type="button"
 				>
 					<HugeiconsIcon icon={Add01Icon} size={11} />
-					{simpleInterface ? "Add computer" : "Add node"}
+					{simpleInterface ? "Add device" : "Add node"}
 				</button>
 				<button
 					className="flex w-full items-center gap-1.5 px-2 py-1.5 text-muted-foreground/60 text-xs hover:text-muted-foreground"
@@ -3523,7 +3722,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 					type="button"
 				>
 					<HugeiconsIcon icon={Share08Icon} size={11} />
-					{simpleInterface ? "Manage cloud computers" : "Manage cloud servers"}
+					{simpleInterface ? "Manage cloud devices" : "Manage cloud servers"}
 				</button>
 				<AddNodeDialog onClose={() => setAddOpen(false)} open={addOpen} />
 				<ShareNodeDialog
@@ -3584,21 +3783,21 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 						<div className="flex items-start justify-between gap-3">
 							<div>
 								<p className="font-semibold text-sm">
-									Choose a {simpleInterface ? "computer" : "node"}
+									Choose a {simpleInterface ? "device" : "node"}
 								</p>
 								<p className="mt-0.5 text-muted-foreground text-xs">
 									Where should Ryu run this conversation?
 								</p>
 							</div>
 							<span className="rounded-full bg-primary/10 px-2 py-1 font-medium text-[10px] text-primary uppercase tracking-wide">
-								{nodes.length} {simpleInterface ? "computer" : "node"}
+								{nodes.length} {simpleInterface ? "device" : "node"}
 								{nodes.length === 1 ? "" : "s"} connected
 							</span>
 						</div>
 					</div>
 					<div className="max-h-[min(68vh,520px)] overflow-y-auto p-2">
 						<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/60 uppercase tracking-wider">
-							Available {simpleInterface ? "computers" : "nodes"}
+							Available {simpleInterface ? "devices" : "nodes"}
 						</p>
 						{nodes.map((node) => (
 							<DropdownMenuItem
@@ -3633,7 +3832,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 											{node.managed
 												? "Ryu Cloud"
 												: isLocalNode(node)
-													? "This computer"
+													? "This device"
 													: node.url}
 										</span>
 									)}
@@ -3759,7 +3958,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 					<DropdownMenuItem onClick={() => setAddOpen(true)}>
 						<HugeiconsIcon icon={Add01Icon} size={12} />
 						<span className="flex-1">
-							{simpleInterface ? "Add computer" : "Add node"}
+							{simpleInterface ? "Add device" : "Add node"}
 						</span>
 					</DropdownMenuItem>
 					<DropdownMenuItem
@@ -3769,14 +3968,14 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 					>
 						<HugeiconsIcon icon={Settings01Icon} size={12} />
 						<span className="flex-1">
-							{simpleInterface ? "Computer settings" : "Gateway settings"}
+							{simpleInterface ? "Device settings" : "Gateway settings"}
 						</span>
 					</DropdownMenuItem>
 					<DropdownMenuItem onClick={openManageCloudServers}>
 						<HugeiconsIcon icon={Share08Icon} size={12} />
 						<span className="flex-1">
 							{simpleInterface
-								? "Manage cloud computers"
+								? "Manage cloud devices"
 								: "Manage cloud servers"}
 						</span>
 					</DropdownMenuItem>

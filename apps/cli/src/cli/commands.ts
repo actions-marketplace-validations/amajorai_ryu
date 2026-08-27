@@ -55,9 +55,7 @@ function packageArg(ctx: CliContext, index: number, usage: string): string {
 
 function packageOutput(ctx: CliContext, value: unknown, human: string): void {
 	ctx.io.out(
-		ctx.flags.json
-			? `${JSON.stringify(value, null, 2)}\n`
-			: `${human}\n`
+		ctx.flags.json ? `${JSON.stringify(value, null, 2)}\n` : `${human}\n`
 	);
 }
 
@@ -66,13 +64,16 @@ async function packageUnlockKey(ctx: CliContext): Promise<string> {
 	if (key) {
 		return key;
 	}
-	if (!process.stdin.isTTY || !process.stdout.isTTY) {
+	if (!(process.stdin.isTTY && process.stdout.isTTY)) {
 		throw new Error(
 			"An encrypted package requires RYU_PACKAGE_KEY when stdin is not interactive."
 		);
 	}
 	const { createInterface } = await import("node:readline/promises");
-	const readline = createInterface({ input: process.stdin, output: process.stdout });
+	const readline = createInterface({
+		input: process.stdin,
+		output: process.stdout,
+	});
 	try {
 		const answer = await readline.question("Package unlock key: ");
 		if (!answer.trim()) {
@@ -212,6 +213,63 @@ async function callCore(
 		body: options.body,
 	});
 }
+
+/** `ryu action <id> <json> --agent <agent-id>` — invoke one canonical Action
+ * through Core. The explicit agent is required because Core's node token
+ * authenticates the node, not the calling agent; omitting it would make the
+ * allowlist/approval principal ambiguous. */
+const actionCommand: Command = {
+	name: "action",
+	summary: "Call one governed Action through Core",
+	usage: "ryu action <id> <json> --agent <agent-id>",
+	run: async (ctx) => {
+		const actionId = ctx.args[0];
+		if (!(actionId && ctx.flags.agent)) {
+			throw new UsageError("Usage: ryu action <id> <json> --agent <agent-id>");
+		}
+		const rawArguments = ctx.args[1] ?? "{}";
+		let argumentsValue: unknown;
+		try {
+			argumentsValue = JSON.parse(rawArguments) as unknown;
+		} catch {
+			throw new UsageError("Action arguments must be valid JSON.");
+		}
+
+		const result = ctx.api.callAction
+			? await ctx.api.callAction(ctx.target, actionId, {
+					agentId: ctx.flags.agent,
+					arguments: argumentsValue,
+				})
+			: await callCore(ctx, `/api/actions/${encodeURIComponent(actionId)}`, {
+					method: "POST",
+					body: {
+						agent_id: ctx.flags.agent,
+						arguments: argumentsValue,
+					},
+				});
+
+		if (ctx.flags.json) {
+			ctx.io.out(`${JSON.stringify(result, null, 2)}\n`);
+		} else if (
+			typeof result === "object" &&
+			result !== null &&
+			"ok" in result &&
+			(result as { ok?: unknown }).ok === false
+		) {
+			ctx.io.out(
+				`Action ${actionId} failed: ${String((result as { error?: unknown }).error ?? "unknown error")}\n`
+			);
+		} else {
+			ctx.io.out(`Action ${actionId} completed.\n`);
+		}
+		return typeof result === "object" &&
+			result !== null &&
+			"ok" in result &&
+			(result as { ok?: unknown }).ok === false
+			? 1
+			: 0;
+	},
+};
 
 function rawCommand(
 	name: string,
@@ -1088,6 +1146,7 @@ const versionCommand: Command = {
 /** All built-in commands, in help-display order. `help` is appended below so its
  *  handler can close over this same list. */
 const BASE_COMMANDS: Command[] = [
+	actionCommand,
 	statusCommand,
 	sidecarCommand("start"),
 	sidecarCommand("stop"),
@@ -1150,6 +1209,7 @@ export function renderHelp(): string {
 	lines.push(
 		"",
 		"Global flags:",
+		"  --agent <id>    Calling agent for 'ryu action' (required)",
 		"  --json          Machine-readable output (for agents/CI)",
 		"  --node <url>    Target a specific Core node for this invocation",
 		"  --kind <k>      Filter list/catalog: app | plugin | all (default: all)",

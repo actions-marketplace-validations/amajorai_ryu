@@ -2281,12 +2281,17 @@ pub fn run() {
             // false whenever the tray icon is hidden, so this can never strand a
             // running app with neither a window nor an icon.
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main"
-                    && !tray::is_quitting()
-                    && tray::read_close_to_tray(window.app_handle())
-                {
+                if window.label() == "main" && !tray::is_quitting() {
+                    if tray::read_close_to_tray(window.app_handle()) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        return;
+                    }
+                    // A real close destroys the managed Core child. Prevent the
+                    // native close while the tray guard checks for active local
+                    // chat/workflow runs and asks before stopping them.
                     api.prevent_close();
-                    let _ = window.hide();
+                    tray::request_quit(window.app_handle());
                     return;
                 }
             }
@@ -2313,6 +2318,17 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|_app, _event| {
+            // App-level Quit (Cmd/Ctrl-Q, OS shutdown, or another native menu) can
+            // arrive without a main-window CloseRequested event. Send it through
+            // the same local-run guard so every real quit has one consistent
+            // warning before the managed Core child is stopped.
+            if let tauri::RunEvent::ExitRequested { api, .. } = _event {
+                if !tray::is_quitting() {
+                    api.prevent_exit();
+                    tray::request_quit(_app.app_handle());
+                }
+                return;
+            }
             // macOS: clicking the dock icon (or re-opening from Spotlight) does
             // not spawn a second process, so the single-instance handler never
             // fires. Without this, an instance started hidden at login — or one

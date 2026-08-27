@@ -234,7 +234,7 @@ export default function ConsentSettings({
 				/>
 				<CapabilityToggle
 					checked={consent.doIt}
-					description="Enables Ghost computer-use actions (Focus App, Click Element, Screenshot)."
+					description="Enables Ghost device-control actions (Focus App, Click Element, Screenshot)."
 					label="Do it (Ghost actions)"
 					onChange={() => handleConsentToggle("doIt").catch(() => undefined)}
 				/>

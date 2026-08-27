@@ -5,6 +5,11 @@
 // scaffold runner rides the same seam for the same reason: it is injected, so the
 // tests exercise the command without ever spawning a process.
 
+import {
+	type ActionCallInput,
+	type ActionCallResult,
+	callAction,
+} from "@ryuhq/core-client/actions";
 import type { ApiTarget } from "@ryuhq/core-client/client";
 import { apiUrl, makeHeaders, request } from "@ryuhq/core-client/client";
 import {
@@ -110,6 +115,11 @@ const runScaffold: ScaffoldRunner = async (
 
 /** The production CoreApi wired to a live Core node over HTTP. */
 export const realCoreApi: CoreApi = {
+	callAction: (
+		target: ApiTarget,
+		actionId: string,
+		input: ActionCallInput
+	): Promise<ActionCallResult> => callAction(target, actionId, input),
 	call: (target, path, options) => request<unknown>(target, path, options),
 	disableApp,
 	enableApp,

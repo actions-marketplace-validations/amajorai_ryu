@@ -146,6 +146,7 @@ function rowItem(
 		iconUrl: item.iconUrl,
 		id: item.id,
 		likeNamespace: item.id,
+		membershipIncluded: item.membershipIncluded,
 		name: item.name,
 		onClick: () => onOpenRealm(row.realm, "", item.id),
 		seedId: item.id,

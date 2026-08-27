@@ -236,7 +236,7 @@ export function AcpRuntimeSection({
 						<div className="flex items-center justify-between gap-3">
 							<div className="space-y-1">
 								<Label htmlFor="acp-keep-awake">
-									{"Keep this computer awake while agents run"}
+									{"Keep this device awake while agents run"}
 								</Label>
 								<p className="text-muted-foreground text-xs">
 									Uses the native OS sleep-inhibition API only while a local ACP
@@ -244,7 +244,7 @@ export function AcpRuntimeSection({
 								</p>
 							</div>
 							<Switch
-								aria-label="Keep this computer awake while ACP agents run"
+								aria-label="Keep this device awake while ACP agents run"
 								checked={config.keep_computer_awake}
 								disabled={disabled}
 								id="acp-keep-awake"

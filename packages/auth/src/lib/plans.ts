@@ -162,7 +162,7 @@ export interface Plan {
 	readonly id: PlanId;
 	/** Whether this plan includes Ryu-managed inference (a credit pool). */
 	readonly managedInference: boolean;
-	/** Whether this plan unlocks publisher-opted-in paid Marketplace apps. */
+	/** Whether this plan contributes to the optional Marketplace publisher pool. */
 	readonly marketplaceApps: boolean;
 	/**
 	 * Included monthly credit pool in micro-USD, DERIVED from the price by the
@@ -419,7 +419,7 @@ export const includedCreditPoolMicroUsd = (
  */
 export const PLAN_MONTHLY_PRICE_MICRO_USD: Record<PlanId, number> = {
 	"desktop-license": 0, // one-time list price; no recurring price
-	"marketplace-membership": usdToMicro(9.99),
+	"marketplace-membership": usdToMicro(20),
 	pro: usdToMicro(39),
 	max: usdToMicro(99),
 	// Per-seat list price. Five Teams seats therefore start at $250/mo.
@@ -522,6 +522,13 @@ export const PLAN_VERSIONS: Record<PlanId, readonly PlanVersion[]> = {
 		{
 			version: 5,
 			monthlyPriceMicroUsd: usdToMicro(9.99),
+			monthlyCreditPoolMicroUsd: 0,
+		},
+		{
+			// A Major Pass launch price. Earlier subscribers stay on their
+			// immutable $9.99 snapshots.
+			version: 6,
+			monthlyPriceMicroUsd: usdToMicro(20),
 			monthlyCreditPoolMicroUsd: 0,
 		},
 	],
@@ -632,7 +639,7 @@ export const CURRENT_PLAN_VERSION = 5;
 /** Current immutable pricing snapshot per recurring plan. */
 export const CURRENT_PLAN_VERSION_BY_PLAN: Record<PlanId, number> = {
 	"desktop-license": 4,
-	"marketplace-membership": 5,
+	"marketplace-membership": 6,
 	pro: 4,
 	max: 4,
 	teams: 5,
@@ -797,7 +804,7 @@ export const PLANS: Record<PlanId, Plan> = {
 	"marketplace-membership": {
 		audience: "individual",
 		id: "marketplace-membership",
-		name: "Marketplace Membership",
+		name: "A Major Pass",
 		desktopAccess: false,
 		marketplaceApps: true,
 		managedInference: false,
@@ -1001,22 +1008,9 @@ export interface QuotaSpec {
 }
 
 /**
- * Quotas the KERNEL owns: no app declares them, so they stay compiled in here.
- *
- * Each of these gates a shell or runtime concern that survives uninstalling
- * every app — tabs and remote nodes are the desktop shell itself, `maxPlugins`
- * caps the app list so it cannot be owned by an entry in that list, and agents /
- * MCP servers / skills / schedules / spaces / concurrency are Core subsystems
- * with no package home under `apps-store/`. `maxSpaces` in particular matches
- * the kernel's own taxonomy: `spaces` is in Core's `KERNEL_DATA_CATEGORY_IDS`,
- * the list of data categories an app is forbidden to claim.
- *
- * `maxWorkflows` looks like an obvious mover and is not. `@ryu/workflows` is a
- * GATE-ONLY governance shell: Core's own executor runs workflows dispatched by
- * the scheduler whether or not the app is enabled, and the public per-workflow
- * webhook stays mounted regardless. A quota that vanished with that app would
- * stop counting entities the kernel is still running. Contrast Monitors, which
- * really is out-of-process (the `ryu-monitors` sidecar owns the data).
+ * Quotas owned by the desktop shell or Core runtime. Marketplace apps, plugins,
+ * skills, MCP servers, and workflows are intentionally absent: their catalog
+ * price is commerce metadata and must not become a plan-based runtime limit.
  */
 export const KERNEL_QUOTAS = {
 	maxAgents: { free: 3, label: "Agents", owner: null, unit: "count" },
@@ -1034,29 +1028,14 @@ export const KERNEL_QUOTAS = {
 		owner: null,
 		unit: "count",
 	},
-	maxMcpServers: { free: 3, label: "MCP servers", owner: null, unit: "count" },
 	maxOpenTabs: { free: 3, label: "Open tabs", owner: null, unit: "count" },
-	maxPlugins: {
-		free: 5,
-		label: "Installed apps and plugins",
-		owner: null,
-		unit: "count",
-	},
 	maxRemoteNodes: {
 		free: 1,
 		label: "Remote nodes",
 		owner: null,
 		unit: "count",
 	},
-	maxSchedules: {
-		free: 1,
-		label: "Scheduled automations",
-		owner: null,
-		unit: "count",
-	},
-	maxSkills: { free: 5, label: "Skills", owner: null, unit: "count" },
 	maxSpaces: { free: 1, label: "Spaces", owner: null, unit: "count" },
-	maxWorkflows: { free: 3, label: "Workflows", owner: null, unit: "count" },
 	spaceStorageLimitGb: {
 		free: 1,
 		label: "Space storage",
@@ -1068,44 +1047,19 @@ export const KERNEL_QUOTAS = {
 } as const satisfies Record<string, QuotaSpec>;
 
 /**
- * Quotas an APP owns, keyed to the app that declares the key in its
- * `contributes.quotas` manifest block. The `owner` id is the load-bearing half:
- * a node where the app is not installed or not enabled must not carry its limit
- * (requirement of the same "the row appears and disappears with the app" rule
- * the Danger Zone categories follow).
- */
-export const APP_QUOTAS = {
-	maxMonitors: {
-		free: 3,
-		label: "Website monitors",
-		owner: "@ryu/monitors",
-		unit: "count",
-	},
-	meetingRetentionDays: {
-		free: 14,
-		label: "Meeting-note retention",
-		owner: "@ryu/meetings",
-		unit: "days",
-	},
-} as const satisfies Record<string, QuotaSpec>;
-
-/**
- * Every declared quota key. DERIVED from the two registries above — never
+ * Every declared Core quota key. DERIVED from the registry above — never
  * hand-written, and never widened to `string`: call sites pass string literals
  * (`guard("maxSpaces", n)`), so a widened union would keep every one of them
  * compiling while silently losing the typo check that is the point.
  */
-export type PlanLimitField =
-	| keyof typeof KERNEL_QUOTAS
-	| keyof typeof APP_QUOTAS;
+export type PlanLimitField = keyof typeof KERNEL_QUOTAS;
 
-/** The merged registry: kernel-owned keys plus every app-declared one. */
+/** The single registry of plan quotas that remain after app/plugin access opens. */
 export const QUOTAS: Readonly<Record<PlanLimitField, QuotaSpec>> = {
 	...KERNEL_QUOTAS,
-	...APP_QUOTAS,
 };
 
-/** The app that owns `field`, or `null` when the kernel does. */
+/** Retained for callers that render quota ownership; remaining keys are Core-owned. */
 export const quotaOwner = (field: PlanLimitField): string | null =>
 	QUOTAS[field].owner;
 
@@ -1125,9 +1079,8 @@ export const FREE_TIER_LIMITS: Readonly<Record<PlanLimitField, number>> =
  * unbounded. Single source of truth for every count/quota gate — enforce with
  * this, never a literal.
  *
- * This answers "what does this tier allow", NOT "does this quota apply at all".
- * An app-owned key on a node without that app is the client's call, because only
- * the client knows what is installed; see the desktop `resolveCapLimit`.
+ * This answers "what does this tier allow" for the remaining Core-owned
+ * resource limits. Marketplace app/plugin access is not represented here.
  */
 export const planLimit = (
 	plan: PlanId | null,
@@ -1286,7 +1239,7 @@ export interface LicenseView {
 export interface Entitlement {
 	readonly desktopAccess: boolean;
 	readonly managedInference: boolean;
-	/** Whether the resolved recurring plan unlocks opted-in paid Marketplace apps. */
+	/** Whether the resolved plan unlocks supported paid Marketplace apps. */
 	readonly marketplaceApps: boolean;
 	/** Total included credit pool after the plan's fixed/per-seat model is applied. */
 	readonly monthlyCreditPoolMicroUsd: number;
@@ -1514,19 +1467,15 @@ export type CapabilityTier = "pro" | "subscription";
 /** Each gated capability and the entitlement tier it requires. */
 export const CAPABILITY_TIERS = {
 	// Band 2 — local power features; a one-time Lifetime license unlocks forever.
-	council: "pro",
-	"local-background-runs": "pro",
 	"gateway-governance-ui": "pro",
 	"prompt-studio": "pro",
 	// Band 2 (added 2026-07-11) — power features that still run at zero marginal
-	// cost to Ryu, so a one-time Lifetime license unlocks them. (Fine-tune / eval
-	// COMPUTE on the managed path is separately metered as real spend; these caps
-	// gate the FEATURE surface, not the cloud compute.)
-	"fine-tuning": "pro",
+	// cost to Ryu, so a one-time Lifetime license unlocks them. Fine-tune and
+	// other Marketplace app/plugin surfaces are intentionally absent: their
+	// catalog price is commerce metadata, not a runtime access gate.
 	evals: "pro",
 	graphrag: "pro",
 	"companion-overlay": "pro",
-	clips: "pro",
 	// Band 3 — Ryu pays a recurring bill; an ACTIVE subscription only.
 	"managed-inference": "subscription",
 	"cloud-sync": "subscription",
@@ -1600,7 +1549,7 @@ export interface DesktopGateVerdict {
 	readonly daysLeftInTrial: number;
 	/** True when managed inference is available (sub with the pool, not trial). */
 	readonly managedInference: boolean;
-	/** Whether the resolved state can use publisher-opted-in Marketplace apps. */
+	/** Whether the resolved state can use supported paid Marketplace apps. */
 	readonly marketplaceApps: boolean;
 	/**
 	 * True when the user is on the FREE band only (no Lifetime license, no active

@@ -10,8 +10,8 @@
   "version": "0.1.15",
   "stability": "experimental",
   "category": "Productivity",
-  "description": "The ten built-in output styles \u2014 ELI5, I have ADHD, Explanatory, Learning, Proactive, Plain text, Plain Technical, No AI slop, Bro and Gen Z. A style is appended to (or replaces) the agent's base instructions for the turn, so it changes how the agent talks \u2014 role, tone, default response shape \u2014 and never what it knows, which tools it has, or which model runs. Pick one in the composer; browse them in the Store's Output Styles tab.",
-  "tagline": "Change how the agent talks, not what it knows",
+  "description": "The eleven built-in personality profiles \u2014 ELI5, I have ADHD, Explanatory, Learning, Proactive, Plain text, Plain Technical, No AI slop, No Hype, Bro and Gen Z. Assign a profile to each agent to shape how it talks \u2014 role, tone, default response shape \u2014 without changing what it knows, which tools it has, or which model runs. Browse profiles here and choose one in the agent editor.",
+  "tagline": "Give each agent its own voice",
   "keywords": ["output-style", "tone", "prompt", "accessibility", "writing"],
   "icon": "file-export",
   "iconDither": {
@@ -85,6 +85,10 @@
         "file": "output-styles/no-ai-slop.md"
       },
       {
+        "id": "no-hype",
+        "file": "output-styles/no-hype.md"
+      },
+      {
         "id": "bro",
         "file": "output-styles/bro.md"
       },
@@ -96,8 +100,8 @@
     "store_tabs": [
       {
         "id": "output-styles",
-        "title": "Output Styles",
-        "subtitle": "A style changes how the agent talks \u2014 its role, tone and the shape of its answers. It never changes what the agent knows or which model runs.",
+        "title": "Personality Profiles",
+        "subtitle": "Profiles change how an agent talks \u2014 its role, tone and answer shape. Assign them per agent; they never change what the agent knows or which model runs.",
         "icon": "file-export",
         "group": "catalog",
         "order": 80,
@@ -112,23 +116,11 @@
           "map": {
             "id": "id",
             "title": "name",
-            "description": "description",
-            "installed": "active"
+            "description": "description"
           },
-          "searchPlaceholder": "Search output styles\u2026",
-          "install": {
-            "http": {
-              "method": "POST",
-              "path": "/api/output-styles/select",
-              "body": {
-                "style_id": "{{item.id}}"
-              }
-            },
-            "label": "Use",
-            "successMessage": "Output style selected"
-          },
+          "searchPlaceholder": "Search personality profiles\u2026",
           "empty": {
-            "title": "No output styles found",
+            "title": "No personality profiles found",
             "description": "Try a different search."
           }
         }

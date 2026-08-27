@@ -35,7 +35,6 @@
 import {
 	Add01Icon,
 	CheckmarkCircle02Icon,
-	Delete02Icon,
 	Download04Icon,
 	HelpCircleIcon,
 	Loading03Icon,
@@ -75,6 +74,11 @@ import { EffortSliderRow } from "@/components/agent-elements/input/effort-slider
 import { groupModelItems } from "@/components/agent-elements/input/model-groups.ts";
 import { createModelMenuRenderer } from "@/components/agent-elements/input/model-menu-content.tsx";
 import { modelMenuItem } from "@/components/agent-elements/input/model-router.ts";
+import {
+	type ProviderAccount,
+	ProviderAccountSection,
+	type ProviderAccountTarget,
+} from "@/components/agent-elements/input/provider-account-section.tsx";
 import { useProviderCommandNavigation } from "@/components/agent-elements/input/provider-command-dialog.tsx";
 import {
 	ProviderCreditsBadge,
@@ -103,19 +107,6 @@ import {
 	showsModelPicker,
 } from "@/src/lib/interface-level.ts";
 import { svglForProvider } from "@/src/lib/provider-brand.tsx";
-
-/** One account a Pi provider / ACP agent holds (labels only — never a credential). */
-export interface ProviderAccount {
-	accountId: string;
-	/** Whether this is the account in use right now. */
-	active: boolean;
-	/** "api_key" | "oauth" | "opaque". */
-	kind: string;
-	/** Display name (email, provider label, or "Account N"). */
-	label: string;
-	/** For the managed Pi agent's accounts, the provider id they belong to. */
-	provider?: string;
-}
 
 /** A Pi provider row for the Providers section (built by `useUniversalPicker`). */
 export interface ProviderEntry {
@@ -150,6 +141,8 @@ export interface ProviderEntry {
 	discoveryProviderId?: string;
 	/** Engine key for the brand logo (anthropic / openai / gemini / …). */
 	engineKey: string;
+	/** Whether API-key accounts for this provider can be installed in the Gateway. */
+	gatewayAccountSupported?: boolean;
 	id: string;
 	/** True when this provider is the Ryu agent's active route. */
 	isActive: boolean;
@@ -230,6 +223,8 @@ export interface UniversalPickerData {
 	agents: AgentSummary[];
 	/** Not-installed external agents (catalog entries with `added === false`). */
 	availableExternal: AgentCatalogEntry[];
+	/** Whether the caller may set a provider account for the shared Gateway. */
+	canSetGatewayAccount?: boolean;
 	/**
 	 * Plain selectable agents that are neither the flagship nor ACP externals
 	 * (custom store agents, `transport` null). Rendered as flat pick rows — they
@@ -268,7 +263,11 @@ export interface UniversalPickerData {
 		provider?: string
 	) => void;
 	/** Switch the active account for a Pi provider (sealed vault + materialize). */
-	onSwitchProviderAccount: (providerId: string, accountId: string) => void;
+	onSwitchProviderAccount: (
+		providerId: string,
+		accountId: string,
+		target?: ProviderAccountTarget
+	) => void;
 	/** Open the subscription upgrade / paywall (managed-provider upsell). */
 	onUpgrade: () => void;
 	onUseProvider: (providerId: string) => void;
@@ -496,8 +495,8 @@ function SettingSub({ section }: { section: ComposerSettingsSection }) {
 			    so the popover must NOT add a second one — nested scrollers are what
 			    made the model list feel stuck. A plain item list has no scroller of
 			    its own, so it scrolls HERE or not at all: with `overflow-hidden` on
-			    both paths, any section taller than `max-h-80` (Output style, with
-			    seven two-line rows) was simply clipped and unreachable. */}
+				    both paths, any plain section with many two-line rows was simply clipped
+				    and unreachable. */}
 			<DropdownMenuSubContent
 				className={cn(
 					"max-h-80 min-w-[220px] max-w-[300px] p-0",
@@ -656,10 +655,12 @@ function ExternalAgentSettings({
 					onSelect();
 				}}
 			/>
-			<AccountsSection
+			<ProviderAccountSection
 				accounts={accounts}
+				canSetGateway={false}
+				gatewaySupported={false}
 				onRemove={onRemoveAccount}
-				onSwitch={onSwitchAccount}
+				onSwitch={(account) => onSwitchAccount(account)}
 			/>
 			{showModelSection && <SettingSub section={modelAsSection} />}
 			{showTuningSections &&
@@ -720,95 +721,6 @@ function ActionRow({
 	);
 }
 
-/** One account row: label, active checkmark, and a remove action. */
-function AccountRow({
-	account,
-	onRemove,
-	onSwitch,
-}: {
-	account: ProviderAccount;
-	onRemove: (accountId: string) => void;
-	onSwitch: (account: ProviderAccount) => void;
-}) {
-	return (
-		<div className="flex items-center gap-1">
-			<DropdownMenuItem
-				className={cn("min-w-0 flex-1", account.active && "bg-foreground/10")}
-				closeOnClick={false}
-				onClick={() => onSwitch(account)}
-			>
-				<span className="min-w-0 flex-1 truncate text-[13px]">
-					{account.label}
-					{account.provider ? (
-						<span className="text-muted-foreground/60">
-							{" "}
-							· {account.provider}
-						</span>
-					) : null}
-				</span>
-				{account.active && (
-					<HugeiconsIcon
-						className="shrink-0 text-muted-foreground"
-						icon={Tick02Icon}
-						size={14}
-						strokeWidth={2}
-					/>
-				)}
-			</DropdownMenuItem>
-			<Button
-				aria-label={`Remove ${account.label}`}
-				className="h-6 w-6 shrink-0 px-0"
-				onClick={(e) => {
-					e.stopPropagation();
-					onRemove(account.accountId);
-				}}
-				size="sm"
-				type="button"
-				variant="ghost"
-			>
-				<HugeiconsIcon
-					className="text-muted-foreground/70 hover:text-foreground"
-					icon={Delete02Icon}
-					size={12}
-					strokeWidth={2}
-				/>
-			</Button>
-		</div>
-	);
-}
-
-/** The "Account" section of a provider or ACP-agent submenu: every sign-in this
- *  target holds, switchable and removable. Renders nothing when there is no
- *  account to show. */
-function AccountsSection({
-	accounts,
-	onRemove,
-	onSwitch,
-}: {
-	accounts: ProviderAccount[];
-	onRemove: (accountId: string) => void;
-	onSwitch: (account: ProviderAccount) => void;
-}) {
-	if (!accounts.length) {
-		return null;
-	}
-	return (
-		<div className="border-border/50 border-t pt-1">
-			<div className="px-3 pt-1 pb-0.5 font-medium text-[11px] text-muted-foreground uppercase tracking-wide">
-				Account
-			</div>
-			{accounts.map((account) => (
-				<AccountRow
-					account={account}
-					key={account.accountId}
-					onRemove={onRemove}
-					onSwitch={onSwitch}
-				/>
-			))}
-		</div>
-	);
-}
-
 /**
  * Provider submenu body. Configured → its models (live-discovered for OpenRouter
  * and friends) + thinking. Unconfigured branches by auth kind: the managed Ryu
@@ -825,15 +737,20 @@ function ProviderSubBody({
 	onUpgrade,
 	onSwitchAccount,
 	onRemoveAccount,
+	canSetGateway,
 	close,
 	forceModelPicker = false,
 }: {
+	canSetGateway: boolean;
 	close: () => void;
 	forceModelPicker?: boolean;
 	onConfigure: () => void;
 	onModel: (modelId: string) => void;
 	onRemoveAccount: (accountId: string) => void;
-	onSwitchAccount: (account: ProviderAccount) => void;
+	onSwitchAccount: (
+		account: ProviderAccount,
+		target: ProviderAccountTarget
+	) => void;
 	onThinking: (level: string) => void;
 	onUpgrade: () => void;
 	onUse: () => void;
@@ -1008,8 +925,10 @@ function ProviderSubBody({
 			{/* Every sign-in this provider holds, switchable/removable. Multi-account
 			    is the point of the sealed vault; the section renders only when there
 			    are accounts to show. */}
-			<AccountsSection
+			<ProviderAccountSection
 				accounts={provider.accounts ?? []}
+				canSetGateway={canSetGateway}
+				gatewaySupported={provider.gatewayAccountSupported === true}
 				onRemove={onRemoveAccount}
 				onSwitch={onSwitchAccount}
 			/>
@@ -1441,6 +1360,7 @@ export function UniversalPickerBody({
 			}
 		>
 			<ProviderSubBody
+				canSetGateway={data.canSetGatewayAccount ?? true}
 				close={close}
 				forceModelPicker={data.forceModelPicker}
 				onConfigure={onConfigureCredentials}
@@ -1448,8 +1368,8 @@ export function UniversalPickerBody({
 				onRemoveAccount={(accountId) =>
 					onRemoveProviderAccount(provider.id, accountId)
 				}
-				onSwitchAccount={(account) =>
-					onSwitchProviderAccount(provider.id, account.accountId)
+				onSwitchAccount={(account, target) =>
+					onSwitchProviderAccount(provider.id, account.accountId, target)
 				}
 				onThinking={(level) => onSelectProviderThinking(provider.id, level)}
 				onUpgrade={onUpgrade}
@@ -1698,10 +1618,10 @@ export function UniversalPickerBody({
 					</>
 				)}
 
-				{/* Teams (preserved from the legacy picker when present) */}
+				{/* Groups (preserved from the legacy picker when present) */}
 				{showAgents && filteredTeams.length > 0 && onSelectTeam && (
 					<>
-						<SectionHeader label="Teams" />
+						<SectionHeader label="Groups" />
 						{filteredTeams.map((team) => (
 							<DropdownMenuItem
 								className={cn("gap-2", team.isActive && "bg-foreground/10")}

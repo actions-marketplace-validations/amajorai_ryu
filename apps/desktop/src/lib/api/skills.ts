@@ -242,8 +242,8 @@ export async function installSkill(
 	}>(target, "/api/skills/catalog/install", {
 		method: "POST",
 		body: { id, ...(source ? { source } : {}) },
-		// Forward the buyer's control-plane session so a PAID marketplace item's
-		// entitlement check (#491) can resolve the org + license. Free items ignore it.
+		// Forward the buyer's control-plane session for optional Marketplace
+		// account-aware operations. It is not required for installation.
 		headers: buyerTokenHeader(target),
 	});
 	if (json.success === false || !json.result) {

@@ -90,7 +90,7 @@ export const TABS: TabModule[] = [
 	},
 	{
 		id: "teams",
-		title: "Teams",
+		title: "Groups",
 		hotkey: "e",
 		Component: TeamsTab,
 	},

@@ -2289,6 +2289,19 @@ struct ResolvedAppTool {
     needs_approval: bool,
 }
 
+/// Metadata for one enabled SDK Action. The registered tool id remains the
+/// execution authority; the other fields are only projections for HTTP and A2A
+/// discovery.
+#[derive(Debug, Clone)]
+pub(crate) struct ActionDescriptor {
+    pub action_id: String,
+    pub description: String,
+    pub effect: &'static str,
+    pub name: String,
+    pub plugin_id: String,
+    pub registered_id: String,
+}
+
 /// The config-driven MCP server registry. Cheap to clone-share via `Arc`.
 ///
 /// Interior mutability: `servers` uses `RwLock` (reads dominate) so the
@@ -4001,30 +4014,12 @@ impl McpRegistry {
             .as_ref()
             .map(|record| record.approval_tools.clone())
             .unwrap_or_default();
-        let mut action_needs_approval = false;
-        // An `app.…` id's action segment is plugin-chosen and can look benign
-        // while its manifest-fixed alias target is risky (`gmail.send_email`),
-        // so the gate must classify the RESOLVED target — plugin naming must not
-        // launder a risky call past `smart`. Non-alias backends (inline/http)
-        // keep their own grant gates and classify under the outer id.
-        let gate_id: String = if is_app_tool_id(tool_id) {
-            match self.resolve_app_tool_backend(tool_id).await {
-                Some(resolved) => {
-                    action_needs_approval = resolved.needs_approval;
-                    match resolved.backend {
-                        crate::plugin_manifest::schema::ToolBackend::Alias { target } => target,
-                        _ => tool_id.to_owned(),
-                    }
-                }
-                // Legacy alias re-enter: the target is the id after the prefix.
-                None => tool_id
-                    .strip_prefix(APP_TOOL_PREFIX)
-                    .unwrap_or(tool_id)
-                    .to_owned(),
-            }
-        } else {
-            tool_id.to_owned()
-        };
+        // An app id's action segment is plugin-chosen and can look benign while
+        // its manifest-fixed alias target is risky (`gmail.send_email`), so the
+        // gate must classify the RESOLVED target — plugin naming must not launder
+        // a risky call past `smart`. Native app-tool ids must use the same path:
+        // their manifest metadata is just as authoritative as an `app.` id's.
+        let (gate_id, action_needs_approval) = self.approval_target_for_tool(tool_id).await;
         let (annotations, http_method) = self.tool_effect_metadata(&gate_id).await;
         let effect = agent_record
             .as_ref()
@@ -5929,6 +5924,142 @@ impl McpRegistry {
             }
         }
         None
+    }
+
+    /// Resolve the approval target and explicit manifest gate for a registered
+    /// app tool. Native dotted ids (for example `crm.save`) do not carry the
+    /// `app.` prefix, so checking only [`is_app_tool_id`] would bypass an
+    /// explicit `needs_approval: true` declaration. Restrict the extra lookup
+    /// to ids already registered by the app-tool loader; ordinary native MCP
+    /// ids remain on their existing path.
+    async fn approval_target_for_tool(&self, tool_id: &str) -> (String, bool) {
+        let is_registered_app_tool = self
+            .app_tools
+            .lock()
+            .map(|tools| tools.iter().any(|tool| tool.id == tool_id))
+            .unwrap_or(false);
+        if !is_app_tool_id(tool_id) && !is_registered_app_tool {
+            return (tool_id.to_owned(), false);
+        }
+
+        match self.resolve_app_tool_backend(tool_id).await {
+            Some(resolved) => {
+                let gate_id = match resolved.backend {
+                    crate::plugin_manifest::schema::ToolBackend::Alias { target } => target,
+                    _ => tool_id.to_owned(),
+                };
+                (gate_id, resolved.needs_approval)
+            }
+            // Legacy alias re-enter: the target is the id after the prefix.
+            None => (
+                tool_id
+                    .strip_prefix(APP_TOOL_PREFIX)
+                    .unwrap_or(tool_id)
+                    .to_owned(),
+                false,
+            ),
+        }
+    }
+
+    /// List enabled, registered SDK Actions without exposing ordinary tools.
+    /// The manifest marker is authoritative for semantics, while `app_tools`
+    /// confirms the runnable was actually activated before it becomes reachable
+    /// through a protocol projection.
+    pub(crate) async fn action_descriptors(&self) -> Vec<ActionDescriptor> {
+        let Some(manifests) = self.self_build_manifests.as_ref() else {
+            return Vec::new();
+        };
+        let Some(store) = self.self_build_app_store.as_ref() else {
+            return Vec::new();
+        };
+        let enabled: std::collections::HashSet<String> = match store.list().await {
+            Ok(records) => records
+                .into_iter()
+                .filter(|record| record.enabled)
+                .map(|record| record.id)
+                .collect(),
+            Err(_) => return Vec::new(),
+        };
+        if enabled.is_empty() {
+            return Vec::new();
+        }
+        let registered: std::collections::HashSet<String> = self
+            .app_tools
+            .lock()
+            .map(|tools| tools.iter().map(|tool| tool.id.clone()).collect())
+            .unwrap_or_default();
+        let guard = manifests.read().await;
+        let mut actions = Vec::new();
+        for manifest in guard.iter() {
+            if !enabled.contains(&manifest.id) {
+                continue;
+            }
+            for entry in &manifest.runnables {
+                if entry.kind != crate::runnable::RunnableKind::Tool {
+                    continue;
+                }
+                let Some(config) = entry.config.as_ref() else {
+                    continue;
+                };
+                let Ok(tool_config) = serde_json::from_value::<
+                    crate::plugin_manifest::schema::ToolConfig,
+                >(config.clone()) else {
+                    continue;
+                };
+                if tool_config.action != Some(true) {
+                    continue;
+                }
+                let registered_id = app_tool_registered_id(&tool_config);
+                if !registered.contains(&registered_id) {
+                    continue;
+                }
+                let effect = if tool_config
+                    .annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.get("readOnlyHint"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    "read"
+                } else {
+                    "mutate"
+                };
+                actions.push(ActionDescriptor {
+                    action_id: tool_config.slug,
+                    description: tool_config
+                        .description
+                        .unwrap_or_else(|| format!("{} action", entry.name)),
+                    effect,
+                    name: entry.name.clone(),
+                    plugin_id: manifest.id.clone(),
+                    registered_id,
+                });
+            }
+        }
+        actions.sort_by(|left, right| left.registered_id.cmp(&right.registered_id));
+        actions
+    }
+
+    /// Resolve an external Action id to the activated tool id used by Core
+    /// dispatch. Raw slugs are accepted only when unambiguous; the registered
+    /// id (`app.<slug>`) or `<plugin-id>/<slug>` can always identify the action.
+    pub(crate) async fn resolve_action_tool_id(&self, action_id: &str) -> Option<String> {
+        let requested = action_id.trim();
+        if requested.is_empty() {
+            return None;
+        }
+        let matches: Vec<String> = self
+            .action_descriptors()
+            .await
+            .into_iter()
+            .filter(|action| {
+                requested == action.registered_id
+                    || requested == action.action_id
+                    || requested == format!("{}/{}", action.plugin_id, action.action_id)
+            })
+            .map(|action| action.registered_id)
+            .collect();
+        (matches.len() == 1).then(|| matches[0].clone())
     }
 
     /// The effective grant set of the plugin that OWNS a derived ext-API route, or
@@ -8472,6 +8603,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn action_tool_resolution_accepts_only_action_marked_tools() {
+        let reg = registry_with_plugin(
+            "com.test.actions",
+            vec!["tool:execute"],
+            vec![
+                tool_entry(
+                    "action-save",
+                    serde_json::json!({
+                        "slug": "action-save",
+                        "backend": "inline_deno",
+                        "code": "return { ok: true };",
+                        "action": true,
+                    }),
+                ),
+                tool_entry(
+                    "ordinary-tool",
+                    serde_json::json!({
+                        "slug": "ordinary-tool",
+                        "backend": "inline_deno",
+                        "code": "return { ok: true };",
+                    }),
+                ),
+            ],
+        )
+        .await;
+        reg.register_app_tool("app.action-save".into(), "action-save".into(), None);
+        reg.register_app_tool("app.ordinary-tool".into(), "ordinary-tool".into(), None);
+
+        assert_eq!(
+            reg.resolve_action_tool_id("action-save").await,
+            Some("app.action-save".to_owned())
+        );
+        assert_eq!(
+            reg.resolve_action_tool_id("app.action-save").await,
+            Some("app.action-save".to_owned())
+        );
+        assert_eq!(reg.resolve_action_tool_id("ordinary-tool").await, None);
+        let descriptors = reg.action_descriptors().await;
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].plugin_id, "com.test.actions");
+        assert_eq!(descriptors[0].effect, "mutate");
+    }
+
+    #[tokio::test]
     async fn verified_implementation_hash_changes_with_same_schema_backend_replacement() {
         let reg = registry_with_plugin(
             "com.test.binding",
@@ -8784,6 +8959,43 @@ mod tests {
             !msg.contains("unknown MCP server"),
             "native id must route to the app arm, got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn native_app_tool_inherits_manifest_approval_requirement() {
+        let cfg = serde_json::json!({
+            "slug": "crm.save",
+            "backend": "inline_deno",
+            "code": "return await ((input, host) => ({ ok: true }))(input, host);",
+            "needs_approval": true,
+        });
+        let id = app_tool_registered_id(&tool_cfg(cfg.clone()));
+        assert_eq!(id, "crm.save");
+
+        let reg = registry_with_plugin(
+            "com.test.crm",
+            vec!["tool:execute"],
+            vec![tool_entry("tool-crm-save", cfg)],
+        )
+        .await;
+        reg.register_app_tool_tagged(
+            id.clone(),
+            "crm.save".into(),
+            None,
+            Some(AppToolBackendTag::InlineDeno),
+        );
+
+        // The explicit manifest flag must reach the approval path even though
+        // the registered id is native and the action name is innocuous.
+        let (gate_id, needs_approval) = reg.approval_target_for_tool(&id).await;
+        assert_eq!(gate_id, "crm.save");
+        assert!(needs_approval);
+
+        // An ordinary unregistered native MCP id must not trigger app metadata
+        // resolution merely because it contains a dotted name.
+        let (gate_id, needs_approval) = reg.approval_target_for_tool("crm.delete").await;
+        assert_eq!(gate_id, "crm.delete");
+        assert!(!needs_approval);
     }
 
     #[tokio::test]

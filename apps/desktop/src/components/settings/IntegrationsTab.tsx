@@ -395,8 +395,8 @@ export function IntegrationsTab() {
 					</p>
 					<ol className="list-decimal space-y-1 pl-4">
 						<li>
-							Open this computer's settings → API keys and paste your Composio
-							API key (create one at{" "}
+							Open this device's settings → API keys and paste your Composio API
+							key (create one at{" "}
 							<a
 								className="underline hover:text-foreground"
 								href="https://platform.composio.dev"

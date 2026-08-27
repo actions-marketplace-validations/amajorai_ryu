@@ -30,6 +30,7 @@ pub const LOCAL_ENGINES: &[&str] = &[
     "docker-model-runner",
     // Apple Foundation Models via the `apfel` server (Apple Silicon macOS 26+).
     "apfel",
+    "mesh-llm",
 ];
 
 /// True if `name` is one of the swappable local inference engines.
@@ -75,6 +76,12 @@ pub fn local_engine_base_url(name: &str) -> Option<String> {
         // apfel serves Apple Foundation Models on :11434 (shared with Ollama —
         // the two never reside at once; `apfel` has no `--port` override).
         "apfel" => Some("http://127.0.0.1:11434".to_owned()),
+        // Mesh LLM's OpenAI-compatible API defaults to :9337. Profile-shift it
+        // when Ryu manages the process so dev/canary nodes cannot collide.
+        "mesh-llm" => Some(format!(
+            "http://127.0.0.1:{}",
+            crate::profile::port(crate::sidecar::providers::mesh_llm::DEFAULT_PORT)
+        )),
         _ => None,
     }
 }
@@ -118,6 +125,10 @@ pub fn local_engine_url(name: &str) -> Option<String> {
         // apfel (Apple Foundation Models) — OpenAI-compat on :11434. Shares the
         // port with Ollama; safe, the two never reside at once.
         "apfel" => Some("http://127.0.0.1:11434/v1".to_owned()),
+        "mesh-llm" => Some(format!(
+            "http://127.0.0.1:{}/v1",
+            crate::profile::port(crate::sidecar::providers::mesh_llm::DEFAULT_PORT)
+        )),
         _ => None,
     }
 }
@@ -177,6 +188,7 @@ mod tests {
         assert!(is_local_engine("omlx"));
         assert!(is_local_engine("docker-model-runner"));
         assert!(is_local_engine("apfel"));
+        assert!(is_local_engine("mesh-llm"));
     }
 
     #[test]
@@ -221,6 +233,8 @@ mod tests {
         // Non-engines (agents/tools) have no local inference endpoint.
         assert_eq!(local_engine_base_url("zeroclaw"), None);
         assert_eq!(local_engine_base_url(""), None);
+        assert!(local_engine_base_url("mesh-llm")
+            .is_some_and(|url| url.contains("127.0.0.1:")));
     }
 
     #[test]

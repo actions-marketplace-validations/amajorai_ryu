@@ -1,5 +1,5 @@
 {
-  "tags": ["desktop", "vnc", "stream", "remote", "computer-use"],
+  "tags": ["desktop", "devices", "vnc", "stream", "remote", "computer-use"],
   "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-desktop",
   "homepage": "https://github.com/amajorai/ryu-desktop",
@@ -9,8 +9,8 @@
   "name": "Virtual Desktop",
   "version": "0.1.14",
   "stability": "experimental",
-  "description": "An interactive Linux virtual desktop for Ryu nodes. The app sidecar owns stable per-Bot screens on the shared node computer and exposes them through Core's authenticated WebSocket proxy with mouse and keyboard input. Files and installed applications remain shared.",
-  "keywords": ["desktop", "vnc", "stream", "remote", "computer-use"],
+  "description": "An interactive Linux virtual desktop for Ryu nodes. The app sidecar owns stable per-Bot screens on the shared node device and exposes them through Core's authenticated WebSocket proxy with mouse and keyboard input. Files and installed applications remain shared.",
+  "keywords": ["desktop", "devices", "vnc", "stream", "remote", "computer-use"],
   "icon": "monitor-02",
   "iconDither": { "from": 210, "to": "transparent", "direction": "down" },
   "tagline": "A live, interactive desktop for the node — watch and drive it",
@@ -85,12 +85,12 @@
     },
     {
       "id": "agent.view",
-      "label": "Can view agent computers",
+      "label": "Can view agent devices",
       "description": "See the persistent virtual desktop assigned to an allowed agent."
     },
     {
       "id": "agent.run",
-      "label": "Can control agent computers",
+      "label": "Can control agent devices",
       "description": "Drive the persistent virtual desktop assigned to an allowed agent.",
       "implies": ["agent.view"]
     }

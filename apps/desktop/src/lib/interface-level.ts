@@ -24,7 +24,7 @@
 // What the level itself gates live (no write involved) is two surfaces:
 //
 //   - The composer: at Ryu Work the chat bar offers the agent picker and nothing
-//     else — no model, no approval mode, no thinking budget, no output style.
+//     else — no model, no approval mode, no thinking budget, no profile picker.
 //     See `composer-agent-controls.tsx`.
 //   - The node dropdown: at Ryu Work the Engines, Voice & Sandbox and Toolkits
 //     blocks start folded behind their own headings rather than listing flat.
@@ -254,7 +254,7 @@ export function showsModelPicker(level: InterfaceLevel): boolean {
 
 /**
  * Does this level show the composer's tuning sections — approval mode, thinking
- * budget, agent-advertised config options, output style?
+ * budget, and agent-advertised config options?
  *
  * Ryu Work hides them. Hiding is not disabling: the agent still runs
  * on whatever approval mode is configured, it simply is not surfaced in the chat

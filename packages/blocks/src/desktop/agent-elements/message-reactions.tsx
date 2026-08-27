@@ -53,6 +53,121 @@ export interface MessageReactionsProps {
 	side?: "top" | "bottom";
 }
 
+export interface MessageReactionButtonProps {
+	buckets: readonly MessageReactionBucket[];
+	/** Keep the trigger for read-only reactions, but hide it when there is no data. */
+	canReact?: boolean;
+	className?: string;
+	onToggle: (emoji: string) => void;
+}
+
+/**
+ * Compact reaction action for a message toolbar.
+ *
+ * The transcript shows one icon, not a second chip row. Existing reaction
+ * buckets remain available inside the popover so a message with reactions does
+ * not become visually heavier than an ordinary message.
+ */
+export function MessageReactionButton({
+	buckets,
+	canReact = false,
+	className,
+	onToggle,
+}: MessageReactionButtonProps) {
+	const [open, setOpen] = useState(false);
+	const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+
+	if (buckets.length === 0 && !canReact) {
+		return null;
+	}
+
+	const handleOpenChange = (nextOpen: boolean) => {
+		setOpen(nextOpen);
+		if (!nextOpen) {
+			setShowEmojiPicker(false);
+		}
+	};
+
+	const handlePick = (emoji: string) => {
+		onToggle(emoji);
+		handleOpenChange(false);
+	};
+
+	return (
+		<Popover onOpenChange={handleOpenChange} open={open}>
+			<PopoverTrigger
+				render={
+					<button
+						aria-label="Add reaction"
+						className={cn(
+							"flex size-6 items-center justify-center rounded-md text-muted-foreground opacity-60 transition-colors hover:bg-foreground/8 hover:text-foreground hover:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/60",
+							className
+						)}
+						data-slot="message-reaction-button"
+						title="Add reaction"
+						type="button"
+					>
+						<IconMoodPlus aria-hidden="true" className="size-3.5" />
+					</button>
+				}
+			/>
+			<PopoverContent className="w-auto p-1">
+				<div className="flex items-center gap-0.5">
+					{buckets.map((bucket) => (
+						<button
+							aria-label={`${bucket.emoji} ${formatNumber(bucket.count)}`}
+							aria-pressed={bucket.reactedByMe}
+							className={cn(
+								"flex items-center gap-1 rounded-full px-1.5 py-0.5 text-xs leading-none transition-colors hover:bg-foreground/8",
+								bucket.reactedByMe
+									? "bg-primary/15 text-foreground"
+									: "text-muted-foreground"
+							)}
+							key={bucket.emoji}
+							onClick={() => handlePick(bucket.emoji)}
+							type="button"
+						>
+							<span className="text-sm leading-none">{bucket.emoji}</span>
+							<span className="tabular-nums">{formatNumber(bucket.count)}</span>
+						</button>
+					))}
+					{canReact ? (
+						<>
+							{QUICK_REACTIONS.map((emoji) => (
+								<button
+									aria-label={`Add ${emoji} reaction`}
+									className="rounded-md p-1 text-base leading-none transition-colors hover:bg-foreground/8"
+									key={emoji}
+									onClick={() => handlePick(emoji)}
+									type="button"
+								>
+									{emoji}
+								</button>
+							))}
+							<button
+								aria-expanded={showEmojiPicker}
+								aria-label="More emoji"
+								className="flex items-center gap-0.5 rounded-md px-1.5 py-1 text-muted-foreground text-xs transition-colors hover:bg-foreground/8 hover:text-foreground"
+								onClick={() => setShowEmojiPicker(true)}
+								title="More emoji"
+								type="button"
+							>
+								<IconPlus aria-hidden="true" className="size-3.5" />
+								<span>More</span>
+							</button>
+						</>
+					) : null}
+				</div>
+				{showEmojiPicker && canReact ? (
+					<div className="mt-1 overflow-hidden rounded-lg border border-border [&_em-emoji-picker]:w-full!">
+						<EmojiPicker onEmojiSelect={(emoji) => handlePick(emoji.native)} />
+					</div>
+				) : null}
+			</PopoverContent>
+		</Popover>
+	);
+}
+
 /**
  * The chip row. Renders nothing at all when a message has no reactions and
  * cannot take one, so an ordinary message carries no extra box.

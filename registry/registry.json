@@ -26,6 +26,21 @@
         "editor"
       ],
       "type": "app",
+      "surface_support": [
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "limited"
+        },
+        {
+          "surface": "web",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        }
+      ],
       "icon": "ai-image",
       "icon_dither": {
         "from": 225,
@@ -67,6 +82,39 @@
         "desktop"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "full"
+        },
+        {
+          "surface": "mobile",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon": "cursor-02",
       "icon_dither": {
         "from": 354,
@@ -120,6 +168,39 @@
         "memory"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "full"
+        },
+        {
+          "surface": "mobile",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon": "record",
       "icon_dither": {
         "from": 296,
@@ -156,6 +237,39 @@
         "scraping"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "full"
+        },
+        {
+          "surface": "mobile",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon_url": "https://avatars.githubusercontent.com/u/112983871?v=4",
       "icon_dither": {
         "from": 233,
@@ -215,6 +329,39 @@
         "web"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "limited"
+        },
+        {
+          "surface": "mobile",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon_url": "https://avatars.githubusercontent.com/u/77906174?v=4",
       "icon_dither": {
         "from": 213,
@@ -264,6 +411,39 @@
         "extract"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "limited"
+        },
+        {
+          "surface": "mobile",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon_url": "https://www.tavily.com/favicon.ico",
       "icon_dither": {
         "from": 272,
@@ -323,6 +503,39 @@
         "web"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "limited"
+        },
+        {
+          "surface": "mobile",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon": "svgl:brave",
       "icon_dither": {
         "from": 300,
@@ -370,6 +583,39 @@
         "compression"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "full"
+        },
+        {
+          "surface": "mobile",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon": "arrow-shrink-02",
       "icon_dither": {
         "from": 228,
@@ -410,6 +656,39 @@
         "scrape"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "limited"
+        },
+        {
+          "surface": "mobile",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon": "svgl:firecrawl|firecrawl-dark",
       "icon_dither": {
         "from": 315,
@@ -482,6 +761,39 @@
         "scrape"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "limited"
+        },
+        {
+          "surface": "mobile",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon": "google",
       "icon_dither": {
         "from": 257,
@@ -543,6 +855,39 @@
         "mem0"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "limited"
+        },
+        {
+          "surface": "mobile",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon_url": "https://avatars.githubusercontent.com/u/137054526?v=4",
       "icon_dither": {
         "from": 9,
@@ -597,6 +942,39 @@
         "scraping"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "limited"
+        },
+        {
+          "surface": "mobile",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon_url": "https://avatars.githubusercontent.com/u/112983871?v=4",
       "icon_dither": {
         "from": 335,
@@ -649,6 +1027,39 @@
         "extract"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "full"
+        },
+        {
+          "surface": "mobile",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon_url": "https://raw.githubusercontent.com/D4Vinci/Scrapling/main/docs/assets/logo.png",
       "icon_dither": {
         "from": 84,
@@ -703,6 +1114,39 @@
         "honcho"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "limited"
+        },
+        {
+          "surface": "mobile",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon_url": "https://avatars.githubusercontent.com/u/123981229?v=4",
       "icon_dither": {
         "from": 330,
@@ -759,6 +1203,39 @@
         "bytebot"
       ],
       "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "full"
+        },
+        {
+          "surface": "mobile",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
       "icon_url": "https://avatars.githubusercontent.com/u/154629106?v=4",
       "icon_dither": {
         "from": 237,

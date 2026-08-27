@@ -1,14 +1,12 @@
 // apps/desktop/src/components/marketplace/MarketplaceDetailDialog.tsx
 //
-// App-Store / ChatGPT-plugin-style listing detail. Renders ONE canonical detail
+// App-Store / ChatGPT-plugin-style listing preview. Renders ONE canonical detail
 // payload (lib/api/marketplace.ts `MarketplaceDetail`) produced by all three
-// detail sources (built-in manifest, git MarketplaceSource, Ryu Mongo). Layout,
-// top to bottom: a header (logo, name, tagline, an overflow menu of external
-// links, and a primary "Open" CTA when the payload carries a setup action), a row
-// of example-prompt chips, a screenshot gallery, the long description, a Setup
-// section (companion/config cards), a Skills section (bundled runnables with an
-// enable-state toggle), an Information block (capabilities / developer / category
-// / version + external links), and finally the reviews list + write-review form.
+// detail sources (built-in manifest, git MarketplaceSource, Ryu Mongo). The
+// default view is intentionally small: identity, a manifest-driven sample-prompt
+// banner, and the short description. Screenshots, setup, bundled skills, trust
+// metadata, links, and reviews stay behind "More details" so the preview answers
+// what the item does before asking the user to inspect its implementation.
 //
 // Every section renders ONLY when its data is present, so an older listing
 // missing the richer fields still renders gracefully. The write form is gated to
@@ -16,7 +14,6 @@
 // as a "purchase" error), and a user may edit or delete their own review.
 
 import {
-	ArrowRight01Icon,
 	CheckmarkCircle02Icon,
 	Delete02Icon,
 	InformationCircleIcon,
@@ -34,15 +31,12 @@ import {
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ImageLightbox } from "@ryu/blocks/desktop/agent-elements/image-lightbox";
+import { MarketplacePromptBanner } from "@ryu/marketplace/catalog/chrome/marketplace-prompt-banner";
 import VerifiedBadge from "@ryu/marketplace/catalog/chrome/verified-badge";
 import {
 	ListingAsideCard,
-	ListingDetailShell,
-	ListingHero,
 	ListingInfoGrid,
 	ListingSection,
-	type ListingStat,
-	ListingStatStrip,
 } from "@ryu/marketplace/catalog/detail/listing-detail-shell";
 import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
 import { Badge } from "@ryu/ui/components/badge";
@@ -65,6 +59,8 @@ import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
 import { Textarea } from "@ryu/ui/components/textarea";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
+import { ChevronDown } from "lucide-react";
+import { useTheme } from "next-themes";
 import {
 	type ReactNode,
 	useCallback,
@@ -117,18 +113,10 @@ export default function MarketplaceDetailDialog({
 			onOpenChange={(next: boolean) => (next ? undefined : onClose())}
 			open={open}
 		>
-			{/* Same width and the same `p-0` full-bleed contract as the Store's
-			    catalog preview (`StoreCatalogLayout`), because it is the same THING —
-			    a listing page. It was `max-w-3xl` (48rem) while the catalog preview was
-			    already wider, so the paid listings opened in a noticeably narrower box
-			    than the free ones and every section inside wrapped early.
-
-			    The `sm:` copy is load-bearing: `DialogContent`'s base classes carry
-			    `sm:max-w-md`, and `twMerge` only drops a class whose modifier AND group
-			    match, so an unprefixed `max-w-[…]` left it in the markup where it won on
-			    source order and clamped this dialog to 28rem above 640px. Same trap and
-			    same fix as `store-catalog-layout.tsx`, which documents it in full. */}
-			<DialogContent className="max-h-[88vh] w-[min(80rem,94vw)] max-w-[min(80rem,94vw)] overflow-hidden p-0 sm:max-w-[min(80rem,94vw)]">
+			{/* The paid preview is intentionally a focused 720px card: identity,
+			    sample prompts, and a short description first. Advanced install and trust
+			    metadata stays behind the in-card disclosure below. */}
+			<DialogContent className="max-h-[88vh] w-[min(45rem,94vw)] max-w-[min(45rem,94vw)] overflow-hidden p-0 sm:max-w-[min(45rem,94vw)]">
 				<DialogHeader className="sr-only">
 					<DialogTitle>{initialName ?? "Listing"}</DialogTitle>
 				</DialogHeader>
@@ -161,10 +149,7 @@ function DetailBody({
 	const [detail, setDetail] = useState<MarketplaceDetail | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
-	const [rating, setRating] = useState<RatingAggregate>({
-		average: 0,
-		count: 0,
-	});
+	const { resolvedTheme } = useTheme();
 
 	useEffect(() => {
 		let cancelled = false;
@@ -175,7 +160,6 @@ function DetailBody({
 					return;
 				}
 				setDetail(d);
-				setRating({ average: d.ratingAverage, count: d.ratingCount });
 				setError(null);
 			})
 			.catch((e: unknown) => {
@@ -197,91 +181,67 @@ function DetailBody({
 	const iconUrl = detail?.iconUrl ?? initialIconUrl ?? null;
 	// The header's primary CTA opens the first setup step that carries a link.
 	const primaryAction = detail?.setup.find((s) => s.actionUrl) ?? null;
-
-	// `(ListingStat | null)[]`, not `ListingStat[]`: an absent fact contributes
-	// `null` and drops its whole cell, rather than widening the array's inferred
-	// element union per branch.
-	const cells: (ListingStat | null)[] = [
-		rating.count > 0
-			? {
-					label: `${formatCount(rating.count) ?? "—"} Ratings`,
-					sub: (
-						<StarRating
-							className="justify-center"
-							size="size-3"
-							value={rating.average}
-						/>
-					),
-					value: rating.average.toFixed(1),
-				}
-			: { label: "Ratings", value: "—", sub: "No reviews yet" },
-		detail?.version ? { label: "Version", value: `v${detail.version}` } : null,
-		detail?.category ? { label: "Category", value: detail.category } : null,
-		detail?.developer ? { label: "Developer", value: detail.developer } : null,
-		detail && detail.runnables.length > 0
-			? {
-					label: "Includes",
-					value: formatCount(detail.runnables.length) ?? "—",
-				}
-			: null,
-	];
-	const statItems = cells.filter((cell): cell is ListingStat => cell !== null);
+	const copyPrompt = useCallback((prompt: string) => {
+		navigator.clipboard
+			?.writeText(prompt)
+			.then(() => sileo.success({ title: "Prompt copied" }))
+			.catch(() => sileo.error({ title: "Could not copy prompt" }));
+	}, []);
 
 	return (
-		<ListingDetailShell
-			actions={
-				<>
-					{primaryAction?.actionUrl ? (
-						// Base UI: `render=`, not an `asChild` child — nesting an <a>
-						// inside <Button> renders a link inside a button element.
-						<Button
-							render={
-								<a
-									href={primaryAction.actionUrl}
-									rel="noopener noreferrer"
-									target="_blank"
+		<div className="flex flex-col gap-6 p-5 lg:p-7">
+			<header className="flex items-start gap-4 pr-10">
+				<div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-muted ring-1 ring-border/60">
+					<DetailLogo iconUrl={iconUrl} name={name} />
+				</div>
+				<div className="min-w-0 flex-1">
+					<div className="flex items-start justify-between gap-4">
+						<div className="min-w-0">
+							<div className="flex min-w-0 items-center gap-2">
+								<h2 className="truncate font-semibold text-2xl tracking-tight">
+									{name}
+								</h2>
+								<VerifiedBadge
+									orgVerified={detail?.orgVerified}
+									publisherTrust={detail?.publisherTrust}
+									tier={detail?.orgVerifiedTier}
+									verificationDetails={detail?.publisherVerification}
 								/>
-							}
-							size="sm"
-						>
-							{primaryAction.actionLabel || "Open"}
-							<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
-						</Button>
-					) : null}
-					{detail ? (
-						<span className="ml-auto shrink-0">
-							<OverflowMenu detail={detail} />
-						</span>
-					) : null}
-				</>
-			}
-			aside={detail ? <InformationBlock detail={detail} /> : null}
-			gallery={
-				detail && detail.screenshots.length > 0 ? (
-					<ScreenshotGallery name={name} screenshots={detail.screenshots} />
-				) : null
-			}
-			hero={
-				<ListingHero
-					badges={[detail?.category ?? null].filter((b): b is string =>
-						Boolean(b)
-					)}
-					icon={<DetailLogo iconUrl={iconUrl} name={name} />}
-					name={name}
-					nameBadge={
-						<VerifiedBadge
-							orgVerified={detail?.orgVerified}
-							publisherTrust={detail?.publisherTrust}
-							tier={detail?.orgVerifiedTier}
-							tone="hero"
-							verificationDetails={detail?.publisherVerification}
-						/>
-					}
-					tagline={detail?.tagline}
-				/>
-			}
-			stats={<ListingStatStrip items={statItems} />}
-		>
+							</div>
+							{detail?.tagline ? (
+								<p className="mt-1 text-muted-foreground text-sm leading-relaxed">
+									{detail.tagline}
+								</p>
+							) : null}
+							{detail?.category ? (
+								<p className="mt-2 text-muted-foreground text-xs">
+									{detail.category}
+								</p>
+							) : null}
+						</div>
+						<div className="flex shrink-0 items-center gap-1.5">
+							{primaryAction?.actionUrl ? (
+								<Button
+									nativeButton={false}
+									render={
+										<a
+											href={primaryAction.actionUrl}
+											rel="noopener noreferrer"
+											target="_blank"
+										/>
+									}
+									size="sm"
+								>
+									{primaryAction.actionLabel || "Open"}
+									<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
+								</Button>
+							) : null}
+							{detail ? <OverflowMenu detail={detail} /> : null}
+						</div>
+					</div>
+				</div>
+			</header>
+
 			{loading && !detail ? (
 				<div className="flex justify-center py-8">
 					<Spinner className="size-5" />
@@ -290,7 +250,14 @@ function DetailBody({
 			{error ? <p className="text-destructive text-sm">{error}</p> : null}
 
 			{detail && detail.examplePrompts.length > 0 ? (
-				<ExamplePrompts name={name} prompts={detail.examplePrompts} />
+				<MarketplacePromptBanner
+					banner={detail.banner}
+					isDark={resolvedTheme !== "light"}
+					name={name}
+					onPrompt={copyPrompt}
+					prompts={detail.examplePrompts}
+					seed={detail.id}
+				/>
 			) : null}
 
 			{detail?.description ? (
@@ -301,16 +268,69 @@ function DetailBody({
 				</ListingSection>
 			) : null}
 
-			{detail && detail.setup.length > 0 ? (
-				<SetupSection steps={detail.setup} />
+			{detail ? (
+				<MarketplacePreviewDetails detail={detail} id={id} kind={kind} />
 			) : null}
+		</div>
+	);
+}
 
-			{detail && detail.runnables.length > 0 ? (
-				<RunnablesSection runnables={detail.runnables} />
+/** Progressive disclosure for listing metadata, setup, bundled skills, and
+ * reviews. The preview answers "what is this?" first; operators can still open
+ * the complete trust/install context without making every listing a long form. */
+function MarketplacePreviewDetails({
+	detail,
+	id,
+	kind,
+}: {
+	detail: MarketplaceDetail;
+	id: string;
+	kind: MarketplaceKind;
+}) {
+	const [open, setOpen] = useState(false);
+	const hasDetails =
+		detail.setup.length > 0 ||
+		detail.runnables.length > 0 ||
+		detail.screenshots.length > 0 ||
+		externalLinks(detail).length > 0 ||
+		detail.capabilities.length > 0 ||
+		Boolean(detail.developer || detail.category || detail.version);
+	if (!hasDetails) {
+		return null;
+	}
+
+	return (
+		<section className="border-border/60 border-t pt-4">
+			<button
+				aria-expanded={open}
+				className="flex w-full items-center justify-between gap-3 text-left text-muted-foreground text-sm transition-colors hover:text-foreground"
+				onClick={() => setOpen((value) => !value)}
+				type="button"
+			>
+				<span>More details</span>
+				<ChevronDown
+					className={`size-4 transition-transform ${open ? "rotate-180" : ""}`}
+				/>
+			</button>
+			{open ? (
+				<div className="mt-4 flex flex-col gap-6">
+					{detail.screenshots.length > 0 ? (
+						<ScreenshotGallery
+							name={detail.name}
+							screenshots={detail.screenshots}
+						/>
+					) : null}
+					{detail.setup.length > 0 ? (
+						<SetupSection steps={detail.setup} />
+					) : null}
+					{detail.runnables.length > 0 ? (
+						<RunnablesSection runnables={detail.runnables} />
+					) : null}
+					<InformationBlock detail={detail} />
+					<ReviewsSection id={id} kind={kind} />
+				</div>
 			) : null}
-
-			<ReviewsSection id={id} kind={kind} onRatingChange={setRating} />
-		</ListingDetailShell>
+		</section>
 	);
 }
 
@@ -402,56 +422,10 @@ function DetailLogo({
 	return (
 		<span
 			aria-hidden="true"
-			className="font-semibold text-2xl text-white uppercase"
+			className="font-semibold text-2xl text-foreground uppercase"
 		>
 			{name.trim().charAt(0) || "?"}
 		</span>
-	);
-}
-
-/** Horizontal row of example-prompt chips. Each chip is a keyboard-reachable
- *  button that copies its prompt to the clipboard — a cheap, no-dependency
- *  default action for a preview surface. The chip shows the app-name pill, the
- *  prompt text, and a trailing arrow, mirroring the ChatGPT-plugin reference. */
-function ExamplePrompts({
-	prompts,
-	name,
-}: {
-	prompts: string[];
-	name: string;
-}) {
-	const copy = useCallback((prompt: string) => {
-		navigator.clipboard
-			?.writeText(prompt)
-			.then(() => sileo.success({ title: "Prompt copied" }))
-			.catch(() => sileo.error({ title: "Could not copy prompt" }));
-	}, []);
-
-	return (
-		<section className="flex flex-col gap-2">
-			<h3 className="font-medium text-sm">Try it</h3>
-			<div className="scroll-fade-x flex gap-2 overflow-x-auto pb-1">
-				{prompts.map((prompt) => (
-					<button
-						className="group flex shrink-0 items-center gap-2 rounded-full border bg-card py-1.5 pr-2.5 pl-1.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-						key={prompt}
-						onClick={() => copy(prompt)}
-						title="Copy prompt"
-						type="button"
-					>
-						<span className="rounded-full bg-muted px-2 py-0.5 font-medium text-[11px] text-muted-foreground">
-							{name}
-						</span>
-						<span className="max-w-[16rem] truncate text-sm">{prompt}</span>
-						<HugeiconsIcon
-							aria-hidden="true"
-							className="size-3.5 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5"
-							icon={ArrowRight01Icon}
-						/>
-					</button>
-				))}
-			</div>
-		</section>
 	);
 }
 
@@ -540,6 +514,7 @@ function SetupSection({ steps }: { steps: DetailSetupStep[] }) {
 							// Base UI: `render=`, not an `asChild` child (same rule as the
 							// header CTA above) — otherwise this is an <a> inside a <button>.
 							<Button
+								nativeButton={false}
 								render={
 									<a
 										href={step.actionUrl}
@@ -667,9 +642,9 @@ function InformationBlock({ detail }: { detail: MarketplaceDetail }) {
 		return null;
 	}
 
-	// Rendered as the shell's RIGHT-RAIL card. It used to be a full-width block
-	// stacked between Runnables and Reviews, which put "who made this / what
-	// version / where are its links" below every other section on the page.
+	// Rendered inside the collapsed preview's advanced section. The information
+	// stays available for trust/install decisions without leading every listing
+	// with a long metadata rail.
 	return (
 		<ListingAsideCard title="Information">
 			<ListingInfoGrid
@@ -714,7 +689,7 @@ function ReviewsSection({
 }: {
 	kind: MarketplaceKind;
 	id: string;
-	onRatingChange: (rating: RatingAggregate) => void;
+	onRatingChange?: (rating: RatingAggregate) => void;
 }) {
 	const { data: session } = useSession();
 	const currentUserId = session?.user?.id ?? null;
@@ -730,7 +705,10 @@ function ReviewsSection({
 			const page = await fetchReviews(kind, id, { limit: REVIEW_PAGE_LIMIT });
 			setReviews(page.reviews);
 			setNextCursor(page.nextCursor);
-			onRatingChange({ average: page.ratingAverage, count: page.ratingCount });
+			onRatingChange?.({
+				average: page.ratingAverage,
+				count: page.ratingCount,
+			});
 		} catch {
 			// Reviews are non-critical; leave the list empty on failure.
 		} finally {

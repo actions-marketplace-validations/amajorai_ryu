@@ -41,6 +41,7 @@ import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgentsCatalog } from "@/src/hooks/useAgentsCatalog.ts";
 import { useCreditGrants } from "@/src/hooks/useCreditGrants.ts";
+import { useCanManagePermission } from "@/src/hooks/useGatewayConfigurable.ts";
 import { usePiConfig } from "@/src/hooks/usePiConfig.ts";
 import { engineForAgent } from "@/src/lib/agent-logos.tsx";
 import {
@@ -56,6 +57,7 @@ import {
 } from "@/src/lib/api/models.ts";
 import {
 	filterEnabledModels,
+	gatewayProviderSlug,
 	type PiCatalog,
 	type PiProvider,
 	removeProviderAccount,
@@ -216,6 +218,7 @@ export function useUniversalPicker(
 	const { config, catalog, save } = usePiConfig();
 	const catalogAgents = useAgentsCatalog();
 	const openGateway = useGatewayDialog((s) => s.openGateway);
+	const canSetGatewayAccount = useCanManagePermission("gateway.configure");
 	const { verdict, requestUpgrade } = useEntitlementContext();
 	// True only with an active PAID managed plan. The managed provider is always
 	// `configured` server-side (wallet-gated at the Gateway), so the composer upsell
@@ -422,6 +425,8 @@ export function useUniversalPicker(
 					authKind: p.authKind,
 					managed: Boolean(p.managed),
 					supportsDiscovery: p.supportsDiscovery !== false,
+					gatewayAccountSupported:
+						p.authKind === "api-key" && gatewayProviderSlug(p.id) !== null,
 					// Every account the provider holds in the sealed vault (labels
 					// only). Renders the submenu's switchable Account section.
 					accounts: p.accounts ?? [],
@@ -567,6 +572,7 @@ export function useUniversalPicker(
 				installedExternal,
 				availableExternal,
 				installPendingId: catalogAgents.pendingId,
+				canSetGatewayAccount,
 				teams: teamEntries,
 				thinkingLevels,
 				onSelectAgent: (id) => onSelectAgent(id),
@@ -655,8 +661,17 @@ export function useUniversalPicker(
 				// (the route returns it) so the picker's `configured`/`accounts`
 				// state flips without a second round trip. Agent accounts live in a
 				// separate query keyed by agent id, so those get invalidated instead.
-				onSwitchProviderAccount: (providerId, accountId) => {
-					switchProviderAccount(toTarget(node), providerId, accountId)
+				onSwitchProviderAccount: (
+					providerId,
+					accountId,
+					accountTarget = "self"
+				) => {
+					switchProviderAccount(
+						toTarget(node),
+						providerId,
+						accountId,
+						accountTarget
+					)
 						.then(applyCatalog)
 						.catch((error: unknown) => {
 							sileo.error({
@@ -740,6 +755,7 @@ export function useUniversalPicker(
 			teams,
 			teamId,
 			catalogAgents,
+			canSetGatewayAccount,
 			onSelectAgent,
 			onSelectTeam,
 			onCreateAgent,

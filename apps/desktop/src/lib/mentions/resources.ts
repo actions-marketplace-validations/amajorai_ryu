@@ -97,22 +97,17 @@ export function buildSpacePageMentionSources(
 	return pages;
 }
 
-/** Convert the active node's output-style list into navigable references. */
+/** Convert the node's available personality profiles into navigable references. */
 export function buildOutputStyleMentionSources(
 	styles: readonly OutputStyleSummary[]
 ): MentionSources["outputStyles"] {
 	return styles.map((style): MentionSourceItem => {
-		const description = [
-			style.description?.trim(),
-			style.active ? "Active" : undefined,
-		]
-			.filter((value): value is string => Boolean(value))
-			.join(" · ");
+		const description = style.description?.trim();
 		return {
 			description: description || undefined,
 			id: style.id,
 			name: style.name,
-			target: { path: "/settings" },
+			target: { path: "/library/agent" },
 		};
 	});
 }

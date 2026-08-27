@@ -3,6 +3,7 @@
 import { Button } from "@ryu/ui/components/button";
 import { Skeleton } from "@ryu/ui/components/skeleton.tsx";
 import { cn } from "@ryu/ui/lib/utils";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
 	type ReactNode,
 	useCallback,
@@ -11,7 +12,10 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { ChatDisplayPrefsProvider } from "./chat-display-prefs.tsx";
+import {
+	ChatDisplayPrefsProvider,
+	useChatDisplayPrefs,
+} from "./chat-display-prefs.tsx";
 import { deriveContextUsage } from "./context-usage.tsx";
 import { type SuggestionItem, Suggestions } from "./input/suggestions.tsx";
 import { InputBar } from "./input-bar.tsx";
@@ -19,6 +23,13 @@ import { MessageList } from "./message-list.tsx";
 import { ComposerQuotePreview } from "./quote.tsx";
 import type { AgentChatProps } from "./types.ts";
 import { useDeferredComposerPrompt } from "./use-deferred-question.ts";
+
+const CHAT_LAYOUT_TRANSITION = {
+	damping: 34,
+	mass: 0.75,
+	stiffness: 420,
+	type: "spring" as const,
+};
 
 export function AgentChat({
 	messages,
@@ -103,6 +114,8 @@ export function AgentChat({
 	draftControls,
 }: AgentChatProps) {
 	const rootRef = useRef<HTMLDivElement>(null);
+	const { animationsEnabled } = useChatDisplayPrefs();
+	const reduceMotion = !animationsEnabled || (useReducedMotion() ?? false);
 	const [draft, setDraft] = useState("");
 	const draftTouchedRef = useRef(false);
 	const setDraftFromUser = useCallback((nextDraft: string) => {
@@ -185,7 +198,12 @@ export function AgentChat({
 	// and `historyError` are only ever set for a thread that HAS a conversation
 	// id, so a real new chat still gets its greeting.
 	const isPlaceholder = Boolean(historyLoading || historyError);
-	const isEmpty = !(error || isPlaceholder) && messages.length === 0;
+	const isStreaming = status === "streaming" || status === "submitted";
+	// A submitted turn is already a real chat, even if the transport has not
+	// appended the optimistic user message yet. Leaving the empty layout mounted
+	// for that gap made the composer teleport only after the first stream frame.
+	const isEmpty =
+		!(error || isPlaceholder) && messages.length === 0 && !isStreaming;
 	const isCenteredEmptyState = isEmpty && emptyStatePosition === "center";
 	// The placeholder replaces the transcript only while there is nothing to show;
 	// a re-fetch over an already-rendered thread must not blank it.
@@ -242,12 +260,18 @@ export function AgentChat({
 				emptySuggestionsPosition === "top" ? "mb-3" : "mt-3",
 				suggestionConfig.className
 			)}
-			disabled={status === "streaming" || status === "submitted"}
+			disabled={isStreaming}
 			itemClassName={cn("h-8 rounded-md px-3", suggestionConfig.itemClassName)}
 			items={suggestionConfig.items}
 			onSelect={handleEmptySuggestionSelect}
 		/>
 	) : null;
+	// Compact surfaces can keep their empty-state affordances above the composer
+	// without opting into the large centered start page. The full chat launchpad
+	// still owns the centered branch below; this slot is intentionally only used
+	// when the host chooses the ordinary/default empty layout.
+	const emptyStateFooterNode =
+		isEmpty && !isCenteredEmptyState ? emptyStateFooter : null;
 
 	// ChatGPT-style follow-up chips: shown between the transcript and the
 	// composer once a turn settles (never while streaming, never in the empty
@@ -343,30 +367,7 @@ export function AgentChat({
 	);
 
 	let transcriptNode: ReactNode;
-	if (isCenteredEmptyState) {
-		transcriptNode = (
-			// The centred start page SCROLLS when it outgrows its pane, and it is
-			// centred with `my-auto` rather than `items-center` to make that possible:
-			// a flex item centred by `align-items` overflows its scroll container
-			// equally in BOTH directions, and the part above the top edge cannot be
-			// scrolled to — so in a short split pane the greeting would be cut off with
-			// no way to reach it. Auto margins collapse to zero once the item no longer
-			// fits, which pins it to the top and leaves every part of it reachable.
-			//
-			// This matters now because the footer slot can hold a tall surface (the app
-			// launchpad). Before it was ever filled the column always fit, so the
-			// difference was invisible.
-			<div className="scroll-fade flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-4 py-4">
-				<div className="my-auto flex w-full max-w-[720px] flex-col">
-					{emptyStateHeader}
-					{emptySuggestionsPosition === "top" ? emptySuggestionsNode : null}
-					{inputBarNode}
-					{emptySuggestionsPosition === "bottom" ? emptySuggestionsNode : null}
-					{emptyStateFooter}
-				</div>
-			</div>
-		);
-	} else if (showPlaceholder) {
+	if (showPlaceholder) {
 		transcriptNode = (
 			<HistoryPlaceholder
 				className={classNames?.messageList}
@@ -435,6 +436,87 @@ export function AgentChat({
 		);
 	}
 
+	// Keep the centered start page and the active transcript in one stage. The
+	// composer below is intentionally a sibling of the leading content in both
+	// states, so Motion can interpolate its measured position instead of React
+	// unmounting one composer and mounting another. The centered stage scrolls when
+	// the launchpad footer outgrows a short pane; `my-auto` centers it only while it
+	// fits, keeping the greeting and composer reachable in either case.
+	const chatLeadingNode = isCenteredEmptyState ? (
+		<motion.div
+			animate={{ opacity: 1, y: 0 }}
+			className="flex w-full flex-col"
+			data-chat-empty-intro="true"
+			exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -8 }}
+			initial={reduceMotion ? false : { opacity: 1, y: 0 }}
+			key="empty-chat-intro"
+			layout={reduceMotion ? false : "position"}
+			transition={{ duration: reduceMotion ? 0 : 0.2, ease: "easeOut" }}
+		>
+			{emptyStateHeader}
+			{emptySuggestionsPosition === "top" ? emptySuggestionsNode : null}
+		</motion.div>
+	) : (
+		<motion.div
+			className="flex min-h-0 flex-1 flex-col"
+			data-chat-transcript="true"
+			initial={false}
+			key="active-chat-transcript"
+			layout={reduceMotion ? false : "position"}
+		>
+			{transcriptNode}
+			{followUpsNode}
+			{emptyStateFooterNode}
+		</motion.div>
+	);
+
+	const chatStage = (
+		<motion.div
+			className={cn(
+				"flex min-h-0 flex-1",
+				isCenteredEmptyState
+					? "scroll-fade items-start justify-center overflow-y-auto px-4 py-4"
+					: "flex-col overflow-hidden"
+			)}
+			data-chat-layout={isCenteredEmptyState ? "empty" : "active"}
+			layout={reduceMotion ? false : "position"}
+			transition={CHAT_LAYOUT_TRANSITION}
+		>
+			<motion.div
+				className={cn(
+					"w-full",
+					isCenteredEmptyState
+						? "my-auto flex max-w-[720px] flex-col"
+						: "flex min-h-0 flex-1 flex-col"
+				)}
+				layout={reduceMotion ? false : "position"}
+				transition={CHAT_LAYOUT_TRANSITION}
+			>
+				<AnimatePresence initial={false} mode="popLayout">
+					{chatLeadingNode}
+				</AnimatePresence>
+				<motion.div
+					className="w-full"
+					data-chat-composer-transition="true"
+					layout={!reduceMotion}
+					transition={reduceMotion ? { duration: 0 } : CHAT_LAYOUT_TRANSITION}
+				>
+					{inputBarNode}
+				</motion.div>
+				{isCenteredEmptyState ? (
+					<>
+						{emptySuggestionsPosition === "bottom"
+							? emptySuggestionsNode
+							: null}
+						{emptyStateFooter}
+					</>
+				) : composerFooter ? (
+					<div className="shrink-0 px-3 pb-2">{composerFooter}</div>
+				) : null}
+			</motion.div>
+		</motion.div>
+	);
+
 	const chatNode = (
 		<div
 			className={cn(
@@ -442,19 +524,12 @@ export function AgentChat({
 				classNames?.root,
 				className
 			)}
+			data-chat-motion={reduceMotion ? "off" : "on"}
+			data-chat-state={isCenteredEmptyState ? "empty" : "active"}
 			ref={rootRef}
 			style={style}
 		>
-			{transcriptNode}
-			{isCenteredEmptyState ? null : (
-				<>
-					{followUpsNode}
-					{inputBarNode}
-					{composerFooter ? (
-						<div className="shrink-0 px-3 pb-2">{composerFooter}</div>
-					) : null}
-				</>
-			)}
+			{chatStage}
 		</div>
 	);
 

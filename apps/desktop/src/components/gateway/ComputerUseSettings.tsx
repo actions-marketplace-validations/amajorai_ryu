@@ -15,7 +15,7 @@ import {
 	updateGatewayConfig,
 } from "@/src/lib/api/gateway.ts";
 
-/** Gateway-owned policy controls for Ghost's use of one selected computer. */
+/** Gateway-owned policy controls for Ghost's use of one selected device. */
 export function ComputerUseSettings({
 	canConfigure,
 	reachable,
@@ -57,7 +57,7 @@ export function ComputerUseSettings({
 					setError(
 						cause instanceof Error
 							? cause.message
-							: "Could not load computer settings"
+							: "Could not load device settings"
 					);
 				}
 			})
@@ -91,7 +91,7 @@ export function ComputerUseSettings({
 			setError(
 				cause instanceof Error
 					? cause.message
-					: "Could not save computer settings"
+					: "Could not save device settings"
 			);
 		} finally {
 			setSaving(false);
@@ -102,8 +102,8 @@ export function ComputerUseSettings({
 
 	return (
 		<SettingsSection
-			caption="These permissions belong to the selected computer. The Gateway stores the policy; Ghost still has to pass the operating system's safety and permission checks."
-			title="Computer use"
+			caption="These permissions belong to the selected device. The Gateway stores the policy; Ghost still has to pass the operating system's safety and permission checks."
+			title="Device control"
 		>
 			<SettingsGroup>
 				<SettingsItem
@@ -126,7 +126,7 @@ export function ComputerUseSettings({
 							/>
 						</div>
 					}
-					description="Allow Ghost to request a locked-session path on this computer. Turning this on does not unlock the computer or bypass local safety controls."
+					description="Allow Ghost to request a locked-session path on this device. Turning this on does not unlock the device or bypass local safety controls."
 					title={
 						<span className="flex items-center gap-2">
 							<HugeiconsIcon
@@ -140,19 +140,19 @@ export function ComputerUseSettings({
 			</SettingsGroup>
 			{loading ? (
 				<p className="px-3 text-muted-foreground text-sm">
-					Loading computer settings…
+					Loading device settings…
 				</p>
 			) : null}
 			{reachable ? null : (
 				<p className="px-3 text-muted-foreground text-sm">
-					Computer settings are unavailable while this computer is offline.
+					Device settings are unavailable while this device is offline.
 				</p>
 			)}
 			{error ? <p className="px-3 text-destructive text-sm">{error}</p> : null}
 			{canConfigure ? null : (
 				<p className="px-3 text-muted-foreground text-sm">
-					You can view this policy, but you need computer configuration access
-					to change it.
+					You can view this policy, but you need device configuration access to
+					change it.
 				</p>
 			)}
 			{saved ? <p className="px-3 text-sm text-success">Saved.</p> : null}

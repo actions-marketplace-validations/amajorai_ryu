@@ -46,6 +46,7 @@
     "./components/item": "./src/components/item.tsx",
     "./components/label": "./src/components/label.tsx",
     "./components/marker": "./src/components/marker.tsx",
+    "./components/marketplace-access-badge": "./src/components/marketplace-access-badge.tsx",
     "./components/message": "./src/components/message.tsx",
     "./components/motion-navigation-menu": "./src/components/motion-navigation-menu.tsx",
     "./components/motion/action-swap-roll": "./src/components/motion/action-swap-roll.tsx",

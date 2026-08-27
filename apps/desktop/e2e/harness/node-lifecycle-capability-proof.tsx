@@ -45,12 +45,10 @@ interface AccessRule {
 interface Scenario {
 	action: Action;
 	actor: Subject;
-	entitlement: "active" | "expired" | "none";
 	expected: DecisionStatus;
 	id: string;
 	label: string;
 	packageLabel: string;
-	paid: boolean;
 }
 
 type Result = Scenario & {
@@ -205,15 +203,6 @@ const runScenario = (scenario: Scenario): Result => {
 	) {
 		actual = "denied";
 		reason = "acl_denied";
-	} else if (
-		scenario.paid &&
-		scenario.entitlement !== "active" &&
-		(scenario.action === "install" ||
-			scenario.action === "update" ||
-			scenario.action === "download")
-	) {
-		actual = "denied";
-		reason = "entitlement_required";
 	}
 
 	const log = JSON.stringify({
@@ -234,82 +223,66 @@ const scenarios: Scenario[] = [
 	{
 		action: "install",
 		actor: subjects.viewer,
-		entitlement: "none",
 		expected: "denied",
 		id: "member-denied",
 		label: "Ordinary member denied by default",
 		packageLabel: "free/plugin-calendar",
-		paid: false,
 	},
 	{
 		action: "install",
 		actor: subjects.member,
-		entitlement: "none",
 		expected: "allowed",
 		id: "team-grant",
 		label: "Explicit team grant succeeds",
 		packageLabel: "free/plugin-calendar",
-		paid: false,
 	},
 	{
 		action: "install",
 		actor: subjects.denied,
-		entitlement: "none",
 		expected: "denied",
 		id: "individual-deny",
 		label: "Individual deny overrides team grant",
 		packageLabel: "free/plugin-calendar",
-		paid: false,
 	},
 	{
 		action: "update",
 		actor: subjects.admin,
-		entitlement: "active",
 		expected: "allowed",
 		id: "admin-team-node",
 		label: "Org admin governs team node",
 		packageLabel: "paid/plugin-pro",
-		paid: true,
 	},
 	{
 		action: "update",
 		actor: subjects.member,
-		entitlement: "expired",
-		expected: "denied",
-		id: "expired-update",
-		label: "Expired entitlement blocks update",
+		expected: "allowed",
+		id: "paid-update",
+		label: "Paid listing update is access-first",
 		packageLabel: "paid/plugin-pro",
-		paid: true,
 	},
 	{
 		action: "download",
 		actor: subjects.member,
-		entitlement: "expired",
-		expected: "denied",
-		id: "expired-download",
-		label: "Expired entitlement blocks new download",
+		expected: "allowed",
+		id: "paid-download",
+		label: "Paid listing download is access-first",
 		packageLabel: "paid/plugin-pro",
-		paid: true,
 	},
 	{
 		action: "disable",
 		actor: subjects.member,
-		entitlement: "expired",
 		expected: "allowed",
-		id: "expired-disable",
-		label: "Expired package can still be disabled",
+		id: "paid-disable",
+		label: "Paid package can be disabled",
 		packageLabel: "paid/plugin-pro",
-		paid: true,
 	},
 	{
 		action: "uninstall",
 		actor: subjects.member,
-		entitlement: "expired",
 		expected: "allowed",
-		id: "expired-uninstall",
-		label: "Expired package can still be uninstalled",
+		id: "paid-uninstall",
+		label: "Paid package can be uninstalled",
 		packageLabel: "paid/plugin-pro",
-		paid: true,
 	},
 ];
 
@@ -389,9 +362,9 @@ const App = () => {
 				<h1>GitHub packages with node-scoped lifecycle authorization</h1>
 				<p className="lede">
 					The seller brings a GitHub repository, while Ryu keeps the billing,
-					entitlement, proxy, and ACL decisions. The desktop receives a stable
-					node identity and asks the server for lifecycle capabilities before
-					any package filesystem mutation.
+					signed-package, proxy, and ACL decisions. The desktop receives a
+					stable node identity and asks the server for lifecycle capabilities
+					before any package filesystem mutation.
 				</p>
 				<div className="toolbar">
 					<div className="status" data-testid="proof-status">
@@ -507,8 +480,9 @@ const App = () => {
 						<div className="matrix-head">
 							<h2>Org / team / member decision matrix</h2>
 							<p className="note">
-								Free packages use ACL only. Paid package install, update, and
-								download additionally require an active entitlement.
+								Free and paid packages use the same node ACL. Listing price and
+								optional checkout do not change install, update, or download
+								access.
 							</p>
 						</div>
 						<table>
@@ -557,8 +531,8 @@ const App = () => {
 						))}
 						<p className="note">
 							Denied rows carry the required permission and stable node scope in
-							the 403-shaped payload. Expiry never removes the installed
-							package; it only blocks new package bytes.
+							the 403-shaped payload. Prices are recorded separately from the
+							lifecycle ACL and never turn a valid package into a paywall.
 						</p>
 					</section>
 				</div>

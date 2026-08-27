@@ -545,7 +545,7 @@ export default function AgentsCatalogSection({
 	// A second, independent catalog: it has its own loading/error state and its own
 	// selection, because a marketplace outage must not touch the runtime list above.
 	const community = useCommunityAgents();
-	const { buy, buying, isLicensed } = useMarketplacePurchase();
+	const { buy, buying } = useMarketplacePurchase();
 	const [selectedCommunity, setSelectedCommunity] =
 		useState<MarketplaceCard | null>(null);
 	// What Core stripped, per listing installed in this session. Keyed by listing
@@ -642,7 +642,6 @@ export default function AgentsCatalogSection({
 							buying === selectedCommunity.id
 						}
 						card={selectedCommunity}
-						isLicensed={(id) => isLicensed("agent", id)}
 						onBuy={() => buy({ id: selectedCommunity.id, kind: "agent" })}
 						onInstall={() => installCommunity(selectedCommunity)}
 						requestedSpaceCount={communityInstall?.requestedSpaceCount ?? 0}
@@ -693,7 +692,6 @@ export default function AgentsCatalogSection({
 						agents={filteredCommunity}
 						busyId={community.pendingId ?? buying}
 						error={community.error}
-						isLicensed={(id) => isLicensed("agent", id)}
 						loading={community.loading}
 						onBuy={(card) => buy({ id: card.id, kind: "agent" })}
 						onInstall={(card) => installCommunity(card)}

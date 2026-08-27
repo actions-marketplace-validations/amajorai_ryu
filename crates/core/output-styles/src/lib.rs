@@ -12,7 +12,8 @@
 //!   byte-compatible with a Claude Code output style;
 //! - the four-source merge ([`OutputStyleRegistry`]) — plugin contributions, the
 //!   user root, project roots, managed settings, later sources winning;
-//! - the node-default selection ([`load_selection`] / [`set_selection`]);
+//! - the legacy node-default selection ([`load_selection`] / [`set_selection`]),
+//!   retained only for upgrade compatibility;
 //! - the text actually injected into the system prompt ([`style_block`]).
 //!
 //! **What it deliberately does NOT own.** `keep-coding-instructions` is surfaced
@@ -20,10 +21,10 @@
 //! decides whether the style body *replaces* or is *appended after* the agent's
 //! base instructions, and that assembly happens at the injection seams in
 //! `apps/core/src/sidecar/adapters/mod.rs`. [`style_block`] returns body + adherence
-//! reminder; the caller owns the merge. Likewise the three-tier selection
-//! (per-turn → per-conversation → node default) resolves in Core, which holds the
-//! request and the conversation row; this crate supplies only the node-default tier
-//! and the [`OutputStyleRegistry::forced_style`] override that beats all three.
+//! reminder; the caller owns the merge. Agent assignment resolves in Core, which
+//! holds the request and the agent record; this crate supplies the style registry
+//! and the [`OutputStyleRegistry::forced_style`] override that beats the caller's
+//! selection.
 //!
 //! Core-vs-crate rule: like `ryu-skills`, this crate has **ZERO dependency on
 //! `apps/core`**. The Ryu data folder is inverted in via [`set_data_dir`], and the
@@ -275,7 +276,7 @@ pub struct OutputStyleRecord {
     /// and nothing more, so there is exactly one place that decides replace-vs-append.
     pub keep_coding_instructions: bool,
     /// Apply this style automatically while its plugin is enabled, overriding all
-    /// three selection tiers. Parsed from any source (the frontmatter struct cannot
+    /// selection tiers. Parsed from any source (the frontmatter struct cannot
     /// know where a file came from) but **honoured only for
     /// [`OutputStyleSource::Plugin`]** — see [`OutputStyleRegistry::forced_style`].
     pub force_for_plugin: bool,
@@ -408,11 +409,11 @@ following them even in long, multi-step, or heavily technical answers.";
 /// The text injected into the system prompt for `record` — its body plus the
 /// adherence reminder (design §5).
 ///
-/// A **free function, not a method** on [`OutputStyleRegistry`]: the three-tier
-/// selection has already resolved to one record by the time an injection seam calls
-/// this, so the block builder needs no registry state, and keeping it free means the
-/// per-turn `ChatRequest.output_style` path can build a block without touching the
-/// global handle.
+/// A **free function, not a method** on [`OutputStyleRegistry`]: agent assignment has
+/// already resolved to one record by the time an injection seam calls this, so the
+/// block builder needs no registry state, and keeping it free means the per-turn
+/// `ChatRequest.output_style` path can build a block without touching the global
+/// handle.
 ///
 /// Returns an **empty string** when the record has no body ([`OutputStyleRecord::has_body`]),
 /// so a frontmatter-only style injects nothing rather than a reminder pointing at
@@ -675,20 +676,20 @@ pub fn scan_all_output_style_dirs() -> Vec<DiscoveredOutputStyle> {
     merged.into_values().collect()
 }
 
-// ── Node-default selection ───────────────────────────────────────────────────────
+// ── Legacy node-default selection ────────────────────────────────────────────────
 //
-// The node default is the *lowest* of design §5's three selection tiers — a fresh
-// conversation inherits it, a per-conversation or per-turn choice overrides it. Only
-// this tier lives here, because it is node-wide state with no natural home in Core's
-// per-conversation tables; the other two ride on the request and the conversation row.
+// This file is retained only so older clients and existing nodes can be upgraded
+// without losing their former choice. Normal turns no longer read it: profile
+// assignment lives on the agent record, while an explicit per-turn override rides
+// on the request.
 //
 // Stored in Ryu's OWN data folder, never in the styles dir, so Ryu-local state never
 // mutates files another tool owns — the same split `ryu_skills` makes for
 // `skills-active.json`.
 
-/// The persisted node-default selection. A struct rather than a bare string so
+/// The persisted legacy node-default selection. A struct rather than a bare string so
 /// "explicitly no style" (`{"style_id": null}`) and "never chosen" (no file) stay
-/// distinguishable, and so a future per-scope field can land without a format break.
+/// distinguishable while older clients are still upgraded.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SelectionFile {
     #[serde(default)]
@@ -704,7 +705,7 @@ fn selection_path() -> PathBuf {
     ryu_data_dir().join("output-style.json")
 }
 
-/// The node-default style id, or `None` when no style is selected.
+/// The legacy node-default style id, or `None` when no style is selected.
 ///
 /// Design §8: the shipped default is "no style", so the whole feature is inert until
 /// a user picks one — which is why an unreadable or absent file resolves to `None`
@@ -718,9 +719,8 @@ pub fn load_selection() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Set (or clear, with `None`) the node-default style. Best-effort: a failure to
-/// persist is logged, not surfaced, matching how the skills activation set behaves —
-/// a node that cannot write its data dir has a larger problem than a lost preference.
+/// Set (or clear, with `None`) the legacy node-default style. Best-effort: a failure
+/// to persist is logged, not surfaced, matching how the skills activation set behaves.
 pub fn set_selection(style_id: Option<&str>) {
     let path = selection_path();
     if let Some(parent) = path.parent() {
@@ -921,7 +921,7 @@ impl OutputStyleRegistry {
     }
 
     /// The style forced by an enabled plugin (`force-for-plugin: true`), which
-    /// overrides all three selection tiers while that plugin is enabled.
+    /// overrides the per-turn and per-agent selection while that plugin is enabled.
     ///
     /// Two rules are enforced here rather than at the call sites:
     ///
@@ -971,11 +971,9 @@ impl OutputStyleRegistry {
 /// One row of `GET /api/output-styles`.
 ///
 /// The field names are chosen so a `store_tabs` contribution can map straight onto
-/// them the way the Meetings note-templates tab does (`installed: "active"`), which is
-/// the whole reason `active` is computed server-side: "which style is in force" has
-/// exactly one source of truth ([`load_selection`] plus
-/// [`OutputStyleRegistry::forced_style`]), and a client re-deriving it from a
-/// separately-fetched preference would be a second one.
+/// them as a read-only catalog. `active` is retained for older clients while the
+/// legacy node selection is migrated; agent assignment is read from each agent's
+/// persona record instead.
 #[derive(Debug, Clone, Serialize)]
 pub struct OutputStyleSummary {
     pub id: String,
@@ -983,7 +981,8 @@ pub struct OutputStyleSummary {
     pub description: Option<String>,
     /// Provenance discriminant (`"plugin"`, `"user"`, …).
     pub source: &'static str,
-    /// Whether this style is the one currently in force.
+    /// Whether this style is selected by the legacy node-default file or forced by
+    /// a plugin. It is not the per-agent assignment state.
     pub active: bool,
     /// Whether a forced plugin style is what makes it active — the picker uses this to
     /// explain why the selection is not the user's own.

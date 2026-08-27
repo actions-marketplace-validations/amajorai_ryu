@@ -156,7 +156,7 @@ describe("buildMentionGroups", () => {
 		);
 	});
 
-	test("offers app rows, Space pages, and output styles with destinations", () => {
+	test("offers app rows, Space pages, and personality profiles with destinations", () => {
 		const groups = buildMentionGroups(
 			{
 				...sources(),
@@ -194,7 +194,7 @@ describe("buildMentionGroups", () => {
 			"Chats",
 			"App items",
 			"Space pages",
-			"Output styles",
+			"Personality profiles",
 		]);
 		expect(groups.find((group) => group.kind === "app-item")?.items[0]).toEqual(
 			{

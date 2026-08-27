@@ -1167,6 +1167,117 @@ export function setVoiceInputPrefs(
 	return setPreference(target, VOICE_PREF_KEY, JSON.stringify(prefs));
 }
 
+// --- Speech Processing -----------------------------------------------------
+// The node-local post-ASR cleanup layer. This is intentionally separate from
+// `voice-input` and `dictation`: Voice Recognition produces raw text, while
+// Speech Processing optionally formats it before a dictation insert. The
+// Dictation setting owns the on-record opt-in; this preference owns which
+// cleanup engine and S1-mini controls are used by that stage.
+
+export const SPEECH_PROCESSING_PREF_KEY = "speech-processing";
+
+export type SpeechProcessingEngine = "s1-mini";
+export type SpeechProcessingStyling =
+	| "casual"
+	| "semi-casual"
+	| "semi-formal"
+	| "formal";
+export type SpeechProcessingStructure = "prose" | "lists";
+export type SpeechProcessingContext = "general" | "email";
+
+export interface SpeechProcessingPrefs {
+	context: SpeechProcessingContext;
+	engine: SpeechProcessingEngine;
+	structure: SpeechProcessingStructure;
+	styling: SpeechProcessingStyling;
+}
+
+/** The node-local engines exposed by the Speech Processing layer. */
+export const SPEECH_PROCESSING_ENGINES: {
+	engine: SpeechProcessingEngine;
+	label: string;
+	model: string;
+	sidecar: string;
+}[] = [
+	{
+		engine: "s1-mini",
+		label: "S1-mini by Superwhisper",
+		model: "s1-mini-q4_k_m",
+		sidecar: "llamacpp-speech",
+	},
+];
+
+export const DEFAULT_SPEECH_PROCESSING_PREFS: SpeechProcessingPrefs = {
+	context: "general",
+	engine: "s1-mini",
+	structure: "prose",
+	styling: "semi-formal",
+};
+
+function isSpeechProcessingEngine(
+	value: unknown
+): value is SpeechProcessingEngine {
+	return (
+		typeof value === "string" &&
+		SPEECH_PROCESSING_ENGINES.some((entry) => entry.engine === value)
+	);
+}
+
+/** Parse the shared Speech Processing preference defensively. */
+export function parseSpeechProcessingPrefs(
+	raw: string | null
+): SpeechProcessingPrefs {
+	if (!raw) {
+		return DEFAULT_SPEECH_PROCESSING_PREFS;
+	}
+	try {
+		const parsed = JSON.parse(raw) as Partial<SpeechProcessingPrefs>;
+		return {
+			context:
+				parsed.context === "email"
+					? "email"
+					: DEFAULT_SPEECH_PROCESSING_PREFS.context,
+			engine: isSpeechProcessingEngine(parsed.engine)
+				? parsed.engine
+				: DEFAULT_SPEECH_PROCESSING_PREFS.engine,
+			structure:
+				parsed.structure === "lists"
+					? "lists"
+					: DEFAULT_SPEECH_PROCESSING_PREFS.structure,
+			styling:
+				parsed.styling === "casual" ||
+				parsed.styling === "semi-casual" ||
+				parsed.styling === "semi-formal" ||
+				parsed.styling === "formal"
+					? parsed.styling
+					: DEFAULT_SPEECH_PROCESSING_PREFS.styling,
+		};
+	} catch {
+		return DEFAULT_SPEECH_PROCESSING_PREFS;
+	}
+}
+
+/** Read the node's Speech Processing engine and S1-mini controls. */
+export async function getSpeechProcessingPrefs(
+	target: ApiTarget
+): Promise<SpeechProcessingPrefs> {
+	return parseSpeechProcessingPrefs(
+		await getPreference(target, SPEECH_PROCESSING_PREF_KEY)
+	);
+}
+
+/** Write the node's Speech Processing engine and S1-mini controls. */
+export function setSpeechProcessingPrefs(
+	target: ApiTarget,
+	prefs: SpeechProcessingPrefs
+): Promise<boolean> {
+	return setPreference(
+		target,
+		SPEECH_PROCESSING_PREF_KEY,
+		JSON.stringify(prefs)
+	);
+}
+
 // --- Dictation --------------------------------------------------------------
 // System-wide dictation for the island companion: hold a separate global shortcut,
 // speak, and the transcript is typed straight into whatever native app has OS
@@ -1254,7 +1365,7 @@ export const DEFAULT_DICTATION_PREFS: DictationPrefs = {
 	mode: "push-to-talk",
 	pasteKeys: "",
 	postProcess: {
-		enabled: false,
+		enabled: true,
 		prompt: DEFAULT_DICTATION_POSTPROCESS_PROMPT,
 		selection: EMPTY_AGENT_SELECTION,
 	},
@@ -1305,7 +1416,7 @@ function parseDictationPostProcess(value: unknown): DictationPostProcess {
 			? raw.prompt
 			: DEFAULT_DICTATION_POSTPROCESS_PROMPT;
 	return {
-		enabled: raw.enabled === true,
+		enabled: value == null ? true : raw.enabled === true,
 		prompt,
 		selection: parseAgentSelectionWithLegacyAgent(raw.selection, raw.agent),
 	};
@@ -1344,11 +1455,12 @@ export async function getDictationPrefs(
 			typeof parsed.shortcut === "string" && parsed.shortcut.trim().length > 0
 				? parsed.shortcut.trim()
 				: DEFAULT_DICTATION_SHORTCUT;
+		const engine = isVoiceEngine(parsed.engine) ? parsed.engine : "parakeet";
 		return {
 			ask: parseDictationAsk(parsed.ask),
 			autoSend: parsed.autoSend === true,
 			enabled: parsed.enabled !== false,
-			engine: parsed.engine === "whisper" ? "whisper" : "parakeet",
+			engine,
 			insertMode: coerceDictationInsertMode(parsed.insertMode),
 			mode: coerceDictationMode(parsed.mode),
 			pasteKeys:
@@ -3093,9 +3205,6 @@ export function setSupportAccessLocalExpiry(
 
 export const ENTITLEMENT_ACTIVE_PREF_KEY = "entitlement-active";
 export const MANAGED_INFERENCE_ENTITLED_PREF_KEY = "managed-inference-entitled";
-export const MARKETPLACE_APPS_ENTITLED_PREF_KEY = "marketplace-apps-entitled";
-export const MARKETPLACE_DIRECT_LICENSED_ITEMS_PREF_KEY =
-	"marketplace-direct-licensed-items";
 
 /** Push whether the node is entitled to run autonomous automations. */
 export function setEntitlementActive(
@@ -3114,30 +3223,6 @@ export function setManagedInferenceEntitled(
 		target,
 		MANAGED_INFERENCE_ENTITLED_PREF_KEY,
 		String(active)
-	);
-}
-
-/** Push the control-plane's recurring Marketplace capability to Core. */
-export function setMarketplaceAppsEntitled(
-	target: ApiTarget,
-	active: boolean
-): Promise<boolean> {
-	return setPreference(
-		target,
-		MARKETPLACE_APPS_ENTITLED_PREF_KEY,
-		String(active)
-	);
-}
-
-/** Push active direct Marketplace app licenses to Core for per-app bypass. */
-export function setMarketplaceDirectLicensedItems(
-	target: ApiTarget,
-	itemIds: string[]
-): Promise<boolean> {
-	return setPreference(
-		target,
-		MARKETPLACE_DIRECT_LICENSED_ITEMS_PREF_KEY,
-		JSON.stringify([...new Set(itemIds.filter((itemId) => itemId.trim()))])
 	);
 }
 

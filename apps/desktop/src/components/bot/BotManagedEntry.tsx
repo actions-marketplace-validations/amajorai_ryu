@@ -62,7 +62,7 @@ function BotEntryCard({
 					</div>
 				) : subscribe ? (
 					<p className="max-w-sm text-center text-muted-foreground text-sm leading-relaxed">
-						Subscribe once and Ryu manages the models, computer, and
+						Subscribe once and Ryu manages the models, device, and
 						infrastructure for you. There is no provider setup in Ryu Bot.
 					</p>
 				) : (

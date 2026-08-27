@@ -120,11 +120,10 @@ fn read_credentials() -> Option<String> {
     }
 }
 
-/// Translate Pi's managed OAuth entry into the Claude CLI credential shape the
-/// rest of this reader already understands. Pi stores expiry in unix seconds;
-/// Claude's usage credential uses epoch milliseconds.
-fn ryu_credentials_from_auth(root: &serde_json::Value) -> Option<String> {
-    let entry = root.get("anthropic")?;
+/// Translate one Pi OAuth entry into the Claude CLI credential shape the rest of
+/// this reader already understands. Pi stores expiry in unix seconds; Claude's
+/// usage credential uses epoch milliseconds.
+fn ryu_credentials_from_entry(entry: &serde_json::Value) -> Option<String> {
     let access = entry
         .get("access")
         .and_then(serde_json::Value::as_str)
@@ -149,6 +148,11 @@ fn ryu_credentials_from_auth(root: &serde_json::Value) -> Option<String> {
         "scopes": entry.get("scopes").cloned(),
     });
     Some(serde_json::json!({ "claudeAiOauth": oauth }).to_string())
+}
+
+/// Translate the managed Pi auth file's Claude entry into the CLI shape.
+fn ryu_credentials_from_auth(root: &serde_json::Value) -> Option<String> {
+    ryu_credentials_from_entry(root.get("anthropic")?)
 }
 
 /// Read the managed Pi auth entry for the Ryu Claude subscription provider.
@@ -194,16 +198,32 @@ pub(super) async fn fetch_ryu(agent_id: &str) -> UsageSnapshot {
     fetch_from_credentials(agent_id, read_ryu_credentials).await
 }
 
+pub(super) async fn fetch_ryu_with_credential(
+    agent_id: &str,
+    credential: Option<serde_json::Value>,
+) -> UsageSnapshot {
+    fetch_from_text(
+        agent_id,
+        credential.as_ref().and_then(ryu_credentials_from_entry),
+    )
+    .await
+}
+
 async fn fetch_from_credentials(agent_id: &str, reader: fn() -> Option<String>) -> UsageSnapshot {
+    let text = match tokio::task::spawn_blocking(reader).await {
+        Ok(text) => text,
+        Err(_) => return UsageSnapshot::unavailable(agent_id, "claude", UsageUnavailable::Error),
+    };
+    fetch_from_text(agent_id, text).await
+}
+
+async fn fetch_from_text(agent_id: &str, text: Option<String>) -> UsageSnapshot {
     let unavailable =
         |reason: UsageUnavailable| UsageSnapshot::unavailable(agent_id, "claude", reason);
 
-    // Off the async worker: the macOS Keychain fallback can block on an
-    // authorization dialog, and the file read is sync IO either way.
-    let text = match tokio::task::spawn_blocking(reader).await {
-        Ok(Some(text)) => text,
-        Ok(None) => return unavailable(UsageUnavailable::NotLoggedIn),
-        Err(_) => return unavailable(UsageUnavailable::Error),
+    let text = match text {
+        Some(text) => text,
+        None => return unavailable(UsageUnavailable::NotLoggedIn),
     };
     let Ok(parsed) = serde_json::from_str::<CredentialsFile>(&text) else {
         return unavailable(UsageUnavailable::NotLoggedIn);

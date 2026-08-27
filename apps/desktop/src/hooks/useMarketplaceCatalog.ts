@@ -28,10 +28,11 @@ interface UseMarketplaceCatalog {
 }
 
 export function useMarketplaceCatalog(
-	initialKind: MarketplaceKind = "skill"
+	initialKind: MarketplaceKind = "skill",
+	initialQuery = ""
 ): UseMarketplaceCatalog {
 	const [kind, setKind] = useState<MarketplaceKind>(initialKind);
-	const [query, setQuery] = useState("");
+	const [query, setQuery] = useState(initialQuery);
 	const [debouncedQuery, setDebouncedQuery] = useState("");
 	const [items, setItems] = useState<MarketplaceCard[]>([]);
 	const [loading, setLoading] = useState(true);

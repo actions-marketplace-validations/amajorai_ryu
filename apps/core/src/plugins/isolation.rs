@@ -190,11 +190,6 @@ pub struct PluginProvenance {
     /// The marketplace blue check on the publishing ORG at install time.
     #[serde(default)]
     pub org_verified: bool,
-    /// Whether this installed app was opted into Ryu Membership at install time.
-    /// This is an access marker, not a trust signal; the desktop refreshes the
-    /// live entitlement separately and Core never treats it as a bypass.
-    #[serde(default)]
-    pub membership_required: bool,
     /// Verification tier, only meaningful alongside `org_verified`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_verified_tier: Option<String>,
@@ -487,21 +482,6 @@ mod tests {
             signature_verified: true,
             ..PluginProvenance::default()
         }
-    }
-
-    #[test]
-    fn membership_requirement_is_persisted_and_legacy_rows_default_off() {
-        let legacy: PluginProvenance =
-            serde_json::from_str(r#"{"source_id":"ryu-marketplace","signature_verified":true}"#)
-                .expect("legacy provenance should remain readable");
-        assert!(!legacy.membership_required);
-
-        let mut membership = PluginProvenance::default();
-        membership.membership_required = true;
-        let encoded = serde_json::to_string(&membership).expect("serialize provenance");
-        let decoded: PluginProvenance =
-            serde_json::from_str(&encoded).expect("deserialize provenance");
-        assert!(decoded.membership_required);
     }
 
     #[test]

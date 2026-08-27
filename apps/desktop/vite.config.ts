@@ -14,6 +14,10 @@ export default defineConfig({
 	// The Lanyard component (@ryu/ui) imports a binary .glb model as a URL asset.
 	assetsInclude: ["**/*.glb"],
 	optimizeDeps: {
+		// The desktop root also contains standalone e2e HTML stories. Let their
+		// dedicated Vite configs own those graphs; the app dev server should only
+		// pre-bundle the actual desktop entry point.
+		entries: ["index.html"],
 		esbuildOptions: {
 			target: "chrome105",
 		},

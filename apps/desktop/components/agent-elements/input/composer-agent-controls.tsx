@@ -47,7 +47,6 @@ import {
 import { ProviderCommandDialog } from "@/components/agent-elements/input/provider-command-dialog.tsx";
 import { AUTO_AGENT_ID } from "@/components/agent-elements/input/universal-picker-body.tsx";
 import { UsageBar } from "@/components/agent-elements/input/usage-bar.tsx";
-import { useComposerOutputStyleSection } from "@/components/agent-elements/input/use-composer-output-style-section.ts";
 import { useUniversalPicker } from "@/components/agent-elements/input/use-universal-picker.ts";
 import type { InputBarInfoBar } from "@/components/agent-elements/input-bar.tsx";
 import type { ModelOption } from "@/components/agent-elements/types.ts";
@@ -90,14 +89,14 @@ function AutoModeIcon({ className }: { className?: string }) {
 export interface ComposerAgentModesOptions {
 	/** Append the "New agent…" create sentinel row. Default: true. */
 	includeCreate?: boolean;
-	/** Append a "Teams" section addressable as one target. Default: true. */
+	/** Append a "Groups" section addressable as one target. Default: true. */
 	includeTeams?: boolean;
 }
 
 /**
  * The composer's agent picker options, derived from the live agent/team registry
  * with each entry's engine (or team-stack) logo — never hardcoded. Agents render
- * under an "Agents" group, teams under "Teams", and an optional "New agent…"
+ * under an "Agents" group, groups under "Groups", and an optional "New agent…"
  * sentinel closes the list.
  */
 export function useComposerAgentModes(
@@ -131,7 +130,7 @@ export function useComposerAgentModes(
 							})
 						),
 						description: t.description ?? undefined,
-						group: "Teams",
+						group: "Groups",
 					}))
 				: [];
 		return [
@@ -213,7 +212,7 @@ export interface ComposerAgentControlsConfig {
 	onSelectProviderModel?: (providerId: string, modelId: string) => void;
 	/** Optional setup-surface override for provider thinking-level picks. */
 	onSelectProviderThinking?: (providerId: string, level: string) => void;
-	/** Pick a team as the driving target. Omit to hide the Teams section. */
+	/** Pick a group as the driving target. Omit to hide the Groups section. */
 	onSelectTeam?: (teamId: string) => void;
 	/** Optional setup-surface override for a provider pick. */
 	onUseProvider?: (providerId: string, modelId: string | null) => void;
@@ -223,7 +222,7 @@ export interface ComposerAgentControlsConfig {
 	surface?: BrowserSurface;
 	/** Currently selected team id, or null when an agent is the active target. */
 	teamId?: string | null;
-	/** Live teams; pass `[]` (or omit `onSelectTeam`) to disable the Teams section. */
+	/** Live groups; pass `[]` (or omit `onSelectTeam`) to disable the Groups section. */
 	teams?: Team[];
 }
 
@@ -274,8 +273,8 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	 * trigger summary (`Ryu · Sonnet · Plan`) stays glanceable on a surface with
 	 * its own trigger. The body itself now comes from `renderBody`.
 	 *
-	 * The Output style section joins this list only while a style is actually in
-	 * force — see the note at its construction. It is always in the picker body.
+	 * Personality profiles are assigned on the agent editor, so the composer only
+	 * summarizes the target and its runtime controls.
 	 */
 	sections: ComposerSettingsSection[];
 	/** The sections shown in the trigger summary, excluding plugin-only rows. */
@@ -452,18 +451,11 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 				onChange: onModelChange,
 			};
 
-	// Output style (`docs/output-styles.md` §6) — the ONE place it is wired, so every
-	// composer surface offers it and no surface hand-rolls its own. It comes after the
-	// caller's own extra sections because those (approval, thinking, agent-advertised
-	// config) tune the active TARGET, while a style is a node-wide prompt preset that
-	// outlives whichever agent is selected. Empty when the node has no styles, and
-	// every consumer auto-hides an empty section.
-	const outputStyleSection = useComposerOutputStyleSection();
 	// Interface mode decides how much of this bar exists at all (see
 	// `@/src/lib/interface-level.ts`). At Ryu Work the composer is the agent picker
 	// and nothing else; Code adds the model and tuning
-	// sections (approval mode, thinking budget, agent config options, output
-	// style). Gating happens HERE, in the one hook all three composer surfaces
+	// sections (approval mode, thinking budget, and agent config). Gating happens HERE,
+	// in the one hook all three composer surfaces
 	// share, so the chat page, the launchpad and the Ask Ryu dock cannot disagree
 	// about what a mode means.
 	//
@@ -480,33 +472,19 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		agentId !== AUTO_AGENT_ID;
 	const showTuningSections =
 		!managedProduct && showsComposerTuning(interfaceLevel);
-	// Output style is NOT gated with the tuning sections, deliberately.
-	//
-	// The others (approval mode, thinking budget, agent config) are knobs on how
-	// hard the model works and how freely it may act — the things Ryu Work exists to
-	// keep out of a beginner's way. A style is the opposite kind of choice: it
-	// picks how replies should READ, it is the most legible control on the bar, and
-	// it is node-wide rather than a property of the selected agent. Hiding it below
-	// Code used to mean a user who authored a style had nowhere in the product to
-	// apply it, which reads as the feature not existing.
-	//
-	// The section self-hides when the node has no styles, so this adds nothing to a
-	// Ryu Work composer that has not opted into styles at all.
 	const bodySections = useMemo(
-		() => [...(showTuningSections ? extraSections : []), outputStyleSection],
-		[extraSections, outputStyleSection, showTuningSections]
+		() => (showTuningSections ? extraSections : []),
+		[extraSections, showTuningSections]
 	);
 
 	// The trigger summary reads `Ryu · Sonnet · Plan` — the agent, what it runs on,
 	// and how it is allowed to act. Those are the facts that change what the NEXT
 	// message does, and they are worth permanent space.
 	//
-	// Contributed pickers are not. An output style and an app's own mode `select` are
-	// both settings you set once and leave, so spelling their current value out on the
-	// trigger buys a word of chrome per installed plugin and pushes the three facts
-	// above out of a bar that is already narrow at compact density. They stay fully
-	// present — and fully readable — one click away in `bodySections`, which is where
-	// you go to change them anyway.
+	// Contributed pickers are not. An app's own mode `select` is a setting you set once
+	// and leave, so spelling its current value out on the trigger buys a word of chrome
+	// per installed plugin and pushes the three facts above out of a bar that is already
+	// narrow at compact density.
 	//
 	// This narrowing is applied to `triggerSections` ONLY, never to `sections`.
 	// The two are not interchangeable: `sections` is also what the composer's
@@ -529,11 +507,6 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 					agentSection,
 					...(showModelSection ? [modelSectionResolved] : []),
 					...(showTuningSections ? extras : []),
-					// Ungated, matching `bodySections` above. `sections` is also what the
-					// composer's keyboard shortcuts cycle, so leaving the style out here would
-					// make it reachable by mouse and not by keyboard — and the trigger summary
-					// would describe a popover that has a row the summary never mentions.
-					outputStyleSection,
 				];
 	/** Every composed section — the shortcut targets, and the list any surface
 	 *  rendering these as ROWS must use. */

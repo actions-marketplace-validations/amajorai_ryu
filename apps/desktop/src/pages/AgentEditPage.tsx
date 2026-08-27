@@ -102,6 +102,7 @@ import {
 import { isLocalEngine, type SamplingConfig } from "@/src/lib/api/inference.ts";
 import { fetchMcpTools } from "@/src/lib/api/mcp.ts";
 import { getActiveModel } from "@/src/lib/api/models.ts";
+import { listOutputStyles } from "@/src/lib/api/output-styles.ts";
 import { type InstalledSkill, listSkills } from "@/src/lib/api/skills.ts";
 import { fetchSpaces } from "@/src/lib/api/spaces.ts";
 import {
@@ -335,6 +336,9 @@ const TONE_OPTIONS: { value: ToneOption; label: string }[] = [
 	{ value: "custom", label: "Custom" },
 ];
 
+/** Client-only sentinel for an agent that does not use a reusable profile. */
+const AGENT_OWN_VOICE_PROFILE = "__agent_own_voice__";
+
 // ── Fallback tool list (used when GET /api/mcp/tools returns empty) ───────────
 
 const FALLBACK_TOOLS = [
@@ -456,6 +460,12 @@ export default function AgentEditPage({
 		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
 		[activeNode.url, activeNode.token]
 	);
+	const personalityProfilesQuery = useQuery({
+		queryKey: ["agent-personality-profiles", target.url, target.token],
+		queryFn: () => listOutputStyles(target),
+		staleTime: 30_000,
+		retry: false,
+	});
 	const agentEditPanels = useMemo(
 		() =>
 			pluginContributions.agent_edit_panels.filter(
@@ -541,6 +551,31 @@ export default function AgentEditPage({
 	const [personaDisplayName, setPersonaDisplayName] = useState("");
 	const [tone, setTone] = useState<ToneOption>("neutral");
 	const [customTone, setCustomTone] = useState("");
+	const [personalityProfileId, setPersonalityProfileId] = useState(
+		AGENT_OWN_VOICE_PROFILE
+	);
+	const personalityProfileOptions = useMemo<SlotOption[]>(() => {
+		const options: SlotOption[] = [
+			{ id: AGENT_OWN_VOICE_PROFILE, label: "Agent's own voice" },
+		];
+		const styles = personalityProfilesQuery.data?.styles ?? [];
+		for (const style of styles) {
+			options.push({ id: style.id, label: style.name });
+		}
+		if (
+			personalityProfileId !== AGENT_OWN_VOICE_PROFILE &&
+			personalityProfileId &&
+			!options.some((option) => option.id === personalityProfileId)
+		) {
+			// Keep a profile selected in the editor when its plugin/file is currently
+			// unavailable; saving must not silently clear an agent's configuration.
+			options.push({
+				id: personalityProfileId,
+				label: `Unavailable (${personalityProfileId})`,
+			});
+		}
+		return options;
+	}, [personalityProfileId, personalityProfilesQuery.data?.styles]);
 	// Custom agent avatar — single GlyphValue covering avatar/icon/emoji/
 	// dicebear/expressive/dither. Null = use the engine logo.
 	const [avatarGlyph, setAvatarGlyph] = useState<GlyphValue>(null);
@@ -622,9 +657,9 @@ export default function AgentEditPage({
 
 	// ── Coming-soon attribute slots (collapsed by default) ───────────────────────
 
-	// Paywall gate: Prompt Studio and background agent schedules are Band-2 (pro)
-	// features — a one-time Lifetime license or a subscription unlocks them.
-	const { canUse, requestUpgrade } = useEntitlementContext();
+	// Prompt Studio remains an optional core capability; app-provided automation
+	// schedules are available without a plan gate.
+	const { canUse } = useEntitlementContext();
 
 	// ── Schedule/trigger state ───────────────────────────────────────────────────
 	const [scheduleEnabled, setScheduleEnabled] = useState(false);
@@ -897,6 +932,9 @@ export default function AgentEditPage({
 			const persona = existing.persona;
 			setPersonaDisplayName(persona?.display_name ?? "");
 			setAvatarGlyph(personaToGlyphValue(persona));
+			setPersonalityProfileId(
+				persona?.output_style_id?.trim() || AGENT_OWN_VOICE_PROFILE
+			);
 			const savedTone = persona?.tone ?? null;
 			const presetTone = savedTone
 				? TONE_OPTIONS.find(
@@ -1070,6 +1108,10 @@ export default function AgentEditPage({
 			// is non-null (the field clears the others when a new source is picked).
 			persona: {
 				display_name: personaDisplayName.trim() || null,
+				output_style_id:
+					personalityProfileId === AGENT_OWN_VOICE_PROFILE
+						? null
+						: personalityProfileId.trim() || null,
 				tone: toneValue === "neutral" ? null : toneValue,
 				...glyphToPersonaFields(avatarGlyph),
 			},
@@ -1266,6 +1308,20 @@ export default function AgentEditPage({
 				composioActions: Array.from(selectedComposio),
 				skills: savedSkills,
 				identityProfileIds: Array.from(selectedIdentities),
+				persona: {
+					display_name: personaDisplayName.trim() || null,
+					output_style_id:
+						personalityProfileId === AGENT_OWN_VOICE_PROFILE
+							? null
+							: personalityProfileId.trim() || null,
+					tone:
+						tone === "custom"
+							? customTone.trim() || null
+							: tone === "neutral"
+								? null
+								: tone,
+					...glyphToPersonaFields(avatarGlyph),
+				},
 				orchestrator,
 				canCreateAgents,
 				safetyProfile,
@@ -1294,6 +1350,11 @@ export default function AgentEditPage({
 		selectedComposio,
 		savedSkills,
 		selectedIdentities,
+		personaDisplayName,
+		personalityProfileId,
+		tone,
+		customTone,
+		avatarGlyph,
 		orchestrator,
 		canCreateAgents,
 		safetyProfile,
@@ -1332,6 +1393,10 @@ export default function AgentEditPage({
 				skills: savedSkills,
 				composioActions: Array.from(selectedComposio),
 				tone,
+				personalityProfile:
+					personalityProfileId === AGENT_OWN_VOICE_PROFILE
+						? null
+						: personalityProfileId,
 			}),
 		[
 			effectiveAgentId,
@@ -1345,6 +1410,7 @@ export default function AgentEditPage({
 			savedSkills,
 			selectedComposio,
 			tone,
+			personalityProfileId,
 		]
 	);
 
@@ -1656,6 +1722,7 @@ export default function AgentEditPage({
 					onMemoryWriteEnabledChange={setMemoryWriteEnabled}
 					onNameChange={setName}
 					onPersonaDisplayNameChange={setPersonaDisplayName}
+					onPersonalityProfileChange={setPersonalityProfileId}
 					onRemoveRule={(index) =>
 						setRules((prev) => prev.filter((_, i) => i !== index))
 					}
@@ -1668,10 +1735,6 @@ export default function AgentEditPage({
 							setFormError(
 								"Promote this agent to Active before enabling an automation."
 							);
-							return;
-						}
-						if (next && !canUse("local-background-runs")) {
-							requestUpgrade();
 							return;
 						}
 						setScheduleEnabled(next);
@@ -1689,6 +1752,8 @@ export default function AgentEditPage({
 					onWeeklyDayChange={setWeeklyDay}
 					onWeeklyTimeChange={setWeeklyTime}
 					personaDisplayName={personaDisplayName}
+					personalityProfile={personalityProfileId}
+					personalityProfiles={personalityProfileOptions}
 					piConfig={agentId === "ryu" ? <RyuPiConfig /> : null}
 					preview={previewProps}
 					promptStudioPanel={

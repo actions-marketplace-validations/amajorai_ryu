@@ -14,6 +14,7 @@ import type {
 	MemoryClient,
 	RagClient,
 	RealtimeClient,
+	StorageClient,
 	SttClient,
 	TtsClient,
 } from "./primitives.ts";
@@ -81,6 +82,8 @@ export interface RunnableContext {
 	sessionId?: string;
 	/** Signal to abort a long-running run. */
 	signal?: AbortSignal;
+	/** Durable app-owned KV state, gated by the manifest's `storage:kv` grant. */
+	storage?: StorageClient;
 	/** STT primitive: transcribe (`crates/ryu-stt`). */
 	stt?: SttClient;
 	/** TTS primitive: speak (`crates/ryu-tts`). */

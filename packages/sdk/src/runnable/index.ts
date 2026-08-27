@@ -51,6 +51,7 @@ export type {
 	RealtimeClient,
 	RealtimeSubscription,
 	RyuPrimitives,
+	StorageClient,
 	SttClient,
 	TtsClient,
 } from "./primitives.ts";

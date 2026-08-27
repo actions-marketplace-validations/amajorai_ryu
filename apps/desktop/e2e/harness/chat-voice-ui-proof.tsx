@@ -50,7 +50,7 @@ const REACTIONS_PLUGIN_ACTION: ContributedMessageAction = {
 	label: "Add reaction",
 	order: 100,
 	plugin: "@ryu/reactions",
-	target: "user",
+	target: "any",
 };
 
 function ProofBadge({

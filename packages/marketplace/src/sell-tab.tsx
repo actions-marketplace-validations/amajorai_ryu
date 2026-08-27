@@ -210,11 +210,11 @@ export function SellTab() {
 				<div className="mt-5 rounded-lg border border-primary/20 bg-primary/5 p-5">
 					<div className="flex items-start justify-between gap-3">
 						<div>
-							<p className="font-medium text-sm">Marketplace Membership</p>
+							<p className="font-medium text-sm">A Major Pass</p>
 							<p className="mt-1 text-muted-foreground text-sm">
-								Opt paid apps in to show “Included with Membership”. Ryu
-								allocates 70% of Membership revenue to opted-in publishers using
-								weighted app usage.
+								Opt supported paid apps into the A Major Pass publisher pool.
+								Ryu allocates 70% of A Major Pass revenue to opted-in publishers
+								using weighted app usage.
 							</p>
 						</div>
 						<Badge variant="outline">Recurring plans only</Badge>
@@ -226,7 +226,7 @@ export function SellTab() {
 					{membership.loading && !membership.report ? (
 						<div className="mt-4 flex items-center gap-2 text-muted-foreground text-sm">
 							<Spinner className="size-4" />
-							Loading Membership totals…
+							Loading A Major Pass totals…
 						</div>
 					) : membership.error ? (
 						<p className="mt-4 text-destructive text-xs">

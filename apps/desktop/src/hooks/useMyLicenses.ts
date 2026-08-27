@@ -12,15 +12,12 @@
 // newly granted license without a manual reload.
 
 import { useCallback, useEffect, useState } from "react";
-import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	fetchLicenses,
 	hasMarketplaceAuth,
 	type MarketplaceError,
 	type OwnedLicense,
 } from "@/src/lib/api/marketplace.ts";
-import { setMarketplaceDirectLicensedItems } from "@/src/lib/api/preferences.ts";
-import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
 interface UseMyLicenses {
 	/** False when there is no session token (the money layer requires sign-in). */
@@ -41,10 +38,8 @@ export function useMyLicenses(): UseMyLicenses {
 	const authed = hasMarketplaceAuth();
 
 	const refresh = useCallback(async () => {
-		const target = toTarget(useNodeStore.getState().getActiveNode());
 		if (!hasMarketplaceAuth()) {
 			setLicenses([]);
-			await setMarketplaceDirectLicensedItems(target, []);
 			setLoading(false);
 			setError(null);
 			return;
@@ -53,15 +48,6 @@ export function useMyLicenses(): UseMyLicenses {
 		try {
 			const data = await fetchLicenses();
 			setLicenses(data);
-			await setMarketplaceDirectLicensedItems(
-				target,
-				data
-					.filter(
-						(license) =>
-							license.status === "active" && license.itemKind === "app"
-					)
-					.map((license) => license.itemId)
-			);
 			setError(null);
 		} catch (e) {
 			setError(e as MarketplaceError);

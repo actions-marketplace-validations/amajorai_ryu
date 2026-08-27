@@ -24,6 +24,8 @@
 // granted asynchronously by the server webhook, so the UI re-fetches licenses on
 // window focus (mirrors useCreditsWallet).
 
+import { MARKETPLACE_BROWSE_KINDS } from "@ryu/marketplace/catalog/chrome/marketplace-sections";
+import type { CatalogBanner } from "@ryu/marketplace/catalog/types";
 import type { VerificationDetails } from "@ryu/ui/components/verification-popover.tsx";
 import { formatMinorCurrency } from "@ryu/ui/lib/number-format.ts";
 import {
@@ -118,7 +120,7 @@ export interface MarketplaceCard {
 	installSource: string | null;
 	kind: MarketplaceKind;
 	latestVersion: string | null;
-	/** Server-derived label: this paid app is included in Membership. */
+	/** True when the publisher's supported paid offer is covered by A Major Pass. */
 	membershipIncluded: boolean;
 	name: string;
 	orgVerified: boolean;
@@ -153,6 +155,7 @@ interface MarketplaceCardWire
 		| "verification"
 		| "orgVerified"
 		| "orgVerifiedTier"
+		| "membershipIncluded"
 		| "publisherTrust"
 		| "publisherTrustSource"
 		| "publisherVerification"
@@ -168,7 +171,6 @@ interface MarketplaceCardWire
 		| "requirements"
 		| "installedVersion"
 		| "latestVersion"
-		| "membershipIncluded"
 		| "updateAvailable"
 		| "updatePreview"
 	> {
@@ -177,7 +179,6 @@ interface MarketplaceCardWire
 	githubSource?: Record<string, unknown> | null;
 	installedVersion?: string | null;
 	latestVersion?: string | null;
-	/** Server-derived Membership inclusion flag, absent on older servers. */
 	membershipIncluded?: boolean | null;
 	orgVerified?: boolean | null;
 	orgVerifiedTier?: string | null;
@@ -264,7 +265,7 @@ function toMarketplaceCard(card: MarketplaceCardWire): MarketplaceCard {
 		requirements: rest.requirements ?? {},
 		installedVersion: rest.installedVersion ?? null,
 		latestVersion: rest.latestVersion ?? null,
-		membershipIncluded: Boolean(rest.membershipIncluded),
+		membershipIncluded: Boolean(card.membershipIncluded),
 		updateAvailable: Boolean(rest.updateAvailable),
 		updatePreview: rest.updatePreview ?? null,
 		ratingAverage: rest.ratingAverage ?? 0,
@@ -328,7 +329,7 @@ export interface MarketplaceMembershipPublisherReport {
 	organizationId: string;
 }
 
-/** Record one first-use signal for an app included with Membership. */
+/** Record one first-use signal for a listing eligible for the legacy publisher pool. */
 export async function recordMarketplaceMembershipUsage(input: {
 	id: string;
 	idempotencyKey: string;
@@ -350,7 +351,7 @@ export async function recordMarketplaceMembershipUsage(input: {
 	};
 }
 
-/** Fetch the active publisher organization's Membership distribution totals. */
+/** Fetch the active publisher organization's A Major Pass distribution totals. */
 export async function fetchMarketplaceMembershipPublisherReport(): Promise<MarketplaceMembershipPublisherReport> {
 	const resp = await fetch(`${BASE}/membership/publisher-report`, {
 		headers: authHeaders(),
@@ -761,9 +762,9 @@ export async function fetchInstalledPortablePackages(
  * Install or update a GitHub-backed `.ryupack` through the selected node.
  *
  * The control-plane session is carried separately from the node token: Core
- * uses it only when it asks Ryu to resolve the buyer entitlement and proxy the
- * private GitHub Release. Buyers never need GitHub credentials or a GitHub App
- * installation of their own.
+ * uses it only when it asks Ryu to resolve optional account-aware commerce and
+ * proxy the private GitHub Release. Buyers never need GitHub credentials or a
+ * GitHub App installation of their own.
  */
 export async function installPortablePackage(
 	target: ApiTarget,
@@ -841,6 +842,8 @@ function authHeaders(): Record<string, string> {
 }
 
 const BASE = `${BACKEND_URL.replace(/\/$/, "")}/api/marketplace`;
+const MARKETPLACE_SEARCH_KINDS: MarketplaceKind[] =
+	MARKETPLACE_BROWSE_KINDS.map((kind) => kind.value);
 
 /**
  * Distinguishes the degrade-cleanly states from generic failures so the UI can
@@ -952,7 +955,8 @@ async function toError(resp: Response): Promise<MarketplaceError> {
  */
 export async function fetchCatalog(
 	kind: MarketplaceKind,
-	query = ""
+	query = "",
+	signal?: AbortSignal
 ): Promise<MarketplaceCard[]> {
 	const q = new URLSearchParams({ kind });
 	if (query.trim()) {
@@ -960,12 +964,48 @@ export async function fetchCatalog(
 	}
 	const resp = await fetch(`${BASE}/catalog?${q.toString()}`, {
 		headers: authHeaders(),
+		signal,
 	});
 	if (!resp.ok) {
 		throw await toError(resp);
 	}
 	const json = (await resp.json()) as { items?: MarketplaceCardWire[] };
 	return (json.items ?? []).map(toMarketplaceCard);
+}
+
+/** Search every published Marketplace kind for the global command palette.
+ * Individual kind failures are ignored so an unavailable catalog lane cannot
+ * make the rest of the palette unusable. */
+export async function searchMarketplaceCatalog(
+	query: string,
+	limit = 8,
+	signal?: AbortSignal
+): Promise<MarketplaceCard[]> {
+	const results = await Promise.allSettled(
+		MARKETPLACE_SEARCH_KINDS.map((kind) => fetchCatalog(kind, query, signal))
+	);
+	const seen = new Set<string>();
+	const cards: MarketplaceCard[] = [];
+	for (const result of results) {
+		if (result.status !== "fulfilled") {
+			continue;
+		}
+		for (const card of result.value) {
+			const key = `${card.kind}:${card.id}`;
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			cards.push(card);
+		}
+	}
+	return cards
+		.sort(
+			(a, b) =>
+				Number(b.firstParty) - Number(a.firstParty) ||
+				a.name.localeCompare(b.name)
+		)
+		.slice(0, Math.max(0, limit));
 }
 
 /**
@@ -1092,6 +1132,8 @@ export interface DetailSetupStep {
  * plus Ryu extensions for the richer preview.
  */
 export interface MarketplaceDetail {
+	/** Optional manifest banner used by the compact prompt preview. */
+	banner: CatalogBanner | null;
 	bannerUrl: string | null;
 	/** Human-readable capability labels; derived from permission grants when the
 	 *  source omits an explicit list. Empty when neither is present. */
@@ -1232,6 +1274,42 @@ function resolveSetup(value: unknown): DetailSetupStep[] {
 	return steps;
 }
 
+/** Keep the manifest banner's prompt-palette fields typed without trusting the
+ *  opaque control-plane payload. The renderer applies a second CSS/color guard. */
+function resolveCatalogBanner(value: unknown): CatalogBanner | null {
+	const raw = recordValue(value);
+	if (!raw) {
+		return null;
+	}
+	const banner: CatalogBanner = {};
+	const background = stringValue(raw.background);
+	if (background) {
+		banner.background = background;
+	}
+	const colors = toStringArray(raw.colors);
+	if (colors.length > 0) {
+		banner.colors = colors;
+	}
+	const imageUrl = stringValue(raw.imageUrl ?? raw.image_url);
+	if (imageUrl) {
+		banner.imageUrl = imageUrl;
+	}
+	const style = stringValue(raw.style);
+	if (
+		style === "gradient" ||
+		style === "animated-gradient" ||
+		style === "dither" ||
+		style === "flat" ||
+		style === "image"
+	) {
+		banner.style = style;
+	}
+	if (typeof raw.seed === "number" && Number.isFinite(raw.seed)) {
+		banner.seed = Math.trunc(raw.seed);
+	}
+	return Object.keys(banner).length > 0 ? banner : null;
+}
+
 /** Normalize the `runnables` field into typed entries with enable state. */
 function resolveRunnables(value: unknown): DetailRunnable[] {
 	if (!Array.isArray(value)) {
@@ -1304,6 +1382,7 @@ export async function fetchDetail(
 	}
 	const json = (await resp.json()) as Partial<MarketplaceDetail> & {
 		author?: unknown;
+		banner?: unknown;
 		homepage?: unknown;
 		permission_grants?: unknown;
 		permissionGrants?: unknown;
@@ -1312,6 +1391,7 @@ export async function fetchDetail(
 		setup?: unknown;
 	};
 	return {
+		banner: resolveCatalogBanner(json.banner),
 		id: json.id ?? id,
 		kind: (json.kind as MarketplaceKind) ?? kind,
 		name: json.name ?? "",

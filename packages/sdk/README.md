@@ -22,6 +22,8 @@ bun test
 
 - **Runnable factories:** `agent`, `workflow`, `tool`, `skill` (and `AgentBuilder` / `WorkflowBuilder` / `ToolBuilder` / `SkillBuilder` / `PluginBuilder`) for the one Runnable contract (input to run to output). `defineApp` can attach a `ToolRunnable` so a widget's behavior ships as a grant-gated Core `inline_deno` tool.
 - **Canonical Actions:** `defineAction` adds one description, input schema, output schema, effect, approval requirement, and implementation, then lowers it to a governed Ryu Tool/Runnable.
+- **Action adapters:** the same contract is callable through Core HTTP (`@ryuhq/core-client/actions`), `ryu action`, the SDK MCP adapter, and A2A card discovery; calls remain Core-governed.
+- **App-owned state:** `RunnableContext.storage` exposes the grant-gated `storage:kv` bridge for durable plugin state. Relational app data remains owned by an app sidecar.
 - **Manifest model:** `PluginManifest` types + `PluginManifestSchema` / `validateManifestStrict` / `validatePluginId` (also exported from `@ryuhq/sdk/manifest`).
 - **Gateway-mandatory model client:** chat types and a client where every model call routes through the Ryu Gateway (also from `@ryuhq/sdk/model`).
 - **MCP server/client:** author (`McpServer`) and consume (`listTools` / `callTool`) MCP tool surfaces, via `@ryuhq/sdk/mcp`, `@ryuhq/sdk/mcp/server`, or `@ryuhq/sdk/mcp/client`.
@@ -69,6 +71,11 @@ export const createTicket = defineAction({
 and `needs_approval`. Core keeps the existing tool registry, Gateway grants, audit trail, and
 approval inbox as the execution authorities; `defineAction` is the shared authoring seam, not a
 second runtime.
+
+The generated Action can also be invoked by `POST /api/actions/<id>` or `ryu action <id> <json>
+--agent <agent-id>`. Both require the calling agent explicitly, so a node token cannot silently
+become an unscoped action principal. A2A publishes enabled Actions as skills on the agent card and
+delegates the actual request to the published agent.
 
 ## Managing a running node
 

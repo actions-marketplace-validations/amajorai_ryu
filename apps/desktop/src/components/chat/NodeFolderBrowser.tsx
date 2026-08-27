@@ -355,7 +355,7 @@ export function NodeFolderBrowser({
 
 	const locationLabel =
 		activeNode.name === "local"
-			? "this computer"
+			? "this device"
 			: `the "${activeNode.name}" node`;
 
 	return (

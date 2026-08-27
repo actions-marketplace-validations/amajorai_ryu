@@ -81,7 +81,7 @@ const GRANT_META: Record<string, GrantMeta> = {
 			"Deliver Inbox notifications to people in your organization or team.",
 	},
 	shell: {
-		label: "Run commands on your computer",
+		label: "Run commands on your device",
 		description: "Execute shell commands on this device.",
 	},
 	chat: {

@@ -531,6 +531,37 @@ mod tests {
     }
 
     #[test]
+    fn safe_actions_protected_namespace_requires_exact_first_party_id() {
+        let reserved = scopes(&["model"]);
+        let protected = scopes(&["@ryu/safe-actions", "com.ryu.safe-actions"]);
+        let policy = protected_policy(&[], &reserved, &protected);
+
+        for id in ["@ryu/safe-actions", "com.ryu.safe-actions"] {
+            let decision =
+                validate_grants_for(Some(id), &scopes(&["safe-actions:manage"]), &policy);
+            assert!(
+                decision.all_approved(),
+                "{id} denied: {:?}",
+                decision.denied
+            );
+        }
+
+        for id in [
+            "com.evil.safe-actions",
+            "@evil/safe-actions",
+            "safe-actions",
+        ] {
+            let decision =
+                validate_grants_for(Some(id), &scopes(&["safe-actions:manage"]), &policy);
+            assert_eq!(
+                decision.denied,
+                vec!["safe-actions:manage".to_string()],
+                "{id} must not squat on Safe Actions' namespace"
+            );
+        }
+    }
+
+    #[test]
     fn reserved_namespace_is_never_owner_scoped() {
         // An app that names itself after a host primitive still cannot
         // self-grant it — `sidecar:process` above all (arbitrary code

@@ -11,13 +11,11 @@
 //     they only agree because those numbers were matched on purpose. When the
 //     transcript was `max-w-[720px] px-4` it sat 16px inside the composer on
 //     each side, which reads as a gap to the right of the avatar.
-//  2. The user turn's hover toolbar starts at the left edge of the BUBBLE, not
-//     at the left edge of the transcript column. The bubble is right-aligned and
+//  2. The user turn's hover toolbar sits just to the LEFT of the BUBBLE, not at
+//     the left edge of the transcript column. The bubble is right-aligned and
 //     shrink-to-fit, so its left edge is content-derived: the toolbar only lands
-//     on it because it now lives inside the bubble's own column (`actions` on
-//     UserMessage). It used to be a sibling of the whole message with
-//     `justify-start`, which pinned it to the column edge — metres from a short
-//     bubble.
+//     beside it because it now lives in the same row as the bubble (`actions` on
+//     UserMessage). The assistant side mirrors this on the bubble's right.
 //
 // Both are checked at a wide and a narrow viewport: the columns are centered at
 // wide widths and gutter-clamped at narrow ones, and only one of those is
@@ -113,10 +111,9 @@ for (const size of [
 		// row. If it were flush with the row the assertion below would pass for
 		// the old (broken) layout too.
 		expect(m.bubbleLeft).toBeGreaterThan(m.rowLeft + EDGE_SLACK_PX);
-		// Left-aligned actions, under the bubble: the first toolbar button starts
-		// at the bubble's own left edge.
-		expect(Math.abs(m.toolbarButtonLeft - m.bubbleLeft)).toBeLessThanOrEqual(
-			EDGE_SLACK_PX
-		);
+		// The user is right-aligned, so the first toolbar button sits to the left of
+		// the bubble with the same small gap as the transcript's other controls.
+		expect(m.toolbarButtonLeft).toBeLessThan(m.bubbleLeft);
+		expect(m.toolbarButtonLeft).toBeGreaterThan(m.rowLeft);
 	});
 }

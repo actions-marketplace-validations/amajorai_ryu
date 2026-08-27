@@ -178,8 +178,9 @@ use sidecar::{
     onboarding::SetupManager,
     providers::{
         apfel::ApfelManager, llamacpp::LlamaCppClassifyManager, llamacpp::LlamaCppEmbedManager,
-        llamacpp::LlamaCppManager, llamacpp::LlamaCppRerankManager, mlx::MlxManager,
-        mlx_vlm::MlxVlmManager, ollama::OllamaManager, omlx::OmlxManager, outetts::OuteTtsManager,
+        llamacpp::LlamaCppManager, llamacpp::LlamaCppRerankManager,
+        llamacpp::LlamaCppSpeechManager, mlx::MlxManager,
+        mlx_vlm::MlxVlmManager, mesh_llm::MeshLlmManager, ollama::OllamaManager, omlx::OmlxManager, outetts::OuteTtsManager,
         parakeet::ParakeetManager, ryutts::RyuTtsManager, sdcpp::StableDiffusionManager,
         sglang::SglangManager, vllm::VllmManager, whispercpp::WhisperCppManager,
         DockerModelRunnerManager,
@@ -607,6 +608,11 @@ async fn main() {
         // config-push path lazily starts it when a pushed config selects the tier.
         // The model is still auto-downloaded during onboarding.
         Arc::new(LlamaCppClassifyManager::new().with_downloads(download_center.clone())),
+        // Dedicated Speech Processing server — serves S1-mini for optional
+        // post-ASR cleanup. It is lazy and shares the llama.cpp binary with the
+        // other local tiers, so disabling cleanup stops new calls without
+        // affecting the resident chat or Voice Recognition engine.
+        Arc::new(LlamaCppSpeechManager::new().with_downloads(download_center.clone())),
         Arc::new(OllamaManager::new().with_downloads(download_center.clone())),
         Arc::new(VllmManager::new()),
         Arc::new(SglangManager::new()),
@@ -627,6 +633,10 @@ async fn main() {
         // Registered on every platform so the catalog shows it (disabled) off a
         // supported Mac; the node-gate refuses to run/install it elsewhere.
         Arc::new(ApfelManager::new()),
+        // Mesh LLM — an OpenAI-compatible distributed local engine. Ryu adopts
+        // or starts the user's executable and routes it through the existing
+        // Gateway `local` provider; it does not vendor Mesh LLM or its models.
+        Arc::new(MeshLlmManager::new()),
         // Voice engines (STT/TTS) — opt-in, run alongside the resident chat engine.
         Arc::new(WhisperCppManager::new().with_downloads(download_center.clone())),
         Arc::new(ParakeetManager::new().with_downloads(download_center.clone())),
@@ -715,6 +725,7 @@ async fn main() {
         // install on restart — otherwise a Mac that chose Apple Intelligence would
         // lose the selection across Core restarts.
         "apfel".into(),
+        "mesh-llm".into(),
         // Finally agents
         "zeroclaw".into(),
         "openclaw".into(),
@@ -803,6 +814,35 @@ async fn main() {
         Err(e) => boot_fail!("failed to open agent store: {e:#}"),
     };
     crate::agents::set_global(agent_store.clone());
+    // Output-style profiles now belong to agents. Initialise the shared registry
+    // before plugin activation and migrate the retired node-wide selection once,
+    // copying it to every existing agent so an upgrade does not change anyone's
+    // voice unexpectedly. New agents start with the explicit "agent's own voice"
+    // default; the old selection file is cleared only after the copy succeeds.
+    ryu_output_styles::set_data_dir(crate::paths::ryu_dir());
+    let legacy_output_style = ryu_output_styles::load_selection();
+    ryu_output_styles::set_global_registry(ryu_output_styles::OutputStyleRegistry::load());
+    if !crate::safe_mode::is_active() {
+        if let Some(style_id) = legacy_output_style {
+            match agent_store.migrate_legacy_output_style(&style_id).await {
+                Ok(migrated) => {
+                    tracing::info!(
+                        style = %style_id,
+                        agents = migrated,
+                        "migrated node-wide output style to agent personality profiles"
+                    );
+                    ryu_output_styles::set_selection(None);
+                }
+                Err(error) => tracing::warn!(
+                    style = %style_id,
+                    error = %error,
+                    "could not migrate node-wide output style; keeping the legacy selection"
+                ),
+            }
+        }
+    } else if legacy_output_style.is_some() {
+        tracing::info!("safe mode: deferring output-style profile migration");
+    }
     // Persisted agent teams (collections of agents + a coordination strategy) now
     // live OUT-OF-PROCESS in the `ryu-teams` sidecar (single owner of `teams.db`).
     // Core reaches them over loopback via `TeamsClient`, constructed below once the
@@ -1109,18 +1149,6 @@ async fn main() {
         .await
     {
         entitlement::set_managed_inference_entitled(&v);
-    }
-    if let Ok(Some(v)) = preferences
-        .get(entitlement::MARKETPLACE_APPS_ENTITLED_PREF_KEY)
-        .await
-    {
-        entitlement::set_marketplace_apps_entitled(&v);
-    }
-    if let Ok(Some(v)) = preferences
-        .get(entitlement::MARKETPLACE_DIRECT_LICENSED_ITEMS_PREF_KEY)
-        .await
-    {
-        entitlement::set_marketplace_direct_licensed_items(&v);
     }
     // Same for the Artificial Analysis API key, which enriches the model catalog
     // with independent benchmark stats (intelligence/speed/price).

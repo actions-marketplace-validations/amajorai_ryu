@@ -58,6 +58,11 @@ import {
 	type MessageSearchHit,
 	searchConversations,
 } from "@/src/lib/api/conversation-search.ts";
+import {
+	formatPricingLabel,
+	type MarketplaceCard,
+	searchMarketplaceCatalog,
+} from "@/src/lib/api/marketplace.ts";
 import { fireActivationEvent } from "@/src/lib/api/plugins.ts";
 import { indexChunk } from "@/src/lib/api/retrieval.ts";
 import { type ShadowSearchResult, searchShadow } from "@/src/lib/api/shadow.ts";
@@ -193,9 +198,13 @@ export function CommandPalette() {
 	const [shadowResults, setShadowResults] = useState<ShadowSearchResult[]>([]);
 	const [messageResults, setMessageResults] = useState<MessageSearchHit[]>([]);
 	const [spaceResults, setSpaceResults] = useState<SpaceLexicalHit[]>([]);
+	const [marketplaceResults, setMarketplaceResults] = useState<
+		MarketplaceCard[]
+	>([]);
 	const searchAbort = useRef<AbortController | null>(null);
 	const messageAbort = useRef<AbortController | null>(null);
 	const spaceAbort = useRef<AbortController | null>(null);
+	const marketplaceAbort = useRef<AbortController | null>(null);
 
 	// The palette toggle routes through the unified hotkey system so a rebind in
 	// Settings → Keyboard Shortcuts retargets it live. The custom event stays for
@@ -339,6 +348,37 @@ export function CommandPalette() {
 		return () => clearTimeout(handle);
 	}, [query, target.url, target.token]);
 
+	// The control-plane Marketplace is a separate public catalog from the
+	// node-scoped Store feed. Search it only after the user has typed a real query,
+	// and keep failures isolated so an unavailable Marketplace never breaks local
+	// commands, messages, pages, or captured context.
+	useEffect(() => {
+		const q = query.trim();
+		marketplaceAbort.current?.abort();
+		if (q.length < 2) {
+			setMarketplaceResults([]);
+			return;
+		}
+		setMarketplaceResults([]);
+		const controller = new AbortController();
+		marketplaceAbort.current = controller;
+		const handle = setTimeout(() => {
+			searchMarketplaceCatalog(q, 8, controller.signal)
+				.then((results) => {
+					if (!controller.signal.aborted) {
+						setMarketplaceResults(results);
+					}
+				})
+				.catch(() => {
+					// Marketplace search is an optional palette lane.
+				});
+		}, 250);
+		return () => {
+			clearTimeout(handle);
+			controller.abort();
+		};
+	}, [query]);
+
 	const close = () => {
 		setOpen(false);
 		setQuery("");
@@ -346,6 +386,7 @@ export function CommandPalette() {
 		setShadowResults([]);
 		setMessageResults([]);
 		setSpaceResults([]);
+		setMarketplaceResults([]);
 	};
 
 	const searchTabs = useMemo<CommandPaletteTab[]>(
@@ -353,6 +394,7 @@ export function CommandPalette() {
 			{ id: "all", label: "All" },
 			{ id: "messages", label: "Messages", icon: Chat01Icon },
 			{ id: "pages", label: "Pages", icon: DeliverySecure01Icon },
+			{ id: "marketplace", label: "Marketplace", icon: Package01Icon },
 			...commandSearchSections.map((section) => ({
 				icon: section.icon,
 				id: section.id,
@@ -432,6 +474,17 @@ export function CommandPalette() {
 			`/spaces/${encodeURIComponent(hit.spaceId)}/doc/${encodeURIComponent(hit.documentId)}`,
 			{ title: hit.title }
 		);
+		close();
+	};
+
+	const handleSelectMarketplace = (
+		card: MarketplaceCard,
+		queryText: string
+	) => {
+		openTab("/marketplace", {
+			initialStoreItem: { id: card.id, kind: card.kind },
+			initialStoreQuery: queryText,
+		});
 		close();
 	};
 
@@ -894,6 +947,18 @@ export function CommandPalette() {
 					trailing: resultMeta(hit.spaceName, hit.updatedAt),
 					icon: DeliverySecure01Icon,
 					onSelect: () => handleSelectPage(hit),
+				});
+			}
+			for (const card of marketplaceResults) {
+				items.push({
+					id: `marketplace-${card.kind}-${card.id}`,
+					group: "Marketplace",
+					title: card.name,
+					value: `${q} marketplace ${card.kind} ${card.id} ${card.description ?? ""} ${card.author ?? ""}`,
+					resultType: "marketplace",
+					trailing: card.pricing ? formatPricingLabel(card.pricing) : card.kind,
+					icon: Package01Icon,
+					onSelect: () => handleSelectMarketplace(card, q),
 				});
 			}
 			// "Remember" is listed last so it's never the auto-highlighted default

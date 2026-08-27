@@ -73,7 +73,6 @@ import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getActiveUserId, useSession } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
-import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import {
 	useCurrentTabId,
 	useTabsContext,
@@ -248,8 +247,6 @@ import {
 	runWorkflow,
 } from "@/src/lib/api/workflows.ts";
 import { createScheduledAgentWorkflow } from "@/src/lib/automations.ts";
-import { PlanCapError } from "@/src/lib/gating/planCapBridge.ts";
-import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
 import { getRealtimeJwt } from "@/src/lib/realtime/jwt.ts";
 import {
 	enrichTimelineJournal,
@@ -654,22 +651,6 @@ export function PluginHostPanel({
 		});
 		return () => observer.disconnect();
 	}, []);
-	// The managed-path numeric cap on monitors (free-tier gating). Read from the
-	// React entitlement context so the guard is always fresh — the `@ryu/monitors`
-	// companion re-applies it in `monitorsCreate` below (the old `useMonitors` hook
-	// that carried this gate is deleted with `MonitorsPage`). Caps live ONLY in the
-	// closed desktop layer (open-core rule, `planCapBridge.ts`), so this stays here,
-	// not in Core. A no-op off the managed path (self-host is uncapped).
-	const { guard, limitFor } = useEntityCap();
-	// Band-2 boolean gate for always-on workflow triggers (schedule / webhook /
-	// Composio). The `@ryu/workflows` companion re-applies it in `workflowsSave`
-	// below — the shell `TriggerConfig` that carried `canUse("local-background-runs")`
-	// was deleted with the shell canvas, and the sandboxed companion's own
-	// entitlement is stubbed (it cannot import `@ryu/auth`). Same open-core reasoning
-	// as the monitors cap: enforcement lives in the closed desktop layer, never Core
-	// (Core's scheduler fires triggers headlessly and carries no paywall). A no-op
-	// off the managed path (self-host is unrestricted).
-	const { canUse, requestUpgrade } = useEntitlementContext();
 	// The shell Settings dialog opener — the `@ryu/quests` companion's detection-
 	// settings gear opens Settings → Quests through the `questsOpenDetectionSettings`
 	// bridge verb (the QuestsSettings tab stays a shell surface; the extracted page's
@@ -1237,16 +1218,7 @@ export function PluginHostPanel({
 			// the same @ryu/monitors enabled bit, so no Core bridge verb is needed.
 			monitorsList: () => listMonitors(toTarget(node)),
 			monitorsGet: ({ id }) => getMonitor(toTarget(node), id),
-			// The paywall gate: re-applied here because deleting `useMonitors` dropped
-			// it. Fetch the live count, then the fresh React `guard` (opens the upgrade
-			// modal in the shell + throws) — the throw crosses the bridge as a denial.
-			monitorsCreate: async (input) => {
-				const existing = await listMonitors(toTarget(node));
-				if (!guard("maxMonitors", existing.length)) {
-					throw new PlanCapError("maxMonitors", limitFor("maxMonitors"));
-				}
-				return createMonitor(toTarget(node), input);
-			},
+			monitorsCreate: (input) => createMonitor(toTarget(node), input),
 			monitorsUpdate: ({ id, input }) =>
 				updateMonitor(toTarget(node), id, input),
 			monitorsDelete: async ({ id }) => {
@@ -1265,23 +1237,7 @@ export function PluginHostPanel({
 			// definition CRUD (workflows:crud)
 			workflowsList: () => fetchWorkflows(toTarget(node)),
 			workflowsGet: ({ id }) => fetchWorkflow(toTarget(node), id),
-			workflowsSave: (def) => {
-				// Gate always-on triggers: a free (Band-1) workflow runs manually only;
-				// any schedule / webhook / Composio trigger is a Band-2 "background runs"
-				// feature. Deny at save (opens the shell upgrade modal + throws, crossing
-				// the bridge as a denial) so a stubbed in-frame entitlement can't smuggle
-				// a background trigger past the paywall.
-				const wantsBackground = (
-					(def as { triggers?: { type?: string }[] }).triggers ?? []
-				).some((t) => t?.type && t.type !== "manual");
-				if (wantsBackground && !canUse("local-background-runs")) {
-					requestUpgrade();
-					throw new Error(
-						"Background workflow runs (schedule / webhook / Composio triggers) require a Lifetime license or a subscription."
-					);
-				}
-				return createWorkflow(toTarget(node), def);
-			},
+			workflowsSave: (def) => createWorkflow(toTarget(node), def),
 			workflowsDelete: async ({ id }) => {
 				await deleteWorkflow(toTarget(node), id);
 			},
@@ -2126,10 +2082,6 @@ export function PluginHostPanel({
 			companion.name,
 			companion.pluginId,
 			assistantOwner,
-			guard,
-			limitFor,
-			canUse,
-			requestUpgrade,
 			openGateway,
 			openTab,
 			updateTabTitle,

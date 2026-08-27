@@ -20,9 +20,9 @@ use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 
 use super::conversations::StoredMessage;
-use super::sync::{SyncMessage, SyncPayload, apply_sync_payload};
+use super::sync::{apply_sync_payload, SyncMessage, SyncPayload};
 use super::{
-    ServerState, caller_tenancy, json_error, require_resource_read, require_resource_write,
+    caller_tenancy, json_error, require_resource_read, require_resource_write, ServerState,
 };
 use crate::identity_verify::VerifiedCaller;
 

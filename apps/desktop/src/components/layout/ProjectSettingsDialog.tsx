@@ -9,6 +9,7 @@ import {
 	Folder03Icon,
 	FolderAddIcon,
 	PlayIcon,
+	SourceCodeIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button.tsx";
@@ -28,6 +29,7 @@ import { Textarea } from "@ryu/ui/components/textarea.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { useEffect, useRef, useState } from "react";
 import { NodeFolderBrowser } from "@/src/components/chat/NodeFolderBrowser.tsx";
+import { CloneFolderDialog } from "@/src/components/chat/ProjectPicker.tsx";
 import { MarkdownEditor } from "@/src/components/editor/MarkdownEditor.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { request } from "@/src/lib/api/client.ts";
@@ -119,6 +121,7 @@ export function ProjectSettingsDialog({
 	} | null>(null);
 	const [sourceFolders, setSourceFolders] = useState<string[]>([]);
 	const [browseOpen, setBrowseOpen] = useState(false);
+	const [cloneOpen, setCloneOpen] = useState(false);
 
 	// Reset + load when the dialog opens for a path.
 	useEffect(() => {
@@ -417,14 +420,24 @@ export function ProjectSettingsDialog({
 										</div>
 									))
 								)}
-								<button
-									className="flex w-full items-center gap-3 border-t px-3 py-2 text-muted-foreground text-sm transition-colors hover:bg-muted/40 hover:text-foreground"
-									onClick={() => setBrowseOpen(true)}
-									type="button"
-								>
-									<HugeiconsIcon className="size-4" icon={FolderAddIcon} />
-									Add folder
-								</button>
+								<div className="flex border-t">
+									<button
+										className="flex flex-1 items-center gap-3 px-3 py-2 text-muted-foreground text-sm transition-colors hover:bg-muted/40 hover:text-foreground"
+										onClick={() => setBrowseOpen(true)}
+										type="button"
+									>
+										<HugeiconsIcon className="size-4" icon={FolderAddIcon} />
+										Add folder
+									</button>
+									<button
+										className="flex flex-1 items-center gap-3 border-l px-3 py-2 text-muted-foreground text-sm transition-colors hover:bg-muted/40 hover:text-foreground"
+										onClick={() => setCloneOpen(true)}
+										type="button"
+									>
+										<HugeiconsIcon className="size-4" icon={SourceCodeIcon} />
+										Clone from GitHub
+									</button>
+								</div>
 							</div>
 						</section>
 
@@ -652,6 +665,18 @@ export function ProjectSettingsDialog({
 					);
 				}}
 				open={browseOpen}
+			/>
+			<CloneFolderDialog
+				activate={false}
+				onFolderSelected={(selected) => {
+					setSourceFolders((current) =>
+						current.some((folder) => sameFolder(folder, selected))
+							? current
+							: [...current, selected]
+					);
+				}}
+				onOpenChange={setCloneOpen}
+				open={cloneOpen}
 			/>
 		</>
 	);

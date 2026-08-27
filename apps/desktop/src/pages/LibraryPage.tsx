@@ -251,7 +251,7 @@ const TYPE_META: Record<
 	workflow: { label: "Workflow", icon: WorkflowCircle06Icon },
 	chat: { label: "Chat", icon: SECTION_ICONS.chats },
 	space: { label: "Space", icon: DeliverySecure01Icon },
-	team: { label: "Team", icon: UserMultiple02Icon },
+	team: { label: "Group", icon: UserMultiple02Icon },
 	meeting: { label: "Meeting", icon: AudioWave01Icon },
 	channel: { label: "Channel", icon: SECTION_ICONS.channels },
 	identity: { label: "Identity", icon: SECTION_ICONS.identities },
@@ -1306,7 +1306,7 @@ function LibraryCollections({
 			case "space":
 				return { label: "New space", onCta: () => setSpaceDialogOpen(true) };
 			case "team":
-				return { label: "New team", onCta: () => openTeam(null) };
+				return { label: "New group", onCta: () => openTeam(null) };
 			case "meeting":
 				// `/meetings` is owned by the not-pre-installed `@ryu/meetings` app and
 				// resolves through the companion-alias catch-all, so with no enabled
@@ -1445,7 +1445,7 @@ function LibraryCollections({
 		workflow: "Build an automation on the workflow canvas.",
 		chat: "Start a new chat to see it here.",
 		space: "Create a space to give your agents a knowledge base.",
-		team: "Group several agents into a team.",
+		team: "Group several agents into a group.",
 		meeting: "Record a meeting to get AI-written notes.",
 		channel: "Connect a Telegram, Slack, WhatsApp, or Discord bot.",
 		identity: "Save a login profile agents can reuse on the web.",

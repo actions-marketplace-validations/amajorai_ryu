@@ -95,7 +95,7 @@ const PATH_TITLES: Record<string, string> = {
 	"/chat": "New chat",
 	"/home": "Home",
 	"/agents": "Agents",
-	"/teams": "Teams",
+	"/teams": "Groups",
 	"/engines": "Engines",
 	"/models": "Models",
 	"/skills": "Skills",

@@ -429,8 +429,8 @@ export async function installModelFile(
 		}>(target, "/api/models/catalog/install", {
 			method: "POST",
 			body: { id, file, format: "gguf" },
-			// Forward the buyer's control-plane session so a PAID marketplace item's
-			// entitlement check (#491) can resolve the org + license. Free items ignore it.
+			// Forward the buyer's control-plane session for optional Marketplace
+			// account-aware operations. It is not required for installation.
 			headers: buyerTokenHeader(target),
 		});
 	} catch (err) {

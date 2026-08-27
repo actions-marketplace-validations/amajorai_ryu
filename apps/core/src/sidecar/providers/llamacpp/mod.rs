@@ -3,6 +3,7 @@ pub mod downloader;
 pub mod embed;
 pub mod process;
 pub mod rerank;
+pub mod speech;
 pub mod variant;
 
 pub use classify::LlamaCppClassifyManager;
@@ -10,6 +11,7 @@ pub use downloader::LlamaCppDownloader;
 pub use embed::LlamaCppEmbedManager;
 pub use process::LlamaCppProcess;
 pub use rerank::LlamaCppRerankManager;
+pub use speech::LlamaCppSpeechManager;
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};

@@ -38,6 +38,7 @@ use utoipa::OpenApi;
         (name = "Prompt Evals", description = "Promptfoo-compatible suites, runs, versions, and human review."),
         (name = "Teams", description = "Agent teams + members."),
         (name = "MCP", description = "MCP servers, tools, catalog, sandbox."),
+        (name = "Actions", description = "Canonical governed Action calls."),
         (name = "Tools", description = "Unified tool catalog (search/describe) + PTC exec."),
         (name = "Chat", description = "Chat, channels, delegation."),
         (name = "Retrieval", description = "Chunk indexing + search."),
@@ -181,6 +182,7 @@ use utoipa::OpenApi;
         super::create_mcp_server,
         super::list_mcp_tools,
         super::call_mcp_tool,
+        super::call_action,
         super::exec_scan,
         super::tools_search,
         super::tools_describe,
@@ -339,6 +341,7 @@ use utoipa::OpenApi;
         super::acp_logout,
         super::agent_capabilities,
         super::usage_api::agent_usage,
+        super::usage_api::provider_account_usage,
         super::usage_api::provider_credits,
         super::usage_review::get_review,
         super::usage_review::get_settings,
@@ -415,6 +418,7 @@ use utoipa::OpenApi;
         // Gateway
         super::engine_concurrency,
         // Git
+        super::git::clone_project_folder,
         super::git::create_project_folder,
         super::git::git_branches,
         super::git::git_checkout,
@@ -561,6 +565,9 @@ use utoipa::OpenApi;
         // Voice
         super::voice::speak,
         super::voice::transcribe,
+        super::voice::speech_processing,
+        super::voice::speech_processing_engines,
+        super::voice::speech_processing_model_install,
         super::voice::tts_engines,
         super::voice::tts_models,
         super::voice::tts_models_install,

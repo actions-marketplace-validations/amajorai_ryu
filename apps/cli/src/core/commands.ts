@@ -22,7 +22,7 @@ export type CommandName =
 	| "rename"
 	| "delete"
 	| "sessions"
-	| "team"
+	| "group"
 	| "goal"
 	| "proof"
 	| "receipt"
@@ -451,10 +451,10 @@ export const COMMAND_SPECS = [
 		handler: noArgumentOverlay("session-list"),
 	},
 	{
-		name: "team",
-		aliases: [],
-		description: "route turns to a team",
-		usage: "/team [team-id|clear]",
+		name: "group",
+		aliases: ["team"],
+		description: "route turns to a group",
+		usage: "/group [group-id|clear]",
 		completion: "command",
 		mode: "local",
 		handler: (context) =>

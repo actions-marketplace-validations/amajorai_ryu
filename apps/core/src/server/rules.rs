@@ -275,7 +275,9 @@ fn add_rule(path: &Path, root: &Path, state: &mut DiscoveryState) {
     if !state.seen_files.insert(canonical_file.clone()) {
         return;
     }
-    let Ok(bytes) = fs::read(&canonical_file) else { return };
+    let Ok(bytes) = fs::read(&canonical_file) else {
+        return;
+    };
     if bytes.is_empty() || bytes.len() > MAX_TOTAL_BYTES.saturating_sub(state.bytes) {
         return;
     }
