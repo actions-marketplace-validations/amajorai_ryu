@@ -3,6 +3,10 @@
   "version": "0.2.2",
   "type": "module",
   "description": "Scaffold a starter Ryu SDK project with a Runnable, gateway-pointed model config, and manifest.json manifest",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amajorai/ryu"
+  },
   "bin": {
     "create-ryu-app": "./dist/index.js"
   },

@@ -3,6 +3,10 @@
   "version": "0.2.2",
   "type": "module",
   "description": "TypeScript client SDK for embedding a Ryu Core agent in any app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amajorai/ryu"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

@@ -42,6 +42,14 @@ jobs:
         # monorepo, so the mirrored bun.lock never matches the subset and a frozen
         # install fails ("lockfile had changes"). Let bun resolve the public tree.
         run: bun install
+      - name: Build packages
+        run: |
+          set -e
+          for pkg in packages/client packages/sdk packages/create-ryu-app; do
+            echo "::group::build $pkg"
+            (cd "$pkg" && bun run build)
+            echo "::endgroup::"
+          done
       - name: Publish packages
         if: env.HAS_NPM == 'true'
         env:
@@ -50,6 +58,6 @@ jobs:
           set -e
           for pkg in packages/client packages/sdk packages/create-ryu-app; do
             echo "::group::publish $pkg"
-            (cd "$pkg" && npm publish --access public --provenance) || echo "publish $pkg failed (already published or build step needed)"
+            (cd "$pkg" && npm publish --access public --provenance)
             echo "::endgroup::"
           done

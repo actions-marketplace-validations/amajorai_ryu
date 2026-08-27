@@ -3,6 +3,10 @@
   "version": "0.2.2",
   "type": "module",
   "description": "Ryu developer SDK: typed builders and CLI for authoring manifest.json Plugin bundles",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amajorai/ryu"
+  },
   "main": "./dist/index.cjs",
   "types": "./dist/index.d.ts",
   "exports": {
