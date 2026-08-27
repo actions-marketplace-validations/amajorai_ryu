@@ -21,6 +21,11 @@ paths = [
   # is now pruned from the public tree, but the allowlist keeps history scans
   # honest about its bundled third-party credential-like strings.
   '''apps/desktop/e2e/harness/dist-private-team-visibility-proof/.*''',
+  # The generated goal-completion proof was present in an earlier public mirror
+  # commit. Its browser clear-key UUID fixtures and shortcut text are test data,
+  # not credentials; the current overlay prunes the bundle, and this history
+  # allowlist keeps the full-history CI scan honest.
+  '''apps/desktop/e2e/harness/dist-goal-completion-proof/.*''',
   # Desktop build-time env. Every value here is `VITE_`-prefixed, which means Vite
   # INLINES it into the shipped bundle — the PostHog project key and Sentry DSN are
   # public client identifiers present in every released binary, by design. Publishing
