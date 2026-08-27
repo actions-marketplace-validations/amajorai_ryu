@@ -46,6 +46,7 @@
     "@platejs/docx-io": "53.0.8",
     "@platejs/yjs": "^53.2.0",
     "@ryu/app-host": "workspace:*",
+    "@ryu/assistant-widget": "workspace:*",
     "@ryu/auth": "workspace:*",
     "@ryu/blocks": "workspace:*",
     "@ryu/command": "workspace:*",

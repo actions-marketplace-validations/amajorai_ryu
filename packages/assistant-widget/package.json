@@ -1,0 +1,38 @@
+{
+  "name": "@ryu/assistant-widget",
+  "version": "0.2.2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./chat": "./src/chat.tsx",
+    "./core-chat": "./src/core-chat.tsx",
+    "./docs-assistant": "./src/docs-assistant.ts",
+    "./iframe": "./src/iframe.tsx",
+    "./morph": "./src/morph.tsx",
+    "./surface": "./src/surface.tsx"
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "@ai-sdk/react": "catalog:",
+    "@ryu/blocks": "workspace:*",
+    "@ryu/browser-local-ai": "workspace:*",
+    "@ryu/ui": "workspace:*",
+    "ai": "catalog:",
+    "lucide-react": "catalog:",
+    "motion": "^12.38.0"
+  },
+  "peerDependencies": {
+    "react": "^19",
+    "react-dom": "^19"
+  },
+  "devDependencies": {
+    "@ryu/config": "workspace:*",
+    "@types/bun": "catalog:",
+    "@types/react": "^19.2.10",
+    "@types/react-dom": "catalog:",
+    "typescript": "^5"
+  }
+}

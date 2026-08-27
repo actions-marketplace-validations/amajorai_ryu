@@ -1,0 +1,119 @@
+"use client";
+
+import { AgentChat } from "@ryu/blocks/desktop/agent-elements/agent-chat";
+import {
+	InputBar,
+	type InputBarProps,
+} from "@ryu/blocks/desktop/agent-elements/input-bar";
+import type { AgentChatProps } from "@ryu/blocks/desktop/agent-elements/types";
+import type { ReactNode } from "react";
+import {
+	type AssistantWidgetPlacement,
+	type RyuAssistantRecentChat,
+	RyuAssistantRecentChats,
+	RyuAssistantWidgetFrame,
+	RyuAssistantWidgetHeader,
+} from "./surface";
+
+/**
+ * A complete shared assistant surface. The host supplies chat state and transport
+ * callbacks; Ryu owns the transcript, composer, compact layout, recent-chat handoff,
+ * and surface chrome so consumers do not rebuild the Desktop assistant by hand.
+ */
+export interface RyuAssistantChatProps
+	extends Omit<AgentChatProps, "density" | "emptyStateFooter" | "slots"> {
+	actions?: ReactNode;
+	closeLabel?: string;
+	closeTitle?: string;
+	density?: AgentChatProps["density"];
+	divider?: boolean;
+	footer?: ReactNode;
+	minimal?: boolean;
+	onClose?: () => void;
+	onSelectRecentChat?: (id: string) => void;
+	placement?: AssistantWidgetPlacement;
+	recentChats?: readonly RyuAssistantRecentChat[];
+	showHeader?: boolean;
+	slots?: AgentChatProps["slots"];
+	testId?: string;
+	title?: ReactNode;
+}
+
+function MinimalInputBar(props: InputBarProps) {
+	return (
+		<InputBar
+			{...props}
+			compact
+			leftActions={null}
+			onGenerateImage={undefined}
+			onGenerateVideo={undefined}
+			rightActions={null}
+			voiceMode={undefined}
+		/>
+	);
+}
+
+export function RyuAssistantChat({
+	actions,
+	closeLabel,
+	closeTitle,
+	divider,
+	density,
+	footer,
+	minimal,
+	onClose,
+	onSelectRecentChat,
+	placement = "inline",
+	recentChats,
+	showHeader = true,
+	slots,
+	testId,
+	title,
+	...chatProps
+}: RyuAssistantChatProps) {
+	const isMinimal = minimal ?? placement === "floating";
+	const recentFooter =
+		recentChats && onSelectRecentChat ? (
+			<RyuAssistantRecentChats
+				items={recentChats}
+				onSelect={onSelectRecentChat}
+			/>
+		) : null;
+	const emptyStateFooter =
+		footer || recentFooter ? (
+			<>
+				{footer}
+				{recentFooter}
+			</>
+		) : undefined;
+	const resolvedSlots = isMinimal
+		? { ...slots, InputBar: slots?.InputBar ?? MinimalInputBar }
+		: slots;
+
+	return (
+		<RyuAssistantWidgetFrame ariaLabel="Ryu assistant" placement={placement}>
+			{showHeader ? (
+				<RyuAssistantWidgetHeader
+					actions={actions}
+					closeLabel={closeLabel}
+					closeTitle={closeTitle}
+					divider={divider ?? placement === "docked"}
+					onClose={onClose}
+					testId={testId}
+					title={title ?? (isMinimal ? "New chat" : "Chat")}
+				/>
+			) : null}
+			<div className="min-h-0 flex-1">
+				<AgentChat
+					{...chatProps}
+					density={isMinimal ? "compact" : density}
+					emptyStateFooter={emptyStateFooter}
+					emptyStatePosition={
+						isMinimal ? "default" : chatProps.emptyStatePosition
+					}
+					slots={resolvedSlots}
+				/>
+			</div>
+		</RyuAssistantWidgetFrame>
+	);
+}
