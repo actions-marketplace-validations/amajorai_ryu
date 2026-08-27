@@ -7,6 +7,7 @@ export default defineConfig({
 		"agent-plugin": "src/agent-plugin.ts",
 		cli: "src/cli.ts",
 		agent: "src/agent/index.ts",
+		action: "src/runnable/action.ts",
 		model: "src/model/index.ts",
 		mcp: "src/mcp/index.ts",
 		"mcp/server": "src/mcp/server.ts",

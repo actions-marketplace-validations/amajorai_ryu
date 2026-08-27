@@ -1,6 +1,7 @@
 /**
- * Runnable — the single contract unifying Agent, Workflow, Tool, and Skill
- * in the Ryu SDK.
+ * Runnable — the execution contract unifying Agent, Workflow, Tool, and Skill
+ * in the Ryu SDK. `defineAction` is the governed business-operation facade over
+ * the Tool kind.
  *
  * Design rules (from the M8 spike doc packages/sdk/README.md):
  *   - An agent may invoke a workflow as a named tool.
@@ -12,6 +13,14 @@
  * import from `@ryuhq/sdk/runnable` as a single entry point.
  */
 
+export type {
+	ActionAnnotations,
+	ActionEffect,
+	ActionManifestOptions,
+	ActionOptions,
+	ActionRunnable,
+} from "./action.ts";
+export { defineAction } from "./action.ts";
 export type {
 	AgentCard,
 	AgentManifestOptions,
@@ -57,7 +66,12 @@ export type {
 } from "./runnable-types.ts";
 export type { SkillOptions } from "./skill.ts";
 export { defineSkill } from "./skill.ts";
-export type { JsonSchemaProperty, ToolOptions, ToolSchema } from "./tool.ts";
+export type {
+	InlineToolManifestOptions,
+	JsonSchemaProperty,
+	ToolOptions,
+	ToolSchema,
+} from "./tool.ts";
 export { defineTool } from "./tool.ts";
 export type { WorkflowOptions, WorkflowStep } from "./workflow.ts";
 export { defineWorkflow } from "./workflow.ts";

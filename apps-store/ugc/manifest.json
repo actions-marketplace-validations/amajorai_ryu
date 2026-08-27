@@ -52,8 +52,6 @@
           { "path": "/", "method": "GET", "permission": "ugc.view" },
           { "path": "/health" },
           { "path": "/platforms", "method": "GET", "permission": "ugc.view" },
-          { "path": "/settings", "permission": "ugc.manage" },
-          { "path": "/settings/composio-key", "permission": "ugc.manage" },
           { "path": "/campaigns", "method": "GET", "permission": "ugc.view" },
           {
             "path": "/campaigns",

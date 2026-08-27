@@ -55,12 +55,16 @@ export interface ToolSchema {
 	required?: string[];
 	/** Type is always "object" for a tool's top-level input schema. */
 	type: "object";
+	/** Preserve additional JSON Schema keywords for Core/MCP consumers. */
+	[key: string]: unknown;
 }
 
 // ── Options ───────────────────────────────────────────────────────────────────
 
 /** Options accepted by `defineTool`. */
 export interface ToolOptions<TInput extends Record<string, unknown>, TOutput> {
+	/** Optional description surfaced to models and tool discovery. */
+	description?: string;
 	/** Stable unique identifier (e.g. "tool-web-search"). */
 	id: string;
 	/** Human-readable display name. */
@@ -171,6 +175,8 @@ export interface ToolRunnable<
 	 * the sandbox form is the second parameter aliased to `host`.
 	 */
 	readonly code: string;
+	/** Optional description surfaced to models and tool discovery. */
+	readonly description?: string;
 	readonly kind: "tool";
 	/** JSON Schema for this tool's input — compatible with Core's ToolInfo.schema. */
 	readonly schema: ToolSchema;
@@ -211,7 +217,7 @@ export function defineTool<
 	TInput extends Record<string, unknown> = Record<string, unknown>,
 	TOutput = unknown,
 >(options: ToolOptions<TInput, TOutput>): ToolRunnable<TInput, TOutput> {
-	const { id, name, schema, run } = options;
+	const { description, id, name, schema, run } = options;
 
 	// Serialize the run body for Core's `inline_deno` backend — the same approach
 	// `defineTurnHook` uses: the sandbox wraps this in an async IIFE where `input`
@@ -223,12 +229,27 @@ export function defineTool<
 		name,
 		kind: "tool",
 		schema,
+		...(description === undefined ? {} : { description }),
 		code,
 		run(input: TInput, ctx: RunnableContext): Promise<TOutput> {
 			validateInput(input, schema, id);
 			return run(input, ctx);
 		},
 	} satisfies ToolRunnable<TInput, TOutput>;
+}
+
+/** Optional metadata lowered alongside a tool's executable backend. */
+export interface InlineToolManifestOptions {
+	/** Marks the entry as a semantic Ryu Action. */
+	action?: boolean;
+	/** MCP-style effect annotations, for example `readOnlyHint`. */
+	annotations?: Record<string, boolean | undefined>;
+	/** Description shown in Core's unified tool catalog. */
+	description?: string;
+	/** Force the human approval gate before the tool runs. */
+	needsApproval?: boolean;
+	/** JSON Schema for the structured result. */
+	outputSchema?: Record<string, unknown>;
 }
 
 /**
@@ -242,8 +263,8 @@ export function defineTool<
  * The plugin must declare the `tool:execute` grant (see `definePlugin`).
  */
 export function inlineToolRunnable(
-	tool: Pick<ToolRunnable, "code" | "id" | "name" | "schema">,
-	options?: { description?: string }
+	tool: Pick<ToolRunnable, "code" | "description" | "id" | "name" | "schema">,
+	options?: InlineToolManifestOptions
 ): RunnableMeta {
 	return {
 		id: tool.id,
@@ -254,7 +275,17 @@ export function inlineToolRunnable(
 			backend: "inline_deno",
 			code: tool.code,
 			input_schema: tool.schema,
-			...(options?.description ? { description: options.description } : {}),
+			...(options?.description === undefined
+				? tool.description === undefined
+					? {}
+					: { description: tool.description }
+				: { description: options.description }),
+			...(options?.outputSchema ? { output_schema: options.outputSchema } : {}),
+			...(options?.annotations ? { annotations: options.annotations } : {}),
+			...(options?.action === undefined ? {} : { action: options.action }),
+			...(options?.needsApproval === undefined
+				? {}
+				: { needs_approval: options.needsApproval }),
 		},
 	};
 }

@@ -76,6 +76,7 @@ describe("scaffold rejects bad input", () => {
 		// The app template must be offered too — it is the only one that scaffolds a
 		// satellite, and a list that omits it hides the whole shape.
 		expect(stderr).toContain("app");
+		expect(stderr).toContain("action");
 	});
 
 	it("an existing target directory → exits without overwriting", () => {

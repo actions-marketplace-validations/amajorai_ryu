@@ -28,7 +28,8 @@ import { callTool, listTools, MCP_PROTOCOL_VERSION } from "./client.ts";
 /** JSON Schema fragment — enough to describe a tool's input arguments. */
 export interface JsonSchema {
 	description?: string;
-	properties?: Record<string, JsonSchema>;
+	/** Property schemas may use any JSON Schema dialect or nested shape. */
+	properties?: Record<string, unknown>;
 	required?: string[];
 	type?: string;
 	[key: string]: unknown;

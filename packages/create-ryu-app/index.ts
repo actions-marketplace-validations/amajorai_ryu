@@ -12,8 +12,8 @@
  *             touches Core or the Gateway. Template: `app`.
  *   PLUGIN  — a manifest of CONTRIBUTIONS Core and the desktop render in-process:
  *             runnables, turn hooks, widgets, composer controls, a companion
- *             panel. No sidecar, no port. Templates: `agent`, `hook-plugin`,
- *             `ryu-app`, `companion-plugin`.
+ *             panel. No sidecar, no port. Templates: `agent`, `action`,
+ *             `hook-plugin`, `ryu-app`, `companion-plugin`.
  *
  * Every template emits a directory `<name>/` containing:
  *   manifest.json  — the manifest (validated against PluginManifestSchema)
@@ -88,6 +88,11 @@ const TEMPLATES: Record<string, TemplateSpec> = {
 		kind: "plugin",
 		summary: "a loop-owning Runnable agent (Agent + ryuTool)",
 		devEntry: "src/agent.ts",
+	},
+	action: {
+		kind: "plugin",
+		summary: "a governed business action (defineAction)",
+		devEntry: "src/action.ts",
 	},
 	"hook-plugin": {
 		kind: "plugin",

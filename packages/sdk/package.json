@@ -26,6 +26,11 @@
       "import": "./dist/agent.js",
       "require": "./dist/agent.cjs"
     },
+    "./action": {
+      "types": "./dist/action.d.ts",
+      "import": "./dist/action.js",
+      "require": "./dist/action.cjs"
+    },
     "./model": {
       "types": "./dist/model.d.ts",
       "import": "./dist/model.js",

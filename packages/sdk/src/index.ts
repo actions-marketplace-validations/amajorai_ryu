@@ -116,6 +116,14 @@ export type {
 } from "./plugin/ryu-plugin.ts";
 export { toDisposable } from "./plugin/ryu-plugin.ts";
 export type {
+	ActionAnnotations,
+	ActionEffect,
+	ActionManifestOptions,
+	ActionOptions,
+	ActionRunnable,
+} from "./runnable/action.ts";
+export { defineAction } from "./runnable/action.ts";
+export type {
 	AgentCard,
 	AgentManifestOptions,
 	AgentOptions,
@@ -164,6 +172,7 @@ export type {
 export type { SkillOptions } from "./runnable/skill.ts";
 export { defineSkill } from "./runnable/skill.ts";
 export type {
+	InlineToolManifestOptions,
 	JsonSchemaProperty,
 	ToolOptions,
 	ToolRunnable,

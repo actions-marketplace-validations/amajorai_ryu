@@ -106,6 +106,56 @@ describe("create-ryu-app scaffold (agent, default)", () => {
 	});
 });
 
+// ── action template ──────────────────────────────────────────────────────────
+
+describe("create-ryu-app scaffold (action)", () => {
+	let tmpDir: string;
+	let projectDir: string;
+
+	beforeAll(() => {
+		tmpDir = join(import.meta.dir, `__test-action-${Date.now()}`);
+		projectDir = scaffold("my-action", tmpDir, "action");
+	});
+
+	afterAll(() => {
+		if (existsSync(tmpDir)) {
+			rmSync(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	it("produces an action source, manifest, and package", () => {
+		for (const file of ["manifest.json", "src/action.ts", "package.json"]) {
+			expect(existsSync(join(projectDir, file))).toBe(true);
+		}
+	});
+
+	it("declares a governed action with structured output and approval", () => {
+		const parsed = readManifest(projectDir);
+		const action = parsed.runnables.find((r) => r.id === "action-main");
+		expect(action).toMatchObject({
+			name: "Main Action",
+			kind: "tool",
+		});
+		expect(action?.config).toMatchObject({
+			action: true,
+			backend: "inline_deno",
+			needs_approval: true,
+			annotations: {
+				destructiveHint: true,
+				readOnlyHint: false,
+			},
+		});
+		expect(action?.config?.output_schema).toBeDefined();
+	});
+
+	it("source uses defineAction from the public SDK", () => {
+		const src = readFileSync(join(projectDir, "src/action.ts"), "utf8");
+		expect(src).toContain('import { defineAction } from "@ryuhq/sdk"');
+		expect(src).toContain("needsApproval: true");
+		expect(src).toContain('effect: "mutate"');
+	});
+});
+
 // ── a Ryu-branded project name never crashes the manifest gate ─────────────────
 
 describe("create-ryu-app scaffold (Ryu-branded name)", () => {

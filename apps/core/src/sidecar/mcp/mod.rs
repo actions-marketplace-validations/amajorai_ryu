@@ -1629,6 +1629,8 @@ pub struct WidgetResource {
 struct SelfBuildToolMetadata {
     description: Option<String>,
     input_schema: Option<Value>,
+    output_schema: Option<Value>,
+    annotations: Option<Value>,
     widget: Option<WidgetBinding>,
 }
 
@@ -1691,6 +1693,8 @@ fn self_build_tool_metadata(
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 input_schema: config.get("input_schema").cloned(),
+                output_schema: config.get("output_schema").cloned(),
+                annotations: config.get("annotations").cloned(),
                 widget,
             });
         }
@@ -2279,6 +2283,10 @@ struct ResolvedAppTool {
     /// Optional active-compute deadline for an inline sandbox tool. The value is
     /// clamped at dispatch so a manifest cannot create an unbounded execution.
     timeout_secs: Option<u64>,
+    /// Whether the owning manifest explicitly requires human approval before
+    /// dispatch. This is kept beside the resolved backend so the approval path
+    /// and execution path read the same live manifest record.
+    needs_approval: bool,
 }
 
 /// The config-driven MCP server registry. Cheap to clone-share via `Arc`.
@@ -3642,6 +3650,8 @@ impl McpRegistry {
                 if let Some(metadata) = self_build_tool_metadata(&manifests, &tool.id) {
                     tool.description = metadata.description.or(tool.description);
                     tool.input_schema = metadata.input_schema.or(tool.input_schema);
+                    tool.output_schema = metadata.output_schema.or(tool.output_schema);
+                    tool.annotations = metadata.annotations.or(tool.annotations);
                     tool.widget = metadata.widget.clone().or(tool.widget);
                     tool.widget_accessible = tool
                         .widget
@@ -3991,6 +4001,7 @@ impl McpRegistry {
             .as_ref()
             .map(|record| record.approval_tools.clone())
             .unwrap_or_default();
+        let mut action_needs_approval = false;
         // An `app.…` id's action segment is plugin-chosen and can look benign
         // while its manifest-fixed alias target is risky (`gmail.send_email`),
         // so the gate must classify the RESOLVED target — plugin naming must not
@@ -3998,10 +4009,13 @@ impl McpRegistry {
         // keep their own grant gates and classify under the outer id.
         let gate_id: String = if is_app_tool_id(tool_id) {
             match self.resolve_app_tool_backend(tool_id).await {
-                Some(resolved) => match resolved.backend {
-                    crate::plugin_manifest::schema::ToolBackend::Alias { target } => target,
-                    _ => tool_id.to_owned(),
-                },
+                Some(resolved) => {
+                    action_needs_approval = resolved.needs_approval;
+                    match resolved.backend {
+                        crate::plugin_manifest::schema::ToolBackend::Alias { target } => target,
+                        _ => tool_id.to_owned(),
+                    }
+                }
                 // Legacy alias re-enter: the target is the id after the prefix.
                 None => tool_id
                     .strip_prefix(APP_TOOL_PREFIX)
@@ -4023,6 +4037,14 @@ impl McpRegistry {
                 )
             })
             .transpose()?;
+        if action_needs_approval && !agent_approval_tools.iter().any(|id| id == &gate_id) {
+            // An Action's explicit `needsApproval` is stronger than the global
+            // smart-mode name heuristic: its author declared the side effect
+            // consequential even if the slug is innocuous (for example,
+            // `crm.save`). Reuse Layer A so the existing approval queue,
+            // persistence, and no-gate re-dispatch remain the single path.
+            agent_approval_tools.push(gate_id.clone());
+        }
         if agent_record.as_ref().is_some_and(|record| {
             record.safety_profile == crate::agents::AgentSafetyProfile::ApprovalRequired
         }) && effect.is_some_and(|effect| !effect.is_read_only())
@@ -4543,13 +4565,12 @@ impl McpRegistry {
                         // not an authorization identity. Never let it choose a
                         // plugin-storage tenant; the bridge falls back to the
                         // active local account when no verified caller is present.
-                        let bridge = std::sync::Arc::new(
-                            crate::plugin_host::PluginHookBridge::new(
+                        let bridge =
+                            std::sync::Arc::new(crate::plugin_host::PluginHookBridge::new(
                                 resolved.plugin_id.clone(),
                                 resolved.grants.clone(),
                                 state,
-                            ),
-                        );
+                            ));
                         let invoker = std::sync::Arc::new(
                             crate::tool_exec::SandboxToolInvoker::bridge(bridge),
                         );
@@ -5903,6 +5924,7 @@ impl McpRegistry {
                     plugin_id: manifest.id.clone(),
                     permissions: manifest.permissions.clone(),
                     timeout_secs: cfg.timeout_secs,
+                    needs_approval: cfg.needs_approval.unwrap_or(false),
                 });
             }
         }
@@ -6164,6 +6186,7 @@ pub use crate::runnable::self_build::SERVER_NAME as SELF_BUILD_SERVER;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// Serializes the tests that mutate the process-global `RYU_MCP_CONFIG` env
     /// var (they point `load`/`reload` at different temp configs). Poison-tolerant.
@@ -8397,6 +8420,55 @@ mod tests {
         }
         // If a real Deno backend + ServerState were present the call would succeed;
         // that path is exercised only when `tool_exec::is_available()`.
+    }
+
+    #[tokio::test]
+    async fn action_metadata_is_exposed_in_tool_discovery_and_resolution() {
+        let reg = registry_with_plugin(
+            "com.test.actions",
+            vec!["tool:execute"],
+            vec![tool_entry(
+                "action-save",
+                serde_json::json!({
+                    "slug": "action-save",
+                    "backend": "inline_deno",
+                    "code": "return { ok: true };",
+                    "action": true,
+                    "output_schema": {
+                        "type": "object",
+                        "properties": { "ok": { "type": "boolean" } }
+                    },
+                    "annotations": {
+                        "readOnlyHint": false,
+                        "destructiveHint": true
+                    },
+                    "needs_approval": true
+                }),
+            )],
+        )
+        .await;
+        reg.register_app_tool("app.action-save".into(), "action-save".into(), None);
+
+        let tool = reg
+            .list_all_tools()
+            .await
+            .into_iter()
+            .find(|item| item.id == "app.action-save")
+            .expect("action tool is discoverable");
+        assert_eq!(
+            tool.output_schema.as_ref().map(|v| &v["type"]),
+            Some(&json!("object"))
+        );
+        assert_eq!(
+            tool.annotations.as_ref().map(|v| &v["destructiveHint"]),
+            Some(&json!(true))
+        );
+
+        let resolved = reg
+            .resolve_app_tool_backend("app.action-save")
+            .await
+            .expect("action backend resolves");
+        assert!(resolved.needs_approval);
     }
 
     #[tokio::test]

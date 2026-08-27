@@ -20,6 +20,7 @@ Ryu extensions come in two shapes, and `--template` picks which one you get.
 | Template | Emits | Factory |
 |---|---|---|
 | `agent` | A loop-owning Runnable agent | `Agent` / `ryuTool` |
+| `action` | A governed business operation with input/output contracts | `defineAction` |
 | `hook-plugin` | A post-assistant-turn plugin | `definePlugin` + `defineTurnHook` |
 | `ryu-app` | An interactive in-chat widget | `defineApp` + a self-contained widget |
 | `companion-plugin` | A Ryu App whose widget calls a companion tool, plus a panel surface | `defineApp` |

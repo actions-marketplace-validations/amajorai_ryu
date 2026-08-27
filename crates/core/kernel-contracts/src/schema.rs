@@ -103,6 +103,24 @@ pub struct ToolConfig {
     /// Optional JSON Schema for the tool input, surfaced in discovery.
     #[serde(default)]
     pub input_schema: Option<serde_json::Value>,
+    /// Optional JSON Schema for a structured tool result, surfaced to MCP clients.
+    /// Action-authored tools use this to keep the result contract beside the
+    /// input contract rather than making callers infer the output shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+    /// Optional MCP effect annotations (`readOnlyHint`, `destructiveHint`, …).
+    /// Core's existing tool-effect classifier prefers these trusted manifest
+    /// annotations over the tool-id heuristic when enforcing agent posture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<serde_json::Value>,
+    /// Marks this entry as the semantic Action contract emitted by the SDK.
+    /// It is descriptive metadata; dispatch remains the existing Tool backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<bool>,
+    /// Force the human approval gate before this tool executes, even when the
+    /// global smart mode would not infer a risky effect from its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_approval: Option<bool>,
     /// `http`: arg names that are sent as request HEADERS rather than as path /
     /// query / body params. This is how an OpenAPI operation routes its
     /// `in: header` parameters and how auth (an `apiKey` header, a bearer token
@@ -2073,6 +2091,34 @@ mod tests {
     }
 
     #[test]
+    fn action_metadata_round_trips_through_tool_config() {
+        let raw = json!({
+            "slug": "action-create-ticket",
+            "backend": "inline_deno",
+            "code": "return { ok: true };",
+            "action": true,
+            "output_schema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } }
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true
+            },
+            "needs_approval": true
+        });
+        let cfg: ToolConfig = serde_json::from_value(raw).expect("action config parses");
+
+        assert_eq!(cfg.action, Some(true));
+        assert_eq!(cfg.needs_approval, Some(true));
+        assert_eq!(cfg.output_schema.expect("output schema")["type"], "object");
+        assert_eq!(
+            cfg.annotations.expect("annotations")["destructiveHint"],
+            true
+        );
+    }
+
+    #[test]
     fn command_backend_carries_structured_args_for_rtk() {
         // The exact `rtk` shape: a mode-map (wrap → zero tokens) + a shell-split
         // command. It must resolve to a Command backend carrying `arg_specs`.
@@ -2209,8 +2255,7 @@ mod tests {
         .unwrap();
         match configured.resolve_backend().unwrap() {
             ToolBackend::Http {
-                caller_agent_query,
-                ..
+                caller_agent_query, ..
             } => assert_eq!(caller_agent_query.as_deref(), Some("agent_id")),
             other => panic!("expected Http backend, got {other:?}"),
         }
