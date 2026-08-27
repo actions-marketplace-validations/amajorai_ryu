@@ -227,7 +227,7 @@ fn reserved_namespaces() -> Vec<String> {
 /// **What is deliberately NOT here.** The per-app companion capabilities
 /// (`monitors:crud`, `simulator:control`, `webhooks:crud`,
 /// `activity:read`, `timeline:read`, `calendar:crud`, `learning:crud`,
-/// `approvals:crud`, `meetings:crud`, `mail:crud`, `finetune:runs`) used to be
+/// `approvals:crud`, `meetings:crud`, `finetune:runs`) used to be
 /// listed one-by-one, which meant every new App — including a third-party one —
 /// needed a Gateway Rust edit before it could ever be enabled. They are now
 /// approved by the owner-scoped rule in
@@ -401,6 +401,12 @@ fn default_grant_allowlist() -> Vec<String> {
         // transport surfaces. `app` is reserved, so the owner-scoped rule cannot
         // approve either grant even when the manifest id is `@ryu/<app>`.
         "app:realtime",
+        // Outreach uses the Mail app's reviewed host bridge to list inboxes and
+        // send an explicitly selected, human-reviewed message. This is a
+        // cross-app grant, so owner-scoping cannot approve it; keep the exact
+        // capability on the reviewed list rather than teaching the Gateway
+        // about the Outreach app itself.
+        "mail:crud",
         // Warmup is a Core-owned host bridge rather than an app-owned namespace.
         // Keep its explicit grant reviewed so the reserved `warmup` namespace
         // cannot be self-approved by a lookalike app.
@@ -1316,7 +1322,6 @@ mod tests {
         let allow = default_grant_allowlist();
         let retired = [
             "monitors:crud",
-            "mail:crud",
             "finetune:runs",
             "simulator:control",
             "webhooks:crud",
