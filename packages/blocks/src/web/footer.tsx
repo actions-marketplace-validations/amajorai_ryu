@@ -26,12 +26,12 @@ export default function Footer({
 				<div className="mb-12 grid grid-cols-1 gap-12 md:grid-cols-2">
 					<div className="space-y-4">
 						<h3 className="font-medium text-2xl">
-							AI deployment for small teams
+							We deploy and run AI agents safely in the cloud
 						</h3>
 						<p className="max-w-md text-muted-foreground">
-							Ryu helps pre-seed to seed startups with fewer than 10 employees
-							run autonomous AI safely in the cloud. We deploy it, keep it
-							running, and connect the tools your team already uses.
+							Ryu is the integration layer for AI. We deploy it, keep it
+							running, and connect the tools, models, and workflows you already
+							use.
 						</p>
 						<BackedBy className="pt-2" />
 					</div>
@@ -134,7 +134,7 @@ export default function Footer({
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/startups"
 								>
-									Startups
+									Programs
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"

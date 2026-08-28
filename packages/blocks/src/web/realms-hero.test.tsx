@@ -2,28 +2,22 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import RealmsHero from "./realms-hero.tsx";
 
-test("landing page carries the managed startup positioning", () => {
+test("landing page carries the composable cloud positioning", () => {
 	const html = renderToStaticMarkup(<RealmsHero />);
 
 	expect(html).toContain('data-testid="realms-hero"');
 	expect(html).toContain('data-testid="hero-workflow-stage"');
+	expect(html).toContain('data-testid="realm-card-apps"');
+	expect(html).toContain('data-testid="realm-card-bot"');
+	expect(html).toContain('data-testid="realm-card-console"');
 	expect(html).toContain('data-testid="product-realm-selector"');
-	expect(html).toContain('data-testid="positioning-section"');
-	expect(html).toContain('data-testid="delivery-section"');
-	expect(html).toContain('data-testid="toolkit-section"');
-	expect(html).toContain('data-testid="start-section"');
-	for (const label of [
-		"Deploy",
-		"SDK",
-		"Core",
-		"Gateway",
-		"Bot",
-		"Console",
-		"Apps",
-	]) {
+	expect(html).toContain('aria-label="Ryu surfaces"');
+	expect(html).toContain('data-testid="managed-deployment"');
+	expect(html).toContain('id="integration-layer"');
+	for (const label of ["Ryu Apps", "Ryu Bot", "Ryu Console"]) {
 		expect(html).toContain(label);
 	}
-	expect(html).toContain("We deploy and run autonomous AI<br/>");
+	expect(html).toContain("We deploy and run AI agents<br/>");
 	expect(html).toContain("safely in the");
 	expect(html).toContain("cloud");
 	expect(html).toContain("background-image:var(--chromatic-gradient)");
@@ -38,48 +32,47 @@ test("landing page carries the managed startup positioning", () => {
 	expect(html).not.toContain("Explore Ryu Apps");
 	expect(html).not.toContain("Book a Demo");
 	expect(html).toContain('href="/help"');
-	expect(html.indexOf("We deploy and run autonomous AI<br/>")).toBeLessThan(
+	expect(html.indexOf("We deploy and run AI agents<br/>")).toBeLessThan(
 		html.indexOf('data-testid="hero-workflow-stage"')
 	);
 	expect(html.indexOf("Download")).toBeLessThan(
 		html.indexOf('data-testid="hero-workflow-stage"')
 	);
 	expect(html).toContain('href="https://cal.com/amajor/ryu-demo"');
-	expect(html).toContain("Ryu is an AI deployment platform.");
+	expect(html).toContain("Ryu is the integration layer for AI.");
+	expect(html).toContain("font-medium text-xl text-muted-foreground");
+	expect(html).toContain("mt-3 max-w-2xl text-balance font-medium text-xl");
 	expect(html).toContain(
-		"Ryu helps pre-seed to seed startups with fewer than 10 employees"
+		"A simple toolkit that connects the tools they already"
 	);
-	expect(html).toContain("Customer");
-	expect(html).toContain("Time to value");
-	expect(html).toContain("Delivery");
 	expect(html).toContain(
-		"Pre-seed to seed startups with fewer than 10 employees"
+		"Use the same deployment through Apps, Bot, and Console."
 	);
-	expect(html).toContain("fewer than 10 employees");
-	expect(html).toContain("It takes only a few minutes.");
-	expect(html).toContain("We deploy and keep it running");
-	expect(html).toContain("We provide a simple toolkit.");
-	expect(html).toContain("Connect the tools the team already uses.");
-	expect(html).toContain(
-		"A simple toolkit that connects the tools they already use."
-	);
-	expect(html).toContain("Run autonomous AI safely in the cloud.");
-	expect(html).toContain("AI deployment platform");
-	expect(html).toContain("Deploy = Cloud");
-	expect(html).toContain("bg-[#dbeafe]");
-	expect(html).toContain("bg-[#ede9fe]");
-	expect(html).toContain("bg-[#fef3c7]");
-	expect(html).toContain("bg-[#ffe0b3]");
+	expect(html).toContain("Connect the pieces.");
+	expect(html).toContain("Run the");
+	expect(html).toContain("work.");
+	expect(html).toContain("Use existing AI");
+	expect(html).toContain("Connect your tools");
+	expect(html).toContain("Secure each run");
+	expect(html).toContain("Deploy to Cloud");
+	expect(html).toContain("Ready-made applications for business workflows.");
+	expect(html).toContain("Chat with Ryu through the Bot interface.");
+	expect(html).toContain("Configure Ryu from the control panel.");
+	expect(html).not.toContain("pre-seed");
+	expect(html).not.toContain("fewer than 10");
+	expect(html).not.toContain("early-stage");
+	expect(html).not.toContain("AI deployment for small teams");
 	expect(html).toContain("bg-[#ccfbf1]");
 	expect(html).toContain("bg-[#fce7f3]");
 	expect(html).toContain("bg-[#dcfce7]");
-	expect(html).toContain('data-testid="product-realm-tab-deploy"');
-	expect(html).toContain('data-testid="product-realm-tab-console"');
-	expect(html).toContain('data-testid="toolkit-surface-apps"');
-	expect(html).toContain('data-testid="toolkit-surface-bot"');
-	expect(html).toContain('data-testid="toolkit-surface-console"');
+	expect(html).toContain("Backed by leading startup programs");
+	for (const id of ["apps", "bot", "console"]) {
+		expect(
+			html.match(new RegExp(`data-testid="realm-card-${id}"`, "g"))
+		).toHaveLength(1);
+	}
+	expect(html).not.toContain('data-testid="product-realm-tab-deploy"');
 	expect(html).not.toContain("The product loop");
-	expect(html).not.toContain("The managed option");
 	expect(html).not.toContain("Keep shipping while Ryu runs the AI layer.");
 	expect(html).not.toContain("The pieces that make AI useful on day one.");
 	expect(html).not.toContain("Building instead of buying?");

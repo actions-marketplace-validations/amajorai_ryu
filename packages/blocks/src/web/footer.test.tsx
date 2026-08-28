@@ -10,3 +10,10 @@ test("footer uses the cursor-aware outline Ryu mark", () => {
 	expect(html).toContain('stroke="currentColor"');
 	expect(html).not.toContain(">ryu</div>");
 });
+
+test("footer carries the landing deployment positioning", () => {
+	const html = renderToStaticMarkup(<Footer />);
+
+	expect(html).toContain("We deploy and run AI agents safely in the cloud");
+	expect(html).not.toContain("Autonomous AI in the cloud");
+});

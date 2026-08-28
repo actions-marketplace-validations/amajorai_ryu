@@ -88,9 +88,7 @@ export function InstallLocalMock() {
 				<span className="text-[11px] text-success">
 					gemma-4 running locally · :8080
 				</span>
-				<span className="font-mono text-[10px] text-success/80">
-					0 API keys
-				</span>
+				<span className="text-[10px] text-success/80">0 API keys</span>
 			</div>
 			<div className="space-y-2">
 				{models.map((model) => (
@@ -155,7 +153,7 @@ export function DemoDeathMock() {
 				</div>
 				<div className="flex items-center gap-2 rounded-lg border border-border border-dashed bg-muted/20 px-3 py-2 text-[10px] text-muted-foreground">
 					<FolderOpen className="size-3.5 shrink-0" />
-					<span className="font-mono">~/projects/later/</span>
+					<span>~/projects/later/</span>
 				</div>
 			</div>
 		</AppShell>
@@ -172,13 +170,13 @@ export function TrustReceiptMock() {
 						<ScrollText className="size-4 text-muted-foreground" />
 						<p className="font-medium text-foreground text-xs">What happened</p>
 					</div>
-					<p className="font-mono text-[10px] text-muted-foreground">
+					<p className="text-[10px] text-muted-foreground">
 						req_8f2a · logged · allowed
 					</p>
-					<p className="font-mono text-[10px] text-muted-foreground">
+					<p className="text-[10px] text-muted-foreground">
 						tool_exec · ghost.snapshot · allowed
 					</p>
-					<p className="font-mono text-[10px] text-muted-foreground">
+					<p className="text-[10px] text-muted-foreground">
 						pii_scan · 2 fields redacted
 					</p>
 				</div>
@@ -215,9 +213,7 @@ export function SevenMinuteMock() {
 			<div className="space-y-3">
 				<div className="flex items-center justify-between rounded-lg bg-foreground px-3 py-2 text-background">
 					<span className="font-medium text-[11px]">first run complete</span>
-					<span className="font-mono text-[10px] text-background/80">
-						gateway on
-					</span>
+					<span className="text-[10px] text-background/80">gateway on</span>
 				</div>
 				<div className="space-y-1.5">
 					{steps.map((step) => (
@@ -248,7 +244,7 @@ export function StillRunningMock() {
 			<div className="space-y-3">
 				<div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2">
 					<div>
-						<p className="font-mono text-foreground text-xs">support-triage</p>
+						<p className="text-foreground text-xs">support-triage</p>
 						<p className="text-[10px] text-muted-foreground">
 							overnight run · governed
 						</p>

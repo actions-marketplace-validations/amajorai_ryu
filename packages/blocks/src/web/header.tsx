@@ -20,7 +20,7 @@ import {
 	MotionNavigationMenuTrigger,
 } from "@ryu/ui/components/motion-navigation-menu";
 import { cn } from "@ryu/ui/lib/utils";
-import { ChevronDown, Menu } from "lucide-react";
+import { Menu } from "lucide-react";
 // import { Link2 } from "lucide-react";
 import type { Route } from "next";
 import Link from "next/link";
@@ -52,13 +52,13 @@ const MARKETING_LINKS: readonly HeaderLink[] = [
 const SURFACE_LINKS = [
 	...PRODUCT_REALMS.filter((realm) =>
 		["os", "bot", "console", "box", "hire"].includes(realm.id)
-	).map(({ href, label }) => ({ href, label })),
-	{ href: "/marketplace/apps", label: "Ryu Apps" },
+	).map(({ href, shortLabel }) => ({ href, label: shortLabel })),
+	{ href: "/marketplace/apps", label: "Apps" },
 ];
 
 const PLATFORM_LINKS = [
 	...PRODUCT_REALMS.filter((realm) => realm.id === "gateway").map(
-		({ href, label }) => ({ href, label })
+		({ href, shortLabel }) => ({ href, label: shortLabel })
 	),
 	{
 		href: "/products/sdk",
@@ -73,7 +73,7 @@ const PLATFORM_LINKS = [
 const INFRA_LINKS = [
 	{
 		href: "/platform#infra",
-		label: "Ryu Cloud",
+		label: "Cloud",
 	},
 	{
 		href: "/platform#infra",
@@ -124,7 +124,7 @@ function PrimaryProductLinks() {
 					render={<Link href="/platform" />}
 				>
 					<span className="font-medium text-foreground text-sm">
-						Explore Ryu Platform →
+						Explore the platform →
 					</span>
 				</MotionNavigationMenuLink>
 			</div>
@@ -134,11 +134,9 @@ function PrimaryProductLinks() {
 
 function ProductsMenu({ pathname }: { pathname: string }) {
 	return (
-		<DropdownMenu>
-			<DropdownMenuTrigger
+		<>
+			<MotionNavigationMenuTrigger
 				className={cn(
-					buttonVariants({ variant: "ghost" }),
-					"gap-1 hover:bg-muted hover:text-foreground",
 					(pathname.startsWith("/products") ||
 						pathname === "/bot" ||
 						pathname === "/console" ||
@@ -149,16 +147,11 @@ function ProductsMenu({ pathname }: { pathname: string }) {
 				)}
 			>
 				Products
-				<ChevronDown aria-hidden="true" className="size-3.5" />
-			</DropdownMenuTrigger>
-			<DropdownMenuContent
-				align="center"
-				className="!w-[800px] rounded-2xl p-2"
-				withBackdrop={false}
-			>
+			</MotionNavigationMenuTrigger>
+			<MotionNavigationMenuContent>
 				<PrimaryProductLinks />
-			</DropdownMenuContent>
-		</DropdownMenu>
+			</MotionNavigationMenuContent>
+		</>
 	);
 }
 
@@ -191,7 +184,7 @@ function HeaderLinkList({
 						)
 					: cn(
 							buttonVariants({ size: "sm", variant: "ghost" }),
-							"text-muted-foreground hover:bg-muted hover:text-foreground",
+							"text-foreground hover:bg-muted hover:text-foreground",
 							active && "bg-muted text-foreground"
 						);
 				if (link.external) {

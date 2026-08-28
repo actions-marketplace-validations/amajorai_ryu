@@ -5,161 +5,167 @@ import { ChromaticTextReveal } from "@ryu/ui/components/motion/chromatic-text-re
 import PageHeader from "@ryu/ui/components/page-header";
 import { cn } from "@ryu/ui/lib/utils";
 import {
-	ArrowRight,
-	Bot,
+	ChevronRight,
 	Cloud,
-	type LucideIcon,
+	LockKeyhole,
 	Plug,
-	Settings2,
 	Timer,
-	UsersRound,
 	Workflow,
 } from "lucide-react";
-import type { Route } from "next";
 import Link from "next/link";
 import { useState } from "react";
 import { DownloadMenu } from "./download-menu.tsx";
+import {
+	InstallLocalMock,
+	SevenMinuteMock,
+	StillRunningMock,
+	TrustReceiptMock,
+} from "./emotional-story-mockups.tsx";
 import HeroWorkflowLoop, {
 	HeroUseCaseSwitcher,
 } from "./hero-workflow-loop.tsx";
-import type { LandingCardTone } from "./landing-card-tones.ts";
-import {
-	LANDING_CARD_TONES,
-	landingCardSurfaceClass,
-} from "./landing-card-tones.ts";
 import { landingHeadlineClass } from "./landing-typography.ts";
 import ProductLandingCtas from "./product-landing-ctas.tsx";
 import { ProductRealmSelector } from "./product-realm-selector.tsx";
-import { Reveal } from "./reveal.tsx";
+import {
+	BentoGrid,
+	type BentoItem,
+	SectionTitle,
+	sectionSubtitleClass,
+} from "./sections.tsx";
+import { StaggerLines } from "./stagger-lines.tsx";
+import StartupPrograms from "./startup-programs.tsx";
 
-interface PitchCardData {
-	description: string;
-	icon: LucideIcon;
-	title: string;
-	tone: LandingCardTone;
-}
-
-const POSITIONING_CARDS: PitchCardData[] = [
+const MANAGED_DEPLOYMENT_STEPS = [
 	{
-		description: "Fewer than 10 employees.",
-		icon: UsersRound,
-		title: "Pre-seed to seed startups",
-		tone: "blue",
-	},
-	{
-		description: "Run autonomous AI safely in the cloud.",
+		description: "We put the agent and its approved tools in the cloud.",
 		icon: Cloud,
-		title: "Autonomous AI in the cloud",
-		tone: "purple",
+		label: "Deploy",
+		status: "Configured",
 	},
 	{
 		description:
-			"Get the first agent running without building the platform first.",
+			"We watch the run, handle the upkeep, and keep the workflow available.",
 		icon: Timer,
-		title: "Start in a few minutes",
-		tone: "yellow",
-	},
-];
-
-const DELIVERY_CARDS: PitchCardData[] = [
-	{
-		description: "Ryu handles cloud deployment and runtime operations.",
-		icon: Cloud,
-		title: "We deploy and keep it running.",
-		tone: "orange",
+		label: "Operate",
+		status: "Maintained",
 	},
 	{
-		description: "Connect the tools the team already uses.",
-		icon: Plug,
-		title: "We provide a simple toolkit.",
-		tone: "teal",
-	},
-];
-
-const TOOLKIT_SURFACES = [
-	{
-		action: "View Bot",
-		description: "Chat with Ryu through the Bot interface.",
-		href: "/bot",
-		icon: Bot,
-		id: "bot",
-		label: "Bot",
-		tone: "teal",
-	},
-	{
-		action: "View Console",
-		description: "Configure Ryu from the control panel.",
-		href: "/console",
-		icon: Settings2,
-		id: "console",
-		label: "Console",
-		tone: "pink",
-	},
-	{
-		action: "View Apps",
-		description: "Use ready-made applications for business workflows.",
-		href: "/marketplace",
-		icon: Workflow,
-		id: "apps",
-		label: "Apps",
-		tone: "green",
+		description:
+			"Your team sees the result, the access, and the record of what happened.",
+		icon: LockKeyhole,
+		label: "Stay in control",
+		status: "Governed",
 	},
 ] as const;
 
-function PitchCard({ card }: { card: PitchCardData }) {
-	const Icon = card.icon;
-	const tone = LANDING_CARD_TONES[card.tone];
+const INTEGRATION_BENTO_ITEMS: BentoItem[] = [
+	{
+		description: "Bring the models and provider access you already use.",
+		title: "Use existing AI",
+		visual: <InstallLocalMock />,
+	},
+	{
+		description: "Connect approved files and systems to the work.",
+		span: "md:col-span-2",
+		title: "Connect your tools",
+		visual: <SevenMinuteMock />,
+	},
+	{
+		description: "Keep approvals, audit, and cost with the result.",
+		span: "md:col-span-2",
+		title: "Secure each run",
+		visual: <TrustReceiptMock />,
+	},
+	{
+		description: "Ryu deploys the runtime and keeps it running.",
+		title: "Deploy to Cloud",
+		visual: <StillRunningMock />,
+	},
+];
 
+function LandingSectionHeader({
+	className,
+	subtitle,
+	title,
+}: {
+	className?: string;
+	subtitle: string;
+	title: string;
+}) {
 	return (
-		<div
-			className={cn(
-				"flex min-h-52 flex-col",
-				landingCardSurfaceClass(card.tone)
-			)}
-		>
-			<Icon
-				aria-hidden="true"
-				className={cn("size-5", tone.title)}
-				strokeWidth={1.75}
-			/>
-			<h3
-				className={cn("mt-6 font-medium text-2xl tracking-tight", tone.title)}
-			>
-				{card.title}
-			</h3>
-			<p className={cn("mt-3 leading-relaxed", tone.body)}>
-				{card.description}
-			</p>
-		</div>
+		<StaggerLines className={cn("max-w-2xl", className)}>
+			<SectionTitle title={title} />
+			<p className={sectionSubtitleClass}>{subtitle}</p>
+		</StaggerLines>
 	);
 }
 
-function PositioningSection() {
+function ManagedDeployment() {
 	return (
 		<section
-			aria-labelledby="positioning-heading"
-			className="border-muted border-t"
-			data-testid="positioning-section"
-			id="positioning"
+			className="bg-muted/20"
+			data-testid="managed-deployment"
+			id="managed-deployment"
 		>
 			<div className="mx-auto max-w-6xl px-6 py-20 md:py-28">
-				<h2
-					className="max-w-3xl text-balance font-medium text-4xl text-foreground leading-tight tracking-[-0.04em] md:text-5xl"
-					id="positioning-heading"
-				>
-					Ryu is an AI deployment platform.
-				</h2>
-				<p className="mt-5 max-w-2xl text-lg text-muted-foreground leading-relaxed">
-					Ryu helps pre-seed to seed startups with fewer than 10 employees run
-					autonomous AI safely in the cloud.
-				</p>
+				<div className="grid gap-10 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] lg:items-center lg:gap-16">
+					<div className="max-w-xl">
+						<LandingSectionHeader
+							className="max-w-xl"
+							subtitle="Ryu is the integration layer for AI. We deploy the runtime, keep it running, and give you one place to use and oversee it."
+							title="We deploy and keep it running."
+						/>
+						<Link
+							className="mt-6 inline-flex items-center gap-2 font-medium text-foreground text-sm underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+							href="/console"
+						>
+							See the control surface
+							<ChevronRight aria-hidden="true" className="size-4" />
+						</Link>
+					</div>
 
-				<div className="mt-10 grid gap-4 md:grid-cols-3">
-					{POSITIONING_CARDS.map((card, index) => (
-						<Reveal delay={index * 0.08} key={card.title}>
-							<PitchCard card={card} />
-						</Reveal>
-					))}
+					<div className="rounded-[2rem] bg-background p-5 shadow-[0_24px_70px_-48px_rgba(15,23,42,0.55)] ring-1 ring-black/[0.06] sm:p-7 dark:ring-white/[0.08]">
+						<div className="flex items-center justify-between gap-4 pb-4">
+							<div>
+								<p className="font-medium text-foreground text-sm">
+									What Ryu handles
+								</p>
+								<p className="mt-1 text-muted-foreground text-xs">
+									The work between your idea and a dependable run.
+								</p>
+							</div>
+							<span className="rounded-full bg-muted px-2.5 py-1 font-medium text-[10px] text-muted-foreground uppercase tracking-wider">
+								Cloud
+							</span>
+						</div>
+
+						<ol className="mt-6 space-y-5">
+							{MANAGED_DEPLOYMENT_STEPS.map((step) => {
+								const Icon = step.icon;
+								return (
+									<li className="relative flex gap-3.5" key={step.label}>
+										<span className="relative z-10 flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted text-foreground/65">
+											<Icon aria-hidden="true" className="size-4" />
+										</span>
+										<span className="min-w-0 flex-1 pt-0.5">
+											<span className="flex flex-wrap items-center justify-between gap-2">
+												<span className="font-medium text-foreground text-sm">
+													{step.label}
+												</span>
+												<span className="text-[10px] text-muted-foreground uppercase tracking-wider">
+													{step.status}
+												</span>
+											</span>
+											<span className="mt-1 block text-muted-foreground text-sm leading-relaxed">
+												{step.description}
+											</span>
+										</span>
+									</li>
+								);
+							})}
+						</ol>
+					</div>
 				</div>
 			</div>
 		</section>
@@ -177,7 +183,7 @@ export default function RealmsHero() {
 						className="max-w-xl"
 						title={
 							<>
-								We deploy and run autonomous AI
+								We deploy and run AI agents
 								<br />
 								<ChromaticTextReveal
 									delay={0.3}
@@ -233,16 +239,18 @@ export default function RealmsHero() {
 					<ProductRealmSelector />
 				</div>
 
-				<div className="mt-14 grid gap-3 border-muted border-t pt-6 text-sm sm:grid-cols-3">
+				<div className="mt-14 grid gap-3 pt-6 text-sm sm:grid-cols-3">
 					<div className="flex gap-3">
-						<UsersRound
+						<Workflow
 							aria-hidden="true"
 							className="mt-0.5 size-4 shrink-0 text-emerald-600"
 						/>
 						<div>
-							<p className="font-medium text-foreground/80">Customer</p>
+							<p className="font-medium text-foreground/80">
+								Useful on day one
+							</p>
 							<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
-								Pre-seed to seed startups with fewer than 10 employees.
+								Start from a process you already run.
 							</p>
 						</div>
 					</div>
@@ -252,9 +260,12 @@ export default function RealmsHero() {
 							className="mt-0.5 size-4 shrink-0 text-[#8f7bf2]"
 						/>
 						<div>
-							<p className="font-medium text-foreground/80">Time to value</p>
+							<p className="font-medium text-foreground/80">
+								Live in a few minutes
+							</p>
 							<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
-								A few minutes to get started.
+								Start from the job you need done, not a blank repo or an
+								infrastructure project.
 							</p>
 						</div>
 					</div>
@@ -264,129 +275,116 @@ export default function RealmsHero() {
 							className="mt-0.5 size-4 shrink-0 text-[#d97706]"
 						/>
 						<div>
-							<p className="font-medium text-foreground/80">Delivery</p>
+							<p className="font-medium text-foreground/80">
+								Managed in the cloud
+							</p>
 							<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
-								We deploy and keep it running.
+								We deploy and keep it running, with permissions and audit
+								history in place.
 							</p>
 						</div>
 					</div>
 				</div>
 			</section>
 
-			<PositioningSection />
-
-			<section
-				aria-labelledby="delivery-heading"
-				className="border-muted border-t bg-muted/20"
-				data-testid="delivery-section"
-				id="how-it-works"
-			>
+			<section className="bg-muted/20" id="how-it-works">
 				<div className="mx-auto max-w-6xl px-6 py-20 md:py-28">
-					<h2
-						className="max-w-3xl text-balance font-medium text-4xl text-foreground leading-tight tracking-[-0.04em] md:text-5xl"
-						id="delivery-heading"
-					>
-						No need to build from scratch or maintain it themselves.
-					</h2>
-					<p className="mt-5 max-w-2xl text-lg text-muted-foreground leading-relaxed">
-						It takes only a few minutes. Ryu deploys the platform and keeps it
-						running.
-					</p>
+					<LandingSectionHeader
+						subtitle="Tell Ryu the job you need done. Ryu connects the tools you already use, then runs the workflow in the cloud without another platform to build."
+						title="Start a working deployment in a few minutes."
+					/>
 
-					<div className="mt-10 grid gap-4 md:grid-cols-2">
-						{DELIVERY_CARDS.map((card, index) => (
-							<Reveal delay={index * 0.08} key={card.title}>
-								<PitchCard card={card} />
-							</Reveal>
-						))}
+					<div className="mt-12 grid gap-3 md:grid-cols-3">
+						<div className="rounded-2xl bg-background p-5 ring-1 ring-black/[0.06] dark:ring-white/[0.08]">
+							<Workflow
+								aria-hidden="true"
+								className="size-5 text-foreground/70"
+							/>
+							<h3 className="mt-7 font-medium text-foreground text-lg tracking-tight">
+								Choose one job
+							</h3>
+							<p className="mt-2 text-muted-foreground text-sm leading-relaxed">
+								Start with a repeatable task your team needs done every week.
+							</p>
+						</div>
+						<div className="rounded-2xl bg-background p-5 ring-1 ring-black/[0.06] dark:ring-white/[0.08]">
+							<Plug aria-hidden="true" className="size-5 text-foreground/70" />
+							<h3 className="mt-7 font-medium text-foreground text-lg tracking-tight">
+								Connect your tools
+							</h3>
+							<p className="mt-2 text-muted-foreground text-sm leading-relaxed">
+								Use the systems your team already relies on, with only the
+								access the run needs.
+							</p>
+						</div>
+						<div className="rounded-2xl bg-background p-5 ring-1 ring-black/[0.06] dark:ring-white/[0.08]">
+							<Cloud aria-hidden="true" className="size-5 text-foreground/70" />
+							<h3 className="mt-7 font-medium text-foreground text-lg tracking-tight">
+								We keep it running
+							</h3>
+							<p className="mt-2 text-muted-foreground text-sm leading-relaxed">
+								Ryu deploys the workflow, handles the upkeep, and keeps the run
+								governed.
+							</p>
+						</div>
 					</div>
 				</div>
 			</section>
 
-			<section
-				aria-labelledby="toolkit-heading"
-				className="border-muted border-t"
-				data-testid="toolkit-section"
-				id="toolkit"
-			>
-				<div className="mx-auto max-w-6xl px-6 py-20 md:py-28">
-					<h2
-						className="max-w-3xl text-balance font-medium text-4xl text-foreground leading-tight tracking-[-0.04em] md:text-5xl"
-						id="toolkit-heading"
-					>
-						A simple toolkit that connects the tools they already use.
-					</h2>
-					<p className="mt-5 max-w-2xl text-lg text-muted-foreground leading-relaxed">
-						Use the same deployment through Apps, Bot, and Console.
-					</p>
-
-					<ul className="mt-10 grid gap-4 md:grid-cols-3">
-						{TOOLKIT_SURFACES.map((surface) => {
-							const Icon = surface.icon;
-							const tone = LANDING_CARD_TONES[surface.tone];
-							return (
-								<li
-									data-testid={`toolkit-surface-${surface.id}`}
-									key={surface.id}
-								>
-									<Link
-										className={cn(
-											"group flex min-h-56 flex-col transition-transform hover:-translate-y-0.5",
-											landingCardSurfaceClass(surface.tone)
-										)}
-										href={surface.href as Route}
-									>
-										<Icon
-											aria-hidden="true"
-											className={cn("size-5", tone.title)}
-											strokeWidth={1.75}
-										/>
-										<h3
-											className={cn(
-												"mt-6 font-medium text-2xl tracking-tight",
-												tone.title
-											)}
-										>
-											{surface.label}
-										</h3>
-										<p className={cn("mt-3 leading-relaxed", tone.body)}>
-											{surface.description}
-										</p>
-										<span
-											className={cn(
-												"mt-auto inline-flex items-center gap-1.5 pt-8 font-medium text-sm",
-												tone.ctaSecondary
-											)}
-										>
-											{surface.action}
-											<ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
-										</span>
-									</Link>
-								</li>
-							);
-						})}
-					</ul>
+			<section className="mx-auto max-w-6xl px-6 py-20 md:py-28">
+				<div className="grid items-center gap-8 rounded-[2rem] bg-[#16151a] px-6 py-8 text-white md:grid-cols-[1fr_auto] md:px-10 md:py-10">
+					<div>
+						<h2 className="max-w-2xl text-balance font-medium text-xl leading-tight tracking-tight md:text-2xl">
+							Ryu runs the AI layer.
+						</h2>
+						<p className="mt-3 max-w-xl font-medium text-white/60 text-xl leading-tight tracking-tight md:text-2xl">
+							Use the apps, tools, models, and workflows you already have
+							without building and maintaining another runtime.
+						</p>
+					</div>
+					<div className="md:min-w-52 md:text-right">
+						<p className="font-medium text-2xl tracking-[-0.04em]">
+							A few minutes
+						</p>
+						<p className="mt-1 text-sm text-white/55">
+							to get your first workflow running
+						</p>
+						<Link
+							className={cn(
+								buttonVariants({ variant: "secondary" }),
+								"mt-5 rounded-full bg-white text-[#16151a] hover:bg-white/90"
+							)}
+							href="/pricing"
+						>
+							View plans
+						</Link>
+					</div>
 				</div>
 			</section>
 
-			<section
-				aria-labelledby="start-heading"
-				className="border-muted border-t"
-				data-testid="start-section"
-			>
+			<section id="integration-layer">
+				<div className="mx-auto max-w-6xl px-6 py-20 md:py-28">
+					<LandingSectionHeader
+						subtitle="Ryu connects existing apps, tools, models, and workflows through one composable integration layer."
+						title="Connect the pieces. Run the work."
+					/>
+					<div className="mt-12">
+						<BentoGrid items={INTEGRATION_BENTO_ITEMS} />
+					</div>
+				</div>
+			</section>
+
+			<ManagedDeployment />
+
+			<section>
 				<div className="mx-auto flex max-w-6xl flex-col items-center px-6 py-20 text-center md:py-28">
-					<h2
-						className="max-w-2xl text-balance font-medium text-3xl text-foreground leading-tight tracking-[-0.04em] md:text-5xl"
-						id="start-heading"
-					>
-						Run autonomous AI safely in the cloud.
-					</h2>
-					<p className="mt-5 max-w-xl text-muted-foreground leading-relaxed">
-						Ryu deploys it, connects your tools, and keeps it running.
+					<p className="max-w-2xl text-balance font-medium text-3xl text-foreground leading-tight tracking-[-0.04em] md:text-5xl">
+						Run autonomous AI in the cloud.
 					</p>
 					<ProductLandingCtas className="mt-8" />
 				</div>
 			</section>
+			<StartupPrograms />
 		</main>
 	);
 }

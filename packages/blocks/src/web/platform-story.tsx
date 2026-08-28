@@ -313,10 +313,6 @@ function PlatformLayerCard({ layer }: { layer: PlatformLayer }) {
 	const Icon = layer.icon;
 	return (
 		<li className="relative">
-			<span
-				aria-hidden="true"
-				className="absolute top-1/2 -left-5 hidden h-px w-5 bg-foreground/15 sm:block"
-			/>
 			<Link
 				className="group flex items-start gap-3 rounded-xl bg-muted/50 p-3.5 transition-colors hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
 				href={layer.href as Route}
@@ -329,7 +325,7 @@ function PlatformLayerCard({ layer }: { layer: PlatformLayer }) {
 						<span className="font-medium text-foreground text-sm">
 							{layer.name}
 						</span>
-						<span className="font-mono text-[10px] text-muted-foreground uppercase tracking-wider">
+						<span className="text-[10px] text-muted-foreground uppercase tracking-wider">
 							{layer.group} · {layer.verb}
 						</span>
 					</span>
@@ -356,26 +352,21 @@ function PlatformHierarchy() {
 				<p className="font-medium text-muted-foreground text-xs uppercase tracking-[0.18em]">
 					Product hierarchy
 				</p>
-				<span className="font-mono text-[10px] text-muted-foreground/70">
+				<span className="text-[10px] text-muted-foreground/70">
 					Deploy = Cloud
 				</span>
 			</div>
 
 			<div className="mt-6">
 				<div className="mx-auto max-w-xs rounded-2xl bg-foreground px-4 py-4 text-background shadow-lg">
-					<p className="font-mono text-[10px] text-background/55 uppercase tracking-[0.18em]">
+					<p className="text-[10px] text-background/55 uppercase tracking-[0.18em]">
 						Ryu
 					</p>
 					<p className="mt-1 font-medium text-lg tracking-tight">
 						AI deployment platform
 					</p>
 				</div>
-				<div aria-hidden="true" className="mx-auto h-7 w-px bg-foreground/15" />
 				<div className="relative sm:pl-5">
-					<div
-						aria-hidden="true"
-						className="absolute inset-y-2 left-0 hidden w-px bg-foreground/15 sm:block"
-					/>
 					<ul className="space-y-2">
 						{PLATFORM_LAYERS.map((layer) => (
 							<PlatformLayerCard key={layer.id} layer={layer} />
@@ -387,7 +378,7 @@ function PlatformHierarchy() {
 			<ul aria-label="Ryu primitives" className="mt-6 flex flex-wrap gap-1.5">
 				{PRIMITIVES.map((primitive) => (
 					<li key={primitive}>
-						<span className="rounded-full bg-background px-2.5 py-1 font-mono text-[10px] text-muted-foreground">
+						<span className="rounded-full bg-background px-2.5 py-1 text-[10px] text-muted-foreground">
 							{primitive}
 						</span>
 					</li>
@@ -413,7 +404,7 @@ function RoleDistinction() {
 			<dl className="mt-7 grid gap-2 sm:grid-cols-2">
 				{PLATFORM_LAYERS.map((layer) => (
 					<div className="rounded-xl bg-background/70 p-3" key={layer.id}>
-						<dt className="font-mono text-[10px] text-muted-foreground uppercase tracking-wider">
+						<dt className="text-[10px] text-muted-foreground uppercase tracking-wider">
 							{layer.group} · {layer.name} = {layer.verb}
 						</dt>
 						<dd className="mt-1 text-foreground/80 text-xs leading-relaxed">
@@ -423,7 +414,7 @@ function RoleDistinction() {
 				))}
 			</dl>
 			<div className="mt-7 rounded-xl bg-background/70 p-4">
-				<p className="font-mono text-[10px] text-muted-foreground uppercase tracking-wider">
+				<p className="text-[10px] text-muted-foreground uppercase tracking-wider">
 					The invariant
 				</p>
 				<p className="mt-2 text-foreground text-sm leading-relaxed">
@@ -442,7 +433,7 @@ function IntegrationCard({ path }: { path: IntegrationPath }) {
 				<span className="flex size-9 items-center justify-center rounded-lg bg-background text-foreground/65 shadow-sm">
 					<Icon aria-hidden="true" className="size-4" />
 				</span>
-				<span className="rounded-full bg-background px-2 py-1 font-mono text-[10px] text-muted-foreground">
+				<span className="rounded-full bg-background px-2 py-1 text-[10px] text-muted-foreground">
 					{path.token}
 				</span>
 			</div>
@@ -505,7 +496,7 @@ function ShowcaseCard({ item }: { item: ShowcaseItem }) {
 					className="size-4 text-muted-foreground/50 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
 				/>
 			</div>
-			<p className="mt-6 font-mono text-[10px] text-muted-foreground uppercase tracking-[0.16em]">
+			<p className="mt-6 text-[10px] text-muted-foreground uppercase tracking-[0.16em]">
 				{item.label}
 			</p>
 			<h3 className="mt-2 font-medium text-foreground text-lg tracking-tight">
@@ -560,11 +551,7 @@ function PlatformStoryHeading() {
 export function PlatformStory({ compact = false }: { compact?: boolean }) {
 	if (compact) {
 		return (
-			<section
-				className="border-muted border-t"
-				data-testid="platform-story-compact"
-				id="platform-story"
-			>
+			<section data-testid="platform-story-compact" id="platform-story">
 				<div className="mx-auto max-w-6xl px-6 py-20 md:py-28">
 					<div className="max-w-2xl">
 						<p className="font-medium text-muted-foreground text-xs uppercase tracking-[0.18em]">
@@ -589,7 +576,7 @@ export function PlatformStory({ compact = false }: { compact?: boolean }) {
 								<span className="font-medium text-foreground text-sm">
 									{layer.name}
 								</span>
-								<span className="font-mono text-[10px] text-muted-foreground uppercase tracking-wider">
+								<span className="text-[10px] text-muted-foreground uppercase tracking-wider">
 									{layer.group} · {layer.verb}
 								</span>
 								<ArrowUpRight
@@ -627,7 +614,7 @@ export function PlatformStory({ compact = false }: { compact?: boolean }) {
 				</div>
 			</section>
 
-			<section className="border-muted border-t" id="integration-gallery">
+			<section id="integration-gallery">
 				<div className="container mx-auto px-4 py-20 md:py-28">
 					<div className="mx-auto max-w-6xl">
 						<SectionTitle title="Use Ryu from the seam you already have." />
@@ -663,7 +650,7 @@ export function PlatformStory({ compact = false }: { compact?: boolean }) {
 				</div>
 			</section>
 
-			<section className="border-muted border-t" id="built-with-ryu">
+			<section id="built-with-ryu">
 				<div className="container mx-auto px-4 py-20 md:py-28">
 					<div className="mx-auto max-w-6xl">
 						<div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
