@@ -55,7 +55,7 @@ jobs:
 
           published() {
             local name="$1" version="$2"
-            curl -fsSL --max-time 30 "https://crates.io/api/v1/crates/$name/versions" \
+            curl -fsSL --max-time 30 -H "User-Agent: ryu-publish-rust-sdk" "https://crates.io/api/v1/crates/$name/versions" \
               | python3 -c 'import json, sys; d=json.load(sys.stdin); raise SystemExit(0 if sys.argv[1] in {v["num"] for v in d.get("versions", [])} else 1)' "$version"
           }
 
@@ -76,7 +76,7 @@ jobs:
             if published "$name" "$version"; then
               echo "$name@$version already published; continuing."
             else
-              cargo publish --token "$CARGO_REGISTRY_TOKEN" --manifest-path "$path/Cargo.toml"
+              cargo publish --allow-dirty --token "$CARGO_REGISTRY_TOKEN" --manifest-path "$path/Cargo.toml"
             fi
             wait_until_published "$name" "$version"
           }
